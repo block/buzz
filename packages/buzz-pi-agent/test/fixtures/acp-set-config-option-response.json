@@ -1,0 +1,52 @@
+{
+  "model": {
+    "configOptions": [
+      {
+        "configId": "model",
+        "category": "model",
+        "displayName": "Model",
+        "value": "provider/alternate",
+        "options": [
+          { "value": "provider/model", "displayName": "Model" },
+          { "value": "provider/alternate", "displayName": "Alternate" }
+        ]
+      },
+      {
+        "configId": "thinking",
+        "category": "thought",
+        "displayName": "Thinking",
+        "value": "off",
+        "options": [
+          { "value": "off", "displayName": "off" },
+          { "value": "medium", "displayName": "medium" },
+          { "value": "high", "displayName": "high" }
+        ]
+      }
+    ]
+  },
+  "thinking": {
+    "configOptions": [
+      {
+        "configId": "model",
+        "category": "model",
+        "displayName": "Model",
+        "value": "provider/alternate",
+        "options": [
+          { "value": "provider/model", "displayName": "Model" },
+          { "value": "provider/alternate", "displayName": "Alternate" }
+        ]
+      },
+      {
+        "configId": "thinking",
+        "category": "thought",
+        "displayName": "Thinking",
+        "value": "high",
+        "options": [
+          { "value": "off", "displayName": "off" },
+          { "value": "medium", "displayName": "medium" },
+          { "value": "high", "displayName": "high" }
+        ]
+      }
+    ]
+  }
+}

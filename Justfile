@@ -92,7 +92,7 @@ build-release:
     cargo build --workspace --release
 
 # Run repo lint and formatting checks
-check: fmt-check clippy desktop-check desktop-tauri-fmt-check desktop-tauri-clippy web-check mobile-check
+check: fmt-check clippy desktop-check desktop-tauri-fmt-check desktop-tauri-clippy web-check mobile-check pi-agent-check
 
 # Format all Rust code
 fmt:
@@ -129,6 +129,35 @@ desktop-test:
 # Run desktop TypeScript checks
 desktop-typecheck:
     cd {{desktop_dir}} && pnpm typecheck
+
+# Build the Pi SDK ACP adapter used by the Desktop Pi harness preset
+pi-agent-build:
+    pnpm --dir packages/buzz-pi-agent build
+
+# Install the built Pi adapter on PATH for the Desktop Pi preset
+pi-agent-install: pi-agent-build
+    npm install --global ./packages/buzz-pi-agent
+
+# Type-check and lint the Pi SDK ACP adapter
+pi-agent-check:
+    pnpm --dir packages/buzz-pi-agent check
+
+# Run the Pi SDK ACP adapter unit and protocol tests
+pi-agent-test:
+    pnpm --dir packages/buzz-pi-agent test
+
+# Run the Pi adapter and full ACP unit suites, then reuse the adapter build for
+# the real cross-process contract. This is the production verification path
+# used by CI/pre-push and avoids rebuilding dist between the Node and contract
+# suites.
+pi-agent-verify:
+    pnpm --dir packages/buzz-pi-agent test
+    cargo test -p buzz-acp --lib
+    BUZZ_PI_AGENT_BIN="{{justfile_directory()}}/packages/buzz-pi-agent/dist/cli.js" cargo test -p buzz-acp --test pi_adapter_contract -- --nocapture
+
+# Exercise the real Rust harness ↔ built Pi adapter persistence/reset contract
+pi-agent-contract-test: pi-agent-build
+    BUZZ_PI_AGENT_BIN="{{justfile_directory()}}/packages/buzz-pi-agent/dist/cli.js" cargo test -p buzz-acp --test pi_adapter_contract -- --nocapture
 
 # Build desktop frontend assets
 desktop-build:
@@ -270,7 +299,7 @@ desktop-e2e-pre-push: _ensure-migrations
     cd {{desktop_dir}} && pnpm build:e2e && pnpm exec playwright test --only-changed=origin/main
 
 # Run all checks suitable for CI / pre-push (no infra needed)
-ci: check test-unit desktop-test desktop-build desktop-tauri-check desktop-tauri-test web-build mobile-test
+ci: check test-unit desktop-test desktop-build desktop-tauri-check desktop-tauri-test web-build mobile-test pi-agent-verify
 
 # ─── Test ─────────────────────────────────────────────────────────────────────
 

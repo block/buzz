@@ -8,10 +8,14 @@ import { useQueryClient } from "@tanstack/react-query";
 import type { AgentModelsResponse, ManagedAgent } from "@/shared/api/types";
 import { getAgentModels, updateManagedAgent } from "@/shared/api/tauri";
 import { switchManagedAgentModel } from "@/shared/api/agentControl";
-import { awaitLiveSwitchOutcome } from "@/features/agents/lib/liveSwitchOutcome";
-import { subscribeControlResults } from "@/features/agents/observerRelayStore";
-import { useActiveAgentTurns } from "@/features/agents/activeAgentTurnsStore";
 import {
+  awaitLiveSwitchOutcome,
+  sendAllLiveSwitchRequests,
+} from "@/features/agents/lib/liveSwitchOutcome";
+import { subscribeControlResults } from "@/features/agents/observerRelayStore";
+import { useActiveAgentTurnDetails } from "@/features/agents/activeAgentTurnsStore";
+import {
+  agentConfigSurfaceQueryKey,
   useAgentConfigSurface,
   managedAgentsQueryKey,
 } from "@/features/agents/hooks";
@@ -43,7 +47,7 @@ export function ModelPicker({
   const queryClient = useQueryClient();
 
   const isRunning = agent.status === "running" || agent.status === "deployed";
-  const activeTurns = useActiveAgentTurns(agent.pubkey);
+  const activeTurns = useActiveAgentTurnDetails(agent.pubkey);
   // A live switch rides the agent's running session(s) instead of persisting a
   // new default. It applies only to a persona-linked running agent with at
   // least one active turn — those are the channels the desktop can name in the
@@ -109,25 +113,37 @@ export function ModelPicker({
 
   // Send a live `switch_model` frame to each channel the agent is working in
   // and wait for the harness to acknowledge. Any single `unsupported_model`
-  // result rejects the whole pick immediately; all other statuses must arrive
-  // from every channel before resolving success.
+  // or `switch_failed` result rejects the whole pick immediately; confirmed
+  // success must arrive from every exact turn.
   const sendLiveSwitch = React.useCallback(
     (modelId: string) => {
-      const channelIds = activeTurns.map((turn) => turn.channelId);
+      const turnTargets = activeTurns.map(({ channelId, turnId }) => ({
+        channelId,
+        turnId,
+      }));
       return awaitLiveSwitchOutcome({
-        channelCount: channelIds.length,
+        channelCount: turnTargets.length,
         modelId,
+        turnIds: turnTargets.map((turn) => turn.turnId),
         subscribe: (listener) =>
           subscribeControlResults(agent.pubkey, listener),
         sendSwitches: async () => {
-          await Promise.all(
-            channelIds.map((channelId) =>
-              switchManagedAgentModel(agent.pubkey, channelId, modelId),
+          await sendAllLiveSwitchRequests(
+            turnTargets.map(
+              ({ channelId, turnId }) =>
+                () =>
+                  switchManagedAgentModel(
+                    agent.pubkey,
+                    channelId,
+                    turnId,
+                    modelId,
+                  ),
             ),
           );
         },
-        // No reply in time: treat as sent. The override still rides the
-        // requeued/next session; we just can't confirm synchronously.
+        // No final reply in time: report the switch as pending. A `sent`
+        // control frame confirms delivery only; validation happens after the
+        // active turn is cancelled and its replacement session is created.
         scheduleTimeout: (onTimeout) => {
           const timeout = window.setTimeout(onTimeout, 8_000);
           return () => window.clearTimeout(timeout);
@@ -143,12 +159,31 @@ export function ModelPicker({
     try {
       if (isLiveSwitch) {
         const outcome = await sendLiveSwitch(modelId);
+        // Every exact turn applies independently. Refresh even on failure or
+        // timeout because another sibling turn may already have switched.
+        void queryClient.invalidateQueries({
+          queryKey: agentConfigSurfaceQueryKey(agent.pubkey),
+        });
+        onModelChanged?.();
         if (outcome === "unsupported") {
-          toast.error("That model isn't available for this agent.");
+          toast.error(
+            "At least one active turn rejected that model. Other turns may already have switched; review the refreshed session state.",
+          );
+          return;
+        }
+        if (outcome === "failed") {
+          toast.error(
+            "At least one active turn could not apply the model. Other turns may already have switched; review the refreshed session state.",
+          );
+          return;
+        }
+        if (outcome === "pending") {
+          toast.info(
+            "Model switch requested. It is still being applied to the restarted turn.",
+          );
           return;
         }
         toast.success("Model switched for this session.");
-        onModelChanged?.();
         return;
       }
 

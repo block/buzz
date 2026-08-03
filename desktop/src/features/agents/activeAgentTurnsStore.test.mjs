@@ -4,6 +4,7 @@ import { describe, it, beforeEach, afterEach, mock } from "node:test";
 import {
   syncAgentTurnsFromEvents,
   syncActiveAgentTurnsFromObserver,
+  getActiveTurnDetailsForAgent,
   getActiveTurnsForAgent,
   getActiveTurnsByChannel,
   resetActiveAgentTurnsStore,
@@ -734,6 +735,27 @@ describe("activeAgentTurnsStore", () => {
         summaries[0].anchorAt,
         firstAnchor,
         "earliest start's anchor must be surfaced",
+      );
+    });
+
+    it("preserves exact turn ids for sibling thread controls", () => {
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 1, turnId: "thread-b", channelId: "c1" }),
+        makeEvent({ seq: 2, turnId: "thread-a", channelId: "c1" }),
+      ]);
+
+      const details = getActiveTurnDetailsForAgent(AGENT);
+      assert.deepEqual(
+        details.map(({ channelId, turnId }) => ({ channelId, turnId })),
+        [
+          { channelId: "c1", turnId: "thread-a" },
+          { channelId: "c1", turnId: "thread-b" },
+        ],
+      );
+      assert.equal(
+        getActiveTurnDetailsForAgent(AGENT),
+        details,
+        "exact-turn snapshot must keep a stable reference",
       );
     });
 

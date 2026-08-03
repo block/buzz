@@ -25,6 +25,7 @@ jobs:
       rust: ${{ steps.filter.outputs.rust }}
       desktop: ${{ steps.filter.outputs.desktop }}
       desktop-rust: ${{ steps.filter.outputs.desktop-rust }}
+      pi-agent: ${{ steps.filter.outputs.pi-agent }}
       web: ${{ steps.filter.outputs.web }}
       mobile: ${{ steps.filter.outputs.mobile }}
     steps:
@@ -55,6 +56,16 @@ jobs:
               - 'pnpm-lock.yaml'
             desktop-rust:
               - 'desktop/src-tauri/**'
+            pi-agent:
+              - 'packages/buzz-pi-agent/**'
+              - 'crates/buzz-acp/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - 'pnpm-workspace.yaml'
+              - 'pnpm-lock.yaml'
+              - 'Justfile'
+              - '.github/workflows/ci.yml'
             web:
               - 'scripts/check-file-sizes-core.mjs'
               - 'scripts/check-file-sizes-core.test.mjs'
@@ -129,6 +140,42 @@ jobs:
           tool: cargo-nextest@0.9.136
       - name: Unit tests
         run: just test-unit
+
+  pi-agent:
+    name: Pi Agent
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [changes]
+    if: github.event_name == 'push' || needs.changes.outputs.pi-agent == 'true'
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - name: Restore pnpm store cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: pnpm-${{ runner.os }}-
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Pi adapter lint and typecheck
+        run: just pi-agent-check
+      - name: Pi adapter, Buzz ACP, and cross-process contract tests
+        run: just pi-agent-verify
+      - name: Save pnpm store cache
+        if: github.event_name == 'push'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
 
   desktop-core:
     name: Desktop Core

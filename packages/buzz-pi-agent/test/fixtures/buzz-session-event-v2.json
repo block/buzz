@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 2,
+  "sessionId": "ses_fixture",
+  "conversationId": "buzz:fixture:conversation",
+  "eventId": "9ba32f72-e8ce-4195-96a2-7b472198bb7e",
+  "event": {
+    "type": "compaction_completed",
+    "compactionId": "9ba32f72-e8ce-4195-96a2-7b472198bb7e",
+    "timestamp": "2026-08-02T00:00:00.000Z",
+    "message": "Pi compacted this thread's context from 140,000 tokens to approximately 30,000 tokens.",
+    "piSessionId": "pi_fixture",
+    "reason": "threshold",
+    "beforeTokens": 140000,
+    "afterTokens": 30000,
+    "limitTokens": 150000,
+    "effectiveLimitTokens": 150000,
+    "compactionThresholdTokens": 133616,
+    "willRetry": false,
+    "fromExtension": false
+  }
+}

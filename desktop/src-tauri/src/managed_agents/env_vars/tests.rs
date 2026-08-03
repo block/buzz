@@ -168,6 +168,14 @@ fn reserved_keys_include_remote_lifetime_policy() {
 }
 
 #[test]
+fn reserved_keys_include_durable_thread_session_contract() {
+    let key = "BUZZ_ACP_REQUIRE_DURABLE_THREAD_SESSIONS";
+    assert!(is_reserved_env_key(key));
+    let agent = map(&[(key, "false")]);
+    assert!(merged_user_env(&BTreeMap::new(), &agent).is_empty());
+}
+
+#[test]
 fn reserved_keys_include_code_execution_surface() {
     // The agent/MCP command + args are what Buzz actually exec's.
     // Overriding lets the user run arbitrary code as the agent.

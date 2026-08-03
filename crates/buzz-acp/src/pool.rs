@@ -30,21 +30,27 @@ use tokio::time::timeout;
 use uuid::Uuid;
 
 use crate::acp::{
-    extract_model_config_options, extract_model_state, model_in_catalog,
-    resolve_model_switch_method, AcpClient, AcpError, McpServer, ModelSwitchMethod, StopReason,
+    extract_model_config_options, extract_model_state, resolve_model_switch_method, AcpClient,
+    AcpError, ConversationResetCommit, McpServer, ModelSwitchMethod, StopReason,
     SystemPromptTransport,
 };
 use crate::config::{compose_session_title, DedupMode, PermissionMode};
 use crate::observer;
 use crate::queue::{
-    CancelReason, ContextMessage, ConversationContext, FlushBatch, PromptChannelInfo,
-    PromptProfile, PromptProfileLookup, ThreadTags,
+    CancelReason, ContextMessage, ConversationContext, ConversationKey, FlushBatch,
+    PromptChannelInfo, PromptProfile, PromptProfileLookup, ThreadTags,
 };
 use crate::relay::{ChannelInfo, RestClient};
 
 /// Window within which agent activity before a hard-cap death qualifies
 /// the turn as "recently active" (eligible for requeue instead of dead-letter).
 const RECENT_ACTIVITY_WINDOW: Duration = Duration::from_secs(60);
+
+/// Affinity is a routing cache, not authoritative session storage. Keep it
+/// bounded even for legacy adapters whose channel-session map predates the
+/// thread-session LRU. Exact busy-task checks below preserve the no-fork rule
+/// when a cache entry is evicted.
+const MAX_AFFINITY_ENTRIES: usize = 16_384;
 
 // FlushBatch and BatchEvent derive Clone (added in queue.rs) so we can store
 // a recoverable copy in TaskMeta for panic recovery in Queue mode.
@@ -53,6 +59,8 @@ const RECENT_ACTIVITY_WINDOW: Duration = Duration::from_secs(60);
 pub struct TaskMeta {
     pub agent_index: usize,
     pub channel_id: Option<Uuid>,
+    /// Exact thread conversation for channel prompts. `None` for heartbeats.
+    pub conversation_key: Option<ConversationKey>,
     /// Identifies terminal events when the task panics before returning a result.
     pub turn_id: String,
     /// Clone of batch for Queue mode panic recovery.
@@ -80,18 +88,20 @@ pub struct AgentModelCapabilities {
     pub available_models_raw: Option<serde_json::Value>,
 }
 
-/// Per-channel session IDs and turn counters.
+/// Per-conversation session IDs and turn counters.
 ///
 /// Separated from `OwnedAgent` so the state machine is testable without
 /// spawning a real agent subprocess.
 #[derive(Default)]
 pub struct SessionState {
-    /// channel_id → session_id
-    pub sessions: HashMap<Uuid, String>,
+    /// thread conversation → session_id
+    pub sessions: HashMap<ConversationKey, String>,
     pub heartbeat_session: Option<String>,
     /// Per-channel turn counters for proactive session rotation.
     /// Incremented on each successful prompt; reset when the session is rotated.
-    pub turn_counts: HashMap<Uuid, u32>,
+    pub turn_counts: HashMap<ConversationKey, u32>,
+    /// Last successful use (or creation) for idle TTL/LRU eviction.
+    pub last_used: HashMap<ConversationKey, std::time::Instant>,
     /// Turn counter for the heartbeat session.
     pub heartbeat_turn_count: u32,
     /// channel_id → rendered NIP-AE core prompt section, populated once at
@@ -110,6 +120,9 @@ impl SessionState {
     /// Invalidate the session (and turn counter) for a specific prompt source.
     pub fn invalidate(&mut self, source: &PromptSource) {
         match source {
+            PromptSource::Conversation(key) => {
+                self.invalidate_conversation(key);
+            }
             PromptSource::Channel(cid) => {
                 self.invalidate_channel(cid);
             }
@@ -123,16 +136,91 @@ impl SessionState {
     /// Invalidate a single channel's session and turn counter.
     /// Returns `true` if the channel had an active session.
     pub fn invalidate_channel(&mut self, channel_id: &Uuid) -> bool {
-        self.turn_counts.remove(channel_id);
+        let keys: Vec<_> = self
+            .sessions
+            .keys()
+            .chain(self.turn_counts.keys())
+            .chain(self.last_used.keys())
+            .filter(|key| key.channel_id == *channel_id)
+            .cloned()
+            .collect();
+        let mut removed = false;
+        for key in keys {
+            removed |= self.invalidate_conversation(&key);
+        }
         self.core_sections.remove(channel_id);
         self.canvas_sections.remove(channel_id);
-        self.sessions.remove(channel_id).is_some()
+        removed
+    }
+
+    /// Invalidate one thread without disturbing sibling threads in its channel.
+    pub fn invalidate_conversation(&mut self, key: &ConversationKey) -> bool {
+        self.turn_counts.remove(key);
+        self.last_used.remove(key);
+        self.sessions.remove(key).is_some()
+    }
+
+    fn take_conversation(&mut self, key: &ConversationKey) -> Option<String> {
+        self.turn_counts.remove(key);
+        self.last_used.remove(key);
+        self.sessions.remove(key)
+    }
+
+    /// Evict idle sessions by TTL, then oldest-first until the configured cap.
+    /// `active` is never evicted, even when the configured cap is zero.
+    pub fn prune_idle(
+        &mut self,
+        active: &ConversationKey,
+        max_sessions: usize,
+        idle_ttl: Duration,
+    ) -> Vec<(ConversationKey, String)> {
+        let now = std::time::Instant::now();
+        let mut evicted = Vec::new();
+        let expired: Vec<_> = self
+            .sessions
+            .keys()
+            .filter(|key| *key != active)
+            .filter(|key| {
+                self.last_used
+                    .get(*key)
+                    .is_none_or(|used| now.duration_since(*used) >= idle_ttl)
+            })
+            .cloned()
+            .collect();
+        for key in expired {
+            if let Some(session_id) = self.take_conversation(&key) {
+                evicted.push((key, session_id));
+            }
+        }
+
+        let max_sessions = max_sessions.max(1);
+        let target_before_use = if self.sessions.contains_key(active) {
+            max_sessions
+        } else {
+            max_sessions.saturating_sub(1)
+        };
+        while self.sessions.len() > target_before_use {
+            let Some(oldest) = self
+                .sessions
+                .keys()
+                .filter(|key| *key != active)
+                .min_by_key(|key| self.last_used.get(*key).copied())
+                .cloned()
+            else {
+                break;
+            };
+            if let Some(session_id) = self.take_conversation(&oldest) {
+                evicted.push((oldest, session_id));
+            }
+        }
+        evicted
     }
 
     /// Invalidate all sessions and turn counters (e.g. after agent exit).
     pub fn invalidate_all(&mut self) {
         self.sessions.clear();
         self.turn_counts.clear();
+        self.last_used.clear();
         self.heartbeat_session = None;
         self.heartbeat_turn_count = 0;
         self.core_sections.clear();
@@ -141,14 +229,62 @@ impl SessionState {
 
     #[cfg(test)]
     fn has_channel_state(&self, channel_id: &Uuid) -> bool {
-        self.sessions.contains_key(channel_id)
-            || self.turn_counts.contains_key(channel_id)
+        self.sessions
+            .keys()
+            .any(|key| key.channel_id == *channel_id)
+            || self
+                .turn_counts
+                .keys()
+                .any(|key| key.channel_id == *channel_id)
             || self.core_sections.contains_key(channel_id)
             || self.canvas_sections.contains_key(channel_id)
     }
 }
 
 /// An agent with its session state, owned by the pool or a running task.
+pub(crate) struct PendingModelSwitch {
+    turn_id: String,
+    previous_model: Option<String>,
+    previous_model_overridden: bool,
+}
+
+/// A control cancellation can fail after Desktop already received the
+/// immediate `sent` acknowledgement. Close that known outcome explicitly:
+/// restore this process's prior model intent and emit the exact correlated
+/// terminal result. A process crash before this branch remains honestly
+/// `pending` because no actor observed a definitive application result.
+fn report_control_cancel_failure(
+    agent: &mut OwnedAgent,
+    signal: &ControlSignal,
+    fallback_turn_id: &str,
+) {
+    let ControlSignal::SwitchModel(requested_model) = signal else {
+        return;
+    };
+    let pending = agent.pending_model_switch.take();
+    let result_turn_id = if let Some(pending) = pending {
+        agent.desired_model = pending.previous_model;
+        agent.model_overridden = pending.previous_model_overridden;
+        pending.turn_id
+    } else {
+        tracing::error!(
+            turn_id = fallback_turn_id,
+            model_id = requested_model,
+            "failed model-switch cancellation lost its pending correlation"
+        );
+        fallback_turn_id.to_owned()
+    };
+    agent.acp.observe(
+        "control_result",
+        serde_json::json!({
+            "type": "switch_model",
+            "status": "switch_failed",
+            "modelId": requested_model,
+            "turnId": result_turn_id,
+        }),
+    );
+}
+
 pub struct OwnedAgent {
     pub index: usize,
     pub acp: AcpClient,
@@ -162,6 +298,11 @@ pub struct OwnedAgent {
     /// desktop reader to distinguish a genuine runtime override from a stale
     /// session whose persona model was edited. Reset on spawn/restart.
     pub model_overridden: bool,
+    /// Exact desktop turn awaiting the final result of a busy live-model
+    /// switch. The immediate control acknowledgement means only "delivered";
+    /// this correlation survives cancel/requeue so the desktop resolves on
+    /// the later applied/unsupported result instead of showing false success.
+    pub pending_model_switch: Option<PendingModelSwitch>,
     /// Normalized agent name from initialize (`agentInfo.name`/`serverInfo.name`).
     pub agent_name: String,
     /// Whether Goose accepted its custom system-prompt method. `None` probes on
@@ -216,6 +357,32 @@ impl OwnedAgent {
             self.goose_system_prompt_supported,
         )
     }
+
+    /// Forget every cached conversation for a channel before membership
+    /// removal returns this checked-out agent to the pool. Idle agents are
+    /// handled by [`AgentPool::dispose_channel_sessions`]; this closes the
+    /// checked-out gap without leaving adapter-owned Pi runtimes behind.
+    pub(crate) async fn forget_channel_sessions(&mut self, channel_id: Uuid) -> usize {
+        let sessions: Vec<String> = self
+            .state
+            .sessions
+            .iter()
+            .filter(|(key, _)| key.channel_id == channel_id)
+            .map(|(_, session_id)| session_id.clone())
+            .collect();
+        self.state.invalidate_channel(&channel_id);
+
+        let mut forgotten = 0;
+        for session_id in sessions {
+            forgotten += 1;
+            if !dispose_session_or_poison(self, &session_id, true, "channel membership removal")
+                .await
+            {
+                break;
+            }
+        }
+        forgotten
+    }
 }
 
 /// Pool of agents with take-and-return ownership semantics.
@@ -225,6 +392,10 @@ impl OwnedAgent {
 /// tasks for panic recovery.
 pub struct AgentPool {
     agents: Vec<Option<OwnedAgent>>,
+    /// Sticky ownership of a conversation by one ACP subprocess. A busy owner
+    /// makes dispatch wait; routing the same key to a different idle process
+    /// would silently fork its model context.
+    affinities: HashMap<ConversationKey, usize>,
     result_tx: mpsc::UnboundedSender<PromptResult>,
     result_rx: mpsc::UnboundedReceiver<PromptResult>,
     pub join_set: JoinSet<()>,
@@ -245,6 +416,10 @@ pub struct PromptResult {
 /// Whether the prompt came from a channel event or a heartbeat.
 #[derive(Debug)]
 pub enum PromptSource {
+    Conversation(ConversationKey),
+    /// Channel-wide compatibility/admin source. Normal message turns use
+    /// [`Conversation`](Self::Conversation).
+    #[allow(dead_code)] // Retained for adapters without thread-session capability.
     Channel(Uuid),
     Heartbeat,
 }
@@ -295,6 +470,34 @@ pub enum ControlSignal {
     /// turn re-creates the session and re-applies `desired_model`. Runtime-only
     /// — never persisted, gone on restart/respawn.
     SwitchModel(String),
+}
+
+/// Only explicit context-clear controls may delete a durable adapter mapping.
+/// Cancel, steer/interrupt, and live model switches all preserve the thread's
+/// Pi transcript while replacing only the hot ACP handle.
+fn control_forgets_durable_context(signal: &ControlSignal) -> bool {
+    matches!(signal, ControlSignal::Rotate)
+}
+
+#[cfg(test)]
+mod durable_control_policy_tests {
+    use super::{control_forgets_durable_context, ControlSignal};
+
+    #[test]
+    fn only_explicit_rotation_forgets_durable_context() {
+        assert!(control_forgets_durable_context(&ControlSignal::Rotate));
+        for signal in [
+            ControlSignal::Cancel,
+            ControlSignal::Interrupt,
+            ControlSignal::Steer,
+            ControlSignal::SwitchModel("model".to_string()),
+        ] {
+            assert!(
+                !control_forgets_durable_context(&signal),
+                "ordinary lifecycle signal must preserve durable context: {signal:?}"
+            );
+        }
+    }
 }
 
 /// Goose-native non-cancelling steer request, sent from the main loop to an
@@ -543,6 +746,10 @@ pub struct PromptContext {
     pub context_message_limit: u32,
     /// Max turns per session before proactive rotation. 0 = disabled.
     pub max_turns_per_session: u32,
+    /// Per-agent cap for cached thread sessions.
+    pub max_cached_conversation_sessions: usize,
+    /// Idle TTL for cached thread sessions.
+    pub conversation_session_idle_ttl: Duration,
     /// Permission mode to apply after session creation. `Default` = skip.
     pub permission_mode: PermissionMode,
     /// Agent identity — used to derive the NIP-AE conversation key at
@@ -575,12 +782,91 @@ impl AgentPool {
     /// the index invariant.
     pub fn from_slots(slots: Vec<Option<OwnedAgent>>) -> Self {
         let (result_tx, result_rx) = mpsc::unbounded_channel();
+        let affinities = slots
+            .iter()
+            .enumerate()
+            .flat_map(|(index, slot)| {
+                slot.iter().flat_map(move |agent| {
+                    agent
+                        .state
+                        .sessions
+                        .keys()
+                        .cloned()
+                        .map(move |key| (key, index))
+                })
+            })
+            .collect();
         Self {
             agents: slots,
+            affinities,
             result_tx,
             result_rx,
             join_set: JoinSet::new(),
             task_map: HashMap::new(),
+        }
+    }
+
+    /// Whether every live adapter explicitly implements Buzz's production
+    /// per-thread lifecycle contract: durable identity/reset plus replayable,
+    /// acknowledged user-awareness events. A partial pool is safe because
+    /// every live slot is checked; an empty pool is deliberately unsupported.
+    pub fn thread_sessions_supported(&self) -> bool {
+        let mut live = self.agents.iter().filter_map(Option::as_ref).peekable();
+        live.peek().is_some()
+            && live.all(|agent| {
+                agent.acp.thread_sessions_supported()
+                    && agent.acp.conversation_reset_supported()
+                    && agent.acp.durable_session_events_supported()
+            })
+    }
+
+    /// Atomically forget a stable logical conversation in an idle adapter.
+    ///
+    /// This is the durable half of `/new`: it remains effective when the hot
+    /// ACP session was already evicted, so the relay acknowledgement must not
+    /// be published until this method succeeds. A failed or capability-drifted
+    /// adapter is terminated rather than returned to the pool; maintenance
+    /// will replace the empty slot while the reset barrier stays closed.
+    pub async fn commit_conversation_reset(
+        &mut self,
+        conversation_id: &str,
+        reset_token: &str,
+    ) -> Option<ConversationResetCommit> {
+        let index = self.agents.iter().position(Option::is_some)?;
+        let mut agent = self.agents[index].take()?;
+
+        match agent
+            .acp
+            .conversation_reset(conversation_id, reset_token)
+            .await
+        {
+            Ok(Some(commit)) => {
+                self.return_agent(agent);
+                Some(commit)
+            }
+            Ok(None) => {
+                tracing::error!(
+                    agent = index,
+                    conversation_id,
+                    "adapter lost durable conversation-reset support; terminating it before /new acknowledgement"
+                );
+                agent.acp.shutdown().await;
+                agent.state.invalidate_all();
+                self.affinities.retain(|_, owner| *owner != index);
+                None
+            }
+            Err(error) => {
+                tracing::error!(
+                    agent = index,
+                    conversation_id,
+                    %error,
+                    "durable conversation reset failed; terminating adapter and keeping /new barrier closed"
+                );
+                agent.acp.shutdown().await;
+                agent.state.invalidate_all();
+                self.affinities.retain(|_, owner| *owner != index);
+                None
+            }
         }
     }
 
@@ -595,7 +881,7 @@ impl AgentPool {
         if let Some(cid) = channel_id {
             let idx = self.agents.iter().position(|slot| {
                 slot.as_ref()
-                    .map(|a| a.state.sessions.contains_key(&cid))
+                    .map(|a| a.state.sessions.keys().any(|key| key.channel_id == cid))
                     .unwrap_or(false)
             });
             if let Some(i) = idx {
@@ -608,9 +894,62 @@ impl AgentPool {
         idx.map(|i| self.agents[i].take().unwrap())
     }
 
+    /// Claim an idle agent, preferring the one that owns this exact thread.
+    pub fn try_claim_conversation(
+        &mut self,
+        conversation_key: &ConversationKey,
+    ) -> Option<OwnedAgent> {
+        if self
+            .task_map
+            .values()
+            .any(|meta| meta.conversation_key.as_ref() == Some(conversation_key))
+        {
+            return None;
+        }
+        if let Some(&index) = self.affinities.get(conversation_key) {
+            if self.agents.get(index).is_some_and(Option::is_none) {
+                // The owning subprocess is checked out. Never fork context to
+                // a different slot; leave the batch queued until it returns.
+                if self.task_map.values().any(|meta| meta.agent_index == index) {
+                    return None;
+                }
+                // Empty slot with no task means the owner died. Let a healthy
+                // process adopt the conversation with a fresh ACP session.
+                self.affinities.remove(conversation_key);
+            } else if self
+                .agents
+                .get(index)
+                .and_then(Option::as_ref)
+                .is_some_and(|agent| agent.state.sessions.contains_key(conversation_key))
+            {
+                return self.agents[index].take();
+            } else {
+                // Respawned/replaced slot no longer owns the session.
+                self.affinities.remove(conversation_key);
+            }
+        }
+        if let Some(index) = self.agents.iter().position(|slot| {
+            slot.as_ref()
+                .is_some_and(|agent| agent.state.sessions.contains_key(conversation_key))
+        }) {
+            return self.agents[index].take();
+        }
+        let index = self.agents.iter().position(Option::is_some)?;
+        self.agents[index].take()
+    }
+
     /// Return an agent to its slot after a task completes.
     pub fn return_agent(&mut self, agent: OwnedAgent) {
         let idx = agent.index;
+        self.affinities.retain(|_, owner| *owner != idx);
+        self.affinities
+            .extend(agent.state.sessions.keys().cloned().map(|key| (key, idx)));
+        while self.affinities.len() > MAX_AFFINITY_ENTRIES {
+            let Some(victim) = self.affinities.keys().next().cloned() else {
+                break;
+            };
+            self.affinities.remove(&victim);
+        }
         if self.agents[idx].is_some() {
             // This is a bug: two tasks returned the same agent index. Log it
             // loudly so it shows up in production logs, then overwrite — the
@@ -629,13 +968,11 @@ impl AgentPool {
         self.agents.iter().any(|slot| slot.is_some())
     }
 
-    /// Whether any idle agent already has a session for `channel_id`.
-    /// Used to compute `affinity_hit` before calling `try_claim`.
-    pub fn has_session_for(&self, channel_id: Uuid) -> bool {
+    /// Whether an idle agent owns the exact thread session.
+    pub fn has_session_for_conversation(&self, conversation_key: &ConversationKey) -> bool {
         self.agents.iter().any(|slot| {
             slot.as_ref()
-                .map(|a| a.state.sessions.contains_key(&channel_id))
-                .unwrap_or(false)
+                .is_some_and(|agent| agent.state.sessions.contains_key(conversation_key))
         })
     }
 
@@ -656,44 +993,23 @@ impl AgentPool {
         &mut self.task_map
     }
 
-    /// Try to send a goose-native steer request to the in-flight task for
-    /// `channel_id`.
-    ///
-    /// Returns `Ok(())` if the request was accepted by the read loop's
-    /// receiver (capacity-1 mpsc; one slot is the single in-flight steer
-    /// write). Returns `Err(SteerError::Transport(_))` on `Full`/`Closed`
-    /// (already-in-flight write, or read loop torn down). Callers must
-    /// fall back to the universal `ControlSignal::Steer` cancel+merge path
-    /// on `Err`.
-    ///
-    /// This does **not** spawn the ack watcher — the caller owns the
-    /// oneshot `ack_tx` inside `SteerRequest` and is responsible for
-    /// awaiting it and applying the locked Success / Err / PromptCompletedNeutral
-    /// semantics. Caller is also responsible for the synchronous
-    /// `queue.mark_native_steer_pending(...)` *before* spawning the
-    /// watcher, to close the result-vs-ack race.
-    ///
-    /// Returns `Err(SteerError::PromptCompleted)` if no task is in flight
-    /// for `channel_id` (the prompt completed between the mode-gate check
-    /// and this call, or the channel was never in flight). This is
-    /// semantically a soft no-op — the caller should release any withheld
-    /// event and let normal dispatch handle delivery.
-    pub fn send_steer(
+    /// Send a steer request only to the task for `conversation_key`.
+    pub fn send_conversation_steer(
         &mut self,
-        channel_id: Uuid,
+        conversation_key: &ConversationKey,
         request: SteerRequest,
     ) -> Result<(), SteerError> {
         let meta = self
             .task_map
             .values_mut()
-            .find(|m| m.channel_id == Some(channel_id))
+            .find(|meta| meta.conversation_key.as_ref() == Some(conversation_key))
             .ok_or(SteerError::PromptCompleted)?;
         let tx = meta
             .steer_tx
             .as_ref()
             .ok_or_else(|| SteerError::Transport("steer_tx not installed".into()))?;
         tx.try_send(request)
-            .map_err(|e| SteerError::Transport(e.to_string()))
+            .map_err(|error| SteerError::Transport(error.to_string()))
     }
 
     pub fn result_tx(&self) -> mpsc::UnboundedSender<PromptResult> {
@@ -731,82 +1047,70 @@ impl AgentPool {
         &mut self.agents
     }
 
-    /// Remove the session for `channel_id` from all idle agents.
-    ///
-    /// Called when the agent is removed from a channel — stale sessions
-    /// should not be reused. Checked-out agents (in-flight) are not
-    /// modified; their sessions will fail naturally on the next prompt
-    /// if the relay rejects the request.
-    ///
-    /// Returns the number of sessions invalidated.
-    pub fn invalidate_channel_sessions(&mut self, channel_id: Uuid) -> usize {
-        let mut count = 0;
-        for slot in &mut self.agents {
-            if let Some(agent) = slot.as_mut() {
-                if agent.state.invalidate_channel(&channel_id) {
-                    count += 1;
-                }
-            }
-        }
-        count
-    }
-
-    /// Idle-path model switch: set `desired_model` on the idle agent for
-    /// `channel_id` and invalidate its session so the next turn re-creates the
-    /// session under the new model.
-    ///
-    /// Pre-cancel guard: the desired model is validated against the agent's
-    /// cached catalog *before* the session is invalidated, so an unsupported
-    /// pick is rejected without disturbing the existing session.
-    ///
-    /// Returns [`IdleSwitchResult`] describing what happened. The model does not
-    /// take effect — and the panel does not reflect it — until the agent next
-    /// runs a turn (no live session exists to re-emit `session_config_captured`
-    /// from an idle agent). This lag is intentional: faking the emit would
-    /// surface an override the session has not actually applied.
-    pub fn switch_idle_agent_model(
+    /// Dispose one idle conversation in each owning adapter and remove local
+    /// affinity. `forget=true` is used by `/new`; `false` is reserved for
+    /// eviction where a persisted adapter mapping may later be resumed.
+    pub async fn dispose_conversation_sessions(
         &mut self,
-        channel_id: Uuid,
-        model_id: &str,
-    ) -> IdleSwitchResult {
-        let Some(agent) = self
-            .agents
-            .iter_mut()
-            .flatten()
-            .find(|a| a.state.sessions.contains_key(&channel_id))
-        else {
-            return IdleSwitchResult::NoIdleAgent;
-        };
-
-        // Pre-cancel guard against the cached catalog. None = catalog not yet
-        // populated (no session ever created); defer validation to apply time.
-        if let Some(caps) = agent.model_capabilities.as_ref() {
-            if !model_in_catalog(
-                &caps.config_options_raw,
-                caps.available_models_raw.as_ref(),
-                model_id,
-            ) {
-                return IdleSwitchResult::UnsupportedModel;
+        key: &ConversationKey,
+        forget: bool,
+    ) -> usize {
+        let mut disposed = 0;
+        for agent in self.agents.iter_mut().flatten() {
+            if let Some(session_id) = agent.state.take_conversation(key) {
+                match agent.acp.session_dispose(&session_id, forget).await {
+                    Ok(true) => {}
+                    Ok(false) if forget => {
+                        tracing::error!(
+                            conversation = %key,
+                            %session_id,
+                            "adapter cannot durably forget sessions; terminating it to enforce reset isolation"
+                        );
+                        agent.acp.shutdown().await;
+                        agent.state.invalidate_all();
+                    }
+                    Ok(false) => {}
+                    Err(error) if forget => {
+                        tracing::error!(
+                            conversation = %key,
+                            %session_id,
+                            %error,
+                            "adapter session disposal failed; terminating it before acknowledging reset"
+                        );
+                        agent.acp.shutdown().await;
+                        agent.state.invalidate_all();
+                    }
+                    Err(error) => tracing::warn!(
+                        conversation = %key,
+                        %session_id,
+                        %error,
+                        "adapter session disposal failed; local context was still invalidated"
+                    ),
+                }
+                disposed += 1;
             }
         }
-
-        agent.desired_model = Some(model_id.to_string());
-        agent.model_overridden = true;
-        agent.state.invalidate_channel(&channel_id);
-        IdleSwitchResult::Switched
+        self.affinities.remove(key);
+        disposed
     }
-}
 
-/// Outcome of [`AgentPool::switch_idle_agent_model`].
-#[derive(Debug, PartialEq, Eq)]
-pub enum IdleSwitchResult {
-    /// `desired_model` set and the channel session invalidated.
-    Switched,
-    /// Desired model is not in the agent's cached catalog — pick rejected,
-    /// session untouched.
-    UnsupportedModel,
-    /// No idle agent available (all checked out / none spawned).
-    NoIdleAgent,
+    /// Dispose every idle conversation in a channel. Used by intentionally
+    /// channel-wide `!rotate` and membership removal.
+    pub async fn dispose_channel_sessions(&mut self, channel_id: Uuid, forget: bool) -> usize {
+        let keys: Vec<_> = self
+            .agents
+            .iter()
+            .flatten()
+            .flat_map(|agent| agent.state.sessions.keys())
+            .filter(|key| key.channel_id == channel_id)
+            .cloned()
+            .collect();
+        let mut disposed = 0;
+        for key in keys {
+            disposed += self.dispose_conversation_sessions(&key, forget).await;
+        }
+        disposed
+    }
 }
 
 /// Timeout for a single pre-prompt context fetch attempt (thread/DM history).
@@ -882,13 +1186,55 @@ async fn resolve_new_session_channel_context(
 /// On error from `session_new_full()`, returns the `AcpError` — caller handles
 /// error reporting. Model-switch failures are logged and gracefully ignored
 /// (the agent proceeds with its default model).
+struct CreatedSession {
+    session_id: String,
+    /// The adapter reopened an existing durable logical conversation. Buzz
+    /// must not seed relay history again in that case.
+    resumed_conversation: bool,
+    /// A durable adapter tombstone says this is intentionally fresh after a
+    /// prior forget, even if the outer harness restarted and lost its in-memory
+    /// reset token. Relay history must not resurrect the cleared conversation.
+    skip_relay_history: bool,
+}
+
+fn should_seed_relay_history(
+    resumed_conversation: bool,
+    skip_relay_history: bool,
+    reset_token: Option<&str>,
+) -> bool {
+    !resumed_conversation && !skip_relay_history && reset_token.is_none()
+}
+
+#[cfg(test)]
+mod conversation_history_seed_tests {
+    use super::should_seed_relay_history;
+
+    #[test]
+    fn seeds_only_a_truly_new_non_reset_conversation() {
+        assert!(should_seed_relay_history(false, false, None));
+        assert!(!should_seed_relay_history(true, false, None));
+        assert!(!should_seed_relay_history(false, true, None));
+        assert!(!should_seed_relay_history(
+            false,
+            false,
+            Some("signed-reset-event")
+        ));
+        assert!(!should_seed_relay_history(
+            true,
+            false,
+            Some("signed-reset-event")
+        ));
+    }
+}
+
 async fn create_session_and_apply_model(
     agent: &mut OwnedAgent,
     ctx: &PromptContext,
     agent_core: Option<&str>,
     agent_canvas: Option<&str>,
     channel_name: Option<&str>,
-) -> Result<String, AcpError> {
+    conversation_key: Option<&ConversationKey>,
+) -> Result<CreatedSession, AcpError> {
     // Build base_prompt + system_prompt + agent core + canvas metadata into a
     // single prompt. Standard protocol-v2 agents receive it in `session/new`;
     // Goose receives it through the custom request below. Legacy agents receive
@@ -914,7 +1260,7 @@ async fn create_session_and_apply_model(
 
     let resp = agent
         .acp
-        .session_new_full(
+        .session_new_full_for_conversation(
             &ctx.cwd,
             ctx.mcp_servers.clone(),
             session_new_system_prompt(
@@ -924,6 +1270,8 @@ async fn create_session_and_apply_model(
                 combined_system_prompt.as_deref(),
             ),
             session_title.as_deref(),
+            conversation_key.map(ConversationKey::stable_id).as_deref(),
+            conversation_key.and_then(|key| key.reset_token.as_deref()),
         )
         .await?;
 
@@ -955,51 +1303,145 @@ async fn create_session_and_apply_model(
         });
     }
 
-    // Apply desired_model if set, matching against the fresh session/new response.
-    // Track whether the switch succeeded so session_config_captured reflects
-    // the post-switch state (not the pre-switch desired state).
-    let switch_succeeded = if let Some(ref desired) = agent.desired_model {
-        match resolve_model_switch_method(&resp.raw, desired) {
+    // Apply desired_model if set, matching against the fresh session/new
+    // response. Live switches are transactional: if A -> B is rejected after
+    // the old A session was cancelled, explicitly restore A on this fresh
+    // session before the requeued prompt is allowed to run.
+    let mut reported_config_options = resp
+        .raw
+        .get("configOptions")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let mut reported_models = resp
+        .raw
+        .get("models")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let desired_model = agent.desired_model.clone();
+    if let Some(desired) = desired_model {
+        match resolve_model_switch_method(&resp.raw, &desired) {
             Some(method) => {
-                apply_model_switch(&mut agent.acp, &resp.session_id, desired, &method).await?;
-                true
+                match apply_model_switch(&mut agent.acp, &resp.session_id, &desired, &method).await
+                {
+                    Ok(ModelSwitchApplyOutcome::Applied { response }) => {
+                        merge_applied_model_state(
+                            &mut reported_config_options,
+                            &mut reported_models,
+                            &response,
+                            &method,
+                        );
+                        if let Some(pending) = agent.pending_model_switch.take() {
+                            agent.acp.observe(
+                                "control_result",
+                                serde_json::json!({
+                                    "type": "switch_model",
+                                    "status": "switched",
+                                    "modelId": desired,
+                                    "turnId": pending.turn_id,
+                                }),
+                            );
+                        }
+                    }
+                    Ok(ModelSwitchApplyOutcome::Rejected) => {
+                        if let Some(pending) = agent.pending_model_switch.take() {
+                            agent.desired_model = pending.previous_model.clone();
+                            agent.model_overridden = pending.previous_model_overridden;
+                            let rollback = restore_previous_model(
+                                &mut agent.acp,
+                                &resp.session_id,
+                                &resp.raw,
+                                pending.previous_model.as_deref(),
+                            )
+                            .await;
+                            agent.acp.observe(
+                                "control_result",
+                                serde_json::json!({
+                                    "type": "switch_model",
+                                    "status": "switch_failed",
+                                    "modelId": desired,
+                                    "turnId": pending.turn_id,
+                                }),
+                            );
+                            match rollback {
+                                Ok(Some((response, method))) => merge_applied_model_state(
+                                    &mut reported_config_options,
+                                    &mut reported_models,
+                                    &response,
+                                    &method,
+                                ),
+                                Ok(None) => {}
+                                Err(error) => return Err(error),
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(pending) = agent.pending_model_switch.take() {
+                            agent.desired_model = pending.previous_model;
+                            agent.model_overridden = pending.previous_model_overridden;
+                            agent.acp.observe(
+                                "control_result",
+                                serde_json::json!({
+                                    "type": "switch_model",
+                                    "status": "switch_failed",
+                                    "modelId": desired,
+                                    "turnId": pending.turn_id,
+                                }),
+                            );
+                        }
+                        return Err(error);
+                    }
+                }
             }
             None => {
                 tracing::warn!(
                     target: "pool::model",
                     "desired model {desired} not found in agent's available models — proceeding with agent default"
                 );
-                // Surface the miss so the desktop ModelPicker can reject a live
-                // pick rather than silently no-op. On the busy path the turn has
-                // already been cancelled+requeued by the time we get here, so the
-                // turn restarts on the unchanged model and the user is told no.
-                agent.acp.observe(
-                    "control_result",
-                    serde_json::json!({
-                        "type": "switch_model",
-                        "status": "unsupported_model",
-                        "modelId": desired,
-                    }),
-                );
-                false
+                if let Some(pending) = agent.pending_model_switch.take() {
+                    agent.desired_model = pending.previous_model.clone();
+                    agent.model_overridden = pending.previous_model_overridden;
+                    let rollback = restore_previous_model(
+                        &mut agent.acp,
+                        &resp.session_id,
+                        &resp.raw,
+                        pending.previous_model.as_deref(),
+                    )
+                    .await;
+                    agent.acp.observe(
+                        "control_result",
+                        serde_json::json!({
+                            "type": "switch_model",
+                            "status": "unsupported_model",
+                            "modelId": desired,
+                            "turnId": pending.turn_id,
+                        }),
+                    );
+                    match rollback {
+                        Ok(Some((response, method))) => merge_applied_model_state(
+                            &mut reported_config_options,
+                            &mut reported_models,
+                            &response,
+                            &method,
+                        ),
+                        Ok(None) => {}
+                        Err(error) => return Err(error),
+                    }
+                }
             }
         }
-    } else {
-        false
-    };
+    }
 
     // Emit session config for desktop consumption (config bridge tier 1b).
     // Emitted AFTER desired_model resolution so the desktop caches the
-    // post-switch state. modelOverridden reflects whether the switch actually
-    // applied — false on the unsupported arm so the panel doesn't show a
-    // stale override badge.
+    // post-switch state. A failed live switch may restore an earlier live
+    // override, so modelOverridden reflects the confirmed final session.
     agent.acp.observe(
         "session_config_captured",
         serde_json::json!({
-            "configOptions": resp.raw.get("configOptions").cloned().unwrap_or(serde_json::Value::Null),
+            "configOptions": reported_config_options,
             "modes": resp.raw.get("modes").cloned().unwrap_or(serde_json::Value::Null),
-            "models": resp.raw.get("models").cloned().unwrap_or(serde_json::Value::Null),
-            "modelOverridden": agent.model_overridden && switch_succeeded,
+            "models": reported_models,
+            "modelOverridden": agent.model_overridden,
             // Pair identity for the desktop session-config cache, which is
             // keyed by (agent, relay) like the lifecycle frames.
             "relayUrl": ctx.relay_url,
@@ -1016,21 +1458,164 @@ async fn create_session_and_apply_model(
         apply_permission_mode(&mut agent.acp, &resp.session_id, &ctx.permission_mode).await?;
     }
 
-    Ok(resp.session_id)
+    let resumed_conversation = resp
+        .raw
+        .pointer("/_meta/buzz/resumedConversation")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let skip_relay_history = resp
+        .raw
+        .pointer("/_meta/buzz/skipRelayHistory")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    Ok(CreatedSession {
+        session_id: resp.session_id,
+        resumed_conversation,
+        skip_relay_history,
+    })
 }
 
-/// Send the appropriate ACP model-switch request with a timeout.
-///
-/// On timeout or error, logs a warning and returns — the caller proceeds
-/// with the agent's default model. This is intentionally non-fatal: a stale
-/// response from a timed-out request is safely ignored by `read_until_response`
-/// (non-matching JSON-RPC IDs are skipped).
+/// Result of one model application attempt. A successful response is retained
+/// so the observer cache can publish authoritative post-switch configuration.
+#[derive(Debug, PartialEq)]
+enum ModelSwitchApplyOutcome {
+    Applied { response: serde_json::Value },
+    Rejected,
+}
+
+fn model_switch_response_confirms(
+    response: &serde_json::Value,
+    method: &ModelSwitchMethod,
+) -> bool {
+    match method {
+        ModelSwitchMethod::ConfigOption {
+            config_id,
+            option_value,
+        } => {
+            let standard_confirmation = response
+                .get("configOptions")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|options| {
+                    options.iter().any(|option| {
+                        option
+                            .get("id")
+                            .or_else(|| option.get("configId"))
+                            .and_then(serde_json::Value::as_str)
+                            == Some(config_id.as_str())
+                            && option
+                                .get("currentValue")
+                                .or_else(|| option.get("value"))
+                                .and_then(serde_json::Value::as_str)
+                                == Some(option_value.as_str())
+                    })
+                });
+            if standard_confirmation {
+                return true;
+            }
+            let returned_id = response.get("configId").and_then(serde_json::Value::as_str);
+            let returned_value = response.get("value").and_then(serde_json::Value::as_str);
+            returned_id == Some(config_id.as_str()) && returned_value == Some(option_value.as_str())
+        }
+        ModelSwitchMethod::SetModel { model_id } => {
+            match response.get("modelId").and_then(serde_json::Value::as_str) {
+                Some(returned) => returned == model_id,
+                None => response
+                    .as_object()
+                    .is_some_and(|object| object.keys().all(|key| key == "_meta")),
+            }
+        }
+    }
+}
+
+/// Merge a confirmed response into the configuration snapshot sent to the
+/// desktop. Stable ACP returns the full updated `configOptions` list; legacy
+/// echo and unstable set-model responses are normalized locally.
+fn merge_applied_model_state(
+    config_options: &mut serde_json::Value,
+    models: &mut serde_json::Value,
+    response: &serde_json::Value,
+    method: &ModelSwitchMethod,
+) {
+    if response
+        .get("configOptions")
+        .is_some_and(serde_json::Value::is_array)
+    {
+        *config_options = response["configOptions"].clone();
+    }
+    if response
+        .get("models")
+        .is_some_and(serde_json::Value::is_object)
+    {
+        *models = response["models"].clone();
+    }
+
+    let (config_id, model_id) = match method {
+        ModelSwitchMethod::ConfigOption {
+            config_id,
+            option_value,
+        } => (Some(config_id.as_str()), option_value.as_str()),
+        ModelSwitchMethod::SetModel { model_id } => (None, model_id.as_str()),
+    };
+    if let (Some(config_id), Some(options)) = (config_id, config_options.as_array_mut()) {
+        if let Some(option) = options.iter_mut().find(|option| {
+            option
+                .get("id")
+                .or_else(|| option.get("configId"))
+                .and_then(serde_json::Value::as_str)
+                == Some(config_id)
+        }) {
+            if let Some(object) = option.as_object_mut() {
+                let key = if object.contains_key("currentValue") {
+                    "currentValue"
+                } else {
+                    "value"
+                };
+                object.insert(
+                    key.to_string(),
+                    serde_json::Value::String(model_id.to_string()),
+                );
+            }
+        }
+    }
+    if let Some(models) = models.as_object_mut() {
+        models.insert(
+            "currentModelId".to_string(),
+            serde_json::Value::String(model_id.to_string()),
+        );
+    }
+}
+
+/// Reapply the model that was active before a rejected live switch. Returning
+/// without a confirmed rollback would run the requeued turn on an unreported
+/// adapter default, so any miss poisons the fresh session.
+async fn restore_previous_model(
+    acp: &mut AcpClient,
+    session_id: &str,
+    session_new_result: &serde_json::Value,
+    previous_model: Option<&str>,
+) -> Result<Option<(serde_json::Value, ModelSwitchMethod)>, AcpError> {
+    let Some(previous_model) = previous_model else {
+        return Ok(None);
+    };
+    let method = resolve_model_switch_method(session_new_result, previous_model).ok_or_else(|| {
+        AcpError::Protocol(format!(
+            "cannot restore previous model {previous_model}: it is absent from the fresh session catalog"
+        ))
+    })?;
+    match apply_model_switch(acp, session_id, previous_model, &method).await? {
+        ModelSwitchApplyOutcome::Applied { response } => Ok(Some((response, method))),
+        ModelSwitchApplyOutcome::Rejected => Err(AcpError::Protocol(format!(
+            "adapter rejected rollback to previous model {previous_model}"
+        ))),
+    }
+}
+
 async fn apply_model_switch(
     acp: &mut AcpClient,
     session_id: &str,
     desired: &str,
     method: &ModelSwitchMethod,
-) -> Result<(), AcpError> {
+) -> Result<ModelSwitchApplyOutcome, AcpError> {
     let method_label = match method {
         ModelSwitchMethod::ConfigOption { config_id, .. } => {
             format!("configOption (configId={config_id})")
@@ -1055,31 +1640,40 @@ async fn apply_model_switch(
     .await;
 
     match result {
-        Ok(Ok(_)) => {
+        Ok(Ok(response)) if model_switch_response_confirms(&response, method) => {
             tracing::info!(
                 target: "pool::model",
                 "applied model {desired} via {method_label} on session {session_id}"
             );
+            Ok(ModelSwitchApplyOutcome::Applied { response })
         }
-        // Transport-class errors may have corrupted the stdio stream — propagate
-        // so the caller can respawn the agent instead of reusing a poisoned one.
-        Ok(Err(e @ AcpError::Io(_)))
-        | Ok(Err(e @ AcpError::WriteTimeout(_)))
-        | Ok(Err(e @ AcpError::Timeout(_)))
-        | Ok(Err(e @ AcpError::Protocol(_)))
-        | Ok(Err(e @ AcpError::AgentExited)) => {
+        Ok(Ok(response)) => {
+            tracing::warn!(
+                target: "pool::model",
+                response = %response,
+                "agent returned a contradictory model-switch success via {method_label}"
+            );
+            Ok(ModelSwitchApplyOutcome::Rejected)
+        }
+        // JSON-RPC application rejection leaves the agent usable but does not
+        // mean the requested model was applied.
+        Ok(Err(AcpError::AgentError { code, message })) => {
+            tracing::warn!(
+                target: "pool::model",
+                code,
+                message,
+                "agent rejected model {desired} via {method_label}"
+            );
+            Ok(ModelSwitchApplyOutcome::Rejected)
+        }
+        // Every other ACP error may indicate a damaged or desynchronized
+        // transport. Propagate so the caller replaces the agent.
+        Ok(Err(e)) => {
             tracing::error!(
                 target: "pool::model",
                 "fatal error setting model {desired} via {method_label}: {e}"
             );
-            return Err(e);
-        }
-        // Application-level errors (Json, etc.) — agent is fine, just uses default model.
-        Ok(Err(e)) => {
-            tracing::warn!(
-                target: "pool::model",
-                "failed to set model {desired} via {method_label}: {e} — proceeding with agent default"
-            );
+            Err(e)
         }
         Err(_) => {
             // Outer timeout fired — the inner send_request may have left the
@@ -1088,10 +1682,9 @@ async fn apply_model_switch(
                 target: "pool::model",
                 "model set via {method_label} timed out ({MODEL_SWITCH_TIMEOUT:?}) — treating as fatal"
             );
-            return Err(AcpError::Timeout(MODEL_SWITCH_TIMEOUT));
+            Err(AcpError::Timeout(MODEL_SWITCH_TIMEOUT))
         }
     }
-    Ok(())
 }
 
 /// Set the session permission mode via `session/set_config_option`.
@@ -1351,6 +1944,46 @@ fn send_prompt_result(
 ///
 /// The agent is ALWAYS returned — even on panic the `JoinSet` detects the
 /// abort and the caller uses `task_map` to recover the agent index.
+/// Dispose an adapter session or poison the whole adapter process if disposal
+/// fails. `forget=true` is reserved for authenticated destructive lifecycle
+/// actions (`/new`, `!rotate`, membership removal). Ordinary cancellation,
+/// model switching, interruption, and automatic hot-session rotation pass
+/// `false`, releasing the live handle while preserving durable Pi context.
+async fn dispose_session_or_poison(
+    agent: &mut OwnedAgent,
+    session_id: &str,
+    forget: bool,
+    operation: &'static str,
+) -> bool {
+    match agent.acp.session_dispose(session_id, forget).await {
+        Ok(true) => true,
+        Ok(false) if !forget => true,
+        Ok(false) => {
+            tracing::error!(
+                target: "pool::session",
+                %session_id,
+                operation,
+                "adapter cannot forget sessions; terminating it to preserve context isolation"
+            );
+            agent.acp.shutdown().await;
+            agent.state.invalidate_all();
+            false
+        }
+        Err(error) => {
+            tracing::error!(
+                target: "pool::session",
+                %session_id,
+                %error,
+                operation,
+                "adapter session disposal failed; terminating it to preserve context isolation"
+            );
+            agent.acp.shutdown().await;
+            agent.state.invalidate_all();
+            false
+        }
+    }
+}
+
 pub async fn run_prompt_task(
     mut agent: OwnedAgent,
     batch: Option<FlushBatch>,
@@ -1362,10 +1995,11 @@ pub async fn run_prompt_task(
 ) {
     // Is this a channel prompt or a heartbeat?
     let source = match &batch {
-        Some(b) => PromptSource::Channel(b.channel_id),
+        Some(b) => PromptSource::Conversation(b.conversation_key.clone()),
         None => PromptSource::Heartbeat,
     };
     let observer_channel_id = match &source {
+        PromptSource::Conversation(key) => Some(key.channel_id),
         PromptSource::Channel(channel_id) => Some(*channel_id),
         PromptSource::Heartbeat => None,
     };
@@ -1384,6 +2018,7 @@ pub async fn run_prompt_task(
         "turn_started",
         serde_json::json!({
             "source": match &source {
+                PromptSource::Conversation(_) => "thread",
                 PromptSource::Channel(_) => "channel",
                 PromptSource::Heartbeat => "heartbeat",
             },
@@ -1465,11 +2100,12 @@ pub async fn run_prompt_task(
     //
     // Operator opt-out: `--no-memory` / `BUZZ_ACP_NO_MEMORY` skips the fetch.
     if ctx.memory_enabled {
-        if let (PromptSource::Channel(cid), Some(owner_pk)) =
+        if let (PromptSource::Conversation(key), Some(owner_pk)) =
             (&source, ctx.agent_owner_pubkey.as_ref())
         {
-            let is_new_channel_session = !agent.state.sessions.contains_key(cid);
-            if is_new_channel_session && !agent.state.core_sections.contains_key(cid) {
+            let cid = key.channel_id;
+            let is_new_conversation_session = !agent.state.sessions.contains_key(key);
+            if is_new_conversation_session && !agent.state.core_sections.contains_key(&cid) {
                 // Bounded — we'd rather start the session with no core hint
                 // than block session creation on a stalled relay.
                 const CORE_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
@@ -1497,7 +2133,7 @@ pub async fn run_prompt_task(
                         section_len = rendered.len(),
                         "injected NIP-AE core section into system prompt"
                     );
-                    agent.state.core_sections.insert(*cid, rendered);
+                    agent.state.core_sections.insert(cid, rendered);
                 }
             }
         }
@@ -1519,19 +2155,21 @@ pub async fn run_prompt_task(
     // Channel name for the session title, from the same single resolve the
     // canvas DM check uses — see `resolve_new_session_channel_context`.
     let mut title_channel: Option<String> = None;
-    if let PromptSource::Channel(cid) = &source {
-        let is_new_channel_session = !agent.state.sessions.contains_key(cid);
-        let needs_canvas = is_new_channel_session && !agent.state.canvas_sections.contains_key(cid);
-        let needs_title = is_new_channel_session && ctx.session_title.is_some();
+    if let PromptSource::Conversation(key) = &source {
+        let cid = key.channel_id;
+        let is_new_conversation_session = !agent.state.sessions.contains_key(key);
+        let needs_canvas =
+            is_new_conversation_session && !agent.state.canvas_sections.contains_key(&cid);
+        let needs_title = is_new_conversation_session && ctx.session_title.is_some();
         if needs_canvas || needs_title {
             let (is_dm, resolved_channel) =
-                resolve_new_session_channel_context(&ctx.channel_info, *cid).await;
+                resolve_new_session_channel_context(&ctx.channel_info, cid).await;
             title_channel = resolved_channel;
             // A confirmed DM never receives a canvas section; an undeterminable
             // channel type fails closed as a DM for the same reason.
             if needs_canvas && !is_dm {
-                if let Some(section) = fetch_canvas_section(*cid, &ctx.rest_client).await {
-                    pending_canvas = Some((*cid, section));
+                if let Some(section) = fetch_canvas_section(cid, &ctx.rest_client).await {
+                    pending_canvas = Some((cid, section));
                 }
             }
         }
@@ -1540,6 +2178,7 @@ pub async fn run_prompt_task(
     // The core section to fold into the system prompt for this turn's session.
     // Channel-scoped; heartbeats carry no owner core.
     let agent_core: Option<String> = match &source {
+        PromptSource::Conversation(key) => agent.state.core_sections.get(&key.channel_id).cloned(),
         PromptSource::Channel(cid) => agent.state.core_sections.get(cid).cloned(),
         PromptSource::Heartbeat => None,
     };
@@ -1547,6 +2186,12 @@ pub async fn run_prompt_task(
     // The canvas metadata section — channel-scoped, absent for heartbeats/DMs.
     // Prefer the committed cache; fall back to pending (for new sessions being created now).
     let agent_canvas: Option<String> = match &source {
+        PromptSource::Conversation(key) => agent
+            .state
+            .canvas_sections
+            .get(&key.channel_id)
+            .cloned()
+            .or_else(|| pending_canvas.as_ref().map(|(_, s)| s.clone())),
         PromptSource::Channel(cid) => agent
             .state
             .canvas_sections
@@ -1556,11 +2201,115 @@ pub async fn run_prompt_task(
         PromptSource::Heartbeat => None,
     };
 
-    let (session_id, is_new_session) = match &source {
-        PromptSource::Channel(cid) => {
-            if let Some(sid) = agent.state.sessions.get(cid) {
-                (sid.clone(), false)
+    let (session_id, is_new_session, seed_conversation_history) = match &source {
+        PromptSource::Conversation(key) => {
+            let evicted_sessions = if agent.acp.thread_sessions_supported() {
+                agent.state.prune_idle(
+                    key,
+                    ctx.max_cached_conversation_sessions,
+                    ctx.conversation_session_idle_ttl,
+                )
             } else {
+                // Legacy adapters own opaque channel sessions and do not
+                // implement disposal/resume. Auto-evicting the outer ACP ID
+                // would leak their inner session and lose context on revisit.
+                Vec::new()
+            };
+            for (evicted, evicted_session_id) in evicted_sessions {
+                match agent.acp.session_dispose(&evicted_session_id, false).await {
+                    Ok(true) => tracing::debug!(
+                        target: "pool::session",
+                        conversation = %evicted,
+                        session_id = %evicted_session_id,
+                        "adapter released idle session while preserving persistent mapping"
+                    ),
+                    Ok(false) => {}
+                    Err(error) => tracing::warn!(
+                        target: "pool::session",
+                        conversation = %evicted,
+                        session_id = %evicted_session_id,
+                        %error,
+                        "adapter could not release evicted session; local LRU still applied"
+                    ),
+                }
+                tracing::info!(
+                    target: "pool::session",
+                    conversation = %evicted,
+                    "evicted idle conversation session"
+                );
+            }
+            if let Some(sid) = agent.state.sessions.get(key) {
+                agent
+                    .state
+                    .last_used
+                    .insert(key.clone(), std::time::Instant::now());
+                (sid.clone(), false, false)
+            } else {
+                match create_session_and_apply_model(
+                    &mut agent,
+                    &ctx,
+                    agent_core.as_deref(),
+                    agent_canvas.as_deref(),
+                    title_channel.as_deref(),
+                    Some(key),
+                )
+                .await
+                {
+                    Ok(created) => {
+                        let sid = created.session_id;
+                        let seed_history = should_seed_relay_history(
+                            created.resumed_conversation,
+                            created.skip_relay_history,
+                            key.reset_token.as_deref(),
+                        );
+                        tracing::info!(
+                            target: "pool::session",
+                            conversation = %key,
+                            resumed = created.resumed_conversation,
+                            skip_relay_history = created.skip_relay_history,
+                            seed_history,
+                            "created session {sid} for Buzz thread"
+                        );
+                        agent.state.sessions.insert(key.clone(), sid.clone());
+                        agent
+                            .state
+                            .last_used
+                            .insert(key.clone(), std::time::Instant::now());
+                        if let Some((pending_cid, section)) = pending_canvas.take() {
+                            agent.state.canvas_sections.insert(pending_cid, section);
+                        }
+                        (sid, !created.resumed_conversation, seed_history)
+                    }
+                    Err(AcpError::AgentExited) => {
+                        agent.state.invalidate_all();
+                        send_prompt_result(
+                            &result_tx,
+                            &turn_id,
+                            agent,
+                            source,
+                            PromptOutcome::AgentExited,
+                            batch,
+                        );
+                        return;
+                    }
+                    Err(e) => {
+                        send_prompt_result(
+                            &result_tx,
+                            &turn_id,
+                            agent,
+                            source,
+                            PromptOutcome::Error(e),
+                            batch,
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+        PromptSource::Channel(cid) => {
+            // Compatibility/admin source: it never owns a regular per-thread
+            // session. Create an untracked session if exercised by old callers.
+            {
                 // The title is channel-qualified (`Agent · #channel`) so one
                 // agent in several channels doesn't produce identical session
                 // rows; `title_channel` comes from the single resolve above and
@@ -1571,20 +2320,25 @@ pub async fn run_prompt_task(
                     agent_core.as_deref(),
                     agent_canvas.as_deref(),
                     title_channel.as_deref(),
+                    None,
                 )
                 .await
                 {
-                    Ok(sid) => {
+                    Ok(created) => {
+                        let sid = created.session_id;
                         tracing::info!(
                             target: "pool::session",
                             "created session {sid} for channel {cid}"
                         );
-                        agent.state.sessions.insert(*cid, sid.clone());
                         // Commit canvas only after session creation succeeds (I3).
                         if let Some((pending_cid, section)) = pending_canvas.take() {
                             agent.state.canvas_sections.insert(pending_cid, section);
                         }
-                        (sid, true)
+                        (
+                            sid,
+                            !created.resumed_conversation,
+                            !created.resumed_conversation,
+                        )
                     }
                     Err(AcpError::AgentExited) => {
                         agent.state.invalidate_all();
@@ -1616,17 +2370,19 @@ pub async fn run_prompt_task(
         }
         PromptSource::Heartbeat => {
             if let Some(sid) = &agent.state.heartbeat_session {
-                (sid.clone(), false)
+                (sid.clone(), false, false)
             } else {
-                match create_session_and_apply_model(&mut agent, &ctx, None, None, None).await {
-                    Ok(sid) => {
+                match create_session_and_apply_model(&mut agent, &ctx, None, None, None, None).await
+                {
+                    Ok(created) => {
+                        let sid = created.session_id;
                         tracing::info!(
                             target: "pool::session",
                             "created heartbeat session {sid} for agent {}",
                             agent.index
                         );
                         agent.state.heartbeat_session = Some(sid.clone());
-                        (sid, true)
+                        (sid, !created.resumed_conversation, false)
                     }
                     Err(AcpError::AgentExited) => {
                         agent.state.invalidate_all();
@@ -1673,11 +2429,13 @@ pub async fn run_prompt_task(
     );
 
     if is_new_session {
-        if let (PromptSource::Channel(cid), Some(ref initial_msg)) = (&source, &ctx.initial_message)
+        if let (PromptSource::Conversation(key), Some(ref initial_msg)) =
+            (&source, &ctx.initial_message)
         {
             tracing::info!(
                 target: "pool::session",
-                "sending initial_message to session {session_id} for channel {cid}"
+                conversation = %key,
+                "sending initial_message to new thread session {session_id}"
             );
             // For agents with systemPrompt support (protocol_version >= 2),
             // base_prompt is delivered via the system role in session/new.
@@ -1717,7 +2475,8 @@ pub async fn run_prompt_task(
                 Ok(stop_reason) => {
                     tracing::info!(
                         target: "pool::session",
-                        "initial_message complete for channel {cid}: {stop_reason:?}"
+                        conversation = %key,
+                        "initial_message complete: {stop_reason:?}"
                     );
                 }
                 Err(AcpError::AgentExited) => {
@@ -1735,7 +2494,8 @@ pub async fn run_prompt_task(
                 Err(AcpError::IdleTimeout(_)) => {
                     tracing::warn!(
                         target: "pool::session",
-                        "initial_message idle timeout ({}s) for channel {cid} — cancelling",
+                        conversation = %key,
+                        "initial_message idle timeout ({}s) — cancelling",
                         ctx.idle_timeout.as_secs()
                     );
                     match agent
@@ -1780,7 +2540,8 @@ pub async fn run_prompt_task(
                     let recently_active = silence < RECENT_ACTIVITY_WINDOW;
                     tracing::error!(
                         target: "pool::session",
-                        "hard timeout ({}s cap, silence {silence:?}, recently_active={recently_active}) during initial_message for channel {cid} — agent process is unrecoverable",
+                        conversation = %key,
+                        "hard timeout ({}s cap, silence {silence:?}, recently_active={recently_active}) during initial_message — agent process is unrecoverable",
                         ctx.max_turn_duration.as_secs()
                     );
                     agent.state.invalidate_all();
@@ -1797,7 +2558,8 @@ pub async fn run_prompt_task(
                 Err(e) => {
                     tracing::error!(
                         target: "pool::session",
-                        "initial_message failed for channel {cid}: {e} — invalidating session"
+                        conversation = %key,
+                        "initial_message failed: {e} — invalidating session"
                     );
                     agent.state.invalidate(&source);
                     send_prompt_result(
@@ -1838,7 +2600,13 @@ pub async fn run_prompt_task(
         // Try startup cache first; lazy-fetch via REST for dynamic channels.
         let channel_info = ctx.channel_info.resolve(b.channel_id).await;
 
-        let conversation_context = if ctx.context_message_limit > 0 {
+        // Seed relay history exactly once for a genuinely fresh logical
+        // conversation. Reused local sessions and adapter-resumed persistent
+        // sessions already contain prior prompts; embedding the full thread on
+        // every turn would grow context quadratically. A `/new` generation is
+        // also deliberately not seeded, because relay history before the reset
+        // command is precisely the context the owner asked to clear.
+        let conversation_context = if seed_conversation_history && ctx.context_message_limit > 0 {
             fetch_conversation_context(b, &channel_info, &ctx).await
         } else {
             None
@@ -1960,8 +2728,14 @@ pub async fn run_prompt_task(
                     // requeued turn (busy) or the next turn (already-completed)
                     // applies the new model. Runtime-only — never persisted.
                     if let ControlSignal::SwitchModel(ref model_id) = control_signal {
+                        let pending = PendingModelSwitch {
+                            turn_id: turn_id.clone(),
+                            previous_model: agent.desired_model.clone(),
+                            previous_model_overridden: agent.model_overridden,
+                        };
                         agent.desired_model = Some(model_id.clone());
                         agent.model_overridden = true;
+                        agent.pending_model_switch = Some(pending);
                     }
                     // Control signal received. Guard against Race 1: the turn may
                     // have completed naturally just as cancel fired.
@@ -1974,6 +2748,15 @@ pub async fn run_prompt_task(
                         {
                             Ok(stop_reason) => {
                                 log_stop_reason(&source, &stop_reason);
+                                let forget_context =
+                                    control_forgets_durable_context(&control_signal);
+                                dispose_session_or_poison(
+                                    &mut agent,
+                                    &session_id,
+                                    forget_context,
+                                    "control cancellation",
+                                )
+                                .await;
                                 agent.state.invalidate(&source);
                                 let retry_batch =
                                     requeue_cancelled_batch(&ctx, control_signal, batch);
@@ -2002,6 +2785,13 @@ pub async fn run_prompt_task(
                                 // Single production arm: classify the error→outcome
                                 // and outcome→batch-fate boundary once via the seam
                                 // shared with tests, then invalidate/publish/send once.
+                                let forget_context =
+                                    control_forgets_durable_context(&control_signal);
+                                report_control_cancel_failure(
+                                    &mut agent,
+                                    &control_signal,
+                                    &turn_id,
+                                );
                                 let failure = classify_control_cancel_failure(
                                     &ctx,
                                     error,
@@ -2011,6 +2801,13 @@ pub async fn run_prompt_task(
                                 if failure.invalidate_all {
                                     agent.state.invalidate_all();
                                 } else {
+                                    dispose_session_or_poison(
+                                        &mut agent,
+                                        &session_id,
+                                        forget_context,
+                                        "failed control cancellation",
+                                    )
+                                    .await;
                                     agent.state.invalidate(&source);
                                 }
 
@@ -2069,6 +2866,18 @@ pub async fn run_prompt_task(
                             &source,
                             &control_signal,
                         );
+                        if matches!(
+                            control_signal,
+                            ControlSignal::Rotate | ControlSignal::SwitchModel(_)
+                        ) {
+                            dispose_session_or_poison(
+                                &mut agent,
+                                &session_id,
+                                control_forgets_durable_context(&control_signal),
+                                "completed-turn rotation",
+                            )
+                            .await;
+                        }
                         let usage = agent.acp.take_turn_usage();
                         publish_agent_turn_metric(
                             &ctx,
@@ -2107,11 +2916,12 @@ pub async fn run_prompt_task(
                 let limit = ctx.max_turns_per_session;
                 if limit > 0 {
                     match &source {
-                        PromptSource::Channel(cid) => {
-                            let count = agent.state.turn_counts.entry(*cid).or_insert(0);
+                        PromptSource::Conversation(key) => {
+                            let count = agent.state.turn_counts.entry(key.clone()).or_insert(0);
                             *count += 1;
                             *count >= limit
                         }
+                        PromptSource::Channel(_) => false,
                         PromptSource::Heartbeat => {
                             agent.state.heartbeat_turn_count += 1;
                             agent.state.heartbeat_turn_count >= limit
@@ -2127,6 +2937,8 @@ pub async fn run_prompt_task(
                     target: "pool::session",
                     "rotating session for {source:?} after {stop_reason:?}",
                 );
+                dispose_session_or_poison(&mut agent, &session_id, false, "automatic rotation")
+                    .await;
                 agent.state.invalidate(&source);
             }
 
@@ -2616,6 +3428,11 @@ async fn fetch_conversation_context(
     // channels and DMs. A DM reply needs thread context (not channel history)
     // because /api/channels/{id}/messages excludes thread replies.
     let last_event = batch.events.last()?;
+    let batch_event_ids: HashSet<String> = batch
+        .events
+        .iter()
+        .map(|event| event.event.id.to_hex())
+        .collect();
     let tags = crate::queue::parse_thread_tags(&last_event.event);
     if let Some(root_id) = tags.root_event_id {
         return fetch_thread_context(
@@ -2623,6 +3440,7 @@ async fn fetch_conversation_context(
             &root_id,
             limit,
             ctx.agent_keys.public_key(),
+            &batch_event_ids,
             &ctx.rest_client,
         )
         .await;
@@ -2630,7 +3448,7 @@ async fn fetch_conversation_context(
 
     // DM non-reply: fetch recent conversation history.
     if is_dm {
-        return fetch_dm_context(batch.channel_id, limit, &ctx.rest_client).await;
+        return fetch_dm_context(batch.channel_id, limit, &batch_event_ids, &ctx.rest_client).await;
     }
 
     None
@@ -2802,6 +3620,7 @@ async fn fetch_thread_context(
     root_event_id: &str,
     limit: u32,
     agent_pubkey: nostr::PublicKey,
+    excluded_event_ids: &HashSet<String>,
     rest: &RestClient,
 ) -> Option<ConversationContext> {
     fetch_thread_context_with(
@@ -2809,6 +3628,7 @@ async fn fetch_thread_context(
         root_event_id,
         limit,
         agent_pubkey,
+        excluded_event_ids,
         |filters| async move { rest.query(&filters).await },
         |filters| async move { rest.count(&filters).await },
     )
@@ -2820,6 +3640,7 @@ async fn fetch_thread_context_with<Query, QueryFut, Count, CountFut>(
     root_event_id: &str,
     limit: u32,
     agent_pubkey: nostr::PublicKey,
+    excluded_event_ids: &HashSet<String>,
     query: Query,
     count: Count,
 ) -> Option<ConversationContext>
@@ -2849,7 +3670,16 @@ where
 
     // Three filters: (1) root event by ID, (2) recent replies with #e=root +
     // #h=channel plus a sentinel, and (3) the agent's newest reply for pinning.
-    let root_filter = nostr::Filter::new().id(nostr::EventId::from_hex(root_event_id).ok()?);
+    let root_filter = nostr::Filter::new()
+        .id(nostr::EventId::from_hex(root_event_id).ok()?)
+        .kinds([
+            nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16),
+            nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE_V2 as u16),
+        ])
+        .custom_tags(h_tag, [ch_str.as_str()]);
+    let reply_limit = (limit as usize)
+        .saturating_add(excluded_event_ids.len())
+        .saturating_add(1);
     let replies_filter = nostr::Filter::new()
         .kinds([
             nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16),
@@ -2857,7 +3687,7 @@ where
         ])
         .custom_tags(e_tag, [root_event_id])
         .custom_tags(h_tag, [ch_str.as_str()])
-        .limit(limit.saturating_add(1) as usize);
+        .limit(reply_limit);
     let agent_reply_filter = replies_filter.clone().author(agent_pubkey).limit(1);
 
     let context = fetch_with_retry(|| async {
@@ -2871,9 +3701,13 @@ where
         )
         .await
         {
-            Ok(Ok(json)) => {
-                parse_nostr_thread_response_with_meta(json, root_event_id, limit, &agent_pubkey)
-            }
+            Ok(Ok(json)) => parse_nostr_thread_response_with_meta(
+                json,
+                root_event_id,
+                limit,
+                &agent_pubkey,
+                excluded_event_ids,
+            ),
             Ok(Err(e)) => {
                 tracing::warn!(
                     channel_id = %channel_id,
@@ -2967,6 +3801,7 @@ where
 async fn fetch_dm_context(
     channel_id: Uuid,
     limit: u32,
+    excluded_event_ids: &HashSet<String>,
     rest: &RestClient,
 ) -> Option<ConversationContext> {
     use nostr::{Alphabet, SingleLetterTag};
@@ -2979,7 +3814,7 @@ async fn fetch_dm_context(
             nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE_V2 as u16),
         ])
         .custom_tags(h_tag, [ch_str.as_str()])
-        .limit(limit as usize);
+        .limit((limit as usize).saturating_add(excluded_event_ids.len()));
 
     fetch_with_retry(|| async {
         match timeout(
@@ -2988,7 +3823,7 @@ async fn fetch_dm_context(
         )
         .await
         {
-            Ok(Ok(json)) => parse_nostr_dm_response(json, limit),
+            Ok(Ok(json)) => parse_nostr_dm_response(json, limit, excluded_event_ids),
             Ok(Err(e)) => {
                 tracing::warn!(
                     channel_id = %channel_id,
@@ -3124,9 +3959,16 @@ fn parse_nostr_thread_response(
     root_event_id: &str,
     limit: u32,
     agent_pubkey: &nostr::PublicKey,
+    excluded_event_ids: &HashSet<String>,
 ) -> Option<ConversationContext> {
-    parse_nostr_thread_response_with_meta(json, root_event_id, limit, agent_pubkey)
-        .map(|parsed| parsed.context)
+    parse_nostr_thread_response_with_meta(
+        json,
+        root_event_id,
+        limit,
+        agent_pubkey,
+        excluded_event_ids,
+    )
+    .map(|parsed| parsed.context)
 }
 
 struct ParsedThreadContext {
@@ -3139,19 +3981,26 @@ fn parse_nostr_thread_response_with_meta(
     root_event_id: &str,
     limit: u32,
     agent_pubkey: &nostr::PublicKey,
+    excluded_event_ids: &HashSet<String>,
 ) -> Option<ParsedThreadContext> {
     let events = json.as_array()?;
     let agent_pubkey_hex = agent_pubkey.to_hex();
     let mut root_msg = None;
     let mut reply_msgs = Vec::new();
-    let mut seen_reply_ids = HashSet::new();
+    let mut seen_ids = HashSet::new();
 
     for ev in events {
         let ev_id = ev.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        if ev_id.is_empty()
+            || !seen_ids.insert(ev_id.to_ascii_lowercase())
+            || excluded_event_ids.contains(&ev_id.to_ascii_lowercase())
+        {
+            continue;
+        }
         if let Some(msg) = json_to_context_message(ev) {
-            if ev_id == root_event_id {
+            if ev_id.eq_ignore_ascii_case(root_event_id) {
                 root_msg = Some(msg);
-            } else if seen_reply_ids.insert(ev_id.to_string()) {
+            } else {
                 let is_agent = msg.pubkey.eq_ignore_ascii_case(&agent_pubkey_hex);
                 reply_msgs.push((
                     ev_id.to_string(),
@@ -3223,12 +4072,21 @@ fn parse_nostr_thread_response_with_meta(
 /// Parse a Nostr query response (array of events) into DM context.
 ///
 /// Events arrive in relay order (newest first); reversed to chronological.
-fn parse_nostr_dm_response(json: serde_json::Value, limit: u32) -> Option<ConversationContext> {
+fn parse_nostr_dm_response(
+    json: serde_json::Value,
+    limit: u32,
+    excluded_event_ids: &HashSet<String>,
+) -> Option<ConversationContext> {
     let events = json.as_array()?;
+    let mut seen_ids = HashSet::new();
 
     let mut messages: Vec<(u64, ContextMessage)> = events
         .iter()
         .filter_map(|ev| {
+            let event_id = ev.get("id")?.as_str()?.to_ascii_lowercase();
+            if !seen_ids.insert(event_id.clone()) || excluded_event_ids.contains(&event_id) {
+                return None;
+            }
             let ts = ev.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0);
             json_to_context_message(ev).map(|msg| (ts, msg))
         })
@@ -3347,6 +4205,7 @@ fn classify_control_cancel_failure(
 /// Shared by the turn-start and turn-stop lines so a log can be read as pairs.
 fn prompt_label(source: &PromptSource) -> String {
     match source {
+        PromptSource::Conversation(key) => format!("conversation {key}"),
         PromptSource::Channel(cid) => format!("channel {cid}"),
         PromptSource::Heartbeat => "heartbeat".to_string(),
     }
@@ -3824,16 +4683,15 @@ pub(crate) async fn reaction_add(rest: &crate::relay::RestClient, event_id: &str
     }
 }
 
-/// Best-effort: post a visible failure notice (kind:9) to a channel after a
-/// batch is dead-lettered. Replies into the thread of `thread_tags` when the
-/// triggering event was threaded. Errors are logged and swallowed — the
-/// notice must never take down the main loop.
-pub(crate) async fn post_failure_notice(
+/// Build and sign one visible harness notice. Keeping this separate from
+/// submission lets reset acknowledgements retry the exact same Nostr event ID
+/// after an ambiguous timeout.
+pub(crate) fn build_notice_event(
     rest: &crate::relay::RestClient,
     channel_id: Uuid,
     thread_tags: &ThreadTags,
     content: &str,
-) {
+) -> Result<nostr::Event, String> {
     let thread_ref = thread_tags.root_event_id.as_deref().and_then(|root| {
         let root_id = nostr::EventId::from_hex(root).ok()?;
         let parent_id = thread_tags
@@ -3847,24 +4705,100 @@ pub(crate) async fn post_failure_notice(
         })
     });
     let builder =
-        match buzz_sdk::build_message(channel_id, content, thread_ref.as_ref(), &[], false, &[]) {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!(channel = %channel_id, "failure notice: build failed: {e}");
-                return;
-            }
-        };
-    let event = match builder.sign_with_keys(&rest.keys) {
-        Ok(e) => e,
-        Err(e) => {
-            tracing::warn!(channel = %channel_id, "failure notice: sign failed: {e}");
-            return;
+        buzz_sdk::build_message(channel_id, content, thread_ref.as_ref(), &[], false, &[])
+            .map_err(|error| format!("notice build failed: {error}"))?;
+    builder
+        .sign_with_keys(&rest.keys)
+        .map_err(|error| format!("notice signing failed: {error}"))
+}
+
+fn notice_response_is_accepted(response: &serde_json::Value) -> bool {
+    response.get("accepted").and_then(|value| value.as_bool()) == Some(true)
+}
+
+/// Submit an already-signed notice once. `true` means the relay accepted the
+/// event (including its idempotent duplicate path); false is safe to retry with
+/// the same event ID.
+pub(crate) async fn submit_notice_event(
+    rest: &crate::relay::RestClient,
+    event: &nostr::Event,
+) -> bool {
+    match tokio::time::timeout(Duration::from_secs(5), rest.submit_event(event)).await {
+        Ok(Ok(response)) if notice_response_is_accepted(&response) => true,
+        Ok(Ok(response)) => {
+            tracing::warn!(
+                event_id = %event.id,
+                accepted = response.get("accepted").and_then(|value| value.as_bool()),
+                "notice rejected by relay"
+            );
+            false
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(event_id = %event.id, %error, "notice submission failed");
+            false
+        }
+        Err(_) => {
+            tracing::warn!(event_id = %event.id, "notice submission timed out");
+            false
+        }
+    }
+}
+
+/// Submit one signed notice with a short bounded retry schedule.
+pub(crate) async fn submit_notice_event_with_retry(
+    rest: &crate::relay::RestClient,
+    event: &nostr::Event,
+) -> bool {
+    for delay in [
+        Duration::ZERO,
+        Duration::from_millis(250),
+        Duration::from_secs(1),
+    ] {
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+        if submit_notice_event(rest, event).await {
+            return true;
+        }
+    }
+    false
+}
+
+/// Post a visible kind-9 harness notice with bounded idempotent retry. The
+/// event is signed once; every retry therefore has the same event ID and
+/// cannot create duplicate Buzz messages if an earlier response was lost.
+pub(crate) async fn post_failure_notice(
+    rest: &crate::relay::RestClient,
+    channel_id: Uuid,
+    thread_tags: &ThreadTags,
+    content: &str,
+) -> bool {
+    let event = match build_notice_event(rest, channel_id, thread_tags, content) {
+        Ok(event) => event,
+        Err(error) => {
+            tracing::error!(channel = %channel_id, %error, "could not construct user-visible notice");
+            return false;
         }
     };
-    match tokio::time::timeout(Duration::from_secs(5), rest.submit_event(&event)).await {
-        Ok(Ok(_)) => {}
-        Ok(Err(e)) => tracing::warn!(channel = %channel_id, "failure notice failed: {e}"),
-        Err(_) => tracing::warn!(channel = %channel_id, "failure notice timed out"),
+    submit_notice_event_with_retry(rest, &event).await
+}
+
+#[cfg(test)]
+mod notice_delivery_tests {
+    use super::notice_response_is_accepted;
+
+    #[test]
+    fn relay_notice_acceptance_requires_an_explicit_accepted_response() {
+        assert!(notice_response_is_accepted(&serde_json::json!({
+            "event_id": "abc",
+            "accepted": true,
+            "message": "duplicate:"
+        })));
+        assert!(!notice_response_is_accepted(&serde_json::json!({
+            "event_id": "abc",
+            "accepted": false
+        })));
+        assert!(!notice_response_is_accepted(&serde_json::Value::Null));
     }
 }
 
@@ -3988,6 +4922,16 @@ mod tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
+    use std::time::Instant;
+
+    fn test_conversation_key(channel_id: Uuid) -> ConversationKey {
+        ConversationKey {
+            channel_id,
+            root_event_id: format!("test-root-{channel_id}"),
+            generation: 0,
+            reset_token: None,
+        }
+    }
 
     // These pin the initial_message dispatch path (run_prompt_task, ~line 855):
     // a legacy agent WITH a base_prompt must get [Base] prepended to the user
@@ -4475,8 +5419,9 @@ mod tests {
             }
         ]);
 
-        let ctx = parse_nostr_thread_response(json, root_id, 2, &agent.public_key())
-            .expect("should parse");
+        let ctx =
+            parse_nostr_thread_response(json, root_id, 2, &agent.public_key(), &HashSet::new())
+                .expect("should parse");
         match ctx {
             ConversationContext::Thread {
                 messages,
@@ -4516,8 +5461,9 @@ mod tests {
             }
         ]);
 
-        let ctx = parse_nostr_thread_response(json, root_id, 2, &agent.public_key())
-            .expect("should parse");
+        let ctx =
+            parse_nostr_thread_response(json, root_id, 2, &agent.public_key(), &HashSet::new())
+                .expect("should parse");
         match ctx {
             ConversationContext::Thread {
                 messages,
@@ -4570,8 +5516,9 @@ mod tests {
             }
         ]);
 
-        let ctx = parse_nostr_thread_response(json, root_id, 2, &agent.public_key())
-            .expect("should parse");
+        let ctx =
+            parse_nostr_thread_response(json, root_id, 2, &agent.public_key(), &HashSet::new())
+                .expect("should parse");
         match ctx {
             ConversationContext::Thread { messages, .. } => {
                 assert_eq!(messages.len(), 3); // root + 2 displayed replies
@@ -4626,6 +5573,7 @@ mod tests {
             root_id,
             2,
             agent_pubkey,
+            &HashSet::new(),
             move |filters| {
                 assert_thread_query_filters(&filters, channel_id, root_id, agent_pubkey, 3);
                 std::future::ready(Ok(json.clone()))
@@ -4650,6 +5598,74 @@ mod tests {
             }
             _ => panic!("expected Thread context"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_thread_context_excludes_live_batch_without_shrinking_prior_window() {
+        let agent = Keys::generate();
+        let root_id = "1111111111111111111111111111111111111111111111111111111111111111";
+        let current_id = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        let channel_id = Uuid::new_v4();
+        let agent_pubkey = agent.public_key();
+        let excluded = HashSet::from([current_id.to_string()]);
+        let json = json!([
+            thread_event(root_id, "rootpub", "root", 1000),
+            thread_event(current_id, "humanpub", "current request", 6000),
+            thread_event(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "humanpub",
+                "newest prior reply",
+                5000
+            ),
+            thread_event(
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "humanpub",
+                "middle prior reply",
+                4000
+            ),
+            thread_event(
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "humanpub",
+                "sentinel prior reply",
+                3000
+            )
+        ]);
+
+        let ctx = fetch_thread_context_with(
+            channel_id,
+            root_id,
+            2,
+            agent_pubkey,
+            &excluded,
+            move |filters| {
+                assert_thread_query_filters(&filters, channel_id, root_id, agent_pubkey, 4);
+                std::future::ready(Ok(json.clone()))
+            },
+            |_filters| std::future::ready(Err(crate::relay::RelayError::Http("boom".into()))),
+        )
+        .await
+        .expect("thread context");
+
+        let ConversationContext::Thread {
+            messages,
+            total,
+            truncated,
+        } = ctx
+        else {
+            panic!("expected Thread context");
+        };
+        assert!(truncated);
+        assert_eq!(total, 4, "root plus three distinct prior replies");
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["root", "middle prior reply", "newest prior reply"]
+        );
+        assert!(messages
+            .iter()
+            .all(|message| message.content != "current request"));
     }
 
     #[tokio::test]
@@ -4683,6 +5699,7 @@ mod tests {
             root_id,
             2,
             agent.public_key(),
+            &HashSet::new(),
             move |_filters| std::future::ready(Ok(json.clone())),
             |_filters| std::future::ready(Ok(json!({ "count": 6 }))),
         )
@@ -4735,6 +5752,7 @@ mod tests {
             root_id,
             2,
             agent.public_key(),
+            &HashSet::new(),
             move |_filters| std::future::ready(Ok(json.clone())),
             |_filters| std::future::ready(Ok(json!({ "count": 1 }))),
         )
@@ -4787,6 +5805,7 @@ mod tests {
             root_id,
             2,
             agent.public_key(),
+            &HashSet::new(),
             move |_filters| std::future::ready(Ok(json.clone())),
             |_filters| std::future::ready(Err(crate::relay::RelayError::Http("boom".into()))),
         )
@@ -4848,6 +5867,7 @@ mod tests {
             root_id,
             2,
             agent.public_key(),
+            &HashSet::new(),
             move |_filters| std::future::ready(Ok(json.clone())),
             |_filters| std::future::ready(Ok(json!({ "count": 3 }))),
         )
@@ -4921,6 +5941,7 @@ mod tests {
             root_id,
             2,
             agent.public_key(),
+            &HashSet::new(),
             move |_filters| std::future::ready(Ok(json.clone())),
             |_filters| std::future::ready(Err(crate::relay::RelayError::Http("boom".into()))),
         )
@@ -4971,6 +5992,8 @@ mod tests {
 
         let root = serde_json::to_value(&filters[0]).expect("serialize root filter");
         assert_eq!(root.get("ids"), Some(&json!([root_id])));
+        assert_eq!(root.get("kinds"), Some(&json!([9, 40002])));
+        assert_eq!(root.get("#h"), Some(&json!([channel_id.to_string()])));
         assert!(root.get("limit").is_none());
 
         let replies = serde_json::to_value(&filters[1]).expect("serialize replies filter");
@@ -5007,6 +6030,61 @@ mod tests {
             "content": content,
             "created_at": created_at
         })
+    }
+
+    #[test]
+    fn nostr_thread_context_excludes_live_batch_and_deduplicates_relay_rows() {
+        let root = "aa".repeat(32);
+        let prior = "bb".repeat(32);
+        let current = "cc".repeat(32);
+        let json = json!([
+            { "id": root, "content": "root", "pubkey": "01", "created_at": 1 },
+            { "id": prior, "content": "prior", "pubkey": "02", "created_at": 2 },
+            { "id": prior, "content": "duplicate prior", "pubkey": "02", "created_at": 2 },
+            { "id": current, "content": "current request", "pubkey": "03", "created_at": 3 }
+        ]);
+        let excluded = HashSet::from([current]);
+        let agent = Keys::generate();
+
+        let context = parse_nostr_thread_response(json, &root, 12, &agent.public_key(), &excluded)
+            .expect("root and prior reply remain");
+        let ConversationContext::Thread { messages, .. } = context else {
+            panic!("expected thread context");
+        };
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["root", "prior"]
+        );
+    }
+
+    #[test]
+    fn nostr_dm_context_excludes_live_batch_and_deduplicates_relay_rows() {
+        let older = "aa".repeat(32);
+        let prior = "bb".repeat(32);
+        let current = "cc".repeat(32);
+        let json = json!([
+            { "id": current, "content": "current request", "pubkey": "03", "created_at": 3 },
+            { "id": prior, "content": "prior", "pubkey": "02", "created_at": 2 },
+            { "id": prior, "content": "duplicate prior", "pubkey": "02", "created_at": 2 },
+            { "id": older, "content": "older", "pubkey": "01", "created_at": 1 }
+        ]);
+        let excluded = HashSet::from([current]);
+
+        let context =
+            parse_nostr_dm_response(json, 12, &excluded).expect("older DM history remains");
+        let ConversationContext::Dm { messages, .. } = context else {
+            panic!("expected DM context");
+        };
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["older", "prior"]
+        );
     }
 
     #[test]
@@ -5054,6 +6132,7 @@ mod tests {
         let author_hex = event.pubkey.to_hex();
         let batch = FlushBatch {
             channel_id: Uuid::new_v4(),
+            conversation_key: test_conversation_key(Uuid::new_v4()),
             events: vec![crate::queue::BatchEvent {
                 event,
                 prompt_tag: "@mention".into(),
@@ -5183,10 +6262,12 @@ mod tests {
         let ch_a = Uuid::new_v4();
         let ch_b = Uuid::new_v4();
         let mut s = SessionState::default();
-        s.sessions.insert(ch_a, "sess-a".into());
-        s.sessions.insert(ch_b, "sess-b".into());
-        s.turn_counts.insert(ch_a, 5);
-        s.turn_counts.insert(ch_b, 3);
+        s.sessions
+            .insert(test_conversation_key(ch_a), "sess-a".into());
+        s.sessions
+            .insert(test_conversation_key(ch_b), "sess-b".into());
+        s.turn_counts.insert(test_conversation_key(ch_a), 5);
+        s.turn_counts.insert(test_conversation_key(ch_b), 3);
         s.core_sections.insert(ch_a, "core-a".into());
         s.core_sections.insert(ch_b, "core-b".into());
         s.heartbeat_session = Some("sess-hb".into());
@@ -5204,12 +6285,15 @@ mod tests {
             &ControlSignal::Rotate,
         );
 
-        assert!(!s.sessions.contains_key(&ch_a));
-        assert!(!s.turn_counts.contains_key(&ch_a));
+        assert!(!s.sessions.contains_key(&test_conversation_key(ch_a)));
+        assert!(!s.turn_counts.contains_key(&test_conversation_key(ch_a)));
         assert!(!s.core_sections.contains_key(&ch_a));
         assert!(!s.has_channel_state(&ch_a));
-        assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
-        assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
+        assert_eq!(
+            s.sessions.get(&test_conversation_key(ch_b)).unwrap(),
+            "sess-b"
+        );
+        assert_eq!(*s.turn_counts.get(&test_conversation_key(ch_b)).unwrap(), 3);
         assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
         assert_eq!(s.heartbeat_session.as_deref(), Some("sess-hb"));
         assert_eq!(s.heartbeat_turn_count, 7);
@@ -5225,10 +6309,16 @@ mod tests {
             &ControlSignal::Cancel,
         );
 
-        assert_eq!(s.sessions.get(&ch_a).unwrap(), "sess-a");
-        assert_eq!(*s.turn_counts.get(&ch_a).unwrap(), 5);
+        assert_eq!(
+            s.sessions.get(&test_conversation_key(ch_a)).unwrap(),
+            "sess-a"
+        );
+        assert_eq!(*s.turn_counts.get(&test_conversation_key(ch_a)).unwrap(), 5);
         assert_eq!(s.core_sections.get(&ch_a).unwrap(), "core-a");
-        assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
+        assert_eq!(
+            s.sessions.get(&test_conversation_key(ch_b)).unwrap(),
+            "sess-b"
+        );
     }
 
     #[test]
@@ -5236,13 +6326,16 @@ mod tests {
         let (mut s, ch_a, ch_b) = make_state();
         s.invalidate(&PromptSource::Channel(ch_a));
 
-        assert!(!s.sessions.contains_key(&ch_a));
-        assert!(!s.turn_counts.contains_key(&ch_a));
+        assert!(!s.sessions.contains_key(&test_conversation_key(ch_a)));
+        assert!(!s.turn_counts.contains_key(&test_conversation_key(ch_a)));
         assert!(!s.core_sections.contains_key(&ch_a));
         assert!(!s.has_channel_state(&ch_a));
         // ch_b untouched
-        assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
-        assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
+        assert_eq!(
+            s.sessions.get(&test_conversation_key(ch_b)).unwrap(),
+            "sess-b"
+        );
+        assert_eq!(*s.turn_counts.get(&test_conversation_key(ch_b)).unwrap(), 3);
         assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
         // heartbeat untouched
         assert_eq!(s.heartbeat_session.as_deref(), Some("sess-hb"));
@@ -5258,8 +6351,8 @@ mod tests {
         assert_eq!(s.heartbeat_turn_count, 0);
         // channels untouched
         assert_eq!(s.sessions.len(), 2);
-        assert_eq!(*s.turn_counts.get(&ch_a).unwrap(), 5);
-        assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
+        assert_eq!(*s.turn_counts.get(&test_conversation_key(ch_a)).unwrap(), 5);
+        assert_eq!(*s.turn_counts.get(&test_conversation_key(ch_b)).unwrap(), 3);
         assert_eq!(s.core_sections.get(&ch_a).unwrap(), "core-a");
         assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
     }
@@ -5285,8 +6378,8 @@ mod tests {
         // Everything still intact.
         assert_eq!(s.sessions.len(), 2);
         assert_eq!(s.turn_counts.len(), 2);
-        assert_eq!(*s.turn_counts.get(&ch_a).unwrap(), 5);
-        assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
+        assert_eq!(*s.turn_counts.get(&test_conversation_key(ch_a)).unwrap(), 5);
+        assert_eq!(*s.turn_counts.get(&test_conversation_key(ch_b)).unwrap(), 3);
         assert_eq!(s.core_sections.get(&ch_a).unwrap(), "core-a");
         assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
     }
@@ -5304,13 +6397,16 @@ mod tests {
     fn test_invalidate_channel_returns_true_when_session_existed() {
         let (mut s, ch_a, ch_b) = make_state();
         assert!(s.invalidate_channel(&ch_a));
-        assert!(!s.sessions.contains_key(&ch_a));
-        assert!(!s.turn_counts.contains_key(&ch_a));
+        assert!(!s.sessions.contains_key(&test_conversation_key(ch_a)));
+        assert!(!s.turn_counts.contains_key(&test_conversation_key(ch_a)));
         assert!(!s.core_sections.contains_key(&ch_a));
         assert!(!s.has_channel_state(&ch_a));
         // ch_b untouched
-        assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
-        assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
+        assert_eq!(
+            s.sessions.get(&test_conversation_key(ch_b)).unwrap(),
+            "sess-b"
+        );
+        assert_eq!(*s.turn_counts.get(&test_conversation_key(ch_b)).unwrap(), 3);
         assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
         // heartbeat untouched
         assert_eq!(s.heartbeat_session.as_deref(), Some("sess-hb"));
@@ -5328,6 +6424,140 @@ mod tests {
     }
 
     #[test]
+    fn invalidate_conversation_preserves_sibling_thread_and_channel_metadata() {
+        let channel_id = Uuid::new_v4();
+        let first = ConversationKey {
+            channel_id,
+            root_event_id: "a".repeat(64),
+            generation: 0,
+            reset_token: None,
+        };
+        let second = ConversationKey {
+            channel_id,
+            root_event_id: "b".repeat(64),
+            generation: 0,
+            reset_token: None,
+        };
+        let mut state = SessionState::default();
+        state.sessions.insert(first.clone(), "first-session".into());
+        state
+            .sessions
+            .insert(second.clone(), "second-session".into());
+        state.turn_counts.insert(first.clone(), 3);
+        state.turn_counts.insert(second.clone(), 7);
+        state.last_used.insert(first.clone(), Instant::now());
+        state.last_used.insert(second.clone(), Instant::now());
+        state.core_sections.insert(channel_id, "shared core".into());
+        state
+            .canvas_sections
+            .insert(channel_id, "shared canvas".into());
+
+        assert!(state.invalidate_conversation(&first));
+        assert!(!state.sessions.contains_key(&first));
+        assert!(!state.turn_counts.contains_key(&first));
+        assert!(!state.last_used.contains_key(&first));
+        assert_eq!(
+            state.sessions.get(&second).map(String::as_str),
+            Some("second-session")
+        );
+        assert_eq!(state.turn_counts.get(&second), Some(&7));
+        assert!(state.core_sections.contains_key(&channel_id));
+        assert!(state.canvas_sections.contains_key(&channel_id));
+    }
+
+    #[test]
+    fn prune_idle_removes_expired_sessions_before_applying_lru_cap() {
+        let channel_id = Uuid::new_v4();
+        let active = ConversationKey {
+            channel_id,
+            root_event_id: "active".into(),
+            generation: 0,
+            reset_token: None,
+        };
+        let expired = ConversationKey {
+            channel_id,
+            root_event_id: "expired".into(),
+            generation: 0,
+            reset_token: None,
+        };
+        let recent = ConversationKey {
+            channel_id,
+            root_event_id: "recent".into(),
+            generation: 0,
+            reset_token: None,
+        };
+        let now = Instant::now();
+        let mut state = SessionState::default();
+        for (key, session) in [
+            (active.clone(), "active-session"),
+            (expired.clone(), "expired-session"),
+            (recent.clone(), "recent-session"),
+        ] {
+            state.sessions.insert(key, session.into());
+        }
+        state.last_used.insert(active.clone(), now);
+        state
+            .last_used
+            .insert(expired.clone(), now - Duration::from_secs(120));
+        state.last_used.insert(recent.clone(), now);
+
+        let evicted = state.prune_idle(&active, 2, Duration::from_secs(60));
+        assert_eq!(evicted, vec![(expired.clone(), "expired-session".into())]);
+        assert!(state.sessions.contains_key(&active));
+        assert!(state.sessions.contains_key(&recent));
+        assert!(!state.sessions.contains_key(&expired));
+    }
+
+    #[test]
+    fn prune_idle_reserves_capacity_for_a_new_active_session_without_off_by_one() {
+        let channel_id = Uuid::new_v4();
+        let oldest = ConversationKey {
+            channel_id,
+            root_event_id: "oldest".into(),
+            generation: 0,
+            reset_token: None,
+        };
+        let newest = ConversationKey {
+            channel_id,
+            root_event_id: "newest".into(),
+            generation: 0,
+            reset_token: None,
+        };
+        let new_active = ConversationKey {
+            channel_id,
+            root_event_id: "new-active".into(),
+            generation: 0,
+            reset_token: None,
+        };
+        let now = Instant::now();
+        let mut state = SessionState::default();
+        state
+            .sessions
+            .insert(oldest.clone(), "oldest-session".into());
+        state
+            .sessions
+            .insert(newest.clone(), "newest-session".into());
+        state
+            .last_used
+            .insert(oldest.clone(), now - Duration::from_secs(10));
+        state.last_used.insert(newest.clone(), now);
+
+        let evicted = state.prune_idle(&new_active, 2, Duration::from_secs(60));
+        assert_eq!(evicted, vec![(oldest, "oldest-session".into())]);
+        assert_eq!(state.sessions.len(), 1);
+        assert!(state.sessions.contains_key(&newest));
+
+        state
+            .sessions
+            .insert(new_active.clone(), "active-session".into());
+        state.last_used.insert(new_active.clone(), Instant::now());
+        assert!(state
+            .prune_idle(&new_active, 2, Duration::from_secs(60))
+            .is_empty());
+        assert_eq!(state.sessions.len(), 2);
+    }
+
+    #[test]
     fn test_removed_channels_cleaned_via_invalidate_channel() {
         // Simulates handle_prompt_result: channels removed while agent
         // was checked out should have both sessions and turn_counts stripped.
@@ -5336,12 +6566,15 @@ mod tests {
         for ch in &removed {
             s.invalidate_channel(ch);
         }
-        assert!(!s.sessions.contains_key(&ch_a));
-        assert!(!s.turn_counts.contains_key(&ch_a));
+        assert!(!s.sessions.contains_key(&test_conversation_key(ch_a)));
+        assert!(!s.turn_counts.contains_key(&test_conversation_key(ch_a)));
         assert!(!s.core_sections.contains_key(&ch_a));
         assert!(!s.has_channel_state(&ch_a));
-        assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
-        assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
+        assert_eq!(
+            s.sessions.get(&test_conversation_key(ch_b)).unwrap(),
+            "sess-b"
+        );
+        assert_eq!(*s.turn_counts.get(&test_conversation_key(ch_b)).unwrap(), 3);
         assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
     }
 
@@ -5361,8 +6594,180 @@ mod tests {
 
         assert!(!s.has_channel_state(&ch_a));
         // ch_b untouched — the switch is channel-scoped.
-        assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
-        assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
+        assert_eq!(
+            s.sessions.get(&test_conversation_key(ch_b)).unwrap(),
+            "sess-b"
+        );
+        assert_eq!(*s.turn_counts.get(&test_conversation_key(ch_b)).unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn failed_switch_cancellation_restores_model_and_emits_terminal_result() {
+        let mut acp = AcpClient::spawn(
+            "bash",
+            &["-c".to_string(), "sleep 10".to_string()],
+            &[],
+            false,
+        )
+        .await
+        .expect("spawn model cancellation fixture");
+        let observer = observer::ObserverHandle::in_process();
+        acp.set_observer(Some(observer.clone()), 0);
+        let mut agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: Some("model-b".to_string()),
+            model_overridden: true,
+            pending_model_switch: Some(PendingModelSwitch {
+                turn_id: "target-turn".to_string(),
+                previous_model: Some("model-a".to_string()),
+                previous_model_overridden: false,
+            }),
+            agent_name: "fixture".to_string(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+        };
+
+        report_control_cancel_failure(
+            &mut agent,
+            &ControlSignal::SwitchModel("model-b".to_string()),
+            "fallback-turn",
+        );
+
+        assert_eq!(agent.desired_model.as_deref(), Some("model-a"));
+        assert!(!agent.model_overridden);
+        assert!(agent.pending_model_switch.is_none());
+        let result = observer
+            .snapshot()
+            .into_iter()
+            .find(|event| event.kind == "control_result")
+            .expect("known cancellation failure must emit a terminal result");
+        assert_eq!(result.payload["type"], "switch_model");
+        assert_eq!(result.payload["status"], "switch_failed");
+        assert_eq!(result.payload["modelId"], "model-b");
+        assert_eq!(result.payload["turnId"], "target-turn");
+        agent.acp.shutdown().await;
+    }
+
+    #[test]
+    fn stable_model_switch_requires_an_explicit_matching_confirmation() {
+        let method = ModelSwitchMethod::ConfigOption {
+            config_id: "model".into(),
+            option_value: "model-b".into(),
+        };
+        assert!(model_switch_response_confirms(
+            &json!({
+                "configOptions": [{
+                    "id": "model",
+                    "currentValue": "model-b",
+                    "options": []
+                }]
+            }),
+            &method,
+        ));
+        assert!(model_switch_response_confirms(
+            &json!({"configId": "model", "value": "model-b"}),
+            &method,
+        ));
+        assert!(!model_switch_response_confirms(&json!({}), &method));
+        assert!(!model_switch_response_confirms(
+            &json!({
+                "configOptions": [{"configId": "model", "value": "model-a"}]
+            }),
+            &method,
+        ));
+    }
+
+    #[test]
+    fn unstable_model_switch_accepts_only_empty_success_or_a_matching_echo() {
+        let method = ModelSwitchMethod::SetModel {
+            model_id: "model-b".into(),
+        };
+        assert!(model_switch_response_confirms(&json!({}), &method));
+        assert!(model_switch_response_confirms(
+            &json!({"_meta": {"adapter": "ok"}}),
+            &method,
+        ));
+        assert!(model_switch_response_confirms(
+            &json!({"modelId": "model-b"}),
+            &method,
+        ));
+        assert!(!model_switch_response_confirms(
+            &json!({"modelId": "model-a"}),
+            &method,
+        ));
+        assert!(!model_switch_response_confirms(
+            &json!({"unexpected": true}),
+            &method,
+        ));
+    }
+
+    #[test]
+    fn confirmed_model_switch_updates_both_desktop_catalog_shapes() {
+        let mut config_options = json!([{
+            "configId": "model",
+            "category": "model",
+            "value": "model-a",
+            "options": [{"value": "model-a"}, {"value": "model-b"}]
+        }]);
+        let mut models = json!({
+            "currentModelId": "model-a",
+            "availableModels": [{"modelId": "model-a"}, {"modelId": "model-b"}]
+        });
+        let method = ModelSwitchMethod::ConfigOption {
+            config_id: "model".into(),
+            option_value: "model-b".into(),
+        };
+        merge_applied_model_state(
+            &mut config_options,
+            &mut models,
+            &json!({"configId": "model", "value": "model-b"}),
+            &method,
+        );
+        assert_eq!(config_options[0]["value"], "model-b");
+        assert_eq!(models["currentModelId"], "model-b");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejected_live_model_switch_reapplies_the_previous_model() {
+        let script = r#"
+            read -r _attempt_b
+            echo '{"jsonrpc":"2.0","id":0,"error":{"code":-32000,"message":"model b unavailable"}}'
+            read -r _rollback_a
+            echo '{"jsonrpc":"2.0","id":1,"result":{"configOptions":[{"configId":"model","category":"model","value":"model-a","options":[{"value":"model-a"},{"value":"model-b"}]}]}}'
+            sleep 1
+        "#;
+        let mut acp = AcpClient::spawn("bash", &["-c".to_string(), script.to_string()], &[], false)
+            .await
+            .expect("spawn model-switch test adapter");
+        let fresh_catalog = json!({
+            "configOptions": [{
+                "configId": "model",
+                "category": "model",
+                "value": "adapter-default",
+                "options": [{"value": "model-a"}, {"value": "model-b"}]
+            }]
+        });
+        let method_b = resolve_model_switch_method(&fresh_catalog, "model-b")
+            .expect("model b appears in fresh catalog");
+        assert_eq!(
+            apply_model_switch(&mut acp, "session-1", "model-b", &method_b)
+                .await
+                .expect("application rejection keeps transport usable"),
+            ModelSwitchApplyOutcome::Rejected,
+        );
+
+        let (response, rollback_method) =
+            restore_previous_model(&mut acp, "session-1", &fresh_catalog, Some("model-a"))
+                .await
+                .expect("rollback request is transport-safe")
+                .expect("previous explicit model requires rollback");
+        assert!(model_switch_response_confirms(&response, &rollback_method));
+        assert_eq!(response["configOptions"][0]["value"], "model-a");
+        acp.shutdown().await;
     }
 
     // ── requeue_cancelled_batch ────────────────────────────────────────────
@@ -5380,6 +6785,7 @@ mod tests {
             .unwrap();
         FlushBatch {
             channel_id,
+            conversation_key: test_conversation_key(channel_id),
             events: vec![crate::queue::BatchEvent {
                 event,
                 prompt_tag: "test".into(),
@@ -5930,6 +7336,7 @@ mod tests {
             model_capabilities: None,
             desired_model: None,
             model_overridden: false,
+            pending_model_switch: None,
             agent_name: "unknown".into(),
             goose_system_prompt_supported: None,
             protocol_version: 2,
@@ -5988,6 +7395,7 @@ mod tests {
             model_capabilities: None,
             desired_model: None,
             model_overridden: false,
+            pending_model_switch: None,
             agent_name: "unknown".into(),
             goose_system_prompt_supported: None,
             protocol_version: 2,
@@ -6023,6 +7431,93 @@ mod tests {
         let (_steer_tx, steer_rx) = tokio::sync::mpsc::channel::<SteerRequest>(1);
         result.agent.acp.install_steer_rx(steer_rx);
         // Reaching here without a panic is the test.
+    }
+
+    #[tokio::test]
+    async fn two_agent_affinity_keeps_interleaved_threads_sticky_and_never_forks_busy_owner() {
+        async fn test_agent(index: usize, key: ConversationKey) -> OwnedAgent {
+            let acp = AcpClient::spawn(
+                "bash",
+                &["-c".to_string(), "sleep 10".to_string()],
+                &[],
+                false,
+            )
+            .await
+            .expect("spawn affinity test agent");
+            let mut state = SessionState::default();
+            state.sessions.insert(key, format!("session-{index}"));
+            OwnedAgent {
+                index,
+                acp,
+                state,
+                model_capabilities: None,
+                desired_model: None,
+                model_overridden: false,
+                pending_model_switch: None,
+                agent_name: "test".into(),
+                goose_system_prompt_supported: None,
+                protocol_version: 2,
+            }
+        }
+
+        let channel_id = Uuid::new_v4();
+        let first = ConversationKey {
+            channel_id,
+            root_event_id: "a".repeat(64),
+            generation: 0,
+            reset_token: None,
+        };
+        let second = ConversationKey {
+            channel_id,
+            root_event_id: "b".repeat(64),
+            generation: 0,
+            reset_token: None,
+        };
+        let first_agent = test_agent(0, first.clone()).await;
+        let second_agent = test_agent(1, second.clone()).await;
+        let mut pool = AgentPool::from_slots(vec![Some(first_agent), Some(second_agent)]);
+
+        let claimed_first = pool
+            .try_claim_conversation(&first)
+            .expect("first thread owner");
+        let claimed_second = pool
+            .try_claim_conversation(&second)
+            .expect("sibling thread owner");
+        assert_eq!(claimed_first.index, 0);
+        assert_eq!(claimed_second.index, 1);
+        pool.return_agent(claimed_second);
+        pool.return_agent(claimed_first);
+
+        let claimed_first = pool
+            .try_claim_conversation(&first)
+            .expect("first owner remains sticky");
+        assert_eq!(claimed_first.index, 0);
+        let task_id = pool.join_set.spawn(std::future::pending::<()>()).id();
+        pool.task_map.insert(
+            task_id,
+            TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                conversation_key: Some(first.clone()),
+                turn_id: "affinity-test".into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+            },
+        );
+        assert!(
+            pool.try_claim_conversation(&first).is_none(),
+            "a busy owner must not let the same thread fork onto idle slot 1"
+        );
+
+        pool.task_map.remove(&task_id);
+        pool.join_set.abort_all();
+        pool.return_agent(claimed_first);
+        for slot in &mut pool.agents {
+            if let Some(mut agent) = slot.take() {
+                agent.acp.shutdown().await;
+            }
+        }
     }
 
     // ── NIP-AM emit-hook unit tests ────────────────────────────────────────
@@ -6451,6 +7946,8 @@ mod tests {
             ),
             context_message_limit: 0,
             max_turns_per_session: 0,
+            max_cached_conversation_sessions: 8,
+            conversation_session_idle_ttl: Duration::from_secs(1_800),
             permission_mode: PermissionMode::Default,
             agent_keys: agent_keys.clone(),
             agent_owner_pubkey: owner_pubkey,
@@ -6509,14 +8006,14 @@ mod tests {
     fn test_invalidate_channel_clears_canvas_section() {
         let ch = Uuid::new_v4();
         let mut s = SessionState::default();
-        s.sessions.insert(ch, "sess".into());
+        s.sessions.insert(test_conversation_key(ch), "sess".into());
         s.canvas_sections
             .insert(ch, "[Channel Canvas]\nrev abc".into());
 
         s.invalidate_channel(&ch);
 
         assert!(!s.canvas_sections.contains_key(&ch));
-        assert!(!s.sessions.contains_key(&ch));
+        assert!(!s.sessions.contains_key(&test_conversation_key(ch)));
     }
 
     #[test]
@@ -6526,7 +8023,8 @@ mod tests {
         let mut s = SessionState::default();
         s.canvas_sections.insert(ch_a, "canvas-a".into());
         s.canvas_sections.insert(ch_b, "canvas-b".into());
-        s.sessions.insert(ch_a, "sess-a".into());
+        s.sessions
+            .insert(test_conversation_key(ch_a), "sess-a".into());
 
         s.invalidate_all();
 
@@ -6539,8 +8037,10 @@ mod tests {
         let ch_a = Uuid::new_v4();
         let ch_b = Uuid::new_v4();
         let mut s = SessionState::default();
-        s.sessions.insert(ch_a, "sess-a".into());
-        s.sessions.insert(ch_b, "sess-b".into());
+        s.sessions
+            .insert(test_conversation_key(ch_a), "sess-a".into());
+        s.sessions
+            .insert(test_conversation_key(ch_b), "sess-b".into());
         s.canvas_sections.insert(ch_a, "canvas-a".into());
         s.canvas_sections.insert(ch_b, "canvas-b".into());
 

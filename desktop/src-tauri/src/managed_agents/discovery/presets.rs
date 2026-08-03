@@ -147,6 +147,15 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         underlying_cli: Some("amp"),
     },
     PresetHarness {
+        id: "pi",
+        label: "Pi",
+        command: "buzz-pi-agent",
+        args: &[],
+        install_instructions_url: "https://github.com/block/buzz/tree/main/packages/buzz-pi-agent",
+        install_hint: "Buzz talks to the Pi coding agent through Buzz's buzz-pi-agent ACP adapter. Install the adapter so buzz-pi-agent is on your PATH; your existing Pi authentication, settings, and trusted extensions are reused.",
+        underlying_cli: Some("pi"),
+    },
+    PresetHarness {
         id: "hermes",
         label: "Hermes Agent",
         command: "hermes-acp",
@@ -268,6 +277,39 @@ mod tests {
         assert_eq!(entry.default_args, vec!["acp"]);
         assert_eq!(entry.install_instructions_url, "https://docs.devin.ai/cli");
         assert_eq!(entry.source, HarnessSource::Preset);
+    }
+
+    #[test]
+    fn pi_preset_uses_the_buzz_adapter_and_detects_an_existing_pi_cli() {
+        let preset = PRESET_HARNESSES
+            .iter()
+            .find(|preset| preset.id == "pi")
+            .expect("Pi preset should be present");
+
+        assert_eq!(preset.label, "Pi");
+        assert_eq!(preset.command, "buzz-pi-agent");
+        assert!(preset.args.is_empty());
+        assert_eq!(preset.underlying_cli, Some("pi"));
+
+        let adapter_missing = preset_catalog_entry(preset, |command| {
+            (command == "pi").then(|| PathBuf::from("/usr/local/bin/pi"))
+        });
+        assert_eq!(
+            adapter_missing.availability,
+            AcpAvailabilityStatus::AdapterMissing
+        );
+        assert!(adapter_missing.command.is_none());
+        assert_eq!(
+            adapter_missing.underlying_cli_path.as_deref(),
+            Some("/usr/local/bin/pi")
+        );
+
+        let available = preset_catalog_entry(preset, |command| {
+            (command == "buzz-pi-agent").then(|| PathBuf::from("/usr/local/bin/buzz-pi-agent"))
+        });
+        assert_eq!(available.availability, AcpAvailabilityStatus::Available);
+        assert_eq!(available.command.as_deref(), Some("buzz-pi-agent"));
+        assert!(available.default_args.is_empty());
     }
 
     #[test]

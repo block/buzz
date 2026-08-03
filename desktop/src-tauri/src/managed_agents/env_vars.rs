@@ -71,6 +71,10 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     "BUZZ_ACP_AGENT_COMMAND",
     "BUZZ_ACP_AGENT_ARGS",
     "BUZZ_ACP_MCP_COMMAND",
+    // Conversation-safety contract: the desktop derives this from the
+    // selected harness. A user override could silently collapse Pi threads
+    // into one channel context or force an incompatible adapter to crash-loop.
+    "BUZZ_ACP_REQUIRE_DURABLE_THREAD_SESSIONS",
     // Security gates: respond-to mode + allowlist + legacy owner-only
     // fallback. Overriding would make the running agent's gate diverge
     // from the saved/UI-visible settings.

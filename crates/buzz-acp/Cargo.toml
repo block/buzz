@@ -53,6 +53,8 @@ url = { workspace = true }
 sha2 = { workspace = true }
 base64 = "0.22"
 hex = { workspace = true }
+dirs = "6"
+fs2 = "0.4"
 
 # Logging
 tracing = { workspace = true }
@@ -79,3 +81,4 @@ nix = { version = "0.31", default-features = false, features = ["signal"] }
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 httparse = "1"
+tempfile = "3"

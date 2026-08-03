@@ -251,6 +251,14 @@ const REST_RETRY_BASE_DELAYS: [Duration; 3] = [
     Duration::from_millis(2000),
 ];
 
+/// `/query` can legitimately return channel discovery metadata plus bounded
+/// conversation history, but it must never allocate an untrusted relay-sized
+/// body without a ceiling.
+const MAX_QUERY_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+/// `/events` acknowledgements are tiny JSON objects. A larger response is a
+/// broken or hostile relay and is never needed to decide acceptance.
+const MAX_EVENT_SUBMIT_RESPONSE_BYTES: usize = 64 * 1024;
+
 fn unix_now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -400,9 +408,10 @@ impl RestClient {
         let body_bytes = serde_json::to_vec(filters)
             .map_err(|e| RelayError::Http(format!("filter serialize error: {e}")))?;
         let resp = self.bridge_post("/query", &body_bytes).await?;
-        resp.json()
-            .await
-            .map_err(|e| RelayError::Http(e.to_string()))
+        let body =
+            read_bounded_http_body(resp, MAX_QUERY_RESPONSE_BYTES, "/query response").await?;
+        serde_json::from_slice(&body)
+            .map_err(|error| RelayError::Http(format!("invalid /query response: {error}")))
     }
 
     /// Count events via the HTTP bridge: `POST /count` with NIP-98 auth.
@@ -425,14 +434,14 @@ impl RestClient {
         let body_bytes = serde_json::to_vec(event)
             .map_err(|e| RelayError::Http(format!("event serialize error: {e}")))?;
         let resp = self.bridge_post("/events", &body_bytes).await?;
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| RelayError::Http(e.to_string()))?;
-        if text.is_empty() {
+        let body =
+            read_bounded_http_body(resp, MAX_EVENT_SUBMIT_RESPONSE_BYTES, "/events response")
+                .await?;
+        if body.is_empty() {
             return Ok(Value::Null);
         }
-        serde_json::from_str(&text).map_err(|e| RelayError::Http(e.to_string()))
+        serde_json::from_slice(&body)
+            .map_err(|error| RelayError::Http(format!("invalid /events response: {error}")))
     }
 }
 
@@ -510,6 +519,14 @@ enum RelayMessage {
 const MEMBERSHIP_NOTIF_SUB_ID: &str = "membership-notif";
 /// Subscription ID for encrypted owner-to-agent observer control frames.
 const OBSERVER_CONTROL_SUB_ID: &str = "agent-observer-control";
+/// Reject signed events implausibly far ahead of the local clock before they
+/// can poison reconnect watermarks. Five minutes tolerates ordinary host skew
+/// while bounding suppression of subsequent traffic.
+const MAX_EVENT_FUTURE_SKEW_SECS: u64 = 5 * 60;
+/// NIP-11 is a small metadata document. Bound both declared and chunked bodies
+/// before JSON parsing so a relay cannot make harness startup allocate an
+/// attacker-controlled response.
+const MAX_NIP11_DOCUMENT_BYTES: usize = 64 * 1024;
 
 /// Commands sent from `HarnessRelay` to the background WebSocket task.
 enum RelayCommand {
@@ -601,6 +618,78 @@ impl RelayEventPublisher {
     }
 }
 
+async fn fetch_relay_signing_pubkey(
+    http: &reqwest::Client,
+    relay_url: &str,
+) -> Result<String, RelayError> {
+    let info_url = relay_ws_to_http(relay_url);
+    let response = http
+        .get(&info_url)
+        .header(reqwest::header::ACCEPT, "application/nostr+json")
+        .send()
+        .await
+        .map_err(|error| RelayError::Http(format!("NIP-11 request failed: {error}")))?
+        .error_for_status()
+        .map_err(|error| RelayError::Http(format!("NIP-11 request failed: {error}")))?;
+    let body = read_bounded_nip11_body(response).await?;
+    let document: serde_json::Value = serde_json::from_slice(&body)
+        .map_err(|error| RelayError::Http(format!("invalid NIP-11 document: {error}")))?;
+    let relay_self = document
+        .get("self")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            RelayError::Http(
+                "NIP-11 document omitted relay signing identity (`self`); refusing relay-only membership events"
+                    .into(),
+            )
+        })?;
+    nostr::PublicKey::from_hex(relay_self)
+        .map(|key| key.to_hex())
+        .map_err(|error| RelayError::Http(format!("invalid NIP-11 `self` pubkey: {error}")))
+}
+
+async fn read_bounded_nip11_body(response: reqwest::Response) -> Result<Vec<u8>, RelayError> {
+    read_bounded_http_body(response, MAX_NIP11_DOCUMENT_BYTES, "NIP-11 document").await
+}
+
+/// Read an HTTP response without trusting either `Content-Length` or transfer
+/// framing. The declared length is rejected before allocation, and every
+/// streamed chunk is checked before it is appended, covering chunked bodies
+/// and servers that lie about their length.
+async fn read_bounded_http_body(
+    response: reqwest::Response,
+    max_bytes: usize,
+    label: &str,
+) -> Result<Vec<u8>, RelayError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_bytes as u64)
+    {
+        return Err(RelayError::Http(format!(
+            "{label} exceeds {max_bytes} byte limit"
+        )));
+    }
+
+    let mut body =
+        Vec::with_capacity(response.content_length().unwrap_or(0).min(max_bytes as u64) as usize);
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk
+            .map_err(|error| RelayError::Http(format!("{label} body read failed: {error}")))?;
+        let next_len = body
+            .len()
+            .checked_add(chunk.len())
+            .ok_or_else(|| RelayError::Http(format!("{label} size overflow")))?;
+        if next_len > max_bytes {
+            return Err(RelayError::Http(format!(
+                "{label} exceeds {max_bytes} byte limit"
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
 impl HarnessRelay {
     /// Connect to relay and authenticate via NIP-42.
     ///
@@ -612,6 +701,12 @@ impl HarnessRelay {
         agent_pubkey_hex: &str,
         auth_tag: Option<nostr::Tag>,
     ) -> Result<Self, RelayError> {
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .build()
+            .map_err(|e| RelayError::Http(format!("failed to build HTTP client: {e}")))?;
+        let relay_signing_pubkey = fetch_relay_signing_pubkey(&http, relay_url).await?;
         // Perform the initial connection and auth handshake, retrying
         // transient failures (dropped handshake, timeout) with bounded
         // jittered backoff. A terminal error (bad URL, bad auth tag,
@@ -641,6 +736,7 @@ impl HarnessRelay {
                 bg_relay_url,
                 bg_agent_pubkey_hex,
                 bg_auth_tag,
+                relay_signing_pubkey,
             )
             .await;
         });
@@ -649,11 +745,7 @@ impl HarnessRelay {
             event_rx,
             observer_control_rx: Some(observer_control_rx),
             cmd_tx,
-            http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(10))
-                .connect_timeout(std::time::Duration::from_secs(5))
-                .build()
-                .map_err(|e| RelayError::Http(format!("failed to build HTTP client: {e}")))?,
+            http,
             relay_url: relay_url.to_string(),
             keys: keys.clone(),
             auth_tag,
@@ -987,8 +1079,14 @@ impl TwoGenDedup {
 
 /// State maintained by the background WebSocket task.
 struct BgState {
+    /// Relay signing identity pinned from the TLS-authenticated NIP-11 `self`
+    /// document. Relay-only membership kinds are authorized against this key,
+    /// not merely by having a valid Schnorr signature.
+    relay_signing_pubkey: Option<String>,
     /// Active subscriptions: channel_id → subscription_id string.
     active_subscriptions: HashMap<Uuid, String>,
+    /// Exact `since` floor serialized in the currently active channel REQ.
+    active_subscription_since: HashMap<Uuid, u64>,
     /// Most recent `created_at` timestamp seen per channel (for `since` filter).
     last_seen: HashMap<Uuid, u64>,
     /// Two-generation dedup set of event IDs seen.
@@ -1004,8 +1102,12 @@ struct BgState {
     membership_last_seen: Option<u64>,
     /// Whether the membership notification subscription is active.
     membership_sub_active: bool,
+    /// Exact `since` floor serialized in the active membership REQ.
+    membership_active_since: Option<u64>,
     /// Whether the observer control subscription is active.
     observer_control_sub_active: bool,
+    /// Exact `since` floor serialized in the active observer-control REQ.
+    observer_control_active_since: Option<u64>,
     /// Oldest dropped channel-event timestamp per channel, keyed by channel_id.
     /// Mirrors `membership_dropped_since` but for ordinary channel events.
     /// On reconnect resubscribe, `since` = min(last_seen, channel_dropped_since).
@@ -1075,14 +1177,18 @@ struct BgState {
 impl BgState {
     fn new() -> Self {
         Self {
+            relay_signing_pubkey: None,
             active_subscriptions: HashMap::new(),
+            active_subscription_since: HashMap::new(),
             last_seen: HashMap::new(),
             seen_ids: TwoGenDedup::new(SEEN_ID_LIMIT),
             active_filters: HashMap::new(),
             membership_dropped_since: None,
             membership_last_seen: None,
             membership_sub_active: false,
+            membership_active_since: None,
             observer_control_sub_active: false,
+            observer_control_active_since: None,
             channel_dropped_since: HashMap::new(),
             proactive_resubscribe_needed: false,
             startup_watermark: None,
@@ -1102,6 +1208,9 @@ impl BgState {
     /// Record a received event for dedup and `since` tracking.
     /// Returns `true` if the event is new (not a duplicate).
     fn record_event(&mut self, channel_id: Uuid, event: &Event) -> bool {
+        if !event_timestamp_is_acceptable(event, unix_now_secs()) {
+            return false;
+        }
         let id_hex = event.id.to_hex();
 
         // Two-generation dedup: no amnesia window on rotation.
@@ -1110,7 +1219,10 @@ impl BgState {
         }
 
         // Update last_seen timestamp.
-        let ts = event.created_at.as_secs();
+        // Preserve the signed event timestamp in the event itself, but never
+        // let an accepted future-skewed value advance a reconnect watermark
+        // beyond local time and suppress normal subsequent traffic.
+        let ts = bounded_replay_timestamp(event, unix_now_secs());
         self.last_seen
             .entry(channel_id)
             .and_modify(|t| *t = (*t).max(ts))
@@ -1148,6 +1260,7 @@ impl BgState {
         self.subscribe_since.remove(channel_id);
         self.channel_dropped_since.remove(channel_id);
         self.active_filters.remove(channel_id);
+        self.active_subscription_since.remove(channel_id);
         self.rate_limited_pending.remove(channel_id);
         self.resubscribe_retry.remove(channel_id);
     }
@@ -1264,6 +1377,7 @@ fn apply_command_to_state(state: &mut BgState, cmd: RelayCommand) {
             state
                 .active_subscriptions
                 .insert(channel_id, channel_sub_id(channel_id));
+            state.active_subscription_since.remove(&channel_id);
             state.active_filters.insert(channel_id, filter);
             state.subscribe_since.entry(channel_id).or_insert_with(|| {
                 // Use an explicit replay floor when available (dynamic
@@ -1280,9 +1394,11 @@ fn apply_command_to_state(state: &mut BgState, cmd: RelayCommand) {
         }
         RelayCommand::SubscribeMembership => {
             state.membership_sub_active = true;
+            state.membership_active_since = None;
         }
         RelayCommand::SubscribeObserverControls => {
             state.observer_control_sub_active = true;
+            state.observer_control_active_since = None;
         }
         RelayCommand::SetStartupWatermark { ts } => {
             state.startup_watermark = Some(ts);
@@ -1399,12 +1515,15 @@ async fn execute_connected_command(
                 .get(&channel_id)
                 .copied()
                 .or_else(|| state.subscribe_since.get(&channel_id).copied());
-            let sent =
+            let sent_since =
                 send_subscribe(ws, state, channel_id, agent_pubkey_hex, since, &filter).await;
-            if sent {
+            if let Some(sent_since) = sent_since {
                 state
                     .active_subscriptions
                     .insert(channel_id, channel_sub_id(channel_id));
+                state
+                    .active_subscription_since
+                    .insert(channel_id, sent_since);
                 state.active_filters.insert(channel_id, filter);
                 // Evict stale drain entries so the drain loop can't send a
                 // duplicate REQ for this now-live subscription.
@@ -1447,9 +1566,10 @@ async fn execute_connected_command(
                 return true;
             }
             let since = state.membership_last_seen.or(state.startup_watermark);
-            let sent = send_membership_subscribe(ws, agent_pubkey_hex, since).await;
-            if sent {
+            let sent_since = send_membership_subscribe(ws, agent_pubkey_hex, since).await;
+            if let Some(sent_since) = sent_since {
                 state.membership_resub_needed = false;
+                state.membership_active_since = Some(sent_since);
                 if state.membership_last_seen.is_none() {
                     state.membership_last_seen = since;
                 }
@@ -1468,9 +1588,10 @@ async fn execute_connected_command(
                 state.observer_resub_needed = true;
                 return true;
             }
-            let sent = send_observer_control_subscribe(ws, agent_pubkey_hex).await;
-            if sent {
+            let sent_since = send_observer_control_subscribe(ws, agent_pubkey_hex).await;
+            if let Some(sent_since) = sent_since {
                 state.observer_resub_needed = false;
+                state.observer_control_active_since = Some(sent_since);
                 true
             } else {
                 warn!("observer control subscribe REQ failed — recording intent for reconnect");
@@ -1554,8 +1675,10 @@ async fn run_background_task(
     relay_url: String,
     agent_pubkey_hex: String,
     auth_tag: Option<nostr::Tag>,
+    relay_signing_pubkey: String,
 ) {
     let mut state = BgState::new();
+    state.relay_signing_pubkey = Some(relay_signing_pubkey);
 
     let handshake_ok = process_handshake_buffer(
         &mut ws,
@@ -1732,9 +1855,12 @@ async fn run_background_task(
                             (None, Some(l)) => Some(l),
                             (None, None) => state.startup_watermark,
                         };
-                    if send_membership_subscribe(&mut ws, &agent_pubkey_hex, replay_since).await {
+                    if let Some(sent_since) =
+                        send_membership_subscribe(&mut ws, &agent_pubkey_hex, replay_since).await
+                    {
                         state.membership_resub_needed = false;
                         state.membership_dropped_since = None;
+                        state.membership_active_since = Some(sent_since);
                         budget = budget.saturating_sub(1);
                         any_sent = true;
                     } else {
@@ -1744,8 +1870,11 @@ async fn run_background_task(
                     }
                 }
                 if state.observer_resub_needed && budget > 0 {
-                    if send_observer_control_subscribe(&mut ws, &agent_pubkey_hex).await {
+                    if let Some(sent_since) =
+                        send_observer_control_subscribe(&mut ws, &agent_pubkey_hex).await
+                    {
                         state.observer_resub_needed = false;
+                        state.observer_control_active_since = Some(sent_since);
                         budget = budget.saturating_sub(1);
                         any_sent = true;
                     } else {
@@ -2048,6 +2177,31 @@ async fn run_background_task(
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+enum InboundEventVerificationError {
+    #[error(transparent)]
+    InvalidEvent(#[from] buzz_core::VerificationError),
+
+    #[error("event verification worker failed: {0}")]
+    Worker(#[from] tokio::task::JoinError),
+}
+
+/// Authenticate one relay-supplied Nostr event without blocking the async
+/// WebSocket task. The original event is returned only after both its canonical
+/// ID and Schnorr signature have been verified.
+async fn verify_inbound_event(
+    event: Box<Event>,
+) -> Result<Box<Event>, InboundEventVerificationError> {
+    let event = tokio::task::spawn_blocking(
+        move || -> Result<Box<Event>, buzz_core::VerificationError> {
+            buzz_core::verify_event(&event)?;
+            Ok(event)
+        },
+    )
+    .await??;
+    Ok(event)
+}
+
 /// Handle a single WebSocket message in the background task.
 ///
 /// Returns `false` if the connection has been lost (Close frame or unrecoverable
@@ -2079,7 +2233,52 @@ async fn handle_ws_message(
                     subscription_id,
                     event,
                 } => {
+                    // A relay is a transport, not a trust boundary. Authenticate every
+                    // NIP-01 EVENT before inspecting its subscription, touching dedup /
+                    // replay state, or forwarding it to code that can mutate a session.
+                    // Schnorr verification is CPU-bound, so keep it off this async task.
+                    let event_id = event.id.to_hex();
+                    let author = event.pubkey.to_hex();
+                    let event = match verify_inbound_event(event).await {
+                        Ok(event) => event,
+                        Err(error) => {
+                            warn!(
+                                subscription_id = %subscription_id,
+                                event_id = %event_id,
+                                author = %author,
+                                %error,
+                                "dropping relay EVENT that failed authenticity verification"
+                            );
+                            return true;
+                        }
+                    };
+                    if !event_timestamp_is_acceptable(&event, unix_now_secs()) {
+                        warn!(
+                            subscription_id = %subscription_id,
+                            event_id = %event.id,
+                            created_at = event.created_at.as_secs(),
+                            max_future_skew_secs = MAX_EVENT_FUTURE_SKEW_SECS,
+                            "dropping relay EVENT with an implausible future timestamp"
+                        );
+                        return true;
+                    }
+
                     if subscription_id == OBSERVER_CONTROL_SUB_ID {
+                        if !state.observer_control_sub_active
+                            || !event_matches_since_floor(
+                                &event,
+                                state.observer_control_active_since,
+                            )
+                            || event.kind.as_u16() as u32 != KIND_AGENT_OBSERVER_FRAME
+                            || !event_has_tag_value(&event, "p", agent_pubkey_hex)
+                        {
+                            warn!(
+                                subscription_id = %subscription_id,
+                                event_id = %event.id,
+                                "dropping observer control EVENT that does not match the active signed subscription"
+                            );
+                            return true;
+                        }
                         match observer_control_tx.try_send(*event) {
                             Ok(()) => {}
                             Err(mpsc::error::TrySendError::Full(_)) => {
@@ -2088,13 +2287,15 @@ async fn handle_ws_message(
                             Err(mpsc::error::TrySendError::Closed(_)) => return false,
                         }
                     } else if subscription_id == MEMBERSHIP_NOTIF_SUB_ID {
-                        // Membership notification — extract channel UUID from h tag.
-                        let channel_uuid = match extract_h_tag_uuid(&event) {
-                            Some(uuid) => uuid,
-                            None => {
-                                warn!("membership notification missing h tag — dropping");
-                                return true;
-                            }
+                        let Some(channel_uuid) =
+                            event_matches_membership_subscription(state, &event, agent_pubkey_hex)
+                        else {
+                            warn!(
+                                subscription_id = %subscription_id,
+                                event_id = %event.id,
+                                "dropping membership EVENT that does not match the active signed subscription"
+                            );
+                            return true;
                         };
                         // Dedup membership notifications through TwoGenDedup.
                         // We use seen_ids directly instead of record_event()
@@ -2111,7 +2312,7 @@ async fn handle_ws_message(
                             );
                             return true;
                         }
-                        let ts = event.created_at.as_secs();
+                        let ts = bounded_replay_timestamp(&event, unix_now_secs());
                         let buzz_event = BuzzEvent {
                             channel_id: channel_uuid,
                             event: *event,
@@ -2150,7 +2351,22 @@ async fn handle_ws_message(
                             Err(mpsc::error::TrySendError::Closed(_)) => return false,
                         }
                     } else if let Some(channel_id) = channel_id_from_sub_id(&subscription_id) {
-                        let ts = event.created_at.as_secs();
+                        if !event_matches_channel_subscription(
+                            state,
+                            &subscription_id,
+                            channel_id,
+                            &event,
+                            agent_pubkey_hex,
+                        ) {
+                            warn!(
+                                subscription_id = %subscription_id,
+                                channel_id = %channel_id,
+                                event_id = %event.id,
+                                "dropping channel EVENT that does not match the active signed subscription"
+                            );
+                            return true;
+                        }
+                        let ts = bounded_replay_timestamp(&event, unix_now_secs());
                         let event_id_hex = event.id.to_hex();
                         if state.record_event(channel_id, &event) {
                             let buzz_event = BuzzEvent {
@@ -2248,13 +2464,16 @@ async fn handle_ws_message(
                         );
                         if let Some(channel_id) = channel_id_from_sub_id(&subscription_id) {
                             state.rate_limited_pending.insert(channel_id, deadline);
+                            state.active_subscription_since.remove(&channel_id);
                         } else if subscription_id == MEMBERSHIP_NOTIF_SUB_ID {
                             // Mark membership sub for drain recovery. The relay rejected
                             // this REQ before registering it, so the sub does not exist
                             // server-side — the drain must re-send it.
                             state.membership_resub_needed = true;
+                            state.membership_active_since = None;
                         } else if subscription_id == OBSERVER_CONTROL_SUB_ID {
                             state.observer_resub_needed = true;
+                            state.observer_control_active_since = None;
                         }
                         return true; // keep the socket
                     }
@@ -2282,9 +2501,11 @@ async fn handle_ws_message(
                     // resubscribe_after_reconnect() needs the subscription to
                     // still be in state so it can restore it.
                     if subscription_id == OBSERVER_CONTROL_SUB_ID {
-                        let sent = send_observer_control_subscribe(ws, agent_pubkey_hex).await;
-                        if sent {
+                        let sent_since =
+                            send_observer_control_subscribe(ws, agent_pubkey_hex).await;
+                        if let Some(sent_since) = sent_since {
                             state.observer_control_sub_active = true;
+                            state.observer_control_active_since = Some(sent_since);
                         } else {
                             warn!("observer control resubscribe failed after CLOSED — triggering reconnect");
                             return false;
@@ -2297,10 +2518,12 @@ async fn handle_ws_message(
                                 (None, Some(l)) => Some(l),
                                 (None, None) => state.startup_watermark,
                             };
-                        let sent = send_membership_subscribe(ws, agent_pubkey_hex, since).await;
-                        if sent {
+                        let sent_since =
+                            send_membership_subscribe(ws, agent_pubkey_hex, since).await;
+                        if let Some(sent_since) = sent_since {
                             // Success — subscription is live again.
                             state.membership_dropped_since = None;
+                            state.membership_active_since = Some(sent_since);
                         } else {
                             // Resubscribe failed — likely half-dead socket.
                             // Keep membership_sub_active = true so reconnect restores it.
@@ -2328,7 +2551,7 @@ async fn handle_ws_message(
                                     return false;
                                 }
                             };
-                            let sent = send_subscribe(
+                            let sent_since = send_subscribe(
                                 ws,
                                 state,
                                 channel_id,
@@ -2337,11 +2560,14 @@ async fn handle_ws_message(
                                 &filter,
                             )
                             .await;
-                            if sent {
+                            if let Some(sent_since) = sent_since {
                                 // Success — update subscription ID (relay may assign new one).
                                 state
                                     .active_subscriptions
                                     .insert(channel_id, channel_sub_id(channel_id));
+                                state
+                                    .active_subscription_since
+                                    .insert(channel_id, sent_since);
                                 state.channel_dropped_since.remove(&channel_id);
                             } else {
                                 // Resubscribe failed — likely half-dead socket.
@@ -2394,6 +2620,103 @@ async fn handle_ws_message(
         // Binary, Pong, Frame — ignore
         _ => true,
     }
+}
+
+fn event_has_tag_value(event: &Event, kind: &str, expected: &str) -> bool {
+    event.tags.iter().any(|tag| {
+        let values = tag.as_slice();
+        values.len() >= 2 && values[0] == kind && values[1] == expected
+    })
+}
+
+fn event_timestamp_is_acceptable(event: &Event, now: u64) -> bool {
+    event.created_at.as_secs() <= now.saturating_add(MAX_EVENT_FUTURE_SKEW_SECS)
+}
+
+fn bounded_replay_timestamp(event: &Event, now: u64) -> u64 {
+    event.created_at.as_secs().min(now)
+}
+
+/// Timestamp safe to reuse as a dynamic subscription watermark outside the
+/// relay background task. Accepted near-future events remain processable but
+/// never suppress subsequent real-time traffic until the local clock catches up.
+pub(crate) fn bounded_event_replay_timestamp(event: &Event) -> u64 {
+    bounded_replay_timestamp(event, unix_now_secs())
+}
+
+fn event_matches_since_floor(event: &Event, floor: Option<u64>) -> bool {
+    floor.is_some_and(|floor| event.created_at.as_secs() >= floor)
+}
+
+fn event_has_exact_channel_tag(event: &Event, expected: Uuid) -> bool {
+    let mut channel_tags = event.tags.iter().filter(|tag| {
+        let values = tag.as_slice();
+        !values.is_empty() && values[0] == "h"
+    });
+    let Some(channel_tag) = channel_tags.next() else {
+        return false;
+    };
+    if channel_tags.next().is_some() {
+        return false;
+    }
+    let values = channel_tag.as_slice();
+    values.len() >= 2 && values[1].parse::<Uuid>() == Ok(expected)
+}
+
+fn event_matches_channel_subscription(
+    state: &BgState,
+    subscription_id: &str,
+    channel_id: Uuid,
+    event: &Event,
+    agent_pubkey_hex: &str,
+) -> bool {
+    if state
+        .active_subscriptions
+        .get(&channel_id)
+        .map(String::as_str)
+        != Some(subscription_id)
+        || !event_has_exact_channel_tag(event, channel_id)
+        || !event_matches_since_floor(
+            event,
+            state.active_subscription_since.get(&channel_id).copied(),
+        )
+    {
+        return false;
+    }
+    let Some(filter) = state.active_filters.get(&channel_id) else {
+        return false;
+    };
+    let kind = event.kind.as_u16() as u32;
+    if filter
+        .kinds
+        .as_ref()
+        .is_some_and(|kinds| !kinds.contains(&kind))
+    {
+        return false;
+    }
+    !filter.require_mention || event_has_tag_value(event, "p", agent_pubkey_hex)
+}
+
+fn event_matches_membership_subscription(
+    state: &BgState,
+    event: &Event,
+    agent_pubkey_hex: &str,
+) -> Option<Uuid> {
+    let kind = event.kind.as_u16() as u32;
+    let expected_relay = state.relay_signing_pubkey.as_deref()?;
+    if !state.membership_sub_active
+        || !event_matches_since_floor(event, state.membership_active_since)
+        || !matches!(
+            kind,
+            KIND_MEMBER_ADDED_NOTIFICATION | KIND_MEMBER_REMOVED_NOTIFICATION
+        )
+        || !event_has_tag_value(event, "p", agent_pubkey_hex)
+        || event.pubkey.to_hex() != expected_relay
+    {
+        return None;
+    }
+    let channel_id = extract_h_tag_uuid(event)?;
+    event_has_exact_channel_tag(event, channel_id).then_some(channel_id)
 }
 
 /// Process messages buffered during the NIP-42 auth handshake.
@@ -2506,6 +2829,12 @@ async fn resubscribe_after_reconnect(
     agent_pubkey_hex: &str,
     is_fresh_connection: bool,
 ) -> ResubscribeResult {
+    // A new socket has no server-side subscriptions. Floors are reinstalled
+    // only after each exact REQ is successfully written; until then inbound
+    // EVENT frames fail closed even if a malicious relay reuses an old sub ID.
+    state.active_subscription_since.clear();
+    state.membership_active_since = None;
+    state.observer_control_active_since = None;
     if is_fresh_connection {
         // These queues are derived from active subscription intent and rebuilt
         // below. The rate-limit gate is deliberately preserved: the relay's
@@ -2543,9 +2872,12 @@ async fn resubscribe_after_reconnect(
                     continue;
                 }
             };
-            let this_sent =
+            let sent_since =
                 send_subscribe(ws, state, channel_id, agent_pubkey_hex, since, &filter).await;
-            if this_sent {
+            if let Some(sent_since) = sent_since {
+                state
+                    .active_subscription_since
+                    .insert(channel_id, sent_since);
                 state.channel_dropped_since.remove(&channel_id);
                 // Shutdown-aware pacing sleep before any next replay/deferred REQ.
                 if !pacing_sleep(cmd_rx, &mut deferred_commands, REQ_PACING_INTERVAL).await {
@@ -2581,10 +2913,11 @@ async fn resubscribe_after_reconnect(
                 (None, Some(l)) => Some(l),
                 (None, None) => state.startup_watermark,
             };
-            let sent = send_membership_subscribe(ws, agent_pubkey_hex, replay_since).await;
-            if sent {
+            let sent_since = send_membership_subscribe(ws, agent_pubkey_hex, replay_since).await;
+            if let Some(sent_since) = sent_since {
                 state.membership_dropped_since = None;
                 state.membership_resub_needed = false;
+                state.membership_active_since = Some(sent_since);
             } else {
                 warn!("failed to resubscribe membership after reconnect");
                 retain_deferred_command_intent(state, &mut deferred_commands);
@@ -2601,12 +2934,17 @@ async fn resubscribe_after_reconnect(
             if !pacing_sleep(cmd_rx, &mut deferred_commands, REQ_PACING_INTERVAL).await {
                 return ResubscribeResult::Shutdown;
             }
-            if !send_observer_control_subscribe(ws, agent_pubkey_hex).await {
-                warn!("failed to resubscribe observer controls after reconnect");
-                retain_deferred_command_intent(state, &mut deferred_commands);
-                return ResubscribeResult::RetryConnection;
+            match send_observer_control_subscribe(ws, agent_pubkey_hex).await {
+                Some(sent_since) => {
+                    state.observer_control_active_since = Some(sent_since);
+                    state.observer_resub_needed = false;
+                }
+                None => {
+                    warn!("failed to resubscribe observer controls after reconnect");
+                    retain_deferred_command_intent(state, &mut deferred_commands);
+                    return ResubscribeResult::RetryConnection;
+                }
             }
-            state.observer_resub_needed = false;
         }
     }
 
@@ -2714,8 +3052,12 @@ async fn drain_rate_limited_pending(
                 continue;
             }
         };
-        let sent = send_subscribe(ws, state, channel_id, agent_pubkey_hex, since, &filter).await;
-        if sent {
+        let sent_since =
+            send_subscribe(ws, state, channel_id, agent_pubkey_hex, since, &filter).await;
+        if let Some(sent_since) = sent_since {
+            state
+                .active_subscription_since
+                .insert(channel_id, sent_since);
             state.rate_limited_pending.remove(&channel_id);
             state.channel_dropped_since.remove(&channel_id);
             sent_count += 1;
@@ -2771,8 +3113,12 @@ async fn drain_resubscribe_retry(
                 continue;
             }
         };
-        let sent = send_subscribe(ws, state, channel_id, agent_pubkey_hex, since, &filter).await;
-        if sent {
+        let sent_since =
+            send_subscribe(ws, state, channel_id, agent_pubkey_hex, since, &filter).await;
+        if let Some(sent_since) = sent_since {
+            state
+                .active_subscription_since
+                .insert(channel_id, sent_since);
             state.resubscribe_retry.remove(&channel_id);
             state.channel_dropped_since.remove(&channel_id);
             sent_count += 1;
@@ -3177,7 +3523,7 @@ async fn send_subscribe(
     agent_pubkey_hex: &str,
     since: Option<u64>,
     filter: &ChannelFilter,
-) -> bool {
+) -> Option<u64> {
     let sub_id = channel_sub_id(channel_id);
 
     let mut req_filter = serde_json::Map::new();
@@ -3220,17 +3566,17 @@ async fn send_subscribe(
                             " (since=now)"
                         }
                     );
-                    true
+                    Some(since_ts)
                 }
                 Err(e) => {
                     warn!("failed to send REQ for channel {channel_id}: {e}");
-                    false
+                    None
                 }
             }
         }
         Err(e) => {
             warn!("failed to serialize REQ for channel {channel_id}: {e}");
-            false
+            None
         }
     }
 }
@@ -3241,7 +3587,7 @@ async fn send_membership_subscribe(
     ws: &mut WsStream,
     agent_pubkey_hex: &str,
     since: Option<u64>,
-) -> bool {
+) -> Option<u64> {
     let mut req_filter = serde_json::Map::new();
     req_filter.insert(
         "kinds".into(),
@@ -3267,33 +3613,31 @@ async fn send_membership_subscribe(
             match ws_send_timeout(ws, Message::Text(text.into()), WS_SEND_TIMEOUT_SECS).await {
                 Ok(()) => {
                     debug!("subscribed to membership notifications (since={since_ts})");
-                    true
+                    Some(since_ts)
                 }
                 Err(e) => {
                     warn!("failed to send membership notification REQ: {e}");
-                    false
+                    None
                 }
             }
         }
         Err(e) => {
             warn!("failed to serialize membership notification REQ: {e}");
-            false
+            None
         }
     }
 }
 
 /// Send a NIP-01 REQ for owner-to-agent observer control frames.
-async fn send_observer_control_subscribe(ws: &mut WsStream, agent_pubkey_hex: &str) -> bool {
+async fn send_observer_control_subscribe(ws: &mut WsStream, agent_pubkey_hex: &str) -> Option<u64> {
+    let since_ts = unix_now_secs();
     let req = json!([
         "REQ",
         OBSERVER_CONTROL_SUB_ID,
         {
             "kinds": [KIND_AGENT_OBSERVER_FRAME],
             "#p": [agent_pubkey_hex],
-            "since": std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
+            "since": since_ts,
         }
     ]);
 
@@ -3302,17 +3646,17 @@ async fn send_observer_control_subscribe(ws: &mut WsStream, agent_pubkey_hex: &s
             match ws_send_timeout(ws, Message::Text(text.into()), WS_SEND_TIMEOUT_SECS).await {
                 Ok(()) => {
                     debug!("subscribed to observer control frames");
-                    true
+                    Some(since_ts)
                 }
                 Err(e) => {
                     warn!("failed to send observer control REQ: {e}");
-                    false
+                    None
                 }
             }
         }
         Err(e) => {
             warn!("failed to serialize observer control REQ: {e}");
-            false
+            None
         }
     }
 }
@@ -4008,6 +4352,136 @@ async fn wait_for_any_ok(
 mod tests {
     use super::*;
 
+    async fn one_shot_http_response(response: Vec<u8>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind HTTP fixture");
+        let address = listener.local_addr().expect("fixture address");
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept fixture request");
+            let mut request = vec![0_u8; 4_096];
+            let _ = socket.read(&mut request).await;
+            socket.write_all(&response).await.expect("write response");
+        });
+        format!("ws://{address}")
+    }
+
+    #[tokio::test]
+    async fn nip11_rejects_oversized_declared_content_length_before_body_read() {
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/nostr+json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            MAX_NIP11_DOCUMENT_BYTES + 1
+        )
+        .into_bytes();
+        let relay_url = one_shot_http_response(response).await;
+        let error = fetch_relay_signing_pubkey(&reqwest::Client::new(), &relay_url)
+            .await
+            .expect_err("oversized NIP-11 must fail");
+        assert!(error.to_string().contains("exceeds"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn nip11_rejects_oversized_chunked_body_without_content_length() {
+        let body = vec![b'x'; MAX_NIP11_DOCUMENT_BYTES + 1];
+        let mut response =
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/nostr+json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+                .to_vec();
+        response.extend_from_slice(format!("{:X}\r\n", body.len()).as_bytes());
+        response.extend_from_slice(&body);
+        response.extend_from_slice(b"\r\n0\r\n\r\n");
+        let relay_url = one_shot_http_response(response).await;
+        let error = fetch_relay_signing_pubkey(&reqwest::Client::new(), &relay_url)
+            .await
+            .expect_err("oversized chunked NIP-11 must fail");
+        assert!(error.to_string().contains("exceeds"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn bounded_http_reader_rejects_declared_body_before_allocation() {
+        const TEST_LIMIT: usize = 1_024;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            TEST_LIMIT + 1
+        )
+        .into_bytes();
+        let relay_url = one_shot_http_response(response).await;
+        let response = reqwest::Client::new()
+            .get(relay_ws_to_http(&relay_url))
+            .send()
+            .await
+            .expect("receive declared-length fixture");
+        let error = read_bounded_http_body(response, TEST_LIMIT, "test response")
+            .await
+            .expect_err("oversized declared response must fail");
+        assert!(error.to_string().contains("exceeds"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn bounded_http_reader_rejects_oversized_chunked_body() {
+        const TEST_LIMIT: usize = 1_024;
+        let body = vec![b'x'; TEST_LIMIT + 1];
+        let mut response = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n".to_vec();
+        response.extend_from_slice(format!("{:X}\r\n", body.len()).as_bytes());
+        response.extend_from_slice(&body);
+        response.extend_from_slice(b"\r\n0\r\n\r\n");
+        let relay_url = one_shot_http_response(response).await;
+        let response = reqwest::Client::new()
+            .get(relay_ws_to_http(&relay_url))
+            .send()
+            .await
+            .expect("receive chunked fixture");
+        let error = read_bounded_http_body(response, TEST_LIMIT, "test response")
+            .await
+            .expect_err("oversized chunked response must fail");
+        assert!(error.to_string().contains("exceeds"), "{error}");
+    }
+
+    fn rest_client_for_fixture(relay_url: &str) -> RestClient {
+        RestClient {
+            http: reqwest::Client::new(),
+            base_url: relay_ws_to_http(relay_url),
+            keys: Keys::generate(),
+            auth_tag_json: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn query_rejects_oversized_declared_response() {
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            MAX_QUERY_RESPONSE_BYTES + 1
+        )
+        .into_bytes();
+        let relay_url = one_shot_http_response(response).await;
+        let rest = rest_client_for_fixture(&relay_url);
+        let error = rest
+            .query(&[])
+            .await
+            .expect_err("oversized /query response must fail");
+        assert!(error.to_string().contains("/query response exceeds"));
+    }
+
+    #[tokio::test]
+    async fn event_submit_rejects_oversized_chunked_response() {
+        let body = vec![b'x'; MAX_EVENT_SUBMIT_RESPONSE_BYTES + 1];
+        let mut response = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n".to_vec();
+        response.extend_from_slice(format!("{:X}\r\n", body.len()).as_bytes());
+        response.extend_from_slice(&body);
+        response.extend_from_slice(b"\r\n0\r\n\r\n");
+        let relay_url = one_shot_http_response(response).await;
+        let rest = rest_client_for_fixture(&relay_url);
+        let event = EventBuilder::new(Kind::TextNote, "bounded response test")
+            .sign_with_keys(&rest.keys)
+            .expect("sign fixture event");
+        let error = rest
+            .submit_event(&event)
+            .await
+            .expect_err("oversized /events response must fail");
+        assert!(error.to_string().contains("/events response exceeds"));
+    }
+
     #[test]
     fn relay_ws_to_http_plain() {
         assert_eq!(
@@ -4367,6 +4841,387 @@ mod tests {
         (client, server.await.expect("join test websocket server"))
     }
 
+    async fn dispatch_test_channel_event(
+        channel_id: Uuid,
+        event: Event,
+    ) -> (
+        bool,
+        BgState,
+        mpsc::Receiver<Option<BuzzEvent>>,
+        mpsc::Receiver<Event>,
+    ) {
+        let (mut client, _server) = test_ws_pair().await;
+        let (event_tx, event_rx) = mpsc::channel(4);
+        let (observer_control_tx, observer_control_rx) = mpsc::channel(4);
+        let mut state = BgState::new();
+        seed_test_subscription(&mut state, channel_id);
+        let keys = Keys::generate();
+        let agent_pubkey_hex = Keys::generate().public_key().to_hex();
+        let text = serde_json::to_string(&json!(["EVENT", channel_sub_id(channel_id), event]))
+            .expect("serialize inbound EVENT");
+
+        let should_continue = handle_ws_message(
+            Message::Text(text.into()),
+            &mut client,
+            &event_tx,
+            &observer_control_tx,
+            &mut state,
+            &keys,
+            "ws://127.0.0.1",
+            &agent_pubkey_hex,
+            None,
+        )
+        .await;
+
+        (should_continue, state, event_rx, observer_control_rx)
+    }
+
+    #[tokio::test]
+    async fn valid_inbound_event_is_forwarded_after_authenticity_verification() {
+        let channel_id = Uuid::new_v4();
+        let channel = channel_id.to_string();
+        let event = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16),
+            "test",
+        )
+        .tags([Tag::parse(["h", channel.as_str()]).expect("h tag")])
+        .custom_created_at(nostr::Timestamp::from(2_000))
+        .sign_with_keys(&Keys::generate())
+        .expect("sign channel event");
+        let event_id = event.id.to_hex();
+
+        let (should_continue, state, mut event_rx, mut observer_control_rx) =
+            dispatch_test_channel_event(channel_id, event).await;
+
+        assert!(should_continue, "a valid event must keep the relay live");
+        let forwarded = event_rx
+            .try_recv()
+            .expect("valid event should be forwarded")
+            .expect("forwarded item should contain an event");
+        assert_eq!(forwarded.channel_id, channel_id);
+        assert_eq!(forwarded.event.id.to_hex(), event_id);
+        assert!(
+            state.seen_ids.contains(&event_id),
+            "valid event should enter dedup only after verification"
+        );
+        assert!(
+            observer_control_rx.try_recv().is_err(),
+            "a channel event must not enter the observer-control queue"
+        );
+    }
+
+    #[tokio::test]
+    async fn valid_signed_event_from_another_channel_cannot_cross_subscription_scope() {
+        let subscribed_channel = Uuid::new_v4();
+        let signed_channel = Uuid::new_v4();
+        let signed_channel_text = signed_channel.to_string();
+        let event = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16),
+            "@agent /new",
+        )
+        .tags([Tag::parse(["h", signed_channel_text.as_str()]).expect("h tag")])
+        .sign_with_keys(&Keys::generate())
+        .expect("sign wrong-channel event");
+        let event_id = event.id.to_hex();
+
+        let (should_continue, state, mut event_rx, mut observer_control_rx) =
+            dispatch_test_channel_event(subscribed_channel, event).await;
+
+        assert!(should_continue);
+        assert!(event_rx.try_recv().is_err());
+        assert!(observer_control_rx.try_recv().is_err());
+        assert!(!state.seen_ids.contains(&event_id));
+        assert!(!state.last_seen.contains_key(&subscribed_channel));
+    }
+
+    #[tokio::test]
+    async fn valid_old_owner_control_cannot_cross_the_active_req_since_floor() {
+        let channel_id = Uuid::new_v4();
+        let channel = channel_id.to_string();
+        let event = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16),
+            "/new",
+        )
+        .tags([Tag::parse(["h", channel.as_str()]).expect("h tag")])
+        .custom_created_at(nostr::Timestamp::from(
+            1_000u64.saturating_sub(SINCE_SKEW_SECS + 1),
+        ))
+        .sign_with_keys(&Keys::generate())
+        .expect("sign old owner control");
+        let event_id = event.id.to_hex();
+
+        let (should_continue, state, mut event_rx, _) =
+            dispatch_test_channel_event(channel_id, event).await;
+
+        assert!(should_continue);
+        assert!(event_rx.try_recv().is_err());
+        assert!(!state.seen_ids.contains(&event_id));
+        assert!(!state.last_seen.contains_key(&channel_id));
+    }
+
+    #[tokio::test]
+    async fn channel_event_must_match_kind_and_mention_constraints() {
+        let channel_id = Uuid::new_v4();
+        let channel = channel_id.to_string();
+        let agent = Keys::generate().public_key().to_hex();
+        let mut state = BgState::new();
+        apply_command_to_state(
+            &mut state,
+            RelayCommand::Subscribe {
+                channel_id,
+                filter: ChannelFilter {
+                    kinds: Some(vec![buzz_core::kind::KIND_STREAM_MESSAGE]),
+                    require_mention: true,
+                },
+                replay_since: Some(1_000),
+            },
+        );
+        state.active_subscription_since.insert(channel_id, 1_000);
+        let wrong_kind = EventBuilder::new(Kind::TextNote, "test")
+            .tags([
+                Tag::parse(["h", channel.as_str()]).expect("h tag"),
+                Tag::parse(["p", agent.as_str()]).expect("p tag"),
+            ])
+            .sign_with_keys(&Keys::generate())
+            .expect("sign wrong-kind event");
+        let missing_mention = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16),
+            "test",
+        )
+        .tags([Tag::parse(["h", channel.as_str()]).expect("h tag")])
+        .sign_with_keys(&Keys::generate())
+        .expect("sign missing-mention event");
+
+        assert!(!event_matches_channel_subscription(
+            &state,
+            &channel_sub_id(channel_id),
+            channel_id,
+            &wrong_kind,
+            &agent,
+        ));
+        assert!(!event_matches_channel_subscription(
+            &state,
+            &channel_sub_id(channel_id),
+            channel_id,
+            &missing_mention,
+            &agent,
+        ));
+
+        let duplicate_h = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16),
+            "test",
+        )
+        .tags([
+            Tag::parse(["h", channel.as_str()]).expect("first h tag"),
+            Tag::parse(["h", channel.as_str()]).expect("second h tag"),
+            Tag::parse(["p", agent.as_str()]).expect("p tag"),
+        ])
+        .sign_with_keys(&Keys::generate())
+        .expect("sign duplicate-h event");
+        let malformed_h = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16),
+            "test",
+        )
+        .tags([
+            Tag::parse(["h", channel.as_str()]).expect("valid h tag"),
+            Tag::parse(["h", "not-a-uuid"]).expect("malformed h tag"),
+            Tag::parse(["p", agent.as_str()]).expect("p tag"),
+        ])
+        .sign_with_keys(&Keys::generate())
+        .expect("sign malformed-h event");
+        assert!(!event_matches_channel_subscription(
+            &state,
+            &channel_sub_id(channel_id),
+            channel_id,
+            &duplicate_h,
+            &agent,
+        ));
+        assert!(!event_matches_channel_subscription(
+            &state,
+            &channel_sub_id(channel_id),
+            channel_id,
+            &malformed_h,
+            &agent,
+        ));
+    }
+
+    #[test]
+    fn subscription_floors_and_future_skew_are_enforced_before_watermarking() {
+        let keys = Keys::generate();
+        let now = unix_now_secs();
+        let old = make_test_event(&keys, now.saturating_sub(10));
+        assert!(!event_matches_since_floor(&old, Some(now)));
+        assert!(event_matches_since_floor(
+            &old,
+            Some(now.saturating_sub(10))
+        ));
+        assert!(!event_matches_since_floor(&old, None));
+
+        let future = make_test_event(&keys, now.saturating_add(MAX_EVENT_FUTURE_SKEW_SECS + 1));
+        assert!(!event_timestamp_is_acceptable(&future, now));
+        let mut state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        assert!(!state.record_event(channel_id, &future));
+        assert!(!state.seen_ids.contains(&future.id.to_hex()));
+        assert!(!state.last_seen.contains_key(&channel_id));
+
+        let accepted_future =
+            make_test_event(&keys, now.saturating_add(MAX_EVENT_FUTURE_SKEW_SECS));
+        assert!(event_timestamp_is_acceptable(&accepted_future, now));
+        assert_eq!(bounded_replay_timestamp(&accepted_future, now), now);
+        assert!(state.record_event(channel_id, &accepted_future));
+        assert!(
+            state.last_seen[&channel_id] <= unix_now_secs(),
+            "accepted future skew must not poison a channel reconnect watermark"
+        );
+        // Membership uses the same bounded helper before advancing either its
+        // successful or dropped replay floor.
+        let mut membership_last_seen = None;
+        let bounded = bounded_replay_timestamp(&accepted_future, now);
+        membership_last_seen = Some(membership_last_seen.unwrap_or(0).max(bounded));
+        assert_eq!(membership_last_seen, Some(now));
+    }
+
+    #[test]
+    fn membership_notifications_require_the_pinned_nip11_relay_signer() {
+        let relay_keys = Keys::generate();
+        let attacker_keys = Keys::generate();
+        let agent = Keys::generate().public_key().to_hex();
+        let channel_id = Uuid::new_v4();
+        let channel = channel_id.to_string();
+        let build = |keys: &Keys| {
+            EventBuilder::new(Kind::Custom(KIND_MEMBER_REMOVED_NOTIFICATION as u16), "")
+                .tags([
+                    Tag::parse(["h", channel.as_str()]).expect("h tag"),
+                    Tag::parse(["p", agent.as_str()]).expect("p tag"),
+                ])
+                .sign_with_keys(keys)
+                .expect("sign membership notification")
+        };
+        let mut state = BgState::new();
+        state.membership_sub_active = true;
+        state.membership_active_since = Some(0);
+        state.relay_signing_pubkey = Some(relay_keys.public_key().to_hex());
+
+        assert_eq!(
+            event_matches_membership_subscription(&state, &build(&relay_keys), &agent),
+            Some(channel_id)
+        );
+        assert_eq!(
+            event_matches_membership_subscription(&state, &build(&attacker_keys), &agent),
+            None,
+            "a valid signature is not authorization for relay-only membership kinds"
+        );
+        state.relay_signing_pubkey = None;
+        assert_eq!(
+            event_matches_membership_subscription(&state, &build(&relay_keys), &agent),
+            None,
+            "missing NIP-11 relay identity must fail closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn forged_owner_new_event_is_rejected_before_routing_or_dedup() {
+        let channel_id = Uuid::new_v4();
+        let channel_id_string = channel_id.to_string();
+        let owner_keys = Keys::generate();
+        let agent_pubkey_hex = Keys::generate().public_key().to_hex();
+        let original = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16),
+            "@Buzz Agent summarize the thread",
+        )
+        .tags([
+            Tag::parse(["h", channel_id_string.as_str()]).expect("h tag"),
+            Tag::parse(["p", agent_pubkey_hex.as_str()]).expect("p tag"),
+        ])
+        .sign_with_keys(&owner_keys)
+        .expect("sign benign owner event");
+
+        // Model a malicious relay/client that keeps the owner's pubkey and tags,
+        // changes the request to `/new`, and recomputes the canonical event ID.
+        // The attacker can make verify_id() pass but cannot produce the owner's
+        // Schnorr signature for that new ID.
+        let forged_content = "@Buzz Agent /new";
+        let forged_id = nostr::EventId::new(
+            &original.pubkey,
+            &original.created_at,
+            &original.kind,
+            &original.tags,
+            forged_content,
+        );
+        let mut forged_json = serde_json::to_value(&original).expect("serialize signed event");
+        forged_json["content"] = Value::String(forged_content.to_string());
+        forged_json["id"] = Value::String(forged_id.to_hex());
+        let forged: Event = serde_json::from_value(forged_json).expect("parse forged event");
+
+        assert_eq!(forged.pubkey, owner_keys.public_key());
+        assert!(forged.verify_id(), "attacker recomputed a canonical ID");
+        assert!(
+            !forged.verify_signature(),
+            "attacker must not have a signature for the forged /new ID"
+        );
+        assert!(
+            crate::is_owner_control_command(
+                &forged,
+                buzz_core::kind::KIND_STREAM_MESSAGE,
+                "/new",
+                &agent_pubkey_hex,
+                Some("Buzz Agent"),
+            ),
+            "the forged payload would be interpreted as /new if it reached intake"
+        );
+        let verification = verify_inbound_event(Box::new(forged.clone())).await;
+        assert!(matches!(
+            verification,
+            Err(InboundEventVerificationError::InvalidEvent(
+                buzz_core::VerificationError::InvalidSignature
+            ))
+        ));
+        let forged_id_hex = forged.id.to_hex();
+
+        let (should_continue, state, mut event_rx, mut observer_control_rx) =
+            dispatch_test_channel_event(channel_id, forged).await;
+
+        assert!(
+            should_continue,
+            "an unauthentic event is isolated without dropping the connection"
+        );
+        assert!(
+            event_rx.try_recv().is_err(),
+            "forged /new must not reach normal harness intake"
+        );
+        assert!(
+            observer_control_rx.try_recv().is_err(),
+            "forged /new must not reach the observer-control intake"
+        );
+        assert!(
+            !state.seen_ids.contains(&forged_id_hex),
+            "invalid events must not poison replay dedup"
+        );
+        assert!(
+            !state.last_seen.contains_key(&channel_id),
+            "invalid events must not advance replay watermarks"
+        );
+    }
+
+    #[tokio::test]
+    async fn inbound_event_with_stale_id_is_rejected() {
+        let signed = make_test_event(&Keys::generate(), 2_000);
+        let mut tampered_json = serde_json::to_value(signed).expect("serialize signed event");
+        tampered_json["content"] = Value::String("tampered after signing".to_string());
+        let tampered: Event =
+            serde_json::from_value(tampered_json).expect("parse structurally valid event");
+
+        assert!(!tampered.verify_id());
+        let result = verify_inbound_event(Box::new(tampered)).await;
+        assert!(matches!(
+            result,
+            Err(InboundEventVerificationError::InvalidEvent(
+                buzz_core::VerificationError::InvalidId { .. }
+            ))
+        ));
+    }
+
     async fn next_test_frame(
         server: &mut WebSocketStream<tokio::net::TcpStream>,
     ) -> serde_json::Value {
@@ -4395,6 +5250,9 @@ mod tests {
                 replay_since: Some(1_000),
             },
         );
+        state
+            .active_subscription_since
+            .insert(channel_id, 1_000u64.saturating_sub(SINCE_SKEW_SECS));
     }
 
     #[tokio::test]

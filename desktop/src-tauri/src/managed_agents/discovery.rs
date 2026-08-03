@@ -10,9 +10,12 @@ use crate::managed_agents::{
     HarnessSource,
 };
 
+mod command_identity;
 mod presets;
 mod runtime_metadata;
 
+use command_identity::normalize_command_identity;
+pub(crate) use command_identity::requires_durable_thread_sessions;
 use presets::{preset_catalog_entry, PRESET_HARNESSES};
 pub(crate) use presets::{preset_harness_definitions, preset_harness_ids};
 pub(crate) use runtime_metadata::KnownAcpRuntime;
@@ -227,35 +230,6 @@ fn executable_basename(command: &str) -> String {
     } else {
         format!("{command}{suffix}")
     }
-}
-
-fn normalize_command_identity(command: &str) -> String {
-    let normalized = command.trim().replace('\\', "/");
-    let basename = normalized.rsplit('/').next().unwrap_or(normalized.as_str());
-    let lower = basename
-        .chars()
-        .map(|character| match character {
-            ' ' | '_' => '-',
-            _ => character.to_ascii_lowercase(),
-        })
-        .collect::<String>();
-    let lower = lower.strip_suffix(".exe").unwrap_or(&lower).to_string();
-
-    if let Some(suffix) = std::env::consts::EXE_SUFFIX.strip_prefix('.') {
-        return lower
-            .strip_suffix(&format!(".{suffix}"))
-            .unwrap_or(&lower)
-            .to_string();
-    }
-
-    if !std::env::consts::EXE_SUFFIX.is_empty() {
-        return lower
-            .strip_suffix(std::env::consts::EXE_SUFFIX)
-            .unwrap_or(&lower)
-            .to_string();
-    }
-
-    lower
 }
 
 pub(crate) fn known_acp_runtime(command: &str) -> Option<&'static KnownAcpRuntime> {

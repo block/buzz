@@ -1,7 +1,8 @@
 # Glob patterns below mirror the `changes` job's dorny/paths-filter groups in
 # .github/workflows/ci.yml — keep the two in sync. Deliberate deviations:
-# - The `.github/workflows/ci.yml` path CI adds to its `rust`/`mobile` filters
-#   is omitted; a CI-workflow-only edit doesn't need a local test run.
+# - The `.github/workflows/ci.yml` path CI adds to its `rust`/`mobile`/
+#   `pi-agent` filters is omitted; a CI-workflow-only edit doesn't need a local
+#   test run.
 # - `desktop-check`/`desktop-test` don't trigger on `rust` changes, though CI's
 #   Desktop Core job does. Those commands are pure TS (biome + node:test) with
 #   no Rust dependency, so the extra trigger would be spurious locally.
@@ -61,6 +62,11 @@ pre-push:
       glob: ["desktop/**", "pnpm-lock.yaml"]
       exclude: ["desktop/src-tauri/**"]
       run: just desktop-test
+    pi-agent:
+      # Keep the Node and cross-process suites in one hook: both touch the
+      # adapter's dist directory, so parallel hooks would race its clean/build.
+      glob: ["packages/buzz-pi-agent/**", "crates/buzz-acp/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "pnpm-workspace.yaml", "pnpm-lock.yaml", "Justfile"]
+      run: just pi-agent-check && just pi-agent-verify
     desktop-tauri-checks:
       # Keep local lint parity with Desktop Core CI for every path that can
       # affect the Tauri crate or its path dependencies. Run clippy and tests

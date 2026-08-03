@@ -20,6 +20,9 @@ pub(crate) use path::compose_path_entries;
 pub(crate) use path::should_skip_claude_executable;
 pub(crate) use path::should_use_inherited;
 
+mod spawn_env;
+use spawn_env::{apply_harness_process_env, HarnessProcessEnv};
+
 mod metadata;
 pub(crate) use metadata::{
     resolve_effective_prompt_model_provider, resolve_session_title, runtime_metadata_env_vars,
@@ -576,26 +579,19 @@ pub fn spawn_agent_child(
     if let Some(ref path) = augmented_path {
         command.env("PATH", path);
     }
-    command.env("RUST_LOG", child_rust_log_filter());
-    command.env("BUZZ_PRIVATE_KEY", &record.private_key_nsec);
-    command.env("BUZZ_RELAY_URL", &effective_relay_url);
-    command.env("BUZZ_ACP_LAZY_POOL", if lazy { "true" } else { "false" });
-    command.env("BUZZ_ACP_AGENT_COMMAND", &resolved_agent_command);
-    command.env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","));
-    match &resolved_mcp_command {
-        Some(mcp_cmd) => {
-            command.env("BUZZ_ACP_MCP_COMMAND", mcp_cmd);
-        }
-        None => {
-            command.env("BUZZ_ACP_MCP_COMMAND", "");
-        }
-    }
-    // Enable MCP hook tools (_Stop, _PostCompact) for agents that need them.
-    // Uses "*" because build_mcp_servers() hard-codes the server name to "buzz-mcp".
     let runtime_meta = known_acp_runtime(effective_command);
-    if runtime_meta.is_some_and(|r| r.mcp_hooks) {
-        command.env("MCP_HOOK_SERVERS", "*");
-    }
+    apply_harness_process_env(
+        &mut command,
+        HarnessProcessEnv {
+            record,
+            relay_url: &effective_relay_url,
+            lazy,
+            effective_command,
+            resolved_agent_command: &resolved_agent_command,
+            agent_args,
+            resolved_mcp_command: resolved_mcp_command.as_deref(),
+        },
+    );
 
     // ── Readiness check: set setup-payload if agent is not ready ─────────────
     //

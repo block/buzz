@@ -9,6 +9,7 @@ import {
 import { toast } from "sonner";
 
 import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
+import { useActiveAgentTurnDetails } from "@/features/agents/activeAgentTurnsStore";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import {
   mergeObserverEventWindows,
@@ -105,7 +106,17 @@ export function AgentSessionThreadPanel({
     agent.pubkey,
     sessionChannelId,
   );
-  const canStopCurrentTurn = isWorking && canInterruptTurn;
+  const activeTurnDetails = useActiveAgentTurnDetails(agent.pubkey);
+  const scopedActiveTurns = React.useMemo(
+    () =>
+      sessionChannelId
+        ? activeTurnDetails.filter(
+            (turn) => turn.channelId === sessionChannelId,
+          )
+        : [],
+    [activeTurnDetails, sessionChannelId],
+  );
+  const canStopCurrentTurn = scopedActiveTurns.length > 0 && canInterruptTurn;
   useEscapeKey(onClose, isOverlay || isSinglePanelView);
 
   const scrollRef = React.useRef<HTMLDivElement>(null);
@@ -251,14 +262,20 @@ export function AgentSessionThreadPanel({
   const animateActivity = useTranscriptAnimationEnabled();
   const showTimestamps = useTranscriptTimestampsEnabled();
   async function handleInterruptTurn() {
-    if (!channel) {
+    if (!sessionChannelId || scopedActiveTurns.length === 0) {
       return;
     }
 
     try {
-      await cancelManagedAgentTurn(agent.pubkey, channel.id);
+      await Promise.all(
+        scopedActiveTurns.map((turn) =>
+          cancelManagedAgentTurn(agent.pubkey, sessionChannelId, turn.turnId),
+        ),
+      );
       toast.success(
-        `Stop signal sent to ${agent.name}. It may take a moment to respond.`,
+        scopedActiveTurns.length === 1
+          ? `Stop signal sent to ${agent.name}. It may take a moment to respond.`
+          : `Stop signals sent for ${scopedActiveTurns.length} active ${agent.name} turns in this channel.`,
       );
     } catch (error) {
       toast.error(
@@ -403,7 +420,9 @@ export function AgentSessionThreadPanel({
               <Octagon className="mt-0.5 h-4 w-4 text-muted-foreground" />
               <span className="min-w-0 flex-1">
                 <span className="block text-sm font-medium">
-                  Stop current turn
+                  {scopedActiveTurns.length > 1
+                    ? `Stop ${scopedActiveTurns.length} current turns`
+                    : "Stop current turn"}
                 </span>
                 {!canStopCurrentTurn ? (
                   <span className="mt-0.5 block text-xs text-muted-foreground">

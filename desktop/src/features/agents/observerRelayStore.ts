@@ -25,6 +25,7 @@ import {
   createEmptyTranscriptState,
   processTranscriptEvent,
 } from "./ui/agentSessionTranscript";
+import { correlateControlResultFrame } from "./lib/controlResultCorrelation";
 
 const MAX_OBSERVER_EVENTS = 3000;
 const MAX_PENDING_UNKNOWN_AGENT_FRAMES = 100;
@@ -402,7 +403,7 @@ async function handleRelayObserverEvent(
       void putAgentSessionConfig(agentPubkey, parsed.payload);
       onSessionConfigCaptured?.(agentPubkey);
     } else if (parsed.kind === "control_result") {
-      dispatchControlResult(agentPubkey, parsed.payload);
+      dispatchControlResult(agentPubkey, parsed.payload, parsed.turnId);
     } else if (parsed.kind === "managed_agent_runtime_lifecycle") {
       void putManagedAgentRuntimeLifecycle(agentPubkey, parsed.payload).catch(
         (error) => {
@@ -495,8 +496,16 @@ function isControlResultFrame(payload: unknown): payload is ControlResultFrame {
   );
 }
 
-function dispatchControlResult(agentPubkey: string, payload: unknown) {
+function dispatchControlResult(
+  agentPubkey: string,
+  payload: unknown,
+  envelopeTurnId: string | null,
+) {
   if (!isControlResultFrame(payload)) {
+    return;
+  }
+  const frame = correlateControlResultFrame(payload, envelopeTurnId);
+  if (!frame) {
     return;
   }
   const subscribers = controlResultListeners.get(normalizePubkey(agentPubkey));
@@ -504,7 +513,7 @@ function dispatchControlResult(agentPubkey: string, payload: unknown) {
     return;
   }
   for (const subscriber of subscribers) {
-    subscriber(payload);
+    subscriber(frame);
   }
 }
 

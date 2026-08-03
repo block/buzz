@@ -8,6 +8,8 @@
 //! 4. [`AcpClient::session_prompt_with_idle_timeout`] — send prompt with idle/hard deadline, return stop reason
 //! 5. [`AcpClient::session_cancel`] / [`AcpClient::cancel_with_cleanup`] — cancel in-flight turn
 
+use std::collections::{HashMap, HashSet, VecDeque};
+
 use futures_util::StreamExt;
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, ChildStdin, ChildStdout};
@@ -19,6 +21,377 @@ use crate::usage::{TurnUsage, UsageTracker};
 /// Maximum allowed size of a single NDJSON line from the agent's stdout.
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
 const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
+/// Adapter lifecycle events are small status records, never transcripts. Keep
+/// them far below the general ACP line cap so a noisy/malicious extension
+/// cannot retain tens or hundreds of megabytes in the bounded event queue.
+const MAX_BUZZ_SESSION_EVENT_BYTES: usize = 64 * 1024;
+
+/// Maximum number of adapter lifecycle events retained until the pool drains
+/// them at turn completion. This prevents a buggy or hostile adapter from
+/// growing the harness indefinitely while preserving more than enough room for
+/// the handful of compaction/context events a normal turn emits.
+const MAX_PENDING_SESSION_EVENTS: usize = 64;
+const MAX_SEEN_SESSION_EVENT_IDS: usize = 512;
+
+/// Best-effort lifecycle RPCs must not stall a user turn if an adapter accepts
+/// the request but never replies.
+const SESSION_DISPOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Buzz-specific ACP notification emitted by adapters that have meaningful
+/// session lifecycle state to surface back into the originating Buzz thread.
+pub(crate) const BUZZ_SESSION_EVENT_METHOD: &str = "_buzz/session/event";
+pub(crate) const BUZZ_SESSION_EVENT_SCHEMA_VERSION: u32 = 2;
+const BUZZ_SESSION_EVENT_ACK_METHOD: &str = "_buzz/session/event_ack";
+const MAX_PENDING_SESSION_EVENT_ACKS: usize = 256;
+
+/// Explicit result of Buzz's idempotent durable conversation-reset RPC.
+/// `AlreadyCommitted` is intentionally distinct: a freshly received command
+/// may only advance the harness queue on `NewlyCommitted`, while crash recovery
+/// may accept either result for its already-persisted prepared intent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConversationResetCommit {
+    NewlyCommitted,
+    AlreadyCommitted,
+}
+
+/// Wire envelope for [`BUZZ_SESSION_EVENT_METHOD`]. The ACP session id lets the
+/// pool reject late notifications from a session invalidated by `/new`.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BuzzSessionEventNotification {
+    #[serde(rename = "schemaVersion")]
+    pub(crate) schema_version: u32,
+    pub(crate) session_id: String,
+    pub(crate) conversation_id: String,
+    pub(crate) event_id: String,
+    pub(crate) event: BuzzSessionEvent,
+}
+
+/// Durable adapter lifecycle record that may be acknowledged only after the
+/// equivalent signed Buzz notice has entered the harness outbox.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BuzzSessionEventAck {
+    pub(crate) conversation_id: String,
+    pub(crate) event_id: String,
+}
+
+/// User-visible session lifecycle events emitted by the Pi adapter.
+///
+/// The adapter includes a ready-to-display `message` for local diagnostics,
+/// but the Buzz harness renders notices from the typed numeric fields instead
+/// of blindly publishing adapter-provided text.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum BuzzSessionEvent {
+    CompactionCompleted {
+        #[serde(rename = "compactionId")]
+        compaction_id: String,
+        timestamp: String,
+        message: String,
+        #[serde(rename = "piSessionId")]
+        pi_session_id: String,
+        reason: CompactionReason,
+        #[serde(rename = "beforeTokens")]
+        before_tokens: Option<u64>,
+        #[serde(rename = "afterTokens")]
+        after_tokens: Option<u64>,
+        #[serde(rename = "limitTokens")]
+        limit_tokens: u64,
+        #[serde(rename = "effectiveLimitTokens")]
+        effective_limit_tokens: u64,
+        #[serde(rename = "compactionThresholdTokens")]
+        compaction_threshold_tokens: u64,
+        #[serde(rename = "willRetry")]
+        will_retry: bool,
+        #[serde(rename = "fromExtension")]
+        from_extension: bool,
+    },
+    CompactionFailed {
+        #[serde(rename = "compactionId")]
+        compaction_id: String,
+        timestamp: String,
+        message: String,
+        #[serde(rename = "piSessionId")]
+        pi_session_id: String,
+        reason: CompactionReason,
+        #[serde(rename = "beforeTokens")]
+        before_tokens: Option<u64>,
+        #[serde(rename = "limitTokens")]
+        limit_tokens: u64,
+        #[serde(rename = "effectiveLimitTokens")]
+        effective_limit_tokens: u64,
+        #[serde(rename = "compactionThresholdTokens")]
+        compaction_threshold_tokens: u64,
+        error: String,
+        aborted: bool,
+        #[serde(rename = "willRetry")]
+        will_retry: bool,
+        #[serde(rename = "fromExtension")]
+        from_extension: bool,
+    },
+    ContextStatus {
+        timestamp: String,
+        message: String,
+        #[serde(rename = "piSessionId")]
+        pi_session_id: String,
+        #[serde(rename = "usedTokens")]
+        used_tokens: Option<u64>,
+        #[serde(rename = "remainingTokens")]
+        remaining_tokens: Option<u64>,
+        percent: Option<f64>,
+        #[serde(rename = "limitTokens")]
+        limit_tokens: u64,
+        #[serde(rename = "effectiveLimitTokens")]
+        effective_limit_tokens: u64,
+        #[serde(rename = "compactionThresholdTokens")]
+        compaction_threshold_tokens: u64,
+        #[serde(rename = "autoCompaction")]
+        auto_compaction: bool,
+        compacting: bool,
+        model: Option<String>,
+    },
+    SessionReset {
+        timestamp: String,
+        message: String,
+        #[serde(rename = "previousPiSessionId")]
+        previous_pi_session_id: String,
+        #[serde(rename = "piSessionId")]
+        pi_session_id: String,
+        #[serde(rename = "limitTokens")]
+        limit_tokens: u64,
+        #[serde(rename = "effectiveLimitTokens")]
+        effective_limit_tokens: u64,
+        #[serde(rename = "compactionThresholdTokens")]
+        compaction_threshold_tokens: u64,
+    },
+    ExtensionsReloaded {
+        timestamp: String,
+        message: String,
+        #[serde(rename = "piSessionId")]
+        pi_session_id: String,
+        extensions: u64,
+        skills: u64,
+        prompts: u64,
+        #[serde(rename = "contextFiles")]
+        context_files: u64,
+        errors: Vec<String>,
+        #[serde(rename = "projectTrusted")]
+        project_trusted: bool,
+    },
+}
+
+/// Why Pi compacted (or attempted to compact) a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CompactionReason {
+    Manual,
+    Threshold,
+    Overflow,
+    Preflight,
+}
+
+impl BuzzSessionEvent {
+    pub(crate) fn compaction_id(&self) -> Option<&str> {
+        match self {
+            Self::CompactionCompleted { compaction_id, .. }
+            | Self::CompactionFailed { compaction_id, .. } => Some(compaction_id),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            Self::CompactionCompleted { .. } => "compaction_completed",
+            Self::CompactionFailed { .. } => "compaction_failed",
+            Self::ContextStatus { .. } => "context_status",
+            Self::SessionReset { .. } => "session_reset",
+            Self::ExtensionsReloaded { .. } => "extensions_reloaded",
+        }
+    }
+
+    pub(crate) fn pi_session_id(&self) -> &str {
+        match self {
+            Self::CompactionCompleted { pi_session_id, .. }
+            | Self::CompactionFailed { pi_session_id, .. }
+            | Self::ContextStatus { pi_session_id, .. }
+            | Self::SessionReset { pi_session_id, .. }
+            | Self::ExtensionsReloaded { pi_session_id, .. } => pi_session_id,
+        }
+    }
+
+    fn validate(&self) -> std::result::Result<(), &'static str> {
+        const MAX_CONTEXT_TOKENS: u64 = 10_000_000_000;
+        const MAX_RESOURCE_COUNT: u64 = 1_000_000;
+
+        let (timestamp, message, pi_session_id) = match self {
+            Self::CompactionCompleted {
+                timestamp,
+                message,
+                pi_session_id,
+                ..
+            }
+            | Self::CompactionFailed {
+                timestamp,
+                message,
+                pi_session_id,
+                ..
+            }
+            | Self::ContextStatus {
+                timestamp,
+                message,
+                pi_session_id,
+                ..
+            }
+            | Self::SessionReset {
+                timestamp,
+                message,
+                pi_session_id,
+                ..
+            }
+            | Self::ExtensionsReloaded {
+                timestamp,
+                message,
+                pi_session_id,
+                ..
+            } => (timestamp, message, pi_session_id),
+        };
+        if timestamp.len() > 64 || chrono::DateTime::parse_from_rfc3339(timestamp).is_err() {
+            return Err("invalid timestamp");
+        }
+        if message.len() > 4_096 {
+            return Err("message too long");
+        }
+        if pi_session_id.is_empty() || pi_session_id.len() > 256 {
+            return Err("invalid Pi session id");
+        }
+
+        let validate_limits = |limit: u64, effective: u64, threshold: u64| {
+            if limit == 0
+                || limit > MAX_CONTEXT_TOKENS
+                || effective == 0
+                || effective > limit
+                || threshold == 0
+                || threshold > effective
+            {
+                Err("invalid context limits")
+            } else {
+                Ok(())
+            }
+        };
+        let validate_optional_tokens = |tokens: Option<u64>| {
+            if tokens.is_some_and(|value| value > MAX_CONTEXT_TOKENS) {
+                Err("invalid token count")
+            } else {
+                Ok(())
+            }
+        };
+
+        match self {
+            Self::CompactionCompleted {
+                compaction_id,
+                before_tokens,
+                after_tokens,
+                limit_tokens,
+                effective_limit_tokens,
+                compaction_threshold_tokens,
+                ..
+            } => {
+                uuid::Uuid::parse_str(compaction_id).map_err(|_| "invalid compaction id")?;
+                validate_limits(
+                    *limit_tokens,
+                    *effective_limit_tokens,
+                    *compaction_threshold_tokens,
+                )?;
+                validate_optional_tokens(*before_tokens)?;
+                validate_optional_tokens(*after_tokens)
+            }
+            Self::CompactionFailed {
+                compaction_id,
+                before_tokens,
+                limit_tokens,
+                effective_limit_tokens,
+                compaction_threshold_tokens,
+                error,
+                ..
+            } => {
+                uuid::Uuid::parse_str(compaction_id).map_err(|_| "invalid compaction id")?;
+                validate_limits(
+                    *limit_tokens,
+                    *effective_limit_tokens,
+                    *compaction_threshold_tokens,
+                )?;
+                validate_optional_tokens(*before_tokens)?;
+                if error.len() > 4_096 {
+                    return Err("error too long");
+                }
+                Ok(())
+            }
+            Self::ContextStatus {
+                used_tokens,
+                remaining_tokens,
+                percent,
+                limit_tokens,
+                effective_limit_tokens,
+                compaction_threshold_tokens,
+                model,
+                ..
+            } => {
+                validate_limits(
+                    *limit_tokens,
+                    *effective_limit_tokens,
+                    *compaction_threshold_tokens,
+                )?;
+                validate_optional_tokens(*used_tokens)?;
+                validate_optional_tokens(*remaining_tokens)?;
+                if percent
+                    .is_some_and(|value| !value.is_finite() || !(0.0..=10_000.0).contains(&value))
+                {
+                    return Err("invalid percentage");
+                }
+                if model.as_ref().is_some_and(|value| value.len() > 256) {
+                    return Err("model id too long");
+                }
+                Ok(())
+            }
+            Self::SessionReset {
+                previous_pi_session_id,
+                limit_tokens,
+                effective_limit_tokens,
+                compaction_threshold_tokens,
+                ..
+            } => {
+                validate_limits(
+                    *limit_tokens,
+                    *effective_limit_tokens,
+                    *compaction_threshold_tokens,
+                )?;
+                if previous_pi_session_id.is_empty() || previous_pi_session_id.len() > 256 {
+                    return Err("invalid previous Pi session id");
+                }
+                Ok(())
+            }
+            Self::ExtensionsReloaded {
+                extensions,
+                skills,
+                prompts,
+                context_files,
+                errors,
+                ..
+            } => {
+                if [*extensions, *skills, *prompts, *context_files]
+                    .into_iter()
+                    .any(|count| count > MAX_RESOURCE_COUNT)
+                {
+                    return Err("invalid resource count");
+                }
+                if errors.len() > 64 || errors.iter().any(|error| error.len() > 2_000) {
+                    return Err("invalid resource diagnostics");
+                }
+                Ok(())
+            }
+        }
+    }
+}
 
 /// An MCP server configuration passed to `session/new`.
 ///
@@ -187,6 +560,10 @@ pub struct AcpClient {
     /// Other agents may leave this unset — readers must treat `None` as
     /// "no active run to steer into" and fall back to cancel+merge.
     active_run_id: Option<String>,
+    /// Capability cache for Buzz's optional session-dispose extension.
+    /// `Some(false)` suppresses future probes after a standards-compliant
+    /// method-not-found response; timeouts remain retryable.
+    buzz_session_dispose_supported: Option<bool>,
     /// Whether the agent advertised `_meta.steering.supported: true` in its
     /// `initialize` response, meaning it implements the cross-adapter
     /// [`ACP_STEER_METHOD`] extension.
@@ -198,6 +575,15 @@ pub struct AcpClient {
     /// a JSON-RPC *success*, not `-32601` — which the main loop would read as
     /// a delivered steer and drop the user's message from the queue.
     steering_supported: bool,
+    /// Whether the adapter explicitly opts into Buzz's thread-scoped session
+    /// lifecycle contract (persistent conversation identity + bounded
+    /// disposal). Legacy adapters stay channel-scoped to avoid leaking an
+    /// unbounded number of inner sessions they cannot release.
+    thread_sessions_supported: bool,
+    conversation_reset_supported: bool,
+    /// The adapter persists lifecycle records before notification, replays
+    /// them after process death, and removes them only after an explicit ACK.
+    durable_session_events_supported: bool,
     /// Per-turn channel for receiving goose-native non-cancelling steer
     /// requests from the main loop. Installed by
     /// [`install_steer_rx`](Self::install_steer_rx) at dispatch and
@@ -211,6 +597,23 @@ pub struct AcpClient {
     /// deltas. Both goose and buzz-agent emit this notification; goose gates
     /// on client capability advertisement, buzz-agent emits unconditionally.
     goose_usage: UsageTracker,
+    /// Bounded FIFO of adapter lifecycle events waiting for the pool to attach
+    /// them to the exact Buzz conversation that owns this ACP session.
+    buzz_session_events: VecDeque<BuzzSessionEventNotification>,
+    /// Bounded compaction-event deduplication. IDs are supplied by the adapter
+    /// and shared by retransmissions of the same lifecycle transition.
+    seen_session_event_ids: HashSet<String>,
+    seen_session_event_id_order: VecDeque<String>,
+    /// ACKs are queued synchronously when the Buzz outbox commit succeeds and
+    /// flushed before the next prompt (or during orderly shutdown). Keeping
+    /// them here avoids blocking the relay loop on an adapter round trip.
+    pending_session_event_acks: VecDeque<BuzzSessionEventAck>,
+    pending_session_event_ack_ids: HashSet<String>,
+    /// Current durable Pi generation attached to each ACP session. Lifecycle
+    /// replay is accepted only when both the outer ACP envelope and this inner
+    /// Pi identity match, so a late pre-`/new` writer cannot leak into the
+    /// replacement conversation.
+    pi_session_ids: HashMap<String, String>,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -417,6 +820,9 @@ impl AcpClient {
     /// Call this when you need guaranteed cleanup — e.g., in `run_models`
     /// before process exit.
     pub async fn shutdown(&mut self) {
+        if !self.pending_session_event_acks.is_empty() {
+            self.flush_buzz_session_event_acks().await;
+        }
         // Kill the entire process group when possible. The child was spawned
         // with process_group(0), so its PID == its PGID. Killing the group
         // ensures subprocesses (MCP servers, tool processes) are cleaned up
@@ -547,9 +953,19 @@ impl AcpClient {
             observer_agent_index: None,
             observer_context: ObserverContext::default(),
             active_run_id: None,
+            buzz_session_dispose_supported: None,
             steering_supported: false,
+            thread_sessions_supported: false,
+            conversation_reset_supported: false,
+            durable_session_events_supported: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
+            buzz_session_events: VecDeque::new(),
+            seen_session_event_ids: HashSet::new(),
+            seen_session_event_id_order: VecDeque::new(),
+            pending_session_event_acks: VecDeque::new(),
+            pending_session_event_ack_ids: HashSet::new(),
+            pi_session_ids: HashMap::new(),
         })
     }
 
@@ -562,6 +978,19 @@ impl AcpClient {
     /// Update metadata that will be attached to subsequent raw wire events.
     pub fn set_observer_context(&mut self, context: ObserverContext) {
         self.observer_context = context;
+    }
+
+    /// ACP session currently attached to this process's in-flight turn.
+    ///
+    /// Lifecycle notifications are accepted only when their envelope matches
+    /// this value, preventing a late event from an invalidated `/new` session
+    /// from being surfaced in the replacement conversation.
+    pub(crate) fn current_turn_session_id(&self) -> Option<&str> {
+        self.observer_context.session_id.as_deref()
+    }
+
+    pub(crate) fn pi_session_id_for(&self, session_id: &str) -> Option<&str> {
+        self.pi_session_ids.get(session_id).map(String::as_str)
     }
 
     /// Return a clone of the observer handle, if attached.
@@ -604,6 +1033,31 @@ impl AcpClient {
             .pointer("/_meta/steering/supported")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        self.thread_sessions_supported = result
+            .pointer("/_meta/buzz/threadSessions/supported")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        self.conversation_reset_supported = result
+            .pointer("/_meta/buzz/threadSessions/resetCommit")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        self.durable_session_events_supported = result
+            .pointer("/_meta/buzz/sessionEvents")
+            .is_some_and(|capability| {
+                capability
+                    .get("supported")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+                    && capability
+                        .get("schemaVersion")
+                        .and_then(serde_json::Value::as_u64)
+                        == Some(u64::from(BUZZ_SESSION_EVENT_SCHEMA_VERSION))
+                    && capability
+                        .get("durableReplay")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+                    && capability.get("ack").and_then(serde_json::Value::as_bool) == Some(true)
+            });
         tracing::debug!(target: "acp::init", "initialize response: {result}");
         Ok(result)
     }
@@ -642,6 +1096,34 @@ impl AcpClient {
         system_prompt: Option<SystemPromptTransport<'_>>,
         session_title: Option<&str>,
     ) -> Result<SessionNewResponse, AcpError> {
+        self.session_new_full_for_conversation(
+            cwd,
+            mcp_servers,
+            system_prompt,
+            session_title,
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// Send `session/new` with Buzz's stable logical conversation identity.
+    ///
+    /// Adapters that understand `_meta.buzz.conversationId` can resume their
+    /// persisted SDK session after harness restarts or outer-cache eviction.
+    /// A unique `_meta.buzz.resetToken` marks `/new`; adapters atomically
+    /// replace the logical mapping when that token changes. Other ACP agents
+    /// ignore the metadata. The identifier is opaque to the adapter and
+    /// deliberately excludes the in-process race-prevention epoch.
+    pub async fn session_new_full_for_conversation(
+        &mut self,
+        cwd: &str,
+        mcp_servers: Vec<McpServer>,
+        system_prompt: Option<SystemPromptTransport<'_>>,
+        session_title: Option<&str>,
+        conversation_id: Option<&str>,
+        reset_token: Option<&str>,
+    ) -> Result<SessionNewResponse, AcpError> {
         let mut params = serde_json::json!({
             "cwd": cwd,
             "mcpServers": mcp_servers,
@@ -660,16 +1142,156 @@ impl AcpClient {
             // Merge — _meta may already carry systemPrompt from ClaudeMeta above.
             params["_meta"]["sessionTitle"] = serde_json::Value::String(title.to_owned());
         }
+        if conversation_id.is_some() || reset_token.is_some() {
+            let mut buzz = serde_json::Map::new();
+            if let Some(conversation_id) = conversation_id {
+                buzz.insert(
+                    "conversationId".to_string(),
+                    serde_json::Value::String(conversation_id.to_owned()),
+                );
+            }
+            if let Some(reset_token) = reset_token {
+                buzz.insert(
+                    "resetToken".to_string(),
+                    serde_json::Value::String(reset_token.to_owned()),
+                );
+            }
+            // Merge — _meta may already carry a Claude system prompt and a title.
+            params["_meta"]["buzz"] = serde_json::Value::Object(buzz);
+        }
         let result = self.send_request("session/new", params).await?;
         let session_id = result["sessionId"]
             .as_str()
             .ok_or_else(|| AcpError::Protocol("session/new response missing sessionId".into()))?
             .to_owned();
+        if let Some(pi_session_id) = result
+            .pointer("/_meta/buzz/piSessionId")
+            .and_then(serde_json::Value::as_str)
+        {
+            if pi_session_id.is_empty() || pi_session_id.len() > 256 {
+                return Err(AcpError::Protocol(
+                    "session/new response has invalid _meta.buzz.piSessionId".into(),
+                ));
+            }
+            self.pi_session_ids
+                .insert(session_id.clone(), pi_session_id.to_owned());
+        }
         tracing::info!(target: "acp::session", "session created: {session_id}");
         Ok(SessionNewResponse {
             session_id,
             raw: result,
         })
+    }
+
+    /// Best-effort Buzz extension for releasing an adapter-owned SDK session.
+    ///
+    /// `forget=false` closes in-memory resources while preserving the adapter's
+    /// persisted conversation mapping, so a later `session/new` can resume it.
+    /// `forget=true` is `/new`: the mapping must be removed before disposal so
+    /// the next session is guaranteed to start with an empty context.
+    /// Returns `Ok(false)` when the adapter explicitly does not implement the
+    /// extension; callers may safely continue in either case.
+    pub async fn session_dispose(
+        &mut self,
+        session_id: &str,
+        forget: bool,
+    ) -> Result<bool, AcpError> {
+        if self.buzz_session_dispose_supported == Some(false) {
+            return Ok(false);
+        }
+
+        let result = tokio::time::timeout(
+            SESSION_DISPOSE_TIMEOUT,
+            self.send_request(
+                "_buzz/session/dispose",
+                serde_json::json!({
+                    "sessionId": session_id,
+                    "forget": forget,
+                }),
+            ),
+        )
+        .await;
+
+        match result {
+            Ok(Ok(response))
+                if response
+                    .get("disposed")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+                    && (!forget
+                        || response
+                            .get("forgotten")
+                            .and_then(serde_json::Value::as_bool)
+                            == Some(true)) =>
+            {
+                self.buzz_session_dispose_supported = Some(true);
+                self.pi_session_ids.remove(session_id);
+                Ok(true)
+            }
+            Ok(Ok(_)) => Err(AcpError::Protocol(
+                "_buzz/session/dispose did not confirm the requested disposal".into(),
+            )),
+            Ok(Err(AcpError::AgentError { code: -32601, .. })) => {
+                self.buzz_session_dispose_supported = Some(false);
+                Ok(false)
+            }
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err(AcpError::Timeout(SESSION_DISPOSE_TIMEOUT)),
+        }
+    }
+
+    /// Durably commit an authenticated Buzz conversation reset before the
+    /// harness acknowledges `/new`. Unlike session disposal, this operation is
+    /// keyed by the stable logical conversation and works after its hot ACP
+    /// handle was already evicted. The signed command event ID is an
+    /// idempotency token.
+    pub async fn conversation_reset(
+        &mut self,
+        conversation_id: &str,
+        reset_token: &str,
+    ) -> Result<Option<ConversationResetCommit>, AcpError> {
+        if !self.conversation_reset_supported {
+            return Ok(None);
+        }
+        let result = tokio::time::timeout(
+            SESSION_DISPOSE_TIMEOUT,
+            self.send_request(
+                "_buzz/conversation/reset",
+                serde_json::json!({
+                    "conversationId": conversation_id,
+                    "resetToken": reset_token,
+                }),
+            ),
+        )
+        .await;
+        match result {
+            Ok(Ok(response))
+                if response
+                    .get("committed")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true) =>
+            {
+                match response
+                    .get("alreadyCommitted")
+                    .and_then(serde_json::Value::as_bool)
+                {
+                    Some(true) => Ok(Some(ConversationResetCommit::AlreadyCommitted)),
+                    Some(false) => Ok(Some(ConversationResetCommit::NewlyCommitted)),
+                    None => Err(AcpError::Protocol(
+                        "_buzz/conversation/reset omitted alreadyCommitted".into(),
+                    )),
+                }
+            }
+            Ok(Ok(_)) => Err(AcpError::Protocol(
+                "_buzz/conversation/reset did not confirm a durable commit".into(),
+            )),
+            Ok(Err(AcpError::AgentError { code: -32601, .. })) => {
+                self.conversation_reset_supported = false;
+                Ok(None)
+            }
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err(AcpError::Timeout(SESSION_DISPOSE_TIMEOUT)),
+        }
     }
 
     /// Send `session/new` and return only the `sessionId` string.
@@ -768,6 +1390,9 @@ impl AcpClient {
         idle_timeout: std::time::Duration,
         max_duration: std::time::Duration,
     ) -> Result<StopReason, AcpError> {
+        if !self.pending_session_event_acks.is_empty() {
+            self.flush_buzz_session_event_acks().await;
+        }
         let params = build_prompt_params(session_id, prompt_blocks);
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
@@ -867,6 +1492,87 @@ impl AcpClient {
         self.steering_supported
     }
 
+    /// Whether this adapter opted into Buzz's thread-session lifecycle
+    /// extension during `initialize`.
+    pub fn thread_sessions_supported(&self) -> bool {
+        self.thread_sessions_supported
+    }
+
+    pub fn conversation_reset_supported(&self) -> bool {
+        self.conversation_reset_supported
+    }
+
+    pub fn durable_session_events_supported(&self) -> bool {
+        self.durable_session_events_supported
+    }
+
+    /// Queue a durable lifecycle ACK after the corresponding signed Buzz event
+    /// has been persisted. Duplicate adapter replay is harmless and bounded.
+    pub(crate) fn queue_buzz_session_event_ack(&mut self, ack: BuzzSessionEventAck) {
+        if !self.durable_session_events_supported
+            || self.pending_session_event_ack_ids.contains(&ack.event_id)
+        {
+            return;
+        }
+        if self.pending_session_event_acks.len() >= MAX_PENDING_SESSION_EVENT_ACKS {
+            tracing::error!(
+                max_pending = MAX_PENDING_SESSION_EVENT_ACKS,
+                "durable lifecycle ACK queue is full; leaving adapter record unacknowledged for replay"
+            );
+            return;
+        }
+        self.pending_session_event_ack_ids
+            .insert(ack.event_id.clone());
+        self.pending_session_event_acks.push_back(ack);
+    }
+
+    /// Flush queued ACKs outside an active prompt. The adapter confirms only
+    /// after atomically deleting its durable record. Any failure leaves the
+    /// record queued and therefore replayable after this process dies.
+    pub(crate) async fn flush_buzz_session_event_acks(&mut self) {
+        if !self.durable_session_events_supported {
+            return;
+        }
+        while let Some(ack) = self.pending_session_event_acks.front().cloned() {
+            let request = self.send_request(
+                BUZZ_SESSION_EVENT_ACK_METHOD,
+                serde_json::json!({
+                    "conversationId": ack.conversation_id,
+                    "eventId": ack.event_id,
+                }),
+            );
+            let acknowledged = match tokio::time::timeout(SESSION_DISPOSE_TIMEOUT, request).await {
+                Ok(Ok(response)) => {
+                    response
+                        .get("acknowledged")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+                }
+                Ok(Err(error)) => {
+                    tracing::warn!(
+                        event_id = %ack.event_id,
+                        %error,
+                        "durable lifecycle ACK failed; adapter will replay it"
+                    );
+                    false
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        event_id = %ack.event_id,
+                        "durable lifecycle ACK timed out; adapter will replay it"
+                    );
+                    false
+                }
+            };
+            if !acknowledged {
+                break;
+            }
+            let removed = self.pending_session_event_acks.pop_front();
+            debug_assert_eq!(removed.as_ref(), Some(&ack));
+            self.pending_session_event_ack_ids.remove(&ack.event_id);
+        }
+    }
+
     /// Consume and return the per-turn usage record computed from the most
     /// recent `_goose/unstable/session/update` notification.
     ///
@@ -879,6 +1585,16 @@ impl AcpClient {
     /// publish a kind 44200 NIP-AM event.
     pub fn take_turn_usage(&mut self) -> Option<TurnUsage> {
         self.goose_usage.take()
+    }
+
+    /// Drain adapter session lifecycle events observed since the previous call.
+    ///
+    /// The pool must still verify `session_id` against its current session and
+    /// generation before publishing a notice. Draining here ensures events are
+    /// associated with exactly one completed turn and cannot leak into a later
+    /// conversation when this subprocess is reused.
+    pub(crate) fn take_buzz_session_events(&mut self) -> Vec<BuzzSessionEventNotification> {
+        self.buzz_session_events.drain(..).collect()
     }
 
     /// Install a per-turn steer request channel for goose-native
@@ -1236,6 +1952,9 @@ impl AcpClient {
                     }
                     "_goose/unstable/session/update" => {
                         self.handle_goose_usage_update(&msg);
+                    }
+                    BUZZ_SESSION_EVENT_METHOD => {
+                        self.handle_buzz_session_event(&msg)?;
                     }
                     "session/request_permission" => {
                         self.handle_permission_request(&msg).await?;
@@ -1681,6 +2400,9 @@ impl AcpClient {
                             "_goose/unstable/session/update" => {
                                 self.handle_goose_usage_update(&msg);
                             }
+                            BUZZ_SESSION_EVENT_METHOD => {
+                                self.handle_buzz_session_event(&msg)?;
+                            }
                             "session/request_permission" => {
                                 self.handle_permission_request(&msg).await?;
                             }
@@ -1867,6 +2589,155 @@ impl AcpClient {
                     "_goose/unstable/session/update: deserialization error: {e}"
                 );
             }
+        }
+    }
+
+    /// Parse and retain a Buzz adapter lifecycle notification.
+    ///
+    /// Older adapters treated these notifications as optional observability,
+    /// so malformed records and bounded-queue overflow remain best-effort for
+    /// adapters that did not negotiate durable session events. Once an adapter
+    /// advertises the durable v2 contract, however, every record remains in its
+    /// own outbox until Buzz ACKs it. Silently dropping or ignoring one would
+    /// strand that record for the lifetime of this ACP process. Durable-mode
+    /// validation and backpressure therefore fail the transport closed, forcing
+    /// a fresh adapter process to replay the exact event ID.
+    fn handle_buzz_session_event(&mut self, msg: &serde_json::Value) -> Result<(), AcpError> {
+        let Some(params) = msg.get("params") else {
+            tracing::debug!(
+                target: "acp::session_event",
+                "{BUZZ_SESSION_EVENT_METHOD}: missing params"
+            );
+            return self.reject_invalid_buzz_session_event("missing params");
+        };
+
+        let serialized_size = serde_json::to_vec(params)
+            .map(|bytes| bytes.len())
+            .unwrap_or(usize::MAX);
+        if serialized_size > MAX_BUZZ_SESSION_EVENT_BYTES {
+            tracing::warn!(
+                target: "acp::session_event",
+                serialized_size,
+                max_bytes = MAX_BUZZ_SESSION_EVENT_BYTES,
+                "ignoring oversized adapter session event"
+            );
+            return self.reject_invalid_buzz_session_event(format!(
+                "payload exceeded {MAX_BUZZ_SESSION_EVENT_BYTES} bytes"
+            ));
+        }
+
+        match serde_json::from_value::<BuzzSessionEventNotification>(params.clone()) {
+            Ok(notification) => {
+                if notification.schema_version != BUZZ_SESSION_EVENT_SCHEMA_VERSION {
+                    tracing::debug!(
+                        target: "acp::session_event",
+                        schema_version = notification.schema_version,
+                        "ignoring unsupported adapter session-event schema"
+                    );
+                    return self.reject_invalid_buzz_session_event(format!(
+                        "unsupported schema version {}",
+                        notification.schema_version
+                    ));
+                }
+                if notification.session_id.is_empty() || notification.session_id.len() > 256 {
+                    tracing::debug!(
+                        target: "acp::session_event",
+                        "ignoring adapter session event with invalid ACP session id"
+                    );
+                    return self.reject_invalid_buzz_session_event("invalid ACP session id");
+                }
+                if notification.conversation_id.is_empty()
+                    || notification.conversation_id.len() > 1_024
+                    || uuid::Uuid::parse_str(&notification.event_id).is_err()
+                {
+                    tracing::debug!(
+                        target: "acp::session_event",
+                        "ignoring adapter session event with invalid durable identity"
+                    );
+                    return self.reject_invalid_buzz_session_event(
+                        "invalid durable conversation or event identity",
+                    );
+                }
+                if let Err(reason) = notification.event.validate() {
+                    tracing::debug!(
+                        target: "acp::session_event",
+                        event_kind = notification.event.kind(),
+                        reason,
+                        "ignoring invalid adapter session event"
+                    );
+                    return self.reject_invalid_buzz_session_event(format!(
+                        "invalid typed lifecycle event: {reason}"
+                    ));
+                }
+                if !self
+                    .seen_session_event_ids
+                    .insert(notification.event_id.clone())
+                {
+                    tracing::debug!(
+                        target: "acp::session_event",
+                        event_id = %notification.event_id,
+                        "ignoring duplicate durable adapter session event"
+                    );
+                    return Ok(());
+                }
+                if let Some(compaction_id) = notification.event.compaction_id() {
+                    if uuid::Uuid::parse_str(compaction_id).is_err() {
+                        // Event validation already checked this. Keep a
+                        // defensive branch so future event variants cannot
+                        // accidentally weaken durable dedupe identity.
+                        self.seen_session_event_ids.remove(&notification.event_id);
+                        return self
+                            .reject_invalid_buzz_session_event("invalid compaction identity");
+                    }
+                }
+                if self.buzz_session_events.len() == MAX_PENDING_SESSION_EVENTS {
+                    if self.durable_session_events_supported {
+                        self.seen_session_event_ids.remove(&notification.event_id);
+                        return Err(AcpError::Protocol(format!(
+                            "durable adapter session-event queue reached its {MAX_PENDING_SESSION_EVENTS}-record limit"
+                        )));
+                    }
+                    let _ = self.buzz_session_events.pop_front();
+                    tracing::warn!(
+                        target: "acp::session_event",
+                        max_pending = MAX_PENDING_SESSION_EVENTS,
+                        "adapter session-event queue full; dropped oldest event"
+                    );
+                }
+                self.seen_session_event_id_order
+                    .push_back(notification.event_id.clone());
+                if self.seen_session_event_id_order.len() > MAX_SEEN_SESSION_EVENT_IDS {
+                    if let Some(expired) = self.seen_session_event_id_order.pop_front() {
+                        self.seen_session_event_ids.remove(&expired);
+                    }
+                }
+                tracing::debug!(
+                    target: "acp::session_event",
+                    session_id = %notification.session_id,
+                    event_kind = notification.event.kind(),
+                    "adapter session event"
+                );
+                self.buzz_session_events.push_back(notification);
+                Ok(())
+            }
+            Err(error) => {
+                tracing::debug!(
+                    target: "acp::session_event",
+                    "{BUZZ_SESSION_EVENT_METHOD}: deserialization error: {error}"
+                );
+                self.reject_invalid_buzz_session_event(format!("deserialization failed: {error}"))
+            }
+        }
+    }
+
+    fn reject_invalid_buzz_session_event(&self, reason: impl Into<String>) -> Result<(), AcpError> {
+        let reason = reason.into();
+        if self.durable_session_events_supported {
+            Err(AcpError::Protocol(format!(
+                "durable adapter session event rejected: {reason}"
+            )))
+        } else {
+            Ok(())
         }
     }
 
@@ -2167,6 +3038,7 @@ pub fn resolve_model_switch_method(
 /// already-extracted `configOptions` (model category) and `models` state that
 /// [`AgentModelCapabilities`](crate::pool::AgentModelCapabilities) caches — the
 /// idle-path pre-cancel guard has those halves, not the full `session/new` JSON.
+#[cfg(test)]
 pub fn model_in_catalog(
     config_options: &[serde_json::Value],
     available_models: Option<&serde_json::Value>,
@@ -3435,6 +4307,145 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_new_sends_persistent_buzz_conversation_identity() {
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":2,"agentCapabilities":{}}}'
+            read -t 2 REQ
+            echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_test","_receivedRequest":'"$REQ"'}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+
+        let response = client
+            .session_new_full_for_conversation(
+                "/tmp",
+                vec![],
+                Some(SystemPromptTransport::ClaudeMeta("Be concise")),
+                Some("Fizz · #buzz-dev"),
+                Some("channel:abc:thread:def"),
+                Some("reset-event-123"),
+            )
+            .await
+            .expect("session_new should succeed");
+
+        let params = &response.raw["_receivedRequest"]["params"];
+        assert_eq!(params["_meta"]["systemPrompt"]["append"], "Be concise");
+        assert_eq!(params["_meta"]["sessionTitle"], "Fizz · #buzz-dev");
+        assert_eq!(
+            params["_meta"]["buzz"]["conversationId"],
+            "channel:abc:thread:def"
+        );
+        assert_eq!(params["_meta"]["buzz"]["resetToken"], "reset-event-123");
+    }
+
+    #[tokio::test]
+    async fn buzz_session_dispose_sends_forget_flag() {
+        let script = r#"
+            read -t 2 REQ
+            if [[ "$REQ" == *'"method":"_buzz/session/dispose"'* && "$REQ" == *'"sessionId":"session-to-forget"'* && "$REQ" == *'"forget":true'* ]]; then
+                echo '{"jsonrpc":"2.0","id":0,"result":{"disposed":true,"forgotten":true}}'
+            else
+                echo '{"jsonrpc":"2.0","id":0,"error":{"code":-32602,"message":"wrong dispose payload"}}'
+            fi
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        assert!(client
+            .session_dispose("session-to-forget", true)
+            .await
+            .expect("dispose should succeed"));
+        assert_eq!(client.buzz_session_dispose_supported, Some(true));
+    }
+
+    #[tokio::test]
+    async fn destructive_session_dispose_fails_closed_without_forgotten_confirmation() {
+        let script = r#"
+            read -t 2 _REQ
+            echo '{"jsonrpc":"2.0","id":0,"result":{"disposed":true,"forgotten":false}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        let result = client.session_dispose("session-not-forgotten", true).await;
+        assert!(matches!(result, Err(AcpError::Protocol(_))));
+    }
+
+    #[tokio::test]
+    async fn conversation_reset_sends_stable_identity_and_requires_explicit_commit() {
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":2,"_meta":{"buzz":{"threadSessions":{"supported":true,"resetCommit":true}}}}}'
+            read -t 2 REQ
+            if [[ "$REQ" == *'"method":"_buzz/conversation/reset"'* && "$REQ" == *'"conversationId":"buzz:channel:thread"'* && "$REQ" == *'"resetToken":"signed-event-id"'* ]]; then
+                echo '{"jsonrpc":"2.0","id":1,"result":{"committed":true,"alreadyCommitted":false}}'
+            else
+                echo '{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"wrong reset payload"}}'
+            fi
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+        assert_eq!(
+            client
+                .conversation_reset("buzz:channel:thread", "signed-event-id")
+                .await
+                .expect("explicitly committed reset should succeed"),
+            Some(ConversationResetCommit::NewlyCommitted)
+        );
+    }
+
+    #[tokio::test]
+    async fn conversation_reset_fails_closed_on_unconfirmed_success_payload() {
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":2,"_meta":{"buzz":{"threadSessions":{"supported":true,"resetCommit":true}}}}}'
+            read -t 2 _REQ
+            echo '{"jsonrpc":"2.0","id":1,"result":{"committed":false}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+        let result = client
+            .conversation_reset("buzz:channel:thread", "signed-event-id")
+            .await;
+        assert!(matches!(result, Err(AcpError::Protocol(_))));
+    }
+
+    #[tokio::test]
+    async fn unsupported_buzz_session_dispose_is_cached() {
+        let script = r#"
+            read -t 2 _REQ
+            echo '{"jsonrpc":"2.0","id":0,"error":{"code":-32601,"message":"Method not found"}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        assert!(!client
+            .session_dispose("session-1", false)
+            .await
+            .expect("method-not-found should be a soft result"));
+        assert_eq!(client.buzz_session_dispose_supported, Some(false));
+
+        let cached = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            client.session_dispose("session-2", false),
+        )
+        .await
+        .expect("cached unsupported result must not wait on the subprocess")
+        .expect("cached unsupported result is not an error");
+        assert!(!cached);
+    }
+
+    #[tokio::test]
     async fn session_new_full_omits_meta_when_session_title_none() {
         let script = r#"
             read -t 2 _init
@@ -3995,6 +5006,61 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn initialize_records_buzz_thread_session_capability() {
+        let script = r#"
+            read -r _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":2,"_meta":{"buzz":{"threadSessions":{"supported":true,"persistence":true,"dispose":true,"resetToken":true,"resetCommit":true}}}}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+        assert!(client.thread_sessions_supported());
+        assert!(client.conversation_reset_supported());
+    }
+
+    #[tokio::test]
+    async fn durable_session_events_require_the_exact_supported_schema() {
+        for (schema_version, expected) in [(1, false), (2, true), (3, false)] {
+            let script = format!(
+                r#"
+                    read -r _init
+                    echo '{{"jsonrpc":"2.0","id":0,"result":{{"protocolVersion":2,"_meta":{{"buzz":{{"sessionEvents":{{"supported":true,"schemaVersion":{schema_version},"durableReplay":true,"ack":true}}}}}}}}}}'
+                    sleep 1
+                "#,
+            );
+            let mut client = spawn_script(&script).await;
+            client
+                .initialize()
+                .await
+                .expect("initialize should succeed");
+            assert_eq!(
+                client.durable_session_events_supported(),
+                expected,
+                "schema {schema_version} negotiation did not fail closed",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn thread_sessions_default_off_for_legacy_adapters() {
+        let script = r#"
+            read -r _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":2,"agentCapabilities":{}}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+        assert!(!client.thread_sessions_supported());
+        assert!(!client.conversation_reset_supported());
+    }
+
     /// Test 2: no `active_run_id` + capability advertised → the bytes on the
     /// wire are an `_session/steering` request carrying `sessionId` and
     /// `prompt`, and carrying **no** `expectedRunId` (the adapters reject
@@ -4288,6 +5354,211 @@ mod tests {
                 "update": update
             }
         })
+    }
+
+    fn buzz_compaction_event_msg(session_id: &str, before: u64) -> serde_json::Value {
+        let event_id = uuid::Uuid::from_u128(before as u128).to_string();
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": BUZZ_SESSION_EVENT_METHOD,
+            "params": {
+                "schemaVersion": 2,
+                "sessionId": session_id,
+                "conversationId": "buzz:fixture:conversation",
+                "eventId": event_id,
+                "event": {
+                    "type": "compaction_completed",
+                    "compactionId": event_id,
+                    "timestamp": "2026-08-02T12:00:00.000Z",
+                    "message": "Context compacted",
+                    "piSessionId": "pi-session-1",
+                    "reason": "threshold",
+                    "beforeTokens": before,
+                    "afterTokens": 31_400,
+                    "limitTokens": 150_000,
+                    "effectiveLimitTokens": 150_000,
+                    "compactionThresholdTokens": 133_616,
+                    "willRetry": false,
+                    "fromExtension": false
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn shared_pi_lifecycle_fixture_matches_rust_wire_schema() {
+        let fixture = include_str!(
+            "../../../packages/buzz-pi-agent/test/fixtures/buzz-session-event-v2.json"
+        );
+        let notification: BuzzSessionEventNotification =
+            serde_json::from_str(fixture).expect("shared Pi lifecycle fixture must deserialize");
+
+        assert_eq!(
+            notification.schema_version,
+            BUZZ_SESSION_EVENT_SCHEMA_VERSION
+        );
+        assert_eq!(notification.session_id, "ses_fixture");
+        assert_eq!(notification.conversation_id, "buzz:fixture:conversation");
+        assert!(uuid::Uuid::parse_str(&notification.event_id).is_ok());
+        assert!(matches!(
+            notification.event,
+            BuzzSessionEvent::CompactionCompleted {
+                limit_tokens: 150_000,
+                effective_limit_tokens: 150_000,
+                compaction_threshold_tokens: 133_616,
+                will_retry: false,
+                from_extension: false,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn buzz_session_event_is_typed_and_drained_once() {
+        let mut client = spawn_inert_client().await;
+        client
+            .handle_buzz_session_event(&buzz_compaction_event_msg("acp-session-1", 147_820))
+            .expect("valid lifecycle event");
+
+        let events = client.take_buzz_session_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].session_id, "acp-session-1");
+        match &events[0].event {
+            BuzzSessionEvent::CompactionCompleted {
+                reason,
+                before_tokens,
+                after_tokens,
+                limit_tokens,
+                effective_limit_tokens,
+                compaction_threshold_tokens,
+                ..
+            } => {
+                assert_eq!(*reason, CompactionReason::Threshold);
+                assert_eq!(*before_tokens, Some(147_820));
+                assert_eq!(*after_tokens, Some(31_400));
+                assert_eq!(*limit_tokens, 150_000);
+                assert_eq!(*effective_limit_tokens, 150_000);
+                assert_eq!(*compaction_threshold_tokens, 133_616);
+            }
+            other => panic!("expected compaction event, got {other:?}"),
+        }
+        assert!(
+            client.take_buzz_session_events().is_empty(),
+            "events must be consumed exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn buzz_session_event_queue_is_bounded_and_keeps_newest() {
+        let mut client = spawn_inert_client().await;
+        for before in 0..=(MAX_PENDING_SESSION_EVENTS as u64) {
+            client
+                .handle_buzz_session_event(&buzz_compaction_event_msg("acp-session-1", before))
+                .expect("legacy lifecycle event remains best-effort");
+        }
+
+        let events = client.take_buzz_session_events();
+        assert_eq!(events.len(), MAX_PENDING_SESSION_EVENTS);
+        match &events[0].event {
+            BuzzSessionEvent::CompactionCompleted { before_tokens, .. } => {
+                assert_eq!(*before_tokens, Some(1), "oldest event should be dropped");
+            }
+            other => panic!("expected compaction event, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn duplicate_buzz_compaction_event_is_queued_once() {
+        let mut client = spawn_inert_client().await;
+        let event = buzz_compaction_event_msg("acp-session-1", 100_000);
+        client
+            .handle_buzz_session_event(&event)
+            .expect("first lifecycle event");
+        client
+            .handle_buzz_session_event(&event)
+            .expect("duplicate lifecycle event");
+
+        assert_eq!(client.take_buzz_session_events().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn malformed_buzz_session_events_are_ignored() {
+        let mut client = spawn_inert_client().await;
+        client
+            .handle_buzz_session_event(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": BUZZ_SESSION_EVENT_METHOD,
+                "params": {"sessionId": "s", "event": {"type": "unknown"}}
+            }))
+            .expect("legacy malformed event is optional");
+        client
+            .handle_buzz_session_event(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": BUZZ_SESSION_EVENT_METHOD
+            }))
+            .expect("legacy missing event is optional");
+
+        assert!(client.take_buzz_session_events().is_empty());
+    }
+
+    #[tokio::test]
+    async fn untrusted_buzz_session_events_are_bounded_and_validated() {
+        let mut client = spawn_inert_client().await;
+
+        let mut unsupported_schema = buzz_compaction_event_msg("session", 10);
+        unsupported_schema["params"]["schemaVersion"] = serde_json::json!(3);
+        client
+            .handle_buzz_session_event(&unsupported_schema)
+            .expect("legacy unsupported schema is optional");
+
+        let mut invalid_id = buzz_compaction_event_msg("session", 11);
+        invalid_id["params"]["event"]["compactionId"] = serde_json::json!("not-a-uuid");
+        client
+            .handle_buzz_session_event(&invalid_id)
+            .expect("legacy invalid id is optional");
+
+        let mut invalid_limits = buzz_compaction_event_msg("session", 12);
+        invalid_limits["params"]["event"]["compactionThresholdTokens"] = serde_json::json!(200_000);
+        client
+            .handle_buzz_session_event(&invalid_limits)
+            .expect("legacy invalid limits are optional");
+
+        let mut oversized = buzz_compaction_event_msg("session", 13);
+        oversized["params"]["event"]["message"] =
+            serde_json::json!("x".repeat(MAX_BUZZ_SESSION_EVENT_BYTES));
+        client
+            .handle_buzz_session_event(&oversized)
+            .expect("legacy oversized event is optional");
+
+        assert!(client.take_buzz_session_events().is_empty());
+    }
+
+    #[tokio::test]
+    async fn durable_buzz_session_event_overflow_fails_closed_for_replay() {
+        let mut client = spawn_inert_client().await;
+        client.durable_session_events_supported = true;
+        for before in 0..(MAX_PENDING_SESSION_EVENTS as u64) {
+            client
+                .handle_buzz_session_event(&buzz_compaction_event_msg("acp-session-1", before))
+                .expect("queue below durable capacity");
+        }
+
+        let overflow = client
+            .handle_buzz_session_event(&buzz_compaction_event_msg(
+                "acp-session-1",
+                MAX_PENDING_SESSION_EVENTS as u64,
+            ))
+            .expect_err("durable lifecycle events must never be dropped");
+        assert!(matches!(overflow, AcpError::Protocol(_)));
+
+        let events = client.take_buzz_session_events();
+        assert_eq!(events.len(), MAX_PENDING_SESSION_EVENTS);
+        match &events[0].event {
+            BuzzSessionEvent::CompactionCompleted { before_tokens, .. } => {
+                assert_eq!(*before_tokens, Some(0), "oldest durable event was retained");
+            }
+            other => panic!("expected compaction event, got {other:?}"),
+        }
     }
 
     #[tokio::test]

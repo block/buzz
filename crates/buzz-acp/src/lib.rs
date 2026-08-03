@@ -2,6 +2,7 @@
 
 mod acp;
 mod config;
+mod durable_outbox;
 mod engram_fetch;
 mod filter;
 mod observer;
@@ -15,10 +16,10 @@ mod usage;
 pub use usage::TurnUsage;
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use acp::{AcpClient, EnvVar, McpServer};
+use acp::{AcpClient, BuzzSessionEvent, ConversationResetCommit, EnvVar, McpServer};
 use anyhow::Result;
 use buzz_core::kind::{
     KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_STREAM_MESSAGE,
@@ -33,17 +34,20 @@ use config::{
     AuthAgentArgs, AuthMethodsArgs, AuthenticateArgs, Config, DedupMode, ModelsArgs,
     MultipleEventHandling, RespondTo, SubscribeMode,
 };
+use durable_outbox::{
+    DurableLifecycleEnvelope, DurableOutbox, DurableResetPhase, DurableResetRecord,
+};
 use filter::SubscriptionRule;
 use futures_util::FutureExt;
 use nostr::{PublicKey, ToBech32};
 use pool::{
-    AgentPool, ControlSignal, IdleSwitchResult, OwnedAgent, PromptContext, PromptOutcome,
-    PromptResult, PromptSource, SessionState, TimeoutKind,
+    AgentPool, ControlSignal, OwnedAgent, PromptContext, PromptOutcome, PromptResult, PromptSource,
+    SessionState, TimeoutKind,
 };
 use pool_lifecycle::PoolLifecycle;
-use queue::{CancelReason, EventQueue, FlushBatch, QueuedEvent, ThreadTags};
+use queue::{CancelReason, ConversationKey, EventQueue, FlushBatch, QueuedEvent, ThreadTags};
 use relay::{HarnessRelay, RelayEventPublisher};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, watch, Semaphore};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
@@ -274,14 +278,29 @@ pub(crate) async fn is_dm_channel(
     channel_id: Uuid,
     channel_info: &pool::ChannelInfoResolver,
 ) -> bool {
+    resolve_dm_channel_scope(channel_id, channel_info).await.0
+}
+
+/// Return `(author_gate_is_dm, conversation_scope_is_dm)`.
+///
+/// Unknown metadata must be restrictive for authorization but isolated for
+/// context: treating an unknown public channel as a stable DM conversation
+/// would collapse unrelated top-level messages into one agent session.
+async fn resolve_dm_channel_scope(
+    channel_id: Uuid,
+    channel_info: &pool::ChannelInfoResolver,
+) -> (bool, bool) {
     match channel_info.resolve(channel_id).await {
-        Some(info) => info.channel_type == "dm",
+        Some(info) => {
+            let is_dm = info.channel_type == "dm";
+            (is_dm, is_dm)
+        }
         None => {
             tracing::warn!(
                 channel_id = %channel_id,
-                "channel type unresolved — treating as DM for author gate (fail closed)"
+                "channel type unresolved — treating as DM for author gate while isolating conversation scope"
             );
-            true
+            (true, false)
         }
     }
 }
@@ -833,6 +852,48 @@ async fn publish_relay_observer_event(
 
 /// Maximum age (seconds) for an observer control frame to be considered fresh.
 const OBSERVER_CONTROL_FRESHNESS_SECS: i64 = 300;
+/// Retain every authenticated control ID for the full freshness window. If an
+/// owner legitimately produces more than this many controls before entries
+/// expire, fail closed instead of evicting replay protection early.
+const OBSERVER_CONTROL_REPLAY_CAPACITY: usize = 8_192;
+
+#[derive(Debug, Default)]
+struct ObserverControlReplayCache {
+    seen: HashSet<String>,
+    expiry_order: VecDeque<(String, i64)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ObserverControlAdmission {
+    Accepted,
+    Replay,
+    Saturated,
+}
+
+impl ObserverControlReplayCache {
+    fn admit(&mut self, event_id: String, event_ts: i64, now: i64) -> ObserverControlAdmission {
+        while self
+            .expiry_order
+            .front()
+            .is_some_and(|(_, expires_at)| *expires_at < now)
+        {
+            if let Some((expired_id, _)) = self.expiry_order.pop_front() {
+                self.seen.remove(&expired_id);
+            }
+        }
+        if self.seen.contains(&event_id) {
+            return ObserverControlAdmission::Replay;
+        }
+        if self.seen.len() >= OBSERVER_CONTROL_REPLAY_CAPACITY {
+            return ObserverControlAdmission::Saturated;
+        }
+
+        let expires_at = event_ts.saturating_add(OBSERVER_CONTROL_FRESHNESS_SECS);
+        self.seen.insert(event_id.clone());
+        self.expiry_order.push_back((event_id, expires_at));
+        ObserverControlAdmission::Accepted
+    }
+}
 
 fn handle_relay_observer_control_event(
     keys: &nostr::Keys,
@@ -840,6 +901,7 @@ fn handle_relay_observer_control_event(
     pool: &mut AgentPool,
     observer: Option<&observer::ObserverHandle>,
     owner_pubkey_hex: &str,
+    replay_cache: &mut ObserverControlReplayCache,
 ) {
     // Defense-in-depth: verify signature even though the relay already checked.
     if let Err(e) = buzz_core::verify_event(&event) {
@@ -877,17 +939,55 @@ fn handle_relay_observer_control_event(
         }
     };
 
+    route_authenticated_observer_control(
+        event.id.to_hex(),
+        event_ts,
+        now,
+        &payload,
+        pool,
+        observer,
+        replay_cache,
+    );
+}
+
+fn route_authenticated_observer_control(
+    event_id: String,
+    event_ts: i64,
+    now: i64,
+    payload: &serde_json::Value,
+    pool: &mut AgentPool,
+    observer: Option<&observer::ObserverHandle>,
+    replay_cache: &mut ObserverControlReplayCache,
+) {
     let command_type = payload.get("type").and_then(|value| value.as_str());
+    if !matches!(command_type, Some("cancel_turn" | "switch_model")) {
+        tracing::debug!(payload = %payload, "ignoring unknown observer control frame");
+        return;
+    }
+    match replay_cache.admit(event_id.clone(), event_ts, now) {
+        ObserverControlAdmission::Accepted => {}
+        ObserverControlAdmission::Replay => {
+            tracing::warn!(%event_id, "dropping replayed observer control frame");
+            return;
+        }
+        ObserverControlAdmission::Saturated => {
+            tracing::error!(
+                %event_id,
+                capacity = OBSERVER_CONTROL_REPLAY_CAPACITY,
+                "observer control replay cache saturated — failing closed"
+            );
+            return;
+        }
+    }
+
     match command_type {
         Some("cancel_turn") => {
-            handle_cancel_turn_control(&payload, pool, observer);
+            handle_cancel_turn_control(payload, pool, observer);
         }
         Some("switch_model") => {
-            handle_switch_model_control(&payload, pool, observer);
+            handle_switch_model_control(payload, pool, observer);
         }
-        _ => {
-            tracing::debug!(payload = %payload, "ignoring unknown observer control frame");
-        }
+        _ => unreachable!("recognized observer control type checked above"),
     }
 }
 
@@ -906,22 +1006,35 @@ fn handle_cancel_turn_control(
         return;
     };
 
-    let fired = signal_in_flight_task(pool, channel_id, ControlSignal::Cancel);
-    let status = if fired { "sent" } else { "no_active_turn" };
+    let Some(turn_id) = payload
+        .get("turnId")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+    else {
+        tracing::warn!(
+            channel = %channel_id,
+            "observer cancel_turn control frame missing turnId — dropping fail closed"
+        );
+        return;
+    };
+    let status =
+        signal_observer_control(pool, channel_id, turn_id, ControlSignal::Cancel).as_status();
     if let Some(observer) = observer {
+        let mut result = serde_json::json!({
+            "type": "cancel_turn",
+            "status": status,
+        });
+        result["turnId"] = serde_json::Value::String(turn_id.to_string());
         observer.emit(
             "control_result",
             None,
             &observer::ObserverContext {
                 channel_id: Some(channel_id.to_string()),
                 session_id: None,
-                turn_id: None,
+                turn_id: Some(turn_id.to_owned()),
                 started_at: None,
             },
-            serde_json::json!({
-                "type": "cancel_turn",
-                "status": status,
-            }),
+            result,
         );
     }
 }
@@ -934,9 +1047,6 @@ fn handle_cancel_turn_control(
 /// post-cancel via `create_session_and_apply_model` (the turn restarts on the
 /// unchanged model + an `unsupported_model` result).
 ///
-/// Idle path: validate against the cached catalog *before* invalidating
-/// (pre-cancel guard), then set `desired_model` + invalidate. The override
-/// takes visible effect on the agent's next turn.
 fn handle_switch_model_control(
     payload: &serde_json::Value,
     pool: &mut AgentPool,
@@ -954,52 +1064,46 @@ fn handle_switch_model_control(
         tracing::warn!("observer switch_model control frame missing modelId");
         return;
     };
-
-    // A turn is in flight for this channel iff a task_map entry exists. The
-    // agent is moved out of the pool during a turn, so the control oneshot is
-    // the only reachable lever; an idle channel has no such entry.
-    let turn_in_flight = pool
-        .task_map()
-        .values()
-        .any(|m| m.channel_id == Some(channel_id));
-
-    let status = if turn_in_flight {
-        // Busy path: deliver over the oneshot. `false` means the oneshot was
-        // already consumed this turn (a prior cancel/interrupt) — the turn is
-        // already ending, so the switch cannot land on it.
-        if signal_in_flight_task(
-            pool,
-            channel_id,
-            ControlSignal::SwitchModel(model_id.to_string()),
-        ) {
-            "sent"
-        } else {
-            "turn_ending"
-        }
-    } else {
-        // Idle path: validate against the cached catalog before invalidating.
-        match pool.switch_idle_agent_model(channel_id, model_id) {
-            IdleSwitchResult::Switched => "switched",
-            IdleSwitchResult::UnsupportedModel => "unsupported_model",
-            IdleSwitchResult::NoIdleAgent => "no_active_turn",
-        }
+    let Some(turn_id) = payload
+        .get("turnId")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+    else {
+        tracing::warn!(
+            channel = %channel_id,
+            "observer switch_model control frame missing turnId — dropping fail closed"
+        );
+        return;
     };
 
+    // Controls are deliberately turn-bound: if that turn completed between
+    // the desktop snapshot and this frame arriving, never fall back to a
+    // potentially unrelated current or idle thread in the same channel.
+    let status = signal_observer_control(
+        pool,
+        channel_id,
+        turn_id,
+        ControlSignal::SwitchModel(model_id.to_string()),
+    )
+    .as_status();
+
     if let Some(observer) = observer {
+        let mut result = serde_json::json!({
+            "type": "switch_model",
+            "status": status,
+            "modelId": model_id,
+        });
+        result["turnId"] = serde_json::Value::String(turn_id.to_string());
         observer.emit(
             "control_result",
             None,
             &observer::ObserverContext {
                 channel_id: Some(channel_id.to_string()),
                 session_id: None,
-                turn_id: None,
+                turn_id: Some(turn_id.to_owned()),
                 started_at: None,
             },
-            serde_json::json!({
-                "type": "switch_model",
-                "status": status,
-                "modelId": model_id,
-            }),
+            result,
         );
     }
 }
@@ -1155,6 +1259,7 @@ struct RespawnResult {
 /// `event_id` is the hex id of the single event the steer carried.
 struct SteerAckEvent {
     channel_id: Uuid,
+    conversation_key: ConversationKey,
     event_id: String,
     /// `Ok` if the read loop sent any of the locked `SteerAck` variants.
     /// `Err` if the oneshot was dropped without a send — should not happen
@@ -1162,6 +1267,737 @@ struct SteerAckEvent {
     /// loop treats it as `PromptCompletedNeutral` (release withheld, no
     /// fallback signal) to avoid leaking the withheld event.
     ack: std::result::Result<pool::SteerAck, tokio::sync::oneshot::error::RecvError>,
+}
+
+struct PendingResetConfirmation {
+    event: nostr::Event,
+    next_attempt_at: Instant,
+    durable: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ResetAckAttemptKey {
+    identity: (Uuid, String),
+    event_id: String,
+}
+
+#[derive(Debug)]
+struct ResetAckAttemptResult {
+    key: ResetAckAttemptKey,
+    accepted: bool,
+}
+
+const RESET_ACK_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+const RESET_HELPER_INIT_TIMEOUT: Duration = Duration::from_secs(15);
+const RESET_HELPER_ATTEMPTS: usize = 2;
+
+fn reset_confirmation(thread_sessions_enabled: bool) -> &'static str {
+    if thread_sessions_enabled {
+        "✨ Fresh context ready. I’ll keep this Buzz thread separate and start the next request without its prior conversation history."
+    } else {
+        "✨ Fresh context ready. This agent adapter does not support thread-local sessions, so the reset applies to this entire Buzz channel."
+    }
+}
+
+/// Commit `/new` in the adapter's durable store before relying on any
+/// in-memory queue/barrier state. An idle pool process is preferred. When the
+/// only process is busy with the turn being reset, a short-lived ACP helper is
+/// initialized against the same adapter state and performs the idempotent
+/// logical reset by stable conversation id.
+async fn commit_durable_conversation_reset(
+    pool: &mut AgentPool,
+    config: &Config,
+    conversation_id: &str,
+    reset_token: &str,
+) -> Option<ConversationResetCommit> {
+    commit_durable_conversation_reset_with_adapter(
+        pool,
+        &config.agent_command,
+        &config.agent_args,
+        &config.persona_env_vars,
+        config.has_generated_codex_config,
+        conversation_id,
+        reset_token,
+    )
+    .await
+}
+
+async fn commit_durable_conversation_reset_with_adapter(
+    pool: &mut AgentPool,
+    agent_command: &str,
+    agent_args: &[String],
+    persona_env_vars: &[(String, String)],
+    has_generated_codex_config: bool,
+    conversation_id: &str,
+    reset_token: &str,
+) -> Option<ConversationResetCommit> {
+    if let Some(commit) = pool
+        .commit_conversation_reset(conversation_id, reset_token)
+        .await
+    {
+        return Some(commit);
+    }
+
+    // A timeout/EOF after the request is ambiguous: the adapter may have
+    // committed just before its response was lost. Retry the same idempotency
+    // token through a fresh process so a durable commit can be confirmed.
+    for attempt in 1..=RESET_HELPER_ATTEMPTS {
+        let mut helper = match AcpClient::spawn(
+            agent_command,
+            agent_args,
+            persona_env_vars,
+            has_generated_codex_config,
+        )
+        .await
+        {
+            Ok(helper) => helper,
+            Err(error) => {
+                tracing::error!(
+                    conversation_id,
+                    attempt,
+                    %error,
+                    "could not spawn the durable reset helper"
+                );
+                continue;
+            }
+        };
+
+        let initialized =
+            tokio::time::timeout(RESET_HELPER_INIT_TIMEOUT, helper.initialize()).await;
+        let supported = match initialized {
+            Ok(Ok(_)) => {
+                helper.thread_sessions_supported()
+                    && helper.conversation_reset_supported()
+                    && helper.durable_session_events_supported()
+            }
+            Ok(Err(error)) => {
+                tracing::error!(
+                    conversation_id,
+                    attempt,
+                    %error,
+                    "durable reset helper initialization failed"
+                );
+                false
+            }
+            Err(_) => {
+                tracing::error!(
+                    conversation_id,
+                    attempt,
+                    timeout_secs = RESET_HELPER_INIT_TIMEOUT.as_secs(),
+                    "durable reset helper initialization timed out"
+                );
+                false
+            }
+        };
+
+        let committed = if supported {
+            match helper
+                .conversation_reset(conversation_id, reset_token)
+                .await
+            {
+                Ok(Some(commit)) => Some(commit),
+                Ok(None) => {
+                    tracing::error!(
+                        conversation_id,
+                        attempt,
+                        "durable reset helper withdrew its advertised reset capability"
+                    );
+                    None
+                }
+                Err(error) => {
+                    tracing::error!(
+                        conversation_id,
+                        attempt,
+                        %error,
+                        "durable reset helper reset result was not confirmed"
+                    );
+                    None
+                }
+            }
+        } else {
+            tracing::error!(
+                conversation_id,
+                attempt,
+                "durable reset helper does not advertise the required thread reset contract"
+            );
+            None
+        };
+        helper.shutdown().await;
+        if committed.is_some() {
+            return committed;
+        }
+    }
+    None
+}
+
+/// Resolve crash-interrupted `/new` intents before relay intake. A prepared
+/// record means the signed acknowledgement was durably stored before the Pi
+/// tombstone RPC began, but the process died before recording its response.
+/// Repeating the same reset token is idempotent and converts that ambiguity
+/// into a confirmed committed record.
+async fn recover_durable_reset_intents(
+    outbox: &DurableOutbox,
+    pool: &mut AgentPool,
+    config: &Config,
+    thread_sessions_enabled: bool,
+) -> Result<Vec<DurableResetRecord>> {
+    for record in outbox
+        .pending_resets()
+        .map_err(|error| anyhow::anyhow!("could not read durable /new intents: {error}"))?
+    {
+        if record.phase == DurableResetPhase::Committed {
+            continue;
+        }
+        if !thread_sessions_enabled {
+            return Err(anyhow::anyhow!(
+                "a prepared durable /new intent exists, but the configured adapter no longer supports durable thread sessions"
+            ));
+        }
+        if commit_durable_conversation_reset(
+            pool,
+            config,
+            &record.conversation_id,
+            &record.reset_token,
+        )
+        .await
+        .is_none()
+        {
+            return Err(anyhow::anyhow!(
+                "could not recover durable /new intent for {}:{}; refusing relay intake",
+                record.channel_id,
+                record.root_event_id
+            ));
+        }
+        let identity = record.identity();
+        if !outbox
+            .mark_reset_committed(&identity, &record.event.id.to_hex())
+            .map_err(|error| anyhow::anyhow!("could not checkpoint recovered /new: {error}"))?
+        {
+            return Err(anyhow::anyhow!(
+                "recovered /new record disappeared before it could be committed"
+            ));
+        }
+    }
+    outbox
+        .pending_resets()
+        .map_err(|error| anyhow::anyhow!("could not read recovered /new intents: {error}"))
+}
+
+/// Select queue identity before any event is accepted. A required durable
+/// adapter declares thread scope up front even when its pool starts lazily;
+/// once a process is initialized, failure to advertise the full contract is a
+/// startup error rather than a silent downgrade to channel-wide context.
+fn select_thread_session_scope(
+    durable_sessions_required: bool,
+    pool_ready: bool,
+    durable_sessions_supported: bool,
+) -> Result<bool, &'static str> {
+    if pool_ready && durable_sessions_required && !durable_sessions_supported {
+        return Err(
+            "configured adapter does not advertise required durable thread-session and reset-commit capabilities",
+        );
+    }
+    Ok(durable_sessions_required || (pool_ready && durable_sessions_supported))
+}
+
+/// Start at most one reset acknowledgement delivery attempt without awaiting
+/// the relay. The reset barrier remains closed until the signed event is
+/// explicitly accepted, while a slow or black-holed HTTP bridge cannot stall
+/// WebSocket ingress, prompt completion, or shutdown handling.
+fn schedule_completed_reset_ack(
+    queue: &EventQueue,
+    pending: &HashMap<(Uuid, String), PendingResetConfirmation>,
+    rest: &relay::RestClient,
+    tasks: &mut tokio::task::JoinSet<ResetAckAttemptResult>,
+    in_flight: &mut Option<ResetAckAttemptKey>,
+) {
+    if in_flight.is_some() {
+        return;
+    }
+
+    for identity in queue.completed_resets() {
+        let Some(confirmation) = pending.get(&identity) else {
+            tracing::warn!(
+                channel_id = %identity.0,
+                root_event_id = %identity.1,
+                "completed reset barrier has no signed acknowledgement; keeping it closed"
+            );
+            continue;
+        };
+        let next_attempt_at = confirmation.next_attempt_at;
+        let event = confirmation.event.clone();
+        if Instant::now() < next_attempt_at {
+            continue;
+        }
+
+        let key = ResetAckAttemptKey {
+            identity,
+            event_id: event.id.to_string(),
+        };
+        let task_key = key.clone();
+        let task_rest = rest.clone();
+        *in_flight = Some(key);
+        tasks.spawn(async move {
+            let accepted = pool::submit_notice_event(&task_rest, &event).await;
+            ResetAckAttemptResult {
+                key: task_key,
+                accepted,
+            }
+        });
+        return;
+    }
+}
+
+/// Apply one tracked delivery result. Event identity is checked before the
+/// barrier is released so a stale completion can never acknowledge a newer
+/// reset for the same Buzz thread.
+fn finish_reset_ack_attempt(
+    queue: &mut EventQueue,
+    pending: &mut HashMap<(Uuid, String), PendingResetConfirmation>,
+    in_flight: &mut Option<ResetAckAttemptKey>,
+    durable_outbox: Option<&DurableOutbox>,
+    result: std::result::Result<ResetAckAttemptResult, tokio::task::JoinError>,
+) {
+    let Some(expected) = in_flight.take() else {
+        tracing::warn!("reset acknowledgement task completed without in-flight identity");
+        return;
+    };
+
+    let (key, accepted) = match result {
+        Ok(result) if result.key == expected => (result.key, result.accepted),
+        Ok(result) => {
+            tracing::error!(
+                expected_channel_id = %expected.identity.0,
+                expected_root_event_id = %expected.identity.1,
+                actual_channel_id = %result.key.identity.0,
+                actual_root_event_id = %result.key.identity.1,
+                "reset acknowledgement task returned the wrong identity"
+            );
+            if let Some(confirmation) = pending.get_mut(&expected.identity) {
+                confirmation.next_attempt_at = Instant::now() + RESET_ACK_RETRY_INTERVAL;
+            }
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(
+                channel_id = %expected.identity.0,
+                root_event_id = %expected.identity.1,
+                %error,
+                "reset acknowledgement task failed"
+            );
+            if let Some(confirmation) = pending.get_mut(&expected.identity) {
+                confirmation.next_attempt_at = Instant::now() + RESET_ACK_RETRY_INTERVAL;
+            }
+            return;
+        }
+    };
+
+    let is_current_event = pending
+        .get(&key.identity)
+        .is_some_and(|confirmation| confirmation.event.id.to_string() == key.event_id);
+    if !is_current_event {
+        tracing::warn!(
+            channel_id = %key.identity.0,
+            root_event_id = %key.identity.1,
+            event_id = %key.event_id,
+            "ignoring stale reset acknowledgement completion"
+        );
+        return;
+    }
+
+    if accepted {
+        let requires_durable_completion = pending
+            .get(&key.identity)
+            .is_some_and(|confirmation| confirmation.durable);
+        if requires_durable_completion {
+            let durable_result = durable_outbox
+                .ok_or_else(|| "durable outbox unavailable".to_string())
+                .and_then(|outbox| {
+                    outbox
+                        .complete_reset(&key.identity, &key.event_id)
+                        .map_err(|error| error.to_string())
+                });
+            match durable_result {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::error!(
+                        channel_id = %key.identity.0,
+                        root_event_id = %key.identity.1,
+                        event_id = %key.event_id,
+                        "accepted reset acknowledgement was absent from durable state; keeping barrier closed"
+                    );
+                    if let Some(confirmation) = pending.get_mut(&key.identity) {
+                        confirmation.next_attempt_at = Instant::now() + RESET_ACK_RETRY_INTERVAL;
+                    }
+                    return;
+                }
+                Err(error) => {
+                    tracing::error!(
+                        channel_id = %key.identity.0,
+                        root_event_id = %key.identity.1,
+                        event_id = %key.event_id,
+                        %error,
+                        "relay accepted reset acknowledgement but durable completion failed; keeping barrier closed"
+                    );
+                    if let Some(confirmation) = pending.get_mut(&key.identity) {
+                        confirmation.next_attempt_at = Instant::now() + RESET_ACK_RETRY_INTERVAL;
+                    }
+                    return;
+                }
+            }
+        }
+        pending.remove(&key.identity);
+        queue.release_completed_reset(&key.identity);
+    } else if let Some(confirmation) = pending.get_mut(&key.identity) {
+        confirmation.next_attempt_at = Instant::now() + RESET_ACK_RETRY_INTERVAL;
+        tracing::warn!(
+            channel_id = %key.identity.0,
+            root_event_id = %key.identity.1,
+            event_id = %key.event_id,
+            "reset acknowledgement is still pending relay delivery"
+        );
+    }
+}
+
+/// Earliest signed reset acknowledgement that is both ready to publish and
+/// guarding a completed reset barrier. Keeping this deadline in the main
+/// `select!` prevents a quiet relay from leaving `/new` blocked forever after
+/// one transient HTTP failure. Confirmations whose old turn is still draining
+/// are deliberately excluded to avoid a past-deadline busy loop.
+fn next_completed_reset_ack_attempt(
+    queue: &EventQueue,
+    pending: &HashMap<(Uuid, String), PendingResetConfirmation>,
+) -> Option<Instant> {
+    queue
+        .completed_resets()
+        .into_iter()
+        .filter_map(|identity| pending.get(&identity).map(|item| item.next_attempt_at))
+        .min()
+}
+
+#[cfg(test)]
+mod reset_ack_retry_tests {
+    use super::*;
+    use nostr::{EventBuilder, Keys, Kind};
+
+    fn signed_notice() -> nostr::Event {
+        EventBuilder::new(Kind::Custom(KIND_STREAM_MESSAGE as u16), "reset ready")
+            .sign_with_keys(&Keys::generate())
+            .expect("sign reset notice")
+    }
+
+    fn completed_reset() -> (EventQueue, ConversationKey) {
+        let mut queue = EventQueue::new(DedupMode::Queue).with_thread_sessions_enabled(true);
+        let conversation = ConversationKey {
+            channel_id: Uuid::new_v4(),
+            root_event_id: "44".repeat(32),
+            generation: 0,
+            reset_token: None,
+        };
+        queue
+            .reset_conversation(&conversation, "cc".repeat(32))
+            .expect("idle reset completes immediately");
+        (queue, conversation)
+    }
+
+    fn unreachable_rest_client() -> relay::RestClient {
+        relay::RestClient {
+            http: reqwest::Client::new(),
+            base_url: "http://127.0.0.1:9".to_string(),
+            keys: Keys::generate(),
+            auth_tag_json: None,
+        }
+    }
+
+    #[test]
+    fn retry_deadline_tracks_only_completed_reset_barriers() {
+        let mut queue = EventQueue::new(DedupMode::Queue).with_thread_sessions_enabled(true);
+        let first = ConversationKey {
+            channel_id: Uuid::new_v4(),
+            root_event_id: "11".repeat(32),
+            generation: 0,
+            reset_token: None,
+        };
+        let second = ConversationKey {
+            channel_id: Uuid::new_v4(),
+            root_event_id: "22".repeat(32),
+            generation: 0,
+            reset_token: None,
+        };
+        queue
+            .reset_conversation(&first, "aa".repeat(32))
+            .expect("first idle reset");
+        queue
+            .reset_conversation(&second, "bb".repeat(32))
+            .expect("second idle reset");
+
+        let now = Instant::now();
+        let first_deadline = now + Duration::from_secs(7);
+        let second_deadline = now + Duration::from_secs(3);
+        let unrelated_identity = (Uuid::new_v4(), "33".repeat(32));
+        let pending = HashMap::from([
+            (
+                (first.channel_id, first.root_event_id.clone()),
+                PendingResetConfirmation {
+                    event: signed_notice(),
+                    next_attempt_at: first_deadline,
+                    durable: false,
+                },
+            ),
+            (
+                (second.channel_id, second.root_event_id.clone()),
+                PendingResetConfirmation {
+                    event: signed_notice(),
+                    next_attempt_at: second_deadline,
+                    durable: false,
+                },
+            ),
+            (
+                unrelated_identity,
+                PendingResetConfirmation {
+                    event: signed_notice(),
+                    next_attempt_at: now,
+                    durable: false,
+                },
+            ),
+        ]);
+
+        assert_eq!(
+            next_completed_reset_ack_attempt(&queue, &pending),
+            Some(second_deadline),
+            "unrelated past-due confirmations must not busy-spin the loop"
+        );
+    }
+
+    #[tokio::test]
+    async fn reset_ack_scheduler_is_non_blocking_and_globally_bounded() {
+        let (queue, conversation) = completed_reset();
+        let identity = (conversation.channel_id, conversation.root_event_id.clone());
+        let pending = HashMap::from([(
+            identity,
+            PendingResetConfirmation {
+                event: signed_notice(),
+                next_attempt_at: Instant::now(),
+                durable: false,
+            },
+        )]);
+        let mut tasks = tokio::task::JoinSet::new();
+        let mut in_flight = None;
+
+        schedule_completed_reset_ack(
+            &queue,
+            &pending,
+            &unreachable_rest_client(),
+            &mut tasks,
+            &mut in_flight,
+        );
+        assert!(in_flight.is_some());
+        assert_eq!(tasks.len(), 1);
+
+        // Re-entering the scheduler while HTTP is pending cannot spawn a
+        // second task, even if more barriers become ready.
+        schedule_completed_reset_ack(
+            &queue,
+            &pending,
+            &unreachable_rest_client(),
+            &mut tasks,
+            &mut in_flight,
+        );
+        assert_eq!(tasks.len(), 1);
+        tasks.shutdown().await;
+    }
+
+    #[test]
+    fn accepted_reset_ack_releases_only_the_matching_barrier() {
+        let (mut queue, conversation) = completed_reset();
+        let identity = (conversation.channel_id, conversation.root_event_id.clone());
+        let event = signed_notice();
+        let key = ResetAckAttemptKey {
+            identity: identity.clone(),
+            event_id: event.id.to_string(),
+        };
+        let mut pending = HashMap::from([(
+            identity.clone(),
+            PendingResetConfirmation {
+                event,
+                next_attempt_at: Instant::now(),
+                durable: false,
+            },
+        )]);
+        let mut in_flight = Some(key.clone());
+
+        finish_reset_ack_attempt(
+            &mut queue,
+            &mut pending,
+            &mut in_flight,
+            None,
+            Ok(ResetAckAttemptResult {
+                key,
+                accepted: true,
+            }),
+        );
+
+        assert!(in_flight.is_none());
+        assert!(!pending.contains_key(&identity));
+        assert!(queue.completed_resets().is_empty());
+    }
+
+    #[test]
+    fn accepted_durable_reset_ack_atomically_becomes_a_replay_receipt() {
+        let (mut queue, conversation) = completed_reset();
+        let identity = (conversation.channel_id, conversation.root_event_id.clone());
+        let keys = Keys::generate();
+        let event = EventBuilder::new(
+            Kind::Custom(KIND_STREAM_MESSAGE as u16),
+            reset_confirmation(true),
+        )
+        .sign_with_keys(&keys)
+        .expect("sign reset acknowledgement");
+        let event_id = event.id.to_hex();
+        let reset_token = "dd".repeat(32);
+        let dir = tempfile::tempdir().expect("durable state dir");
+        let durable = DurableOutbox::open(dir.path(), &keys.public_key().to_hex()).expect("open");
+        durable
+            .prepare_reset(DurableResetRecord {
+                channel_id: identity.0,
+                root_event_id: identity.1.clone(),
+                conversation_id: conversation.stable_id(),
+                reset_token: reset_token.clone(),
+                event: event.clone(),
+                phase: DurableResetPhase::Prepared,
+            })
+            .expect("prepare durable reset");
+        assert!(durable
+            .mark_reset_committed(&identity, &event_id)
+            .expect("commit durable reset"));
+        let key = ResetAckAttemptKey {
+            identity: identity.clone(),
+            event_id,
+        };
+        let mut pending = HashMap::from([(
+            identity.clone(),
+            PendingResetConfirmation {
+                event,
+                next_attempt_at: Instant::now(),
+                durable: true,
+            },
+        )]);
+        let mut in_flight = Some(key.clone());
+
+        finish_reset_ack_attempt(
+            &mut queue,
+            &mut pending,
+            &mut in_flight,
+            Some(&durable),
+            Ok(ResetAckAttemptResult {
+                key,
+                accepted: true,
+            }),
+        );
+
+        assert!(pending.is_empty());
+        assert!(queue.completed_resets().is_empty());
+        assert!(durable
+            .pending_resets()
+            .expect("read pending resets")
+            .is_empty());
+        assert!(durable
+            .consumed_reset(&identity, &reset_token)
+            .expect("read receipt")
+            .is_some());
+    }
+
+    #[test]
+    fn stale_reset_ack_cannot_release_a_newer_notice() {
+        let (mut queue, conversation) = completed_reset();
+        let identity = (conversation.channel_id, conversation.root_event_id.clone());
+        let stale_event = signed_notice();
+        let current_event = signed_notice();
+        let stale_key = ResetAckAttemptKey {
+            identity: identity.clone(),
+            event_id: stale_event.id.to_string(),
+        };
+        let mut pending = HashMap::from([(
+            identity.clone(),
+            PendingResetConfirmation {
+                event: current_event,
+                next_attempt_at: Instant::now(),
+                durable: false,
+            },
+        )]);
+        let mut in_flight = Some(stale_key.clone());
+
+        finish_reset_ack_attempt(
+            &mut queue,
+            &mut pending,
+            &mut in_flight,
+            None,
+            Ok(ResetAckAttemptResult {
+                key: stale_key,
+                accepted: true,
+            }),
+        );
+
+        assert!(pending.contains_key(&identity));
+        assert_eq!(queue.completed_resets().len(), 1);
+    }
+
+    #[test]
+    fn required_durable_scope_is_selected_before_a_lazy_pool_wakes() {
+        assert_eq!(select_thread_session_scope(true, false, false), Ok(true));
+    }
+
+    #[test]
+    fn required_durable_scope_fails_closed_after_an_unsupported_wake() {
+        assert!(select_thread_session_scope(true, true, false).is_err());
+    }
+
+    #[test]
+    fn optional_scope_uses_the_initialized_adapter_capability() {
+        assert_eq!(select_thread_session_scope(false, false, false), Ok(false));
+        assert_eq!(select_thread_session_scope(false, true, false), Ok(false));
+        assert_eq!(select_thread_session_scope(false, true, true), Ok(true));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn durable_reset_retries_same_token_when_first_commit_response_is_dropped() {
+        let marker =
+            std::env::temp_dir().join(format!("buzz-acp-reset-commit-{}", uuid::Uuid::new_v4()));
+        let script = format!(
+            r#"
+                read -r _init
+                echo '{{"jsonrpc":"2.0","id":0,"result":{{"protocolVersion":2,"_meta":{{"buzz":{{"threadSessions":{{"supported":true,"persistence":true,"dispose":true,"resetToken":true,"resetCommit":true}},"sessionEvents":{{"supported":true,"schemaVersion":2,"durableReplay":true,"ack":true}}}}}}}}}}'
+                read -r _reset
+                if [ -f '{marker}' ]; then
+                    echo '{{"jsonrpc":"2.0","id":1,"result":{{"committed":true,"alreadyCommitted":true}}}}'
+                    sleep 1
+                else
+                    printf committed > '{marker}'
+                    exit 0
+                fi
+            "#,
+            marker = marker.display(),
+        );
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let committed = commit_durable_conversation_reset_with_adapter(
+            &mut pool,
+            "bash",
+            &["-c".to_string(), script],
+            &[],
+            false,
+            "buzz:channel:root",
+            "signed-reset-event-id",
+        )
+        .await;
+        assert_eq!(
+            committed,
+            Some(ConversationResetCommit::AlreadyCommitted),
+            "fresh helper must distinguish the idempotent retry"
+        );
+        assert!(marker.exists(), "first helper performed the durable commit");
+        std::fs::remove_file(marker).expect("remove reset test marker");
+    }
 }
 
 /// RAII guard that ensures a `RespawnResult` is sent even if the task panics.
@@ -1286,6 +2122,392 @@ pub fn run() -> Result<()> {
     tokio_main()
 }
 
+/// Exercise the production Buzz↔Pi ACP contract against a built adapter.
+///
+/// This is intentionally a narrow public probe rather than exposing the
+/// harness's internal ACP client module. It starts the real Node adapter in an
+/// isolated state directory, proves a logical conversation survives an adapter
+/// restart, commits an idempotent reset, and verifies the replacement reports
+/// that relay history must be skipped. It never sends a model prompt or reads
+/// the caller's normal Pi settings.
+///
+/// `adapter_entrypoint`, `state_dir`, `pi_agent_dir`, and `cwd` must be absolute
+/// paths. The adapter entrypoint is run with the `node` executable on `PATH`.
+#[doc(hidden)]
+pub async fn verify_pi_adapter_contract(
+    adapter_entrypoint: &std::path::Path,
+    state_dir: &std::path::Path,
+    pi_agent_dir: &std::path::Path,
+    cwd: &std::path::Path,
+) -> Result<()> {
+    for (name, path) in [
+        ("adapter entrypoint", adapter_entrypoint),
+        ("state directory", state_dir),
+        ("Pi agent directory", pi_agent_dir),
+        ("working directory", cwd),
+    ] {
+        anyhow::ensure!(
+            path.is_absolute(),
+            "{name} must be absolute: {}",
+            path.display()
+        );
+    }
+    anyhow::ensure!(
+        adapter_entrypoint.is_file(),
+        "Pi adapter entrypoint does not exist: {}",
+        adapter_entrypoint.display()
+    );
+    std::fs::create_dir_all(state_dir)?;
+    std::fs::create_dir_all(pi_agent_dir)?;
+
+    async fn spawn_adapter(
+        adapter_entrypoint: &std::path::Path,
+        state_dir: &std::path::Path,
+        pi_agent_dir: &std::path::Path,
+        namespace: &str,
+    ) -> Result<AcpClient> {
+        let isolated_env = [
+            (
+                "BUZZ_PI_STATE_DIR".to_owned(),
+                state_dir.to_string_lossy().into_owned(),
+            ),
+            ("BUZZ_PI_NAMESPACE".to_owned(), namespace.to_owned()),
+            ("BUZZ_PI_CONTEXT_LIMIT".to_owned(), "150000".to_owned()),
+            (
+                "PI_CODING_AGENT_DIR".to_owned(),
+                pi_agent_dir.to_string_lossy().into_owned(),
+            ),
+            ("BUZZ_PI_TRUST_PROJECT".to_owned(), "false".to_owned()),
+            ("BUZZ_PI_LOG_LEVEL".to_owned(), "error".to_owned()),
+        ];
+
+        #[cfg(unix)]
+        {
+            // `AcpClient::spawn` normally gives parent environment variables
+            // operator precedence. The contract probe must never reuse a
+            // developer's real state, so launch through `env KEY=value ...`
+            // and make the isolation overrides unambiguous.
+            let mut args: Vec<String> = isolated_env
+                .iter()
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect();
+            args.push("node".to_owned());
+            args.push(adapter_entrypoint.to_string_lossy().into_owned());
+            return AcpClient::spawn("env", &args, &[], false)
+                .await
+                .map_err(Into::into);
+        }
+
+        #[cfg(not(unix))]
+        {
+            AcpClient::spawn(
+                "node",
+                &[adapter_entrypoint.to_string_lossy().into_owned()],
+                &isolated_env,
+                false,
+            )
+            .await
+            .map_err(Into::into)
+        }
+    }
+
+    fn assert_initialize_contract(client: &AcpClient, response: &serde_json::Value) -> Result<()> {
+        anyhow::ensure!(
+            response
+                .get("protocolVersion")
+                .and_then(|value| value.as_u64())
+                == Some(2),
+            "Pi adapter did not negotiate ACP protocol version 2"
+        );
+        anyhow::ensure!(
+            response
+                .pointer("/agentInfo/name")
+                .and_then(|value| value.as_str())
+                == Some("buzz-pi-agent"),
+            "Pi adapter initialize response has an unexpected agent identity"
+        );
+        anyhow::ensure!(
+            response
+                .pointer("/_meta/buzz/contextLimitTokens")
+                .and_then(|value| value.as_u64())
+                == Some(150_000),
+            "Pi adapter initialize response did not advertise the 150k context ceiling"
+        );
+        anyhow::ensure!(
+            response
+                .pointer("/_meta/buzz/sessionEvents/supported")
+                .and_then(|value| value.as_bool())
+                == Some(true)
+                && client.durable_session_events_supported(),
+            "Pi adapter did not advertise durable replay plus ACKs for typed lifecycle events"
+        );
+        anyhow::ensure!(
+            client.thread_sessions_supported() && client.conversation_reset_supported(),
+            "Pi adapter did not advertise durable thread sessions plus reset commits"
+        );
+        Ok(())
+    }
+
+    fn pi_session_id(response: &acp::SessionNewResponse) -> Result<&str> {
+        response
+            .raw
+            .pointer("/_meta/buzz/piSessionId")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| anyhow::anyhow!("session/new response omitted _meta.buzz.piSessionId"))
+    }
+
+    fn assert_session_shape(response: &acp::SessionNewResponse) -> Result<()> {
+        anyhow::ensure!(
+            response
+                .raw
+                .get("configOptions")
+                .is_some_and(|value| value.is_array()),
+            "session/new response omitted stable configOptions"
+        );
+        anyhow::ensure!(
+            response
+                .raw
+                .pointer("/models/availableModels")
+                .is_some_and(|value| value.is_array()),
+            "session/new response omitted available model metadata"
+        );
+        anyhow::ensure!(
+            response
+                .raw
+                .pointer("/_meta/buzz/persistent")
+                .and_then(|value| value.as_bool())
+                == Some(true),
+            "Pi session was not persisted"
+        );
+        anyhow::ensure!(
+            response
+                .raw
+                .pointer("/_meta/buzz/contextLimitTokens")
+                .and_then(|value| value.as_u64())
+                == Some(150_000),
+            "session/new response lost the configured context ceiling"
+        );
+        Ok(())
+    }
+
+    let namespace = format!("contract-{}", Uuid::new_v4());
+    let conversation_id = format!("contract:{}:thread", Uuid::new_v4());
+    let reset_token = format!("contract-reset:{}", Uuid::new_v4());
+    let cwd = cwd.to_string_lossy();
+
+    let mut first = spawn_adapter(adapter_entrypoint, state_dir, pi_agent_dir, &namespace).await?;
+    let first_result: Result<(String, String)> = async {
+        let initialize = first.initialize().await?;
+        assert_initialize_contract(&first, &initialize)?;
+
+        // Heartbeat and compatibility/admin callers do not carry a Buzz
+        // conversation identity. A server that negotiated durable schema v2
+        // must never emit its legacy schema-v1 lifecycle envelope on those
+        // sessions: doing so is a protocol-fatal downgrade in AcpClient. The
+        // adapter therefore completes local commands but suppresses their
+        // undeliverable lifecycle notice.
+        let unmapped = first
+            .session_new_full(
+                &cwd,
+                Vec::new(),
+                None,
+                Some("Buzz Pi unmapped lifecycle smoke"),
+            )
+            .await?;
+        let unmapped_stop = first
+            .session_prompt_with_idle_timeout(
+                &unmapped.session_id,
+                "/context",
+                Duration::from_secs(15),
+                Duration::from_secs(30),
+            )
+            .await?;
+        anyhow::ensure!(
+            unmapped_stop == acp::StopReason::EndTurn,
+            "Pi's local /context command failed on an unmapped heartbeat-like session"
+        );
+        anyhow::ensure!(
+            first.take_buzz_session_events().is_empty(),
+            "Pi emitted a lifecycle envelope without a durable Buzz conversation identity"
+        );
+        anyhow::ensure!(
+            first.session_dispose(&unmapped.session_id, false).await?,
+            "Pi did not dispose the unmapped contract session"
+        );
+
+        let session = first
+            .session_new_full_for_conversation(
+                &cwd,
+                Vec::new(),
+                None,
+                Some("Buzz Pi contract smoke"),
+                Some(&conversation_id),
+                None,
+            )
+            .await?;
+        assert_session_shape(&session)?;
+        anyhow::ensure!(
+            session
+                .raw
+                .pointer("/_meta/buzz/resumedConversation")
+                .and_then(|value| value.as_bool())
+                == Some(false),
+            "the first logical conversation unexpectedly resumed"
+        );
+        anyhow::ensure!(
+            session
+                .raw
+                .pointer("/_meta/buzz/skipRelayHistory")
+                .and_then(|value| value.as_bool())
+                == Some(false),
+            "the first logical conversation unexpectedly suppressed relay context"
+        );
+        let stop_reason = first
+            .session_prompt_with_idle_timeout(
+                &session.session_id,
+                "/context",
+                Duration::from_secs(15),
+                Duration::from_secs(30),
+            )
+            .await?;
+        anyhow::ensure!(
+            stop_reason == acp::StopReason::EndTurn,
+            "Pi's local /context command did not complete normally"
+        );
+        let lifecycle_events = first.take_buzz_session_events();
+        anyhow::ensure!(
+            lifecycle_events.len() == 1,
+            "Pi /context emitted {} typed lifecycle events instead of one",
+            lifecycle_events.len()
+        );
+        let context_event = &lifecycle_events[0];
+        anyhow::ensure!(
+            context_event.schema_version == acp::BUZZ_SESSION_EVENT_SCHEMA_VERSION
+                && context_event.session_id == session.session_id
+                && context_event.conversation_id == conversation_id
+                && Uuid::parse_str(&context_event.event_id).is_ok(),
+            "Pi /context lifecycle envelope did not match the active ACP session"
+        );
+        anyhow::ensure!(
+            matches!(
+                &context_event.event,
+                BuzzSessionEvent::ContextStatus {
+                    limit_tokens: 150_000,
+                    auto_compaction: true,
+                    ..
+                }
+            ),
+            "Pi /context lifecycle payload did not report the 150k automatic-compaction policy"
+        );
+        let context_event_ack = acp::BuzzSessionEventAck {
+            conversation_id: context_event.conversation_id.clone(),
+            event_id: context_event.event_id.clone(),
+        };
+        first.queue_buzz_session_event_ack(context_event_ack);
+        first.flush_buzz_session_event_acks().await;
+        let pi_session_id = pi_session_id(&session)?.to_owned();
+        Ok((session.session_id, pi_session_id))
+    }
+    .await;
+    first.shutdown().await;
+    let (first_acp_session_id, first_pi_session_id) = first_result?;
+
+    let mut second = spawn_adapter(adapter_entrypoint, state_dir, pi_agent_dir, &namespace).await?;
+    let second_result: Result<()> = async {
+        let initialize = second.initialize().await?;
+        assert_initialize_contract(&second, &initialize)?;
+        let resumed = second
+            .session_new_full_for_conversation(
+                &cwd,
+                Vec::new(),
+                None,
+                Some("Buzz Pi contract smoke"),
+                Some(&conversation_id),
+                None,
+            )
+            .await?;
+        assert_session_shape(&resumed)?;
+        anyhow::ensure!(
+            resumed.session_id != first_acp_session_id,
+            "a restarted adapter reused an outer ACP session ID"
+        );
+        anyhow::ensure!(
+            pi_session_id(&resumed)? == first_pi_session_id,
+            "a restarted adapter failed to resume the same durable Pi session"
+        );
+        anyhow::ensure!(
+            resumed
+                .raw
+                .pointer("/_meta/buzz/resumedConversation")
+                .and_then(|value| value.as_bool())
+                == Some(true),
+            "the restarted adapter did not report a resumed conversation"
+        );
+        anyhow::ensure!(
+            resumed
+                .raw
+                .pointer("/_meta/buzz/skipRelayHistory")
+                .and_then(|value| value.as_bool())
+                == Some(false),
+            "a normal resume incorrectly suppressed Buzz relay context"
+        );
+
+        anyhow::ensure!(
+            second
+                .conversation_reset(&conversation_id, &reset_token)
+                .await?
+                == Some(ConversationResetCommit::NewlyCommitted),
+            "Pi adapter did not explicitly confirm the durable reset"
+        );
+        anyhow::ensure!(
+            second
+                .conversation_reset(&conversation_id, &reset_token)
+                .await?
+                == Some(ConversationResetCommit::AlreadyCommitted),
+            "Pi adapter did not idempotently confirm the same reset token"
+        );
+        let fresh = second
+            .session_new_full_for_conversation(
+                &cwd,
+                Vec::new(),
+                None,
+                Some("Buzz Pi contract smoke"),
+                Some(&conversation_id),
+                Some(&reset_token),
+            )
+            .await?;
+        assert_session_shape(&fresh)?;
+        anyhow::ensure!(
+            pi_session_id(&fresh)? != first_pi_session_id,
+            "the committed reset reopened the previous Pi session"
+        );
+        anyhow::ensure!(
+            fresh
+                .raw
+                .pointer("/_meta/buzz/resumedConversation")
+                .and_then(|value| value.as_bool())
+                == Some(false),
+            "the committed reset was reported as a resume"
+        );
+        anyhow::ensure!(
+            fresh
+                .raw
+                .pointer("/_meta/buzz/skipRelayHistory")
+                .and_then(|value| value.as_bool())
+                == Some(true),
+            "the committed reset did not request relay-history suppression"
+        );
+        anyhow::ensure!(
+            second.session_dispose(&fresh.session_id, true).await?,
+            "Pi adapter did not confirm destructive session disposal"
+        );
+        Ok(())
+    }
+    .await;
+    second.shutdown().await;
+    second_result
+}
+
 #[tokio::main]
 async fn tokio_main() -> Result<()> {
     // Install the ring crypto provider for rustls (required for wss:// connections).
@@ -1371,6 +2593,17 @@ async fn tokio_main() -> Result<()> {
         initialize_agent_pool(&PoolStartup::from_config(&config, observer.clone()), None).await?
     };
     let mut pool_ready = !config.lazy_pool;
+    let mut thread_sessions_enabled = match select_thread_session_scope(
+        config.require_durable_thread_sessions,
+        pool_ready,
+        pool.thread_sessions_supported(),
+    ) {
+        Ok(enabled) => enabled,
+        Err(message) => {
+            shutdown_agent_pool(&mut pool).await;
+            return Err(anyhow::anyhow!(message));
+        }
+    };
     let mut pool_lifecycle: PoolLifecycle<AgentPool> = PoolLifecycle::listening();
 
     // Capture a startup watermark BEFORE connecting to the relay. This timestamp
@@ -1384,6 +2617,11 @@ async fn tokio_main() -> Result<()> {
         .as_secs();
 
     let pubkey_hex = config.keys.public_key().to_hex();
+    let durable_outbox = DurableOutbox::open(&config.state_dir, &pubkey_hex)
+        .map_err(|error| anyhow::anyhow!("could not open durable harness state: {error}"))?;
+    let recovered_reset_records =
+        recover_durable_reset_intents(&durable_outbox, &mut pool, &config, thread_sessions_enabled)
+            .await?;
 
     // Parse BUZZ_AUTH_TAG into a nostr::Tag for NIP-OA relay membership delegation.
     let relay_auth_tag: Option<nostr::Tag> = std::env::var("BUZZ_AUTH_TAG")
@@ -1553,8 +2791,27 @@ async fn tokio_main() -> Result<()> {
 
     let runtime_start_nonce = std::env::var("BUZZ_MANAGED_AGENT_START_NONCE").unwrap_or_default();
     let dedup_mode = config.dedup_mode;
-    let mut queue =
-        EventQueue::new(dedup_mode).with_in_flight_deadline(config.max_turn_duration_secs);
+    let mut queue = EventQueue::new(dedup_mode)
+        .with_thread_sessions_enabled(thread_sessions_enabled)
+        .with_in_flight_deadline(config.max_turn_duration_secs);
+    let mut pending_reset_confirmations: HashMap<(Uuid, String), PendingResetConfirmation> =
+        HashMap::new();
+    for record in recovered_reset_records {
+        let identity = record.identity();
+        queue.restore_completed_reset_barrier(identity.clone());
+        pending_reset_confirmations.insert(
+            identity,
+            PendingResetConfirmation {
+                event: record.event,
+                next_attempt_at: Instant::now(),
+                durable: true,
+            },
+        );
+    }
+    tracing::info!(
+        thread_sessions_enabled,
+        "configured ACP conversation scoping"
+    );
 
     // Online means the harness can receive work, not merely that its socket is
     // connected. Publishing after channel subscriptions gives desktop callers
@@ -1604,6 +2861,10 @@ async fn tokio_main() -> Result<()> {
         channel_info: pool::ChannelInfoResolver::new(channel_info_map, relay.rest_client()),
         context_message_limit: config.context_message_limit,
         max_turns_per_session: config.max_turns_per_session,
+        max_cached_conversation_sessions: config.max_cached_conversation_sessions as usize,
+        conversation_session_idle_ttl: Duration::from_secs(
+            config.conversation_session_idle_ttl_secs,
+        ),
         permission_mode: config.permission_mode,
         agent_keys: config.keys.clone(),
         agent_owner_pubkey: startup_owner
@@ -1613,6 +2874,8 @@ async fn tokio_main() -> Result<()> {
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
     });
+    let mut lifecycle_notice_outbox =
+        LifecycleNoticeOutbox::spawn(ctx.rest_client.clone(), durable_outbox.clone())?;
 
     if !config.memory_enabled {
         tracing::info!(
@@ -1651,7 +2914,16 @@ async fn tokio_main() -> Result<()> {
     } else {
         None
     };
-    let mut typing_channels: HashMap<Uuid, ThreadTags> = HashMap::new();
+    let mut typing_channels: HashMap<ConversationKey, ThreadTags> = HashMap::new();
+    let mut observer_control_replay_cache = ObserverControlReplayCache::default();
+    // Reset success notices have stronger ordering than ordinary lifecycle
+    // notices: their completed barrier is released only after relay
+    // acceptance. Keep one tracked HTTP attempt globally so delivery never
+    // blocks relay ingress and a relay outage cannot create an unbounded task
+    // fan-out.
+    let mut reset_ack_tasks: tokio::task::JoinSet<ResetAckAttemptResult> =
+        tokio::task::JoinSet::new();
+    let mut reset_ack_in_flight: Option<ResetAckAttemptKey> = None;
     let mut presence_task: Option<tokio::task::JoinHandle<()>> = None;
 
     // Independent of pool readiness: a never-mentioned lazy agent must still
@@ -1767,11 +3039,21 @@ async fn tokio_main() -> Result<()> {
     enum PoolEvent {
         Result(Box<PromptResult>),
         Panic(tokio::task::JoinError),
+        ResetAck(std::result::Result<ResetAckAttemptResult, tokio::task::JoinError>),
         SteerAck(SteerAckEvent),
         Wake(u32, Result<AgentPool, String>),
     }
 
+    let mut terminal_error = None;
     loop {
+        schedule_completed_reset_ack(
+            &queue,
+            &pending_reset_confirmations,
+            &ctx.rest_client,
+            &mut reset_ack_tasks,
+            &mut reset_ack_in_flight,
+        );
+
         // Whether buffered work is waiting on a lazy pool. Also gates the
         // retry-deadline sleep arm below: a `Failed` lifecycle keeps its
         // (possibly past) `retry_at` until the next wake, so sleeping on it
@@ -1854,7 +3136,25 @@ async fn tokio_main() -> Result<()> {
         while let Ok(rr) = respawn_rx.try_recv() {
             crash_history[rr.index].respawn_in_flight = false;
             match rr.result {
-                Ok((acp, protocol_version, agent_name)) => {
+                Ok((mut acp, protocol_version, agent_name)) => {
+                    let durable_thread_sessions_supported = acp.thread_sessions_supported()
+                        && acp.conversation_reset_supported()
+                        && acp.durable_session_events_supported();
+                    if thread_sessions_enabled && !durable_thread_sessions_supported {
+                        tracing::error!(
+                            agent = rr.index,
+                            "rejecting respawn whose adapter no longer advertises durable thread-session reset support"
+                        );
+                        acp.shutdown().await;
+                        crash_history[rr.index].mark_spawn_failed();
+                        continue;
+                    }
+                    if !thread_sessions_enabled && durable_thread_sessions_supported {
+                        tracing::info!(
+                            agent = rr.index,
+                            "respawn supports thread sessions; retaining startup legacy channel scope"
+                        );
+                    }
                     let agent = OwnedAgent {
                         index: rr.index,
                         acp,
@@ -1862,6 +3162,7 @@ async fn tokio_main() -> Result<()> {
                         model_capabilities: None,
                         desired_model: config.model.clone(),
                         model_overridden: false,
+                        pending_model_switch: None,
                         agent_name,
                         goose_system_prompt_supported: None,
                         protocol_version,
@@ -1887,6 +3188,11 @@ async fn tokio_main() -> Result<()> {
             }
         }
 
+        let reset_ack_retry_at = reset_ack_in_flight
+            .is_none()
+            .then(|| next_completed_reset_ack_attempt(&queue, &pending_reset_confirmations))
+            .flatten();
+
         // Borrow result_rx and join_set simultaneously via split-borrow helper.
         let pool_event: Option<PoolEvent> = {
             let (result_rx, join_set) = pool.rx_and_join_set();
@@ -1906,6 +3212,9 @@ async fn tokio_main() -> Result<()> {
                 // are in-flight tasks.
                 Some(Err(e)) = join_set.join_next(), if !join_set.is_empty() => {
                     Some(PoolEvent::Panic(e))
+                }
+                Some(result) = reset_ack_tasks.join_next(), if !reset_ack_tasks.is_empty() => {
+                    Some(PoolEvent::ResetAck(result))
                 }
                 // Goose-native steer ack from a watcher task. Outcomes drive
                 // queue side-effects (drop / release withheld event) and
@@ -1928,6 +3237,14 @@ async fn tokio_main() -> Result<()> {
                             tokio::time::sleep_until(retry_at).await
                         }
                         _ => std::future::pending().await,
+                    }
+                } => None,
+                _ = async {
+                    match reset_ack_retry_at {
+                        Some(deadline) => {
+                            tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await
+                        }
+                        None => std::future::pending().await,
                     }
                 } => None,
                 Some(Err(error)) = wake_tasks.join_next(), if !wake_tasks.is_empty() => {
@@ -1960,7 +3277,14 @@ async fn tokio_main() -> Result<()> {
                     match control_event {
                         Some(event) => {
                             if let Some(ref owner_hex) = owner_cache.pubkey {
-                                handle_relay_observer_control_event(&config.keys, event, &mut pool, observer.as_ref(), owner_hex);
+                                handle_relay_observer_control_event(
+                                    &config.keys,
+                                    event,
+                                    &mut pool,
+                                    observer.as_ref(),
+                                    owner_hex,
+                                    &mut observer_control_replay_cache,
+                                );
                             } else {
                                 tracing::warn!("observer control frame received but no owner resolved — dropping");
                             }
@@ -1983,7 +3307,7 @@ async fn tokio_main() -> Result<()> {
                                 || kind_u32 == KIND_MEMBER_REMOVED_NOTIFICATION
                             {
                                 let ch = buzz_event.channel_id;
-                                let ts = buzz_event.event.created_at.as_secs();
+                                let ts = relay::bounded_event_replay_timestamp(&buzz_event.event);
                                 let eid = buzz_event.event.id.to_hex();
 
                                 // Two-layer membership dedup:
@@ -2060,14 +3384,14 @@ async fn tokio_main() -> Result<()> {
                                     // the agent lost access).
                                     let drained_ids = queue.drain_channel(ch);
                                     let invalidated = if pool_ready {
-                                        pool.invalidate_channel_sessions(ch)
+                                        pool.dispose_channel_sessions(ch, true).await
                                     } else {
                                         0
                                     };
                                     // Track removed channels so checked-out agents get
                                     // their sessions stripped when they return to the pool.
                                     removed_channels.insert(ch);
-                                    typing_channels.remove(&ch);
+                                    typing_channels.retain(|key, _| key.channel_id != ch);
                                     // Best-effort: clean up 👀 on drained events.
                                     // Note: the relay revokes membership before
                                     // emitting the notification, so this DELETE may
@@ -2100,12 +3424,46 @@ async fn tokio_main() -> Result<()> {
                                 continue;
                             }
 
+                            // Conversation identity is security-sensitive: it
+                            // selects the queue, session, control target, and
+                            // relay context query. Reject malformed or
+                            // conflicting NIP-10 markers before interpreting
+                            // any lifecycle command.
+                            if !queue::has_valid_thread_identity(&buzz_event.event) {
+                                tracing::warn!(
+                                    channel_id = %buzz_event.channel_id,
+                                    event_id = %buzz_event.event.id,
+                                    "dropping event with invalid NIP-10 thread identity"
+                                );
+                                continue;
+                            }
+
+                            // Compute thread identity once, before any control
+                            // command can consume the event. Top-level events
+                            // are their own prospective roots; replies inherit
+                            // their NIP-10 root.
+                            let (event_is_dm, conversation_is_dm) =
+                                resolve_dm_channel_scope(
+                                    buzz_event.channel_id,
+                                    &ctx.channel_info,
+                                )
+                                .await;
+                            queue.set_channel_is_dm(
+                                buzz_event.channel_id,
+                                conversation_is_dm,
+                            );
+                            let event_conversation = queue.conversation_key_for_event(
+                                buzz_event.channel_id,
+                                &buzz_event.event,
+                            );
+
                             // Check: kind:9, content "!shutdown", from owner, mentions THIS agent.
                             let is_shutdown = is_owner_control_command(
                                 &buzz_event.event,
                                 kind_u32,
                                 "!shutdown",
                                 &pubkey_hex,
+                                config.session_title.as_deref(),
                             );
                             if is_shutdown {
                                 let owner = owner_cache.get();
@@ -2137,13 +3495,14 @@ async fn tokio_main() -> Result<()> {
                                 kind_u32,
                                 "!cancel",
                                 &pubkey_hex,
+                                config.session_title.as_deref(),
                             );
                             if is_cancel {
                                 if let Some(owner) = owner_cache.get() {
                                     if buzz_event.event.pubkey.to_hex() == *owner {
-                                        let fired = signal_in_flight_task(
+                                        let fired = signal_in_flight_conversation(
                                             &mut pool,
-                                            buzz_event.channel_id,
+                                            &event_conversation,
                                             ControlSignal::Cancel,
                                         );
                                         if !fired {
@@ -2175,22 +3534,29 @@ async fn tokio_main() -> Result<()> {
                                 kind_u32,
                                 "!rotate",
                                 &pubkey_hex,
+                                config.session_title.as_deref(),
                             );
                             if is_rotate {
                                 if let Some(owner) = owner_cache.get() {
                                     if buzz_event.event.pubkey.to_hex() == *owner {
-                                        let fired = signal_in_flight_task(
+                                        let rotated = rotate_all_in_flight_channel(
                                             &mut pool,
                                             buzz_event.channel_id,
-                                            ControlSignal::Rotate,
                                         );
-                                        if fired {
+                                        let invalidated = pool
+                                            .dispose_channel_sessions(
+                                                buzz_event.channel_id,
+                                                true,
+                                            )
+                                            .await;
+                                        if rotated > 0 {
                                             tracing::info!(
                                                 channel_id = %buzz_event.channel_id,
+                                                rotated,
+                                                invalidated,
                                                 "!rotate received — cancelling in-flight turn and rotating session"
                                             );
                                         } else {
-                                            let invalidated = pool.invalidate_channel_sessions(buzz_event.channel_id);
                                             tracing::info!(
                                                 channel_id = %buzz_event.channel_id,
                                                 invalidated,
@@ -2201,6 +3567,327 @@ async fn tokio_main() -> Result<()> {
                                     }
                                 }
                                 // Not from owner — fall through to normal prompt handling.
+                            }
+
+                            // Thread-local context reset. Unlike channel-wide
+                            // `!rotate`, `/new` affects only the NIP-10 thread
+                            // containing the command. It is owner-authorized,
+                            // consumed by the harness, and visibly acknowledged
+                            // in the same thread.
+                            let is_new = is_owner_control_command(
+                                &buzz_event.event,
+                                kind_u32,
+                                "/new",
+                                &pubkey_hex,
+                                config.session_title.as_deref(),
+                            );
+                            if is_new {
+                                if let Some(owner) = owner_cache.get() {
+                                    if buzz_event.event.pubkey.to_hex() == *owner {
+                                        let command_id = buzz_event.event.id.to_hex();
+                                        let mut thread_tags =
+                                            queue::parse_thread_tags(&buzz_event.event);
+                                        if thread_tags.root_event_id.is_none() {
+                                            thread_tags.root_event_id = Some(command_id.clone());
+                                            thread_tags.parent_event_id = Some(command_id.clone());
+                                        }
+                                        let conversation_id = event_conversation.stable_id();
+                                        let reset_identity = (
+                                            event_conversation.channel_id,
+                                            event_conversation.root_event_id.clone(),
+                                        );
+                                        if thread_sessions_enabled {
+                                            match durable_outbox
+                                                .consumed_reset(&reset_identity, &command_id)
+                                            {
+                                              Ok(Some(receipt)) => {
+                                                // Relay overlap or a long-delayed duplicate must
+                                                // not advance the queue generation or cancel a
+                                                // newer turn. The original signed ACK was already
+                                                // accepted before this receipt was checkpointed;
+                                                // re-submit it idempotently for convergence.
+                                                tracing::info!(
+                                                    conversation = %event_conversation,
+                                                    command_id,
+                                                    acknowledgement_event_id = %receipt.event.id,
+                                                    "replaying previously consumed /new without mutating context"
+                                                );
+                                                let rest = ctx.rest_client.clone();
+                                                tokio::spawn(async move {
+                                                    if !pool::submit_notice_event(&rest, &receipt.event).await {
+                                                        tracing::warn!(
+                                                            event_id = %receipt.event.id,
+                                                            "relay did not accept replayed /new acknowledgement"
+                                                        );
+                                                    }
+                                                });
+                                                continue;
+                                              }
+                                              Ok(None) => {}
+                                              Err(error) => {
+                                                  // Treat loss of durable replay knowledge as
+                                                  // a process-fatal safety fault. Continuing
+                                                  // would make a consumed `/new` look fresh.
+                                                  return Err(anyhow::anyhow!(
+                                                      "could not read durable /new replay receipts: {error}"
+                                                  ));
+                                              }
+                                            }
+                                        }
+                                        let reset_notice_event = match pool::build_notice_event(
+                                            &ctx.rest_client,
+                                            buzz_event.channel_id,
+                                            &thread_tags,
+                                            reset_confirmation(thread_sessions_enabled),
+                                        ) {
+                                            Ok(event) => event,
+                                            Err(error) => {
+                                                tracing::error!(
+                                                    conversation = %event_conversation,
+                                                    %error,
+                                                    "/new rejected because its acknowledgement could not be signed"
+                                                );
+                                                continue;
+                                            }
+                                        };
+                                        let prepared_reset = match queue
+                                            .prepare_reset_conversation(&event_conversation)
+                                        {
+                                            Ok(prepared) => prepared,
+                                            Err(error) => {
+                                                tracing::error!(
+                                                    conversation = %event_conversation,
+                                                    %error,
+                                                    "/new rejected before mutating the active session"
+                                                );
+                                                let failure = match error {
+                                                    queue::ResetConversationError::ResetInProgress => {
+                                                        "⚠️ A previous `/new` for this thread is still waiting for Buzz to acknowledge its signed reset notice. I left that reset intact; wait a moment, then try again."
+                                                    }
+                                                    queue::ResetConversationError::MetadataCapacity => {
+                                                        "⚠️ I couldn't reset this thread because the agent's reset metadata is at capacity. No success was recorded; restart the agent and try `/new` again."
+                                                    }
+                                                };
+                                                pool::post_failure_notice(
+                                                    &ctx.rest_client,
+                                                    buzz_event.channel_id,
+                                                    &thread_tags,
+                                                    failure,
+                                                )
+                                                .await;
+                                                continue;
+                                            }
+                                        };
+                                        if thread_sessions_enabled {
+                                            let record = DurableResetRecord {
+                                                channel_id: reset_identity.0,
+                                                root_event_id: reset_identity.1.clone(),
+                                                conversation_id: conversation_id.clone(),
+                                                reset_token: command_id.clone(),
+                                                event: reset_notice_event.clone(),
+                                                phase: DurableResetPhase::Prepared,
+                                            };
+                                            if let Err(error) = durable_outbox.prepare_reset(record) {
+                                                tracing::error!(
+                                                    conversation = %event_conversation,
+                                                    %error,
+                                                    "/new rejected because its signed acknowledgement intent could not be persisted"
+                                                );
+                                                pool::post_failure_notice(
+                                                    &ctx.rest_client,
+                                                    buzz_event.channel_id,
+                                                    &thread_tags,
+                                                    "⚠️ I couldn't persist the reset safely, so the active context was left unchanged. Free local disk space and try `/new` again.",
+                                                )
+                                                .await;
+                                                continue;
+                                            }
+                                        }
+                                        let reset_commit = if thread_sessions_enabled {
+                                            commit_durable_conversation_reset(
+                                                &mut pool,
+                                                &config,
+                                                &conversation_id,
+                                                &command_id,
+                                            )
+                                            .await
+                                        } else {
+                                            Some(ConversationResetCommit::NewlyCommitted)
+                                        };
+                                        if reset_commit != Some(ConversationResetCommit::NewlyCommitted) {
+                                            // The result may be ambiguous (the
+                                            // tombstone can outlive a dropped
+                                            // response), or an evicted replay
+                                            // receipt may have produced an
+                                            // already-committed token. Never
+                                            // advance a second queue generation
+                                            // or continue using an old hot
+                                            // handle in either state.
+                                            let cancelled = signal_in_flight_conversation(
+                                                &mut pool,
+                                                &event_conversation,
+                                                ControlSignal::Cancel,
+                                            );
+                                            let invalidated = pool
+                                                .dispose_conversation_sessions(
+                                                    &event_conversation,
+                                                    false,
+                                                )
+                                                .await;
+                                            tracing::error!(
+                                                conversation = %event_conversation,
+                                                cancelled,
+                                                invalidated,
+                                                "durable reset remained unconfirmed; old hot context was invalidated without acknowledging success"
+                                            );
+                                            if let Err(error) = durable_outbox.discard_reset(
+                                                &reset_identity,
+                                                &reset_notice_event.id.to_hex(),
+                                            ) {
+                                                tracing::error!(
+                                                    %error,
+                                                    "could not remove an unconfirmed durable reset intent; restart recovery will retry it"
+                                                );
+                                            }
+                                            pool::post_failure_notice(
+                                                &ctx.rest_client,
+                                                buzz_event.channel_id,
+                                                &thread_tags,
+                                                "⚠️ I couldn't uniquely confirm this durable reset. I stopped the old live context and did not record success; send a new `/new` command to finish safely.",
+                                            )
+                                            .await;
+                                            continue;
+                                        }
+
+                                        if thread_sessions_enabled {
+                                            match durable_outbox.mark_reset_committed(
+                                                &reset_identity,
+                                                &reset_notice_event.id.to_hex(),
+                                            ) {
+                                                Ok(true) => {}
+                                                Ok(false) => {
+                                                    tracing::error!(
+                                                        conversation = %event_conversation,
+                                                        "durable reset intent disappeared after adapter commit; stopping before in-memory release"
+                                                    );
+                                                    return Err(anyhow::anyhow!(
+                                                        "durable /new intent disappeared after commit"
+                                                    ));
+                                                }
+                                                Err(error) => {
+                                                    tracing::error!(
+                                                        conversation = %event_conversation,
+                                                        %error,
+                                                        "could not checkpoint committed reset; prepared recovery record remains"
+                                                    );
+                                                    return Err(anyhow::anyhow!(
+                                                        "could not checkpoint committed durable /new: {error}"
+                                                    ));
+                                                }
+                                            }
+                                        }
+
+                                        // No fallible queue mutation remains after
+                                        // the durable adapter commit. If the harness
+                                        // dies before this in-memory step, Pi's reset
+                                        // tombstone still forces fresh context and
+                                        // suppresses relay-history seeding on restart.
+                                        let fresh_conversation = queue
+                                            .commit_prepared_reset(prepared_reset, command_id);
+                                        let reset_signal = if thread_sessions_enabled {
+                                            // The durable mapping is already gone;
+                                            // cancellation only releases the old hot
+                                            // handle and must not issue a second forget.
+                                            ControlSignal::Cancel
+                                        } else {
+                                            ControlSignal::Rotate
+                                        };
+                                        let fired = signal_in_flight_conversation(
+                                            &mut pool,
+                                            &event_conversation,
+                                            reset_signal,
+                                        );
+                                        let invalidated = pool
+                                            .dispose_conversation_sessions(
+                                                &event_conversation,
+                                                !thread_sessions_enabled,
+                                            )
+                                            .await;
+                                        tracing::info!(
+                                            conversation = %event_conversation,
+                                            fresh_conversation = %fresh_conversation,
+                                            fired,
+                                            invalidated,
+                                            "/new consumed — resetting thread context"
+                                        );
+                                        let identity = (
+                                            fresh_conversation.channel_id,
+                                            fresh_conversation.root_event_id.clone(),
+                                        );
+                                        debug_assert_eq!(identity, reset_identity);
+                                        pending_reset_confirmations.insert(
+                                            identity,
+                                            PendingResetConfirmation {
+                                                event: reset_notice_event,
+                                                next_attempt_at: Instant::now(),
+                                                durable: thread_sessions_enabled,
+                                            },
+                                        );
+                                        tracing::info!(
+                                            conversation = %fresh_conversation,
+                                            waiting_for_old_turn = fired,
+                                            "deferring /new dispatch until its signed acknowledgement is accepted"
+                                        );
+                                        continue;
+                                    }
+                                }
+                                tracing::warn!(
+                                    conversation = %event_conversation,
+                                    sender = %buzz_event.event.pubkey,
+                                    "denying non-owner /new command"
+                                );
+                                // Reserved lifecycle commands are always
+                                // consumed. Forwarding this to Pi could let an
+                                // adapter or extension reset context despite
+                                // the harness authorization failure.
+                                continue;
+                            }
+
+                            // Pi lifecycle commands that mutate a thread's
+                            // durable runtime are owner-only. They still pass
+                            // through to the adapter for an authorized owner;
+                            // an untrusted participant cannot force compaction
+                            // or reload executable extension resources.
+                            if let Some(command) = reserved_pi_lifecycle_command(
+                                &buzz_event.event,
+                                kind_u32,
+                                config.session_title.as_deref(),
+                            ) {
+                                // An addressed /new was consumed above whether
+                                // authorized or denied. Reaching this arm with
+                                // /new means it lacked this agent's p tag; never
+                                // forward it to an adapter whose first-line
+                                // command parser could interpret it anyway.
+                                let authorized = command != "/new"
+                                    && is_owner_control_command(
+                                        &buzz_event.event,
+                                        kind_u32,
+                                        command,
+                                        &pubkey_hex,
+                                        config.session_title.as_deref(),
+                                    )
+                                    && owner_cache.get().is_some_and(|owner| {
+                                        buzz_event.event.pubkey.to_hex() == *owner
+                                    });
+                                if !authorized {
+                                    tracing::warn!(
+                                        conversation = %event_conversation,
+                                        sender = %buzz_event.event.pubkey,
+                                        command,
+                                        "denying unaddressed or non-owner Pi lifecycle command"
+                                    );
+                                    continue;
+                                }
                             }
 
                             // Coarse security policy: drop events from disallowed
@@ -2219,13 +3906,11 @@ async fn tokio_main() -> Result<()> {
                                 // DM hardening: resolve channel type (fail-closed
                                 // to DM) so allowlist/anyone modes cannot be
                                 // exercised by non-owner authors inside DMs.
-                                let is_dm =
-                                    is_dm_channel(buzz_event.channel_id, &ctx.channel_info).await;
                                 let allowed = author_allowed(
                                     &config.respond_to,
                                     &config.respond_to_allowlist,
                                     &author,
-                                    is_dm,
+                                    event_is_dm,
                                     &owner_cache,
                                     &ctx.rest_client,
                                 )
@@ -2235,7 +3920,7 @@ async fn tokio_main() -> Result<()> {
                                         channel_id = %buzz_event.channel_id,
                                         author = %buzz_event.event.pubkey.to_hex(),
                                         mode = %config.respond_to,
-                                        is_dm,
+                                        is_dm = event_is_dm,
                                         "inbound author gate — dropping event"
                                     );
                                     continue;
@@ -2287,7 +3972,9 @@ async fn tokio_main() -> Result<()> {
                             // Event is already queued. If mode requires it AND
                             // the channel has an in-flight task, fire cancel —
                             // OR take the non-cancelling (ACP steer) fork for Steer signals.
-                            if accepted && queue.is_channel_in_flight(buzz_event.channel_id) {
+                            if accepted
+                                && queue.is_conversation_in_flight(&event_conversation)
+                            {
                                 // Author eligibility (owner ∪ allowlist ∪ siblings)
                                 // is already enforced by the inbound author gate
                                 // above, so the mid-turn signal fires for every
@@ -2314,15 +4001,15 @@ async fn tokio_main() -> Result<()> {
                                         && try_native_steer(
                                             &mut pool,
                                             &mut queue,
-                                            buzz_event.channel_id,
+                                            event_conversation.clone(),
                                             event_for_steer,
                                             prompt_tag_for_steer,
                                             &steer_ack_tx,
                                         );
                                     if !native_attempted {
-                                        signal_in_flight_task(
+                                        signal_in_flight_conversation(
                                             &mut pool,
-                                            buzz_event.channel_id,
+                                            &event_conversation,
                                             signal,
                                         );
                                     }
@@ -2421,7 +4108,8 @@ async fn tokio_main() -> Result<()> {
                     // Use try_publish (non-blocking) for typing indicators —
                     // they're ephemeral and must not block the main loop during
                     // relay reconnection (#35).
-                    for (&ch, thread_tags) in &typing_channels {
+                    for (conversation_key, thread_tags) in &typing_channels {
+                        let ch = conversation_key.channel_id;
                         if let Ok(event) = relay.build_typing_event(
                             ch,
                             thread_tags.root_event_id.as_deref(),
@@ -2443,24 +4131,35 @@ async fn tokio_main() -> Result<()> {
 
         match pool_event {
             Some(PoolEvent::Result(result)) => {
-                // Stop typing indicator for the completed channel.
-                if let PromptSource::Channel(ch) = &result.source {
-                    typing_channels.remove(ch);
+                let mut result = *result;
+                // Membership removal can race a checked-out agent that still
+                // owns sibling thread sessions in the removed channel. Forget
+                // those adapter runtimes before this agent becomes claimable
+                // again; on failure the adapter is terminated fail-closed.
+                for channel_id in &removed_channels {
+                    result.agent.forget_channel_sessions(*channel_id).await;
                 }
-                if handle_prompt_result(
+                // Stop typing indicator for the completed channel.
+                if let PromptSource::Conversation(key) = &result.source {
+                    typing_channels.remove(key);
+                } else if let PromptSource::Channel(ch) = &result.source {
+                    typing_channels.retain(|key, _| key.channel_id != *ch);
+                }
+                let action = handle_prompt_result(
                     &mut pool,
                     &mut queue,
                     &config,
-                    *result,
+                    result,
                     &mut heartbeat_in_flight,
                     &removed_channels,
                     &mut crash_history,
                     &respawn_tx,
                     &mut respawn_tasks,
                     observer.clone(),
+                    Some(&lifecycle_notice_outbox),
                     Some(&ctx.rest_client),
-                ) == LoopAction::Exit
-                {
+                );
+                if action == LoopAction::Exit {
                     break;
                 }
                 if drain_ready_join_results(
@@ -2509,8 +4208,18 @@ async fn tokio_main() -> Result<()> {
                     typing_channels.insert(channel_id, thread_tags);
                 }
             }
+            Some(PoolEvent::ResetAck(result)) => {
+                finish_reset_ack_attempt(
+                    &mut queue,
+                    &mut pending_reset_confirmations,
+                    &mut reset_ack_in_flight,
+                    Some(&durable_outbox),
+                    result,
+                );
+            }
             Some(PoolEvent::SteerAck(SteerAckEvent {
                 channel_id,
+                conversation_key,
                 event_id,
                 ack,
             })) => {
@@ -2624,13 +4333,16 @@ async fn tokio_main() -> Result<()> {
                     "non-cancelling steer ack received"
                 );
                 if matches!(ack, Ok(pool::SteerAck::Success)) {
-                    queue.extend_in_flight_deadline(channel_id, config.max_turn_duration_secs);
+                    queue.extend_conversation_deadline(
+                        &conversation_key,
+                        config.max_turn_duration_secs,
+                    );
                 }
                 if drop_withheld {
-                    queue.remove_event(channel_id, &event_id);
+                    queue.remove_conversation_event(&conversation_key, &event_id);
                 }
                 if release_withheld {
-                    queue.release_native_steer(channel_id, &event_id);
+                    queue.release_conversation_native_steer(&conversation_key, &event_id);
                 }
                 if signal_fallback {
                     // Universal cancel+merge fallback. Note: the
@@ -2638,7 +4350,11 @@ async fn tokio_main() -> Result<()> {
                     // front of `queues[channel_id]`, so the cancel
                     // will pick it up as part of the merged batch and
                     // re-prompt the agent.
-                    signal_in_flight_task(&mut pool, channel_id, ControlSignal::Steer);
+                    signal_in_flight_conversation(
+                        &mut pool,
+                        &conversation_key,
+                        ControlSignal::Steer,
+                    );
                 }
                 // After releasing a withheld event, give dispatch a chance
                 // to re-flush. If the prompt is still in flight, the
@@ -2666,6 +4382,50 @@ async fn tokio_main() -> Result<()> {
                         pool = pool_lifecycle
                             .take_ready()
                             .expect("successful wake stores a ready pool");
+                        thread_sessions_enabled = match select_thread_session_scope(
+                            config.require_durable_thread_sessions,
+                            true,
+                            pool.thread_sessions_supported(),
+                        ) {
+                            Ok(enabled) => enabled,
+                            Err(message) => {
+                                tracing::error!(
+                                    message,
+                                    "lazy adapter capability check failed closed"
+                                );
+                                emit_runtime_lifecycle(
+                                    observer.as_ref(),
+                                    &runtime_start_nonce,
+                                    &pubkey_hex,
+                                    &config.relay_url,
+                                    "failed",
+                                    Some(message),
+                                );
+                                terminal_error = Some(anyhow::anyhow!(message));
+                                break;
+                            }
+                        };
+                        if !queue.set_thread_sessions_enabled(thread_sessions_enabled) {
+                            if config.require_durable_thread_sessions {
+                                let message = "required durable thread-session scope could not be applied to the lazy event queue";
+                                tracing::error!(message, "lazy adapter queue scope failed closed");
+                                emit_runtime_lifecycle(
+                                    observer.as_ref(),
+                                    &runtime_start_nonce,
+                                    &pubkey_hex,
+                                    &config.relay_url,
+                                    "failed",
+                                    Some(message),
+                                );
+                                terminal_error = Some(anyhow::anyhow!(message));
+                                break;
+                            }
+                            tracing::error!(
+                                thread_sessions_enabled,
+                                "lazy pool initialized after queue lifecycle state; retaining prior conversation scope"
+                            );
+                            thread_sessions_enabled = queue.thread_sessions_enabled();
+                        }
                         pool_ready = true;
                         emit_runtime_lifecycle(
                             observer.as_ref(),
@@ -2696,6 +4456,35 @@ async fn tokio_main() -> Result<()> {
             }
             None => {} // relay/heartbeat/shutdown branches handled inline above
         }
+    }
+
+    // A reset acknowledgement may be inside its bounded HTTP attempt when a
+    // signal arrives. Give that tracked delivery one attempt window to finish
+    // so a normal shutdown does not discard an already-signed `/new` success
+    // message. We deliberately do not begin a fresh retry schedule while
+    // shutting down.
+    schedule_completed_reset_ack(
+        &queue,
+        &pending_reset_confirmations,
+        &ctx.rest_client,
+        &mut reset_ack_tasks,
+        &mut reset_ack_in_flight,
+    );
+    let reset_ack_drain = tokio::time::timeout(Duration::from_secs(6), async {
+        while let Some(result) = reset_ack_tasks.join_next().await {
+            finish_reset_ack_attempt(
+                &mut queue,
+                &mut pending_reset_confirmations,
+                &mut reset_ack_in_flight,
+                Some(&durable_outbox),
+                result,
+            );
+        }
+    })
+    .await;
+    if reset_ack_drain.is_err() {
+        tracing::warn!("reset acknowledgement task did not drain — aborting it");
+        reset_ack_tasks.shutdown().await;
     }
 
     // Drain wake tasks gracefully rather than aborting: an in-flight
@@ -2744,6 +4533,20 @@ async fn tokio_main() -> Result<()> {
                 }
                 maybe_result = rx_ref.recv() => {
                     if let Some(mut pr) = maybe_result {
+                        let lifecycle_scope = lifecycle_notice_scope(&pr);
+                        let lifecycle_notices =
+                            take_current_buzz_session_notices(&mut pr, &queue);
+                        let lifecycle_outcome = enqueue_session_lifecycle_notices(
+                            Some(&lifecycle_notice_outbox),
+                            Some(&ctx.rest_client),
+                            lifecycle_scope,
+                            lifecycle_notices,
+                        );
+                        for acknowledgement in lifecycle_outcome.acknowledgements {
+                            pr.agent
+                                .acp
+                                .queue_buzz_session_event_ack(acknowledgement);
+                        }
                         let idx = pr.agent.index;
                         pr.agent.acp.shutdown().await;
                         tracing::debug!(agent = idx, "reaped checked-out agent on shutdown");
@@ -2761,6 +4564,17 @@ async fn tokio_main() -> Result<()> {
     // Drain any remaining results that arrived after join_set drained but
     // before tasks were aborted.
     while let Ok(mut pr) = pool.result_rx_try_recv() {
+        let lifecycle_scope = lifecycle_notice_scope(&pr);
+        let lifecycle_notices = take_current_buzz_session_notices(&mut pr, &queue);
+        let lifecycle_outcome = enqueue_session_lifecycle_notices(
+            Some(&lifecycle_notice_outbox),
+            Some(&ctx.rest_client),
+            lifecycle_scope,
+            lifecycle_notices,
+        );
+        for acknowledgement in lifecycle_outcome.acknowledgements {
+            pr.agent.acp.queue_buzz_session_event_ack(acknowledgement);
+        }
         let idx = pr.agent.index;
         pr.agent.acp.shutdown().await;
         tracing::debug!(agent = idx, "reaped late-arriving agent on shutdown");
@@ -2814,18 +4628,37 @@ async fn tokio_main() -> Result<()> {
         handle.abort();
     }
 
+    // Compaction/session lifecycle notices are product-visible state, not
+    // cosmetic telemetry. Drain their signed, retrying outbox before tearing
+    // down relay resources so a normal shutdown cannot lose an awareness
+    // message that was already emitted by Pi.
+    lifecycle_notice_outbox.shutdown().await;
+
     // Graceful relay shutdown — sends WebSocket close frame and waits up to 5s
     // for the background task to finish, rather than aborting immediately (#40).
     relay.shutdown().await;
 
     tracing::info!("buzz-acp stopped");
-    Ok(())
+    match terminal_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 #[derive(PartialEq)]
 enum LoopAction {
     Continue,
     Exit,
+}
+
+#[cfg(test)]
+fn test_conversation_key(channel_id: Uuid) -> ConversationKey {
+    ConversationKey {
+        channel_id,
+        root_event_id: format!("channel:{channel_id}"),
+        generation: 0,
+        reset_token: None,
+    }
 }
 
 fn event_mentions_agent(event: &nostr::Event, agent_pubkey_hex: &str) -> bool {
@@ -2840,10 +4673,50 @@ fn is_owner_control_command(
     kind_u32: u32,
     command: &str,
     agent_pubkey_hex: &str,
+    agent_display_name: Option<&str>,
 ) -> bool {
+    let content_matches = if command.starts_with('/') {
+        let known_names = agent_display_name.map_or_else(Vec::new, |name| vec![name]);
+        adapter_leading_slash_command(&event.content, &known_names).as_deref() == Some(command)
+    } else {
+        event.content.trim() == command
+    };
     kind_u32 == KIND_STREAM_MESSAGE
-        && event.content.trim() == command
+        && content_matches
         && event_mentions_agent(event, agent_pubkey_hex)
+}
+
+/// Mirror the adapter's first-line command semantics after Buzz mention
+/// normalization. This closes a policy gap where `/reload\n...` was not an
+/// exact harness match but Pi still executed its first line as `/reload`.
+fn adapter_leading_slash_command(content: &str, known_names: &[&str]) -> Option<String> {
+    queue::extract_slash_command(content, known_names).and_then(|command| {
+        command
+            .split(['\r', '\n'])
+            .next()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+    })
+}
+
+/// Detect every Pi command that can mutate or replace durable session state,
+/// independently of Nostr mention tags. Detection happens before the general
+/// author/filter gates so subscribe-all and no-mention modes cannot smuggle a
+/// bare command into Pi's first text block.
+fn reserved_pi_lifecycle_command(
+    event: &nostr::Event,
+    kind_u32: u32,
+    agent_display_name: Option<&str>,
+) -> Option<&'static str> {
+    if kind_u32 != KIND_STREAM_MESSAGE {
+        return None;
+    }
+    let known_names = agent_display_name.map_or_else(Vec::new, |name| vec![name]);
+    let command = adapter_leading_slash_command(&event.content, &known_names)?;
+    ["/new", "/compact", "/reload"]
+        .into_iter()
+        .find(|reserved| command == *reserved)
 }
 
 // ── signal_in_flight_task ─────────────────────────────────────────────────────
@@ -2876,11 +4749,27 @@ fn mode_gate_signal(
 
 /// Send a control signal to the in-flight task for `channel_id`.
 /// Returns `true` if a signal was sent, `false` if no in-flight task was found.
+#[cfg(test)]
 fn signal_in_flight_task(
     pool: &mut AgentPool,
     channel_id: uuid::Uuid,
     mode: ControlSignal,
 ) -> bool {
+    let matches = pool
+        .task_map()
+        .values()
+        .filter(|meta| meta.channel_id == Some(channel_id))
+        .count();
+    if matches != 1 {
+        if matches > 1 {
+            tracing::warn!(
+                channel = %channel_id,
+                active_conversations = matches,
+                "refusing ambiguous channel-only control signal"
+            );
+        }
+        return false;
+    }
     let entry = pool
         .task_map_mut()
         .values_mut()
@@ -2889,6 +4778,129 @@ fn signal_in_flight_task(
     if let Some(meta) = entry {
         if let Some(tx) = meta.control_tx.take() {
             tracing::info!(channel = %channel_id, ?mode, "control signal sent to in-flight task");
+            let _ = tx.send(mode);
+            return true;
+        }
+    }
+    false
+}
+
+/// Routing outcome for an owner-authenticated desktop control frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ObserverControlResult {
+    Sent,
+    TurnEnding,
+    NoActiveTurn,
+    Ambiguous,
+}
+
+impl ObserverControlResult {
+    fn as_status(self) -> &'static str {
+        match self {
+            Self::Sent => "sent",
+            Self::TurnEnding => "turn_ending",
+            Self::NoActiveTurn => "no_active_turn",
+            Self::Ambiguous => "ambiguous",
+        }
+    }
+}
+
+/// Route a desktop control to one in-flight turn.
+///
+/// `turn_id` must match both the exact turn and its channel. Channel-only relay
+/// controls are rejected before this function so a retained signed frame can
+/// never select a later turn after a process restart.
+fn signal_observer_control(
+    pool: &mut AgentPool,
+    channel_id: Uuid,
+    turn_id: &str,
+    signal: ControlSignal,
+) -> ObserverControlResult {
+    let matching_task_ids: Vec<_> = pool
+        .task_map()
+        .iter()
+        .filter(|(_, meta)| meta.channel_id == Some(channel_id) && meta.turn_id == turn_id)
+        .map(|(task_id, _)| *task_id)
+        .collect();
+
+    let task_id = match matching_task_ids.as_slice() {
+        [] => return ObserverControlResult::NoActiveTurn,
+        [task_id] => *task_id,
+        _ => {
+            tracing::warn!(
+                channel = %channel_id,
+                %turn_id,
+                matches = matching_task_ids.len(),
+                "refusing ambiguous observer control signal"
+            );
+            return ObserverControlResult::Ambiguous;
+        }
+    };
+
+    let Some(meta) = pool.task_map_mut().get_mut(&task_id) else {
+        return ObserverControlResult::NoActiveTurn;
+    };
+    let Some(tx) = meta.control_tx.take() else {
+        return ObserverControlResult::TurnEnding;
+    };
+
+    match tx.send(signal) {
+        Ok(()) => {
+            tracing::info!(
+                channel = %channel_id,
+                turn_id = %meta.turn_id,
+                "observer control signal sent to exact in-flight turn"
+            );
+            ObserverControlResult::Sent
+        }
+        Err(signal) => {
+            tracing::warn!(
+                channel = %channel_id,
+                turn_id = %meta.turn_id,
+                ?signal,
+                "observer control receiver closed before delivery"
+            );
+            ObserverControlResult::TurnEnding
+        }
+    }
+}
+
+/// Broadcast the intentionally channel-wide `!rotate` command to every active
+/// thread. Unlike legacy channel-only desktop controls, this fan-out is
+/// explicit product semantics rather than an ambiguous first-match lookup.
+fn rotate_all_in_flight_channel(pool: &mut AgentPool, channel_id: Uuid) -> usize {
+    let mut sent = 0;
+    for meta in pool
+        .task_map_mut()
+        .values_mut()
+        .filter(|meta| meta.channel_id == Some(channel_id))
+    {
+        if let Some(tx) = meta.control_tx.take() {
+            let _ = tx.send(ControlSignal::Rotate);
+            sent += 1;
+        }
+    }
+    sent
+}
+
+/// Send a control signal to one exact in-flight thread conversation.
+fn signal_in_flight_conversation(
+    pool: &mut AgentPool,
+    conversation_key: &ConversationKey,
+    mode: ControlSignal,
+) -> bool {
+    let entry = pool
+        .task_map_mut()
+        .values_mut()
+        .find(|meta| meta.conversation_key.as_ref() == Some(conversation_key));
+
+    if let Some(meta) = entry {
+        if let Some(tx) = meta.control_tx.take() {
+            tracing::info!(
+                conversation = %conversation_key,
+                ?mode,
+                "control signal sent to in-flight conversation"
+            );
             let _ = tx.send(mode);
             return true;
         }
@@ -2923,11 +4935,12 @@ fn signal_in_flight_task(
 fn try_native_steer(
     pool: &mut AgentPool,
     queue: &mut EventQueue,
-    channel_id: uuid::Uuid,
+    conversation_key: ConversationKey,
     event: nostr::Event,
     prompt_tag: String,
     steer_ack_tx: &mpsc::UnboundedSender<SteerAckEvent>,
 ) -> bool {
+    let channel_id = conversation_key.channel_id;
     // Build the steer body: framing strings come from
     // `queue::native_steer_framing()` (Eva's drift-proof requirement —
     // native and cancel+merge fallback share these so the agent gets the
@@ -2957,14 +4970,15 @@ fn try_native_steer(
         ack_tx,
     };
 
-    match pool.send_steer(channel_id, request) {
+    match pool.send_conversation_steer(&conversation_key, request) {
         Ok(()) => {
             // Withhold the queued event synchronously BEFORE spawning
             // the watcher: this closes the race where `mark_complete`
             // clears `in_flight_channels` and a stray `flush_next` could
             // re-deliver the event via normal dispatch. See
             // `EventQueue::mark_native_steer_pending` docs at queue.rs:606.
-            let withheld = queue.mark_native_steer_pending(channel_id, &event_id_hex);
+            let withheld =
+                queue.mark_conversation_native_steer_pending(&conversation_key, &event_id_hex);
             if !withheld {
                 // Race: the event was already drained out of the queue
                 // before we got here (e.g. a concurrent flush picked it
@@ -2986,6 +5000,7 @@ fn try_native_steer(
                 let ack = ack_rx.await;
                 let _ = ack_tx_clone.send(SteerAckEvent {
                     channel_id,
+                    conversation_key,
                     event_id: event_id_for_watcher,
                     ack,
                 });
@@ -3011,27 +5026,33 @@ fn dispatch_pending(
     queue: &mut EventQueue,
     ctx: &Arc<PromptContext>,
     last_activity: &mut tokio::time::Instant,
-) -> Vec<(Uuid, ThreadTags)> {
+) -> Vec<(ConversationKey, ThreadTags)> {
     let mut dispatched_channels = Vec::new();
+    let mut affinity_blocked = HashSet::new();
     loop {
-        let batch = match queue.flush_next() {
+        let batch = match queue.flush_next_excluding(&affinity_blocked) {
             Some(b) => b,
             None => break,
         };
         let channel_id = batch.channel_id;
+        let conversation_key = batch.conversation_key.clone();
         let typing_scope = batch
             .events
             .last()
             .map(|event| queue::parse_thread_tags(&event.event))
             .unwrap_or_default();
-        let affinity_hit = pool.has_session_for(channel_id);
-        let mut agent = match pool.try_claim(Some(channel_id)) {
+        let affinity_hit = pool.has_session_for_conversation(&conversation_key);
+        let mut agent = match pool.try_claim_conversation(&conversation_key) {
             Some(a) => a,
             None => {
                 let pending = queue.pending_channels();
                 tracing::debug!(pending_channels = pending, "pool_exhausted");
                 queue.requeue_preserve_timestamps(batch);
-                queue.mark_complete(channel_id);
+                queue.mark_conversation_complete(&conversation_key);
+                if pool.any_idle() {
+                    affinity_blocked.insert(conversation_key);
+                    continue;
+                }
                 break;
             }
         };
@@ -3083,13 +5104,14 @@ fn dispatch_pending(
             pool::TaskMeta {
                 agent_index,
                 channel_id: Some(channel_id),
+                conversation_key: Some(conversation_key.clone()),
                 turn_id,
                 recoverable_batch,
                 control_tx: Some(control_tx),
                 steer_tx,
             },
         );
-        dispatched_channels.push((channel_id, typing_scope));
+        dispatched_channels.push((conversation_key, typing_scope));
         *last_activity = tokio::time::Instant::now();
     }
     tracing::debug!(
@@ -3129,6 +5151,96 @@ fn is_auth_error(error: &acp::AcpError) -> bool {
     message.contains("Re-authenticate") || message.contains("API Error: 401")
 }
 
+/// Stable adapter error used when Pi's final provider-payload guard cannot
+/// compact enough to stay under the configured context ceiling.
+const PI_CONTEXT_LIMIT_ERROR_CODE: i64 = -32042;
+/// Pi session transcript/quota exhaustion. This is distinct from the context
+/// window: retrying appends more rollback/control entries and cannot recover.
+const PI_SESSION_STORAGE_LIMIT_ERROR_CODE: i64 = -32044;
+/// Pi has deliberately invalidated the inner runtime after a safety-boundary
+/// failure (for example, a project-resource reload whose old runner was
+/// disposed). The outer ACP process must be replaced; reusing its session ID
+/// can only repeat against the invalid registry proxy.
+const PI_SESSION_INVALIDATED_ERROR_CODE: i64 = -32045;
+/// Disk/outbox repair is an operator prerequisite, not a prompt failure. Keep
+/// the original request crash-replayable in Buzz and retry locally at a calm
+/// fixed cadence without burning the normal poison-batch budget.
+const DURABLE_NOTICE_BLOCKED_RETRY_DELAY: Duration = Duration::from_secs(30);
+
+fn is_pi_context_limit_error(error: &acp::AcpError) -> bool {
+    matches!(
+        error,
+        acp::AcpError::AgentError {
+            code: PI_CONTEXT_LIMIT_ERROR_CODE,
+            ..
+        }
+    )
+}
+
+fn is_pi_session_storage_limit_error(error: &acp::AcpError) -> bool {
+    matches!(
+        error,
+        acp::AcpError::AgentError {
+            code: PI_SESSION_STORAGE_LIMIT_ERROR_CODE,
+            ..
+        }
+    )
+}
+
+fn is_pi_session_invalidated_error(error: &acp::AcpError) -> bool {
+    matches!(
+        error,
+        acp::AcpError::AgentError {
+            code: PI_SESSION_INVALIDATED_ERROR_CODE,
+            ..
+        }
+    )
+}
+
+fn pi_session_storage_limit_notice() -> &'static str {
+    "⚠️ This thread's durable Pi session reached its local storage limit, so I stopped without retrying or changing its context. Use `/new` in this thread to start a fresh session, then resend the request."
+}
+
+fn persist_pi_session_storage_limit_notice(
+    outbox: Option<&LifecycleNoticeOutbox>,
+    rest: Option<&relay::RestClient>,
+    batch: &FlushBatch,
+) -> bool {
+    let (Some(outbox), Some(rest)) = (outbox, rest) else {
+        return false;
+    };
+    let mut thread_tags = batch
+        .events
+        .last()
+        .map(|event| queue::parse_thread_tags(&event.event))
+        .unwrap_or_default();
+    if thread_tags.root_event_id.is_none()
+        && !batch.conversation_key.root_event_id.starts_with("dm:")
+        && nostr::EventId::from_hex(&batch.conversation_key.root_event_id).is_ok()
+    {
+        thread_tags.root_event_id = Some(batch.conversation_key.root_event_id.clone());
+        thread_tags.parent_event_id = Some(batch.conversation_key.root_event_id.clone());
+    }
+    let source_event = batch
+        .events
+        .last()
+        .map(|event| event.event.id.to_hex())
+        .unwrap_or_else(|| batch.conversation_key.stable_id());
+    outbox
+        .enqueue(
+            batch.channel_id,
+            &thread_tags,
+            vec![LifecycleNotice {
+                dedupe_key: Some(format!("pi-storage-limit:{source_event}")),
+                content: pi_session_storage_limit_notice().to_owned(),
+                ack: None,
+            }],
+            rest,
+        )
+        .persisted
+        == 1
+}
+
 /// Spawn a task that posts a user-visible failure notice to the relay.
 ///
 /// Shared by the hard-cap immediate dead-letter path and the retries-exhausted
@@ -3152,6 +5264,683 @@ fn spawn_failure_notice(
     }
 }
 
+fn format_token_count(value: u64) -> String {
+    let digits = value.to_string();
+    let mut formatted = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            formatted.push(',');
+        }
+        formatted.push(digit);
+    }
+    formatted
+}
+
+fn context_limit_summary(limit: u64, effective: u64, threshold: u64) -> String {
+    if limit == effective {
+        format!(
+            "Configured cap {} tokens; automatic compaction threshold {}.",
+            format_token_count(limit),
+            format_token_count(threshold)
+        )
+    } else {
+        format!(
+            "Configured cap {} tokens; this model's effective limit is {}; automatic compaction threshold {}.",
+            format_token_count(limit),
+            format_token_count(effective),
+            format_token_count(threshold)
+        )
+    }
+}
+
+fn safe_notice_model(model: &str) -> Option<String> {
+    let model = model.trim();
+    (!model.is_empty()
+        && model.len() <= 128
+        && model
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "-._/:+".contains(character)))
+    .then(|| model.to_string())
+}
+
+fn should_publish_buzz_session_notice(event: &BuzzSessionEvent) -> bool {
+    match event {
+        // Pi retries this internally. Publishing the transient failure before
+        // the eventual completion would make one successful compaction look
+        // like an error to the user.
+        BuzzSessionEvent::CompactionFailed {
+            will_retry: true, ..
+        } => false,
+        // The harness acknowledges `/new` only after its reset barrier commits.
+        // Repeating Pi's confirmation on the next prompt is noisy and can be
+        // mistaken for a second reset.
+        BuzzSessionEvent::SessionReset { .. } => false,
+        _ => true,
+    }
+}
+
+/// Render a lifecycle notice exclusively from bounded typed fields. Adapter
+/// `message`, `error`, paths, and resource diagnostics are intentionally never
+/// copied into Buzz content.
+fn render_buzz_session_notice(event: &BuzzSessionEvent) -> String {
+    match event {
+        BuzzSessionEvent::CompactionCompleted {
+            reason,
+            before_tokens,
+            after_tokens,
+            limit_tokens,
+            effective_limit_tokens,
+            compaction_threshold_tokens,
+            ..
+        } => {
+            let mode = if matches!(reason, acp::CompactionReason::Manual) {
+                "on request"
+            } else {
+                "automatically"
+            };
+            let change = match (before_tokens, after_tokens) {
+                (Some(before), Some(after)) => format!(
+                    ": {} → ~{} tokens",
+                    format_token_count(*before),
+                    format_token_count(*after)
+                ),
+                (Some(before), None) => {
+                    format!(" from about {} tokens", format_token_count(*before))
+                }
+                _ => String::new(),
+            };
+            format!(
+                "🧠 Pi compacted this thread's context {mode}{change}. It will continue from a summary. {}",
+                context_limit_summary(
+                    *limit_tokens,
+                    *effective_limit_tokens,
+                    *compaction_threshold_tokens,
+                )
+            )
+        }
+        BuzzSessionEvent::CompactionFailed {
+            limit_tokens,
+            effective_limit_tokens,
+            compaction_threshold_tokens,
+            aborted,
+            ..
+        } => {
+            let failure = if *aborted {
+                "Context compaction was cancelled"
+            } else {
+                "Context compaction failed"
+            };
+            format!(
+                "⚠️ {failure}, so this request was stopped before Pi could exceed its context limit. Your thread is preserved; try again or use `/new` for a fresh session. {}",
+                context_limit_summary(
+                    *limit_tokens,
+                    *effective_limit_tokens,
+                    *compaction_threshold_tokens,
+                )
+            )
+        }
+        BuzzSessionEvent::ContextStatus {
+            used_tokens,
+            limit_tokens,
+            effective_limit_tokens,
+            compaction_threshold_tokens,
+            auto_compaction,
+            compacting,
+            model,
+            ..
+        } => {
+            let usage = match used_tokens {
+                Some(used) => {
+                    let percent = (*used as f64 / *effective_limit_tokens as f64) * 100.0;
+                    format!(
+                        "{} / {} tokens ({percent:.1}%)",
+                        format_token_count(*used),
+                        format_token_count(*effective_limit_tokens)
+                    )
+                }
+                None => format!(
+                    "recalculating after compaction (effective limit {})",
+                    format_token_count(*effective_limit_tokens)
+                ),
+            };
+            let state = if *compacting {
+                " Compaction is running now."
+            } else if *auto_compaction {
+                " Auto-compaction is enabled."
+            } else {
+                " Auto-compaction is disabled."
+            };
+            let model = model
+                .as_deref()
+                .and_then(safe_notice_model)
+                .map(|model| format!(" Model: `{model}`."))
+                .unwrap_or_default();
+            format!(
+                "🧭 Pi context: {usage}. Automatic compaction threshold {}.{}{model} Configured cap {} tokens.",
+                format_token_count(*compaction_threshold_tokens),
+                state,
+                format_token_count(*limit_tokens),
+            )
+        }
+        BuzzSessionEvent::SessionReset {
+            limit_tokens,
+            effective_limit_tokens,
+            compaction_threshold_tokens,
+            ..
+        } => format!(
+            "✅ Pi confirmed a fresh persistent session for this Buzz thread. Its previous conversation context will not be reused. {}",
+            context_limit_summary(
+                *limit_tokens,
+                *effective_limit_tokens,
+                *compaction_threshold_tokens,
+            )
+        ),
+        BuzzSessionEvent::ExtensionsReloaded {
+            extensions,
+            skills,
+            prompts,
+            context_files,
+            errors,
+            project_trusted,
+            ..
+        } => {
+            let trust = if *project_trusted {
+                "Trusted project-local Pi resources are enabled."
+            } else {
+                "Untrusted project-local Pi resources stayed disabled."
+            };
+            let diagnostics = if errors.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " {} resource diagnostic(s) were reported; see the agent logs for safe details.",
+                    errors.len()
+                )
+            };
+            format!(
+                "🧩 Reloaded Pi resources: {extensions} extension(s), {skills} skill(s), {prompts} prompt template(s), and {context_files} context file(s). {trust}{diagnostics}"
+            )
+        }
+    }
+}
+
+fn lifecycle_notice_scope(result: &PromptResult) -> Option<(Uuid, ThreadTags)> {
+    let PromptSource::Conversation(key) = &result.source else {
+        return None;
+    };
+    let mut tags = result
+        .batch
+        .as_ref()
+        .and_then(|batch| batch.events.last())
+        .map(|event| queue::parse_thread_tags(&event.event))
+        .unwrap_or_default();
+    if tags.root_event_id.is_none()
+        && !key.root_event_id.starts_with("dm:")
+        && nostr::EventId::from_hex(&key.root_event_id).is_ok()
+    {
+        tags.root_event_id = Some(key.root_event_id.clone());
+        tags.parent_event_id = Some(key.root_event_id.clone());
+    }
+    Some((key.channel_id, tags))
+}
+
+/// A rendered lifecycle transition plus its adapter-stable identity. Pi emits
+/// a UUID for every compaction attempt; retaining it here lets the delivery
+/// outbox collapse retransmissions without trusting adapter-provided prose.
+#[derive(Debug)]
+struct LifecycleNotice {
+    dedupe_key: Option<String>,
+    content: String,
+    ack: Option<acp::BuzzSessionEventAck>,
+}
+
+#[derive(Default)]
+struct LifecycleEnqueueOutcome {
+    acknowledgements: Vec<acp::BuzzSessionEventAck>,
+    persisted: usize,
+    failed: usize,
+}
+
+fn lifecycle_persistence_boundary_error(failed: usize) -> Option<acp::AcpError> {
+    (failed > 0).then(|| {
+        acp::AcpError::Protocol(format!(
+            "failed to durably persist {failed} adapter lifecycle notice(s)"
+        ))
+    })
+}
+
+type LifecycleNoticeEnvelope = DurableLifecycleEnvelope;
+
+#[derive(Debug, Default)]
+struct LifecycleNoticeDedupe {
+    pending: HashSet<String>,
+    delivered: HashSet<String>,
+    delivered_order: VecDeque<String>,
+}
+
+impl LifecycleNoticeDedupe {
+    fn reserve(&mut self, key: Option<&str>) -> bool {
+        let Some(key) = key else {
+            return true;
+        };
+        if self.pending.contains(key) || self.delivered.contains(key) {
+            return false;
+        }
+        self.pending.insert(key.to_owned());
+        true
+    }
+
+    fn finish(&mut self, key: Option<&str>, delivered: bool) {
+        let Some(key) = key else {
+            return;
+        };
+        self.pending.remove(key);
+        if !delivered || !self.delivered.insert(key.to_owned()) {
+            return;
+        }
+        self.delivered_order.push_back(key.to_owned());
+        while self.delivered_order.len() > LIFECYCLE_NOTICE_DEDUPE_CAPACITY {
+            if let Some(expired) = self.delivered_order.pop_front() {
+                self.delivered.remove(&expired);
+            }
+        }
+    }
+}
+
+const LIFECYCLE_NOTICE_DEDUPE_CAPACITY: usize = 1_024;
+const LIFECYCLE_NOTICE_SHUTDOWN_GRACE: Duration = Duration::from_secs(60);
+/// Bound relay pressure while allowing unrelated threads to make progress
+/// around a permanently rejected lifecycle notice.
+const LIFECYCLE_NOTICE_MAX_IN_FLIGHT_ATTEMPTS: usize = 8;
+const LIFECYCLE_NOTICE_RETRY_DELAYS: [Duration; 6] = [
+    Duration::ZERO,
+    Duration::from_millis(250),
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(5),
+    Duration::from_secs(10),
+];
+
+/// Bounded, tracked delivery for user-visible Pi lifecycle messages.
+///
+/// Events are signed and persisted before entering the worker queue, so every
+/// retry has the same Nostr event ID. Pending events and delivered compaction
+/// identities survive a hard process death. The worker retries until the relay
+/// accepts the event *and* that completion is durably checkpointed.
+struct LifecycleNoticeOutbox {
+    tx: Option<mpsc::UnboundedSender<LifecycleNoticeEnvelope>>,
+    worker: Option<tokio::task::JoinHandle<()>>,
+    dedupe: Arc<Mutex<LifecycleNoticeDedupe>>,
+    durable: DurableOutbox,
+}
+
+impl LifecycleNoticeOutbox {
+    fn spawn(rest: relay::RestClient, durable: DurableOutbox) -> Result<Self> {
+        let (tx, mut rx) = mpsc::unbounded_channel::<LifecycleNoticeEnvelope>();
+        let restored = durable.pending_lifecycle()?;
+        let mut initial_dedupe = LifecycleNoticeDedupe::default();
+        for envelope in &restored {
+            if let Some(key) = envelope.dedupe_key.as_ref() {
+                initial_dedupe.pending.insert(key.clone());
+            }
+        }
+        for key in durable.delivered_keys()? {
+            initial_dedupe.delivered.insert(key.clone());
+            initial_dedupe.delivered_order.push_back(key);
+        }
+        let dedupe = Arc::new(Mutex::new(initial_dedupe));
+        let worker_dedupe = Arc::clone(&dedupe);
+        let worker_durable = durable.clone();
+        let worker = tokio::spawn(async move {
+            let attempt_slots = Arc::new(Semaphore::new(LIFECYCLE_NOTICE_MAX_IN_FLIGHT_ATTEMPTS));
+            let mut deliveries = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    envelope = rx.recv() => {
+                        let Some(envelope) = envelope else {
+                            break;
+                        };
+                        let delivery_rest = rest.clone();
+                        let delivery_durable = worker_durable.clone();
+                        let delivery_dedupe = Arc::clone(&worker_dedupe);
+                        let delivery_slots = Arc::clone(&attempt_slots);
+                        deliveries.spawn(async move {
+                            let delivered = submit_lifecycle_notice_until_persisted(
+                                &delivery_rest,
+                                &delivery_durable,
+                                &envelope,
+                                &delivery_slots,
+                            )
+                            .await;
+                            if let Ok(mut state) = delivery_dedupe.lock() {
+                                state.finish(envelope.dedupe_key.as_deref(), delivered);
+                            } else {
+                                tracing::error!(
+                                    event_id = %envelope.event.id,
+                                    "lifecycle notice dedupe state was poisoned"
+                                );
+                            }
+                        });
+                    }
+                    completed = deliveries.join_next(), if !deliveries.is_empty() => {
+                        if let Some(Err(error)) = completed {
+                            tracing::error!(%error, "lifecycle notice delivery task failed");
+                        }
+                    }
+                }
+            }
+
+            // Normal shutdown keeps its existing bounded grace period: accepted
+            // deliveries drain, while a permanently rejected envelope is
+            // aborted with this worker and remains in the durable snapshot for
+            // exact-event replay on the next start.
+            while let Some(completed) = deliveries.join_next().await {
+                if let Err(error) = completed {
+                    tracing::error!(%error, "lifecycle notice delivery task failed while draining");
+                }
+            }
+        });
+        for envelope in restored {
+            tx.send(envelope).map_err(|error| {
+                anyhow::anyhow!("could not restore durable lifecycle notice: {error}")
+            })?;
+        }
+        Ok(Self {
+            tx: Some(tx),
+            worker: Some(worker),
+            dedupe,
+            durable,
+        })
+    }
+
+    fn enqueue(
+        &self,
+        channel_id: Uuid,
+        thread_tags: &ThreadTags,
+        notices: Vec<LifecycleNotice>,
+        rest: &relay::RestClient,
+    ) -> LifecycleEnqueueOutcome {
+        let mut outcome = LifecycleEnqueueOutcome::default();
+        let Some(tx) = self.tx.as_ref() else {
+            tracing::warn!("lifecycle notice outbox is already closed");
+            outcome.failed = notices.len();
+            return outcome;
+        };
+        for notice in notices {
+            let event = match pool::build_notice_event(
+                rest,
+                channel_id,
+                thread_tags,
+                &notice.content,
+            ) {
+                Ok(event) => event,
+                Err(error) => {
+                    tracing::error!(channel = %channel_id, %error, "could not construct lifecycle notice");
+                    outcome.failed += 1;
+                    continue;
+                }
+            };
+            let dedupe_key = notice.dedupe_key.map(|key| {
+                let thread_scope = thread_tags
+                    .root_event_id
+                    .as_deref()
+                    .unwrap_or("channel-root");
+                format!("{channel_id}:{thread_scope}:{key}")
+            });
+            let reserved = match self.dedupe.lock() {
+                Ok(mut state) => Some(state.reserve(dedupe_key.as_deref())),
+                Err(_) => {
+                    tracing::error!(
+                        event_id = %event.id,
+                        "lifecycle notice dedupe state was poisoned"
+                    );
+                    None
+                }
+            };
+            let Some(reserved) = reserved else {
+                // A poisoned in-memory dedupe index is not evidence of an
+                // already-persisted duplicate. Do not ACK the adapter or claim
+                // the user-visible notice is safe; its durable record remains
+                // available for retransmission after harness restart.
+                outcome.failed += 1;
+                continue;
+            };
+            if !reserved {
+                tracing::debug!(
+                    event_id = %event.id,
+                    lifecycle_key = dedupe_key.as_deref(),
+                    "suppressing duplicate lifecycle notice"
+                );
+                outcome.persisted += 1;
+                outcome.acknowledgements.extend(notice.ack);
+                continue;
+            }
+
+            let envelope = LifecycleNoticeEnvelope {
+                dedupe_key: dedupe_key.clone(),
+                event,
+            };
+            match self.durable.enqueue_lifecycle(envelope.clone()) {
+                Ok(true) => {}
+                Ok(false) => {
+                    if let Ok(mut state) = self.dedupe.lock() {
+                        state.finish(dedupe_key.as_deref(), true);
+                    }
+                    outcome.persisted += 1;
+                    outcome.acknowledgements.extend(notice.ack);
+                    continue;
+                }
+                Err(error) => {
+                    if let Ok(mut state) = self.dedupe.lock() {
+                        state.finish(dedupe_key.as_deref(), false);
+                    }
+                    tracing::error!(
+                        channel = %channel_id,
+                        lifecycle_key = dedupe_key.as_deref(),
+                        %error,
+                        "could not durably enqueue lifecycle notice"
+                    );
+                    outcome.failed += 1;
+                    continue;
+                }
+            }
+            if let Err(error) = tx.send(envelope) {
+                tracing::error!(
+                    channel = %channel_id,
+                    lifecycle_key = dedupe_key.as_deref(),
+                    %error,
+                    "lifecycle notice outbox worker is closed"
+                );
+            }
+            // Durability, not worker queue admission, is the ACK boundary. A
+            // closed worker leaves this exact signed event for startup replay.
+            outcome.persisted += 1;
+            outcome.acknowledgements.extend(notice.ack);
+        }
+        outcome
+    }
+
+    async fn shutdown(&mut self) {
+        self.tx.take();
+        let Some(mut worker) = self.worker.take() else {
+            return;
+        };
+        match tokio::time::timeout(LIFECYCLE_NOTICE_SHUTDOWN_GRACE, &mut worker).await {
+            Ok(Ok(())) => tracing::debug!("lifecycle notice outbox drained"),
+            Ok(Err(error)) => tracing::warn!(%error, "lifecycle notice outbox worker failed"),
+            Err(_) => {
+                tracing::warn!("lifecycle notice outbox did not drain within shutdown grace");
+                worker.abort();
+                let _ = worker.await;
+            }
+        }
+    }
+}
+
+async fn submit_lifecycle_notice_until_persisted(
+    rest: &relay::RestClient,
+    durable: &DurableOutbox,
+    envelope: &LifecycleNoticeEnvelope,
+    attempt_slots: &Semaphore,
+) -> bool {
+    let event = &envelope.event;
+    let mut attempt = 0usize;
+    loop {
+        let delay = LIFECYCLE_NOTICE_RETRY_DELAYS
+            .get(attempt)
+            .copied()
+            .unwrap_or(Duration::from_secs(30));
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+        let attempt_permit = match attempt_slots.acquire().await {
+            Ok(permit) => permit,
+            Err(_) => return false,
+        };
+        let accepted = pool::submit_notice_event(rest, event).await;
+        drop(attempt_permit);
+        if accepted {
+            match durable.mark_lifecycle_delivered(&event.id.to_hex()) {
+                Ok(true) => return true,
+                Ok(false) => {
+                    // Absence is success only when the same stable key is
+                    // durably recorded as delivered. Otherwise we cannot
+                    // distinguish a logic/corruption bug from completion and
+                    // must keep retrying the exact accepted event ID.
+                    let durably_delivered = envelope.dedupe_key.as_ref().is_some_and(|key| {
+                        durable
+                            .delivered_keys()
+                            .is_ok_and(|keys| keys.iter().any(|item| item == key))
+                    });
+                    if durably_delivered {
+                        return true;
+                    }
+                    tracing::error!(
+                        event_id = %event.id,
+                        "accepted lifecycle notice was absent without a durable delivered receipt; retrying"
+                    );
+                }
+                Err(error) => {
+                    tracing::error!(
+                        event_id = %event.id,
+                        %error,
+                        "relay accepted lifecycle notice but durable completion failed; retrying the same event ID"
+                    );
+                }
+            }
+        }
+        attempt = attempt.saturating_add(1);
+    }
+}
+
+/// Drain lifecycle events at the terminal boundary of one exact turn. The ACP
+/// session envelope and conversation generation must both still match.
+fn take_current_buzz_session_notices(
+    result: &mut PromptResult,
+    queue: &EventQueue,
+) -> Vec<LifecycleNotice> {
+    let expected_session_id = result
+        .agent
+        .acp
+        .current_turn_session_id()
+        .map(ToOwned::to_owned);
+    let expected_pi_session_id = expected_session_id
+        .as_deref()
+        .and_then(|session_id| result.agent.acp.pi_session_id_for(session_id))
+        .map(ToOwned::to_owned);
+    let events = result.agent.acp.take_buzz_session_events();
+    if events.is_empty() {
+        return Vec::new();
+    }
+    let (is_current_generation, expected_conversation_id) = match &result.source {
+        PromptSource::Conversation(key) => {
+            (queue.is_current_conversation(key), Some(key.stable_id()))
+        }
+        PromptSource::Channel(_) | PromptSource::Heartbeat => (false, None),
+    };
+    let Some(expected_session_id) = expected_session_id.filter(|_| is_current_generation) else {
+        tracing::debug!(
+            count = events.len(),
+            "discarding lifecycle events without a current conversation session"
+        );
+        return Vec::new();
+    };
+
+    let Some(expected_conversation_id) = expected_conversation_id else {
+        return Vec::new();
+    };
+    let mut notices = Vec::new();
+    for notification in events {
+        if notification.session_id != expected_session_id {
+            tracing::debug!(
+                event_kind = notification.event.kind(),
+                "discarding lifecycle event from a stale ACP session"
+            );
+            continue;
+        }
+        if notification.conversation_id != expected_conversation_id {
+            tracing::warn!(
+                event_id = %notification.event_id,
+                "discarding lifecycle event whose durable conversation identity does not match the active turn"
+            );
+            continue;
+        }
+        let ack = acp::BuzzSessionEventAck {
+            conversation_id: notification.conversation_id,
+            event_id: notification.event_id,
+        };
+        if expected_pi_session_id.as_deref() != Some(notification.event.pi_session_id()) {
+            tracing::warn!(
+                event_id = %ack.event_id,
+                "suppressing stale lifecycle event from a superseded Pi session"
+            );
+            // The outer ACP session and durable conversation are current, so
+            // the mismatched inner Pi identity is definitively stale. ACKing
+            // deletes it instead of replaying it forever into this generation.
+            result.agent.acp.queue_buzz_session_event_ack(ack);
+            continue;
+        }
+        if !should_publish_buzz_session_notice(&notification.event) {
+            tracing::debug!(
+                event_kind = notification.event.kind(),
+                "suppressing non-terminal compaction failure while Pi retries"
+            );
+            result.agent.acp.queue_buzz_session_event_ack(ack);
+            continue;
+        }
+        notices.push(LifecycleNotice {
+            dedupe_key: Some(format!("adapter-event:{}", ack.event_id)),
+            content: render_buzz_session_notice(&notification.event),
+            ack: Some(ack),
+        });
+    }
+    notices
+}
+
+fn enqueue_session_lifecycle_notices(
+    outbox: Option<&LifecycleNoticeOutbox>,
+    rest_client: Option<&relay::RestClient>,
+    scope: Option<(Uuid, ThreadTags)>,
+    notices: Vec<LifecycleNotice>,
+) -> LifecycleEnqueueOutcome {
+    if notices.is_empty() {
+        return LifecycleEnqueueOutcome::default();
+    }
+    let notice_count = notices.len();
+    let (Some(outbox), Some(rest), Some((channel_id, thread_tags))) = (outbox, rest_client, scope)
+    else {
+        tracing::error!(
+            notice_count,
+            "durable lifecycle notices had no delivery scope or outbox"
+        );
+        return LifecycleEnqueueOutcome {
+            failed: notice_count,
+            ..LifecycleEnqueueOutcome::default()
+        };
+    };
+    outbox.enqueue(channel_id, &thread_tags, notices, rest)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_prompt_result(
     pool: &mut AgentPool,
@@ -3164,6 +5953,7 @@ fn handle_prompt_result(
     respawn_tx: &mpsc::Sender<RespawnResult>,
     respawn_tasks: &mut tokio::task::JoinSet<()>,
     observer: Option<observer::ObserverHandle>,
+    lifecycle_notice_outbox: Option<&LifecycleNoticeOutbox>,
     rest_client: Option<&relay::RestClient>,
 ) -> LoopAction {
     let before = pool.task_map().len();
@@ -3171,6 +5961,33 @@ fn handle_prompt_result(
     pool.task_map_mut()
         .retain(|_, meta| meta.agent_index != agent_index);
     debug_assert_eq!(before, pool.task_map().len() + 1);
+
+    // Drain before any outcome arm moves or respawns the agent. The scope is
+    // captured while the original batch is still present, including successful
+    // turns whose batch is consumed below.
+    let lifecycle_scope = lifecycle_notice_scope(&result);
+    let lifecycle_notices = take_current_buzz_session_notices(&mut result, queue);
+    let lifecycle_outcome = enqueue_session_lifecycle_notices(
+        lifecycle_notice_outbox,
+        rest_client,
+        lifecycle_scope,
+        lifecycle_notices,
+    );
+    for acknowledgement in lifecycle_outcome.acknowledgements {
+        result
+            .agent
+            .acp
+            .queue_buzz_session_event_ack(acknowledgement);
+    }
+    if let Some(error) = lifecycle_persistence_boundary_error(lifecycle_outcome.failed) {
+        // The Pi adapter retains every durable lifecycle record until it gets
+        // an explicit ACK. Continuing to reuse this ACP process after draining
+        // a record that Buzz could not persist would suppress the adapter's
+        // replay behind this client's in-memory seen-ID set. Treat the boundary
+        // as a transport failure: the child is replaced and replays the exact
+        // event ID from its own durable outbox on startup.
+        result.outcome = PromptOutcome::Error(error);
+    }
 
     // The hard-timeout death_message (below) must describe the batch's
     // *actual* fate, not just the `recently_active` eligibility flag — a
@@ -3187,9 +6004,15 @@ fn handle_prompt_result(
     // every retry starts at attempt 1 — defeating exponential backoff and
     // dead-letter protection.
     if let Some(batch) = result.batch.take() {
+        if !queue.is_current_conversation(&batch.conversation_key) {
+            tracing::info!(
+                conversation = %batch.conversation_key,
+                events = batch.events.len(),
+                "discarding late batch from superseded /new generation"
+            );
         // Don't requeue batches for channels the agent was removed from —
         // those events are stale and should be silently dropped.
-        if !removed_channels.contains(&batch.channel_id) {
+        } else if !removed_channels.contains(&batch.channel_id) {
             if matches!(
                 result.outcome,
                 PromptOutcome::Cancelled | PromptOutcome::CancelDrainTimeout(_)
@@ -3249,6 +6072,36 @@ fn handle_prompt_result(
                 } else {
                     hard_timeout_fate_suffix = Some(" — requeued for retry (recently active)");
                 }
+            } else if matches!(&result.outcome, PromptOutcome::Error(e) if is_pi_context_limit_error(e))
+            {
+                // Pi already emitted one typed, safely-rendered lifecycle
+                // notice for this failure. Retrying would append duplicate
+                // error turns to its durable context and publish duplicate
+                // notices, while the same oversized provider payload remains
+                // deterministic. Preserve the session and dead-letter once.
+                tracing::warn!(
+                    channel_id = %batch.channel_id,
+                    events = batch.events.len(),
+                    "dead-lettering batch immediately — Pi context ceiling could not be satisfied"
+                );
+            } else if matches!(&result.outcome, PromptOutcome::Error(e) if is_pi_session_storage_limit_error(e))
+            {
+                tracing::warn!(
+                    channel_id = %batch.channel_id,
+                    events = batch.events.len(),
+                    "dead-lettering batch immediately — Pi durable session storage is exhausted"
+                );
+                if !persist_pi_session_storage_limit_notice(
+                    lifecycle_notice_outbox,
+                    rest_client,
+                    &batch,
+                ) {
+                    tracing::error!(
+                        channel_id = %batch.channel_id,
+                        "could not persist the storage-limit recovery notice; retaining the user batch"
+                    );
+                    queue.requeue_blocked(batch, DURABLE_NOTICE_BLOCKED_RETRY_DELAY);
+                }
             } else if matches!(&result.outcome, PromptOutcome::Error(e) if is_auth_error(e)) {
                 // Auth errors are non-retryable: the token won't self-repair
                 // between retries, so requeueing only wastes attempt slots and
@@ -3290,6 +6143,7 @@ fn handle_prompt_result(
     }
 
     match &result.source {
+        PromptSource::Conversation(key) => queue.mark_conversation_complete(key),
         PromptSource::Channel(ch) => queue.mark_complete(*ch),
         PromptSource::Heartbeat => *heartbeat_in_flight = false,
     }
@@ -3326,6 +6180,7 @@ fn handle_prompt_result(
     let harness_pid = std::process::id();
 
     let channel_id = match &result.source {
+        PromptSource::Conversation(key) => Some(key.channel_id),
         PromptSource::Channel(ch) => Some(*ch),
         PromptSource::Heartbeat => None,
     };
@@ -3472,7 +6327,7 @@ fn handle_prompt_result(
                     | acp::AcpError::WriteTimeout(_)
                     | acp::AcpError::Timeout(_)
                     | acp::AcpError::Protocol(_)
-            );
+            ) || is_pi_session_invalidated_error(e);
             let error_code = match &e {
                 acp::AcpError::AgentError { code, .. } => Some(*code),
                 _ => None,
@@ -3528,7 +6383,7 @@ fn recover_panicked_agent(
     join_error: tokio::task::JoinError,
     heartbeat_in_flight: &mut bool,
     removed_channels: &HashSet<Uuid>,
-    typing_channels: &mut HashMap<Uuid, ThreadTags>,
+    typing_channels: &mut HashMap<ConversationKey, ThreadTags>,
     crash_history: &mut [SlotCircuit],
     respawn_tx: &mpsc::Sender<RespawnResult>,
     respawn_tasks: &mut tokio::task::JoinSet<()>,
@@ -3544,7 +6399,12 @@ fn recover_panicked_agent(
     // Requeue BEFORE mark_complete (same rationale as handle_prompt_result).
     if let Some(batch) = meta.recoverable_batch {
         if let Some(ch) = meta.channel_id {
-            if !removed_channels.contains(&ch) {
+            if !queue.is_current_conversation(&batch.conversation_key) {
+                tracing::info!(
+                    conversation = %batch.conversation_key,
+                    "discarding panicked batch from superseded /new generation"
+                );
+            } else if !removed_channels.contains(&ch) {
                 // Dead-letter on exhaustion is logged inside requeue(); a
                 // panic path has no outcome to report, so no notice here.
                 let _ = queue.requeue(batch);
@@ -3558,10 +6418,14 @@ fn recover_panicked_agent(
         }
     }
 
-    if let Some(ch) = meta.channel_id {
+    if let Some(key) = meta.conversation_key.as_ref() {
+        queue.mark_conversation_complete(key);
+        typing_channels.remove(key);
+        tracing::warn!("cleared wedged in-flight conversation {key} from panicked agent {i}");
+    } else if let Some(ch) = meta.channel_id {
         queue.mark_complete(ch);
-        typing_channels.remove(&ch);
-        tracing::warn!("cleared wedged in-flight channel {ch} from panicked agent {i}");
+        typing_channels.retain(|key, _| key.channel_id != ch);
+        tracing::warn!("cleared wedged legacy in-flight channel {ch} from panicked agent {i}");
     } else {
         *heartbeat_in_flight = false;
         tracing::warn!("cleared wedged heartbeat_in_flight from panicked agent {i}");
@@ -3626,7 +6490,7 @@ fn drain_ready_join_results(
     config: &Config,
     heartbeat_in_flight: &mut bool,
     removed_channels: &HashSet<Uuid>,
-    typing_channels: &mut HashMap<Uuid, ThreadTags>,
+    typing_channels: &mut HashMap<ConversationKey, ThreadTags>,
     crash_history: &mut [SlotCircuit],
     respawn_tx: &mpsc::Sender<RespawnResult>,
     respawn_tasks: &mut tokio::task::JoinSet<()>,
@@ -3697,6 +6561,7 @@ fn dispatch_heartbeat(
         pool::TaskMeta {
             agent_index,
             channel_id: None,
+            conversation_key: None,
             turn_id,
             recoverable_batch: None,
             control_tx: None,
@@ -3938,6 +6803,7 @@ async fn initialize_agent_pool(
                             model_capabilities: None,
                             desired_model: startup.model.clone(),
                             model_overridden: false,
+                            pending_model_switch: None,
                             agent_name,
                             goose_system_prompt_supported: None,
                             protocol_version,
@@ -4367,6 +7233,446 @@ mod heartbeat_base_prompt_tests {
 }
 
 #[cfg(test)]
+mod buzz_session_notice_tests {
+    use super::*;
+
+    #[test]
+    fn lifecycle_persistence_failure_poison_is_transport_fatal() {
+        let error = lifecycle_persistence_boundary_error(1)
+            .expect("one unpersisted durable notice must poison the live ACP process");
+        assert!(matches!(error, acp::AcpError::Protocol(_)));
+        assert!(lifecycle_persistence_boundary_error(0).is_none());
+    }
+
+    #[test]
+    fn lifecycle_notice_dedupe_covers_pending_and_delivered_compactions() {
+        let mut state = LifecycleNoticeDedupe::default();
+        assert!(state.reserve(Some("compaction:one")));
+        assert!(!state.reserve(Some("compaction:one")));
+        state.finish(Some("compaction:one"), true);
+        assert!(!state.reserve(Some("compaction:one")));
+
+        assert!(state.reserve(Some("compaction:retryable")));
+        state.finish(Some("compaction:retryable"), false);
+        assert!(
+            state.reserve(Some("compaction:retryable")),
+            "a notice that exhausted delivery must remain retryable if Pi retransmits it"
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_notice_outbox_dedupes_and_drains_on_shutdown() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test HTTP server");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(AtomicUsize::new(0));
+        let server_requests = Arc::clone(&requests);
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut request = vec![0; 16_384];
+                let _ = socket.read(&mut request).await;
+                server_requests.fetch_add(1, Ordering::SeqCst);
+                let body = r#"{"event_id":"accepted","accepted":true,"message":"ok"}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        let keys = nostr::Keys::generate();
+        let rest = relay::RestClient {
+            http: reqwest::Client::new(),
+            base_url,
+            keys: keys.clone(),
+            auth_tag_json: None,
+        };
+        let state_dir = tempfile::tempdir().expect("outbox tempdir");
+        let durable = DurableOutbox::open(state_dir.path(), &keys.public_key().to_hex())
+            .expect("open durable outbox");
+        let mut outbox =
+            LifecycleNoticeOutbox::spawn(rest.clone(), durable).expect("spawn lifecycle outbox");
+        let channel_id = Uuid::new_v4();
+        let notice = || LifecycleNotice {
+            dedupe_key: Some("compaction:stable-id".to_owned()),
+            content: "🧹 Context compacted safely.".to_owned(),
+            ack: Some(acp::BuzzSessionEventAck {
+                conversation_id: "buzz:test:conversation".to_owned(),
+                event_id: Uuid::new_v4().to_string(),
+            }),
+        };
+
+        outbox.enqueue(channel_id, &ThreadTags::default(), vec![notice()], &rest);
+        outbox.enqueue(channel_id, &ThreadTags::default(), vec![notice()], &rest);
+        outbox.enqueue(
+            Uuid::new_v4(),
+            &ThreadTags::default(),
+            vec![notice()],
+            &rest,
+        );
+        outbox.shutdown().await;
+
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            2,
+            "one thread must dedupe its compaction ID without suppressing another thread"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn rejected_lifecycle_notice_does_not_block_another_thread() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test HTTP server");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let blocked_event_id = Arc::new(Mutex::new(None::<String>));
+        let server_blocked_event_id = Arc::clone(&blocked_event_id);
+        let accepted_requests = Arc::new(AtomicUsize::new(0));
+        let server_accepted_requests = Arc::clone(&accepted_requests);
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 4_096];
+                while let Ok(read) = socket.read(&mut buffer).await {
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                    let Some(header_end) = request.windows(4).position(|item| item == b"\r\n\r\n")
+                    else {
+                        continue;
+                    };
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= header_end + 4 + content_length {
+                        break;
+                    }
+                }
+
+                let blocked = loop {
+                    if let Ok(guard) = server_blocked_event_id.lock() {
+                        if let Some(value) = guard.clone() {
+                            break value;
+                        }
+                    }
+                    tokio::task::yield_now().await;
+                };
+                let is_blocked = String::from_utf8_lossy(&request).contains(&blocked);
+                if !is_blocked {
+                    server_accepted_requests.fetch_add(1, Ordering::SeqCst);
+                }
+                let body = format!(
+                    r#"{{"event_id":"fixture","accepted":{},"message":"fixture"}}"#,
+                    !is_blocked
+                );
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+
+        let keys = nostr::Keys::generate();
+        let rest = relay::RestClient {
+            http: reqwest::Client::new(),
+            base_url,
+            keys: keys.clone(),
+            auth_tag_json: None,
+        };
+        let state_dir = tempfile::tempdir().expect("outbox tempdir");
+        let durable = DurableOutbox::open(state_dir.path(), &keys.public_key().to_hex())
+            .expect("open durable outbox");
+        let mut outbox = LifecycleNoticeOutbox::spawn(rest.clone(), durable.clone())
+            .expect("spawn lifecycle outbox");
+        let blocked_channel = Uuid::new_v4();
+        let healthy_channel = Uuid::new_v4();
+        let notice = |key: &str, content: &str| LifecycleNotice {
+            dedupe_key: Some(key.to_owned()),
+            content: content.to_owned(),
+            ack: None,
+        };
+
+        let blocked_outcome = outbox.enqueue(
+            blocked_channel,
+            &ThreadTags::default(),
+            vec![notice("blocked", "blocked lifecycle notice")],
+            &rest,
+        );
+        assert_eq!(blocked_outcome.persisted, 1);
+        let pending = durable
+            .pending_lifecycle()
+            .expect("read blocked durable lifecycle event");
+        assert_eq!(pending.len(), 1);
+        let rejected_event_id = pending[0].event.id.to_hex();
+        *blocked_event_id.lock().expect("set blocked event id") = Some(rejected_event_id.clone());
+
+        let healthy_outcome = outbox.enqueue(
+            healthy_channel,
+            &ThreadTags::default(),
+            vec![notice("healthy", "healthy lifecycle notice")],
+            &rest,
+        );
+        assert_eq!(healthy_outcome.persisted, 1);
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let pending = durable
+                    .pending_lifecycle()
+                    .expect("read lifecycle delivery progress");
+                if accepted_requests.load(Ordering::SeqCst) >= 1
+                    && pending.len() == 1
+                    && pending[0].event.id.to_hex() == rejected_event_id
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("healthy lifecycle notice was head-of-line blocked");
+
+        let healthy_key = format!("{healthy_channel}:channel-root:healthy");
+        assert!(
+            durable
+                .delivered_keys()
+                .expect("read durable delivery receipts")
+                .contains(&healthy_key),
+            "healthy notice must be durably retired while the rejected notice remains pending"
+        );
+
+        outbox.tx.take();
+        if let Some(worker) = outbox.worker.take() {
+            worker.abort();
+            let _ = worker.await;
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn poisoned_lifecycle_dedupe_never_acks_without_durable_persistence() {
+        let keys = nostr::Keys::generate();
+        let rest = relay::RestClient {
+            http: reqwest::Client::new(),
+            base_url: "http://127.0.0.1:9".to_owned(),
+            keys: keys.clone(),
+            auth_tag_json: None,
+        };
+        let state_dir = tempfile::tempdir().expect("outbox tempdir");
+        let durable = DurableOutbox::open(state_dir.path(), &keys.public_key().to_hex())
+            .expect("open durable outbox");
+        let mut outbox =
+            LifecycleNoticeOutbox::spawn(rest.clone(), durable.clone()).expect("spawn outbox");
+        let poisoned = Arc::clone(&outbox.dedupe);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = poisoned.lock().expect("lock before poison");
+            panic!("intentional lifecycle dedupe poison");
+        }));
+
+        let ack = acp::BuzzSessionEventAck {
+            conversation_id: "buzz:test:poison".to_owned(),
+            event_id: Uuid::new_v4().to_string(),
+        };
+        let adapter_event_id = ack.event_id.clone();
+        let outcome = outbox.enqueue(
+            Uuid::new_v4(),
+            &ThreadTags::default(),
+            vec![LifecycleNotice {
+                dedupe_key: Some("poisoned-dedupe-event".to_owned()),
+                content: "must not be acknowledged".to_owned(),
+                ack: Some(ack.clone()),
+            }],
+            &rest,
+        );
+        assert_eq!(outcome.persisted, 0);
+        assert_eq!(outcome.failed, 1);
+        assert!(outcome.acknowledgements.is_empty());
+        assert!(durable
+            .pending_lifecycle()
+            .expect("read pending lifecycle")
+            .is_empty());
+        outbox.shutdown().await;
+
+        // A poisoned live boundary is fatal to that ACP process. After a
+        // replacement process replays the same adapter record, the exact
+        // durable event identity can be persisted and acknowledged.
+        let mut recovered = LifecycleNoticeOutbox::spawn(rest.clone(), durable.clone())
+            .expect("restart lifecycle outbox");
+        let recovery_channel_id = Uuid::new_v4();
+        let recovered_outcome = recovered.enqueue(
+            recovery_channel_id,
+            &ThreadTags::default(),
+            vec![LifecycleNotice {
+                dedupe_key: Some(format!("adapter-event:{adapter_event_id}")),
+                content: "replayed safely".to_owned(),
+                ack: Some(ack.clone()),
+            }],
+            &rest,
+        );
+        assert_eq!(recovered_outcome.failed, 0);
+        assert_eq!(recovered_outcome.persisted, 1);
+        assert_eq!(recovered_outcome.acknowledgements, vec![ack]);
+        let pending = durable
+            .pending_lifecycle()
+            .expect("read recovered durable lifecycle");
+        assert_eq!(pending.len(), 1);
+        let expected_key =
+            format!("{recovery_channel_id}:channel-root:adapter-event:{adapter_event_id}");
+        assert_eq!(
+            pending[0].dedupe_key.as_deref(),
+            Some(expected_key.as_str())
+        );
+        recovered.tx.take();
+        if let Some(worker) = recovered.worker.take() {
+            worker.abort();
+        }
+    }
+
+    #[test]
+    fn compaction_notice_reports_configured_cap_and_effective_threshold() {
+        let notice = render_buzz_session_notice(&BuzzSessionEvent::CompactionCompleted {
+            compaction_id: Uuid::new_v4().to_string(),
+            timestamp: "2026-08-02T12:00:00Z".to_string(),
+            message: "do not publish adapter prose SECRET".to_string(),
+            pi_session_id: "pi-session".to_string(),
+            reason: acp::CompactionReason::Threshold,
+            before_tokens: Some(147_820),
+            after_tokens: Some(31_400),
+            limit_tokens: 150_000,
+            effective_limit_tokens: 150_000,
+            compaction_threshold_tokens: 133_616,
+            will_retry: false,
+            from_extension: false,
+        });
+
+        assert!(notice.contains("147,820 → ~31,400"));
+        assert!(notice.contains("Configured cap 150,000 tokens"));
+        assert!(notice.contains("automatic compaction threshold 133,616"));
+        assert!(!notice.contains("SECRET"));
+    }
+
+    #[test]
+    fn compaction_failure_never_exposes_adapter_error_details() {
+        let notice = render_buzz_session_notice(&BuzzSessionEvent::CompactionFailed {
+            compaction_id: Uuid::new_v4().to_string(),
+            timestamp: "2026-08-02T12:00:00Z".to_string(),
+            message: "secret message".to_string(),
+            pi_session_id: "pi-session".to_string(),
+            reason: acp::CompactionReason::Preflight,
+            before_tokens: Some(140_000),
+            limit_tokens: 150_000,
+            effective_limit_tokens: 150_000,
+            compaction_threshold_tokens: 133_616,
+            error: "/Users/example/.pi/extensions/private.ts: API_KEY=secret".to_string(),
+            aborted: false,
+            will_retry: false,
+            from_extension: true,
+        });
+
+        assert!(notice.contains("request was stopped"));
+        assert!(notice.contains("`/new`"));
+        assert!(!notice.contains("API_KEY"));
+        assert!(!notice.contains("/Users"));
+        assert!(!notice.contains("secret message"));
+    }
+
+    #[test]
+    fn context_and_reload_notices_sanitize_untrusted_strings() {
+        let context = render_buzz_session_notice(&BuzzSessionEvent::ContextStatus {
+            timestamp: "2026-08-02T12:00:00Z".to_string(),
+            message: "ignored".to_string(),
+            pi_session_id: "pi-session".to_string(),
+            used_tokens: Some(75_000),
+            remaining_tokens: Some(75_000),
+            percent: Some(1.0),
+            limit_tokens: 150_000,
+            effective_limit_tokens: 150_000,
+            compaction_threshold_tokens: 133_616,
+            auto_compaction: true,
+            compacting: false,
+            model: Some("provider/model`\n@everyone SECRET".to_string()),
+        });
+        assert!(
+            context.contains("50.0%"),
+            "percentage is recomputed from counts"
+        );
+        assert!(!context.contains("@everyone"));
+        assert!(!context.contains("SECRET"));
+
+        let reload = render_buzz_session_notice(&BuzzSessionEvent::ExtensionsReloaded {
+            timestamp: "2026-08-02T12:00:00Z".to_string(),
+            message: "ignored".to_string(),
+            pi_session_id: "pi-session".to_string(),
+            extensions: 2,
+            skills: 3,
+            prompts: 4,
+            context_files: 1,
+            errors: vec!["/private/path: token=SECRET".to_string()],
+            project_trusted: false,
+        });
+        assert!(reload.contains("1 resource diagnostic(s)"));
+        assert!(reload.contains("stayed disabled"));
+        assert!(!reload.contains("SECRET"));
+        assert!(!reload.contains("/private/path"));
+    }
+
+    #[test]
+    fn transient_compaction_failures_and_pi_reset_echoes_are_not_published() {
+        let retrying_failure = BuzzSessionEvent::CompactionFailed {
+            compaction_id: Uuid::new_v4().to_string(),
+            timestamp: "2026-08-02T12:00:00Z".to_string(),
+            message: "ignored".to_string(),
+            pi_session_id: "pi-session".to_string(),
+            reason: acp::CompactionReason::Preflight,
+            before_tokens: Some(140_000),
+            limit_tokens: 150_000,
+            effective_limit_tokens: 150_000,
+            compaction_threshold_tokens: 133_616,
+            error: "ignored".to_string(),
+            aborted: false,
+            will_retry: true,
+            from_extension: false,
+        };
+        let reset_echo = BuzzSessionEvent::SessionReset {
+            timestamp: "2026-08-02T12:00:00Z".to_string(),
+            message: "ignored".to_string(),
+            previous_pi_session_id: "old-pi-session".to_string(),
+            pi_session_id: "pi-session".to_string(),
+            limit_tokens: 150_000,
+            effective_limit_tokens: 150_000,
+            compaction_threshold_tokens: 133_616,
+        };
+
+        assert!(!should_publish_buzz_session_notice(&retrying_failure));
+        assert!(!should_publish_buzz_session_notice(&reset_echo));
+    }
+}
+
+#[cfg(test)]
 mod owner_control_command_tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag};
@@ -4392,18 +7698,26 @@ mod owner_control_command_tests {
             &event,
             KIND_STREAM_MESSAGE,
             "!rotate",
-            &agent
+            &agent,
+            None,
         ));
 
         let wrong_kind = make_event(1, "!rotate", Some(&agent));
-        assert!(!is_owner_control_command(&wrong_kind, 1, "!rotate", &agent));
+        assert!(!is_owner_control_command(
+            &wrong_kind,
+            1,
+            "!rotate",
+            &agent,
+            None,
+        ));
 
         let wrong_content = make_event(KIND_STREAM_MESSAGE, "!cancel", Some(&agent));
         assert!(!is_owner_control_command(
             &wrong_content,
             KIND_STREAM_MESSAGE,
             "!rotate",
-            &agent
+            &agent,
+            None,
         ));
 
         let no_mention = make_event(KIND_STREAM_MESSAGE, "!rotate", None);
@@ -4411,7 +7725,141 @@ mod owner_control_command_tests {
             &no_mention,
             KIND_STREAM_MESSAGE,
             "!rotate",
-            &agent
+            &agent,
+            None,
+        ));
+    }
+
+    #[test]
+    fn reserved_new_uses_the_same_leading_mention_normalization_as_slash_commands() {
+        let agent = "ab".repeat(32);
+        let npub = "nostr:npub1xhqc4cnnln86lqxk983qulu8yxusfxfhntwl75es2jkvy5zvz26qzr0685";
+
+        for content in ["/new", "@Agent /new", &format!("{npub} /new")] {
+            let event = make_event(KIND_STREAM_MESSAGE, content, Some(&agent));
+            assert!(
+                is_owner_control_command(&event, KIND_STREAM_MESSAGE, "/new", &agent, None),
+                "reserved /new should be recognized after mention stripping: {content}"
+            );
+        }
+
+        for content in [
+            "@Agent see /new",
+            "@Agent /new please",
+            "@Agent /newer",
+            "@Agent /tmp/new",
+            "look at /new",
+        ] {
+            let event = make_event(KIND_STREAM_MESSAGE, content, Some(&agent));
+            assert!(
+                !is_owner_control_command(&event, KIND_STREAM_MESSAGE, "/new", &agent, None),
+                "non-exact or non-leading content must not be consumed: {content}"
+            );
+        }
+    }
+
+    #[test]
+    fn reserved_new_recognizes_the_configured_multi_word_agent_name() {
+        let agent = "ab".repeat(32);
+        let event = make_event(KIND_STREAM_MESSAGE, "@Buzz Agent /new", Some(&agent));
+
+        assert!(is_owner_control_command(
+            &event,
+            KIND_STREAM_MESSAGE,
+            "/new",
+            &agent,
+            Some("Buzz Agent"),
+        ));
+        assert!(!is_owner_control_command(
+            &event,
+            KIND_STREAM_MESSAGE,
+            "/new",
+            &agent,
+            None,
+        ));
+    }
+
+    #[test]
+    fn reserved_new_detection_is_sender_independent_so_non_owners_are_consumed() {
+        let agent = "ab".repeat(32);
+        let owner_event = make_event(KIND_STREAM_MESSAGE, "@Agent /new", Some(&agent));
+        let non_owner_event = make_event(KIND_STREAM_MESSAGE, "@Agent /new", Some(&agent));
+
+        assert_ne!(owner_event.pubkey, non_owner_event.pubkey);
+        assert!(is_owner_control_command(
+            &owner_event,
+            KIND_STREAM_MESSAGE,
+            "/new",
+            &agent,
+            None,
+        ));
+        assert!(is_owner_control_command(
+            &non_owner_event,
+            KIND_STREAM_MESSAGE,
+            "/new",
+            &agent,
+            None,
+        ));
+        // The main intake authorizes the first only when its pubkey equals the
+        // configured owner, but consumes both once this reserved shape matches.
+    }
+
+    #[test]
+    fn bare_pi_mutations_are_reserved_even_without_a_nostr_mention() {
+        let agent = "ab".repeat(32);
+        for (content, expected) in [
+            ("/new", "/new"),
+            ("/compact", "/compact"),
+            ("/reload\nignore this trailing prompt", "/reload"),
+            ("@Buzz Agent /compact", "/compact"),
+        ] {
+            let event = make_event(KIND_STREAM_MESSAGE, content, None);
+            assert_eq!(
+                reserved_pi_lifecycle_command(&event, KIND_STREAM_MESSAGE, Some("Buzz Agent")),
+                Some(expected),
+                "subscribe-all/no-mention intake must reserve {content:?}"
+            );
+            assert!(
+                !is_owner_control_command(
+                    &event,
+                    KIND_STREAM_MESSAGE,
+                    expected,
+                    &agent,
+                    Some("Buzz Agent"),
+                ),
+                "an unaddressed command may be consumed but never authorized"
+            );
+        }
+    }
+
+    #[test]
+    fn pi_mutation_reservation_matches_only_the_adapter_command_line() {
+        for content in ["/compact now", "/reloader", "please /reload", "/context"] {
+            let event = make_event(KIND_STREAM_MESSAGE, content, None);
+            assert_eq!(
+                reserved_pi_lifecycle_command(&event, KIND_STREAM_MESSAGE, None),
+                None,
+                "non-mutating or non-exact command must not be reserved: {content:?}"
+            );
+        }
+        let wrong_kind = make_event(1, "/reload", None);
+        assert_eq!(reserved_pi_lifecycle_command(&wrong_kind, 1, None), None);
+    }
+
+    #[test]
+    fn addressed_owner_command_uses_the_same_first_line_semantics_as_pi() {
+        let agent = "ab".repeat(32);
+        let event = make_event(
+            KIND_STREAM_MESSAGE,
+            "@Buzz Agent /reload\ntrailing context",
+            Some(&agent),
+        );
+        assert!(is_owner_control_command(
+            &event,
+            KIND_STREAM_MESSAGE,
+            "/reload",
+            &agent,
+            Some("Buzz Agent"),
         ));
     }
 
@@ -4468,6 +7916,7 @@ mod owner_control_command_tests {
             pool::TaskMeta {
                 agent_index: 0,
                 channel_id: Some(channel_id),
+                conversation_key: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
                 control_tx: Some(control_tx),
@@ -4491,6 +7940,194 @@ mod owner_control_command_tests {
             channel_id,
             ControlSignal::Rotate
         ));
+    }
+
+    #[tokio::test]
+    async fn observer_control_routes_exact_turn_and_rejects_ambiguous_legacy_frames() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let channel_id = Uuid::new_v4();
+        let wrong_channel_id = Uuid::new_v4();
+        let (first_tx, mut first_rx) = tokio::sync::oneshot::channel();
+        let (second_tx, second_rx) = tokio::sync::oneshot::channel();
+
+        let first_task = pool.join_set.spawn(std::future::pending::<()>());
+        pool.task_map_mut().insert(
+            first_task.id(),
+            pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                conversation_key: None,
+                turn_id: "turn-one".to_string(),
+                recoverable_batch: None,
+                control_tx: Some(first_tx),
+                steer_tx: None,
+            },
+        );
+        let second_task = pool.join_set.spawn(std::future::pending::<()>());
+        pool.task_map_mut().insert(
+            second_task.id(),
+            pool::TaskMeta {
+                agent_index: 1,
+                channel_id: Some(channel_id),
+                conversation_key: None,
+                turn_id: "turn-two".to_string(),
+                recoverable_batch: None,
+                control_tx: Some(second_tx),
+                steer_tx: None,
+            },
+        );
+
+        assert_eq!(
+            signal_observer_control(&mut pool, channel_id, "turn-two", ControlSignal::Cancel,),
+            ObserverControlResult::Sent
+        );
+        assert_eq!(second_rx.await.unwrap(), ControlSignal::Cancel);
+        assert!(
+            first_rx.try_recv().is_err(),
+            "sibling turn must be untouched"
+        );
+
+        assert_eq!(
+            signal_observer_control(
+                &mut pool,
+                wrong_channel_id,
+                "turn-one",
+                ControlSignal::Cancel,
+            ),
+            ObserverControlResult::NoActiveTurn,
+            "an exact turn id cannot be replayed against another channel"
+        );
+        assert_eq!(
+            signal_observer_control(&mut pool, channel_id, "turn-two", ControlSignal::Cancel,),
+            ObserverControlResult::TurnEnding,
+            "a second signal for the same turn reports that it is already ending"
+        );
+
+        let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
+        drop(closed_rx);
+        let closed_task = pool.join_set.spawn(std::future::pending::<()>());
+        pool.task_map_mut().insert(
+            closed_task.id(),
+            pool::TaskMeta {
+                agent_index: 2,
+                channel_id: Some(channel_id),
+                conversation_key: None,
+                turn_id: "turn-closed".to_string(),
+                recoverable_batch: None,
+                control_tx: Some(closed_tx),
+                steer_tx: None,
+            },
+        );
+        assert_eq!(
+            signal_observer_control(
+                &mut pool,
+                channel_id,
+                "turn-closed",
+                ControlSignal::SwitchModel("provider/model".to_string()),
+            ),
+            ObserverControlResult::TurnEnding,
+            "a closed receiver must never be reported to Desktop as sent"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_observer_control_cannot_mutate_turns_across_fresh_replay_caches() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let mut replay_cache = ObserverControlReplayCache::default();
+        let channel_id = Uuid::new_v4();
+        let payload = serde_json::json!({
+            "type": "cancel_turn",
+            "channelId": channel_id,
+        });
+        let now = chrono::Utc::now().timestamp();
+
+        let (first_tx, mut first_rx) = tokio::sync::oneshot::channel();
+        let first_task = pool.join_set.spawn(std::future::pending::<()>());
+        let first_task_id = first_task.id();
+        pool.task_map_mut().insert(
+            first_task_id,
+            pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                conversation_key: None,
+                turn_id: "turn-one".to_string(),
+                recoverable_batch: None,
+                control_tx: Some(first_tx),
+                steer_tx: None,
+            },
+        );
+
+        route_authenticated_observer_control(
+            "aa".repeat(32),
+            now,
+            now,
+            &payload,
+            &mut pool,
+            None,
+            &mut replay_cache,
+        );
+        assert!(
+            first_rx.try_recv().is_err(),
+            "a channel-only control must not mutate even the first matching turn"
+        );
+        pool.task_map_mut().remove(&first_task_id);
+        first_task.abort();
+
+        let (second_tx, mut second_rx) = tokio::sync::oneshot::channel();
+        let second_task = pool.join_set.spawn(std::future::pending::<()>());
+        pool.task_map_mut().insert(
+            second_task.id(),
+            pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                conversation_key: None,
+                turn_id: "turn-two".to_string(),
+                recoverable_batch: None,
+                control_tx: Some(second_tx),
+                steer_tx: None,
+            },
+        );
+
+        // A restart has an empty in-memory replay cache. The missing turnId is
+        // still enough to reject the retained signed frame fail closed.
+        let mut restarted_replay_cache = ObserverControlReplayCache::default();
+        route_authenticated_observer_control(
+            "aa".repeat(32),
+            now,
+            now,
+            &payload,
+            &mut pool,
+            None,
+            &mut restarted_replay_cache,
+        );
+        assert!(
+            second_rx.try_recv().is_err(),
+            "the same signed legacy control must not target a later turn"
+        );
+    }
+
+    #[test]
+    fn observer_control_replay_cache_fails_closed_at_capacity_until_expiry() {
+        let mut cache = ObserverControlReplayCache::default();
+        let now = 10_000;
+        for index in 0..OBSERVER_CONTROL_REPLAY_CAPACITY {
+            assert_eq!(
+                cache.admit(format!("event-{index}"), now, now),
+                ObserverControlAdmission::Accepted
+            );
+        }
+        assert_eq!(
+            cache.admit("overflow".into(), now, now),
+            ObserverControlAdmission::Saturated
+        );
+        assert_eq!(
+            cache.admit(
+                "after-expiry".into(),
+                now + OBSERVER_CONTROL_FRESHNESS_SECS + 1,
+                now + OBSERVER_CONTROL_FRESHNESS_SECS + 1,
+            ),
+            ObserverControlAdmission::Accepted
+        );
     }
 }
 
@@ -4788,6 +8425,13 @@ mod author_gate_tests {
             is_dm_channel(id, &resolver(startup)).await,
             "missing startup metadata must not be trusted as a stream"
         );
+    }
+
+    #[tokio::test]
+    async fn unknown_channel_is_dm_for_auth_but_not_for_conversation_scope() {
+        let id = Uuid::new_v4();
+        let classification = resolve_dm_channel_scope(id, &resolver(HashMap::new())).await;
+        assert_eq!(classification, (true, false));
     }
 
     async fn lazy_resolver_with_response(
@@ -5118,8 +8762,11 @@ mod build_mcp_servers_tests {
             channels_override: None,
             no_mention_filter: false,
             config_path: std::path::PathBuf::from("./buzz-acp.toml"),
+            state_dir: std::env::temp_dir().join("buzz-acp-lib-test"),
             context_message_limit: 12,
             max_turns_per_session: 0,
+            max_cached_conversation_sessions: 8,
+            conversation_session_idle_ttl_secs: 1_800,
             presence_enabled: true,
             typing_enabled: true,
             memory_enabled: false,
@@ -5134,6 +8781,7 @@ mod build_mcp_servers_tests {
             relay_observer: false,
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
+            require_durable_thread_sessions: false,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -5340,8 +8988,11 @@ mod error_outcome_emission_tests {
             channels_override: None,
             no_mention_filter: false,
             config_path: std::path::PathBuf::from("./buzz-acp.toml"),
+            state_dir: std::env::temp_dir().join("buzz-acp-observer-test"),
             context_message_limit: 12,
             max_turns_per_session: 0,
+            max_cached_conversation_sessions: 8,
+            conversation_session_idle_ttl_secs: 1_800,
             presence_enabled: true,
             typing_enabled: true,
             memory_enabled: false,
@@ -5356,6 +9007,7 @@ mod error_outcome_emission_tests {
             relay_observer: false,
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
+            require_durable_thread_sessions: false,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -5391,6 +9043,7 @@ mod error_outcome_emission_tests {
             model_capabilities: None,
             desired_model: None,
             model_overridden: false,
+            pending_model_switch: None,
             agent_name: "unknown".into(),
             goose_system_prompt_supported: None,
             // Error branches under test never read this; 1 is the legacy
@@ -5415,6 +9068,7 @@ mod error_outcome_emission_tests {
             crate::pool::TaskMeta {
                 agent_index: 0,
                 channel_id: None,
+                conversation_key: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
                 control_tx: None,
@@ -5455,6 +9109,7 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             Some(observer.clone()),
             None,
+            None,
         );
 
         let turn_errors: Vec<_> = observer
@@ -5491,6 +9146,7 @@ mod error_outcome_emission_tests {
             crate::pool::TaskMeta {
                 agent_index: 0,
                 channel_id: Some(channel_id),
+                conversation_key: None,
                 turn_id: "panic-turn-id".to_string(),
                 recoverable_batch: None,
                 control_tx: None,
@@ -5583,6 +9239,7 @@ mod error_outcome_emission_tests {
                 crate::pool::TaskMeta {
                     agent_index: 0,
                     channel_id: None,
+                    conversation_key: None,
                     turn_id: "test-turn-id".to_string(),
                     recoverable_batch: None,
                     control_tx: None,
@@ -5620,6 +9277,7 @@ mod error_outcome_emission_tests {
                 &mut respawn_tasks,
                 Some(observer.clone()),
                 None,
+                None,
             );
             let events = observer.snapshot();
             let turn_error = events.iter().find(|e| e.kind == "turn_error").unwrap();
@@ -5651,8 +9309,10 @@ mod error_outcome_emission_tests {
             let event = EventBuilder::new(Kind::Custom(9), "test")
                 .sign_with_keys(&keys)
                 .unwrap();
+            let channel_id = Uuid::new_v4();
             FlushBatch {
-                channel_id: Uuid::new_v4(),
+                channel_id,
+                conversation_key: test_conversation_key(channel_id),
                 events: vec![BatchEvent {
                     event,
                     prompt_tag: "test".into(),
@@ -5674,6 +9334,7 @@ mod error_outcome_emission_tests {
                 crate::pool::TaskMeta {
                     agent_index: 0,
                     channel_id: None,
+                    conversation_key: None,
                     turn_id: "test-turn-id".to_string(),
                     recoverable_batch: None,
                     control_tx: None,
@@ -5708,6 +9369,7 @@ mod error_outcome_emission_tests {
                 &mut crash_history,
                 &respawn_tx,
                 &mut respawn_tasks,
+                None,
                 None,
                 None,
             );
@@ -5759,6 +9421,7 @@ mod error_outcome_emission_tests {
                 .unwrap();
             FlushBatch {
                 channel_id,
+                conversation_key: test_conversation_key(channel_id),
                 events: vec![BatchEvent {
                     event,
                     prompt_tag: "test".into(),
@@ -5779,6 +9442,7 @@ mod error_outcome_emission_tests {
                 crate::pool::TaskMeta {
                     agent_index: 0,
                     channel_id: None,
+                    conversation_key: None,
                     turn_id: "test-turn-id".to_string(),
                     recoverable_batch: None,
                     control_tx: None,
@@ -5813,6 +9477,7 @@ mod error_outcome_emission_tests {
                 &mut crash_history,
                 &respawn_tx,
                 &mut respawn_tasks,
+                None,
                 None,
                 None,
             );
@@ -5855,6 +9520,7 @@ mod error_outcome_emission_tests {
             crate::pool::TaskMeta {
                 agent_index: 0,
                 channel_id: None,
+                conversation_key: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
                 control_tx: None,
@@ -5875,6 +9541,7 @@ mod error_outcome_emission_tests {
         let observer = ObserverHandle::in_process();
         let batch = FlushBatch {
             channel_id,
+            conversation_key: test_conversation_key(channel_id),
             events: vec![BatchEvent {
                 event: EventBuilder::new(Kind::Custom(9), "test")
                     .sign_with_keys(&Keys::generate())
@@ -5905,6 +9572,7 @@ mod error_outcome_emission_tests {
             &respawn_tx,
             &mut respawn_tasks,
             Some(observer.clone()),
+            None,
             None,
         );
 
@@ -5949,6 +9617,7 @@ mod error_outcome_emission_tests {
             crate::pool::TaskMeta {
                 agent_index: 0,
                 channel_id: None,
+                conversation_key: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
                 control_tx: None,
@@ -5968,6 +9637,7 @@ mod error_outcome_emission_tests {
         let observer = ObserverHandle::in_process();
         let batch = FlushBatch {
             channel_id,
+            conversation_key: test_conversation_key(channel_id),
             events: vec![BatchEvent {
                 event: EventBuilder::new(Kind::Custom(9), "final-attempt")
                     .sign_with_keys(&Keys::generate())
@@ -5998,6 +9668,7 @@ mod error_outcome_emission_tests {
             &respawn_tx,
             &mut respawn_tasks,
             Some(observer.clone()),
+            None,
             None,
         );
 
@@ -6048,6 +9719,7 @@ mod error_outcome_emission_tests {
         let channel_id = Uuid::new_v4();
         let batch = FlushBatch {
             channel_id,
+            conversation_key: test_conversation_key(channel_id),
             events: vec![BatchEvent {
                 event: original_event.clone(),
                 prompt_tag: "test".into(),
@@ -6065,6 +9737,7 @@ mod error_outcome_emission_tests {
             crate::pool::TaskMeta {
                 agent_index: 0,
                 channel_id: None,
+                conversation_key: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
                 control_tx: None,
@@ -6113,6 +9786,7 @@ mod error_outcome_emission_tests {
             &respawn_tx,
             &mut respawn_tasks,
             Some(observer.clone()),
+            None,
             None,
         );
 
@@ -6204,6 +9878,7 @@ mod error_outcome_emission_tests {
             crate::pool::TaskMeta {
                 agent_index: 0,
                 channel_id: None,
+                conversation_key: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
                 control_tx: None,
@@ -6245,6 +9920,7 @@ mod error_outcome_emission_tests {
             &respawn_tx,
             &mut respawn_tasks,
             Some(observer.clone()),
+            None,
             None,
         );
 
@@ -6355,6 +10031,130 @@ mod error_outcome_emission_tests {
         );
     }
 
+    #[test]
+    fn pi_context_limit_code_is_stable_and_non_retryable() {
+        let limit = acp::AcpError::AgentError {
+            code: PI_CONTEXT_LIMIT_ERROR_CODE,
+            message: "untrusted adapter prose is not part of classification".to_string(),
+        };
+        let other = acp::AcpError::AgentError {
+            code: -32000,
+            message: "context words alone must not trigger dead-lettering".to_string(),
+        };
+
+        assert!(is_pi_context_limit_error(&limit));
+        assert!(!is_pi_context_limit_error(&other));
+    }
+
+    #[test]
+    fn pi_storage_limit_code_and_recovery_notice_are_stable() {
+        let limit = acp::AcpError::AgentError {
+            code: PI_SESSION_STORAGE_LIMIT_ERROR_CODE,
+            message: "adapter detail must not drive classification".to_string(),
+        };
+        let other = acp::AcpError::AgentError {
+            code: -32602,
+            message: "BUZZ_SESSION_STORAGE_LIMIT text alone is untrusted".to_string(),
+        };
+        assert!(is_pi_session_storage_limit_error(&limit));
+        assert!(!is_pi_session_storage_limit_error(&other));
+        assert!(pi_session_storage_limit_notice().contains("`/new`"));
+        assert!(pi_session_storage_limit_notice().contains("without retrying"));
+    }
+
+    #[test]
+    fn pi_session_invalidation_code_is_stable_and_exact() {
+        let invalidated = acp::AcpError::AgentError {
+            code: PI_SESSION_INVALIDATED_ERROR_CODE,
+            message: "safe adapter detail does not drive classification".to_string(),
+        };
+        let text_only = acp::AcpError::AgentError {
+            code: -32603,
+            message: "BUZZ_PI_SESSION_INVALIDATED".to_string(),
+        };
+        assert!(is_pi_session_invalidated_error(&invalidated));
+        assert!(!is_pi_session_invalidated_error(&text_only));
+    }
+
+    #[tokio::test]
+    async fn pi_session_invalidation_requeues_exact_batch_and_replaces_agent() {
+        let channel_id = Uuid::new_v4();
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "reload safely")
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign invalidation fixture");
+        let event_id = event.id.to_hex();
+        let batch = FlushBatch {
+            channel_id,
+            conversation_key: test_conversation_key(channel_id),
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let agent = dummy_agent(0).await;
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                conversation_key: None,
+                turn_id: "reload-invalidated-turn".to_string(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+            },
+        );
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+
+        handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            PromptResult {
+                agent,
+                source: PromptSource::Channel(channel_id),
+                turn_id: "reload-invalidated-turn".to_string(),
+                outcome: PromptOutcome::Error(acp::AcpError::AgentError {
+                    code: PI_SESSION_INVALIDATED_ERROR_CODE,
+                    message: "Pi session was invalidated after reload failure".to_string(),
+                }),
+                batch: Some(batch),
+            },
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(pool.live_count(), 0, "invalid proxy must never be reused");
+        assert_eq!(respawn_tasks.len(), 1, "ACP process must be replaced");
+        assert_eq!(queue.queued_event_count(&channel_id), 1);
+        assert_eq!(
+            queue.drain_channel(channel_id),
+            vec![event_id],
+            "the exact triggering event must survive for the fresh process"
+        );
+    }
+
     // ── auth error dead-letter behavior ────────────────────────────────────
 
     /// An auth-class `PromptOutcome::Error` must dead-letter immediately
@@ -6369,6 +10169,7 @@ mod error_outcome_emission_tests {
         let channel_id = uuid::Uuid::new_v4();
         let batch = FlushBatch {
             channel_id,
+            conversation_key: test_conversation_key(channel_id),
             events: vec![BatchEvent {
                 event,
                 prompt_tag: "test".into(),
@@ -6392,6 +10193,7 @@ mod error_outcome_emission_tests {
             crate::pool::TaskMeta {
                 agent_index: 0,
                 channel_id: None,
+                conversation_key: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
                 control_tx: None,
@@ -6428,6 +10230,7 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             None,
             None,
+            None,
         );
 
         // The batch must not be requeued: pending_channels returns 0.
@@ -6443,6 +10246,96 @@ mod error_outcome_emission_tests {
         );
     }
 
+    #[tokio::test]
+    async fn pi_storage_exhaustion_dead_letters_immediately_without_requeueing() {
+        let channel_id = uuid::Uuid::new_v4();
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "test")
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign test event");
+        let batch = FlushBatch {
+            channel_id,
+            conversation_key: test_conversation_key(channel_id),
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let agent = dummy_agent(0).await;
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                conversation_key: None,
+                turn_id: "storage-limit-turn".to_string(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+            },
+        );
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let notice_keys = nostr::Keys::generate();
+        let rest = relay::RestClient {
+            http: reqwest::Client::new(),
+            base_url: "http://127.0.0.1:9".to_owned(),
+            keys: notice_keys.clone(),
+            auth_tag_json: None,
+        };
+        let state_dir = tempfile::tempdir().expect("durable state tempdir");
+        let durable = DurableOutbox::open(state_dir.path(), &notice_keys.public_key().to_hex())
+            .expect("open durable outbox");
+        let outbox = LifecycleNoticeOutbox::spawn(rest.clone(), durable.clone())
+            .expect("spawn durable notice worker");
+        handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            PromptResult {
+                agent,
+                source: PromptSource::Channel(channel_id),
+                turn_id: "storage-limit-turn".to_string(),
+                outcome: PromptOutcome::Error(acp::AcpError::AgentError {
+                    code: PI_SESSION_STORAGE_LIMIT_ERROR_CODE,
+                    message: "quota exhausted".to_string(),
+                }),
+                batch: Some(batch),
+            },
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+            Some(&outbox),
+            Some(&rest),
+        );
+        assert_eq!(queue.pending_channels(), 0);
+        assert_eq!(queue.queued_event_count(&channel_id), 0);
+        assert_eq!(
+            durable
+                .pending_lifecycle()
+                .expect("read pending lifecycle")
+                .len(),
+            1,
+            "dead-lettering is allowed only after the recovery notice is crash-durable"
+        );
+    }
+
     /// A non-auth application error (e.g. usage credits) must still follow the
     /// standard requeue path so today's behavior is unchanged.
     #[tokio::test]
@@ -6454,6 +10347,7 @@ mod error_outcome_emission_tests {
         let channel_id = uuid::Uuid::new_v4();
         let batch = FlushBatch {
             channel_id,
+            conversation_key: test_conversation_key(channel_id),
             events: vec![BatchEvent {
                 event,
                 prompt_tag: "test".into(),
@@ -6477,6 +10371,7 @@ mod error_outcome_emission_tests {
             crate::pool::TaskMeta {
                 agent_index: 0,
                 channel_id: None,
+                conversation_key: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
                 control_tx: None,
@@ -6511,6 +10406,7 @@ mod error_outcome_emission_tests {
             &mut crash_history,
             &respawn_tx,
             &mut respawn_tasks,
+            None,
             None,
             None,
         );

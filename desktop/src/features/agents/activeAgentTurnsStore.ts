@@ -50,6 +50,12 @@ export type ActiveTurnSummary = {
   anchorAt: number;
 };
 
+/** One exact active turn. Used by controls that must never guess between
+ * sibling thread turns running concurrently in the same channel. */
+export type ActiveTurnDetail = ActiveTurnSummary & {
+  turnId: string;
+};
+
 /** One channel with active agent work, aggregated across agents. */
 export type ActiveChannelTurnSummary = {
   channelId: string;
@@ -83,6 +89,7 @@ const clockOffsetByAgent = new Map<string, number>();
 // Cached snapshots for useSyncExternalStore reference stability.
 // Only regenerated when the underlying turn map for an agent actually changes.
 const cachedTurnSummaries = new Map<string, ActiveTurnSummary[]>();
+const cachedTurnDetails = new Map<string, ActiveTurnDetail[]>();
 let cachedChannelTurnSummaries: ActiveChannelTurnSummary[] | null = null;
 
 // Composite watermark per agent: the newest observer event processed, by
@@ -103,6 +110,7 @@ let pruneInterval: ReturnType<typeof setInterval> | null = null;
 
 function invalidateCache(agentKey: string) {
   cachedTurnSummaries.delete(agentKey);
+  cachedTurnDetails.delete(agentKey);
   cachedChannelTurnSummaries = null;
 }
 
@@ -457,7 +465,41 @@ export function getActiveTurnsForAgent(
 }
 
 const EMPTY_TURNS: ActiveTurnSummary[] = [];
+const EMPTY_TURN_DETAILS: ActiveTurnDetail[] = [];
 const EMPTY_CHANNEL_TURNS: ActiveChannelTurnSummary[] = [];
+
+/**
+ * Returns every exact active turn for an agent. Unlike
+ * `getActiveTurnsForAgent`, this deliberately does not collapse sibling turns
+ * in the same channel; callers use `turnId` as the authoritative control key.
+ * The returned reference is stable until the underlying turn map changes.
+ */
+export function getActiveTurnDetailsForAgent(
+  agentPubkey: string | null | undefined,
+): ActiveTurnDetail[] {
+  if (!agentPubkey) return EMPTY_TURN_DETAILS;
+  const key = normalizePubkey(agentPubkey);
+  const agentTurns = activeTurnsByAgent.get(key);
+  if (!agentTurns || agentTurns.size === 0) return EMPTY_TURN_DETAILS;
+
+  const cached = cachedTurnDetails.get(key);
+  if (cached) return cached;
+
+  const offset = clockOffsetByAgent.get(key) ?? 0;
+  const result = [...agentTurns.values()]
+    .map((turn) => ({
+      turnId: turn.turnId,
+      channelId: turn.channelId,
+      anchorAt: turn.startedAt + offset,
+    }))
+    .sort(
+      (a, b) =>
+        a.channelId.localeCompare(b.channelId) ||
+        a.turnId.localeCompare(b.turnId),
+    );
+  cachedTurnDetails.set(key, result);
+  return result;
+}
 
 /**
  * Returns active working channels across all tracked agents, sorted by
@@ -529,6 +571,18 @@ export function useActiveAgentTurns(
 ): ActiveTurnSummary[] {
   const getSnapshot = React.useCallback(
     () => getActiveTurnsForAgent(agentPubkey),
+    [agentPubkey],
+  );
+
+  return React.useSyncExternalStore(subscribeActiveAgentTurns, getSnapshot);
+}
+
+/** React hook for exact active turn identities (including sibling threads). */
+export function useActiveAgentTurnDetails(
+  agentPubkey: string | null | undefined,
+): ActiveTurnDetail[] {
+  const getSnapshot = React.useCallback(
+    () => getActiveTurnDetailsForAgent(agentPubkey),
     [agentPubkey],
   );
 
@@ -618,6 +672,7 @@ export function resetActiveAgentTurnsStore() {
   lastProcessed.clear();
   clockOffsetByAgent.clear();
   cachedTurnSummaries.clear();
+  cachedTurnDetails.clear();
   cachedChannelTurnSummaries = null;
   terminalAtByAgent.clear();
   notifyListeners();
@@ -728,6 +783,7 @@ export function restoreActiveAgentTurnsForCommunity(communityId: string): void {
   }
 
   cachedTurnSummaries.clear();
+  cachedTurnDetails.clear();
   cachedChannelTurnSummaries = null;
   notifyListeners();
 }

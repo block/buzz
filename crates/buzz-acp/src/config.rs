@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use clap::Parser;
 use clap::ValueEnum;
 use nostr::Keys;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use url::Url;
 use uuid::Uuid;
@@ -341,6 +342,11 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_CONFIG", default_value = "./buzz-acp.toml")]
     pub config: PathBuf,
 
+    /// Durable harness state directory for signed lifecycle notices and
+    /// committed `/new` acknowledgement barriers. Must be absolute when set.
+    #[arg(long, env = "BUZZ_ACP_STATE_DIR")]
+    pub state_dir: Option<PathBuf>,
+
     #[arg(long, env = "BUZZ_ACP_DEDUP", default_value = "queue", value_enum)]
     pub dedup: DedupMode,
 
@@ -372,6 +378,27 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_MAX_TURNS_PER_SESSION", default_value_t = 0,
           value_parser = clap::value_parser!(u32))]
     pub max_turns_per_session: u32,
+
+    /// Maximum hot thread sessions cached by each ACP agent process. Least-
+    /// recently-used idle sessions are closed before a new one is created;
+    /// persistent adapters can reopen their durable context on demand.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_MAX_CACHED_CONVERSATION_SESSIONS",
+        default_value_t = 8,
+        value_parser = clap::value_parser!(u32).range(1..=4096)
+    )]
+    pub max_cached_conversation_sessions: u32,
+
+    /// Idle lifetime of a hot thread session, in seconds. Persistent adapters
+    /// retain the durable conversation even after the runtime is closed.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_CONVERSATION_SESSION_IDLE_TTL_SECS",
+        default_value_t = 1800,
+        value_parser = clap::value_parser!(u64).range(60..)
+    )]
+    pub conversation_session_idle_ttl_secs: u64,
 
     /// Disable automatic presence (online/offline) status.
     #[arg(long, env = "BUZZ_ACP_NO_PRESENCE")]
@@ -482,6 +509,17 @@ pub struct CliArgs {
     /// Connect and subscribe before starting the ACP/LLM subprocess pool.
     #[arg(long, env = "BUZZ_ACP_LAZY_POOL", default_value_t = false)]
     pub lazy_pool: bool,
+
+    /// Require the configured adapter to provide Buzz's durable thread-session
+    /// and reset-commit capability contract. This also selects thread-local
+    /// queue identity before a lazy adapter starts, so the first event cannot
+    /// be grouped into legacy channel-wide context.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_REQUIRE_DURABLE_THREAD_SESSIONS",
+        default_value_t = false
+    )]
+    pub require_durable_thread_sessions: bool,
 }
 
 /// Merged NIP-01 subscription filter for a single channel.
@@ -521,9 +559,12 @@ pub struct Config {
     pub channels_override: Option<Vec<String>>,
     pub no_mention_filter: bool,
     pub config_path: PathBuf,
+    pub state_dir: PathBuf,
     pub context_message_limit: u32,
     /// Maximum turns per session before proactive rotation. 0 = disabled.
     pub max_turns_per_session: u32,
+    pub max_cached_conversation_sessions: u32,
+    pub conversation_session_idle_ttl_secs: u64,
     pub presence_enabled: bool,
     pub typing_enabled: bool,
     /// Whether NIP-AE agent core memory injection is enabled. When false,
@@ -559,6 +600,9 @@ pub struct Config {
     pub exit_after_inactivity_secs: u64,
     /// Whether ACP/LLM subprocess initialization is deferred until accepted work arrives.
     pub lazy_pool: bool,
+    /// Whether startup must fail closed unless every adapter process supports
+    /// durable per-thread sessions and synchronous conversation reset commits.
+    pub require_durable_thread_sessions: bool,
     /// Agent owner pubkey (hex). Used for `--respond-to=owner-only` gate.
     /// Replaces the old REST-based owner lookup.
     pub agent_owner: Option<String>,
@@ -701,9 +745,13 @@ fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_agent_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
-        | "claudecode" | "buzz-agent" => Some(Vec::new()),
+        | "claudecode" | "buzz-agent" | "buzz-pi-agent" => Some(Vec::new()),
         _ => None,
     }
+}
+
+fn agent_requires_durable_thread_sessions(command: &str) -> bool {
+    normalize_agent_command_identity(command) == "buzz-pi-agent"
 }
 
 /// Per-runtime environment defaults applied when Buzz owns the agent process.
@@ -848,6 +896,22 @@ impl Config {
             .replace_range(.., &"0".repeat(args.private_key.len()));
         args.private_key.clear();
 
+        args.relay_url =
+            buzz_core::relay::normalize_relay_url(&args.relay_url).map_err(|error| {
+                ConfigError::ConfigFile(format!("invalid --relay-url / BUZZ_RELAY_URL: {error}"))
+            })?;
+
+        let state_dir = match args.state_dir {
+            Some(path) if path.is_absolute() => path,
+            Some(path) => {
+                return Err(ConfigError::ConfigFile(format!(
+                    "--state-dir / BUZZ_ACP_STATE_DIR must be absolute: {}",
+                    path.display()
+                )));
+            }
+            None => default_state_dir(&keys, &args.relay_url)?,
+        };
+
         let system_prompt = if let Some(text) = args.system_prompt {
             Some(text)
         } else if let Some(ref path) = args.system_prompt_file {
@@ -913,6 +977,12 @@ impl Config {
         }
 
         let agent_args = normalize_agent_args(&agent_command, args.agent_args);
+        // Pi's durable identity must be selected before a lazy adapter starts;
+        // waiting for initialize would let the first root event or `/new`
+        // enter the legacy channel-wide queue. Recognize the production binary
+        // directly while retaining the explicit flag for wrapper commands.
+        let require_durable_thread_sessions = args.require_durable_thread_sessions
+            || agent_requires_durable_thread_sessions(&agent_command);
 
         if let Some(ref channels) = args.channels {
             for ch in channels {
@@ -1088,8 +1158,11 @@ impl Config {
             channels_override: args.channels,
             no_mention_filter: args.no_mention_filter,
             config_path: args.config,
+            state_dir,
             context_message_limit: args.context_message_limit,
             max_turns_per_session: args.max_turns_per_session,
+            max_cached_conversation_sessions: args.max_cached_conversation_sessions,
+            conversation_session_idle_ttl_secs: args.conversation_session_idle_ttl_secs,
             presence_enabled: !args.no_presence,
             typing_enabled: !args.no_typing,
             memory_enabled: args.memory && !args.no_memory,
@@ -1107,6 +1180,7 @@ impl Config {
             relay_observer: args.relay_observer,
             exit_after_inactivity_secs: args.exit_after_inactivity,
             lazy_pool: args.lazy_pool,
+            require_durable_thread_sessions,
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
             no_base_prompt: args.no_base_prompt,
             base_prompt_content,
@@ -1131,7 +1205,7 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} durable_thread_sessions_required={} {}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
@@ -1152,10 +1226,30 @@ impl Config {
             self.memory_enabled,
             self.model.as_deref().unwrap_or("(agent default)"),
             self.permission_mode,
+            self.require_durable_thread_sessions,
             respond_to_detail,
             allowed_respond_to_detail,
         )
     }
+}
+
+fn default_state_dir(keys: &Keys, relay_url: &str) -> Result<PathBuf, ConfigError> {
+    let base = dirs::data_local_dir()
+        .or_else(|| dirs::home_dir().map(|home| home.join(".local").join("share")))
+        .ok_or_else(|| {
+            ConfigError::ConfigFile(
+                "could not resolve a durable data directory; set BUZZ_ACP_STATE_DIR".into(),
+            )
+        })?;
+    let relay_identity = buzz_core::relay::normalize_relay_url(relay_url).map_err(|error| {
+        ConfigError::ConfigFile(format!("invalid relay URL for durable state: {error}"))
+    })?;
+    let relay_hash = hex::encode(Sha256::digest(relay_identity.as_bytes()));
+    Ok(base
+        .join("Buzz")
+        .join("acp")
+        .join(&relay_hash[..24])
+        .join(keys.public_key().to_hex()))
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1437,6 +1531,26 @@ mod tests {
     use crate::filter::{ChannelScope, SubscriptionRule};
     use clap::{Parser, ValueEnum};
 
+    #[test]
+    fn durable_state_identity_canonicalizes_equivalent_relay_spellings() {
+        let keys = nostr::Keys::generate();
+        let canonical = default_state_dir(&keys, "wss://relay.example").expect("canonical path");
+        let equivalent =
+            default_state_dir(&keys, " WSS://Relay.Example:443/ ").expect("equivalent path");
+        assert_eq!(canonical, equivalent);
+
+        let distinct_path =
+            default_state_dir(&keys, "wss://relay.example/community").expect("path-scoped relay");
+        assert_ne!(canonical, distinct_path);
+    }
+
+    #[test]
+    fn durable_state_identity_rejects_invalid_relay_origins() {
+        let keys = nostr::Keys::generate();
+        assert!(default_state_dir(&keys, "https://relay.example").is_err());
+        assert!(default_state_dir(&keys, "wss://user@relay.example").is_err());
+    }
+
     /// Build a minimal Config for testing without CLI parsing.
     fn test_config(mode: SubscribeMode) -> Config {
         Config {
@@ -1462,8 +1576,11 @@ mod tests {
             channels_override: None,
             no_mention_filter: false,
             config_path: PathBuf::from("./buzz-acp.toml"),
+            state_dir: std::env::temp_dir().join("buzz-acp-config-test"),
             context_message_limit: 12,
             max_turns_per_session: 0,
+            max_cached_conversation_sessions: 8,
+            conversation_session_idle_ttl_secs: 1_800,
             presence_enabled: true,
             typing_enabled: true,
             memory_enabled: true,
@@ -1478,6 +1595,7 @@ mod tests {
             relay_observer: false,
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
+            require_durable_thread_sessions: false,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -1599,6 +1717,23 @@ mod tests {
             normalize_agent_args("buzz-agent", vec!["acp".into()]),
             Vec::<String>::new()
         );
+        assert_eq!(
+            normalize_agent_args("/usr/local/bin/buzz-pi-agent", vec!["acp".into()]),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn production_pi_binary_requires_durable_thread_identity_before_startup() {
+        for command in [
+            "buzz-pi-agent",
+            "/usr/local/bin/buzz-pi-agent",
+            r"C:\Users\test\AppData\Roaming\npm\buzz-pi-agent.cmd",
+        ] {
+            assert!(agent_requires_durable_thread_sessions(command));
+        }
+        assert!(!agent_requires_durable_thread_sessions("pi"));
+        assert!(!agent_requires_durable_thread_sessions("wrapper-script"));
     }
 
     #[test]
@@ -2204,6 +2339,24 @@ channels = "ALL"
         let args = CliArgs::try_parse_from(["buzz-acp", "--private-key", &key, "--lazy-pool=true"]);
         assert!(args.is_err(), "bool flags do not take an explicit value");
         assert!(CliArgs::parse_from(["buzz-acp", "--private-key", &key, "--lazy-pool"]).lazy_pool);
+    }
+
+    #[test]
+    fn durable_thread_session_requirement_defaults_off_and_can_be_enabled() {
+        let key = "0".repeat(64);
+        assert!(
+            !CliArgs::parse_from(["buzz-acp", "--private-key", &key])
+                .require_durable_thread_sessions
+        );
+        assert!(
+            CliArgs::parse_from([
+                "buzz-acp",
+                "--private-key",
+                &key,
+                "--require-durable-thread-sessions",
+            ])
+            .require_durable_thread_sessions
+        );
     }
 
     #[test]

@@ -1,0 +1,40 @@
+{
+  "name": "buzz-pi-agent",
+  "version": "0.1.0",
+  "description": "Production ACP adapter for running Pi as a Buzz agent",
+  "type": "module",
+  "bin": {
+    "buzz-pi-agent": "dist/cli.js"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "build": "npm run clean && tsc -p tsconfig.build.json && node scripts/postbuild.mjs",
+    "check": "tsc -p tsconfig.json --noEmit && biome check .",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\""
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.83.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.6",
+    "@types/node": "^24.12.0",
+    "typescript": "^5.9.3"
+  },
+  "license": "Apache-2.0",
+  "private": true
+}

@@ -4,10 +4,12 @@ import type { CancelManagedAgentTurnResult } from "@/shared/api/types";
 export async function cancelManagedAgentTurn(
   pubkey: string,
   channelId: string,
+  turnId: string,
 ): Promise<CancelManagedAgentTurnResult> {
   await sendAgentObserverControl(pubkey, {
     type: "cancel_turn",
     channelId,
+    turnId,
   });
   return { status: "sent" };
 }
@@ -21,11 +23,13 @@ export async function cancelManagedAgentTurn(
 export async function switchManagedAgentModel(
   pubkey: string,
   channelId: string,
+  turnId: string,
   modelId: string,
 ): Promise<void> {
   await sendAgentObserverControl(pubkey, {
     type: "switch_model",
     channelId,
+    turnId,
     modelId,
   });
 }

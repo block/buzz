@@ -648,30 +648,39 @@ Standalone binary that bridges Buzz relay events to AI agents via the [Agent Com
 **Architecture:**
 
 ```
-Buzz Relay ──WS──→ buzz-acp ──stdio (ACP/JSON-RPC)──→ Agent (goose/codex/claude)
+Buzz Relay ──WS──→ buzz-acp ──stdio (ACP/JSON-RPC)──→ Agent (goose/codex/claude/pi)
 ```
 
-`buzz-acp` spawns AI agent subprocesses (1–32, default 1), connects to the relay via WebSocket with NIP-42 auth, discovers channels via REST API, and queues `@mention` events per channel. At most one prompt is in-flight per channel. Queued events are batched into a single prompt sent via `session/prompt` over ACP.
+`buzz-acp` spawns AI agent subprocesses (1–32, default 1), connects to the relay via WebSocket with NIP-42 auth, discovers channels via REST API, and routes accepted events by exact conversation. A channel thread is keyed by its validated NIP-10 root; a definite DM conversation uses its participant scope. At most one prompt is in flight per conversation, while sibling threads can run concurrently. Queued events for the same conversation are batched into one `session/prompt` call.
+
+Adapters can advertise Buzz's thread-session ACP extension. The harness then supplies a stable, opaque conversation ID, caches sessions with an idle TTL and LRU bound, and asks the adapter to dispose or forget them explicitly. Durable adapters can additionally advertise synchronous reset commits. `/new` is owner-authenticated and transactionally ordered: Buzz preflights bounded reset metadata, commits an idempotent adapter tombstone, fences and cancels the old generation, then publishes a pre-signed acknowledgement. Replacement work is released only after the old turn drains and the relay explicitly accepts that acknowledgement. A short-lived helper performs the same commit when the owning adapter is busy or the pool is still lazy.
+
+The `buzz-pi-agent` adapter persists each conversation as a Pi JSONL session, so cold eviction or process restart does not lose context. It enforces a 150,000-token logical ceiling, proactively compacts, performs a final provider-payload guard, and emits typed lifecycle events that the harness renders as safe, thread-scoped Buzz notices. Project-local Pi resources are fail-closed behind Pi's project trust store; normal global Pi extensions and resources are reused.
 
 **Key modules:**
 
 | Module | LOC | Responsibility |
 |--------|-----|---------------|
-| `relay.rs` | 3,143 | WebSocket + REST relay connection, NIP-42 auth |
-| `queue.rs` | 2,565 | Per-channel event queue, batching, dedup |
-| `main.rs` | 2,457 | Event loop, pool orchestration, heartbeat |
-| `pool.rs` | 2,253 | N-agent pool, claim/return lifecycle |
-| `config.rs` | 1,903 | CLI/env/TOML configuration |
-| `acp.rs` | 1,785 | ACP client, stdio JSON-RPC, timeouts |
-| `filter.rs` | 814 | Subscription rules, evalexpr filtering |
+| `lib.rs` | 10,675 | Event loop, reset coordination, pool orchestration, heartbeat |
+| `pool.rs` | 8,361 | N-agent pool, sticky conversation sessions, claim/return lifecycle |
+| `relay.rs` | 7,104 | WebSocket + REST relay connection, NIP-42 auth |
+| `queue.rs` | 6,017 | Per-conversation event queue, batching, reset generations, dedup |
+| `acp.rs` | 5,884 | ACP client, stdio JSON-RPC, extension negotiation, timeouts |
+| `config.rs` | 3,109 | CLI/env/TOML configuration |
+| `durable_outbox.rs` | 929 | Crash-safe lifecycle notices and committed reset barriers |
+| `filter.rs` | 787 | Subscription rules, evalexpr filtering |
 
 **Key behaviors:**
 - Pool of 1–32 agent subprocesses with claim/return lifecycle.
-- Per-channel queuing: at most one prompt in-flight per channel; subsequent @mentions queue until the agent responds.
+- Per-conversation queuing: at most one prompt in flight per thread or DM scope; sibling threads remain independent.
+- Sticky agent affinity keeps a hot conversation on one subprocess when possible, with fair bypass when that subprocess is busy.
+- Bounded hot-session lifecycle (8 sessions per process, 30-minute idle TTL by default) with explicit adapter disposal and durable cold resume where supported.
+- Owner-authenticated, thread-local `/new` with generation fencing and an accepted signed acknowledgement before replacement work is released.
+- Typed session lifecycle notices for context status, compaction, reset, and resource reload.
 - Crash recovery: agent subprocess crashes are detected and the agent is respawned.
 - Depends on `buzz-core` (kind constants) and `buzz-sdk` (relay/REST utilities).
 
-**Does NOT:** persist state.
+**Persistence boundary:** the harness keeps only an in-memory reconnect/startup watermark; it does not persist a durable relay cursor across process restarts. Conversation persistence and acknowledged reset tombstones belong to capable adapters. Legacy ACP adapters remain hot-session-only; `buzz-pi-agent` provides durable thread sessions, and reset safety never relies on relay replay behavior.
 
 ---
 

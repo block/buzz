@@ -39,6 +39,30 @@ function CursorMark({ className }: MarkProps) {
   );
 }
 
+/** A neutral mathematical pi mark for Buzz's Pi SDK adapter. This is drawn
+ * locally rather than bundling a vendor logo, and follows the surrounding
+ * runtime icon's current color in both themes. */
+function PiMark({ className }: MarkProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={className}
+      fill="none"
+      role="img"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="2"
+      viewBox="0 0 24 24"
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <path d="M3 6h18" />
+      <path d="M8 6v12" />
+      <path d="M15 6v8a4 4 0 0 0 4 4h2" />
+    </svg>
+  );
+}
+
 /// Theme-adaptive inline marks, keyed by runtime/preset id. Consulted before
 /// the bitmap logo maps in `RuntimeIcon`. Codex deliberately has no entry:
 /// the OpenAI blossom was removed from simple-icons v16 at the vendor's
@@ -46,4 +70,5 @@ function CursorMark({ className }: MarkProps) {
 export const RUNTIME_MARKS: Record<string, React.FC<MarkProps>> = {
   cursor: CursorMark,
   goose: GooseMark,
+  pi: PiMark,
 };
