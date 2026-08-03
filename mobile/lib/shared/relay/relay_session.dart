@@ -103,6 +103,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   int _subIdCounter = 0;
   bool _disposed = false;
   bool _paused = false;
+  bool _resumeReconnectRequired = false;
   bool _hasConnectedOnce = false;
   int _connectionGeneration = 0;
 
@@ -291,9 +292,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
         throw StateError('Relay connection unavailable');
       }
       if (DateTime.now().isAfter(deadline)) {
-        throw TimeoutException(
-          'Relay did not reconnect within $timeout',
-        );
+        throw TimeoutException('Relay did not reconnect within $timeout');
       }
       await Future<void>.delayed(const Duration(milliseconds: 50));
     }
@@ -342,6 +341,10 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
   /// Called by the app lifecycle provider when the app goes to background.
   void onAppPaused() {
+    // Do not trust an iOS socket after any background transition. The process
+    // may be suspended before the grace timer runs, leaving Dart's local
+    // socket state as `connected` even though the network path is gone.
+    _resumeReconnectRequired = true;
     _backgroundGraceTimer?.cancel();
     _backgroundGraceTimer = Timer(const Duration(seconds: 5), _pauseNow);
   }
@@ -361,12 +364,28 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _backgroundGraceTimer?.cancel();
     _backgroundGraceTimer = null;
 
-    // If still connected, nothing to do — the socket survived the background
-    // grace window.
-    if (state.status == SessionStatus.connected) return;
+    if (!_resumeReconnectRequired && state.status == SessionStatus.connected) {
+      return;
+    }
+    _resumeReconnectRequired = false;
 
-    // Cancel any in-flight reconnect backoff timer so we reconnect immediately
-    // instead of waiting for the (possibly large) exponential delay.
+    // Reconnect even when the socket still claims to be connected. On iOS a
+    // backgrounded or path-migrated socket can remain locally open while no
+    // longer receiving relay events; replacing it is what makes the first
+    // message after foregrounding observable.
+    _reconnectTimer?.cancel();
+    _reconnectDelayMs = _baseReconnectDelayMs;
+    final config = ref.read(relayConfigProvider);
+    _connect(config);
+  }
+
+  /// Replace the socket immediately after the network becomes reachable.
+  ///
+  /// Connectivity restoration is stronger evidence than the websocket's
+  /// local state: a half-open socket may still report connected after Wi-Fi,
+  /// cellular, VPN, or Tailnet path migration.
+  void onNetworkRestored() {
+    if (_disposed || _paused) return;
     _reconnectTimer?.cancel();
     _reconnectDelayMs = _baseReconnectDelayMs;
     final config = ref.read(relayConfigProvider);

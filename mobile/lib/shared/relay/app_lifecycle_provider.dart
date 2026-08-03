@@ -20,7 +20,7 @@ class AppLifecycleNotifier extends Notifier<AppLifecycleState> {
     _connectivitySub = Connectivity().onConnectivityChanged.listen((results) {
       final hasNetwork = results.any((r) => r != ConnectivityResult.none);
       if (hasNetwork && state == AppLifecycleState.resumed) {
-        ref.read(relaySessionProvider.notifier).onAppResumed();
+        ref.read(relaySessionProvider.notifier).onNetworkRestored();
       }
     });
 

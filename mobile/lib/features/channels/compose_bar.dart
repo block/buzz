@@ -495,6 +495,7 @@ class ComposeBar extends HookConsumerWidget {
       );
 
       isSending.value = true;
+      uploadError.value = null;
       try {
         if (nonMemberAgentPubkeys.isNotEmpty) {
           await ref
@@ -517,6 +518,13 @@ class ComposeBar extends HookConsumerWidget {
         );
         if (context.mounted) {
           clearComposer();
+        }
+      } catch (error) {
+        // Keep the draft intact and make a missing relay acknowledgement
+        // visible. An optimistic composer clear is not proof that the relay
+        // accepted the message.
+        if (context.mounted) {
+          uploadError.value = _formatSendError(error);
         }
       } finally {
         if (context.mounted) isSending.value = false;
@@ -973,4 +981,11 @@ class ComposeBar extends HookConsumerWidget {
       ),
     );
   }
+}
+
+String _formatSendError(Object error) {
+  if (error is TimeoutException) {
+    return 'Message wasn\u2019t sent because Buzz did not confirm it. Try again.';
+  }
+  return 'Message wasn\u2019t sent. Check your connection and try again.';
 }

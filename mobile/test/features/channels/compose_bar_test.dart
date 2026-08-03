@@ -393,6 +393,37 @@ void main() {
   });
 
   group('ComposeBar', () {
+    testWidgets('failed send keeps the draft and shows a truthful error', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {
+                throw TimeoutException('relay acknowledgement missing');
+              },
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), 'please persist');
+      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.pump();
+
+      expect(find.text('please persist'), findsOneWidget);
+      expect(
+        find.text(
+          'Message wasn\u2019t sent because Buzz did not confirm it. Try again.',
+        ),
+        findsOneWidget,
+      );
+    });
+
     testWidgets('mounted composer does not carry draft text across an in-place '
         'identity switch', (tester) async {
       final keysA = nostr.Keys.generate();
