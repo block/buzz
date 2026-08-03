@@ -3,7 +3,7 @@ pub(super) fn validate_managed_adapter_descriptor(
     args: &[String],
 ) -> Result<(), String> {
     let canonical_command = crate::managed_agents::default_agent_command();
-    if command != &canonical_command || !args.is_empty() {
+    if command != canonical_command || !args.is_empty() {
         return Err(
             "unsupported_managed_adapter: durable managed mode requires the canonical bundled buzz-agent command with default arguments"
                 .into(),
