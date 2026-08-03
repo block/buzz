@@ -46,8 +46,9 @@ notify-rust = "4"
 webkit2gtk = { version = "=2.0.2", features = ["v2_22"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+block2 = { version = "0.6", default-features = false, features = ["std"] }
 objc2 = { version = "0.6.4", default-features = false }
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSHapticFeedback", "NSMenu", "NSMenuItem", "NSStatusItem"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSEvent", "NSHapticFeedback", "NSMenu", "NSMenuItem", "NSStatusItem", "block2"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSProcessInfo", "NSString"] }
 keyring = { version = "3.6.3", default-features = false, features = ["apple-native", "vendored"], optional = true }
 security-framework = { version = "3.7.0", features = ["OSX_10_15"] }
@@ -138,6 +139,7 @@ strip-ansi-escapes = "0.2"
 tracing = "0.1"
 
 [dev-dependencies]
+tauri-utils = "2"
 # `test-util` enables tokio's paused-clock (`start_paused`) so the relay
 # admission gate tests can assert exact wait durations without real sleeps.
 tokio = { version = "1", features = ["test-util"] }

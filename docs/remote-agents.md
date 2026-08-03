@@ -203,17 +203,20 @@ one.
   deployment axis (`deployed`/`not_deployed`, from the stored
   `backend_agent_id`) is bookkeeping, not liveness. Staleness bound: presence
   can be wrong for the window between an abnormal agent death (SIGKILL, node
-  loss) and the relay's presence expiry — **90 seconds**
+  loss) and the relay's presence expiry — **180 seconds**
   (`PRESENCE_TTL_SECS`, `buzz-pubsub/src/presence.rs:16`; the vision's
-  "ninety seconds of a wrong dot, never an indefinite one"), the accepted
-  cost of M1.
+  "a bounded wrong dot, never an indefinite one"), the accepted
+  cost of M1. The specific number is a relay-wide constant, not a
+  remote-agent choice: #3783 raised it from 90s to keep a three-heartbeat
+  expiry window after the desktop heartbeat moved to 60s. What I3 promises
+  is that the window is *bounded*, not its width.
   The Kubernetes binding minimizes the *avoidable* part of that window by
   sizing the termination grace period to the harness's full graceful-shutdown
   path (§K8s Grace). Two consequences the bound imposes: (a) the harness's
   presence-suppression knob, `BUZZ_ACP_NO_PRESENCE`, MUST join
   `RESERVED_ENV_KEYS` — locally the knob is cosmetic (the process and UI
   remain visible), but remotely M1 makes presence the *only* signal, so an
-  unreserved user env var would convert "wrong for ≤90s" into "wrong
+  unreserved user env var would convert "wrong for ≤180s" into "wrong
   indefinitely" and silently disarm the one bound in print; (b) presence is
   scoped to a **community**: the relay derives community from its host, so
   the deploy-time `relay_url` binds the body to one community for its whole
@@ -273,7 +276,7 @@ one.
   directives. Any revive-on-abnormal-death policy carries a universal
   precondition: the supervisor can distinguish intent from accident only
   if the harness formally promises *clean exit = exit code 0* on every
-  intentional path and nonzero otherwise, pinned by test. At `c1bca1b56`
+  intentional path and nonzero otherwise, pinned by test. At `28ae6cd21`
   that property is emergent, not defended (Known Defect 6);
   restart-on-failure before the pinned contract is how a refactor
   silently converts every clean stop into a restart loop with no failing
@@ -308,7 +311,7 @@ entry of `PATH`, and `~/.local/bin`, for executables named
 `buzz-backend-<id>`. The suffix after the prefix is the provider id and MUST
 match `[a-z0-9][a-z0-9_-]*`. On Windows, an `.exe`/`.bat`/`.cmd` extension
 MUST be stripped before the id is derived (see §Known Defects — as of
-`c1bca1b56` it is not, so Windows providers probe but cannot deploy). First
+`28ae6cd21` it is not, so Windows providers probe but cannot deploy). First
 hit per filename wins. Discovery executes nothing.
 
 **Shadowing and invalid candidates are diagnosable, not silent.** First-hit
@@ -319,7 +322,7 @@ deploy-time errors MUST be able to surface: the selected binary's full
 path, any shadowed candidates for the same id (later-PATH duplicates), and
 candidates rejected for malformed names. A deploy error that names which
 binary ran answers the first question a user with two copies of
-`buzz-backend-kubernetes` will ask. (At `c1bca1b56` discovery records only
+`buzz-backend-kubernetes` will ask. (At `28ae6cd21` discovery records only
 the winning path — a desktop change alongside Known Defect 3's.)
 
 **Resolution rule.** Every subsequent operation resolves the provider id
@@ -330,7 +333,7 @@ to a binary discovery would not have found.
 
 **Pre-secret negotiation gate (normative).** Declaring `protocol_version`
 is worthless if nothing checks it before the nsec crosses the trust
-boundary — and at `c1bca1b56` nothing does: `provider_deploy` invokes
+boundary — and at `28ae6cd21` nothing does: `provider_deploy` invokes
 `deploy` directly, so a stale UI-time probe (or a binary replaced on PATH
 since that probe) can receive `private_key_nsec` unchecked (Known Defect
 5). The deploy path MUST: resolve the provider id **once**; copy the
@@ -420,7 +423,7 @@ timeout:  600s
 ```
 
 The agent payload (field list per
-`commands/agents_deploy.rs: deploy_payload_json` at `c1bca1b56`; the
+`commands/agents_deploy.rs: deploy_payload_json` at `28ae6cd21`; the
 `launch` block is a normative addition not yet emitted — Known Defect 3):
 
 | field | meaning |
@@ -429,7 +432,7 @@ The agent payload (field list per
 | `relay_url` | concrete WS URL (workspace fallback materialized — the remote side has no workspace notion) |
 | `private_key_nsec` | **the identity** (I1: never empty) |
 | `auth_tag` | NIP-OA owner attestation |
-| `agent_command`, `agent_args` | the ACP agent under the harness (configurable-harness support). At `c1bca1b56` these are raw record bytes — see Known Defect 3: the normative source is the resolved descriptor in `launch` |
+| `agent_command`, `agent_args` | the ACP agent under the harness (configurable-harness support). At `28ae6cd21` these are raw record bytes — see Known Defect 3: the normative source is the resolved descriptor in `launch` |
 | `system_prompt`, `model`, `provider` | effective values, live-persona-first resolution |
 | `turn_timeout_seconds`, `idle_timeout_seconds`, `max_turn_duration_seconds` | harness timeout knobs |
 | `parallelism` | concurrent-turn bound |
@@ -466,7 +469,7 @@ deploy of the same key, or manually).
 Reproducing the local spawn's launch semantics requires state only the
 desktop can resolve: the runtime-metadata table (`model_env_var`,
 `provider_env_var`, `provider_locked`, `default_env` —
-`discovery.rs:74-193`), the six-layer env resolution, harness-definition
+`discovery.rs:75-207`), the six-layer env resolution, harness-definition
 command/args fallback, team instructions, session title, the respond-to
 gate's legacy owner fallback, and the mesh rewrite. A provider MUST NOT
 reimplement that derivation — it would be a second copy of desktop runtime
@@ -529,12 +532,12 @@ mis-tiered (below):
   verbatim would bake a host accident into the pod. Launch data MUST be
   computed from record + config alone.
 - `BUZZ_ACP_LAZY_POOL=true` — a **deliberate pick, not a transcription**:
-  the two local paths disagree (manual Start is eager, `runtime.rs:1006`;
+  the two local paths disagree (manual Start is eager, `runtime.rs:1001`;
   launch restore is lazy, `restore.rs:333`, precisely to avoid "N idle
   brains on every launch"). Remote pods take the lazy arm: an idle LLM pool
   in a cluster is billable waste with no user watching it warm up.
 - `MCP_HOOK_SERVERS=*` when the resolved runtime has `mcp_hooks`
-  (`runtime.rs:594-598`; buzz-agent only at `c1bca1b56`) — gates the
+  (`runtime.rs:594-598`; buzz-agent only at `28ae6cd21`) — gates the
   `_Stop`/`_PostCompact` hook tools.
 - `BUZZ_ACP_SYSTEM_PROMPT`, `BUZZ_ACP_IDLE_TIMEOUT`,
   `BUZZ_ACP_MAX_TURN_DURATION`, `BUZZ_ACP_AGENTS` — resolved by the desktop
@@ -728,6 +731,31 @@ keys on it. Whether ten minutes fits the intended cluster class is a
 product ruling,
 not a correctness one.
 
+**One create attempt per call (normative).** The replacement rows above —
+terminated, never-started provably broken, never-started divergent — exist
+to clear residue from a *previous* life. Once a deploy call has created its
+own pod, a classification that would replace that pod means the attempt this
+call just made has already failed: the harness started, rejected its
+configuration, and exited (the deterministic startup failure), or the pod
+was proven broken. Re-running the identical create against the same cluster
+inside the same call cannot produce a different outcome; what it produces is
+a hot delete/mint/create cycle every poll interval for the whole operation
+deadline, one immutable Secret per cycle (measured live: 107 Secrets in a
+single 600s call), every one younger than §K8s GC's orphan age gate — a
+bounded-call resource DoS and nsec-bearing-Secret amplifier. A binding MUST
+NOT delete-recreate a pod created by the same deploy call: it MUST return
+the in-band error carrying the latest condition (for a terminated container,
+the exit code and reason — never the terminated `message`, which is
+process-composed output under the same redaction rule as pull messages).
+The failed attempt's pod and Secret are deliberately left in place: the pod
+is terminated, so the *next* Start's preflight GC collects the pod and its
+referenced Secret together before that call's own single attempt — retry is
+thereby gated on fresh owner intent, and litter is bounded at one pod plus
+one Secret per press, not per poll. This bounds attempts, not observation:
+the recoverable rows still observe a slow startup for the full deadline, and
+residue from previous lives is still replaced exactly once on the way to
+this call's attempt.
+
 **Destructive decisions come from views you control — reads and writes
 both (normative).** This is one rule with three instances, stated once so
 nobody optimizes an instance away. §K8s GC's same-clock rule is the time
@@ -853,13 +881,13 @@ can yield two live instances in one scope.
   derive an upper bound for this path from its segment timeouts, because
   review proved that arithmetic wrong twice**: the visible constants (30s
   drain, 2s presence, 5s relay close) omit terms that are *variable*, not
-  constant — at this PR's base `b4f4ed1a6` the post-drain reap segment
+  constant — at `28ae6cd21` the post-drain reap segment
   (late-arriving reap `lib.rs:2664`, idle-slot reap loop `:2670`, respawn
   drain `:2684-2688`) runs *outside* the 30s drain timeout (opened at
   `:2636`, closed at `:2657`) and serially awaits a 5s post-SIGKILL wait
   per occupied pool slot (`acp.rs:436`). **That segment alone can reach
   `30 + 5×parallelism + 7` — ~87s at the desktop's default parallelism
-  of 10** (`DEFAULT_AGENT_PARALLELISM`, `types.rs:809`; lowered from 24 by
+  of 10** (`DEFAULT_AGENT_PARALLELISM`, `types.rs:814`; lowered from 24 by
   #3038), ~197s at the harness cap of 32 (`config.rs:293`) — already
   exceeding a 60s grace. And it is a *lower* bound on the tail, not the
   worst case: the same path runs earlier segments before the prompt drain
@@ -925,7 +953,7 @@ I5's enforcement point. A new harness knob:
   could disable the reaper and reopen unbounded lifetime through the front
   door. `BUZZ_ACP_NO_PRESENCE` (`config.rs:378`) MUST join in the same
   change, for the same shape of reason at I3 instead of I5: unreserved, it
-  lets user env silently defeat the 90s presence bound (I3). One knob
+  lets user env silently defeat the 180s presence bound (I3). One knob
   guards "knows when to leave", the other "you can see that it left";
   both are promises users must not be able to un-make by typo.
 - Distinctness note: this is a **fourth** timeout concept, deliberately named
@@ -1173,7 +1201,7 @@ regardless of `HOME`.
   would SIGKILL the harness mid-drain, leaving presence stale-online — the
   avoidable half of I3's staleness window — so the binding declares 60s.
   But the shutdown tail is *variable*, not constant (§Stop: the post-drain
-  reap segment alone reaches ~87s at default parallelism at `b4f4ed1a6`,
+  reap segment alone reaches ~87s at default parallelism at `28ae6cd21`,
   and earlier untimed segments precede it — the total is not bounded by
   today's segment timeouts), so no fixed grace can be proven
   sufficient by adding segment timeouts. The two halves of the requirement:
@@ -1541,14 +1569,11 @@ the wrong tool here: the failure modes found in review were wrong
 delete, phase-as-readiness, non-atomic Secret→pod against GC), which a
 hand-written model would have reproduced convincingly.
 
-## Known Defects (at `c1bca1b56`)
+## Known Defects (at `28ae6cd21`)
 
-**Citation-pin caveat:** `c1bca1b56` is an unmerged feature-branch commit
-that diverged from main on Jul 18 and predates #3038 (default parallelism
-24 → 10). Line references marked `at b4f4ed1a6` were re-verified against
-this PR's own base; unmarked `c1bca1b56` references may be offset on
-current main. A follow-up re-pins the whole document to one merged
-commit.
+**Citation pin:** every `file:line` reference in this document was verified
+against `28ae6cd21` — the commit at which this spec merged to `main`.
+References are to that tree; a later commit may offset them.
 
 Desktop- and harness-side, discovered during this design:
 
@@ -1562,7 +1587,7 @@ Desktop- and harness-side, discovered during this design:
    a desktop-side PATH augmentation would fix the class.
 3. **Deploy payload bypasses the launch resolver** (the prerequisite this
    spec names for §Launch data — a desktop code change, not spec text).
-   At `c1bca1b56`, `deploy_payload_json` serializes raw record bytes and a
+   At `28ae6cd21`, `deploy_payload_json` serializes raw record bytes and a
    three-layer `merged_user_env` where the local spawn uses
    `resolve_effective_harness_descriptor`'s six-layer resolution. Concrete
    consequences, each verified in review: (a) no per-runtime model/provider
@@ -1584,14 +1609,14 @@ Desktop- and harness-side, discovered during this design:
    semantics-preserving remote launch. **Security follow-through:** once
    secrets can arrive via `launch.env`, desktop redaction MUST collect
    candidate values from `launch.env` (and `launch.policy_env`) as well as
-   legacy `agent.env_vars` — at `c1bca1b56`, `env_secrets_from_request`
+   legacy `agent.env_vars` — at `28ae6cd21`, `env_secrets_from_request`
    reads only `agent.env_vars` (`backend.rs`), leaving a
    definition/persona-layer secret outside the literal-value scrub.
    Conformance: a provider that echoes a launch-only secret into an error
    must come back redacted.
 4. **The I5 reaper does not exist, and its natural home is a trap**
    (harness code prerequisite). `BUZZ_ACP_EXIT_AFTER_INACTIVITY` appears
-   nowhere in the harness at `c1bca1b56`; §Auto-Stop is a design, not a
+   nowhere in the harness at `28ae6cd21`; §Auto-Stop is a design, not a
    description. Worse, the obvious attachment point — the existing 30s
    maintenance tick — is gated on `pool_ready` (`lib.rs:1743`), which under
    `lazy_pool` only becomes true when work arrives, so a never-mentioned
@@ -1607,7 +1632,7 @@ Desktop- and harness-side, discovered during this design:
    resolve-once → stage-and-digest → `info` → explicit-version check →
    `deploy`, both invocations running the staged bytes.
 6. **The clean-exit contract is emergent, not defended** (harness code
-   prerequisite; gates `OnFailure`). At `b4f4ed1a6`: the graceful path
+   prerequisite; gates `OnFailure`). At `28ae6cd21`: the graceful path
    returns `Ok(())` (`lib.rs:2723`), and owner `!shutdown` (`:2045`),
    Ctrl-C (`:1635`), and
    SIGTERM (`:1644`) all route into the same shutdown channel — so clean
@@ -1620,12 +1645,12 @@ Desktop- and harness-side, discovered during this design:
    timeout would silently convert every clean stop into a restart loop —
    I5 defeated with no failing test (I5 ordering rule).
 7. **The shutdown tail overruns the declared grace budget at default
-   config** (harness code prerequisite). At `b4f4ed1a6`: the post-drain
+   config** (harness code prerequisite). At `28ae6cd21`: the post-drain
    reap segment
    (`lib.rs:2664-2688`) runs *after* the 30s drain timeout closes
    (`:2636,:2657`) and serially awaits a 5s post-SIGKILL wait per occupied
    slot (`acp.rs:436`) — that segment alone reaches ~87s at the desktop's
-   default parallelism of 10 (`types.rs:809`; #3038 lowered it from 24),
+   default parallelism of 10 (`types.rs:814`; #3038 lowered it from 24),
    ~197s at the harness cap of 32 (`config.rs:293`), against the binding's
    60s grace; and it is not the whole tail — the wake-task drain
    (`:2612`) and awakened-pool shutdown (`:2620-2624`, per-slot loop
@@ -1640,7 +1665,7 @@ Desktop- and harness-side, discovered during this design:
 8. **Cleared numeric config fields ship as strings** (desktop code
    prerequisite, raised by blessing `0`). `coerceConfigValues`
    (`desktop/src/features/agents/ui/ProviderConfigFields.tsx:6` at
-   `b4f4ed1a6`) skips numeric coercion when the value is `""`, so a
+   `28ae6cd21`) skips numeric coercion when the value is `""`, so a
    *cleared* numeric field reaches the provider as a JSON string instead
    of a number. Blessing `inactivity_seconds: 0` makes clearing that
    field a legitimate user action, so the empty-string arm now sits on a
