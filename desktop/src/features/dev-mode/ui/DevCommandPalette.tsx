@@ -39,6 +39,9 @@ import {
   parseSubChannelName,
   subChannelName,
 } from "@/features/dev-mode/lib/subChannels";
+import { selectRootEvents } from "@/features/dev-mode/lib/transcriptRoots";
+import { useChannelMessagesQuery } from "@/features/messages/hooks";
+import { buildMessageLink } from "@/features/messages/lib/messageLink";
 import {
   useFlattenedUserSearchResults,
   useInfiniteUserSearchQuery,
@@ -46,6 +49,7 @@ import {
 import type { SettingsSection } from "@/features/settings/ui/SettingsPanels";
 import type { Channel, UserSearchResult } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { copyTextToClipboard } from "@/shared/lib/clipboard";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 
 type PaletteEntry = {
@@ -151,6 +155,15 @@ export function DevCommandPalette({
   const updateChannelMutation = useUpdateChannelMutation(activeChannelId);
   const membersQuery = useChannelMembersQuery(activeChannelId);
   const resolveColor = useAuthorColorResolver();
+
+  // Shares the transcript's query cache. The deep-link protocol has no
+  // channel-only form (`id` is required end-to-end), so "copy link to
+  // channel" links the newest root message, which opens the channel.
+  const channelMessagesQuery = useChannelMessagesQuery(activeChannel);
+  const latestRootId = React.useMemo(
+    () => selectRootEvents(channelMessagesQuery.data).at(-1)?.id ?? null,
+    [channelMessagesQuery.data],
+  );
 
   // The relay refuses to remove a channel's last owner, so when no other
   // human would remain, "leave" archives the channel instead.
@@ -551,6 +564,27 @@ export function DevCommandPalette({
                 } satisfies PaletteEntry,
               ]
             : []),
+          // Empty channels have nothing to link, so the entry stays hidden
+          // until the first message exists.
+          ...(latestRootId
+            ? [
+                {
+                  id: "copy-channel-link",
+                  label: `copy link to # ${activeChannel.name}`,
+                  detail: "buzz:// link to its latest message",
+                  run: () => {
+                    copyTextToClipboard(
+                      buildMessageLink({
+                        channelId: activeChannel.id,
+                        messageId: latestRootId,
+                      }),
+                      "Link copied to clipboard",
+                    );
+                    onClose();
+                  },
+                } satisfies PaletteEntry,
+              ]
+            : []),
           {
             id: "rename-channel",
             label: `rename # ${activeChannel.name}`,
@@ -711,6 +745,7 @@ export function DevCommandPalette({
     discoverableChannels,
     isLastHumanMember,
     joinAndOpenChannel,
+    latestRootId,
     leaveChannel,
     membersQuery.data,
     mode,

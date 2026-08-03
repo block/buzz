@@ -139,6 +139,42 @@ test("create channel action makes a named channel and opens it", async ({
   );
 });
 
+test("copy link to channel puts a buzz:// message link on the clipboard", async ({
+  page,
+}) => {
+  await openDevModeChannel(page, "general");
+
+  await page.keyboard.press("Meta+k");
+  const palette = page.getByTestId("dev-mode-palette");
+  await expect(palette).toBeVisible();
+  await page
+    .getByTestId("dev-mode-palette-input")
+    .pressSequentially("copy link");
+  const entries = page.getByTestId("dev-mode-palette-entry");
+  await expect(entries.first()).toContainText("copy link to # general");
+  await page.keyboard.press("Enter");
+  await expect(palette).not.toBeVisible();
+
+  const payload = await page.evaluate(() => {
+    const log = (
+      window as Window & {
+        __BUZZ_E2E_COMMAND_LOG__?: Array<{
+          command: string;
+          payload: Record<string, unknown> | null;
+        }>;
+      }
+    ).__BUZZ_E2E_COMMAND_LOG__;
+    return log?.findLast(({ command }) => command === "copy_text_to_clipboard")
+      ?.payload;
+  });
+
+  // The deep-link protocol has no channel-only form, so the channel link
+  // targets its newest root message.
+  expect(payload?.text).toMatch(
+    /^buzz:\/\/message\?channel=9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50&id=.+/,
+  );
+});
+
 test("archiving a chat lands on the most recent non-pinned chat", async ({
   page,
 }) => {
