@@ -45,5 +45,8 @@ class _SendButton extends StatelessWidget {
 }
 
 String _formatUploadError(Object error) {
+  if (error is TimeoutException) {
+    return 'Upload timed out. Check your connection and try again.';
+  }
   return error.toString().replaceFirst('Exception: ', '');
 }

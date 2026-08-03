@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -27,6 +28,8 @@ const _readClipboardImageMethod = 'readClipboardImage';
 const _clipboardHasImageMethod = 'clipboardHasImage';
 const _uploadAuthKind = 24242;
 const _uploadAuthLifetimeSeconds = 300;
+const _defaultMediaUploadTimeout = Duration(minutes: 2);
+const _defaultVideoUploadTimeout = Duration(minutes: 10);
 const _heicBrands = {
   'heic',
   'heix',
@@ -80,6 +83,14 @@ class MediaPolicyUploadException implements Exception {
 
   @override
   String toString() => _mediaPolicyUploadMessage;
+}
+
+/// Thrown when the user intentionally cancels an in-flight media upload.
+class MediaUploadCancelledException implements Exception {
+  const MediaUploadCancelledException();
+
+  @override
+  String toString() => 'Upload cancelled';
 }
 
 @immutable
@@ -185,6 +196,9 @@ class MediaUploadService {
   final DateTime Function() _now;
   final http.Client _http;
   final bool _ownsHttpClient;
+  final Duration _mediaUploadTimeout;
+  final Duration _videoUploadTimeout;
+  final Set<Completer<void>> _pendingUploadAborts = {};
 
   MediaUploadService({
     required String baseUrl,
@@ -199,6 +213,8 @@ class MediaUploadService {
     ReadClipboardImage? readClipboardImage,
     DateTime Function()? now,
     http.Client? httpClient,
+    Duration mediaUploadTimeout = _defaultMediaUploadTimeout,
+    Duration videoUploadTimeout = _defaultVideoUploadTimeout,
   }) : _baseUrl = baseUrl,
        _nsec = nsec,
        _pickGalleryImage = pickGalleryImage,
@@ -217,11 +233,21 @@ class MediaUploadService {
        _readClipboardImage = readClipboardImage ?? _readPlatformClipboardImage,
        _now = now ?? DateTime.now,
        _http = httpClient ?? http.Client(),
-       _ownsHttpClient = httpClient == null;
+       _ownsHttpClient = httpClient == null,
+       _mediaUploadTimeout = mediaUploadTimeout,
+       _videoUploadTimeout = videoUploadTimeout;
 
   void dispose() {
+    cancelPendingUploads();
     if (_ownsHttpClient) {
       _http.close();
+    }
+  }
+
+  /// Cancels every upload currently owned by this service.
+  void cancelPendingUploads() {
+    for (final abort in _pendingUploadAborts.toList(growable: false)) {
+      if (!abort.isCompleted) abort.complete();
     }
   }
 
@@ -363,49 +389,77 @@ class MediaUploadService {
     }
 
     final sha256 = _sha256Hex(bytes);
-    var request = _buildUploadRequest(
-      bytes: bytes,
-      mimeType: mimeType,
-      sha256: sha256,
-      path: _mediaUploadPath,
-    );
+    final abort = Completer<void>();
+    _pendingUploadAborts.add(abort);
+    var timedOut = false;
+    final timeout = mimeType.startsWith('video/')
+        ? _videoUploadTimeout
+        : _mediaUploadTimeout;
+    final timer = Timer(timeout, () {
+      timedOut = true;
+      if (!abort.isCompleted) abort.complete();
+    });
 
-    var streamed = await _http.send(request);
-    var response = await http.Response.fromStream(streamed);
-    if (response.statusCode == HttpStatus.notFound ||
-        response.statusCode == HttpStatus.methodNotAllowed) {
-      request = _buildUploadRequest(
+    try {
+      var request = _buildUploadRequest(
         bytes: bytes,
         mimeType: mimeType,
         sha256: sha256,
-        path: _legacyMediaUploadPath,
+        path: _mediaUploadPath,
+        abortTrigger: abort.future,
       );
-      streamed = await _http.send(request);
-      response = await http.Response.fromStream(streamed);
-    }
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      if (_allowedImageMimeTypes.contains(mimeType) &&
-          (response.statusCode == HttpStatus.unsupportedMediaType ||
-              response.statusCode == HttpStatus.unprocessableEntity)) {
-        throw const MediaPolicyUploadException();
-      }
-      throw Exception(
-        'upload failed (${response.statusCode}): ${response.body}',
-      );
-    }
 
-    return BlobDescriptor.fromJson(
-      jsonDecode(response.body) as Map<String, dynamic>,
-    );
+      var streamed = await _http.send(request);
+      var response = await http.Response.fromStream(streamed);
+      if (response.statusCode == HttpStatus.notFound ||
+          response.statusCode == HttpStatus.methodNotAllowed) {
+        request = _buildUploadRequest(
+          bytes: bytes,
+          mimeType: mimeType,
+          sha256: sha256,
+          path: _legacyMediaUploadPath,
+          abortTrigger: abort.future,
+        );
+        streamed = await _http.send(request);
+        response = await http.Response.fromStream(streamed);
+      }
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        if (_allowedImageMimeTypes.contains(mimeType) &&
+            (response.statusCode == HttpStatus.unsupportedMediaType ||
+                response.statusCode == HttpStatus.unprocessableEntity)) {
+          throw const MediaPolicyUploadException();
+        }
+        throw Exception(
+          'upload failed (${response.statusCode}): ${response.body}',
+        );
+      }
+
+      return BlobDescriptor.fromJson(
+        jsonDecode(response.body) as Map<String, dynamic>,
+      );
+    } on http.RequestAbortedException {
+      if (timedOut) {
+        throw TimeoutException('Upload timed out', timeout);
+      }
+      throw const MediaUploadCancelledException();
+    } finally {
+      timer.cancel();
+      _pendingUploadAborts.remove(abort);
+    }
   }
 
-  http.Request _buildUploadRequest({
+  http.AbortableRequest _buildUploadRequest({
     required Uint8List bytes,
     required String mimeType,
     required String sha256,
     required String path,
+    required Future<void> abortTrigger,
   }) {
-    final request = http.Request('PUT', Uri.parse(_baseUrl).resolve(path));
+    final request = http.AbortableRequest(
+      'PUT',
+      Uri.parse(_baseUrl).resolve(path),
+      abortTrigger: abortTrigger,
+    );
     request.bodyBytes = bytes;
     request.headers.addAll(
       _buildUploadHeaders(mimeType: mimeType, sha256: sha256),

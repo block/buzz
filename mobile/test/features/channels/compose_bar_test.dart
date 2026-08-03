@@ -134,6 +134,18 @@ const _nativeAttachmentPopoverChannel = MethodChannel(
   'buzz/native_attachment_popover',
 );
 
+class _AbortAwareClient extends http.BaseClient {
+  final started = Completer<void>();
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    if (!started.isCompleted) started.complete();
+    final abortTrigger = (request as http.AbortableRequest).abortTrigger;
+    await abortTrigger;
+    throw http.RequestAbortedException(request.url);
+  }
+}
+
 void _setMockMediaUploadPlatformHandler(
   Future<Object?> Function(MethodCall call)? handler,
 ) {
@@ -1863,6 +1875,55 @@ void main() {
       );
     });
 
+    testWidgets('cancels a pending upload without showing an error', (
+      tester,
+    ) async {
+      final client = _AbortAwareClient();
+      final uploadService = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        httpClient: client,
+        pickGalleryVideo: () async => null,
+        pickGalleryImage: () async => null,
+        pickGalleryImages: () async => [
+          XFile.fromData(_pngBytes, name: 'tiny.png'),
+        ],
+      );
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: uploadService,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await _openSystemPhotoPicker(tester);
+      await client.started.future;
+      await tester.pump();
+      expect(
+        find.byKey(const ValueKey('compose-upload-progress')),
+        findsOneWidget,
+      );
+      expect(find.bySemanticsLabel(RegExp(r'Cancel upload')), findsOneWidget);
+
+      await tester.tap(find.byKey(const ValueKey('compose-upload-cancel')));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('compose-upload-progress')),
+        findsNothing,
+      );
+      expect(
+        find.byKey(const ValueKey('compose-upload-error-dismiss')),
+        findsNothing,
+      );
+    });
+
     testWidgets('renders markdown formatting without visible delimiters', (
       tester,
     ) async {
@@ -2478,6 +2539,16 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.textContaining('upload failed'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('compose-upload-error-dismiss')),
+        findsOneWidget,
+      );
+
+      await tester.tap(
+        find.byKey(const ValueKey('compose-upload-error-dismiss')),
+      );
+      await tester.pumpAndSettle();
+      expect(find.textContaining('upload failed'), findsNothing);
     });
 
     for (final statusCode in [

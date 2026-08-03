@@ -465,11 +465,13 @@ class _AttachmentStrip extends StatelessWidget {
   final List<BlobDescriptor> attachments;
   final int uploadingCount;
   final void Function(String url) onRemove;
+  final VoidCallback onCancelUploads;
 
   const _AttachmentStrip({
     required this.attachments,
     required this.uploadingCount,
     required this.onRemove,
+    required this.onCancelUploads,
   });
 
   @override
@@ -489,9 +491,8 @@ class _AttachmentStrip extends StatelessWidget {
                 ? 'Uploading attachment…'
                 : 'Uploading $uploadingCount attachments…';
             return Semantics(
-              excludeSemantics: true,
-              liveRegion: true,
-              label: label,
+              container: true,
+              explicitChildNodes: true,
               child: Container(
                 key: const ValueKey('compose-upload-progress'),
                 width: thumbWidth,
@@ -503,15 +504,20 @@ class _AttachmentStrip extends StatelessWidget {
                 child: Stack(
                   alignment: Alignment.center,
                   children: [
-                    BuzzLoadingIndicator(
-                      size: 34,
-                      color: context.colors.primary,
-                      semanticLabel: label,
+                    Semantics(
+                      excludeSemantics: true,
+                      liveRegion: true,
+                      label: label,
+                      child: BuzzLoadingIndicator(
+                        size: 34,
+                        color: context.colors.primary,
+                        semanticLabel: label,
+                      ),
                     ),
                     if (uploadingCount > 1)
                       PositionedDirectional(
                         top: Grid.quarter,
-                        end: Grid.quarter,
+                        start: Grid.quarter,
                         child: Container(
                           key: const ValueKey('compose-upload-count'),
                           constraints: const BoxConstraints(
@@ -533,6 +539,31 @@ class _AttachmentStrip extends StatelessWidget {
                           ),
                         ),
                       ),
+                    PositionedDirectional(
+                      top: Grid.quarter,
+                      end: Grid.quarter,
+                      child: Semantics(
+                        button: true,
+                        label: 'Cancel upload',
+                        child: ExcludeSemantics(
+                          child: SizedBox(
+                            width: 24,
+                            height: 24,
+                            child: IconButton(
+                              key: const ValueKey('compose-upload-cancel'),
+                              tooltip: 'Cancel upload',
+                              onPressed: onCancelUploads,
+                              style: IconButton.styleFrom(
+                                backgroundColor: context.colors.surface,
+                                foregroundColor: context.colors.onSurface,
+                                padding: EdgeInsets.zero,
+                              ),
+                              icon: const Icon(LucideIcons.x, size: 16),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
                   ],
                 ),
               ),

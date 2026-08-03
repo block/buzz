@@ -4,7 +4,9 @@ class _ComposeBarLayout extends StatelessWidget {
   final List<BlobDescriptor> attachments;
   final int uploadingCount;
   final ValueChanged<String> onRemoveAttachment;
+  final VoidCallback onCancelUploads;
   final String? uploadError;
+  final VoidCallback onDismissUploadError;
   final bool isExpanded;
   final TextEditingController controller;
   final FocusNode focusNode;
@@ -33,7 +35,9 @@ class _ComposeBarLayout extends StatelessWidget {
     required this.attachments,
     required this.uploadingCount,
     required this.onRemoveAttachment,
+    required this.onCancelUploads,
     required this.uploadError,
+    required this.onDismissUploadError,
     required this.isExpanded,
     required this.controller,
     required this.focusNode,
@@ -90,18 +94,29 @@ class _ComposeBarLayout extends StatelessWidget {
               attachments: attachments,
               uploadingCount: uploadingCount,
               onRemove: onRemoveAttachment,
+              onCancelUploads: onCancelUploads,
             ),
             const SizedBox(height: Grid.xxs),
           ],
           if (uploadError case final error?) ...[
-            Align(
-              alignment: Alignment.centerLeft,
-              child: Text(
-                error,
-                style: context.textTheme.bodySmall?.copyWith(
-                  color: context.colors.error,
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    error,
+                    style: context.textTheme.bodySmall?.copyWith(
+                      color: context.colors.error,
+                    ),
+                  ),
                 ),
-              ),
+                IconButton(
+                  key: const ValueKey('compose-upload-error-dismiss'),
+                  tooltip: 'Dismiss upload error',
+                  visualDensity: VisualDensity.compact,
+                  onPressed: onDismissUploadError,
+                  icon: const Icon(LucideIcons.x, size: 18),
+                ),
+              ],
             ),
             const SizedBox(height: Grid.xxs),
           ],
