@@ -137,7 +137,12 @@ ensure_identity() {
   fi
   # Bind the identity to this session and keep the display name current, so a
   # later /rename moves this identity instead of minting another one.
-  [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] \
+  #
+  # Only for a resolved name. An explicit name already opts out of adoption, and
+  # binding it anyway would mean a /rename in the terminal that happened to run
+  # `ensure <name>` renames that identity too — which is wrong for a named agent
+  # that outlives the session, and is how a daemon loses its key.
+  [ -z "$ARG" ] && [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] \
     && [ "$(meta_get "$SESSION_NAME" BUZZ_SESSION_ID)" != "${CLAUDE_CODE_SESSION_ID}" ] \
     && meta_set "$SESSION_NAME" BUZZ_SESSION_ID "$CLAUDE_CODE_SESSION_ID"
   [ "$(meta_get "$SESSION_NAME" BUZZ_SESSION_DISPLAY_NAME)" = "$SESSION_DISPLAY" ] \

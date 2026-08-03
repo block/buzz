@@ -60,10 +60,19 @@
 # (KEY=value, parsed not sourced, chmod 600 — it holds a bearer token):
 #   BUZZ_RELAY_URL           relay base URL          [http://localhost:3000]
 #   BUZZ_INVITE_CODE         invite code every session self-enrols with
-#   BUZZ_COORD_CHANNEL       default channel's UUID, written on creation
 #   BUZZ_COORD_CHANNEL_NAME  default channel name    [agent-coordination]
-#   BUZZ_CHANNEL_<NAME>      a dedicated channel's UUID, written on creation
 #   BUZZ_AUTO_ADMIT          0 disables admitting with a local owner key  [1]
+#
+# Anything a relay minted is cached per relay, because a channel UUID and an
+# invite code are both meaningless on a different one — and a UUID is
+# structurally valid everywhere, so the wrong relay is silent rather than an
+# error. These keys are written, not set by hand:
+#   BUZZ_COORD_CHANNEL__<RELAY>   default channel's UUID on that relay
+#   BUZZ_CHANNEL_<NAME>__<RELAY>  a dedicated channel's UUID on that relay
+#   BUZZ_INVITE_CODE__<RELAY>     the code that worked on that relay
+# The unscoped BUZZ_COORD_CHANNEL, BUZZ_CHANNEL_<NAME> and BUZZ_INVITE_CODE are
+# still read, so an existing config keeps working, and are adopted into the
+# scoped form on first use.
 set -uo pipefail
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -151,8 +160,13 @@ if [ -n "$INVITE_ARG" ]; then
   Expected the whole link from Buzz Desktop → Invite to community → Copy link,
   e.g. https://relay.example/invite/v2.abc123 — or just the code after /invite/." ;;
   esac
+  # Saved against this relay AND unscoped. The scoped key is what a later relay
+  # change reads, so switching relays cannot retry a code the new one never
+  # minted; the unscoped one keeps older copies of these scripts working.
+  config_set "$(invite_cache_key)" "$code"
   config_set BUZZ_INVITE_CODE "$code"
-  echo "invite   : saved to $CONFIG_FILE — every future session enrols itself"
+  echo "invite   : saved to $CONFIG_FILE for $(setting BUZZ_RELAY_URL '') —"
+  echo "           every future session on this relay enrols itself"
 fi
 
 # --- 1-3. identity -----------------------------------------------------------
@@ -197,59 +211,10 @@ if [ "$VERB" = leave ] || [ "$VERB" = disconnect ]; then
 fi
 
 # --- 4. relay membership -----------------------------------------------------
-# A single cheap authenticated read is the membership probe.
-relay_probe() { buzz_run channels list --limit 1; }
-
-# Capture the status directly: after `if ! cmd`, $? is the negation, not cmd's.
-relay_probe; RC=$?
-if [ "$RC" != 0 ]; then
-  claimed=0
-  case "$BUZZ_ERR" in
-    *relay_membership_required*)
-      code=$(setting BUZZ_INVITE_CODE "")
-      if [ -n "$code" ]; then
-        if "$BUZZ" invites --help >/dev/null 2>&1; then
-          if buzz_run invites claim --code "$code"; then
-            echo "relay    : enrolled from the configured invite code"
-            claimed=1
-          else
-            note "invite claim failed: ${BUZZ_ERR:-(no detail)}"
-          fi
-        else
-          note ""
-          note "  An invite code is configured but this build of buzz has no"
-          note "  'invites' subcommand (it lands with block/buzz#4479). Until then"
-          note "  the relay operator must add the pubkey below by hand."
-        fi
-      fi
-      ;;
-  esac
-  if [ "$claimed" = 1 ]; then
-    relay_probe || { diagnose_relay "$?" "$BUZZ_ERR" "$PUBKEY" "$RELAY"; exit 3; }
-  else
-    diagnose_relay "$RC" "$BUZZ_ERR" "$PUBKEY" "$RELAY"
-    exit "$RC"
-  fi
-fi
-echo "relay    : member"
+ensure_relay_membership "$PUBKEY" "$RELAY" || exit $?
 
 # --- 5. profile --------------------------------------------------------------
-# Idempotent, and it refreshes after a /rename because the published name is
-# recorded in the identity file and compared on every run.
-PUBLISHED=$(meta_get "$SESSION_NAME" BUZZ_PROFILE_NAME || printf '')
-if [ "$PUBLISHED" = "$SESSION_DISPLAY" ]; then
-  echo "profile  : '$SESSION_DISPLAY' (already published)"
-elif buzz_run users set-profile --name "$SESSION_DISPLAY"; then
-  meta_set "$SESSION_NAME" BUZZ_PROFILE_NAME "$SESSION_DISPLAY"
-  if [ -n "$PUBLISHED" ]; then
-    echo "profile  : renamed '$PUBLISHED' -> '$SESSION_DISPLAY'"
-  else
-    echo "profile  : published as '$SESSION_DISPLAY'"
-  fi
-else
-  note "warning: could not publish the display name: ${BUZZ_ERR:-(no detail)}"
-  note "         coordination still works; peers will see the pubkey prefix."
-fi
+publish_profile "$SESSION_NAME" "$SESSION_DISPLAY"
 
 # --- 6. channel --------------------------------------------------------------
 # status reports; it does not act. It must not create a channel and — the case
@@ -274,6 +239,12 @@ if [ "$CHANNEL_CREATED" = 1 ]; then
   echo "           sessions on this machine join it rather than creating their own."
 else
   echo "channel  : ${CHANNEL_NAME:-<uuid>} ($CHANNEL)"
+fi
+# Which relay this channel belongs to is invisible in a UUID, and getting it
+# wrong is silent, so status says it out loud.
+if [ "$STATUS_ONLY" = 1 ]; then
+  echo "           on $RELAY"
+  [ -n "${CHANNEL_KEY:-}" ] && echo "           cached as $CHANNEL_KEY"
 fi
 
 # --- 6b. channel membership --------------------------------------------------
@@ -328,6 +299,9 @@ fi
 # allowed to drag it back.
 meta_set "$SESSION_NAME" BUZZ_SESSION_CHANNEL "$CHANNEL"
 meta_set "$SESSION_NAME" BUZZ_SESSION_CHANNEL_NAME "${CHANNEL_NAME:-}"
+# The relay the pin belongs to. Without it, a relay change leaves the session
+# posting a valid-looking UUID into a channel that does not exist there.
+meta_set "$SESSION_NAME" BUZZ_SESSION_CHANNEL_RELAY "$(relay_tag)"
 
 # --- 7. HELLO ----------------------------------------------------------------
 if [ "$SAY_HELLO" = 1 ]; then

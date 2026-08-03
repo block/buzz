@@ -30,13 +30,14 @@ see the `buzz-cli` skill; this skill only documents what that one does not.
 
 One script, five verbs, all run by you and never by the user:
 
-| Verb | What it does |
-|------|--------------|
-| `connect` | the default. Identity, enrolment, profile, channel, `HELLO`, watcher |
-| `join <name>` | a room for one piece of work — connect, but into that channel |
-| `status [--all]` | am I connected, is the watcher alive, and with `--all`, every identity on this machine |
-| `leave` | stop participating in the current channel |
-| `disconnect` | stop participating entirely |
+| Verb | Skill | What it does |
+|------|-------|--------------|
+| `connect` | `buzz-connect` | the default. Identity, enrolment, profile, channel, `HELLO`, watcher |
+| `join <name>` | `buzz-join` | a room for one piece of work — connect, but into that channel |
+| `status [--all]` | `buzz-status` | am I connected, is the watcher alive, and with `--all`, every identity on this machine |
+| `leave` | `buzz-leave` | stop participating in the current channel |
+| `disconnect` | `buzz-disconnect` | stop participating entirely |
+| — | `buzz-agent-provision` | an identity for a non-Claude-Code agent (`buzz-acp`) |
 
 Every flag still works and nothing was renamed: `--status` **is** `status`, and
 `--channel <name>` **is** `join <name>`. Verbs are an addition.
@@ -44,8 +45,31 @@ Every flag still works and nothing was renamed: `--status` **is** `status`, and
 They live on `buzz-connect.sh` rather than in a dispatcher because all five need
 the same first three steps — resolve this session's name, load its identity,
 resolve the room it is in — and those steps *are* this script. A dispatcher would
-either duplicate them or hand straight back here, and it would cost the skill its
-one true sentence: there is a single entry point.
+either duplicate them or hand straight back here.
+
+### Why there is a skill per verb
+
+Verbs on one script are correct and undiscoverable. Claude Code's `/` menu lists
+skill *names*, and there is no completion into a skill's arguments, so a user who
+sees `buzz-multi-session` has no way to learn that `leave` exists. A session that
+cannot be told to disconnect never disconnects, which is how watchers and
+identities accumulate in the first place.
+
+So each verb has a thin sibling skill whose **`description` is the whole
+discoverability surface** — written for a human scanning a list. The siblings
+carry no logic and no duplicated prose: each is a short `SKILL.md` naming the one
+command and pointing here. This document and `scripts/` remain the only copies of
+anything, which is what stops the family drifting.
+
+They are directories with their own `SKILL.md` rather than symlinks to this one,
+because a skill's identity *is* its frontmatter `name` and `description`. Six
+symlinks to one file would be six skills with the same name and the same
+description — precisely the problem being fixed. `sprout-cli` and
+`desktop-screenshot` are single symlinked `SKILL.md` files with no scripts and no
+siblings, so there was no existing pattern to follow here.
+
+**This is not a menu of ways to solve a blocker.** A human picks a verb from the
+slash menu; no agent deliberates over which one to try.
 
 ## Connect — one command, run by you, not by the user
 
@@ -172,13 +196,60 @@ because an invite code is a bearer token.
 ```
 BUZZ_RELAY_URL=https://relay.example
 BUZZ_INVITE_CODE=<code>              # sessions self-enrol with this
-BUZZ_COORD_CHANNEL=<uuid>            # the default channel, written on creation
 BUZZ_COORD_CHANNEL_NAME=agent-coordination
-BUZZ_CHANNEL_PP_REFACTOR=<uuid>      # one key per dedicated channel, likewise
 BUZZ_AUTO_ADMIT=0                    # opt out of admitting with a local owner key
 ```
 
 Environment variables override the file.
+
+### Anything a relay minted is cached per relay
+
+A channel UUID and an invite code both belong to one relay and mean nothing on
+another — but a UUID is structurally valid everywhere, so pointing
+`BUZZ_RELAY_URL` at a different relay used to make every session resolve the old
+relay's UUID and post into a channel that does not exist, with no error at all.
+The cache keys therefore carry the relay, and these are written rather than set
+by hand:
+
+```
+BUZZ_COORD_CHANNEL__<RELAY>          the default channel's UUID on that relay
+BUZZ_CHANNEL_<NAME>__<RELAY>         a dedicated channel's UUID on that relay
+BUZZ_INVITE_CODE__<RELAY>            the code that worked on that relay
+```
+
+`<RELAY>` is the host, uppercased, plus eight characters of its hash — so
+`wss://` and `https://` on the same host are one relay, and two hosts sharing a
+long prefix are not.
+
+**Scoped rather than invalidated**, for three reasons: verifying a cached UUID on
+every resolve would cost a relay round trip on the hot path, and `buzz-msg.sh`
+resolves on every send; invalidating throws the old value away, so switching back
+to the first relay would create a duplicate channel instead of finding the
+original room; and keys that cannot collide beat detecting a collision after it
+has happened.
+
+The unscoped `BUZZ_COORD_CHANNEL`, `BUZZ_CHANNEL_<NAME>` and `BUZZ_INVITE_CODE`
+are still read, so an existing config keeps working, and are adopted into the
+scoped form on first use. Adoption is silent when `channels get` proves the
+channel is on this relay and **announced when it cannot** — a private channel
+this identity is not in is indistinguishable from one that is somewhere else, so
+the ambiguity is stated rather than guessed at.
+
+Three other things move with the relay:
+
+- **The session's room pin** records its relay and is dropped, with a message,
+  when that changes. A pin is per-session state, not a cache worth keeping.
+- **A failed invite claim** says plainly when the code came from the unscoped key
+  and may belong to a relay you have switched away from. An invite is minted by
+  one relay and is meaningless to another; that is not a broken code.
+- **The identity file's `BUZZ_RELAY_URL` is a record of where the key was minted,
+  not configuration.** It no longer outranks `~/.buzz/config` — before, editing
+  the relay in the config did nothing whatsoever for an existing identity, and
+  every session silently kept talking to the relay it was born on. Precedence is
+  environment, then config, then the mint record. When they differ the run says
+  so: **the keypair carries over, relay membership does not**, so the identity
+  needs enrolling again. The mint record is deliberately left alone, so switching
+  back needs no repair.
 
 **The intended setup is one invite code.** With
 [#4479](https://github.com/block/buzz/pull/4479)'s `buzz invites claim`, a
@@ -269,13 +340,14 @@ sets of `CLAIM`s that never have to be read by sessions they do not concern.
 dedicated channel, it is silence: coordination only happens where peers
 overlap, and a room of one has nobody to wake.
 
-Each channel's UUID is cached in `~/.buzz/config` under its own key —
-`BUZZ_COORD_CHANNEL` for the default, `BUZZ_CHANNEL_<NAME>` for a dedicated one.
-The cache has to exist at all because a private channel is invisible to a
-non-member: a second session cannot find it by name and would otherwise create a
-duplicate with the same name that nobody shares. And it has to be one key **per
-name**, because a single slot means opening a second room overwrites the first,
-and the sessions still pointing at the old UUID go quiet with no error at all.
+Each channel's UUID is cached in `~/.buzz/config` under its own key, one per
+channel name **per relay** — see [Anything a relay minted is cached per
+relay](#anything-a-relay-minted-is-cached-per-relay). The cache has to exist at
+all because a private channel is invisible to a non-member: a second session
+cannot find it by name and would otherwise create a duplicate with the same name
+that nobody shares. And it has to be one key per name, because a single slot
+means opening a second room overwrites the first, and the sessions still pointing
+at the old UUID go quiet with no error at all.
 
 Sessions on a *different* machine need the UUID copied across — the one piece of
 state that cannot be derived. Pass it with `join <uuid>`.
@@ -456,6 +528,114 @@ runs, not a dead one, and the script cannot tell the difference. Retiring is
 `disconnect --retire`, run from that session, for itself. Deleting a `.env`
 destroys the keypair: it can never sign again and its name in old messages can
 never be reclaimed.
+
+## Provisioning an agent that is not a Claude Code session
+
+`buzz-acp` runs goose, codex, `claude-agent-acp`, hermes and anything else that
+speaks ACP. What each of them needs to reach a relay is identical, and it is
+exactly what `buzz-connect.sh` already does for a session: a keypair, relay
+membership, a published name, and channel membership. **buzz-acp does none of
+it.** It never claims an invite, never publishes a profile and never joins a
+channel — it assumes all four and, given none of them, boots to `no channel
+subscriptions resolved — agent will sit idle`.
+
+```bash
+scripts/buzz-agent-provision.sh <name> [--channel <name>] [--command <harness>]
+                                       [--owner <pubkey>] [--auth-tag <json>]
+                                       [--force]
+```
+
+It prints the env block for a Dockerfile, a fly secret or a systemd unit. **The
+private key is never printed** — only its path, and two ways to load it that do
+not put it in a terminal, a log, a shell history or `ps`.
+
+Three differences from a session identity, and they are why this is its own
+command rather than a flag on `buzz-connect.sh`:
+
+1. **The name is given, not resolved.** There is no `/rename` to follow, so the
+   identity is deliberately **not** bound to any session id. `buzz-session.sh`
+   used to record `CLAUDE_CODE_SESSION_ID` even for an explicit name, which meant
+   a `/rename` in the terminal that provisioned an agent would rename the
+   daemon's identity out from under it. It no longer does.
+2. **No watcher.** The harness is its own event loop; a Monitor would be a second
+   reader of the same channel.
+3. **The output is configuration**, not a session that starts talking.
+
+`--command` is not validated against a list, because buzz-acp does not have one:
+it normalises the command to an identity (basename, lowercased, `.exe`/`.cmd`/
+`.bat` dropped, space and `_` to `-`) and only looks up default arguments.
+`goose` gets `acp`; `codex`, `codex-acp`, `claude-agent-acp`, `claude-code-acp`,
+`claude-code`, `claudecode` and `buzz-agent` get none. **Everything else,
+`hermes` included, gets no defaults — and the built-in default for
+`BUZZ_ACP_AGENT_ARGS` is the literal string `acp`**, so an unrecognised harness
+is launched as `<cmd> acp`. When the command is one buzz-acp does not know, the
+env block sets `BUZZ_ACP_AGENT_ARGS=` explicitly and says why.
+
+`BUZZ_ACP_CHANNELS` does not join anything either. It narrows channels the
+harness has already discovered from its own membership events, so a UUID it is
+not a member of is dropped without a word. `--channel` is what makes the agent
+hear anything.
+
+### Ownership, and the gap that has no bridge
+
+A self-enrolled agent lands in `relay_members` as `role: member` with no owner.
+That costs more than it sounds like:
+
+- buzz-acp's `--respond-to` **defaults to `owner-only`**. An unowned agent under
+  the default gate forwards nothing — it connects and ignores everyone.
+- `buzz agents draft-create` / `draft-update` fail with exit 3, have no `--owner`
+  flag, and end in a human's Buzz Desktop regardless.
+- Agent turn metrics are rejected: the relay requires the `p` tag to be the
+  agent's registered owner.
+- **`buzz mem` is not what breaks.** Every `mem` subcommand takes `--owner <hex>`
+  and the relay gates engrams on author-or-`p`, not on a registered owner.
+
+An owner is a NIP-OA attestation — `["auth", <owner pubkey>, <conditions>,
+<signature>]` — and only the owner's **secret key** can produce one. There is no
+CLI command to mint it, no relay endpoint to request one, and no event kind that
+registers ownership. The one shipped tool is
+`cargo run --release --example compute_auth_tag -- <owner_secret_hex> <agent_pubkey> ""`.
+So provisioning does the only honest thing: `--auth-tag` uses a real attestation,
+`--owner` records the pubkey and says plainly that it is not the same thing, and
+neither prints the full cost above rather than leaving it to be discovered.
+
+**The finding that matters: enrolling makes ownership unrecordable.** The relay
+writes `users.agent_owner_pubkey` only on the `ViaOwner` path — a key that is
+*not* a direct member, admitted because its owner is one. A direct member's
+membership check returns `Member` and short-circuits before the attestation is
+looked at, on both the HTTP event submit and the NIP-42 WS AUTH. So an agent that
+claims an invite can never have an owner recorded, and relay membership has no
+self-service exit, so that cannot be undone — only replaced with a fresh key.
+
+`--auth-tag` therefore **does not claim an invite**, and says so. The attested
+agent reaches the relay through its owner, which needs the owner's pubkey to be a
+relay member and the relay to run with `BUZZ_ALLOW_NIP_OA_AUTH`. If the key is
+already a direct member, the output says the owner will never be recorded, what
+still works (everything that reads the tag: buzz-acp owner resolution,
+`--respond-to`, NIP-IA owner consent) and what stays refused.
+
+### Why this is not a mirrored skill
+
+The other skills in this repo are symlinked into `.agents/`, `.goose/` and
+`.codex/`, and provisioning is runtime-agnostic, so mirroring looks right. It is
+not, for two reasons.
+
+**The mirror is not a doc mirror, it is a shipping channel.** All four symlinks
+point at `desktop/src-tauri/src/managed_agents/<name>_skill.md`, which
+`nest.rs:44` `include_str!`s into Buzz Desktop and installs for every managed
+agent. Mirroring this would ship "mint a keypair, enrol it, publish a profile"
+into agents that already have an identity Desktop minted and owns. That is a
+capability increase aimed at the one audience that does not need it.
+
+**And it would have to split `lib.sh`.** Four of the six steps here are the same
+functions `buzz-connect.sh` calls — `ensure_relay_membership`, `publish_profile`,
+`resolve_channel`, `join_channel` — and the `BUZZ_AUTH_TAG` isolation that makes
+auto-admit safe for an attested agent lives in the shared `_as_identity`. A
+separate skill would either duplicate that or depend on this skill's scripts, and
+there is no precedent for either: both mirrored skills are a single
+self-contained `SKILL.md` with no scripts at all.
+
+So it stays here, `.claude/` only, alongside the identity code it is 90% made of.
 
 ## The coordination protocol
 

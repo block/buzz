@@ -197,8 +197,11 @@ identity_for_session() {
 # one of the three known keys with a conservative value is refused rather than
 # executed: a sourced file is code, and this one is written by a script.
 load_identity() {
-  local f="$1" env_relay="${BUZZ_RELAY_URL:-}" bad
+  local f="$1" env_relay="${BUZZ_RELAY_URL:-}" cfg_relay bad minted
   [ -f "$f" ] || return 1
+  # Read the config's relay BEFORE sourcing, because sourcing puts the file's
+  # value in the environment and `setting` would then just read it back.
+  cfg_relay=$(config_get BUZZ_RELAY_URL || printf '')
   bad=$(grep -vE '^[[:space:]]*(#.*)?$|^BUZZ_(PRIVATE_KEY|PUBKEY)=[0-9a-fA-F]{64}$|^BUZZ_RELAY_URL=[A-Za-z0-9:/._~%+-]+$' "$f")
   if [ -n "$bad" ]; then
     note "refusing to source $f — unexpected content. Delete it and re-run buzz-connect.sh."
@@ -208,9 +211,29 @@ load_identity() {
   # shellcheck disable=SC1090  # runtime path, one identity file per session
   . "$f"
   set +a
-  # An explicit BUZZ_RELAY_URL in the caller's environment outranks the value
-  # recorded when the key was minted.
-  [ -n "$env_relay" ] && export BUZZ_RELAY_URL="$env_relay"
+  minted="${BUZZ_RELAY_URL:-}"
+  # The relay in the identity file is a record of where the key was MINTED, not
+  # a configuration source. It must not outrank the machine's current config:
+  # before this, editing BUZZ_RELAY_URL in ~/.buzz/config did nothing at all for
+  # any existing identity, and every session silently kept talking to the relay
+  # it was born on. Precedence is environment, then config, then the mint record.
+  if [ -n "$env_relay" ]; then
+    export BUZZ_RELAY_URL="$env_relay"
+  elif [ -n "$cfg_relay" ]; then
+    export BUZZ_RELAY_URL="$cfg_relay"
+  fi
+  # A keypair is relay-agnostic, but membership is not: the same key is a
+  # stranger on a relay it was never enrolled on. Say so rather than letting it
+  # surface as an unexplained relay_membership_required.
+  if [ -n "$minted" ] && [ "$minted" != "${BUZZ_RELAY_URL:-}" ]; then
+    note "relay differs from where this identity was minted."
+    note "  minted on : $minted"
+    note "  using     : ${BUZZ_RELAY_URL:-}"
+    note "  The keypair carries over; relay membership does not. This identity"
+    note "  needs enrolling on the new relay, and channel UUIDs from the old one"
+    note "  mean nothing here. The mint record is left alone, so switching back"
+    note "  needs no repair."
+  fi
   return 0
 }
 
@@ -230,6 +253,111 @@ buzz_run() {
   return $rc
 }
 
+# --- getting onto the relay ---------------------------------------------------
+# Shared by buzz-connect.sh and buzz-agent-provision.sh, because a session and a
+# daemon agent need exactly the same thing here: a key the relay will accept.
+# Needs $BUZZ and an already-loaded identity.
+
+# A single cheap authenticated read is the membership probe.
+relay_probe() { buzz_run channels list --limit 1; }
+
+# An invite is minted by one relay and is meaningless to another, so the code is
+# cached per relay too. The unscoped BUZZ_INVITE_CODE is still honoured — it is
+# what every existing config has — but only as a fallback.
+invite_cache_key() { printf 'BUZZ_INVITE_CODE__%s' "$(relay_tag)"; }
+invite_code_for_relay() {
+  local code
+  code=$(setting "$(invite_cache_key)" "")
+  [ -n "$code" ] || code=$(setting BUZZ_INVITE_CODE "")
+  printf '%s' "$code"
+}
+
+# ensure_relay_membership PUBKEY RELAY [ALLOW_CLAIM]
+# Returns 0 when the relay accepts this key, having claimed the configured invite
+# if that was what was missing. On failure it has already printed the diagnosis,
+# and its status is the exit code the caller should use.
+#
+# ALLOW_CLAIM defaults to 1. Provisioning an owner-attested agent passes 0,
+# because claiming an invite makes the key a direct relay member and a direct
+# member's owner is never recorded — see agent_ownership_report.
+ensure_relay_membership() {
+  local pubkey="$1" relay="$2" allow_claim="${3:-1}" rc claimed=0 code
+  # Capture the status directly: after `if ! cmd`, $? is the negation, not cmd's.
+  relay_probe; rc=$?
+  if [ "$rc" != 0 ]; then
+    case "$BUZZ_ERR" in
+      *relay_membership_required*)
+        code=$(invite_code_for_relay)
+        if [ "$allow_claim" = 0 ]; then
+          code=""
+          note ""
+          note "  Not claiming the configured invite: this agent has a NIP-OA"
+          note "  attestation, and a key that enrols itself becomes a direct relay"
+          note "  member, whose owner the relay then never records."
+        fi
+        if [ -n "$code" ]; then
+          if "$BUZZ" invites --help >/dev/null 2>&1; then
+            if buzz_run invites claim --code "$code"; then
+              echo "relay    : enrolled from the configured invite code"
+              # Pin the code to this relay, so a later relay change does not
+              # silently retry a code that cannot work there.
+              config_set "$(invite_cache_key)" "$code"
+              claimed=1
+            else
+              note "invite claim failed: ${BUZZ_ERR:-(no detail)}"
+              if [ "$(setting "$(invite_cache_key)" "")" != "$code" ]; then
+                note ""
+                note "  That code is not recorded against this relay — it came from"
+                note "  the unscoped BUZZ_INVITE_CODE, which an earlier setup wrote"
+                note "  for whatever relay was configured then. An invite is minted"
+                note "  by one relay and is meaningless to another, so if you have"
+                note "  switched relays this is expected, not a broken code."
+                note "  relay: $relay"
+                note "  Ask for a fresh link from THIS relay and run:"
+                note "    buzz-connect.sh --invite \"<what they paste>\""
+              fi
+            fi
+          else
+            note ""
+            note "  An invite code is configured but this build of buzz has no"
+            note "  'invites' subcommand (it lands with block/buzz#4479). Until then"
+            note "  the relay operator must add the pubkey below by hand."
+          fi
+        fi
+        ;;
+    esac
+    if [ "$claimed" = 1 ]; then
+      relay_probe || { diagnose_relay "$?" "$BUZZ_ERR" "$pubkey" "$relay"; return 3; }
+    else
+      diagnose_relay "$rc" "$BUZZ_ERR" "$pubkey" "$relay"
+      return "$rc"
+    fi
+  fi
+  echo "relay    : member"
+  return 0
+}
+
+# publish_profile NAME DISPLAY — idempotent, and it refreshes after a /rename
+# because the published name is recorded in the identity's .meta and compared on
+# every run. Never fatal: a nameless member still coordinates.
+publish_profile() {
+  local name="$1" display="$2" published
+  published=$(meta_get "$name" BUZZ_PROFILE_NAME || printf '')
+  if [ "$published" = "$display" ]; then
+    echo "profile  : '$display' (already published)"
+  elif buzz_run users set-profile --name "$display"; then
+    meta_set "$name" BUZZ_PROFILE_NAME "$display"
+    if [ -n "$published" ]; then
+      echo "profile  : renamed '$published' -> '$display'"
+    else
+      echo "profile  : published as '$display'"
+    fi
+  else
+    note "warning: could not publish the display name: ${BUZZ_ERR:-(no detail)}"
+    note "         coordination still works; peers will see the pubkey prefix."
+  fi
+}
+
 # --- the coordination channel ------------------------------------------------
 is_uuid() {
   case "$1" in
@@ -240,16 +368,67 @@ is_uuid() {
 
 default_channel_name() { setting BUZZ_COORD_CHANNEL_NAME "agent-coordination"; }
 
+# --- everything cached is relay-specific --------------------------------------
+# A channel UUID means nothing on a different relay, and neither does an invite
+# code — but a UUID is structurally valid everywhere, so a cache written against
+# relay A and read against relay B produces no error at all. The session posts
+# into a channel that does not exist and goes quiet, which is the failure mode
+# this whole skill exists to eliminate.
+#
+# So the cache keys carry the relay. Scoping rather than invalidating, because:
+#   - verifying a cached UUID on every resolve costs a relay round trip on the
+#     hot path, and buzz-msg.sh resolves on every single send;
+#   - invalidating on mismatch throws the old value away, so switching back to
+#     the first relay re-creates a duplicate channel. Scoped keys mean switching
+#     back finds the original room;
+#   - keys that cannot collide beat detecting a collision after the fact.
+#
+# relay_tag [URL] — a stable config-key suffix for a relay. The scheme is
+# dropped, so wss:// and https:// on the same host are the same relay; the hash
+# keeps two hosts with a common 24-character prefix apart.
+relay_tag() {
+  local url host short hash
+  url="${1:-${BUZZ_RELAY_URL:-}}"
+  host=${url#*://}
+  host=${host%%/*}
+  [ -n "$host" ] || host="unset"
+  short=$(printf '%s' "$host" | LC_ALL=C tr '[:lower:]' '[:upper:]' \
+            | LC_ALL=C tr -c 'A-Z0-9' '_')
+  hash=$(printf '%s' "$host" | python3 -c \
+    'import hashlib,sys;sys.stdout.write(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:8].upper())' \
+    2>/dev/null) || hash=""
+  printf '%s_%s' "${short:0:24}" "${hash:-NOHASH}"
+}
+
 # channel_cache_key NAME — the ~/.buzz/config key that caches this channel's
-# UUID. One slot per channel name, because a single BUZZ_COORD_CHANNEL cannot
-# hold two rooms: opening a second dedicated channel overwrote the first, and
-# the sessions still pointing at the old UUID went quiet with no error at all.
-# The default name keeps the historical key, so existing configs keep working.
+# UUID. One slot per channel name per relay: a single BUZZ_COORD_CHANNEL could
+# not hold two rooms either, and opening a second dedicated channel overwrote the
+# first while the sessions still pointing at the old UUID went quiet.
 channel_cache_key() {
+  printf '%s__%s' "$(channel_cache_key_unscoped "$1")" "$(relay_tag)"
+}
+
+# The pre-relay-scoping key. Still read, once, so an existing ~/.buzz/config
+# keeps working — but only after the UUID is confirmed to exist on the relay
+# that is configured now, because the whole point is that it might not.
+channel_cache_key_unscoped() {
   local name="$1" slug
   [ "$name" = "$(default_channel_name)" ] && { printf 'BUZZ_COORD_CHANNEL'; return 0; }
   slug=$(printf '%s' "$name" | LC_ALL=C tr '[:lower:]' '[:upper:]' | LC_ALL=C tr -c 'A-Z0-9' '_')
   printf 'BUZZ_CHANNEL_%s' "${slug:0:48}"
+}
+
+# channel_exists_here UUID — does the current relay know this channel?
+# `channels get` returns null (not an error) for a channel a non-member cannot
+# see, so "null" has to be treated as unknown rather than absent: a private
+# channel on the right relay looks identical to one on the wrong relay.
+# Returns 0 = exists, 1 = definitely not on this relay, 2 = cannot tell.
+channel_exists_here() {
+  buzz_run channels get --channel "$1" || return 2
+  case "$(printf '%s' "$BUZZ_OUT" | tr -d '[:space:]')" in
+    ''|null) return 2 ;;
+    *) return 0 ;;
+  esac
 }
 
 # resolve_channel <uuid-or-name-or-empty> <create:0|1>
@@ -262,7 +441,7 @@ CHANNEL_CREATED=0
 # shellcheck disable=SC2034
 CHANNEL_KEY=""
 resolve_channel() {
-  local want="${1:-}" create="${2:-0}" cached pin
+  local want="${1:-}" create="${2:-0}" cached pin pin_relay legacy legacy_key
   CHANNEL=""; CHANNEL_CREATED=0; CHANNEL_KEY=""
   if [ -n "$want" ] && is_uuid "$want"; then
     CHANNEL="$want"; CHANNEL_NAME=""
@@ -281,8 +460,25 @@ resolve_channel() {
     # per machine: session A can sit in the default channel while session B
     # works in pp-refactor, and buzz-msg.sh in each posts where that session
     # actually is rather than where the machine's default points.
+    #
+    # The pin records its relay. A pin is per-session state rather than a cache
+    # worth keeping, so a relay change drops it and says so — unlike the config
+    # cache, which is scoped and survives switching back.
     if [ -n "${SESSION_NAME:-}" ]; then
       pin=$(meta_get "$SESSION_NAME" BUZZ_SESSION_CHANNEL || printf '')
+      pin_relay=$(meta_get "$SESSION_NAME" BUZZ_SESSION_CHANNEL_RELAY || printf '')
+      if is_uuid "$pin" && [ -n "$pin_relay" ] && [ "$pin_relay" != "$(relay_tag)" ]; then
+        note "relay changed since this session pinned its room."
+        note "  pinned on : $pin_relay"
+        note "  now       : $(relay_tag)  ($(setting BUZZ_RELAY_URL ''))"
+        note "  A channel UUID means nothing on another relay, so the pin is being"
+        note "  ignored rather than used to post into a room that does not exist"
+        note "  there. Re-join with: buzz-connect.sh join <name>"
+        meta_unset "$SESSION_NAME" BUZZ_SESSION_CHANNEL
+        meta_unset "$SESSION_NAME" BUZZ_SESSION_CHANNEL_NAME
+        meta_unset "$SESSION_NAME" BUZZ_SESSION_CHANNEL_RELAY
+        pin=""
+      fi
       if is_uuid "$pin"; then
         CHANNEL="$pin"
         CHANNEL_NAME=$(meta_get "$SESSION_NAME" BUZZ_SESSION_CHANNEL_NAME || printf '')
@@ -298,6 +494,31 @@ resolve_channel() {
   CHANNEL_KEY=$(channel_cache_key "$CHANNEL_NAME")
   cached=$(setting "$CHANNEL_KEY" "")
   if is_uuid "$cached"; then CHANNEL="$cached"; return 0; fi
+
+  # No relay-scoped entry. There may be a pre-scoping one, written by an earlier
+  # version of this script against whatever relay was configured then. Adopt it
+  # for this relay, but check first where checking is decisive: `channels get`
+  # returning an object proves the channel is here, while null proves nothing —
+  # a private channel a non-member cannot see looks the same as one that is not
+  # on this relay at all. So adopt silently when proven, and announce when not.
+  legacy_key=$(channel_cache_key_unscoped "$CHANNEL_NAME")
+  legacy=$(setting "$legacy_key" "")
+  if is_uuid "$legacy"; then
+    if channel_exists_here "$legacy"; then
+      CHANNEL="$legacy"
+      config_set "$CHANNEL_KEY" "$CHANNEL"
+      return 0
+    fi
+    note "note: adopting $legacy_key=$legacy for this relay as $CHANNEL_KEY."
+    note "      The relay could not confirm the channel — a private channel this"
+    note "      identity cannot see is indistinguishable from one that is not"
+    note "      here. If this UUID belongs to a relay you have switched away"
+    note "      from, delete $legacy_key from $CONFIG_FILE and re-run to create"
+    note "      or find '$CHANNEL_NAME' on $(setting BUZZ_RELAY_URL '')."
+    CHANNEL="$legacy"
+    config_set "$CHANNEL_KEY" "$CHANNEL"
+    return 0
+  fi
 
   buzz_run channels list --limit 500 || return 2
   CHANNEL=$(printf '%s' "$BUZZ_OUT" | WANT="$CHANNEL_NAME" python3 -c '
@@ -361,7 +582,12 @@ _as_identity() {
   local f err rc
   f=$(identity_file "$ident")
   err=$(mktemp -t buzz-as) || return 127
-  AS_OUT=$( { load_identity "$f" 2>/dev/null || exit 127; "$BUZZ" "$@"; } 2>"$err" )
+  # BUZZ_AUTH_TAG must not cross into another key's call. The CLI verifies the
+  # tag against its own pubkey and hard-fails when it does not match, so an
+  # attestation left in the environment by a provisioning run would break every
+  # owner-key call here with an error about the wrong identity entirely.
+  AS_OUT=$( { unset BUZZ_AUTH_TAG
+              load_identity "$f" 2>/dev/null || exit 127; "$BUZZ" "$@"; } 2>"$err" )
   rc=$?
   AS_ERR=$(cat "$err" 2>/dev/null)
   rm -f "$err"
@@ -447,6 +673,210 @@ EOF
   return 1
 }
 
+# --- provisioning a non-Claude-Code agent -------------------------------------
+# buzz-acp assumes its identity is already a relay member and already a channel
+# member. It never claims an invite, never publishes a profile and never joins
+# anything: `BUZZ_ACP_CHANNELS` narrows channels it has already discovered from
+# kind:39002 membership events, so a UUID it is not a member of is dropped
+# silently and the agent boots to "no channel subscriptions resolved — agent will
+# sit idle". Provisioning is exactly the gap between a keypair and that.
+
+# acp_command_identity CMD — reproduce buzz-acp's normalisation so the guidance
+# printed here matches what the harness will actually do: basename, lowercase,
+# drop .exe/.cmd/.bat, and space/underscore to hyphen.
+acp_command_identity() {
+  printf '%s' "$1" \
+    | LC_ALL=C tr '\134' '/' \
+    | sed -e 's#/*$##' -e 's#.*/##' \
+    | LC_ALL=C tr '[:upper:]' '[:lower:]' \
+    | sed -E -e 's/\.(exe|cmd|bat)$//' \
+    | LC_ALL=C tr ' _' '--'
+}
+
+# acp_has_default_args IDENT — true when buzz-acp knows this harness's arguments.
+# The list is config.rs's, and it matters because clap's default for
+# --agent-args is the literal "acp": a harness buzz-acp does not recognise is
+# launched as `<cmd> acp` whether or not that means anything to it.
+acp_has_default_args() {
+  case "$1" in
+    goose|codex|codex-acp|claude-agent-acp|claude-code-acp|claude-code|claudecode|buzz-agent)
+      return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# auth_tag_owner JSON — the owner pubkey out of a NIP-OA tag, or fail.
+# The tag is exactly ["auth", <owner 64 hex>, <conditions>, <sig 128 hex>].
+auth_tag_owner() {
+  printf '%s' "$1" | python3 -c '
+import json, re, sys
+try:
+    tag = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+if (not isinstance(tag, list) or len(tag) != 4 or tag[0] != "auth"
+        or not re.fullmatch(r"[0-9a-f]{64}", str(tag[1]))
+        or not re.fullmatch(r"[0-9a-f]{128}", str(tag[3]))):
+    sys.exit(1)
+sys.stdout.write(tag[1])
+'
+}
+
+# agent_ownership_report NAME PUBKEY OWNER AUTH_TAG DIRECT_MEMBER
+# Ownership is the part of provisioning that cannot be automated, so the job here
+# is to say exactly which state this agent ended up in and what it costs.
+agent_ownership_report() {
+  local name="$1" pubkey="$2" owner="$3" tag="$4" direct="${5:-0}" tag_owner mint
+  mint="cargo run --release --example compute_auth_tag -- \\
+               <owner_secret_hex> $pubkey \"\""
+
+  if [ -n "$tag" ]; then
+    tag_owner=$(auth_tag_owner "$tag") || return 0   # validated before we got here
+    meta_set "$name" BUZZ_AGENT_AUTH_TAG "$tag"
+    meta_set "$name" BUZZ_AGENT_OWNER "$tag_owner"
+    cat <<EOF
+owner    : attested. NIP-OA tag owned by
+             $tag_owner
+           buzz verified the tag against this agent's pubkey before using it, so
+           a bad tag stops this script rather than the deployment, and the
+           profile publish carried it — the tag is now on the agent's kind:0,
+           which is where the relay re-reads it for NIP-IA owner consent.
+EOF
+    if [ "$direct" = 1 ]; then
+      cat <<EOF
+           BUT the relay has NOT recorded users.agent_owner_pubkey, and it never
+           will for this key. On a closed relay the owner is materialised only on
+           the ViaOwner path — a key that is NOT a direct member, admitted
+           because its owner is one. This key IS a direct member, so the
+           membership check returns Member and short-circuits before the
+           attestation is ever looked at. Both routes behave this way: the HTTP
+           event submit and the NIP-42 WS AUTH.
+           What still works: everything that reads the tag itself — buzz-acp's
+           owner resolution, --respond-to=owner-only, NIP-IA owner consent.
+           What stays refused: 'agents draft-create'/'draft-update' ("observer
+           frame is not authorized for this agent owner") and agent turn
+           metrics, because those check the recorded owner, not the tag.
+           To get a recorded owner, the agent must reach the relay THROUGH its
+           owner instead of enrolling itself:
+             - the owner's pubkey must be a relay member, and
+             - the relay must run with BUZZ_ALLOW_NIP_OA_AUTH, and
+             - this key must not already be a direct member.
+           The last condition cannot be undone from here: relay membership has no
+           self-service exit. Provision a fresh key with --auth-tag and do not
+           let it claim an invite.
+EOF
+    else
+      cat <<EOF
+           This key is not a direct relay member; it reached the relay through
+           its owner, which is the path that records users.agent_owner_pubkey.
+           That write is first-write-wins and immutable — the owner cannot be
+           changed later.
+EOF
+    fi
+    return 0
+  fi
+
+  if [ -n "$owner" ]; then
+    meta_set "$name" BUZZ_AGENT_OWNER "$owner"
+    cat <<EOF
+owner    : $owner recorded — but the relay does not consider this agent owned.
+           users.agent_owner_pubkey is written only from a verified NIP-OA
+           attestation, and an owner pubkey on its own is not one. What it does
+           buy is BUZZ_ACP_AGENT_OWNER, which is what buzz-acp's --respond-to
+           gate resolves against; its default is owner-only, so without this the
+           harness forwards nothing at all.
+           To make it real, on a machine holding the owner's SECRET key:
+             $mint
+           then re-run this with --auth-tag '<the tag it prints>'.
+EOF
+    return 0
+  fi
+
+  cat <<EOF
+owner    : NONE. This agent will be unowned. That is a real cost, not a
+           formality:
+             - buzz-acp's --respond-to defaults to owner-only, and an unowned
+               agent under that default forwards nothing. It boots, connects,
+               and ignores everyone, which reads as a broken agent.
+             - 'buzz agents draft-create' and 'draft-update' fail with exit 3,
+               "agent draft requests require BUZZ_AUTH_TAG". They have no
+               --owner flag and there is no headless path: the flow ends in a
+               human's Buzz Desktop.
+             - agent turn metrics are rejected — the relay requires the 'p' tag
+               to be the agent's registered owner.
+             - 'buzz mem' is NOT what breaks. Every mem subcommand takes
+               --owner <hex>, and the relay gates engrams on author-or-'p', not
+               on a registered owner. Memory works unowned.
+           The agent cannot fix this itself. Ownership needs a signature only the
+           owner's secret key can produce, and nothing in the repo carries that
+           request to an owner except Buzz Desktop's create-agent flow, which
+           already assumes one. On a machine holding the owner's SECRET key:
+             $mint
+           then re-run this with --auth-tag '<the tag it prints>'.
+EOF
+}
+
+# agent_env_block NAME PUBKEY RELAY IDFILE COMMAND CHANNEL CHANNEL_NAME
+# The deliverable: what goes in a Dockerfile, a fly secret or a systemd unit.
+agent_env_block() {
+  local name="$1" pubkey="$2" relay="$3" idfile="$4" cmd="$5" chan="$6" cname="$7"
+  local ident args_line="" owner auth in_room=""
+  cmd=${cmd:-goose}
+  [ -n "$cname" ] && in_room="
+  This agent is a member of '$cname'."
+  ident=$(acp_command_identity "$cmd")
+  owner=$(meta_get "$name" BUZZ_AGENT_OWNER || printf '')
+  auth=$(meta_get "$name" BUZZ_AGENT_AUTH_TAG || printf '')
+
+  cat <<EOF
+
+env block: buzz-acp reads all of these. BUZZ_PRIVATE_KEY is the only one it
+           requires, and it is the only one not printed here.
+
+  BUZZ_RELAY_URL=$relay
+  BUZZ_ACP_AGENT_COMMAND=$cmd
+EOF
+  if ! acp_has_default_args "$ident"; then
+    args_line=1
+    cat <<EOF
+  BUZZ_ACP_AGENT_ARGS=
+EOF
+  fi
+  [ -n "$chan" ] && printf '  BUZZ_ACP_CHANNELS=%s\n' "$chan"
+  if [ -n "$owner" ]; then
+    printf '  BUZZ_ACP_AGENT_OWNER=%s\n' "$owner"
+  fi
+  if [ -n "$auth" ]; then
+    printf "  BUZZ_AUTH_TAG='%s'\n" "$auth"
+  fi
+
+  cat <<EOF
+
+  # BUZZ_PRIVATE_KEY is not printed, here or anywhere. It is in:
+  #   $idfile   (mode 600)
+  # Load it without it reaching a terminal, a log or a transcript:
+  #   set -a; . $idfile; set +a
+  # Or hand it to a secret store by pipe rather than by argument, so it never
+  # appears in shell history or in \`ps\`:
+  #   sed -n 's/^BUZZ_PRIVATE_KEY=//p' $idfile | <your secret manager> --stdin
+EOF
+
+  [ -n "$args_line" ] && cat <<EOF
+
+  buzz-acp has no default arguments for '$ident', and the built-in default for
+  BUZZ_ACP_AGENT_ARGS is the literal string "acp". Left unset, the harness would
+  run '$cmd acp'. Set it explicitly — empty above — or to whatever '$cmd' expects.
+EOF
+
+  cat <<EOF
+
+  Channel membership, not BUZZ_ACP_CHANNELS, is what makes the agent hear
+  anything. That variable narrows channels the harness has already discovered
+  from its own membership events; a UUID it is not a member of is dropped
+  without a word and the agent boots to "agent will sit idle".$in_room
+EOF
+}
+
 # --- self-diagnosis ----------------------------------------------------------
 # The three failures that cost real time are indistinguishable from "the agent
 # is ignoring me" unless they are named. Never let a bare 403 through.
@@ -528,8 +958,12 @@ watcher_pid() {  # prints the pid of a live watcher for this session, else fails
 # It goes the long way round: the identity's .meta records the session id it was
 # minted under, and the marker is named after that. An identity with no .meta was
 # never adopted by a Claude Code session at all, which is worth saying out loud.
-identity_watch_state() {   # prints "live <pid> <channel>" | "stale <pid>" | "none" | "unbound"
+identity_watch_state() {   # "live <pid> <ch>" | "stale <pid>" | "none" | "unbound" | "daemon"
   local name="$1" sid m pid ch
+  # A provisioned agent identity is unbound on purpose and has no watcher by
+  # design — the harness is its own event loop. Saying "unbound" about it would
+  # be true and misleading.
+  [ "$(meta_get "$name" BUZZ_AGENT || printf '')" = 1 ] && { printf 'daemon'; return 0; }
   sid=$(meta_get "$name" BUZZ_SESSION_ID) || { printf 'unbound'; return 0; }
   m="$SESSION_DIR/.watch-$sid"
   [ -f "$m" ] || { printf 'none'; return 0; }
@@ -622,6 +1056,8 @@ roster_report() {
 
   WATCHER   live = a Monitor is polling for it now. none = nothing is listening,
             but the identity is still a relay member and still holds a key.
+            daemon = a provisioned agent identity (buzz-agent-provision.sh); it
+            has no watcher by design, because its harness is its own event loop.
             unbound = no .meta, so no Claude Code session ever adopted it: it was
             minted by hand or is left over from a session that never ran.
   RELAY     member = the relay still accepts writes from that key. Membership has
@@ -779,6 +1215,7 @@ EOF
 # retire_identity — NIP-IA kind:9035 for this session's own pubkey. Self-service
 # because the relay's self consent path is actor == target; this never touches
 # another identity, and there is no flag here that could make it.
+# shellcheck disable=SC2153  # $PUBKEY is the caller's global, not a typo for $pubkey
 retire_identity() {
   cat <<EOF
 retire   : submitting a NIP-IA archive request (kind 9035) for THIS session's own
