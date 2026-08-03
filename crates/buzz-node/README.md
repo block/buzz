@@ -23,10 +23,73 @@ Configuration:
   defaults to `127.0.0.1:8081`.
 - `BUZZ_NODE_MAX_CONCURRENT_COMMANDS` — optional positive limit for concurrent
   encrypted command processing; defaults to `8`.
+- `BUZZ_NODE_SUBSTRATE` (or `--substrate`) — workload substrate for `run`;
+  defaults to `process`, which launches each deployed agent as a supervised
+  `buzz-acp` harness child process. `docker` runs each agent as a container of
+  the agent body image. `inert` accepts commands without launching anything.
+- `BUZZ_NODE_HARNESS_PATH` (or `--harness-path`) — optional explicit path to
+  the `buzz-acp` harness binary used by the process substrate; defaults to a
+  `buzz-acp` sibling of the node executable, then `PATH` lookup.
+- `BUZZ_NODE_AGENT_IMAGE` (or `--image`) — agent body image run by the docker
+  substrate for the bundled `buzz-agent` runtime and unknown runtimes;
+  defaults to `buzz-agent:local` (build it with `just agent-image` from
+  `Dockerfile.agent`). Catalog runtimes with their own image variant
+  (goose/claude/codex) run `<repository>:<runtime>` instead, derived by
+  replacing this image's tag — e.g. `--image myrepo/buzz-agent:v3` resolves
+  the goose runtime to `myrepo/buzz-agent:goose`. Variant images must
+  already be present on the node (`just agent-image goose|claude|codex`);
+  a deploy for a runtime whose image is missing fails closed with the exact
+  build command — the node never pulls or builds images.
+- `BUZZ_NODE_DOCKER_PATH` (or `--docker-path`) — docker CLI used by the docker
+  substrate; defaults to `docker` on `PATH`.
+- `BUZZ_NODE_CONTAINER_RELAY_URL` (or `--container-relay-url`) — relay URL as
+  reachable from inside agent containers. When absent, loopback relay hosts
+  (`localhost`, `127.0.0.1`, …) are rewritten to `host.docker.internal`.
+
+Both launching substrates hand each agent body its identity and relay
+settings via environment variables (the same contract the Desktop launcher
+uses) and forward a documented allowlist of the node's own environment — LLM
+provider credentials such as `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`, or
+`CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token` for headless Claude Code
+subscription auth, are node operator environment, never workload
+configuration. Bodies that exit on their
+own are recorded (clean exit → stopped, failure → failed) and never restarted
+automatically.
+
+An agent's private key is a one-time launch handoff. For the process
+substrate it lives only in memory and in the child process environment, so
+after a node restart a `start` fails closed until the owner redeploys from
+Desktop. For the docker substrate the container is the key store: the key is
+injected once via a short-lived owner-only env-file (never on a command line)
+and lives on in the container's environment, so `start`/`restart` survive
+node restarts and fail closed only once the container is gone. The node
+refuses to start a docker-substrate `run` when the Docker daemon is
+unreachable.
+
+Both substrates resolve agent runtimes against the same catalog the Desktop
+launcher uses: `goose`, `claude` (the `claude-agent-acp` npm adapter fronting
+the Claude Code CLI via `CLAUDE_CODE_EXECUTABLE`), `codex` (the `codex-acp`
+npm adapter plus `buzz-dev-mcp`), and the bundled `buzz-agent` (plus
+`buzz-dev-mcp`). The process substrate resolves these to executables on the
+node host; the docker substrate runs each catalog runtime in its own image
+variant (`Dockerfile.agent`, `RUNTIME` build arg — build with
+`just agent-image goose|claude|codex`), which bakes that runtime onto the
+container `PATH` using the same official installer the Desktop auto-install
+runs, with `CLAUDE_CODE_EXECUTABLE` pointing at the in-image Claude CLI in
+the `claude` variant. The slim default image (`just agent-image`) carries
+only the sprig personalities and runs `buzz-agent`; every image records its
+runtime in the `buzz.runtime` OCI label and the `BUZZ_IMAGE_RUNTIME` env
+var. Unknown runtime identifiers are attempted verbatim as a command name on
+either substrate (in the configured image on docker), so custom harness
+setups and custom images keep working.
 
 The data directory contains `identity.nsec` (the node identity), `owners.json`
-(paired owner public keys), and `execution-state.json` (workloads, encrypted
-credential state, sequences, and the idempotency journal). Back up and restore
+(paired owner public keys), and `execution-state.json` (the durable workload
+ledger — admitted workloads and removal tombstones — plus encrypted credential
+state, receipt sequences, and the command idempotency journal). The process
+substrate also keeps per-workload scratch directories under `workloads/` and
+harness logs under `logs/`; the docker substrate keeps transient env-files
+under `env/` only while a `docker run` is in flight. Back up and restore
 the directory as one unit; restoring only part of it can detach workloads from
 their identity or replay protection. Keep backups access-controlled because
 the identity file can authenticate the node.

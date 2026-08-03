@@ -12,10 +12,11 @@ use buzz_core::pairing::{qr::decode_qr, types::PayloadType, PairingError};
 use buzz_core::tenant::relay_url_authority;
 use buzz_node::{
     build_announcement_with_workloads_and_attestations, build_presence_event,
-    parse_desktop_pairing_payload, DesktopPairingPayload, ExecutionController, NodeConfig,
-    NodeError, NodeIdentity, OwnerStore,
+    parse_desktop_pairing_payload, DesktopPairingPayload, DockerSubstrate, DockerSubstrateConfig,
+    ExecutionController, InertSubstrate, NodeConfig, NodeError, NodeIdentity, OwnerStore,
+    ProcessSubstrate, ProcessSubstrateConfig, Substrate, WorkloadExit,
 };
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
 use nostr::{Event, EventBuilder, EventId, RelayUrl};
@@ -53,10 +54,46 @@ struct Cli {
     command: Option<Command>,
 }
 
+/// Default agent body image run by the docker substrate. Built locally via
+/// `just agent-image` (Dockerfile.agent); per-runtime variants are built via
+/// `just agent-image goose|claude|codex` and resolved from this image's
+/// repository (see the `--image` flag).
+const DEFAULT_AGENT_IMAGE: &str = "buzz-agent:local";
+
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Connect to the relay and publish the node announcement.
-    Run,
+    Run {
+        /// Workload substrate that runs deployed agent bodies. `process`
+        /// spawns the sprig ACP harness as a supervised child process;
+        /// `docker` runs each body as a container of the agent image;
+        /// `inert` accepts commands without launching anything.
+        #[arg(long, env = "BUZZ_NODE_SUBSTRATE", value_enum, default_value_t = SubstrateChoice::Process)]
+        substrate: SubstrateChoice,
+        /// Explicit path to the `buzz-acp` harness binary used by the
+        /// process substrate. Defaults to a `buzz-acp` sibling of this
+        /// executable, then `PATH` lookup.
+        #[arg(long, env = "BUZZ_NODE_HARNESS_PATH")]
+        harness_path: Option<std::path::PathBuf>,
+        /// Agent body image used by the docker substrate for the bundled
+        /// `buzz-agent` runtime and unknown runtimes (built from
+        /// Dockerfile.agent, e.g. via `just agent-image`). Catalog runtimes
+        /// with their own image variant (goose/claude/codex) run
+        /// `<repository>:<runtime>` instead, derived by replacing this
+        /// image's tag — `--image myrepo/buzz-agent:v3` resolves the goose
+        /// runtime to `myrepo/buzz-agent:goose`. Images must already be
+        /// present on the node (`just agent-image <runtime>`); the node
+        /// never pulls or builds them.
+        #[arg(long, env = "BUZZ_NODE_AGENT_IMAGE", default_value = DEFAULT_AGENT_IMAGE)]
+        image: String,
+        /// Docker CLI used by the docker substrate.
+        #[arg(long, env = "BUZZ_NODE_DOCKER_PATH", default_value = "docker")]
+        docker_path: std::path::PathBuf,
+        /// Relay URL as reachable from inside agent containers. When absent,
+        /// loopback relay hosts are rewritten to `host.docker.internal`.
+        #[arg(long, env = "BUZZ_NODE_CONTAINER_RELAY_URL")]
+        container_relay_url: Option<String>,
+    },
     /// Complete an owner pairing session from a Desktop QR URI.
     Pair {
         /// Read the QR URI from this argument instead of stdin.
@@ -65,14 +102,74 @@ enum Command {
     },
 }
 
+/// Substrate selection for `buzz-node run`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum SubstrateChoice {
+    /// Supervised child processes running the sprig ACP harness.
+    Process,
+    /// Docker containers running the agent body image.
+    Docker,
+    /// No-op substrate: reconciliation bookkeeping only.
+    Inert,
+}
+
+/// Options collected from the `run` subcommand (or its environment-variable
+/// defaults).
+#[derive(Debug)]
+struct RunOptions {
+    substrate: SubstrateChoice,
+    harness_path: Option<std::path::PathBuf>,
+    image: String,
+    docker_path: std::path::PathBuf,
+    container_relay_url: Option<String>,
+}
+
+/// Default `run` invocation used when no subcommand is given on the command
+/// line. Reads the same environment variables as the clap definitions so
+/// `BUZZ_NODE_SUBSTRATE` and its companions keep working without an explicit
+/// `run`.
+fn default_run_command() -> Result<Command> {
+    let substrate = match std::env::var("BUZZ_NODE_SUBSTRATE") {
+        Ok(value) => SubstrateChoice::from_str(value.trim(), true)
+            .map_err(|error| anyhow::anyhow!("BUZZ_NODE_SUBSTRATE: {error}"))?,
+        Err(_) => SubstrateChoice::Process,
+    };
+    Ok(Command::Run {
+        substrate,
+        harness_path: std::env::var_os("BUZZ_NODE_HARNESS_PATH").map(std::path::PathBuf::from),
+        image: std::env::var("BUZZ_NODE_AGENT_IMAGE")
+            .unwrap_or_else(|_| DEFAULT_AGENT_IMAGE.to_string()),
+        docker_path: std::env::var_os("BUZZ_NODE_DOCKER_PATH").map_or_else(
+            || std::path::PathBuf::from("docker"),
+            std::path::PathBuf::from,
+        ),
+        container_relay_url: std::env::var("BUZZ_NODE_CONTAINER_RELAY_URL").ok(),
+    })
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
-    let command = cli.command.unwrap_or(Command::Run);
-    let result = match command {
-        Command::Run => run_node().await,
-        Command::Pair { qr } => pair_node(qr).await,
+    let result = match cli.command.map_or_else(default_run_command, Ok) {
+        Ok(Command::Run {
+            substrate,
+            harness_path,
+            image,
+            docker_path,
+            container_relay_url,
+        }) => {
+            run_node(RunOptions {
+                substrate,
+                harness_path,
+                image,
+                docker_path,
+                container_relay_url,
+            })
+            .await
+        }
+        Ok(Command::Pair { qr }) => pair_node(qr).await,
+        Err(error) => Err(error),
     };
     if let Err(error) = result {
         eprintln!("error: {error:#}");
@@ -80,7 +177,7 @@ async fn main() {
     }
 }
 
-async fn run_node() -> Result<()> {
+async fn run_node(options: RunOptions) -> Result<()> {
     let config = NodeConfig::from_env()?;
     let identity = NodeIdentity::load_or_create(&config.data_dir)?;
     let mut owners = OwnerStore::load(&config.data_dir)?;
@@ -88,10 +185,46 @@ async fn run_node() -> Result<()> {
     if relay_authority.is_empty() {
         bail!("configured relay URL has no valid authority");
     }
+    // Keep an exit-channel sender alive for the inert case so the receiver
+    // never reports closure while the connection loop is selecting on it.
+    let (substrate, mut exit_events, _inert_exit_keepalive): (
+        Arc<dyn Substrate>,
+        tokio::sync::mpsc::UnboundedReceiver<WorkloadExit>,
+        Option<tokio::sync::mpsc::UnboundedSender<WorkloadExit>>,
+    ) = match options.substrate {
+        SubstrateChoice::Process => {
+            let mut substrate_config =
+                ProcessSubstrateConfig::new(config.data_dir.clone(), config.relay_url.clone());
+            substrate_config.harness_path = options.harness_path;
+            let (substrate, exit_events) = ProcessSubstrate::new(substrate_config);
+            (Arc::new(substrate), exit_events, None)
+        }
+        SubstrateChoice::Docker => {
+            let mut substrate_config = DockerSubstrateConfig::new(
+                config.data_dir.clone(),
+                config.relay_url.clone(),
+                options.image,
+            );
+            substrate_config.docker_path = options.docker_path;
+            substrate_config.container_relay_url = options.container_relay_url;
+            // Fail fast: refuse to announce a docker substrate the daemon
+            // cannot honor.
+            let (substrate, exit_events) = DockerSubstrate::connect(substrate_config)
+                .await
+                .context("initialize docker substrate")?;
+            (Arc::new(substrate), exit_events, None)
+        }
+        SubstrateChoice::Inert => {
+            let (exit_tx, exit_events) = tokio::sync::mpsc::unbounded_channel();
+            (Arc::new(InertSubstrate), exit_events, Some(exit_tx))
+        }
+    };
+    info!(substrate = ?options.substrate, "execution node substrate selected");
     let mut controller = ExecutionController::load_with_concurrency(
         &config.data_dir,
         config.max_concurrent_commands,
-    )?;
+    )?
+    .with_substrate(substrate);
     let relay_connected = Arc::new(AtomicBool::new(false));
     let health_listener = TcpListener::bind(config.health_addr)
         .await
@@ -118,6 +251,7 @@ async fn run_node() -> Result<()> {
                 &identity,
                 &mut owners,
                 &mut controller,
+                &mut exit_events,
                 &relay_authority,
                 &relay_connected,
                 connection_shutdown,
@@ -161,11 +295,13 @@ async fn shutdown_signal() -> io::Result<()> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_connection(
     config: &NodeConfig,
     identity: &NodeIdentity,
     owners: &mut OwnerStore,
     controller: &mut ExecutionController,
+    exit_events: &mut tokio::sync::mpsc::UnboundedReceiver<WorkloadExit>,
     relay_authority: &str,
     relay_connected: &AtomicBool,
     mut shutdown: watch::Receiver<bool>,
@@ -227,6 +363,34 @@ async fn run_connection(
                             .context("publish refreshed node announcement")?;
                     if !response.accepted {
                         warn!(message = %response.message, "relay rejected refreshed node announcement");
+                    }
+                }
+            }
+            // A workload body exited on its own: it was finished, not killed.
+            // Record the outcome in the durable ledger (never respawn) and
+            // re-announce so paired Desktops observe the new lifecycle. The
+            // channel cannot report closure while this loop runs — the
+            // controller keeps the substrate (and its sender) alive, and the
+            // inert case parks a keepalive sender in `run_node`.
+            Some(exit) = exit_events.recv() => {
+                info!(
+                    workload = exit.workload_id.as_str(),
+                    clean = exit.clean,
+                    "workload body exited on its own"
+                );
+                match controller.record_workload_exit(&exit).await {
+                    Ok(true) => {
+                        let response =
+                            publish_node_announcement(&mut connection, controller, identity, owners, config)
+                                .await
+                                .context("publish node announcement after workload exit")?;
+                        if !response.accepted {
+                            warn!(message = %response.message, "relay rejected post-exit node announcement");
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        warn!(%error, workload = exit.workload_id.as_str(), "failed to record workload exit");
                     }
                 }
             }

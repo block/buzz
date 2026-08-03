@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = { workspace = true }
+async-trait = "0.1"
 buzz-core = { workspace = true }
 buzz-ws-client = { workspace = true }
 chrono = { workspace = true }

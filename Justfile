@@ -91,6 +91,13 @@ build:
 build-release:
     cargo build --workspace --release
 
+# Build the agent body image (sprig harness) for the buzz-node Docker substrate.
+# Default builds the slim buzz-agent-only image (buzz-agent:local); pass a
+# runtime id to layer that runtime on top: `just agent-image goose|claude|codex`
+# (tagged buzz-agent:<runtime>).
+agent-image runtime="none":
+    docker build -f Dockerfile.agent --build-arg RUNTIME={{ runtime }} -t buzz-agent:{{ if runtime == "none" { "local" } else { runtime } }} .
+
 # Run repo lint and formatting checks
 check: fmt-check clippy desktop-check desktop-tauri-fmt-check desktop-tauri-clippy web-check mobile-check
 

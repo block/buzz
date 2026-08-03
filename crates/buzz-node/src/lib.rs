@@ -2,7 +2,7 @@
 
 //! Runtime-neutral relay client for a standalone Buzz execution node.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::fs::File;
@@ -28,6 +28,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::sync::{Mutex, Semaphore};
+use tracing::warn;
+
+pub mod substrate;
+
+pub use substrate::docker::{DockerSubstrate, DockerSubstrateConfig};
+pub use substrate::process::{ProcessSubstrate, ProcessSubstrateConfig};
+pub use substrate::{InertSubstrate, Substrate, SubstrateError, WorkloadExit};
 
 /// Environment-driven configuration for a node process.
 #[derive(Debug, Clone)]
@@ -386,55 +393,30 @@ pub fn parse_desktop_pairing_payload(payload: &str) -> Result<DesktopPairingPayl
     Ok(parsed)
 }
 
-/// Minimal fake runtime used to prove the relay-native execution contract.
+/// Durable, owner-scoped ledger of workload intent.
 ///
-/// The runtime deliberately stores only safe workload specifications. It does
-/// not launch a process or retain credential material; a later ticket can swap
-/// this implementation for a durable provider-backed runtime without changing
-/// the command and receipt protocol.
+/// The ledger is the node's persisted record of what a paired owner asked
+/// for: admitted workload specifications, their last commanded lifecycle, and
+/// sequenced removal tombstones. It deliberately stores only safe workload
+/// data and never launches anything itself — making reality match an admitted
+/// command is the [`Substrate`]'s job.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct FakeWorkloadRuntime {
-    workloads: BTreeMap<WorkloadId, RuntimeWorkload>,
+pub struct WorkloadLedger {
+    workloads: BTreeMap<WorkloadId, LedgerWorkload>,
     /// Removal tombstones keyed by workload, valued by the node-assigned
     /// receipt sequence of the removal. A tombstone blocks deploys that
     /// cannot prove they were issued after the owner observed the removal
     /// (a stale or replayed deploy must not resurrect a removed workload),
     /// while a deploy carrying `supersedes_removal` at or above the recorded
-    /// sequence clears the tombstone. Legacy persisted tombstones carry
-    /// sequence `0` and are cleared by any new deploy.
-    #[serde(default, deserialize_with = "deserialize_removed_workloads")]
+    /// sequence clears the tombstone.
+    #[serde(default)]
     removed_workloads: BTreeMap<WorkloadId, u64>,
-    deploy_invocations: usize,
-}
-
-/// Accept both the current sequenced tombstone map and the legacy persisted
-/// shape (a plain list of workload ids). Legacy entries migrate to sequence
-/// `0`, which any new deploy may clear.
-fn deserialize_removed_workloads<'de, D>(
-    deserializer: D,
-) -> Result<BTreeMap<WorkloadId, u64>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum RemovedWorkloadsCompat {
-        Sequenced(BTreeMap<WorkloadId, u64>),
-        Legacy(Vec<WorkloadId>),
-    }
-
-    Ok(match RemovedWorkloadsCompat::deserialize(deserializer)? {
-        RemovedWorkloadsCompat::Sequenced(map) => map,
-        RemovedWorkloadsCompat::Legacy(list) => list
-            .into_iter()
-            .map(|workload_id| (workload_id, 0))
-            .collect(),
-    })
+    deploy_admissions: usize,
 }
 
 /// Encrypted local state proving a provider subscription has been authenticated.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct FakeCredentialStore {
+struct CredentialStore {
     authenticated: Vec<StoredCredentialState>,
     pending_sessions: Vec<PendingAuthSession>,
 }
@@ -454,7 +436,7 @@ struct PendingAuthSession {
     expires_at: DateTime<Utc>,
 }
 
-impl FakeCredentialStore {
+impl CredentialStore {
     fn begin(
         &mut self,
         session: &buzz_core::execution::ProviderAuthSession,
@@ -528,12 +510,12 @@ impl FakeCredentialStore {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct RuntimeWorkload {
+struct LedgerWorkload {
     spec: WorkloadSpec,
     lifecycle: WorkloadLifecycle,
 }
 
-impl FakeWorkloadRuntime {
+impl WorkloadLedger {
     fn without_private_keys(mut self) -> Self {
         for workload in self.workloads.values_mut() {
             workload.spec = workload.spec.clone().without_private_key();
@@ -541,7 +523,7 @@ impl FakeWorkloadRuntime {
         self
     }
 
-    /// Reconcile a deploy request into the fake runtime.
+    /// Pure admissibility check for a deploy — no state is modified.
     ///
     /// A removal tombstone rejects the deploy unless the deploy proves it was
     /// issued after the owner observed the removal: `supersedes_removal` must
@@ -549,44 +531,88 @@ impl FakeWorkloadRuntime {
     /// replayed deploy from before the removal cannot carry that sequence,
     /// because the node had not assigned it yet. Legacy tombstones persisted
     /// without a sequence (recorded as `0`) are cleared by any new deploy.
-    pub fn deploy(
-        &mut self,
+    fn validate_deploy(
+        &self,
         workload: &WorkloadSpec,
         supersedes_removal: Option<u64>,
-    ) -> Result<WorkloadLifecycle, SafeErrorCode> {
+    ) -> Result<(), SafeErrorCode> {
         if let Some(&removal_sequence) = self.removed_workloads.get(&workload.workload_id) {
             let supersedes = removal_sequence == 0
                 || supersedes_removal.is_some_and(|sequence| sequence >= removal_sequence);
             if !supersedes {
                 return Err(SafeErrorCode::Conflict);
             }
-            self.removed_workloads.remove(&workload.workload_id);
         }
+        Ok(())
+    }
+
+    /// Pure admissibility check for start/stop/restart — no state is modified.
+    fn validate_transition(&self, workload_id: &WorkloadId) -> Result<(), SafeErrorCode> {
+        if self.workloads.contains_key(workload_id) {
+            Ok(())
+        } else {
+            Err(SafeErrorCode::WorkloadNotFound)
+        }
+    }
+
+    /// Pure admissibility check for a remove — no state is modified.
+    fn validate_remove(&self, workload_id: &WorkloadId) -> Result<(), SafeErrorCode> {
+        if self.workloads.contains_key(workload_id)
+            || self.removed_workloads.contains_key(workload_id)
+        {
+            Ok(())
+        } else {
+            Err(SafeErrorCode::WorkloadNotFound)
+        }
+    }
+
+    /// Whether the ledger currently admits this workload.
+    pub fn contains(&self, workload_id: &WorkloadId) -> bool {
+        self.workloads.contains_key(workload_id)
+    }
+
+    /// Return the durable, key-stripped spec of an admitted workload — what
+    /// the substrate receives for start and restart.
+    pub fn durable_spec(&self, workload_id: &WorkloadId) -> Option<WorkloadSpec> {
+        self.workloads
+            .get(workload_id)
+            .map(|workload| workload.spec.clone())
+    }
+
+    /// Admit a deploy into the ledger. Callers run [`Self::validate_deploy`]
+    /// and the substrate action first; this records the outcome.
+    pub fn deploy(
+        &mut self,
+        workload: &WorkloadSpec,
+        supersedes_removal: Option<u64>,
+    ) -> Result<WorkloadLifecycle, SafeErrorCode> {
+        self.validate_deploy(workload, supersedes_removal)?;
+        self.removed_workloads.remove(&workload.workload_id);
         let is_new = !self.workloads.contains_key(&workload.workload_id);
         self.workloads.insert(
             workload.workload_id.clone(),
-            RuntimeWorkload {
+            LedgerWorkload {
                 spec: workload.clone().without_private_key(),
                 lifecycle: WorkloadLifecycle::Running,
             },
         );
         if is_new {
-            self.deploy_invocations += 1;
+            self.deploy_admissions += 1;
         }
         Ok(WorkloadLifecycle::Running)
     }
 
-    /// Start an existing workload.
+    /// Record a started workload.
     pub fn start(&mut self, workload_id: &WorkloadId) -> Result<WorkloadLifecycle, SafeErrorCode> {
         self.transition(workload_id, WorkloadLifecycle::Running)
     }
 
-    /// Stop an existing workload.
+    /// Record a stopped workload.
     pub fn stop(&mut self, workload_id: &WorkloadId) -> Result<WorkloadLifecycle, SafeErrorCode> {
         self.transition(workload_id, WorkloadLifecycle::Stopped)
     }
 
-    /// Restart an existing workload.
+    /// Record a restarted workload.
     pub fn restart(
         &mut self,
         workload_id: &WorkloadId,
@@ -594,9 +620,12 @@ impl FakeWorkloadRuntime {
         self.transition(workload_id, WorkloadLifecycle::Running)
     }
 
-    /// Remove an existing workload.
+    /// Remove an admitted workload and record its removal tombstone.
     pub fn remove(&mut self, workload_id: &WorkloadId) -> Result<WorkloadLifecycle, SafeErrorCode> {
         if self.workloads.remove(workload_id).is_some() {
+            // The tombstone starts at sequence 0 and is stamped with the
+            // removal's terminal receipt sequence via
+            // `record_removal_sequence` before the state is persisted.
             self.removed_workloads
                 .entry(workload_id.clone())
                 .or_insert(0);
@@ -606,6 +635,30 @@ impl FakeWorkloadRuntime {
             return Ok(WorkloadLifecycle::Removed);
         }
         Err(SafeErrorCode::WorkloadNotFound)
+    }
+
+    /// Record that a workload body exited on its own.
+    ///
+    /// A clean exit means the body finished — the agent said goodbye and shut
+    /// itself down — and maps to [`WorkloadLifecycle::Stopped`]; a non-zero
+    /// exit maps to [`WorkloadLifecycle::Failed`]. Only a currently `Running`
+    /// row transitions: exits observed after an explicit stop or removal are
+    /// stale news. Returns the new lifecycle when the ledger changed.
+    pub fn record_body_exit(
+        &mut self,
+        workload_id: &WorkloadId,
+        clean: bool,
+    ) -> Option<WorkloadLifecycle> {
+        let workload = self.workloads.get_mut(workload_id)?;
+        if workload.lifecycle != WorkloadLifecycle::Running {
+            return None;
+        }
+        workload.lifecycle = if clean {
+            WorkloadLifecycle::Stopped
+        } else {
+            WorkloadLifecycle::Failed
+        };
+        Some(workload.lifecycle)
     }
 
     /// Record the node-assigned receipt sequence of a successful removal on
@@ -630,14 +683,14 @@ impl FakeWorkloadRuntime {
         Ok(lifecycle)
     }
 
-    /// Number of distinct workload rows currently known to the runtime.
+    /// Number of distinct workload rows currently admitted to the ledger.
     pub fn workload_count(&self) -> usize {
         self.workloads.len()
     }
 
-    /// Number of first-time deploy reconciliations.
-    pub fn deploy_invocations(&self) -> usize {
-        self.deploy_invocations
+    /// Number of first-time deploy admissions.
+    pub fn deploy_admissions(&self) -> usize {
+        self.deploy_admissions
     }
 
     fn statuses(&self, sequences: &BTreeMap<WorkloadId, u64>) -> Vec<WorkloadStatus> {
@@ -664,6 +717,7 @@ impl FakeWorkloadRuntime {
 #[derive(Debug, Clone)]
 pub struct ExecutionController {
     state: Arc<Mutex<ControllerState>>,
+    substrate: Arc<dyn Substrate>,
     workload_locks: Arc<Mutex<HashMap<WorkloadKey, Arc<Mutex<()>>>>>,
     concurrency: Arc<Semaphore>,
     persist_lock: Arc<Mutex<()>>,
@@ -677,10 +731,15 @@ impl Default for ExecutionController {
 
 #[derive(Debug, Default)]
 struct ControllerState {
-    runtimes: BTreeMap<String, FakeWorkloadRuntime>,
-    credentials: BTreeMap<String, FakeCredentialStore>,
+    ledgers: BTreeMap<String, WorkloadLedger>,
+    credentials: BTreeMap<String, CredentialStore>,
     processed: HashMap<JournalKey, ProcessedCommand>,
     conflicts: HashMap<JournalKey, StoredEvents>,
+    /// Journal keys whose substrate action is currently running. A second
+    /// command reusing the same command id (necessarily for a different
+    /// workload — same-workload redelivery is serialized by the workload
+    /// lock) is a conflicting reuse and is rejected instead of racing.
+    in_flight: HashSet<JournalKey>,
     next_sequences: BTreeMap<String, BTreeMap<WorkloadId, u64>>,
     data_dir: Option<PathBuf>,
 }
@@ -718,13 +777,24 @@ impl ExecutionController {
     }
 
     /// Create an in-memory controller with an explicit concurrency limit.
+    ///
+    /// Library constructors default to the no-op [`InertSubstrate`]; attach a
+    /// real substrate with [`Self::with_substrate`].
     pub fn with_concurrency(limit: usize) -> Self {
         Self {
             state: Arc::new(Mutex::new(ControllerState::default())),
+            substrate: Arc::new(InertSubstrate),
             workload_locks: Arc::new(Mutex::new(HashMap::new())),
             concurrency: Arc::new(Semaphore::new(limit.max(1))),
             persist_lock: Arc::new(Mutex::new(())),
         }
+    }
+
+    /// Replace the substrate that performs real side effects for workload
+    /// commands. The durable ledger and idempotency journal are unaffected.
+    pub fn with_substrate(mut self, substrate: Arc<dyn Substrate>) -> Self {
+        self.substrate = substrate;
+        self
     }
 
     /// Load command idempotency state from a node data directory.
@@ -748,45 +818,14 @@ impl ExecutionController {
                 .data_dir = Some(data_dir.to_path_buf());
             return Ok(controller);
         }
-        let raw: serde_json::Value = serde_json::from_str(&fs::read_to_string(path)?)?;
-        let state = match serde_json::from_value::<PersistedExecutionState>(raw.clone()) {
-            Ok(state) => state,
-            Err(_) => {
-                let legacy: LegacyPersistedExecutionState = serde_json::from_value(raw)?;
-                PersistedExecutionState {
-                    runtimes: legacy
-                        .runtime
-                        .map(|runtime| BTreeMap::from([("legacy".to_string(), runtime)]))
-                        .unwrap_or_default(),
-                    runtime: None,
-                    credentials: BTreeMap::new(),
-                    processed: legacy
-                        .processed
-                        .into_iter()
-                        .map(|(command_id, receipts)| PersistedProcessedCommand {
-                            key: JournalKey {
-                                owner: "legacy".to_string(),
-                                command_id,
-                            },
-                            value: ProcessedCommand {
-                                fingerprint: String::new(),
-                                receipts,
-                                events: Vec::new(),
-                            },
-                        })
-                        .collect(),
-                    conflicts: Vec::new(),
-                    next_sequences: BTreeMap::from([("legacy".to_string(), legacy.next_sequences)]),
-                }
-            }
-        };
+        let state: PersistedExecutionState = serde_json::from_str(&fs::read_to_string(path)?)?;
         let controller = Self::with_concurrency(limit);
         *controller.state.try_lock().map_err(|_| {
             NodeError::InvalidConfiguration(
                 "new execution controller was unexpectedly locked".into(),
             )
         })? = ControllerState {
-            runtimes: state.runtimes,
+            ledgers: state.ledgers,
             credentials: state.credentials,
             processed: state
                 .processed
@@ -798,6 +837,7 @@ impl ExecutionController {
                 .into_iter()
                 .map(|entry| (entry.key, entry.value))
                 .collect(),
+            in_flight: HashSet::new(),
             next_sequences: state.next_sequences,
             data_dir: Some(data_dir.to_path_buf()),
         };
@@ -806,7 +846,7 @@ impl ExecutionController {
 
     /// Process one signed, owner-authorized command event and return its signed
     /// encrypted receipt events. Invalid or unauthorized events are ignored by
-    /// the caller's subscription loop and never reach the fake runtime.
+    /// the caller's subscription loop and never reach the ledger or substrate.
     pub async fn handle_command_event(
         &self,
         identity: &NodeIdentity,
@@ -907,7 +947,7 @@ impl ExecutionController {
             .await
             .map_err(|_| NodeError::InvalidCommand("execution controller is closed".into()))?;
 
-        // The runtime seam is asynchronous even for the fake runtime. Yielding
+        // The substrate seam is asynchronous even when the substrate is inert. Yielding
         // here lets commands for different workloads make progress concurrently
         // while the per-workload guard keeps same-workload ordering strict.
         tokio::task::yield_now().await;
@@ -954,32 +994,59 @@ impl ExecutionController {
             return Ok(events);
         }
 
-        let receipts = if envelope.node_id() != &node_id {
-            vec![next_receipt(
+        if state.in_flight.contains(&journal_key) {
+            // The same command id is mid-execution for a different workload
+            // (same-workload redelivery is serialized by the workload lock):
+            // conflicting reuse, rejected without touching the substrate.
+            let receipts = vec![next_receipt(
+                &mut state,
+                &journal_key.owner,
+                &envelope,
+                ReceiptOutcome::Rejected {
+                    error: SafeErrorCode::Conflict,
+                },
+            )?];
+            drop(state);
+            return self.receipt_events(identity, &owner, receipts);
+        }
+
+        let rejection = if envelope.node_id() != &node_id {
+            Some(vec![next_receipt(
                 &mut state,
                 &journal_key.owner,
                 &envelope,
                 ReceiptOutcome::Rejected {
                     error: SafeErrorCode::Unauthorized,
                 },
-            )?]
+            )?])
         } else if let Err(error) = envelope.validate_at(now) {
-            vec![next_receipt(
+            Some(vec![next_receipt(
                 &mut state,
                 &journal_key.owner,
                 &envelope,
                 ReceiptOutcome::Rejected {
                     error: safe_error_for_validation(&error),
                 },
-            )?]
+            )?])
         } else {
-            execute(
-                &mut state,
-                &journal_key.owner,
-                &envelope,
-                now,
-                &identity.keys,
-            )?
+            None
+        };
+
+        let receipts = match rejection {
+            Some(receipts) => receipts,
+            None => {
+                // Execute drops the state lock around the substrate action;
+                // the in-flight marker keeps the command id reserved while no
+                // lock is held.
+                state.in_flight.insert(journal_key.clone());
+                drop(state);
+                let executed = self
+                    .execute(&journal_key.owner, &envelope, now, &identity.keys)
+                    .await;
+                state = self.state.lock().await;
+                state.in_flight.remove(&journal_key);
+                executed?
+            }
         };
 
         let events = self.receipt_events(identity, &owner, receipts.clone())?;
@@ -1005,20 +1072,20 @@ impl ExecutionController {
         persist_snapshot(&snapshot, data_dir.as_deref())
     }
 
-    /// Inspect the fake runtime for diagnostics and tests.
-    pub async fn runtime(&self) -> FakeWorkloadRuntime {
+    /// Inspect the first owner's workload ledger for diagnostics and tests.
+    pub async fn ledger(&self) -> WorkloadLedger {
         let state = self.state.lock().await;
-        state.runtimes.values().next().cloned().unwrap_or_default()
+        state.ledgers.values().next().cloned().unwrap_or_default()
     }
 
     /// Return the current durable workload projection for node announcements.
     pub async fn workload_statuses(&self) -> Vec<buzz_core::execution::WorkloadStatus> {
         let state = self.state.lock().await;
         state
-            .runtimes
+            .ledgers
             .iter()
-            .flat_map(|(owner, runtime)| {
-                runtime.statuses(state.next_sequences.get(owner).unwrap_or(&BTreeMap::new()))
+            .flat_map(|(owner, ledger)| {
+                ledger.statuses(state.next_sequences.get(owner).unwrap_or(&BTreeMap::new()))
             })
             .collect()
     }
@@ -1051,88 +1118,242 @@ impl ExecutionController {
     }
 }
 
-fn execute(
+impl ExecutionController {
+    /// Execute one admitted command: ledger validation first (pure), then the
+    /// substrate side effect, then — only on substrate success — the ledger
+    /// mutation and its `Succeeded` receipt. A substrate failure earns a
+    /// `Failed` receipt with a safe error code and leaves the ledger exactly
+    /// as it was: a failed deploy records no running workload, a failed stop
+    /// keeps the previous lifecycle.
+    ///
+    /// The state lock is released around the substrate action (which may wait
+    /// on process shutdown); the per-workload lock held by the caller keeps
+    /// same-workload commands strictly ordered while other workloads make
+    /// progress.
+    async fn execute(
+        &self,
+        owner: &str,
+        envelope: &ExecutionCommandEnvelope,
+        now: DateTime<Utc>,
+        node_keys: &Keys,
+    ) -> Result<Vec<ExecutionReceipt>, NodeError> {
+        // Phase 1 — accepted receipt plus pure ledger validation.
+        let mut state = self.state.lock().await;
+        let accepted = next_receipt(&mut state, owner, envelope, ReceiptOutcome::Accepted)?;
+
+        if matches!(
+            &envelope.command,
+            ExecutionCommand::AuthenticateProvider { .. }
+                | ExecutionCommand::SubmitProviderAuthentication { .. }
+                | ExecutionCommand::CancelProviderAuthentication { .. }
+        ) {
+            // Provider authentication is pure credential bookkeeping — no
+            // substrate involvement — and completes under one lock hold.
+            let (outcome, detail) =
+                execute_provider_auth(&mut state, owner, envelope, now, node_keys);
+            let terminal = next_receipt_with_detail(&mut state, owner, envelope, outcome, detail)?;
+            return Ok(vec![accepted, terminal]);
+        }
+
+        let ledger = state.ledgers.entry(owner.to_string()).or_default();
+        let validation = match &envelope.command {
+            ExecutionCommand::Deploy {
+                workload,
+                supersedes_removal,
+            } => ledger.validate_deploy(workload, *supersedes_removal),
+            ExecutionCommand::Start { workload_id }
+            | ExecutionCommand::Stop { workload_id }
+            | ExecutionCommand::Restart { workload_id } => ledger.validate_transition(workload_id),
+            ExecutionCommand::Remove { workload_id } => ledger.validate_remove(workload_id),
+            _ => Ok(()),
+        };
+        // Start and restart hand the substrate the ledger's durable,
+        // key-stripped spec; a passing validation guarantees it exists.
+        let durable_spec = if validation.is_ok() {
+            match &envelope.command {
+                ExecutionCommand::Start { workload_id }
+                | ExecutionCommand::Restart { workload_id } => ledger.durable_spec(workload_id),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Err(error) = validation {
+            let terminal = next_receipt(
+                &mut state,
+                owner,
+                envelope,
+                ReceiptOutcome::Failed { error },
+            )?;
+            return Ok(vec![accepted, terminal]);
+        }
+        drop(state);
+
+        // Phase 2 — the substrate side effect, outside the state lock.
+        let missing_spec = || {
+            SubstrateError::new(
+                SafeErrorCode::WorkloadNotFound,
+                "workload disappeared from the ledger mid-command",
+            )
+        };
+        let substrate_result = match &envelope.command {
+            ExecutionCommand::Deploy { workload, .. } => {
+                self.substrate.deploy(owner, workload).await
+            }
+            ExecutionCommand::Start { .. } => match &durable_spec {
+                Some(spec) => self.substrate.start(owner, spec).await,
+                None => Err(missing_spec()),
+            },
+            ExecutionCommand::Stop { workload_id } => self.substrate.stop(owner, workload_id).await,
+            ExecutionCommand::Restart { .. } => match &durable_spec {
+                Some(spec) => self.substrate.restart(owner, spec).await,
+                None => Err(missing_spec()),
+            },
+            ExecutionCommand::Remove { workload_id } => {
+                self.substrate.remove(owner, workload_id).await
+            }
+            _ => Ok(()),
+        };
+
+        // Phase 3 — ledger mutation and the terminal receipt.
+        let mut state = self.state.lock().await;
+        let outcome = match substrate_result {
+            Err(error) => {
+                // The node-local diagnostic stays in the node log; only the
+                // safe classification travels in the receipt.
+                warn!(
+                    workload = envelope.command.workload_id().as_str(),
+                    code = ?error.code,
+                    message = %error.message,
+                    "substrate action failed"
+                );
+                ReceiptOutcome::Failed { error: error.code }
+            }
+            Ok(()) => {
+                let ledger = state.ledgers.entry(owner.to_string()).or_default();
+                let applied = match &envelope.command {
+                    ExecutionCommand::Deploy {
+                        workload,
+                        supersedes_removal,
+                    } => ledger.deploy(workload, *supersedes_removal),
+                    ExecutionCommand::Start { workload_id } => ledger.start(workload_id),
+                    ExecutionCommand::Stop { workload_id } => ledger.stop(workload_id),
+                    ExecutionCommand::Restart { workload_id } => ledger.restart(workload_id),
+                    ExecutionCommand::Remove { workload_id } => ledger.remove(workload_id),
+                    _ => Ok(WorkloadLifecycle::Pending),
+                };
+                match applied {
+                    Ok(_) => ReceiptOutcome::Succeeded,
+                    Err(error) => ReceiptOutcome::Failed { error },
+                }
+            }
+        };
+        let terminal = next_receipt_with_detail(&mut state, owner, envelope, outcome, None)?;
+        // The removal tombstone must remember the sequence of the removal's
+        // terminal receipt: that is the sequence the owner observes (in the
+        // receipt and in the announced workload status) and echoes back in a
+        // deliberate redeploy to prove it is not a stale replay.
+        if matches!(envelope.command, ExecutionCommand::Remove { .. })
+            && matches!(terminal.outcome, ReceiptOutcome::Succeeded)
+        {
+            if let Some(ledger) = state.ledgers.get_mut(owner) {
+                ledger.record_removal_sequence(envelope.command.workload_id(), terminal.sequence);
+            }
+        }
+        Ok(vec![accepted, terminal])
+    }
+
+    /// Record a body exit observed by the substrate's exit channel.
+    ///
+    /// A clean self-exit transitions the ledger row to `Stopped`, a non-zero
+    /// exit to `Failed`; the body is never respawned. Returns whether the
+    /// durable ledger changed so callers can republish the node announcement.
+    pub async fn record_workload_exit(&self, exit: &WorkloadExit) -> Result<bool, NodeError> {
+        let workload_lock = self.workload_lock_for(&exit.owner, &exit.workload_id).await;
+        let _workload_guard = workload_lock.lock().await;
+        let mut state = self.state.lock().await;
+        let Some(ledger) = state.ledgers.get_mut(&exit.owner) else {
+            return Ok(false);
+        };
+        if ledger
+            .record_body_exit(&exit.workload_id, exit.clean)
+            .is_none()
+        {
+            return Ok(false);
+        }
+        drop(state);
+        self.persist_current_state().await?;
+        Ok(true)
+    }
+
+    /// Return the serialization lock for one owner-scoped workload.
+    async fn workload_lock_for(&self, owner: &str, workload_id: &WorkloadId) -> Arc<Mutex<()>> {
+        let mut locks = self.workload_locks.lock().await;
+        locks
+            .entry(WorkloadKey {
+                owner: owner.to_string(),
+                workload_id: workload_id.clone(),
+            })
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+}
+
+/// Apply one provider-authentication command to the credential store.
+fn execute_provider_auth(
     state: &mut ControllerState,
     owner: &str,
     envelope: &ExecutionCommandEnvelope,
     now: DateTime<Utc>,
     node_keys: &Keys,
-) -> Result<Vec<ExecutionReceipt>, NodeError> {
-    let accepted = next_receipt(state, owner, envelope, ReceiptOutcome::Accepted)?;
-    let runtime = state.runtimes.entry(owner.to_string()).or_default();
-    let (outcome, detail) = match &envelope.command {
-        ExecutionCommand::Deploy {
-            workload,
-            supersedes_removal,
-        } => (runtime.deploy(workload, *supersedes_removal), None),
-        ExecutionCommand::Start { workload_id } => (runtime.start(workload_id), None),
-        ExecutionCommand::Stop { workload_id } => (runtime.stop(workload_id), None),
-        ExecutionCommand::Restart { workload_id } => (runtime.restart(workload_id), None),
-        ExecutionCommand::Remove { workload_id } => (runtime.remove(workload_id), None),
+) -> (ReceiptOutcome, Option<ReceiptDetail>) {
+    let result = match &envelope.command {
         ExecutionCommand::AuthenticateProvider { session } => {
-            let result = if runtime.workloads.contains_key(&session.workload_id) {
+            let workload_exists = state
+                .ledgers
+                .entry(owner.to_string())
+                .or_default()
+                .contains(&session.workload_id);
+            if workload_exists {
                 state
                     .credentials
                     .entry(owner.to_string())
                     .or_default()
                     .begin(session)
+                    .map(Some)
             } else {
                 Err(SafeErrorCode::WorkloadNotFound)
-            };
-            match result {
-                Ok(detail) => (Ok(WorkloadLifecycle::Pending), Some(detail)),
-                Err(error) => (Err(error), None),
             }
         }
-        ExecutionCommand::SubmitProviderAuthentication { response } => {
-            let result = state
-                .credentials
-                .entry(owner.to_string())
-                .or_default()
-                .submit(response, now, node_keys);
-            match result {
-                Ok(detail) => (Ok(WorkloadLifecycle::Running), Some(detail)),
-                Err(error) => (Err(error), None),
-            }
-        }
+        ExecutionCommand::SubmitProviderAuthentication { response } => state
+            .credentials
+            .entry(owner.to_string())
+            .or_default()
+            .submit(response, now, node_keys)
+            .map(Some),
         ExecutionCommand::CancelProviderAuthentication {
             workload_id,
             session_id,
-        } => {
-            let result = state
-                .credentials
-                .entry(owner.to_string())
-                .or_default()
-                .cancel(workload_id, session_id)
-                .map(|_| WorkloadLifecycle::Stopped);
-            (result, None)
-        }
+        } => state
+            .credentials
+            .entry(owner.to_string())
+            .or_default()
+            .cancel(workload_id, session_id)
+            .map(|_| None),
+        _ => Err(SafeErrorCode::InvalidCommand),
     };
-    let outcome = match outcome {
-        Ok(_)
+    match result {
+        Ok(detail)
             if matches!(
                 &envelope.command,
                 ExecutionCommand::AuthenticateProvider { .. }
             ) =>
         {
-            ReceiptOutcome::Progress
+            (ReceiptOutcome::Progress, detail)
         }
-        Ok(_) => ReceiptOutcome::Succeeded,
-        Err(error) => ReceiptOutcome::Failed { error },
-    };
-    let terminal = next_receipt_with_detail(state, owner, envelope, outcome, detail)?;
-    // The removal tombstone must remember the sequence of the removal's
-    // terminal receipt: that is the sequence the owner observes (in the
-    // receipt and in the announced workload status) and echoes back in a
-    // deliberate redeploy to prove it is not a stale replay.
-    if matches!(envelope.command, ExecutionCommand::Remove { .. })
-        && matches!(terminal.outcome, ReceiptOutcome::Succeeded)
-    {
-        if let Some(runtime) = state.runtimes.get_mut(owner) {
-            runtime.record_removal_sequence(envelope.command.workload_id(), terminal.sequence);
-        }
+        Ok(detail) => (ReceiptOutcome::Succeeded, detail),
+        Err(error) => (ReceiptOutcome::Failed { error }, None),
     }
-    Ok(vec![accepted, terminal])
 }
 
 fn next_receipt(
@@ -1170,12 +1391,11 @@ fn command_fingerprint(envelope: &ExecutionCommandEnvelope) -> Result<String, No
 
 fn persisted_state(state: &ControllerState) -> PersistedExecutionState {
     PersistedExecutionState {
-        runtimes: state
-            .runtimes
+        ledgers: state
+            .ledgers
             .iter()
-            .map(|(owner, runtime)| (owner.clone(), runtime.clone().without_private_keys()))
+            .map(|(owner, ledger)| (owner.clone(), ledger.clone().without_private_keys()))
             .collect(),
-        runtime: None,
         credentials: state.credentials.clone(),
         processed: state
             .processed
@@ -1215,26 +1435,20 @@ fn persist_snapshot(
     set_private_file_permissions(&path)
 }
 
+/// On-disk shape of `execution-state.json`: the durable ledger plus the
+/// command idempotency journal. Substrate state is deliberately absent — it
+/// is rebuilt from the ledger on restart (minus one-time launch keys, which
+/// are never persisted).
 #[derive(Debug, Serialize, Deserialize)]
 struct PersistedExecutionState {
     #[serde(default)]
-    runtimes: BTreeMap<String, FakeWorkloadRuntime>,
+    ledgers: BTreeMap<String, WorkloadLedger>,
     #[serde(default)]
-    runtime: Option<FakeWorkloadRuntime>,
-    #[serde(default)]
-    credentials: BTreeMap<String, FakeCredentialStore>,
+    credentials: BTreeMap<String, CredentialStore>,
     processed: Vec<PersistedProcessedCommand>,
     #[serde(default)]
     conflicts: Vec<PersistedConflict>,
     next_sequences: BTreeMap<String, BTreeMap<WorkloadId, u64>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct LegacyPersistedExecutionState {
-    #[serde(default)]
-    runtime: Option<FakeWorkloadRuntime>,
-    processed: HashMap<buzz_core::execution::CommandId, Vec<ExecutionReceipt>>,
-    next_sequences: BTreeMap<WorkloadId, u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1506,9 +1720,9 @@ mod tests {
 
         assert_eq!(first.len(), 2);
         assert_eq!(second.len(), 2);
-        let runtime = controller.runtime().await;
-        assert_eq!(runtime.workload_count(), 1);
-        assert_eq!(runtime.deploy_invocations(), 1);
+        let ledger = controller.ledger().await;
+        assert_eq!(ledger.workload_count(), 1);
+        assert_eq!(ledger.deploy_admissions(), 1);
         for receipt_event in first {
             assert!(receipt_event.verify_id());
             assert!(receipt_event.verify_signature());
@@ -1579,14 +1793,14 @@ mod tests {
 
         assert_eq!(receipts.len(), 2);
         assert_eq!(receipts, first_receipts);
-        let runtime = restarted_controller.runtime().await;
-        assert_eq!(runtime.workload_count(), 1);
-        assert_eq!(runtime.deploy_invocations(), 1);
+        let ledger = restarted_controller.ledger().await;
+        assert_eq!(ledger.workload_count(), 1);
+        assert_eq!(ledger.deploy_admissions(), 1);
         let _ = fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
-    async fn lifecycle_commands_update_durable_runtime_state() {
+    async fn lifecycle_commands_update_durable_ledger_state() {
         let dir = temp_dir();
         let node = NodeIdentity::load_or_create(&dir).expect("node identity");
         let owner = Keys::generate();
@@ -1657,7 +1871,7 @@ mod tests {
         assert!(sequences
             .windows(2)
             .all(|pair| pair[1].sequence > pair[0].sequence));
-        assert_eq!(controller.runtime().await.workload_count(), 0);
+        assert_eq!(controller.ledger().await.workload_count(), 0);
         let statuses = controller.workload_statuses().await;
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].lifecycle, WorkloadLifecycle::Removed);
@@ -2113,32 +2327,14 @@ mod tests {
 
         assert!(first_result.is_ok());
         assert!(second_result.is_ok());
-        assert_eq!(controller.runtime().await.workload_count(), 2);
+        assert_eq!(controller.ledger().await.workload_count(), 2);
         let restarted = ExecutionController::load(&dir).expect("restart controller");
-        assert_eq!(restarted.runtime().await.workload_count(), 2);
-        let _ = fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn legacy_execution_state_is_migrated_without_startup_failure() {
-        let dir = temp_dir();
-        fs::create_dir_all(&dir).expect("data directory");
-        fs::write(
-            dir.join("execution-state.json"),
-            serde_json::json!({
-                "processed": {},
-                "next_sequences": {}
-            })
-            .to_string(),
-        )
-        .expect("legacy state");
-
-        ExecutionController::load(&dir).expect("migrate legacy state");
+        assert_eq!(restarted.ledger().await.workload_count(), 2);
         let _ = fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
-    async fn unpaired_command_never_reaches_the_runtime() {
+    async fn unpaired_command_never_reaches_the_ledger() {
         let dir = temp_dir();
         let node = NodeIdentity::load_or_create(&dir).expect("node identity");
         let owner = Keys::generate();
@@ -2178,7 +2374,7 @@ mod tests {
             .expect("unpaired command is ignored");
 
         assert!(receipts.is_empty());
-        assert_eq!(controller.runtime().await.workload_count(), 0);
+        assert_eq!(controller.ledger().await.workload_count(), 0);
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -2276,7 +2472,7 @@ mod tests {
                 }
             );
         }
-        assert_eq!(controller.runtime().await.workload_count(), 0);
+        assert_eq!(controller.ledger().await.workload_count(), 0);
 
         // A deliberate redeploy echoes the removal receipt's sequence. Restart
         // the controller first so the sequenced tombstone is proven to
@@ -2300,63 +2496,126 @@ mod tests {
             terminal_receipt(&owner, &node, &events).outcome,
             ReceiptOutcome::Succeeded
         );
-        assert_eq!(restarted.runtime().await.workload_count(), 1);
+        assert_eq!(restarted.ledger().await.workload_count(), 1);
         let statuses = restarted.workload_statuses().await;
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].lifecycle, WorkloadLifecycle::Running);
         let _ = fs::remove_dir_all(dir);
     }
 
-    #[tokio::test]
-    async fn legacy_tombstone_state_is_cleared_by_any_new_deploy() {
-        let dir = temp_dir();
-        let node = NodeIdentity::load_or_create(&dir).expect("node identity");
-        let owner = Keys::generate();
-        let owners = paired_owner_store(&owner, &node, &dir);
-        let owner_hex = owner.public_key().to_hex();
-        let workload_id = WorkloadId::random();
-        // The exact persisted shape written by earlier builds: tombstones as a
-        // plain list of workload ids, without removal sequences.
-        let legacy_state = format!(
-            r#"{{
-                "runtimes": {{
-                    "{owner_hex}": {{
-                        "workloads": {{}},
-                        "removed_workloads": ["{workload_id}"],
-                        "deploy_invocations": 1
-                    }}
-                }},
-                "credentials": {{}},
-                "processed": [],
-                "conflicts": [],
-                "next_sequences": {{ "{owner_hex}": {{ "{workload_id}": 14 }} }}
-            }}"#,
-            workload_id = workload_id.as_str(),
-        );
-        fs::write(dir.join("execution-state.json"), legacy_state).expect("legacy state");
+    /// Recording substrate with scriptable failures, proving the
+    /// ledger-validation → substrate → ledger-mutation ordering.
+    #[derive(Debug, Default)]
+    struct ScriptedSubstrate {
+        calls: std::sync::Mutex<Vec<String>>,
+        failures: std::sync::Mutex<HashMap<String, SafeErrorCode>>,
+    }
 
-        let controller = ExecutionController::load(&dir).expect("load legacy state");
+    impl ScriptedSubstrate {
+        fn fail(&self, operation: &str, error: SafeErrorCode) {
+            self.failures
+                .lock()
+                .expect("failures lock")
+                .insert(operation.to_string(), error);
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().expect("calls lock").clone()
+        }
+
+        fn record(&self, operation: &str) -> Result<(), SubstrateError> {
+            self.calls
+                .lock()
+                .expect("calls lock")
+                .push(operation.to_string());
+            match self.failures.lock().expect("failures lock").get(operation) {
+                Some(error) => Err(SubstrateError::new(*error, "scripted failure")),
+                None => Ok(()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Substrate for ScriptedSubstrate {
+        async fn deploy(
+            &self,
+            _owner: &str,
+            _workload: &WorkloadSpec,
+        ) -> Result<(), SubstrateError> {
+            self.record("deploy")
+        }
+
+        async fn start(
+            &self,
+            _owner: &str,
+            _workload: &WorkloadSpec,
+        ) -> Result<(), SubstrateError> {
+            self.record("start")
+        }
+
+        async fn stop(
+            &self,
+            _owner: &str,
+            _workload_id: &WorkloadId,
+        ) -> Result<(), SubstrateError> {
+            self.record("stop")
+        }
+
+        async fn restart(
+            &self,
+            _owner: &str,
+            _workload: &WorkloadSpec,
+        ) -> Result<(), SubstrateError> {
+            self.record("restart")
+        }
+
+        async fn remove(
+            &self,
+            _owner: &str,
+            _workload_id: &WorkloadId,
+        ) -> Result<(), SubstrateError> {
+            self.record("remove")
+        }
+    }
+
+    fn agent_deploy_envelope(
+        node: &NodeIdentity,
+        workload: &WorkloadSpec,
+    ) -> ExecutionCommandEnvelope {
         let now = Utc::now();
-        let deploy = ExecutionCommandEnvelope::new(
+        ExecutionCommandEnvelope::new(
             node.node_id().expect("node id"),
             now,
             now + Duration::minutes(5),
             ExecutionCommand::Deploy {
                 supersedes_removal: None,
-                workload: Box::new(
-                    WorkloadSpec::agent(
-                        workload_id.clone(),
-                        "Legacy agent",
-                        "fake-runtime",
-                        None,
-                        None,
-                        Vec::new(),
-                    )
-                    .expect("workload"),
-                ),
+                workload: Box::new(workload.clone()),
             },
         )
-        .expect("command");
+        .expect("command")
+    }
+
+    #[tokio::test]
+    async fn substrate_refusal_fails_the_receipt_and_leaves_no_ledger_entry() {
+        let dir = temp_dir();
+        let node = NodeIdentity::load_or_create(&dir).expect("node identity");
+        let owner = Keys::generate();
+        let owners = paired_owner_store(&owner, &node, &dir);
+        let now = Utc::now();
+        let workload = WorkloadSpec::agent(
+            WorkloadId::random(),
+            "Refused agent",
+            "fake-runtime",
+            None,
+            None,
+            Vec::new(),
+        )
+        .expect("workload");
+        let deploy = agent_deploy_envelope(&node, &workload);
+        let substrate = Arc::new(ScriptedSubstrate::default());
+        substrate.fail("deploy", SafeErrorCode::RuntimeFailed);
+        let controller = ExecutionController::new().with_substrate(substrate.clone());
+
         let events = controller
             .handle_command_event(
                 &node,
@@ -2366,17 +2625,358 @@ mod tests {
                 now,
             )
             .await
-            .expect("deploy over legacy tombstone");
+            .expect("refused deploy still yields receipts");
+
         assert_eq!(
             terminal_receipt(&owner, &node, &events).outcome,
+            ReceiptOutcome::Failed {
+                error: SafeErrorCode::RuntimeFailed
+            }
+        );
+        assert_eq!(substrate.calls(), vec!["deploy".to_string()]);
+        assert_eq!(controller.ledger().await.workload_count(), 0);
+        assert_eq!(controller.ledger().await.deploy_admissions(), 0);
+        assert!(controller.workload_statuses().await.is_empty());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn failed_stop_keeps_the_previous_lifecycle_and_start_failure_is_fail_closed() {
+        let dir = temp_dir();
+        let node = NodeIdentity::load_or_create(&dir).expect("node identity");
+        let owner = Keys::generate();
+        let owners = paired_owner_store(&owner, &node, &dir);
+        let now = Utc::now();
+        let workload_id = WorkloadId::random();
+        let workload = WorkloadSpec::agent(
+            workload_id.clone(),
+            "Sticky agent",
+            "fake-runtime",
+            None,
+            None,
+            Vec::new(),
+        )
+        .expect("workload");
+        let substrate = Arc::new(ScriptedSubstrate::default());
+        let controller = ExecutionController::new().with_substrate(substrate.clone());
+        let envelope = |command| {
+            ExecutionCommandEnvelope::new(
+                node.node_id().expect("node id"),
+                now,
+                now + Duration::minutes(5),
+                command,
+            )
+            .expect("command")
+        };
+        controller
+            .handle_command_event(
+                &node,
+                &owners,
+                TEST_RELAY_AUTHORITY,
+                &deploy_command_event(&owner, &node, &agent_deploy_envelope(&node, &workload)),
+                now,
+            )
+            .await
+            .expect("deploy");
+
+        // A substrate stop failure earns a Failed receipt and must leave the
+        // ledger lifecycle exactly as it was.
+        substrate.fail("stop", SafeErrorCode::RuntimeFailed);
+        let stop_events = controller
+            .handle_command_event(
+                &node,
+                &owners,
+                TEST_RELAY_AUTHORITY,
+                &deploy_command_event(
+                    &owner,
+                    &node,
+                    &envelope(ExecutionCommand::Stop {
+                        workload_id: workload_id.clone(),
+                    }),
+                ),
+                now,
+            )
+            .await
+            .expect("stop attempt");
+        assert_eq!(
+            terminal_receipt(&owner, &node, &stop_events).outcome,
+            ReceiptOutcome::Failed {
+                error: SafeErrorCode::RuntimeFailed
+            }
+        );
+        let statuses = controller.workload_statuses().await;
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].lifecycle, WorkloadLifecycle::Running);
+
+        // A fail-closed start (e.g. the process substrate lost the launch key
+        // across a node restart) surfaces its safe code the same way.
+        substrate.fail("start", SafeErrorCode::RuntimeUnavailable);
+        let start_events = controller
+            .handle_command_event(
+                &node,
+                &owners,
+                TEST_RELAY_AUTHORITY,
+                &deploy_command_event(
+                    &owner,
+                    &node,
+                    &envelope(ExecutionCommand::Start {
+                        workload_id: workload_id.clone(),
+                    }),
+                ),
+                now,
+            )
+            .await
+            .expect("start attempt");
+        assert_eq!(
+            terminal_receipt(&owner, &node, &start_events).outcome,
+            ReceiptOutcome::Failed {
+                error: SafeErrorCode::RuntimeUnavailable
+            }
+        );
+        let statuses = controller.workload_statuses().await;
+        assert_eq!(statuses[0].lifecycle, WorkloadLifecycle::Running);
+        assert_eq!(
+            substrate.calls(),
+            vec![
+                "deploy".to_string(),
+                "stop".to_string(),
+                "start".to_string()
+            ]
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn inadmissible_commands_never_reach_the_substrate() {
+        let dir = temp_dir();
+        let node = NodeIdentity::load_or_create(&dir).expect("node identity");
+        let owner = Keys::generate();
+        let owners = paired_owner_store(&owner, &node, &dir);
+        let now = Utc::now();
+        let workload_id = WorkloadId::random();
+        let workload = WorkloadSpec::agent(
+            workload_id.clone(),
+            "Tombstoned agent",
+            "fake-runtime",
+            None,
+            None,
+            Vec::new(),
+        )
+        .expect("workload");
+        let substrate = Arc::new(ScriptedSubstrate::default());
+        let controller = ExecutionController::new().with_substrate(substrate.clone());
+        let envelope = |command| {
+            ExecutionCommandEnvelope::new(
+                node.node_id().expect("node id"),
+                now,
+                now + Duration::minutes(5),
+                command,
+            )
+            .expect("command")
+        };
+
+        // Start of an unknown workload fails in pure validation.
+        let events = controller
+            .handle_command_event(
+                &node,
+                &owners,
+                TEST_RELAY_AUTHORITY,
+                &deploy_command_event(
+                    &owner,
+                    &node,
+                    &envelope(ExecutionCommand::Start {
+                        workload_id: workload_id.clone(),
+                    }),
+                ),
+                now,
+            )
+            .await
+            .expect("start of unknown workload");
+        assert_eq!(
+            terminal_receipt(&owner, &node, &events).outcome,
+            ReceiptOutcome::Failed {
+                error: SafeErrorCode::WorkloadNotFound
+            }
+        );
+        assert!(substrate.calls().is_empty());
+
+        // A stale redeploy blocked by a removal tombstone also stays purely
+        // in the ledger.
+        controller
+            .handle_command_event(
+                &node,
+                &owners,
+                TEST_RELAY_AUTHORITY,
+                &deploy_command_event(&owner, &node, &agent_deploy_envelope(&node, &workload)),
+                now,
+            )
+            .await
+            .expect("deploy");
+        let remove_events = controller
+            .handle_command_event(
+                &node,
+                &owners,
+                TEST_RELAY_AUTHORITY,
+                &deploy_command_event(
+                    &owner,
+                    &node,
+                    &envelope(ExecutionCommand::Remove {
+                        workload_id: workload_id.clone(),
+                    }),
+                ),
+                now,
+            )
+            .await
+            .expect("remove");
+        assert_eq!(
+            terminal_receipt(&owner, &node, &remove_events).outcome,
             ReceiptOutcome::Succeeded
         );
-        assert_eq!(controller.runtime().await.workload_count(), 1);
+        let stale = controller
+            .handle_command_event(
+                &node,
+                &owners,
+                TEST_RELAY_AUTHORITY,
+                &deploy_command_event(&owner, &node, &agent_deploy_envelope(&node, &workload)),
+                now,
+            )
+            .await
+            .expect("stale deploy");
+        assert_eq!(
+            terminal_receipt(&owner, &node, &stale).outcome,
+            ReceiptOutcome::Failed {
+                error: SafeErrorCode::Conflict
+            }
+        );
+        // Exactly one deploy and one remove hit the substrate; the stale
+        // deploy was refused before any side effect.
+        assert_eq!(
+            substrate.calls(),
+            vec!["deploy".to_string(), "remove".to_string()]
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn self_exits_transition_the_ledger_without_receipts_or_respawns() {
+        let dir = temp_dir();
+        let node = NodeIdentity::load_or_create(&dir).expect("node identity");
+        let owner = Keys::generate();
+        let owners = paired_owner_store(&owner, &node, &dir);
+        let owner_hex = owner.public_key().to_hex();
+        let now = Utc::now();
+        let workload_id = WorkloadId::random();
+        let workload = WorkloadSpec::agent(
+            workload_id.clone(),
+            "Self-reaping agent",
+            "fake-runtime",
+            None,
+            None,
+            Vec::new(),
+        )
+        .expect("workload");
+        let substrate = Arc::new(ScriptedSubstrate::default());
+        let controller = ExecutionController::load(&dir)
+            .expect("controller")
+            .with_substrate(substrate.clone());
+        controller
+            .handle_command_event(
+                &node,
+                &owners,
+                TEST_RELAY_AUTHORITY,
+                &deploy_command_event(&owner, &node, &agent_deploy_envelope(&node, &workload)),
+                now,
+            )
+            .await
+            .expect("deploy");
+
+        // A clean self-exit: the agent finished and left. Stopped, no respawn.
+        let changed = controller
+            .record_workload_exit(&WorkloadExit {
+                owner: owner_hex.clone(),
+                workload_id: workload_id.clone(),
+                clean: true,
+            })
+            .await
+            .expect("record clean exit");
+        assert!(changed);
+        let statuses = controller.workload_statuses().await;
+        assert_eq!(statuses[0].lifecycle, WorkloadLifecycle::Stopped);
+        // The transition is durable across a node restart.
+        let restarted = ExecutionController::load(&dir).expect("restarted controller");
+        assert_eq!(
+            restarted.workload_statuses().await[0].lifecycle,
+            WorkloadLifecycle::Stopped
+        );
+
+        // A stale duplicate exit observation changes nothing.
+        let changed = controller
+            .record_workload_exit(&WorkloadExit {
+                owner: owner_hex.clone(),
+                workload_id: workload_id.clone(),
+                clean: true,
+            })
+            .await
+            .expect("record duplicate exit");
+        assert!(!changed);
+
+        // A crash exit maps to Failed.
+        controller
+            .handle_command_event(
+                &node,
+                &owners,
+                TEST_RELAY_AUTHORITY,
+                &deploy_command_event(
+                    &owner,
+                    &node,
+                    &ExecutionCommandEnvelope::new(
+                        node.node_id().expect("node id"),
+                        now,
+                        now + Duration::minutes(5),
+                        ExecutionCommand::Start {
+                            workload_id: workload_id.clone(),
+                        },
+                    )
+                    .expect("start command"),
+                ),
+                now,
+            )
+            .await
+            .expect("start");
+        let changed = controller
+            .record_workload_exit(&WorkloadExit {
+                owner: owner_hex.clone(),
+                workload_id: workload_id.clone(),
+                clean: false,
+            })
+            .await
+            .expect("record crash exit");
+        assert!(changed);
+        assert_eq!(
+            controller.workload_statuses().await[0].lifecycle,
+            WorkloadLifecycle::Failed
+        );
+
+        // Unknown owners and workloads are ignored.
+        let changed = controller
+            .record_workload_exit(&WorkloadExit {
+                owner: "not-an-owner".into(),
+                workload_id: WorkloadId::random(),
+                clean: true,
+            })
+            .await
+            .expect("record unknown exit");
+        assert!(!changed);
+        // The substrate saw only the explicit commands — never a respawn.
+        assert_eq!(
+            substrate.calls(),
+            vec!["deploy".to_string(), "start".to_string()]
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn removal_tombstones_round_trip_and_accept_the_legacy_shape() {
+    fn removal_tombstones_round_trip_with_their_sequences() {
         let workload_id = WorkloadId::random();
         let workload = WorkloadSpec::agent(
             workload_id.clone(),
@@ -2387,15 +2987,17 @@ mod tests {
             Vec::new(),
         )
         .expect("workload");
-        let mut runtime = FakeWorkloadRuntime::default();
-        runtime.deploy(&workload, None).expect("deploy");
-        runtime.remove(&workload_id).expect("remove");
-        runtime.record_removal_sequence(&workload_id, 4);
+        let mut ledger = WorkloadLedger::default();
+        ledger.deploy(&workload, None).expect("deploy");
+        ledger.remove(&workload_id).expect("remove");
+        ledger.record_removal_sequence(&workload_id, 4);
 
-        let encoded = serde_json::to_value(&runtime).expect("serialize runtime");
+        let encoded = serde_json::to_value(&ledger).expect("serialize ledger");
         assert_eq!(encoded["removed_workloads"][workload_id.as_str()], 4);
-        let decoded: FakeWorkloadRuntime =
-            serde_json::from_value(encoded).expect("decode sequenced runtime");
+        assert_eq!(encoded["deploy_admissions"], 1);
+        let decoded: WorkloadLedger =
+            serde_json::from_value(encoded).expect("decode sequenced ledger");
+        assert_eq!(decoded.deploy_admissions(), 1);
         assert!(matches!(
             decoded.clone().deploy(&workload, None),
             Err(SafeErrorCode::Conflict)
@@ -2408,22 +3010,10 @@ mod tests {
             decoded.clone().deploy(&workload, Some(4)),
             Ok(WorkloadLifecycle::Running)
         );
-
-        let legacy = serde_json::json!({
-            "workloads": {},
-            "removed_workloads": [workload_id.as_str()],
-            "deploy_invocations": 1
-        });
-        let mut legacy_runtime: FakeWorkloadRuntime =
-            serde_json::from_value(legacy).expect("decode legacy runtime");
-        assert_eq!(
-            legacy_runtime.deploy(&workload, None),
-            Ok(WorkloadLifecycle::Running)
-        );
     }
 
     #[tokio::test]
-    async fn expired_command_is_rejected_without_runtime_side_effects() {
+    async fn expired_command_is_rejected_without_ledger_side_effects() {
         let dir = temp_dir();
         let node = NodeIdentity::load_or_create(&dir).expect("node identity");
         let owner = Keys::generate();
@@ -2470,7 +3060,7 @@ mod tests {
                 error: SafeErrorCode::Expired
             }
         );
-        assert_eq!(controller.runtime().await.workload_count(), 0);
+        assert_eq!(controller.ledger().await.workload_count(), 0);
         let _ = fs::remove_dir_all(dir);
     }
 }

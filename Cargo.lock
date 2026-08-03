@@ -1083,6 +1083,7 @@ name = "buzz-node"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "buzz-core",
  "buzz-ws-client",
  "chrono",
