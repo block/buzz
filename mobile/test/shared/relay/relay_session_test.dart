@@ -324,12 +324,14 @@ void main() {
       final session = RelaySessionNotifier();
       final container = ProviderContainer(
         overrides: [relaySessionProvider.overrideWith(() => session)],
-    );
-    addTearDown(container.dispose);
-    container.read(relaySessionProvider);
-    await Future<void>.delayed(Duration.zero);
+      );
+      addTearDown(container.dispose);
+      container.read(relaySessionProvider);
+      final subscription = container.listen(relaySessionProvider, (_, _) {});
+      addTearDown(subscription.close);
+      await Future<void>.delayed(Duration.zero);
 
-    final firstSocket = _testSocket();
+      final firstSocket = _testSocket();
       session.debugAttachSocketForTest(firstSocket);
       session.debugHandleDisconnected();
 
@@ -358,14 +360,19 @@ void main() {
       );
       addTearDown(container.dispose);
       container.read(relaySessionProvider);
+      final subscription = container.listen(relaySessionProvider, (_, _) {});
+      addTearDown(subscription.close);
       await Future<void>.delayed(Duration.zero);
 
+      final event = _event();
+      final disconnectedSocket = _testSocket();
+      session.debugAttachSocketForTest(disconnectedSocket);
+      session.debugHandleDisconnected();
+      final publish = session.publish(event);
       final firstSocket = _testSocket();
       session.debugAttachSocketForTest(firstSocket);
-      session.debugHandleDisconnected();
-      final event = _event();
-      final publish = session.publish(event);
-      expect(firstSocket.sentPayloads, isEmpty);
+      session.debugHandleConnected();
+      expect(firstSocket.sentPayloads, hasLength(1));
 
       session.debugPauseNow();
       final replacementSocket = _testSocket();

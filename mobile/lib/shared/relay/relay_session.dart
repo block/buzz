@@ -317,6 +317,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   Future<void> reconnect() async {
     _flushBufferedEventsNow();
     _cancelAllHistory(Exception('Relay session replaced'));
+    _resetPendingDispatches();
     await _socket?.disconnect();
     _reconnectDelayMs = _baseReconnectDelayMs;
     final config = ref.read(relayConfigProvider);
@@ -334,6 +335,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _paused = true;
     _reconnectTimer?.cancel();
     _cancelAllHistory(Exception('App moved to background'));
+    _resetPendingDispatches();
     _socket?.disconnect();
     state = const SessionState(status: SessionStatus.disconnected);
   }
@@ -409,11 +411,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       state = const SessionState(status: SessionStatus.disconnected);
       return;
     }
-    for (final pending in _pendingEvents.values) {
-      pending.dispatched = false;
-      pending.timeout?.cancel();
-      pending.timeout = null;
-    }
+    _resetPendingDispatches();
     _scheduleReconnect();
   }
 
@@ -677,6 +675,17 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   void _drainPendingEvents() {
     for (final eventId in _pendingEvents.keys.toList()) {
       _dispatchPending(eventId);
+    }
+  }
+
+  /// A transport replacement makes every unacknowledged EVENT ambiguous. Keep
+  /// the signed event and retry its exact ID after authentication; relays
+  /// deduplicate by ID, while a lost old-socket OK cannot strand the message.
+  void _resetPendingDispatches() {
+    for (final pending in _pendingEvents.values) {
+      pending.dispatched = false;
+      pending.timeout?.cancel();
+      pending.timeout = null;
     }
   }
 
