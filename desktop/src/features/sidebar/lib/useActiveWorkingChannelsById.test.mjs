@@ -11,6 +11,7 @@ describe("resolveActiveWorkingChannelNames", () => {
         anchorAt: 0,
         agentCount: 2,
         agentPubkeys: ["AAAA", "bbbb"],
+        agentAnchorAts: { aaaa: 0, bbbb: 0 },
       },
       [
         { pubkey: "aaaa", name: "Ned" },
@@ -28,6 +29,7 @@ describe("resolveActiveWorkingChannelNames", () => {
         anchorAt: 0,
         agentCount: 2,
         agentPubkeys: ["AAAA", "cccc"],
+        agentAnchorAts: { aaaa: 0, cccc: 0 },
       },
       [{ pubkey: "aaaa", name: "Ned" }],
     );

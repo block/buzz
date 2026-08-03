@@ -213,7 +213,11 @@ export function getWorkingChannels(): WorkingChannelSummary[] {
 
   const byChannel = new Map<string, WorkingChannelSummary>();
   for (const summary of getActiveTurnsByChannel()) {
-    byChannel.set(summary.channelId, { ...summary, source: "observer" });
+    byChannel.set(summary.channelId, {
+      ...summary,
+      agentAnchorAts: { ...summary.agentAnchorAts },
+      source: "observer",
+    });
   }
 
   for (const [channelId, entries] of typingByChannel) {
@@ -223,9 +227,13 @@ export function getWorkingChannels(): WorkingChannelSummary[] {
         existing.agentPubkeys.map((pubkey) => normalizePubkey(pubkey)),
       );
       const merged = [...existing.agentPubkeys];
-      for (const pubkey of entries.keys()) {
+      const agentAnchorAts = { ...existing.agentAnchorAts };
+      for (const [pubkey, since] of entries) {
         if (!known.has(pubkey)) {
           merged.push(pubkey);
+          agentAnchorAts[pubkey] = since;
+        } else if (agentAnchorAts[pubkey] === undefined) {
+          agentAnchorAts[pubkey] = since;
         }
       }
       if (merged.length !== existing.agentPubkeys.length) {
@@ -233,13 +241,16 @@ export function getWorkingChannels(): WorkingChannelSummary[] {
           ...existing,
           agentPubkeys: merged,
           agentCount: merged.length,
+          agentAnchorAts,
         });
       }
       continue;
     }
 
     let anchorAt = Number.POSITIVE_INFINITY;
-    for (const since of entries.values()) {
+    const agentAnchorAts: Record<string, number> = {};
+    for (const [pubkey, since] of entries) {
+      agentAnchorAts[pubkey] = since;
       if (since < anchorAt) {
         anchorAt = since;
       }
@@ -249,6 +260,7 @@ export function getWorkingChannels(): WorkingChannelSummary[] {
       anchorAt,
       agentCount: entries.size,
       agentPubkeys: [...entries.keys()],
+      agentAnchorAts,
       source: "typing",
     });
   }
