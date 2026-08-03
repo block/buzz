@@ -52,7 +52,7 @@ test("Share compute chooses a model before sharing", async ({ page }) => {
   await expect(toggle).toBeChecked();
   await expect(
     page.getByTestId("mesh-share-compute-sharing-status"),
-  ).toContainText("with relay members");
+  ).toContainText("SmolLM2 135M with relay members");
   await expect
     .poll(() =>
       page.evaluate(() => (window as E2eWindow).__BUZZ_E2E_COMMANDS__ ?? []),
