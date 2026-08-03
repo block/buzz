@@ -349,6 +349,7 @@ function CommunityApp({
     activeCommunity,
     communityKey,
     sharedIdentity,
+    isFindingCommunityAfterLeave,
   );
 
   const transitionCommunity = useCallback(

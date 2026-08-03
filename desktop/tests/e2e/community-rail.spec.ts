@@ -771,7 +771,10 @@ test.describe("community rail", () => {
   test("leaving the final community returns to setup without resetting identity", async ({
     page,
   }) => {
-    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    await installMockBridge(page, undefined, {
+      autoConnectDefaultRelay: true,
+      skipCommunitySeed: true,
+    });
     await seedCommunities(page, [COMMUNITY_A], COMMUNITY_A.id);
     await page.goto("/");
 
