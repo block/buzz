@@ -26,6 +26,7 @@ import type {
   ProjectRepoFile,
   ProjectRepoSnapshot,
 } from "@/features/projects/hooks";
+import { projectFileTreeSummary } from "@/features/projects/lib/projectFileTreeSummary";
 import { relativeTime } from "@/features/projects/lib/projectsViewHelpers";
 import { useUserSearchQuery } from "@/features/profile/hooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
@@ -44,10 +45,6 @@ import {
   RepoSyncActionButton,
   RepositoryBranchDropdown,
 } from "./ProjectRepositorySource";
-
-function pluralize(count: number, singular: string) {
-  return `${count} ${singular}${count === 1 ? "" : "s"}`;
-}
 
 export function formatLastChangedAt(timestamp: number | null) {
   if (!timestamp) return "—";
@@ -639,6 +636,10 @@ export function RepositoryFilesPanel({
   );
   const visibleEntries = entries.slice(0, 200);
   const latestCommit = snapshot?.latestCommit ?? null;
+  const fileTreeSummary = projectFileTreeSummary(
+    files.length,
+    snapshot?.totalFileCount ?? files.length,
+  );
   const knownLatestCommitProfile = React.useMemo(
     () => profileForCommitAuthor(latestCommit, profiles),
     [latestCommit, profiles],
@@ -829,7 +830,7 @@ export function RepositoryFilesPanel({
                           {latestCommit.shortHash}
                         </code>
                         <span className="text-muted-foreground">
-                          · {pluralize(files.length, "file")}
+                          · {fileTreeSummary.countLabel}
                         </span>
                       </p>
                     </div>
@@ -844,7 +845,7 @@ export function RepositoryFilesPanel({
                   </div>
                 ) : (
                   <p className="truncate text-sm font-medium text-foreground">
-                    Repository files · {files.length} tracked files
+                    Repository files · {fileTreeSummary.countLabel}
                   </p>
                 )}
               </th>
@@ -908,6 +909,11 @@ export function RepositoryFilesPanel({
         <p className="border-border/50 border-t px-4 py-3 text-2xs text-muted-foreground">
           Showing the first 200 entries in this folder. Open a folder to narrow
           the list.
+        </p>
+      ) : null}
+      {fileTreeSummary.truncationNotice ? (
+        <p className="border-border/50 border-t px-4 py-3 text-2xs text-muted-foreground">
+          {fileTreeSummary.truncationNotice}
         </p>
       ) : null}
     </div>

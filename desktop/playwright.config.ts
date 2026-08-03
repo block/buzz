@@ -105,6 +105,7 @@ export default defineConfig({
         "**/inbox-edit.spec.ts",
         "**/send-channel-binding.spec.ts",
         "**/project-commit-detail.spec.ts",
+        "**/project-file-tree.spec.ts",
         "**/project-inbox.spec.ts",
         "**/project-issue-comments.spec.ts",
         "**/project-pr-review.spec.ts",
