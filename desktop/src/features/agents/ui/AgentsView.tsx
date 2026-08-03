@@ -19,8 +19,11 @@ import { TeamShareDialog } from "./TeamShareDialog";
 import { SecretRevealDialog } from "./SecretRevealDialog";
 import { TeamDeleteDialog } from "./TeamDeleteDialog";
 import { TeamDialog } from "./TeamDialog";
+import { ConnectAgentDialog } from "./ConnectAgentDialog";
+import { ConnectedAgentsSection } from "./ConnectedAgentsSection";
 import { TeamsSection } from "./TeamsSection";
 import { UnifiedAgentsSection } from "./UnifiedAgentsSection";
+import { useConnectedAgents } from "./useConnectedAgents";
 import { useManagedAgentActions } from "./useManagedAgentActions";
 import { usePersonaActions } from "./usePersonaActions";
 import { useTeamActions } from "./useTeamActions";
@@ -44,6 +47,7 @@ export function AgentsView() {
   const { data: bakedEnv } = useBakedBuildEnvQuery({ enabled: true });
   const inheritedDefaults = getInheritedAgentDefaults(globalConfig, bakedEnv);
   const agents = useManagedAgentActions();
+  const connected = useConnectedAgents();
   const personas = usePersonaActions();
   const teamImportInputRef = React.useRef<HTMLInputElement | null>(null);
   const aiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);
@@ -271,6 +275,18 @@ export function AgentsView() {
               }}
             />
 
+            <ConnectedAgentsSection
+              agents={connected.agents}
+              error={connected.error}
+              isLoading={connected.isLoading}
+              isPending={connected.isPending}
+              noticeMessage={connected.noticeMessage}
+              onConnect={connected.openConnectDialog}
+              onDisconnect={(agent) => {
+                void connected.handleDisconnect(agent);
+              }}
+            />
+
             <TeamsSection
               error={
                 teamActions.teamsQuery.error instanceof Error
@@ -303,6 +319,12 @@ export function AgentsView() {
         onOpenChange={setAiDefaultsDialogOpen}
         open={isAiDefaultsOpen}
         returnFocusRef={aiDefaultsTriggerRef}
+      />
+
+      <ConnectAgentDialog
+        onConnected={connected.handleConnected}
+        onOpenChange={connected.setIsDialogOpen}
+        open={connected.isDialogOpen}
       />
 
       {isCreateDialogOpen ? (
