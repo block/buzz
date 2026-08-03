@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import type { AudioWorkletHandle } from "./audioWorklet";
+import { availableMediaDevices } from "./mediaDevices";
 
 /**
  * Manages audio input device enumeration, device selection, and mic gain.
@@ -15,9 +16,16 @@ export function useAudioDevices(
   const micGainRef = React.useRef(1);
 
   // Enumerate audio input devices on mount and when devices change.
+  // No-op where `navigator.mediaDevices` is absent (non-secure context) —
+  // the device list stays empty rather than crashing the tree on mount.
   React.useEffect(() => {
-    function refreshDevices() {
-      navigator.mediaDevices
+    const media = availableMediaDevices();
+    if (!media) return;
+
+    // Arrow const, not a hoisted `function` — a declaration would float above
+    // the null guard and lose the narrowing on `media`.
+    const refreshDevices = () => {
+      media
         .enumerateDevices()
         .then((devices) =>
           setAudioDevices(devices.filter((d) => d.kind === "audioinput")),
@@ -25,14 +33,11 @@ export function useAudioDevices(
         .catch(() => {
           /* best-effort */
         });
-    }
+    };
     refreshDevices();
-    navigator.mediaDevices.addEventListener("devicechange", refreshDevices);
+    media.addEventListener("devicechange", refreshDevices);
     return () => {
-      navigator.mediaDevices.removeEventListener(
-        "devicechange",
-        refreshDevices,
-      );
+      media.removeEventListener("devicechange", refreshDevices);
     };
   }, []);
 
