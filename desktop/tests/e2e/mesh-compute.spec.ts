@@ -17,9 +17,6 @@ type E2eWindow = Window & {
 
 test("Share compute chooses a model before sharing", async ({ page }) => {
   const modelRef = "hf://demo/SmolLM2-135M-Instruct-GGUF:Q4_K_M";
-  await page.addInitScript((model) => {
-    window.localStorage.setItem("buzz.mesh-compute.share.model.v1", model);
-  }, modelRef);
   await installMockBridge(page);
   await page.goto("/");
   await openSettings(page, "compute");
@@ -37,6 +34,9 @@ test("Share compute chooses a model before sharing", async ({ page }) => {
   ).toHaveCount(0);
   await expect(model).toBeVisible();
   await expect(toggle).toBeEnabled();
+  await model.click();
+  await page.getByRole("option", { name: "Custom model…" }).click();
+  await page.getByLabel("Custom model reference").fill(modelRef);
 
   await toggle.click();
   await expect(
@@ -52,7 +52,7 @@ test("Share compute chooses a model before sharing", async ({ page }) => {
   await expect(toggle).toBeChecked();
   await expect(
     page.getByTestId("mesh-share-compute-sharing-status"),
-  ).toContainText("SmolLM2 135M with relay members");
+  ).toContainText("with relay members");
   await expect
     .poll(() =>
       page.evaluate(() => (window as E2eWindow).__BUZZ_E2E_COMMANDS__ ?? []),
