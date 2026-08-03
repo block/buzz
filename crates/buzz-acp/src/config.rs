@@ -68,7 +68,7 @@ const PROTECTED_MCP_ENV_NAMES: [&str; 6] = [
 /// The transport tag is part of the version-1 document even though this PR
 /// implements only stdio. Additional transports can extend the same ordered
 /// server list without introducing a parallel configuration format.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, serde::Deserialize)]
 #[serde(tag = "transport", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ConfiguredMcpServer {
     /// A local MCP child process connected over stdio.
@@ -83,6 +83,37 @@ pub enum ConfiguredMcpServer {
         #[serde(deserialize_with = "deserialize_mcp_env")]
         env: BTreeMap<String, String>,
     },
+}
+
+struct RedactedMcpEnv<'a>(&'a BTreeMap<String, String>);
+
+impl std::fmt::Debug for RedactedMcpEnv<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut map = formatter.debug_map();
+        for key in self.0.keys() {
+            map.entry(key, &"[REDACTED]");
+        }
+        map.finish()
+    }
+}
+
+impl std::fmt::Debug for ConfiguredMcpServer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Stdio {
+                name,
+                command,
+                args,
+                env,
+            } => formatter
+                .debug_struct("Stdio")
+                .field("name", name)
+                .field("command", command)
+                .field("arg_count", &args.len())
+                .field("env", &RedactedMcpEnv(env))
+                .finish(),
+        }
+    }
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -3349,6 +3380,27 @@ channels = "ALL"
         assert!(!summary.contains(command));
         assert!(!summary.contains("/legacy/private/tool"));
         assert!(!summary.contains("DOMAIN_TOKEN"));
+    }
+
+    #[test]
+    fn debug_output_redacts_structured_mcp_environment_values() {
+        let secret_value = "structured-debug-secret";
+        let argument_secret = "structured-argument-secret";
+        let file = TempMcpConfig::write(&document_json(vec![serde_json::json!({
+            "name": "safe",
+            "transport": "stdio",
+            "command": "/opt/mcp",
+            "args": ["--token", argument_secret],
+            "env": {"DOMAIN_TOKEN": secret_value}
+        })]));
+        let config = config_from_mcp_file(&file, None).expect("config should load");
+
+        let rendered = format!("{config:?}");
+
+        assert!(rendered.contains("DOMAIN_TOKEN"));
+        assert!(rendered.contains("[REDACTED]"));
+        assert!(!rendered.contains(secret_value));
+        assert!(!rendered.contains(argument_secret));
     }
 
     #[test]

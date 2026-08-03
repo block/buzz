@@ -41,6 +41,7 @@ reqwest = { workspace = true }
 # Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }
+aho-corasick = "1.1"
 
 # IDs
 uuid = { workspace = true }
