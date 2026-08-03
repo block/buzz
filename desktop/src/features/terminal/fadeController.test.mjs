@@ -37,8 +37,26 @@ function fixture() {
       calls.push("cancel");
     },
   };
+  // Models the part of CSSOM this class depends on: an inline declaration is
+  // PRESENT or ABSENT, and only an absent one lets the stylesheet through.
+  // A plain `{ willChange: "auto" }` bag cannot tell those apart, so it would
+  // score a clobbering write as a correct release.
+  const authored = "bottom, box-shadow";
+  const style = {
+    opacity: "1",
+    willChange: "",
+    removeProperty(property) {
+      assert.equal(property, "will-change");
+      this.willChange = "";
+    },
+    /** What the element would actually compute, stylesheet included. */
+    get computedWillChange() {
+      return this.willChange === "" ? authored : this.willChange;
+    },
+  };
   const surface = {
-    style: { opacity: "1", willChange: "auto" },
+    authored,
+    style,
     animate(frames, options) {
       calls.push({ frames, options });
       return animation;
@@ -77,7 +95,7 @@ test("completed fades retain the timeline but release its compositor hint", asyn
   assert.equal(controller.toggle(false), "reveal");
   completions[0].resolve();
   await Promise.resolve();
-  assert.equal(surface.style.willChange, "auto");
+  assert.equal(surface.style.computedWillChange, surface.authored);
 
   assert.equal(controller.toggle(false), "conceal");
   assert.equal(calls.includes("cancel"), false);
@@ -96,13 +114,41 @@ test("a stale completion cannot release the hint during a reversal", async () =>
 
   completions[1].resolve();
   await Promise.resolve();
-  assert.equal(surface.style.willChange, "auto");
+  assert.equal(surface.style.computedWillChange, surface.authored);
 });
 
 test("reduced motion settles immediately without allocating an animation", () => {
   const { calls, controller, surface } = fixture();
   assert.equal(controller.toggle(true), "reveal");
   assert.equal(surface.style.opacity, "0");
-  assert.equal(surface.style.willChange, "auto");
+  assert.equal(surface.style.computedWillChange, surface.authored);
   assert.deepEqual(calls, []);
+});
+
+test('releasing the fade hint restores the authored will-change, not "auto"', async () => {
+  const { completions, controller, surface } = fixture();
+
+  // Before any fade the element is on the stylesheet's hint.
+  assert.equal(surface.style.computedWillChange, surface.authored);
+
+  controller.toggle(false);
+  assert.equal(surface.style.willChange, "opacity");
+
+  completions[0].resolve();
+  await Promise.resolve();
+  // The inline declaration must be REMOVED. Writing the literal "auto" would
+  // leave an inline value that outranks the stylesheet and permanently strips
+  // the surface's authored compositor hint after the first fade.
+  assert.equal(surface.style.willChange, "");
+  assert.equal(surface.style.computedWillChange, surface.authored);
+});
+
+test('settle also restores the authored hint rather than pinning "auto"', () => {
+  const { controller, surface } = fixture();
+  controller.toggle(false);
+  assert.equal(surface.style.willChange, "opacity");
+
+  controller.settle("conceal");
+  assert.equal(surface.style.willChange, "");
+  assert.equal(surface.style.computedWillChange, surface.authored);
 });

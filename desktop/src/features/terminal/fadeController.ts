@@ -14,7 +14,7 @@ type AnimationLike = {
 };
 
 type SurfaceLike = {
-  style: Pick<CSSStyleDeclaration, "opacity" | "willChange">;
+  style: Pick<CSSStyleDeclaration, "opacity" | "willChange" | "removeProperty">;
   animate(
     keyframes: Keyframe[] | PropertyIndexedKeyframes | null,
     options?: number | KeyframeAnimationOptions,
@@ -32,6 +32,17 @@ export class FadeController {
     this.#surface = surface;
   }
 
+  /**
+   * The fade owns `will-change` only for as long as it is animating. The app
+   * surface also carries an authored `will-change` for the huddle drawer
+   * transition, and an inline declaration outranks the stylesheet — so writing
+   * the literal `"auto"` does not "clear" the hint, it permanently replaces
+   * the drawer's. Removing the inline property hands the element back to CSS.
+   */
+  #releaseHint(): void {
+    this.#surface.style.removeProperty("will-change");
+  }
+
   settle(direction: Direction): void {
     if (this.#animation) {
       this.#token += 1;
@@ -40,7 +51,7 @@ export class FadeController {
     }
     this.#direction = direction;
     this.#surface.style.opacity = direction === "reveal" ? "0" : "1";
-    this.#surface.style.willChange = "auto";
+    this.#releaseHint();
   }
 
   toggle(reducedMotion: boolean): Direction {
@@ -78,7 +89,7 @@ export class FadeController {
     void animation.finished
       .then(() => {
         if (this.#animation === animation && this.#token === token) {
-          this.#surface.style.willChange = "auto";
+          this.#releaseHint();
         }
       })
       .catch(() => {
