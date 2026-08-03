@@ -10,8 +10,77 @@ MNPI, PII, attachments, or Azure deployment. The frozen scorecard in
 Use Windows with Docker Desktop running, Docker Compose v2.24.4 or newer, and
 WSL available. Keep at least 40 GiB free on the Windows host before the first
 native/release build; the WSL virtual disk can grow by roughly 27 GiB, and host
-exhaustion can remount its ext4 filesystem read-only. In WSL, build the five
-required release binaries exactly once:
+exhaustion can remount its ext4 filesystem read-only.
+
+On a fresh Windows VM, open an elevated PowerShell window and install Ubuntu
+for WSL. Restart Windows if the first command requests it, then reopen the
+elevated window, update WSL, and install Docker Desktop:
+
+```powershell
+wsl.exe --install -d Ubuntu
+wsl.exe --update
+winget.exe install --exact --id Docker.DockerDesktop `
+  --accept-source-agreements --accept-package-agreements
+wsl.exe --list --verbose
+```
+
+Start Docker Desktop from the Windows Start menu. In Docker Desktop, select
+**Settings > General > Use the WSL 2 based engine**, then select **Settings >
+Resources > WSL Integration**, enable the Ubuntu distribution, and choose
+**Apply & restart**. Docker Desktop supplies the Linux `docker` client and
+Compose plugin to that distribution; do not install a second Docker Engine
+inside Ubuntu. In the `wsl.exe --list --verbose` output above, confirm that
+Ubuntu shows version `2`.
+
+Open the Ubuntu terminal and install the host packages used by the build,
+bootstrap, export, and import paths:
+
+```bash
+sudo apt-get update
+sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+  build-essential ca-certificates cmake coreutils curl file findutils gawk git \
+  gnupg grep iproute2 jq libssl-dev nano openssl pinentry-curses pkg-config \
+  procps sed xxd
+```
+
+This installs `gpg` through `gnupg`; `realpath`, `stat`, and `sha256sum`
+through `coreutils`; `ss` through `iproute2`; and `pkill` through `procps`.
+Verify every required command, Docker connectivity, and the minimum Compose
+version before cloning or importing anything:
+
+```bash
+missing=0
+for name in git jq gpg openssl xxd realpath stat sha256sum curl ss pkill \
+  gcc g++ make cmake pkg-config docker; do
+  command -v "$name" >/dev/null 2>&1 || {
+    printf 'missing command: %s\n' "$name" >&2
+    missing=1
+  }
+done
+test "$missing" -eq 0 || exit 1
+docker info >/dev/null || {
+  printf 'Docker Desktop is not running or WSL integration is disabled\n' >&2
+  exit 1
+}
+compose_version="$(docker compose version --short | \
+  sed -E 's/^v?([0-9]+\.[0-9]+\.[0-9]+).*/\1/')"
+printf '%s\n' "$compose_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || {
+  printf 'could not parse Docker Compose version: %s\n' "$compose_version" >&2
+  exit 1
+}
+dpkg --compare-versions "$compose_version" ge 2.24.4 || {
+  printf 'Docker Compose %s is older than required 2.24.4\n' \
+    "$compose_version" >&2
+  exit 1
+}
+printf 'prerequisites ready (Docker Compose %s)\n' "$compose_version"
+```
+
+The five pilot binaries do not require the Linux GTK/WebKit packages used by
+the Tauri desktop CI jobs. Install those separately from `CONTRIBUTING.md` only
+if you intend to run the full desktop/Tauri checks in WSL.
+
+In WSL, build the five required release binaries exactly once:
 
 ```bash
 cd ~/src/buzz-core

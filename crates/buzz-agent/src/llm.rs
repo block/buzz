@@ -1021,19 +1021,20 @@ fn responses_body(
                 tool_calls,
                 reasoning_details,
             } => {
-                if !text.is_empty() {
-                    input.push(json!({
-                        "role": "assistant",
-                        "content": [{ "type": "output_text", "text": text }],
-                    }));
-                }
                 if let Some(responses_output_items) = reasoning_details
                     .as_ref()
                     .and_then(|details| details.get("_buzz_web_search_response_items"))
                     .and_then(Value::as_array)
+                    .filter(|items| !items.is_empty())
                 {
                     input.extend(responses_output_items.iter().cloned());
                 } else {
+                    if !text.is_empty() {
+                        input.push(json!({
+                            "role": "assistant",
+                            "content": [{ "type": "output_text", "text": text }],
+                        }));
+                    }
                     for c in tool_calls {
                         input.push(json!({
                             "type": "function_call",
@@ -1186,6 +1187,27 @@ fn parse_safe_web_url(raw: &str) -> Option<Url> {
         .filter(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some())
 }
 
+fn push_web_search_source(
+    url: &str,
+    title: Option<&str>,
+    seen_urls: &mut BTreeSet<String>,
+    sources: &mut Vec<WebSearchSource>,
+) -> Result<(), AgentError> {
+    let destination = parse_safe_web_url(url)
+        .ok_or_else(|| AgentError::Llm("web search source URL unsafe".into()))?;
+    if seen_urls.insert(url.to_owned()) {
+        sources.push(WebSearchSource {
+            url: url.to_owned(),
+            markdown_destination: destination.to_string(),
+            title: title
+                .filter(|title| !title.is_empty())
+                .unwrap_or(url)
+                .to_owned(),
+        });
+    }
+    Ok(())
+}
+
 fn collect_web_search_sources(v: &Value) -> Result<Option<Vec<WebSearchSource>>, AgentError> {
     let mut used = false;
     let mut seen_urls = BTreeSet::new();
@@ -1201,32 +1223,46 @@ fn collect_web_search_sources(v: &Value) -> Result<Option<Vec<WebSearchSource>>,
             continue;
         }
         used = true;
-        let item_sources = item
+        let action = item
             .get("action")
-            .and_then(|action| action.get("sources"))
-            .and_then(Value::as_array)
             .ok_or_else(|| AgentError::Llm("web search sources missing".into()))?;
 
-        for source in item_sources {
-            let url = source
+        let action_type = action.get("type").and_then(Value::as_str);
+        if let Some(item_sources) = action.get("sources").and_then(Value::as_array) {
+            for source in item_sources {
+                let url = source
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .filter(|url| !url.is_empty())
+                    .ok_or_else(|| AgentError::Llm("web search source URL missing".into()))?;
+                push_web_search_source(
+                    url,
+                    source.get("title").and_then(Value::as_str),
+                    &mut seen_urls,
+                    &mut sources,
+                )?;
+            }
+            continue;
+        }
+        if action.get("sources").is_some_and(|value| !value.is_null()) {
+            return Err(AgentError::Llm("web search sources missing".into()));
+        }
+
+        if action_type == Some("search") {
+            continue;
+        }
+        if action_type == Some("open_page") && action.get("url").is_none_or(Value::is_null) {
+            continue;
+        }
+        if matches!(action_type, Some("open_page" | "find_in_page")) {
+            let url = action
                 .get("url")
                 .and_then(Value::as_str)
                 .filter(|url| !url.is_empty())
                 .ok_or_else(|| AgentError::Llm("web search source URL missing".into()))?;
-            let destination = parse_safe_web_url(url)
-                .ok_or_else(|| AgentError::Llm("web search source URL unsafe".into()))?;
-            if seen_urls.insert(url.to_owned()) {
-                sources.push(WebSearchSource {
-                    url: url.to_owned(),
-                    markdown_destination: destination.to_string(),
-                    title: source
-                        .get("title")
-                        .and_then(Value::as_str)
-                        .filter(|title| !title.is_empty())
-                        .unwrap_or(url)
-                        .to_owned(),
-                });
-            }
+            push_web_search_source(url, None, &mut seen_urls, &mut sources)?;
+        } else {
+            return Err(AgentError::Llm("web search sources missing".into()));
         }
     }
 
@@ -1394,6 +1430,9 @@ fn parse_responses_inner(v: Value, web_search_enabled: bool) -> Result<LlmRespon
         .into_iter()
         .flatten()
     {
+        if web_search_enabled {
+            responses_output_items.push(item.clone());
+        }
         match item.get("type").and_then(Value::as_str) {
             Some("message") => {
                 for p in item
@@ -1421,9 +1460,6 @@ fn parse_responses_inner(v: Value, web_search_enabled: bool) -> Result<LlmRespon
                 }
             }
             Some("function_call") => {
-                if web_search_enabled {
-                    responses_output_items.push(item.clone());
-                }
                 saw_function_call = true;
                 let raw = item
                     .get("arguments")
@@ -1465,9 +1501,7 @@ fn parse_responses_inner(v: Value, web_search_enabled: bool) -> Result<LlmRespon
                     }
                 }
             }
-            Some("web_search_call") if web_search_enabled => {
-                responses_output_items.push(item.clone());
-            }
+            Some("web_search_call") if web_search_enabled => {}
             // Unknown types ignored for forward-compat.
             _ => {}
         }
@@ -3403,6 +3437,216 @@ mod tests {
     }
 
     #[test]
+    fn parse_responses_accepts_open_and_find_action_urls_without_sources() {
+        let response = serde_json::json!({
+            "status": "completed",
+            "output": [
+                {
+                    "type": "web_search_call",
+                    "action": {
+                        "type": "open_page",
+                        "url": "https://one.example/page"
+                    }
+                },
+                {
+                    "type": "web_search_call",
+                    "action": {
+                        "type": "find_in_page",
+                        "url": "https://two.example/page",
+                        "pattern": "Core"
+                    }
+                },
+                {
+                    "type": "web_search_call",
+                    "action": {
+                        "type": "find_in_page",
+                        "url": "https://one.example/page",
+                        "pattern": "duplicate"
+                    }
+                },
+                {
+                    "type": "message",
+                    "content": [{
+                        "type": "output_text",
+                        "text": "answer",
+                        "annotations": []
+                    }]
+                }
+            ]
+        });
+
+        let parsed = parse_responses_web_search(response).unwrap();
+        let sources = &parsed.web_search.expect("web search metadata").sources;
+        assert_eq!(
+            sources
+                .iter()
+                .map(|source| (source.url.as_str(), source.title.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("https://one.example/page", "https://one.example/page"),
+                ("https://two.example/page", "https://two.example/page"),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_responses_skips_optional_source_gaps_after_a_valid_source() {
+        let response = serde_json::json!({
+            "status": "completed",
+            "output": [
+                {
+                    "type": "web_search_call",
+                    "action": {
+                        "type": "search",
+                        "query": "Core",
+                        "sources": [{
+                            "url": "https://valid.example/source",
+                            "title": "Valid"
+                        }]
+                    }
+                },
+                {
+                    "type": "web_search_call",
+                    "action": {"type": "search", "query": "follow-up"}
+                },
+                {
+                    "type": "web_search_call",
+                    "action": {"type": "open_page", "url": null}
+                },
+                {
+                    "type": "message",
+                    "content": [{
+                        "type": "output_text",
+                        "text": "answer",
+                        "annotations": []
+                    }]
+                }
+            ]
+        });
+
+        let parsed = parse_responses_web_search(response).unwrap();
+        let sources = &parsed.web_search.expect("web search metadata").sources;
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].url, "https://valid.example/source");
+    }
+
+    #[test]
+    fn parse_responses_skips_optional_source_gaps_before_valid_open_and_find_actions() {
+        let response = serde_json::json!({
+            "status": "completed",
+            "output": [
+                {
+                    "type": "web_search_call",
+                    "action": {"type": "search", "query": "no sources returned"}
+                },
+                {
+                    "type": "web_search_call",
+                    "action": {"type": "open_page", "url": null}
+                },
+                {
+                    "type": "web_search_call",
+                    "action": {
+                        "type": "open_page",
+                        "url": "https://open.example/page"
+                    }
+                },
+                {
+                    "type": "web_search_call",
+                    "action": {
+                        "type": "find_in_page",
+                        "url": "https://find.example/page",
+                        "pattern": "Core"
+                    }
+                },
+                {
+                    "type": "message",
+                    "content": [{
+                        "type": "output_text",
+                        "text": "answer",
+                        "annotations": []
+                    }]
+                }
+            ]
+        });
+
+        let parsed = parse_responses_web_search(response).unwrap();
+        let sources = &parsed.web_search.expect("web search metadata").sources;
+        assert_eq!(
+            sources
+                .iter()
+                .map(|source| source.url.as_str())
+                .collect::<Vec<_>>(),
+            vec!["https://open.example/page", "https://find.example/page"]
+        );
+    }
+
+    #[test]
+    fn responses_replay_preserves_every_web_search_output_item_in_provider_order() {
+        let output = serde_json::json!([
+            {
+                "type": "reasoning",
+                "id": "reasoning_1",
+                "summary": [{"type": "summary_text", "text": "thought"}]
+            },
+            {
+                "type": "web_search_call",
+                "id": "search_1",
+                "action": {
+                    "type": "search",
+                    "query": "Core investment bank",
+                    "sources": [{
+                        "url": "https://one.example/source",
+                        "title": "One"
+                    }]
+                }
+            },
+            {
+                "type": "message",
+                "id": "message_1",
+                "role": "assistant",
+                "content": [{
+                    "type": "output_text",
+                    "text": "provider answer",
+                    "annotations": []
+                }]
+            },
+            {
+                "type": "function_call",
+                "id": "function_1",
+                "call_id": "call_1",
+                "name": "dev__shell",
+                "arguments": "{}"
+            },
+            {
+                "type": "future_provider_item",
+                "id": "future_1",
+                "opaque": {"keep": [1, 2, 3]}
+            }
+        ]);
+        let response = serde_json::json!({
+            "status": "completed",
+            "output": output.clone(),
+        });
+        let expected_output = output.as_array().expect("output array").clone();
+
+        let parsed = parse_responses_web_search(response).unwrap();
+        assert_eq!(parsed.responses_output_items, expected_output);
+
+        let history = vec![HistoryItem::Assistant {
+            text: parsed.text,
+            tool_calls: parsed.tool_calls,
+            reasoning_details: Some(serde_json::json!({
+                "_buzz_web_search_response_items": parsed.responses_output_items,
+            })),
+        }];
+        let mut cfg = cfg_responses();
+        cfg.web_search = true;
+        let body = responses_body(&cfg, "system", &history, &[], "model", None);
+
+        assert_eq!(body["input"], output);
+    }
+
+    #[test]
     fn parse_responses_rejects_malformed_web_search_metadata() {
         for (name, response, expected_error) in [
             (
@@ -3411,6 +3655,28 @@ mod tests {
                     "status": "completed",
                     "output": [
                         {"type": "web_search_call", "action": {}},
+                        {"type": "message", "content": [{"type": "output_text", "text": "answer", "annotations": []}]}
+                    ]
+                }),
+                "web search sources missing",
+            ),
+            (
+                "source-less search leaves no safe source",
+                serde_json::json!({
+                    "status": "completed",
+                    "output": [
+                        {"type": "web_search_call", "action": {"type": "search", "query": "Core"}},
+                        {"type": "message", "content": [{"type": "output_text", "text": "answer", "annotations": []}]}
+                    ]
+                }),
+                "web search sources missing",
+            ),
+            (
+                "null open-page URL leaves no safe source",
+                serde_json::json!({
+                    "status": "completed",
+                    "output": [
+                        {"type": "web_search_call", "action": {"type": "open_page", "url": null}},
                         {"type": "message", "content": [{"type": "output_text", "text": "answer", "annotations": []}]}
                     ]
                 }),
@@ -3437,6 +3703,39 @@ mod tests {
                     ]
                 }),
                 "web search source URL unsafe",
+            ),
+            (
+                "unsafe open-page URL",
+                serde_json::json!({
+                    "status": "completed",
+                    "output": [
+                        {"type": "web_search_call", "action": {"type": "open_page", "url": "javascript:alert(1)"}},
+                        {"type": "message", "content": [{"type": "output_text", "text": "answer", "annotations": []}]}
+                    ]
+                }),
+                "web search source URL unsafe",
+            ),
+            (
+                "missing find-in-page URL",
+                serde_json::json!({
+                    "status": "completed",
+                    "output": [
+                        {"type": "web_search_call", "action": {"type": "find_in_page", "pattern": "Core"}},
+                        {"type": "message", "content": [{"type": "output_text", "text": "answer", "annotations": []}]}
+                    ]
+                }),
+                "web search source URL missing",
+            ),
+            (
+                "non-string open-page URL",
+                serde_json::json!({
+                    "status": "completed",
+                    "output": [
+                        {"type": "web_search_call", "action": {"type": "open_page", "url": 42}},
+                        {"type": "message", "content": [{"type": "output_text", "text": "answer", "annotations": []}]}
+                    ]
+                }),
+                "web search source URL missing",
             ),
         ] {
             let error = parse_responses_web_search(response).unwrap_err();

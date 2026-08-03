@@ -31,7 +31,8 @@ use uuid::Uuid;
 
 use crate::acp::{
     extract_model_config_options, extract_model_state, model_in_catalog,
-    resolve_model_switch_method, AcpClient, AcpError, McpServer, ModelSwitchMethod, StopReason,
+    resolve_model_switch_method, AcpClient, AcpError, McpServer, ModelSwitchMethod,
+    PromptTerminalSnapshot, StopReason,
 };
 use crate::config::{compose_session_title, DedupMode, PermissionMode, PublishAgentOutput};
 use crate::observer;
@@ -811,6 +812,188 @@ async fn publish_captured_agent_output(
         );
     } else if matches!(result, OutputPublishResult::Rejected) {
         tracing::error!("agent output was definitively rejected; no pending event retained");
+    }
+}
+
+/// How a successfully completed prompt reached the shared completion path.
+///
+/// A control signal can win the outer `select!` after the ACP client has
+/// already cleared its in-flight prompt marker. In that case the prompt's
+/// terminal result was consumed by the dropped future, but its captured output
+/// is still present and must be finalized exactly like an ordinary completion.
+enum SuccessfulPromptCompletion {
+    Natural(StopReason),
+    CompletedBeforeControl {
+        stop_reason: StopReason,
+        control_signal: ControlSignal,
+    },
+}
+
+/// Finalize a successful prompt before acknowledging it to the main loop.
+///
+/// Both the ordinary result arm and the completed-before-control race arm go
+/// through this function so captured output is submitted (or deliberately
+/// skipped by policy) before the triggering batch is reported as consumed.
+#[allow(clippy::too_many_arguments)]
+async fn finish_successful_prompt(
+    mut agent: OwnedAgent,
+    source: PromptSource,
+    completion: SuccessfulPromptCompletion,
+    batch: Option<FlushBatch>,
+    ctx: &PromptContext,
+    result_tx: &mpsc::UnboundedSender<PromptResult>,
+    observer_channel_id: Option<Uuid>,
+    session_id: &str,
+    turn_id: &str,
+) {
+    let (stop_reason, completed_before_control) = match completion {
+        SuccessfulPromptCompletion::Natural(stop_reason) => (stop_reason, None),
+        SuccessfulPromptCompletion::CompletedBeforeControl {
+            stop_reason,
+            control_signal,
+        } => (stop_reason, Some(control_signal)),
+    };
+
+    if should_publish_agent_output(ctx.publish_agent_output, &source, &stop_reason) {
+        if let Some(ref batch) = batch {
+            publish_captured_agent_output(ctx, batch, &mut agent.acp).await;
+        }
+    }
+
+    let should_rotate = matches!(
+        stop_reason,
+        StopReason::MaxTokens | StopReason::MaxTurnRequests
+    );
+
+    let should_rotate = should_rotate || {
+        let limit = ctx.max_turns_per_session;
+        if limit > 0 {
+            match &source {
+                PromptSource::Channel(cid) => {
+                    let count = agent.state.turn_counts.entry(*cid).or_insert(0);
+                    *count += 1;
+                    *count >= limit
+                }
+                PromptSource::Heartbeat => {
+                    agent.state.heartbeat_turn_count += 1;
+                    agent.state.heartbeat_turn_count >= limit
+                }
+            }
+        } else {
+            false
+        }
+    };
+
+    if should_rotate {
+        tracing::info!(
+            target: "pool::session",
+            "rotating session for {source:?} after {stop_reason:?}",
+        );
+        agent.state.invalidate(&source);
+    }
+
+    // A late Rotate/SwitchModel must still invalidate after normal completion
+    // bookkeeping. Applying it last prevents max-turn counting from recreating
+    // channel state immediately after the control signal invalidated it.
+    if let Some(control_signal) = completed_before_control.as_ref() {
+        apply_completed_before_control_signal(&mut agent.state, &source, control_signal);
+    }
+
+    let core_stop = acp_stop_to_core(&stop_reason);
+    let usage = agent.acp.take_turn_usage();
+    publish_agent_turn_metric(
+        ctx,
+        usage,
+        observer_channel_id,
+        session_id,
+        turn_id,
+        Some(core_stop),
+    )
+    .await;
+
+    send_prompt_result(
+        result_tx,
+        turn_id,
+        agent,
+        source,
+        PromptOutcome::Ok(stop_reason),
+        None,
+    );
+}
+
+/// Finish the narrow branch where a control signal wins after the ACP prompt
+/// marker has already cleared.
+///
+/// A retained successful snapshot is finalized with its exact stop reason.
+/// Failed or missing snapshots are uncertain terminal states: invalidate and
+/// report an error, requeueing under Queue mode, without touching captured
+/// output.
+#[allow(clippy::too_many_arguments)]
+async fn finish_completed_before_control_signal(
+    mut agent: OwnedAgent,
+    source: PromptSource,
+    control_signal: ControlSignal,
+    snapshot: Option<PromptTerminalSnapshot>,
+    batch: Option<FlushBatch>,
+    ctx: &PromptContext,
+    result_tx: &mpsc::UnboundedSender<PromptResult>,
+    observer_channel_id: Option<Uuid>,
+    session_id: &str,
+    turn_id: &str,
+) {
+    match snapshot {
+        Some(PromptTerminalSnapshot::Succeeded(stop_reason)) => {
+            finish_successful_prompt(
+                agent,
+                source,
+                SuccessfulPromptCompletion::CompletedBeforeControl {
+                    stop_reason,
+                    control_signal,
+                },
+                batch,
+                ctx,
+                result_tx,
+                observer_channel_id,
+                session_id,
+                turn_id,
+            )
+            .await;
+        }
+        failed_snapshot => {
+            let snapshot_state = if matches!(failed_snapshot, Some(PromptTerminalSnapshot::Failed))
+            {
+                "failed"
+            } else {
+                "missing"
+            };
+            tracing::error!(
+                target: "pool::prompt",
+                ?control_signal,
+                snapshot_state,
+                "control signal won after prompt marker cleared without a successful terminal result"
+            );
+            agent.state.invalidate(&source);
+            let usage = agent.acp.take_turn_usage();
+            publish_agent_turn_metric(
+                ctx,
+                usage,
+                observer_channel_id,
+                session_id,
+                turn_id,
+                Some(buzz_core::agent_turn_metric::StopReason::Error),
+            )
+            .await;
+            send_prompt_result(
+                result_tx,
+                turn_id,
+                agent,
+                source,
+                PromptOutcome::Error(AcpError::Protocol(format!(
+                    "terminal prompt snapshot was {snapshot_state} when control signal won"
+                ))),
+                requeue_batch_if_queue(ctx, batch),
+            );
+        }
     }
 }
 
@@ -2283,57 +2466,32 @@ pub async fn run_prompt_task(
                             }
                         }
                     } else {
-                        // Race 1 resolution: turn completed naturally before cancel
-                        // could fire. last_prompt_id is None — cleared by
-                        // session_prompt_with_idle_timeout() on success. The prompt
-                        // future was dropped by select! — its Ok result is gone.
+                        // Race 1 resolution: the prompt marker cleared before the
+                        // control signal won. Marker absence alone does not prove
+                        // EndTurn: MaxTokens and terminal failures clear it too.
+                        // Recover the one-shot snapshot retained by AcpClient and
+                        // either preserve its exact stop reason or fail closed.
                         //
                         // Note: this `else` branch (last_prompt_id is None) cannot
                         // fire during the pre-prompt phase because `biased` select!
                         // polls the prompt arm first. That arm sets last_prompt_id
                         // synchronously before its first yield point, so by the time
                         // the cancel arm can win, last_prompt_id is already Some.
-                        // This branch only fires when the turn genuinely completed
-                        // and last_prompt_id was cleared by the success path.
-                        //
                         // MUST send a PromptResult or the main loop deadlocks.
-                        if matches!(
+                        let snapshot = agent.acp.take_terminal_prompt_snapshot();
+                        finish_completed_before_control_signal(
+                            agent,
+                            source,
                             control_signal,
-                            ControlSignal::Rotate | ControlSignal::SwitchModel(_)
-                        ) {
-                            tracing::debug!(
-                                target: "pool::prompt",
-                                "rotate/switch signal arrived but turn already completed — invalidating session"
-                            );
-                        } else {
-                            tracing::debug!(
-                                target: "pool::prompt",
-                                "control signal arrived but turn already completed — treating as success"
-                            );
-                        }
-                        apply_completed_before_control_signal(
-                            &mut agent.state,
-                            &source,
-                            &control_signal,
-                        );
-                        let usage = agent.acp.take_turn_usage();
-                        publish_agent_turn_metric(
+                            snapshot,
+                            batch,
                             &ctx,
-                            usage,
+                            &result_tx,
                             observer_channel_id,
                             &session_id,
                             &turn_id,
-                            Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
                         )
                         .await;
-                        send_prompt_result(
-                            &result_tx,
-                            &turn_id,
-                            agent,
-                            source,
-                            PromptOutcome::Ok(StopReason::EndTurn),
-                            None, // turn succeeded — batch was processed, no requeue
-                        );
                         return;
                     }
                 }
@@ -2341,68 +2499,25 @@ pub async fn run_prompt_task(
         }
     };
 
+    // The ordinary result arm already owns the authoritative Result; discard
+    // its defensive snapshot so it cannot be mistaken for a later turn.
+    let _ = agent.acp.take_terminal_prompt_snapshot();
+
     match prompt_result {
         Ok(stop_reason) => {
             log_stop_reason(&source, &stop_reason);
-
-            if should_publish_agent_output(ctx.publish_agent_output, &source, &stop_reason) {
-                if let Some(ref batch) = batch {
-                    publish_captured_agent_output(&ctx, batch, &mut agent.acp).await;
-                }
-            }
-
-            let should_rotate = matches!(
-                stop_reason,
-                StopReason::MaxTokens | StopReason::MaxTurnRequests
-            );
-
-            let should_rotate = should_rotate || {
-                let limit = ctx.max_turns_per_session;
-                if limit > 0 {
-                    match &source {
-                        PromptSource::Channel(cid) => {
-                            let count = agent.state.turn_counts.entry(*cid).or_insert(0);
-                            *count += 1;
-                            *count >= limit
-                        }
-                        PromptSource::Heartbeat => {
-                            agent.state.heartbeat_turn_count += 1;
-                            agent.state.heartbeat_turn_count >= limit
-                        }
-                    }
-                } else {
-                    false
-                }
-            };
-
-            if should_rotate {
-                tracing::info!(
-                    target: "pool::session",
-                    "rotating session for {source:?} after {stop_reason:?}",
-                );
-                agent.state.invalidate(&source);
-            }
-
-            let core_stop = acp_stop_to_core(&stop_reason);
-            let usage = agent.acp.take_turn_usage();
-            publish_agent_turn_metric(
+            finish_successful_prompt(
+                agent,
+                source,
+                SuccessfulPromptCompletion::Natural(stop_reason),
+                batch,
                 &ctx,
-                usage,
+                &result_tx,
                 observer_channel_id,
                 &session_id,
                 &turn_id,
-                Some(core_stop),
             )
             .await;
-
-            send_prompt_result(
-                &result_tx,
-                &turn_id,
-                agent,
-                source,
-                PromptOutcome::Ok(stop_reason),
-                None,
-            );
         }
         Err(AcpError::AgentExited) => {
             tracing::error!(target: "pool::prompt", "agent {} exited during prompt", agent.index);
@@ -4410,6 +4525,357 @@ mod tests {
             &PromptSource::Channel(Uuid::new_v4()),
             &StopReason::MaxTokens,
         ));
+    }
+
+    async fn acp_client_with_completed_output(output: &str, wire_stop_reason: &str) -> AcpClient {
+        let escaped_output = serde_json::to_string(output).expect("serialize test output");
+        let escaped_stop_reason =
+            serde_json::to_string(wire_stop_reason).expect("serialize test stop reason");
+        let script = format!(
+            r#"
+                read -r _initialize
+                printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"protocolVersion":2,"agentCapabilities":{{}}}}}}'
+                read -r _session_new
+                printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"sessionId":"race-session"}}}}'
+                read -r _prompt
+                printf '%s\n' '{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"race-session","update":{{"sessionUpdate":"agent_message_chunk","content":{{"text":{escaped_output}}}}}}}}}'
+                printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"stopReason":{escaped_stop_reason}}}}}'
+                sleep 10
+            "#
+        );
+        let mut acp = AcpClient::spawn("bash", &["-c".into(), script], &[], false)
+            .await
+            .expect("spawn completed-output ACP fixture");
+        acp.initialize().await.expect("initialize fixture agent");
+        let session = acp
+            .session_new("/tmp", vec![], None, None)
+            .await
+            .expect("create fixture session");
+        assert_eq!(session, "race-session");
+        let expected_stop_reason = StopReason::from_str(wire_stop_reason)
+            .expect("completed-output fixture requires a valid stop reason");
+        assert_eq!(
+            acp.session_prompt_with_idle_timeout(
+                &session,
+                "trigger",
+                Duration::from_secs(5),
+                Duration::from_secs(10),
+            )
+            .await
+            .expect("complete fixture prompt"),
+            expected_stop_reason
+        );
+        assert!(
+            !acp.has_in_flight_prompt(),
+            "fixture must model the completed-before-control race state"
+        );
+        acp
+    }
+
+    async fn read_test_http_request(stream: &mut tokio::net::TcpStream) -> String {
+        use tokio::io::AsyncReadExt;
+
+        let mut bytes = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        loop {
+            let read = stream.read(&mut chunk).await.expect("read HTTP request");
+            assert!(read > 0, "HTTP client closed before completing request");
+            bytes.extend_from_slice(&chunk[..read]);
+            let Some(headers_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n")
+            else {
+                continue;
+            };
+            let headers =
+                std::str::from_utf8(&bytes[..headers_end]).expect("HTTP headers are UTF-8");
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    line.split_once(':').and_then(|(name, value)| {
+                        name.eq_ignore_ascii_case("content-length")
+                            .then_some(value.trim())
+                    })
+                })
+                .expect("request carries content length")
+                .parse::<usize>()
+                .expect("content length is numeric");
+            if bytes.len() >= headers_end + 4 + content_length {
+                return String::from_utf8(bytes).expect("request is UTF-8");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_before_control_publishes_output_before_success_result() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind output publish listener");
+        let address = listener.local_addr().expect("read output listener address");
+        let owner_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let channel_id = Uuid::new_v4();
+        let trigger = EventBuilder::new(Kind::Custom(9), "owner trigger")
+            .tag(Tag::parse(["h", &channel_id.to_string()]).expect("valid channel tag"))
+            .sign_with_keys(&owner_keys)
+            .expect("sign owner trigger");
+        let batch = FlushBatch {
+            channel_id,
+            events: vec![BatchEvent {
+                event: trigger,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let mut state = SessionState::default();
+        state.sessions.insert(channel_id, "race-session".into());
+        let agent = OwnedAgent {
+            index: 0,
+            acp: acp_client_with_completed_output("captured race output", "end_turn").await,
+            state,
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            agent_name: "fixture".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+        };
+        let mut ctx = make_prompt_context_with_owner(&agent_keys, owner_keys.public_key());
+        ctx.publish_agent_output = PublishAgentOutput::TriggerReply;
+        ctx.rest_client.base_url = format!("http://{address}");
+        let ctx = Arc::new(ctx);
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+
+        let completion = tokio::spawn({
+            let ctx = Arc::clone(&ctx);
+            async move {
+                finish_completed_before_control_signal(
+                    agent,
+                    PromptSource::Channel(channel_id),
+                    ControlSignal::Cancel,
+                    Some(crate::acp::PromptTerminalSnapshot::Succeeded(
+                        StopReason::EndTurn,
+                    )),
+                    Some(batch),
+                    &ctx,
+                    &result_tx,
+                    Some(channel_id),
+                    "race-session",
+                    "race-turn",
+                )
+                .await;
+            }
+        });
+
+        let (mut stream, _) = listener.accept().await.expect("accept output publish");
+        let request = read_test_http_request(&mut stream).await;
+        assert!(request.starts_with("POST /events "));
+        let published: serde_json::Value = serde_json::from_str(
+            request
+                .split("\r\n\r\n")
+                .nth(1)
+                .expect("published event request body"),
+        )
+        .expect("published event JSON");
+        assert_eq!(published["content"], "captured race output");
+        assert!(
+            matches!(result_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "success must not be acknowledged before output publication is accepted"
+        );
+
+        let response_body = r#"{"accepted":true}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            response_body.len(),
+            response_body
+        );
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .expect("accept output publication");
+
+        completion.await.expect("join successful completion");
+        let result = result_rx.recv().await.expect("receive successful result");
+        assert!(matches!(
+            result.outcome,
+            PromptOutcome::Ok(StopReason::EndTurn)
+        ));
+        assert!(result.batch.is_none(), "successful batch must be consumed");
+        assert_eq!(
+            result
+                .agent
+                .state
+                .sessions
+                .get(&channel_id)
+                .map(String::as_str),
+            Some("race-session"),
+            "Cancel after natural completion must preserve session state"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err(),
+            "captured output must be submitted exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_before_control_preserves_max_tokens_without_publishing() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind no-publish listener");
+        let address = listener.local_addr().expect("read listener address");
+        let owner_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let channel_id = Uuid::new_v4();
+        let trigger = EventBuilder::new(Kind::Custom(9), "owner trigger")
+            .tag(Tag::parse(["h", &channel_id.to_string()]).expect("valid channel tag"))
+            .sign_with_keys(&owner_keys)
+            .expect("sign owner trigger");
+        let batch = FlushBatch {
+            channel_id,
+            events: vec![BatchEvent {
+                event: trigger,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let mut acp = acp_client_with_completed_output("partial output", "max_tokens").await;
+        let snapshot = acp.take_terminal_prompt_snapshot();
+        let mut state = SessionState::default();
+        state.sessions.insert(channel_id, "race-session".into());
+        let agent = OwnedAgent {
+            index: 0,
+            acp,
+            state,
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            agent_name: "fixture".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+        };
+        let mut ctx = make_prompt_context_with_owner(&agent_keys, owner_keys.public_key());
+        ctx.publish_agent_output = PublishAgentOutput::TriggerReply;
+        ctx.rest_client.base_url = format!("http://{address}");
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+
+        finish_completed_before_control_signal(
+            agent,
+            PromptSource::Channel(channel_id),
+            ControlSignal::Cancel,
+            snapshot,
+            Some(batch),
+            &ctx,
+            &result_tx,
+            Some(channel_id),
+            "race-session",
+            "max-token-race",
+        )
+        .await;
+
+        let result = result_rx.recv().await.expect("receive terminal result");
+        assert!(matches!(
+            result.outcome,
+            PromptOutcome::Ok(StopReason::MaxTokens)
+        ));
+        assert!(result.batch.is_none());
+        assert!(
+            !result.agent.state.has_channel_state(&channel_id),
+            "MaxTokens must rotate the completed session even when control wins"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err(),
+            "non-publishable MaxTokens output must never reach the relay"
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_before_control_failed_or_missing_snapshot_requeues_without_publishing() {
+        for (label, snapshot) in [
+            ("failed", Some(crate::acp::PromptTerminalSnapshot::Failed)),
+            ("missing", None),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind no-publish listener");
+            let address = listener.local_addr().expect("read listener address");
+            let owner_keys = Keys::generate();
+            let agent_keys = Keys::generate();
+            let channel_id = Uuid::new_v4();
+            let trigger = EventBuilder::new(Kind::Custom(9), "owner trigger")
+                .tag(Tag::parse(["h", &channel_id.to_string()]).expect("valid channel tag"))
+                .sign_with_keys(&owner_keys)
+                .expect("sign owner trigger");
+            let batch = FlushBatch {
+                channel_id,
+                events: vec![BatchEvent {
+                    event: trigger,
+                    prompt_tag: "test".into(),
+                    received_at: std::time::Instant::now(),
+                }],
+                cancelled_events: vec![],
+                cancel_reason: None,
+            };
+            let mut state = SessionState::default();
+            state.sessions.insert(channel_id, "race-session".into());
+            let agent = OwnedAgent {
+                index: 0,
+                acp: acp_client_with_completed_output("unsafe partial output", "end_turn").await,
+                state,
+                model_capabilities: None,
+                desired_model: None,
+                model_overridden: false,
+                agent_name: "fixture".into(),
+                goose_system_prompt_supported: None,
+                protocol_version: 2,
+            };
+            let mut ctx = make_prompt_context_with_owner(&agent_keys, owner_keys.public_key());
+            ctx.publish_agent_output = PublishAgentOutput::TriggerReply;
+            ctx.dedup_mode = DedupMode::Queue;
+            ctx.rest_client.base_url = format!("http://{address}");
+            let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+
+            finish_completed_before_control_signal(
+                agent,
+                PromptSource::Channel(channel_id),
+                ControlSignal::Cancel,
+                snapshot,
+                Some(batch),
+                &ctx,
+                &result_tx,
+                Some(channel_id),
+                "race-session",
+                label,
+            )
+            .await;
+
+            let result = result_rx.recv().await.expect("receive failed result");
+            assert!(
+                matches!(result.outcome, PromptOutcome::Error(AcpError::Protocol(_))),
+                "{label} snapshot must report an error instead of false success"
+            );
+            assert!(
+                result.batch.is_some(),
+                "{label} snapshot must requeue batch"
+            );
+            assert!(
+                !result.agent.state.has_channel_state(&channel_id),
+                "{label} snapshot must invalidate uncertain session state"
+            );
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                    .await
+                    .is_err(),
+                "{label} snapshot must not publish captured partial output"
+            );
+        }
     }
 
     #[test]

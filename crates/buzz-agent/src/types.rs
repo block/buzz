@@ -235,8 +235,8 @@ pub struct LlmResponse {
     /// OpenAI hosted-web-search metadata. Only populated when the explicit
     /// web-search feature is enabled.
     pub web_search: Option<WebSearchResponse>,
-    /// Raw hosted-tool/function-call output items retained in provider order
-    /// for Responses API replay. Empty outside hosted web search.
+    /// Every raw Responses output item retained in exact provider order for
+    /// manual history replay. Empty when hosted web search is disabled.
     pub responses_output_items: Vec<Value>,
 }
 
