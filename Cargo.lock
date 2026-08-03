@@ -916,6 +916,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-backend-fly"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "nostr",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+]
+
+[[package]]
 name = "buzz-backend-kubernetes"
 version = "0.1.0"
 dependencies = [

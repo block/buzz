@@ -3,7 +3,7 @@
 //! CLI-first: every option is a CLI flag with env var fallback.
 //! Config file (TOML) for complex subscription rules.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 
 use clap::Parser;
@@ -45,6 +45,185 @@ pub enum ConfigError {
 
     #[error("config file error: {0}")]
     ConfigFile(String),
+}
+
+/// Additional stdio MCP server supplied through `BUZZ_ACP_MCP_SERVERS`.
+///
+/// The wire format deliberately mirrors the common `mcpServers` shape while
+/// keeping inherited process secrets out of the JSON value. A server can name
+/// variables in `inherit_env`; the harness resolves them at startup and passes
+/// only those variables to that child process.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ConfiguredMcpServer {
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: BTreeMap<String, String>,
+    pub allowed_tools: Vec<String>,
+}
+
+impl std::fmt::Debug for ConfiguredMcpServer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ConfiguredMcpServer")
+            .field("name", &self.name)
+            .field("command", &self.command)
+            .field("args", &self.args)
+            .field("env_keys", &self.env.keys().collect::<Vec<_>>())
+            .field("allowed_tools", &self.allowed_tools)
+            .finish()
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RawConfiguredMcpServer {
+    name: String,
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    #[serde(default)]
+    inherit_env: Vec<String>,
+    #[serde(default)]
+    allowed_tools: Vec<String>,
+}
+
+const MAX_CONFIGURED_MCP_SERVERS: usize = 16;
+
+fn valid_mcp_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+fn valid_env_name(value: &str) -> bool {
+    let mut chars = value.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn parse_configured_mcp_servers(
+    raw: Option<&str>,
+    has_legacy_server: bool,
+) -> Result<Vec<ConfiguredMcpServer>, ConfigError> {
+    let Some(raw) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(Vec::new());
+    };
+
+    let parsed: Vec<RawConfiguredMcpServer> = serde_json::from_str(raw).map_err(|error| {
+        ConfigError::ConfigFile(format!(
+            "BUZZ_ACP_MCP_SERVERS must be a JSON array of stdio server definitions: {error}"
+        ))
+    })?;
+    let available = MAX_CONFIGURED_MCP_SERVERS.saturating_sub(usize::from(has_legacy_server));
+    if parsed.len() > available {
+        return Err(ConfigError::ConfigFile(format!(
+            "BUZZ_ACP_MCP_SERVERS defines {} servers; at most {available} are allowed{}",
+            parsed.len(),
+            if has_legacy_server {
+                " when BUZZ_ACP_MCP_COMMAND is also set"
+            } else {
+                ""
+            }
+        )));
+    }
+
+    let mut names = HashSet::new();
+    let mut servers = Vec::with_capacity(parsed.len());
+    for (index, raw_server) in parsed.into_iter().enumerate() {
+        if !valid_mcp_name(&raw_server.name) {
+            return Err(ConfigError::ConfigFile(format!(
+                "BUZZ_ACP_MCP_SERVERS[{index}].name must be 1-64 ASCII letters, digits, '-' or '_'"
+            )));
+        }
+        if !names.insert(raw_server.name.clone()) {
+            return Err(ConfigError::ConfigFile(format!(
+                "BUZZ_ACP_MCP_SERVERS contains duplicate server name {:?}",
+                raw_server.name
+            )));
+        }
+        if raw_server.command.trim().is_empty() || raw_server.command.contains('\0') {
+            return Err(ConfigError::ConfigFile(format!(
+                "BUZZ_ACP_MCP_SERVERS[{index}].command must not be empty or contain NUL"
+            )));
+        }
+        if raw_server
+            .args
+            .iter()
+            .any(|argument| argument.contains('\0'))
+        {
+            return Err(ConfigError::ConfigFile(format!(
+                "BUZZ_ACP_MCP_SERVERS[{index}].args must not contain NUL"
+            )));
+        }
+
+        let mut env = raw_server.env;
+        for (key, value) in &env {
+            if !valid_env_name(key) {
+                return Err(ConfigError::ConfigFile(format!(
+                    "BUZZ_ACP_MCP_SERVERS[{index}].env key {key:?} is not a valid environment variable name"
+                )));
+            }
+            if value.contains('\0') {
+                return Err(ConfigError::ConfigFile(format!(
+                    "BUZZ_ACP_MCP_SERVERS[{index}].env value for {key:?} must not contain NUL"
+                )));
+            }
+        }
+        for key in raw_server.inherit_env {
+            if !valid_env_name(&key) {
+                return Err(ConfigError::ConfigFile(format!(
+                    "BUZZ_ACP_MCP_SERVERS[{index}].inherit_env entry {key:?} is not a valid environment variable name"
+                )));
+            }
+            if env.contains_key(&key) {
+                return Err(ConfigError::ConfigFile(format!(
+                    "BUZZ_ACP_MCP_SERVERS[{index}] defines {key:?} in both env and inherit_env"
+                )));
+            }
+            let value = std::env::var(&key).map_err(|_| {
+                ConfigError::ConfigFile(format!(
+                    "BUZZ_ACP_MCP_SERVERS[{index}] requires environment variable {key:?}, but it is not set"
+                ))
+            })?;
+            env.insert(key, value);
+        }
+        if raw_server.allowed_tools.len() > 128 {
+            return Err(ConfigError::ConfigFile(format!(
+                "BUZZ_ACP_MCP_SERVERS[{index}].allowed_tools defines more than 128 tools"
+            )));
+        }
+        let mut allowed_tools = Vec::with_capacity(raw_server.allowed_tools.len());
+        let mut seen_tools = HashSet::new();
+        for tool in raw_server.allowed_tools {
+            if !valid_mcp_name(&tool) || tool.contains("__") {
+                return Err(ConfigError::ConfigFile(format!(
+                    "BUZZ_ACP_MCP_SERVERS[{index}].allowed_tools entry {tool:?} must be 1-64 ASCII letters, digits, '-' or '_' and must not contain '__'"
+                )));
+            }
+            if raw_server.name.len() + 2 + tool.len() > 64 {
+                return Err(ConfigError::ConfigFile(format!(
+                    "BUZZ_ACP_MCP_SERVERS[{index}] server name {:?} and allowed_tools entry {tool:?} exceed the 64-character qualified tool name limit",
+                    raw_server.name
+                )));
+            }
+            if seen_tools.insert(tool.clone()) {
+                allowed_tools.push(tool);
+            }
+        }
+
+        servers.push(ConfiguredMcpServer {
+            name: raw_server.name,
+            command: raw_server.command,
+            args: raw_server.args,
+            env,
+            allowed_tools,
+        });
+    }
+    Ok(servers)
 }
 
 #[derive(Debug, Clone, PartialEq, clap::ValueEnum)]
@@ -260,6 +439,11 @@ pub struct CliArgs {
 
     #[arg(long, env = "BUZZ_ACP_MCP_COMMAND", default_value = "")]
     pub mcp_command: String,
+
+    /// JSON array of additional stdio MCP servers. Secret values should be
+    /// supplied through each server's `inherit_env` list.
+    #[arg(long, env = "BUZZ_ACP_MCP_SERVERS", hide_env_values = true)]
+    pub mcp_servers: Option<String>,
 
     /// Idle timeout: max seconds of silence before killing a turn.
     /// Resets on any agent stdout activity.
@@ -500,6 +684,7 @@ pub struct Config {
     pub agent_command: String,
     pub agent_args: Vec<String>,
     pub mcp_command: String,
+    pub mcp_servers: Vec<ConfiguredMcpServer>,
     pub idle_timeout_secs: u64,
     pub max_turn_duration_secs: u64,
     pub agents: u32,
@@ -913,6 +1098,21 @@ impl Config {
         }
 
         let agent_args = normalize_agent_args(&agent_command, args.agent_args);
+        let mcp_servers = parse_configured_mcp_servers(
+            args.mcp_servers.as_deref(),
+            !args.mcp_command.trim().is_empty(),
+        )?;
+        if !args.mcp_command.is_empty() {
+            let legacy_name = std::path::Path::new(&args.mcp_command)
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("mcp");
+            if mcp_servers.iter().any(|server| server.name == legacy_name) {
+                return Err(ConfigError::ConfigFile(format!(
+                    "BUZZ_ACP_MCP_SERVERS contains server name {legacy_name:?}, which conflicts with BUZZ_ACP_MCP_COMMAND"
+                )));
+            }
+        }
 
         if let Some(ref channels) = args.channels {
             for ch in channels {
@@ -1066,6 +1266,7 @@ impl Config {
             agent_command,
             agent_args,
             mcp_command: args.mcp_command,
+            mcp_servers,
             idle_timeout_secs,
             max_turn_duration_secs,
             agents: args.agents,
@@ -1131,12 +1332,13 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} configured_mcp_servers={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
             self.agent_args.join(" "),
             self.mcp_command,
+            self.mcp_servers.len(),
             self.idle_timeout_secs,
             self.max_turn_duration_secs,
             self.agents,
@@ -1445,6 +1647,7 @@ mod tests {
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
             mcp_command: "".into(),
+            mcp_servers: vec![],
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
@@ -1502,6 +1705,68 @@ mod tests {
             compiled_filter: None,
             consecutive_timeouts: Arc::new(AtomicU32::new(0)),
         }
+    }
+
+    #[test]
+    fn configured_mcp_servers_parse_multiple_stdio_entries() {
+        let raw = r#"[
+            {"name":"crm","command":"mcp-remote","args":["https://crm.example/mcp"],"allowed_tools":["search","create_note"]},
+            {"name":"local_tools","command":"local-mcp","env":{"MODE":"read-only"}}
+        ]"#;
+        let servers = parse_configured_mcp_servers(Some(raw), true).unwrap();
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[0].name, "crm");
+        assert_eq!(servers[0].args, ["https://crm.example/mcp"]);
+        assert_eq!(servers[0].allowed_tools, ["search", "create_note"]);
+        assert_eq!(servers[1].env["MODE"], "read-only");
+    }
+
+    #[test]
+    fn configured_mcp_server_debug_redacts_env_values() {
+        let raw = r#"[{"name":"crm","command":"mcp","env":{"TOKEN":"do-not-print"}}]"#;
+        let servers = parse_configured_mcp_servers(Some(raw), false).unwrap();
+        let debug = format!("{:?}", servers[0]);
+        assert!(debug.contains("TOKEN"));
+        assert!(!debug.contains("do-not-print"));
+    }
+
+    #[test]
+    fn configured_mcp_servers_reject_duplicate_names() {
+        let raw = r#"[
+            {"name":"same","command":"one"},
+            {"name":"same","command":"two"}
+        ]"#;
+        let error = parse_configured_mcp_servers(Some(raw), false).unwrap_err();
+        assert!(error.to_string().contains("duplicate server name"));
+    }
+
+    #[test]
+    fn configured_mcp_servers_require_inherited_env_to_exist() {
+        let raw = r#"[{
+            "name":"crm",
+            "command":"mcp",
+            "inherit_env":["BUZZ_TEST_MCP_ENV_THAT_DOES_NOT_EXIST_8421"]
+        }]"#;
+        let error = parse_configured_mcp_servers(Some(raw), false).unwrap_err();
+        assert!(error.to_string().contains("is not set"));
+    }
+
+    #[test]
+    fn configured_mcp_servers_reject_invalid_allowed_tool_names() {
+        let raw = r#"[{"name":"crm","command":"mcp","allowed_tools":["server__escape"]}]"#;
+        let error = parse_configured_mcp_servers(Some(raw), false).unwrap_err();
+        assert!(error.to_string().contains("allowed_tools"));
+    }
+
+    #[test]
+    fn configured_mcp_servers_reject_overlong_qualified_tool_names() {
+        let raw = format!(
+            r#"[{{"name":"{}","command":"mcp","allowed_tools":["{}"]}}]"#,
+            "a".repeat(32),
+            "b".repeat(32)
+        );
+        let error = parse_configured_mcp_servers(Some(&raw), false).unwrap_err();
+        assert!(error.to_string().contains("qualified tool name limit"));
     }
 
     #[test]

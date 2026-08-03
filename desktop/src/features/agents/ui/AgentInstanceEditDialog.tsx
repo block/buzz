@@ -1,6 +1,4 @@
 import * as React from "react";
-import { ChevronDown } from "lucide-react";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { toast } from "sonner";
 
 import {
@@ -24,9 +22,7 @@ import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
 import { Dialog } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
 import { setManagedAgentAutoRestart } from "@/shared/api/tauriManagedAgents";
-import { EditAgentAdvancedFields } from "./EditAgentAdvancedFields";
 import {
-  ADVANCED_FIELDS_MOTION_TRANSITION,
   AUTO_PROVIDER_DROPDOWN_VALUE,
   BLOCK_BUILD_HIDDEN_PROVIDER_IDS,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
@@ -86,7 +82,6 @@ import { AgentAiDefaultsNotice } from "./AgentAiDefaults";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
 import { useProviderApiKeyFieldState } from "./providerApiKeyFieldState";
 import { resolveModelFieldStatusMessage } from "./agentConfigControls";
-import { AdvancedRequiredBadge } from "./AdvancedRequiredBadge";
 import { showAgentProfileSyncWarning } from "./agentProfileSyncWarning";
 import { AddCustomHarnessDialog } from "./AddCustomHarnessDialog";
 import {
@@ -94,6 +89,14 @@ import {
   runtimeDropdownAction,
   usePendingHarnessSelection,
 } from "./addCustomHarness";
+import { AgentInstanceConfigurationSections } from "./AgentInstanceConfigurationSections";
+import { MCP_PROFILE_ENV_KEY, MCP_SECRET_PREFIX } from "./agentMcpConnections";
+import {
+  MODEL_OVERRIDE_ENV_KEY,
+  PROVIDER_OVERRIDE_ENV_KEY,
+  applyLinkedModelProviderOverrides,
+} from "./agentInstanceOverrides";
+import { isBuzzAgentRuntime } from "./buzzAgentConfig";
 
 export function AgentInstanceEditDialog({
   agent,
@@ -142,6 +145,8 @@ export function AgentInstanceEditDialog({
   const [isCustomProviderEditing, setIsCustomProviderEditing] =
     React.useState(false);
   const [envVars, setEnvVars] = React.useState<EnvVarsValue>(agent.envVars);
+  const overrideTouched = React.useRef({ model: false, provider: false });
+  const [mcpConfigValid, setMcpConfigValid] = React.useState(true);
   const [autoRestartOnConfigChange, setAutoRestartOnConfigChange] =
     React.useState(agent.autoRestartOnConfigChange);
   const personasQuery = usePersonasQuery();
@@ -164,7 +169,6 @@ export function AgentInstanceEditDialog({
   const [isAvatarUploadPending, setIsAvatarUploadPending] =
     React.useState(false);
   const [isAddHarnessOpen, setIsAddHarnessOpen] = React.useState(false);
-  const shouldReduceMotion = useReducedMotion();
 
   // Runtime selector: defaults to "custom" until the dialog opens and the
   // catalog loads. The open-effect re-derives the correct id from the catalog.
@@ -192,6 +196,8 @@ export function AgentInstanceEditDialog({
       setProvider(agent.provider ?? "");
       setIsCustomProviderEditing(false);
       setEnvVars(agent.envVars);
+      overrideTouched.current = { model: false, provider: false };
+      setMcpConfigValid(true);
       setAutoRestartOnConfigChange(agent.autoRestartOnConfigChange);
       setRespondTo(agent.respondTo);
       setRespondToAllowlist(agent.respondToAllowlist);
@@ -503,6 +509,7 @@ export function AgentInstanceEditDialog({
     // Mark that the user has made an explicit runtime choice. The catalog-arrival
     // effect will no longer overwrite selectedRuntimeId after this point.
     runtimeTouched.current = true;
+    overrideTouched.current = { model: true, provider: true };
 
     const resolvedRuntimeId = nextRuntimeId || "custom";
     setSelectedRuntimeId(resolvedRuntimeId);
@@ -554,6 +561,7 @@ export function AgentInstanceEditDialog({
   );
 
   function handleProviderDropdownChange(nextValue: string) {
+    overrideTouched.current.provider = true;
     const nextProvider =
       nextValue === AUTO_PROVIDER_DROPDOWN_VALUE ? "" : nextValue;
     if (nextProvider === "relay-mesh" && selectedRuntimeId !== "buzz-agent") {
@@ -574,6 +582,7 @@ export function AgentInstanceEditDialog({
   }
 
   function handleModelDropdownChange(nextValue: string) {
+    overrideTouched.current.model = true;
     applySelection(
       selectionOnModelDropdownChange(selection, {
         nextValue,
@@ -609,6 +618,7 @@ export function AgentInstanceEditDialog({
       requiredEnvKeyMissing,
     }) &&
     providerValid &&
+    mcpConfigValid &&
     !updateMutation.isPending &&
     !isAvatarUploadPending;
 
@@ -651,7 +661,14 @@ export function AgentInstanceEditDialog({
       // (same values the credential gate validates), so gate ↔ record ↔ spawn
       // all agree. See resolveInheritedRuntimeSubmission.
       const normalizedSubmitProvider = inheritedSubmission.provider;
-      const submitEnvVars = inheritedSubmission.envVars;
+      const submitEnvVars = applyLinkedModelProviderOverrides({
+        envVars: inheritedSubmission.envVars,
+        linked: linkedPersona != null,
+        model: normalizedModel,
+        modelTouched: overrideTouched.current.model,
+        provider: normalizedSubmitProvider,
+        providerTouched: overrideTouched.current.provider,
+      });
       const input: UpdateManagedAgentInput = {
         pubkey: agent.pubkey,
         name: name.trim() !== agent.name ? name.trim() : undefined,
@@ -839,9 +856,13 @@ export function AgentInstanceEditDialog({
 
   const previewLabel = name.trim() || "Agent name";
   const previewAvatarUrl = avatarUrl.trim() || null;
-  const advancedFieldsTransition = shouldReduceMotion
-    ? { duration: 0 }
-    : ADVANCED_FIELDS_MOTION_TRANSITION;
+  const hiddenEnvKeys = [
+    ...(topLevelSecretEnvVar ? [topLevelSecretEnvVar] : []),
+    MCP_PROFILE_ENV_KEY,
+    MODEL_OVERRIDE_ENV_KEY,
+    PROVIDER_OVERRIDE_ENV_KEY,
+    ...Object.keys(envVars).filter((key) => key.startsWith(MCP_SECRET_PREFIX)),
+  ];
 
   return (
     <Dialog onOpenChange={handleOpenChange} open={open}>
@@ -1212,7 +1233,6 @@ export function AgentInstanceEditDialog({
                 ) : null}
               </AnimatePresence>
             </div>
-
             {/* Error */}
             {updateMutation.error instanceof Error ? (
               <p className="text-sm text-destructive">
