@@ -517,7 +517,17 @@ export function TerminalSubstrate({
           <span>{shortcutLabel} BUZZ</span>
         </div>
       </div>
-      <div className="buzz-terminal-viewport">
+      {/* biome-ignore lint/a11y/noStaticElementInteractions: the hidden textarea owns keyboard semantics; this only preserves its focus across canvas clicks. */}
+      <div
+        className="buzz-terminal-viewport"
+        onMouseDown={(event) => {
+          if (owner !== "terminal") return;
+          // Preventing the canvas mousedown also suppresses selection. Revisit
+          // this when the terminal gains mouse selection support.
+          event.preventDefault();
+          textareaRef.current?.focus({ preventScroll: true });
+        }}
+      >
         <canvas ref={canvasRef} />
         {welcomeVisible && banner ? (
           <canvas className="buzz-terminal-welcome" ref={bannerCanvasRef} />
