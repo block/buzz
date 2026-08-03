@@ -343,10 +343,24 @@ export function TerminalSubstrate({
     };
   }, [enabled, getAppSurface]);
 
-  // The banner's animation loop. It exists only while the splash is visible:
-  // once the terminal is in use `welcomeVisible` is false, the overlay canvas
-  // is unmounted, and this effect's teardown cancels the frame — so there is no
-  // rAF running during normal PTY work.
+  // The banner's animation loop. It runs only while the splash is ON SCREEN,
+  // which needs BOTH conditions below — they are different questions:
+  //   - `welcomeVisible`: the splash has not been dismissed by terminal output.
+  //   - `owner === "terminal"`: the terminal layer is revealed at all.
+  //
+  // `owner` is the load-bearing one and it is not optional. This substrate is
+  // mounted unconditionally by AppShell on every route and merely CSS-concealed
+  // in Buzz mode (`.buzz-terminal-substrate` is `position:absolute; inset:0`),
+  // and `welcomeVisible` starts `true` and only clears on terminal INPUT. So a
+  // loop gated on `welcomeVisible` alone runs forever behind the whole app for
+  // anyone who never opens the terminal — measured at 120 rAF/s in the channel
+  // view, repainting a canvas nobody can see and slowing every other paint.
+  //
+  // Deliberately NOT gated on `enabled`: that is `available && Boolean(active)`
+  // where `available` is `isTauri()`, and a session is auto-created on channel
+  // open (TerminalBootstrap), so `enabled` is true while still concealed in the
+  // app and permanently false in the browser — it would gate the tests green
+  // and leave real users paying the cost. `owner` is user-gestured in both.
   //
   // `prefers-reduced-motion` takes the STATIC path (no motion argument), which
   // is the shipped painter call, not a paused animation. Those are different:
@@ -354,6 +368,7 @@ export function TerminalSubstrate({
   React.useEffect(() => {
     const canvas = bannerCanvasRef.current;
     if (!canvas || !banner || !terminalPalette || !welcomeVisible) return;
+    if (owner !== "terminal") return;
 
     const dpr = window.devicePixelRatio || 1;
     if (reducedMotion) {
@@ -380,7 +395,7 @@ export function TerminalSubstrate({
     };
     frame = window.requestAnimationFrame(tick);
     return () => window.cancelAnimationFrame(frame);
-  }, [banner, reducedMotion, terminalPalette, welcomeVisible]);
+  }, [banner, owner, reducedMotion, terminalPalette, welcomeVisible]);
 
   React.useEffect(() => {
     for (const delivered of frames) {
