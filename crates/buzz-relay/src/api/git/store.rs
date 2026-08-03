@@ -36,6 +36,31 @@ use sha2::{Digest, Sha256};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ETag(pub String);
 
+/// Backend-specific compatibility applied to conditional S3 requests.
+///
+/// The default preserves ETags byte-for-byte as required by HTTP and standard
+/// S3 implementations. Non-standard behavior must be selected explicitly.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum S3BackendCompatibility {
+    /// Preserve the response ETag exactly when sending `If-Match`.
+    #[default]
+    Standard,
+    /// Remove one surrounding double-quote pair from `If-Match` for Ceph RGW.
+    CephRgw,
+}
+
+impl S3BackendCompatibility {
+    fn if_match_value(self, etag: &str) -> &str {
+        match self {
+            Self::Standard => etag,
+            Self::CephRgw => etag
+                .strip_prefix('"')
+                .and_then(|unquoted| unquoted.strip_suffix('"'))
+                .unwrap_or(etag),
+        }
+    }
+}
+
 /// Precondition for `put_pointer`.
 #[derive(Debug, Clone)]
 pub enum Precond {
@@ -169,6 +194,7 @@ impl From<ProbeFailure> for StoreError {
 #[derive(Clone)]
 pub struct GitStore {
     bucket: Arc<Bucket>,
+    compatibility: S3BackendCompatibility,
 }
 
 impl GitStore {
@@ -193,6 +219,30 @@ impl GitStore {
         bucket_name: &str,
         region: &str,
         addressing_style: buzz_media::config::S3AddressingStyle,
+    ) -> Result<Self, StoreError> {
+        Self::new_with_compatibility(
+            endpoint,
+            access_key,
+            secret_key,
+            bucket_name,
+            region,
+            addressing_style,
+            S3BackendCompatibility::Standard,
+        )
+    }
+
+    /// Build a client with an explicit backend compatibility policy.
+    ///
+    /// Use [`S3BackendCompatibility::Standard`] unless the target backend is
+    /// known to require a documented compatibility exception.
+    pub fn new_with_compatibility(
+        endpoint: &str,
+        access_key: &str,
+        secret_key: &str,
+        bucket_name: &str,
+        region: &str,
+        addressing_style: buzz_media::config::S3AddressingStyle,
+        compatibility: S3BackendCompatibility,
     ) -> Result<Self, StoreError> {
         let region = Region::Custom {
             region: region.into(),
@@ -219,6 +269,7 @@ impl GitStore {
         };
         Ok(Self {
             bucket: Arc::from(bucket),
+            compatibility,
         })
     }
 
@@ -495,12 +546,13 @@ impl GitStore {
                 headers.insert(axum::http::header::IF_NONE_MATCH, "*".parse().unwrap());
             }
             Precond::IfMatch(ETag(tag)) => {
+                let wire_tag = self.compatibility.if_match_value(tag);
                 headers.insert(
                     axum::http::header::IF_MATCH,
-                    tag.parse().map_err(|_| {
+                    wire_tag.parse().map_err(|_| {
                         StoreError::Backend(S3Error::HttpFailWithBody(
                             400,
-                            format!("invalid etag {tag}"),
+                            format!("invalid etag {wire_tag}"),
                         ))
                     })?,
                 );
@@ -916,6 +968,77 @@ impl GitStore {
 mod tests {
     use super::*;
 
+    async fn capture_if_match(compatibility: Option<S3BackendCompatibility>, etag: &str) -> String {
+        async fn handler(
+            axum::extract::State(seen): axum::extract::State<Arc<tokio::sync::Mutex<Vec<String>>>>,
+            headers: axum::http::HeaderMap,
+        ) -> impl axum::response::IntoResponse {
+            if let Some(value) = headers.get(axum::http::header::IF_MATCH) {
+                seen.lock().await.push(
+                    value
+                        .to_str()
+                        .expect("If-Match should be ASCII")
+                        .to_string(),
+                );
+            }
+            (
+                axum::http::StatusCode::OK,
+                [(axum::http::header::ETAG, "\"next-etag\"")],
+            )
+        }
+
+        let seen = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test S3 listener");
+        let address = listener.local_addr().expect("test S3 listener address");
+        let app = axum::Router::new()
+            .fallback(handler)
+            .with_state(Arc::clone(&seen));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve test S3 endpoint");
+        });
+
+        let endpoint = format!("http://{address}");
+        let store = match compatibility {
+            Some(compatibility) => GitStore::new_with_compatibility(
+                &endpoint,
+                "access-key",
+                "secret-key",
+                "bucket",
+                "us-east-1",
+                buzz_media::config::S3AddressingStyle::Path,
+                compatibility,
+            ),
+            None => GitStore::new(
+                &endpoint,
+                "access-key",
+                "secret-key",
+                "bucket",
+                "us-east-1",
+                buzz_media::config::S3AddressingStyle::Path,
+            ),
+        }
+        .expect("build test git store");
+        let outcome = store
+            .put_pointer(
+                "pointer",
+                br#"{"manifest":"digest"}"#,
+                Precond::IfMatch(ETag(etag.to_string())),
+            )
+            .await
+            .expect("test pointer PUT");
+        assert!(matches!(outcome, CasOutcome::Won(_)));
+
+        server.abort();
+        let _ = server.await;
+        let values = seen.lock().await;
+        assert_eq!(values.len(), 1, "expected one If-Match header");
+        values[0].clone()
+    }
+
     #[test]
     fn idx_key_uses_pack_digest_namespace() {
         let digest = "a".repeat(64);
@@ -945,6 +1068,19 @@ mod tests {
             GitStore::classify_cas(r),
             Err(StoreError::Backend(S3Error::HttpFailWithBody(403, _)))
         ));
+    }
+
+    #[tokio::test]
+    async fn standard_s3_preserves_quoted_if_match_on_wire() {
+        let value = capture_if_match(None, "\"opaque-etag\"").await;
+        assert_eq!(value, "\"opaque-etag\"");
+    }
+
+    #[tokio::test]
+    async fn ceph_rgw_strips_quotes_from_if_match_on_wire() {
+        let value =
+            capture_if_match(Some(S3BackendCompatibility::CephRgw), "\"opaque-etag\"").await;
+        assert_eq!(value, "opaque-etag");
     }
 
     #[test]
