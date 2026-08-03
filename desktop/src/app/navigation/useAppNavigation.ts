@@ -68,6 +68,17 @@ export function useAppNavigation() {
     [commitNavigation],
   );
 
+  const goVoice = React.useCallback(
+    (behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/voice",
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
+
   const goPulse = React.useCallback(
     (behavior?: NavigationBehavior) =>
       commitNavigation(
@@ -308,6 +319,7 @@ export function useAppNavigation() {
     closeSettings,
     closeWorkflowDetail,
     goAgents,
+    goVoice,
     goChannel,
     goForumPost,
     goHome,

@@ -18,6 +18,7 @@ pub(crate) fn shut_down_app(app: &tauri::AppHandle, shutdown_done: &std::sync::a
         .shutdown_started
         .store(true, Ordering::SeqCst);
     if !shutdown_done.swap(true, Ordering::SeqCst) {
+        crate::codex_voice::shutdown_codex_voice(app);
         prevent_sleep::release(&app.state::<AppState>().prevent_sleep);
         if let Err(error) = shutdown_managed_agents(app) {
             eprintln!("buzz-desktop: failed to stop managed agents: {error}");
@@ -40,6 +41,7 @@ pub(crate) fn install_signal_handler(
             .shutdown_started
             .store(true, Ordering::SeqCst);
         if !shutdown_done.swap(true, Ordering::SeqCst) {
+            crate::codex_voice::shutdown_codex_voice(&app);
             let _ = shutdown_managed_agents(&app);
             #[cfg(feature = "mesh-llm")]
             shutdown_mesh_runtime(&app);

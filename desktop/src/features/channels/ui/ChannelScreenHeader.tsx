@@ -1,4 +1,4 @@
-import { LogIn } from "lucide-react";
+import { LogIn, Mic } from "lucide-react";
 import type * as React from "react";
 
 import { ChatHeader } from "@/features/chat/ui/ChatHeader";
@@ -36,10 +36,12 @@ type ChannelScreenHeaderProps = {
   currentPubkey?: string;
   isAddBotOpen?: boolean;
   isJoining?: boolean;
+  dmVoiceAgent?: { name: string; pubkey: string } | null;
   showHeaderContent?: boolean;
   transparentChrome?: boolean;
   onAddBotOpenChange?: (open: boolean) => void;
   onJoinChannel?: () => Promise<void>;
+  onOpenDmVoice?: (pubkey: string) => void;
   onManageChannel: () => void;
   onToggleMembers: () => void;
 };
@@ -56,10 +58,12 @@ export function ChannelScreenHeader({
   currentPubkey,
   isAddBotOpen,
   isJoining = false,
+  dmVoiceAgent,
   onAddBotOpenChange,
   showHeaderContent = true,
   transparentChrome = false,
   onJoinChannel,
+  onOpenDmVoice,
   onManageChannel,
   onToggleMembers,
 }: ChannelScreenHeaderProps) {
@@ -86,15 +90,33 @@ export function ChannelScreenHeader({
         {isJoining ? "Joining…" : "Join"}
       </Button>
     ) : (
-      <ChannelMembersBar
-        channel={activeChannel}
-        currentPubkey={currentPubkey}
-        isAddBotOpen={isAddBotOpen}
-        onAddBotOpenChange={onAddBotOpenChange}
-        onManageChannel={onManageChannel}
-        onToggleMembers={onToggleMembers}
-        variant={actionsVariant}
-      />
+      <div className="flex items-center gap-1">
+        {dmVoiceAgent && onOpenDmVoice ? (
+          <Button
+            aria-label={`Talk to ${dmVoiceAgent.name}`}
+            onClick={() => onOpenDmVoice(dmVoiceAgent.pubkey)}
+            size={actionsVariant === "compact" ? "icon" : "sm"}
+            title={`Talk to ${dmVoiceAgent.name}`}
+            variant="ghost"
+          >
+            <Mic
+              className={
+                actionsVariant === "compact" ? "h-4 w-4" : "mr-1.5 h-4 w-4"
+              }
+            />
+            {actionsVariant === "inline" ? "Talk" : null}
+          </Button>
+        ) : null}
+        <ChannelMembersBar
+          channel={activeChannel}
+          currentPubkey={currentPubkey}
+          isAddBotOpen={isAddBotOpen}
+          onAddBotOpenChange={onAddBotOpenChange}
+          onManageChannel={onManageChannel}
+          onToggleMembers={onToggleMembers}
+          variant={actionsVariant}
+        />
+      </div>
     )
   ) : null;
 

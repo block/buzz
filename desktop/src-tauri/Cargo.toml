@@ -50,6 +50,7 @@ block2 = { version = "0.6", default-features = false, features = ["std"] }
 objc2 = { version = "0.6.4", default-features = false }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSEvent", "NSHapticFeedback", "NSMenu", "NSMenuItem", "NSStatusItem", "block2"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSProcessInfo", "NSString"] }
+objc2-av-foundation = { version = "0.3.2", default-features = false, features = ["AVCaptureDevice", "AVMediaFormat", "block2"] }
 keyring = { version = "3.6.3", default-features = false, features = ["apple-native", "vendored"], optional = true }
 security-framework = { version = "3.7.0", features = ["OSX_10_15"] }
 window-vibrancy = "0.6"

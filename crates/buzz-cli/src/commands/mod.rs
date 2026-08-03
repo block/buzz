@@ -18,6 +18,7 @@ pub mod repos;
 pub mod social;
 pub mod upload;
 pub mod users;
+pub mod voice;
 pub mod workflows;
 
 use crate::{client::normalize_write_response, error::CliError};

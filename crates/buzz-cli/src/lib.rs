@@ -3,6 +3,7 @@ mod client;
 mod commands;
 mod error;
 mod validate;
+pub mod voice_management;
 
 use clap::{Parser, Subcommand};
 use client::BuzzClient;
@@ -176,6 +177,9 @@ enum Cmd {
     /// Draft owner-reviewed agent creation and updates
     #[command(subcommand)]
     Agents(AgentsCmd),
+    /// Control agents participating in the owner's active voice room
+    #[command(subcommand)]
+    Voice(VoiceCmd),
     /// Send, read, search, and manage messages
     #[command(subcommand)]
     Messages(MessagesCmd),
@@ -239,6 +243,71 @@ enum Cmd {
     /// Community moderation — reports queue, bans, timeouts, audit trail
     #[command(subcommand)]
     Moderation(ModerationCmd),
+}
+
+#[derive(Subcommand)]
+pub enum VoiceCmd {
+    /// Add an agent to the active voice room
+    Join(VoiceAgentArgs),
+    /// Remove an agent from the active voice room
+    Remove(VoiceAgentArgs),
+    /// Mute an agent's microphone in the active voice room
+    Mute(VoiceAgentArgs),
+    /// Unmute an agent's microphone in the active voice room
+    Unmute(VoiceAgentArgs),
+    /// Select an agent's synthesized voice
+    SetVoice {
+        #[command(flatten)]
+        agent: VoiceAgentArgs,
+        #[arg(long)]
+        voice: VoiceName,
+    },
+    /// Mute all synthesized voice output
+    MuteOutput,
+    /// Unmute all synthesized voice output
+    UnmuteOutput,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum VoiceName {
+    Sol,
+    Cove,
+    Ember,
+    Breeze,
+    Arbor,
+    Vale,
+    Juniper,
+    Maple,
+    Spruce,
+}
+
+impl VoiceName {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Sol => "sol",
+            Self::Cove => "cove",
+            Self::Ember => "ember",
+            Self::Breeze => "breeze",
+            Self::Arbor => "arbor",
+            Self::Vale => "vale",
+            Self::Juniper => "juniper",
+            Self::Maple => "maple",
+            Self::Spruce => "spruce",
+        }
+    }
+}
+
+#[derive(clap::Args, Debug, Clone)]
+pub struct VoiceAgentArgs {
+    /// Exact display name of the agent
+    #[arg(long)]
+    agent_name: Option<String>,
+    /// Agent public key (hex)
+    #[arg(long)]
+    agent_pubkey: Option<String>,
+    /// Existing agent session thread UUID
+    #[arg(long)]
+    thread_id: Option<String>,
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -1972,6 +2041,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
 
     match cli.command {
         Cmd::Agents(sub) => commands::agents::dispatch(sub, &client).await,
+        Cmd::Voice(sub) => commands::voice::dispatch(sub, &client).await,
         Cmd::Messages(sub) => commands::messages::dispatch(sub, &client, &cli.format).await,
         Cmd::Channels(sub) => commands::channels::dispatch(sub, &client, &cli.format).await,
         Cmd::Canvas(sub) => commands::channels::dispatch_canvas(sub, &client).await,
@@ -2100,6 +2170,7 @@ mod tests {
             "social",
             "upload",
             "users",
+            "voice",
             "workflows",
         ];
 
@@ -2187,6 +2258,18 @@ mod tests {
             ]
         );
         assert_eq!(names(&cmd, "canvas"), vec!["get", "set"]);
+        assert_eq!(
+            names(&cmd, "voice"),
+            vec![
+                "join",
+                "mute",
+                "mute-output",
+                "remove",
+                "set-voice",
+                "unmute",
+                "unmute-output"
+            ]
+        );
         assert_eq!(names(&cmd, "reactions"), vec!["add", "get", "remove"]);
         assert_eq!(
             names(&cmd, "emoji"),
