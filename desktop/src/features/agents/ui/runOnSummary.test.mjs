@@ -41,15 +41,38 @@ test("a saved kubernetes config renders labeled scalar rows", () => {
   assert.ok(summary.rows.every((r) => r.redacted === false));
 });
 
-test("rows are key-sorted regardless of persisted JSON order", () => {
+test("rows follow the provider-schema preferred order, spillover alphabetical", () => {
   const summary = summarizeRunOn({
     type: "provider",
     id: "kubernetes",
-    config: { namespace: "n", context: "c", image: "i" },
+    config: {
+      // Deliberately shuffled persisted order.
+      memory_limit: "1Gi",
+      zeta_extra: "z",
+      namespace: "n",
+      cpu_limit: "1",
+      alpha_extra: "a",
+      image: "i",
+      inactivity_seconds: 7200,
+      cpu_request: "1",
+      context: "c",
+      memory_request: "1Gi",
+    },
   });
   assert.deepEqual(
     summary.rows.map((r) => r.key),
-    ["context", "image", "namespace"],
+    [
+      "context",
+      "namespace",
+      "image",
+      "cpu_request",
+      "memory_request",
+      "cpu_limit",
+      "memory_limit",
+      "inactivity_seconds",
+      "alpha_extra",
+      "zeta_extra",
+    ],
   );
 });
 

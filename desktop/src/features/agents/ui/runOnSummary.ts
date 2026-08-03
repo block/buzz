@@ -97,18 +97,50 @@ function displayValue(value: unknown): string {
 }
 
 /**
+ * Preferred display order, traced from the Kubernetes provider schema
+ * (crates/buzz-backend-kubernetes/src/config.rs): locate the deployment
+ * first (context → namespace), then what runs (image), then the
+ * request/limit pairs kept adjacent, then lifecycle/identity. Keys not
+ * listed here (other providers, future fields) spill over alphabetically
+ * after the known ones, so ordering stays deterministic for every record.
+ */
+const PREFERRED_KEY_ORDER = [
+  "context",
+  "namespace",
+  "image",
+  "cpu_request",
+  "memory_request",
+  "cpu_limit",
+  "memory_limit",
+  "inactivity_seconds",
+  "service_account",
+];
+
+function compareKeys(a: string, b: string): number {
+  const ia = PREFERRED_KEY_ORDER.indexOf(a);
+  const ib = PREFERRED_KEY_ORDER.indexOf(b);
+  if (ia !== -1 && ib !== -1) return ia - ib;
+  if (ia !== -1) return -1;
+  if (ib !== -1) return 1;
+  return a.localeCompare(b);
+}
+
+/**
  * Project a `ManagedAgentBackend` into renderable rows. These are the
  * *saved* settings — the config recorded when the agent was created — not
  * the provider's effective settings: optional fields a record omits are
  * defaulted by the provider at deploy time, and synthesizing today's plugin
  * defaults here could show values that drifted from what actually deployed.
- * Rows are key-sorted so rendering is deterministic regardless of the JSON
- * key order a given record happened to persist.
+ * (`backendAgentId` is deliberately not shown: it is deploy-time runtime
+ * state written on start, not saved creation intent, and this section's
+ * contract is the latter.) Rows follow the preferred key order with
+ * alphabetical spillover, so rendering is deterministic regardless of the
+ * JSON key order a given record happened to persist.
  */
 export function summarizeRunOn(backend: ManagedAgentBackend): RunOnSummary {
   if (backend.type === "local") return { location: "local" };
   const rows = Object.entries(backend.config ?? {})
-    .sort(([a], [b]) => a.localeCompare(b))
+    .sort(([a], [b]) => compareKeys(a, b))
     .map(([key, value]): RunOnConfigRow => {
       const redacted = splitConfigKey(key).some((word) =>
         SECRET_WORDS.has(word),
