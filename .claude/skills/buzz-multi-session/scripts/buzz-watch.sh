@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
-# buzz-watch.sh <session-name> <channel-uuid> [poll-seconds]
+# buzz-watch.sh [session-name|-] <channel-uuid> [poll-seconds]
 #
 # Emits one line per NEW message from a peer in the channel. Designed to be the
 # `command` of Claude Code's Monitor tool with persistent: true — each stdout
 # line becomes one notification, so this must be quiet unless something
 # genuinely new arrived.
+#
+# Pass "-" as the session name (what buzz-connect.sh prints) and the watcher
+# resolves this session's identity itself, so the command stays correct after a
+# /rename. It loads the identity file too; nothing is sourced by hand.
 #
 # Three details this encodes; do not "simplify" them away:
 #   1. `buzz messages get --since <ts>` is INCLUSIVE. A timestamp watermark
@@ -15,35 +19,39 @@
 #   3. A session must never react to its own messages — filter on own pubkey.
 set -uo pipefail
 
-NAME="${1:?usage: buzz-watch.sh <session-name> <channel-uuid> [poll-seconds]}"
-CH="${2:?usage: buzz-watch.sh <session-name> <channel-uuid> [poll-seconds]}"
+HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib.sh
+. "$HERE/lib.sh"
+
+NAME="${1:?usage: buzz-watch.sh [session-name|-] <channel-uuid> [poll-seconds]}"
+CH="${2:?usage: buzz-watch.sh [session-name|-] <channel-uuid> [poll-seconds]}"
 SLEEP="${3:-5}"
 
-SESSION_DIR="${BUZZ_SESSION_DIR:-$HOME/.buzz/sessions}"
-ENV_FILE="$SESSION_DIR/$NAME.env"
-[ -f "$ENV_FILE" ] || { echo "no identity '$NAME' in $SESSION_DIR" >&2; exit 1; }
+require_buzz
 
-resolve_bin() {
-  local name="$1" var="$2" found
-  found="${!var:-}"
-  if [ -n "$found" ]; then printf '%s' "$found"; return 0; fi
-  if found=$(command -v "$name" 2>/dev/null); then printf '%s' "$found"; return 0; fi
-  local root
-  if root=$(git rev-parse --show-toplevel 2>/dev/null); then
-    for cand in "$root/target/release/$name" "$root/target/debug/$name"; do
-      [ -x "$cand" ] && { printf '%s' "$cand"; return 0; }
-    done
-  fi
-  return 1
-}
-BUZZ=$(resolve_bin buzz BUZZ_BIN) || { echo "buzz not found on PATH (set BUZZ_BIN)" >&2; exit 1; }
+if [ "$NAME" = "-" ]; then
+  IDENT=$("$HERE/buzz-session.sh" resolve) || exit 1
+  NAME=$(printf '%s' "$IDENT" | cut -f1)
+  ENV_FILE=$(printf '%s' "$IDENT" | cut -f4)
+else
+  ENV_FILE=$(identity_file "$NAME")
+fi
+[ -f "$ENV_FILE" ] || die \
+"no identity '$NAME' in $SESSION_DIR — run $HERE/buzz-connect.sh first"
 
-# shellcheck source=/dev/null
-set -a; . "$ENV_FILE"; set +a
+load_identity "$ENV_FILE" || die "could not load $ENV_FILE"
 export RUST_LOG="${RUST_LOG:-error}"   # keep tracing off stdout
 
+# Liveness marker so buzz-connect.sh --status can tell "watcher not armed" from
+# "watcher armed and the channel is quiet" — two states that look identical.
+MARKER=$(watch_marker "$NAME")
+mkdir -p "$SESSION_DIR"
+printf '%s\n%s\n' "$$" "$CH" > "$MARKER"
+
 SEEN=$(mktemp -t buzz-watch-seen)
-trap 'rm -f "$SEEN"' EXIT
+# TERM and INT too: Monitor stops a watcher by signalling it, and a marker left
+# behind would make buzz-connect.sh --status claim a watcher that is gone.
+trap 'rm -f "$SEEN" "$MARKER"; exit 0' EXIT INT TERM
 
 # --- prime: everything already in the channel counts as seen -----------------
 "$BUZZ" messages get --channel "$CH" --limit 200 2>/dev/null \
