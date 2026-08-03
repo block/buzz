@@ -1,4 +1,4 @@
-import { X } from "lucide-react";
+import { MoreHorizontal, X } from "lucide-react";
 import * as React from "react";
 
 import {
@@ -293,11 +293,28 @@ export function HuddleParticipantsControl({
             +{hiddenParticipantCount}
           </Button>
         </PopoverTrigger>
+      ) : onRemoveAgent ? (
+        <PopoverTrigger asChild>
+          <Button
+            aria-label="Manage huddle participants"
+            className={cn(
+              "relative z-10 shrink-0 px-1 shadow-none",
+              appearance === "room"
+                ? "buzz-huddle-participant-tile min-h-[6.375rem] min-w-28 rounded-xl border border-border/70 bg-muted/45 text-foreground/70 hover:bg-muted/65 hover:text-foreground"
+                : "h-9 min-w-9 rounded-full border-2 border-black bg-white/15 text-white hover:bg-white/25 hover:text-white",
+            )}
+            size="icon"
+            type="button"
+            variant="ghost"
+          >
+            <MoreHorizontal className="h-4 w-4" />
+          </Button>
+        </PopoverTrigger>
       ) : null}
     </div>
   );
 
-  if (hiddenParticipantCount === 0) return participantStrip;
+  if (hiddenParticipantCount === 0 && !onRemoveAgent) return participantStrip;
 
   return (
     <Popover>

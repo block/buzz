@@ -54,7 +54,7 @@ use huddle::{
     download_voice_models, end_huddle, get_huddle_agent_pubkeys, get_huddle_state,
     get_model_status, get_voice_input_mode, join_huddle, leave_huddle, open_huddle_window,
     push_audio_pcm, set_huddle_transcription_enabled, set_tts_enabled, set_voice_input_mode,
-    speak_agent_message, start_huddle, start_stt_pipeline,
+    speak_agent_message, start_huddle, start_stt_pipeline, HuddlePhase,
 };
 use initial_window::*;
 use managed_agents::{
@@ -910,6 +910,30 @@ pub fn run() {
             if let Some(window) = app_handle.get_webview_window("main") {
                 if let Err(error) = window.hide() {
                     eprintln!("buzz-desktop: failed to hide main window: {error}");
+                }
+            }
+        }
+        #[cfg(target_os = "macos")]
+        RunEvent::WindowEvent {
+            label,
+            event: WindowEvent::CloseRequested { .. },
+            ..
+        } if label.starts_with("huddle-") => {
+            let is_active_huddle_window =
+                app_handle
+                    .state::<AppState>()
+                    .huddle()
+                    .ok()
+                    .is_some_and(|huddle| {
+                        !matches!(huddle.phase, HuddlePhase::Idle | HuddlePhase::Leaving)
+                            && huddle
+                                .ephemeral_channel_id
+                                .as_deref()
+                                .is_some_and(|channel_id| label == format!("huddle-{channel_id}"))
+                    });
+            if is_active_huddle_window {
+                if let Err(error) = app_handle.emit("huddle-companion-returned", ()) {
+                    eprintln!("buzz-desktop: failed to restore huddle drawer: {error}");
                 }
             }
         }
