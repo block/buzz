@@ -17,6 +17,15 @@
  *   - field    -> originates bottom-right, travels top-left across the whole
  *                 viewport (see FIELD_WAVE.direction = {x:-1, y:-1})
  *   - wordmark -> left-to-right across the wordmark's own ink span
+ *
+ * LOOP SEMANTICS. Phase advances monotonically and wraps at 1 -> 0 (`phaseAt`
+ * via `wrap01`); travel is continuous and one-way for as long as it advances,
+ * and one full cycle translates the pattern by exactly one spatial period, so
+ * the wrap is C0 with no snap and no reversal. The palette axis is folded
+ * (`cyclicRampPosition`) so the open three-stop ramp can be driven by a cyclic
+ * phase without a seam. Proof that folding the palette does NOT fold the motion
+ * is on `cyclicRampPosition` -- read it before touching either.
+ *
  * The bevels do not animate. They are the chassis; a moving highlight would
  * read as the box itself deforming.
  */
@@ -172,10 +181,35 @@ const wrap01 = (value: number) => value - Math.floor(value);
  * The fix is to make the cyclic axis traverse the ramp and come back:
  * 0 -> 1 over the first half of the cycle, 1 -> 0 over the second. The ends
  * are then interior turning points and adjacency holds everywhere, so the loop
- * is seamless by construction rather than by choice of period. The cost is that
- * the wave reverses direction each half-cycle — invisible at these periods,
- * because a colour drift has no landmark to read a direction against, and the
- * direction gate measures the crest inside a half-cycle where it is defined.
+ * is seamless by construction rather than by choice of period.
+ *
+ * THIS DOES NOT REVERSE THE WAVE, and an earlier version of this comment
+ * claimed it did. The claim was false and it cost a review round (Wren's #4541
+ * gate), so the reasoning is recorded here rather than left to be re-derived.
+ *
+ * Write the field as `hue(x, phase) = A(G(p(x) + phase))`, where `p` is affine
+ * in position (see `projectWave`), `G` is this fold, and `A` is `applyIntensity`
+ * (affine, monotone). Phase enters `G` ONLY through the sum `p(x) + phase`, so
+ * for a shift `d` along +direction, `p(x + d*u) = p(x) - d*wavelength/span` and
+ *
+ *     hue(x + d*u, phase + D) = hue(x, phase)   for   d = D * span / wavelength
+ *
+ * exactly, at every phase, FOR ANY `G` WHATSOEVER. The shape of `G` sets the
+ * spatial PROFILE; it cannot touch the direction of MOTION. `d` has the sign of
+ * `D`, so travel is uniformly one-way for as long as phase advances, and one
+ * full cycle translates the pattern by exactly one spatial period -- continuous
+ * BR->TL travel and a seamless wrap at the same time, not a trade between them.
+ *
+ * The mistake worth not repeating: the fold DOES make a fixed cell's colour
+ * oscillate (cell(60,25) reads 0.5 0.7 0.9 0.9 0.7 0.5 0.3 0.1 0.1 0.3 0.5 over
+ * one cycle). That is a property of a POINT, not of the pattern -- it is what
+ * every travelling wave does to a point it passes over -- and reading it as a
+ * direction reversal is what put the false sentence here. `travelDirection` in
+ * the test file measures the pattern across the WHOLE cycle, including the
+ * alleged turn at phase 0.5 and the wrap, with a time-folded positive control.
+ *
+ * What the fold does cost is aesthetic, not kinematic: the spatial palette
+ * profile is mirrored (A->C->A) rather than circulating (A->B->C->A).
  */
 export function cyclicRampPosition(phase: number): number {
   const wrapped = wrap01(phase);

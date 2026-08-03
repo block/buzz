@@ -205,75 +205,196 @@ test("an animated frame at phase zero is NOT the static banner", () => {
 });
 
 /**
- * DIRECTION. Eva's spec: the field originates BOTTOM-RIGHT and travels to
- * TOP-LEFT; the wordmark stays left-to-right. A sign error is invisible in any
- * still frame, which is why this measures the movement of a crest over time
- * rather than a property of one frame.
+ * DIRECTION, OVER THE WHOLE CYCLE. Eva's spec: the field originates
+ * BOTTOM-RIGHT and travels to TOP-LEFT; the wordmark stays left-to-right. A
+ * sign error is invisible in any still frame, which is why this measures
+ * movement over time rather than a property of one frame.
  *
- * Measured INSIDE a half-cycle. `cyclicRampPosition` folds the axis into a
- * palindrome so the loop is seamless, which means the wave reverses each
- * half-cycle by design — "the direction" is only defined within one, and a gate
- * that straddled a fold turn would read the reversal as a failure.
+ * THIS GATE USED TO SAMPLE ONLY 0.1 -> 0.2, justified by a comment on
+ * `cyclicRampPosition` claiming the wave reversed each half-cycle. That claim
+ * was false (see the proof there), and the narrow sampling it licensed is what
+ * let a reviewer read the code as back-and-forth motion. The honest version
+ * sweeps the ENTIRE cycle, including the alleged turn at phase 0.5 and the
+ * 1 -> 0 wrap — the exact two places the old gate did not look.
  *
- * The crest position is tracked in VISUAL space (x px, y px), not cell indices,
- * because that is the space the requirement is stated in.
+ * Two instruments, because a crest tracker alone can hop between the level
+ * set's two branches and fake a reversal:
+ *
+ *  A. RIGID-TRANSLATION FIT. If the pattern translates, there is a shift `d`
+ *     along +direction with hue(x + d*u, phase + D) == hue(x, phase). Fit `d`
+ *     per phase and require ONE SIGN and a constant magnitude across the cycle.
+ *     Bounded inside one spatial period: a wider search aliases onto the twin
+ *     shift `d + period` and reports a wrong (though same-signed) magnitude.
+ *  B. BRANCH-CONTINUOUS CREST TRACKING. Follow the crossing nearest the
+ *     previous one — that is what "a crest" means — and require monotone travel
+ *     over 200 steps spanning the full cycle.
+ *
+ * CONTROLS, so the negative is worth something (both must be CAUGHT):
+ *   POS-1 phase folded in TIME. This is what "reverses every half-cycle"
+ *         actually looks like, and it is the mutant the false comment
+ *         described. The shipped spatial fold is not it.
+ *   POS-2 negated phase: uniform travel the WRONG way, i.e. a sign error.
  */
-test("the field wave travels toward top-left and the wordmark left to right", () => {
+
+/** Visual-space unit vector and one-spatial-period pitch, along a FIXED axis.
+ *
+ *  Anchored to the SPEC's axis, never to `FIELD_WAVE.direction`: a gate that
+ *  derives its own measurement axis from the value under test rotates with a
+ *  direction bug and reports success. Measured — flipping the default to
+ *  `{x:1,y:1}` survived this gate until the axis was hardcoded here. The config
+ *  is checked against this axis separately, below. */
+const EXPECTED_FIELD_AXIS = { x: -Math.SQRT1_2, y: -Math.SQRT1_2 };
+const fieldGeometry = (columns, rows) => {
+  const { x: unitX, y: unitY } = EXPECTED_FIELD_AXIS;
+  const span =
+    Math.abs(unitX) * Math.max(1, columns) +
+    Math.abs(unitY) * Math.max(1, rows * ASPECT);
+  return { unitX, unitY, period: span / FIELD_WAVE.wavelength };
+};
+
+/**
+ * Fit the spatial shift along +direction that undoes a phase advance of
+ * `delta`. Returns the shift and its residual; a rigid translation fits with a
+ * residual at rounding level, so a large residual means "not a translation"
+ * rather than "translated by this much".
+ */
+const fitTranslation = (fieldAt, phase, delta, geometry, bound) => {
+  const samples = [];
+  for (let row = 8; row < 42; row += 3)
+    for (let column = 8; column < 112; column += 3) samples.push([column, row]);
+  const score = (d) => {
+    let sum = 0;
+    for (const [column, row] of samples) {
+      const here = fieldAt(column, row, phase);
+      const there = fieldAt(
+        column + geometry.unitX * d,
+        row + (geometry.unitY * d) / ASPECT,
+        phase + delta,
+      );
+      sum += (here - there) ** 2;
+    }
+    return Math.sqrt(sum / samples.length);
+  };
+  let best = 0;
+  let bestResidual = Number.POSITIVE_INFINITY;
+  for (let d = -bound; d <= bound; d += 0.5) {
+    const residual = score(d);
+    if (residual < bestResidual) {
+      bestResidual = residual;
+      best = d;
+    }
+  }
+  for (let d = best - 0.5; d <= best + 0.5; d += 0.01) {
+    const residual = score(d);
+    if (residual < bestResidual) {
+      bestResidual = residual;
+      best = d;
+    }
+  }
+  return { shift: best, residual: bestResidual };
+};
+
+/** Track one crest along the direction axis by continuity, full cycle. */
+const trackCrest = (fieldAt, geometry, columns, rows, steps) => {
+  const target = 0.5;
+  const at = (s, phase) =>
+    fieldAt(
+      columns / 2 + geometry.unitX * s,
+      rows / 2 + (geometry.unitY * s) / ASPECT,
+      phase,
+    );
+  const nearest = (phase, from) => {
+    let best = from;
+    let bestKey = Number.POSITIVE_INFINITY;
+    for (let s = from - 12; s <= from + 12; s += 0.02) {
+      // Prefer the closest match to `target`, tie-broken toward `from` so the
+      // tracker stays on ONE branch instead of jumping to an equal crossing.
+      const key =
+        Math.abs(at(s, phase) - target) * 1000 + Math.abs(s - from) * 1e-6;
+      if (key < bestKey) {
+        bestKey = key;
+        best = s;
+      }
+    }
+    return best;
+  };
+  let position = nearest(0, 0);
+  const start = position;
+  let negative = 0;
+  let positive = 0;
+  for (let index = 1; index <= steps; index += 1) {
+    const next = nearest(index / steps, position);
+    const step = next - position;
+    if (step < -1e-6) negative += 1;
+    if (step > 1e-6) positive += 1;
+    position = next;
+  }
+  return { net: position - start, negative, positive };
+};
+
+/** The three arms: shipped, plus the two reversal/sign controls. `transform`
+ *  maps the animation clock onto the phase actually handed to the module, so
+ *  the controls exercise the REAL composition instead of a reimplementation. */
+const TRAVEL_ARMS = [
+  { name: "shipped", transform: (phase) => phase, oneWay: true },
+  {
+    name: "POS-1 time-folded phase (a real reversal)",
+    transform: (phase) => {
+      const wrapped = phase - Math.floor(phase);
+      return wrapped < 0.5 ? wrapped * 2 : 2 - wrapped * 2;
+    },
+    oneWay: false,
+  },
+  {
+    name: "POS-2 negated phase (sign error)",
+    transform: (phase) => -phase,
+    oneWay: false,
+  },
+];
+
+/** Verdicts for one arm, so the assertions and the controls share an oracle.
+ *
+ *  Phase is obtained through the REAL clock path (`phaseAt(seconds)`), not by
+ *  handing `makeCellHue` a phase directly. Calling the hue factory with a
+ *  hand-made phase tests the wave functions in isolation and is blind to
+ *  anything `phaseAt` does — a time-fold injected there survived this gate
+ *  until it was routed this way. Same composition gap as M9: isolation gates
+ *  compose only if something tests the composition. `transform` perturbs the
+ *  CLOCK, so every arm still runs the whole shipped chain. */
+const travelVerdict = (transform) => {
   const columns = 120;
   const rows = 50;
-  const target = 0.5;
-  const hueAt = (phase) =>
-    makeCellHue(columns, rows, { field: phase, wordmark: phase });
-
-  // Centroid of the cells nearest a fixed hue: a whole crest line moves, and a
-  // single argmin cell can jump sideways along that line without the wave
-  // having moved. The centroid of the whole level set cannot.
-  const crestCentroid = (phase) => {
-    const hue = hueAt(phase);
-    let sx = 0;
-    let sy = 0;
-    let n = 0;
-    for (let row = 0; row < rows; row += 1)
-      for (let column = 0; column < columns; column += 1) {
-        const value = hue("field", 0.5, column, row);
-        if (Math.abs(value - target) < 0.01) {
-          sx += column;
-          sy += row * ASPECT;
-          n += 1;
-        }
-      }
-    assert.ok(n > 0, `no crest cells found at phase ${phase}`);
-    return { x: sx / n, y: sy / n };
+  const geometry = fieldGeometry(columns, rows);
+  // Phase advances by 0.01 of the FIELD cycle per unit of `phase` here, via the
+  // real seconds->phase conversion, so `phaseAt`'s wrapping is in the loop.
+  const hueFor = (phase) => {
+    const clock = transform(phase) * FIELD_PERIOD_SECONDS;
+    return makeCellHue(columns, rows, phaseAt(clock));
   };
+  const fieldAt = (column, row, phase) =>
+    hueFor(phase)("field", 0.5, column, row);
+  const headAt = (t, phase) => hueFor(phase)("head", t, 0, 0);
 
-  const early = crestCentroid(0.1);
-  const later = crestCentroid(0.2);
-  assert.ok(
-    later.x < early.x - 1,
-    `crest x moved ${early.x.toFixed(1)} -> ${later.x.toFixed(1)}, expected leftward`,
+  // A: fits across the full cycle, spanning the fold turn and the wrap.
+  const fits = [
+    0, 0.1, 0.2, 0.3, 0.4, 0.45, 0.49, 0.5, 0.51, 0.55, 0.6, 0.7, 0.8, 0.9,
+    0.95, 0.99,
+  ].map((phase) => ({
+    phase,
+    ...fitTranslation(fieldAt, phase, 0.01, geometry, geometry.period / 2),
+  }));
+  const shiftSigns = new Set(
+    fits.map((fit) => Math.sign(+fit.shift.toFixed(2))),
   );
-  assert.ok(
-    later.y < early.y - 1,
-    `crest y moved ${early.y.toFixed(1)} -> ${later.y.toFixed(1)}, expected upward`,
-  );
+  const crest = trackCrest(fieldAt, geometry, columns, rows, 200);
 
-  // ASPECT CORRECTION, as an angle. Cells are 8.4x17, so projecting raw indices
-  // would render the (-1,-1) vector as a ~27-degree wave instead of 45. The
-  // crest must travel at 45 degrees in VISUAL space for a 45-degree vector.
-  const angle =
-    (Math.atan2(early.y - later.y, early.x - later.x) * 180) / Math.PI;
-  assert.ok(
-    Math.abs(angle - 45) < 6,
-    `crest travels at ${angle.toFixed(1)} degrees in visual space, expected ~45`,
-  );
-
+  // Wordmark: crest position in `t`, unwrapped, across the full cycle.
   const tOfCrest = (phase) => {
-    const hue = hueAt(phase);
     let best = 0;
     let bestError = Number.POSITIVE_INFINITY;
     for (let step = 0; step <= 200; step += 1) {
       const t = step / 200;
-      const error = Math.abs(hue("head", t, 0, 0) - target);
+      const error = Math.abs(headAt(t, phase) - 0.5);
       if (error < bestError) {
         bestError = error;
         best = t;
@@ -281,10 +402,121 @@ test("the field wave travels toward top-left and the wordmark left to right", ()
     }
     return best;
   };
-  assert.ok(
-    tOfCrest(0.2) > tOfCrest(0.1),
-    "wordmark crest did not move rightward",
+  let headBackwards = 0;
+  let headForwards = 0;
+  let previous = tOfCrest(0);
+  for (let index = 1; index <= 60; index += 1) {
+    const current = tOfCrest(index / 60);
+    let step = current - previous;
+    // The crest leaves the right edge and re-enters at the left: unwrap into
+    // (-0.5, 0.5] so a re-entry is not mistaken for backward travel.
+    if (step > 0.5) step -= 1;
+    if (step < -0.5) step += 1;
+    if (step < -1e-9) headBackwards += 1;
+    if (step > 1e-9) headForwards += 1;
+    previous = current;
+  }
+
+  return { fits, shiftSigns, crest, headBackwards, headForwards, geometry };
+};
+
+test("the field travels toward top-left and the wordmark left to right, across the WHOLE cycle", () => {
+  const { fits, shiftSigns, crest, headBackwards, headForwards, geometry } =
+    travelVerdict((phase) => phase);
+
+  // The config must agree with the axis this gate measures along. Hardcoding
+  // the axis is what gives the gate teeth against a direction flip, but it also
+  // means a config change would silently stop being measured — so assert the
+  // two match rather than trusting them to.
+  const configLength = Math.hypot(
+    FIELD_WAVE.direction.x,
+    FIELD_WAVE.direction.y,
   );
+  assert.ok(
+    Math.abs(FIELD_WAVE.direction.x / configLength - EXPECTED_FIELD_AXIS.x) <
+      1e-9 &&
+      Math.abs(FIELD_WAVE.direction.y / configLength - EXPECTED_FIELD_AXIS.y) <
+        1e-9,
+    `FIELD_WAVE.direction ${JSON.stringify(FIELD_WAVE.direction)} is not the ` +
+      "spec's bottom-right -> top-left axis this gate measures along",
+  );
+
+  // A. One sign, constant magnitude, translation-quality residual.
+  assert.deepEqual(
+    [...shiftSigns],
+    [1],
+    `field shift changed sign across the cycle: ${fits
+      .map((fit) => `${fit.phase}:${fit.shift.toFixed(2)}`)
+      .join(" ")}`,
+  );
+  const shifts = fits.map((fit) => fit.shift);
+  const spread = Math.max(...shifts) - Math.min(...shifts);
+  assert.ok(
+    spread < 0.05,
+    `field velocity is not constant across the cycle: spread ${spread.toFixed(3)}px`,
+  );
+  const worstResidual = Math.max(...fits.map((fit) => fit.residual));
+  assert.ok(
+    worstResidual < 1e-3,
+    `field is not a rigid translation: worst residual ${worstResidual.toExponential(2)}`,
+  );
+  // Magnitude matches the closed form d = D * span / wavelength, so the gate
+  // pins the aspect correction too: a wrong ASPECT changes `span`.
+  const predicted = 0.01 * geometry.period;
+  assert.ok(
+    Math.abs(shifts[0] - predicted) < 0.05,
+    `shift ${shifts[0].toFixed(3)}px disagrees with closed form ${predicted.toFixed(3)}px`,
+  );
+
+  // B. Monotone crest travel over the full cycle, and exactly one spatial
+  // period of net travel — continuous travel AND a seamless wrap together.
+  assert.equal(
+    crest.negative,
+    0,
+    `field crest moved backward on ${crest.negative}/200 steps`,
+  );
+  assert.ok(crest.positive > 190, `field crest stalled: ${crest.positive}/200`);
+  assert.ok(
+    Math.abs(crest.net - geometry.period) < geometry.period * 0.05,
+    `net travel ${crest.net.toFixed(1)}px is not one spatial period (${geometry.period.toFixed(1)}px)`,
+  );
+
+  // Wordmark: strictly rightward over the whole cycle, wrap unwrapped.
+  assert.equal(
+    headBackwards,
+    0,
+    `wordmark crest moved leftward on ${headBackwards}/60 steps`,
+  );
+  assert.ok(headForwards > 55, `wordmark crest stalled: ${headForwards}/60`);
+});
+
+/**
+ * THE GATE'S OWN NEGATIVE CONTROLS. A direction gate that a reversal can
+ * survive is worthless, and the previous one could: POS-1 is precisely the
+ * motion the old comment claimed the code had, and the old 0.1->0.2 sampling
+ * could not see it. Both controls must be CAUGHT by the assertions above.
+ */
+test("the travel gate catches a real reversal and a sign error", () => {
+  for (const arm of TRAVEL_ARMS.filter((candidate) => !candidate.oneWay)) {
+    const { shiftSigns, crest, headBackwards } = travelVerdict(arm.transform);
+    const caught =
+      shiftSigns.size > 1 ||
+      !shiftSigns.has(1) ||
+      crest.negative > 0 ||
+      headBackwards > 0;
+    assert.ok(
+      caught,
+      `${arm.name} was NOT caught: signs {${[...shiftSigns].join(",")}}, ` +
+        `crest negative ${crest.negative}, wordmark backward ${headBackwards}`,
+    );
+  }
+
+  // And the shipped arm must pass the same oracle, or "caught" above is just
+  // an instrument that fails everything.
+  const shipped = travelVerdict((phase) => phase);
+  assert.deepEqual([...shipped.shiftSigns], [1]);
+  assert.equal(shipped.crest.negative, 0);
+  assert.equal(shipped.headBackwards, 0);
 });
 
 /** The two waves must not be one wave. Same period would read as a single
