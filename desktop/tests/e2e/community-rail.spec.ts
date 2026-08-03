@@ -585,15 +585,6 @@ test.describe("community rail", () => {
         ),
       )
       .toBe(1);
-    await page.evaluate(() => {
-      const deferNext = (
-        window as Window & {
-          __BUZZ_E2E_DEFER_NEXT_CHANNELS_READ__?: () => void;
-        }
-      ).__BUZZ_E2E_DEFER_NEXT_CHANNELS_READ__;
-      if (!deferNext) throw new Error("missing channel-read defer seam");
-      deferNext();
-    });
     const released = await page.evaluate(
       () =>
         (
