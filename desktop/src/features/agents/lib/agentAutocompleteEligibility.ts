@@ -54,6 +54,7 @@ export function getMentionableAgentPubkeys({
   return pubkeys;
 }
 
+/** Used by the member-adder, which must not offer agents owned elsewhere. */
 export function isAgentIdentityInManagedList(
   candidate: { isAgent?: boolean; pubkey: string },
   managedAgentPubkeys: ReadonlySet<string>,

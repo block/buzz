@@ -826,7 +826,7 @@ test("managed relay agents are visible in channel mentions regardless of relay p
   await expect(dropdown.getByText("agent")).toBeVisible();
 });
 
-test("relay-only agents stay hidden from channel mentions even when allowlisted", async ({
+test("shared anyone relay agents are visible in channel mentions", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -834,8 +834,9 @@ test("relay-only agents stay hidden from channel mentions even when allowlisted"
       {
         pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
         name: "quinn",
-        respondTo: "allowlist",
-        respondToAllowlist: [MOCK_VIEWER_PUBKEY],
+        respondTo: "anyone",
+        respondToAllowlist: [],
+        channelNames: ["general"],
       },
     ],
   });
@@ -846,7 +847,9 @@ test("relay-only agents stay hidden from channel mentions even when allowlisted"
   const input = page.getByTestId("message-input");
   await input.fill("@quinn");
 
-  await expect(autocomplete(page)).toHaveCount(0);
+  const dropdown = autocomplete(page);
+  await expect(dropdown.getByText("quinn")).toBeVisible();
+  await expect(dropdown.getByText("agent")).toBeVisible();
 });
 
 test("mentioning an in-channel stopped managed agent starts it before sending", async ({
