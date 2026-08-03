@@ -1,4 +1,4 @@
-use super::{AgentDefinition, CatalogSource, ManagedAgentRecord};
+use super::{AgentDefinition, CatalogSource, ManagedAgentRecord, RelayAgentInfo, RespondTo};
 use std::path::PathBuf;
 
 #[test]
@@ -782,5 +782,97 @@ fn summary_with_drift_serializes_restart_diff_entries() {
             "field": "model",
             "change": { "kind": "value", "before": "gpt-5", "after": "claude-4" },
         }]))
+    );
+}
+
+// --- RelayAgentInfo wire format -------------------------------------------
+//
+// This struct crosses two boundaries with different casing conventions, and
+// getting either wrong is silent: the frontend simply sees `undefined` and
+// every relay agent becomes un-mentionable.
+
+#[test]
+fn relay_agent_info_serializes_camel_case_for_the_frontend() {
+    // The TS `RelayAgent` type reads agentType/channelIds/respondTo/
+    // respondToAllowlist. Emitting snake_case here made those fields
+    // undefined, so `relayAgentIsSharedWithUser` always returned false.
+    let info = RelayAgentInfo {
+        pubkey: "aa".repeat(32),
+        name: "Scout".to_string(),
+        agent_type: "agent".to_string(),
+        channels: vec!["general".to_string()],
+        channel_ids: vec!["c1".to_string()],
+        capabilities: Vec::new(),
+        status: "online".to_string(),
+        respond_to: Some(RespondTo::Anyone),
+        respond_to_allowlist: vec!["bb".repeat(32)],
+    };
+
+    let json = serde_json::to_value(&info).expect("serialize");
+
+    assert!(json.get("agentType").is_some(), "agentType missing: {json}");
+    assert!(
+        json.get("channelIds").is_some(),
+        "channelIds missing: {json}"
+    );
+    assert!(json.get("respondTo").is_some(), "respondTo missing: {json}");
+    assert!(
+        json.get("respondToAllowlist").is_some(),
+        "respondToAllowlist missing: {json}"
+    );
+
+    // The snake_case spellings must be gone, not merely duplicated — a
+    // frontend reading either name should not silently keep working.
+    assert!(json.get("agent_type").is_none(), "stale agent_type: {json}");
+    assert!(
+        json.get("channel_ids").is_none(),
+        "stale channel_ids: {json}"
+    );
+    assert!(json.get("respond_to").is_none(), "stale respond_to: {json}");
+}
+
+#[test]
+fn relay_agent_info_still_parses_snake_case_directory_content() {
+    // kind:10100 event content is snake_case. The camelCase rename must not
+    // break directory parsing, hence the per-field aliases.
+    let parsed: RelayAgentInfo = serde_json::from_str(
+        r#"{"pubkey":"aa","name":"Scout","agent_type":"agent","channels":[],
+            "channel_ids":["c1"],"capabilities":[],"status":"online",
+            "respond_to":"anyone","respond_to_allowlist":["bb"]}"#,
+    )
+    .expect("snake_case directory content must still parse");
+
+    assert_eq!(parsed.agent_type, "agent");
+    assert_eq!(parsed.channel_ids, vec!["c1".to_string()]);
+    assert_eq!(parsed.respond_to, Some(RespondTo::Anyone));
+    assert_eq!(parsed.respond_to_allowlist, vec!["bb".to_string()]);
+}
+
+#[test]
+fn relay_agent_info_round_trips_through_its_own_camel_case_output() {
+    // What the frontend receives must be re-readable by the same type;
+    // otherwise any future write-back path breaks.
+    let info = RelayAgentInfo {
+        pubkey: "aa".repeat(32),
+        name: "Scout".to_string(),
+        agent_type: "agent".to_string(),
+        channels: Vec::new(),
+        channel_ids: vec!["c1".to_string()],
+        capabilities: Vec::new(),
+        status: "online".to_string(),
+        respond_to: Some(RespondTo::Allowlist),
+        respond_to_allowlist: vec!["bb".repeat(32)],
+    };
+
+    let round_tripped: RelayAgentInfo =
+        serde_json::from_value(serde_json::to_value(&info).expect("serialize"))
+            .expect("deserialize");
+
+    assert_eq!(round_tripped.agent_type, info.agent_type);
+    assert_eq!(round_tripped.channel_ids, info.channel_ids);
+    assert_eq!(round_tripped.respond_to, info.respond_to);
+    assert_eq!(
+        round_tripped.respond_to_allowlist,
+        info.respond_to_allowlist
     );
 }
