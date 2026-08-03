@@ -2,6 +2,7 @@ import { ExternalLink } from "lucide-react";
 
 import type { SupportedLinkPreview } from "@/shared/lib/linkPreview";
 import { cn } from "@/shared/lib/cn";
+import { BuzzMark } from "@/shared/ui/buzz-logo/BuzzMark";
 import {
   Attachment,
   AttachmentActions,
@@ -91,6 +92,8 @@ function GoogleSlidesLogo({ className }: { className?: string }) {
 
 function LinkPreviewLogo({ preview }: { preview: SupportedLinkPreview }) {
   switch (preview.kind) {
+    case "buzz-repository":
+      return <BuzzMark className="h-4 w-4" />;
     case "github-issue":
     case "github-pull-request":
     case "github-repository":

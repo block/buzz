@@ -1,4 +1,5 @@
 export type SupportedLinkPreviewKind =
+  | "buzz-repository"
   | "github-pull-request"
   | "github-issue"
   | "github-repository"
@@ -13,6 +14,7 @@ export type SupportedLinkPreview = {
   kind: SupportedLinkPreviewKind;
   href: string;
   provider:
+    | "Buzz"
     | "GitHub"
     | "Linear"
     | "Google Drive"
@@ -31,10 +33,13 @@ export type SupportedLinkPreview = {
     | "presentation";
 };
 
+// Buzz relay hosts differ per community, so relay git URLs are recognized by
+// their distinctive path shape (`/git/<64-hex-pubkey>/<repo>`) rather than by
+// hostname, and require an explicit scheme.
 const SUPPORTED_URL_RE =
-  /(^|[\s([{<>"'])((?:https?:\/\/)?(?:(?:www\.)?github\.com|(?:www\.)?linear\.app|drive\.google\.com|docs\.google\.com)\/[^\s<>"'\]]+)/gi;
+  /(^|[\s([{<>"'])((?:https?:\/\/)?(?:(?:www\.)?github\.com|(?:www\.)?linear\.app|drive\.google\.com|docs\.google\.com)\/[^\s<>"'\]]+|https?:\/\/[^\s<>"'\]]+\/git\/[a-f0-9]{64}\/[^\s<>"'\]]+)/gi;
 const MARKDOWN_SUPPORTED_LINK_RE =
-  /!?\[([^\]\n]+)\]\(((?:https?:\/\/)?(?:(?:www\.)?github\.com|(?:www\.)?linear\.app|drive\.google\.com|docs\.google\.com)\/[^)\s<>"']+)\)/gi;
+  /!?\[([^\]\n]+)\]\(((?:https?:\/\/)?(?:(?:www\.)?github\.com|(?:www\.)?linear\.app|drive\.google\.com|docs\.google\.com)\/[^)\s<>"']+|https?:\/\/[^)\s<>"']+\/git\/[a-f0-9]{64}\/[^)\s<>"']+)\)/gi;
 const MAX_PREVIEWS = 8;
 
 type HiddenRange = {
@@ -266,6 +271,33 @@ function createPreview(
   };
 }
 
+const BUZZ_GIT_PATH_RE =
+  /^\/git\/[a-f0-9]{64}\/([a-zA-Z0-9._-]+?)(?:\.git)?\/?$/;
+
+/**
+ * Recognize a Buzz relay git URL (`{relay-origin}/git/<owner-pubkey>/<repo>`,
+ * the clone URL shape agents paste when announcing work). The card links to
+ * the relay-served web repo page (`/repos/<d-tag>`) instead of the raw git
+ * transport endpoint, which is not a browsable page.
+ */
+function parseBuzzGitLink(parsed: URL): SupportedLinkPreview | null {
+  const match = BUZZ_GIT_PATH_RE.exec(parsed.pathname);
+  if (!match) return null;
+
+  const repo = match[1];
+  if (repo.startsWith(".") || repo.includes("..") || repo.length > 64) {
+    return null;
+  }
+
+  return {
+    kind: "buzz-repository",
+    href: `${parsed.origin}/repos/${repo}`,
+    provider: "Buzz",
+    title: repo,
+    typeLabel: "repo",
+  };
+}
+
 function parseGithubLink(parsed: URL): SupportedLinkPreview | null {
   if (normalizeHostname(parsed) !== "github.com") {
     return null;
@@ -432,6 +464,7 @@ export function parseSupportedLinkPreview(
   }
 
   return (
+    parseBuzzGitLink(parsed) ??
     parseGithubLink(parsed) ??
     parseLinearIssue(parsed) ??
     parseGoogleDriveLink(parsed) ??

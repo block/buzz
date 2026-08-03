@@ -53,6 +53,55 @@ test("parseSupportedLinkPreview ignores unsupported GitHub URLs", () => {
   );
 });
 
+const BUZZ_OWNER =
+  "71d67180ba17e749ee825fc8819c9c6ee7003617e1c126504f9b658070ab9224";
+
+test("parseSupportedLinkPreview parses Buzz relay git clone URLs", () => {
+  assert.deepEqual(
+    parseSupportedLinkPreview(
+      `https://buzz.block.builderlab.xyz/git/${BUZZ_OWNER}/buzz-world-galaxy`,
+    ),
+    {
+      kind: "buzz-repository",
+      href: "https://buzz.block.builderlab.xyz/repos/buzz-world-galaxy",
+      provider: "Buzz",
+      title: "buzz-world-galaxy",
+      typeLabel: "repo",
+    },
+  );
+});
+
+test("parseSupportedLinkPreview strips .git suffix and keeps relay port", () => {
+  assert.deepEqual(
+    parseSupportedLinkPreview(
+      `http://localhost:3000/git/${BUZZ_OWNER}/buzz-world.git`,
+    ),
+    {
+      kind: "buzz-repository",
+      href: "http://localhost:3000/repos/buzz-world",
+      provider: "Buzz",
+      title: "buzz-world",
+      typeLabel: "repo",
+    },
+  );
+});
+
+test("parseSupportedLinkPreview rejects malformed Buzz git URLs", () => {
+  for (const href of [
+    // Owner segment must be a 64-char lowercase hex pubkey.
+    "https://relay.example/git/not-a-pubkey/repo",
+    `https://relay.example/git/${BUZZ_OWNER.toUpperCase()}/repo`,
+    `https://relay.example/git/${BUZZ_OWNER.slice(0, 32)}/repo`,
+    // Missing or invalid repo segment.
+    `https://relay.example/git/${BUZZ_OWNER}`,
+    `https://relay.example/git/${BUZZ_OWNER}/.hidden`,
+    // Deeper transport paths are not repo links.
+    `https://relay.example/git/${BUZZ_OWNER}/repo/info/refs`,
+  ]) {
+    assert.equal(parseSupportedLinkPreview(href), null, href);
+  }
+});
+
 test("parseSupportedLinkPreview parses Linear issue URLs", () => {
   assert.deepEqual(
     parseSupportedLinkPreview(
@@ -111,6 +160,44 @@ test("extractSupportedLinkPreviews returns unique supported links in order", () 
       ].join(" "),
     ).map((preview) => preview.title),
     ["block/sprout #1", "BUG-2", "Document"],
+  );
+});
+
+test("extractSupportedLinkPreviews picks up bare Buzz clone URLs in prose", () => {
+  assert.deepEqual(
+    extractSupportedLinkPreviews(
+      `master pushed; clone: https://buzz.block.builderlab.xyz/git/${BUZZ_OWNER}/buzz-world-galaxy and review please.`,
+    ),
+    [
+      {
+        kind: "buzz-repository",
+        href: "https://buzz.block.builderlab.xyz/repos/buzz-world-galaxy",
+        provider: "Buzz",
+        title: "buzz-world-galaxy",
+        typeLabel: "repo",
+      },
+    ],
+  );
+});
+
+test("extractSupportedLinkPreviews uses markdown labels for Buzz repo links", () => {
+  assert.deepEqual(
+    extractSupportedLinkPreviews(
+      `[Buzz World](https://relay.example/git/${BUZZ_OWNER}/buzz-world-galaxy)`,
+    ).map((preview) => preview.title),
+    ["Buzz World"],
+  );
+});
+
+test("extractSupportedLinkPreviews dedupes clone URL variants of one repo", () => {
+  assert.deepEqual(
+    extractSupportedLinkPreviews(
+      [
+        `https://relay.example/git/${BUZZ_OWNER}/buzz-world-galaxy`,
+        `https://relay.example/git/${BUZZ_OWNER}/buzz-world-galaxy.git`,
+      ].join(" "),
+    ).map((preview) => preview.href),
+    ["https://relay.example/repos/buzz-world-galaxy"],
   );
 });
 

@@ -1,7 +1,9 @@
 # Buzz Entity Links
 
-Status: **draft spec** — no implementation yet.
-Branch: `spec/buzz-entity-links`.
+Status: **draft spec**. A first slice is implemented on this branch:
+HTTPS relay git clone URLs (`{relay-origin}/git/<pubkey>/<repo>`) render as
+Buzz repository preview cards in chat (see `desktop/src/shared/lib/linkPreview.ts`).
+Everything else below is unimplemented design.
 
 ## Problem
 
@@ -78,13 +80,22 @@ Validation rules match the existing codebase: `owner` and `id` are
 `/^[a-f0-9]{64}$/`; `d` follows addressable d-tag rules already enforced in
 `projectModels.ts` / `buzz-sdk`.
 
-### Why not HTTPS URLs?
+### HTTPS URLs
 
-The relay origin differs per community and the web client has no PR/issue
-routes. A custom-scheme link is community-relative by construction, matches
-the established `buzz://message` precedent, and requires no new relay
-surface. If web views land later, the desktop can additionally recognize
-`{relay-origin}/…` URLs with the same card treatment.
+Agents naturally paste HTTPS clone URLs
+(`{relay-origin}/git/<pubkey>/<repo>`) when announcing work, so those are
+recognized **first** — implemented on this branch. Detection keys on the
+path shape (`/git/` + 64-hex pubkey segment) rather than a host allow-list,
+since relay hosts differ per community; the card links to the relay-served
+web repo page (`/repos/<d-tag>`) because the raw transport URL is not
+browsable.
+
+PRs, issues, and projects have no HTTPS page to link to (the web client has
+no such routes), which is why they use the `buzz://` scheme above: it is
+community-relative by construction, matches the established `buzz://message`
+precedent, and requires no new relay surface. If web views land later, the
+desktop can additionally recognize those `{relay-origin}/…` URLs with the
+same card treatment.
 
 ## Rendering in chat (desktop)
 
@@ -202,6 +213,9 @@ No persona changes needed — the base prompt applies to all managed agents.
 
 ## Implementation plan (suggested PR slices)
 
+0. **HTTPS clone-URL repo cards** *(done, this branch)* — recognize relay
+   `/git/<pubkey>/<repo>` URLs in `linkPreview.ts`, `Buzz` provider card
+   with the `BuzzMark` logo, href rewritten to the web repo page.
 1. **Link core + cards** — `entityLink.ts`, detection in `linkPreview.ts`,
    `Buzz` card variant in `link-preview-attachment.tsx`, in-timeline click
    navigation, relay title enrichment. Unit tests
