@@ -16,6 +16,15 @@ pub mod docker;
 pub(crate) mod env;
 pub mod process;
 
+/// Default inactivity budget handed to every workload body as
+/// `BUZZ_ACP_EXIT_AFTER_INACTIVITY` — the I5 opt-in of
+/// docs/remote-agents.md §Auto-Stop. Mirrors the Kubernetes binding's
+/// `inactivity_seconds` schema default
+/// (`crates/buzz-backend-kubernetes/src/config.rs`): remote bodies opt in,
+/// and a node is remote by definition. `0` is a legal, blessed "no
+/// inactivity bound" and is never rejected.
+pub const DEFAULT_INACTIVITY_SECONDS: u64 = 7200;
+
 /// A body exit observed by a substrate.
 ///
 /// Substrates report only exits they did not cause themselves: a body that

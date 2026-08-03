@@ -30,21 +30,40 @@ Configuration:
 - `BUZZ_NODE_HARNESS_PATH` (or `--harness-path`) — optional explicit path to
   the `buzz-acp` harness binary used by the process substrate; defaults to a
   `buzz-acp` sibling of the node executable, then `PATH` lookup.
-- `BUZZ_NODE_AGENT_IMAGE` (or `--image`) — agent body image run by the docker
-  substrate for the bundled `buzz-agent` runtime and unknown runtimes;
-  defaults to `buzz-agent:local` (build it with `just agent-image` from
-  `Dockerfile.agent`). Catalog runtimes with their own image variant
-  (goose/claude/codex) run `<repository>:<runtime>` instead, derived by
-  replacing this image's tag — e.g. `--image myrepo/buzz-agent:v3` resolves
-  the goose runtime to `myrepo/buzz-agent:goose`. Variant images must
-  already be present on the node (`just agent-image goose|claude|codex`);
-  a deploy for a runtime whose image is missing fails closed with the exact
-  build command — the node never pulls or builds images.
+- `BUZZ_NODE_AGENT_IMAGE` (or `--image`) — base agent body image run by the
+  docker substrate for the bundled `buzz-agent` runtime and unknown runtimes.
+  Defaults to the published, digest-pinned buzz-sprig image
+  (`ghcr.io/block/buzz-sprig:sha-…@sha256:…` — pinned by digest because the
+  body holds an nsec; kept in sync with the Kubernetes backend's default).
+  Fully overridable with any tag, digest, or custom registry reference — the
+  operator's trust decision; `--image buzz-agent:local` remains the local-dev
+  path (build it with `just agent-image` from `Dockerfile.agent`). Catalog
+  runtimes with their own image variant resolve from
+  `BUZZ_NODE_VARIANT_IMAGE_REPO` instead, never from this image. A deploy
+  whose base image is missing fails closed with the exact
+  `docker pull <reference>` command — the node never pulls or builds images.
+- `BUZZ_NODE_VARIANT_IMAGE_REPO` (or `--variant-image-repo`) — local
+  repository the docker substrate resolves per-runtime image variants from:
+  catalog runtimes with their own variant (goose/claude/codex) run
+  `<repo>:<runtime>`. Defaults to `buzz-agent`, so the goose runtime runs
+  `buzz-agent:goose` etc., built on the node with
+  `just agent-image goose|claude|codex` (`Dockerfile.agent`) — these are the
+  "buzz-sprig plus your tools" override images. A deploy for a runtime whose
+  variant image is missing fails closed with the exact
+  `just agent-image <runtime>` build command.
 - `BUZZ_NODE_DOCKER_PATH` (or `--docker-path`) — docker CLI used by the docker
   substrate; defaults to `docker` on `PATH`.
 - `BUZZ_NODE_CONTAINER_RELAY_URL` (or `--container-relay-url`) — relay URL as
   reachable from inside agent containers. When absent, loopback relay hosts
   (`localhost`, `127.0.0.1`, …) are rewritten to `host.docker.internal`.
+- `BUZZ_NODE_INACTIVITY_SECONDS` (or `--inactivity-seconds`) — seconds of
+  inactivity (no dispatched events and no turn in flight) after which a
+  workload body exits on its own, fed to both launching substrates' bodies as
+  `BUZZ_ACP_EXIT_AFTER_INACTIVITY` (docs/remote-agents.md §Auto-Stop).
+  Defaults to `7200`, mirroring the Kubernetes backend. `0` is legal and
+  means no inactivity bound (the variable is omitted; the harness default is
+  disabled). A body that reaps itself is recorded as stopped and never
+  resurrected.
 
 Both launching substrates hand each agent body its identity and relay
 settings via environment variables (the same contract the Desktop launcher
@@ -76,11 +95,12 @@ variant (`Dockerfile.agent`, `RUNTIME` build arg — build with
 `just agent-image goose|claude|codex`), which bakes that runtime onto the
 container `PATH` using the same official installer the Desktop auto-install
 runs, with `CLAUDE_CODE_EXECUTABLE` pointing at the in-image Claude CLI in
-the `claude` variant. The slim default image (`just agent-image`) carries
-only the sprig personalities and runs `buzz-agent`; every image records its
+the `claude` variant. The base image (the digest-pinned buzz-sprig default,
+or the slim local `just agent-image` build) carries only the sprig
+personalities and runs `buzz-agent`; every locally built image records its
 runtime in the `buzz.runtime` OCI label and the `BUZZ_IMAGE_RUNTIME` env
 var. Unknown runtime identifiers are attempted verbatim as a command name on
-either substrate (in the configured image on docker), so custom harness
+either substrate (in the configured base image on docker), so custom harness
 setups and custom images keep working.
 
 The data directory contains `identity.nsec` (the node identity), `owners.json`

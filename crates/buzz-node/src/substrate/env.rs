@@ -155,15 +155,19 @@ fn push(env: &mut Vec<(String, Zeroizing<String>)>, name: &str, value: impl Into
 /// Build the harness environment for one workload body.
 ///
 /// Mirrors the desktop launcher contract
-/// (`desktop/src-tauri/src/managed_agents/runtime.rs`). The returned values
-/// include the one-time launch key (`BUZZ_PRIVATE_KEY`), so every entry is
-/// zeroized on drop and the whole set must never be persisted or logged.
+/// (`desktop/src-tauri/src/managed_agents/runtime.rs`), plus the node-side
+/// inactivity bound (`inactivity_seconds`; `0` = no bound, omitted). The
+/// returned values include the one-time launch key (`BUZZ_PRIVATE_KEY`), so
+/// every entry is zeroized on drop and the whole set must never be persisted
+/// or logged.
 pub(crate) fn harness_environment(
     spec: &WorkloadSpec,
     agent: &AgentWorkloadContext,
+    owner: &str,
     launch_key: &str,
     relay_url: &str,
     launch: &RuntimeLaunch<'_>,
+    inactivity_seconds: u64,
 ) -> Vec<(String, Zeroizing<String>)> {
     let mut env: Vec<(String, Zeroizing<String>)> = Vec::new();
 
@@ -172,6 +176,14 @@ pub(crate) fn harness_environment(
     push(&mut env, "BUZZ_RELAY_URL", relay_url);
     if let Some(auth_tag) = &agent.auth_tag {
         push(&mut env, "BUZZ_AUTH_TAG", auth_tag.as_str());
+    } else {
+        // A body with no resolvable owner cannot match `!shutdown` and drops
+        // everything under `respond_to=owner-only`, so when there is no
+        // NIP-OA attestation to derive the owner from, hand the harness the
+        // verified command signer through its own fallback
+        // (`BUZZ_ACP_AGENT_OWNER`, `resolve_agent_owner` in
+        // crates/buzz-acp/src/lib.rs).
+        push(&mut env, "BUZZ_ACP_AGENT_OWNER", owner);
     }
 
     // ── Harness contract. ───────────────────────────────────────────────────
@@ -197,6 +209,18 @@ pub(crate) fn harness_environment(
     }
     if let Some(max_turn) = agent.runtime_settings.max_turn_duration_seconds {
         push(&mut env, "BUZZ_ACP_MAX_TURN_DURATION", max_turn.to_string());
+    }
+    // Inactivity self-termination (the spec's I5 enforcement point,
+    // docs/remote-agents.md §Auto-Stop): remote bodies opt IN, and a node is
+    // remote by definition. `0` is the legal "no inactivity bound" — the
+    // harness default already means disabled, so the variable is omitted
+    // instead of set to 0.
+    if inactivity_seconds > 0 {
+        push(
+            &mut env,
+            "BUZZ_ACP_EXIT_AFTER_INACTIVITY",
+            inactivity_seconds.to_string(),
+        );
     }
     push(
         &mut env,
@@ -237,4 +261,86 @@ pub(crate) fn harness_environment(
     }
 
     env
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use buzz_core::execution::WorkloadId;
+    use nostr::Keys;
+
+    const OWNER: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+
+    fn environment_for(auth_tag: Option<String>) -> Vec<(String, Zeroizing<String>)> {
+        let agent = AgentWorkloadContext::new(
+            Keys::generate().public_key().to_hex(),
+            None,
+            None,
+            auth_tag,
+            None,
+            Vec::new(),
+            None,
+        )
+        .expect("agent context");
+        let mut spec = WorkloadSpec::agent(
+            WorkloadId::random(),
+            "Owner fallback test agent",
+            "buzz-agent",
+            None,
+            None,
+            Vec::new(),
+        )
+        .expect("workload spec");
+        spec.agent = Some(agent);
+        let agent = spec.agent.clone().expect("agent");
+        let launch = RuntimeLaunch {
+            agent_command: "buzz-agent",
+            mcp_command: None,
+            default_env: &[],
+            model_env: None,
+            provider_env: None,
+        };
+        harness_environment(
+            &spec,
+            &agent,
+            OWNER,
+            "nsec1launchkey",
+            "wss://relay.example",
+            &launch,
+            0,
+        )
+    }
+
+    fn value_of<'a>(
+        env: &'a [(String, Zeroizing<String>)],
+        name: &str,
+    ) -> Option<&'a Zeroizing<String>> {
+        env.iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value)
+    }
+
+    #[test]
+    fn without_an_auth_tag_the_body_gets_the_owner_fallback() {
+        let env = environment_for(None);
+        assert_eq!(
+            value_of(&env, "BUZZ_ACP_AGENT_OWNER").map(|value| value.as_str()),
+            Some(OWNER),
+            "a body with no attestation must still resolve its owner"
+        );
+        assert!(value_of(&env, "BUZZ_AUTH_TAG").is_none());
+    }
+
+    #[test]
+    fn with_an_auth_tag_the_attestation_stays_the_only_owner_source() {
+        let env = environment_for(Some("auth-tag-payload".to_string()));
+        assert_eq!(
+            value_of(&env, "BUZZ_AUTH_TAG").map(|value| value.as_str()),
+            Some("auth-tag-payload")
+        );
+        assert!(
+            value_of(&env, "BUZZ_ACP_AGENT_OWNER").is_none(),
+            "the attestation already carries the owner"
+        );
+    }
 }

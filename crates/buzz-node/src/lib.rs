@@ -32,9 +32,13 @@ use tracing::warn;
 
 pub mod substrate;
 
-pub use substrate::docker::{DockerSubstrate, DockerSubstrateConfig};
+pub use substrate::docker::{
+    DockerSubstrate, DockerSubstrateConfig, DEFAULT_AGENT_IMAGE, DEFAULT_VARIANT_IMAGE_REPO,
+};
 pub use substrate::process::{ProcessSubstrate, ProcessSubstrateConfig};
-pub use substrate::{InertSubstrate, Substrate, SubstrateError, WorkloadExit};
+pub use substrate::{
+    InertSubstrate, Substrate, SubstrateError, WorkloadExit, DEFAULT_INACTIVITY_SECONDS,
+};
 
 /// Environment-driven configuration for a node process.
 #[derive(Debug, Clone)]

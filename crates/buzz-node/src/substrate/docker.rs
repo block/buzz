@@ -1,19 +1,25 @@
 //! Docker substrate: runs each workload body as a Docker container.
 //!
 //! A deploy replaces any previous container for the workload (`docker rm -f`,
-//! then `docker run -d`) using an agent body image built from
-//! `Dockerfile.agent` — `buzz-acp` as the entrypoint. The image comes in
-//! per-runtime variants (the `RUNTIME` build arg): the slim default carries
-//! only the sprig personalities (`buzz-agent`, `buzz-dev-mcp`), and each
-//! catalog runtime of [`env::known_runtime`] with its own tooling — Goose,
-//! the Claude Code and Codex CLIs with their npm ACP adapters — ships as its
-//! own variant. The substrate resolves the image per workload runtime (see
-//! [`DockerSubstrateConfig::image`]) and fails a deploy closed when the
-//! resolved image is not present on the node — it never pulls or builds. The
-//! harness environment contract is shared with the process substrate
-//! ([`super::env`]); it reaches the container through a short-lived `0600`
-//! env-file (plus name-only `-e` pass-through for values an env-file cannot
-//! carry), never through command-line arguments.
+//! then `docker run -d`) using an agent body image with `buzz-acp` as the
+//! entrypoint. The base image defaults to the published, digest-pinned
+//! buzz-sprig image ([`DEFAULT_AGENT_IMAGE`] — the body holds an nsec, so the
+//! default is immutable by construction, docs/remote-agents.md §Image); it
+//! serves the bundled `buzz-agent` runtime and unknown runtimes, and remains
+//! fully overridable via [`DockerSubstrateConfig::image`] (tag, digest, or
+//! custom registry — the operator's trust decision, e.g. a local
+//! `Dockerfile.agent` build). Each catalog runtime of [`env::known_runtime`]
+//! with its own tooling — Goose, the Claude Code and Codex CLIs with their
+//! npm ACP adapters — resolves instead from a dedicated local variant
+//! repository ([`DockerSubstrateConfig::variant_image_repo`], default
+//! `buzz-agent`) as `<repo>:<runtime>`, built on the node via
+//! `just agent-image <runtime>` (`Dockerfile.agent`, `RUNTIME` build arg) —
+//! the spec's "buzz-sprig plus your tools" override images. The substrate
+//! fails a deploy closed when the resolved image is not present on the node —
+//! it never pulls or builds. The harness environment contract is shared with
+//! the process substrate ([`super::env`]); it reaches the container through
+//! a short-lived `0600` env-file (plus name-only `-e` pass-through for
+//! values an env-file cannot carry), never through command-line arguments.
 //!
 //! ## The container is the key store
 //!
@@ -49,6 +55,22 @@ use zeroize::Zeroizing;
 
 use super::{env, Substrate, SubstrateError, WorkloadExit};
 
+/// Default agent body image: the published sprig agent-body image, pinned by
+/// digest because the body holds an nsec — a tag is a movable pointer, a
+/// digest is not (docs/remote-agents.md §Image). The tag stays in the
+/// reference so the image remains human-traceable to its git SHA while the
+/// digest does the pinning.
+///
+/// Keep in sync with crates/buzz-backend-kubernetes/src/config.rs
+/// `DEFAULT_IMAGE` (the Kubernetes binding pins the same image; a unit test
+/// asserts the two constants match so drift fails the build).
+pub const DEFAULT_AGENT_IMAGE: &str = "ghcr.io/block/buzz-sprig:sha-6530b58@sha256:17facfc7608d8ddb33bc056c9aaba1098f4ef6abe5655702fbfd7584d1f74d76";
+
+/// Default local repository for per-runtime agent image variants
+/// (`<repo>:<runtime>`), matching what `just agent-image <runtime>` tags
+/// (`Dockerfile.agent`).
+pub const DEFAULT_VARIANT_IMAGE_REPO: &str = "buzz-agent";
+
 /// Container label carrying the owner scope of a workload container.
 const LABEL_OWNER: &str = "buzz.node.owner";
 
@@ -68,6 +90,20 @@ const LOOPBACK_HOSTS: &[&str] = &["localhost", "127.0.0.1", "0.0.0.0", "[::1]"];
 /// own.
 const FORWARDED_NODE_ENV: &[&str] = &["RUST_LOG"];
 
+/// Bound on the liveness confirmation a container must pass before a
+/// deploy/start/restart is reported as succeeded.
+///
+/// `docker run -d` exiting zero only means the daemon accepted the container:
+/// a body that dies immediately (missing provider credential, unusable
+/// runtime) would otherwise earn a `Succeeded` receipt. A container that is
+/// already running answers on the first poll, so this bound is only ever paid
+/// by a body that is failing. The `docker wait` watcher stays the
+/// after-the-fact path for everything that dies later.
+const LIVENESS_TIMEOUT: Duration = Duration::from_millis(2000);
+
+/// Gap between `docker inspect` liveness polls.
+const LIVENESS_POLL: Duration = Duration::from_millis(100);
+
 /// In-image path of the `claude` CLI (installed into the `buzz` user's home
 /// by the `claude` variant of `Dockerfile.agent`). The Claude ACP adapter is
 /// pointed at it through `CLAUDE_CODE_EXECUTABLE` — an in-image path, never a
@@ -84,15 +120,21 @@ pub struct DockerSubstrateConfig {
     /// Relay the node itself is connected to — the fallback relay for bodies
     /// whose agent context does not carry one.
     pub relay_url: String,
-    /// Agent body image for workloads the slim image can run (built from
-    /// `Dockerfile.agent`, e.g. via `just agent-image`): the bundled
-    /// `buzz-agent` runtime and unknown runtime identifiers, which custom
-    /// images may carry. Catalog runtimes with their own image variant
-    /// (goose/claude/codex) run `<repository>:<runtime-id>` instead, where
-    /// the repository is this image with its tag (or digest) stripped —
-    /// e.g. `--image myrepo/buzz-agent:v3` resolves the goose runtime to
-    /// `myrepo/buzz-agent:goose`.
+    /// Base agent body image for the bundled `buzz-agent` runtime and
+    /// unknown runtime identifiers (which custom images may carry). Defaults
+    /// to the digest-pinned published sprig image
+    /// ([`DEFAULT_AGENT_IMAGE`]); overridable with any tag, digest, or
+    /// custom registry reference — the operator's trust decision (e.g.
+    /// `buzz-agent:local` from a local `just agent-image` build). Catalog
+    /// runtimes with their own image variant (goose/claude/codex) resolve
+    /// from [`Self::variant_image_repo`] instead, never from this image.
     pub image: String,
+    /// Local repository for per-runtime agent image variants: catalog
+    /// runtimes with an `image_variant` run `<repo>:<runtime>` (e.g.
+    /// `buzz-agent:goose`), built on the node via
+    /// `just agent-image <runtime>` (`Dockerfile.agent`). Defaults to
+    /// [`DEFAULT_VARIANT_IMAGE_REPO`].
+    pub variant_image_repo: String,
     /// Docker CLI used for every daemon interaction.
     pub docker_path: PathBuf,
     /// Relay URL as reachable from inside containers. When absent, loopback
@@ -101,18 +143,27 @@ pub struct DockerSubstrateConfig {
     /// Grace period `docker stop`/`docker restart` allow between SIGTERM and
     /// the SIGKILL escalation.
     pub graceful_stop: Duration,
+    /// Inactivity budget handed to every body as
+    /// `BUZZ_ACP_EXIT_AFTER_INACTIVITY` (docs/remote-agents.md §Auto-Stop).
+    /// `0` is the legal "no inactivity bound" and omits the variable — the
+    /// harness default already means disabled.
+    pub inactivity_seconds: u64,
 }
 
 impl DockerSubstrateConfig {
-    /// Build a configuration with default docker lookup and stop behavior.
+    /// Build a configuration with default docker lookup, stop behavior,
+    /// variant image repository ([`DEFAULT_VARIANT_IMAGE_REPO`]), and
+    /// inactivity budget ([`super::DEFAULT_INACTIVITY_SECONDS`]).
     pub fn new(data_dir: PathBuf, relay_url: impl Into<String>, image: impl Into<String>) -> Self {
         Self {
             data_dir,
             relay_url: relay_url.into(),
             image: image.into(),
+            variant_image_repo: DEFAULT_VARIANT_IMAGE_REPO.to_string(),
             docker_path: PathBuf::from("docker"),
             container_relay_url: None,
             graceful_stop: Duration::from_secs(10),
+            inactivity_seconds: super::DEFAULT_INACTIVITY_SECONDS,
         }
     }
 
@@ -135,29 +186,18 @@ impl DockerSubstrateConfig {
 
     /// Resolve the agent body image for one runtime's image variant.
     ///
-    /// `None` (the slim image suffices, or the runtime is unknown and may
-    /// live in a custom image) resolves to the configured image verbatim.
-    /// `Some(variant)` resolves to `<repository>:<variant>`, where the
-    /// repository is the configured image with its tag or digest stripped:
-    /// the default `buzz-agent:local` yields `buzz-agent:goose`, an operator
-    /// override `myrepo/buzz-agent:v3` yields `myrepo/buzz-agent:goose`.
+    /// `None` (the base image suffices, or the runtime is unknown and may
+    /// live in a custom image) resolves to the configured base image
+    /// verbatim — including a digest-pinned default. `Some(variant)`
+    /// resolves to `<variant_image_repo>:<variant>` (the default repository
+    /// yields `buzz-agent:goose`), never from the base image: deriving
+    /// variant tags from a digest-pinned reference would point at tags that
+    /// do not exist on the registry.
     fn image_for(&self, variant: Option<&str>) -> String {
-        let Some(variant) = variant else {
-            return self.image.clone();
-        };
-        format!("{}:{variant}", image_repository(&self.image))
-    }
-}
-
-/// Strip the tag or digest off an image reference, leaving the repository.
-///
-/// A trailing `:tag` is only a tag when it comes after the last `/` —
-/// `registry:5000/buzz-agent` has no tag, only a registry port.
-fn image_repository(image: &str) -> &str {
-    let repository = image.split_once('@').map_or(image, |(repo, _)| repo);
-    match repository.rsplit_once(':') {
-        Some((repo, tag)) if !tag.contains('/') => repo,
-        _ => repository,
+        match variant {
+            None => self.image.clone(),
+            Some(variant) => format!("{}:{variant}", self.variant_image_repo),
+        }
     }
 }
 
@@ -370,6 +410,46 @@ impl DockerSubstrate {
         });
     }
 
+    /// Confirm a just-launched container is actually running, polling
+    /// `docker inspect` within [`LIVENESS_TIMEOUT`].
+    ///
+    /// A container that fails this check is deliberately left in place: it is
+    /// still the workload's key store, and `docker logs` on it is the only
+    /// diagnostic the operator has. Nothing is armed for it, so the substrate
+    /// treats it as not running — a later `start` retries that same container
+    /// rather than mistaking it for a live body.
+    async fn confirm_running(&self, container: &str) -> Result<(), SubstrateError> {
+        let deadline = tokio::time::Instant::now() + LIVENESS_TIMEOUT;
+        let mut state: String;
+        loop {
+            let output = self
+                .docker_output(
+                    &["inspect", "--format", "{{.State.Running}}", container],
+                    &[],
+                )
+                .await?;
+            if output.status.success() {
+                state = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if state == "true" {
+                    return Ok(());
+                }
+            } else {
+                state = stderr_snippet(&output.stderr);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(LIVENESS_POLL).await;
+        }
+        Err(SubstrateError::new(
+            SafeErrorCode::RuntimeFailed,
+            format!(
+                "container {container} is not running shortly after launch \
+                 (docker reported {state:?}); inspect it with `docker logs {container}`"
+            ),
+        ))
+    }
+
     /// Recover the launch key from an existing container's environment — the
     /// container-as-key-store read path used by keyless redeploys.
     async fn recover_launch_key(
@@ -399,8 +479,10 @@ impl DockerSubstrate {
 
     /// Require the resolved agent body image to be present on the node,
     /// failing the deploy closed when it is not. The substrate never pulls
-    /// or builds an image — the error tells the operator the exact
-    /// `just agent-image` invocation that produces the missing variant.
+    /// or builds an image (launch stages an exact artifact) — the error
+    /// tells the operator the one exact command that produces it: `docker
+    /// pull` of the full configured reference for the base image, the
+    /// `just agent-image <runtime>` build for a variant image.
     async fn require_local_image(
         &self,
         image: &str,
@@ -412,16 +494,15 @@ impl DockerSubstrate {
         if inspect.status.success() {
             return Ok(());
         }
-        let build_command = match variant {
-            Some(variant) => format!("just agent-image {variant}"),
-            None => "just agent-image".to_string(),
+        let remedy = match variant {
+            Some(variant) => {
+                format!("build it on the node with `just agent-image {variant}` (Dockerfile.agent)")
+            }
+            None => format!("pull it on the node with `docker pull {image}`"),
         };
         Err(SubstrateError::new(
             SafeErrorCode::RuntimeUnavailable,
-            format!(
-                "agent image {image} is not present on this node; build it on the node \
-                 with `{build_command}` (Dockerfile.agent) and redeploy"
-            ),
+            format!("agent image {image} is not present on this node; {remedy} and redeploy"),
         ))
     }
 
@@ -463,9 +544,11 @@ impl DockerSubstrate {
         let mut environment = env::harness_environment(
             spec,
             agent,
+            owner,
             launch_key.as_str(),
             &relay_url,
             &resolved.launch,
+            self.config.inactivity_seconds,
         );
         if resolved.wants_claude_cli {
             environment.push((
@@ -538,6 +621,7 @@ impl DockerSubstrate {
                 ),
             ));
         }
+        self.confirm_running(&container).await?;
         self.arm_exit_watcher(key, container).await;
         Ok(())
     }
@@ -652,6 +736,7 @@ impl Substrate for DockerSubstrate {
                 format!("docker start: {}", stderr_snippet(&output.stderr)),
             ));
         }
+        self.confirm_running(&container).await?;
         self.arm_exit_watcher(key, container).await;
         Ok(())
     }
@@ -694,6 +779,7 @@ impl Substrate for DockerSubstrate {
                 format!("docker restart: {}", stderr_snippet(&output.stderr)),
             ));
         }
+        self.confirm_running(&container).await?;
         self.arm_exit_watcher(key, container).await;
         Ok(())
     }
@@ -848,8 +934,15 @@ case "$cmd" in
     echo "[]"
     ;;
   inspect)
-    [ -f "$DIR/envfile.captured" ] || {{ echo "Error: No such container" >&2; exit 1; }}
-    cat "$DIR/envfile.captured"
+    case "$2" in
+      *State.Running*)
+        if [ -f "$DIR/notrunning.flag" ]; then echo false; else echo true; fi
+        ;;
+      *)
+        [ -f "$DIR/envfile.captured" ] || {{ echo "Error: No such container" >&2; exit 1; }}
+        cat "$DIR/envfile.captured"
+        ;;
+    esac
     ;;
   run)
     prev=""
@@ -1012,6 +1105,40 @@ exit 0
     }
 
     #[tokio::test]
+    async fn deploy_fails_when_the_container_is_not_running_shortly_after_launch() {
+        let dir = temp_dir();
+        let (substrate, mut exits) = connected_substrate(&dir).await;
+        // The daemon accepted `docker run -d`, but the body died immediately.
+        fs::write(dir.join("notrunning.flag"), "").expect("marker");
+        let (nsec, pubkey) = generated_agent_key();
+        let spec = agent_spec(Some(&nsec), &pubkey);
+
+        let error = substrate
+            .deploy("owner", &spec)
+            .await
+            .expect_err("deploy must not succeed before the body is known to run");
+        assert_eq!(error.code, SafeErrorCode::RuntimeFailed);
+        assert!(
+            error.message.contains(&format!(
+                "docker logs buzz-agent-owner-{}",
+                spec.workload_id.as_str()
+            )),
+            "the node-local message must point at the container's logs: {}",
+            error.message
+        );
+        let log = calls(&dir);
+        assert!(log.contains("run -d"), "{log}");
+        // Nothing is armed for a container that never came up, so the
+        // substrate does not mistake it for a live body.
+        assert!(substrate.entries.lock().await.is_empty());
+        assert!(
+            exits.try_recv().is_err(),
+            "a failed deploy reports through its receipt, not the exit channel"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
     async fn deploy_passes_multiline_values_through_the_client_environment_not_argv() {
         let dir = temp_dir();
         fs::write(dir.join("wait.code"), "0\n").expect("wait code");
@@ -1110,7 +1237,8 @@ exit 0
     async fn catalog_runtimes_map_to_variant_images_and_harness_env() {
         // Goose: the CLI itself is the ACP agent, non-interactive by default,
         // model via GOOSE_MODEL. No developer MCP. Runs its own image
-        // variant, derived from the configured image's repository.
+        // variant, resolved from the dedicated variant repository (default
+        // `buzz-agent`), not from the configured base image.
         let (goose, goose_run) = deploy_capture("goose").await;
         assert!(goose.contains("BUZZ_ACP_AGENT_COMMAND=goose\n"));
         assert!(goose.contains("BUZZ_ACP_MCP_COMMAND=\n"));
@@ -1192,7 +1320,8 @@ exit 0
         );
         assert!(!log.contains("run -d"), "{log}");
 
-        // The slim configured image missing points at the default build.
+        // The base image missing points at the exact pull of the full
+        // configured reference — the one narrow path that stages it.
         fs::write(dir.join("missing-images"), "buzz-agent:test\n").expect("marker");
         spec.runtime = "buzz-agent".to_string();
         let error = substrate
@@ -1206,47 +1335,116 @@ exit 0
             error.message
         );
         assert!(
-            error.message.contains("`just agent-image`"),
-            "{}",
+            error.message.contains("`docker pull buzz-agent:test`"),
+            "the error must name the exact pull command for the full \
+             configured reference: {}",
             error.message
         );
         let _ = fs::remove_dir_all(dir);
     }
 
+    #[tokio::test]
+    async fn inactivity_bound_reaches_the_env_file_and_zero_omits_it() {
+        // Default configuration: the node's remote-body opt-in (7200s).
+        let dir = temp_dir();
+        fs::write(dir.join("wait.code"), "0\n").expect("wait code");
+        let (substrate, _exits) = connected_substrate(&dir).await;
+        assert_eq!(
+            substrate.config.inactivity_seconds,
+            crate::substrate::DEFAULT_INACTIVITY_SECONDS
+        );
+        let (nsec, pubkey) = generated_agent_key();
+        let spec = agent_spec(Some(&nsec), &pubkey);
+        substrate.deploy("owner", &spec).await.expect("deploy");
+        let env_file = fs::read_to_string(dir.join("envfile.captured")).expect("captured env");
+        assert!(
+            env_file.contains("BUZZ_ACP_EXIT_AFTER_INACTIVITY=7200\n"),
+            "{env_file}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+
+        // 0 is the legal "no inactivity bound": the variable is omitted so
+        // the harness default (disabled) stays the single source of truth.
+        let dir = temp_dir();
+        fs::write(dir.join("wait.code"), "0\n").expect("wait code");
+        let stub = write_stub_docker(&dir);
+        let mut config = DockerSubstrateConfig::new(
+            dir.clone(),
+            "ws://localhost:3000".to_string(),
+            "buzz-agent:test".to_string(),
+        );
+        config.docker_path = stub;
+        config.inactivity_seconds = 0;
+        let (substrate, _exits) = DockerSubstrate::connect(config).await.expect("connect");
+        let spec = agent_spec(Some(&nsec), &pubkey);
+        substrate.deploy("owner", &spec).await.expect("deploy");
+        let env_file = fs::read_to_string(dir.join("envfile.captured")).expect("captured env");
+        assert!(
+            !env_file.contains("BUZZ_ACP_EXIT_AFTER_INACTIVITY"),
+            "0 must omit the variable entirely: {env_file}"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
     #[test]
-    fn runtime_image_variants_derive_from_the_configured_repository() {
+    fn runtime_image_variants_resolve_from_the_dedicated_variant_repository() {
         let config = |image: &str| {
             DockerSubstrateConfig::new(PathBuf::from("/tmp"), "ws://localhost:3000", image)
         };
-        // Default image: tag replaced by the variant id.
+        // Variants come from the variant repository, never from the base
+        // image — the digest-pinned default has no goose/claude/codex tags
+        // on its registry.
         assert_eq!(
-            config("buzz-agent:local").image_for(Some("goose")),
+            config(DEFAULT_AGENT_IMAGE).image_for(Some("goose")),
             "buzz-agent:goose"
         );
-        // Operator-overridden repository (and tag): repository kept, tag
-        // replaced.
         assert_eq!(
             config("myrepo/buzz-agent:v3").image_for(Some("claude")),
-            "myrepo/buzz-agent:claude"
+            "buzz-agent:claude"
         );
-        // A registry port is not a tag.
+        // The variant repository itself is configurable.
+        let mut custom = config(DEFAULT_AGENT_IMAGE);
+        custom.variant_image_repo = "registry.example:5000/buzz-agent".to_string();
         assert_eq!(
-            config("registry.example:5000/buzz-agent").image_for(Some("codex")),
+            custom.image_for(Some("codex")),
             "registry.example:5000/buzz-agent:codex"
         );
-        // Digest pins are stripped the same way tags are.
+        // No variant: the configured base image runs verbatim — tag, digest,
+        // or custom registry, including the digest-pinned default.
         assert_eq!(
-            config("buzz-agent@sha256:deadbeef").image_for(Some("goose")),
-            "buzz-agent:goose"
+            config(DEFAULT_AGENT_IMAGE).image_for(None),
+            DEFAULT_AGENT_IMAGE
         );
         assert_eq!(
-            config("myrepo/buzz-agent:v3@sha256:deadbeef").image_for(Some("goose")),
-            "myrepo/buzz-agent:goose"
+            config("myrepo/buzz-agent:v3@sha256:deadbeef").image_for(None),
+            "myrepo/buzz-agent:v3@sha256:deadbeef"
         );
-        // No variant: the configured image runs verbatim.
         assert_eq!(
-            config("myrepo/buzz-agent:v3").image_for(None),
-            "myrepo/buzz-agent:v3"
+            config("buzz-agent:local").image_for(None),
+            "buzz-agent:local"
+        );
+    }
+
+    /// The default image must stay byte-identical to the Kubernetes
+    /// binding's `DEFAULT_IMAGE` — both pin the same published sprig image
+    /// by digest. `buzz-backend-kubernetes` does not depend on `buzz-core`,
+    /// so the constant cannot live in a shared crate; this test makes drift
+    /// a test failure instead of a silent divergence.
+    #[test]
+    fn default_image_matches_the_kubernetes_backend_pin() {
+        let source = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../buzz-backend-kubernetes/src/config.rs"
+        ));
+        let pinned = source
+            .lines()
+            .find_map(|line| line.strip_prefix("pub const DEFAULT_IMAGE: &str = \""))
+            .and_then(|rest| rest.split('"').next())
+            .expect("DEFAULT_IMAGE constant in buzz-backend-kubernetes/src/config.rs");
+        assert_eq!(
+            DEFAULT_AGENT_IMAGE, pinned,
+            "buzz-node's DEFAULT_AGENT_IMAGE drifted from the Kubernetes \
+             binding's DEFAULT_IMAGE; update both together"
         );
     }
 

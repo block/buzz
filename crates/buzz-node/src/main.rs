@@ -14,7 +14,8 @@ use buzz_node::{
     build_announcement_with_workloads_and_attestations, build_presence_event,
     parse_desktop_pairing_payload, DesktopPairingPayload, DockerSubstrate, DockerSubstrateConfig,
     ExecutionController, InertSubstrate, NodeConfig, NodeError, NodeIdentity, OwnerStore,
-    ProcessSubstrate, ProcessSubstrateConfig, Substrate, WorkloadExit,
+    ProcessSubstrate, ProcessSubstrateConfig, Substrate, WorkloadExit, DEFAULT_AGENT_IMAGE,
+    DEFAULT_INACTIVITY_SECONDS, DEFAULT_VARIANT_IMAGE_REPO,
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use futures_util::stream::FuturesUnordered;
@@ -54,12 +55,6 @@ struct Cli {
     command: Option<Command>,
 }
 
-/// Default agent body image run by the docker substrate. Built locally via
-/// `just agent-image` (Dockerfile.agent); per-runtime variants are built via
-/// `just agent-image goose|claude|codex` and resolved from this image's
-/// repository (see the `--image` flag).
-const DEFAULT_AGENT_IMAGE: &str = "buzz-agent:local";
-
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Connect to the relay and publish the node announcement.
@@ -75,17 +70,24 @@ enum Command {
         /// executable, then `PATH` lookup.
         #[arg(long, env = "BUZZ_NODE_HARNESS_PATH")]
         harness_path: Option<std::path::PathBuf>,
-        /// Agent body image used by the docker substrate for the bundled
-        /// `buzz-agent` runtime and unknown runtimes (built from
-        /// Dockerfile.agent, e.g. via `just agent-image`). Catalog runtimes
-        /// with their own image variant (goose/claude/codex) run
-        /// `<repository>:<runtime>` instead, derived by replacing this
-        /// image's tag — `--image myrepo/buzz-agent:v3` resolves the goose
-        /// runtime to `myrepo/buzz-agent:goose`. Images must already be
-        /// present on the node (`just agent-image <runtime>`); the node
+        /// Base agent body image used by the docker substrate for the
+        /// bundled `buzz-agent` runtime and unknown runtimes. Defaults to
+        /// the published, digest-pinned buzz-sprig image; overridable with
+        /// any tag, digest, or custom registry reference — the operator's
+        /// trust decision (`--image buzz-agent:local` for a local
+        /// `just agent-image` build). Catalog runtimes with their own image
+        /// variant (goose/claude/codex) resolve from `--variant-image-repo`
+        /// instead. Images must already be present on the node; the node
         /// never pulls or builds them.
         #[arg(long, env = "BUZZ_NODE_AGENT_IMAGE", default_value = DEFAULT_AGENT_IMAGE)]
         image: String,
+        /// Local repository the docker substrate resolves per-runtime image
+        /// variants from: catalog runtimes with their own variant
+        /// (goose/claude/codex) run `<repo>:<runtime>` — the default yields
+        /// `buzz-agent:goose` etc., built on the node via
+        /// `just agent-image <runtime>` (Dockerfile.agent).
+        #[arg(long, env = "BUZZ_NODE_VARIANT_IMAGE_REPO", default_value = DEFAULT_VARIANT_IMAGE_REPO)]
+        variant_image_repo: String,
         /// Docker CLI used by the docker substrate.
         #[arg(long, env = "BUZZ_NODE_DOCKER_PATH", default_value = "docker")]
         docker_path: std::path::PathBuf,
@@ -93,6 +95,13 @@ enum Command {
         /// loopback relay hosts are rewritten to `host.docker.internal`.
         #[arg(long, env = "BUZZ_NODE_CONTAINER_RELAY_URL")]
         container_relay_url: Option<String>,
+        /// Seconds of inactivity (no dispatched events, no turn in flight)
+        /// after which a workload body exits on its own
+        /// (`BUZZ_ACP_EXIT_AFTER_INACTIVITY`, docs/remote-agents.md
+        /// §Auto-Stop). Applies to both launching substrates. `0` is legal
+        /// and means no inactivity bound.
+        #[arg(long, env = "BUZZ_NODE_INACTIVITY_SECONDS", default_value_t = DEFAULT_INACTIVITY_SECONDS)]
+        inactivity_seconds: u64,
     },
     /// Complete an owner pairing session from a Desktop QR URI.
     Pair {
@@ -120,8 +129,10 @@ struct RunOptions {
     substrate: SubstrateChoice,
     harness_path: Option<std::path::PathBuf>,
     image: String,
+    variant_image_repo: String,
     docker_path: std::path::PathBuf,
     container_relay_url: Option<String>,
+    inactivity_seconds: u64,
 }
 
 /// Default `run` invocation used when no subcommand is given on the command
@@ -134,16 +145,26 @@ fn default_run_command() -> Result<Command> {
             .map_err(|error| anyhow::anyhow!("BUZZ_NODE_SUBSTRATE: {error}"))?,
         Err(_) => SubstrateChoice::Process,
     };
+    let inactivity_seconds = match std::env::var("BUZZ_NODE_INACTIVITY_SECONDS") {
+        Ok(value) => value
+            .trim()
+            .parse::<u64>()
+            .map_err(|error| anyhow::anyhow!("BUZZ_NODE_INACTIVITY_SECONDS: {error}"))?,
+        Err(_) => DEFAULT_INACTIVITY_SECONDS,
+    };
     Ok(Command::Run {
         substrate,
         harness_path: std::env::var_os("BUZZ_NODE_HARNESS_PATH").map(std::path::PathBuf::from),
         image: std::env::var("BUZZ_NODE_AGENT_IMAGE")
             .unwrap_or_else(|_| DEFAULT_AGENT_IMAGE.to_string()),
+        variant_image_repo: std::env::var("BUZZ_NODE_VARIANT_IMAGE_REPO")
+            .unwrap_or_else(|_| DEFAULT_VARIANT_IMAGE_REPO.to_string()),
         docker_path: std::env::var_os("BUZZ_NODE_DOCKER_PATH").map_or_else(
             || std::path::PathBuf::from("docker"),
             std::path::PathBuf::from,
         ),
         container_relay_url: std::env::var("BUZZ_NODE_CONTAINER_RELAY_URL").ok(),
+        inactivity_seconds,
     })
 }
 
@@ -156,15 +177,19 @@ async fn main() {
             substrate,
             harness_path,
             image,
+            variant_image_repo,
             docker_path,
             container_relay_url,
+            inactivity_seconds,
         }) => {
             run_node(RunOptions {
                 substrate,
                 harness_path,
                 image,
+                variant_image_repo,
                 docker_path,
                 container_relay_url,
+                inactivity_seconds,
             })
             .await
         }
@@ -196,6 +221,7 @@ async fn run_node(options: RunOptions) -> Result<()> {
             let mut substrate_config =
                 ProcessSubstrateConfig::new(config.data_dir.clone(), config.relay_url.clone());
             substrate_config.harness_path = options.harness_path;
+            substrate_config.inactivity_seconds = options.inactivity_seconds;
             let (substrate, exit_events) = ProcessSubstrate::new(substrate_config);
             (Arc::new(substrate), exit_events, None)
         }
@@ -205,8 +231,10 @@ async fn run_node(options: RunOptions) -> Result<()> {
                 config.relay_url.clone(),
                 options.image,
             );
+            substrate_config.variant_image_repo = options.variant_image_repo;
             substrate_config.docker_path = options.docker_path;
             substrate_config.container_relay_url = options.container_relay_url;
+            substrate_config.inactivity_seconds = options.inactivity_seconds;
             // Fail fast: refuse to announce a docker substrate the daemon
             // cannot honor.
             let (substrate, exit_events) = DockerSubstrate::connect(substrate_config)

@@ -29,6 +29,16 @@ const HARNESS_BINARY: &str = "buzz-acp";
 /// Bounded wait for a body to die after the SIGKILL escalation.
 const KILL_WAIT: Duration = Duration::from_secs(5);
 
+/// Default settle window a freshly spawned body must survive before a deploy
+/// is reported as succeeded ([`ProcessSubstrateConfig::spawn_settle`]).
+///
+/// `Command::spawn` only proves the fork/exec happened: a body that dies
+/// immediately (missing provider credential, unusable runtime) would
+/// otherwise earn a `Succeeded` receipt. Long enough to catch a fail-fast
+/// launch, short enough not to stall the command path. The exit watcher stays
+/// the after-the-fact path for everything that dies later.
+const DEFAULT_SPAWN_SETTLE: Duration = Duration::from_millis(300);
+
 /// Environment variables copied from the node's own environment into every
 /// workload body, on top of the shared provider-credential allowlist
 /// ([`env::PROVIDER_ENV`]).
@@ -71,16 +81,28 @@ pub struct ProcessSubstrateConfig {
     /// Grace period between SIGTERM and the SIGKILL escalation when stopping
     /// a body.
     pub graceful_stop: Duration,
+    /// Settle window a freshly spawned body must survive before a launch is
+    /// reported as succeeded ([`DEFAULT_SPAWN_SETTLE`]).
+    pub spawn_settle: Duration,
+    /// Inactivity budget handed to every body as
+    /// `BUZZ_ACP_EXIT_AFTER_INACTIVITY` (docs/remote-agents.md §Auto-Stop).
+    /// `0` is the legal "no inactivity bound" and omits the variable — the
+    /// harness default already means disabled.
+    pub inactivity_seconds: u64,
 }
 
 impl ProcessSubstrateConfig {
-    /// Build a configuration with default stop behavior and harness lookup.
+    /// Build a configuration with default stop behavior, harness lookup,
+    /// launch settle window ([`DEFAULT_SPAWN_SETTLE`]), and inactivity budget
+    /// ([`super::DEFAULT_INACTIVITY_SECONDS`]).
     pub fn new(data_dir: PathBuf, relay_url: impl Into<String>) -> Self {
         Self {
             data_dir,
             relay_url: relay_url.into(),
             harness_path: None,
             graceful_stop: Duration::from_secs(10),
+            spawn_settle: DEFAULT_SPAWN_SETTLE,
+            inactivity_seconds: super::DEFAULT_INACTIVITY_SECONDS,
         }
     }
 }
@@ -311,9 +333,15 @@ impl ProcessSubstrate {
             model_env: plan.model_env,
             provider_env: plan.provider_env,
         };
-        for (name, value) in
-            env::harness_environment(spec, agent, launch_key.as_str(), &relay_url, &launch)
-        {
+        for (name, value) in env::harness_environment(
+            spec,
+            agent,
+            owner,
+            launch_key.as_str(),
+            &relay_url,
+            &launch,
+            self.config.inactivity_seconds,
+        ) {
             command.env(name, value.as_str());
         }
         if plan.wants_claude_cli {
@@ -403,6 +431,26 @@ impl ProcessSubstrate {
                 });
             }
         });
+
+        // Bounded liveness confirmation: the watcher above owns `wait()`, so
+        // this only waits on the exit signal it raises — never a second wait
+        // on the same child.
+        let exited = Arc::clone(&handle.exited);
+        let settled = exited.notified();
+        tokio::pin!(settled);
+        if tokio::time::timeout(self.config.spawn_settle, &mut settled)
+            .await
+            .is_ok()
+            || handle.exit_observed.load(Ordering::Acquire)
+        {
+            return Err(SubstrateError::new(
+                SafeErrorCode::RuntimeFailed,
+                format!(
+                    "workload body exited immediately after launch; see the body log at {}",
+                    log_path.display()
+                ),
+            ));
+        }
         Ok(handle)
     }
 
@@ -728,7 +776,9 @@ mod tests {
     #[tokio::test]
     async fn self_exit_is_reported_with_exit_status_and_key_stays_out_of_debug_output() {
         let dir = temp_dir();
-        let harness = write_script(&dir, "clean-exit.sh", "exit 0");
+        // The body must outlive the launch settle window; it then exits on
+        // its own, which is what this test is about.
+        let harness = write_script(&dir, "clean-exit.sh", "sleep 1; exit 0");
         let (substrate, mut exits) = substrate_with_harness(&dir, harness);
         let (nsec, pubkey) = generated_agent_key();
         let spec = agent_spec(Some(&nsec), &pubkey);
@@ -746,7 +796,7 @@ mod tests {
         assert_eq!(exit.owner, "owner");
         assert!(exit.clean);
 
-        let failing = write_script(&dir, "failing-exit.sh", "exit 3");
+        let failing = write_script(&dir, "failing-exit.sh", "sleep 1; exit 3");
         let (substrate, mut exits) = substrate_with_harness(&dir, failing);
         let spec = agent_spec(Some(&nsec), &pubkey);
         substrate.deploy("owner", &spec).await.expect("deploy");
@@ -755,6 +805,86 @@ mod tests {
             .expect("exit before timeout")
             .expect("exit event");
         assert!(!exit.clean);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn inactivity_bound_reaches_the_body_environment_and_zero_omits_it() {
+        let dir = temp_dir();
+        let harness = write_script(
+            &dir,
+            "env-dump.sh",
+            &format!(
+                "printf '%s' \"${{BUZZ_ACP_EXIT_AFTER_INACTIVITY:-unset}}\" \
+                 > '{}/inactivity.captured'; sleep 1",
+                dir.display()
+            ),
+        );
+        let (nsec, pubkey) = generated_agent_key();
+
+        // Default configuration: the node's remote-body opt-in (7200s).
+        let (substrate, mut exits) = substrate_with_harness(&dir, harness.clone());
+        assert_eq!(
+            substrate.config.inactivity_seconds,
+            crate::substrate::DEFAULT_INACTIVITY_SECONDS
+        );
+        let spec = agent_spec(Some(&nsec), &pubkey);
+        substrate.deploy("owner", &spec).await.expect("deploy");
+        tokio::time::timeout(Duration::from_secs(10), exits.recv())
+            .await
+            .expect("exit before timeout")
+            .expect("exit event");
+        let captured = fs::read_to_string(dir.join("inactivity.captured")).expect("captured env");
+        assert_eq!(captured, "7200");
+
+        // 0 is the legal "no inactivity bound": the variable is omitted so
+        // the harness default (disabled) stays the single source of truth.
+        let mut config =
+            ProcessSubstrateConfig::new(dir.to_path_buf(), "ws://relay.example".to_string());
+        config.harness_path = Some(harness);
+        config.inactivity_seconds = 0;
+        let (substrate, mut exits) = ProcessSubstrate::new(config);
+        let spec = agent_spec(Some(&nsec), &pubkey);
+        substrate.deploy("owner", &spec).await.expect("deploy");
+        tokio::time::timeout(Duration::from_secs(10), exits.recv())
+            .await
+            .expect("exit before timeout")
+            .expect("exit event");
+        let captured = fs::read_to_string(dir.join("inactivity.captured")).expect("captured env");
+        assert_eq!(captured, "unset");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_body_that_exits_immediately_fails_the_deploy() {
+        let dir = temp_dir();
+        // A bad credential or unusable runtime looks exactly like this: the
+        // spawn succeeds, the body is gone a moment later.
+        let harness = write_script(&dir, "instant-exit.sh", "exit 1");
+        let mut config =
+            ProcessSubstrateConfig::new(dir.to_path_buf(), "ws://relay.example".to_string());
+        config.harness_path = Some(harness);
+        // A generous settle window keeps the assertion deterministic on a
+        // loaded machine; production uses DEFAULT_SPAWN_SETTLE.
+        config.spawn_settle = Duration::from_secs(5);
+        let (substrate, _exits) = ProcessSubstrate::new(config);
+        let (nsec, pubkey) = generated_agent_key();
+        let spec = agent_spec(Some(&nsec), &pubkey);
+
+        let error = substrate
+            .deploy("owner", &spec)
+            .await
+            .expect_err("deploy must not succeed before the body is known to run");
+        assert_eq!(error.code, SafeErrorCode::RuntimeFailed);
+        assert!(
+            error
+                .message
+                .contains(&substrate.log_path(&spec.workload_id).display().to_string()),
+            "the node-local message must point at the body log: {}",
+            error.message
+        );
+        // A failed launch records no live body.
+        assert!(substrate.entries.lock().await.is_empty());
         let _ = fs::remove_dir_all(dir);
     }
 
