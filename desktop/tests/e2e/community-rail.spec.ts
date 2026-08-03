@@ -467,6 +467,31 @@ test.describe("community rail", () => {
         ),
       )
       .not.toBeNull();
+    expect(
+      await page.evaluate(async () => {
+        const testWindow = window as Window & {
+          __BUZZ_E2E_DEFER_NEXT_CHANNELS_READ__?: () => void;
+          __BUZZ_E2E_RELEASE_CHANNELS_READ__?: () => number;
+          __BUZZ_E2E_CHANNELS_READ_PENDING__?: number;
+          __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+            command: string,
+          ) => Promise<unknown>;
+        };
+        const deferNext = testWindow.__BUZZ_E2E_DEFER_NEXT_CHANNELS_READ__;
+        const release = testWindow.__BUZZ_E2E_RELEASE_CHANNELS_READ__;
+        const invoke = testWindow.__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+        if (!deferNext || !release || !invoke) {
+          throw new Error("missing channel-read latch seam");
+        }
+        deferNext();
+        const released = release();
+        await invoke("get_channels");
+        return {
+          released,
+          pending: testWindow.__BUZZ_E2E_CHANNELS_READ_PENDING__,
+        };
+      }),
+    ).toEqual({ released: 0, pending: 0 });
     await page.evaluate(() => {
       const source = window.localStorage.getItem(
         "buzz-channels.v1:ws://localhost:3000",
@@ -512,6 +537,27 @@ test.describe("community rail", () => {
           }
         ).__BUZZ_E2E_CHANNELS_READ_PENDING__ === 1,
     );
+    await page.evaluate(async () => {
+      const invoke = (
+        window as Window & {
+          __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+            command: string,
+          ) => Promise<unknown>;
+        }
+      ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+      if (!invoke) throw new Error("missing mock command seam");
+      await invoke("get_channels");
+    });
+    expect(
+      await page.evaluate(
+        () =>
+          (
+            window as Window & {
+              __BUZZ_E2E_CHANNELS_READ_PENDING__?: number;
+            }
+          ).__BUZZ_E2E_CHANNELS_READ_PENDING__,
+      ),
+    ).toBe(1);
     await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
     await expect(page).not.toHaveURL(/#\/channels\/general$/);
     await expect
@@ -546,6 +592,15 @@ test.describe("community rail", () => {
         ),
       )
       .toBe(1);
+    await page.evaluate(() => {
+      const deferNext = (
+        window as Window & {
+          __BUZZ_E2E_DEFER_NEXT_CHANNELS_READ__?: () => void;
+        }
+      ).__BUZZ_E2E_DEFER_NEXT_CHANNELS_READ__;
+      if (!deferNext) throw new Error("missing channel-read defer seam");
+      deferNext();
+    });
     const released = await page.evaluate(
       () =>
         (
@@ -555,6 +610,20 @@ test.describe("community rail", () => {
         ).__BUZZ_E2E_RELEASE_CHANNELS_READ__?.() ?? 0,
     );
     expect(released).toBe(1);
+    await page.evaluate(async () => {
+      const testWindow = window as Window & {
+        __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+          command: string,
+        ) => Promise<unknown>;
+        __BUZZ_E2E_CHANNELS_READ_PENDING__?: number;
+      };
+      const invoke = testWindow.__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+      if (!invoke) throw new Error("missing mock command seam");
+      await invoke("get_channels");
+      if (testWindow.__BUZZ_E2E_CHANNELS_READ_PENDING__ !== 0) {
+        throw new Error("release left the channel-read latch armed");
+      }
+    });
     await expect
       .poll(() =>
         page.evaluate(

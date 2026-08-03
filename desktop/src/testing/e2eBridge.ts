@@ -1254,9 +1254,9 @@ declare global {
     __BUZZ_E2E_RELEASE_OBSERVER_ARCHIVE_POLICY__?: () => number;
     /** Number of observer archive policy commands currently held by the seam. */
     __BUZZ_E2E_OBSERVER_ARCHIVE_POLICY_PENDING__?: number;
-    /** Hold channel reads until released. */
+    /** Hold the next channel read until released. */
     __BUZZ_E2E_DEFER_NEXT_CHANNELS_READ__?: () => void;
-    /** Release every channel read held by the explicit E2E seam. */
+    /** Disarm the latch and release the held channel read, if any. */
     __BUZZ_E2E_RELEASE_CHANNELS_READ__?: () => number;
     /** Number of channel reads currently held by the seam. */
     __BUZZ_E2E_CHANNELS_READ_PENDING__?: number;
@@ -1364,7 +1364,7 @@ type DeferredGetEvent = {
 };
 let deferredGetEventQueue: DeferredGetEvent[] = [];
 let deferredObserverArchivePolicyQueue: Array<() => void> = [];
-let deferChannelsReads = false;
+let deferNextChannelsRead = false;
 let deferredChannelsReadQueue: Array<() => void> = [];
 
 const mockDisplayNames = new Map<string, string>([
@@ -9791,14 +9791,14 @@ export function maybeInstallE2eTauriMocks() {
     for (const resolve of queued) resolve();
     return queued.length;
   };
-  deferChannelsReads = false;
+  deferNextChannelsRead = false;
   deferredChannelsReadQueue = [];
   window.__BUZZ_E2E_CHANNELS_READ_PENDING__ = 0;
   window.__BUZZ_E2E_DEFER_NEXT_CHANNELS_READ__ = () => {
-    deferChannelsReads = true;
+    deferNextChannelsRead = true;
   };
   window.__BUZZ_E2E_RELEASE_CHANNELS_READ__ = () => {
-    deferChannelsReads = false;
+    deferNextChannelsRead = false;
     const queued = deferredChannelsReadQueue.splice(0);
     window.__BUZZ_E2E_CHANNELS_READ_PENDING__ = 0;
     for (const resolve of queued) resolve();
@@ -11108,7 +11108,8 @@ export function maybeInstallE2eTauriMocks() {
           activeConfig,
         );
       case "get_channels":
-        if (deferChannelsReads) {
+        if (deferNextChannelsRead) {
+          deferNextChannelsRead = false;
           await new Promise<void>((resolve) => {
             deferredChannelsReadQueue.push(resolve);
             window.__BUZZ_E2E_CHANNELS_READ_PENDING__ =
