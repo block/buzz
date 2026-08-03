@@ -65,10 +65,7 @@ use mesh_llm_stubs::*;
 #[cfg(all(feature = "mesh-llm", target_os = "macos"))]
 use shutdown::{hard_exit_after_mesh_shutdown, relaunch_after_mesh_shutdown};
 use shutdown::{is_restart_request, shut_down_app};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::sync::{atomic::AtomicBool, atomic::Ordering, Arc};
 use tauri::{Emitter, Manager, RunEvent};
 #[cfg(target_os = "macos")]
 use tauri::{Listener, WindowEvent};
@@ -851,6 +848,12 @@ pub fn run() {
             update_team,
             delete_team,
             export_agent_snapshot,
+            card_mint_key_status,
+            card_mint_save_openai_key,
+            mint_agent_card,
+            save_agent_card,
+            list_agent_cards,
+            load_agent_card,
             preview_agent_snapshot_import,
             confirm_agent_snapshot_import,
             encode_agent_snapshot_for_send,

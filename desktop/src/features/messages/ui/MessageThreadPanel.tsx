@@ -755,6 +755,7 @@ export function MessageThreadPanel({
                         onMarkUnread={onMarkUnread}
                         onMarkRead={onMarkRead}
                         onReply={onSelectReplyTarget}
+                        onOpenThread={onExpandReplies}
                         onToggleReaction={onToggleReaction}
                         profiles={profiles}
                         showDepthGuides={shouldShowThreadBranchGuides}

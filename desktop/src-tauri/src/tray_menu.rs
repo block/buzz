@@ -3,6 +3,11 @@
 //! The webview owns the live agent-turn state. It sends the small display
 //! projection here so the native menu can remain useful while Buzz is hidden.
 
+// Mouse back/forward (X1/X2 buttons and swipe) is also macOS-only native I/O;
+// group it here so both platform-layer init paths share one call site in lib.rs.
+#[path = "mouse_nav.rs"]
+pub(crate) mod mouse_nav;
+
 use std::{
     sync::{Mutex, OnceLock},
     time::{Duration, Instant},
@@ -488,6 +493,7 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     if let Err(error) = apply_activity_presentation(&tray, activities, recent_activities) {
         eprintln!("buzz-desktop: failed to apply tray menu presentation: {error}");
     }
+    mouse_nav::init(app);
     Ok(())
 }
 

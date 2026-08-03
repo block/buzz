@@ -9,6 +9,24 @@ const _popoverEnterDuration = Duration(milliseconds: 150);
 const _popoverExitDuration = Duration(milliseconds: 110);
 const _popoverStartScale = 0.96;
 
+/// Elevation shared by anchored menus and composer popover surfaces.
+const appPopoverElevation = 8.0;
+
+/// Returns the translucent surface color shared by app popovers.
+Color appPopoverColor(BuildContext context) =>
+    context.colors.surface.withValues(alpha: 0.98);
+
+/// Returns the shadow color shared by app popovers.
+Color appPopoverShadowColor(BuildContext context) =>
+    context.colors.shadow.withValues(alpha: 0.18);
+
+/// Returns the 20px shape and composer-matching hairline shared by popovers.
+RoundedRectangleBorder appPopoverShape(BuildContext context) =>
+    RoundedRectangleBorder(
+      borderRadius: BorderRadius.circular(Radii.popover),
+      side: BorderSide(color: Colors.black.withValues(alpha: 0.04), width: 1),
+    );
+
 /// The horizontal edge a popover aligns to on its triggering control.
 enum AnchoredPopoverAlignment {
   /// Aligns the popover's leading edge with the trigger's leading edge.
@@ -25,10 +43,10 @@ Future<T?> showAnchoredPopover<T>({
   required List<PopupMenuEntry<T>> items,
   required double width,
   required AnchoredPopoverAlignment alignment,
-  required Color color,
-  required ShapeBorder shape,
-  required double elevation,
-  required Color shadowColor,
+  Color? color,
+  ShapeBorder? shape,
+  double elevation = appPopoverElevation,
+  Color? shadowColor,
   Offset offset = Offset.zero,
   EdgeInsetsGeometry menuPadding = EdgeInsets.zero,
   Clip clipBehavior = Clip.antiAlias,
@@ -56,10 +74,10 @@ Future<T?> showAnchoredPopover<T>({
       width: width,
       alignment: alignment,
       offset: offset,
-      color: color,
-      shape: shape,
+      color: color ?? appPopoverColor(context),
+      shape: shape ?? appPopoverShape(context),
       elevation: elevation,
-      shadowColor: shadowColor,
+      shadowColor: shadowColor ?? appPopoverShadowColor(context),
       menuPadding: menuPadding,
       clipBehavior: clipBehavior,
       surfaceKey: surfaceKey,

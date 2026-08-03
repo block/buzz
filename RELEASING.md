@@ -56,14 +56,15 @@ or mobile GitHub Release.
    updates the PR.
 2. Review the recorded base and candidate SHA, the complete changelog, and CI.
    The required **Desktop Release Candidate** check validates the exact head.
-   Authorization is either an approval on that exact head or a permitted Default
-   ruleset bypass at merge time. Any regeneration changes the head and requires
-   the checks—and, for the review path, approval—to run again.
+   A trusted repository member, owner, or collaborator must approve that exact
+   candidate head. Any regeneration or push changes the head, invalidates the
+   prior approval, and requires both the checks and approval to run again.
 3. **Squash merge** the PR. The protected branch must still be exactly the
    recorded base; otherwise regenerate the candidate from current `main`.
 4. `auto-tag-on-release-pr-merge` verifies the frozen parent, full-tree identity,
-   required checks, and one of the two authorization paths, then tags the squash
-   commit as `desktop-v<version>`.
+   required checks, and trusted approval on the exact candidate head, then tags
+   the squash commit as `desktop-v<version>`. An admin or ruleset bypass does not
+   authorize desktop tagging.
 5. The tag triggers `release.yml`. It builds and stages Apple Silicon and Intel
    macOS, Windows, and Linux artifacts; publishes the versioned release only
    after the complete set succeeds; then updates the rolling updater manifest
@@ -184,10 +185,12 @@ Buildkite pipeline accepts only an exact candidate tag.
 
 For mobile, trigger the private
 [Release Mobile pipeline](https://buildkite.com/runway/buzz-mobile-releases) with
-an exact RC tag for the platform build being cut. For desktop, use
-[Release Desktop](https://buildkite.com/runway/sprout-releases). See the
+an exact RC tag for the platform build being cut. For desktop, start
+[Release Desktop](https://buildkite.com/runway/sprout-releases) and enter the
+exact public source tag as `desktop_ref=desktop-v<version>`; a generic
+`v<version>` tag is intentionally rejected. See the
 [buzz-releases README](https://github.com/squareup/buzz-releases#cutting-a-release)
-for the private pipeline contract.
+for the rest of the private pipeline contract.
 
 ---
 
@@ -269,9 +272,9 @@ actor list.
 
 Do not update the branch manually and do not weaken the ruleset. Run
 `just release-desktop <version>` again from current `main`; this regenerates the
-candidate, reruns CI, and requires a fresh approval when using the review path.
-The post-merge verifier refuses to tag a squash whose parent differs from the
-recorded candidate base or whose tree differs from the validated PR head.
+candidate, reruns CI, and requires a fresh trusted approval on the new exact
+head. The post-merge verifier refuses to tag a squash whose parent differs from
+the recorded candidate base or whose tree differs from the validated PR head.
 
 ### Local `just release-desktop` fails with "must be on main branch"
 Switch to `main` and pull latest before running the release recipe.

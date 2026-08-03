@@ -105,11 +105,11 @@ test("regular message bolds inactive channel without numeric badge", async ({
     "600",
   );
   await expect(page.getByTestId("channel-unread-random")).toHaveCount(0);
-  await expect(page.getByTestId("channel-unread-dot-random")).toBeVisible();
+  await expect(page.getByTestId("channel-unread-dot-random")).toHaveCount(0);
   await waitForBadgeState(page, withDotOnlyBadge(baselineBadge));
 });
 
-test("numeric badge increments for @mention in inactive channel", async ({
+test("top-level @mention bolds the channel without a row badge", async ({
   page,
 }) => {
   await page.goto("/");
@@ -134,7 +134,11 @@ test("numeric badge increments for @mention in inactive channel", async ({
     },
   );
 
-  await expect(page.getByTestId("channel-unread-random")).toBeVisible();
+  await expect(page.getByTestId("channel-random")).toHaveCSS(
+    "font-weight",
+    "600",
+  );
+  await expect(page.getByTestId("channel-unread-random")).toHaveCount(0);
   await expect(page.getByTestId("channel-unread-dot-random")).toHaveCount(0);
   await waitForBadgeState(page, withAdditionalBadgeCount(baselineBadge, 1));
 });
@@ -158,7 +162,7 @@ test("numeric badge increments for DM message", async ({ page }) => {
   await waitForBadgeState(page, withAdditionalBadgeCount(baselineBadge, 1));
 });
 
-test("numeric badge increments for interested thread reply in inactive channel", async ({
+test("interested thread reply shows the channel thread dot", async ({
   page,
 }) => {
   await page.goto("/");
@@ -190,11 +194,12 @@ test("numeric badge increments for interested thread reply in inactive channel",
     { parentEventId: rootEventId, pubkey: TEST_IDENTITIES.alice.pubkey },
   );
 
-  await expect(page.getByTestId("channel-unread-random")).toBeVisible();
+  await expect(page.getByTestId("channel-unread-random")).toHaveCount(0);
+  await expect(page.getByTestId("channel-unread-dot-random")).toBeVisible();
   await waitForBadgeState(page, withAdditionalBadgeCount(baselineBadge, 1));
 });
 
-test("numeric badge increments for broadcast reply in inactive channel", async ({
+test("broadcast reply bolds the channel without a thread dot", async ({
   page,
 }) => {
   await page.goto("/");
@@ -219,7 +224,12 @@ test("numeric badge increments for broadcast reply in inactive channel", async (
     { pubkey: TEST_IDENTITIES.alice.pubkey },
   );
 
-  await expect(page.getByTestId("channel-unread-random")).toBeVisible();
+  await expect(page.getByTestId("channel-random")).toHaveCSS(
+    "font-weight",
+    "600",
+  );
+  await expect(page.getByTestId("channel-unread-random")).toHaveCount(0);
+  await expect(page.getByTestId("channel-unread-dot-random")).toHaveCount(0);
   await waitForBadgeState(page, withAdditionalBadgeCount(baselineBadge, 1));
 });
 
@@ -265,9 +275,7 @@ test("mark-as-read via context menu clears channel unread indicator", async ({
   await waitForBadgeState(page, baselineBadge);
 });
 
-test("mark-as-unread via context menu increments numeric badge", async ({
-  page,
-}) => {
+test("mark-as-unread via context menu bolds the channel", async ({ page }) => {
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -278,8 +286,53 @@ test("mark-as-unread via context menu increments numeric badge", async ({
   await page.getByTestId("channel-random").click({ button: "right" });
   await page.getByText("Mark unread").click();
 
-  await expect(page.getByTestId("channel-unread-random")).toBeVisible();
+  await expect(page.getByTestId("channel-random")).toHaveCSS(
+    "font-weight",
+    "600",
+  );
+  await expect(page.getByTestId("channel-unread-random")).toHaveCount(0);
+  await expect(page.getByTestId("channel-unread-dot-random")).toHaveCount(0);
   await waitForBadgeState(page, withAdditionalBadgeCount(baselineBadge, 1));
+});
+
+test("marking a message unread bolds its channel after leaving", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-random").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+  await waitForMockLiveSubscription(page, "random");
+
+  const message = await page.evaluate(
+    ({ pubkey }) =>
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "random",
+        content: "Keep this channel message unread",
+        kind: 40002,
+        pubkey,
+      }),
+    { pubkey: TEST_IDENTITIES.alice.pubkey },
+  );
+  if (!message) {
+    throw new Error("Mock message emitter is unavailable");
+  }
+
+  const messageRow = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Keep this channel message unread" });
+  await expect(messageRow).toBeVisible();
+  await messageRow.hover();
+  await page.getByTestId(`more-actions-${message.id}`).click();
+  const toggle = page.getByTestId(`mark-read-toggle-${message.id}`);
+  await expect(toggle).toHaveText("Mark unread");
+  await toggle.click();
+
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("channel-random")).toHaveCSS(
+    "font-weight",
+    "600",
+  );
+  await expect(page.getByTestId("channel-unread-dot-random")).toHaveCount(0);
 });
 
 test("remote read-state rollback is ignored while local mark-unread still increments badge", async ({
@@ -379,11 +432,15 @@ test("remote read-state rollback is ignored while local mark-unread still increm
 
   await expect(page.getByTestId("channel-unread-random")).toHaveCount(0);
 
-  // Local mark-unread remains an in-session affordance and should still show
-  // the dot immediately without publishing a lower read timestamp.
+  // Local mark-unread remains an in-session affordance and should still bold
+  // the channel immediately without publishing a lower read timestamp.
   await page.getByTestId("channel-random").click({ button: "right" });
   await page.getByText("Mark unread").click();
-  await expect(page.getByTestId("channel-unread-random")).toBeVisible();
+  await expect(page.getByTestId("channel-random")).toHaveCSS(
+    "font-weight",
+    "600",
+  );
+  await expect(page.getByTestId("channel-unread-random")).toHaveCount(0);
   await waitForBadgeState(page, withAdditionalBadgeCount(baselineBadge, 1));
 
   // Step 3: remote advance clears the local forced-unread dot.

@@ -1,5 +1,7 @@
 part of '../channels_page.dart';
 
+const _sectionMenuItemPadding = EdgeInsets.fromLTRB(Grid.xs, 0, Grid.twelve, 0);
+
 class _CustomChannelSection extends StatelessWidget {
   final ChannelSection section;
   final List<Channel> channels;
@@ -178,32 +180,42 @@ class _CustomSectionHeader extends ConsumerWidget {
                     context: buttonContext,
                     width: 216,
                     alignment: AnchoredPopoverAlignment.end,
-                    color: context.colors.surface,
-                    elevation: 4,
-                    shadowColor: context.colors.shadow.withValues(alpha: 0.18),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(Radii.md),
-                      side: BorderSide(color: context.colors.outline),
-                    ),
                     surfaceKey: ValueKey('section-popover-${section.id}'),
                     items: [
                       const PopupMenuItem(
                         value: 'rename',
-                        child: Text('Rename'),
+                        padding: _sectionMenuItemPadding,
+                        child: _SectionMenuItemContent(
+                          icon: LucideIcons.pencil,
+                          label: 'Rename section',
+                        ),
                       ),
                       PopupMenuItem(
                         value: 'move_up',
                         enabled: !isFirst,
-                        child: const Text('Move Up'),
+                        padding: _sectionMenuItemPadding,
+                        child: const _SectionMenuItemContent(
+                          icon: LucideIcons.arrowUp,
+                          label: 'Move up',
+                        ),
                       ),
                       PopupMenuItem(
                         value: 'move_down',
                         enabled: !isLast,
-                        child: const Text('Move Down'),
+                        padding: _sectionMenuItemPadding,
+                        child: const _SectionMenuItemContent(
+                          icon: LucideIcons.arrowDown,
+                          label: 'Move down',
+                        ),
                       ),
-                      const PopupMenuItem(
+                      PopupMenuItem(
                         value: 'delete',
-                        child: Text('Delete'),
+                        padding: _sectionMenuItemPadding,
+                        child: _SectionMenuItemContent(
+                          icon: LucideIcons.trash2,
+                          label: 'Delete section',
+                          color: context.colors.error,
+                        ),
                       ),
                     ],
                   );
@@ -225,6 +237,36 @@ class _CustomSectionHeader extends ConsumerWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+class _SectionMenuItemContent extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final Color? color;
+
+  const _SectionMenuItemContent({
+    required this.icon,
+    required this.label,
+    this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Icon(icon, size: 16, color: color),
+        const SizedBox(width: Grid.xxs),
+        Flexible(
+          child: Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: color == null ? null : TextStyle(color: color),
+          ),
+        ),
+      ],
     );
   }
 }

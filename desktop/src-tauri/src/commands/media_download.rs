@@ -8,7 +8,8 @@ use crate::commands::export_util::save_bytes_with_dialog;
 use crate::commands::media::{detect_and_validate_mime, mint_media_get_auth, sanitize_filename};
 use crate::commands::{
     personas::{
-        decode_snapshot_from_bytes, MAX_SNAPSHOT_JSON_BYTES, MAX_SNAPSHOT_PNG_BYTES, PNG_MAGIC,
+        parse_snapshot_payload_from_bytes, MAX_SNAPSHOT_JSON_BYTES, MAX_SNAPSHOT_PNG_BYTES,
+        PNG_MAGIC,
     },
     team_snapshot::{
         decode_team_snapshot_from_bytes, MAX_TEAM_SNAPSHOT_JSON_BYTES, MAX_TEAM_SNAPSHOT_PNG_BYTES,
@@ -505,10 +506,12 @@ pub async fn fetch_snapshot_bytes(
 
     // 4. Bytes must parse as the snapshot type selected by the filename.
     //    Team parsing rejects retired flat JSON and persona-pack ZIP inputs
-    //    before anything reaches the frontend.
+    //    before anything reaches the frontend. Agent kinds accept both plain
+    //    manifests and structurally valid locked (encrypted) card envelopes —
+    //    transit validation never decrypts; unlock happens at import time.
     match kind {
         SnapshotFileKind::AgentJson | SnapshotFileKind::AgentPng => {
-            decode_snapshot_from_bytes(&bytes)
+            parse_snapshot_payload_from_bytes(&bytes)
                 .map_err(|e| format!("invalid agent snapshot: {e}"))?;
         }
         SnapshotFileKind::TeamJson | SnapshotFileKind::TeamPng => {

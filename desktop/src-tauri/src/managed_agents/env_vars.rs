@@ -77,6 +77,10 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     "BUZZ_ACP_RESPOND_TO",
     "BUZZ_ACP_RESPOND_TO_ALLOWLIST",
     "BUZZ_ACP_AGENT_OWNER",
+    // Remote lifetime/presence policy: user env must not disable the
+    // desktop/provider-owned bounds while the saved record still promises them.
+    "BUZZ_ACP_EXIT_AFTER_INACTIVITY",
+    "BUZZ_ACP_NO_PRESENCE",
     // Readiness handoff: desktop is the ONLY readiness source. A saved or
     // ambient env var must not be able to forge setup mode (NotReady) on a
     // Ready agent or suppress it (empty/stale payload) on a NotReady one.
@@ -305,29 +309,6 @@ pub(crate) fn live_persona_env(
         .and_then(|pid| personas.iter().find(|p| p.id == pid))
         .map(|p| p.env_vars.clone())
         .unwrap_or_default()
-}
-
-/// Resolve live env_vars for a linked persona, loading personas from disk.
-///
-/// Returns the persona's `env_vars` map if a persona_id is provided and found;
-/// returns an empty map if no persona is linked. Errors if the linked persona
-/// is missing. Used by the provider deploy path, which has no pre-loaded
-/// persona slice.
-pub(crate) fn resolve_persona_env(
-    app: &tauri::AppHandle,
-    persona_id: Option<&str>,
-) -> Result<std::collections::BTreeMap<String, String>, String> {
-    let Some(pid) = persona_id else {
-        return Ok(std::collections::BTreeMap::new());
-    };
-    let personas = super::load_personas(app).map_err(|e| {
-        format!("failed to load personas while resolving env for persona `{pid}`: {e}")
-    })?;
-    let persona = personas
-        .into_iter()
-        .find(|p| p.id == pid)
-        .ok_or_else(|| format!("persona `{pid}` not found while resolving env"))?;
-    Ok(persona.env_vars)
 }
 
 #[cfg(test)]
