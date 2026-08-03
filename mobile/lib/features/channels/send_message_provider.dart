@@ -45,6 +45,7 @@ class SendMessage {
     String? parentEventId,
     String? rootEventId,
     List<String>? mentionPubkeys,
+    List<String> implicitRecipientPubkeys = const [],
     List<List<String>> mediaTags = const [],
   }) async {
     // Use explicitly passed pubkeys, or resolve @mentions against
@@ -58,7 +59,7 @@ class SendMessage {
     final selfLower = authorPubkey?.toLowerCase();
     final seenMentions = <String>{?selfLower};
     final normalizedMentions = <String>[
-      for (final pk in resolvedMentions)
+      for (final pk in [...implicitRecipientPubkeys, ...resolvedMentions])
         if (seenMentions.add(pk.toLowerCase())) pk,
     ];
 

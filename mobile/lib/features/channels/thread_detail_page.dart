@@ -230,9 +230,13 @@ class ThreadDetailPage extends HookConsumerWidget {
     // Channel names for message content rendering.
     final channelsAsync = ref.watch(channelsProvider);
     final channelNamesMap = <String, String>{};
+    var activeChannelParticipantPubkeys = const <String>[];
     channelsAsync.whenData((channels) {
       for (final ch in channels) {
         channelNamesMap[ch.name.toLowerCase()] = ch.id;
+        if (ch.id == channelId && ch.isDm) {
+          activeChannelParticipantPubkeys = ch.participantPubkeys;
+        }
       }
     });
 
@@ -407,6 +411,8 @@ class ThreadDetailPage extends HookConsumerWidget {
                         channelId: channelId,
                         content: content,
                         mentionPubkeys: mentionPubkeys,
+                        implicitRecipientPubkeys:
+                            activeChannelParticipantPubkeys,
                         parentEventId: threadHead.id,
                         rootEventId: effectiveRootId,
                         mediaTags: mediaTags,

@@ -50,10 +50,16 @@ class _LiveSubscription {
 }
 
 class _PendingEvent {
+  final NostrEvent event;
   final Completer<NostrEvent> completer;
   final Timer timeout;
+  bool dispatched = false;
 
-  _PendingEvent({required this.completer, required this.timeout});
+  _PendingEvent({
+    required this.event,
+    required this.completer,
+    required this.timeout,
+  });
 }
 
 class _BufferedEvent {
@@ -78,17 +84,21 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   RelaySessionNotifier({
     http.Client? httpClient,
     RelaySocketFactory socketFactory = RelaySocket.new,
+    DateTime Function()? now,
   }) : _httpClient = httpClient,
-       _socketFactory = socketFactory;
+       _socketFactory = socketFactory,
+       _now = now ?? DateTime.now;
 
   final http.Client? _httpClient;
   final RelaySocketFactory _socketFactory;
+  final DateTime Function() _now;
 
   static const _baseReconnectDelayMs = 1000;
   static const _maxReconnectDelayMs = 30000;
   static const _eventBatchMs = 16;
   static const _reconnectReplaySkewSeconds = 5;
   static const _maxRecentDeliveryKeys = 5000;
+  static const _backgroundGraceDuration = Duration(seconds: 5);
 
   RelaySocket? _socket;
   final Map<String, _HistorySubscription> _historySubscriptions = {};
@@ -99,6 +109,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   Timer? _reconnectTimer;
   Timer? _flushTimer;
   Timer? _backgroundGraceTimer;
+  DateTime? _backgroundedAt;
   int _reconnectDelayMs = _baseReconnectDelayMs;
   int _subIdCounter = 0;
   bool _disposed = false;
@@ -250,6 +261,9 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
   }) {
+    final existing = _pendingEvents[event.id];
+    if (existing != null) return existing.completer.future;
+
     final completer = Completer<NostrEvent>();
 
     final timer = Timer(timeout, () {
@@ -264,11 +278,12 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     });
 
     _pendingEvents[event.id] = _PendingEvent(
+      event: event,
       completer: completer,
       timeout: timer,
     );
 
-    _socket?.send(['EVENT', event.toJson()]);
+    _dispatchPending(event.id);
     return completer.future;
   }
 
@@ -307,6 +322,8 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
   /// Force a reconnect (e.g., returning from background).
   Future<void> reconnect() async {
+    _flushBufferedEventsNow();
+    _cancelAllHistory(Exception('Relay session replaced'));
     await _socket?.disconnect();
     _reconnectDelayMs = _baseReconnectDelayMs;
     final config = ref.read(relayConfigProvider);
@@ -315,8 +332,9 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
   /// Called by the app lifecycle provider when the app goes to background.
   void onAppPaused() {
+    _backgroundedAt = _now();
     _backgroundGraceTimer?.cancel();
-    _backgroundGraceTimer = Timer(const Duration(seconds: 5), _pauseNow);
+    _backgroundGraceTimer = Timer(_backgroundGraceDuration, _pauseNow);
   }
 
   void _pauseNow() {
@@ -331,11 +349,19 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   /// Called by the app lifecycle provider when the app returns to foreground.
   void onAppResumed() {
     _paused = false;
+    final backgroundedAt = _backgroundedAt;
+    _backgroundedAt = null;
     _backgroundGraceTimer?.cancel();
     _backgroundGraceTimer = null;
 
-    // If still connected, nothing to do — the socket survived the background
-    // grace window.
+    final wasBackgroundedBeyondGrace =
+        backgroundedAt != null &&
+        _now().difference(backgroundedAt) >= _backgroundGraceDuration;
+    if (wasBackgroundedBeyondGrace) {
+      unawaited(reconnect());
+      return;
+    }
+
     if (state.status == SessionStatus.connected) return;
 
     // Cancel any in-flight reconnect backoff timer so we reconnect immediately
@@ -378,19 +404,21 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _reconnectDelayMs = _baseReconnectDelayMs;
     state = const SessionState(status: SessionStatus.connected);
     _replayLiveSubscriptions();
+    _drainPendingEvents();
   }
 
   void _handleDisconnected(int generation, Object? error) {
     if (_disposed || generation != _connectionGeneration) return;
     _cancelAllHistory(error);
-    _rejectAllPending(error);
-    _eventBuffer.clear();
-    _flushTimer?.cancel();
-    _flushTimer = null;
+    _flushBufferedEventsNow();
     if (error is RelayAuthRejectedException) {
+      _rejectAllPending(error);
       _reconnectTimer?.cancel();
       state = const SessionState(status: SessionStatus.disconnected);
       return;
+    }
+    for (final pending in _pendingEvents.values) {
+      pending.dispatched = false;
     }
     _scheduleReconnect();
   }
@@ -614,6 +642,24 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _socket?.send(['REQ', subId, filter.toJson()]);
   }
 
+  void _dispatchPending(String eventId) {
+    final pending = _pendingEvents[eventId];
+    if (pending == null ||
+        pending.dispatched ||
+        state.status != SessionStatus.connected) {
+      return;
+    }
+    if (_socket?.send(['EVENT', pending.event.toJson()]) ?? false) {
+      pending.dispatched = true;
+    }
+  }
+
+  void _drainPendingEvents() {
+    for (final eventId in _pendingEvents.keys.toList()) {
+      _dispatchPending(eventId);
+    }
+  }
+
   void _sendClose(String subId) {
     _socket?.send(['CLOSE', subId]);
   }
@@ -650,6 +696,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _reconnectTimer?.cancel();
     _flushTimer?.cancel();
     _backgroundGraceTimer?.cancel();
+    _backgroundedAt = null;
     _cancelAllHistory(null);
     _rejectAllPending(null);
     _recentDeliveryKeys.clear();

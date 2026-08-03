@@ -66,6 +66,45 @@ void main() {
     expect(completedIds, isEmpty);
     expect(removedIds, [localMessages.single.id]);
   });
+
+  test(
+    'adds cached direct-message recipients without a channel refresh',
+    () async {
+      final session = _PendingPublishRelaySession();
+      final send = SendMessage(
+        signedEventRelay: SignedEventRelay(
+          session: session,
+          nsec: nostr.Keys.generate().nsec,
+        ),
+        fetchMembers: (_) => throw StateError('must not fetch channel members'),
+        readUserCache: () => const {},
+        addLocalMessage: (_, _) {},
+        completeLocalMessage: (_, _) {},
+        removeLocalMessage: (_, _) {},
+      );
+
+      final result = send(
+        channelId: _channelId,
+        content: 'plain DM',
+        implicitRecipientPubkeys: const ['recipient-pubkey'],
+      );
+      await session.published;
+
+      expect(
+        session.event.tags,
+        contains(
+          predicate<List<dynamic>>(
+            (tag) =>
+                tag.length == 2 &&
+                tag[0] == 'p' &&
+                tag[1] == 'recipient-pubkey',
+          ),
+        ),
+      );
+      session.accept();
+      await result;
+    },
+  );
 }
 
 const _channelId = '11111111-1111-4111-8111-111111111111';

@@ -260,6 +260,94 @@ void main() {
     expect(session.state.status, SessionStatus.disconnected);
   });
 
+  test(
+    'resume reconnects a stale connected session after a long pause',
+    () async {
+      final sockets = <_ControlledRelaySocket>[];
+      final keychain = nostr.Keys.generate();
+      var now = DateTime(2026, 8, 2, 12);
+      final session = RelaySessionNotifier(
+        now: () => now,
+        socketFactory: _controlledSocketFactory(sockets),
+      );
+      final container = _authenticatedContainer(session, keychain.nsec);
+      addTearDown(container.dispose);
+      await container.read(authProvider.future);
+      final subscription = container.listen(relaySessionProvider, (_, _) {});
+      addTearDown(subscription.close);
+      await Future<void>.delayed(Duration.zero);
+      sockets.single.connectSuccessfully();
+
+      session.onAppPaused();
+      now = now.add(const Duration(minutes: 5));
+      session.onAppResumed();
+      await Future<void>.delayed(Duration.zero);
+
+      expect(sockets, hasLength(2));
+      expect(sockets.first.disposeCalls, 1);
+      expect(session.state.status, SessionStatus.reconnecting);
+    },
+  );
+
+  test(
+    'resume preserves a connected session within the background grace period',
+    () async {
+      final sockets = <_ControlledRelaySocket>[];
+      final keychain = nostr.Keys.generate();
+      var now = DateTime(2026, 8, 2, 12);
+      final session = RelaySessionNotifier(
+        now: () => now,
+        socketFactory: _controlledSocketFactory(sockets),
+      );
+      final container = _authenticatedContainer(session, keychain.nsec);
+      addTearDown(container.dispose);
+      await container.read(authProvider.future);
+      final subscription = container.listen(relaySessionProvider, (_, _) {});
+      addTearDown(subscription.close);
+      await Future<void>.delayed(Duration.zero);
+      sockets.single.connectSuccessfully();
+
+      session.onAppPaused();
+      now = now.add(const Duration(seconds: 4));
+      session.onAppResumed();
+      await Future<void>.delayed(Duration.zero);
+
+      expect(sockets, hasLength(1));
+      expect(sockets.single.disposeCalls, 0);
+      expect(session.state.status, SessionStatus.connected);
+    },
+  );
+
+  test(
+    'queues a disconnected publish and dispatches it exactly once on reconnect',
+    () async {
+      final session = RelaySessionNotifier();
+      final container = ProviderContainer(
+        overrides: [relaySessionProvider.overrideWith(() => session)],
+      );
+      addTearDown(container.dispose);
+      container.read(relaySessionProvider);
+
+      final firstSocket = _testSocket();
+      session.debugAttachSocketForTest(firstSocket);
+      session.debugHandleDisconnected();
+
+      final publish = session.publish(_event());
+      expect(firstSocket.sentPayloads, isEmpty);
+
+      final replacementSocket = _testSocket();
+      session.debugAttachSocketForTest(replacementSocket);
+      session.debugHandleConnected();
+
+      expect(replacementSocket.sentPayloads, hasLength(1));
+      expect(replacementSocket.sentPayloads.single.first, 'EVENT');
+
+      session.debugHandleSocketMessageForTest(['OK', _event().id, true, '']);
+      await expectLater(publish, completion(_event()));
+      expect(replacementSocket.sentPayloads, hasLength(1));
+    },
+  );
+
   test('delivers the same live event to each matching subscription', () async {
     final session = RelaySessionNotifier();
     final firstEvents = <NostrEvent>[];
@@ -402,6 +490,8 @@ class _AuthenticatedAuthNotifier extends AuthNotifier {
 class _ControlledRelaySocket extends RelaySocket {
   final void Function() _connected;
   final void Function(Object? error) _disconnected;
+  final List<List<dynamic>> sentPayloads = [];
+  int disposeCalls = 0;
 
   _ControlledRelaySocket({
     required super.wsUrl,
@@ -416,12 +506,65 @@ class _ControlledRelaySocket extends RelaySocket {
   Future<void> connect() async {}
 
   @override
-  void dispose() {}
+  void dispose() {
+    disposeCalls++;
+  }
+
+  @override
+  bool send(List<dynamic> payload) {
+    sentPayloads.add(payload);
+    return true;
+  }
 
   void connectSuccessfully() => _connected();
 
   void disconnectWith(Object? error) => _disconnected(error);
 }
+
+_ControlledRelaySocket _testSocket() => _ControlledRelaySocket(
+  wsUrl: 'wss://relay.example',
+  nsec: null,
+  onMessage: (_) {},
+  onConnected: () {},
+  onDisconnected: (_) {},
+);
+
+RelaySocketFactory _controlledSocketFactory(
+  List<_ControlledRelaySocket> sockets,
+) =>
+    ({
+      required wsUrl,
+      required nsec,
+      required onMessage,
+      required onConnected,
+      required onDisconnected,
+    }) {
+      final socket = _ControlledRelaySocket(
+        wsUrl: wsUrl,
+        nsec: nsec,
+        onMessage: onMessage,
+        onConnected: onConnected,
+        onDisconnected: onDisconnected,
+      );
+      sockets.add(socket);
+      return socket;
+    };
+
+ProviderContainer _authenticatedContainer(
+  RelaySessionNotifier session,
+  String nsec,
+) => ProviderContainer(
+  overrides: [
+    relaySessionProvider.overrideWith(() => session),
+    relayConfigProvider.overrideWith(
+      () => _FakeRelayConfigNotifier(
+        baseUrl: 'https://relay.example',
+        nsec: nsec,
+      ),
+    ),
+    authProvider.overrideWith(() => _AuthenticatedAuthNotifier()),
+  ],
+);
 
 const _channelId = '11111111-1111-4111-8111-111111111111';
 
