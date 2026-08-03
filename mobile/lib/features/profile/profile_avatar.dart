@@ -23,8 +23,14 @@ const _presenceDotRatio = 8 / 14;
 class ProfileAvatar extends ConsumerWidget {
   final VoidCallback? onTap;
   final bool showPresence;
+  final double size;
 
-  const ProfileAvatar({super.key, this.onTap, this.showPresence = true});
+  const ProfileAvatar({
+    super.key,
+    this.onTap,
+    this.showPresence = true,
+    this.size = _avatarSize,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -45,7 +51,7 @@ class ProfileAvatar extends ConsumerWidget {
 
   Widget _buildPlaceholder(BuildContext context) {
     return CircleAvatar(
-      radius: _avatarSize / 2,
+      radius: size / 2,
       backgroundColor: context.colors.primaryContainer,
     );
   }
@@ -58,7 +64,7 @@ class ProfileAvatar extends ConsumerWidget {
     return GestureDetector(
       onTap: onTap,
       child: MaskedAvatarBadge(
-        size: _avatarSize,
+        size: size,
         geometry: AvatarBadgeMaskGeometry.presenceDot,
         avatar: ClipOval(
           child: ColoredBox(

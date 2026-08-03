@@ -1,8 +1,8 @@
 import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/features/profile/settings_profile_header.dart';
 import 'package:buzz/features/profile/user_profile.dart';
-import 'package:buzz/features/profile/user_status.dart';
-import 'package:buzz/features/profile/user_status_provider.dart';
+import 'package:buzz/shared/relay/user_status.dart';
+import 'package:buzz/shared/relay/user_status_provider.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
 import 'package:buzz/shared/widgets/masked_avatar_badge.dart';
 import 'package:flutter_test/flutter_test.dart';

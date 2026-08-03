@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../theme/theme.dart';
+import 'frosted_header_scroll_state.dart';
 
 /// Minimum height of the frosted app bar content area below the safe area.
 const _kBarContentMinHeight = Grid.xxs + 32 + Grid.xxs; // 48
@@ -120,6 +121,11 @@ class FrostedAppBar extends StatelessWidget {
       titleStyle,
       titleContentHeight,
     );
+    final useIpadHeaderTreatment =
+        MediaQuery.sizeOf(context).shortestSide >= 600;
+    final isScrolled =
+        useIpadHeaderTreatment &&
+        FrostedHeaderScrollState.isScrolledOf(context);
 
     final effectiveLeading =
         leading ??
@@ -142,22 +148,46 @@ class FrostedAppBar extends StatelessWidget {
       right: 0,
       child: ClipRect(
         child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+          filter: ImageFilter.blur(
+            sigmaX: useIpadHeaderTreatment ? 0 : 20,
+            sigmaY: useIpadHeaderTreatment ? 0 : 20,
+          ),
           child: Container(
+            key: Key(
+              useIpadHeaderTreatment && isScrolled
+                  ? 'frosted-app-bar-shadow'
+                  : 'frosted-app-bar-divider',
+            ),
             padding: EdgeInsets.only(top: topPadding),
             decoration: BoxDecoration(
-              // A gradient and a color cannot both paint, so the gradient
-              // replaces the frosted surface fill when one is supplied.
-              color: gradient == null
+              // The expanded iPad layout keeps its title area on the page
+              // canvas. A resting divider becomes a small elevation shadow
+              // once scroll content passes underneath.
+              color: useIpadHeaderTreatment
+                  ? context.colors.surface
+                  : gradient == null
                   ? context.colors.surface.withValues(alpha: 0.5)
                   : null,
-              gradient: gradient,
-              border: Border(
-                bottom: BorderSide(
-                  color: context.colors.outlineVariant.withValues(alpha: 0.3),
-                  width: _kBottomBorderWidth,
-                ),
-              ),
+              gradient: useIpadHeaderTreatment ? null : gradient,
+              border: useIpadHeaderTreatment && isScrolled
+                  ? null
+                  : Border(
+                      bottom: BorderSide(
+                        color: context.colors.outlineVariant.withValues(
+                          alpha: 0.3,
+                        ),
+                        width: _kBottomBorderWidth,
+                      ),
+                    ),
+              boxShadow: useIpadHeaderTreatment && isScrolled
+                  ? [
+                      BoxShadow(
+                        color: context.colors.shadow.withValues(alpha: 0.14),
+                        blurRadius: 8,
+                        offset: const Offset(0, 2),
+                      ),
+                    ]
+                  : null,
             ),
             child: Column(
               mainAxisSize: MainAxisSize.min,

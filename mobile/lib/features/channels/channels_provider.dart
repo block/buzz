@@ -48,7 +48,6 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   Set<String> _participatedRootIds = {};
   Set<String> _authoredRootIds = {};
   String? _threadInterestPubkey;
-  bool _hasLoaded = false;
 
   Map<String, int> get latestObservedByChannel =>
       Map.unmodifiable(_latestObservedByChannel);
@@ -69,9 +68,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         sessionState.status != SessionStatus.connected;
     ref.listen(relaySessionProvider, (previous, next) {
       if (next.status != SessionStatus.connected) return;
-      if (waitingForInitialConnection &&
-          !_hasLoaded &&
-          !connected.isCompleted) {
+      if (waitingForInitialConnection && !connected.isCompleted) {
         connected.complete();
       } else if (previous?.status != SessionStatus.connected) {
         unawaited(_backstopRefresh());
@@ -95,8 +92,9 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     });
 
     if (sessionState.status != SessionStatus.connected) {
-      // Keep the prior community's cache visible until the new relay connects.
-      if (_hasLoaded) return state.value ?? const [];
+      // Preserve the prior community's cache as previous AsyncValue data while
+      // the new relay connects, but remain loading so consumers cannot expose
+      // stale channels as interactive rows in the new community.
       await connected.future;
     }
 
@@ -111,7 +109,6 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       subscribeLive: subscribeLive,
       fetchLastMessage: fetchLastMessage,
     );
-    _hasLoaded = true;
     return channels;
   }
 

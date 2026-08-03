@@ -3,6 +3,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/relay/relay.dart';
 import 'pending_local_messages_provider.dart';
+import 'pending_local_aux_events_provider.dart';
 import 'channel_window.dart';
 import 'thread_replies_provider.dart';
 
@@ -105,6 +106,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       final history = await _fetchNewestHistory(session);
       if (!_isCurrentInit(initVersion)) return;
       _confirmLocalMessages(history.map((event) => event.id));
+      _confirmLocalAuxEvents(history.map((event) => event.id));
 
       final existing = state.value ?? const <NostrEvent>[];
       final existingIds = existing.map((event) => event.id).toSet();
@@ -213,6 +215,9 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     if (authoritative && event.threadReference.parentId == null) {
       _confirmLocalMessages([event.id]);
     }
+    if (authoritative && EventKind.channelAuxEventKinds.contains(event.kind)) {
+      _confirmLocalAuxEvents([event.id]);
+    }
     if (_usingChannelWindow) {
       _handleWindowLiveEvent(event);
     } else {
@@ -282,6 +287,12 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         .confirm(eventIds);
   }
 
+  void _confirmLocalAuxEvents(Iterable<String> eventIds) {
+    ref
+        .read(pendingLocalAuxEventsProvider(channelId).notifier)
+        .confirm(eventIds);
+  }
+
   /// Adds a just-signed outgoing message before the relay acknowledges it.
   /// The live relay echo is deduplicated by event id.
   void addLocalMessage(NostrEvent event) {
@@ -313,6 +324,47 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       );
     }
     _handleLiveEvent(event, authoritative: false);
+  }
+
+  /// Applies a just-signed auxiliary event, such as a reaction or deletion,
+  /// before its relay echo arrives. Thread queries intentionally contain only
+  /// message content, so they rely on this channel stream for their reaction
+  /// state as well.
+  void addLocalAuxEvent(NostrEvent event) {
+    if (!EventKind.channelAuxEventKinds.contains(event.kind)) {
+      throw ArgumentError.value(
+        event.kind,
+        'event.kind',
+        'Expected a channel auxiliary event.',
+      );
+    }
+    ref.read(pendingLocalAuxEventsProvider(channelId).notifier).add(event);
+    _handleLiveEvent(event, authoritative: false);
+  }
+
+  /// Removes an optimistic auxiliary event when its publish is rejected.
+  void removeLocalAuxEvent(String eventId) {
+    final pending = ref
+        .read(pendingLocalAuxEventsProvider(channelId).notifier)
+        .take(eventId);
+    if (pending == null) return;
+    final nextAux = _windowStore.liveAux
+        .where((event) => event.id != eventId)
+        .toList();
+    if (nextAux.length != _windowStore.liveAux.length) {
+      _windowStore = ChannelWindowStore(
+        pages: _windowStore.pages,
+        liveOverlay: _windowStore.liveOverlay,
+        liveAux: nextAux,
+        liveThreadSummaries: _windowStore.liveThreadSummaries,
+      );
+    }
+
+    final current = state.value ?? _lastKnownMessages ?? const <NostrEvent>[];
+    final next = current.where((event) => event.id != eventId).toList();
+    if (next.length == current.length) return;
+    _lastKnownMessages = next;
+    state = AsyncData(next);
   }
 
   /// Releases rollback ownership after the publish future succeeds. The

@@ -42,6 +42,31 @@ class _MessageList extends HookConsumerWidget {
     final previousLatestEntryId = useRef<String?>(null);
     final didOpenInitialThread = useRef(false);
     final didJumpToInitialMessage = useRef(false);
+    final initialThreadHead = initialThreadRootId == null
+        ? null
+        : allMessages
+              .where((message) => message.id == initialThreadRootId)
+              .firstOrNull;
+    final initialThreadQueryRootId = initialThreadHead == null
+        ? null
+        : initialThreadHead.rootId ?? initialThreadHead.id;
+    final initialThreadReplies = initialThreadQueryRootId == null
+        ? null
+        : ref.watch(
+            threadRepliesWithLocalProvider(
+              ThreadRepliesArgs(
+                channelId: channelId,
+                rootId: initialThreadQueryRootId,
+              ),
+            ),
+          );
+    // An Inbox deep link initially has only a channel-window snapshot. Wait
+    // for the canonical thread query before pushing the route so the first
+    // frame matches a thread opened normally from its channel.
+    final initialThreadIsReady =
+        initialThreadReplies == null ||
+        initialThreadReplies.hasValue ||
+        initialThreadReplies.hasError;
 
     int? reversedIndexOf(String? messageId) {
       if (messageId == null) return null;
@@ -130,33 +155,40 @@ class _MessageList extends HookConsumerWidget {
       );
     }, [channelId, entries.length, itemPositionsListener]);
 
-    useEffect(() {
-      if (initialThreadRootId == null || didOpenInitialThread.value) {
-        return null;
-      }
-      final threadHead = allMessages
-          .where((message) => message.id == initialThreadRootId)
-          .firstOrNull;
-      if (threadHead == null) return null;
-      didOpenInitialThread.value = true;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!context.mounted) return;
-        Navigator.of(context).push(
-          MaterialPageRoute<void>(
-            builder: (_) => ThreadDetailPage(
-              threadHead: threadHead,
-              allMessages: allMessages,
-              channelId: channelId,
-              currentPubkey: currentPubkey,
-              isMember: isMember,
-              isArchived: isArchived,
-              initialMessageId: initialMessageId,
+    useEffect(
+      () {
+        if (initialThreadRootId == null ||
+            didOpenInitialThread.value ||
+            initialThreadHead == null ||
+            !initialThreadIsReady) {
+          return null;
+        }
+        didOpenInitialThread.value = true;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!context.mounted) return;
+          Navigator.of(context).push(
+            MaterialPageRoute<void>(
+              builder: (_) => ThreadDetailPage(
+                threadHead: initialThreadHead,
+                allMessages: allMessages,
+                channelId: channelId,
+                currentPubkey: currentPubkey,
+                isMember: isMember,
+                isArchived: isArchived,
+                initialMessageId: initialMessageId,
+              ),
             ),
-          ),
-        );
-      });
-      return null;
-    }, [initialThreadRootId, allMessages]);
+          );
+        });
+        return null;
+      },
+      [
+        initialThreadRootId,
+        initialThreadHead,
+        initialThreadIsReady,
+        allMessages,
+      ],
+    );
 
     useEffect(() {
       final targetIndex = reversedIndexOf(initialMessageId);

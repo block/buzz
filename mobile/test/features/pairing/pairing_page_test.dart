@@ -46,6 +46,48 @@ void main() {
       expect(find.byType(OutlinedButton), findsNothing);
     });
 
+    testWidgets('centers pairing content on wide displays', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1180, 820));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(
+        WidgetHelpers.testable(child: const PairingPage()),
+      );
+
+      final contentRect = tester.getRect(
+        find.byKey(const Key('pairing-welcome-content')),
+      );
+      final screenCenter = const Offset(590, 410);
+
+      expect(contentRect.center.dx, closeTo(screenCenter.dx, 1));
+      expect(contentRect.center.dy, closeTo(screenCenter.dy, 16));
+    });
+
+    testWidgets('keeps security verification compact on wide displays', (
+      tester,
+    ) async {
+      await tester.binding.setSurfaceSize(const Size(1180, 820));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            pairingProvider.overrideWith(() => _ConfirmingSasPairingNotifier()),
+          ],
+          child: MaterialApp(
+            theme: AppTheme.light(),
+            home: const PairingPage(),
+          ),
+        ),
+      );
+
+      final content = tester.getRect(
+        find.byKey(const Key('pairing-sas-verification-content')),
+      );
+      expect(content.width, 520);
+      expect(content.center.dx, closeTo(590, 1));
+    });
+
     testWidgets('uses dark status-bar icons on the onboarding surface', (
       tester,
     ) async {

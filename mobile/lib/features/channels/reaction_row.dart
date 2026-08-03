@@ -38,16 +38,25 @@ const _pillGlyphSize = 16.0;
 ///
 /// Used by channel detail, thread detail, and system message rows to avoid
 /// duplicating the toggle wiring.
-void toggleReaction(WidgetRef ref, TimelineMessage message, String emoji) {
+void toggleReaction(
+  WidgetRef ref,
+  TimelineMessage message,
+  String emoji, {
+  String? channelId,
+}) {
   final actions = ref.read(channelActionsProvider);
   final reaction = message.reactions.firstWhere((r) => r.emoji == emoji);
   if (reaction.reactedByCurrentUser && reaction.currentUserReactionId != null) {
-    actions.removeReaction(reaction.currentUserReactionId!, emoji);
+    actions.removeReaction(
+      reaction.currentUserReactionId!,
+      emoji,
+      channelId: channelId,
+    );
   } else {
     // Only adding counts as a use — removing a reaction shouldn't promote the
     // emoji in the frequently-used ranking.
     ref.read(recentEmojiProvider.notifier).record(emoji);
-    actions.addReaction(message.id, emoji);
+    actions.addReaction(message.id, emoji, channelId: channelId);
   }
 }
 
@@ -74,13 +83,16 @@ void showAddReactionPicker({
   required BuildContext context,
   required WidgetRef ref,
   required TimelineMessage message,
+  String? channelId,
 }) {
   showEmojiPicker(
     context: context,
     onSelect: (emoji) {
       ref.read(recentEmojiProvider.notifier).record(emoji);
       armReactionBurst(ref, message, emoji);
-      ref.read(channelActionsProvider).addReaction(message.id, emoji);
+      ref
+          .read(channelActionsProvider)
+          .addReaction(message.id, emoji, channelId: channelId);
     },
   );
 }

@@ -1,7 +1,7 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
-import '../../shared/relay/relay.dart';
+import 'relay.dart';
 import 'user_status.dart';
 import 'user_status_cache_provider.dart';
 

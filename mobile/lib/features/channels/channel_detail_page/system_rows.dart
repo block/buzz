@@ -63,7 +63,7 @@ class _SystemMessageRow extends ConsumerWidget {
         ),
       );
       if (reactedMessages.isEmpty) {
-        actions.addReaction(message.id, emoji);
+        actions.addReaction(message.id, emoji, channelId: channelId);
         return;
       }
       for (final source in reactedMessages) {
@@ -73,7 +73,11 @@ class _SystemMessageRow extends ConsumerWidget {
               candidate.reactedByCurrentUser &&
               candidate.currentUserReactionId != null,
         );
-        actions.removeReaction(reaction.currentUserReactionId!, emoji);
+        actions.removeReaction(
+          reaction.currentUserReactionId!,
+          emoji,
+          channelId: channelId,
+        );
       }
     }
 
@@ -151,7 +155,12 @@ class _SystemMessageRow extends ConsumerWidget {
                     messageId: message.id,
                     reactions: reactions,
                     onToggle: groupedMessages == null
-                        ? (emoji) => toggleReaction(ref, message, emoji)
+                        ? (emoji) => toggleReaction(
+                            ref,
+                            message,
+                            emoji,
+                            channelId: channelId,
+                          )
                         : toggleGroupedReaction,
                   ),
                 ),

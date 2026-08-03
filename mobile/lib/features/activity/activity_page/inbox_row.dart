@@ -42,6 +42,7 @@ class _InboxRow extends ConsumerWidget {
   final Channel? channel;
   final String? currentPubkey;
   final bool isDone;
+  final bool selected;
   final VoidCallback onTap;
   final VoidCallback onMarkRead;
   final VoidCallback onMarkUnread;
@@ -51,6 +52,7 @@ class _InboxRow extends ConsumerWidget {
     required this.channel,
     required this.currentPubkey,
     required this.isDone,
+    this.selected = false,
     required this.onTap,
     required this.onMarkRead,
     required this.onMarkUnread,
@@ -100,112 +102,119 @@ class _InboxRow extends ConsumerWidget {
         ? context.colors.tertiary
         : mutedColor;
 
-    return InkWell(
-      key: ValueKey('inbox-row-${item.id}'),
-      onTap: onTap,
-      onLongPress: () => _showRowActions(context),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(
-          horizontal: Grid.gutter,
-          vertical: Grid.twelve,
-        ),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _RowAvatar(pubkey: item.item.pubkey, profile: profile),
-            const SizedBox(width: messageAvatarContentGap),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  // Sender + unread dot + timestamp.
-                  Row(
-                    children: [
-                      Expanded(
-                        child: MessageAuthorMeta(
-                          displayName: senderLabel,
-                          username: messageUsernameLabel(profile),
-                          timestamp: _inboxTimestamp(item.latestActivityAt),
-                          nameColor: context.colors.onSurface,
-                          metadataColor: mutedColor,
-                          nameStyle: activityUsernameTextStyle,
-                          metadataStyle: activityTimestampTextStyle,
-                          displayNameKey: ValueKey(
-                            'activity-author-${item.id}',
-                          ),
-                          usernameKey: ValueKey('activity-username-${item.id}'),
-                          timestampKey: ValueKey(
-                            'activity-timestamp-${item.id}',
-                          ),
-                        ),
-                      ),
-                      if (!isDone) ...[
-                        const SizedBox(width: Grid.xxs),
-                        Container(
-                          key: ValueKey('inbox-unread-dot-${item.id}'),
-                          width: 6,
-                          height: 6,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: context.colors.primary,
-                          ),
-                        ),
-                      ],
-                    ],
-                  ),
-                  const SizedBox(height: Grid.quarter),
-                  // Contextual label: "Mentioned in #channel" etc.
-                  Row(
-                    children: [
-                      Flexible(
-                        child: Text(
-                          label.text,
-                          style: activityContextTextStyle.copyWith(
-                            color: labelColor,
-                          ),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                      if (label.channelLabel != null) ...[
-                        const SizedBox(width: Grid.half),
-                        Flexible(
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: Grid.half + Grid.quarter,
-                              vertical: Grid.quarter / 2,
+    return Material(
+      color: selected
+          ? context.colors.surfaceContainerHighest
+          : Colors.transparent,
+      child: InkWell(
+        key: ValueKey('inbox-row-${item.id}'),
+        onTap: onTap,
+        onLongPress: () => _showRowActions(context),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: Grid.gutter,
+            vertical: Grid.twelve,
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _RowAvatar(pubkey: item.item.pubkey, profile: profile),
+              const SizedBox(width: messageAvatarContentGap),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // Sender + unread dot + timestamp.
+                    Row(
+                      children: [
+                        Expanded(
+                          child: MessageAuthorMeta(
+                            displayName: senderLabel,
+                            username: messageUsernameLabel(profile),
+                            timestamp: _inboxTimestamp(item.latestActivityAt),
+                            nameColor: context.colors.onSurface,
+                            metadataColor: mutedColor,
+                            nameStyle: activityUsernameTextStyle,
+                            metadataStyle: activityTimestampTextStyle,
+                            displayNameKey: ValueKey(
+                              'activity-author-${item.id}',
                             ),
+                            usernameKey: ValueKey(
+                              'activity-username-${item.id}',
+                            ),
+                            timestampKey: ValueKey(
+                              'activity-timestamp-${item.id}',
+                            ),
+                          ),
+                        ),
+                        if (!isDone) ...[
+                          const SizedBox(width: Grid.xxs),
+                          Container(
+                            key: ValueKey('inbox-unread-dot-${item.id}'),
+                            width: 6,
+                            height: 6,
                             decoration: BoxDecoration(
-                              color: context.colors.surfaceContainerHighest,
-                              borderRadius: BorderRadius.circular(Grid.half),
-                            ),
-                            child: Text(
-                              '#${label.channelLabel}',
-                              style: activityContextTextStyle.copyWith(
-                                color: mutedColor,
-                              ),
-                              overflow: TextOverflow.ellipsis,
+                              shape: BoxShape.circle,
+                              color: context.colors.primary,
                             ),
                           ),
-                        ),
+                        ],
                       ],
-                    ],
-                  ),
-                  const SizedBox(height: Grid.half),
-                  // Message preview.
-                  MessageContent(
-                    content: item.item.displayContent,
-                    mentionNames: mentionNames,
-                    agentMentionPubkeys: agentMentionPubkeys,
-                    tags: item.item.tags,
-                    maxLines: 2,
-                    baseStyle: activityPreviewTextStyle.copyWith(
-                      color: context.colors.onSurface,
                     ),
-                  ),
-                ],
+                    const SizedBox(height: Grid.quarter),
+                    // Contextual label: "Mentioned in #channel" etc.
+                    Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            label.text,
+                            style: activityContextTextStyle.copyWith(
+                              color: labelColor,
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        if (label.channelLabel != null) ...[
+                          const SizedBox(width: Grid.half),
+                          Flexible(
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: Grid.half + Grid.quarter,
+                                vertical: Grid.quarter / 2,
+                              ),
+                              decoration: BoxDecoration(
+                                color: context.colors.surfaceContainerHighest,
+                                borderRadius: BorderRadius.circular(Grid.half),
+                              ),
+                              child: Text(
+                                '#${label.channelLabel}',
+                                style: activityContextTextStyle.copyWith(
+                                  color: mutedColor,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                    const SizedBox(height: Grid.half),
+                    // Message preview.
+                    MessageContent(
+                      content: item.item.displayContent,
+                      mentionNames: mentionNames,
+                      agentMentionPubkeys: agentMentionPubkeys,
+                      tags: item.item.tags,
+                      maxLines: 2,
+                      baseStyle: activityPreviewTextStyle.copyWith(
+                        color: context.colors.onSurface,
+                      ),
+                    ),
+                  ],
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );

@@ -1,7 +1,23 @@
 part of '../channels_page.dart';
 
+/// Opens the community switcher from either the compact channel header or the
+/// expanded iPad sidebar identity row.
+Future<void> showCommunitySwitcherSheet(
+  BuildContext context, {
+  ValueChanged<String?>? onCommunitySwitchStart,
+}) {
+  return showModalBottomSheet<void>(
+    context: context,
+    showDragHandle: true,
+    builder: (_) =>
+        _CommunitySwitcherSheet(onCommunitySwitchStart: onCommunitySwitchStart),
+  );
+}
+
 class _CommunitySwitcherSheet extends HookConsumerWidget {
-  const _CommunitySwitcherSheet();
+  final ValueChanged<String?>? onCommunitySwitchStart;
+
+  const _CommunitySwitcherSheet({this.onCommunitySwitchStart});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -107,23 +123,49 @@ class _CommunitySwitcherSheet extends HookConsumerWidget {
                                   : () async {
                                       final community = communities[index];
                                       if (community.id != activeId) {
-                                        await ref
-                                            .read(
-                                              communityListProvider.notifier,
-                                            )
-                                            .switchCommunity(community.id);
+                                        onCommunitySwitchStart?.call(
+                                          community.id,
+                                        );
+                                        try {
+                                          await ref
+                                              .read(
+                                                communityListProvider.notifier,
+                                              )
+                                              .switchCommunity(community.id);
+                                        } catch (error) {
+                                          debugPrint(
+                                            '[CommunitySwitcherSheet] failed to switch community: $error',
+                                          );
+                                          onCommunitySwitchStart?.call(null);
+                                        }
                                       }
                                       if (context.mounted) {
                                         Navigator.of(context).pop();
                                       }
                                     },
-                              onRemove: () => _confirmRemoveCommunity(
-                                context,
-                                ref,
-                                communities[index],
-                                closeSheetAfterRemoval:
-                                    communities[index].id == activeId,
-                              ),
+                              onRemove: () {
+                                final community = communities[index];
+                                final nextCommunity = community.id == activeId
+                                    ? communities
+                                          .where(
+                                            (candidate) =>
+                                                candidate.id != community.id,
+                                          )
+                                          .firstOrNull
+                                    : null;
+                                unawaited(
+                                  _confirmRemoveCommunity(
+                                    context,
+                                    ref,
+                                    community,
+                                    closeSheetAfterRemoval:
+                                        community.id == activeId,
+                                    nextCommunityId: nextCommunity?.id,
+                                    onCommunitySwitchStart:
+                                        onCommunitySwitchStart,
+                                  ),
+                                );
+                              },
                             ),
                           ],
                           if (communities.isNotEmpty)
@@ -421,6 +463,8 @@ Future<void> _confirmRemoveCommunity(
   WidgetRef ref,
   Community community, {
   required bool closeSheetAfterRemoval,
+  required String? nextCommunityId,
+  ValueChanged<String?>? onCommunitySwitchStart,
 }) async {
   final confirmed = await showDialog<bool>(
     context: context,
@@ -447,6 +491,7 @@ Future<void> _confirmRemoveCommunity(
   if (confirmed != true || !context.mounted) return;
 
   final messenger = ScaffoldMessenger.of(context);
+  onCommunitySwitchStart?.call(nextCommunityId);
   try {
     await ref
         .read(communityListProvider.notifier)
@@ -455,6 +500,7 @@ Future<void> _confirmRemoveCommunity(
       Navigator.of(context).pop();
     }
   } catch (e) {
+    onCommunitySwitchStart?.call(null);
     messenger.showSnackBar(
       SnackBar(content: Text('Failed to remove community: $e')),
     );

@@ -1,5 +1,6 @@
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
+import 'package:buzz/shared/widgets/frosted_scaffold.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -82,5 +83,39 @@ void main() {
     expect(tester.getSize(clip).height, closeTo(reportedHeight, 0.01));
     expect(reportedHeight, closeTo(titleContentHeight + Grid.xs + 1, 0.01));
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('iPad headers replace the divider with a scroll shadow', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1180, 820);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.light(),
+        home: FrostedScaffold(
+          appBar: const FrostedAppBar(title: Text('Inbox')),
+          body: ListView.builder(
+            itemExtent: 56,
+            itemCount: 30,
+            itemBuilder: (_, index) => Text('Row $index'),
+          ),
+        ),
+      ),
+    );
+
+    expect(find.byKey(const Key('frosted-app-bar-divider')), findsOneWidget);
+    expect(find.byKey(const Key('frosted-app-bar-shadow')), findsNothing);
+
+    await tester.drag(find.byType(ListView), const Offset(0, -180));
+    await tester.pump();
+
+    expect(find.byKey(const Key('frosted-app-bar-divider')), findsNothing);
+    expect(find.byKey(const Key('frosted-app-bar-shadow')), findsOneWidget);
   });
 }

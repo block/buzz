@@ -8,10 +8,10 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/custom_emoji/custom_emoji_render.dart';
+import '../../shared/relay/user_status.dart';
+import '../../shared/relay/user_status_provider.dart';
 import '../../shared/theme/theme.dart';
 import '../channels/emoji_picker.dart';
-import 'user_status.dart';
-import 'user_status_provider.dart';
 
 /// The emoji well and the text field are sized to be the two things you reach
 /// for, so they carry no borders — the sheet has no other controls to compete

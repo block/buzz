@@ -27,6 +27,7 @@ import '../profile/user_cache_provider.dart';
 import '../profile/user_profile.dart';
 import 'activity_provider.dart';
 import 'compose_drafts_provider.dart';
+import 'feed_item.dart';
 import 'inbox_item.dart';
 import 'inbox_local_state_provider.dart';
 import 'inbox_read_state.dart';
@@ -36,6 +37,10 @@ part 'activity_page/header_actions.dart';
 part 'activity_page/inbox_row.dart';
 part 'activity_page/lists.dart';
 part 'activity_page/status_views.dart';
+
+const _wideInboxBreakpoint = 1000.0;
+const _wideInboxMinListWidth = 300.0;
+const _wideInboxMaxListWidth = 400.0;
 
 EdgeInsets _activityScrollPadding(
   BuildContext context, {
@@ -66,6 +71,18 @@ class ActivityPage extends HookConsumerWidget {
     final channelsAsync = ref.watch(channelsProvider);
     final filter = useState(InboxFilter.all);
     final unreadOnly = useState(false);
+    final selectedItemId = useState<String?>(null);
+    // A channel can be left from the persistent detail navigator before the
+    // refreshed Activity feed arrives. Hide its rows immediately so the
+    // sidebar cannot retain a detail for a channel that is no longer joined.
+    final leftChannelIds = useState<Set<String>>({});
+    // Retain the event selected before its row is marked read. A grouped row
+    // otherwise recomputes its deep link after the read marker changes and
+    // opens the latest event instead of the oldest unread one the user chose.
+    final selectedItemTarget = useState<FeedItem?>(null);
+    final selectedItemForDetail = useState<InboxItem?>(null);
+    final isWideInbox =
+        MediaQuery.sizeOf(context).width >= _wideInboxBreakpoint;
     final headerTitleStyle = context.textTheme.titleMedium?.copyWith(
       fontSize: 22,
       fontWeight: FontWeight.w600,
@@ -84,6 +101,25 @@ class ActivityPage extends HookConsumerWidget {
 
     final channels = channelsAsync.asData?.value ?? const <Channel>[];
     final channelById = {for (final c in channels) c.id: c};
+    final memberChannelIds = {
+      for (final channel in channels)
+        if (channel.isMember) channel.id,
+    };
+    final memberChannelIdsKey = memberChannelIds.toList()..sort();
+    final previousMemberChannelIds = useRef<Set<String>>(memberChannelIds);
+    useEffect(() {
+      final rejoinedChannelIds = leftChannelIds.value.where(
+        (channelId) =>
+            !previousMemberChannelIds.value.contains(channelId) &&
+            memberChannelIds.contains(channelId),
+      );
+      if (rejoinedChannelIds.isNotEmpty) {
+        leftChannelIds.value = {...leftChannelIds.value}
+          ..removeAll(rejoinedChannelIds);
+      }
+      previousMemberChannelIds.value = memberChannelIds;
+      return null;
+    }, [memberChannelIdsKey.join('\u0000')]);
 
     int? markerOf(String contextId) => readState.effectiveTimestamp(contextId);
     bool isDone(InboxItem item) => isInboxItemDone(
@@ -95,10 +131,35 @@ class ActivityPage extends HookConsumerWidget {
 
     final visibleItems = [
       for (final item in allItems)
-        if (matchesInboxFilter(item, filter.value) &&
+        if (!leftChannelIds.value.contains(item.item.channelId) &&
+            matchesInboxFilter(item, filter.value) &&
             (!unreadOnly.value || !isDone(item)))
           item,
     ];
+    final visibleItemIdsKey = visibleItems
+        .map((item) => item.id)
+        .join('\u0000');
+    useEffect(() {
+      if (!isWideInbox || visibleItems.isEmpty) return null;
+      final hasSelectedItem = visibleItems.any(
+        (item) => item.conversationId == selectedItemId.value,
+      );
+      final retainsSelectedDetail =
+          unreadOnly.value &&
+          selectedItemForDetail.value?.conversationId == selectedItemId.value;
+      if (!hasSelectedItem && !retainsSelectedDetail) {
+        selectedItemId.value = visibleItems.first.conversationId;
+        selectedItemTarget.value = null;
+        selectedItemForDetail.value = null;
+      }
+      return null;
+    }, [isWideInbox, visibleItemIdsKey, filter.value, unreadOnly.value]);
+    final selectedItem =
+        visibleItems.cast<InboxItem?>().firstWhere(
+          (item) => item?.conversationId == selectedItemId.value,
+          orElse: () => null,
+        ) ??
+        (unreadOnly.value ? selectedItemForDetail.value : null);
 
     // Preload sender profiles for visible rows.
     final preloadPubkeys = {
@@ -176,6 +237,14 @@ class ActivityPage extends HookConsumerWidget {
           ? null
           : thread.parentId;
 
+      if (isWideInbox) {
+        selectedItemId.value = item.conversationId;
+        selectedItemTarget.value = target;
+        selectedItemForDetail.value = item;
+        markItemRead(item);
+        return;
+      }
+
       Navigator.of(context).push(
         MaterialPageRoute<void>(
           builder: (_) => ChannelDetailPage(
@@ -243,6 +312,14 @@ class ActivityPage extends HookConsumerWidget {
       ]);
     }
 
+    void handleChannelLeft(String channelId) {
+      leftChannelIds.value = {...leftChannelIds.value, channelId};
+      selectedItemId.value = null;
+      selectedItemTarget.value = null;
+      selectedItemForDetail.value = null;
+      unawaited(refresh());
+    }
+
     final Widget body;
     if (filter.value == InboxFilter.reminders) {
       body = _RemindersList(onOpen: openReminder, onRefresh: refresh);
@@ -292,6 +369,9 @@ class ActivityPage extends HookConsumerWidget {
                   channel: channel,
                   currentPubkey: myPk,
                   isDone: isDone(item),
+                  selected:
+                      isWideInbox &&
+                      item.conversationId == selectedItemId.value,
                   onTap: () => openItem(item),
                   onMarkRead: () => markItemRead(item),
                   onMarkUnread: () => markItemUnread(item),
@@ -303,24 +383,29 @@ class ActivityPage extends HookConsumerWidget {
       );
     }
 
-    return FrostedScaffold(
+    Widget inboxListPane(String title) => FrostedScaffold(
       backgroundColor: Colors.transparent,
       appBar: FrostedAppBar(
         gradient: context.appColors.topSectionGradient,
         automaticallyImplyLeading: false,
-        title: const Text('Activity'),
+        title: Text(title),
         titleStyle: headerTitleStyle,
         actions: [
           _FilterMenuButton(
             filter: filter.value,
             dueReminderCount: dueReminderCount,
             draftCount: drafts.length,
-            onChanged: (f) => filter.value = f,
+            onChanged: (nextFilter) {
+              filter.value = nextFilter;
+              selectedItemId.value = null;
+              selectedItemTarget.value = null;
+              selectedItemForDetail.value = null;
+            },
           ),
           _InboxOptionsButton(
             unreadOnly: unreadOnly.value,
             unreadCount: unreadVisibleCount,
-            onUnreadOnlyChanged: (v) => unreadOnly.value = v,
+            onUnreadOnlyChanged: (value) => unreadOnly.value = value,
             onMarkAllRead: () {
               for (final item in visibleItems) {
                 if (!isDone(item)) markItemRead(item);
@@ -338,6 +423,136 @@ class ActivityPage extends HookConsumerWidget {
             top: frostedAppBarHeight(context, titleStyle: headerTitleStyle),
           ),
           child: body,
+        ),
+      ),
+    );
+
+    if (isWideInbox) {
+      FeedItem? detailTarget(InboxItem? inboxItem) {
+        if (inboxItem == null) return null;
+        return inboxItem.deepLinkTarget(
+          resolveInboxItemReadAt(inboxItem, markerOf: markerOf),
+        );
+      }
+
+      final selectedTarget =
+          selectedItemTarget.value ?? detailTarget(selectedItem);
+      final selectedChannelId = selectedTarget?.channelId;
+      final selectedChannel = selectedChannelId == null
+          ? null
+          : channelById[selectedChannelId];
+      final selectedThread = selectedTarget == null
+          ? null
+          : isBroadcastReply(selectedTarget.tags)
+          ? null
+          : threadReferenceOf(selectedTarget.tags).parentId;
+
+      return LayoutBuilder(
+        builder: (context, constraints) {
+          final listWidth = (constraints.maxWidth / 3)
+              .clamp(_wideInboxMinListWidth, _wideInboxMaxListWidth)
+              .toDouble();
+          return Row(
+            children: [
+              SizedBox(
+                key: const Key('wide-activity-inbox-list'),
+                width: listWidth,
+                child: inboxListPane('Inbox'),
+              ),
+              VerticalDivider(width: 1, color: context.colors.outlineVariant),
+              Expanded(
+                child: _WideActivityDetail(
+                  item: selectedItem,
+                  channel: selectedChannel,
+                  initialMessageId: selectedTarget?.id,
+                  initialThreadRootId: selectedThread,
+                  onChannelLeft: () => handleChannelLeft(selectedChannel!.id),
+                ),
+              ),
+            ],
+          );
+        },
+      );
+    }
+
+    return inboxListPane('Activity');
+  }
+}
+
+class _WideActivityDetail extends HookWidget {
+  final InboxItem? item;
+  final Channel? channel;
+  final String? initialMessageId;
+  final String? initialThreadRootId;
+  final VoidCallback onChannelLeft;
+
+  const _WideActivityDetail({
+    required this.item,
+    required this.channel,
+    required this.initialMessageId,
+    required this.initialThreadRootId,
+    required this.onChannelLeft,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (item == null || channel == null || initialMessageId == null) {
+      return const _WideActivityEmptyDetail();
+    }
+
+    final navigatorKey = useMemoized(GlobalKey<NavigatorState>.new, [
+      item!.conversationId,
+    ]);
+    return NavigatorPopHandler(
+      key: ValueKey('wide-activity-detail-${item!.conversationId}'),
+      onPopWithResult: (_) => navigatorKey.currentState?.maybePop(),
+      child: Navigator(
+        key: navigatorKey,
+        onGenerateRoute: (_) => MaterialPageRoute<void>(
+          builder: (_) => ChannelDetailPage(
+            channel: channel!,
+            initialMessageId: initialMessageId,
+            initialThreadRootId: initialThreadRootId,
+            onChannelLeft: onChannelLeft,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _WideActivityEmptyDetail extends StatelessWidget {
+  const _WideActivityEmptyDetail();
+
+  @override
+  Widget build(BuildContext context) {
+    return ColoredBox(
+      color: context.colors.surface,
+      child: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              LucideIcons.inbox,
+              color: context.colors.onSurfaceVariant,
+              size: 32,
+            ),
+            const SizedBox(height: Grid.sm),
+            Text(
+              'Select an inbox item',
+              style: context.textTheme.titleMedium?.copyWith(
+                color: context.colors.onSurface,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: Grid.xxs),
+            Text(
+              'Its conversation will open here.',
+              style: context.textTheme.bodyMedium?.copyWith(
+                color: context.colors.onSurfaceVariant,
+              ),
+            ),
+          ],
         ),
       ),
     );

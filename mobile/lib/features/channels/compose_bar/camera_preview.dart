@@ -4,11 +4,13 @@ class _InlineCameraPreview extends HookConsumerWidget {
   final bool initializeCamera;
   final Future<void> Function(XFile image) onCapture;
   final VoidCallback onClose;
+  final ValueChanged<double> onPreviewAspectRatio;
 
   const _InlineCameraPreview({
     required this.initializeCamera,
     required this.onCapture,
     required this.onClose,
+    required this.onPreviewAspectRatio,
   });
 
   @override
@@ -124,6 +126,18 @@ class _InlineCameraPreview extends HookConsumerWidget {
     }
 
     final activeController = controller.value;
+    final previewSize = activeController?.value.previewSize;
+    final previewAspectRatio = previewSize == null
+        ? null
+        : MediaQuery.orientationOf(context) == Orientation.landscape
+        ? activeController!.value.aspectRatio
+        : 1 / activeController!.value.aspectRatio;
+    useEffect(() {
+      if (previewAspectRatio != null) {
+        onPreviewAspectRatio(previewAspectRatio);
+      }
+      return null;
+    }, [onPreviewAspectRatio, previewAspectRatio]);
     final usesAndroidCameraLayout =
         defaultTargetPlatform == TargetPlatform.android;
     return ColoredBox(
@@ -176,13 +190,17 @@ class _CameraFeed extends StatelessWidget {
   Widget build(BuildContext context) {
     final previewSize = controller.value.previewSize;
     if (previewSize == null) return const ColoredBox(color: Colors.black);
+    final previewAspectRatio =
+        MediaQuery.orientationOf(context) == Orientation.landscape
+        ? controller.value.aspectRatio
+        : 1 / controller.value.aspectRatio;
 
     return ClipRect(
       child: FittedBox(
         fit: BoxFit.cover,
         child: SizedBox(
-          width: previewSize.height,
-          height: previewSize.width,
+          width: previewAspectRatio,
+          height: 1,
           child: camera.CameraPreview(controller),
         ),
       ),

@@ -3,7 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
-import '../../shared/relay/relay.dart';
+import 'relay.dart';
 import 'user_status.dart';
 
 /// In-memory cache of other users' NIP-38 statuses (kind:30315, d=general).

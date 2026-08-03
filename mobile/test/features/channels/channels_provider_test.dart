@@ -457,11 +457,13 @@ void main() {
           .read(relayConfigProvider.notifier)
           .update(baseUrl: 'https://new-community.example');
       await Future<void>.delayed(Duration.zero);
+      expect(container.read(channelsProvider).isLoading, isTrue);
       expect(container.read(channelsProvider).value?.single.name, 'general');
 
       session.setStatus(SessionStatus.connected);
       await Future<void>.delayed(Duration.zero);
 
+      expect(container.read(channelsProvider).isLoading, isFalse);
       expect(container.read(channelsProvider).value?.single.name, 'random');
     },
   );

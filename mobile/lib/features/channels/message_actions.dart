@@ -69,6 +69,7 @@ void showMessageActions({
               children: [
                 _QuickReactionRow(
                   message: message,
+                  channelId: channelId,
                   sheetContext: sheetContext,
                   pageContext: context,
                   pageRef: ref,
@@ -593,6 +594,7 @@ class _FastActionTile extends StatelessWidget {
 /// the row is full on a fresh install.
 class _QuickReactionRow extends ConsumerWidget {
   final TimelineMessage message;
+  final String channelId;
 
   /// The sheet's context, popped before the reaction fires.
   final BuildContext sheetContext;
@@ -607,6 +609,7 @@ class _QuickReactionRow extends ConsumerWidget {
 
   const _QuickReactionRow({
     required this.message,
+    required this.channelId,
     required this.sheetContext,
     required this.pageContext,
     required this.pageRef,
@@ -633,7 +636,9 @@ class _QuickReactionRow extends ConsumerWidget {
       // The sheet is on its way out, so the burst can't come from this tile —
       // hand it to the pill that's about to appear in the timeline.
       armReactionBurst(pageRef, message, value);
-      pageRef.read(channelActionsProvider).addReaction(message.id, value);
+      pageRef
+          .read(channelActionsProvider)
+          .addReaction(message.id, value, channelId: channelId);
     }
 
     return Row(

@@ -11,6 +11,7 @@ import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../profile/profile_provider.dart';
 import 'channel.dart';
+import 'channel_messages_provider.dart';
 import 'channels_provider.dart';
 
 @immutable
@@ -682,31 +683,75 @@ class ChannelActions {
     _ref.invalidate(channelBotPubkeysProvider(channelId));
   }
 
-  Future<void> addReaction(String eventId, String emoji) async {
+  Future<void> addReaction(
+    String eventId,
+    String emoji, {
+    String? channelId,
+  }) async {
     final shortcode = normalizeShortcode(emoji);
     final emojiUrl = reactionEmojiUrl(
       emoji,
       _ref.read(customEmojiListProvider),
     );
-    await _signedEventRelay.submit(
-      kind: EventKind.reaction,
-      content: emoji,
-      tags: [
-        ['e', eventId],
-        if (shortcode != null && emojiUrl != null)
-          ['emoji', shortcode, emojiUrl],
-      ],
-    );
+    NostrEvent? localReaction;
+    try {
+      await _signedEventRelay.submit(
+        kind: EventKind.reaction,
+        content: emoji,
+        tags: [
+          ['e', eventId],
+          if (shortcode != null && emojiUrl != null)
+            ['emoji', shortcode, emojiUrl],
+        ],
+        onSigned: (event) {
+          localReaction = event;
+          if (channelId != null) {
+            _ref
+                .read(channelMessagesProvider(channelId).notifier)
+                .addLocalAuxEvent(event);
+          }
+        },
+      );
+    } catch (_) {
+      if (channelId != null && localReaction != null) {
+        _ref
+            .read(channelMessagesProvider(channelId).notifier)
+            .removeLocalAuxEvent(localReaction!.id);
+      }
+      rethrow;
+    }
   }
 
-  Future<void> removeReaction(String reactionEventId, String emoji) async {
-    await _signedEventRelay.submit(
-      kind: EventKind.deletion,
-      content: '',
-      tags: [
-        ['e', reactionEventId],
-      ],
-    );
+  Future<void> removeReaction(
+    String reactionEventId,
+    String emoji, {
+    String? channelId,
+  }) async {
+    NostrEvent? localDeletion;
+    try {
+      await _signedEventRelay.submit(
+        kind: EventKind.deletion,
+        content: '',
+        tags: [
+          ['e', reactionEventId],
+        ],
+        onSigned: (event) {
+          localDeletion = event;
+          if (channelId != null) {
+            _ref
+                .read(channelMessagesProvider(channelId).notifier)
+                .addLocalAuxEvent(event);
+          }
+        },
+      );
+    } catch (_) {
+      if (channelId != null && localDeletion != null) {
+        _ref
+            .read(channelMessagesProvider(channelId).notifier)
+            .removeLocalAuxEvent(localDeletion!.id);
+      }
+      rethrow;
+    }
   }
 
   Future<void> editMessage({

@@ -4,12 +4,12 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/custom_emoji/custom_emoji_render.dart';
+import '../../shared/relay/user_status_provider.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/masked_avatar_badge.dart';
 import 'profile_provider.dart';
 import 'set_status_sheet.dart';
-import 'user_status_provider.dart';
 
 /// Desktop's settings-avatar treatment (`ProfileSettingsCard`): a large centred
 /// avatar with a circular badge notched out of its bottom-right corner. Desktop

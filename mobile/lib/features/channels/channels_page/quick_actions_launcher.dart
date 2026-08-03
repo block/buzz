@@ -5,6 +5,32 @@ const _kQuickActionsTabMotionCurve = Cubic(0.77, 0, 0.175, 1);
 const _kQuickActionsHiddenOverlap = Grid.half;
 const _kQuickActionsHiddenScale = 0.8;
 
+/// Opens the stream-creation flow used by both the compact floating action
+/// button and the expanded iPad sidebar.
+Future<Channel?> showCreateChannelSheet(BuildContext context) {
+  return showModalBottomSheet<Channel>(
+    context: context,
+    constraints: _quickActionSheetConstraints(context),
+    isScrollControlled: true,
+    showDragHandle: true,
+    builder: (_) => const _CreateChannelSheet(channelType: 'stream'),
+  );
+}
+
+/// Opens the direct-message flow used by both navigation layouts.
+Future<Channel?> showNewDirectMessageSheet(
+  BuildContext context, {
+  required String? currentPubkey,
+}) {
+  return showModalBottomSheet<Channel>(
+    context: context,
+    constraints: _quickActionSheetConstraints(context),
+    isScrollControlled: true,
+    showDragHandle: true,
+    builder: (_) => _NewDirectMessageSheet(currentPubkey: currentPubkey),
+  );
+}
+
 /// Places the channel quick-actions button beside mobile navigation.
 ///
 /// The button remains available only on Home and moves behind the navigation
@@ -85,24 +111,14 @@ class ChannelQuickActionsLauncher extends HookConsumerWidget {
 
       switch (action) {
         case _QuickAction.createChannel:
-          final created = await showModalBottomSheet<Channel>(
-            context: context,
-            constraints: _quickActionSheetConstraints(context),
-            isScrollControlled: true,
-            showDragHandle: true,
-            builder: (_) => const _CreateChannelSheet(channelType: 'stream'),
-          );
+          final created = await showCreateChannelSheet(context);
           if (created != null && context.mounted) {
             await openChannel(created);
           }
         case _QuickAction.newDm:
-          final opened = await showModalBottomSheet<Channel>(
-            context: context,
-            constraints: _quickActionSheetConstraints(context),
-            isScrollControlled: true,
-            showDragHandle: true,
-            builder: (_) =>
-                _NewDirectMessageSheet(currentPubkey: currentPubkey),
+          final opened = await showNewDirectMessageSheet(
+            context,
+            currentPubkey: currentPubkey,
           );
           if (opened != null && context.mounted) {
             await openChannel(opened);

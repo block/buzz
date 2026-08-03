@@ -233,13 +233,18 @@ class _MessageBubble extends ConsumerWidget {
                           ReactionRow(
                             messageId: message.id,
                             reactions: message.reactions,
-                            onToggle: (emoji) =>
-                                toggleReaction(ref, message, emoji),
+                            onToggle: (emoji) => toggleReaction(
+                              ref,
+                              message,
+                              emoji,
+                              channelId: currentChannelId,
+                            ),
                             showAddButton: isMember && !isArchived,
                             onAddReaction: () => showAddReactionPicker(
                               context: context,
                               ref: ref,
                               message: message,
+                              channelId: currentChannelId,
                             ),
                           ),
                       ],

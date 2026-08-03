@@ -28,6 +28,7 @@ class SettingsPage extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final packageInfoFuture = useMemoized(() => PackageInfo.fromPlatform());
     final packageInfo = useFuture(packageInfoFuture);
+    final isTablet = MediaQuery.sizeOf(context).shortestSide >= 600;
 
     return FrostedScaffold(
       appBar: const FrostedAppBar(title: Text('Settings')),
@@ -40,10 +41,23 @@ class SettingsPage extends HookConsumerWidget {
                 bottom: Grid.xs,
               ),
               children: [
-                profileHeader,
-                const _AppearanceSection(),
-                const _ConnectionSection(),
-                const _RemoveCommunitySection(),
+                Align(
+                  alignment: Alignment.topCenter,
+                  child: ConstrainedBox(
+                    key: const Key('settings-content'),
+                    constraints: BoxConstraints(
+                      maxWidth: isTablet ? 640 : double.infinity,
+                    ),
+                    child: Column(
+                      children: [
+                        profileHeader,
+                        const _AppearanceSection(),
+                        const _ConnectionSection(),
+                        const _RemoveCommunitySection(),
+                      ],
+                    ),
+                  ),
+                ),
               ],
             ),
           ),

@@ -140,16 +140,19 @@ void main() {
       return container.decoration! as BoxDecoration;
     }
 
-    Widget harness(ThemeData theme) => MaterialApp(
-      theme: theme,
-      home: Builder(
-        builder: (context) => Stack(
-          children: [
-            FrostedAppBar(
-              gradient: context.appColors.topSectionGradient,
-              title: const Text('Home'),
-            ),
-          ],
+    Widget harness(ThemeData theme) => MediaQuery(
+      data: const MediaQueryData(size: Size(390, 844)),
+      child: MaterialApp(
+        theme: theme,
+        home: Builder(
+          builder: (context) => Stack(
+            children: [
+              FrostedAppBar(
+                gradient: context.appColors.topSectionGradient,
+                title: const Text('Home'),
+              ),
+            ],
+          ),
         ),
       ),
     );

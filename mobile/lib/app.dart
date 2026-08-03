@@ -9,7 +9,7 @@ import 'features/home/home_page.dart';
 import 'features/pairing/pairing_page.dart';
 import 'features/channels/agent_activity/observer_subscription.dart';
 import 'features/channels/deep_link_dispatcher.dart';
-import 'features/profile/user_status_cache_provider.dart';
+import 'shared/relay/user_status_cache_provider.dart';
 import 'features/profile/settings_profile_header.dart';
 import 'features/settings/settings_page.dart';
 import 'shared/auth/auth.dart';

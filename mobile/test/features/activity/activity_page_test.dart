@@ -184,6 +184,178 @@ void main() {
     expect(find.byTooltip('Back'), findsNothing);
   });
 
+  testWidgets('uses a persistent inbox list and detail pane on wide iPad', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1180, 820);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    await tester.pumpWidget(await buildTestable());
+    await tester.pump();
+
+    final inboxList = find.byKey(const Key('wide-activity-inbox-list'));
+    expect(inboxList, findsOneWidget);
+    expect(tester.getSize(inboxList).width, closeTo(1180 / 3, 0.1));
+    expect(find.text('Inbox'), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('inbox-row-m1')));
+    await tester.pump();
+
+    expect(
+      find.byKey(const ValueKey('wide-activity-detail-m1')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('keeps a wide inbox detail selected across same-row filters', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1180, 820);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    final secondMention = FeedItem(
+      id: 'm2',
+      kind: 9,
+      pubkey: 'bob_pk',
+      content: 'Another mention',
+      createdAt: now - 60,
+      channelId: 'ch2',
+      channelName: 'engineering',
+      tags: const [],
+      category: 'mention',
+    );
+
+    await tester.pumpWidget(
+      await buildTestable(
+        feed: HomeFeedResponse(
+          mentions: [testMention, secondMention],
+          needsAction: const [],
+          activity: const [],
+          agentActivity: const [],
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('inbox-row-m2')));
+    await tester.pumpAndSettle();
+    expect(find.byType(ChannelDetailPage), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('activity-filter-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Mentions'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(ChannelDetailPage), findsOneWidget);
+  });
+
+  testWidgets(
+    'keeps the oldest unread deep link after a wide inbox row is read',
+    (tester) async {
+      tester.view.physicalSize = const Size(1180, 820);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      final oldestUnread = FeedItem(
+        id: 'oldest-unread',
+        kind: 9,
+        pubkey: 'alice_pk',
+        content: 'First unread reply',
+        createdAt: now - 120,
+        channelId: 'ch1',
+        channelName: 'general',
+        tags: const [
+          ['e', 'thread-root', '', 'root'],
+          ['e', 'oldest-unread', '', 'reply'],
+        ],
+        category: 'activity',
+      );
+      final latestUnread = FeedItem(
+        id: 'latest-unread',
+        kind: 9,
+        pubkey: 'alice_pk',
+        content: 'Latest unread reply',
+        createdAt: now - 60,
+        channelId: 'ch1',
+        channelName: 'general',
+        tags: const [
+          ['e', 'thread-root', '', 'root'],
+          ['e', 'latest-unread', '', 'reply'],
+        ],
+        category: 'activity',
+      );
+      final feed = HomeFeedResponse(
+        mentions: const [],
+        needsAction: const [],
+        activity: [oldestUnread, latestUnread],
+        agentActivity: const [],
+      );
+
+      await tester.pumpWidget(
+        await buildTestable(
+          feed: feed,
+          readContexts: {'thread:thread-root': now - 180},
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('inbox-row-latest-unread')));
+      await tester.pump();
+
+      final detail = tester.widget<ChannelDetailPage>(
+        find.byType(ChannelDetailPage),
+      );
+      expect(detail.initialMessageId, 'oldest-unread');
+    },
+  );
+
+  testWidgets('clears a retained wide detail when its filter changes', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1180, 820);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+
+    await tester.pumpWidget(
+      await buildTestable(
+        feed: HomeFeedResponse(
+          mentions: [testMention],
+          needsAction: const [],
+          activity: const [],
+          agentActivity: const [],
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('inbox-row-m1')));
+    await tester.pumpAndSettle();
+    expect(find.byType(ChannelDetailPage), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('activity-options-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Show unread'));
+    await tester.pumpAndSettle();
+    expect(find.byType(ChannelDetailPage), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('activity-filter-menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Reminders'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(ChannelDetailPage), findsNothing);
+  });
+
   testWidgets('keeps footer clearance inside the scrollable content', (
     tester,
   ) async {

@@ -50,6 +50,7 @@ import 'send_message_provider.dart';
 import '../profile/user_profile_sheet.dart';
 import 'small_avatar.dart';
 import 'thread_detail_page.dart';
+import 'thread_replies_provider.dart';
 import 'timeline_message.dart';
 
 part 'channel_detail_page/message_list.dart';
@@ -117,12 +118,14 @@ class ChannelDetailPage extends HookConsumerWidget {
   final Channel channel;
   final String? initialMessageId;
   final String? initialThreadRootId;
+  final VoidCallback? onChannelLeft;
 
   const ChannelDetailPage({
     super.key,
     required this.channel,
     this.initialMessageId,
     this.initialThreadRootId,
+    this.onChannelLeft,
   });
 
   @override
@@ -292,7 +295,11 @@ class ChannelDetailPage extends HookConsumerWidget {
                   builder: (_) => ManageChannelSheet(channel: resolvedChannel),
                 );
                 if (shouldClose == true && context.mounted) {
-                  Navigator.of(context).pop();
+                  if (onChannelLeft != null) {
+                    onChannelLeft!();
+                  } else {
+                    Navigator.of(context).pop();
+                  }
                 }
               },
               tooltip: 'Manage channel',

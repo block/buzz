@@ -5,6 +5,7 @@ import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/channels/channel_messages_provider.dart';
+import 'package:buzz/features/channels/pending_local_aux_events_provider.dart';
 import 'package:buzz/features/channels/pending_local_messages_provider.dart';
 import 'package:buzz/features/channels/thread_replies_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
@@ -244,6 +245,48 @@ void main() {
             .value
             ?.map((event) => event.id),
         ['local'],
+      );
+    },
+  );
+
+  test(
+    'authoritative auxiliary echo prevents a later publish rollback',
+    () async {
+      final relaySession = _RecordingRelaySessionNotifier(
+        queryResults: [
+          [_event(id: 'message', createdAt: 10), _bounds()],
+        ],
+      );
+      final container = _buildContainer(relaySession);
+      addTearDown(container.dispose);
+
+      container.read(channelMessagesProvider(_channelId));
+      await relaySession.subscribed;
+      await _pumpEventQueue();
+      final notifier = container.read(
+        channelMessagesProvider(_channelId).notifier,
+      );
+      final reaction = _auxEvent(
+        id: 'reaction',
+        kind: EventKind.reaction,
+        createdAt: 20,
+      );
+
+      notifier.addLocalAuxEvent(reaction);
+      relaySession.emit(reaction);
+      await _pumpEventQueue();
+
+      expect(
+        container.read(pendingLocalAuxEventsProvider(_channelId)),
+        isEmpty,
+      );
+      notifier.removeLocalAuxEvent(reaction.id);
+      expect(
+        container
+            .read(channelMessagesProvider(_channelId))
+            .value
+            ?.map((event) => event.id),
+        ['message', 'reaction'],
       );
     },
   );
@@ -659,6 +702,25 @@ NostrEvent _summary({
       'last_reply_at': 20,
       'participants': ['alice'],
     }),
+    sig: 'sig',
+  );
+}
+
+NostrEvent _auxEvent({
+  required String id,
+  required int kind,
+  required int createdAt,
+}) {
+  return NostrEvent(
+    id: id,
+    pubkey: 'alice',
+    createdAt: createdAt,
+    kind: kind,
+    tags: const [
+      ['h', _channelId],
+      ['e', 'message'],
+    ],
+    content: '+',
     sig: 'sig',
   );
 }

@@ -1,6 +1,6 @@
 import 'package:flutter/foundation.dart';
 
-import '../../shared/relay/nostr_models.dart';
+import 'nostr_models.dart';
 
 /// A user's NIP-38 status (kind:30315, d=general).
 @immutable

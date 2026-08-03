@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:buzz/features/settings/accent_picker_page.dart';
+import 'package:buzz/features/settings/settings_page.dart';
 import 'package:buzz/features/settings/theme_picker_page.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -199,5 +200,25 @@ void main() {
         accentColors.indexWhere((a) => a.name == 'Green'),
       );
     });
+  });
+
+  testWidgets('centers settings content at a tablet-friendly width', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(1180, 820));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final instance = await _prefs(const <String, Object>{});
+
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        child: const SettingsPage(profileHeader: SizedBox.shrink()),
+        overrides: [savedPrefsProvider.overrideWithValue(instance)],
+      ),
+    );
+    await tester.pump();
+
+    final content = tester.getRect(find.byKey(const Key('settings-content')));
+    expect(content.width, 640);
+    expect(content.center.dx, closeTo(590, 1));
   });
 }

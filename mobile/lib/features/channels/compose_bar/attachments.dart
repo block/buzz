@@ -9,6 +9,8 @@ const _attachmentMenuItemSpacing = Grid.xxs;
 const _attachmentMenuIconSize = 24.0;
 const _attachmentMenuIconSlotWidth = 28.0;
 const _attachmentExpandedHeight = 372.0;
+const _tabletAttachmentCameraMaxHeight = 640.0;
+const _tabletShortestSideBreakpoint = 600.0;
 
 @immutable
 class _AttachmentMenuLayout {
@@ -97,6 +99,7 @@ class _AttachmentSurfacePanel extends HookWidget {
     final renderedExpandedSurface = useState<_AttachmentSurface?>(
       isExpanded ? surface : null,
     );
+    final cameraPreviewAspectRatio = useState<double?>(null);
     final latestSurface = useRef(surface);
     latestSurface.value = surface;
 
@@ -123,6 +126,13 @@ class _AttachmentSurfacePanel extends HookWidget {
       return null;
     }, [isExpanded, morphController, surface]);
 
+    useEffect(() {
+      if (surface != _AttachmentSurface.camera) {
+        cameraPreviewAspectRatio.value = null;
+      }
+      return null;
+    }, [surface]);
+
     final visibleExpandedSurface =
         renderedExpandedSurface.value ?? (isExpanded ? surface : null);
     final cameraInitializationReady =
@@ -141,6 +151,11 @@ class _AttachmentSurfacePanel extends HookWidget {
             initializeCamera: cameraInitializationReady,
             onClose: onBack,
             onCapture: onCapture,
+            onPreviewAspectRatio: (aspectRatio) {
+              if (cameraPreviewAspectRatio.value != aspectRatio) {
+                cameraPreviewAspectRatio.value = aspectRatio;
+              }
+            },
           ),
         ),
       ),
@@ -170,7 +185,18 @@ class _AttachmentSurfacePanel extends HookWidget {
     return LayoutBuilder(
       builder: (context, constraints) {
         final expandedWidth = constraints.maxWidth;
-        const expandedHeight = _attachmentExpandedHeight;
+        final isTablet =
+            MediaQuery.sizeOf(context).shortestSide >=
+            _tabletShortestSideBreakpoint;
+        final expandedHeight =
+            visibleExpandedSurface == _AttachmentSurface.camera &&
+                isTablet &&
+                cameraPreviewAspectRatio.value != null
+            ? math.min(
+                expandedWidth / cameraPreviewAspectRatio.value!,
+                _tabletAttachmentCameraMaxHeight,
+              )
+            : _attachmentExpandedHeight;
         final width =
             _attachmentMenuWidth +
             ((expandedWidth - _attachmentMenuWidth) * sizeProgress);

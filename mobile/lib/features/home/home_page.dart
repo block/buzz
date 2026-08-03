@@ -7,11 +7,16 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import '../../shared/community/community_provider.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/mobile_tab_footer_backdrop.dart';
+import '../../shared/widgets/skeleton.dart';
 import '../activity/activity_page.dart';
+import '../activity/activity_provider.dart';
 import '../channels/channels_page.dart';
 import '../search/search_page.dart';
+
+part 'home_page/wide_navigation_skeletons.dart';
 
 class HomePage extends HookConsumerWidget {
   const HomePage({required this.settingsPageBuilder, super.key});
@@ -29,19 +34,21 @@ class HomePage extends HookConsumerWidget {
   static const double _tabIconSize = 22;
   static const double _fabClearance = _tabBarHeight + _tabBarBottomGap;
   static const Duration _tabIconWeightDuration = Duration(milliseconds: 120);
+  static const double _wideNavigationBreakpoint = 840;
+  static const double _wideContentInset = Grid.half + Grid.quarter;
 
   static const _destinations = [
-    _HomeDestination(
+    WideNavigationDestination(
       icon: LucideIcons.house300,
       selectedIcon: LucideIcons.house500,
       label: 'Home',
     ),
-    _HomeDestination(
+    WideNavigationDestination(
       icon: LucideIcons.inbox300,
       selectedIcon: LucideIcons.inbox500,
       label: 'Activity',
     ),
-    _HomeDestination(
+    WideNavigationDestination(
       icon: LucideIcons.search300,
       selectedIcon: LucideIcons.search500,
       label: 'Search',
@@ -50,18 +57,62 @@ class HomePage extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final tabIndex = useState(0);
+    final isWide =
+        MediaQuery.sizeOf(context).width >= HomePage._wideNavigationBreakpoint;
+    // On iPad, the persistent sidebar replaces the phone's Home tab. Start at
+    // Inbox, which is the first top-level destination in that layout.
+    final tabIndex = useState(isWide ? 1 : 0);
+    final selectedChannelId = useState<String?>(null);
+    final pendingCommunityId = useState<String?>(null);
+    // Clear the tablet selection as soon as the active-community state begins
+    // changing. The channel provider intentionally retains its last result
+    // while the next relay connects, so retaining the selection here could
+    // briefly render (and query) an old-community channel in the new workspace.
+    final activeCommunityId = ref.watch(
+      activeCommunityProvider.select(
+        (value) => value.unwrapPrevious().value?.id,
+      ),
+    );
+    final selectedChannelCommunityId = useRef<String?>(activeCommunityId);
+    if (selectedChannelCommunityId.value != activeCommunityId) {
+      selectedChannelId.value = null;
+      selectedChannelCommunityId.value = activeCommunityId;
+    }
+    final isCommunitySwitching = pendingCommunityId.value != null;
+    final activityAsync = ref.watch(activityProvider);
+    final isActivitySettled =
+        !activityAsync.isLoading &&
+        (activityAsync.hasValue || activityAsync.hasError);
     final systemBottomInset = MediaQuery.paddingOf(context).bottom;
     final navigationBarWidth = _floatingTabBarWidth(
       MediaQuery.sizeOf(context).width,
       _destinations.length,
     );
+    final useSidebarLayout = isWide;
 
     final pages = [
-      ChannelsPage(settingsPageBuilder: settingsPageBuilder),
+      if (isWide && selectedChannelId.value != null)
+        WideChannelContent(
+          channelId: selectedChannelId.value!,
+          onChannelLeft: () => selectedChannelId.value = null,
+        )
+      else
+        ChannelsPage(settingsPageBuilder: settingsPageBuilder),
       const ActivityPage(),
       const SearchPage(),
     ];
+    // The phone's Home destination is represented by index zero. On a tablet,
+    // that destination only exists while a channel is selected; otherwise
+    // returning from a nested route must land back in Inbox rather than reveal
+    // the phone's ChannelsPage inside the desktop-style workspace.
+    final wideFallbackToInbox =
+        isWide && selectedChannelId.value == null && tabIndex.value == 0;
+    final wideContentIndex = wideFallbackToInbox ? 1 : tabIndex.value;
+    final wideSidebarSelection = selectedChannelId.value != null
+        ? null
+        : wideFallbackToInbox
+        ? 1
+        : tabIndex.value;
 
     return Scaffold(
       backgroundColor: Colors.transparent,
@@ -73,46 +124,187 @@ class HomePage extends HookConsumerWidget {
         child: Stack(
           fit: StackFit.expand,
           children: [
-            Positioned.fill(child: ColoredBox(color: context.colors.surface)),
             Positioned.fill(
-              child: MediaQuery(
-                data: _mediaQueryWithFloatingTabBarClearance(
-                  context,
-                  HomePage._fabClearance,
-                ),
-                child: IndexedStack(index: tabIndex.value, children: pages),
-              ),
-            ),
-            Align(
-              alignment: Alignment.bottomCenter,
-              child: IgnorePointer(
-                child: MobileTabFooterBackdrop(
-                  height: mobileTabFooterBackdropHeight(context),
-                ),
-              ),
+              child: useSidebarLayout
+                  ? DecoratedBox(
+                      decoration: BoxDecoration(
+                        color: context.appColors.topSectionGradient == null
+                            ? context.colors.surfaceContainerLowest
+                            : null,
+                        gradient: context.appColors.topSectionGradient,
+                      ),
+                    )
+                  : ColoredBox(color: context.colors.surface),
             ),
             Positioned.fill(
-              child: ChannelQuickActionsLauncher(
-                visible: tabIndex.value == 0,
-                navigationBarHeight: HomePage._tabBarHeight,
-                navigationBarBottomGap: HomePage._tabBarBottomGap,
-                navigationBarWidth: navigationBarWidth,
-                systemBottomInset: systemBottomInset,
-                rightInset: Grid.sm,
+              child: useSidebarLayout
+                  ? Row(
+                      children: [
+                        WideChannelsNavigation(
+                          selectedIndex: wideSidebarSelection,
+                          onDestinationSelected: (index) {
+                            final hadSelectedChannel =
+                                selectedChannelId.value != null;
+                            if (index == tabIndex.value &&
+                                !(hadSelectedChannel && index != 0)) {
+                              return;
+                            }
+                            // Search and Inbox replace a selected channel in
+                            // the tablet workspace, so they must also clear
+                            // the channel selection that owns the sidebar
+                            // highlight.
+                            selectedChannelId.value = null;
+                            unawaited(HapticFeedback.selectionClick());
+                            tabIndex.value = index;
+                          },
+                          onChannelSelected: (channelId) {
+                            selectedChannelId.value = channelId;
+                            if (tabIndex.value != 0) {
+                              unawaited(HapticFeedback.selectionClick());
+                            }
+                            tabIndex.value = 0;
+                          },
+                          selectedChannelId: selectedChannelId.value,
+                          onProfileSelected: () => unawaited(
+                            Navigator.of(context).push(
+                              MaterialPageRoute<void>(
+                                builder: settingsPageBuilder,
+                              ),
+                            ),
+                          ),
+                          isCommunitySwitching: isCommunitySwitching,
+                          onCommunitySwitchStart: (communityId) {
+                            pendingCommunityId.value = communityId;
+                          },
+                          pendingCommunityId: pendingCommunityId.value,
+                          isActivitySettled: isActivitySettled,
+                          onCommunitySwitchComplete: () {
+                            pendingCommunityId.value = null;
+                          },
+                          destinations: _destinations,
+                        ),
+                        Expanded(
+                          child: Padding(
+                            key: const Key('wide-navigation-content-inset'),
+                            padding: const EdgeInsets.only(
+                              top: HomePage._wideContentInset,
+                              right: HomePage._wideContentInset,
+                              bottom: HomePage._wideContentInset,
+                            ),
+                            child: DecoratedBox(
+                              key: const Key('wide-navigation-content-surface'),
+                              decoration: BoxDecoration(
+                                color: context.colors.surface,
+                                borderRadius: BorderRadius.circular(
+                                  Radii.dialog,
+                                ),
+                                // Matches desktop's Buzz content surface: a
+                                // hairline on the upper-left edge plus a very
+                                // soft lift into the exposed gradient.
+                                boxShadow:
+                                    context.theme.brightness == Brightness.light
+                                    ? [
+                                        BoxShadow(
+                                          color: context.colors.outlineVariant
+                                              .withValues(alpha: 0.45),
+                                          offset: const Offset(-1, -1),
+                                        ),
+                                        BoxShadow(
+                                          color: Colors.black.withValues(
+                                            alpha: 0.07,
+                                          ),
+                                          blurRadius: 4,
+                                        ),
+                                      ]
+                                    : null,
+                              ),
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(
+                                  Radii.dialog,
+                                ),
+                                child: MediaQuery(
+                                  // The desktop-like canvas is inset below the
+                                  // system top edge. Remove that same amount
+                                  // from the workspace's top safe padding so
+                                  // its titles stay aligned with the sidebar
+                                  // community switcher.
+                                  data: MediaQuery.of(context).copyWith(
+                                    padding: MediaQuery.paddingOf(context)
+                                        .copyWith(
+                                          top:
+                                              (MediaQuery.paddingOf(
+                                                        context,
+                                                      ).top -
+                                                      HomePage
+                                                          ._wideContentInset)
+                                                  .clamp(0, double.infinity),
+                                        ),
+                                  ),
+                                  child: SkeletonReveal(
+                                    loading: isCommunitySwitching,
+                                    skeleton: const _WideCommunityContentSkeleton(
+                                      key: Key(
+                                        'wide-community-switch-content-skeleton',
+                                      ),
+                                    ),
+                                    content: IndexedStack(
+                                      index: wideContentIndex,
+                                      children: pages,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    )
+                  : MediaQuery(
+                      data: _mediaQueryWithFloatingTabBarClearance(
+                        context,
+                        HomePage._fabClearance,
+                      ),
+                      child: IndexedStack(
+                        index: tabIndex.value,
+                        children: pages,
+                      ),
+                    ),
+            ),
+            if (!useSidebarLayout)
+              Align(
+                alignment: Alignment.bottomCenter,
+                child: IgnorePointer(
+                  child: MobileTabFooterBackdrop(
+                    height: mobileTabFooterBackdropHeight(context),
+                  ),
+                ),
               ),
+            Positioned.fill(
+              child: useSidebarLayout
+                  ? const SizedBox.shrink()
+                  : ChannelQuickActionsLauncher(
+                      visible: tabIndex.value == 0,
+                      navigationBarHeight: HomePage._tabBarHeight,
+                      navigationBarBottomGap: HomePage._tabBarBottomGap,
+                      navigationBarWidth: navigationBarWidth,
+                      systemBottomInset: systemBottomInset,
+                      rightInset: Grid.sm,
+                    ),
             ),
           ],
         ),
       ),
-      bottomNavigationBar: _FloatingTabBar(
-        selectedIndex: tabIndex.value,
-        onDestinationSelected: (i) {
-          if (i == tabIndex.value) return;
-          unawaited(HapticFeedback.selectionClick());
-          tabIndex.value = i;
-        },
-        destinations: _destinations,
-      ),
+      bottomNavigationBar: useSidebarLayout
+          ? null
+          : _FloatingTabBar(
+              selectedIndex: tabIndex.value,
+              onDestinationSelected: (i) {
+                if (i == tabIndex.value) return;
+                unawaited(HapticFeedback.selectionClick());
+                tabIndex.value = i;
+              },
+              destinations: _destinations,
+            ),
     );
   }
 }
@@ -151,22 +343,10 @@ MediaQueryData _mediaQueryWithFloatingTabBarClearance(
   );
 }
 
-class _HomeDestination {
-  final IconData icon;
-  final IconData selectedIcon;
-  final String label;
-
-  const _HomeDestination({
-    required this.icon,
-    required this.selectedIcon,
-    required this.label,
-  });
-}
-
 class _FloatingTabBar extends StatelessWidget {
   final int selectedIndex;
   final ValueChanged<int> onDestinationSelected;
-  final List<_HomeDestination> destinations;
+  final List<WideNavigationDestination> destinations;
 
   const _FloatingTabBar({
     required this.selectedIndex,
@@ -196,6 +376,7 @@ class _FloatingTabBar extends StatelessWidget {
     );
 
     return SafeArea(
+      key: const Key('floating-tab-bar'),
       minimum: const EdgeInsets.fromLTRB(
         HomePage._tabBarHorizontalMargin,
         0,
@@ -290,7 +471,7 @@ class _FloatingTabBar extends StatelessWidget {
 }
 
 class _FloatingTabDestination extends StatelessWidget {
-  final _HomeDestination destination;
+  final WideNavigationDestination destination;
   final bool selected;
   final VoidCallback onTap;
 
