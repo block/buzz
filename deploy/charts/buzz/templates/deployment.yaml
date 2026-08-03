@@ -151,6 +151,7 @@ spec:
 
             # ── Owner ────────────────────────────────────────────────
             - { name: RELAY_OWNER_PUBKEY, value: {{ .Values.ownerPubkey | quote }} }
+            - { name: RELAY_BOOTSTRAP_ADMIN_PUBKEYS, value: {{ .Values.bootstrapAdminPubkeys | quote }} }
 
             # ── Migrations ───────────────────────────────────────────
             - { name: BUZZ_AUTO_MIGRATE, value: {{ .Values.migrate.autoMigrate | quote }} }

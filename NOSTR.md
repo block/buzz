@@ -215,7 +215,9 @@ nak req -k 1059 --tag "p=<your-hex-pubkey>" \
 
 When `BUZZ_REQUIRE_RELAY_MEMBERSHIP=true`, every authenticated connection is checked against the
 `relay_members` table. In today's single-community deployment this is the relay-wide member list; in multi-community mode the same rule is scoped to the host-derived community. Only pubkeys with a row for that community may use that community. The relay owner
-is bootstrapped automatically from `RELAY_OWNER_PUBKEY` on startup.
+is bootstrapped automatically from `RELAY_OWNER_PUBKEY` on startup. Deployment
+control planes can be bootstrapped as relay administrators with
+`RELAY_BOOTSTRAP_ADMIN_PUBKEYS`; they do not need the owner's private key.
 
 ### CLI: Managing Members
 
