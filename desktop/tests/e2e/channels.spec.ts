@@ -1336,8 +1336,19 @@ test("create channel template selector matches the lifecycle controls", async ({
         description: "Coordinate a new project from planning through launch.",
         channelType: "stream",
         visibility: "private",
-        canvasTemplate: null,
-        agents: { personas: [], teams: [] },
+        canvasTemplate: "# {channel.name}\n\nKickoff notes",
+        agents: {
+          personas: [
+            {
+              personaId: "planner",
+              runtime: null,
+              model: null,
+              role: null,
+              backend: null,
+            },
+          ],
+          teams: [],
+        },
         isBuiltin: false,
         createdAt: "2026-07-23T00:00:00Z",
         updatedAt: "2026-07-23T00:00:00Z",
@@ -1350,16 +1361,49 @@ test("create channel template selector matches the lifecycle controls", async ({
 
   const templateControl = page.getByTestId("create-channel-template");
   await expect(templateControl).toHaveRole("button");
-  await expect(templateControl).toHaveText("No template");
+  await expect(templateControl).toHaveText("Blank channel");
   await templateControl.click();
+  await expect(
+    page.getByRole("menuitem", { name: "Create new channel template…" }),
+  ).toBeVisible();
   await page.getByRole("menuitemradio", { name: "Project kickoff" }).click();
 
   await expect(templateControl).toHaveText("Project kickoff");
+  await expect(page.getByTestId("create-channel-template-summary")).toHaveText(
+    "Private · Canvas included · 1 agent",
+  );
   await expect(page.getByTestId("create-channel-description")).toHaveValue(
     "Coordinate a new project from planning through launch.",
   );
   await expect(page.getByTestId("create-channel-permissions")).toContainText(
     "Private",
+  );
+});
+
+test("create channel exposes templates when the library is empty", async ({
+  page,
+}) => {
+  await installMockBridge(page, { channelTemplates: [] });
+  await page.goto("/");
+  await openCreateChannelDialog(page);
+
+  const templateControl = page.getByTestId("create-channel-template");
+  await expect(templateControl).toHaveText("Blank channel");
+  await templateControl.click();
+  await page
+    .getByRole("menuitem", { name: "Create new channel template…" })
+    .click();
+
+  await expect(
+    page.getByText("Create template", { exact: true }),
+  ).toBeVisible();
+  await page.locator("#template-name").fill("Weekly planning");
+  await page.locator("#template-description").fill("Plan the next week.");
+  await page.getByRole("button", { name: "Create", exact: true }).click();
+
+  await expect(templateControl).toHaveText("Weekly planning");
+  await expect(page.getByTestId("create-channel-description")).toHaveValue(
+    "Plan the next week.",
   );
 });
 
