@@ -135,6 +135,7 @@ export default defineConfig({
         "**/harness-catalog-screenshots.spec.ts",
         "**/inline-custom-harness.spec.ts",
         "**/where-to-run-config.spec.ts",
+        "**/project-connections-screenshots.spec.ts",
         "**/huddle-transcription.spec.ts",
         "**/agent-numeric-tuning.spec.ts",
       ],

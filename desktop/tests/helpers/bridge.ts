@@ -1,4 +1,5 @@
 import type { Page } from "@playwright/test";
+import type { ProjectConnection } from "../../src/shared/api/tauriProjectConnections";
 import type { ChannelTemplate, RelayEvent } from "../../src/shared/api/types";
 import type { MockManagedAgentSeed } from "../../src/testing/e2eBridge";
 import { FEATURE_OVERRIDES_STORAGE_KEY, PREVIEW_FEATURE_IDS } from "./features";
@@ -214,6 +215,7 @@ type MockBridgeOptions = {
     mcp?: MockCommandAvailability;
   };
   managedAgents?: MockManagedAgentSeed[];
+  projectConnections?: ProjectConnection[];
   /** Result returned by the mocked `add_agent_to_huddle` command. */
   addAgentToHuddleResult?: {
     ephemeral_added: boolean;
