@@ -1,16 +1,18 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/relay/relay.dart';
-import '../channels/channel_management_provider.dart';
 import '../profile/user_cache_provider.dart';
 import '../profile/user_profile.dart';
+import 'channel_management_provider.dart';
 import 'channel_messages_provider.dart';
+import 'channels_provider.dart';
 
 /// Sends messages by signing an event with the user's nsec and publishing it
 /// over the relay's NIP-42-authenticated WebSocket session.
 class SendMessage {
   final SignedEventRelay _signedEventRelay;
   final Future<List<ChannelMember>> Function(String channelId) _fetchMembers;
+  final bool Function(String channelId) _isDmChannel;
   final Map<String, UserProfile> Function() _readUserCache;
   final void Function(String channelId, NostrEvent event) _addLocalMessage;
   final void Function(String channelId, String eventId) _completeLocalMessage;
@@ -20,6 +22,7 @@ class SendMessage {
     required SignedEventRelay signedEventRelay,
     required Future<List<ChannelMember>> Function(String channelId)
     fetchMembers,
+    required bool Function(String channelId) isDmChannel,
     required Map<String, UserProfile> Function() readUserCache,
     required void Function(String channelId, NostrEvent event) addLocalMessage,
     required void Function(String channelId, String eventId)
@@ -27,6 +30,7 @@ class SendMessage {
     required void Function(String channelId, String eventId) removeLocalMessage,
   }) : _signedEventRelay = signedEventRelay,
        _fetchMembers = fetchMembers,
+       _isDmChannel = isDmChannel,
        _readUserCache = readUserCache,
        _addLocalMessage = addLocalMessage,
        _completeLocalMessage = completeLocalMessage,
@@ -53,12 +57,22 @@ class SendMessage {
         mentionPubkeys ?? await _resolveMentions(content, channelId);
     final authorPubkey = _signedEventRelay.pubkey;
 
+    // DM messages address every participant. Agent runtimes use these p-tags
+    // both to wake the addressed agent and to distinguish an intentional DM
+    // from an unaddressed channel event. Desktop already follows this
+    // contract; mobile must do the same.
+    final addressedPubkeys = <String>[...resolvedMentions];
+    if (_isDmChannel(channelId)) {
+      final members = await _fetchMembers(channelId);
+      addressedPubkeys.addAll(members.map((member) => member.pubkey));
+    }
+
     // Normalize mentions: lowercase, deduplicate, exclude self (matching
     // the desktop's normalizeMentionPubkeys).
     final selfLower = authorPubkey?.toLowerCase();
     final seenMentions = <String>{?selfLower};
     final normalizedMentions = <String>[
-      for (final pk in resolvedMentions)
+      for (final pk in addressedPubkeys)
         if (seenMentions.add(pk.toLowerCase())) pk,
     ];
 
@@ -169,6 +183,12 @@ final sendMessageProvider = Provider<SendMessage>((ref) {
     ),
     fetchMembers: (channelId) =>
         ref.read(channelMembersProvider(channelId).future),
+    isDmChannel: (channelId) =>
+        ref
+            .read(channelsProvider)
+            .value
+            ?.any((channel) => channel.id == channelId && channel.isDm) ??
+        false,
     readUserCache: () => ref.read(userCacheProvider),
     addLocalMessage: (channelId, event) => ref
         .read(channelMessagesProvider(channelId).notifier)
