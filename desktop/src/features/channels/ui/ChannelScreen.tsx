@@ -44,7 +44,6 @@ import {
 } from "@/features/messages/hooks";
 import { formatTimelineMessages } from "@/features/messages/lib/formatTimelineMessages";
 import { DeleteMessageConfirmDialog } from "@/features/messages/ui/DeleteMessageConfirmDialog";
-import { getThreadReference } from "@/features/messages/lib/threading";
 import { imetaMediaFromTags } from "@/features/messages/lib/imetaMediaMarkdown";
 import {
   resolveTimelineLoadingLatch,
@@ -64,6 +63,7 @@ import {
   useHuddleChannelMessages,
   useIsHuddleTranscript,
 } from "@/features/channels/ui/useHuddleChannelMessages";
+import { useHuddleReadMarker } from "@/features/channels/ui/useHuddleReadMarker";
 import { AgentSessionProvider } from "@/shared/context/AgentSessionContext";
 import { ProfilePanelProvider } from "@/shared/context/ProfilePanelContext";
 import { useMainInsetRef } from "@/shared/layout/MainInsetContext";
@@ -199,25 +199,6 @@ export function ChannelScreen({
   useChannelSubscription(activeChannel);
   const { fetchOlder, hasOlderMessages, historyExhausted, isFetchingOlder } =
     useFetchOlderMessages(activeChannel);
-  const latestActiveMessage = React.useMemo(() => {
-    const messages = messagesQuery.data;
-    if (!messages) return null;
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      if (getThreadReference(messages[index].tags).parentId === null) {
-        return messages[index];
-      }
-    }
-    return null;
-  }, [messagesQuery.data]);
-  const activeReadAt = latestActiveMessage
-    ? new Date(latestActiveMessage.created_at * 1_000).toISOString()
-    : null;
-  React.useEffect(() => {
-    if (!activeChannelId || activeChannel?.isMember === false) {
-      return;
-    }
-    markChannelRead(activeChannelId, activeReadAt, { topLevelOnly: true });
-  }, [activeChannel?.isMember, activeChannelId, activeReadAt, markChannelRead]);
   React.useEffect(() => {
     if (!activeChannelId) {
       setContextParentResolver(null);
@@ -257,6 +238,14 @@ export function ChannelScreen({
     messages: messagesQuery.data ?? EMPTY_RELAY_EVENTS,
     targetMessageEvents,
     windowStore: windowQuery.data,
+  });
+  useHuddleReadMarker({
+    activeChannelId,
+    activeChannelIsMember: activeChannel?.isMember,
+    isHuddleTranscript,
+    markChannelRead,
+    messages: messagesQuery.data,
+    resolvedMessages,
   });
   const threadReplyEvents = threadRepliesQuery.data ?? EMPTY_RELAY_EVENTS;
   const {

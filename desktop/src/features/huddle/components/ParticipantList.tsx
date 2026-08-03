@@ -228,6 +228,63 @@ export function HuddleParticipantsControl({
       : `${participants.length} participants`;
   const visibleIdentities = identities.slice(0, MAX_VISIBLE_PARTICIPANTS);
   const hiddenParticipantCount = identities.length - visibleIdentities.length;
+  const participantDetails = (
+    <PopoverContent
+      align="end"
+      className="buzz-huddle-drawer buzz-huddle-popover w-72 p-3 text-foreground"
+      side={appearance === "room" ? "bottom" : "top"}
+      sideOffset={10}
+    >
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <h2 className="text-sm font-medium">Participants</h2>
+        <span className="shrink-0 text-xs text-foreground/60">
+          {participantLabel}
+        </span>
+      </div>
+      <ul className="flex max-h-64 list-none flex-col gap-1 overflow-y-auto">
+        {identities.map((participant) => {
+          const { displayName, isActive, isAgent, pubkey } = participant;
+
+          return (
+            <li
+              className="flex min-w-0 items-center gap-2 rounded-md px-2 py-1.5"
+              key={pubkey}
+            >
+              <UserProfilePopover
+                pubkey={pubkey}
+                triggerAriaLabel={`Open profile for ${displayName}`}
+                triggerElement="span"
+              >
+                <ParticipantAvatar participant={participant} size="list" />
+              </UserProfilePopover>
+
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-sm font-medium">
+                  {displayName}
+                </div>
+                <div className="truncate text-xs text-foreground/60">
+                  {isActive ? "Speaking" : isAgent ? "Agent" : "In huddle"}
+                </div>
+              </div>
+
+              {isAgent && onRemoveAgent && (
+                <Button
+                  aria-label={`Remove ${displayName} from huddle`}
+                  className="h-7 w-7 shrink-0 text-foreground/65 hover:bg-destructive/15 hover:text-destructive"
+                  onClick={() => void onRemoveAgent(pubkey)}
+                  size="icon"
+                  type="button"
+                  variant="ghost"
+                >
+                  <X className="h-4 w-4" />
+                </Button>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </PopoverContent>
+  );
 
   const participantStrip = (
     <div
@@ -294,86 +351,35 @@ export function HuddleParticipantsControl({
           </Button>
         </PopoverTrigger>
       ) : onRemoveAgent ? (
-        <PopoverTrigger asChild>
-          <Button
-            aria-label="Manage huddle participants"
-            className={cn(
-              "relative z-10 shrink-0 px-1 shadow-none",
-              appearance === "room"
-                ? "buzz-huddle-participant-tile min-h-[6.375rem] min-w-28 rounded-xl border border-border/70 bg-muted/45 text-foreground/70 hover:bg-muted/65 hover:text-foreground"
-                : "h-9 min-w-9 rounded-full border-2 border-black bg-white/15 text-white hover:bg-white/25 hover:text-white",
-            )}
-            size="icon"
-            type="button"
-            variant="ghost"
-          >
-            <MoreHorizontal className="h-4 w-4" />
-          </Button>
-        </PopoverTrigger>
+        <Popover>
+          <PopoverTrigger asChild>
+            <Button
+              aria-label="Manage huddle participants"
+              className={cn(
+                "relative z-10 shrink-0 px-1 shadow-none",
+                appearance === "room"
+                  ? "buzz-huddle-participant-tile min-h-[6.375rem] min-w-28 rounded-xl border border-border/70 bg-muted/45 text-foreground/70 hover:bg-muted/65 hover:text-foreground"
+                  : "h-9 min-w-9 rounded-full border-2 border-black bg-white/15 text-white hover:bg-white/25 hover:text-white",
+              )}
+              size="icon"
+              type="button"
+              variant="ghost"
+            >
+              <MoreHorizontal className="h-4 w-4" />
+            </Button>
+          </PopoverTrigger>
+          {participantDetails}
+        </Popover>
       ) : null}
     </div>
   );
 
-  if (hiddenParticipantCount === 0 && !onRemoveAgent) return participantStrip;
+  if (hiddenParticipantCount === 0) return participantStrip;
 
   return (
     <Popover>
       {participantStrip}
-      <PopoverContent
-        align="end"
-        className="buzz-huddle-drawer buzz-huddle-popover w-72 p-3 text-foreground"
-        side={appearance === "room" ? "bottom" : "top"}
-        sideOffset={10}
-      >
-        <div className="mb-3 flex items-center justify-between gap-3">
-          <h2 className="text-sm font-medium">Participants</h2>
-          <span className="shrink-0 text-xs text-foreground/60">
-            {participantLabel}
-          </span>
-        </div>
-        <ul className="flex max-h-64 list-none flex-col gap-1 overflow-y-auto">
-          {identities.map((participant) => {
-            const { displayName, isActive, isAgent, pubkey } = participant;
-
-            return (
-              <li
-                className="flex min-w-0 items-center gap-2 rounded-md px-2 py-1.5"
-                key={pubkey}
-              >
-                <UserProfilePopover
-                  pubkey={pubkey}
-                  triggerAriaLabel={`Open profile for ${displayName}`}
-                  triggerElement="span"
-                >
-                  <ParticipantAvatar participant={participant} size="list" />
-                </UserProfilePopover>
-
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-sm font-medium">
-                    {displayName}
-                  </div>
-                  <div className="truncate text-xs text-foreground/60">
-                    {isActive ? "Speaking" : isAgent ? "Agent" : "In huddle"}
-                  </div>
-                </div>
-
-                {isAgent && onRemoveAgent && (
-                  <Button
-                    aria-label={`Remove ${displayName} from huddle`}
-                    className="h-7 w-7 shrink-0 text-foreground/65 hover:bg-destructive/15 hover:text-destructive"
-                    onClick={() => void onRemoveAgent(pubkey)}
-                    size="icon"
-                    type="button"
-                    variant="ghost"
-                  >
-                    <X className="h-4 w-4" />
-                  </Button>
-                )}
-              </li>
-            );
-          })}
-        </ul>
-      </PopoverContent>
+      {participantDetails}
     </Popover>
   );
 }
