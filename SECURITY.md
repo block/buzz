@@ -53,6 +53,15 @@ REST endpoints authenticate via
 the client signs a `kind:27235` event containing the request URL and method.
 The relay verifies the Schnorr signature and extracts the pubkey.
 
+Git Smart HTTP is a deliberate exception to per-request method and payload
+binding. The Git credential protocol reuses one repository-root NIP-98 token
+across ref discovery and pack requests, so Git tokens are URL-bound and valid
+only inside the 60-second timestamp window, but are not event-ID deduplicated
+or bound to an individual pack body. Production Git transport therefore
+requires HTTPS; a stolen token can otherwise be replayed against the same
+repository while that short window and the actor's current authorization are
+both still valid.
+
 ### Authorization — Channel Membership as the Foundational Gate
 
 Channel membership is the foundational access control mechanism. If a

@@ -51,6 +51,24 @@ ordinary channel member or bot fails closed instead of inheriting write access.
   A grant tag without a policy tag, duplicate policy tags, or an unknown policy
   version fails closed.
 
+## Authentication and replay boundary
+
+The actor comes from the verified repository-root NIP-98 event and is copied by
+the relay into the pre-receive environment. The internal callback HMAC binds
+the community, repository, owner, actor, timestamp, and every ref/OID/ancestry
+tuple. Replaying that callback inside its 30-second window only repeats the
+read-only authorization decision; it cannot create a ref or substitute a
+different push.
+
+The outer Git credential token follows the existing Smart HTTP contract: Git
+reuses it across discovery and pack requests, so it is repository-URL-bound and
+accepted only inside the 60-second NIP-98 timestamp window, but is not bound to
+one HTTP method or pack body and is not event-ID deduplicated. A stolen token
+may therefore be replayed against the same repository during that short window
+within the actor's current grant scope. HTTPS is mandatory in production; grant
+expiry is an authorization lifetime, not a replacement for transport security
+or per-request anti-replay.
+
 ## Compatibility boundary
 
 The owner-only fallback protects ordinary members and bots on older relays. It
