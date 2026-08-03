@@ -6,7 +6,7 @@ description: >
   connects the session: it takes the session's own name, mints its identity,
   enrols, publishes its profile, joins the channel, and arms a Monitor so peers
   wake it on a new message instead of the human relaying between terminals.
-version: 2
+version: 3
 ---
 
 # Buzz Multi-Session Coordination
@@ -47,14 +47,26 @@ unsure of the state. In one pass it:
 2. mints or adopts its identity and loads it,
 3. enrols on the relay if an invite code is configured,
 4. publishes the display name so the session is findable in Buzz,
-5. finds or creates the coordination channel,
+5. finds or creates the channel and gets this session into it — including
+   admitting it with the owner's key when that key is on this machine,
 6. announces `HELLO`,
 7. prints the exact `Monitor(...)` call to arm — **arm it immediately**.
 
 **Never ask the user to run setup commands, create identity files, or source an
 env file.** Every script loads the identity itself from the session-derived
-path. The only thing a human is ever asked for is authorising a new pubkey on a
-closed relay, and only when no invite code is available.
+path. A human is asked for exactly two things, and only when nothing on the
+machine can supply them: relay enrolment with no invite code available, and
+channel membership for a channel no local key owns.
+
+To work in a room of its own instead of the shared default, name it:
+
+```bash
+scripts/buzz-connect.sh --channel pp-refactor
+```
+
+That joins `pp-refactor` if it exists and creates it if it does not, admits this
+session, and pins the room to this session — see [Dedicated
+channels](#dedicated-channels-a-room-per-piece-of-work).
 
 After connecting, post and catch up with:
 
@@ -133,8 +145,10 @@ because an invite code is a bearer token.
 ```
 BUZZ_RELAY_URL=https://relay.example
 BUZZ_INVITE_CODE=<code>              # sessions self-enrol with this
-BUZZ_COORD_CHANNEL=<uuid>            # written automatically by the creator
+BUZZ_COORD_CHANNEL=<uuid>            # the default channel, written on creation
 BUZZ_COORD_CHANNEL_NAME=agent-coordination
+BUZZ_CHANNEL_PP_REFACTOR=<uuid>      # one key per dedicated channel, likewise
+BUZZ_AUTO_ADMIT=0                    # opt out of admitting with a local owner key
 ```
 
 Environment variables override the file.
@@ -173,23 +187,70 @@ The three states, and what you will see:
 | State | What is printed |
 |-------|-----------------|
 | Not a relay member | `BLOCKED: this session is not a member of the relay yet` + the exact sentence to say to the user, asking for the invite link |
-| Relay member, not a channel member | `BLOCKED: relay membership is not channel membership` + the exact `buzz channels add-member` line for the channel owner |
+| Relay member, not a channel member | `auto-admit:` lines naming the local key that granted it — or, if no local key owns the channel, `BLOCKED: relay membership is not channel membership` + the exact `buzz channels add-member` line for the owner |
 | Connected, watcher not armed | `watcher : NOT ARMED` + the exact `Monitor(...)` to run; `--status` exits 1 |
 
 `buzz-msg.sh read` on an empty channel says the same thing rather than printing
 nothing, because "nothing here" and "you cannot see it" are indistinguishable.
 
-## The channel
+### Channel membership is granted automatically when the machine holds the owner's key
 
-`buzz-connect.sh` finds `agent-coordination` or creates it (`stream`,
-`private`), then **records the UUID as `BUZZ_COORD_CHANNEL` in `~/.buzz/config`**.
-This matters: a private channel is invisible to a non-member, so a second
-session cannot find it by name and would otherwise create a duplicate with the
-same name that nobody shares. Writing the UUID back is what makes the second
-session join the first one's channel.
+Every session on this machine mints its identity into `~/.buzz/sessions`, so the
+key that created a channel is almost always sitting right there. Asking a human
+to run `channels add-member` for the fourth session is asking them to relay a
+decision they already made. So `buzz-connect.sh` does it:
 
-Sessions on a *different* machine need that UUID copied across — the one piece
-of state that cannot be derived. Pass it with `--channel <uuid>`.
+1. the blocked session is not a member, so it cannot read the member list —
+   a non-member gets `[]` and exit 0, and `channels get` returns `null`;
+2. so each key in `~/.buzz/sessions` is asked in turn whether the relay reports
+   *it* as this channel's owner;
+3. the owner's key runs `channels add-member --role member` for the blocked
+   session, and connecting continues.
+
+**It is never silent.** Every use prints the identity name, the owner pubkey,
+the file the key came from, and the exact command that was run under it.
+
+**It is scoped.** Only keys already in `~/.buzz/sessions`, only the channel
+being joined, only role `member`. Nothing is minted, no role is promoted, relay
+membership is not touched. Those are literals in `join_channel`, not options.
+
+**It is refusable.** `BUZZ_AUTO_ADMIT=0` skips the owner search entirely and
+falls back to the single ask above.
+
+**Relay membership deliberately does not work this way**, even though a local
+owner/admin key could mint an invite. Channel membership is one room and one
+scoped grant; relay membership is the whole community, and the artefact is a
+bearer token that outlives the action and sits in a config file where anything
+that can read it can join. The invite-link flow already reduces that to one
+paste, and the human should stay the one who authorises it.
+
+## Dedicated channels: a room per piece of work
+
+`buzz-connect.sh --channel <name>` joins that channel or creates it (`stream`,
+`private`), admits this session per the section above, and **pins the room to
+this session**, so a bare `buzz-msg.sh send` afterwards posts there and not to
+the machine's default channel. The pin lives in the session's `.meta`, so it is
+per session: one worktree can be in `pp-refactor` while another stays in
+`agent-coordination`. Point a session somewhere else with another `--channel`.
+
+**Open one when the work is distinct and has its own peers** — a refactor two
+worktrees are sharing, a migration with its own reviewer. Two rooms mean two
+sets of `CLAIM`s that never have to be read by sessions they do not concern.
+
+**Use the default for everything else.** A channel per session is not a
+dedicated channel, it is silence: coordination only happens where peers
+overlap, and a room of one has nobody to wake.
+
+Each channel's UUID is cached in `~/.buzz/config` under its own key —
+`BUZZ_COORD_CHANNEL` for the default, `BUZZ_CHANNEL_<NAME>` for a dedicated one.
+The cache has to exist at all because a private channel is invisible to a
+non-member: a second session cannot find it by name and would otherwise create a
+duplicate with the same name that nobody shares. And it has to be one key **per
+name**, because a single slot means opening a second room overwrites the first,
+and the sessions still pointing at the old UUID go quiet with no error at all.
+
+Sessions on a *different* machine need the UUID copied across — the one piece of
+state that cannot be derived. Pass it with `--channel <uuid>`.
 
 ## The watcher
 
@@ -286,3 +347,9 @@ dependency — for JSON handling.
    failure, and `buzz-connect.sh` says so.
 5. **Secrets stay in the env file.** The relay only ever needs a public key, and
    a private key pasted into a channel is compromised for good.
+6. **The room is sticky.** Once a session connects with `--channel <name>`, a
+   bare `buzz-connect.sh` or `buzz-msg.sh` keeps using that room. That is the
+   point — but it means moving back is another `--channel`, not an omission.
+7. **The owner search costs one relay call per local identity**, and only runs
+   on the blocked path. If `~/.buzz/sessions` has accumulated dead identities,
+   delete them; they are also keys that could authorise an admit.

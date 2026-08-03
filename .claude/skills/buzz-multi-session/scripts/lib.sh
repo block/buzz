@@ -222,23 +222,66 @@ is_uuid() {
   esac
 }
 
+default_channel_name() { setting BUZZ_COORD_CHANNEL_NAME "agent-coordination"; }
+
+# channel_cache_key NAME — the ~/.buzz/config key that caches this channel's
+# UUID. One slot per channel name, because a single BUZZ_COORD_CHANNEL cannot
+# hold two rooms: opening a second dedicated channel overwrote the first, and
+# the sessions still pointing at the old UUID went quiet with no error at all.
+# The default name keeps the historical key, so existing configs keep working.
+channel_cache_key() {
+  local name="$1" slug
+  [ "$name" = "$(default_channel_name)" ] && { printf 'BUZZ_COORD_CHANNEL'; return 0; }
+  slug=$(printf '%s' "$name" | LC_ALL=C tr '[:lower:]' '[:upper:]' | LC_ALL=C tr -c 'A-Z0-9' '_')
+  printf 'BUZZ_CHANNEL_%s' "${slug:0:48}"
+}
+
 # resolve_channel <uuid-or-name-or-empty> <create:0|1>
-# Sets CHANNEL, CHANNEL_NAME, CHANNEL_CREATED. Needs $BUZZ and a loaded identity.
+# Sets CHANNEL, CHANNEL_NAME, CHANNEL_CREATED, CHANNEL_KEY.
+# Needs $BUZZ and a loaded identity; reads $SESSION_NAME if it is set.
 CHANNEL=""
 CHANNEL_NAME=""
 # shellcheck disable=SC2034  # read by the scripts that source this
 CHANNEL_CREATED=0
+# shellcheck disable=SC2034
+CHANNEL_KEY=""
 resolve_channel() {
-  local want="${1:-}" create="${2:-0}"
-  CHANNEL=""; CHANNEL_CREATED=0
+  local want="${1:-}" create="${2:-0}" cached pin
+  CHANNEL=""; CHANNEL_CREATED=0; CHANNEL_KEY=""
   if [ -n "$want" ] && is_uuid "$want"; then
     CHANNEL="$want"; CHANNEL_NAME=""
     return 0
   fi
-  CHANNEL=$(setting BUZZ_COORD_CHANNEL "")
-  is_uuid "$CHANNEL" || CHANNEL=""
-  CHANNEL_NAME="${want:-$(setting BUZZ_COORD_CHANNEL_NAME "agent-coordination")}"
-  [ -n "$CHANNEL" ] && return 0
+
+  if [ -z "$want" ]; then
+    # A UUID in the environment is an explicit decision; it outranks everything.
+    if is_uuid "${BUZZ_COORD_CHANNEL:-}"; then
+      CHANNEL="$BUZZ_COORD_CHANNEL"
+      CHANNEL_NAME=$(default_channel_name)
+      CHANNEL_KEY=BUZZ_COORD_CHANNEL
+      return 0
+    fi
+    # Then the room this session last connected to. Pinned per *session*, not
+    # per machine: session A can sit in the default channel while session B
+    # works in pp-refactor, and buzz-msg.sh in each posts where that session
+    # actually is rather than where the machine's default points.
+    if [ -n "${SESSION_NAME:-}" ]; then
+      pin=$(meta_get "$SESSION_NAME" BUZZ_SESSION_CHANNEL || printf '')
+      if is_uuid "$pin"; then
+        CHANNEL="$pin"
+        CHANNEL_NAME=$(meta_get "$SESSION_NAME" BUZZ_SESSION_CHANNEL_NAME || printf '')
+        [ -n "$CHANNEL_NAME" ] || CHANNEL_NAME=$(default_channel_name)
+        CHANNEL_KEY=$(channel_cache_key "$CHANNEL_NAME")
+        return 0
+      fi
+    fi
+    want=$(default_channel_name)
+  fi
+
+  CHANNEL_NAME="$want"
+  CHANNEL_KEY=$(channel_cache_key "$CHANNEL_NAME")
+  cached=$(setting "$CHANNEL_KEY" "")
+  if is_uuid "$cached"; then CHANNEL="$cached"; return 0; fi
 
   buzz_run channels list --limit 500 || return 2
   CHANNEL=$(printf '%s' "$BUZZ_OUT" | WANT="$CHANNEL_NAME" python3 -c '
@@ -253,7 +296,7 @@ for row in rows if isinstance(rows, list) else []:
         sys.stdout.write(row.get("channel_id") or row.get("id") or "")
         break
 ')
-  [ -n "$CHANNEL" ] && return 0
+  if [ -n "$CHANNEL" ]; then config_set "$CHANNEL_KEY" "$CHANNEL"; return 0; fi
   [ "$create" = 1 ] || return 1
 
   buzz_run channels create --name "$CHANNEL_NAME" --type stream \
@@ -271,7 +314,117 @@ except Exception:
   CHANNEL_CREATED=1
   # Publish the UUID so the next session on this machine joins this channel
   # instead of creating a second one with the same name that nobody shares.
-  config_set BUZZ_COORD_CHANNEL "$CHANNEL"
+  config_set "$CHANNEL_KEY" "$CHANNEL"
+}
+
+# --- joining a channel someone else owns --------------------------------------
+# Relay membership and channel membership are separate gates, and only the
+# channel's owner can open the second one. When the owner's key is already on
+# this machine — the normal case, because every session here mints its identity
+# into ~/.buzz/sessions — asking a human to run `channels add-member` is asking
+# them to be a relay for a decision they already made. So use the key.
+#
+# The safety model is three rules, enforced below and nowhere else:
+#   1. Only keys already in $SESSION_DIR. Nothing is minted, fetched or derived.
+#   2. Only `channels add-member --role member`, only on the channel being
+#      joined. The role is a literal, the channel is the one just resolved.
+#   3. Every use is printed: which identity authorised it, and what it ran.
+# Relay membership is deliberately NOT in scope — see SKILL.md.
+
+# _as_identity <identity-name> <buzz args...> — one CLI call under another local
+# key, in a subshell so the caller's identity is never replaced in this process.
+# Only the two functions below may call it, and both pass a literal verb.
+AS_OUT=""
+AS_ERR=""
+_as_identity() {
+  local ident="$1"; shift
+  local f err rc
+  f=$(identity_file "$ident")
+  err=$(mktemp -t buzz-as) || return 127
+  AS_OUT=$( { load_identity "$f" 2>/dev/null || exit 127; "$BUZZ" "$@"; } 2>"$err" )
+  rc=$?
+  AS_ERR=$(cat "$err" 2>/dev/null)
+  rm -f "$err"
+  return $rc
+}
+
+# find_local_channel_owner <channel> — print "<identity-name>\t<pubkey>" for a
+# key in $SESSION_DIR that the relay reports as this channel's owner, else fail.
+#
+# It has to be done in this order. A non-member cannot see a private channel at
+# all: `channels get` returns null and `channels members` returns [] with exit
+# 0, so the blocked session cannot read the member list and look the owner up.
+# The only identity that can read it is one that is already in the channel, so
+# each local key is asked in turn and the one the relay calls "owner" wins.
+find_local_channel_owner() {
+  local chan="$1" f name pk
+  [ -d "$SESSION_DIR" ] || return 1
+  for f in "$SESSION_DIR"/*.env; do
+    [ -f "$f" ] || continue
+    name=$(basename "$f" .env)
+    pk=$(identity_field "$f" BUZZ_PUBKEY) || continue
+    _as_identity "$name" channels members --channel "$chan" || continue
+    printf '%s' "$AS_OUT" | ME="$pk" python3 -c '
+import json, os, sys
+me = os.environ["ME"]
+try:
+    rows = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+for row in rows if isinstance(rows, list) else []:
+    if isinstance(row, dict) and row.get("pubkey") == me and row.get("role") == "owner":
+        sys.exit(0)
+sys.exit(1)
+' || continue
+    printf '%s\t%s' "$name" "$pk"
+    return 0
+  done
+  return 1
+}
+
+# join_channel <channel-uuid> <channel-name> <my-pubkey>
+# Returns 0 only if this session is a member of the channel afterwards.
+join_channel() {
+  local chan="$1" cname="$2" me="$3" mode owner ident opk tab=$'\t'
+  # Self-service first: it is what works on an open channel, and it is not a
+  # privileged action, so it needs no announcement.
+  if buzz_run channels add-member --channel "$chan" --pubkey "$me" --role member; then
+    echo "channel  : joined '$cname' as a member"
+    return 0
+  fi
+  mode=$(setting BUZZ_AUTO_ADMIT 1)
+  case "$mode" in
+    0|no|off|false)
+      note "auto-admit: off (BUZZ_AUTO_ADMIT=$mode) — not looking for an owner key"
+      return 1 ;;
+  esac
+  echo "auto-admit: not a member of '$cname'; checking whether a key in"
+  echo "            $SESSION_DIR owns it"
+  owner=$(find_local_channel_owner "$chan") || {
+    echo "auto-admit: no local key owns '$cname'"
+    return 1
+  }
+  ident=${owner%%"$tab"*}
+  opk=${owner#*"$tab"}
+  cat <<EOF
+auto-admit: '$ident' owns this channel and its key is on this machine.
+            owner key : $opk
+            from      : $(identity_file "$ident")
+            running   : buzz channels add-member --channel $chan \\
+                          --pubkey $me --role member
+EOF
+  if _as_identity "$ident" channels add-member \
+       --channel "$chan" --pubkey "$me" --role member; then
+    cat <<EOF
+auto-admit: granted. This session now has role member in '$cname', authorised by
+            the local identity '$ident'. Nothing else was touched: no relay
+            membership, no other channel, no role above member, no new key.
+            Set BUZZ_AUTO_ADMIT=0 in $CONFIG_FILE to turn this off.
+EOF
+    return 0
+  fi
+  note "auto-admit: '$ident' owns '$cname' but add-member failed: ${AS_ERR:-(no detail)}"
+  return 1
 }
 
 # --- self-diagnosis ----------------------------------------------------------

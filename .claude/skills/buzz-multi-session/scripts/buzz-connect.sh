@@ -16,6 +16,15 @@
 #   7. announces HELLO
 #   8. prints the exact Monitor command to arm, or reports the live watcher
 #
+# A dedicated room for one piece of work, joined or created in the same step:
+#
+#   buzz-connect.sh --channel pp-refactor
+#
+# The name is remembered per session and its UUID is cached per name, so a
+# machine can hold several dedicated channels at once. If the channel already
+# exists and its owner's key is in ~/.buzz/sessions, this session is admitted
+# to it automatically and told so (BUZZ_AUTO_ADMIT=0 turns that off).
+#
 # The only step that cannot be automated is authorising a new pubkey on a closed
 # relay with no invite code available. That produces one clearly worded ask.
 #
@@ -23,8 +32,10 @@
 # (KEY=value, parsed not sourced, chmod 600 — it holds a bearer token):
 #   BUZZ_RELAY_URL           relay base URL          [http://localhost:3000]
 #   BUZZ_INVITE_CODE         invite code every session self-enrols with
-#   BUZZ_COORD_CHANNEL       channel UUID, if you already have one
-#   BUZZ_COORD_CHANNEL_NAME  channel to find or create [agent-coordination]
+#   BUZZ_COORD_CHANNEL       default channel's UUID, written on creation
+#   BUZZ_COORD_CHANNEL_NAME  default channel name    [agent-coordination]
+#   BUZZ_CHANNEL_<NAME>      a dedicated channel's UUID, written on creation
+#   BUZZ_AUTO_ADMIT          0 disables admitting with a local owner key  [1]
 set -uo pipefail
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,7 +52,7 @@ while [ $# -gt 0 ]; do
     --invite) INVITE_ARG="${2:-}"; shift ;;
     --status) STATUS_ONLY=1; SAY_HELLO=0 ;;
     --quiet-hello) SAY_HELLO=0 ;;
-    -h|--help) sed -n '2,29p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,38p' "$0"; exit 0 ;;
     *) die "usage: $0 [--channel <uuid-or-name>] [--invite <link-or-code>] [--status] [--quiet-hello]" ;;
   esac
   shift
@@ -154,7 +165,7 @@ if ! resolve_channel "$CHANNEL_ARG" 1; then
 fi
 if [ "$CHANNEL_CREATED" = 1 ]; then
   echo "channel  : created '$CHANNEL_NAME' ($CHANNEL)"
-  echo "           recorded as BUZZ_COORD_CHANNEL in $CONFIG_FILE, so other"
+  echo "           recorded as $CHANNEL_KEY in $CONFIG_FILE, so other"
   echo "           sessions on this machine join it rather than creating their own."
 else
   echo "channel  : ${CHANNEL_NAME:-<uuid>} ($CHANNEL)"
@@ -163,7 +174,13 @@ fi
 # --- 6b. channel membership --------------------------------------------------
 # The second gate. Relay membership does not imply channel membership, and the
 # symptom of missing it is an empty channel with no error at all.
+#
+# A non-member gets [] from `channels members`, not a 403, so "empty list" and
+# "not allowed to look" are the same response. Treat both as not-a-member and
+# let join_channel work out whether it can be fixed here.
 if [ "$CHANNEL_CREATED" = 0 ]; then
+  MEMBER=""
+  OWNER=""
   if buzz_run channels members --channel "$CHANNEL"; then
     CHECK=$(printf '%s' "$BUZZ_OUT" | ME="$PUBKEY" python3 -c '
 import json, os, sys
@@ -184,20 +201,20 @@ sys.stdout.write("%s\t%s" % (member, owner))
 ')
     MEMBER=$(printf '%s' "$CHECK" | cut -f1)
     OWNER=$(printf '%s' "$CHECK" | cut -f2)
-    if [ -z "$MEMBER" ]; then
-      # Being the owner of the channel is the one case we can fix ourselves.
-      if [ "$OWNER" = "$PUBKEY" ] || ! buzz_run channels add-member \
-           --channel "$CHANNEL" --pubkey "$PUBKEY" --role member; then
-        diagnose_channel "$CHANNEL" "${CHANNEL_NAME:-$CHANNEL}" "$PUBKEY" "$OWNER"
-        exit 4
-      fi
-      echo "channel  : added this session as a member"
-    fi
-  else
-    diagnose_channel "$CHANNEL" "${CHANNEL_NAME:-$CHANNEL}" "$PUBKEY" ""
+  fi
+  if [ -z "$MEMBER" ] \
+     && ! join_channel "$CHANNEL" "${CHANNEL_NAME:-$CHANNEL}" "$PUBKEY"; then
+    diagnose_channel "$CHANNEL" "${CHANNEL_NAME:-$CHANNEL}" "$PUBKEY" "$OWNER"
     exit 4
   fi
 fi
+
+# Pin the room to this session, so buzz-msg.sh posts where this session
+# actually is. A session that opened a dedicated channel stays in it until it
+# is pointed somewhere else with --channel; the machine-wide default is not
+# allowed to drag it back.
+meta_set "$SESSION_NAME" BUZZ_SESSION_CHANNEL "$CHANNEL"
+meta_set "$SESSION_NAME" BUZZ_SESSION_CHANNEL_NAME "${CHANNEL_NAME:-}"
 
 # --- 7. HELLO ----------------------------------------------------------------
 if [ "$SAY_HELLO" = 1 ]; then

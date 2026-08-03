@@ -6,9 +6,14 @@
 #   buzz-msg.sh read [limit]      (default 50, oldest first)
 #
 # Both load this session's identity themselves. Nothing is sourced by hand and
-# no channel UUID has to be pasted: the channel comes from --channel, then
-# BUZZ_COORD_CHANNEL, then BUZZ_COORD_CHANNEL_NAME in ~/.buzz/config, then
-# 'agent-coordination'. Run buzz-connect.sh first — this does not create.
+# no channel UUID has to be pasted. The channel is, in order: --channel (a UUID
+# or a name), BUZZ_COORD_CHANNEL in the environment, the room this session last
+# connected to with buzz-connect.sh, then the cached UUID for the channel name,
+# then a lookup by name. Run buzz-connect.sh first — this does not create.
+#
+# The session-pinned room is what makes dedicated channels work: after
+# `buzz-connect.sh --channel pp-refactor`, a bare `buzz-msg.sh send` posts to
+# pp-refactor and not to the machine's default channel.
 set -uo pipefail
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
