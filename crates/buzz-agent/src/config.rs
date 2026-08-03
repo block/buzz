@@ -687,6 +687,161 @@ pub enum OpenAiApi {
     Auto,
 }
 
+/// One provider the agent can send a turn to — a provider slot's full
+/// coordinates. The primary lives in [`Config`] itself; [`Config::fallback`]
+/// holds the ordered alternates tried when the primary cannot serve the turn.
+///
+/// Each endpoint carries its own model deliberately: a fallback answers with
+/// the model its own slot configures, never the primary's. Sending the
+/// primary's model id to a different provider is a guaranteed 404.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Endpoint {
+    pub provider: Provider,
+    pub api_key: String,
+    pub model: String,
+    pub base_url: String,
+    pub openai_api: OpenAiApi,
+}
+
+impl Endpoint {
+    /// Stable identity for circuit-breaker bookkeeping. Keyed on the upstream
+    /// (provider + base URL) rather than the model: a quota wall or a dead host
+    /// applies to every model behind it, and keying per-model would make the
+    /// breaker re-learn the same outage for each one.
+    pub fn circuit_key(&self) -> String {
+        format!(
+            "{:?}|{}",
+            self.provider,
+            self.base_url.trim_end_matches('/')
+        )
+    }
+
+    /// Trailing-slash-insensitive identity of the wire destination. Two slots
+    /// with the same provider and base URL are the same upstream, so one
+    /// cannot stand in for the other when that upstream is down.
+    fn same_upstream_as(&self, other: &Self) -> bool {
+        self.provider == other.provider
+            && self.base_url.trim_end_matches('/') == other.base_url.trim_end_matches('/')
+    }
+}
+
+/// A provider slot as read from the environment, before validation. Borrowed
+/// so [`derive_fallback_chain`] stays pure and testable without mutating the
+/// process environment (env-mutating tests race under a threaded runner).
+#[derive(Debug, Clone, Copy)]
+struct RawSlot<'a> {
+    /// Canonical id accepted in `BUZZ_AGENT_FALLBACK_PROVIDERS`.
+    id: &'a str,
+    provider: Provider,
+    api_key: Option<&'a str>,
+    model: Option<&'a str>,
+    base_url: &'a str,
+    openai_api: OpenAiApi,
+}
+
+/// Auto-derivation order when `BUZZ_AGENT_FALLBACK_PROVIDERS` is unset: the
+/// flat-rate Ollama Cloud slot first, then OpenRouter's free tier. The primary
+/// is removed from whatever this produces.
+const DEFAULT_FALLBACK_ORDER: [&str; 2] = ["openai", "openrouter"];
+
+/// Map a `BUZZ_AGENT_FALLBACK_PROVIDERS` entry to a slot id, accepting the
+/// same spellings as `BUZZ_AGENT_PROVIDER`.
+fn canonical_slot_id(raw: &str) -> Result<&'static str, String> {
+    match raw {
+        "anthropic" => Ok("anthropic"),
+        "openai" | "openai-compat" => Ok("openai"),
+        "openrouter" => Ok("openrouter"),
+        // Known providers that cannot serve as a fallback. Databricks resolves
+        // its bearer through OAuth PKCE against a host-specific discovery
+        // document; there is no way to express a second one in the current env
+        // surface. Say so rather than silently dropping what the operator asked
+        // for and leaving them believing failover is armed.
+        "databricks" | "databricks_v2" | "databricks-v2" => Err(format!(
+            "config: BUZZ_AGENT_FALLBACK_PROVIDERS={raw} is not supported as a fallback \
+             (use anthropic, openai, or openrouter)"
+        )),
+        other => Err(format!(
+            "config: BUZZ_AGENT_FALLBACK_PROVIDERS={other} not supported \
+             (use anthropic, openai, openrouter, or none)"
+        )),
+    }
+}
+
+/// Build the ordered failover chain.
+///
+/// - `Some("none")` disables failover entirely — the pre-failover behavior.
+/// - `Some(list)` takes the named slots in the given order. An unknown id is a
+///   startup error, matching how `BUZZ_AGENT_PROVIDER` treats a typo.
+/// - `None` auto-derives from [`DEFAULT_FALLBACK_ORDER`].
+///
+/// A candidate is dropped when its key or model is absent (nothing to call) or
+/// when it targets the same upstream as `primary` (it would fail the same way).
+/// Dropping is a warning, never an error: a missing fallback must not stop the
+/// agent from starting on a working primary.
+fn derive_fallback_chain(
+    requested: Option<&str>,
+    primary: &Endpoint,
+    slots: &[RawSlot<'_>],
+) -> Result<Vec<Endpoint>, String> {
+    let requested = requested.map(str::trim).filter(|s| !s.is_empty());
+    if requested.is_some_and(|r| r.eq_ignore_ascii_case("none")) {
+        return Ok(Vec::new());
+    }
+
+    let (ids, explicit) = match requested {
+        Some(list) => {
+            let mut ids = Vec::new();
+            for entry in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                ids.push(canonical_slot_id(&entry.to_ascii_lowercase())?);
+            }
+            (ids, true)
+        }
+        None => (DEFAULT_FALLBACK_ORDER.to_vec(), false),
+    };
+
+    let mut chain: Vec<Endpoint> = Vec::new();
+    for id in ids {
+        let Some(slot) = slots.iter().find(|s| s.id == id) else {
+            continue;
+        };
+        let (Some(api_key), Some(model)) = (
+            slot.api_key.map(str::trim).filter(|s| !s.is_empty()),
+            slot.model.map(str::trim).filter(|s| !s.is_empty()),
+        ) else {
+            // Only worth saying out loud when the operator named it — an
+            // absent slot under auto-derivation is the ordinary case.
+            if explicit {
+                tracing::warn!(
+                    provider = id,
+                    "config: fallback provider skipped — its API key or model is not set"
+                );
+            }
+            continue;
+        };
+        let candidate = Endpoint {
+            provider: slot.provider,
+            api_key: api_key.to_owned(),
+            model: model.to_owned(),
+            base_url: slot.base_url.to_owned(),
+            openai_api: slot.openai_api,
+        };
+        if candidate.same_upstream_as(primary) {
+            if explicit {
+                tracing::warn!(
+                    provider = id,
+                    "config: fallback provider skipped — same upstream as the primary"
+                );
+            }
+            continue;
+        }
+        if chain.iter().any(|e| e.same_upstream_as(&candidate)) {
+            continue;
+        }
+        chain.push(candidate);
+    }
+    Ok(chain)
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub provider: Provider,
@@ -737,6 +892,11 @@ pub struct Config {
     pub api_key: String,
     pub model: String,
     pub base_url: String,
+    /// Ordered alternates tried when the primary cannot serve a turn (quota,
+    /// credentials, upstream 5xx, transport). Empty means no failover — the
+    /// single-provider behavior. Derived from the provider slots present in
+    /// the environment; override with `BUZZ_AGENT_FALLBACK_PROVIDERS`.
+    pub fallback: Vec<Endpoint>,
     pub anthropic_api_version: String,
     /// OpenAI endpoint selection. See [`OpenAiApi`].
     pub openai_api: OpenAiApi,
@@ -822,6 +982,62 @@ impl Config {
                 OpenAiApi::Chat, // OpenRouter uses Chat Completions only
             ),
         };
+        // Every provider slot the environment defines, read once so the chain
+        // derivation stays pure. Each slot keeps its OWN model var — the
+        // `BUZZ_AGENT_MODEL` override applies to the primary only, or a
+        // cutover would send the primary's model id to a provider that has
+        // never heard of it. `OPENAI_COMPAT_API` is parsed leniently here for
+        // the same reason it is read conditionally above: a stray value must
+        // not break a deployment whose primary is not OpenAI.
+        let anthropic_key = env("ANTHROPIC_API_KEY");
+        let anthropic_model = env("ANTHROPIC_MODEL");
+        let anthropic_base = env_or("ANTHROPIC_BASE_URL", "https://api.anthropic.com");
+        let openai_key = env("OPENAI_COMPAT_API_KEY");
+        let openai_model = env("OPENAI_COMPAT_MODEL");
+        let openai_base = env_or("OPENAI_COMPAT_BASE_URL", "https://api.openai.com/v1");
+        let openai_slot_api =
+            parse_openai_api(env("OPENAI_COMPAT_API").as_deref()).unwrap_or(OpenAiApi::Auto);
+        let openrouter_key = env("OPENROUTER_API_KEY");
+        let openrouter_model = env("OPENROUTER_MODEL");
+        let openrouter_base = env_or("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1");
+        let primary_endpoint = Endpoint {
+            provider,
+            api_key: api_key.clone(),
+            model: model.clone(),
+            base_url: base_url.clone(),
+            openai_api,
+        };
+        let fallback = derive_fallback_chain(
+            env("BUZZ_AGENT_FALLBACK_PROVIDERS").as_deref(),
+            &primary_endpoint,
+            &[
+                RawSlot {
+                    id: "openai",
+                    provider: Provider::OpenAi,
+                    api_key: openai_key.as_deref(),
+                    model: openai_model.as_deref(),
+                    base_url: &openai_base,
+                    openai_api: openai_slot_api,
+                },
+                RawSlot {
+                    id: "openrouter",
+                    provider: Provider::OpenRouter,
+                    api_key: openrouter_key.as_deref(),
+                    model: openrouter_model.as_deref(),
+                    base_url: &openrouter_base,
+                    openai_api: OpenAiApi::Chat,
+                },
+                RawSlot {
+                    id: "anthropic",
+                    provider: Provider::Anthropic,
+                    api_key: anthropic_key.as_deref(),
+                    model: anthropic_model.as_deref(),
+                    base_url: &anthropic_base,
+                    openai_api: OpenAiApi::Auto,
+                },
+            ],
+        )?;
+
         let system_prompt = match (env("BUZZ_AGENT_SYSTEM_PROMPT"), env("BUZZ_AGENT_SYSTEM_PROMPT_FILE")) {
             (Some(_), Some(_)) => return Err(
                 "config: BUZZ_AGENT_SYSTEM_PROMPT and BUZZ_AGENT_SYSTEM_PROMPT_FILE are mutually exclusive".into()),
@@ -835,6 +1051,7 @@ impl Config {
             api_key,
             model,
             base_url,
+            fallback,
             anthropic_api_version: env_or("ANTHROPIC_API_VERSION", "2023-06-01"),
             openai_api,
             prefer_mesh_for_auto: parse_env("BUZZ_AGENT_PREFER_MESH_FOR_AUTO", 0u8)? != 0,
@@ -882,6 +1099,9 @@ impl Config {
             provider,
             api_key,
             base_url,
+            // Catalog discovery targets one explicit endpoint; there is
+            // nothing to fail over to.
+            fallback: Vec::new(),
             model: String::new(),
             system_prompt: String::new(),
             anthropic_api_version: "2023-06-01".into(),
@@ -909,6 +1129,37 @@ impl Config {
             hints_enabled: false,
             thinking_effort: None,
             prompt_caching: false,
+        }
+    }
+
+    /// This config's own provider slot as an [`Endpoint`] — the first link in
+    /// the failover chain.
+    pub fn primary_endpoint(&self) -> Endpoint {
+        Endpoint {
+            provider: self.provider,
+            api_key: self.api_key.clone(),
+            model: self.model.clone(),
+            base_url: self.base_url.clone(),
+            openai_api: self.openai_api,
+        }
+    }
+
+    /// This config aimed at `endpoint` instead of its own provider slot.
+    ///
+    /// Everything that is not a provider coordinate — prompts, limits,
+    /// timeouts, effort — is preserved, so a failover retry differs from the
+    /// original attempt only in where it is sent.
+    pub fn with_endpoint(&self, endpoint: &Endpoint) -> Self {
+        Self {
+            provider: endpoint.provider,
+            api_key: endpoint.api_key.clone(),
+            model: endpoint.model.clone(),
+            base_url: endpoint.base_url.clone(),
+            openai_api: endpoint.openai_api,
+            // The chain is walked one level up. Clearing it here keeps an
+            // attempt from recursively failing over inside itself.
+            fallback: Vec::new(),
+            ..self.clone()
         }
     }
 
@@ -2762,5 +3013,208 @@ mod tests {
     fn resolve_provider_openrouter_missing_key() {
         let err = resolve_provider(Some("openrouter"), None, None, None).unwrap_err();
         assert!(err.contains("OPENROUTER_API_KEY"));
+    }
+
+    // ---- failover chain derivation ----------------------------------------
+    //
+    // Modelled on the real estate deployment that motivated failover: z.ai's
+    // GLM through the `anthropic` slot as primary, with Ollama Cloud and
+    // OpenRouter available as alternates.
+
+    const OLLAMA: &str = "https://ollama.com/v1";
+    const OPENROUTER: &str = "https://openrouter.ai/api/v1";
+    const ZAI: &str = "https://api.z.ai/api/anthropic";
+
+    fn slots() -> Vec<RawSlot<'static>> {
+        vec![
+            RawSlot {
+                id: "openai",
+                provider: Provider::OpenAi,
+                api_key: Some("ollama-key"),
+                model: Some("qwen3.5:397b"),
+                base_url: OLLAMA,
+                openai_api: OpenAiApi::Chat,
+            },
+            RawSlot {
+                id: "openrouter",
+                provider: Provider::OpenRouter,
+                api_key: Some("openrouter-key"),
+                model: Some("nvidia/nemotron:free"),
+                base_url: OPENROUTER,
+                openai_api: OpenAiApi::Chat,
+            },
+            RawSlot {
+                id: "anthropic",
+                provider: Provider::Anthropic,
+                api_key: Some("zai-key"),
+                model: Some("glm-5.2"),
+                base_url: ZAI,
+                openai_api: OpenAiApi::Auto,
+            },
+        ]
+    }
+
+    fn endpoint(provider: Provider, base_url: &str, model: &str) -> Endpoint {
+        Endpoint {
+            provider,
+            api_key: "key".into(),
+            model: model.into(),
+            base_url: base_url.into(),
+            openai_api: OpenAiApi::Auto,
+        }
+    }
+
+    fn zai_primary() -> Endpoint {
+        endpoint(Provider::Anthropic, ZAI, "glm-5.2")
+    }
+
+    fn ids(chain: &[Endpoint]) -> Vec<String> {
+        chain.iter().map(|e| e.base_url.clone()).collect()
+    }
+
+    #[test]
+    fn fallback_chain_auto_derives_ollama_then_openrouter() {
+        let chain = derive_fallback_chain(None, &zai_primary(), &slots()).unwrap();
+        assert_eq!(ids(&chain), vec![OLLAMA, OPENROUTER]);
+    }
+
+    #[test]
+    fn fallback_chain_none_disables_failover() {
+        for raw in ["none", "NONE", " none "] {
+            let chain = derive_fallback_chain(Some(raw), &zai_primary(), &slots()).unwrap();
+            assert!(chain.is_empty(), "{raw:?} must disable failover");
+        }
+    }
+
+    #[test]
+    fn fallback_chain_honors_an_explicit_order() {
+        let chain =
+            derive_fallback_chain(Some("openrouter, openai"), &zai_primary(), &slots()).unwrap();
+        assert_eq!(ids(&chain), vec![OPENROUTER, OLLAMA]);
+    }
+
+    #[test]
+    fn fallback_chain_accepts_the_openai_compat_spelling() {
+        let chain = derive_fallback_chain(Some("openai-compat"), &zai_primary(), &slots()).unwrap();
+        assert_eq!(ids(&chain), vec![OLLAMA]);
+    }
+
+    /// The trap the estate config hits: the `anthropic` slot IS the primary
+    /// (z.ai), so naming it as a fallback buys nothing — the same key, the
+    /// same URL, the same exhausted quota.
+    #[test]
+    fn fallback_chain_skips_the_primarys_own_upstream() {
+        let chain = derive_fallback_chain(Some("anthropic"), &zai_primary(), &slots()).unwrap();
+        assert!(
+            chain.is_empty(),
+            "an endpoint identical to the primary cannot stand in for it"
+        );
+    }
+
+    #[test]
+    fn fallback_chain_skips_the_primary_during_auto_derivation() {
+        // Primary is Ollama itself — auto-derivation must not list it twice.
+        let primary = endpoint(Provider::OpenAi, OLLAMA, "qwen3.5:397b");
+        let chain = derive_fallback_chain(None, &primary, &slots()).unwrap();
+        assert_eq!(ids(&chain), vec![OPENROUTER]);
+    }
+
+    #[test]
+    fn fallback_chain_matching_ignores_a_trailing_slash() {
+        let primary = endpoint(Provider::OpenAi, &format!("{OLLAMA}/"), "qwen3.5:397b");
+        let chain = derive_fallback_chain(None, &primary, &slots()).unwrap();
+        assert_eq!(
+            ids(&chain),
+            vec![OPENROUTER],
+            "a trailing slash is the same upstream, not a second one"
+        );
+    }
+
+    #[test]
+    fn fallback_chain_carries_each_slots_own_model() {
+        let chain = derive_fallback_chain(None, &zai_primary(), &slots()).unwrap();
+        assert_eq!(
+            chain[0].model, "qwen3.5:397b",
+            "a fallback must answer with its own model — the primary's \
+             `glm-5.2` means nothing to Ollama"
+        );
+        assert_eq!(chain[1].model, "nvidia/nemotron:free");
+    }
+
+    #[test]
+    fn fallback_chain_skips_a_slot_with_no_key_or_model() {
+        let mut incomplete = slots();
+        incomplete[0].api_key = None;
+        incomplete[1].model = Some("   ");
+        let chain = derive_fallback_chain(None, &zai_primary(), &incomplete).unwrap();
+        assert!(
+            chain.is_empty(),
+            "a slot with nothing to call must not enter the chain"
+        );
+    }
+
+    #[test]
+    fn fallback_chain_dedupes_repeated_entries() {
+        let chain =
+            derive_fallback_chain(Some("openai,openai,openrouter"), &zai_primary(), &slots())
+                .unwrap();
+        assert_eq!(ids(&chain), vec![OLLAMA, OPENROUTER]);
+    }
+
+    #[test]
+    fn fallback_chain_rejects_an_unknown_provider_id() {
+        let err =
+            derive_fallback_chain(Some("openrouter,typo"), &zai_primary(), &slots()).unwrap_err();
+        assert!(err.contains("typo"), "{err}");
+        assert!(err.contains("BUZZ_AGENT_FALLBACK_PROVIDERS"), "{err}");
+    }
+
+    /// Databricks resolves its bearer through host-specific OAuth PKCE, which
+    /// the env surface cannot express twice. Saying so beats silently dropping
+    /// it and leaving the operator believing failover is armed.
+    #[test]
+    fn fallback_chain_rejects_databricks_with_a_clear_message() {
+        let err = derive_fallback_chain(Some("databricks"), &zai_primary(), &slots()).unwrap_err();
+        assert!(err.contains("not supported as a fallback"), "{err}");
+    }
+
+    #[test]
+    fn fallback_chain_is_empty_when_no_other_slot_is_configured() {
+        let only_primary = vec![slots()[2]];
+        let chain = derive_fallback_chain(None, &zai_primary(), &only_primary).unwrap();
+        assert!(chain.is_empty());
+    }
+
+    #[test]
+    fn circuit_key_is_stable_across_trailing_slashes_and_models() {
+        let a = endpoint(Provider::OpenAi, OLLAMA, "model-a");
+        let b = endpoint(Provider::OpenAi, &format!("{OLLAMA}/"), "model-b");
+        assert_eq!(
+            a.circuit_key(),
+            b.circuit_key(),
+            "one upstream is one circuit, whatever model is asked of it"
+        );
+        assert_ne!(
+            a.circuit_key(),
+            endpoint(Provider::OpenRouter, OPENROUTER, "model-a").circuit_key()
+        );
+    }
+
+    #[test]
+    fn with_endpoint_swaps_the_provider_and_keeps_everything_else() {
+        let mut cfg = Config::for_discovery(Provider::Anthropic, "zai-key".into(), ZAI.into());
+        cfg.max_output_tokens = 4096;
+        cfg.system_prompt = "keep me".into();
+
+        let swapped = cfg.with_endpoint(&endpoint(Provider::OpenAi, OLLAMA, "qwen3.5:397b"));
+        assert_eq!(swapped.provider, Provider::OpenAi);
+        assert_eq!(swapped.base_url, OLLAMA);
+        assert_eq!(swapped.model, "qwen3.5:397b");
+        assert_eq!(swapped.system_prompt, "keep me");
+        assert_eq!(swapped.max_output_tokens, 4096);
+        assert!(
+            swapped.fallback.is_empty(),
+            "an attempt must not recursively fail over inside itself"
+        );
     }
 }

@@ -5,6 +5,7 @@ mod builtin;
 pub mod catalog;
 pub mod config;
 mod handoff;
+mod health;
 mod hints;
 mod llm;
 mod mcp;

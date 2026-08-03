@@ -358,12 +358,58 @@ pub enum ContentBlock {
     Unsupported,
 }
 
+/// Why a provider call failed in a way that a *different* provider could
+/// plausibly satisfy. Distinguishes the failures worth cutting over on from
+/// the ones that would fail identically everywhere (a malformed request), and
+/// sets how long the circuit breaker holds the endpoint down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CutoverKind {
+    /// Quota or rate limit — HTTP 429 or 402. Usually bound to a provider-side
+    /// window (z.ai's weekly `1310` resets days later), so retrying the same
+    /// endpoint soon is wasted work.
+    Quota,
+    /// Credentials rejected (401/403) after the token source already spent its
+    /// one refresh. A wrong or revoked key does not heal on its own.
+    Auth,
+    /// Upstream 5xx/499 — the provider is reachable but failing. Often brief.
+    Server,
+    /// Connect, timeout, or body-read failure. Often brief.
+    Transport,
+}
+
+impl CutoverKind {
+    /// Whether this failure is unlikely to clear within a minute. Quota
+    /// windows and bad credentials persist; a 503 or a dropped connection
+    /// usually does not.
+    pub fn is_slow_to_heal(self) -> bool {
+        matches!(self, Self::Quota | Self::Auth)
+    }
+
+    /// Short lowercase label for logs and error text.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Quota => "quota",
+            Self::Auth => "auth",
+            Self::Server => "server",
+            Self::Transport => "transport",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum AgentError {
     InvalidParams(String),
     Llm(String),
     LlmAuth(String),
     LlmModelNotFound(String),
+    /// The provider could not serve the request for a reason another provider
+    /// might not share — quota, credentials, upstream 5xx, or transport. This
+    /// is the class that drives failover; it surfaces to the caller only once
+    /// every endpoint in the chain has been tried.
+    LlmUnavailable {
+        kind: CutoverKind,
+        detail: String,
+    },
     Mcp(String),
     Cancelled,
 }
@@ -375,6 +421,9 @@ impl std::fmt::Display for AgentError {
             Self::Llm(s) => write!(f, "llm: {s}"),
             Self::LlmAuth(s) => write!(f, "llm auth: {s}"),
             Self::LlmModelNotFound(s) => write!(f, "llm model not found: {s}"),
+            Self::LlmUnavailable { kind, detail } => {
+                write!(f, "llm unavailable ({}): {detail}", kind.as_str())
+            }
             Self::Mcp(s) => write!(f, "mcp: {s}"),
             Self::Cancelled => write!(f, "cancelled"),
         }
@@ -389,6 +438,7 @@ impl AgentError {
             Self::InvalidParams(_) => -32602,
             Self::LlmAuth(_) => -32001,
             Self::LlmModelNotFound(_) => -32002,
+            Self::LlmUnavailable { .. } => -32003,
             _ => -32000,
         }
     }
