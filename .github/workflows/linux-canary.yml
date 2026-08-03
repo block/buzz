@@ -7,8 +7,8 @@ name: Linux Canary
 # Design notes vs. signed-macos-canary.yml:
 #   - fix-appimage.sh is run without signing env vars; the script detects
 #     their absence and skips re-signing, repacking only (documented inline).
-#   - mold linker added (rui314/setup-mold) to reduce link time, matching
-#     the Linux Rust CI jobs in ci.yml.
+#   - Build tools match release.yml; cache keys derive the concrete linker and
+#     native library identity rather than assuming the moving runner image.
 #   - pnpm store restore/save pattern mirrors ci.yml:149-196.
 on:
   workflow_dispatch:
@@ -83,8 +83,6 @@ jobs:
 
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
 
-      - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
-
       - name: Install appimagetool
         run: |
           case "$(uname -m)" in
@@ -144,6 +142,10 @@ jobs:
           cd desktop && node scripts/set-version-from-tag.mjs "$VERSION"
           cd src-tauri && cargo update --workspace
 
+      - name: Resolve native toolchain identity
+        id: native_toolchain
+        run: echo "id=$(scripts/desktop-native-toolchain-id.sh linux)" >> "$GITHUB_OUTPUT"
+
       # Compute this after cargo update so the key describes the graph that is
       # actually compiled. The helper normalizes only Buzz Desktop's release
       # version, allowing a canary to warm an otherwise identical tag build.
@@ -154,7 +156,7 @@ jobs:
             --platform "$RUNNER_OS" \
             --target x86_64-unknown-linux-gnu \
             --features mesh-llm \
-            --native-inputs ubuntu-24.04-mold)
+            --native-inputs "${{ steps.native_toolchain.outputs.id }}")
           echo "key=$KEY" >> "$GITHUB_OUTPUT"
           echo "Release cache key: $KEY"
 

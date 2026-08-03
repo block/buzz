@@ -93,6 +93,11 @@ jobs:
           cd desktop && node scripts/set-version-from-tag.mjs "$VERSION"
           cd src-tauri && cargo update --workspace
 
+      - name: Resolve native toolchain identity
+        id: native_toolchain
+        shell: bash
+        run: echo "id=$(scripts/desktop-native-toolchain-id.sh windows)" >> "$GITHUB_OUTPUT"
+
       # Compute this after cargo update so the key describes the graph that is
       # actually compiled. The helper normalizes only Buzz Desktop's release
       # version, allowing a canary to warm an otherwise identical tag build.
@@ -104,7 +109,7 @@ jobs:
             --platform "$RUNNER_OS" \
             --target x86_64-pc-windows-msvc \
             --features default \
-            --native-inputs windows-2025-msvc)
+            --native-inputs "${{ steps.native_toolchain.outputs.id }}")
           echo "key=$KEY" >> "$GITHUB_OUTPUT"
           echo "Release cache key: $KEY"
 
