@@ -404,6 +404,15 @@ impl UsageTracker {
     /// 3. **In-flight for another session** (`in_flight_session == Some(other)`):
     ///    ignored entirely — touching this session's baseline while another is
     ///    in-flight would undercount this session's next published delta.
+    ///
+    /// `pending` is replaced wholesale, so a frame reporting fewer counters than
+    /// its predecessor narrows the record. That is safe because a session is
+    /// served by exactly one wire format: goose only sends the extension because
+    /// we ask for it (`_meta.goose.customNotifications` in
+    /// `build_client_capabilities`), and the ACP-native harnesses never send it.
+    /// Should a harness ever emit both formats within one turn, a cost-only
+    /// standard frame would blank the token counters of a preceding goose frame,
+    /// and this would need to merge per counter instead of replacing.
     pub(crate) fn record(&mut self, session_id: &str, snapshot: &UsageSnapshot) {
         if !snapshot.has_any_counter() {
             // Nothing NIP-AM can carry. Returning early also protects the
@@ -1439,6 +1448,104 @@ mod tests {
         assert!(
             (d - 0.20).abs() < 1e-9,
             "delta must run from the surviving 0.10 baseline, got {d}"
+        );
+    }
+
+    /// claude-agent-acp emits several `usage_update` frames per turn. As on the
+    /// goose path, the last one wins on cumulative values, the delta is measured
+    /// from the previous *published* turn rather than an intermediate frame, and
+    /// `turn_seq` advances once per publish.
+    #[test]
+    fn acp_multiple_notifications_in_one_turn_last_one_wins() {
+        let mut tracker = UsageTracker::default();
+        tracker.begin_turn("acp-multi");
+        tracker.record("acp-multi", &acp_snapshot(Some(0.10)));
+        let t1 = tracker.take().expect("turn 1");
+        assert_eq!(t1.turn_seq, 1);
+
+        tracker.begin_turn("acp-multi");
+        tracker.record("acp-multi", &acp_snapshot(Some(0.18)));
+        tracker.record("acp-multi", &acp_snapshot(Some(0.30)));
+        let usage = tracker.take().expect("turn 2");
+
+        assert_eq!(usage.cumulative_cost_usd, Some(0.30), "last frame wins");
+        let d = usage.turn_cost_usd.expect("cost delta");
+        assert!(
+            (d - 0.20).abs() < 1e-9,
+            "delta must run from the 0.10 baseline, not the 0.18 intermediate; got {d}"
+        );
+        assert_eq!(usage.turn_seq, 2, "seq advances per publish, not per frame");
+    }
+
+    /// A cumulative cost that goes backwards is a reset or a harness bug. Per
+    /// NIP-AM the whole `turn` object is nulled, not just the cost.
+    #[test]
+    fn acp_cost_decrease_nulls_all_turn_fields() {
+        let mut tracker = UsageTracker::default();
+        tracker.begin_turn("acp-back");
+        tracker.record("acp-back", &acp_snapshot(Some(0.50)));
+        let _ = tracker.take();
+
+        tracker.begin_turn("acp-back");
+        tracker.record("acp-back", &acp_snapshot(Some(0.20)));
+        let usage = tracker.take().expect("turn 2");
+
+        assert!(!usage.delta_reliable, "a cost decrease is not reliable");
+        assert!(usage.turn_cost_usd.is_none());
+        assert!(usage.turn_input_tokens.is_none());
+        assert!(usage.turn_output_tokens.is_none());
+        // The cumulative snapshot is still reported as observed.
+        assert_eq!(usage.cumulative_cost_usd, Some(0.20));
+    }
+
+    /// A late frame for session B while session A is in-flight must not touch
+    /// B's committed baseline — doing so would undercount B's next delta.
+    /// Mirrors the goose-path regression on cross-session corruption.
+    #[test]
+    fn acp_notification_for_other_session_while_in_flight_is_ignored() {
+        let mut tracker = UsageTracker::default();
+        // Establish a baseline for B, then leave it idle.
+        tracker.begin_turn("acp-b");
+        tracker.record("acp-b", &acp_snapshot(Some(0.10)));
+        let _ = tracker.take();
+
+        // A is in-flight; a straggler frame for B arrives.
+        tracker.begin_turn("acp-a");
+        tracker.record("acp-b", &acp_snapshot(Some(0.90)));
+        assert!(
+            tracker.pending.is_none(),
+            "a frame for another session must not become A's pending record"
+        );
+
+        // B's next real turn still measures from 0.10, not from the straggler.
+        tracker.begin_turn("acp-b");
+        tracker.record("acp-b", &acp_snapshot(Some(0.25)));
+        let usage = tracker.take().expect("B turn 2");
+        let d = usage.turn_cost_usd.expect("cost delta");
+        assert!(
+            (d - 0.15).abs() < 1e-9,
+            "B's baseline must be untouched by the straggler; got {d}"
+        );
+    }
+
+    /// Frames that arrive before any `begin_turn` (session setup) advance the
+    /// baseline but must not produce a publishable record for the next turn.
+    #[test]
+    fn acp_setup_notification_before_begin_turn_advances_baseline_only() {
+        let mut tracker = UsageTracker::default();
+        tracker.record("acp-setup", &acp_snapshot(Some(0.05)));
+        assert!(
+            tracker.pending.is_none(),
+            "no turn in flight → nothing publishable"
+        );
+
+        tracker.begin_turn("acp-setup");
+        tracker.record("acp-setup", &acp_snapshot(Some(0.12)));
+        let usage = tracker.take().expect("first real turn");
+        let d = usage.turn_cost_usd.expect("cost delta");
+        assert!(
+            (d - 0.07).abs() < 1e-9,
+            "the setup frame must have seeded the baseline; got {d}"
         );
     }
 

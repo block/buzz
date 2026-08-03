@@ -4331,8 +4331,9 @@ mod tests {
         assert_eq!(usage.cumulative_output_tokens, None);
     }
 
-    /// The full dispatch path: a raw `session/update` frame must reach the
-    /// tracker through the same match arm that feeds `handle_session_update`.
+    /// Cost is the one counter the standard payload carries, so it must yield a
+    /// real per-turn delta from the second turn on. (Dispatch wiring is covered
+    /// separately by the `acp_usage_frame_dispatched_by_*` tests below.)
     #[tokio::test]
     async fn acp_usage_second_turn_produces_a_cost_delta() {
         let mut client = spawn_inert_client().await;
@@ -4401,6 +4402,70 @@ mod tests {
             "jsonrpc": "2.0", "method": "session/update"
         }));
         assert!(client.take_turn_usage().is_none());
+    }
+
+    /// A bash agent that emits one standard `usage_update` frame and then the
+    /// JSON-RPC response the read loop is waiting for. Frames are exactly what
+    /// claude-agent-acp puts on the wire.
+    const ACP_USAGE_THEN_RESPONSE: &str = concat!(
+        r#"echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"dispatch-s","#,
+        r#""update":{"sessionUpdate":"usage_update","used":15247,"size":200000,"#,
+        r#""cost":{"amount":0.0234,"currency":"USD"}}}}'; "#,
+        r#"echo '{"jsonrpc":"2.0","id":999,"result":{"stopReason":"end_turn"}}'; "#,
+        "sleep 5",
+    );
+
+    /// Regression guard for the routing half of the bug, on the plain read loop.
+    ///
+    /// The handler being correct is not enough — the notification has to be
+    /// handed to it. Every other ACP-usage test calls `handle_acp_usage_update`
+    /// directly, so deleting the dispatch line in `read_until_response` would
+    /// silently restore the original bug. This test drives a real frame through
+    /// the loop, so that deletion fails here.
+    #[tokio::test]
+    async fn acp_usage_frame_dispatched_by_read_until_response() {
+        let mut client = spawn_script(ACP_USAGE_THEN_RESPONSE).await;
+        client.usage.begin_turn("dispatch-s");
+
+        client
+            .read_until_response(999)
+            .await
+            .expect("agent response must arrive");
+
+        let usage = client
+            .take_turn_usage()
+            .expect("the usage frame must reach the tracker through the dispatch");
+        assert_eq!(usage.session_id, "dispatch-s");
+        assert_eq!(usage.cumulative_cost_usd, Some(0.0234));
+        assert_eq!(usage.cumulative_input_tokens, None);
+    }
+
+    /// Same regression guard on the idle-timeout read loop — the loop that
+    /// actually serves prompt turns, and a second, independent dispatch site.
+    #[tokio::test]
+    async fn acp_usage_frame_dispatched_by_idle_timeout_loop() {
+        let mut client = spawn_script(ACP_USAGE_THEN_RESPONSE).await;
+        client.usage.begin_turn("dispatch-s");
+
+        let max_dur = std::time::Duration::from_secs(30);
+        let hard_deadline = tokio::time::Instant::now() + max_dur;
+        client
+            .read_until_response_with_idle_timeout(
+                "dispatch-s",
+                999,
+                std::time::Duration::from_secs(10),
+                hard_deadline,
+                max_dur,
+            )
+            .await
+            .expect("agent response must arrive");
+
+        let usage = client
+            .take_turn_usage()
+            .expect("the usage frame must reach the tracker through the dispatch");
+        assert_eq!(usage.session_id, "dispatch-s");
+        assert_eq!(usage.cumulative_cost_usd, Some(0.0234));
+        assert_eq!(usage.cumulative_input_tokens, None);
     }
 
     #[test]

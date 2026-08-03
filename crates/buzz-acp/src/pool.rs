@@ -6251,6 +6251,90 @@ mod tests {
         );
     }
 
+    /// A cost-only turn — what every standard-ACP harness produces, since the
+    /// protocol carries no cumulative token split. Each token field must reach
+    /// the wire as null. A zero here would be read by a token-usage calculator
+    /// as "this turn consumed nothing" instead of "unknown".
+    #[test]
+    fn test_build_turn_metric_counts_cost_only_turn_nulls_every_token_field() {
+        let usage = crate::usage::TurnUsage {
+            session_id: "sess-acp".to_string(),
+            turn_seq: 2,
+            delta_reliable: true,
+            turn_input_tokens: None,
+            turn_output_tokens: None,
+            turn_total_tokens: None,
+            turn_cost_usd: Some(0.15),
+            cumulative_input_tokens: None,
+            cumulative_output_tokens: None,
+            cumulative_total_tokens: None,
+            cumulative_cost_usd: Some(0.25),
+            model: None,
+        };
+
+        let (turn, cumulative) = crate::pool::build_turn_metric_counts(&usage);
+        let turn_json = serde_json::to_value(turn.as_ref().expect("turn counts present")).unwrap();
+        let cum_json =
+            serde_json::to_value(cumulative.as_ref().expect("cumulative counts present")).unwrap();
+
+        for (label, json) in [("turn", &turn_json), ("cumulative", &cum_json)] {
+            for field in ["inputTokens", "outputTokens", "totalTokens"] {
+                assert!(
+                    json[field].is_null(),
+                    "{label}.{field} must be null for a harness that reports no tokens, got {}",
+                    json[field]
+                );
+            }
+        }
+
+        // The one counter the standard payload does carry must survive.
+        assert_eq!(turn_json["costUsd"], serde_json::json!(0.15));
+        assert_eq!(cum_json["costUsd"], serde_json::json!(0.25));
+    }
+
+    /// The same turn as a complete NIP-AM payload: it must pass validation and
+    /// serialize with explicit nulls. `TokenCounts` carries no
+    /// `skip_serializing_if` on the four counters, so a consumer sees the key
+    /// with a null value rather than an absent key.
+    #[test]
+    fn test_cost_only_payload_validates_and_serializes_tokens_as_null() {
+        use buzz_core::agent_turn_metric::{AgentTurnMetricPayload, TokenCounts};
+
+        let counts = |cost: f64| {
+            Some(TokenCounts {
+                input_tokens: None,
+                output_tokens: None,
+                total_tokens: None,
+                cost_usd: Some(cost),
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+            })
+        };
+        let payload = AgentTurnMetricPayload {
+            harness: "claude-agent-acp".to_string(),
+            model: None,
+            channel_id: None,
+            session_id: Some("sess-acp".to_string()),
+            turn_id: Some("turn-2".to_string()),
+            turn_seq: Some(2),
+            timestamp: "2026-08-03T10:00:00.000Z".to_string(),
+            turn: counts(0.15),
+            cumulative: counts(0.25),
+            delta_reliable: true,
+            stop_reason: Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
+        };
+
+        payload
+            .validate()
+            .expect("a cost-only payload is valid NIP-AM");
+
+        let json = serde_json::to_value(&payload).unwrap();
+        assert!(json["cumulative"]["inputTokens"].is_null());
+        assert!(json["cumulative"]["outputTokens"].is_null());
+        assert_eq!(json["cumulative"]["costUsd"], serde_json::json!(0.25));
+        assert_eq!(json["harness"], serde_json::json!("claude-agent-acp"));
+    }
+
     fn make_prompt_context_no_owner() -> PromptContext {
         let agent_keys = nostr::Keys::generate();
         make_prompt_context_impl(&agent_keys, None)
