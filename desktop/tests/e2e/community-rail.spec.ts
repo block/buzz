@@ -507,26 +507,22 @@ test.describe("community rail", () => {
       );
     });
     await page.evaluate(() => {
-      const deferNextChannelsRead = (
-        window as Window & {
-          __BUZZ_E2E_DEFER_NEXT_CHANNELS_READ__?: () => void;
-        }
-      ).__BUZZ_E2E_DEFER_NEXT_CHANNELS_READ__;
+      const testWindow = window as Window & {
+        __BUZZ_E2E_DEFER_NEXT_CHANNELS_READ__?: () => void;
+        __BUZZ_E2E_INVALIDATE_CHANNELS__?: () => Promise<void>;
+      };
+      const deferNextChannelsRead =
+        testWindow.__BUZZ_E2E_DEFER_NEXT_CHANNELS_READ__;
+      const invalidateChannels = testWindow.__BUZZ_E2E_INVALIDATE_CHANNELS__;
       if (!deferNextChannelsRead) {
         throw new Error("missing channel-read defer seam");
       }
-      deferNextChannelsRead();
-    });
-
-    await page.evaluate(() => {
-      const invalidateChannels = (
-        window as Window & {
-          __BUZZ_E2E_INVALIDATE_CHANNELS__?: () => Promise<void>;
-        }
-      ).__BUZZ_E2E_INVALIDATE_CHANNELS__;
       if (!invalidateChannels) {
         throw new Error("missing channel invalidation seam");
       }
+      // Arm and trigger in one browser task so unrelated callbacks cannot
+      // claim the one-shot before the validation read starts.
+      deferNextChannelsRead();
       void invalidateChannels();
     });
     await page.waitForFunction(
