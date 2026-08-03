@@ -3,6 +3,10 @@ import { useLocation } from "@tanstack/react-router";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import * as React from "react";
+import {
+  loadHuddleBackingChannelIds,
+  rememberHuddleBackingChannelId,
+} from "@/app/huddleBackingChannelStorage";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { channelsQueryKey } from "@/features/channels/hooks";
 import { huddleWindowChannelId } from "@/features/huddle/lib/huddleWindow";
@@ -35,7 +39,7 @@ export function useHuddlePresentation() {
     React.useState<ReadonlySet<string>>(() => new Set());
   const [huddleBackingChannelIds, setHuddleBackingChannelIds] = React.useState<
     ReadonlySet<string>
-  >(() => new Set());
+  >(loadHuddleBackingChannelIds);
   const activeHuddleChannelIdRef = React.useRef<string | null>(null);
   const huddleCompanionChannelIdRef = React.useRef<string | null>(null);
   const huddleCompanionDismissedChannelIdRef = React.useRef<string | null>(
@@ -160,6 +164,7 @@ export function useHuddlePresentation() {
   );
   const trackHuddleBackingChannel = React.useCallback(
     (ephemeralChannelId: string) => {
+      rememberHuddleBackingChannelId(ephemeralChannelId);
       setHuddleBackingChannelIds((current) => {
         if (current.has(ephemeralChannelId)) return current;
         const next = new Set(current);

@@ -658,6 +658,7 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         effective_model_override,
         run_id,
         mut steer_rx,
+        usage_baseline,
     ) = match acquire_session(&app, &p.session_id).await {
         Ok(v) => v,
         Err(reason) => {
@@ -709,6 +710,7 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         turn_output_tokens: &mut turn_output_tokens,
         turn_cached_input_tokens: &mut turn_cached_input_tokens,
         turn_total_state: &mut turn_total_state,
+        usage_baseline,
     };
     let result = ctx.run(p.prompt).await;
     if let Some(s) = app.sessions.lock().await.get_mut(&sid) {
@@ -766,28 +768,16 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         if let Some((accumulated_in, accumulated_out, accumulated_cached, accumulated_total)) =
             accumulated
         {
-            // Build the usage_update payload. `accumulatedTotalTokens` is only
-            // included when the cumulative is exactly known — never when Unseen
-            // (no total ever observed) or Unknown (at least one turn lacked a
-            // total). A goose consumer that doesn't recognise the field ignores it.
-            let mut update = serde_json::json!({
-                "sessionUpdate": "usage_update",
-                // used: total tokens as a context-usage proxy;
-                // contextLimit: 0 (buzz-agent has no context limit tracking).
-                "used": accumulated_in.saturating_add(accumulated_out),
-                "contextLimit": 0u64,
-                "accumulatedInputTokens": accumulated_in,
-                "accumulatedOutputTokens": accumulated_out,
-                // A subset of accumulatedInputTokens, not an addition to
-                // it. Extends goose's usage_update shape; a consumer that
-                // does not know the field ignores it and prices exactly as
-                // it did before.
-                "accumulatedCachedInputTokens": accumulated_cached,
-                "model": effective_model_str,
-            });
-            if let crate::types::TurnTotalState::Exact(total) = accumulated_total {
-                update["accumulatedTotalTokens"] = serde_json::json!(total);
-            }
+            // Same builder the run loop uses for its per-round reports, so the
+            // final notification is shape-identical to the ones that preceded
+            // it and a consumer taking the high-water mark lands on this one.
+            let update = wire::usage_update_payload(
+                accumulated_in,
+                accumulated_out,
+                accumulated_cached,
+                accumulated_total,
+                effective_model_str,
+            );
             wire::send(&wire_tx, goose_session_update(&sid, update)).await;
         }
     }
@@ -821,6 +811,7 @@ async fn acquire_session(
         Option<String>,
         String,
         mpsc::UnboundedReceiver<Vec<ContentBlock>>,
+        crate::types::SessionUsageBaseline,
     ),
     &'static str,
 > {
@@ -857,6 +848,17 @@ async fn acquire_session(
         effective_model,
         run_id,
         steer_rx,
+        // Snapshot rather than a handle: the run loop reports cumulative usage
+        // after every LLM round, and taking the sessions lock on each of those
+        // would serialise concurrent sessions behind one another's provider
+        // round-trips. Nothing else advances these counters while this turn
+        // holds `busy`, so the snapshot cannot go stale under it.
+        crate::types::SessionUsageBaseline {
+            input_tokens: s.accumulated_input_tokens,
+            output_tokens: s.accumulated_output_tokens,
+            cached_input_tokens: s.accumulated_cached_input_tokens,
+            total_state: s.accumulated_total_state,
+        },
     ))
 }
 

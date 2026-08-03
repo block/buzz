@@ -306,6 +306,13 @@ test("keeps main-app shortcuts from navigating the huddle room", async ({
       ephemeralChannelId: HUDDLE_CHANNEL_ID,
       members: [{ pubkey: TEST_IDENTITIES.tyler.pubkey, role: "member" }],
     },
+    pendingCommunityDeepLinks: [
+      {
+        id: "companion-must-not-consume",
+        kind: "connect",
+        relayUrl: "wss://other.example",
+      },
+    ],
   });
   await page.goto("/");
 
@@ -329,6 +336,26 @@ test("keeps main-app shortcuts from navigating the huddle room", async ({
     });
   }, HUDDLE_PARENT_ID);
   await expect.poll(() => page.url()).toBe(huddleUrl);
+
+  const pendingCommunityLink = {
+    code: null,
+    id: "companion-must-not-consume",
+    kind: "connect" as const,
+    name: null,
+    relayUrl: "wss://other.example",
+  };
+  await page.evaluate(async () => {
+    await window.__BUZZ_E2E_EMIT_TAURI_EVENT__?.("deep-link-connect", null);
+  });
+  await expect
+    .poll(() =>
+      page.evaluate(async () =>
+        window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.(
+          "take_pending_community_deep_link",
+        ),
+      ),
+    )
+    .toEqual(pendingCommunityLink);
 });
 
 test("speaks the first eligible agent reply with its participant identity", async ({
