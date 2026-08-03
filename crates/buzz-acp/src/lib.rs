@@ -286,6 +286,21 @@ pub(crate) async fn is_dm_channel(
     }
 }
 
+/// Resolve whether the channel is *positively confirmed* to be a DM.
+///
+/// This is deliberately stricter than [`is_dm_channel`]. It is used only for
+/// relaxing mention filters: an unavailable metadata lookup must retain the
+/// narrower group-channel behavior rather than widen a subscription.
+pub(crate) async fn is_confirmed_dm_channel(
+    channel_id: Uuid,
+    channel_info: &pool::ChannelInfoResolver,
+) -> bool {
+    matches!(
+        channel_info.resolve(channel_id).await,
+        Some(info) if info.channel_type == "dm"
+    )
+}
+
 /// Strip the `#p` subscription filter from DM channels in mentions mode.
 ///
 /// Mentions mode subscribes with `require_mention: true`, which the relay
@@ -314,10 +329,9 @@ pub(crate) async fn is_dm_channel(
 ///   covers, so an absent entry means "not a channel we discovered as a DM" and
 ///   the narrow subscription stands.
 ///
-/// The dynamic (post-startup membership) subscribe path does the reverse and
-/// accepts `is_dm_channel`'s fail-closed-to-DM answer, because agent-initiated
-/// DMs have no startup metadata at all and would otherwise never be exempted.
-/// Widening there is safe: the author gate still runs on every event.
+/// The dynamic (post-startup membership) subscribe path uses the same
+/// confirmed-DM requirement. A transient metadata failure must keep the
+/// subscription narrow; a later membership event or restart can retry it.
 ///
 /// Returns the number of channels whose filter was changed.
 pub(crate) fn apply_dm_mention_exemption(
@@ -2117,18 +2131,12 @@ async fn tokio_main() -> Result<()> {
                                     if subscribed_channel_ids.contains(&ch) {
                                         tracing::debug!(channel_id = %ch, "membership notification: channel already subscribed");
                                     } else if let Some(mut filter) = config::resolve_dynamic_channel_filter(&config, ch, &rules) {
-                                        // Same intent as apply_dm_mention_exemption()
-                                        // on the startup path, but deliberately
-                                        // NOT shared with it: this path has one
-                                        // filter and no startup metadata, so it
-                                        // must await the async is_dm_channel()
-                                        // resolver and accepts its fail-closed-
-                                        // to-DM answer. Agent-initiated DMs
-                                        // arrive on exactly this path and would
-                                        // never be exempted otherwise.
+                                        // Relax the wire filter only after an
+                                        // affirmative metadata lookup. Unknown
+                                        // dynamic channels stay mention-gated.
                                         if config.subscribe_mode == SubscribeMode::Mentions
                                             && filter.require_mention
-                                            && is_dm_channel(ch, &ctx.channel_info).await
+                                            && is_confirmed_dm_channel(ch, &ctx.channel_info).await
                                         {
                                             filter.require_mention = false;
                                             tracing::debug!(
@@ -2345,8 +2353,8 @@ async fn tokio_main() -> Result<()> {
                             // agent, so the require_mention gate must not apply
                             // there. Config-mode rules keep their declared
                             // require_mention semantics in every channel.
-                            let dm_mention_exempt =
-                                config.subscribe_mode == SubscribeMode::Mentions && is_dm;
+                            let dm_mention_exempt = config.subscribe_mode == SubscribeMode::Mentions
+                                && is_confirmed_dm_channel(buzz_event.channel_id, &ctx.channel_info).await;
                             let matched = filter::match_event(&buzz_event.event, buzz_event.channel_id, &rules, &pubkey_hex, dm_mention_exempt).await;
                             let prompt_tag = match matched {
                                 Some(m) => m.prompt_tag,
@@ -4993,6 +5001,14 @@ mod author_gate_tests {
         assert!(
             is_dm_channel(Uuid::new_v4(), &resolver(HashMap::new())).await,
             "an unresolvable channel type must be treated as a DM"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unresolved_channel_is_not_confirmed_for_mention_exemption() {
+        assert!(
+            !is_confirmed_dm_channel(Uuid::new_v4(), &resolver(HashMap::new())).await,
+            "unresolved metadata must retain the narrow mention-gated path"
         );
     }
 }

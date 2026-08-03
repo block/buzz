@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:math';
 
@@ -52,13 +53,14 @@ class _LiveSubscription {
 class _PendingEvent {
   final NostrEvent event;
   final Completer<NostrEvent> completer;
-  final Timer timeout;
+  final Duration acknowledgementTimeout;
+  Timer? timeout;
   bool dispatched = false;
 
   _PendingEvent({
     required this.event,
     required this.completer,
-    required this.timeout,
+    required this.acknowledgementTimeout,
   });
 }
 
@@ -97,7 +99,8 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   static const _maxReconnectDelayMs = 30000;
   static const _eventBatchMs = 16;
   static const _reconnectReplaySkewSeconds = 5;
-  static const _maxRecentDeliveryKeys = 5000;
+  @visibleForTesting
+  static int debugRecentDeliveryKeyLimit = 5000;
   static const _backgroundGraceDuration = Duration(seconds: 5);
 
   RelaySocket? _socket;
@@ -106,6 +109,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   final Map<String, _PendingEvent> _pendingEvents = {};
   final List<_BufferedEvent> _eventBuffer = [];
   final Set<String> _recentDeliveryKeys = {};
+  final Queue<String> _recentDeliveryOrder = Queue<String>();
   Timer? _reconnectTimer;
   Timer? _flushTimer;
   Timer? _backgroundGraceTimer;
@@ -245,7 +249,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       );
     } catch (_) {
       _liveSubscriptions.remove(subId);
-      _recentDeliveryKeys.removeWhere((key) => key.startsWith('$subId:'));
+      _removeDeliveryKeysForSubscription(subId);
       rethrow;
     }
     final liveSub = _liveSubscriptions[subId];
@@ -266,21 +270,10 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
     final completer = Completer<NostrEvent>();
 
-    final timer = Timer(timeout, () {
-      final pending = _pendingEvents.remove(event.id);
-      if (pending != null && !pending.completer.isCompleted) {
-        pending.completer.completeError(
-          TimeoutException(
-            'Event ${event.id} not acknowledged within $timeout',
-          ),
-        );
-      }
-    });
-
     _pendingEvents[event.id] = _PendingEvent(
       event: event,
       completer: completer,
-      timeout: timer,
+      acknowledgementTimeout: timeout,
     );
 
     _dispatchPending(event.id);
@@ -341,7 +334,6 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _paused = true;
     _reconnectTimer?.cancel();
     _cancelAllHistory(Exception('App moved to background'));
-    _rejectAllPending(Exception('App moved to background'));
     _socket?.disconnect();
     state = const SessionState(status: SessionStatus.disconnected);
   }
@@ -419,6 +411,8 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     }
     for (final pending in _pendingEvents.values) {
       pending.dispatched = false;
+      pending.timeout?.cancel();
+      pending.timeout = null;
     }
     _scheduleReconnect();
   }
@@ -544,7 +538,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
     final liveSub = _liveSubscriptions.remove(subId);
     if (liveSub == null) return;
-    _recentDeliveryKeys.removeWhere((key) => key.startsWith('$subId:'));
+    _removeDeliveryKeysForSubscription(subId);
 
     final readyCompleter = liveSub.readyCompleter;
     if (readyCompleter != null && !readyCompleter.isCompleted) {
@@ -565,7 +559,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
     final pending = _pendingEvents.remove(eventId);
     if (pending == null) return;
-    pending.timeout.cancel();
+    pending.timeout?.cancel();
 
     if (accepted) {
       // We don't have the full event here; create a minimal placeholder.
@@ -624,13 +618,25 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       if (_recentDeliveryKeys.contains(deliveryKey)) continue;
 
       // Cap the dedup set to prevent unbounded memory growth.
-      if (_recentDeliveryKeys.length >= _maxRecentDeliveryKeys) {
-        _recentDeliveryKeys.clear();
-      }
-      _recentDeliveryKeys.add(deliveryKey);
+      _rememberDeliveryKey(deliveryKey);
 
       sub.onEvent(buffered.event);
     }
+  }
+
+  void _rememberDeliveryKey(String key) {
+    if (_recentDeliveryKeys.length >= debugRecentDeliveryKeyLimit) {
+      final oldest = _recentDeliveryOrder.removeFirst();
+      _recentDeliveryKeys.remove(oldest);
+    }
+    _recentDeliveryKeys.add(key);
+    _recentDeliveryOrder.addLast(key);
+  }
+
+  void _removeDeliveryKeysForSubscription(String subId) {
+    final prefix = '$subId:';
+    _recentDeliveryKeys.removeWhere((key) => key.startsWith(prefix));
+    _recentDeliveryOrder.removeWhere((key) => key.startsWith(prefix));
   }
 
   String _nextSubId(String prefix) {
@@ -649,8 +655,22 @@ class RelaySessionNotifier extends Notifier<SessionState> {
         state.status != SessionStatus.connected) {
       return;
     }
+    pending.timeout = Timer(pending.acknowledgementTimeout, () {
+      final timedOut = _pendingEvents.remove(eventId);
+      if (timedOut != null && !timedOut.completer.isCompleted) {
+        timedOut.completer.completeError(
+          TimeoutException(
+            'Event $eventId not acknowledged within '
+            '${timedOut.acknowledgementTimeout}',
+          ),
+        );
+      }
+    });
     if (_socket?.send(['EVENT', pending.event.toJson()]) ?? false) {
       pending.dispatched = true;
+    } else {
+      pending.timeout?.cancel();
+      pending.timeout = null;
     }
   }
 
@@ -666,13 +686,13 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
   void _unsubscribe(String subId) {
     _liveSubscriptions.remove(subId);
-    _recentDeliveryKeys.removeWhere((key) => key.startsWith('$subId:'));
+    _removeDeliveryKeysForSubscription(subId);
     _sendClose(subId);
   }
 
   void _cancelAllHistory(Object? error) {
     for (final entry in _historySubscriptions.values) {
-      entry.timeout.cancel();
+      entry.timeout?.cancel();
       if (!entry.completer.isCompleted) {
         entry.completer.completeError(error ?? Exception('Connection lost'));
       }
@@ -682,7 +702,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
   void _rejectAllPending(Object? error) {
     for (final entry in _pendingEvents.values) {
-      entry.timeout.cancel();
+      entry.timeout?.cancel();
       if (!entry.completer.isCompleted) {
         entry.completer.completeError(error ?? Exception('Connection lost'));
       }
@@ -700,6 +720,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _cancelAllHistory(null);
     _rejectAllPending(null);
     _recentDeliveryKeys.clear();
+    _recentDeliveryOrder.clear();
     _socket?.dispose();
     _socket = null;
     _httpClient?.close();

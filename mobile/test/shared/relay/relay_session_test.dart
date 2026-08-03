@@ -324,11 +324,12 @@ void main() {
       final session = RelaySessionNotifier();
       final container = ProviderContainer(
         overrides: [relaySessionProvider.overrideWith(() => session)],
-      );
-      addTearDown(container.dispose);
-      container.read(relaySessionProvider);
+    );
+    addTearDown(container.dispose);
+    container.read(relaySessionProvider);
+    await Future<void>.delayed(Duration.zero);
 
-      final firstSocket = _testSocket();
+    final firstSocket = _testSocket();
       session.debugAttachSocketForTest(firstSocket);
       session.debugHandleDisconnected();
 
@@ -345,6 +346,40 @@ void main() {
       session.debugHandleSocketMessageForTest(['OK', _event().id, true, '']);
       await expectLater(publish, completion(_event()));
       expect(replacementSocket.sentPayloads, hasLength(1));
+    },
+  );
+
+  test(
+    'keeps an unacknowledged publish across a long background disconnect',
+    () async {
+      final session = RelaySessionNotifier();
+      final container = ProviderContainer(
+        overrides: [relaySessionProvider.overrideWith(() => session)],
+      );
+      addTearDown(container.dispose);
+      container.read(relaySessionProvider);
+      await Future<void>.delayed(Duration.zero);
+
+      final firstSocket = _testSocket();
+      session.debugAttachSocketForTest(firstSocket);
+      session.debugHandleDisconnected();
+      final event = _event();
+      final publish = session.publish(event);
+      expect(firstSocket.sentPayloads, isEmpty);
+
+      session.debugPauseNow();
+      final replacementSocket = _testSocket();
+      session.debugAttachSocketForTest(replacementSocket);
+      session.debugHandleConnected();
+
+      expect(replacementSocket.sentPayloads, hasLength(1));
+      expect(
+        (replacementSocket.sentPayloads.single[1]
+            as Map<String, dynamic>)['id'],
+        event.id,
+      );
+      session.debugHandleSocketMessageForTest(['OK', event.id, true, '']);
+      await expectLater(publish, completion(_event()));
     },
   );
 
@@ -385,6 +420,47 @@ void main() {
     unsubscribeFirst();
     unsubscribeSecond();
   });
+
+  test(
+    'retains recent delivery keys across a bounded dedup rollover',
+    () async {
+      RelaySessionNotifier.debugRecentDeliveryKeyLimit = 3;
+      addTearDown(
+        () => RelaySessionNotifier.debugRecentDeliveryKeyLimit = 5000,
+      );
+      final session = RelaySessionNotifier();
+      final delivered = <String>[];
+      const filter = NostrFilter(
+        kinds: EventKind.channelEventKinds,
+        tags: {
+          '#h': [_channelId],
+        },
+        limit: 50,
+      );
+
+      final subscribe = session.subscribe(
+        filter,
+        (event) => delivered.add(event.id),
+      );
+      session.debugHandleMessage(['EOSE', 'l-1']);
+      final unsubscribe = await subscribe;
+      for (var index = 1; index <= 4; index++) {
+        session.debugHandleMessage([
+          'EVENT',
+          'l-1',
+          _eventWithId('$index').toJson(),
+        ]);
+        session.debugFlushEventBuffer();
+      }
+
+      // A replay of the newest retained key must remain deduplicated after the
+      // oldest key was evicted; clearing the whole set would redeliver it.
+      session.debugHandleMessage(['EVENT', 'l-1', _eventWithId('4').toJson()]);
+      session.debugFlushEventBuffer();
+      expect(delivered, ['event-1', 'event-2', 'event-3', 'event-4']);
+      unsubscribe();
+    },
+  );
 
   test('flushes replay events before a post-EOSE query can begin', () async {
     final session = RelaySessionNotifier();
@@ -587,6 +663,20 @@ NostrEvent _event() {
     createdAt: 20,
     kind: EventKind.streamMessageV2,
     tags: [
+      ['h', _channelId],
+    ],
+    content: 'hello',
+    sig: 'sig',
+  );
+}
+
+NostrEvent _eventWithId(String suffix) {
+  return NostrEvent(
+    id: 'event-$suffix',
+    pubkey: 'alice',
+    createdAt: 20,
+    kind: EventKind.streamMessageV2,
+    tags: const [
       ['h', _channelId],
     ],
     content: 'hello',
