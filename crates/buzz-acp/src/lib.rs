@@ -32,7 +32,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use acp::{AcpClient, EnvVar, McpServer};
-use anyhow::{ensure, Context, Result};
+use anyhow::{ensure, Result};
 use buzz_core::kind::{
     KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_STREAM_MESSAGE,
 };
@@ -78,20 +78,22 @@ const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
 /// human interaction, so it must not share the short probe timeout.
 const AUTHENTICATE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
-/// Resolve the process working directory for ACP session metadata and prompts.
+/// Resolve the session working directory for ACP session metadata and prompts.
 ///
-/// `std::env::current_dir()` returns an absolute path on every supported
-/// platform. Keep the explicit invariant check so a future source cannot
-/// silently introduce a relative path, and surface resolution failures instead
-/// of substituting a misleading Unix-specific fallback.
-fn current_working_directory() -> Result<String> {
-    let cwd = std::env::current_dir().context("failed to resolve current working directory")?;
+/// Follows PF-4 in `crates/buzz-persona/PERSONA_PACK_SPEC.md`: `AGENT_CWD`,
+/// then `std::env::current_dir()`, otherwise refuse (see
+/// [`config::resolve_agent_cwd`]). `std::env::current_dir()` returns an
+/// absolute path on every supported platform. Keep the explicit invariant check
+/// so a future source cannot silently introduce a relative path, and surface
+/// resolution failures instead of substituting a misleading Unix-specific
+/// fallback.
+fn session_working_directory() -> Result<String> {
+    let cwd = config::resolve_agent_cwd().map_err(|e| anyhow::anyhow!("{e}"))?;
     ensure!(
-        cwd.is_absolute(),
-        "current working directory is not absolute: {}",
-        cwd.display()
+        std::path::Path::new(&cwd).is_absolute(),
+        "session working directory is not absolute: {cwd}"
     );
-    Ok(cwd.to_string_lossy().into_owned())
+    Ok(cwd)
 }
 
 /// Publish a kind:20001 presence update event via the WebSocket connection.
@@ -2623,6 +2625,14 @@ async fn run_harness(
     mut shutdown_rx: watch::Receiver<()>,
     startup_ready: tokio::sync::oneshot::Sender<()>,
 ) -> Result<()> {
+    // Resolved before Git key material is written or any adapter is spawned, so
+    // a mistyped `AGENT_CWD` refuses startup instead of surfacing after the pool
+    // is up. After the setup-mode branch in `tokio_main` on purpose: setup mode
+    // never opens a session, so a workspace typo must not block an operator from
+    // fixing the credentials that put the agent in setup mode to begin with.
+    let session_cwd = session_working_directory()?;
+    tracing::info!("buzz-acp session working directory: {session_cwd}");
+
     let runtime = AgentRuntime::prepare(config)?;
     let config = runtime.config();
 
@@ -6086,7 +6096,9 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
     use acp::{extract_model_config_options, extract_model_state};
 
     let agent_args = config::normalize_agent_args(&args.agent.agent_command, args.agent.agent_args);
-    let cwd = current_working_directory()?;
+    // Same resolution as the long-running path, so `models` probes the agent in
+    // the workspace the operator pinned rather than wherever the CLI was run.
+    let cwd = session_working_directory()?;
 
     // Spawn outside the timeout so we always own the child for cleanup.
     // `models` subcommand doesn't use persona packs — no extra env, no codex config.
