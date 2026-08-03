@@ -187,3 +187,46 @@ test("scrollback: wheel over Buzz Term reaches terminal_scroll", async ({
   console.log("SCROLLS", JSON.stringify(scrolls));
   expect(scrolls).toEqual([-5, 2]);
 });
+
+test("terminal viewport click retains keyboard input ownership", async ({
+  page,
+}) => {
+  await reveal(page);
+  const input = page.getByLabel("Terminal input");
+  await expect(input).toBeFocused();
+
+  await page
+    .locator(".buzz-terminal-viewport")
+    .click({ position: { x: 40, y: 40 } });
+  await expect(input).toBeFocused();
+
+  await page.keyboard.type("FOCUS_KEYSTROKE");
+  await expect
+    .poll(async () =>
+      page.evaluate(() =>
+        (
+          window as typeof window & { __SAMI_TERM__: { inputs: string[] } }
+        ).__SAMI_TERM__.inputs.join(""),
+      ),
+    )
+    .toContain("FOCUS_KEYSTROKE");
+});
+
+test("concealed terminal viewport does not steal Buzz focus", async ({
+  page,
+}) => {
+  await reveal(page);
+  await page.keyboard.press("Meta+j");
+  await expect(page.locator(TERM)).toHaveAttribute(
+    "data-terminal-owner",
+    "buzz",
+  );
+
+  const input = page.getByLabel("Terminal input");
+  await expect(input).not.toBeFocused();
+  await page.locator(".buzz-terminal-viewport").click({
+    force: true,
+    position: { x: 40, y: 40 },
+  });
+  await expect(input).not.toBeFocused();
+});

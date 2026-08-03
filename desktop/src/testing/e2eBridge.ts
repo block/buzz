@@ -1370,7 +1370,7 @@ type DeferredGetEvent = {
 let deferredGetEventQueue: DeferredGetEvent[] = [];
 let deferredObserverArchivePolicyQueue: Array<() => void> = [];
 let deferNextChannelsRead = false;
-let deferredChannelsReadQueue: Array<() => void> = [];
+let deferredChannelsReadResolve: (() => void) | null = null;
 
 const mockDisplayNames = new Map<string, string>([
   [MOCK_IDENTITY_PUBKEY, DEFAULT_MOCK_IDENTITY.display_name],
@@ -9797,17 +9797,21 @@ export function maybeInstallE2eTauriMocks() {
     return queued.length;
   };
   deferNextChannelsRead = false;
-  deferredChannelsReadQueue = [];
+  deferredChannelsReadResolve = null;
   window.__BUZZ_E2E_CHANNELS_READ_PENDING__ = 0;
   window.__BUZZ_E2E_DEFER_NEXT_CHANNELS_READ__ = () => {
+    if (deferredChannelsReadResolve) {
+      throw new Error("a channel read is already deferred");
+    }
     deferNextChannelsRead = true;
   };
   window.__BUZZ_E2E_RELEASE_CHANNELS_READ__ = () => {
     deferNextChannelsRead = false;
-    const queued = deferredChannelsReadQueue.splice(0);
+    const resolve = deferredChannelsReadResolve;
+    deferredChannelsReadResolve = null;
     window.__BUZZ_E2E_CHANNELS_READ_PENDING__ = 0;
-    for (const resolve of queued) resolve();
-    return queued.length;
+    resolve?.();
+    return resolve ? 1 : 0;
   };
   window.__BUZZ_E2E_RELEASE_GET_EVENT__ = () => {
     const queued = deferredGetEventQueue.splice(0);
@@ -11125,16 +11129,20 @@ export function maybeInstallE2eTauriMocks() {
           payload as Parameters<typeof handleDiscoverManagedAgentPrereqs>[0],
           activeConfig,
         );
-      case "get_channels":
-        if (deferNextChannelsRead) {
-          deferNextChannelsRead = false;
+      case "get_channels": {
+        // Claim the one-shot before starting the read, then hold only that
+        // invocation's completion. Later reads pass through and cannot join it.
+        const deferred = deferNextChannelsRead;
+        deferNextChannelsRead = false;
+        const channels = handleGetChannels(activeConfig);
+        if (deferred) {
           await new Promise<void>((resolve) => {
-            deferredChannelsReadQueue.push(resolve);
-            window.__BUZZ_E2E_CHANNELS_READ_PENDING__ =
-              deferredChannelsReadQueue.length;
+            deferredChannelsReadResolve = resolve;
+            window.__BUZZ_E2E_CHANNELS_READ_PENDING__ = 1;
           });
         }
-        return handleGetChannels(activeConfig);
+        return channels;
+      }
       case "get_feed":
         return handleGetFeed(
           (payload as Parameters<typeof handleGetFeed>[0]) ?? {},
@@ -11895,8 +11903,9 @@ export function maybeInstallE2eTauriMocks() {
         // command was invoked via `__BUZZ_E2E_COMMANDS__`, not the dialog.
         return true;
       case "card_mint_key_status":
-        // Cards: pretend a key is configured so the mint form renders.
-        return true;
+        // Cards: pretend a key is configured in global defaults so the mint
+        // form renders and the key-status row is shown.
+        return "global";
       case "list_agent_cards":
         // Cards archive starts empty in E2E; specs exercising the gallery
         // can extend this with a seeded config knob when needed.
