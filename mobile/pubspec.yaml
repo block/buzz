@@ -47,6 +47,7 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
+  crypto: ^3.0.7
   custom_lint: ^0.8.0
   riverpod_lint: ^3.1.0
   mocktail: ^1.0.4
