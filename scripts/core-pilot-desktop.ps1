@@ -20,8 +20,16 @@ if (Get-Process -Name 'buzz-desktop' -ErrorAction SilentlyContinue) {
   throw 'Close the existing buzz-desktop process, then run this script again.'
 }
 
-$banker = (& wsl.exe -d $WslDistribution -- bash -lc `
-  'awk -F= ''$1=="CORE_BANKER_PRIVATE_KEY" {printf "%s",$2}'' "$HOME/.config/core-buzz/agent.env"').Trim()
+$wslHome = (& wsl.exe -d $WslDistribution -- printenv HOME).Trim()
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($wslHome)) {
+  throw 'The WSL home directory is unavailable.'
+}
+$bankerLine = (& wsl.exe -d $WslDistribution -- grep -m 1 `
+  '^CORE_BANKER_PRIVATE_KEY=' "$wslHome/.config/core-buzz/agent.env")
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($bankerLine)) {
+  throw 'Core banker identity is unavailable.'
+}
+$banker = ($bankerLine -replace '^CORE_BANKER_PRIVATE_KEY=', '').Trim()
 if ([string]::IsNullOrWhiteSpace($banker)) {
   throw 'Core banker identity is unavailable.'
 }
@@ -41,6 +49,7 @@ try {
   Remove-Item Env:\BUZZ_SHARE_IDENTITY -ErrorAction SilentlyContinue
   Remove-Item Env:\BUZZ_RELAY_URL -ErrorAction SilentlyContinue
   $banker = $null
+  $bankerLine = $null
 }
 
 if ($null -eq $desktopProcess -or $desktopProcess.HasExited) {
