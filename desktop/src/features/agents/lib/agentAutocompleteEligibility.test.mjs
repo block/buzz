@@ -162,6 +162,35 @@ test("isAgentIdentityInManagedList: keeps people and only current managed agent 
   );
 });
 
+test("isAgentIdentityInManagedList: keeps an owner-linked member identity for its current owner", () => {
+  assert.equal(
+    isAgentIdentityInManagedList(
+      {
+        isAgent: true,
+        isMember: true,
+        pubkey: PUB_B,
+        ownerPubkey: CURRENT_PUBKEY.toUpperCase(),
+      },
+      new Set(),
+      CURRENT_PUBKEY,
+    ),
+    true,
+  );
+  assert.equal(
+    isAgentIdentityInManagedList(
+      {
+        isAgent: true,
+        isMember: true,
+        pubkey: PUB_B,
+        ownerPubkey: OTHER_OWNER_PUBKEY,
+      },
+      new Set(),
+      CURRENT_PUBKEY,
+    ),
+    false,
+  );
+});
+
 test("shouldHideAgentFromMentions: never hides non-agents", () => {
   assert.equal(
     shouldHideAgentFromMentions({
@@ -214,12 +243,59 @@ test("shouldHideAgentFromMentions: hides member agents with an explicit not-invo
   );
 });
 
-test("shouldHideAgentFromMentions: shows member agents with unknown invocability (not in directory)", () => {
+test("shouldHideAgentFromMentions: shows a member owner-only agent to its owner", () => {
   assert.equal(
     shouldHideAgentFromMentions({
       isAgent: true,
       isMember: true,
       pubkey: PUB_A,
+      ownerPubkey: CURRENT_PUBKEY.toUpperCase(),
+      currentPubkey: CURRENT_PUBKEY,
+      respondTo: "owner-only",
+      mentionableAgentPubkeys: new Set(),
+      directoryAgentPubkeys: new Set(),
+    }),
+    false,
+  );
+  assert.equal(
+    shouldHideAgentFromMentions({
+      isAgent: true,
+      isMember: true,
+      pubkey: PUB_A,
+      ownerPubkey: OTHER_OWNER_PUBKEY,
+      currentPubkey: CURRENT_PUBKEY,
+      respondTo: "owner-only",
+      mentionableAgentPubkeys: new Set(),
+      directoryAgentPubkeys: new Set([PUB_A]),
+    }),
+    true,
+  );
+});
+
+test("shouldHideAgentFromMentions: keeps a current-owned nobody agent hidden", () => {
+  assert.equal(
+    shouldHideAgentFromMentions({
+      isAgent: true,
+      isMember: true,
+      pubkey: PUB_A,
+      ownerPubkey: CURRENT_PUBKEY,
+      currentPubkey: CURRENT_PUBKEY,
+      respondTo: "nobody",
+      mentionableAgentPubkeys: new Set(),
+      directoryAgentPubkeys: new Set(),
+    }),
+    true,
+  );
+});
+
+test("shouldHideAgentFromMentions: shows a current-owned member with unknown policy when absent from the directory", () => {
+  assert.equal(
+    shouldHideAgentFromMentions({
+      isAgent: true,
+      isMember: true,
+      pubkey: PUB_A,
+      ownerPubkey: CURRENT_PUBKEY,
+      currentPubkey: CURRENT_PUBKEY,
       mentionableAgentPubkeys: new Set(),
       directoryAgentPubkeys: new Set(),
     }),

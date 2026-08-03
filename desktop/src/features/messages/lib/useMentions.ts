@@ -16,7 +16,7 @@ import {
   coalesceAutocompleteCandidatesByKey,
   getMentionableAgentPubkeys,
   getSharedChannelIds,
-  isAgentIdentityInManagedList,
+  isAgentIdentityInManagedList as isManagedIdentity,
   shouldHideAgentFromMentions,
 } from "@/features/agents/lib/agentAutocompleteEligibility";
 import {
@@ -220,7 +220,6 @@ export function useMentions(
     }
     return lookup;
   }, [managedAgentsQuery.data, personasQuery.data]);
-  const knownAgentPubkeys = mentionableAgentPubkeys;
   const activePersonas = React.useMemo(
     () => (personasQuery.data ?? []).filter((persona) => persona.isActive),
     [personasQuery.data],
@@ -246,14 +245,15 @@ export function useMentions(
       if (isArchivedDiscovery(pubkey)) {
         return;
       }
-      if (!isAgentIdentityInManagedList(candidate, managedAgentPubkeys)) {
+      if (!isManagedIdentity(candidate, managedAgentPubkeys, currentPubkey)) {
         return;
       }
       if (
         shouldHideAgentFromMentions({
-          isAgent: candidate.isAgent === true,
-          isMember: candidate.isMember === true,
+          ...candidate,
           pubkey,
+          currentPubkey,
+          relayAgents: relayAgentsQuery.data,
           mentionableAgentPubkeys,
           directoryAgentPubkeys,
         })
@@ -647,7 +647,7 @@ export function useMentions(
         suggestion.kind === "team" ||
         suggestion.isAgent === true ||
         (suggestion.pubkey
-          ? knownAgentPubkeys.has(normalizePubkey(suggestion.pubkey))
+          ? mentionableAgentPubkeys.has(normalizePubkey(suggestion.pubkey))
           : false);
       if (isAgentMention) {
         setSelectedAgentMentionNames((current) => {
@@ -676,7 +676,7 @@ export function useMentions(
         insertText,
       };
     },
-    [knownAgentPubkeys, mentionStartIndex],
+    [mentionableAgentPubkeys, mentionStartIndex],
   );
 
   const registerMentionPubkey = React.useCallback(
@@ -748,10 +748,10 @@ export function useMentions(
     },
     [mentionCandidates],
   );
-
   const isAgentPubkey = React.useCallback(
-    (pubkey: string): boolean => knownAgentPubkeys.has(normalizePubkey(pubkey)),
-    [knownAgentPubkeys],
+    (pubkey: string): boolean =>
+      mentionableAgentPubkeys.has(normalizePubkey(pubkey)),
+    [mentionableAgentPubkeys],
   );
   const isManagedAgentPubkey = React.useCallback(
     (pubkey: string): boolean =>

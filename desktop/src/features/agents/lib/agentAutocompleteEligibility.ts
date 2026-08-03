@@ -55,12 +55,25 @@ export function getMentionableAgentPubkeys({
 }
 
 export function isAgentIdentityInManagedList(
-  candidate: { isAgent?: boolean; pubkey: string },
+  candidate: {
+    isAgent?: boolean;
+    isMember?: boolean;
+    pubkey: string;
+    ownerPubkey?: string | null;
+  },
   managedAgentPubkeys: ReadonlySet<string>,
+  currentPubkey?: string | null,
 ) {
+  const isOwnedByCurrentUser = Boolean(
+    candidate.isMember === true &&
+      candidate.ownerPubkey &&
+      currentPubkey &&
+      normalizePubkey(candidate.ownerPubkey) === normalizePubkey(currentPubkey),
+  );
   return (
     candidate.isAgent !== true ||
-    managedAgentPubkeys.has(normalizePubkey(candidate.pubkey))
+    managedAgentPubkeys.has(normalizePubkey(candidate.pubkey)) ||
+    isOwnedByCurrentUser
   );
 }
 
@@ -68,12 +81,20 @@ export function shouldHideAgentFromMentions({
   isAgent,
   isMember,
   pubkey,
+  ownerPubkey,
+  currentPubkey,
+  respondTo,
+  relayAgents,
   mentionableAgentPubkeys,
   directoryAgentPubkeys,
 }: {
   isAgent: boolean;
   isMember: boolean;
   pubkey: string;
+  ownerPubkey?: string | null;
+  currentPubkey?: string | null;
+  respondTo?: RelayAgent["respondTo"];
+  relayAgents?: readonly Pick<RelayAgent, "pubkey" | "respondTo">[];
   mentionableAgentPubkeys: ReadonlySet<string>;
   directoryAgentPubkeys: ReadonlySet<string>;
 }) {
@@ -81,6 +102,21 @@ export function shouldHideAgentFromMentions({
   const normalized = normalizePubkey(pubkey);
   // Invocable => always show.
   if (mentionableAgentPubkeys.has(normalized)) return false;
+  const isOwnedByCurrentUser = Boolean(
+    isMember &&
+      ownerPubkey &&
+      currentPubkey &&
+      normalizePubkey(ownerPubkey) === normalizePubkey(currentPubkey),
+  );
+  const effectiveRespondTo =
+    respondTo ??
+    relayAgents?.find((agent) => normalizePubkey(agent.pubkey) === normalized)
+      ?.respondTo;
+  // For current-owned members, an explicit policy wins over directory
+  // absence. An unknown policy still follows the Option B fallback below.
+  if (isOwnedByCurrentUser && effectiveRespondTo != null) {
+    return effectiveRespondTo !== "owner-only";
+  }
   // Non-member, non-invocable => hide (preserves prior behavior).
   if (!isMember) return true;
   // Member (Option B): hide only when we have an explicit not-invocable
