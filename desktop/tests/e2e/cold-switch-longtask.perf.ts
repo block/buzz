@@ -35,7 +35,7 @@ import { installMockBridge } from "../helpers/bridge";
  * that is a separate real-wheel pass.
  *
  * Run it:
- *   pnpm build && npx playwright test --config=playwright.perf.config.ts \
+ *   pnpm build:e2e && npx playwright test --config=playwright.perf.config.ts \
  *     cold-switch-longtask.perf.ts
  */
 

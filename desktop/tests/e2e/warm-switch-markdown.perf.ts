@@ -37,7 +37,7 @@ import { installMockBridge } from "../helpers/bridge";
  * the same machine are.
  *
  * Run it (from desktop/):
- *   pnpm build
+ *   pnpm build:e2e
  *   npx playwright test --config=playwright.perf.config.ts warm-switch-markdown.perf.ts
  *
  * NOTE: the perf web server reuses an existing server on :4173 — if one is
