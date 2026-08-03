@@ -137,6 +137,7 @@ class ComposeBar extends HookConsumerWidget {
       [focusNode],
     );
     final isComposerExpanded = useState(false);
+    final isEmojiPickerOpen = useState(false);
     final attachmentSurface = useState(_AttachmentSurface.closed);
     final iosAttachmentPopover = useMemoized(
       _IOSAttachmentPopoverController.new,
@@ -177,7 +178,9 @@ class ComposeBar extends HookConsumerWidget {
     // hide the keyboard while Flutter keeps the TextField focused.
     useEffect(() {
       void collapseWhenUnfocused() {
-        if (!focusNode.hasFocus) collapseComposer();
+        if (!focusNode.hasFocus && !isEmojiPickerOpen.value) {
+          collapseComposer();
+        }
       }
 
       focusNode.addListener(collapseWhenUnfocused);
@@ -974,7 +977,12 @@ class ComposeBar extends HookConsumerWidget {
           },
           onEmoji: () {
             attachmentSurface.value = _AttachmentSurface.closed;
-            _showComposerEmojiPicker(context, insertEmoji);
+            isEmojiPickerOpen.value = true;
+            _showComposerEmojiPicker(context, insertEmoji, () {
+              if (!context.mounted) return;
+              isEmojiPickerOpen.value = false;
+              focusNode.requestFocus();
+            });
           },
           onOpenFormatting: () {
             attachmentSurface.value = _AttachmentSurface.closed;

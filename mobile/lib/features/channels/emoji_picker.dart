@@ -31,6 +31,7 @@ const _sheetHeightFactor = 0.62;
 void showEmojiPicker({
   required BuildContext context,
   required void Function(String emoji) onSelect,
+  VoidCallback? onDismiss,
 }) {
   showModalBottomSheet<void>(
     context: context,
@@ -43,7 +44,7 @@ void showEmojiPicker({
         onSelect(emoji);
       },
     ),
-  );
+  ).whenComplete(onDismiss ?? () {});
 }
 
 class EmojiPickerSheet extends HookConsumerWidget {

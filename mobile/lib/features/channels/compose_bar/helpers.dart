@@ -28,10 +28,12 @@ void _runComposerAction(VoidCallback action) {
 void _showComposerEmojiPicker(
   BuildContext context,
   ValueChanged<String> onSelect,
+  VoidCallback onDismiss,
 ) {
   showEmojiPicker(
     context: context,
     onSelect: (emoji) => _runComposerAction(() => onSelect(emoji)),
+    onDismiss: onDismiss,
   );
 }
 

@@ -640,6 +640,8 @@ void main() {
 
       expect(textField.controller!.text, 'hello :meow:world');
       expect(textField.controller!.selection.baseOffset, 12);
+      expect(find.byType(TextField), findsOneWidget);
+      expect(textField.focusNode!.hasFocus, isTrue);
     });
 
     testWidgets('composer controls use selection haptics', (tester) async {
