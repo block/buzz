@@ -1351,7 +1351,12 @@ async fn tokio_main() -> Result<()> {
         tracing::warn!("failed to set startup watermark: {e}");
     }
 
-    tracing::info!("connected to relay at {}", config.relay_url);
+    tracing::info!(
+        target: "buzz_acp::runtime_lifecycle",
+        runtime_state = "transport_authenticated",
+        relay_url = %config.relay_url,
+        "relay transport authenticated; runtime is not ready until discovery and subscriptions finish"
+    );
 
     relay
         .subscribe_membership_notifications()
@@ -1426,10 +1431,21 @@ async fn tokio_main() -> Result<()> {
         }
     }
 
-    let channel_info_map = relay
-        .discover_channels()
-        .await
-        .map_err(|e| anyhow::anyhow!("channel discovery error: {e}"))?;
+    tracing::info!(
+        target: "buzz_acp::runtime_lifecycle",
+        runtime_state = "discovering_channels",
+        "starting canonical channel discovery"
+    );
+    let channel_info_map = relay.discover_channels().await.map_err(|e| {
+        tracing::error!(
+            target: "buzz_acp::runtime_lifecycle",
+            runtime_state = "startup_failed",
+            startup_stage = "channel_discovery",
+            error = %e,
+            "runtime did not become ready because channel discovery failed"
+        );
+        anyhow::anyhow!("channel discovery error: {e}")
+    })?;
 
     tracing::info!("discovered {} channel(s)", channel_info_map.len());
     let channel_ids: Vec<Uuid> = channel_info_map.keys().copied().collect();
@@ -1484,6 +1500,14 @@ async fn tokio_main() -> Result<()> {
             tracing::info!("subscribed to channel {channel_id}");
         }
     }
+
+    tracing::info!(
+        target: "buzz_acp::runtime_lifecycle",
+        runtime_state = "subscriptions_enqueued",
+        discovered_channels = channel_info_map.len(),
+        subscribed_channels = subscribed_channel_ids.len(),
+        "canonical subscriptions are enqueued; runtime may now publish presence"
+    );
 
     if let Some((observer, publisher, keys, agent_pubkey, owner_pubkey, owner)) =
         relay_observer_publisher.take()

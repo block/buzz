@@ -244,12 +244,21 @@ fn is_retriable_status(status: reqwest::StatusCode) -> bool {
     status == 408 || status == 429 || (500..600).contains(&status)
 }
 
-/// Base retry delays for transient HTTP failures: 500ms, 1s, 2s.
+/// Base retry delays for transient HTTP failures.
+///
+/// Managed desktops commonly launch several agents at once. Each agent performs
+/// two discovery queries, so a relay recovering from startup can remain
+/// overloaded for longer than the old 3.5-second window. Seven total attempts
+/// spread that burst over roughly 31.5 seconds (plus jitter) without retrying
+/// deterministic auth or request errors.
 /// Jitter (±20%) is applied at call time via `jittered_duration`.
-const REST_RETRY_BASE_DELAYS: [Duration; 3] = [
+const REST_RETRY_BASE_DELAYS: [Duration; 6] = [
     Duration::from_millis(500),
     Duration::from_millis(1000),
     Duration::from_millis(2000),
+    Duration::from_millis(4000),
+    Duration::from_millis(8000),
+    Duration::from_millis(16000),
 ];
 
 fn unix_now_secs() -> u64 {
@@ -308,7 +317,8 @@ impl RestClient {
         Ok(format!("Nostr {}", self.sign_nip98(method, url, body)?))
     }
 
-    /// Retry helper: executes `build_request` up to 4 times (1 attempt + 3 retries)
+    /// Retry helper: executes `build_request` up to seven times
+    /// (one attempt plus six retries)
     /// on transient failures (408, 429, 5xx, timeout, connect errors).
     ///
     /// NIP-98 auth events are re-signed on each attempt (they have a ±60s window).
@@ -324,24 +334,53 @@ impl RestClient {
     {
         let mut last_err = None;
 
+        let total_attempts = REST_RETRY_BASE_DELAYS.len() + 1;
         for (attempt, delay) in std::iter::once(None)
             .chain(REST_RETRY_BASE_DELAYS.iter().map(|d| Some(*d)))
             .enumerate()
         {
             if let Some(base) = delay {
                 let jittered = jittered_duration(base);
-                tracing::debug!(
-                    "retrying {method} {path} (attempt {attempt}) in {:.1}s",
-                    jittered.as_secs_f64()
+                tracing::warn!(
+                    target: "buzz_acp::relay_lifecycle",
+                    relay_state = "http_retry_wait",
+                    method,
+                    path,
+                    next_attempt = attempt + 1,
+                    total_attempts,
+                    delay_seconds = jittered.as_secs_f64(),
+                    "transient relay request failure; waiting before retry"
                 );
                 tokio::time::sleep(jittered).await;
             }
 
             match build_request().await {
-                Ok(resp) if resp.status().is_success() => return Ok(resp),
+                Ok(resp) if resp.status().is_success() => {
+                    if attempt > 0 {
+                        tracing::info!(
+                            target: "buzz_acp::relay_lifecycle",
+                            relay_state = "http_recovered",
+                            method,
+                            path,
+                            attempt = attempt + 1,
+                            total_attempts,
+                            "relay request recovered after transient failures"
+                        );
+                    }
+                    return Ok(resp);
+                }
                 Ok(resp) if is_retriable_status(resp.status()) => {
                     let status = resp.status();
-                    tracing::warn!("{method} {path} returned retriable HTTP {status}");
+                    tracing::warn!(
+                        target: "buzz_acp::relay_lifecycle",
+                        relay_state = "http_transient_failure",
+                        method,
+                        path,
+                        attempt = attempt + 1,
+                        total_attempts,
+                        http_status = status.as_u16(),
+                        "relay request returned a transient HTTP status"
+                    );
                     last_err = Some(RelayError::Http(format!(
                         "{method} {path} returned HTTP {status}"
                     )));
@@ -354,15 +393,34 @@ impl RestClient {
                     )));
                 }
                 Err(e) if e.is_timeout() || e.is_connect() => {
-                    tracing::warn!("{method} {path} network error: {e}");
+                    tracing::warn!(
+                        target: "buzz_acp::relay_lifecycle",
+                        relay_state = "http_transient_failure",
+                        method,
+                        path,
+                        attempt = attempt + 1,
+                        total_attempts,
+                        error = %e,
+                        "relay request hit a transient network error"
+                    );
                     last_err = Some(RelayError::Http(e.to_string()));
                 }
                 Err(e) => return Err(RelayError::Http(e.to_string())),
             }
         }
 
-        Err(last_err
-            .unwrap_or_else(|| RelayError::Http(format!("{method} {path} failed after retries"))))
+        let error = last_err
+            .unwrap_or_else(|| RelayError::Http(format!("{method} {path} failed after retries")));
+        tracing::error!(
+            target: "buzz_acp::relay_lifecycle",
+            relay_state = "http_retry_exhausted",
+            method,
+            path,
+            total_attempts,
+            error = %error,
+            "relay request exhausted its transient retry budget"
+        );
+        Err(error)
     }
 
     /// POST with NIP-98 auth and retry. Re-signs on each attempt.
@@ -2918,14 +2976,25 @@ async fn try_autonomous_reconnect(
     let mut attempt = 0usize;
     while attempt < backoffs.len() {
         info!(
-            "autonomous reconnect attempt {}/{} to {relay_url}…",
-            attempt + 1,
-            backoffs.len()
+            target: "buzz_acp::relay_lifecycle",
+            relay_state = "reconnecting",
+            reconnect_mode = "autonomous",
+            attempt = attempt + 1,
+            total_attempts = backoffs.len(),
+            relay_url,
+            "attempting relay reconnect"
         );
         match do_connect(relay_url, keys, auth_tag).await {
             Ok((new_ws, handshake_buffer)) => {
                 *ws = new_ws;
-                info!("autonomous reconnect succeeded (attempt {})", attempt + 1);
+                info!(
+                    target: "buzz_acp::relay_lifecycle",
+                    relay_state = "transport_reconnected",
+                    reconnect_mode = "autonomous",
+                    attempt = attempt + 1,
+                    relay_url,
+                    "relay transport reconnected; restoring subscriptions"
+                );
                 let handshake_ok = process_handshake_buffer(
                     ws,
                     handshake_buffer,
@@ -2950,7 +3019,16 @@ async fn try_autonomous_reconnect(
                     match resubscribe_after_reconnect(ws, cmd_rx, state, agent_pubkey_hex, true)
                         .await
                     {
-                        ResubscribeResult::Ok => return ReconnectOutcome::Ok,
+                        ResubscribeResult::Ok => {
+                            info!(
+                                target: "buzz_acp::relay_lifecycle",
+                                relay_state = "online",
+                                reconnect_mode = "autonomous",
+                                active_subscriptions = state.active_subscriptions.len(),
+                                "relay subscriptions restored; event replay is active"
+                            );
+                            return ReconnectOutcome::Ok;
+                        }
                         ResubscribeResult::Shutdown => return ReconnectOutcome::Shutdown,
                         ResubscribeResult::RetryConnection => {
                             warn!("resubscribe failed after autonomous reconnect — treating as failed attempt");
@@ -3008,6 +3086,13 @@ async fn try_autonomous_reconnect(
         attempt += 1;
     }
 
+    tracing::error!(
+        target: "buzz_acp::relay_lifecycle",
+        relay_state = "reconnect_budget_exhausted",
+        reconnect_mode = "autonomous",
+        relay_url,
+        "bounded autonomous reconnect exhausted; entering persistent reconnect loop"
+    );
     ReconnectOutcome::Failed
 }
 
@@ -3059,11 +3144,25 @@ async fn wait_for_reconnect(
     ];
     let mut attempt = state.backoff_step;
     loop {
-        info!("attempting relay reconnect to {relay_url}…");
+        info!(
+            target: "buzz_acp::relay_lifecycle",
+            relay_state = "reconnecting",
+            reconnect_mode = "persistent",
+            attempt = attempt + 1,
+            relay_url,
+            "attempting relay reconnect"
+        );
         match do_connect(relay_url, keys, auth_tag).await {
             Ok((new_ws, handshake_buffer)) => {
                 *ws = new_ws;
-                info!("relay reconnected to {relay_url}");
+                info!(
+                    target: "buzz_acp::relay_lifecycle",
+                    relay_state = "transport_reconnected",
+                    reconnect_mode = "persistent",
+                    attempt = attempt + 1,
+                    relay_url,
+                    "relay transport reconnected; restoring subscriptions"
+                );
                 let handshake_ok = process_handshake_buffer(
                     ws,
                     handshake_buffer,
@@ -3086,6 +3185,13 @@ async fn wait_for_reconnect(
                         .await
                     {
                         ResubscribeResult::Ok => {
+                            info!(
+                                target: "buzz_acp::relay_lifecycle",
+                                relay_state = "online",
+                                reconnect_mode = "persistent",
+                                active_subscriptions = state.active_subscriptions.len(),
+                                "relay subscriptions restored; event replay is active"
+                            );
                             // Drain any commands that arrived during do_connect() +
                             // resubscribe (which don't poll cmd_rx).
                             return drain_post_reconnect(ws, cmd_rx, state, agent_pubkey_hex).await;
@@ -4011,6 +4117,16 @@ mod tests {
                 "HTTP {status} should fail without retry"
             );
         }
+    }
+
+    #[test]
+    fn rest_retry_budget_outlasts_short_relay_startup_overload() {
+        assert_eq!(REST_RETRY_BASE_DELAYS.len() + 1, 7);
+        assert_eq!(
+            REST_RETRY_BASE_DELAYS.iter().sum::<Duration>(),
+            Duration::from_millis(31_500),
+            "managed-agent discovery must not exit after the old 3.5-second window"
+        );
     }
 
     #[test]
