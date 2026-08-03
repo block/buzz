@@ -297,9 +297,10 @@ pub async fn verify_ncryptsec_backup(
 /// Save a portable copy of an `ncryptsec1…` backup to a user-chosen path.
 ///
 /// The input must parse as a structurally valid NIP-49 payload. The dialog is
-/// selection-only; the write uses secret-file semantics (atomic + 0o600).
-/// Never mutates canonical app state. Returns the chosen path, or `None` when
-/// the user cancelled.
+/// selection-only; the write uses the exact save-panel-authorized path with
+/// owner-only permissions, sync, and reread verification. Existing files are
+/// preserved rather than truncated. Never mutates canonical app state. Returns
+/// the chosen path, or `None` when the user cancelled.
 #[tauri::command]
 pub async fn save_ncryptsec_copy(
     ncryptsec: String,
@@ -324,7 +325,7 @@ pub async fn save_ncryptsec_copy(
 
     let dest_for_write = dest.clone();
     tokio::task::spawn_blocking(move || {
-        crate::key_backup::write_backup_file(&dest_for_write, &normalized)
+        crate::key_backup::write_portable_backup_file(&dest_for_write, &normalized)
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))??;
