@@ -1294,7 +1294,20 @@ void main() {
         ]);
         await tester.pumpAndSettle();
 
-        expect(findRichText('Newest live update'), findsNothing);
+        // Cache-extent mounting varies by platform, so assert the reversed
+        // list's semantic boundary rather than whether item 0 is mounted.
+        final positions = tester
+            .widget<ScrollablePositionedList>(messageList)
+            .itemPositionsNotifier!
+            .itemPositions
+            .value;
+        expect(
+          positions.any(
+            (position) =>
+                position.index == 0 && position.itemLeadingEdge.abs() < 0.01,
+          ),
+          isFalse,
+        );
         expect(
           find.byKey(const ValueKey('channel-jump-to-latest')),
           findsOneWidget,
