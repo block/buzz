@@ -5,6 +5,7 @@ class _ChannelTile extends ConsumerWidget {
   final int? unreadCount;
   final bool isUnread;
   final bool isMuted;
+  final bool selected;
   final String? currentPubkey;
   final VoidCallback onTap;
 
@@ -22,17 +23,27 @@ class _ChannelTile extends ConsumerWidget {
     required this.currentPubkey,
     required this.onTap,
     this.isMuted = false,
+    this.selected = false,
     this.onMarkRead,
     this.sectionId,
   });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final foreground = selected
+        ? context.colors.onPrimaryContainer
+        : context.colors.onSurface;
+
     return InkWell(
       borderRadius: BorderRadius.circular(Radii.md),
       onTap: onTap,
       onLongPress: () => _showChannelActions(context, ref),
-      child: Padding(
+      child: Ink(
+        key: ValueKey('channel-tile-${channel.id}'),
+        decoration: BoxDecoration(
+          color: selected ? context.colors.primaryContainer : null,
+          borderRadius: BorderRadius.circular(Radii.md),
+        ),
         padding: const EdgeInsets.only(
           left: _kChannelSectionInset,
           right: _kChannelSectionInset,
@@ -50,7 +61,7 @@ class _ChannelTile extends ConsumerWidget {
                     : Icon(
                         channelIcon(channel),
                         size: _kChannelIconSize,
-                        color: context.colors.onSurface,
+                        color: foreground,
                       ),
               ),
             ),
@@ -67,7 +78,7 @@ class _ChannelTile extends ConsumerWidget {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: contentListTitleTextStyle.copyWith(
-                      color: context.colors.onSurface,
+                      color: foreground,
                       fontWeight: isUnread ? FontWeight.w700 : FontWeight.w400,
                     ),
                   ),

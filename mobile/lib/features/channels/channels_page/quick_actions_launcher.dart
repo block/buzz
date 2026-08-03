@@ -5,38 +5,79 @@ const _kQuickActionsTabMotionCurve = Cubic(0.77, 0, 0.175, 1);
 const _kQuickActionsHiddenOverlap = Grid.half;
 const _kQuickActionsHiddenScale = 0.8;
 
-/// Places the channel quick-actions button beside mobile navigation.
-///
-/// The button remains available only on Home and moves behind the navigation
-/// bar when another destination is selected.
+/// Explicit placement geometry for [ChannelQuickActionsLauncher].
+class ChannelQuickActionsPlacement {
+  final double rightInset;
+  final double closedBottomInset;
+  final double openBottomInset;
+  final double hiddenHorizontalOffset;
+
+  const ChannelQuickActionsPlacement._({
+    required this.rightInset,
+    required this.closedBottomInset,
+    required this.openBottomInset,
+    required this.hiddenHorizontalOffset,
+  });
+
+  /// Aligns the launcher beside a centered floating bottom navigation bar.
+  factory ChannelQuickActionsPlacement.besideBottomNavigation({
+    required double screenWidth,
+    required double navigationBarHeight,
+    required double navigationBarBottomGap,
+    required double navigationBarWidth,
+    required double systemBottomInset,
+    required double rightInset,
+  }) {
+    final navigationBottomInset = max(
+      systemBottomInset,
+      navigationBarBottomGap,
+    );
+    final verticalCentering = (navigationBarHeight - _kMorphClosedSize) / 2;
+    final closedBottomInset = navigationBottomInset + verticalCentering;
+    final navigationBarRight = (screenWidth + navigationBarWidth) / 2;
+    final launcherRight = screenWidth - rightInset;
+
+    return ChannelQuickActionsPlacement._(
+      rightInset: rightInset,
+      closedBottomInset: closedBottomInset,
+      openBottomInset:
+          closedBottomInset +
+          navigationBarHeight +
+          Grid.xxs -
+          verticalCentering,
+      hiddenHorizontalOffset:
+          navigationBarRight - launcherRight - _kQuickActionsHiddenOverlap,
+    );
+  }
+
+  /// Anchors the launcher to the bottom-trailing corner of its content pane.
+  factory ChannelQuickActionsPlacement.bottomTrailing({
+    required double systemBottomInset,
+    double bottomGap = Grid.gutter,
+    double rightInset = Grid.gutter,
+  }) {
+    final closedBottomInset = max(systemBottomInset, bottomGap);
+    return ChannelQuickActionsPlacement._(
+      rightInset: rightInset,
+      closedBottomInset: closedBottomInset,
+      openBottomInset: closedBottomInset + _kMorphClosedSize + Grid.xxs,
+      hiddenHorizontalOffset: 0,
+    );
+  }
+}
+
+/// Places and transitions the channel quick-actions button within its pane.
 class ChannelQuickActionsLauncher extends HookConsumerWidget {
-  /// Whether the launcher should be visible beside the navigation bar.
+  /// Whether the launcher should be visible on the current destination.
   final bool visible;
 
-  /// Height of the navigation bar used to vertically center the closed button.
-  final double navigationBarHeight;
+  /// Placement supplied by the navigation shell that owns the surrounding UI.
+  final ChannelQuickActionsPlacement placement;
 
-  /// Space between the navigation bar and the bottom safe area.
-  final double navigationBarBottomGap;
-
-  /// Full width of the navigation bar, including its inner edge padding.
-  final double navigationBarWidth;
-
-  /// Bottom system inset used by the navigation bar's [SafeArea].
-  final double systemBottomInset;
-
-  /// Distance between the launcher and the right edge of the screen.
-  final double rightInset;
-
-  /// Creates a launcher aligned with the supplied navigation geometry.
   const ChannelQuickActionsLauncher({
     super.key,
     required this.visible,
-    required this.navigationBarHeight,
-    required this.navigationBarBottomGap,
-    required this.navigationBarWidth,
-    required this.systemBottomInset,
-    required this.rightInset,
+    required this.placement,
   });
 
   @override
@@ -44,21 +85,7 @@ class ChannelQuickActionsLauncher extends HookConsumerWidget {
     final currentPubkey = ref.watch(currentPubkeyProvider);
     final quickActionsOpen = useState(false);
     final reducedMotion = MediaQuery.of(context).disableAnimations;
-    final navigationBottomInset = systemBottomInset > navigationBarBottomGap
-        ? systemBottomInset
-        : navigationBarBottomGap;
-    final closedBottomInset =
-        navigationBottomInset + ((navigationBarHeight - _kMorphClosedSize) / 2);
-    final openLift =
-        navigationBarHeight +
-        Grid.xxs -
-        ((navigationBarHeight - _kMorphClosedSize) / 2);
     final effectiveOpen = visible && quickActionsOpen.value;
-    final screenWidth = MediaQuery.sizeOf(context).width;
-    final navigationBarRight = (screenWidth + navigationBarWidth) / 2;
-    final launcherRight = screenWidth - rightInset;
-    final hiddenHorizontalOffset =
-        navigationBarRight - launcherRight - _kQuickActionsHiddenOverlap;
 
     useEffect(() {
       if (!visible && quickActionsOpen.value) {
@@ -130,8 +157,10 @@ class ChannelQuickActionsLauncher extends HookConsumerWidget {
               ? Duration.zero
               : _kQuickActionsTabMotionDuration,
           curve: _kQuickActionsTabMotionCurve,
-          right: rightInset,
-          bottom: closedBottomInset + (effectiveOpen ? openLift : 0),
+          right: placement.rightInset,
+          bottom: effectiveOpen
+              ? placement.openBottomInset
+              : placement.closedBottomInset,
           child: IgnorePointer(
             ignoring: !visible,
             child: ExcludeSemantics(
@@ -148,7 +177,10 @@ class ChannelQuickActionsLauncher extends HookConsumerWidget {
                   opacity: 1 - hiddenProgress,
                   child: Transform.translate(
                     key: const Key('channel-quick-actions-transform'),
-                    offset: Offset(hiddenHorizontalOffset * hiddenProgress, 0),
+                    offset: Offset(
+                      placement.hiddenHorizontalOffset * hiddenProgress,
+                      0,
+                    ),
                     child: Transform.scale(
                       key: const Key('channel-quick-actions-scale'),
                       scale:
@@ -160,7 +192,7 @@ class ChannelQuickActionsLauncher extends HookConsumerWidget {
                 ),
                 child: _MorphingQuickActionsButton(
                   open: effectiveOpen,
-                  openEdgeOffset: rightInset - Grid.gutter,
+                  openEdgeOffset: placement.rightInset - Grid.gutter,
                   onToggle: () =>
                       quickActionsOpen.value = !quickActionsOpen.value,
                   onSelected: (action) => unawaited(selectQuickAction(action)),
