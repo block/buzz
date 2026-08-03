@@ -226,12 +226,15 @@ async fn is_owner_or_sibling(
 /// Clients auto-p-tag every DM participant, so in a DM *any* participant's
 /// message looks like a mention and would fire a turn. Combined with
 /// agent-initiated DMs (the agent can be asked to DM a third party), that
-/// turns `anyone`/`allowlist` modes into transitive access grants: whoever
-/// lands in a DM with the agent can prompt it. To close that hole, when
-/// `is_dm` is true only the owner and cryptographically verified same-owner
-/// siblings may fire a turn — the explicit allowlist and `anyone` mode do
-/// NOT apply inside DMs. `Nobody` still drops everything. Callers must
-/// resolve `is_dm` fail-closed: unknown channel type ⇒ treat as DM.
+/// turns `allowlist` mode into a transitive access grant: whoever lands in a
+/// DM with the agent could otherwise prompt it. To close that hole, an
+/// explicit allowlist does not apply inside DMs; only the owner and
+/// cryptographically verified same-owner siblings may fire a turn.
+/// `Anyone` remains deliberately open to every author whose event the relay
+/// delivers, including in DMs, while `Nobody` still drops everything. On a
+/// membership-enforcing relay, relay and channel admission provide the
+/// community boundary before this gate runs. Callers must resolve `is_dm`
+/// fail-closed: unknown channel type ⇒ treat as DM.
 async fn author_allowed(
     respond_to: &RespondTo,
     allowlist: &HashSet<String>,
@@ -242,6 +245,7 @@ async fn author_allowed(
 ) -> bool {
     if is_dm {
         return match respond_to {
+            RespondTo::Anyone => true,
             RespondTo::Nobody => false,
             _ => is_owner_or_sibling(author, owner_cache, rest_client).await,
         };
@@ -4545,9 +4549,9 @@ mod author_gate_tests {
     // ── DM hardening ──────────────────────────────────────────────────────
     //
     // In a DM, clients auto-p-tag every participant, and an agent can be
-    // asked to open a DM with a third party. The gate must therefore ignore
-    // the allowlist and `anyone` mode inside DMs: only owner + verified
-    // siblings fire turns.
+    // asked to open a DM with a third party. An explicit allowlist must
+    // therefore stay owner/sibling-only inside DMs. `Anyone` is the deliberate
+    // opt-in that admits every author whose event the relay delivers.
 
     #[tokio::test]
     async fn test_dm_rejects_allowlisted_external_pubkey() {
@@ -4568,10 +4572,10 @@ mod author_gate_tests {
     }
 
     #[tokio::test]
-    async fn test_dm_rejects_stranger_under_anyone() {
+    async fn test_dm_admits_relay_delivered_author_under_anyone() {
         let cache = cache_with_sibling();
         assert!(
-            !author_allowed(
+            author_allowed(
                 &RespondTo::Anyone,
                 &HashSet::new(),
                 STRANGER,
@@ -4580,7 +4584,24 @@ mod author_gate_tests {
                 &dummy_rest_client()
             )
             .await,
-            "respond_to=anyone must still drop non-owner authors inside a DM"
+            "respond_to=anyone must admit a relay-delivered author inside a DM"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dm_rejects_untrusted_author_under_owner_only() {
+        let cache = cache_with_sibling();
+        assert!(
+            !author_allowed(
+                &RespondTo::OwnerOnly,
+                &HashSet::new(),
+                STRANGER,
+                true,
+                &cache,
+                &dummy_rest_client()
+            )
+            .await,
+            "respond_to=owner-only must still reject an untrusted DM author"
         );
     }
 
