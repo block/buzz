@@ -38,6 +38,9 @@ export function useHuddlePresentation() {
   >(() => new Set());
   const activeHuddleChannelIdRef = React.useRef<string | null>(null);
   const huddleCompanionChannelIdRef = React.useRef<string | null>(null);
+  const huddleCompanionDismissedChannelIdRef = React.useRef<string | null>(
+    null,
+  );
   const huddleCompanionOpenPromiseRef = React.useRef<Promise<void> | null>(
     null,
   );
@@ -196,6 +199,7 @@ export function useHuddlePresentation() {
   );
   const handleHuddleCompanionOpen = React.useCallback(() => {
     const ephemeralChannelId = activeHuddleChannelIdRef.current;
+    huddleCompanionDismissedChannelIdRef.current = null;
     hideHuddleChannel(ephemeralChannelId);
     setIsHuddleDrawerOpen(false);
     setIsHuddleCompanionOpen(true);
@@ -225,6 +229,12 @@ export function useHuddlePresentation() {
     (ephemeralChannelId: string) => {
       activeHuddleChannelIdRef.current = ephemeralChannelId;
       trackHuddleBackingChannel(ephemeralChannelId);
+
+      if (huddleCompanionDismissedChannelIdRef.current === ephemeralChannelId) {
+        return Promise.resolve();
+      }
+
+      huddleCompanionDismissedChannelIdRef.current = null;
       hideHuddleChannel(ephemeralChannelId);
       setIsHuddleDrawerOpen(false);
       setIsHuddleCompanionOpen(true);
@@ -303,6 +313,7 @@ export function useHuddlePresentation() {
       hideHuddleChannel(endedChannelId);
       activeHuddleChannelIdRef.current = null;
       huddleCompanionChannelIdRef.current = null;
+      huddleCompanionDismissedChannelIdRef.current = null;
       huddleCompanionOpenPromiseRef.current = null;
       setIsHuddleCompanionOpen(false);
       void queryClient.invalidateQueries({ queryKey: channelsQueryKey });
@@ -317,6 +328,10 @@ export function useHuddlePresentation() {
     let unlisten: (() => void) | null = null;
     void listen("huddle-companion-returned", () => {
       if (cancelled) return;
+      huddleCompanionDismissedChannelIdRef.current =
+        activeHuddleChannelIdRef.current;
+      huddleCompanionChannelIdRef.current = null;
+      huddleCompanionOpenPromiseRef.current = null;
       setIsHuddleCompanionOpen(false);
       setIsHuddleDrawerOpen(true);
       void invoke<HuddleTranscriptRouteState>("get_huddle_state")
@@ -381,6 +396,7 @@ export function useHuddlePresentation() {
         activeHuddleChannelIdRef.current = null;
         activeHuddleParentChannelIdRef.current = null;
         huddleCompanionChannelIdRef.current = null;
+        huddleCompanionDismissedChannelIdRef.current = null;
         huddleCompanionOpenPromiseRef.current = null;
         setIsHuddleDrawerOpen(false);
         setIsHuddleCompanionOpen(false);

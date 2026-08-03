@@ -296,6 +296,32 @@ test("shows speaker identity on every huddle chat message", async ({
   await expect(page.getByTestId("message-thread-panel")).toHaveCount(0);
 });
 
+test("keeps main-app shortcuts from navigating the huddle room", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    windowLabel: `huddle-${HUDDLE_CHANNEL_ID}`,
+    huddle: {
+      parentChannelId: HUDDLE_PARENT_ID,
+      ephemeralChannelId: HUDDLE_CHANNEL_ID,
+      members: [{ pubkey: TEST_IDENTITIES.tyler.pubkey, role: "member" }],
+    },
+  });
+  await page.goto("/");
+
+  await expect(page).toHaveURL(
+    new RegExp(`/channels/${HUDDLE_CHANNEL_ID.replaceAll("-", "\\-")}`),
+  );
+  const huddleUrl = page.url();
+  const primaryModifier = process.platform === "darwin" ? "Meta" : "Control";
+
+  for (const shortcut of ["Shift+K", "Shift+A", "Comma"]) {
+    await page.keyboard.press(`${primaryModifier}+${shortcut}`);
+    await expect.poll(() => page.url()).toBe(huddleUrl);
+    await expect(page.getByTestId("settings-view")).toHaveCount(0);
+  }
+});
+
 test("speaks the first eligible agent reply with its participant identity", async ({
   page,
 }) => {
@@ -751,6 +777,75 @@ test("keeps a newer huddle event over a delayed hydration snapshot", async ({
       .getByTestId("huddle-participant-strip")
       .getByTestId("huddle-participant-avatar"),
   ).toHaveCount(1);
+});
+
+test("keeps a starting huddle in the drawer after its companion closes", async ({
+  page,
+}) => {
+  await installFakeHuddleMicrophone(page);
+  await installMockBridge(page, {
+    openHuddleWindowDelayMs: 500,
+    startHuddleReturnDelayMs: 1_500,
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-alice-tyler").click();
+  await page.getByTestId("channel-start-huddle-trigger").click();
+
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).filter(
+            (entry) => entry.command === "open_huddle_window",
+          ).length,
+      ),
+    )
+    .toBe(1);
+  const ephemeralChannelId = await page.evaluate(async () => {
+    const state = (await window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.(
+      "get_huddle_state",
+    )) as { ephemeral_channel_id: string };
+    return state.ephemeral_channel_id;
+  });
+  await page.evaluate(async () => {
+    await window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.("close_huddle_companion");
+  });
+
+  await expect(page.locator(".buzz-huddle-shell")).toHaveAttribute(
+    "data-huddle-open",
+    "true",
+  );
+  await expect(page).toHaveURL(
+    new RegExp(`/channels/${ephemeralChannelId.replaceAll("-", "\\-")}`),
+  );
+  await expect
+    .poll(() =>
+      page.evaluate(async () => {
+        const state = (await window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.(
+          "get_huddle_state",
+        )) as { phase: string };
+        return state.phase;
+      }),
+    )
+    .toBe("active");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).filter(
+            (entry) => entry.command === "open_huddle_window",
+          ).length,
+      ),
+    )
+    .toBe(1);
+  await expect(page.locator(".buzz-huddle-shell")).toHaveAttribute(
+    "data-huddle-open",
+    "true",
+  );
+  await expect(page.getByTestId("profile-huddle-control")).toHaveCount(0);
+  await expect(
+    page.locator(`[data-channel-id="${ephemeralChannelId}"]`),
+  ).toBeVisible();
 });
 
 test("starts an agent DM huddle and hides its backing channel after it ends", async ({

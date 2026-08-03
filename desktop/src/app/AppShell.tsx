@@ -643,14 +643,13 @@ export function AppShell() {
     unreadChannelIds,
     unreadChannelNotificationCount,
   });
-  // Dispatch `buzz://message` deep links into the router.
   useMessageDeepLinks();
   const handleOpenCreateChannel = React.useCallback(
     () => setIsCreateChannelOpen(true),
     [],
   );
   React.useLayoutEffect(() => {
-    if (settingsOpen) {
+    if (settingsOpen || isHuddleRoom) {
       return;
     }
 
@@ -710,12 +709,13 @@ export function AppShell() {
     handleOpenSearch,
     goNewMessage,
     goHome,
+    isHuddleRoom,
     settingsOpen,
   ]);
   useSettingsShortcuts({
     onClose: handleCloseSettings,
     onOpenSettings: handleOpenSettings,
-    open: settingsOpen,
+    open: isHuddleRoom ? undefined : settingsOpen,
   });
   useMarkAsReadShortcuts({
     activeChannelId: activeChannel?.id ?? null,
