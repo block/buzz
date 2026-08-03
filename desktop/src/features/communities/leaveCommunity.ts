@@ -1,11 +1,13 @@
 import { relayClient } from "@/shared/api/relayClient";
 import { ReadOnlyRelayClient } from "@/shared/api/readOnlyRelayClient";
+import { relayRequiresMembership } from "@/shared/api/relayMembers";
 import { signRelayEvent } from "@/shared/api/tauri";
 import type { RelayEvent } from "@/shared/api/types";
 
 export const KIND_NIP43_LEAVE_REQUEST = 28936;
 
 type LeaveCommunityDependencies = {
+  requiresMembership: (relayUrl: string) => Promise<boolean>;
   sign: typeof signRelayEvent;
   publishActive: (event: RelayEvent) => Promise<unknown>;
   createRelayClient: (relayUrl: string) => {
@@ -15,6 +17,7 @@ type LeaveCommunityDependencies = {
 };
 
 const defaultDependencies: LeaveCommunityDependencies = {
+  requiresMembership: relayRequiresMembership,
   sign: signRelayEvent,
   publishActive: (event) =>
     relayClient.publishEvent(
@@ -31,6 +34,8 @@ export async function leaveCommunity(
   activeRelayUrl: string | undefined,
   dependencies: LeaveCommunityDependencies = defaultDependencies,
 ): Promise<void> {
+  if (!(await dependencies.requiresMembership(relayUrl))) return;
+
   const event = await dependencies.sign({
     kind: KIND_NIP43_LEAVE_REQUEST,
     content: "",

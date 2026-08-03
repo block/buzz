@@ -15,6 +15,7 @@ const signedEvent = {
 
 function dependencies(overrides = {}) {
   return {
+    requiresMembership: async () => true,
     sign: async (input) => ({ ...signedEvent, ...input }),
     publishActive: async () => {},
     createRelayClient: () => ({
@@ -24,6 +25,28 @@ function dependencies(overrides = {}) {
     ...overrides,
   };
 }
+
+test("skips relay publishing when the relay does not enforce membership", async () => {
+  let checkedRelay;
+  await leaveCommunity(
+    "wss://open.example",
+    "wss://open.example",
+    dependencies({
+      requiresMembership: async (relayUrl) => {
+        checkedRelay = relayUrl;
+        return false;
+      },
+      sign: async () => {
+        throw new Error("open relay leave should not be signed");
+      },
+      publishActive: async () => {
+        throw new Error("open relay leave should not be published");
+      },
+    }),
+  );
+
+  assert.equal(checkedRelay, "wss://open.example");
+});
 
 test("signs the protected NIP-43 leave request and awaits active relay acceptance", async () => {
   let signInput;
