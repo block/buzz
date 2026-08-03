@@ -67,6 +67,10 @@ pub(crate) struct KnownAcpRuntime {
 }
 
 impl KnownAcpRuntime {
+    pub fn supports_native_voice(&self) -> bool {
+        self.id == "codex"
+    }
+
     /// Return the CLI install commands for the current platform.
     ///
     /// On Windows, returns `cli_install_commands_windows` when non-empty,

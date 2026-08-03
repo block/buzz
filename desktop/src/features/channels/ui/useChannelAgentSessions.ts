@@ -21,6 +21,7 @@ export type ChannelAgentSessionAgent = Pick<
 > & {
   agentSource: "managed" | "member-bot" | "relay";
   canInterruptTurn: boolean;
+  relayUrl?: string;
   channelIds?: string[];
   channels?: string[];
 };
@@ -67,6 +68,7 @@ export function buildChannelAgentSessionCandidates({
       pubkey: agent.pubkey,
       name: agent.name,
       status: relayStatusToManagedStatus(agent.status),
+      relayUrl: "",
       agentSource: "relay",
       canInterruptTurn: false,
       channelIds: agent.channelIds,
@@ -81,6 +83,7 @@ export function buildChannelAgentSessionCandidates({
       pubkey: agent.pubkey,
       name: agent.name,
       status: agent.status,
+      relayUrl: agent.relayUrl,
       agentSource: "managed",
       canInterruptTurn: true,
       channelIds: existing?.channelIds,
@@ -98,6 +101,7 @@ export function buildChannelAgentSessionCandidates({
       pubkey: member.pubkey,
       name: member.displayName ?? truncatePubkey(member.pubkey),
       status: "deployed",
+      relayUrl: "",
       agentSource: "member-bot",
       canInterruptTurn: false,
     });
@@ -219,6 +223,7 @@ export function useChannelAgentSessions({
       setThreadScrollTargetId(null);
       setThreadReplyTargetId(null);
       setChannelManagementOpen(false);
+      setProfilePanelPubkey(null);
       setOpenAgentSessionPubkey(pubkey);
       // Fall back to activeChannelId so opening from within a channel always
       // scopes the panel to that channel — even when no explicit channelId is
@@ -237,6 +242,7 @@ export function useChannelAgentSessions({
       setOpenAgentSessionChannelId,
       setOpenAgentSessionPubkey,
       setOpenThreadHeadId,
+      setProfilePanelPubkey,
       setThreadReplyTargetId,
       setThreadScrollTargetId,
     ],

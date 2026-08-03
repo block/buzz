@@ -7,10 +7,12 @@ import { useAgentSession } from "@/shared/context/AgentSessionContext";
 import type { Channel } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { getAgentWorkingState } from "./agentWorkingSignal";
-import { useRelayAgentsQuery } from "./hooks";
+import { useManagedAgentsQuery, useRelayAgentsQuery } from "./hooks";
 
 const INACCESSIBLE_ACTIVITY_MESSAGE =
   "This agent is active in a channel you haven't joined, so its activity can't be opened from here.";
+const NO_ACTIVITY_DESTINATION_MESSAGE =
+  "Open a shared channel or DM with this agent to view its activity.";
 
 /**
  * Can the viewer actually open this channel? Joined channels always;
@@ -77,6 +79,7 @@ export function useOpenAgentActivity() {
   const { goChannel } = useAppNavigation();
   const relayAgentsQuery = useRelayAgentsQuery();
   const relayAgents = relayAgentsQuery.data;
+  const managedAgents = useManagedAgentsQuery().data;
   const channelsQuery = useChannelsQuery();
   const channels = channelsQuery.data;
 
@@ -92,13 +95,37 @@ export function useOpenAgentActivity() {
       const relayAgent = relayAgents?.find(
         (agent) => normalizePubkey(agent.pubkey) === key,
       );
+      const isLocalAgent = managedAgents?.some(
+        (agent) => normalizePubkey(agent.pubkey) === key,
+      );
+      const localChannelIds = isLocalAgent
+        ? (channels ?? [])
+            .filter((channel) =>
+              channel.memberPubkeys.some(
+                (memberPubkey) => normalizePubkey(memberPubkey) === key,
+              ),
+            )
+            .sort((left, right) => {
+              const leftIsDirectDm =
+                left.channelType === "dm" &&
+                left.participantPubkeys.length <= 2;
+              const rightIsDirectDm =
+                right.channelType === "dm" &&
+                right.participantPubkeys.length <= 2;
+              return Number(rightIsDirectDm) - Number(leftIsDirectDm);
+            })
+            .map((channel) => channel.id)
+        : [];
       const openableChannelIds = new Set(
         (channels ?? [])
           .filter((channel) => isChannelOpenable(channel))
           .map((channel) => channel.id),
       );
       return resolveOpenableActivityChannelId({
-        agentChannelIds: relayAgent?.channelIds ?? [],
+        agentChannelIds: [
+          ...localChannelIds,
+          ...(relayAgent?.channelIds ?? []),
+        ],
         openableChannelIds,
         // Deliberately an unsubscribed snapshot: this callback runs on click
         // (and in canOpenAgentActivity), not in render, so we don't need to
@@ -111,7 +138,7 @@ export function useOpenAgentActivity() {
         ),
       });
     },
-    [channels, relayAgents],
+    [channels, managedAgents, relayAgents],
   );
 
   const canOpenAgentActivity = React.useCallback(
@@ -168,6 +195,8 @@ export function useOpenAgentActivity() {
       // room, or navigating into it.
       if (getAgentWorkingState(pubkey).channels.length > 0) {
         toast.warning(INACCESSIBLE_ACTIVITY_MESSAGE);
+      } else {
+        toast.info(NO_ACTIVITY_DESTINATION_MESSAGE);
       }
       return false;
     },

@@ -54,6 +54,7 @@ pub struct AppState {
     pub managed_agent_processes: Mutex<HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>>,
     pub huddle_state: Mutex<HuddleState>,
     pub huddle_audio: crate::huddle::tts_settings::HuddleAudioSettingsState,
+    pub codex_voice: Mutex<crate::codex_voice::CodexVoiceState>,
     /// Tauri app handle — stored after setup so huddle commands can emit
     /// `huddle-state-changed` events without needing the handle threaded
     /// through every call site.
@@ -134,7 +135,6 @@ pub struct AppState {
     /// `is_member=false`.
     pub pending_owned_channels: Mutex<std::collections::HashSet<(String, String)>>,
 }
-
 /// Parse the `BUZZ_PRIVATE_KEY` env var into identity keys. `Some` means the
 /// env var was present and valid and MUST win over any persisted/keyring key
 /// (the dev/CI/harness override). `None` means absent or malformed — callers
@@ -191,7 +191,6 @@ pub fn build_app_state() -> AppState {
         }
         None => (Keys::generate(), IdentityStorage::Ephemeral),
     };
-
     AppState {
         keys: Mutex::new(keys),
         identity_storage: AtomicU8::new(identity_storage as u8),
@@ -218,6 +217,7 @@ pub fn build_app_state() -> AppState {
         session_config_cache: Mutex::new(HashMap::new()),
         huddle_state: Mutex::new(HuddleState::default()),
         huddle_audio: Default::default(),
+        codex_voice: Mutex::new(crate::codex_voice::CodexVoiceState::default()),
         app_handle: Mutex::new(None),
         media_proxy_port: AtomicU16::new(0),
         prevent_sleep: Arc::new(Mutex::new(

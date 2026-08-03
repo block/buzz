@@ -11,6 +11,7 @@ import { toast } from "sonner";
 import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import {
+  deriveLatestSessionId,
   mergeObserverEventWindows,
   observerEventScrollId,
   scopeByChannel,
@@ -18,6 +19,7 @@ import {
 import { deriveTranscriptBlockIds } from "@/features/agents/ui/agentSessionTranscriptGrouping";
 import type { ObserverEvent } from "@/features/agents/ui/agentSessionTypes";
 import { ManagedAgentSessionPanel } from "@/features/agents/ui/ManagedAgentSessionPanel";
+import { CodexVoiceLauncher } from "@/features/agents/ui/CodexVoiceController";
 import {
   useArchivedChannelEvents,
   useObserverEvents,
@@ -25,6 +27,10 @@ import {
 import { useAnchoredScroll } from "@/features/messages/ui/useAnchoredScroll";
 import { useStableArrayShallow } from "@/shared/hooks/useStableReference";
 import { cancelManagedAgentTurn } from "@/shared/api/agentControl";
+import {
+  getCodexVoiceLink,
+  rememberCodexVoiceLink,
+} from "@/shared/api/codexVoice";
 import type { Channel } from "@/shared/api/types";
 import { useEscapeKey } from "@/shared/hooks/useEscapeKey";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
@@ -132,6 +138,42 @@ export function AgentSessionThreadPanel({
     () => getLatestActivityTimestamp(combinedHeaderEvents),
     [combinedHeaderEvents],
   );
+  const latestSessionId = React.useMemo(
+    () => deriveLatestSessionId(combinedHeaderEvents),
+    [combinedHeaderEvents],
+  );
+  const [rememberedVoiceThreadId, setRememberedVoiceThreadId] = React.useState<
+    string | null
+  >(null);
+  React.useEffect(() => {
+    let active = true;
+    setRememberedVoiceThreadId(null);
+    if (!sessionChannelId) {
+      return () => {
+        active = false;
+      };
+    }
+    void getCodexVoiceLink(agent.pubkey, sessionChannelId).then((threadId) => {
+      if (active) {
+        setRememberedVoiceThreadId(threadId);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [agent.pubkey, sessionChannelId]);
+  React.useEffect(() => {
+    if (!latestSessionId || !sessionChannelId) {
+      return;
+    }
+    setRememberedVoiceThreadId(latestSessionId);
+    void rememberCodexVoiceLink(
+      agent.pubkey,
+      sessionChannelId,
+      latestSessionId,
+    );
+  }, [agent.pubkey, latestSessionId, sessionChannelId]);
+  const voiceThreadId = latestSessionId ?? rememberedVoiceThreadId;
   const lastUpdatedLabel = formatLastUpdatedLabel(latestActivityAt, now);
   const lastUpdatedTitle =
     latestActivityAt === null
@@ -482,6 +524,18 @@ export function AgentSessionThreadPanel({
         >
           {agentHeaderContent}
         </AuxiliaryPanelHeader>
+      }
+      footer={
+        agent.agentSource === "managed" ? (
+          <CodexVoiceLauncher
+            agentName={agent.name}
+            agentPubkey={agent.pubkey}
+            channelId={sessionChannelId}
+            isWorking={isWorking}
+            relayUrl={agent.relayUrl ?? ""}
+            threadId={voiceThreadId}
+          />
+        ) : null
       }
     >
       <AuxiliaryPanelBody

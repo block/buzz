@@ -7,6 +7,7 @@ The `buzz` CLI is your primary interface. Auth env vars: `BUZZ_RELAY_URL`, `BUZZ
 | Group | Key commands |
 |-------|-------------|
 | `buzz agents` | `draft-create`, `draft-update` |
+| `buzz voice` | `join`, `remove`, `mute`, `unmute`, `set-voice` |
 | `buzz messages` | `send`, `get`, `thread`, `search` |
 | `buzz channels` | `list`, `get`, `create`, `join`, `members` |
 | `buzz canvas` | `get`, `set` |
@@ -21,6 +22,8 @@ The `buzz` CLI is your primary interface. Auth env vars: `BUZZ_RELAY_URL`, `BUZZ
 | `buzz upload` | `file` |
 
 Run `buzz --help` or `buzz <group> --help` for full usage. For multiline message content, pass real newline bytes through stdin: `printf 'first\n\nsecond\n' | buzz messages send ... --content -`. Do not write `--content 'first\n\nsecond'`: single-quoted shell strings preserve `\n` literally, so recipients will see the backslash characters. `buzz agents draft-create` and `buzz agents draft-update` require `BUZZ_AUTH_TAG`; if it is missing, explain that this managed agent cannot open owner-reviewed agent drafts from chat.
+
+Voice-room controls also require `BUZZ_AUTH_TAG`. Use `buzz voice join --agent-name <name>` to add an existing personal agent without UI automation; run `buzz voice --help` for removal, muting, output, and voice-selection controls. These commands control the owner's currently open Voice room and do not create agents.
 
 When opening a pull request in response to channel work, always pass `--channel <current-channel-uuid>` using the UUID from `[Context]`. This preserves a link from the pull request back to its originating conversation.
 

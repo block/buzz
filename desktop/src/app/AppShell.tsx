@@ -41,6 +41,7 @@ import { useAutoRestartPolicy } from "@/features/agents/lib/useAutoRestartPolicy
 import { usePersonaSync } from "@/features/agents/lib/usePersonaSync";
 import { useAgentObserverIngestion } from "@/features/agents/useAgentObserverIngestion";
 import { AgentManagementDialogs } from "@/features/agents/ui/AgentManagementDialogs";
+import { CodexVoiceController } from "@/features/agents/ui/CodexVoiceController";
 import { RequestedAgentCreateDialogs } from "@/features/agents/ui/RequestedAgentCreateDialogs";
 import {
   usePresenceSession,
@@ -130,6 +131,7 @@ export function AppShell() {
     goNewMessage,
     goProjects,
     goPulse,
+    goVoice,
     goSettings,
     goWorkflows,
     closeSettings,
@@ -253,13 +255,11 @@ export function AppShell() {
       return;
     }
     hasRestoredCommunityDestinationRef.current = true;
-
     // Restoration belongs to an explicit community transition. Cold boot and
     // reconnect remounts must preserve the route the user explicitly opened.
     if (!consumePendingCommunityRestore(activeCommunityId)) {
       return;
     }
-
     const destination = loadCommunityDestination(activeCommunityId);
     if (!destination || destination.kind === "home") {
       return;
@@ -273,7 +273,6 @@ export function AppShell() {
       void goHome({ replace: true });
       return;
     }
-
     // The normal switch path writes the remembered channel into the hash before
     // the target community mounts, so no intermediate Inbox frame is painted.
     // Older transition callers may still arrive at neutral Home; repair those.
@@ -314,7 +313,6 @@ export function AppShell() {
     openSearchHit,
     pubkey: identityQuery.data?.pubkey,
   });
-
   const {
     followedRootIds,
     isFollowing: isFollowingThread,
@@ -884,6 +882,7 @@ export function AppShell() {
                             onSelectHome={() => void goHome()}
                             onSelectProjects={() => void goProjects()}
                             onSelectPulse={() => void goPulse()}
+                            onSelectVoice={() => void goVoice()}
                             onSelectSettings={handleOpenSettings}
                             onSelectWorkflows={() => void goWorkflows()}
                             onSetPresenceStatus={(status) =>
@@ -940,6 +939,7 @@ export function AppShell() {
                           />
                         </div>
                       )}
+                      <CodexVoiceController />
                       <RequestedAgentCreateDialogs />
                       <AgentManagementDialogs />
                       <AppShellOverlays

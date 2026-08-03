@@ -18,6 +18,7 @@ import {
 import { ChannelScreenEmptyState } from "@/features/channels/ui/ChannelScreenEmptyState";
 import { ChannelScreenHeader } from "@/features/channels/ui/ChannelScreenHeader";
 import { ChannelPane } from "@/features/channels/ui/ChannelScreenLazyViews";
+import { resolveDmCodexVoiceAgent } from "@/features/channels/ui/dmCodexVoiceAgent";
 import { WelcomeAgentCreateDialog } from "@/features/channels/ui/WelcomeAgentCreateDialog";
 import { ForumChannelContent } from "@/features/channels/ui/ForumChannelContent";
 import { MembersSidebar } from "@/features/channels/ui/MembersSidebar";
@@ -754,46 +755,40 @@ export function ChannelScreen({
     () => setIsMembersSidebarOpen((prev) => !prev),
     [],
   );
-
-  const channelHeader = React.useMemo(
-    () => (
-      <ChannelScreenHeader
-        activeChannel={activeChannel}
-        activeChannelEphemeralDisplay={activeChannelEphemeralDisplay}
-        activeChannelTitle={activeChannelTitle}
-        actionsVariant={shouldCompactHeaderActions ? "compact" : "inline"}
-        activeDmAvatarUrl={activeDmAvatarUrl}
-        activeDmHeaderParticipants={activeDmHeaderParticipants}
-        activeDmPresenceStatus={activeDmPresenceStatus}
-        chromeWrapperRef={channelHeaderChromeRef}
-        currentPubkey={currentPubkey}
-        isAddBotOpen={isAddBotOpen}
-        isJoining={joinChannelMutation.isPending}
-        onAddBotOpenChange={setIsAddBotOpen}
-        onJoinChannel={joinChannelMutation.mutateAsync}
-        onManageChannel={handleManageChannel}
-        onToggleMembers={handleToggleMembers}
-        showHeaderContent={!isSinglePanelView}
-        transparentChrome={activeChannel?.channelType !== "forum"}
-      />
-    ),
-    [
-      activeChannel,
-      activeChannelEphemeralDisplay,
-      activeChannelTitle,
-      shouldCompactHeaderActions,
-      activeDmAvatarUrl,
+  const dmVoiceAgent = React.useMemo(() => {
+    return resolveDmCodexVoiceAgent(
+      activeChannel?.channelType,
       activeDmHeaderParticipants,
-      activeDmPresenceStatus,
-      channelHeaderChromeRef,
-      currentPubkey,
-      isAddBotOpen,
-      joinChannelMutation.isPending,
-      joinChannelMutation.mutateAsync,
-      handleManageChannel,
-      handleToggleMembers,
-      isSinglePanelView,
-    ],
+      managedAgents,
+    );
+  }, [activeChannel?.channelType, activeDmHeaderParticipants, managedAgents]);
+  const handleOpenDmVoice = React.useCallback(
+    (pubkey: string) => handleOpenAgentSession(pubkey, activeChannel?.id),
+    [activeChannel?.id, handleOpenAgentSession],
+  );
+
+  const channelHeader = (
+    <ChannelScreenHeader
+      activeChannel={activeChannel}
+      activeChannelEphemeralDisplay={activeChannelEphemeralDisplay}
+      activeChannelTitle={activeChannelTitle}
+      actionsVariant={shouldCompactHeaderActions ? "compact" : "inline"}
+      activeDmAvatarUrl={activeDmAvatarUrl}
+      activeDmHeaderParticipants={activeDmHeaderParticipants}
+      activeDmPresenceStatus={activeDmPresenceStatus}
+      chromeWrapperRef={channelHeaderChromeRef}
+      currentPubkey={currentPubkey}
+      dmVoiceAgent={dmVoiceAgent}
+      isAddBotOpen={isAddBotOpen}
+      isJoining={joinChannelMutation.isPending}
+      onAddBotOpenChange={setIsAddBotOpen}
+      onJoinChannel={joinChannelMutation.mutateAsync}
+      onOpenDmVoice={handleOpenDmVoice}
+      onManageChannel={handleManageChannel}
+      onToggleMembers={handleToggleMembers}
+      showHeaderContent={!isSinglePanelView}
+      transparentChrome={activeChannel?.channelType !== "forum"}
+    />
   );
   return (
     <AgentSessionProvider onOpenAgentSession={handleOpenAgentSession}>

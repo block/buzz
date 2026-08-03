@@ -16,7 +16,7 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
             display_name,
             system_prompt,
         } => {
-            let owner = require_owner(client)?;
+            let owner = require_owner(client, "agent draft requests")?;
             let built = build_create(
                 client.keys(),
                 &owner,
@@ -53,7 +53,7 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
             model,
             respond_to,
         } => {
-            let owner = require_owner(client)?;
+            let owner = require_owner(client, "agent draft requests")?;
             let built = build_update(
                 client.keys(),
                 &owner,
@@ -151,12 +151,14 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
     }
 }
 
-/// Require `BUZZ_AUTH_TAG` and parse the owner pubkey from it. Used only by
-/// the `draft-create` and `draft-update` paths.
-fn require_owner(client: &BuzzClient) -> Result<PublicKey, CliError> {
+/// Require `BUZZ_AUTH_TAG` and parse the owner pubkey from it.
+pub(crate) fn require_owner(
+    client: &BuzzClient,
+    request_kind: &str,
+) -> Result<PublicKey, CliError> {
     let hex = client
         .auth_tag_owner_hex()
-        .ok_or_else(|| CliError::Auth("agent draft requests require BUZZ_AUTH_TAG".into()))?;
+        .ok_or_else(|| CliError::Auth(format!("{request_kind} require BUZZ_AUTH_TAG")))?;
     PublicKey::parse(&hex).map_err(|e| CliError::Auth(format!("invalid owner attestation: {e}")))
 }
 

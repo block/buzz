@@ -11,6 +11,10 @@ import {
   parseAgentManagementRequest,
   type AgentManagementRequest,
 } from "./agentManagement";
+import {
+  parseVoiceRoomCommandRequest,
+  type VoiceRoomCommandRequest,
+} from "./voiceRoomService";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { useQueryClient } from "@tanstack/react-query";
 import { agentConfigSurfaceQueryKey } from "@/features/agents/hooks";
@@ -103,6 +107,9 @@ const controlResultListeners = new Map<
 
 const agentManagementListeners = new Set<
   (agentPubkey: string, request: AgentManagementRequest) => void
+>();
+const voiceRoomCommandListeners = new Set<
+  (agentPubkey: string, request: VoiceRoomCommandRequest) => void
 >();
 
 // Normalized pubkeys of agents we are actively managing. Only events whose
@@ -398,6 +405,12 @@ async function handleRelayObserverEvent(
         listener(agentPubkey, managementRequest);
       }
     }
+    const voiceRoomRequest = parseVoiceRoomCommandRequest(parsed.payload);
+    if (voiceRoomRequest) {
+      for (const listener of voiceRoomCommandListeners) {
+        listener(agentPubkey, voiceRoomRequest);
+      }
+    }
     if (parsed.kind === "session_config_captured") {
       void putAgentSessionConfig(agentPubkey, parsed.payload);
       onSessionConfigCaptured?.(agentPubkey);
@@ -519,6 +532,15 @@ export function subscribeAgentManagementRequests(
   agentManagementListeners.add(listener);
   return () => {
     agentManagementListeners.delete(listener);
+  };
+}
+
+export function subscribeVoiceRoomCommandRequests(
+  listener: (agentPubkey: string, request: VoiceRoomCommandRequest) => void,
+) {
+  voiceRoomCommandListeners.add(listener);
+  return () => {
+    voiceRoomCommandListeners.delete(listener);
   };
 }
 
@@ -750,6 +772,7 @@ export function resetAgentObserverStore() {
   pendingUnknownAgentFrames.length = 0;
   latestLiveSessionByAgentChannel.clear();
   agentManagementListeners.clear();
+  voiceRoomCommandListeners.clear();
   onSessionConfigCaptured = null;
   connectionState = "idle";
   errorMessage = null;

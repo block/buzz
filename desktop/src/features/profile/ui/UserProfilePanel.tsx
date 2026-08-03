@@ -341,7 +341,7 @@ export function UserProfilePanel({
   const canViewActivity =
     viewerIsOwner &&
     Boolean(effectivePubkey) &&
-    canOpenAgentActivity(effectivePubkey);
+    (managedAgent !== undefined || canOpenAgentActivity(effectivePubkey));
   const canOpenAgentLogs =
     isOwner === true && managedAgent?.backend.type === "local";
   const canInstantiateAgent =

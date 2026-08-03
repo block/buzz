@@ -3,7 +3,7 @@ name: buzz-cli
 description: >
   Buzz CLI for relay operations: owner-reviewed agent drafts, messaging,
   channels, DMs, users, workflows, feed, reactions, canvas, social, repos,
-  uploads, and agent memory.
+  uploads, voice-room control, and agent memory.
 version: 1
 ---
 
@@ -16,6 +16,8 @@ version: 1
 `BUZZ_RELAY_URL` defaults to `http://localhost:3000`. In development, the user may need to set this to a staging or production relay URL.
 
 `BUZZ_AUTH_TAG` is required for `buzz agents draft-create` and `buzz agents draft-update` because those commands send owner-reviewed Desktop drafts. If missing, explain that this managed agent cannot open owner-reviewed agent drafts from chat.
+
+`BUZZ_AUTH_TAG` is also required for voice-room commands because they are encrypted to and executed by the owner's Buzz Desktop.
 
 Run the bundled CLI with `--help` and `<command> <subcommand> --help` to discover all flags, arguments, and usage. This skill documents only what `--help` cannot tell you.
 
@@ -40,6 +42,20 @@ buzz agents draft-update --channel <uuid> --agent-name "Current name" \
 ```
 
 Run `buzz agents draft-update --help` for optional runtime, provider, model, rename, and access changes. Prefer these CLI commands over any legacy MCP agent-management tools.
+
+## Voice Room Control
+
+Control existing personal agents in the owner's currently open Voice room without UI automation:
+
+```bash
+buzz voice join --agent-name "Architect"
+buzz voice mute --agent-name "Architect"
+buzz voice unmute --agent-name "Architect"
+buzz voice set-voice --agent-name "Architect" --voice "verse"
+buzz voice remove --agent-name "Architect"
+```
+
+Use `buzz voice mute-output` and `buzz voice unmute-output` for room-wide synthesized output. A successful CLI response means the relay accepted the encrypted command event; Desktop execution is asynchronous. These commands do not create agents.
 
 ## Git Repositories
 

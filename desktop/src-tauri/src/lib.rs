@@ -2,6 +2,7 @@
 mod app_state;
 mod archive;
 mod builderlab;
+mod codex_voice;
 mod commands;
 mod deep_link;
 mod egress_guard;
@@ -39,6 +40,7 @@ mod util;
 pub mod webkit_rendering;
 use app_state::{build_app_state, resolve_persisted_identity, AppState};
 use builderlab::*;
+use codex_voice::*;
 use commands::*;
 use deep_link::{
     acknowledge_pending_community_deep_link, handle_deep_link_url,
@@ -108,10 +110,8 @@ async fn clear_initial_window_backing<R: tauri::Runtime>(window: &tauri::Window<
 async fn wait_for_stable_initial_window_geometry<R: tauri::Runtime>(window: &tauri::Window<R>) {
     const MAX_POLLS: usize = 120;
     const REQUIRED_STABLE_POLLS: usize = 4;
-
     let mut previous_bounds = None;
     let mut stable_polls = 0;
-
     for _ in 0..MAX_POLLS {
         // Accept whatever geometry the window-state plugin restores — maximized
         // or a normal saved size. macOS applies the restore asynchronously, so
@@ -123,7 +123,6 @@ async fn wait_for_stable_initial_window_geometry<R: tauri::Runtime>(window: &tau
             (Ok(position), Ok(size)) => Some((position.x, position.y, size.width, size.height)),
             _ => None,
         };
-
         if bounds.is_some() && bounds == previous_bounds {
             stable_polls += 1;
             if stable_polls >= REQUIRED_STABLE_POLLS {
@@ -133,10 +132,8 @@ async fn wait_for_stable_initial_window_geometry<R: tauri::Runtime>(window: &tau
             stable_polls = 0;
         }
         previous_bounds = bounds;
-
         tokio::time::sleep(std::time::Duration::from_millis(16)).await;
     }
-
     eprintln!("buzz-desktop: initial window geometry did not settle before reveal timeout");
 }
 
@@ -169,7 +166,6 @@ pub fn run() {
             eprintln!("buzz-mesh: failed to build big-stack tokio runtime, using default: {error}");
         }
     }
-
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             // Focus the existing window when a duplicate instance launches.
@@ -199,31 +195,25 @@ pub fn run() {
                     if webview.label() != "main" {
                         return;
                     }
-
                     // Linux/WebKitGTK needs media-stream settings and a
                     // permission-request handler for getUserMedia; no-op
                     // on macOS/Windows.
                     linux_media::enable_media_capture(&webview);
-
                     // macOS applies the restored geometry asynchronously. Wait
                     // for several identical outer bounds and for React to
                     // commit the startup surface before revealing it.
                     let window = webview.window();
-
                     #[cfg(target_os = "macos")]
                     {
                         set_initial_window_backing(&window);
-
                         let (initial_render_tx, initial_render_rx) = tokio::sync::oneshot::channel();
                         window
                             .app_handle()
                             .once(INITIAL_RENDER_READY_EVENT, move |_| {
                                 let _ = initial_render_tx.send(());
                             });
-
                         tauri::async_runtime::spawn(async move {
                             wait_for_stable_initial_window_geometry(&window).await;
-
                             if tokio::time::timeout(
                                 std::time::Duration::from_secs(5),
                                 initial_render_rx,
@@ -909,6 +899,16 @@ pub fn run() {
             list_audio_output_devices,
             set_audio_output_device,
             get_audio_output_device,
+            get_codex_voice_capability,
+            get_codex_voice_link,
+            get_codex_voice_status,
+            get_codex_voice_target_link,
+            remember_codex_voice_link,
+            request_microphone_access,
+            speak_codex_voice,
+            start_codex_voice,
+            stop_codex_voice,
+            set_codex_voice_muted,
             start_pairing,
             confirm_pairing_sas,
             cancel_pairing,
