@@ -217,7 +217,7 @@ export function MachineOnboardingFlow({
                 src="/landing/orbit-wordmark.png"
               />
               <p className="mt-2 max-w-[560px] text-center text-2xl font-normal leading-none text-foreground">
-                Your Context, Knowledge, and Memory — Everything.<br />
+                Your Context, Knowledge, and Memory. Everything.<br />
                 At Orbit
               </p>
               {error ? (
