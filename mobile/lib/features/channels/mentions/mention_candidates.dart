@@ -51,6 +51,7 @@ List<MentionCandidate> buildMentionCandidates({
   required Map<String, UserProfile> userCache,
   required Map<String, String> ownerByAgentPubkey,
   List<UserProfile> searchResults = const [],
+  Set<String> archivedPubkeys = const {},
   String? currentPubkey,
 }) {
   final candidates = <MentionCandidate>[];
@@ -58,6 +59,13 @@ List<MentionCandidate> buildMentionCandidates({
 
   for (final member in members) {
     final pk = member.pubkey.toLowerCase();
+    if (!isIdentityVisibleForDiscovery(
+      pk,
+      archivedPubkeys: archivedPubkeys,
+      currentPubkey: currentPubkey,
+    )) {
+      continue;
+    }
     if (!seen.add(pk)) continue;
     final profile = userCache[pk];
     final ownerPubkey = ownerByAgentPubkey[pk] ?? profile?.ownerPubkey;
@@ -89,6 +97,13 @@ List<MentionCandidate> buildMentionCandidates({
 
   for (final agent in relayAgents) {
     final pk = agent.pubkey;
+    if (!isIdentityVisibleForDiscovery(
+      pk,
+      archivedPubkeys: archivedPubkeys,
+      currentPubkey: currentPubkey,
+    )) {
+      continue;
+    }
     if (seen.contains(pk)) continue;
     if (!sharedAgentPubkeys.contains(pk)) continue;
     seen.add(pk);
@@ -111,6 +126,13 @@ List<MentionCandidate> buildMentionCandidates({
   final currentLower = currentPubkey?.toLowerCase();
   for (final profile in searchResults) {
     final pk = profile.pubkey.toLowerCase();
+    if (!isIdentityVisibleForDiscovery(
+      pk,
+      archivedPubkeys: archivedPubkeys,
+      currentPubkey: currentPubkey,
+    )) {
+      continue;
+    }
     if (seen.contains(pk)) continue;
     final ownerPubkey = ownerByAgentPubkey[pk] ?? profile.ownerPubkey;
     final isAgent = ownerPubkey != null || directoryPubkeys.contains(pk);
