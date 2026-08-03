@@ -220,6 +220,48 @@ void main() {
   );
 
   test(
+    'keeps a failed local message visible and retries its signed event',
+    () async {
+      final relaySession = _RecordingRelaySessionNotifier();
+      final container = _buildContainer(relaySession);
+      addTearDown(container.dispose);
+
+      container.read(channelMessagesProvider(_channelId));
+      await relaySession.subscribed;
+      final notifier = container.read(
+        channelMessagesProvider(_channelId).notifier,
+      );
+      final local = _event(id: 'retryable', createdAt: 20);
+      notifier.addLocalMessage(local);
+      notifier.failLocalMessage(local.id);
+
+      expect(
+        container.read(
+          localMessageDeliveryStatesProvider(_channelId),
+        )[local.id],
+        LocalMessageDeliveryState.failed,
+      );
+      expect(
+        container
+            .read(channelMessagesProvider(_channelId))
+            .value
+            ?.map((event) => event.id),
+        ['retryable'],
+      );
+
+      await notifier.retryLocalMessage(local.id);
+
+      expect(relaySession.publishedEvents, [local]);
+      expect(
+        container.read(
+          localMessageDeliveryStatesProvider(_channelId),
+        )[local.id],
+        LocalMessageDeliveryState.sent,
+      );
+    },
+  );
+
+  test(
     'legacy websocket echo retires ownership without duplicating the row',
     () async {
       final relaySession = _RecordingRelaySessionNotifier();
@@ -699,6 +741,7 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
   final List<NostrFilter> liveFilters = [];
   final List<NostrFilter> historyFilters = [];
   final List<NostrFilter> queryFilters = [];
+  final List<NostrEvent> publishedEvents = [];
   final List<void Function(NostrEvent)> _listeners = [];
   final Completer<void> _subscribed = Completer<void>();
   final Completer<List<NostrEvent>> _history = Completer<List<NostrEvent>>();
@@ -718,6 +761,15 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
     state = SessionState(
       status: connected ? SessionStatus.connected : SessionStatus.disconnected,
     );
+  }
+
+  @override
+  Future<NostrEvent> publish(
+    NostrEvent event, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    publishedEvents.add(event);
+    return event;
   }
 
   @override

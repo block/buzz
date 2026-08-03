@@ -11,7 +11,7 @@ void main() {
     () async {
       final session = _PendingPublishRelaySession();
       final localMessages = <NostrEvent>[];
-      final removedIds = <String>[];
+      final failedIds = <String>[];
       final completedIds = <String>[];
       final send = SendMessage(
         signedEventRelay: SignedEventRelay(
@@ -22,7 +22,7 @@ void main() {
         readUserCache: () => const {},
         addLocalMessage: (_, event) => localMessages.add(event),
         completeLocalMessage: (_, eventId) => completedIds.add(eventId),
-        removeLocalMessage: (_, eventId) => removedIds.add(eventId),
+        failLocalMessage: (_, eventId) => failedIds.add(eventId),
       );
 
       final result = send(channelId: _channelId, content: 'hello');
@@ -32,20 +32,20 @@ void main() {
       expect(localMessages.single.id, session.event.id);
       expect(localMessages.single.content, 'hello');
       expect(localMessages.single.channelId, _channelId);
-      expect(removedIds, isEmpty);
+      expect(failedIds, isEmpty);
 
       session.accept();
       await result;
       expect(completedIds, [localMessages.single.id]);
-      expect(removedIds, isEmpty);
+      expect(failedIds, isEmpty);
     },
   );
 
-  test('rolls back the signed local message when publish fails', () async {
+  test('keeps the signed local message retryable when publish fails', () async {
     final session = _PendingPublishRelaySession();
     final localMessages = <NostrEvent>[];
     final completedIds = <String>[];
-    final removedIds = <String>[];
+    final failedIds = <String>[];
     final send = SendMessage(
       signedEventRelay: SignedEventRelay(
         session: session,
@@ -55,7 +55,7 @@ void main() {
       readUserCache: () => const {},
       addLocalMessage: (_, event) => localMessages.add(event),
       completeLocalMessage: (_, eventId) => completedIds.add(eventId),
-      removeLocalMessage: (_, eventId) => removedIds.add(eventId),
+      failLocalMessage: (_, eventId) => failedIds.add(eventId),
     );
 
     final result = send(channelId: _channelId, content: 'hello');
@@ -64,7 +64,7 @@ void main() {
 
     await expectLater(result, throwsException);
     expect(completedIds, isEmpty);
-    expect(removedIds, [localMessages.single.id]);
+    expect(failedIds, [localMessages.single.id]);
   });
 
   test(
@@ -80,7 +80,7 @@ void main() {
         readUserCache: () => const {},
         addLocalMessage: (_, _) {},
         completeLocalMessage: (_, _) {},
-        removeLocalMessage: (_, _) {},
+        failLocalMessage: (_, _) {},
       );
 
       final result = send(

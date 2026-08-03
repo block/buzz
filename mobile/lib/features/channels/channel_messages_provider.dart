@@ -280,12 +280,21 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     ref
         .read(pendingLocalMessagesProvider(channelId).notifier)
         .confirm(eventIds);
+    final delivery = ref.read(
+      localMessageDeliveryStatesProvider(channelId).notifier,
+    );
+    for (final eventId in eventIds) {
+      delivery.markSent(eventId);
+    }
   }
 
   /// Adds a just-signed outgoing message before the relay acknowledges it.
   /// The live relay echo is deduplicated by event id.
   void addLocalMessage(NostrEvent event) {
     ref.read(pendingLocalMessagesProvider(channelId).notifier).add(event);
+    ref
+        .read(localMessageDeliveryStatesProvider(channelId).notifier)
+        .markSending(event.id);
     final thread = event.threadReference;
     if (thread.parentId != null) {
       final rootId = thread.rootId;
@@ -322,7 +331,15 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     _confirmLocalMessages([eventId]);
   }
 
-  /// Rolls back a local message when its publish is rejected or times out.
+  /// Keeps a rejected or timed-out event visible so the sender can retry it.
+  void failLocalMessage(String eventId) {
+    ref
+        .read(localMessageDeliveryStatesProvider(channelId).notifier)
+        .markFailed(eventId);
+  }
+
+  /// Removes a local row when a caller explicitly abandons it. Publish
+  /// failures use [failLocalMessage] instead so the sender can retry.
   void removeLocalMessage(String eventId) {
     final pending = ref
         .read(pendingLocalMessagesProvider(channelId).notifier)
@@ -361,6 +378,21 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     final next = current.where((event) => event.id != eventId).toList();
     _lastKnownMessages = next;
     state = AsyncData(next);
+  }
+
+  Future<void> retryLocalMessage(String eventId) async {
+    final event = ref.read(pendingLocalMessagesProvider(channelId))[eventId];
+    if (event == null) return;
+
+    ref
+        .read(localMessageDeliveryStatesProvider(channelId).notifier)
+        .markSending(eventId);
+    try {
+      await ref.read(relaySessionProvider.notifier).publish(event);
+      completeLocalMessage(eventId);
+    } catch (_) {
+      failLocalMessage(eventId);
+    }
   }
 
   static List<NostrEvent> _mergeEvent(
