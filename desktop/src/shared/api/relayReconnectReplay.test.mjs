@@ -218,6 +218,37 @@ test("replay sends all subs in one batch when count equals REPLAY_BATCH_SIZE", a
   assert.equal(delayCount, 0, "no inter-batch delay for exactly one batch");
 });
 
+test("replay marks non-paged live subscriptions before reconnect replay", async () => {
+  resetGate();
+  const calls = [];
+  const subscriptions = new Map([
+    [
+      "sub-1",
+      {
+        mode: "live",
+        filter: {
+          kinds: [48100, 48101, 48102, 48103],
+          "#h": ["ch-1"],
+          limit: 100,
+        },
+        onEvent: () => {},
+        onReplayStart: () => calls.push("replay-start"),
+        lastSeenCreatedAt: 100,
+      },
+    ],
+  ]);
+
+  await replayLiveSubscriptions({
+    subscriptions,
+    sendRaw: async () => {
+      calls.push("req");
+    },
+    requestHistory: async () => [],
+  });
+
+  assert.deepEqual(calls, ["replay-start", "req"]);
+});
+
 test("replay splits subscriptions into batches of REPLAY_BATCH_SIZE", async () => {
   resetGate();
   let delayCount = 0;

@@ -58,11 +58,19 @@ type LiveSubscription = {
   mode: "live";
   filter: RelaySubscriptionFilter;
   onEvent: (event: RelayEvent) => void;
+  onEose?: () => void;
+  onReplayStart?: () => void;
+  onTerminalClose?: () => void;
   resolveReady?: () => void;
   lastSeenCreatedAt?: number;
   closedRetryAttempt?: number;
   closedRetryTimeout?: number;
 };
+
+export type RelayLiveSubscriptionOptions = Pick<
+  LiveSubscription,
+  "onEose" | "onReplayStart" | "onTerminalClose"
+>;
 
 export type PendingEvent = {
   event: RelayEvent;

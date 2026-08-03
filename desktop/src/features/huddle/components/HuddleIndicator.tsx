@@ -6,22 +6,28 @@ import { useQueryClient } from "@tanstack/react-query";
 
 import { relayClient } from "@/shared/api/relayClient";
 import type { RelayEvent } from "@/shared/api/types";
+import { KIND_HUDDLE_PARTICIPANT_LEFT } from "@/shared/constants/kinds";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { DropdownMenuItem } from "@/shared/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { useHuddle } from "../HuddleContext";
 import { formatHuddleActionError } from "../lib/huddleError";
-
-/** Huddle lifecycle event kinds */
-const KIND_HUDDLE_STARTED = 48100;
-const KIND_HUDDLE_PARTICIPANT_JOINED = 48101;
-const KIND_HUDDLE_PARTICIPANT_LEFT = 48102;
-const KIND_HUDDLE_ENDED = 48103;
+import {
+  createHuddleReplayTracker,
+  huddleEventClearsSuppressionForState,
+  huddleEventChannelId,
+  huddleParticipantDisplayCount,
+  huddleStalenessDelayMs,
+  reconstructHuddleState,
+  resolveIdleHuddleTransition,
+  selectActiveHuddleState,
+} from "../lib/huddleLifecycleState";
 
 type ActiveHuddle = {
   ephemeralChannelId: string;
   participants: Set<string>;
+  staleDeadlineMs: number | null;
 };
 
 type HuddleIndicatorProps = {
@@ -46,127 +52,149 @@ export function HuddleIndicator({
   onStart,
   startDisabled,
 }: HuddleIndicatorProps) {
-  const { joinHuddle, isStarting } = useHuddle();
+  const { activeEphemeralChannelId, joinHuddle, isStarting } = useHuddle();
   const queryClient = useQueryClient();
   const [activeHuddle, setActiveHuddle] = React.useState<ActiveHuddle | null>(
     null,
   );
   const [isJoining, setIsJoining] = React.useState(false);
+  const activeEphemeralChannelIdRef = React.useRef(activeEphemeralChannelId);
+  const activeHuddleRef = React.useRef<ActiveHuddle | null>(null);
+  const lastActiveEphemeralChannelIdRef = React.useRef<string | null>(
+    activeEphemeralChannelId,
+  );
+  const suppressedEphemeralChannelIdRef = React.useRef<string | null>(null);
+  const reconstructActiveHuddleRef = React.useRef<(() => void) | null>(null);
+
+  activeEphemeralChannelIdRef.current = activeEphemeralChannelId;
+
+  if (activeEphemeralChannelId) {
+    lastActiveEphemeralChannelIdRef.current = activeEphemeralChannelId;
+    suppressedEphemeralChannelIdRef.current = null;
+  }
+
+  const setDisplayedHuddle = React.useCallback(
+    (huddle: ActiveHuddle | null) => {
+      activeHuddleRef.current = huddle;
+      setActiveHuddle(huddle);
+    },
+    [],
+  );
 
   React.useEffect(() => {
     if (!channelId) return;
 
     let disposed = false;
     let cleanup: (() => void) | null = null;
+    let staleTimeout: ReturnType<typeof setTimeout> | null = null;
+    const replayTracker = createHuddleReplayTracker();
 
     // Track all seen events for reconstruction. Keyed by event.id for dedup.
     const seenEvents = new Map<string, RelayEvent>();
 
-    /** Reconstruct huddle state from the full set of seen events.
-     *  Sort by created_at, then kind (causal: start < join < left < end),
-     *  then event id for final tiebreak. This handles out-of-order delivery,
-     *  reconnect replay, late mounts, and same-second event batches.
-     *
-     *  Resilient to missing start event: if we see join/left events for an
-     *  ephemeral channel without a prior start, we infer the huddle exists.
-     *  This covers the edge case where >100 lifecycle events push the start
-     *  event out of the subscription window. */
     function reconstruct() {
-      const sorted = [...seenEvents.values()].sort(
-        (a, b) =>
-          a.created_at - b.created_at ||
-          a.kind - b.kind ||
-          a.id.localeCompare(b.id),
-      );
-
-      let huddle: ActiveHuddle | null = null;
-      // Track ended ephemeral channels so late-arriving join/left events
-      // (e.g. relay-emitted 48102 that lands 1s after a client-emitted 48103)
-      // don't resurrect a phantom huddle via the "infer huddle exists" fallback.
-      const endedChannels = new Set<string>();
-
-      for (const ev of sorted) {
-        let ephId: string | null = null;
-        try {
-          const content = JSON.parse(ev.content);
-          ephId = content.ephemeral_channel_id ?? null;
-        } catch {
-          continue; // Malformed — skip
-        }
-
-        switch (ev.kind) {
-          case KIND_HUDDLE_STARTED: {
-            if (!ephId) break;
-            // A new start supersedes any previous ended state for this channel.
-            endedChannels.delete(ephId);
-            huddle = {
-              ephemeralChannelId: ephId,
-              participants: new Set([ev.pubkey]),
-            };
-            break;
+      if (staleTimeout) clearTimeout(staleTimeout);
+      const selected = selectActiveHuddleState(seenEvents.values(), {
+        activeEphemeralChannelId: activeEphemeralChannelIdRef.current,
+        historyMayBeTruncatedForEvents:
+          replayTracker.historyMayBeTruncatedForEvents,
+        replayComplete: replayTracker.replayComplete(),
+        replayInProgress: replayTracker.replayInProgress(),
+        suppressedEphemeralChannelId: suppressedEphemeralChannelIdRef.current,
+      });
+      const huddle: ActiveHuddle | null = selected
+        ? {
+            ephemeralChannelId: selected.ephemeralChannelId,
+            participants: selected.state.participants,
+            staleDeadlineMs: selected.state.staleDeadlineMs,
           }
-          case KIND_HUDDLE_PARTICIPANT_JOINED: {
-            if (!ephId) break;
-            // Skip if this ephemeral channel has already ended — don't
-            // resurrect a phantom huddle from a late-arriving relay event.
-            if (endedChannels.has(ephId)) break;
-            // 48101 events are relay-signed — the actual participant is in the "p" tag.
-            const joinedPk =
-              ev.tags.find((t) => t[0] === "p")?.[1] ?? ev.pubkey;
-            if (!huddle || ephId !== huddle.ephemeralChannelId) {
-              huddle = {
-                ephemeralChannelId: ephId,
-                participants: new Set(),
-              };
-            }
-            huddle.participants.add(joinedPk);
-            break;
-          }
-          case KIND_HUDDLE_PARTICIPANT_LEFT: {
-            if (!ephId) break;
-            // Skip if this ephemeral channel has already ended.
-            if (endedChannels.has(ephId)) break;
-            // 48102 events are relay-signed — the actual participant is in the "p" tag.
-            const leftPk = ev.tags.find((t) => t[0] === "p")?.[1] ?? ev.pubkey;
-            if (!huddle || ephId !== huddle.ephemeralChannelId) {
-              huddle = {
-                ephemeralChannelId: ephId,
-                participants: new Set(),
-              };
-            }
-            huddle.participants.delete(leftPk);
-            break;
-          }
-          case KIND_HUDDLE_ENDED: {
-            if (!ephId) break;
-            endedChannels.add(ephId);
-            if (huddle && ephId === huddle.ephemeralChannelId) {
-              huddle = null;
-            }
-            break;
-          }
-        }
-      }
+        : null;
 
       if (!disposed) {
-        setActiveHuddle(huddle);
+        setDisplayedHuddle(huddle);
+        const staleDelay = huddle
+          ? huddleStalenessDelayMs(huddle.staleDeadlineMs)
+          : null;
+        if (staleDelay !== null) {
+          staleTimeout = setTimeout(reconstruct, staleDelay);
+        }
       }
     }
+    reconstructActiveHuddleRef.current = reconstruct;
 
     // Subscribe to huddle lifecycle events only (kinds 48100–48103).
     // limit: 100 covers long-lived huddles with many join/leave cycles.
     relayClient
-      .subscribeToHuddleEvents(channelId, (event: RelayEvent) => {
-        if (disposed) return;
+      .subscribeToHuddleEvents(
+        channelId,
+        (event: RelayEvent) => {
+          if (disposed) return;
+          replayTracker.recordReplayEvent(event);
 
-        // Dedup by event ID — ignore replayed events from reconnect.
-        if (seenEvents.has(event.id)) return;
-        seenEvents.set(event.id, event);
+          // Dedup by event ID — ignore replayed events from reconnect.
+          if (seenEvents.has(event.id)) return;
+          seenEvents.set(event.id, event);
+          const suppressedEphemeralChannelId =
+            suppressedEphemeralChannelIdRef.current;
+          const eventEphemeralChannelId = huddleEventChannelId(event);
+          const suppressedHuddleState =
+            suppressedEphemeralChannelId !== null &&
+            eventEphemeralChannelId === suppressedEphemeralChannelId &&
+            event.kind === KIND_HUDDLE_PARTICIPANT_LEFT
+              ? reconstructHuddleState(
+                  seenEvents.values(),
+                  suppressedEphemeralChannelId,
+                  {
+                    historyMayBeTruncated:
+                      replayTracker.historyMayBeTruncatedForEvents(
+                        seenEvents.values(),
+                      ),
+                    isCurrentHuddle:
+                      activeEphemeralChannelIdRef.current ===
+                      suppressedEphemeralChannelId,
+                    replayComplete: replayTracker.replayComplete(),
+                    replayInProgress: replayTracker.replayInProgress(),
+                  },
+                )
+              : null;
+          if (
+            suppressedEphemeralChannelId !== null &&
+            eventEphemeralChannelId === suppressedEphemeralChannelId &&
+            huddleEventClearsSuppressionForState(
+              event,
+              suppressedHuddleState ?? {
+                ended: false,
+                participants: new Set(),
+                staleDeadlineMs: null,
+                startCreatedAt: null,
+              },
+            )
+          ) {
+            suppressedEphemeralChannelIdRef.current = null;
+          }
 
-        // Reconstruct from full history on every new event.
-        // This is cheap — huddle lifecycle events are rare (typically <20).
-        reconstruct();
-      })
+          // Reconstruct from full history on every new event.
+          // This is cheap — huddle lifecycle events are rare (typically <20).
+          reconstruct();
+        },
+        {
+          onEose: () => {
+            if (disposed) return;
+            replayTracker.markReplayComplete();
+            reconstruct();
+          },
+          onTerminalClose: () => {
+            if (disposed) return;
+            replayTracker.markReplayFailed();
+            reconstruct();
+          },
+          onReplayStart: () => {
+            if (disposed) return;
+            replayTracker.markReplayStarted(seenEvents.values());
+            reconstruct();
+          },
+        },
+      )
       .then((dispose) => {
         if (disposed) {
           void dispose();
@@ -175,15 +203,22 @@ export function HuddleIndicator({
         cleanup = () => void dispose();
       })
       .catch((err) => {
+        if (disposed) return;
         console.error("[HuddleIndicator] subscription failed:", err);
+        replayTracker.markReplayFailed();
+        reconstruct();
       });
 
     return () => {
       disposed = true;
+      if (staleTimeout) clearTimeout(staleTimeout);
       cleanup?.();
-      setActiveHuddle(null);
+      if (reconstructActiveHuddleRef.current === reconstruct) {
+        reconstructActiveHuddleRef.current = null;
+      }
+      setDisplayedHuddle(null);
     };
-  }, [channelId]);
+  }, [channelId, setDisplayedHuddle]);
 
   // When the local user ends/leaves a huddle, the backend transitions to idle
   // and emits huddle-state-changed. Clear the indicator immediately rather than
@@ -193,11 +228,32 @@ export function HuddleIndicator({
     let unlisten: (() => void) | null = null;
     let cancelled = false;
 
-    listen<{ phase: string }>("huddle-state-changed", (event) => {
-      if (!cancelled && event.payload.phase === "idle") {
-        setActiveHuddle(null);
-      }
-    }).then((fn) => {
+    listen<{ ephemeral_channel_id: string | null; phase: string }>(
+      "huddle-state-changed",
+      (event) => {
+        if (!cancelled && event.payload.phase === "idle") {
+          const transition = resolveIdleHuddleTransition({
+            activeEphemeralChannelId: activeEphemeralChannelIdRef.current,
+            displayedEphemeralChannelId:
+              activeHuddleRef.current?.ephemeralChannelId,
+            eventEphemeralChannelId: event.payload.ephemeral_channel_id,
+            lastActiveEphemeralChannelId:
+              lastActiveEphemeralChannelIdRef.current,
+          });
+          if (transition.suppressedEphemeralChannelId) {
+            suppressedEphemeralChannelIdRef.current =
+              transition.suppressedEphemeralChannelId;
+            if (
+              transition.suppressedEphemeralChannelId ===
+              lastActiveEphemeralChannelIdRef.current
+            ) {
+              lastActiveEphemeralChannelIdRef.current = null;
+            }
+            reconstructActiveHuddleRef.current?.();
+          }
+        }
+      },
+    ).then((fn) => {
       if (cancelled) fn();
       else unlisten = fn;
     });
@@ -251,10 +307,13 @@ export function HuddleIndicator({
     );
   }
 
-  // At least 1 participant must exist for the huddle to be active.
-  // When START fell out of the event window, the creator isn't in the
-  // reconstructed set — floor at 1 to avoid showing "0 participants".
-  const participantCount = Math.max(1, activeHuddle.participants.size);
+  const participantCount = huddleParticipantDisplayCount(
+    activeHuddle.participants,
+    {
+      isCurrentHuddle:
+        activeHuddle.ephemeralChannelId === activeEphemeralChannelId,
+    },
+  );
 
   async function doJoin() {
     if (!activeHuddle || isJoining) return;

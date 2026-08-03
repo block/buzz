@@ -16,6 +16,7 @@ import {
   getTextPayload,
   type ConnectionState,
   type PendingEvent,
+  type RelayLiveSubscriptionOptions,
   type RelaySubscription,
   type RelaySubscriptionFilter,
 } from "@/shared/api/relayClientShared";
@@ -66,7 +67,6 @@ import {
 } from "@/shared/api/relayClientTimings";
 import { closeWebSocket } from "@/shared/api/relayWebSocketClose";
 import { buildThreadReferenceTags } from "@/features/messages/lib/threading";
-
 export class RelayClient {
   private wsId: number | null = null;
   private relayUrl: string | null = null;
@@ -92,7 +92,6 @@ export class RelayClient {
   private connectionGeneration = 0;
   private stabilityTimer: number | null = null;
   private visibleChannelId: string | null = null;
-
   private terminal = false;
 
   private connectionStateEmitter = new RelayConnectionStateEmitter("idle");
@@ -339,15 +338,10 @@ export class RelayClient {
     );
   }
 
-  /**
-   * Subscribe to huddle lifecycle events (kinds 48100–48103) for a channel.
-   * Used by HuddleIndicator to detect active huddles without being drowned
-   * out by regular channel messages in the generic subscription window.
-   * Includes both historical (last 10) and live events.
-   */
   async subscribeToHuddleEvents(
     channelId: string,
     onEvent: (event: RelayEvent) => void,
+    options?: RelayLiveSubscriptionOptions,
   ) {
     return this.subscribe(
       {
@@ -356,6 +350,7 @@ export class RelayClient {
         limit: 100,
       },
       onEvent,
+      options,
     );
   }
 
@@ -584,6 +579,7 @@ export class RelayClient {
   private async subscribe(
     filter: RelaySubscriptionFilter,
     onEvent: (event: RelayEvent) => void,
+    options: RelayLiveSubscriptionOptions = {},
   ) {
     await this.ensureConnected();
 
@@ -605,6 +601,7 @@ export class RelayClient {
       mode: "live",
       filter,
       onEvent,
+      ...options,
       resolveReady,
     });
 
@@ -879,6 +876,8 @@ export class RelayClient {
   }
 
   private handleEose(subId: string) {
+    if (this.flushTimeout !== null) window.clearTimeout(this.flushTimeout);
+    this.flushEventBuffer();
     handleSubscriptionEose({
       subscriptions: this.subscriptions,
       subId,

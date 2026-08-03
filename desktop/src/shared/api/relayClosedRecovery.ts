@@ -81,6 +81,7 @@ function recoverLiveSubscriptionFromClosed({
   if (closedClass === "terminal") {
     // Auth/access/filter failure — permanently remove the subscription so it
     // doesn't silently loop.
+    subscription.onTerminalClose?.();
     subscriptions.delete(subId);
     return;
   }
@@ -111,6 +112,7 @@ function recoverLiveSubscriptionFromClosed({
   subscription.closedRetryTimeout = window.setTimeout(() => {
     subscription.closedRetryTimeout = undefined;
     if (subscriptions.get(subId) !== subscription) return;
+    subscription.onReplayStart?.();
     void sendReq(subId, subscription.filter).catch((error) => {
       if (subscriptions.get(subId) !== subscription) return;
       console.error("Failed to restore closed relay subscription", error);
@@ -157,6 +159,7 @@ export function handleSubscriptionEose({
   const subscription = subscriptions.get(subId);
   if (!subscription) return;
   if (subscription.mode === "live") {
+    subscription.onEose?.();
     subscription.resolveReady?.();
     subscription.resolveReady = undefined;
     subscription.closedRetryAttempt = 0;

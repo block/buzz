@@ -209,15 +209,16 @@ export async function replayLiveSubscriptions({
     if (!isActive()) return;
     const batch = replayRequests.slice(i, i + replayBatchSize);
     await Promise.all(
-      batch.map(({ subId, subscription, replaySince, shouldPageReplay }) =>
-        sendRaw([
+      batch.map(({ subId, subscription, replaySince, shouldPageReplay }) => {
+        if (!shouldPageReplay) subscription.onReplayStart?.();
+        return sendRaw([
           "REQ",
           subId,
           shouldPageReplay
             ? subscription.filter
             : buildReconnectReplayFilter(subscription.filter, replaySince),
-        ]),
-      ),
+        ]);
+      }),
     );
     if (i + replayBatchSize < replayRequests.length) {
       await new Promise<void>((resolve) =>

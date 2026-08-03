@@ -5,6 +5,7 @@ import {
   handleRelayClosed,
   handleSubscriptionEose,
 } from "./relayClosedRecovery.ts";
+import { RelayClient } from "./relayClientSession.ts";
 import {
   requestFirstEventGated,
   requestHistoryGated,
@@ -260,8 +261,74 @@ test("first-event request resolves null when EOSE arrives without an event", asy
   assert.equal(subscriptions.has(requestedSubId), false);
 });
 
+test("live subscription EOSE calls readiness and replay boundary callbacks", () => {
+  let readyCalls = 0;
+  let eoseCalls = 0;
+  const subscriptions = new Map([
+    [
+      "live-1",
+      {
+        mode: "live",
+        filter: { kinds: [9], limit: 50 },
+        onEvent: () => {},
+        onEose: () => {
+          eoseCalls += 1;
+        },
+        resolveReady: () => {
+          readyCalls += 1;
+        },
+      },
+    ],
+  ]);
+
+  handleSubscriptionEose({
+    subscriptions,
+    subId: "live-1",
+    closeSubscription: async () => {},
+  });
+
+  assert.equal(eoseCalls, 1);
+  assert.equal(readyCalls, 1);
+  assert.equal(subscriptions.has("live-1"), true);
+});
+
+test("live subscription EOSE clears pending event batch timer before forced flush", () => {
+  resetAll(0);
+  const client = new RelayClient();
+  const deliveredEvents = [];
+  const subscription = {
+    mode: "live",
+    filter: { kinds: [9], limit: 50 },
+    onEvent: (event) => deliveredEvents.push(event),
+    resolveReady: () => {},
+  };
+  const firstEvent = {
+    id: "event-1",
+    pubkey: "a".repeat(64),
+    created_at: 1,
+    kind: 9,
+    tags: [],
+    content: "",
+    sig: "",
+  };
+
+  client.subscriptions.set("live-1", subscription);
+  client.handleEvent("live-1", firstEvent);
+  assert.equal(pendingTimers.size, 1);
+  const [batchTimerId] = pendingTimers.keys();
+
+  client.handleEose("live-1");
+
+  assert.equal(pendingTimers.has(batchTimerId), false);
+  assert.deepEqual(
+    deliveredEvents.map((event) => event.id),
+    ["event-1"],
+  );
+});
+
 test("production CLOSED handler removes terminal live subscriptions", () => {
   let readyCalls = 0;
+  let terminalCloseCalls = 0;
   const subscriptions = new Map([
     [
       "live-1",
@@ -271,6 +338,9 @@ test("production CLOSED handler removes terminal live subscriptions", () => {
         onEvent: () => {},
         resolveReady: () => {
           readyCalls += 1;
+        },
+        onTerminalClose: () => {
+          terminalCloseCalls += 1;
         },
       },
     ],
@@ -283,6 +353,7 @@ test("production CLOSED handler removes terminal live subscriptions", () => {
   });
   assert.equal(subscriptions.has("live-1"), false);
   assert.equal(readyCalls, 1);
+  assert.equal(terminalCloseCalls, 1);
 });
 
 // ── Rate-limited CLOSED core behaviour (F5) ───────────────────────────────────
@@ -414,6 +485,38 @@ test("non-rate-limited retryable CLOSED still schedules a retry", () => {
     true,
     "subscription must survive retryable CLOSED",
   );
+});
+
+test("retryable CLOSED marks live subscription replay before retry REQ", () => {
+  resetAll(0);
+  const calls = [];
+  const subscriptions = new Map([
+    [
+      "live-1",
+      {
+        mode: "live",
+        filter: { kinds: [9], "#h": ["ch-1"], limit: 50 },
+        onEvent: () => {},
+        onReplayStart: () => {
+          calls.push("replay-start");
+        },
+        resolveReady: () => {},
+      },
+    ],
+  ]);
+  handleRelayClosed({
+    subscriptions,
+    subId: "live-1",
+    message: "error: database error",
+    sendReq: () => {
+      calls.push("req");
+      return Promise.resolve();
+    },
+  });
+
+  tickTo(1_001);
+
+  assert.deepEqual(calls, ["replay-start", "req"]);
 });
 
 test("terminal CLOSED deletes subscription and does not retry", () => {
