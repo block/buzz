@@ -27,6 +27,8 @@ export type ProjectRepoSnapshot = {
   latestCommit: ProjectRepoCommit | null;
   commits: ProjectRepoCommit[];
   files: ProjectRepoFile[];
+  /** Complete file count before the native snapshot payload is capped. */
+  totalFileCount: number;
   contributors: ProjectRepoContributor[];
 };
 

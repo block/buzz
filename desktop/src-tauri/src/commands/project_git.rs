@@ -2,11 +2,11 @@ use super::project_git_exec::{
     build_git_auth_config, clean_branch, clean_target_ref, run_git, validate_workspace_clone_url,
     GitAuthConfig,
 };
+use super::project_git_files::{parse_ls_tree, parse_worktree_files, ParsedProjectRepoFiles};
 use super::project_git_push::push_project_local_repository_blocking;
 use super::project_repo_paths::{canonical_repos_roots, find_local_repo_dir};
 use crate::app_state::AppState;
 use serde::Serialize;
-use std::time::UNIX_EPOCH;
 use tauri::State;
 #[derive(Clone, Serialize)]
 pub struct ProjectRepoCommitInfo {
@@ -38,6 +38,8 @@ pub struct ProjectRepoSnapshotInfo {
     pub latest_commit: Option<ProjectRepoCommitInfo>,
     pub commits: Vec<ProjectRepoCommitInfo>,
     pub files: Vec<ProjectRepoFileInfo>,
+    /// Complete file count before the snapshot payload is capped.
+    pub total_file_count: usize,
     pub contributors: Vec<ProjectRepoContributorInfo>,
 }
 #[derive(Serialize)]
@@ -134,30 +136,6 @@ fn has_untracked_files(output: &str) -> bool {
     output.lines().any(|line| line.starts_with("??"))
 }
 
-fn read_preview_content(
-    repo_dir: &std::path::Path,
-    path: &str,
-    size: Option<u64>,
-) -> Option<String> {
-    const MAX_PREVIEW_BYTES: u64 = 64 * 1024;
-    if size.is_some_and(|value| value > MAX_PREVIEW_BYTES) {
-        return None;
-    }
-
-    let full_path = repo_dir.join(path);
-    let normalized = full_path.canonicalize().ok()?;
-    let repo_root = repo_dir.canonicalize().ok()?;
-    if !normalized.starts_with(repo_root) {
-        return None;
-    }
-
-    let bytes = std::fs::read(normalized).ok()?;
-    if bytes.contains(&0) {
-        return None;
-    }
-    String::from_utf8(bytes).ok()
-}
-
 fn parse_commits(output: &str) -> Vec<ProjectRepoCommitInfo> {
     output
         .lines()
@@ -235,46 +213,6 @@ fn parse_latest_commit_by_path(
     result
 }
 
-fn path_modified_at(path: &std::path::Path) -> Option<i64> {
-    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
-    modified
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| i64::try_from(duration.as_secs()).ok())
-}
-
-fn parse_worktree_files(
-    repo_dir: &std::path::Path,
-    output: &str,
-    latest_commit_by_path: &std::collections::HashMap<String, ProjectRepoCommitInfo>,
-) -> Vec<ProjectRepoFileInfo> {
-    output
-        .split('\0')
-        .filter(|path| !path.trim().is_empty())
-        .filter_map(|path| {
-            let full_path = repo_dir.join(path);
-            let metadata = std::fs::metadata(&full_path).ok()?;
-            if !metadata.is_file() {
-                return None;
-            }
-            let size = Some(metadata.len());
-            let latest_commit = latest_commit_by_path.get(path).cloned();
-            Some(ProjectRepoFileInfo {
-                path: path.to_string(),
-                kind: "blob".to_string(),
-                size,
-                preview_content: read_preview_content(repo_dir, path, size),
-                last_changed_at: latest_commit
-                    .as_ref()
-                    .map(|commit| commit.timestamp)
-                    .or_else(|| path_modified_at(&full_path)),
-                latest_commit,
-            })
-        })
-        .take(250)
-        .collect()
-}
-
 fn normalize_branch_name(branch: &str) -> &str {
     branch
         .trim()
@@ -307,40 +245,6 @@ fn branch_activity_range(
     }
 
     Some(format!("origin/{base_branch}..HEAD"))
-}
-
-fn parse_ls_tree(
-    repo_dir: &std::path::Path,
-    output: &str,
-    latest_commit_by_path: &std::collections::HashMap<String, ProjectRepoCommitInfo>,
-) -> Vec<ProjectRepoFileInfo> {
-    output
-        .lines()
-        .filter_map(|line| {
-            let (meta, path) = line.split_once('\t')?;
-            let mut parts = meta.split_whitespace();
-            let _mode = parts.next()?;
-            let kind = parts.next()?.to_string();
-            let _object = parts.next()?;
-            let size = parts.next().and_then(|value| value.parse::<u64>().ok());
-            let preview_content = if kind == "blob" {
-                read_preview_content(repo_dir, path, size)
-            } else {
-                None
-            };
-            Some(ProjectRepoFileInfo {
-                path: path.to_string(),
-                kind,
-                size,
-                preview_content,
-                last_changed_at: latest_commit_by_path
-                    .get(path)
-                    .map(|commit| commit.timestamp),
-                latest_commit: latest_commit_by_path.get(path).cloned(),
-            })
-        })
-        .take(250)
-        .collect()
 }
 
 fn snapshot_from_repo(
@@ -383,7 +287,7 @@ fn snapshot_from_repo(
         (Vec::new(), Vec::new())
     };
 
-    let files = if latest_commit.is_some() {
+    let parsed_files = if latest_commit.is_some() {
         let latest_commit_by_path = run_git(
             &[
                 "log",
@@ -402,13 +306,14 @@ fn snapshot_from_repo(
             .map(|output| parse_ls_tree(repo_dir, &output, &latest_commit_by_path))
             .unwrap_or_default()
     } else {
-        Vec::new()
+        ParsedProjectRepoFiles::default()
     };
 
     ProjectRepoSnapshotInfo {
         latest_commit,
         commits,
-        files,
+        files: parsed_files.files,
+        total_file_count: parsed_files.total_file_count,
         contributors,
     }
 }
@@ -466,7 +371,7 @@ fn snapshot_from_worktree(
         (Vec::new(), Vec::new(), std::collections::HashMap::new())
     };
 
-    let files = run_git(
+    let parsed_files = run_git(
         &[
             "ls-files",
             "--cached",
@@ -483,7 +388,8 @@ fn snapshot_from_worktree(
     ProjectRepoSnapshotInfo {
         latest_commit,
         commits,
-        files,
+        files: parsed_files.files,
+        total_file_count: parsed_files.total_file_count,
         contributors,
     }
 }

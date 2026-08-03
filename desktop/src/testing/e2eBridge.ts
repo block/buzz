@@ -180,6 +180,8 @@ type E2eConfig = {
     pocketVoiceImportResult?: "success" | "cancel" | "invalid";
     /** Advertised HEAD for the first mock project without adding that branch. */
     projectHeadBranch?: string;
+    /** Full repository file count reported alongside the capped snapshot payload. */
+    projectRepoTotalFileCount?: number;
     /** Builderlab account returned by hosted-community onboarding. Null/omitted = signed out. */
     builderlabAuth?: {
       email?: string;
@@ -11265,6 +11267,7 @@ export function maybeInstallE2eTauriMocks() {
               last_commit_at: Math.floor(Date.now() / 1000) - 7_200,
             },
           ],
+          total_file_count: activeConfig?.mock?.projectRepoTotalFileCount ?? 4,
           files: [
             {
               path: "desktop/src/features/projects/ui/ProjectDetailScreen.tsx",
