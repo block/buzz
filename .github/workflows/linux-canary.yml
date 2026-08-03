@@ -170,6 +170,9 @@ jobs:
           ./scripts/bundle-sidecars.sh
 
       - name: Build Linux Tauri app
+        # Intentionally without --features mesh-llm: release-linux matches this
+        # (CI mesh builds use Metal). Settings → Compute shows a build-unavailable
+        # empty state via mesh_feature_enabled instead of a dead-end toggle (#3841).
         run: cd desktop && pnpm tauri build --ci --bundles deb,appimage --config src-tauri/tauri.canary.conf.json
         env:
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"

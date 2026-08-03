@@ -23,11 +23,13 @@ import {
 } from "@/features/settings/ui/SettingsOptionGroup";
 import { SettingsSectionHeader } from "@/features/settings/ui/SettingsSectionHeader";
 import { classifyModelRef } from "../classifyModelRef";
+import { isMeshFeatureDisabledError } from "../isMeshFeatureDisabledError";
 import {
   downloadPercent,
   formatDownloadBytes,
   useMeshDownloadProgress,
 } from "../hooks/useMeshDownloadProgress";
+import { useMeshFeatureEnabled } from "../hooks/useMeshFeatureEnabled";
 import { useMeshNodeStatus } from "../hooks/useMeshNodeStatus";
 import { useMeshServingUsage } from "../hooks/useMeshServingUsage";
 import { deriveMeshShareToggle } from "../shareToggleState";
@@ -64,6 +66,7 @@ function writeDraft(key: string, value: string): void {
  * exposing implementation protocols or raw mesh controls.
  */
 export function MeshComputeSettingsCard() {
+  const featureEnabled = useMeshFeatureEnabled();
   const { status, error, refresh } = useMeshNodeStatus();
   const [installedModels, setInstalledModels] = React.useState<
     MeshModelOption[]
@@ -83,6 +86,35 @@ export function MeshComputeSettingsCard() {
   const [actionError, setActionError] = React.useState<string | null>(null);
   const { progress: downloadProgress, reset: resetDownloadProgress } =
     useMeshDownloadProgress();
+
+  const buildUnavailable =
+    featureEnabled === false || isMeshFeatureDisabledError(error);
+
+  if (buildUnavailable) {
+    return (
+      <section className="min-w-0" data-testid="settings-mesh-share-compute">
+        <SettingsSectionHeader
+          title="Share compute"
+          description={
+            <>
+              Share this machine with your relay. When on, other members can run
+              their agents here.
+            </>
+          }
+        />
+        <p
+          className="mt-4 text-sm text-muted-foreground"
+          data-testid="settings-mesh-share-unavailable"
+        >
+          Share Compute is not included in this desktop build. Official Linux
+          and Windows packages currently ship without the mesh-llm feature;
+          macOS release builds enable it. Build from source with{" "}
+          <code className="text-xs">--features mesh-llm</code> to turn it on
+          locally.
+        </p>
+      </section>
+    );
+  }
 
   // Fetch installed models. Called on mount and whenever the running state
   // changes (a fresh start may have downloaded a new model). Stale-tolerant —
