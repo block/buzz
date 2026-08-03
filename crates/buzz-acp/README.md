@@ -143,10 +143,10 @@ servers:
 ```
 
 The JSON is strict. The only top-level fields are `version` and `servers`.
-Each server has `name`, `command`, `args`, and `env`. Server names must be
-unique, contain 1 to 128 ASCII bytes using only letters, digits, `_`, or `-`,
-and cannot contain `__`. Names are checked across both structured entries and
-the legacy server.
+Each server has `name`, `transport`, `command`, `args`, and `env`. Version 1
+supports the `stdio` transport. Server names must be unique, contain 1 to 128
+ASCII bytes using only letters, digits, `_`, or `-`, and cannot contain `__`.
+Names are checked across both structured entries and the legacy server.
 
 The config file is limited to 64 KiB. A harness can have at most 16 MCP
 servers in total, including the server from `BUZZ_ACP_MCP_COMMAND`. An
