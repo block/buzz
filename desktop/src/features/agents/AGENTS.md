@@ -39,6 +39,8 @@ with a TypeScript lookup table or an id comparison in a component.
    migration work.
 3. **Field absence has a named reason, not a boolean.** Codex effort is
    `ownedByModelId`; Claude effort is `deferredUntilNativeOptionsAvailable`.
+   Google Antigravity is provider-locked, gets model options from `agy-acp`,
+   and omits effort as `unsupportedByHarness`.
    New absences get new named reasons in `AgentConfigOmission` /
    `render` — never a `showX` prop.
 4. **The clearing policy is the named types.** `onContextChange:

@@ -126,6 +126,22 @@ test("Codex omits separate effort because model IDs own it", () => {
   ]);
 });
 
+test("Antigravity exposes ACP model selection without provider or effort controls", () => {
+  const model = deriveAgentConfigFieldModel({
+    config,
+    runtime: runtime("antigravity"),
+    scope: "global",
+  });
+
+  assert.deepEqual(
+    model.fields.map((item) => item.kind),
+    ["model"],
+  );
+  assert.deepEqual(model.omissions, [
+    { kind: "effort", reason: "unsupportedByHarness" },
+  ]);
+});
+
 test("catalog mismatch cleanup is named and restricted to onboarding", () => {
   const selectedRuntime = runtime("buzz-agent", {
     modelEnvVar: "BUZZ_AGENT_MODEL",

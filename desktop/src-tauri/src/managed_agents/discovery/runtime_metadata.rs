@@ -1,3 +1,5 @@
+use crate::managed_agents::AcpAvailabilityStatus;
+
 /// Static capabilities and installation metadata for a known ACP runtime.
 pub(crate) struct KnownAcpRuntime {
     pub id: &'static str,
@@ -79,11 +81,34 @@ impl KnownAcpRuntime {
         }
         self.cli_install_commands
     }
+
+    pub(super) fn can_auto_install(&self, availability: &AcpAvailabilityStatus) -> bool {
+        let can_install_cli = !self.cli_install_commands_for_os().is_empty();
+        let can_install_adapter = !self.adapter_install_commands.is_empty();
+        let uses_separate_adapter = self.underlying_cli.is_some_and(|cli| {
+            !self.commands.iter().any(|command| {
+                super::normalize_command_identity(command)
+                    == super::normalize_command_identity(cli)
+            })
+        });
+
+        match availability {
+            AcpAvailabilityStatus::Available => false,
+            AcpAvailabilityStatus::CliMissing => can_install_cli,
+            AcpAvailabilityStatus::AdapterMissing | AcpAvailabilityStatus::AdapterOutdated => {
+                can_install_adapter
+            }
+            AcpAvailabilityStatus::NotInstalled => {
+                can_install_cli && (!uses_separate_adapter || can_install_adapter)
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::known_acp_runtime_exact;
+    use crate::managed_agents::AcpAvailabilityStatus;
 
     #[test]
     fn vendor_metadata_distinguishes_cli_and_adapter_guidance() {
@@ -120,5 +145,30 @@ mod tests {
         );
         assert!(codex.adapter_install_instructions_url.contains("codex-acp"));
         assert!(codex.cli_install_hint.contains("Codex CLI"));
+
+        let antigravity = known_acp_runtime_exact("antigravity").unwrap();
+        assert_eq!(antigravity.commands, &["agy-acp"]);
+        assert_eq!(antigravity.underlying_cli, Some("agy"));
+        assert_eq!(
+            antigravity.cli_install_instructions_url,
+            "https://antigravity.google/docs/cli-install"
+        );
+        assert!(antigravity
+            .adapter_install_instructions_url
+            .contains("agy-acp"));
+        assert!(antigravity.adapter_install_commands.is_empty());
+        assert!(antigravity.supports_acp_model_switching);
+        assert!(antigravity.provider_locked);
+        assert!(antigravity.can_auto_install(&AcpAvailabilityStatus::CliMissing));
+        assert!(!antigravity.can_auto_install(&AcpAvailabilityStatus::AdapterMissing));
+        assert!(!antigravity.can_auto_install(&AcpAvailabilityStatus::NotInstalled));
+        assert_eq!(
+            super::super::managed_agent_avatar_url("/usr/local/bin/agy-acp"),
+            Some(super::super::antigravity::AVATAR_URL.to_string())
+        );
+        assert_eq!(
+            super::super::normalize_agent_args("agy-acp", vec!["acp".into()]),
+            Vec::<String>::new()
+        );
     }
 }
