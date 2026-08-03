@@ -318,19 +318,59 @@ if [ "$SAY_HELLO" = 1 ]; then
   fi
 fi
 
-# --- 8. watcher --------------------------------------------------------------
+# --- 8. receiver --------------------------------------------------------------
+# Reception is started here, before anything is armed, and it is a separate
+# concern from waking. It runs outside Monitor and keeps fetching messages into
+# a log whatever happens to the Monitor task; see lib.sh for why.
 WATCH_CMD="$HERE/buzz-watch.sh - $CHANNEL 5"
+STREAM_LOG=$(stream_log "$SESSION_NAME" "$CHANNEL")
+RECV_BAD=0
+case "$(receiver_state "$SESSION_NAME" "$CHANNEL")" in
+  live*) ;;
+  *) ensure_receiver "$SESSION_NAME" "$CHANNEL" 5 || RECV_BAD=1 ;;
+esac
+RSTATE=$(receiver_state "$SESSION_NAME" "$CHANNEL")
+case "$RSTATE" in
+  live*)
+    echo "receiver : $(printf '%s' "$RSTATE" | awk '{print "live pid " $2 ", heartbeat " $3 "s ago"}')"
+    echo "           queueing to $STREAM_LOG" ;;
+  *)
+    RECV_BAD=1
+    cat >&2 <<EOF
+receiver : $RSTATE — NOT RECEIVING. This is the serious one: nothing is
+           fetching messages for this session, so peers' messages are not
+           being missed by the watcher, they are not arriving at all.
+           Why, if it said anything: $(stream_err "$SESSION_NAME" "$CHANNEL")
+EOF
+    ;;
+esac
+
+# --- 9. watcher ---------------------------------------------------------------
 if PID=$(watcher_pid "$SESSION_NAME"); then
-  echo "watcher  : running (pid $PID)"
+  echo "watcher  : armed (pid $PID)"
   [ "$SHOW_ALL" = 1 ] && roster_report
+  [ "$RECV_BAD" = 0 ] || exit 6
   exit 0
+fi
+
+QUEUED=0
+if [ -f "$STREAM_LOG" ] && [ -f "$(stream_pos "$SESSION_NAME" "$CHANNEL")" ]; then
+  HAVE=$(wc -l < "$STREAM_LOG" 2>/dev/null | tr -d ' ')
+  DONE=$(cat "$(stream_pos "$SESSION_NAME" "$CHANNEL")" 2>/dev/null)
+  case "$HAVE" in ''|*[!0-9]*) HAVE=0 ;; esac
+  case "$DONE" in ''|*[!0-9]*) DONE=0 ;; esac
+  [ "$HAVE" -gt "$DONE" ] && QUEUED=$(( HAVE - DONE ))
 fi
 
 if [ "$STATUS_ONLY" = 1 ]; then
   # Exit non-zero so "connected but deaf" is a checkable state, not prose.
-  echo "watcher  : NOT ARMED — peers' messages cannot wake this session."
+  echo "watcher  : NOT ARMED — nothing will wake this session."
+  if [ "$QUEUED" != 0 ]; then
+    echo "           $QUEUED message(s) already queued; arming delivers them."
+  fi
   echo "           Arm it with: Monitor(command: \"$WATCH_CMD\", persistent: true)"
   [ "$SHOW_ALL" = 1 ] && roster_report
+  [ "$RECV_BAD" = 0 ] || exit 6
   exit 1
 fi
 
@@ -344,12 +384,27 @@ Monitor(
   description: "buzz coordination: ${CHANNEL_NAME:-$CHANNEL}",
   persistent: true
 )
+EOF
+
+[ "$QUEUED" = 0 ] || cat <<EOF
+
+           $QUEUED message(s) arrived while nothing was armed and are waiting in
+           the log. Arming replays them from the stored offset — in order, once.
+EOF
+
+cat <<EOF
 
 Keep the task id that call returns — 'buzz-connect.sh leave' and 'disconnect'
 print the TaskStop that needs it, and a watcher nobody can stop outlives the
-session and keeps polling.
+session.
+
+If that Monitor ever dies, messages are NOT lost: the receiver is a separate
+process and keeps queueing them. Re-arm with exactly the call above and every
+message since is delivered. Check with 'buzz-connect.sh status', which exits
+non-zero when the watcher is unarmed and 6 when the receiver itself is down.
 
 Post and catch up with (they load this session's identity themselves):
   $HERE/buzz-msg.sh send "STATUS ..."
   $HERE/buzz-msg.sh read 50
 EOF
+[ "$RECV_BAD" = 0 ] || exit 6

@@ -19,10 +19,11 @@ version: 1
 ~/.claude/skills/buzz-multi-session/scripts/buzz-connect.sh disconnect
 ```
 
-By default it does the two unambiguous things and nothing else: posts `DONE`
-while still a channel member, and prints the exact **`TaskStop`** for the
-watcher — a Claude Code `Monitor` that a shell script cannot kill, and that
-otherwise keeps polling a channel where nothing will happen again. Then it clears
+By default it does the three unambiguous things and nothing else: posts `DONE`
+while still a channel member, stops the receiver — an ordinary process, so this
+one really is stopped — and prints the exact **`TaskStop`** for the watcher — a Claude Code `Monitor` that a shell script cannot kill, and that
+otherwise keeps a relay connection open to a channel where nothing will happen
+again. Then it clears
 the room pin and prints what remains.
 
 Two opt-ins, because each is right in one case and wrong in the other:

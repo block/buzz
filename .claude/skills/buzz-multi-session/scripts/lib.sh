@@ -937,11 +937,171 @@ diagnose_channel() { # $1 channel uuid, $2 channel name, $3 pubkey, $4 owner-or-
 EOF
 }
 
+# --- the receiver, and why it is not the watcher ------------------------------
+# Two jobs that used to be one process, deliberately split:
+#
+#   RECEIVING  buzz-stream.sh. Holds the relay connection, filters, and appends
+#              one notification line to a log. Runs OUTSIDE Monitor, in its own
+#              process group, so nothing that happens to a Monitor task can stop
+#              messages being fetched.
+#   WAKING     buzz-watch.sh, which is all Monitor runs: `tail -f` on that log,
+#              resuming from a stored line offset.
+#
+# The split exists because Monitor-hosted watchers have been observed dying
+# (exit 144) while the identical command under nohup stayed healthy on the same
+# channel. Nobody has a mechanism. What the split buys is that a mechanism is no
+# longer needed: a dead Monitor now costs the WAKE, not the MESSAGES. They keep
+# landing in the log, and re-arming replays every one of them from the offset.
+# Before the split, a dead watcher meant those messages were never fetched at
+# all and were gone.
+#
+# Files are per identity AND per channel. One log per channel would be wrong:
+# the log holds post-filter notifications, and the filter that matters most is
+# "drop my own pubkey" — three worktree sessions sharing the default channel
+# would each be woken by their own messages.
+STREAM_DIR="${BUZZ_STREAM_DIR:-$HOME/.buzz/stream}"
+
+stream_base() { printf '%s/%s.%s' "$STREAM_DIR" "$1" "$(printf '%s' "$2" | cut -c1-8)"; }
+stream_log()  { printf '%s.log' "$(stream_base "$1" "$2")"; }   # notifications
+stream_err()  { printf '%s.err' "$(stream_base "$1" "$2")"; }   # the post-mortem
+stream_hb()   { printf '%s.hb'  "$(stream_base "$1" "$2")"; }   # pid + heartbeat
+stream_pidf() { printf '%s.pid' "$(stream_base "$1" "$2")"; }
+stream_pos()  { printf '%s.pos' "$(stream_base "$1" "$2")"; }   # lines delivered
+
+# A heartbeat older than this means dead or wedged. The receiver ticks every
+# BUZZ_STREAM_TICK seconds, so this has to clear several ticks.
+stream_tick()  { setting BUZZ_STREAM_TICK 15; }
+stream_stale() { setting BUZZ_STREAM_STALE 60; }
+
+# receiver_state NAME CHANNEL — "live <pid> <age>" | "stale <pid> <age>" |
+# "dead <pid>" | "none". Age is seconds since the last heartbeat.
+#
+# Liveness is the heartbeat, not just the pid: a receiver wedged on a socket is
+# still a running process, and "the process exists" would call that healthy.
+#
+# The pidfile is authoritative for WHICH process is the receiver, and the
+# heartbeat only for whether it is well. They were briefly the same file and it
+# produced a flapping answer: a receiver killed with SIGKILL runs no trap, so its
+# heartbeat child was orphaned and went on stamping a fresh timestamp against a
+# dead pid, alternating with the replacement receiver's own writes. Whoever wrote
+# last decided the answer, and `disconnect` duly reported "not running" about a
+# receiver that was running, and left it behind.
+receiver_pid() {
+  local pid
+  pid=$(cat "$(stream_pidf "$1" "$2")" 2>/dev/null) || return 1
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$pid"
+}
+
+receiver_state() {
+  local hb pid ts age now
+  pid=$(receiver_pid "$1" "$2") || { printf 'none'; return 0; }
+  kill -0 "$pid" 2>/dev/null || { printf 'dead %s' "$pid"; return 0; }
+  hb=$(stream_hb "$1" "$2")
+  ts=$(sed -n '2p' "$hb" 2>/dev/null)
+  case "$ts" in ''|*[!0-9]*) ts=0 ;; esac
+  now=$(date +%s)
+  age=$(( now - ts ))
+  [ "$age" -lt 0 ] && age=0
+  if [ "$age" -gt "$(stream_stale)" ]; then
+    printf 'stale %s %s' "$pid" "$age"
+  else
+    printf 'live %s %s' "$pid" "$age"
+  fi
+}
+
+# ensure_receiver NAME CHANNEL POLL — start the receiver unless one is already
+# healthy. Idempotent, and safe to call from connect, from the watcher, and from
+# status alike; that redundancy is the point, because whichever of them runs
+# next is the one that repairs a receiver that stopped.
+ensure_receiver() {
+  local name="$1" chan="$2" poll="${3:-5}" state pid i
+  state=$(receiver_state "$name" "$chan")
+  case "$state" in
+    live*) return 0 ;;
+    stale*|dead*)
+      pid=$(printf '%s' "$state" | cut -d' ' -f2)
+      # A wedged receiver holds the lock and the relay connection, so it has to
+      # go before a replacement can work. A dead one is already gone.
+      kill -TERM "$pid" 2>/dev/null
+      sleep 1
+      ;;
+  esac
+  mkdir -p "$STREAM_DIR"
+  chmod 700 "$STREAM_DIR" 2>/dev/null || true
+  # nohup + background: the receiver must outlive both this shell and any
+  # Monitor task, which is the entire reason it is a separate process.
+  nohup "$BUZZ_SKILL_SCRIPTS/buzz-stream.sh" "$name" "$chan" "$poll" \
+    >/dev/null 2>&1 &
+  disown 2>/dev/null || true
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    sleep 1
+    case "$(receiver_state "$name" "$chan")" in live*) return 0 ;; esac
+    : "$i"
+  done
+  return 1
+}
+
+# stop_receiver NAME CHANNEL — used by leave and disconnect. A receiver left
+# running holds an authenticated relay connection open for a session that has
+# finished, and goes on appending to a log nobody will read.
+#
+# Deliberately keyed on the pidfile and not on health. A wedged receiver is the
+# one it is most important to be able to stop, and asking "is it well?" before
+# "is it there?" is how one got left behind.
+stop_receiver() {
+  local pid
+  pid=$(receiver_pid "$1" "$2") || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  kill -TERM "$pid" 2>/dev/null
+  printf '%s' "$pid"
+  return 0
+}
+
 # --- watcher liveness --------------------------------------------------------
 # Keyed on the session id, not the name, so a /rename mid-watch does not orphan
 # the marker and make an armed watcher look unarmed.
 watch_marker() {
   printf '%s/.watch-%s' "$SESSION_DIR" "${CLAUDE_CODE_SESSION_ID:-$1}"
+}
+
+# watcher_warning NAME CHANNEL — print a warning when this session cannot
+# currently hear its peers, else print nothing. Returns 0 when something is
+# wrong, so a caller can also change its exit status.
+#
+# It is called before every send and every read, because those are the moments a
+# session is actually relying on the channel, and "connected but deaf" is
+# indistinguishable from "nobody is talking" until something says otherwise.
+watcher_warning() {
+  local name="$1" chan="$2" rstate wpid bad=1
+  rstate=$(receiver_state "$name" "$chan")
+  case "$rstate" in
+    live*) ;;
+    *)
+      bad=0
+      note ""
+      note "  WARNING: nothing is receiving messages for this session."
+      note "    receiver: $rstate  (per-channel, runs outside Monitor)"
+      note "    Messages posted by peers are not being fetched at all."
+      note "    Fix: $BUZZ_SKILL_SCRIPTS/buzz-connect.sh status"
+      note "         restarts it and prints the Monitor to re-arm."
+      ;;
+  esac
+  if ! wpid=$(watcher_pid "$name"); then
+    if [ "$bad" != 0 ]; then
+      bad=0
+      note ""
+      note "  WARNING: this session's watcher is not armed."
+      note "    Messages ARE still being received and are queued in"
+      note "      $(stream_log "$name" "$chan")"
+      note "    but nothing will wake this session when one arrives. Re-arm and"
+      note "    every message queued since it died is delivered:"
+      note "    $BUZZ_SKILL_SCRIPTS/buzz-connect.sh status"
+    fi
+  else
+    : "$wpid"
+  fi
+  return "$bad"
 }
 
 watcher_pid() {  # prints the pid of a live watcher for this session, else fails
@@ -1036,11 +1196,12 @@ roster_report() {
         live=$((live + 1))
         pid=${state#live }; ch=${pid#* }; pid=${pid%% *}
         state="live pid $pid"
-        # A watcher still polling a room the identity is no longer pinned to is
-        # the leak this whole verb exists for: the session went away, the Monitor
-        # did not, and it will poll until the Claude Code session ends.
+        # A watcher still listening to a room the identity is no longer pinned
+        # to is the leak this whole verb exists for: the session went away, the
+        # Monitor did not, and it holds a relay connection open until the Claude
+        # Code session ends.
         if [ -z "$room" ]; then
-          room="none pinned; still polling ${ch:0:8}"
+          room="none pinned; still watching ${ch:0:8}"
           orphan=$((orphan + 1))
         fi ;;
       unbound)
@@ -1054,7 +1215,7 @@ roster_report() {
 
   $total identities, $live with a live watcher.
 
-  WATCHER   live = a Monitor is polling for it now. none = nothing is listening,
+  WATCHER   live = a Monitor is listening for it now. none = nothing is listening,
             but the identity is still a relay member and still holds a key.
             daemon = a provisioned agent identity (buzz-agent-provision.sh); it
             has no watcher by design, because its harness is its own event loop.
@@ -1075,9 +1236,9 @@ roster_report() {
 EOF
   [ "$orphan" = 0 ] || cat <<EOF
 
-  $orphan watcher(s) are polling a room their identity is no longer pinned to.
+  $orphan watcher(s) are listening to a room their identity is no longer pinned to.
   That is a Monitor whose session has moved on; stop it with TaskStop. Until then
-  it costs a relay call every 5 seconds and wakes nobody.
+  it holds an authenticated WebSocket open against the relay and wakes nobody.
 EOF
   [ "$unbound" = 0 ] || cat <<EOF
 
@@ -1089,16 +1250,18 @@ EOF
 }
 
 # --- teardown -----------------------------------------------------------------
-# Four separable actions, and only the first two are unambiguous, so only the
-# first two happen by default:
+# Five separable actions, and only the first three are unambiguous, so only the
+# first three happen by default:
 #
-#   1. stop the watcher   — always. It is a Claude Code Monitor, so this script
-#                           cannot kill it; it prints the exact TaskStop call.
-#   2. say goodbye        — always. A session that stops answering without a DONE
+#   1. say goodbye        — always. A session that stops answering without a DONE
 #                           is indistinguishable from one that is just slow.
-#   3. leave the channel  — --leave-channel. Right for a finished piece of work,
+#   2. stop the receiver  — always, and this one really is stopped: it is an
+#                           ordinary process, not a Monitor task.
+#   3. stop the watcher   — always. It is a Claude Code Monitor, so this script
+#                           cannot kill it; it prints the exact TaskStop call.
+#   4. leave the channel  — --leave-channel. Right for a finished piece of work,
 #                           wrong for a session that reconnects tomorrow.
-#   4. retire the identity — --retire. Right for a throwaway worktree, wrong for
+#   5. retire the identity — --retire. Right for a throwaway worktree, wrong for
 #                           anything resumable. Never implicit.
 #
 # Reads SESSION_NAME, SESSION_DISPLAY, PUBKEY, CHANNEL, CHANNEL_NAME.
@@ -1125,12 +1288,25 @@ teardown() {
     fi
   fi
 
-  # 2. The watcher. A shell script cannot stop a Monitor — print the call, the
+  # 2. The receiver. Unlike the watcher this IS an ordinary process, so it is
+  #    stopped here rather than described. Leaving it running would keep an
+  #    authenticated relay connection open for a session that has finished, and
+  #    it would go on appending to a log nobody will ever read again.
+  if pid=$(stop_receiver "$SESSION_NAME" "$CHANNEL"); then
+    echo "receiver : stopped (pid $pid). Nothing is fetching messages for this"
+    echo "           session any more. Its log and post-mortem are kept:"
+    echo "             $(stream_log "$SESSION_NAME" "$CHANNEL")"
+    echo "             $(stream_err "$SESSION_NAME" "$CHANNEL")"
+  else
+    echo "receiver : not running — nothing to stop."
+  fi
+
+  # 3. The watcher. A shell script cannot stop a Monitor — print the call, the
   #    mirror of the Monitor(...) that connect prints.
   if pid=$(watcher_pid "$SESSION_NAME"); then
     cat <<EOF
 watcher  : running (pid $pid). It is a Claude Code Monitor, so this script
-           cannot stop it. Stop it now — otherwise it keeps polling $room
+           cannot stop it. Stop it now — otherwise it keeps listening to $room
            after this session is gone:
 
 TaskStop(
@@ -1145,14 +1321,14 @@ EOF
     echo "watcher  : not running — nothing to stop."
   fi
 
-  # 3. Unpin the room. The pin is what makes a bare `buzz-msg.sh send` post here;
+  # 4. Unpin the room. The pin is what makes a bare `buzz-msg.sh send` post here;
   #    leaving it set after a leave would route messages into a room this session
   #    is no longer in, which fails with 'not a channel member' and reads as a bug.
   meta_unset "$SESSION_NAME" BUZZ_SESSION_CHANNEL
   meta_unset "$SESSION_NAME" BUZZ_SESSION_CHANNEL_NAME
   echo "room     : unpinned. 'buzz-msg.sh send' no longer posts to $room."
 
-  # 4. Opt-in: leave the channel.
+  # 5. Opt-in: leave the channel.
   if [ "$do_leave" = 1 ] && [ -n "$CHANNEL" ]; then
     if buzz_run channels leave --channel "$CHANNEL"; then
       cat <<EOF
@@ -1188,12 +1364,12 @@ EOF
     echo "           the membership. Keeping it is what makes a reconnect free."
   fi
 
-  # 5. Opt-in: retire the identity.
+  # 6. Opt-in: retire the identity.
   if [ "$do_retire" = 1 ]; then
     retire_identity || return 5
   fi
 
-  # 6. What is left, said plainly. Every teardown leaves residue and pretending
+  # 7. What is left, said plainly. Every teardown leaves residue and pretending
   #    otherwise is how six identities accumulated in the first place.
   cat <<EOF
 remains  : keypair  $(identity_file "$SESSION_NAME")  (mode 600)

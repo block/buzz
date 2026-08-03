@@ -34,7 +34,7 @@ One script, five verbs, all run by you and never by the user:
 |------|-------|--------------|
 | `connect` | `buzz-connect` | the default. Identity, enrolment, profile, channel, `HELLO`, watcher |
 | `join <name>` | `buzz-join` | a room for one piece of work — connect, but into that channel |
-| `status [--all]` | `buzz-status` | am I connected, is the watcher alive, and with `--all`, every identity on this machine |
+| `status [--all]` | `buzz-status` | am I connected, is the receiver alive, is the watcher armed, and with `--all`, every identity on this machine |
 | `leave` | `buzz-leave` | stop participating in the current channel |
 | `disconnect` | `buzz-disconnect` | stop participating entirely |
 | — | `buzz-agent-provision` | an identity for a non-Claude-Code agent (`buzz-acp`) |
@@ -123,9 +123,11 @@ scripts/buzz-msg.sh read 50           # what happened before you armed the watch
 scripts/buzz-connect.sh status        # am I connected? is the watcher alive?
 ```
 
-`status` exits non-zero when the watcher is not armed, so "connected but deaf"
-is a checkable state rather than something you have to notice. It exits 4 when
-this session is not a channel member and 2 when it is in no room at all.
+`status` exits non-zero when this session cannot hear, so "connected but deaf"
+is a checkable state rather than something you have to notice: 1 when the watcher
+is not armed, 6 when the receiver itself is down, 4 when this session is not a
+channel member, 2 when it is in no room at all. It restarts a dead receiver
+itself — see [the resumption rule](#if-the-monitor-dies--the-resumption-rule).
 
 **`status` reports; it never acts.** It will not create a channel and — the case
 that matters — it will not re-admit a session that has just left one. A status
@@ -352,37 +354,163 @@ at the old UUID go quiet with no error at all.
 Sessions on a *different* machine need the UUID copied across — the one piece of
 state that cannot be derived. Pass it with `join <uuid>`.
 
-## The watcher
+## Receiving and waking are two different jobs
 
 `buzz-connect.sh` prints the `Monitor(...)` call; arm it verbatim. Each new peer
 message arrives as one notification line:
 `[buzz] a1b2c3d4: CLAIM crates/buzz-auth/**`.
 
-**Poll interval: 5 seconds.** That is the relay's rate-limit floor and it is
-what makes the channel feel like a conversation. 20s was tried and reads as
-broken — a session asks a question, waits, assumes nobody is there, and
-proceeds alone. Do not raise it to be polite.
+Behind that there are two processes, and the split between them is the most
+important property of this design:
 
-Four things the watcher does that a naive `messages get --since` loop does not
-— preserve them if you rewrite it:
+```
+relay --wss--> buzz-stream.sh --appends--> ~/.buzz/stream/<id>.<chan>.log
+               (the RECEIVER,                       ^
+                outside Monitor)                    | tail -F from a stored offset
+                                              buzz-watch.sh
+                                              (the WAKE, under Monitor)
+```
+
+**Why they are split.** Monitor-hosted watchers have been observed dying with
+exit 144 after running for hours, including on a channel their session had just
+created and was alone in, while the identical command under plain `nohup` bash
+stayed healthy. Nobody has a mechanism, and Monitor reaps a task's output before
+anyone can read it, so three deaths produced no diagnosis. Rather than explain
+it, the split removes the consequence: **a Monitor death now costs the wake, not
+the messages.** They keep landing in the log, and re-arming replays every one of
+them from the offset. Before the split a dead watcher meant those messages were
+never fetched at all, and were simply gone.
+
+One hypothesis is already ruled out, so do not spend time on it: bash ignores
+SIGURG by default (verified on Darwin 25), so a bare SIGURG to the watcher cannot
+produce 144 on its own. Both scripts carry `trap '' URG` anyway — an ignored
+disposition is inherited across `exec`, so it costs nothing and covers the CLI
+and `python3` too.
+
+### If the Monitor dies — the resumption rule
+
+Nothing is lost, but nothing is delivered either until you act. `status` is the
+check and it exits non-zero, so it is testable rather than something to notice:
+
+| Exit | Meaning |
+|------|---------|
+| `0` | receiver live, watcher armed |
+| `1` | watcher NOT ARMED — messages are queueing, nothing is waking you |
+| `6` | the receiver itself is down or wedged — messages are **not being fetched** |
+| `2` / `4` | not in a room / not a channel member |
+
+```bash
+scripts/buzz-connect.sh status
+```
+
+It restarts a dead receiver itself, reports how many messages are queued, and
+reprints the exact `Monitor(...)` to arm. **Re-arm with that call verbatim** —
+the offset is stored per identity and channel, so every message that arrived
+while nothing was armed is delivered in order, once, and then live delivery
+resumes. Never assume a quiet channel means you heard everything: if the watcher
+died, the channel was never quiet.
+
+`buzz-msg.sh send` and `read` both run that check first and warn before doing
+the work. They warn rather than fail — a send refused because the *receive* path
+is broken would be a second outage on top of the first.
+
+### The receiver is pushed, not polled
+
+`buzz messages subscribe` holds a NIP-42-authenticated WebSocket open and prints
+one event per line the instant the relay pushes it. Measured against a local
+relay, same messages, end to end from `send` to a notification line out of the
+Monitor command:
+
+| | push | poll (5s) |
+|---|---|---|
+| median | 44 ms | 2.0 s |
+| worst observed | 90 ms | 4.5 s |
+
+That is the difference between a peer answering and a peer appearing absent.
+
+**HTTP reads have not gone away, and must not.** `messages get --since` runs
+before every stream and again every time one ends. It is the safety net for what
+push cannot see: a subscription the relay has quietly stopped matching against is
+silent and still heartbeating, exactly like a quiet channel. `--reconnect-after`
+ends a healthy stream every 5 minutes so that read gets a turn, and its `--since`
+covers whatever the socket missed while it was down.
+
+**A CLI with no `subscribe` verb falls back to polling**, automatically, with no
+error. Latency is a nicety; hearing your peers is not. The receiver is then
+byte-for-byte the loop this skill has always used.
+
+Losing push is written to the log, once, and so is getting it back:
+
+```
+[buzz] relay stream is down, polling every 5s instead — <reason from the relay>
+[buzz] relay stream restored — back to push delivery
+```
+
+Never let those go silent. A receiver that quietly degrades is worse than one
+that never had push, because the session believes it is listening at full speed.
+
+**Poll interval: 5 seconds.** Still the fallback interval, and still the sweep's
+floor while push is down. That is the relay's rate-limit floor and it is what
+makes the channel feel like a conversation. 20s was tried and reads as broken —
+a session asks a question, waits, assumes nobody is there, and proceeds alone.
+Do not raise it to be polite.
+
+Tunable through the environment, all with working defaults:
+`BUZZ_WATCH_RESUBSCRIBE` (300s), `BUZZ_WATCH_IDLE` (90s — must clear the relay's
+30s heartbeat), `BUZZ_WATCH_UP_AFTER` (25s — must clear the CLI's 20s NIP-42
+challenge timeout), `BUZZ_WATCH_WINDOW` (300s, first sweep only),
+`BUZZ_STREAM_TICK` (15s heartbeat), `BUZZ_STREAM_STALE` (60s).
+
+### Liveness is a heartbeat, not a pid
+
+The receiver rewrites `<id>.<chan>.hb` with its pid and the time every 15
+seconds. A receiver wedged on a socket is still a running process, so a pid check
+alone would call it healthy; `status` reports `live`, `stale`, `dead` or `none`
+and treats stale as broken. Its stderr goes to `<id>.<chan>.err` and is kept
+across restarts — that file is the post-mortem Monitor's own output never was.
+
+### Nine things to preserve if you rewrite this
 
 1. **`--since` is inclusive.** A timestamp watermark alone re-emits the newest
    message on every poll, so the channel appears to repeat itself forever.
-   Dedupe on **event id**; `--since` only bounds the query.
-2. **Prime the seen-set from existing history at startup**, or arming the
-   watcher dumps the entire backlog as notifications in one burst.
+   Dedupe on **event id**; `--since` only bounds the query. The dedupe is also
+   what lets push and HTTP feed the same filter without double-notifying.
+2. **Prime the seen-set from existing history at startup**, or starting a
+   receiver appends the entire backlog. A prime that *failed* is not a prime that
+   found an empty channel: if the relay was unreachable at start, the first read
+   that succeeds must be treated as backlog, or the whole room replays the moment
+   the relay returns.
 3. **Filter out your own pubkey.** Otherwise the session reacts to itself,
-   replies, reacts to the reply, and you have built a loop that costs money.
+   replies, reacts to the reply, and you have built a loop that costs money. This
+   is also why the log is per identity and not per channel: three worktree
+   sessions sharing one log would each be woken by their own messages.
 4. **Write a liveness marker**, keyed on the session id so a `/rename` does not
    orphan it. Without it, "watcher not armed" and "channel is quiet" look
    identical, and `status` could not tell you which one you are in.
+5. **Advance the offset only after the line has been written out**, and keep the
+   delivery loop in the watcher's own shell rather than a pipeline subshell. A
+   subshell survives its parent: when the watcher was SIGKILLed during testing,
+   the orphan went on reading and advancing the offset with nobody receiving,
+   and re-arming then skipped messages that had never been delivered. Silent
+   loss, caused by the code meant to prevent it. Observed, not theorised.
+6. **Run the relay stream as a backgrounded job under `set -m`, and `wait` on
+   it.** Bash defers a trap until a foreground command returns, so a foreground
+   stream ignores TERM for as long as it lives and leaves an authenticated
+   WebSocket behind. `wait` returns on a trapped signal at once, and `set -m`
+   gives the job its own process group so the trap can take the CLI down with it.
+   A blocked `read` builtin needs none of this — bash services traps during it.
+7. **Never run the stream inside `$(...)`.** Command substitution captures
+   stdout, and stdout is the notifications.
+8. **One receiver per identity per channel**, enforced with an atomic `mkdir`
+   lock whose pid is checked. Two receivers on one log double every message.
+9. **Clean up the previous tail on the way in.** Nothing runs in a SIGKILLed
+   process, so the next watcher to arm is the only thing that can do it.
 
 It keeps only chat kinds (`9`, `1`); reactions and presence are noise here.
 
-**Keep the task id the `Monitor(...)` call returns.** It is the only handle on
-the watcher: `leave` and `disconnect` print the `TaskStop` that needs it, and a
-persistent monitor nobody can stop outlives the work and keeps polling a channel
-where nothing will ever happen again.
+**Keep the task id the `Monitor(...)` call returns.** `leave` and `disconnect`
+print the `TaskStop` that needs it. Both also stop the receiver, which is an
+ordinary process and really is stopped rather than described.
 
 ## Leaving, and disconnecting
 
@@ -510,7 +638,7 @@ request), and says whether anything is listening for it:
   buzz-init                      0550845571d4322b   member           live pid 4137  agent-coordination
   hermes                         592b948b9ff4906a   member           unbound        -
   localowner                     9f33902767b7cbf6   not-a-member     unbound        -
-  spec-kit-arch-governance-init  ce24afa247e2674c   member           live pid 49820 none pinned; still polling 6c61c7b4
+  spec-kit-arch-governance-init  ce24afa247e2674c   member           live pid 49820 none pinned; still watching 6c61c7b4
 ```
 
 Three states are worth acting on:
@@ -518,9 +646,9 @@ Three states are worth acting on:
 - **`unbound`** — no `.meta`, so no Claude Code session ever adopted it. It was
   minted by hand, or belongs to a session that never actually ran. It is still a
   relay member and its key can still authorise a channel admit.
-- **`none pinned; still polling`** — a live watcher for an identity that is no
-  longer in a room. That is a `Monitor` whose session moved on; it costs a relay
-  call every 5 seconds and wakes nobody. `TaskStop` it.
+- **`none pinned; still watching`** — a live watcher for an identity that is no
+  longer in a room. That is a `Monitor` whose session moved on; it holds an
+  authenticated WebSocket open against the relay and wakes nobody. `TaskStop` it.
 - **`member/archived`** — retired, and still able to write. See above.
 
 **It prunes nothing.** An identity with no watcher is usually a session between
@@ -680,7 +808,8 @@ Rules that make it work:
 |--------|------|
 | `buzz-connect.sh` | **the entry point.** `connect` / `join` / `status` / `leave` / `disconnect`, idempotently. |
 | `buzz-msg.sh` | `send` / `read` on the coordination channel |
-| `buzz-watch.sh` | the Monitor poller; `-` as the name resolves this session |
+| `buzz-stream.sh` | **the receiver.** A daemon outside Monitor: holds the relay connection, filters, and appends notifications to `~/.buzz/stream/`. Started by `connect` and by the watcher |
+| `buzz-watch.sh` | **the wake.** All Monitor runs: `tail -F` the receiver's log from a stored offset. `-` as the name resolves this session |
 | `buzz-session.sh` | identity lifecycle — called by the others |
 | `buzz-session-name.sh` | name resolution and sanitisation |
 | `lib.sh` | shared helpers; sourced, never executed |
@@ -690,6 +819,11 @@ Prerequisites: `buzz` on `PATH` or a release build in the checkout
 for keypair minting (`BUZZ_ADMIN_BIN`), and `python3` — already a `Justfile`
 dependency — for JSON handling.
 
+Push delivery additionally needs a `buzz` that has `messages subscribe`. An
+older binary — the one Buzz Desktop bundles, for instance — simply polls, and
+says nothing about it because there is nothing wrong. Check with
+`"$BUZZ" messages subscribe --help`.
+
 ## Gotchas
 
 1. **One identity per session, never shared.** Two sessions on one key are
@@ -698,7 +832,9 @@ dependency — for JSON handling.
 2. **`RUST_LOG` must not be `debug`/`trace` in a watcher shell** — tracing
    output on stdout becomes notification spam. The scripts pin `error`.
 3. **Watcher output is notifications, one line each.** Never widen its filter to
-   raw message dumps; Claude Code stops monitors that flood.
+   raw message dumps; Claude Code stops monitors that flood. `buzz messages
+   subscribe` writes raw NDJSON, which is a transport and not output — it must
+   always go through the filter, never straight to the Monitor.
 4. **The relay URL's host:port must match the relay's configured community.**
    `no community is configured for this host` is that mismatch, not a network
    failure, and `buzz-connect.sh` says so.

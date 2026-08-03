@@ -33,11 +33,17 @@ still counts it as a member, and whether anything is listening for it. It costs
 one relay call per identity, which is why it is on request. Three states are
 worth acting on: `unbound` (no Claude Code session ever adopted it, yet it is
 still a relay member holding a key that can authorise a channel admit), `none
-pinned; still polling` (a watcher whose session moved on — `TaskStop` it), and
+pinned; still watching` (a watcher whose session moved on — `TaskStop` it), and
 `member/archived` (retired, and still able to write).
 
 **It prunes nothing.** An identity with no watcher is usually a session between
 runs, and nothing here can tell the difference.
+
+Two separate things can be broken, and the exit code says which: **1** the
+Monitor is not armed, so messages are queueing and nothing is waking this
+session; **6** the receiver itself is down or wedged, so messages are not being
+fetched at all. This verb restarts a dead receiver and reprints the `Monitor(...)`
+to arm — re-arming replays everything queued since it died.
 
 This skill is one entry point to `buzz-connect.sh` and adds no behaviour of its
 own. The full model is documented once, in the **`buzz-multi-session`** skill.

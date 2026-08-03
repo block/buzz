@@ -33,6 +33,7 @@ For a room of its own rather than the shared default, use the `buzz-join` skill.
 
 This skill is one entry point to `buzz-connect.sh` and adds no behaviour of its
 own. The whole model — identities that follow `/rename`, the two membership
-gates, the `CLAIM`/`RELEASE` protocol, the watcher's four non-obvious rules — is
+gates, the `CLAIM`/`RELEASE` protocol, how the watcher is pushed rather than
+polled — is
 documented once, in the **`buzz-multi-session`** skill. Read that when something
 is surprising.

@@ -45,6 +45,12 @@ resolve_channel "$CHANNEL_ARG" 0 || die \
 "no coordination channel found (looked for '${CHANNEL_NAME:-?}').
   Fix: run $HERE/buzz-connect.sh — it finds or creates the channel."
 
+# Every send and every read is a moment this session is relying on the channel,
+# so both check first. It warns and continues rather than failing: a send that
+# refused to go out because the RECEIVE path is broken would be a second outage
+# on top of the first.
+watcher_warning "$SESSION_NAME" "$CHANNEL" || true
+
 case "$cmd" in
   send)
     [ -n "$ARGS" ] || die "usage: $0 send <text|->"
