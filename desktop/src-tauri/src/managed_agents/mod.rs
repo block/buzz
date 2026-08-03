@@ -8,6 +8,7 @@ pub(crate) use agent_env::{
 };
 mod backend;
 pub(crate) mod config_bridge;
+mod connected_agents;
 pub(crate) mod custom_harnesses;
 mod discovery;
 pub(crate) mod effective_config;
@@ -24,6 +25,7 @@ mod process_lifecycle;
 pub(crate) mod readiness;
 pub(crate) mod reconcile;
 mod relay_mesh;
+pub mod remote_probe;
 mod repos;
 mod restore;
 pub mod retention;
@@ -32,6 +34,7 @@ mod runtime_commands;
 mod runtime_types;
 pub(crate) mod snapshot_avatar;
 pub(crate) mod spawn_hash;
+pub mod ssh_config;
 pub(crate) mod storage;
 pub(crate) mod team_events;
 mod team_repair;
@@ -48,6 +51,10 @@ pub(crate) fn lock_path_mutex() -> std::sync::MutexGuard<'static, ()> {
 }
 
 pub use backend::*;
+pub(crate) use connected_agents::{
+    load_connected_agents, normalize_community_url, save_connected_agents, ConnectedAgentRecord,
+    ConnectedAgentSummary,
+};
 pub use discovery::*;
 pub use env_vars::*;
 #[cfg(windows)]

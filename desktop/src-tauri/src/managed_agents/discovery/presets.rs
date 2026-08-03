@@ -10,17 +10,17 @@ use super::normalize_agent_args;
 /// Static data for a well-known tier-2 ACP harness.
 pub(super) struct PresetHarness {
     pub(super) id: &'static str,
-    label: &'static str,
-    command: &'static str,
-    args: &'static [&'static str],
-    install_instructions_url: &'static str,
-    install_hint: &'static str,
+    pub(super) label: &'static str,
+    pub(super) command: &'static str,
+    pub(super) args: &'static [&'static str],
+    pub(super) install_instructions_url: &'static str,
+    pub(super) install_hint: &'static str,
     /// Vendor CLI the ACP command wraps, when the preset is an adapter.
     ///
     /// Consulted only when the adapter is absent, so `AdapterMissing` replaces
     /// `NotInstalled` when the CLI is present but the adapter is not. `None`
     /// when the command is itself the vendor CLI.
-    underlying_cli: Option<&'static str>,
+    pub(super) underlying_cli: Option<&'static str>,
 }
 
 /// Build one preset catalog entry through an injectable command resolver.
