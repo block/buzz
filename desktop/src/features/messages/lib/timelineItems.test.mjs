@@ -173,11 +173,11 @@ test("buildTimelineItems: prepending membership history preserves the loaded suf
   const prependedKeys = prependedItems.slice(1).map((item) => item.key);
 
   assert.deepEqual(loadedKeys, ["c", "message"]);
-  assert.deepEqual(prependedKeys, ["c", "message"]);
+  assert.deepEqual(prependedKeys, ["a", "c", "message"]);
   assert.deepEqual(prependedKeys.slice(-loadedKeys.length), loadedKeys);
 });
 
-test("buildTimelineItems: contiguous member additions extend a group outside one hour", () => {
+test("buildTimelineItems: membership groups stop after one hour", () => {
   const start = dayAt(2026, 6, 14);
   const entries = [
     memberAddedEntry({ id: "a", target: "target-a", createdAt: start }),
@@ -186,15 +186,15 @@ test("buildTimelineItems: contiguous member additions extend a group outside one
   ];
 
   const { items } = buildTimelineItems(entries, null);
-  assert.deepEqual(kinds(items), ["day-divider", "system-group"]);
+  assert.deepEqual(kinds(items), ["day-divider", "system", "system-group"]);
   const group = items.find((item) => item.kind === "system-group");
   assert.deepEqual(
     group?.entries.map((groupEntry) => groupEntry.message.id),
-    ["a", "b", "c"],
+    ["b", "c"],
   );
 });
 
-test("buildTimelineItems: arrivals share a group but intervening rows break it", () => {
+test("buildTimelineItems: incompatible arrivals remain separate", () => {
   const start = dayAt(2026, 6, 14);
   const entries = [
     memberAddedEntry({ id: "a", target: "target-a", createdAt: start }),
@@ -222,9 +222,11 @@ test("buildTimelineItems: arrivals share a group but intervening rows break it",
   const { items } = buildTimelineItems(entries, null);
   assert.deepEqual(kinds(items), [
     "day-divider",
-    "system-group",
+    "system",
+    "system",
     "message",
-    "system-group",
+    "system",
+    "system",
   ]);
 });
 

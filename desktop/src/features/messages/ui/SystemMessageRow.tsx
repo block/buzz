@@ -146,6 +146,7 @@ function buildJoinedThenLeftPayload(
   if (
     arrival?.type !== "member_joined" ||
     departure?.type !== "member_left" ||
+    !arrival.actor ||
     !arrivalTarget ||
     normalizePubkey(arrival.actor) !== arrivalTarget ||
     arrivalTarget !== departureActor

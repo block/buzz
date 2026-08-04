@@ -62,10 +62,10 @@ function entryRenderKey(entry: MainTimelineEntry): string {
   return entry.message.renderKey ?? entry.message.id;
 }
 
-type MembershipChangePayload = {
-  mode: "arrival" | "departure";
-  target: string;
-};
+type MembershipChangePayload =
+  | { mode: "self-arrival"; target: string }
+  | { actor: string; mode: "addition"; target: string }
+  | { mode: "departure"; target: string };
 
 function parseMembershipChangePayload(
   entry: MainTimelineEntry,
@@ -84,13 +84,18 @@ function parseMembershipChangePayload(
     }
     if (
       payload.type !== "member_joined" ||
+      typeof payload.actor !== "string" ||
       typeof payload.target !== "string"
     ) {
       return null;
     }
 
+    const actor = payload.actor.trim().toLowerCase();
     const target = payload.target.trim().toLowerCase();
-    return target ? { mode: "arrival", target } : null;
+    if (!actor || !target) return null;
+    return actor === target
+      ? { mode: "self-arrival", target }
+      : { actor, mode: "addition", target };
   } catch {
     return null;
   }
@@ -100,11 +105,16 @@ function membershipChangesCanGroup(
   first: MembershipChangePayload,
   second: MembershipChangePayload,
 ): boolean {
+  if (first.mode === "self-arrival") {
+    return (
+      second.mode === "self-arrival" ||
+      (second.mode === "departure" && first.target === second.target)
+    );
+  }
   return (
-    (first.mode === "arrival" && second.mode === "arrival") ||
-    (first.mode === "arrival" &&
-      second.mode === "departure" &&
-      first.target === second.target)
+    first.mode === "addition" &&
+    second.mode === "addition" &&
+    first.actor === second.actor
   );
 }
 
@@ -115,9 +125,9 @@ function membershipChangesCanGroup(
  * its contents, but not its identity or the virtual list's existing key suffix.
  *
  * Compatible membership activities stay together while they are contiguous.
- * Arrivals (self-joins and additions) share one summary; an arrival immediately
- * followed by that member leaving becomes a single lifecycle summary. That
- * deliberately lets a contiguous activity run extend beyond its original hour.
+ * Self-joins and additions from one administrator each form their own summary;
+ * a self-join immediately followed by that member leaving becomes a single
+ * lifecycle summary. Groups do not cross the one-hour activity window.
  */
 function buildMembershipGroups(
   entries: readonly MainTimelineEntry[],
