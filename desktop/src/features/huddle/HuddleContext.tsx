@@ -65,6 +65,10 @@ function clamp01(value: number): number {
   return Math.min(1, Math.max(0, value));
 }
 
+function interruptAgentSpeech(agentPubkey: string) {
+  return invoke<void>("interrupt_huddle_speech", { agentPubkey });
+}
+
 const HuddleContext = React.createContext<HuddleContextValue | null>(null);
 
 export function HuddleProvider({
@@ -294,10 +298,6 @@ export function HuddleProvider({
     ownsAudioSession,
     voiceInputMode,
   ]);
-
-  const interruptAgentSpeech = React.useCallback(async () => {
-    await invoke("interrupt_huddle_speech");
-  }, []);
 
   React.useEffect(() => {
     let cancelled = false;

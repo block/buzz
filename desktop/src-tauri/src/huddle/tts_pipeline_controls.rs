@@ -48,11 +48,12 @@ impl TtsPipeline {
     /// The speaker generation is advanced while ownership is locked, so a
     /// stale Stop click cannot cancel a later utterance that starts after the
     /// observed one drains.
-    pub(crate) fn cancel_active_speaker(&self) -> bool {
+    pub(crate) fn cancel_active_speaker(&self, expected_speaker_pubkey: &str) -> bool {
         request_active_speaker_cancel(
             &self.speaker_generations,
             &self.active_speaker,
             &self.speaker_cancel,
+            expected_speaker_pubkey,
         )
     }
 

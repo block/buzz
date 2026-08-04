@@ -134,6 +134,7 @@ pub(super) fn request_active_speaker_cancel(
     generations: &SpeakerGenerations,
     active_speaker: &ActiveSpeaker,
     cancellation: &SpeakerCancellation,
+    expected_speaker_pubkey: &str,
 ) -> bool {
     let active = active_speaker
         .lock()
@@ -141,6 +142,9 @@ pub(super) fn request_active_speaker_cancel(
     let Some(speaker_pubkey) = active.as_deref() else {
         return false;
     };
+    if !speaker_pubkey.eq_ignore_ascii_case(expected_speaker_pubkey) {
+        return false;
+    }
 
     // Keep ownership locked until the generation and cancellation request are
     // committed. The drain path takes the same lock, so the request is bound
@@ -448,6 +452,7 @@ mod speaker_generation_tests {
             &generations,
             &active_speaker,
             &cancellation,
+            "alice",
         ));
         assert_eq!(current_speaker_generation(&generations, "alice"), 1);
         assert_eq!(
@@ -461,11 +466,33 @@ mod speaker_generation_tests {
             &generations,
             &active_speaker,
             &cancellation,
+            "alice",
         ));
 
         let next_utterance =
             queued_speech("alice", current_speaker_generation(&generations, "alice"));
         assert!(queued_speaker_is_current(&generations, &next_utterance));
         assert!(cancellation.lock().expect("cancellation").is_none());
+    }
+
+    #[test]
+    fn stop_request_does_not_cancel_a_different_active_speaker() {
+        let generations = Arc::new(Mutex::new(HashMap::new()));
+        let active_speaker = Arc::new(Mutex::new(Some("bob".to_string())));
+        let cancellation = Arc::new(Mutex::new(None));
+
+        assert!(!request_active_speaker_cancel(
+            &generations,
+            &active_speaker,
+            &cancellation,
+            "alice",
+        ));
+        assert_eq!(current_speaker_generation(&generations, "alice"), 0);
+        assert_eq!(current_speaker_generation(&generations, "bob"), 0);
+        assert!(cancellation.lock().expect("cancellation").is_none());
+        assert_eq!(
+            active_speaker.lock().expect("active speaker").as_deref(),
+            Some("bob"),
+        );
     }
 }

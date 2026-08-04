@@ -108,7 +108,9 @@ export function HuddleRoomHeader() {
         agentPubkeys={state.agent_pubkeys}
         agentVoiceSettings={state.agent_voice_settings}
         appearance="room"
-        onInterruptAgentSpeech={() => void interruptAgentSpeech()}
+        onInterruptAgentSpeech={(agentPubkey) =>
+          void interruptAgentSpeech(agentPubkey)
+        }
         onRemoveAgent={handleRemoveAgent}
         participants={state.participants}
         selfProfile={{

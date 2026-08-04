@@ -640,13 +640,14 @@ test("stops the speaking agent from the huddle controls", async ({ page }) => {
   await stopButton.click();
   await expect
     .poll(() =>
-      page.evaluate(() =>
-        (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).some(
-          (entry) => entry.command === "interrupt_huddle_speech",
-        ),
+      page.evaluate(
+        () =>
+          (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).findLast(
+            (entry) => entry.command === "interrupt_huddle_speech",
+          )?.payload ?? null,
       ),
     )
-    .toBe(true);
+    .toEqual({ agentPubkey: TEST_IDENTITIES.alice.pubkey });
 });
 
 test("assigns distinct agent voices and exposes compact per-agent controls", async ({

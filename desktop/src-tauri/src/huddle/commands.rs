@@ -25,7 +25,11 @@ pub fn set_huddle_manual_mic_unmuted(
 
 /// Immediately interrupt the agent utterance that is currently speaking.
 #[tauri::command]
-pub fn interrupt_huddle_speech(state: State<'_, AppState>) -> Result<(), String> {
+pub fn interrupt_huddle_speech(
+    agent_pubkey: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    validate_pubkey_hex(&agent_pubkey)?;
     let tts_pipeline = {
         let huddle = state.huddle()?;
         if !matches!(huddle.phase, HuddlePhase::Connected | HuddlePhase::Active) {
@@ -34,7 +38,7 @@ pub fn interrupt_huddle_speech(state: State<'_, AppState>) -> Result<(), String>
         huddle.tts_pipeline.as_ref().map(Arc::clone)
     };
     if let Some(tts_pipeline) = tts_pipeline {
-        tts_pipeline.cancel_active_speaker();
+        tts_pipeline.cancel_active_speaker(&agent_pubkey);
     }
     Ok(())
 }
