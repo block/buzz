@@ -283,7 +283,9 @@ fn start_pair(
         .lock()
         .ok()
         .map(|keys| keys.public_key().to_hex());
-    let mut process = spawn_agent_child(&app, record, &key.relay_url, lazy, owner.as_deref())?;
+    // Connect via the configured relay (`relay_url`), not the normalized key —
+    // see spawn_agent_child: the loopback fold to 127.0.0.1 is identity-only.
+    let mut process = spawn_agent_child(&app, record, &relay_url, lazy, owner.as_deref())?;
     let now = crate::util::now_iso();
     let receipt = ManagedAgentRuntimeReceipt {
         key: key.clone(),
@@ -504,7 +506,11 @@ pub async fn reconcile_managed_agent_runtimes(
                 Ok((record, key, requested)) => {
                     match start_pair(
                         record.pubkey.clone(),
-                        key.relay_url.clone(),
+                        // Connect via the raw requested community URL, not the
+                        // normalized pair key — see spawn_agent_child: the
+                        // loopback fold to 127.0.0.1 is identity-only and would
+                        // land the agent in a different, empty tenant.
+                        requested.clone(),
                         true,
                         Some(&record.updated_at),
                         app.clone(),
