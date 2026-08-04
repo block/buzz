@@ -9,7 +9,7 @@ const DEFAULT_MOCK_PUBKEY = "deadbeef".repeat(8);
 const PROJECT_SCOPE = {
   relayUrl: "ws://localhost:3000",
   operatorPubkey: DEFAULT_MOCK_PUBKEY,
-  repoAddress: `30617:${DEFAULT_MOCK_PUBKEY}:buzz`,
+  projectAddress: `30617:${DEFAULT_MOCK_PUBKEY}:buzz`,
 };
 
 async function capture(page: Page, subject: Locator, filename: string) {

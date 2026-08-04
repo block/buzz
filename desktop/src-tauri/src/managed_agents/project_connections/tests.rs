@@ -4,7 +4,7 @@ fn scope() -> ProjectConnectionScope {
     ProjectConnectionScope {
         relay_url: "ws://127.0.0.1:3000".to_string(),
         operator_pubkey: "b".repeat(64),
-        repo_address: format!("30617:{}:portable-agents", "a".repeat(64)),
+        project_address: format!("30621:{}:portable-agents", "a".repeat(64)),
     }
 }
 
@@ -39,11 +39,15 @@ fn project_scope_requires_canonical_relay_identity_and_coordinate() {
     localhost.relay_url = "ws://localhost:3000".to_string();
     assert_eq!(canonical_project_scope(&localhost).unwrap(), scope());
     let mut invalid = scope();
-    invalid.repo_address = "local-project-id".to_string();
+    invalid.project_address = "local-project-id".to_string();
     assert!(canonical_project_scope(&invalid).is_err());
     let mut invalid = scope();
     invalid.operator_pubkey = "not-a-key".to_string();
     assert!(canonical_project_scope(&invalid).is_err());
+
+    let mut legacy = scope();
+    legacy.project_address = format!("30617:{}:portable-agents", "a".repeat(64));
+    assert_eq!(canonical_project_scope(&legacy).unwrap(), legacy);
 }
 
 #[test]
@@ -102,7 +106,7 @@ fn connection_lookup_cannot_cross_project_boundaries() {
     assert!(find_connection(&store, &connection.project_scope, &connection.id).is_ok());
 
     let mut other_project = connection.project_scope;
-    other_project.repo_address = format!("30617:{}:other-project", "a".repeat(64));
+    other_project.project_address = format!("30621:{}:other-project", "a".repeat(64));
     assert!(find_connection(&store, &other_project, &connection.id).is_err());
 }
 
