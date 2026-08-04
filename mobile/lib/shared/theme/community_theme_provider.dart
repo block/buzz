@@ -62,9 +62,12 @@ class CommunityThemeNotifier extends Notifier<CommunityThemePreference> {
         final result = await manager.initialize();
         if (_manager != manager) return;
         if (result.status == CommunityThemeRemoteStatus.absent) {
-          await _storage.write(pubkey, config.baseUrl, initial);
-          await _storage.writeOutbox(pubkey, config.baseUrl, initial);
-          if (_manager == manager) manager.publish(initial);
+          final currentDirty = _storage.readOutbox(pubkey, config.baseUrl);
+          final seed =
+              currentDirty ?? _storage.read(pubkey, config.baseUrl) ?? state;
+          await _storage.write(pubkey, config.baseUrl, seed);
+          await _storage.writeOutbox(pubkey, config.baseUrl, seed);
+          if (_manager == manager) manager.publish(seed);
         }
         if (result.status == CommunityThemeRemoteStatus.valid ||
             result.status == CommunityThemeRemoteStatus.absent) {

@@ -10,6 +10,38 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
+  test('delayed absence seeds the intervening local edit', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final keys = nostr.Keys.generate();
+    final history = Completer<List<NostrEvent>>();
+    final session = _ThemeRelaySession(
+      keys.nsec,
+      keys.public,
+      historyFuture: history.future,
+    );
+    final storage = CommunityThemeStorage(prefs);
+    final container = ProviderContainer(
+      overrides: [
+        communityThemeStorageProvider.overrideWithValue(storage),
+        relayConfigProvider.overrideWith(() => _RelayConfig(keys.nsec)),
+        relaySessionProvider.overrideWith(() => session),
+      ],
+    );
+    addTearDown(container.dispose);
+    container.listen(communityThemeProvider, (_, _) {}, fireImmediately: true);
+
+    container.read(communityThemeProvider.notifier).setTheme('dracula');
+    history.complete([]);
+    await _waitUntil(() => session.published != null);
+
+    expect(container.read(communityThemeProvider).theme, 'dracula');
+    expect(
+      storage.read(keys.public, 'https://relay.example')?.theme,
+      'dracula',
+    );
+  });
+
   test(
     'local edit stays authoritative before persistence through exact ack',
     () async {
@@ -104,10 +136,11 @@ class _RelayConfig extends RelayConfigNotifier {
 }
 
 class _ThemeRelaySession extends RelaySessionNotifier {
-  _ThemeRelaySession(this.nsec, this.pubkey);
+  _ThemeRelaySession(this.nsec, this.pubkey, {this.historyFuture});
 
   final String nsec;
   final String pubkey;
+  final Future<List<NostrEvent>>? historyFuture;
   final subscribed = Completer<void>();
   void Function(NostrEvent)? _listener;
   NostrEvent? published;
@@ -119,7 +152,7 @@ class _ThemeRelaySession extends RelaySessionNotifier {
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
-  }) async => [remoteEvent(theme: 'buzz', id: 'initial')];
+  }) async => historyFuture ?? [remoteEvent(theme: 'buzz', id: 'initial')];
 
   @override
   Future<void Function()> subscribe(

@@ -57,6 +57,8 @@ class CommunityThemeSyncManager {
   int _subscriptionEpoch = 0;
   int _subscriptionRetryAttempt = 0;
   int _publishRetryAttempt = 0;
+  bool _publishInFlight = false;
+  bool _publishRequestedWhileInFlight = false;
   bool _disposed = false;
 
   CommunityThemeSyncManager({
@@ -210,8 +212,20 @@ class CommunityThemeSyncManager {
   }
 
   Future<void> flush() async {
+    if (_publishInFlight) {
+      _publishTimer?.cancel();
+      _publishTimer = null;
+      _publishRequestedWhileInFlight = true;
+      return;
+    }
     final preference = _pending;
-    if (_disposed || preference == null || preference == _lastPublished) return;
+    if (_disposed || preference == null) return;
+    if (preference == _lastPublished) {
+      _pending = null;
+      onPublished(preference);
+      return;
+    }
+    _publishInFlight = true;
     try {
       final content = crypto.encrypt(jsonEncode(preference.toJson()));
       if (_disposed) return;
@@ -251,6 +265,17 @@ class CommunityThemeSyncManager {
         publishRetryMax.inMilliseconds,
       );
       _schedulePublish(Duration(milliseconds: retryMs));
+    } finally {
+      _publishInFlight = false;
+      if (!_disposed &&
+          _pending != null &&
+          (_publishRequestedWhileInFlight || _pending != preference) &&
+          _publishTimer == null) {
+        _publishRequestedWhileInFlight = false;
+        _schedulePublish(Duration.zero);
+      } else {
+        _publishRequestedWhileInFlight = false;
+      }
     }
   }
 
@@ -273,7 +298,6 @@ class CommunityThemeSyncManager {
   }
 
   void _accept(RemoteCommunityTheme remote) {
-    if (_pending != null) return;
     if (remote.createdAt < _lastCreatedAt ||
         (remote.createdAt == _lastCreatedAt &&
             _lastEventId.isNotEmpty &&
@@ -282,7 +306,11 @@ class CommunityThemeSyncManager {
     }
     _lastCreatedAt = remote.createdAt;
     _lastEventId = remote.eventId;
-    cancelPending();
+    if (_pending != null) {
+      _lastPublished = null;
+      return;
+    }
+    _lastPublished = null;
     onRemote(remote);
   }
 

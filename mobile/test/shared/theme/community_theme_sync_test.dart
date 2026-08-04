@@ -191,6 +191,85 @@ void main() {
     expect(acknowledgements, [local]);
   });
 
+  test('serializes in-flight publish before latest edit', () async {
+    final firstSubmission = Completer<void>();
+    final relay = _FakeSignedRelay(firstSubmissionGate: firstSubmission.future);
+    final manager = _manager(_FakeSession(), relay);
+    const latest = CommunityThemePreference(
+      theme: 'dracula',
+      accent: '#ef4444',
+      followSystem: false,
+    );
+
+    manager.publish(local);
+    final firstFlush = manager.flush();
+    await _waitUntil(() => relay.attempts == 1);
+    manager.publish(latest);
+    await manager.flush();
+    expect(relay.attempts, 1);
+
+    firstSubmission.complete();
+    await firstFlush;
+    await _waitUntil(() => relay.attempts == 2);
+
+    expect(relay.submittedEvents, hasLength(2));
+    expect(
+      relay.submittedEvents[1].createdAt,
+      greaterThan(relay.submittedEvents[0].createdAt),
+    );
+    expect(jsonDecode(relay.submissions[1].content)['theme'], 'dracula');
+    expect(manager.pending, isNull);
+  });
+
+  test('remote coordinate advances pending local publish timestamp', () async {
+    final relay = _FakeSignedRelay();
+    final session = _FakeSession();
+    final manager = _manager(session, relay);
+    await manager.initialize();
+    manager.publish(local);
+
+    session.emit(
+      _event(
+        id: 'remote',
+        createdAt: 2000000000,
+        content: jsonEncode(local.toJson()),
+      ),
+    );
+    await manager.flush();
+
+    expect(relay.submittedEvents.single.createdAt, 2000000001);
+  });
+
+  test(
+    'remote replacement invalidates A to B to A no-op suppression',
+    () async {
+      final relay = _FakeSignedRelay();
+      final session = _FakeSession();
+      final manager = _manager(session, relay);
+      await manager.initialize();
+      manager.publish(local);
+      await manager.flush();
+
+      const remotePreference = CommunityThemePreference(
+        theme: 'dracula',
+        accent: '#ef4444',
+        followSystem: false,
+      );
+      session.emit(
+        _event(
+          id: 'remote',
+          createdAt: relay.submittedEvents.single.createdAt + 1,
+          content: jsonEncode(remotePreference.toJson()),
+        ),
+      );
+      manager.publish(local);
+      await manager.flush();
+
+      expect(relay.submissions, hasLength(2));
+      expect(manager.pending, isNull);
+    },
+  );
+
   test(
     'published coordinate rejects delayed same-second initialization result',
     () async {
@@ -342,9 +421,14 @@ class _Submission {
 }
 
 class _FakeSignedRelay implements SignedEventRelay {
-  _FakeSignedRelay({this.failuresRemaining = 0, this.eventId = 'event'});
+  _FakeSignedRelay({
+    this.failuresRemaining = 0,
+    this.eventId = 'event',
+    this.firstSubmissionGate,
+  });
   int failuresRemaining;
   final String eventId;
+  final Future<void>? firstSubmissionGate;
   int attempts = 0;
   final submissions = <_Submission>[];
   final submittedEvents = <NostrEvent>[];
@@ -359,6 +443,9 @@ class _FakeSignedRelay implements SignedEventRelay {
     void Function(NostrEvent)? onSigned,
   }) async {
     attempts++;
+    if (attempts == 1 && firstSubmissionGate != null) {
+      await firstSubmissionGate;
+    }
     if (failuresRemaining > 0) {
       failuresRemaining--;
       throw StateError('publish failed');
