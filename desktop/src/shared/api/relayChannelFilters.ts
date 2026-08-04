@@ -3,6 +3,7 @@ import {
   CHANNEL_EVENT_KINDS,
   CHANNEL_TIMELINE_CONTENT_KINDS,
   HOME_MENTION_EVENT_KINDS,
+  KIND_CHANNEL_THREAD_SUMMARY,
   KIND_DELETION,
   KIND_NIP29_DELETE_EVENT,
   KIND_REACTION,
@@ -18,6 +19,29 @@ import type { RelaySubscriptionFilter } from "@/shared/api/relayClientShared";
 // a single reaction-heavy message can have many aux events.
 export const AUX_BACKFILL_CHUNK_SIZE = 100;
 export const MAX_HISTORICAL_LIMIT = 10_000;
+
+/**
+ * Live window-store subscription for an open channel.
+ *
+ * Deliberately omits `since`: deriving it from the reader's clock permanently
+ * drops accepted events whose author clock is behind. Initial replay volume is
+ * bounded with `limit: 50` instead; `limit` does not constrain future fan-out.
+ * Keep the limit above zero because `shouldPageReconnectReplay` uses that as
+ * the gate for paged reconnect recovery. The authoritative HTTP window read
+ * owns history depth, so a larger WebSocket replay only adds serialized load.
+ */
+export function buildChannelLiveFilter(
+  channelId: string,
+): RelaySubscriptionFilter {
+  return {
+    // 39005 rides only this window-store subscription — not
+    // CHANNEL_EVENT_KINDS, whose other consumers (unread tracking,
+    // timeline-cache merges) must never see summary overlays.
+    kinds: [...CHANNEL_EVENT_KINDS, KIND_CHANNEL_THREAD_SUMMARY],
+    "#h": [channelId],
+    limit: 50,
+  };
+}
 
 /**
  * Live-subscription filter for an open channel: the broad

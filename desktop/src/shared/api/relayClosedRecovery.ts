@@ -9,10 +9,16 @@ import {
   type RelaySubscription,
   type RelaySubscriptionFilter,
 } from "@/shared/api/relayClientShared";
+import {
+  buildReconnectReplayFilter,
+  replayReconnectHistoryPages,
+  shouldPageReconnectReplay,
+} from "@/shared/api/relayReconnectReplay";
 import type { RelayEvent } from "@/shared/api/types";
 
 const RETRY_BASE_DELAY_MS = 1_000;
 const RETRY_MAX_DELAY_MS = 30_000;
+const CLOSED_REPLAY_SKEW_SECS = 5;
 
 type LiveSubscription = Extract<RelaySubscription, { mode: "live" }>;
 
@@ -27,11 +33,15 @@ export function handleRelayClosed({
   subId,
   message,
   sendReq,
+  requestHistory,
+  replaySubscriptionEvent,
 }: {
   subscriptions: Map<string, RelaySubscription>;
   subId: string;
   message: string;
   sendReq: (subId: string, filter: RelaySubscriptionFilter) => Promise<void>;
+  requestHistory?: (filter: RelaySubscriptionFilter) => Promise<RelayEvent[]>;
+  replaySubscriptionEvent?: (subId: string, event: RelayEvent) => void;
 }) {
   const subscription = subscriptions.get(subId);
   if (!subscription) return;
@@ -57,6 +67,8 @@ export function handleRelayClosed({
     subscription,
     message,
     sendReq,
+    requestHistory,
+    replaySubscriptionEvent,
   });
 }
 
@@ -66,12 +78,16 @@ function recoverLiveSubscriptionFromClosed({
   subscription,
   message,
   sendReq,
+  requestHistory,
+  replaySubscriptionEvent,
 }: {
   subscriptions: Map<string, RelaySubscription>;
   subId: string;
   subscription: LiveSubscription;
   message: string;
   sendReq: (subId: string, filter: RelaySubscriptionFilter) => Promise<void>;
+  requestHistory?: (filter: RelaySubscriptionFilter) => Promise<RelayEvent[]>;
+  replaySubscriptionEvent?: (subId: string, event: RelayEvent) => void;
 }) {
   subscription.resolveReady?.();
   subscription.resolveReady = undefined;
@@ -111,7 +127,43 @@ function recoverLiveSubscriptionFromClosed({
   subscription.closedRetryTimeout = window.setTimeout(() => {
     subscription.closedRetryTimeout = undefined;
     if (subscriptions.get(subId) !== subscription) return;
-    void sendReq(subId, subscription.filter).catch((error) => {
+    const replaySince =
+      subscription.lastSeenCreatedAt === undefined
+        ? undefined
+        : Math.max(0, subscription.lastSeenCreatedAt - CLOSED_REPLAY_SKEW_SECS);
+    const shouldPageReplay =
+      replaySince !== undefined &&
+      requestHistory !== undefined &&
+      shouldPageReconnectReplay(subscription.filter);
+
+    void (async () => {
+      await sendReq(
+        subId,
+        shouldPageReplay
+          ? subscription.filter
+          : buildReconnectReplayFilter(subscription.filter, replaySince),
+      );
+      if (!shouldPageReplay || replaySince === undefined || !requestHistory) {
+        return;
+      }
+
+      await replayReconnectHistoryPages({
+        subscription: {
+          ...subscription,
+          onEvent: (event) => {
+            if (replaySubscriptionEvent) {
+              replaySubscriptionEvent(subId, event);
+            } else {
+              subscription.onEvent(event);
+            }
+          },
+        },
+        since: replaySince,
+        until: Math.floor(Date.now() / 1_000),
+        isActive: () => subscriptions.get(subId) === subscription,
+        requestHistory,
+      });
+    })().catch((error) => {
       if (subscriptions.get(subId) !== subscription) return;
       console.error("Failed to restore closed relay subscription", error);
       recoverLiveSubscriptionFromClosed({
@@ -120,6 +172,8 @@ function recoverLiveSubscriptionFromClosed({
         subscription,
         message,
         sendReq,
+        requestHistory,
+        replaySubscriptionEvent,
       });
     });
   }, delayMs);
