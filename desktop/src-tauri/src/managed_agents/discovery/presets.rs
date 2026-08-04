@@ -188,6 +188,15 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
             Gateway's own environment separately.",
         underlying_cli: None,
     },
+    PresetHarness {
+        id: "cline",
+        label: "Cline",
+        command: "cline",
+        args: &["--acp"],
+        install_instructions_url: "https://docs.cline.bot/cli/overview",
+        install_hint: "Buzz talks to Cline through its CLI's ACP mode (cline --acp).",
+        underlying_cli: None,
+    },
 ];
 
 /// Return preset definitions for the spawn/readiness registry.
