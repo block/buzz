@@ -163,6 +163,11 @@ async fn check_operator_replay(
 /// The request is authenticated against `RELAY_OPERATOR_API_ORIGIN` and does
 /// not bind the inbound host to a tenant. The operator allowlist is the
 /// authority for this deployment-root control-plane surface.
+///
+/// Successful responses carry `max_communities_per_owner` — this deployment's
+/// effective per-owner limit (`BUZZ_MAX_COMMUNITIES_PER_OWNER`); a
+/// `limit_reached:` rejection returns HTTP 409 with the same field beside the
+/// `error` message.
 pub async fn provision_community(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -315,6 +320,11 @@ pub async fn unarchive_community(
 }
 
 /// List communities where a pubkey currently holds the `owner` role.
+///
+/// `GET /operator/communities?owner_pubkey=<hex>`. Beside `communities`, the
+/// response carries `max_communities_per_owner` — this deployment's effective
+/// per-owner limit (`BUZZ_MAX_COMMUNITIES_PER_OWNER`) — so clients gate on the
+/// deployment's configuration instead of a hardcoded default.
 pub async fn list_owned_communities(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -365,12 +375,24 @@ pub async fn list_owned_communities(
 /// `RELAY_OPERATOR_PUBKEYS`, body:
 ///
 /// ```json
-/// { "community_id": "<uuid>", "new_owner_pubkey": "<hex>" }
+/// {
+///   "community_id": "<uuid>",
+///   "new_owner_pubkey": "<hex>",
+///   "expected_owner_pubkey": "<hex>"
+/// }
 /// ```
+///
+/// All three fields are required; `expected_owner_pubkey` is the compare-and-set
+/// guard against a stale-owner race.
 ///
 /// The previous owner is demoted to `member` (not `admin`). The transfer is
 /// instant and atomic at the database layer. Publication of the updated
 /// NIP-43 membership list is best-effort, matching the provision path.
+///
+/// The relay rejects a transfer on the *transferee's* quota: that rejection is
+/// HTTP 409 carrying `max_communities_per_owner` — this deployment's effective
+/// per-owner limit (`BUZZ_MAX_COMMUNITIES_PER_OWNER`) — beside the
+/// `limit_reached:` `error` message.
 pub async fn transfer_community(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1265,6 +1287,53 @@ mod tests {
                 .get("max_communities_per_owner")
                 .and_then(Value::as_i64),
             Some(effective_limit)
+        );
+    }
+
+    /// The `limit_reached` 409 body is the surface clients read the number
+    /// from, and it must report whatever `BUZZ_MAX_COMMUNITIES_PER_OWNER`
+    /// resolved to for this process rather than a literal 5 (#4160). The
+    /// Postgres-backed tests above assert the same field end-to-end through
+    /// the handlers; this one covers the body itself on the unit gate, and
+    /// prints it so the wire shape under a given env value is inspectable.
+    #[test]
+    fn limit_reached_conflict_body_reports_the_deployment_limit() {
+        use crate::handlers::community_provisioning::{
+            limit_reached_error, ProvisionCommunityResponse,
+        };
+
+        let effective_limit = buzz_db::relay_members::max_communities_per_owner();
+        let (status, axum::Json(body)) = super::limit_reached_conflict(&limit_reached_error(
+            "owner already owns the maximum number of communities",
+        ));
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            body.get("error").and_then(Value::as_str),
+            Some("limit_reached: owner already owns the maximum number of communities")
+        );
+        assert_eq!(
+            body.get("max_communities_per_owner")
+                .and_then(Value::as_i64),
+            Some(effective_limit)
+        );
+
+        println!(
+            "BUZZ_MAX_COMMUNITIES_PER_OWNER={} -> HTTP 409 {}",
+            std::env::var("BUZZ_MAX_COMMUNITIES_PER_OWNER").unwrap_or_else(|_| "<unset>".into()),
+            serde_json::to_string(&body).expect("serialize 409 body")
+        );
+        println!(
+            "BUZZ_MAX_COMMUNITIES_PER_OWNER={} -> HTTP 200 {}",
+            std::env::var("BUZZ_MAX_COMMUNITIES_PER_OWNER").unwrap_or_else(|_| "<unset>".into()),
+            serde_json::to_string(&ProvisionCommunityResponse {
+                community_id: "b8f7f4a0-0000-0000-0000-000000000000".to_string(),
+                host: "acme.communities.buzz.xyz".to_string(),
+                status: "created",
+                owner_pubkey: None,
+                max_communities_per_owner: effective_limit,
+            })
+            .expect("serialize provision response")
         );
     }
 
