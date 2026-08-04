@@ -169,8 +169,14 @@ export function BotActivityComposerAction({
           )}
           data-testid="bot-activity-composer-trigger"
           onBlur={closeWithDelay}
-          onClick={() => {
+          onClick={(event) => {
             clearHoverTimer();
+            if (singleWorkingAgent) {
+              event.preventDefault();
+              setOpen(false);
+              onOpenAgentSession(singleWorkingAgent.pubkey, channelId);
+              return;
+            }
             setOpen((current) => !current);
           }}
           onFocus={() => setOpen(true)}
