@@ -638,8 +638,7 @@ fn codex_spawn_does_not_set_a_claude_executable() {
 
 /// On Windows, `.cmd` and `.bat` batch shims must NOT be assigned to
 /// `CLAUDE_CODE_EXECUTABLE` — `CreateProcess` cannot exec them directly and
-/// returns EINVAL (issue #2397). The adapter must fall back to its own PATH
-/// lookup instead.
+/// returns EINVAL (issue #2397). The adapter must fall back to its own PATH lookup instead.
 ///
 /// These tests exercise `is_batch_shim` directly — a pure path predicate with
 /// no global PATH or resolve_command cache involvement — so they run on every

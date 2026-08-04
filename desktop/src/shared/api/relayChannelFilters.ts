@@ -42,14 +42,23 @@ export function buildChannelFilter(
   return filter;
 }
 
-/** Strictly live huddle message filter: zero stored rows, future messages only. */
+/**
+ * Huddle TTS message filter with a bounded startup replay window.
+ *
+ * The Huddle window and agent membership snapshot can finish mounting just
+ * after the first agent reply is stored. Replaying only the caller-provided
+ * startup window closes that race; event-id dedup in the consumer prevents a
+ * stored row from being spoken twice when it is also delivered live.
+ */
 export function buildHuddleTtsLiveFilter(
   channelId: string,
+  since: number,
 ): RelaySubscriptionFilter {
   return {
     kinds: [KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_V2],
     "#h": [channelId],
-    limit: 0,
+    since,
+    limit: 50,
   };
 }
 

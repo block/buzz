@@ -77,11 +77,10 @@ pub struct AgentDefinition {
     /// Stored as a BTreeMap for deterministic on-disk ordering.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env_vars: BTreeMap<String, String>,
-    /// NIP-AP behavioral defaults, stored in WIRE shape (kebab-case string,
-    /// not the `RespondTo` enum) so `persona_event_content` is a verbatim
-    /// copy and quad-absent records serialize byte-identically to the
-    /// pre-activation era. Copied onto instances at mint time only — spawn
-    /// re-snapshot never touches them. Validated at the instance boundary.
+    /// NIP-AP behavioral defaults, stored in WIRE shape (kebab-case string, not the `RespondTo`
+    /// enum) so `persona_event_content` is a verbatim copy and quad-absent records serialize byte-
+    /// identically to the pre-activation era. Copied onto instances at mint time only — spawn re-
+    /// snapshot never touches them. Validated at the instance boundary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub respond_to: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -218,15 +217,13 @@ pub struct ManagedAgentRecord {
     /// Team this instance was deployed from. Resolves runtime team instructions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub team_id: Option<String>,
-    /// nsec private key. Held in memory but persisted to the OS keyring (keyed
-    /// by `pubkey`) rather than serialized to `managed-agents.json`. The
-    /// storage layer blanks this before writing JSON once the key is safely in
-    /// the keyring, and re-hydrates it from the keyring on load.
+    /// nsec private key. Held in memory but persisted to the OS keyring (keyed by `pubkey`) rather
+    /// than serialized to `managed-agents.json`. The storage layer blanks this before writing JSON
+    /// once the key is safely in the keyring, and re-hydrates it from the keyring on load.
     ///
-    /// It is only serialized inline (the `0o600` JSON fallback) when the
-    /// keyring is unreachable — `skip_serializing_if` keeps it out of JSON in
-    /// the normal keyring-backed case. `default` also lets an old build parse a
-    /// store whose inline key was already migrated out and blanked.
+    /// It is only serialized inline (the `0o600` JSON fallback) when the keyring is unreachable —
+    /// `skip_serializing_if` keeps it out of JSON in the normal keyring-backed case. `default` also
+    /// lets an old build parse a store whose inline key was already migrated out and blanked.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub private_key_nsec: String,
     /// NIP-OA auth tag JSON. Computed at agent creation time.
@@ -266,9 +263,8 @@ pub struct ManagedAgentRecord {
     /// existing stores; use `idle_timeout_seconds` or
     /// `max_turn_duration_seconds` for turn-length control.
     pub turn_timeout_seconds: u64,
-    /// Idle timeout in seconds (`BUZZ_ACP_IDLE_TIMEOUT`): how long the agent
-    /// may stay silent on its ACP channel mid-turn before the harness times
-    /// the turn out.
+    /// Idle timeout in seconds (`BUZZ_ACP_IDLE_TIMEOUT`): how long the agent may stay silent on its
+    /// ACP channel mid-turn before the harness times the turn out.
     #[serde(default)]
     pub idle_timeout_seconds: Option<u64>,
     /// Absolute wall-clock cap per turn.
@@ -286,13 +282,11 @@ pub struct ManagedAgentRecord {
     /// For a definition-less instance this field is authoritative.
     #[serde(default)]
     pub model: Option<String>,
-    /// LLM inference provider. For a linked instance this is a legacy/display
-    /// snapshot only — spawn and deploy resolve the effective provider from
-    /// the definition, never from this field (see
-    /// `effective_config::resolve_effective_config`). For a definition-less
-    /// instance this field is authoritative. `#[serde(default)]` so
-    /// pre-existing records deserialize as `None` and get backfilled on
-    /// first load.
+    /// LLM inference provider. For a linked instance this is a legacy/display snapshot only — spawn
+    /// and deploy resolve the effective provider from the definition, never from this field (see
+    /// `effective_config::resolve_effective_config`). For a definition-less instance this field is
+    /// authoritative. `#[serde(default)]` so pre-existing records deserialize as `None` and get
+    /// backfilled on first load.
     #[serde(default)]
     pub provider: Option<String>,
     /// Content hash of the persona at the time this agent was created — the
@@ -310,10 +304,10 @@ pub struct ManagedAgentRecord {
     pub env_vars: BTreeMap<String, String>,
     #[serde(default = "default_start_on_app_launch")]
     pub start_on_app_launch: bool,
-    /// One-shot marker: this agent was running when the app shut down and was
-    /// stopped by `shutdown_managed_agents`. Launch restore starts such agents
-    /// even when `start_on_app_launch` is off, then clears the flag — so an
-    /// agent the user explicitly stopped before quitting stays stopped.
+    /// One-shot marker: this agent was running when the app shut down and was stopped by
+    /// `shutdown_managed_agents`. Launch restore starts such agents even when `start_on_app_launch`
+    /// is off, then clears the flag — so an agent the user explicitly stopped before quitting stays
+    /// stopped.
     #[serde(default)]
     pub stopped_by_app_shutdown: bool,
     /// Auto-restart this agent when its effective spawn config drifts from
@@ -441,8 +435,7 @@ pub struct ManagedAgentRecord {
     /// a `provider` field, and is consulted only for definition-less records
     /// that carry no provider — after which the env-var preset is the last
     /// fallback. A linked instance's marker is never read: its definition is
-    /// authoritative. `#[serde(default)]` so records predating the field
-    /// deserialize as `None`.
+    /// authoritative. `#[serde(default)]` so records predating the field deserialize as `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_mesh: Option<RelayMeshConfig>,
 }
@@ -601,10 +594,8 @@ pub enum AcpAvailabilityStatus {
     NotInstalled,
 }
 
-/// Authentication/login status for a CLI-based ACP runtime.
-///
-/// Serializes as a tagged union `{ status: "...", diagnostic?: "..." }` so
-/// the TypeScript side can exhaustively switch on `status`.
+/// Authentication/login status for a CLI-based ACP runtime. Serializes as a tagged union
+/// `{ status: "...", diagnostic?: "..." }` so the TypeScript side can exhaustively switch on `status`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "status")]
 pub enum AuthStatus {
@@ -623,8 +614,7 @@ pub enum AuthStatus {
     Unknown,
 }
 
-/// Origin of an ACP runtime catalog entry. Serializes as a lowercase string
-/// so the TypeScript consumer can switch on it without numeric comparisons.
+/// Origin of an ACP runtime catalog entry. Serializes as a lowercase string so the TypeScript consumer can switch on it without numeric comparisons.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum HarnessSource {
@@ -652,6 +642,9 @@ pub struct AcpRuntimeCatalogEntry {
     pub provider_env_var: Option<String>,
     /// Environment variable used to apply thinking effort, when supported.
     pub thinking_env_var: Option<String>,
+    pub max_tokens_env_var: Option<String>,
+    pub context_limit_env_var: Option<String>,
+    pub max_rounds_env_var: Option<String>,
     pub install_hint: String,
     pub install_instructions_url: String,
     /// true when at least one automated install step is available

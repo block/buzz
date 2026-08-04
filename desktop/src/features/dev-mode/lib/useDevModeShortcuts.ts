@@ -10,6 +10,7 @@ import type { Channel } from "@/shared/api/types";
  * - ⌘T drafts a side chat in the open channel
  * - ⌘⇧T drafts a new tab (sub-channel) of the open main
  * - ⇧⌘[/⇧⌘] cycle through the open channel's tabs, wrapping at the ends
+ * - ⌘1–⌘8 jump to that tab (main is 1); ⌘9 jumps to the last tab
  */
 export function useDevModeShortcuts({
   view,
@@ -80,6 +81,17 @@ export function useDevModeShortcuts({
       } else if (key === "t" && onDraftSideChat) {
         event.preventDefault();
         onDraftSideChat();
+      } else if (
+        /^Digit[1-9]$/.test(event.code) &&
+        view === "channel" &&
+        activeMainChannel
+      ) {
+        // Browser-style: ⌘1–⌘8 pick that tab (main is 1), ⌘9 the last.
+        event.preventDefault();
+        const tabs = [activeMainChannel, ...activeSubChannels];
+        const digit = Number(event.code.slice(-1));
+        const tab = digit === 9 ? tabs[tabs.length - 1] : tabs[digit - 1];
+        if (tab) onOpenChannel(tab.id);
       }
     };
     window.addEventListener("keydown", handlePaletteKeyDown, true);

@@ -17,6 +17,7 @@ import '../../shared/theme/theme.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/custom_emoji/custom_emoji_render.dart';
+import '../../shared/emoji/native_emoji_glyph.dart';
 import '../../shared/widgets/sheet_divider.dart';
 import '../../shared/reminders/remind_me_later_sheet.dart';
 import '../../shared/reminders/reminder_service.dart';
@@ -24,9 +25,9 @@ import 'channel_management_provider.dart';
 import 'emoji_picker.dart';
 import 'reaction_row.dart';
 import 'recent_emoji_provider.dart';
-import 'read_state/message_read_state.dart';
-import 'read_state/read_state_format.dart';
-import 'read_state/read_state_provider.dart';
+import '../../shared/read_state/message_read_state.dart';
+import '../../shared/read_state/read_state_format.dart';
+import '../../shared/read_state/read_state_provider.dart';
 import 'thread_detail_page.dart';
 import 'thread_follows/thread_follows_provider.dart';
 import 'timeline_message.dart';
@@ -689,7 +690,7 @@ class _QuickReactionGlyph extends StatelessWidget {
         );
       }
     }
-    return Text(value, style: const TextStyle(fontSize: 24));
+    return NativeEmojiGlyph(emoji: value, size: 24);
   }
 }
 

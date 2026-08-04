@@ -16,6 +16,27 @@ double mobileTabFooterBackdropHeight(BuildContext context) =>
     Grid.xl +
     Grid.gutter;
 
+/// Builds the shared transparent-to-surface footer fade.
+///
+/// Kept separate from [MobileTabFooterBackdrop] so floating controls such as
+/// the channel composer can paint the exact same fade behind their own content.
+LinearGradient mobileTabFooterBackdropGradient(
+  BuildContext context, {
+  List<double> stops = const [0, 0.5, 1],
+  List<double> opacities = const [0, 0.75, 1],
+}) {
+  assert(stops.length == opacities.length);
+  final surface = context.colors.surface;
+  return LinearGradient(
+    begin: Alignment.topCenter,
+    end: Alignment.bottomCenter,
+    stops: stops,
+    colors: [
+      for (final opacity in opacities) surface.withValues(alpha: opacity),
+    ],
+  );
+}
+
 /// Shared fade behind the floating mobile tab bar.
 class MobileTabFooterBackdrop extends StatelessWidget {
   /// Vertical extent of the backdrop in logical pixels.
@@ -39,20 +60,15 @@ class MobileTabFooterBackdrop extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final surface = context.colors.surface;
     return SizedBox(
       height: height,
       width: double.infinity,
       child: DecoratedBox(
         decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
+          gradient: mobileTabFooterBackdropGradient(
+            context,
             stops: stops,
-            colors: [
-              for (final opacity in opacities)
-                surface.withValues(alpha: opacity),
-            ],
+            opacities: opacities,
           ),
         ),
       ),

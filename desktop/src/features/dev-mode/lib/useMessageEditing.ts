@@ -38,6 +38,11 @@ export function useMessageEditing({
   const [editingRootId, setEditingRootId] = React.useState<string | null>(null);
   const preEditInputRef = React.useRef<string | null>(null);
 
+  // The channel-switch draft stash reads this so the scope keeps its
+  // pre-edit draft (not the abandoned edit buffer) when a switch cancels
+  // an in-flight edit.
+  const peekPreEditInput = React.useCallback(() => preEditInputRef.current, []);
+
   // Exit edit mode and put the stashed pre-edit draft back in the box.
   const stopEditing = React.useCallback(() => {
     setEditingRootId(null);
@@ -136,5 +141,11 @@ export function useMessageEditing({
     ],
   );
 
-  return { editingRootId, startEditing, stopEditing, submitEdit };
+  return {
+    editingRootId,
+    peekPreEditInput,
+    startEditing,
+    stopEditing,
+    submitEdit,
+  };
 }

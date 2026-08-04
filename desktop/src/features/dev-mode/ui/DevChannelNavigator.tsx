@@ -5,8 +5,8 @@ import {
   type ChannelGroup,
   toggleChannelPinned,
 } from "@/features/dev-mode/lib/pinnedChannels";
+import { DevWavyText } from "@/features/dev-mode/ui/DevWavyText";
 import type { NavigatorWidthControls } from "@/features/dev-mode/lib/useNavigatorWidth";
-import { DevWorkingChannelName } from "@/features/dev-mode/ui/DevWorkingChannelName";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 
@@ -99,7 +99,7 @@ function ChannelRow({
             isUnread ? "font-semibold" : "font-medium",
           )}
         >
-          # <DevWorkingChannelName name={channel.name} working={isWorking} />
+          # {isWorking ? <DevWavyText text={channel.name} /> : channel.name}
         </span>
         {isUnread ? (
           <span

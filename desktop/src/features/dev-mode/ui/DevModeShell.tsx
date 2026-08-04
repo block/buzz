@@ -9,6 +9,8 @@ import {
   groupSessionChannels,
   usePinnedChannels,
 } from "@/features/dev-mode/lib/pinnedChannels";
+import { consumeComposerDraft } from "@/features/dev-mode/lib/composerDrafts";
+import { useComposerDrafts } from "@/features/dev-mode/lib/useComposerDrafts";
 import { useComposerModeSelection } from "@/features/dev-mode/lib/useComposerModeSelection";
 import { copySelectionWithLinkUrls } from "@/features/dev-mode/lib/copyLinkUrls";
 import type { MentionRecord } from "@/features/dev-mode/lib/mentionRecords";
@@ -35,6 +37,7 @@ import { useCardSelectionShortcuts } from "@/features/dev-mode/lib/useCardSelect
 import { useDevModeShortcuts } from "@/features/dev-mode/lib/useDevModeShortcuts";
 import { useMessageEditing } from "@/features/dev-mode/lib/useMessageEditing";
 import { useMentionTickerNavigation } from "@/features/dev-mode/lib/useMentionTickerNavigation";
+import { useDevShellNavigation } from "@/features/dev-mode/lib/useDevShellNavigation";
 import { useNavigatorWidth } from "@/features/dev-mode/lib/useNavigatorWidth";
 import { DevChannelNavigator } from "@/features/dev-mode/ui/DevChannelNavigator";
 import { DevChannelTabs } from "@/features/dev-mode/ui/DevChannelTabs";
@@ -252,17 +255,38 @@ export function DevModeShell({
   const selectedRoot = roots.find((root) => root.id === selectedRootId) ?? null;
 
   // `e` on a selected own prompt card edits that message in the composer.
+  const messageEditing = useMessageEditing({
+    channel: activeChannel,
+    roots,
+    myPubkey: identityQuery.data?.pubkey ?? null,
+    setInput,
+    setBusy,
+    setError,
+  });
   const { editingRootId, startEditing, stopEditing, submitEdit } =
-    useMessageEditing({
-      channel: activeChannel,
-      roots,
-      myPubkey: identityQuery.data?.pubkey ?? null,
-      setInput,
-      setBusy,
-      setError,
-    });
+    messageEditing;
 
   useDevReadMarking(activeChannel, roots);
+
+  // Card selection and the side chat belong to one channel's transcript.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: intentional — selection resets only on channel switch
+  React.useEffect(() => {
+    setSelectedRootId(null);
+    setThreadOpen(false);
+    setActivePane("main");
+    setSubDraftParentId(null);
+    stopEditing();
+  }, [effectiveSessionId]);
+
+  // Per-channel composer drafts. Called after the reset effect above so the
+  // draft restore wins over stopEditing's pre-edit put-back.
+  const { draftKey, restoreFailedPrompt } = useComposerDrafts({
+    view,
+    channelId: effectiveSessionId,
+    input,
+    setInput,
+    peekPreEditInput: messageEditing.peekPreEditInput,
+  });
 
   // `e` on a selected card: edit your own prompt in the composer.
   const startEditingSelected = React.useCallback(() => {
@@ -435,99 +459,19 @@ export function DevModeShell({
     onOpenChannel: openChannel,
   });
 
-  const navigateChannels = React.useCallback(
-    (direction: 1 | -1) => {
-      if (orderedChannels.length === 0) return;
-      const currentIndex = orderedChannels.findIndex(
-        (session) => session.id === navigatorId,
-      );
-      if (currentIndex === -1) {
-        setNavigatorId(orderedChannels[orderedChannels.length - 1].id);
-        return;
-      }
-      // ↑ walks up the visible list; ↓ back down. The navigator stays
-      // highlighted at the ends — only Enter or Escape leave it.
-      const nextIndex = Math.min(
-        orderedChannels.length - 1,
-        Math.max(0, currentIndex + direction),
-      );
-      setNavigatorId(orderedChannels[nextIndex].id);
-    },
-    [navigatorId, orderedChannels],
-  );
-
-  // ⌥↑/⌥↓ from the composer: open the previous/next channel in the visible
-  // list directly — focus stays in the box the whole time.
-  const stepChannel = React.useCallback(
-    (direction: 1 | -1) => {
-      if (orderedChannels.length === 0) return;
-      const referenceId = view === "channel" ? activeMainId : navigatorId;
-      const currentIndex = orderedChannels.findIndex(
-        (session) => session.id === referenceId,
-      );
-      if (currentIndex === -1) {
-        // Nothing open — ⌥↑ enters the list at the bottom (nearest channel).
-        if (direction === -1) {
-          openChannel(orderedChannels[orderedChannels.length - 1].id);
-        }
-        return;
-      }
-      const nextIndex = Math.min(
-        orderedChannels.length - 1,
-        Math.max(0, currentIndex + direction),
-      );
-      if (nextIndex === currentIndex) return;
-      openChannel(orderedChannels[nextIndex].id);
-    },
-    [activeMainId, navigatorId, openChannel, orderedChannels, view],
-  );
-
-  const navigateCards = React.useCallback(
-    (direction: 1 | -1) => {
-      if (roots.length === 0) return;
-      const currentIndex = roots.findIndex(
-        (root) => root.id === selectedRootId,
-      );
-      if (currentIndex === -1) {
-        // ArrowUp enters the cards at the newest prompt; ArrowDown is a no-op.
-        if (direction === -1) {
-          setSelectedRootId(roots[roots.length - 1].id);
-        }
-        return;
-      }
-      const nextIndex = currentIndex + direction;
-      if (nextIndex >= roots.length) {
-        // Past the newest card — back to plain channel input.
-        setSelectedRootId(null);
-        setThreadOpen(false);
-        return;
-      }
-      setSelectedRootId(roots[Math.max(0, nextIndex)].id);
-    },
-    [roots, selectedRootId],
-  );
-
-  const handleNavigate = React.useCallback(
-    (direction: 1 | -1) => {
-      if (view === "channel") {
-        navigateCards(direction);
-        return;
-      }
-      if (view === "fresh") {
-        if (direction === -1) {
-          setView("navigator");
-          setNavigatorId(
-            orderedChannels.length > 0
-              ? orderedChannels[orderedChannels.length - 1].id
-              : null,
-          );
-        }
-        return;
-      }
-      navigateChannels(direction);
-    },
-    [navigateChannels, navigateCards, orderedChannels, view],
-  );
+  const { handleNavigate, navigateCards, stepChannel } = useDevShellNavigation({
+    activeMainId,
+    navigatorId,
+    onOpenChannel: openChannel,
+    orderedChannels,
+    roots,
+    selectedRootId,
+    setNavigatorId,
+    setSelectedRootId,
+    setThreadOpen,
+    setView,
+    view,
+  });
 
   const handleEscape = React.useCallback(() => {
     if (view === "channel") {
@@ -615,6 +559,7 @@ export function DevModeShell({
       setBusy(true);
       setError(null);
       setInput("");
+      consumeComposerDraft(draftKey);
       void (async () => {
         try {
           let channel = activeChannel;
@@ -646,8 +591,8 @@ export function DevModeShell({
               ? submitError.message
               : "Failed to send prompt.",
           );
-          // Restore the failed prompt unless the user already typed on.
-          setInput((current) => (current === "" ? prompt : current));
+          // Restore the failed prompt to the channel it was sent from.
+          restoreFailedPrompt(draftKey, prompt);
         } finally {
           setBusy(false);
         }
@@ -659,6 +604,7 @@ export function DevModeShell({
       busy,
       createSessionChannel,
       createSubChannel,
+      draftKey,
       editingRootId,
       handleOpenThread,
       input,
@@ -666,6 +612,7 @@ export function DevModeShell({
       navigatorId,
       openChannelAtUnread,
       rememberMode,
+      restoreFailedPrompt,
       selectedRootId,
       sendToSession,
       subDraftActive,

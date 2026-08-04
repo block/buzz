@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
+import type { Page } from "@playwright/test";
 
+import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
 import { expectCornerRadiusPx, expectSmoothCorners } from "../helpers/css";
 
@@ -11,6 +13,7 @@ import { expectCornerRadiusPx, expectSmoothCorners } from "../helpers/css";
 
 test.beforeEach(async ({ page }) => {
   await installMockBridge(page, {
+    deferredComposerUploads: true,
     uploadDescriptors: [
       {
         url: `https://mock.relay/media/${"a".repeat(64)}.pdf`,
@@ -24,13 +27,37 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
+async function chooseQuarterlyReport(page: Page) {
+  const [chooser] = await Promise.all([
+    page.waitForEvent("filechooser"),
+    page.getByRole("button", { name: "Attach image" }).click(),
+  ]);
+  await chooser.setFiles({
+    buffer: Buffer.from("quarterly report"),
+    mimeType: "application/pdf",
+    name: "quarterly-report.pdf",
+  });
+}
+
+async function chooseLargeVideo(page: Page) {
+  const [chooser] = await Promise.all([
+    page.waitForEvent("filechooser"),
+    page.getByRole("button", { name: "Attach image" }).click(),
+  ]);
+  await chooser.setFiles({
+    buffer: Buffer.alloc(16 * 1024 * 1024, 1),
+    mimeType: "video/mp4",
+    name: "large-video.mp4",
+  });
+}
+
 test("upload a file and see a FileCard in the timeline", async ({ page }) => {
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
-  // Paperclip → mocked pick_and_upload_media returns the PDF descriptor.
-  await page.getByRole("button", { name: "Attach image" }).click();
+  // The paperclip queues the local file without starting its upload.
+  await chooseQuarterlyReport(page);
 
   // The composer shows a chip with the original filename.
   await expect(page.getByTestId("message-composer")).toContainText(
@@ -61,6 +88,206 @@ test("upload a file and see a FileCard in the timeline", async ({ page }) => {
       ),
     )
     .toContain("download_file");
+});
+
+test("sends immediately and keeps upload progress across channels", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.evaluate(() => {
+    const e2e = (
+      window as Window & {
+        __BUZZ_E2E__?: { mock?: { uploadDelayMs?: number } };
+      }
+    ).__BUZZ_E2E__;
+    if (e2e?.mock) e2e.mock.uploadDelayMs = 1_000;
+  });
+  await page.getByTestId("channel-general").click();
+  await chooseQuarterlyReport(page);
+
+  await expect(page.getByTestId("composer-upload-progress")).toHaveCount(0);
+  await page.getByTestId("send-message").click();
+
+  await expect(page.getByTestId("message-composer")).not.toContainText(
+    "quarterly-report.pdf",
+  );
+  await expect(page.getByTestId("composer-upload-progress")).toBeVisible();
+
+  await page.getByTestId("channel-random").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+  await expect(page.getByTestId("composer-upload-progress")).toBeVisible();
+  await expect(page.getByTestId("composer-upload-progress")).toHaveCount(0, {
+    timeout: 5_000,
+  });
+
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("file-card").last()).toContainText(
+    "quarterly-report.pdf",
+  );
+});
+
+test("shows upload feedback before transferring a large file", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.evaluate(() => {
+    const e2e = (
+      window as Window & {
+        __BUZZ_E2E__?: { mock?: { uploadDelayMs?: number } };
+      }
+    ).__BUZZ_E2E__;
+    if (e2e?.mock) e2e.mock.uploadDelayMs = 5_000;
+  });
+  await page.getByTestId("channel-general").click();
+  await chooseLargeVideo(page);
+
+  const progress = page.getByTestId("composer-upload-progress");
+  await Promise.all([
+    page.getByTestId("send-message").click(),
+    expect(progress).toBeVisible({ timeout: 800 }),
+  ]);
+  await expect(progress).toHaveAttribute("aria-label", "Preparing");
+  await expect(page.getByTestId("composer-upload-spinner")).toBeVisible();
+  await expect(page.getByTestId("composer-upload-percentage")).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (
+            window as Window & {
+              __BUZZ_E2E_COMMAND_PAYLOADS__?: Array<{
+                command: string;
+                payload: { rawByteLength?: number } | null;
+              }>;
+            }
+          ).__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [],
+      ),
+    )
+    .toContainEqual({
+      command: "upload_media_bytes_raw",
+      payload: { rawByteLength: 16 * 1024 * 1024 },
+    });
+
+  const uploadId = "background-media-upload-0-0";
+  await page.evaluate(async (id) => {
+    await window.__BUZZ_E2E_EMIT_MEDIA_UPLOAD_PHASE__?.({
+      id,
+      phase: "processing-video",
+    });
+  }, uploadId);
+  await expect(progress).toHaveAttribute("aria-label", "Processing");
+  await waitForAnimations(page);
+  const processingPhaseBox = await page
+    .getByTestId("composer-upload-phase")
+    .boundingBox();
+  const processingStatusBox = await page
+    .getByTestId("composer-upload-status")
+    .boundingBox();
+  expect(processingPhaseBox).not.toBeNull();
+  expect(processingStatusBox).not.toBeNull();
+  expect(
+    (processingStatusBox?.x ?? 0) -
+      ((processingPhaseBox?.x ?? 0) + (processingPhaseBox?.width ?? 0)),
+  ).toBeGreaterThanOrEqual(3);
+  await expect(page.getByTestId("composer-upload-spinner")).toBeVisible();
+  await expect(page.getByTestId("composer-upload-percentage")).toHaveCount(0);
+
+  await page.evaluate(async (id) => {
+    await window.__BUZZ_E2E_EMIT_MEDIA_UPLOAD_PHASE__?.({
+      id,
+      phase: "uploading",
+    });
+    await window.__BUZZ_E2E_EMIT_MEDIA_UPLOAD_PROGRESS__?.({
+      id,
+      sent: 42,
+      total: 100,
+    });
+  }, uploadId);
+  await expect(progress).toHaveAttribute("aria-label", "Uploading 42%");
+  await waitForAnimations(page);
+  await expect(page.getByTestId("composer-upload-spinner")).toHaveCount(0);
+  await expect(page.getByTestId("composer-upload-percentage")).toHaveText(
+    "42%",
+  );
+
+  await page.getByTestId("composer-upload-cancel").click();
+});
+
+test("canceling a background upload prevents the message from publishing", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.evaluate(() => {
+    const e2e = (
+      window as Window & {
+        __BUZZ_E2E__?: { mock?: { uploadDelayMs?: number } };
+      }
+    ).__BUZZ_E2E__;
+    if (e2e?.mock) e2e.mock.uploadDelayMs = 1_000;
+  });
+  await page.getByTestId("channel-general").click();
+  await chooseQuarterlyReport(page);
+  await page.getByTestId("send-message").click();
+
+  await page.getByTestId("composer-upload-cancel").click();
+  await expect(page.getByTestId("composer-upload-progress")).toHaveCount(0);
+  await page.waitForTimeout(1_100);
+  await expect(page.getByTestId("file-card")).toHaveCount(0);
+});
+
+test("upload progress floats above the dock and lifts Jump to latest", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.evaluate(() => {
+    const e2e = (
+      window as Window & {
+        __BUZZ_E2E__?: { mock?: { uploadDelayMs?: number } };
+      }
+    ).__BUZZ_E2E__;
+    if (e2e?.mock) e2e.mock.uploadDelayMs = 2_000;
+  });
+  await page.getByTestId("channel-deep-history").click();
+
+  const timeline = page.getByTestId("message-timeline");
+  await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
+  await timeline.evaluate((element) => {
+    element.scrollTop = Math.max(500, element.scrollHeight / 2);
+    element.dispatchEvent(new Event("scroll", { bubbles: true }));
+  });
+  const jumpToLatest = page.getByTestId("message-scroll-to-latest");
+  await expect(jumpToLatest).toBeVisible();
+  const restingBox = await jumpToLatest.boundingBox();
+
+  await chooseQuarterlyReport(page);
+  await page.getByTestId("send-message").click();
+  const uploadMotion = page.getByTestId("composer-upload-progress-motion");
+  await expect(uploadMotion).toBeVisible();
+  await timeline.evaluate((element) => {
+    element.scrollTop = Math.max(500, element.scrollHeight / 2);
+    element.dispatchEvent(new Event("scroll", { bubbles: true }));
+  });
+  await expect(jumpToLatest).toBeVisible();
+  await page.waitForTimeout(250);
+
+  const [uploadBox, dockBackdropBox, liftedBox] = await Promise.all([
+    uploadMotion.boundingBox(),
+    page.getByTestId("composer-dock-backdrop").boundingBox(),
+    jumpToLatest.boundingBox(),
+  ]);
+  expect(restingBox).not.toBeNull();
+  expect(uploadBox).not.toBeNull();
+  expect(dockBackdropBox).not.toBeNull();
+  expect(liftedBox).not.toBeNull();
+  expect((dockBackdropBox?.y ?? 0) + 1).toBeGreaterThanOrEqual(
+    (uploadBox?.y ?? 0) + (uploadBox?.height ?? 0),
+  );
+  expect((liftedBox?.y ?? 0) + (liftedBox?.height ?? 0)).toBeLessThanOrEqual(
+    uploadBox?.y ?? 0,
+  );
+  expect(liftedBox?.y ?? 0).toBeLessThan((restingBox?.y ?? 0) - 10);
+
+  await page.getByTestId("composer-upload-cancel").click();
 });
 
 test("dropping a file on the channel column attaches it to the composer", async ({

@@ -7,9 +7,9 @@ use super::{
     effective_agent_command, find_nvm_default_bin, find_via_login_shell,
     is_login_shell_path_uninit, is_safe_nvm_tag, managed_agent_avatar_url, normalize_agent_args,
     parse_semver_tag, probe_codex_acp_version, record_agent_command, refresh_login_shell_path,
-    try_record_agent_command, BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL,
-    GOOSE_AVATAR_URL,
+    try_record_agent_command,
 };
+use super::{BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL};
 use crate::managed_agents::AcpAvailabilityStatus;
 
 #[test]
@@ -397,8 +397,7 @@ fn effective_agent_command_empty_override_is_inherit() {
 
 #[test]
 fn effective_agent_command_falls_back_to_default() {
-    // No override, no persona runtime, and a deleted persona all fall back
-    // to the bundled default.
+    // No override, no persona runtime, and a deleted persona all fall back to the bundled default.
     let personas = vec![persona_with_runtime("p1", None)];
     assert_eq!(
         effective_agent_command(Some("p1"), &personas, None),

@@ -41,14 +41,11 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+use crate::managed_agents::discovery::{known_acp_runtime, KnownAcpRuntime};
+use crate::managed_agents::types::{AcpAvailabilityStatus, AgentDefinition, ManagedAgentRecord};
 use crate::managed_agents::{
-    agent_env::baked_build_env,
-    config_bridge::read_goose_file_config,
-    discovery::{known_acp_runtime, KnownAcpRuntime},
-    env_vars::merged_user_env,
-    global_config::GlobalAgentConfig,
-    normalize_agent_args,
-    types::{AcpAvailabilityStatus, AgentDefinition, ManagedAgentRecord},
+    agent_env::baked_build_env, config_bridge::read_goose_file_config, env_vars::merged_user_env,
+    global_config::GlobalAgentConfig, normalize_agent_args,
 };
 
 mod cli_login;
@@ -1051,19 +1048,16 @@ mod tests {
             thinking_env_var: None,
             max_tokens_env_var: None,
             context_limit_env_var: None,
+            max_rounds_env_var: None,
             required_normalized_fields: &[],
             login_hint: None,
             auth_probe_args: None,
         }
     }
 
-    /// Returns the absolute path of the currently-running test binary as a
-    /// `&'static str`.  Host-portable stand-in for a "present" binary:
-    /// the path is absolute so `find_command` resolves it via `path.exists()`
-    /// rather than searching `PATH`, and the file always exists on the host.
-    ///
-    /// The tiny allocation is intentionally leaked — this runs at most once per
-    /// test process and the process exits immediately after tests complete.
+    /// Returns the absolute path of the currently-running test binary as a `&'static str`.
+    /// Host-portable stand-in for a "present" binary: absolute path so `find_command` resolves
+    /// it via `path.exists()`. Leaked allocation is intentional — process exits after tests.
     fn present_binary_str() -> &'static str {
         let path = std::env::current_exe().expect("current_exe must be available in tests");
         Box::leak(path.to_string_lossy().into_owned().into_boxed_str())
@@ -1246,6 +1240,7 @@ mod tests {
             thinking_env_var: None,
             max_tokens_env_var: None,
             context_limit_env_var: None,
+            max_rounds_env_var: None,
             required_normalized_fields: &[],
             login_hint: None,
             auth_probe_args: None,

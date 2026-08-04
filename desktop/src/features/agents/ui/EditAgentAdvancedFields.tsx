@@ -1,15 +1,30 @@
+import * as React from "react";
 import { cn } from "@/shared/lib/cn";
 import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
 import { EnvVarsEditor, type EnvVarsValue } from "./EnvVarsEditor";
 import {
+  CARD_MINT_KEY_ANNOTATIONS,
   PERSONA_FIELD_CONTROL_CLASS,
   PERSONA_FIELD_SHELL_CLASS,
   PERSONA_LABEL_OPTIONAL_CLASS,
 } from "./agentConfigOptions";
 import type { AgentPersona } from "@/shared/api/types";
-import { BuzzAgentModelTuningFields } from "./buzzAgentModelTuningFields";
-import { isBuzzAgentRuntime } from "./buzzAgentConfig";
+import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
+import {
+  BuzzAgentModelTuningFields,
+  NumericTuningFields,
+} from "./buzzAgentModelTuningFields";
+import {
+  isBuzzAgentRuntime,
+  BUZZ_AGENT_THINKING_EFFORT,
+} from "./buzzAgentConfig";
+import { EDIT_AGENT_PARALLELISM_HELP } from "../lib/agentParallelism";
+import {
+  deriveNumericDescriptors,
+  structuredEnvKeys,
+  type RuntimeCatalogStatus,
+} from "../lib/agentConfigCore";
 
 export function EditAgentAdvancedFields({
   acpCommand,
@@ -28,6 +43,8 @@ export function EditAgentAdvancedFields({
   parallelism,
   provider,
   requiredEnvKeys,
+  catalogStatus = "ready",
+  selectedRuntime,
   systemPrompt,
   onAcpCommandChange,
   onAgentArgsChange,
@@ -53,7 +70,7 @@ export function EditAgentAdvancedFields({
   model?: string;
   /**
    * The actual/prospective runtime id used to decide whether to show the
-   * buzz-agent model-tuning fields. Uses `prospectiveRuntimeId` from
+   * buzz-agent effort-tuning field. Uses `prospectiveRuntimeId` from
    * EditAgentDialog — the resolved runtime, not the "inherit"/"custom" sentinel.
    */
   modelTuningRuntimeId: string;
@@ -61,6 +78,24 @@ export function EditAgentAdvancedFields({
   /** Active LLM provider id — forwarded to BuzzAgentModelTuningFields for effort filtering. */
   provider?: string;
   requiredEnvKeys: readonly string[];
+  /**
+   * Lifecycle status of the runtime catalog query. Controls the numeric-tuning
+   * gate and hidden-key behaviour:
+   * - `loading` or `error`: no structured controls; keys not hidden — saved
+   *   values stay visible as generic rows.
+   * - `ready`: descriptors derived from `selectedRuntime` (empty when the
+   *   runtime has no numeric env-var fields).
+   *
+   * Defaults to `"ready"` so existing callers without the catalog query do not
+   * need to change.
+   */
+  catalogStatus?: RuntimeCatalogStatus;
+  /**
+   * The catalog entry for the prospective runtime. Drives descriptor-based
+   * numeric tuning fields (max output tokens / context limit / max rounds).
+   * When undefined after the catalog has settled, no numeric controls render.
+   */
+  selectedRuntime?: AcpRuntimeCatalogEntry;
   systemPrompt: string;
   onAcpCommandChange: (value: string) => void;
   onAgentArgsChange: (value: string) => void;
@@ -70,6 +105,29 @@ export function EditAgentAdvancedFields({
   onAutoRestartChange: (value: boolean) => void;
   onSystemPromptChange: (value: string) => void;
 }) {
+  // Numeric tuning descriptors — gate on catalog status so that loading/error
+  // never collapses to "no controls": keys stay visible as generic rows.
+  const numericDescriptors = React.useMemo(
+    () =>
+      catalogStatus === "ready"
+        ? deriveNumericDescriptors(selectedRuntime)
+        : [],
+    [catalogStatus, selectedRuntime],
+  );
+
+  // Build the effective hidden-key list: caller's secrets + effort key (when
+  // rendered by BuzzAgentModelTuningFields) + numeric keys via structuredEnvKeys.
+  const effectiveHiddenKeys = React.useMemo(
+    () => [
+      ...hiddenEnvKeys,
+      ...(isBuzzAgentRuntime(modelTuningRuntimeId)
+        ? [BUZZ_AGENT_THINKING_EFFORT]
+        : []),
+      ...structuredEnvKeys(numericDescriptors),
+    ],
+    [hiddenEnvKeys, modelTuningRuntimeId, numericDescriptors],
+  );
+
   return (
     <div className="space-y-5 pt-2">
       {/* Inherit runtime from template */}
@@ -172,10 +230,14 @@ export function EditAgentAdvancedFields({
             id="edit-agent-parallelism"
             inputMode="numeric"
             onChange={(event) => onParallelismChange(event.target.value)}
-            placeholder="1"
+            placeholder="Current value"
+            type="text"
             value={parallelism}
           />
         </div>
+        <p className="text-xs text-muted-foreground">
+          {EDIT_AGENT_PARALLELISM_HELP}
+        </p>
       </div>
 
       {/* Relay URL: intentionally no editor. The legacy per-record relay pin
@@ -242,17 +304,37 @@ export function EditAgentAdvancedFields({
       <EnvVarsEditor
         disabled={disabled}
         fileSatisfiedKeys={fileSatisfiedEnvKeys}
-        hiddenKeys={hiddenEnvKeys}
+        hiddenKeys={effectiveHiddenKeys}
         focusKey={focusKey}
         helperText="Per-agent env vars. Override the template's vars on collision."
         inheritedFrom={inheritedEnvVars}
         inheritedLabel="template / global defaults"
+        keyAnnotations={CARD_MINT_KEY_ANNOTATIONS}
         onChange={onEnvVarsChange}
         requiredKeys={requiredEnvKeys}
         value={envVars}
       />
 
-      {/* Tier-1 buzz-agent model-tuning knobs — only shown for buzz-agent. */}
+      {/* Descriptor-driven numeric tuning knobs — shown when the catalog has settled
+          and the runtime exposes numeric env-var fields. */}
+      {numericDescriptors.length > 0 ? (
+        <NumericTuningFields
+          descriptors={numericDescriptors}
+          envVars={envVars}
+          inheritedEnvVars={inheritedEnvVars}
+          onEnvVarChange={(key, value) => {
+            const next = { ...envVars };
+            if (value === "") {
+              delete next[key];
+            } else {
+              next[key] = value;
+            }
+            onEnvVarsChange(next);
+          }}
+        />
+      ) : null}
+
+      {/* Effort-tuning knob — only shown for buzz-agent. */}
       {isBuzzAgentRuntime(modelTuningRuntimeId) ? (
         <BuzzAgentModelTuningFields
           envVars={envVars}

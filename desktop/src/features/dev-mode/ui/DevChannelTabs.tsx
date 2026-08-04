@@ -1,7 +1,7 @@
 import * as React from "react";
 
 import { parseSubChannelName } from "@/features/dev-mode/lib/subChannels";
-import { DevWorkingChannelName } from "@/features/dev-mode/ui/DevWorkingChannelName";
+import { DevWavyText } from "@/features/dev-mode/ui/DevWavyText";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 
@@ -9,7 +9,8 @@ import { cn } from "@/shared/lib/cn";
  * Tab strip across the top of an open channel: `main` plus one tab per
  * sub-channel the user can see (surfaced to users as "tabs"). Parents can
  * carry hundreds, so the strip scrolls horizontally instead of wrapping;
- * the active tab scrolls itself into view. ⇧⌘[/⇧⌘] cycle through tabs.
+ * the active tab scrolls itself into view. ⇧⌘[/⇧⌘] cycle through tabs;
+ * ⌘1–⌘9 jump straight to one.
  */
 export function DevChannelTabs({
   main,
@@ -46,6 +47,7 @@ export function DevChannelTabs({
     const isUnread = unreadChannelIds.has(channel.id);
     const isHighPriority = highPriorityChannelIds.has(channel.id);
     const isBlocked = blockedChannelIds.has(channel.id);
+    const isWorking = workingChannelIds.has(channel.id);
     return (
       <button
         key={channel.id}
@@ -62,10 +64,7 @@ export function DevChannelTabs({
         type="button"
       >
         <span className={cn("whitespace-nowrap", isUnread && "font-semibold")}>
-          <DevWorkingChannelName
-            name={label}
-            working={workingChannelIds.has(channel.id)}
-          />
+          {isWorking ? <DevWavyText text={label} /> : label}
         </span>
         {isUnread ? (
           <span

@@ -406,7 +406,7 @@ export function CommunityRail({
     <nav
       aria-label="Communities"
       className={cn(
-        "relative z-20 flex w-14 shrink-0 flex-col items-center gap-2 overflow-y-auto px-2.5 pb-5 pt-[calc(var(--buzz-top-chrome-height,40px)+7px)]",
+        "relative z-0 flex w-14 shrink-0 flex-col items-center gap-2 overflow-y-auto px-2.5 pb-5 pt-[calc(var(--buzz-top-chrome-height,40px)+7px)]",
         variant === "developer"
           ? "border-r border-border/60 bg-background font-mono"
           : "bg-sidebar",
