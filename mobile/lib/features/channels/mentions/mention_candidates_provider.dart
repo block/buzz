@@ -2,6 +2,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../../shared/crypto/nip_oa.dart';
 import '../../../shared/mentions/agent_identity_provider.dart';
+import '../../../shared/mentions/archived_identities_provider.dart';
 import '../../../shared/relay/relay.dart';
 import '../../profile/user_cache_provider.dart';
 import '../../profile/user_profile.dart';
@@ -87,6 +88,11 @@ final mentionCandidatesProvider = Provider.family
       final searchResults =
           ref.watch(mentionUserSearchProvider(args.query)).asData?.value ??
           const <UserProfile>[];
+      // Fail-open while the NIP-IA snapshot loads (empty set) — mirrors
+      // desktop's `useIsArchivedPredicate`.
+      final archivedPubkeys =
+          ref.watch(archivedIdentitiesProvider).asData?.value ??
+          const <String>{};
 
       final sharedChannelIds = {
         for (final channel in channels)
@@ -101,6 +107,7 @@ final mentionCandidatesProvider = Provider.family
         ownerByAgentPubkey: owners,
         searchResults: searchResults,
         currentPubkey: currentPubkey,
+        archivedPubkeys: archivedPubkeys,
       );
 
       return rankMentionCandidates(candidates, args.query);

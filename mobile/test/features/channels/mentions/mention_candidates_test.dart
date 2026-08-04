@@ -280,5 +280,50 @@ void main() {
       expect(candidates, hasLength(1));
       expect(candidates.single.isMember, isTrue);
     });
+
+    test('archived identities are hidden from every candidate source', () {
+      final archivedMember = '4' * 64;
+      final archivedAgent = '5' * 64;
+      final archivedSearchHit = '6' * 64;
+      final candidates = buildMentionCandidates(
+        members: [member(memberPubkey), member(archivedMember)],
+        relayAgents: [
+          AgentDirectoryEntry(
+            pubkey: archivedAgent,
+            displayName: 'Retired Helper',
+            respondTo: 'anyone',
+            channelIds: const ['chan-1'],
+          ),
+        ],
+        sharedChannelIds: {'chan-1'},
+        userCache: const {},
+        ownerByAgentPubkey: const {},
+        searchResults: [
+          UserProfile(
+            pubkey: archivedSearchHit,
+            displayName: 'Old Bot',
+            ownerPubkey: userPubkey,
+          ),
+        ],
+        currentPubkey: userPubkey,
+        archivedPubkeys: {archivedMember, archivedAgent, archivedSearchHit},
+      );
+
+      expect(candidates.map((c) => c.pubkey), [memberPubkey]);
+    });
+
+    test('the current user is never hidden by their own archival', () {
+      final candidates = buildMentionCandidates(
+        members: [member(userPubkey)],
+        relayAgents: const [],
+        sharedChannelIds: const {},
+        userCache: const {},
+        ownerByAgentPubkey: const {},
+        currentPubkey: userPubkey,
+        archivedPubkeys: {userPubkey},
+      );
+
+      expect(candidates.map((c) => c.pubkey), contains(userPubkey));
+    });
   });
 }
