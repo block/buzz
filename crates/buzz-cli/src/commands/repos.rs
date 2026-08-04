@@ -91,6 +91,195 @@ enum RepoChange {
     BindChannel(String),
 }
 
+const MAIN_REF: &str = "refs/heads/main";
+const MAIN_PROTECTION: [&str; 5] = [
+    "buzz-protect",
+    MAIN_REF,
+    "push:admin",
+    "no-force-push",
+    "no-delete",
+];
+
+enum RepoAnnouncementPlan {
+    Replay(Event),
+    Publish(EventBuilder),
+}
+
+const CREATE_RECONCILED_MESSAGE: &str = "reconciled: repository provisioning ready";
+
+fn tag_values(tag: &Tag) -> &[String] {
+    tag.as_slice()
+}
+
+fn github_mirror(url: &str) -> bool {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|url| {
+            url.host_str()
+                .map(|host| host.eq_ignore_ascii_case("github.com"))
+        })
+        .unwrap_or(false)
+}
+
+fn existing_github_mirror(existing: Option<&Event>) -> Option<String> {
+    existing
+        .into_iter()
+        .flat_map(|event| event.tags.iter())
+        .filter(|tag| has_tag_name(tag, "clone"))
+        .flat_map(|tag| tag_values(tag).iter().skip(1))
+        .find(|url| github_mirror(url))
+        .cloned()
+}
+
+fn canonical_clone_urls(
+    buzz_url: &str,
+    requested: &[String],
+    existing: Option<&Event>,
+) -> Result<Vec<String>, CliError> {
+    let mut mirrors: Vec<String> = requested
+        .iter()
+        .filter(|url| url.as_str() != buzz_url)
+        .cloned()
+        .collect();
+    mirrors.sort();
+    mirrors.dedup();
+
+    let mirror = if mirrors.is_empty() {
+        existing_github_mirror(existing)
+    } else if mirrors.len() == 1 && github_mirror(&mirrors[0]) {
+        mirrors.pop()
+    } else {
+        return Err(CliError::Usage(
+            "--clone accepts the active Buzz repository URL and at most one github.com mirror"
+                .into(),
+        ));
+    };
+
+    let mut urls = vec![buzz_url.to_string()];
+    if let Some(mirror) = mirror {
+        urls.push(mirror);
+    }
+    Ok(urls)
+}
+
+fn replace_optional_metadata(
+    tags: &mut Vec<Tag>,
+    name: &str,
+    value: Option<&str>,
+) -> Result<(), CliError> {
+    if let Some(value) = value {
+        tags.retain(|tag| !has_tag_name(tag, name));
+        tags.push(Tag::parse([name, value]).map_err(tag_error)?);
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plan_repo_announcement(
+    existing: Option<&Event>,
+    repo_id: &str,
+    owner: &str,
+    relay_url: &str,
+    name: Option<&str>,
+    description: Option<&str>,
+    clone_urls: &[String],
+    web_url: Option<&str>,
+    relays: &[String],
+    channel: &str,
+) -> Result<RepoAnnouncementPlan, CliError> {
+    validate_repo_id(repo_id)?;
+    crate::validate::validate_hex64(owner)?;
+    let channel = uuid::Uuid::parse_str(channel)
+        .map_err(|error| CliError::Usage(format!("channel must be a valid UUID: {error}")))?
+        .to_string();
+    let buzz_url = format!("{}/git/{owner}/{repo_id}", relay_url.trim_end_matches('/'));
+    let clone_urls = canonical_clone_urls(&buzz_url, clone_urls, existing)?;
+
+    // Keep SDK validation authoritative for standard NIP-34 metadata.
+    let clone_refs: Vec<&str> = clone_urls.iter().map(String::as_str).collect();
+    let relay_refs: Vec<&str> = relays.iter().map(String::as_str).collect();
+    buzz_sdk::build_repo_announcement(
+        repo_id,
+        name,
+        description,
+        &clone_refs,
+        web_url,
+        &relay_refs,
+    )
+    .map_err(|error| CliError::Usage(error.to_string()))?;
+
+    let mut tags: Vec<Tag> = existing
+        .map(|event| {
+            event
+                .tags
+                .iter()
+                .filter(|tag| {
+                    !matches!(
+                        tag_values(tag).first().map(String::as_str),
+                        Some("auth" | "d" | "buzz-channel" | "clone")
+                    ) && protection_pattern(tag) != Some(MAIN_REF)
+                })
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+
+    replace_optional_metadata(&mut tags, "name", name)?;
+    replace_optional_metadata(&mut tags, "description", description)?;
+    replace_optional_metadata(&mut tags, "web", web_url)?;
+    if !relays.is_empty() {
+        tags.retain(|tag| !has_tag_name(tag, "relays"));
+        let mut values = vec!["relays".to_string()];
+        values.extend(relays.iter().cloned());
+        tags.push(Tag::parse(values).map_err(tag_error)?);
+    }
+
+    tags.insert(0, Tag::parse(["d", repo_id]).map_err(tag_error)?);
+    let mut clone_tag = vec!["clone".to_string()];
+    clone_tag.extend(clone_urls);
+    tags.push(Tag::parse(clone_tag).map_err(tag_error)?);
+    tags.push(Tag::parse(["buzz-channel", channel.as_str()]).map_err(tag_error)?);
+    tags.push(Tag::parse(MAIN_PROTECTION).map_err(tag_error)?);
+
+    let raw_tags: Vec<Vec<String>> = tags.iter().map(|tag| tag.as_slice().to_vec()).collect();
+    parse_protection_tags(&raw_tags).map_err(|error| {
+        CliError::Other(format!(
+            "repository contains invalid protection rules; refusing update: {error}"
+        ))
+    })?;
+
+    if let Some(existing) = existing.filter(|event| {
+        let semantic_tags: Vec<&Tag> = event
+            .tags
+            .iter()
+            .filter(|tag| !has_tag_name(tag, "auth"))
+            .collect();
+        semantic_tags.len() == tags.len()
+            && semantic_tags
+                .iter()
+                .zip(&tags)
+                .all(|(left, right)| left.as_slice() == right.as_slice())
+    }) {
+        // A semantically current announcement does not prove the relay-side
+        // bare repository exists. Replay the exact signed event so the relay
+        // can reconcile provisioning without creating a newer announcement.
+        return Ok(RepoAnnouncementPlan::Replay(existing.clone()));
+    }
+
+    let content = existing.map(|event| event.content.as_str()).unwrap_or("");
+    let mut builder = buzz_sdk::build_repo_announcement_with_tags(repo_id, content, tags)
+        .map_err(|error| CliError::Other(format!("failed to build repository update: {error}")))?;
+    if let Some(existing) = existing {
+        let next_created_at = existing
+            .created_at
+            .as_secs()
+            .checked_add(1)
+            .ok_or_else(|| CliError::Other("repository timestamp cannot be advanced".into()))?;
+        builder = builder.custom_created_at(Timestamp::from(next_created_at));
+    }
+    Ok(RepoAnnouncementPlan::Publish(builder))
+}
+
 fn build_updated_repo_announcement(
     existing: &Event,
     change: RepoChange,
@@ -207,51 +396,38 @@ fn validate_write_response(raw: &str) -> Result<String, CliError> {
     Ok(normalize_write_response(raw))
 }
 
+fn validate_create_replay_response(raw: &str) -> Result<String, CliError> {
+    let response: serde_json::Value = serde_json::from_str(raw)
+        .map_err(|error| CliError::Other(format!("relay response is not JSON: {error} ({raw})")))?;
+    let accepted = response
+        .get("accepted")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let message = response
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    if !accepted {
+        return Err(CliError::Other(format!("relay rejected event: {message}")));
+    }
+    if message == "duplicate" || message.starts_with("duplicate:") {
+        return Err(CliError::Conflict(
+            "repository provisioning was not reconciled; retry create against the relay".into(),
+        ));
+    }
+    if message != CREATE_RECONCILED_MESSAGE {
+        return Err(CliError::Other(format!(
+            "relay did not confirm repository provisioning reconciliation: {message}"
+        )));
+    }
+    Ok(normalize_write_response(raw))
+}
+
 async fn submit_repo_update(client: &BuzzClient, builder: EventBuilder) -> Result<(), CliError> {
     let event = client.sign_event(builder)?;
     let raw = client.submit_event(event).await?;
     println!("{}", validate_write_response(&raw)?);
     Ok(())
-}
-
-/// Build the kind:30617 announcement for `repos create`, including the
-/// `buzz-channel` binding when requested.
-///
-/// Pure (no I/O) so the emitted tags are unit-testable. Exactly one
-/// validated `buzz-channel` tag is appended — the tag is the git ACL
-/// (issue #3527: without it the relay 404s every clone/fetch/push), so the
-/// UUID is shape-validated here and its existence/membership is the relay's
-/// authority at git-access time, same posture as `repos bind`.
-#[allow(clippy::too_many_arguments)]
-fn build_create_announcement(
-    repo_id: &str,
-    name: Option<&str>,
-    description: Option<&str>,
-    clone_urls: &[String],
-    web_url: Option<&str>,
-    relays: &[String],
-    channel: Option<&str>,
-) -> Result<EventBuilder, CliError> {
-    validate_repo_id(repo_id)?;
-
-    let clone_refs: Vec<&str> = clone_urls.iter().map(|s| s.as_str()).collect();
-    let relay_refs: Vec<&str> = relays.iter().map(|s| s.as_str()).collect();
-
-    let mut builder = buzz_sdk::build_repo_announcement(
-        repo_id,
-        name,
-        description,
-        &clone_refs,
-        web_url,
-        &relay_refs,
-    )
-    .map_err(|e| CliError::Other(format!("build_repo_announcement failed: {e}")))?;
-
-    if let Some(channel) = channel {
-        crate::validate::validate_uuid(channel)?;
-        builder = builder.tag(Tag::parse(["buzz-channel", channel]).map_err(tag_error)?);
-    }
-    Ok(builder)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -263,10 +439,14 @@ pub async fn cmd_create_repo(
     clone_urls: &[String],
     web_url: Option<&str>,
     relays: &[String],
-    channel: Option<&str>,
+    channel: &str,
 ) -> Result<(), CliError> {
-    let builder = build_create_announcement(
+    let existing = fetch_own_repo_announcement(client, repo_id).await?;
+    let plan = plan_repo_announcement(
+        existing.as_ref(),
         repo_id,
+        &client.keys().public_key().to_hex(),
+        client.relay_url(),
         name,
         description,
         clone_urls,
@@ -274,10 +454,14 @@ pub async fn cmd_create_repo(
         relays,
         channel,
     )?;
-    let event = client.sign_event(builder)?;
-    let resp = client.submit_event(event).await?;
-    println!("{resp}");
-    Ok(())
+    match plan {
+        RepoAnnouncementPlan::Replay(event) => {
+            let raw = client.submit_event(event).await?;
+            println!("{}", validate_create_replay_response(&raw)?);
+            Ok(())
+        }
+        RepoAnnouncementPlan::Publish(builder) => submit_repo_update(client, builder).await,
+    }
 }
 
 pub async fn cmd_get_repo(
@@ -437,7 +621,7 @@ pub async fn dispatch(cmd: crate::ReposCmd, client: &BuzzClient) -> Result<(), C
                 &clone_urls,
                 web.as_deref(),
                 &relays,
-                channel.as_deref(),
+                &channel,
             )
             .await
         }
@@ -477,8 +661,9 @@ mod tests {
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
     use super::{
-        build_create_announcement, build_protection_tag, build_updated_repo_announcement,
-        protection_rules_json, validate_write_response, RepoChange,
+        build_protection_tag, build_updated_repo_announcement, plan_repo_announcement,
+        protection_rules_json, validate_create_replay_response, validate_write_response,
+        RepoAnnouncementPlan, RepoChange,
     };
 
     fn signed_repo(tags: Vec<Tag>, content: &str, created_at: u64) -> nostr::Event {
@@ -770,62 +955,226 @@ mod tests {
         assert!(matches!(error, crate::error::CliError::Usage(_)));
     }
 
-    /// Issue #3527: `repos create --channel` must emit exactly one
-    /// `buzz-channel` tag so the primary create command stops producing
-    /// repos the relay 404s forever.
     #[test]
-    fn create_with_channel_emits_exactly_one_binding_tag() {
+    fn desired_create_is_buzz_first_and_atomically_protected() {
         let channel = uuid::Uuid::new_v4().to_string();
-        let event = build_create_announcement(
+        let keys = Keys::generate();
+        let owner = keys.public_key().to_hex();
+        let mirror = "https://github.com/example/demo.git".to_string();
+        let RepoAnnouncementPlan::Publish(builder) = plan_repo_announcement(
+            None,
             "demo",
+            &owner,
+            "https://relay.example/",
             Some("Demo"),
             None,
-            &["https://relay.example/git/owner/demo".to_string()],
+            std::slice::from_ref(&mirror),
             None,
             &[],
-            Some(&channel),
+            &channel,
         )
-        .expect("build create announcement")
-        .sign_with_keys(&Keys::generate())
-        .expect("sign create announcement");
+        .expect("plan create") else {
+            panic!("new repository must publish");
+        };
+        let event = builder.sign_with_keys(&keys).expect("sign create");
 
         assert_eq!(event.kind, Kind::Custom(30617));
-        let bindings: Vec<_> = event
-            .tags
-            .iter()
-            .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("buzz-channel"))
-            .collect();
-        assert_eq!(bindings.len(), 1, "exactly one buzz-channel tag");
-        assert_eq!(bindings[0].as_slice(), ["buzz-channel", channel.as_str()]);
-        // The standard metadata still rides along.
+        assert_eq!(event.pubkey, keys.public_key());
+        assert_eq!(
+            event
+                .tags
+                .iter()
+                .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("d"))
+                .count(),
+            1
+        );
         assert!(event.tags.iter().any(|tag| tag.as_slice() == ["d", "demo"]));
+        assert_eq!(
+            event
+                .tags
+                .iter()
+                .find(|tag| tag.as_slice().first().map(String::as_str) == Some("clone"))
+                .expect("clone tag")
+                .as_slice(),
+            [
+                "clone",
+                &format!("https://relay.example/git/{owner}/demo"),
+                mirror.as_str(),
+            ]
+        );
+        assert_eq!(
+            event
+                .tags
+                .iter()
+                .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("buzz-channel"))
+                .count(),
+            1
+        );
         assert!(event
             .tags
             .iter()
-            .any(|tag| tag.as_slice() == ["name", "Demo"]));
-    }
-
-    #[test]
-    fn create_without_channel_emits_no_binding_tag() {
-        let event = build_create_announcement("demo", None, None, &[], None, &[], None)
-            .expect("build create announcement")
-            .sign_with_keys(&Keys::generate())
-            .expect("sign create announcement");
-
-        assert!(
-            !event
+            .any(|tag| tag.as_slice() == ["buzz-channel", channel.as_str()]));
+        assert!(event
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice() == super::MAIN_PROTECTION));
+        assert_eq!(
+            event
                 .tags
                 .iter()
-                .any(|tag| tag.as_slice().first().map(String::as_str) == Some("buzz-channel")),
-            "no --channel means no binding tag (vanilla NIP-34 stays possible)"
+                .filter(|tag| super::protection_pattern(tag) == Some(super::MAIN_REF))
+                .count(),
+            1
         );
     }
 
     #[test]
-    fn create_rejects_malformed_channel_uuid() {
-        let error = build_create_announcement("demo", None, None, &[], None, &[], Some("nope"))
-            .expect_err("malformed channel id must not build an announcement");
+    fn desired_update_promotes_github_only_and_preserves_unrelated_metadata() {
+        let channel = uuid::Uuid::new_v4().to_string();
+        let owner = "a".repeat(64);
+        let existing = signed_repo(
+            vec![
+                tag(&["d", "demo"]),
+                tag(&["clone", "https://github.com/example/demo.git"]),
+                tag(&["buzz-channel", &uuid::Uuid::new_v4().to_string()]),
+                tag(&["buzz-protect", "refs/heads/main", "push:member"]),
+                tag(&["buzz-protect", "refs/tags/*", "no-delete"]),
+                tag(&["future-metadata", "preserve-me"]),
+                tag(&["auth", &"b".repeat(64), "kind=30617", &"c".repeat(128)]),
+            ],
+            "repository content",
+            50,
+        );
+        let RepoAnnouncementPlan::Publish(builder) = plan_repo_announcement(
+            Some(&existing),
+            "demo",
+            &owner,
+            "https://relay.example",
+            None,
+            None,
+            &[],
+            None,
+            &[],
+            &channel,
+        )
+        .expect("plan update") else {
+            panic!("legacy repository needs an update")
+        };
+        let event = builder
+            .sign_with_keys(&Keys::generate())
+            .expect("sign update");
+
+        assert_eq!(event.content, "repository content");
+        assert_eq!(event.created_at.as_secs(), 51);
+        assert!(event
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["future-metadata", "preserve-me"]));
+        assert!(event
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["buzz-protect", "refs/tags/*", "no-delete"]));
+        assert_eq!(
+            event
+                .tags
+                .iter()
+                .find(|tag| super::has_tag_name(tag, "clone"))
+                .expect("clone")
+                .as_slice(),
+            [
+                "clone",
+                &format!("https://relay.example/git/{owner}/demo"),
+                "https://github.com/example/demo.git"
+            ]
+        );
+    }
+
+    #[test]
+    fn semantically_exact_desired_state_replays_the_exact_fetched_event() {
+        let channel = uuid::Uuid::new_v4().to_string();
+        let owner = "a".repeat(64);
+        let RepoAnnouncementPlan::Publish(builder) = plan_repo_announcement(
+            None,
+            "demo",
+            &owner,
+            "https://relay.example",
+            Some("Demo"),
+            None,
+            &[],
+            None,
+            &[],
+            &channel,
+        )
+        .expect("initial plan") else {
+            panic!("initial plan must publish")
+        };
+        let canonical = builder
+            .sign_with_keys(&Keys::generate())
+            .expect("sign initial state");
+        let mut stored_tags: Vec<Tag> = canonical.tags.iter().cloned().collect();
+        stored_tags.push(tag(&[
+            "auth",
+            &"b".repeat(64),
+            "kind=30617",
+            &"c".repeat(128),
+        ]));
+        let existing = signed_repo(
+            stored_tags,
+            &canonical.content,
+            canonical.created_at.as_secs(),
+        );
+
+        let RepoAnnouncementPlan::Replay(replayed) = plan_repo_announcement(
+            Some(&existing),
+            "demo",
+            &owner,
+            "https://relay.example",
+            Some("Demo"),
+            None,
+            &[],
+            None,
+            &[],
+            &channel,
+        )
+        .expect("rerun plan") else {
+            panic!("semantically current state must reconcile by replay")
+        };
+        assert_eq!(replayed, existing);
+    }
+
+    #[test]
+    fn desired_state_rejects_non_github_secondary_clone() {
+        let error = plan_repo_announcement(
+            None,
+            "demo",
+            &"a".repeat(64),
+            "https://relay.example",
+            None,
+            None,
+            &["https://gitlab.com/example/demo.git".to_string()],
+            None,
+            &[],
+            &uuid::Uuid::new_v4().to_string(),
+        )
+        .err()
+        .expect("non-GitHub secondary clone must fail");
         assert!(matches!(error, crate::error::CliError::Usage(_)));
+
+        let malformed = plan_repo_announcement(
+            None,
+            "demo",
+            &"a".repeat(64),
+            "https://relay.example",
+            None,
+            None,
+            &["not a clone URL".to_string()],
+            None,
+            &[],
+            &uuid::Uuid::new_v4().to_string(),
+        )
+        .err()
+        .expect("malformed secondary clone must fail");
+        assert!(matches!(malformed, crate::error::CliError::Usage(_)));
     }
 
     #[test]
@@ -853,5 +1202,47 @@ mod tests {
                 "message": "saved",
             })
         );
+    }
+
+    #[test]
+    fn create_replay_requires_the_explicit_reconciled_success() {
+        let output = validate_create_replay_response(
+            r#"{"event_id":"abc","accepted":true,"message":"reconciled: repository provisioning ready","extra":"ignored"}"#,
+        )
+        .expect("explicit reconciliation success");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&output).expect("normalized JSON"),
+            serde_json::json!({
+                "event_id": "abc",
+                "accepted": true,
+                "message": "reconciled: repository provisioning ready",
+            })
+        );
+
+        let duplicate = validate_create_replay_response(
+            r#"{"event_id":"abc","accepted":true,"message":"duplicate: already stored"}"#,
+        )
+        .expect_err("ordinary duplicate remains a conflict");
+        assert!(matches!(duplicate, crate::error::CliError::Conflict(_)));
+
+        for raw in [
+            r#"{"event_id":"abc","accepted":true,"message":"saved"}"#,
+            r#"{"event_id":"abc","accepted":false,"message":"reconciled: repository provisioning ready"}"#,
+            "not json",
+        ] {
+            assert!(
+                validate_create_replay_response(raw).is_err(),
+                "unexpected replay acceptance: {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejected_or_malformed_write_response_fails_closed() {
+        assert!(validate_write_response(
+            r#"{"event_id":"abc","accepted":false,"message":"denied"}"#
+        )
+        .is_err());
+        assert!(validate_write_response("not json").is_err());
     }
 }

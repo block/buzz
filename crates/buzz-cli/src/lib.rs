@@ -1123,7 +1123,8 @@ pub enum ReposCmd {
         /// Repository description
         #[arg(long)]
         description: Option<String>,
-        /// Clone URL(s) — can be specified multiple times
+        /// Existing clone location(s). Buzz derives its own URL; at most one
+        /// GitHub mirror is retained after it.
         #[arg(long = "clone")]
         clone_urls: Vec<String>,
         /// Web browsing URL
@@ -1132,11 +1133,10 @@ pub enum ReposCmd {
         /// Preferred Nostr relay(s) for repo discovery — can be specified multiple times
         #[arg(long = "nostr-relay")]
         relays: Vec<String>,
-        /// Channel UUID to bind the repo to. The `buzz-channel` tag is the
-        /// git ACL: without it the relay 404s every clone/fetch/push until
-        /// the author runs `buzz repos bind` (issue #3527).
+        /// Channel UUID to bind the repo to. Repository creation converges the
+        /// binding and protected-main rule before any later content push.
         #[arg(long)]
-        channel: Option<String>,
+        channel: String,
     },
     /// Get a repository announcement
     Get {
@@ -2041,6 +2041,38 @@ mod tests {
         };
         assert_eq!(parsed_issue_id.as_deref(), Some(issue_id.as_str()));
         assert_eq!(external_id.as_deref(), Some("github:pull/42"));
+    }
+
+    #[test]
+    fn repo_create_requires_channel_and_keeps_clone_as_announcement_metadata() {
+        assert!(Cli::try_parse_from(["buzz", "repos", "create", "--id", "demo"]).is_err());
+
+        let cli = Cli::try_parse_from([
+            "buzz",
+            "repos",
+            "create",
+            "--id",
+            "demo",
+            "--channel",
+            "11111111-1111-4111-8111-111111111111",
+            "--clone",
+            "https://github.com/example/demo.git",
+        ])
+        .expect("desired repository announcement arguments should parse");
+
+        let Cmd::Repos(ReposCmd::Create {
+            channel,
+            clone_urls,
+            ..
+        }) = cli.command
+        else {
+            panic!("expected repos create");
+        };
+        assert_eq!(channel, "11111111-1111-4111-8111-111111111111");
+        assert_eq!(
+            clone_urls,
+            vec!["https://github.com/example/demo.git".to_string()]
+        );
     }
 
     #[test]
