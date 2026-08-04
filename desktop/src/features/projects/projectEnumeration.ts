@@ -1,5 +1,11 @@
 import { relayClient } from "@/shared/api/relayClient";
 import type { RelayEvent } from "@/shared/api/types";
+import {
+  KIND_DELETION,
+  KIND_PROJECT_ANNOUNCEMENT,
+  KIND_REPO_ANNOUNCEMENT,
+} from "@/shared/constants/kinds";
+import { buildProjectReadModels, type Project } from "./projectModels";
 
 const PROJECT_ENUMERATION_PAGE_SIZE = 500;
 
@@ -76,4 +82,48 @@ export function fetchProjectEventsExhaustively(
     kinds,
     pageSize,
   );
+}
+
+/**
+ * Core fetch-and-build logic for `fetchProjects`, extracted for testability.
+ *
+ * Accepts an injectable `fetchExhaustively` so unit tests can stub individual
+ * kind enumerations (including injecting a rejection for kind:5 tombstones) without
+ * pulling in the Tauri relay client.
+ *
+ * Fail-closed: if the kind:5 tombstone enumeration rejects, throws rather than
+ * returning an empty deletion set that would resurrect every deleted head.
+ */
+export async function buildProjectsFromFetcher(
+  fetchExhaustively: (kinds: number[]) => Promise<RelayEvent[]>,
+  options: {
+    relayOrigin?: string | null;
+    hiddenAddresses?: ReadonlySet<string>;
+  } = {},
+): Promise<Project[]> {
+  const [projectEvents, repositoryEvents, tombstoneResult] = await Promise.all([
+    fetchExhaustively([KIND_PROJECT_ANNOUNCEMENT]),
+    fetchExhaustively([KIND_REPO_ANNOUNCEMENT]),
+    fetchExhaustively([KIND_DELETION]).then(
+      (events) => ({ ok: true as const, events }),
+      (error: unknown) => ({
+        ok: false as const,
+        message: error instanceof Error ? error.message : "Unknown error",
+      }),
+    ),
+  ]);
+
+  if (!tombstoneResult.ok) {
+    throw new Error(
+      `Could not fetch project deletion records: ${tombstoneResult.message} — refresh to retry.`,
+    );
+  }
+
+  return buildProjectReadModels({
+    projectEvents,
+    repositoryEvents,
+    deletionEvents: tombstoneResult.events,
+    relayOrigin: options.relayOrigin ?? null,
+    hiddenAddresses: options.hiddenAddresses ?? new Set(),
+  }).sort((a, b) => b.createdAt - a.createdAt);
 }

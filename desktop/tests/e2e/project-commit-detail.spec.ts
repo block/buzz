@@ -826,3 +826,65 @@ test("adding a repository blocks when a standalone 30617 already exists at that 
     "neither project nor repository event must be published when clobber guard fires",
   ).toBe(false);
 });
+
+test("navigating via a 30617 entity-link route opens the correct non-primary repository and renders its PR", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  // Seed a known pull-request for relay-tools (the non-primary member of "buzz")
+  // with a deterministic id so the URL can be constructed before navigation.
+  const ALICE_PUBKEY =
+    "953d3363262e86b770419834c53d2446409db6d918a57f8f339d495d54ab001f";
+  const RELAY_TOOLS_ADDRESS = `30617:${ALICE_PUBKEY}:relay-tools`;
+  const KNOWN_PR_ID = "entity-link-pr-test".padEnd(64, "0");
+
+  await page.addInitScript(
+    ({ repoAddress, prId, alicePubkey }) => {
+      window.__BUZZ_E2E_EXTRA_PROJECT_EVENTS__ = [
+        {
+          id: prId,
+          kind: 1618, // KIND_GIT_PULL_REQUEST
+          pubkey: alicePubkey,
+          created_at: Math.floor(Date.now() / 1000) - 60,
+          content: "Entity-link test PR from relay-tools",
+          tags: [
+            ["a", repoAddress],
+            ["subject", "Entity-link test PR from relay-tools"],
+            ["c", "abc123".padEnd(40, "0")],
+            ["h", "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"],
+            ["branch-name", "feature/entity-link-test"],
+            ["clone", "https://github.com/block/relay-tools.git"],
+          ],
+        },
+      ];
+    },
+    {
+      repoAddress: RELAY_TOOLS_ADDRESS,
+      prId: KNOWN_PR_ID,
+      alicePubkey: ALICE_PUBKEY,
+    },
+  );
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+
+  // Enable the feature before navigating to the project route directly.
+  await page.getByTestId("open-projects-view").click();
+
+  // Navigate via the entity-link route: projectId is the 30617 coordinate
+  // (what #4695 entity links emit) and pullRequestId targets the relay-tools PR.
+  const encodedProjectId = encodeURIComponent(RELAY_TOOLS_ADDRESS);
+  await page.goto(
+    `/projects/${encodedProjectId}?pullRequestId=${KNOWN_PR_ID}`,
+    { waitUntil: "domcontentloaded" },
+  );
+
+  // The repository picker must show "relay-tools" (non-primary), not "buzz" (primary).
+  const picker = page.getByTestId("project-repository-picker");
+  await expect(picker).toContainText("relay-tools", { timeout: 10_000 });
+  await expect(picker).not.toContainText("buzz");
+
+  // The PR detail panel must render from the relay-tools repository — not blank.
+  await expect(
+    page.getByText("Entity-link test PR from relay-tools"),
+  ).toBeVisible({ timeout: 10_000 });
+});

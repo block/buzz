@@ -23,8 +23,6 @@ import {
   KIND_GIT_STATUS_DRAFT,
   KIND_GIT_STATUS_MERGED,
   KIND_GIT_STATUS_OPEN,
-  KIND_PROJECT_ANNOUNCEMENT,
-  KIND_REPO_ANNOUNCEMENT,
   KIND_REPO_STATE,
   KIND_TEXT_NOTE,
 } from "@/shared/constants/kinds";
@@ -58,12 +56,14 @@ import {
 } from "./projectPullRequests.mjs";
 import { fetchProjectsWorkItems } from "./projectWorkItems";
 import {
-  buildProjectReadModels,
   eventToRepository,
   type Project,
   type Repository,
 } from "./projectModels";
-import { fetchProjectEventsExhaustively } from "./projectEnumeration";
+import {
+  buildProjectsFromFetcher,
+  fetchProjectEventsExhaustively,
+} from "./projectEnumeration";
 import { projectMatchesRouteId } from "./projectRoutes";
 
 export type {
@@ -162,51 +162,19 @@ export function eventToProject(
   return repository;
 }
 
-export async function fetchProjects(): Promise<Project[]> {
-  // Enumerate tombstones exhaustively per NIP-MP §Deletion enumeration rules:
-  // a fixed-limit query silently omits deletions 2001+, resurrecting deleted
-  // heads on history-retaining relays. A failed tombstone query must mark
-  // results as incomplete rather than substituting an empty set (which would
-  // resurrect every deleted head the relay still serves).
-  //
-  // NIP-OA owner-authorized deletion (NIP-MP §157-165, §328-331): The Buzz
-  // relay suppresses tombstones from registered NIP-OA owners server-side
-  // before serving them to clients. Desktop therefore narrows its client-side
-  // authorization check to the self-signed case (event.pubkey === coordinate
-  // owner) and relies on the relay for cross-owner owner-authorized deletions.
-  // This is the explicit choice: implementing NIP-OA client-side requires
-  // attestation data (the NIP-OA owner registry) that is not available in the
-  // current `fetchProjects` context. The relay-side suppression is the
-  // authoritative gate; client-side rejects only the owner's own tombstones.
-  const [projectEvents, repositoryEvents, tombstoneResult] = await Promise.all([
-    fetchProjectEventsExhaustively([KIND_PROJECT_ANNOUNCEMENT]),
-    fetchProjectEventsExhaustively([KIND_REPO_ANNOUNCEMENT]),
-    fetchProjectEventsExhaustively([KIND_DELETION]).then(
-      (events) => ({ ok: true as const, events }),
-      (error: unknown) => ({
-        ok: false as const,
-        message: error instanceof Error ? error.message : "Unknown error",
-      }),
-    ),
-  ]);
-
-  // If tombstone enumeration failed, we cannot safely present any projects
-  // whose deletion status is unknown — but we also must not silently resurrect
-  // all deleted heads. Surface an error so the query layer can retry rather
-  // than caching a stale read model.
-  if (!tombstoneResult.ok) {
-    throw new Error(
-      `Could not fetch project deletion records: ${tombstoneResult.message} — refresh to retry.`,
-    );
-  }
-
-  return buildProjectReadModels({
-    projectEvents,
-    repositoryEvents,
-    deletionEvents: tombstoneResult.events,
+export async function fetchProjects(
+  fetchExhaustively: (
+    kinds: number[],
+  ) => Promise<RelayEvent[]> = fetchProjectEventsExhaustively,
+): Promise<Project[]> {
+  // Delegates to `buildProjectsFromFetcher` in `projectEnumeration.ts`, which
+  // is the pure, Tauri-free core of this operation. That helper's javadoc
+  // explains the fail-closed tombstone contract and the NIP-OA owner-deletion
+  // relay-side-suppression decision.
+  return buildProjectsFromFetcher(fetchExhaustively, {
     relayOrigin: getCachedRelayOrigin(),
     hiddenAddresses: new Set(readHiddenProjectCards()),
-  }).sort((a, b) => b.createdAt - a.createdAt);
+  });
 }
 
 function eventToRepoState(event: RelayEvent): RepoState {
@@ -656,7 +624,7 @@ export const projectsQueryKey = ["projects"] as const;
 export function useProjectsQuery() {
   return useQuery({
     queryKey: projectsQueryKey,
-    queryFn: fetchProjects,
+    queryFn: () => fetchProjects(),
     staleTime: 60_000,
   });
 }
@@ -664,7 +632,7 @@ export function useProjectsQuery() {
 export function useProjectQuery(projectId: string) {
   return useQuery({
     queryKey: projectsQueryKey,
-    queryFn: fetchProjects,
+    queryFn: () => fetchProjects(),
     select: (projects) =>
       projects.find((project) => projectMatchesRouteId(project, projectId)) ??
       null,

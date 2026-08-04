@@ -291,38 +291,32 @@ export function eventToExplicitProject(
   repositoriesByAddress: ReadonlyMap<string, Repository>,
   visibleRepositoriesByAddress: ReadonlyMap<string, Repository>,
 ): Project | null {
-  // NIP-MP rule `d-cardinality`: exactly one `d` tag is required.
-  // Multiple `d` tags make the addressing coordinate reader-dependent; reject.
-  const dTags = event.tags.filter((tag) => tag[0] === "d");
-  const dtag = dTags.length === 1 ? dTags[0][1] : undefined;
   if (
     event.kind !== KIND_PROJECT_ANNOUNCEMENT ||
-    !dtag ||
-    !isValidDTag(dtag) ||
     !isValidPubkey(event.pubkey)
   ) {
     return null;
   }
 
-  const membershipTags = event.tags.filter((tag) => tag[0] === "a");
-  // NIP-MP rule `member-cap`: reject events exceeding the 64-member limit.
-  if (membershipTags.length > MAX_PROJECT_MEMBERS) {
+  // Delegate all NIP-MP envelope validation to the shared validator so the
+  // read parser and the write helper (`buildProjectPatchTemplate`) agree on
+  // which heads are valid. The parser rejects invalid events silently (returns
+  // null) while the write helper throws, so wrap in a try/catch here.
+  try {
+    validateProjectEventEnvelope(event.tags, event.content);
+  } catch {
     return null;
   }
+
+  // After validation we know: exactly one `d` tag with a valid value, at most
+  // 64 `a` tags with valid repo coordinates, no duplicate addresses, and all
+  // singleton metadata tags within their byte caps.
+  const dtag = event.tags.find((tag) => tag[0] === "d")?.[1] ?? "";
+  const membershipTags = event.tags.filter((tag) => tag[0] === "a");
   const repositoryAddresses: string[] = [];
   const repositoryRelayHints: Record<string, string> = {};
-  const seen = new Set<string>();
   for (const membershipTag of membershipTags) {
     const repositoryAddress = membershipTag[1];
-    if (
-      !repositoryAddress ||
-      !parseRepositoryAddress(repositoryAddress) ||
-      (membershipTag.length !== 2 && membershipTag.length !== 3) ||
-      seen.has(repositoryAddress)
-    ) {
-      return null;
-    }
-    seen.add(repositoryAddress);
     repositoryAddresses.push(repositoryAddress);
     if (membershipTag[2]) {
       repositoryRelayHints[repositoryAddress] = membershipTag[2];
@@ -340,36 +334,6 @@ export function eventToExplicitProject(
 
   const owner = event.pubkey.toLowerCase();
   const projectAddress = `${KIND_PROJECT_ANNOUNCEMENT}:${owner}:${dtag}`;
-
-  // NIP-MP rule `metadata-cardinality`: at most one each of `name`,
-  // `description`, `buzz-channel`, `buzz-visibility`. Duplicates make the
-  // effective value reader-dependent; reject.
-  const SINGLETON_METADATA = [
-    "name",
-    "description",
-    "buzz-channel",
-    "buzz-visibility",
-  ] as const;
-  for (const tagName of SINGLETON_METADATA) {
-    if (event.tags.filter((tag) => tag[0] === tagName).length > 1) {
-      return null;
-    }
-  }
-
-  // NIP-MP rule `metadata-length`: enforce per-field byte limits.
-  const MAX_METADATA_BYTES: Record<string, number> = {
-    name: 256,
-    description: 2_048,
-    "buzz-channel": 256,
-    "buzz-visibility": 256,
-  };
-  const encoder = new TextEncoder();
-  for (const [tagName, maxBytes] of Object.entries(MAX_METADATA_BYTES)) {
-    const value = getTag(event, tagName);
-    if (value !== undefined && encoder.encode(value).byteLength > maxBytes) {
-      return null;
-    }
-  }
 
   const rawVisibility = getTag(event, "buzz-visibility");
   const visibility =

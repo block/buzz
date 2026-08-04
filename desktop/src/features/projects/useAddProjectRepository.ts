@@ -175,7 +175,7 @@ async function addProjectRepository({
         // query the relay directly and re-submit the signed event if needed.
         throw new Error(
           `The project was updated but the repository could not be created (event ${repositoryEvent.id.slice(0, 8)}…): ${message} ` +
-            `The incomplete repository will appear as unavailable — retry by opening the project and re-submitting from the repository management panel.`,
+            `The add-repository operation is idempotent — re-run Add repository with the same name to resume: the recovery query will find the stored event or retry the publish.`,
         );
       }
     }
