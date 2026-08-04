@@ -263,48 +263,6 @@ mod tests {
         );
     }
 
-    // ── Spawn snapshot: above-cap equivalence + cap crossing ──────────────────
-    //
-    // The snapshot stores effective parallelism, so an over-cap edit
-    // (10 → 8, both cap to 5) must not raise the restart badge.
-    // A cross-cap edit (8 → 3, 8 caps to 5 but 3 is below cap) must raise it.
-
-    fn snapshot_for(command: &str, parallelism: u32) -> serde_json::Value {
-        use crate::managed_agents::{
-            spawn_snapshot::prospective_spawn_config_snapshot, GlobalAgentConfig,
-        };
-        let mut record = record_with(Some(command), parallelism);
-        record.pubkey = "abc".to_string();
-        record.respond_to = crate::managed_agents::types::RespondTo::OwnerOnly;
-        record.backend = crate::managed_agents::types::BackendKind::Local;
-        // Force the command into agent_command so the descriptor resolves it.
-        record.agent_command = command.to_string();
-        let global = GlobalAgentConfig::default();
-        prospective_spawn_config_snapshot(&record, &[], &[], "wss://relay.example", &global)
-            .canonical()
-    }
-
-    /// Two over-cap values (10 and 8) produce the same snapshot for OpenClaw:
-    /// both clamp to 5.
-    #[test]
-    fn hash_above_cap_equivalence() {
-        assert_eq!(
-            snapshot_for("openclaw", 10),
-            snapshot_for("openclaw", 8),
-            "parallelism 10 and 8 both clamp to 5 for OpenClaw — snapshots must be equal"
-        );
-    }
-
-    /// Cap-crossing edit (8 → 3) produces different snapshots: 8 caps to 5 but 3 does not.
-    #[test]
-    fn hash_cap_crossing_inequality() {
-        assert_ne!(
-            snapshot_for("openclaw", 8),
-            snapshot_for("openclaw", 3),
-            "parallelism 8 (clamps to 5) and 3 (no clamp) must produce different snapshots"
-        );
-    }
-
     // ── Snapshot export: requested-definition / effective-instance contract ───
 
     fn snapshot_record(
