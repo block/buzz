@@ -61,12 +61,49 @@ pub fn build_imeta_tag(d: &BlobDescriptor) -> Vec<String> {
 }
 
 /// MIME types accepted for upload.
+///
+/// Images and `video/mp4` go through the relay's dedicated media pipelines.
+/// Everything else here matches what `buzz-media`'s generic file path
+/// (`validate_file_content` in `crates/buzz-media/src/validation.rs`)
+/// actually accepts today: documents, archives, and plain text/data. Audio
+/// and other video containers (`video/quicktime`, `webm`, `mkv`) are *not*
+/// included even though they appear in that file's extension table — the
+/// relay currently rejects anything sniffed as `audio/*` or `video/*` on the
+/// generic path (no sanitizer yet), so allowing them here would just move
+/// the rejection from a clear client-side error to a confusing relay 4xx.
 const ALLOWED_MIMES: &[&str] = &[
     "image/jpeg",
     "image/png",
     "image/gif",
     "image/webp",
     "video/mp4",
+    // Documents
+    "application/pdf",
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.ms-powerpoint",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/vnd.oasis.opendocument.text",
+    "application/vnd.oasis.opendocument.spreadsheet",
+    "application/vnd.oasis.opendocument.presentation",
+    "application/rtf",
+    "application/epub+zip",
+    // Archives
+    "application/zip",
+    "application/gzip",
+    "application/x-tar",
+    "application/x-7z-compressed",
+    "application/x-rar-compressed",
+    "application/vnd.rar",
+    "application/x-bzip2",
+    "application/x-xz",
+    "application/zstd",
+    // Data / text
+    "application/json",
+    "text/csv",
+    "text/plain",
 ];
 
 /// Maximum file size for image uploads (50 MB).
@@ -74,6 +111,21 @@ const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Maximum file size for video uploads (500 MB).
 const MAX_VIDEO_BYTES: u64 = 500 * 1024 * 1024;
+
+/// Maximum file size for generic (document/archive/data) uploads (100 MB),
+/// matching `MediaConfig::max_file_bytes`'s default in `buzz-media`.
+const MAX_GENERIC_FILE_BYTES: u64 = 100 * 1024 * 1024;
+
+/// The upload size cap to apply for a given (already-allowlisted) MIME type.
+fn max_bytes_for_mime(mime: &str) -> u64 {
+    if mime.starts_with("video/") {
+        MAX_VIDEO_BYTES
+    } else if mime.starts_with("image/") {
+        MAX_IMAGE_BYTES
+    } else {
+        MAX_GENERIC_FILE_BYTES
+    }
+}
 
 /// Sign a NIP-98 HTTP auth event (kind:27235) and return the Authorization header value.
 ///
@@ -1118,11 +1170,7 @@ impl BuzzClient {
         }
 
         // 3. Size check
-        let max = if mime.starts_with("video/") {
-            MAX_VIDEO_BYTES
-        } else {
-            MAX_IMAGE_BYTES
-        };
+        let max = max_bytes_for_mime(&mime);
         if bytes.len() as u64 > max {
             return Err(CliError::Usage(format!(
                 "file too large: {} bytes (max {})",
@@ -2297,9 +2345,61 @@ mod retry_policy_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        advance_query_cursor, create_response_with_id, extract_relay_response_field, BuzzClient,
+        advance_query_cursor, create_response_with_id, extract_relay_response_field,
+        max_bytes_for_mime, BuzzClient, ALLOWED_MIMES, MAX_GENERIC_FILE_BYTES, MAX_IMAGE_BYTES,
+        MAX_VIDEO_BYTES,
     };
     use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    #[test]
+    fn allowed_mimes_covers_generic_file_path_types() {
+        // Matches what buzz-media's validate_file_content actually accepts
+        // today (crates/buzz-media/src/validation.rs).
+        for mime in [
+            "application/pdf",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/zip",
+            "application/json",
+            "text/csv",
+            "text/plain",
+        ] {
+            assert!(ALLOWED_MIMES.contains(&mime), "missing {mime}");
+        }
+    }
+
+    #[test]
+    fn allowed_mimes_excludes_types_the_relay_still_rejects() {
+        // audio/* and non-mp4 video/* are sniffed and accepted by
+        // `infer`/`file_mime_to_ext` in buzz-media, but validate_file_content
+        // rejects anything starting with "audio/" or "video/" on the generic
+        // path (no sanitizer yet) before that mapping is ever consulted. If
+        // the CLI allowed these, uploads would fail at the relay instead of
+        // failing clearly and immediately in the CLI.
+        for mime in [
+            "audio/mpeg",
+            "audio/flac",
+            "audio/wav",
+            "video/quicktime",
+            "video/webm",
+            "video/x-matroska",
+        ] {
+            assert!(!ALLOWED_MIMES.contains(&mime), "should not allow {mime}");
+        }
+    }
+
+    #[test]
+    fn max_bytes_for_mime_routes_by_category() {
+        assert_eq!(max_bytes_for_mime("video/mp4"), MAX_VIDEO_BYTES);
+        assert_eq!(max_bytes_for_mime("image/png"), MAX_IMAGE_BYTES);
+        assert_eq!(
+            max_bytes_for_mime("application/pdf"),
+            MAX_GENERIC_FILE_BYTES
+        );
+        assert_eq!(
+            max_bytes_for_mime("application/zip"),
+            MAX_GENERIC_FILE_BYTES
+        );
+    }
 
     #[test]
     fn query_cursor_uses_last_events_composite_sort_key() {
