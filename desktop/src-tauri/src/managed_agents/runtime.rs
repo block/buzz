@@ -851,6 +851,7 @@ pub fn spawn_agent_child(
             record,
             descriptor: &descriptor,
             relay_url: &effective_relay_url,
+            mcp_command: launch.mcp_command.as_deref(),
             team_instructions: team_instructions.as_deref(),
             system_prompt: effective_cfg.system_prompt.value.as_deref(),
             model: effective_cfg.model.value.as_deref(),
