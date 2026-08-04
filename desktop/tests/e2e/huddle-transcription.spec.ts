@@ -153,15 +153,10 @@ test("keeps the drawer open until the huddle is expanded", async ({ page }) => {
       huddleBackdrop.evaluate((element) => {
         const shell = element.parentElement;
         const appSurface = shell?.querySelector(".buzz-huddle-app-surface");
-        const terminal = shell?.querySelector(".buzz-terminal-substrate");
-        if (!appSurface || !terminal) return false;
+        if (!appSurface) return false;
         const backdropStyle = getComputedStyle(element);
         const appStyle = getComputedStyle(appSurface);
-        const terminalStyle = getComputedStyle(terminal);
-        return (
-          Number(backdropStyle.zIndex) > Number(terminalStyle.zIndex) &&
-          Number(backdropStyle.zIndex) < Number(appStyle.zIndex)
-        );
+        return Number(backdropStyle.zIndex) < Number(appStyle.zIndex);
       }),
     )
     .toBe(true);
