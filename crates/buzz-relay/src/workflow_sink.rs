@@ -8,7 +8,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Weak};
 
-use buzz_core::kind::KIND_STREAM_MESSAGE;
+use buzz_core::kind::{KIND_REACTION, KIND_STREAM_MESSAGE};
 use buzz_core::tenant::CommunityId;
 use buzz_workflow::action_sink::{ActionSink, ActionSinkError};
 use chrono::Utc;
@@ -360,6 +360,145 @@ impl ActionSink for RelayActionSink {
             }
 
             Ok(event_id_hex)
+        })
+    }
+
+    fn add_reaction(
+        &self,
+        community_id: CommunityId,
+        message_id: &str,
+        emoji: &str,
+        author_pubkey: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
+        let message_id = message_id.to_owned();
+        let emoji = emoji.to_owned();
+        let author_pubkey = author_pubkey.to_owned();
+
+        Box::pin(async move {
+            // 0. Upgrade weak reference — fails only during shutdown.
+            let state = self
+                .state
+                .upgrade()
+                .ok_or_else(|| ActionSinkError::Database("relay is shutting down".into()))?;
+
+            // 1. Resolve community → TenantContext.
+            let host = state
+                .db
+                .lookup_community_host(community_id)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?
+                .ok_or_else(|| {
+                    ActionSinkError::Database(format!(
+                        "workflow run community {community_id} is not mapped to a host"
+                    ))
+                })?;
+            let tenant = buzz_core::tenant::TenantContext::resolved(community_id, host);
+
+            // 2. Parse author pubkey.
+            let author_pubkey_key = nostr::PublicKey::from_hex(&author_pubkey).map_err(|e| {
+                ActionSinkError::InvalidInput(format!("invalid author pubkey: {e}"))
+            })?;
+            let author_pubkey_hex = author_pubkey_key.to_hex();
+            let author_bytes = author_pubkey_key.to_bytes().to_vec();
+
+            // 3. Parse message_id as EventId and look up target event.
+            let target_event_id = nostr::EventId::from_hex(&message_id)
+                .map_err(|e| ActionSinkError::InvalidInput(format!("invalid message_id: {e}")))?;
+            let target_bytes = target_event_id.as_bytes().to_vec();
+
+            let target = state
+                .db
+                .get_event_by_id(tenant.community(), &target_bytes)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?
+                .ok_or_else(|| {
+                    ActionSinkError::InvalidInput(format!(
+                        "reaction target event not found: {message_id}"
+                    ))
+                })?;
+
+            // 4. Normalise emoji: empty → "+"; trim; reject if too long.
+            let emoji_normalised = if emoji.is_empty() {
+                "+".to_owned()
+            } else {
+                emoji.trim().to_owned()
+            };
+            if emoji_normalised.chars().count() > 64 {
+                return Err(ActionSinkError::InvalidInput(
+                    "emoji exceeds 64 characters".into(),
+                ));
+            }
+
+            // 5. Build kind:7 event.
+            //    Tags: e (target), p (author), buzz:workflow true.
+            let tags = vec![
+                Tag::parse(["e", &message_id])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("e tag: {e}")))?,
+                Tag::parse(["p", &author_pubkey_hex])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("p tag: {e}")))?,
+                Tag::parse(["buzz:workflow", "true"])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?,
+            ];
+
+            let kind = Kind::from(KIND_REACTION as u16);
+            let event = EventBuilder::new(kind, &emoji_normalised)
+                .tags(tags)
+                .sign_with_keys(&state.relay_keypair)
+                .map_err(|e| ActionSinkError::EventBuild(format!("signing: {e}")))?;
+
+            let event_id_hex = event.id.to_hex();
+
+            info!(
+                event_id = %event_id_hex,
+                target = %message_id,
+                author = %author_pubkey_hex,
+                emoji = %emoji_normalised,
+                "Workflow AddReaction: posting kind:7 event"
+            );
+
+            // 6. Persist via insert_reaction_event_with_thread_metadata.
+            let channel_id = target.channel_id;
+            match state
+                .db
+                .insert_reaction_event_with_thread_metadata(
+                    tenant.community(),
+                    &event,
+                    channel_id,
+                    None,
+                    &target_bytes,
+                    &author_bytes,
+                    &emoji_normalised,
+                )
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?
+            {
+                buzz_db::ReactionEventInsertOutcome::Inserted {
+                    stored_event,
+                    was_inserted,
+                } => {
+                    if was_inserted {
+                        let _ = dispatch_persistent_event(
+                            &tenant,
+                            &state,
+                            &stored_event,
+                            KIND_REACTION,
+                            &author_pubkey_hex,
+                            None,
+                        )
+                        .await;
+                    }
+                    Ok(event_id_hex)
+                }
+                buzz_db::ReactionEventInsertOutcome::Duplicate => {
+                    // Idempotent — return the original message_id.
+                    Ok(message_id)
+                }
+                buzz_db::ReactionEventInsertOutcome::TargetMissing => {
+                    Err(ActionSinkError::InvalidInput(format!(
+                        "reaction target event not found: {message_id}"
+                    )))
+                }
+            }
         })
     }
 }
