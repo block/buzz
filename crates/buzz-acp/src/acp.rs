@@ -761,12 +761,6 @@ impl AcpClient {
         .await
     }
 
-    /// Like [`session_prompt_with_idle_timeout`](Self::session_prompt_with_idle_timeout),
-    /// but sends each entry in `prompt_blocks` as a separate text content block.
-    ///
-    /// Used for slash-command pass-through: ACP connectors detect commands via
-    /// the **first** block's text starting with `/`, so the harness sends
-    /// `["/cmd args", "<buzz context>"]` instead of one wrapped block.
     /// Whether the most recent turn emitted any non-whitespace assistant text.
     ///
     /// A CLI runtime that refuses to start — lost or expired credentials, an
@@ -779,6 +773,12 @@ impl AcpClient {
         self.turn_emitted_text
     }
 
+    /// Like [`session_prompt_with_idle_timeout`](Self::session_prompt_with_idle_timeout),
+    /// but sends each entry in `prompt_blocks` as a separate text content block.
+    ///
+    /// Used for slash-command pass-through: ACP connectors detect commands via
+    /// the **first** block's text starting with `/`, so the harness sends
+    /// `["/cmd args", "<buzz context>"]` instead of one wrapped block.
     pub async fn session_prompt_blocks_with_idle_timeout(
         &mut self,
         session_id: &str,
