@@ -74,6 +74,7 @@ class ActivityPage extends HookConsumerWidget {
     );
     final topSectionHeight = frostedAppBarHeight(
       context,
+      titleStyle: headerTitleStyle,
       bottomHeight: Grid.xxs,
     );
 
@@ -337,6 +338,7 @@ class ActivityPage extends HookConsumerWidget {
         showBottomDivider: true,
         bottomDividerOpacity: 0.06,
         title: Text('Activity', style: headerTitleStyle),
+        titleStyle: headerTitleStyle,
         actions: [
           _ActivityActionsPill(
             filter: filter.value,

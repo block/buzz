@@ -192,6 +192,32 @@ void main() {
     expect(find.byTooltip('Back'), findsNothing);
   });
 
+  testWidgets('sizes the Activity app bar for its custom title style', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      await buildTestable(textScaler: const TextScaler.linear(2)),
+    );
+    await tester.pumpAndSettle();
+
+    final appBar = tester.widget<FrostedAppBar>(
+      find.byType(FrostedAppBar).last,
+    );
+    final titleStyle = appBar.titleStyle!;
+    expect(titleStyle.fontSize, 22);
+    expect(
+      tester.getSize(find.byType(ClipRect).last).height,
+      closeTo(
+        frostedAppBarHeight(
+          tester.element(find.byType(FrostedAppBar).last),
+          titleStyle: titleStyle,
+          bottomHeight: Grid.xxs,
+        ),
+        0.01,
+      ),
+    );
+  });
+
   testWidgets('keeps footer clearance inside the scrollable content', (
     tester,
   ) async {

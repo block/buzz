@@ -133,6 +133,45 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('search filters grow with accessible text', (tester) async {
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          searchProvider.overrideWith(
+            () => _FakeSearchNotifier(const SearchState.initial()),
+          ),
+          recentSearchesProvider.overrideWith(
+            () => _FakeRecentSearchesNotifier(const []),
+          ),
+          profileProvider.overrideWith(() => _FakeProfileNotifier()),
+        ],
+        child: Builder(
+          builder: (context) => MediaQuery(
+            data: MediaQuery.of(
+              context,
+            ).copyWith(textScaler: const TextScaler.linear(2)),
+            child: const SearchPage(),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('search-field')));
+    await tester.pumpAndSettle();
+
+    final filters = find.byKey(const Key('search-header-filters'));
+    expect(filters, findsOneWidget);
+    expect(tester.getSize(filters).height, greaterThan(Grid.xl));
+    expect(
+      tester.getSize(filters).height,
+      greaterThanOrEqualTo(
+        tester.getSize(find.text('Messages')).height + Grid.xs * 2,
+      ),
+    );
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('focus slides Cancel in beside the search field', (tester) async {
     await tester.pumpWidget(
       WidgetHelpers.testable(

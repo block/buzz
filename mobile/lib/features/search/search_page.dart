@@ -39,7 +39,9 @@ const _searchTitleReturnDuration = Duration(milliseconds: 80);
 const _searchCancelEnterDuration = Duration(milliseconds: 80);
 const _searchCancelExitDuration = Duration(milliseconds: 60);
 const _searchIdleFieldTopInset = Grid.half;
-const _searchHeaderFiltersHeight = Grid.xl;
+const _searchFilterChipVerticalPadding = Grid.xxs;
+const _searchFilterBarVerticalPadding = Grid.xxs;
+const _searchHeaderFiltersMinHeight = Grid.xl;
 const _searchActiveFieldRightInset = 72.0;
 
 double _searchFieldHeight(BuildContext context) {
@@ -66,6 +68,18 @@ double _idleSearchFieldHeight(BuildContext context) {
       : _searchIdleFieldHeight;
 }
 
+double _searchHeaderFiltersHeight(BuildContext context) {
+  const style = filterChipTextStyle;
+  final scaledLabelHeight =
+      MediaQuery.textScalerOf(context).scale(style.fontSize ?? 15) *
+      (style.height ?? 1);
+  final chipHeight = scaledLabelHeight + _searchFilterChipVerticalPadding * 2;
+  final contentHeight = chipHeight + _searchFilterBarVerticalPadding * 2;
+  return contentHeight > _searchHeaderFiltersMinHeight
+      ? contentHeight
+      : _searchHeaderFiltersMinHeight;
+}
+
 class SearchPage extends HookConsumerWidget {
   const SearchPage({super.key});
 
@@ -87,6 +101,7 @@ class SearchPage extends HookConsumerWidget {
     final searchPlaceholderColor = navigationSecondaryForeground(context);
     final compactSearchFieldHeight = _searchFieldHeight(context);
     final idleSearchFieldHeight = _idleSearchFieldHeight(context);
+    final searchHeaderFiltersHeight = _searchHeaderFiltersHeight(context);
     // Cancel remains an accessible target without giving the text action a
     // visual button treatment.
     final searchControlHeight = compactSearchFieldHeight > Grid.xl
@@ -95,7 +110,7 @@ class SearchPage extends HookConsumerWidget {
     final searchHeaderBottomHeight = isSearchEditing.value
         ? _searchIdleFieldTopInset +
               compactSearchFieldHeight +
-              _searchHeaderFiltersHeight
+              searchHeaderFiltersHeight
         : idleSearchFieldHeight + _searchIdleFieldTopInset + Grid.xxs;
     final topSectionHeight = frostedAppBarHeight(
       context,
@@ -300,14 +315,16 @@ class SearchPage extends HookConsumerWidget {
                           ),
                           child: SizedBox(
                             key: const ValueKey('search-header-filters'),
-                            height: _searchHeaderFiltersHeight,
+                            height: searchHeaderFiltersHeight,
                             child: FilterChipBar<_SearchFilter>(
                               expandItems: true,
                               visualDensity: const VisualDensity(
                                 horizontal: -2,
                               ),
-                              chipVerticalPadding: Grid.xxs,
-                              barVerticalPadding: Grid.xxs,
+                              chipVerticalPadding:
+                                  _searchFilterChipVerticalPadding,
+                              barVerticalPadding:
+                                  _searchFilterBarVerticalPadding,
                               selected: activeFilter.value,
                               onSelected: (f) => activeFilter.value = f,
                               items: [
