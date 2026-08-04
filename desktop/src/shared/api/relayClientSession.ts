@@ -414,12 +414,12 @@ export class RelayClient {
   }
 
   async subscribeToChannelMentionEvents(
-    channelId: string,
+    channelIds: string[],
     pubkey: string,
     onEvent: (event: RelayEvent) => void,
   ) {
     return this.subscribe(
-      buildChannelMentionFilter(channelId, pubkey, 50),
+      buildChannelMentionFilter(channelIds, pubkey, 50),
       onEvent,
     );
   }

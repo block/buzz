@@ -20,9 +20,11 @@ import {
 } from "./unreadReadMarker.ts";
 import {
   advanceChannelLastMessageAt,
+  batchChannelIds,
   isChannelUnreadTriggerKind,
+  LIVE_SUBSCRIPTION_BATCH_SIZE,
+  resolveChannelIdByEventReference,
   trackSeenEvent,
-  withChannelTagFallback,
 } from "./useLiveChannelUpdates.ts";
 import {
   KIND_HUDDLE_ENDED,
@@ -65,7 +67,7 @@ test("receiveThenReopen_frontierAtLatestArrival_clobbersDivider", () => {
   assert.equal(marker.unreadCount, 0);
 });
 
-test("live reaction without h tag inherits its subscription channel", () => {
+test("live reaction without h tag resolves its channel from the cached parent", () => {
   const reaction = {
     id: "reaction",
     kind: 7,
@@ -75,23 +77,70 @@ test("live reaction without h tag inherits its subscription channel", () => {
     tags: [["e", "message"]],
   };
 
-  assert.deepEqual(withChannelTagFallback(reaction, "channel-a").tags, [
-    ["e", "message"],
-    ["h", "channel-a"],
-  ]);
+  const cachedTimelines = [
+    [["channel-messages", "channel-a"], [{ id: "other" }]],
+    [["channel-messages", "channel-b"], [{ id: "message" }]],
+  ];
+
+  assert.equal(
+    resolveChannelIdByEventReference(reaction, cachedTimelines),
+    "channel-b",
+  );
 });
 
-test("live event with h tag is preserved", () => {
-  const message = {
-    id: "message",
-    kind: KIND_STREAM_MESSAGE,
-    pubkey: "author",
+test("reaction whose parent is in no loaded timeline is unresolved", () => {
+  const reaction = {
+    id: "reaction",
+    kind: 7,
+    pubkey: "agent",
     created_at: 1,
-    content: "hello",
-    tags: [["h", "channel-from-event"]],
+    content: "👀",
+    tags: [["e", "missing"]],
   };
 
-  assert.equal(withChannelTagFallback(message, "other-channel"), message);
+  assert.equal(
+    resolveChannelIdByEventReference(reaction, [
+      [["channel-messages", "channel-a"], [{ id: "other" }]],
+      [["channel-messages", "channel-b"], undefined],
+    ]),
+    undefined,
+  );
+});
+
+test("event without e tags is unresolved", () => {
+  const event = {
+    id: "system",
+    kind: 40099,
+    pubkey: "relay",
+    created_at: 1,
+    content: "",
+    tags: [],
+  };
+
+  assert.equal(
+    resolveChannelIdByEventReference(event, [
+      [["channel-messages", "channel-a"], [{ id: "system" }]],
+    ]),
+    undefined,
+  );
+});
+
+test("batchChannelIds chunks a channel list into stable batches", () => {
+  assert.deepEqual(batchChannelIds([], 3), []);
+  assert.deepEqual(batchChannelIds(["a"], 3), [["a"]]);
+  assert.deepEqual(batchChannelIds(["a", "b", "c", "d"], 3), [
+    ["a", "b", "c"],
+    ["d"],
+  ]);
+
+  const many = Array.from(
+    { length: LIVE_SUBSCRIPTION_BATCH_SIZE + 1 },
+    (_, i) => String(i).padStart(3, "0"),
+  );
+  const batches = batchChannelIds(many);
+  assert.equal(batches.length, 2);
+  assert.equal(batches[0].length, LIVE_SUBSCRIPTION_BATCH_SIZE);
+  assert.deepEqual(batches[1], [many[many.length - 1]]);
 });
 
 test("notification event guard suppresses reconnect replay and stays bounded", () => {

@@ -1,7 +1,9 @@
 import type { RelayEvent } from "@/shared/api/types";
 
+export const channelMessagesKeyPrefix = ["channel-messages"] as const;
+
 export function channelMessagesKey(channelId: string) {
-  return ["channel-messages", channelId] as const;
+  return [...channelMessagesKeyPrefix, channelId] as const;
 }
 
 export function channelWindowKey(channelId: string) {

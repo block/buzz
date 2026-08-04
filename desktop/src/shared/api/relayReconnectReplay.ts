@@ -26,8 +26,11 @@ export const REPLAY_BATCH_SIZE = 8;
  *
  * Spreads the REQ storm across time so the relay's sliding quota window
  * can absorb each batch without triggering rate-limiting on the next.
+ * The relay admits 50 frames per 5 s per pubkey (10/sec average); 8 REQs
+ * per second keeps replay under that budget while leaving headroom for
+ * concurrent EVENT publishes on the same connection.
  */
-export const REPLAY_INTER_BATCH_DELAY_MS = 50;
+export const REPLAY_INTER_BATCH_DELAY_MS = 1_000;
 
 async function runWithConcurrency<T>(
   items: T[],
@@ -73,7 +76,7 @@ export function shouldPageReconnectReplay(filter: RelaySubscriptionFilter) {
   return (
     filter.limit > 0 &&
     Array.isArray(filter["#h"]) &&
-    filter["#h"].length === 1 &&
+    filter["#h"].length > 0 &&
     CHANNEL_EVENT_KINDS.every((kind) => filter.kinds.includes(kind))
   );
 }

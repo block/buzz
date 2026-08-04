@@ -154,13 +154,13 @@ export function buildGlobalStreamFilter(
 }
 
 export function buildChannelMentionFilter(
-  channelId: string,
+  channelIds: string[],
   pubkey: string,
   limit: number,
 ): RelaySubscriptionFilter {
   return {
     kinds: [...HOME_MENTION_EVENT_KINDS],
-    "#h": [channelId],
+    "#h": [...channelIds],
     "#p": [pubkey],
     limit,
     since: Math.floor(Date.now() / 1_000),

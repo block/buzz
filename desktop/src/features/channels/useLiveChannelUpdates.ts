@@ -3,7 +3,10 @@ import { useQueryClient } from "@tanstack/react-query";
 
 import { channelsQueryKey } from "@/features/channels/hooks";
 import { mergeTimelineCacheMessages } from "@/features/messages/hooks";
-import { channelMessagesKey } from "@/features/messages/lib/messageQueryKeys";
+import {
+  channelMessagesKey,
+  channelMessagesKeyPrefix,
+} from "@/features/messages/lib/messageQueryKeys";
 import {
   getChannelIdFromTags,
   isThreadReply,
@@ -71,6 +74,30 @@ export type UseLiveChannelUpdatesOptions = {
 const LIVE_SUBSCRIPTION_RETRY_BASE_MS = 1_000;
 const LIVE_SUBSCRIPTION_RETRY_MAX_MS = 30_000;
 
+/**
+ * Channels per live-subscription REQ. The relay's admission control counts
+ * REQ frames per pubkey (50 per 5 s window), so one-REQ-per-channel blows
+ * the budget for members of many channels. Batching `#h` values cuts the
+ * REQ count from 2N to ~2·⌈N/25⌉ across the event + mention subscriptions.
+ */
+export const LIVE_SUBSCRIPTION_BATCH_SIZE = 25;
+
+/**
+ * Chunk a sorted channel-ID list into stable batches for multi-channel
+ * `#h` filters. Batch identity is the joined ID list, so an unchanged
+ * channel set produces identical batch keys and zero subscription churn.
+ */
+export function batchChannelIds(
+  channelIds: string[],
+  batchSize: number = LIVE_SUBSCRIPTION_BATCH_SIZE,
+): string[][] {
+  const batches: string[][] = [];
+  for (let i = 0; i < channelIds.length; i += batchSize) {
+    batches.push(channelIds.slice(i, i + batchSize));
+  }
+  return batches;
+}
+
 // get_channels is an expensive O(channels) relay fan-out. Incoming traffic for
 // non-active channels arrives in bursts, so coalesce the refetch into a single
 // trailing invalidation instead of one per event.
@@ -123,13 +150,41 @@ export function isHomeActivityEvent(
   return isThreadedReply || isDmChannel;
 }
 
-export function withChannelTagFallback(
+/**
+ * Resolve the channel for an event that carries no `h` tag — reactions
+ * (kind:7) and deletions (kind:5) reference their target via an `e` tag
+ * only. The relay routes them to `#h` subscriptions by resolving the
+ * target's channel server-side; mirror that client-side by finding the
+ * referenced event in a loaded timeline cache. Unresolved events are
+ * dropped: without a loaded cache the timeline merge would be a no-op,
+ * and these kinds never trigger unread or notification paths.
+ */
+export function resolveChannelIdByEventReference(
   event: RelayEvent,
-  channelId: string,
-): RelayEvent {
-  return getChannelIdFromTags(event.tags)
-    ? event
-    : { ...event, tags: [...event.tags, ["h", channelId]] };
+  cachedTimelines: Array<
+    readonly [readonly unknown[], RelayEvent[] | undefined]
+  >,
+): string | undefined {
+  const referencedIds = new Set(
+    event.tags
+      .filter((tag) => tag[0] === "e" && typeof tag[1] === "string")
+      .map((tag) => tag[1]),
+  );
+  if (referencedIds.size === 0) {
+    return undefined;
+  }
+
+  for (const [queryKey, messages] of cachedTimelines) {
+    const channelId = queryKey[1];
+    if (typeof channelId !== "string" || !Array.isArray(messages)) {
+      continue;
+    }
+    if (messages.some((message) => referencedIds.has(message.id))) {
+      return channelId;
+    }
+  }
+
+  return undefined;
 }
 
 function isExternalMentionEvent(event: RelayEvent, currentPubkey: string) {
@@ -257,7 +312,14 @@ export function useLiveChannelUpdates(
   );
 
   const handleIncomingMessage = React.useEffectEvent((event: RelayEvent) => {
-    const channelId = getChannelIdFromTags(event.tags);
+    const channelId =
+      getChannelIdFromTags(event.tags) ??
+      resolveChannelIdByEventReference(
+        event,
+        queryClient.getQueriesData<RelayEvent[]>({
+          queryKey: channelMessagesKeyPrefix,
+        }),
+      );
     if (!channelId) {
       return;
     }
@@ -396,46 +458,50 @@ export function useLiveChannelUpdates(
 
     const syncSubs = async (): Promise<boolean> => {
       const activeSubs = liveSubsRef.current;
-      const targetIds = new Set(channelIdsKey ? channelIdsKey.split(",") : []);
+      const channelIds = channelIdsKey ? channelIdsKey.split(",") : [];
+      const targetBatches = new Map(
+        batchChannelIds(channelIds).map((batch) => [batch.join(","), batch]),
+      );
 
-      for (const [channelId, dispose] of activeSubs) {
-        if (!targetIds.has(channelId)) {
-          activeSubs.delete(channelId);
+      for (const [batchKey, dispose] of activeSubs) {
+        if (!targetBatches.has(batchKey)) {
+          activeSubs.delete(batchKey);
           void dispose().catch(() => {});
         }
       }
 
-      if (targetIds.size > 0) {
+      if (channelIds.length > 0) {
         // Record the subscription start time so handleDmEvent can distinguish
         // backlog replays (created_at < startedAt) from live messages.
         dmSubscriptionStartedAtRef.current = Math.floor(Date.now() / 1000);
       }
 
       let anyFailed = false;
-      const additions = Array.from(targetIds)
-        .filter((channelId) => !activeSubs.has(channelId))
-        .map(async (channelId) => {
+      const additions = Array.from(targetBatches.entries())
+        .filter(([batchKey]) => !activeSubs.has(batchKey))
+        .map(async ([batchKey, batchIds]) => {
           try {
+            // Events are matched by the `#h` filter, so each one carries an
+            // `h` tag; handleIncomingMessage routes by it and drops the rest.
             const dispose = await relayClient.subscribeLive(
               {
                 kinds: [...CHANNEL_EVENT_KINDS],
-                "#h": [channelId],
+                "#h": batchIds,
                 limit: 1000,
                 since: Math.floor(Date.now() / 1_000),
               },
-              (event) =>
-                handleIncomingMessage(withChannelTagFallback(event, channelId)),
+              handleIncomingMessage,
             );
             if (isCancelled) {
               void dispose().catch(() => {});
               return;
             }
-            activeSubs.set(channelId, dispose);
+            activeSubs.set(batchKey, dispose);
           } catch (err) {
             anyFailed = true;
             console.error(
               "Failed to subscribe to live channel updates",
-              channelId,
+              batchIds,
               err,
             );
           }
@@ -501,11 +567,14 @@ export function useLiveChannelUpdates(
       }
       mentionSubsPubkeyRef.current = normalizedCurrentPubkey;
 
-      const targetIds = new Set(channelIdsKey ? channelIdsKey.split(",") : []);
+      const channelIds = channelIdsKey ? channelIdsKey.split(",") : [];
+      const targetBatches = new Map(
+        batchChannelIds(channelIds).map((batch) => [batch.join(","), batch]),
+      );
 
-      for (const [channelId, dispose] of activeSubs) {
-        if (!targetIds.has(channelId)) {
-          activeSubs.delete(channelId);
+      for (const [batchKey, dispose] of activeSubs) {
+        if (!targetBatches.has(batchKey)) {
+          activeSubs.delete(batchKey);
           void dispose().catch(() => {});
         }
       }
@@ -516,12 +585,12 @@ export function useLiveChannelUpdates(
       // across effect runs (that's the point of the diff manager), so a
       // stale isCancelled flag from a prior run would silently drop events
       // on long-lived subs.
-      const additions = Array.from(targetIds)
-        .filter((channelId) => !activeSubs.has(channelId))
-        .map(async (channelId) => {
+      const additions = Array.from(targetBatches.entries())
+        .filter(([batchKey]) => !activeSubs.has(batchKey))
+        .map(async ([batchKey, batchIds]) => {
           try {
             const dispose = await relayClient.subscribeToChannelMentionEvents(
-              channelId,
+              batchIds,
               normalizedCurrentPubkey,
               handleMentionEvent,
             );
@@ -529,12 +598,12 @@ export function useLiveChannelUpdates(
               void dispose().catch(() => {});
               return;
             }
-            activeSubs.set(channelId, dispose);
+            activeSubs.set(batchKey, dispose);
           } catch (err) {
             anyFailed = true;
             console.error(
               "Failed to subscribe to mention events",
-              channelId,
+              batchIds,
               err,
             );
           }

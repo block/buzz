@@ -383,6 +383,18 @@ test("stale replay sends no REQs when generation advances while gate was active"
   assert.equal(sentIds.length, 0, "no REQs sent for a stale replay");
 });
 
+// ── Paging eligibility ────────────────────────────────────────────────────────
+
+test("batched multi-channel #h filters are eligible for history paging", () => {
+  const single = buildChannelFilter("channel-1", 50);
+  assert.equal(shouldPageReconnectReplay(single), true);
+  assert.equal(
+    shouldPageReconnectReplay({ ...single, "#h": ["c1", "c2", "c3"] }),
+    true,
+  );
+  assert.equal(shouldPageReconnectReplay({ ...single, "#h": [] }), false);
+});
+
 // ── Paged replay (existing behaviour) ────────────────────────────────────────
 
 test("channel reconnect replay pages the missed window until a short page", async () => {
