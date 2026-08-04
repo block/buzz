@@ -130,6 +130,29 @@ pub(super) fn request_speaker_cancel(
     }
 }
 
+pub(super) fn request_active_speaker_cancel(
+    generations: &SpeakerGenerations,
+    active_speaker: &ActiveSpeaker,
+    cancellation: &SpeakerCancellation,
+) -> bool {
+    let active = active_speaker
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let Some(speaker_pubkey) = active.as_deref() else {
+        return false;
+    };
+
+    // Keep ownership locked until the generation and cancellation request are
+    // committed. The drain path takes the same lock, so the request is bound
+    // to the utterance the Stop action actually observed.
+    advance_speaker_generation(generations, speaker_pubkey);
+    cancellation
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .replace(speaker_pubkey.to_ascii_lowercase());
+    true
+}
+
 pub(super) fn retain_current_speaker_text(
     generations: &SpeakerGenerations,
     deferred_text: &mut VecDeque<QueuedText>,
@@ -413,5 +436,36 @@ mod speaker_generation_tests {
 
         assert_eq!(deferred.len(), 1);
         assert_eq!(deferred[0].speaker_pubkey.as_deref(), Some("bob"));
+    }
+
+    #[test]
+    fn stop_request_is_bound_to_the_observed_speaker_generation() {
+        let generations = Arc::new(Mutex::new(HashMap::new()));
+        let active_speaker = Arc::new(Mutex::new(Some("alice".to_string())));
+        let cancellation = Arc::new(Mutex::new(None));
+
+        assert!(request_active_speaker_cancel(
+            &generations,
+            &active_speaker,
+            &cancellation,
+        ));
+        assert_eq!(current_speaker_generation(&generations, "alice"), 1);
+        assert_eq!(
+            cancellation.lock().expect("cancellation").as_deref(),
+            Some("alice")
+        );
+
+        active_speaker.lock().expect("active speaker").take();
+        cancellation.lock().expect("cancellation").take();
+        assert!(!request_active_speaker_cancel(
+            &generations,
+            &active_speaker,
+            &cancellation,
+        ));
+
+        let next_utterance =
+            queued_speech("alice", current_speaker_generation(&generations, "alice"));
+        assert!(queued_speaker_is_current(&generations, &next_utterance));
+        assert!(cancellation.lock().expect("cancellation").is_none());
     }
 }

@@ -106,18 +106,25 @@ pub(super) fn silence_cancelled_speaker(
         return;
     };
     let _ops = lock_player_ops(player_ops);
+    if take_cancelled_active_speaker(&cancelled, active_speaker) {
+        player.clear();
+        player.play();
+        tts_active.store(false, Ordering::Release);
+    }
+}
+
+fn take_cancelled_active_speaker(cancelled: &str, active_speaker: &ActiveSpeaker) -> bool {
     let mut active = active_speaker
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    if active
+    if !active
         .as_deref()
-        .is_some_and(|speaker| speaker.eq_ignore_ascii_case(&cancelled))
+        .is_some_and(|speaker| speaker.eq_ignore_ascii_case(cancelled))
     {
-        player.clear();
-        player.play();
-        active.take();
-        tts_active.store(false, Ordering::Release);
+        return false;
     }
+    active.take();
+    true
 }
 
 pub(super) fn consume_speaker_cancel(
@@ -137,20 +144,34 @@ pub(super) fn consume_speaker_cancel(
     };
     let (text_rx, deferred_text, current_text) = text_state;
     retain_current_speaker_text(generations, deferred_text, current_text, text_rx);
+    let mut cleared_player = false;
     if let Some((player, player_ops)) = player {
         let _ops = lock_player_ops(player_ops);
-        let mut active = active_speaker
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        if active
-            .as_deref()
-            .is_some_and(|speaker| speaker.eq_ignore_ascii_case(&cancelled))
-        {
+        if take_cancelled_active_speaker(&cancelled, active_speaker) {
             player.clear();
             player.play();
-            active.take();
+            tts_active.store(false, Ordering::Release);
+            cleared_player = true;
         }
     }
-    tts_active.store(false, Ordering::Release);
-    true
+    // The monitor may already have cleared the cancelled speaker while the
+    // worker was blocked. If another speaker has since claimed the player,
+    // preserve that speaker's activity flag and lead-in state.
+    cleared_player
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stale_targeted_cancel_does_not_release_the_next_speaker() {
+        let active_speaker = Arc::new(Mutex::new(Some("bob".to_string())));
+
+        assert!(!take_cancelled_active_speaker("alice", &active_speaker));
+        assert_eq!(
+            active_speaker.lock().expect("active speaker").as_deref(),
+            Some("bob")
+        );
+    }
 }

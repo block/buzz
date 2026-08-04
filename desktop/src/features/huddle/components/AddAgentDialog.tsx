@@ -5,12 +5,14 @@ import * as React from "react";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { Dialog } from "@/shared/ui/dialog";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
+import type { ManagedAgentBackend } from "@/shared/api/types";
 
 type ManagedAgentSummary = {
   pubkey: string;
   name: string;
   status: string;
   avatar_url: string | null;
+  backend: ManagedAgentBackend;
 };
 
 type AgentAddResult = {
@@ -79,11 +81,28 @@ export function AddAgentDialog({
     setWarning(null);
     let startedForAdd = false;
     try {
-      if (agent.status !== "running") {
+      const isLocal = agent.backend.type === "local";
+      const needsStart = isLocal
+        ? agent.status !== "running"
+        : agent.status !== "deployed";
+      if (needsStart && isLocal) {
         await invoke("start_managed_agent", { pubkey: agent.pubkey });
         startedForAdd = true;
       }
       const result = await onAdd(agent.pubkey);
+      if (needsStart && !isLocal) {
+        try {
+          await invoke("start_managed_agent", { pubkey: agent.pubkey });
+        } catch (startError: unknown) {
+          const msg =
+            startError instanceof Error
+              ? startError.message
+              : String(startError);
+          setWarning(`Added to huddle, but could not start agent: ${msg}`);
+          console.error("Failed to start agent after huddle add:", startError);
+          return;
+        }
+      }
       if (result.parent_error) {
         // Agent was added to the ephemeral channel but parent channel add failed.
         // Show as a warning — don't close the dialog so the user can see it.

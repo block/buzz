@@ -464,18 +464,8 @@ fn tts_worker(
             );
             return false;
         }
-        let speaker_generation_guard = speaker_pubkey.map(|_| {
-            speaker_generations
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-        });
         let speaker_is_current = speaker_pubkey.is_none_or(|pubkey| {
-            speaker_generation_guard
-                .as_ref()
-                .and_then(|generations| generations.get(&pubkey.to_ascii_lowercase()))
-                .copied()
-                .unwrap_or(0)
-                == speaker_generation
+            current_speaker_generation(&speaker_generations, pubkey) == speaker_generation
         });
         if !speaker_is_current {
             eprintln!(

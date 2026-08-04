@@ -1559,3 +1559,47 @@ test("stops an agent started solely for a failed huddle add", async ({
       "stop_managed_agent",
     ]);
 });
+
+test("does not deploy a provider agent when its huddle add fails", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    addAgentToHuddleError: "membership publish rejected",
+    huddle: {
+      parentChannelId: HUDDLE_PARENT_ID,
+      ephemeralChannelId: HUDDLE_CHANNEL_ID,
+      members: [{ pubkey: TEST_IDENTITIES.tyler.pubkey, role: "member" }],
+    },
+    managedAgents: [
+      {
+        avatarUrl: "https://example.com/bob.png",
+        backend: { type: "provider", id: "mock", config: {} },
+        pubkey: TEST_IDENTITIES.bob.pubkey,
+        name: "bob",
+        status: "not_deployed",
+      },
+    ],
+  });
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Add agent to huddle" }).click();
+  const dialog = page.getByRole("dialog", { name: "Add agents" });
+  await dialog.getByRole("button", { name: /bob/i }).click();
+
+  await expect(dialog.getByText(/Failed to add agent:/)).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window.__BUZZ_E2E_COMMAND_LOG__ ?? [])
+          .filter((entry) =>
+            [
+              "start_managed_agent",
+              "add_agent_to_huddle",
+              "stop_managed_agent",
+            ].includes(entry.command),
+          )
+          .map((entry) => entry.command),
+      ),
+    )
+    .toEqual(["add_agent_to_huddle"]);
+});

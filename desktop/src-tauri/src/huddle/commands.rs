@@ -1,9 +1,6 @@
 //! Small Huddle controls that mutate an active session.
 
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::sync::{atomic::Ordering, Arc};
 
 use tauri::State;
 use uuid::Uuid;
@@ -26,30 +23,20 @@ pub fn set_huddle_manual_mic_unmuted(
     Ok(())
 }
 
-/// Immediately interrupt the agent's current speech and discard queued TTS.
-///
-/// This shares the barge-in cancellation path used when a participant starts
-/// talking, so it stops both audio already handed to the player and response
-/// text waiting to be synthesized.
+/// Immediately interrupt the agent utterance that is currently speaking.
 #[tauri::command]
 pub fn interrupt_huddle_speech(state: State<'_, AppState>) -> Result<(), String> {
-    let (active, cancel) = {
+    let tts_pipeline = {
         let huddle = state.huddle()?;
         if !matches!(huddle.phase, HuddlePhase::Connected | HuddlePhase::Active) {
             return Err("no active huddle".to_string());
         }
-        (huddle.tts_active.clone(), huddle.tts_cancel.clone())
+        huddle.tts_pipeline.as_ref().map(Arc::clone)
     };
-    request_speech_interrupt(&active, &cancel);
-    Ok(())
-}
-
-fn request_speech_interrupt(active: &AtomicBool, cancel: &AtomicBool) -> bool {
-    if !active.load(Ordering::Acquire) {
-        return false;
+    if let Some(tts_pipeline) = tts_pipeline {
+        tts_pipeline.cancel_active_speaker();
     }
-    cancel.store(true, Ordering::Release);
-    true
+    Ok(())
 }
 
 /// Remove an agent from the active huddle without removing its parent-channel
@@ -138,29 +125,4 @@ pub async fn remove_agent_from_huddle(
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn stale_stop_does_not_cancel_the_next_utterance() {
-        let active = AtomicBool::new(false);
-        let cancel = AtomicBool::new(false);
-
-        assert!(!request_speech_interrupt(&active, &cancel));
-        active.store(true, Ordering::Release);
-
-        assert!(!cancel.load(Ordering::Acquire));
-    }
-
-    #[test]
-    fn stop_cancels_active_speech() {
-        let active = AtomicBool::new(true);
-        let cancel = AtomicBool::new(false);
-
-        assert!(request_speech_interrupt(&active, &cancel));
-        assert!(cancel.load(Ordering::Acquire));
-    }
 }

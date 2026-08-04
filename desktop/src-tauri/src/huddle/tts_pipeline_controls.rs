@@ -43,6 +43,19 @@ impl TtsPipeline {
         );
     }
 
+    /// Cancel exactly the speaker utterance currently owning playback.
+    ///
+    /// The speaker generation is advanced while ownership is locked, so a
+    /// stale Stop click cannot cancel a later utterance that starts after the
+    /// observed one drains.
+    pub(crate) fn cancel_active_speaker(&self) -> bool {
+        request_active_speaker_cancel(
+            &self.speaker_generations,
+            &self.active_speaker,
+            &self.speaker_cancel,
+        )
+    }
+
     /// Select a bundled Pocket voice for subsequent speech.
     ///
     /// Current playback and queued text are cancelled immediately so content
