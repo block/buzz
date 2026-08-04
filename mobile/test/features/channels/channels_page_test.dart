@@ -12,7 +12,7 @@ import 'package:buzz/features/channels/channel_sections/channel_sections_provide
 import 'package:buzz/features/channels/channel_sections/channel_sections_storage.dart';
 import 'package:buzz/features/channels/channels_page.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
-import 'package:buzz/features/channels/read_state/read_state_provider.dart';
+import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/features/profile/profile_avatar.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
@@ -1312,7 +1312,7 @@ void main() {
     expect(find.text('Retry'), findsOneWidget);
   });
 
-  testWidgets('renders and clears unread dot indicator', (tester) async {
+  testWidgets('bolds and clears unread channel labels', (tester) async {
     final channels = [
       Channel(
         id: '1',
@@ -1356,15 +1356,21 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.byKey(const Key('channel-unread-dot-1')), findsOneWidget);
+    expect(
+      tester.widget<Text>(find.text('general')).style?.fontWeight,
+      FontWeight.w700,
+    );
 
     readState.markContextRead('1', 20);
     await tester.pump();
 
-    expect(find.byKey(const Key('channel-unread-dot-1')), findsNothing);
+    expect(
+      tester.widget<Text>(find.text('general')).style?.fontWeight,
+      FontWeight.w400,
+    );
   });
 
-  testWidgets('renders numeric unread count for counted events', (
+  testWidgets('bolds channels with unread thread activity without a badge', (
     tester,
   ) async {
     final channels = [
@@ -1423,9 +1429,10 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.byKey(const Key('channel-unread-1')), findsOneWidget);
-    expect(find.text('2'), findsOneWidget);
-    expect(find.byKey(const Key('channel-unread-dot-1')), findsNothing);
+    expect(
+      tester.widget<Text>(find.text('general')).style?.fontWeight,
+      FontWeight.w700,
+    );
   });
 
   testWidgets('seeds first loaded channels as read', (tester) async {
@@ -1467,7 +1474,10 @@ void main() {
 
     expect(readState.seededContexts, {'1': 20});
     expect(readState.markedContexts, isEmpty);
-    expect(find.byKey(const Key('channel-unread-1')), findsNothing);
+    expect(
+      tester.widget<Text>(find.text('general')).style?.fontWeight,
+      FontWeight.w400,
+    );
   });
 
   testWidgets('waits for read-state readiness before initial seeding', (

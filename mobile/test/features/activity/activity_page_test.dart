@@ -9,7 +9,7 @@ import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_detail_page.dart';
 import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
-import 'package:buzz/features/channels/read_state/read_state_provider.dart';
+import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/features/profile/user_cache_provider.dart';
 import 'package:buzz/features/profile/user_profile.dart';
 import 'package:buzz/shared/theme/theme.dart';
@@ -17,8 +17,10 @@ import 'package:buzz/shared/widgets/anchored_popover_menu.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/avatar_image.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
@@ -601,10 +603,155 @@ void main() {
 
     await tester.longPress(find.byKey(const ValueKey('inbox-row-m1')));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Mark unread'));
+    await tester.tap(
+      find.descendant(
+        of: find.byType(BottomSheet),
+        matching: find.text('Mark unread'),
+      ),
+    );
     await tester.pumpAndSettle();
 
     expect(find.byKey(const ValueKey('inbox-unread-dot-m1')), findsOneWidget);
+  });
+
+  testWidgets('swiping an inbox row reveals and runs its row actions', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      await buildTestable(
+        readContexts: {'ch1': now, 'ch2': now, 'thread:root1': now},
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final row = find.byKey(const ValueKey('inbox-row-m1'));
+    final originalLeft = tester.getTopLeft(row).dx;
+    await tester.drag(row, const Offset(-200, 0));
+    await tester.pumpAndSettle();
+
+    expect(tester.getTopLeft(row).dx, lessThan(originalLeft));
+    expect(find.byKey(const ValueKey('inbox-swipe-read-m1')), findsOneWidget);
+    expect(find.byKey(const ValueKey('inbox-swipe-open-m1')), findsNothing);
+    expect(
+      find.byKey(const ValueKey('inbox-swipe-background-m1')),
+      findsOneWidget,
+    );
+    expect(
+      tester
+          .getSize(find.byKey(const ValueKey('inbox-swipe-background-m1')))
+          .height,
+      tester.getSize(row).height,
+    );
+    final markUnreadAction = find.byKey(const ValueKey('inbox-swipe-read-m1'));
+    final markUnreadMaterial = tester.widget<Material>(
+      find.descendant(of: markUnreadAction, matching: find.byType(Material)),
+    );
+    expect(markUnreadMaterial.color, tester.element(row).colors.primary);
+    expect(markUnreadMaterial.borderRadius, BorderRadius.circular(Radii.full));
+
+    await tester.tap(find.byKey(const ValueKey('inbox-swipe-read-m1')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('inbox-unread-dot-m1')), findsOneWidget);
+
+    await tester.drag(row, const Offset(-200, 0));
+    await tester.pumpAndSettle();
+    final markReadAction = find.byKey(const ValueKey('inbox-swipe-read-m1'));
+    final markReadMaterial = tester.widget<Material>(
+      find.descendant(of: markReadAction, matching: find.byType(Material)),
+    );
+    expect(markReadMaterial.color, tester.element(row).appColors.success);
+    expect(markReadMaterial.color, isNot(markUnreadMaterial.color));
+  });
+
+  testWidgets('swipe action reveals its label with one threshold haptic', (
+    tester,
+  ) async {
+    final hapticCalls = <MethodCall>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+          if (call.method == 'HapticFeedback.vibrate') {
+            hapticCalls.add(call);
+          }
+          return null;
+        });
+    addTearDown(
+      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, null),
+    );
+
+    await tester.pumpWidget(
+      await buildTestable(
+        readContexts: {'ch1': now, 'ch2': now, 'thread:root1': now},
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final row = find.byKey(const ValueKey('inbox-row-m1'));
+    final gesture = await tester.startGesture(tester.getCenter(row));
+    for (var step = 1; step <= 7; step++) {
+      await gesture.moveBy(
+        const Offset(-10, 0),
+        timeStamp: Duration(milliseconds: step * 50),
+      );
+      await tester.pump();
+    }
+
+    final action = find.byKey(const ValueKey('inbox-swipe-read-m1'));
+    expect(action, findsOneWidget);
+    expect(
+      find.descendant(of: action, matching: find.byIcon(LucideIcons.mail)),
+      findsOneWidget,
+    );
+    expect(find.text('Mark unread'), findsNothing);
+    expect(hapticCalls, isEmpty);
+
+    for (var step = 8; step <= 10; step++) {
+      await gesture.moveBy(
+        const Offset(-10, 0),
+        timeStamp: Duration(milliseconds: step * 50),
+      );
+      await tester.pump();
+    }
+    expect(find.text('Mark unread'), findsOneWidget);
+    expect(hapticCalls, hasLength(1));
+    expect(hapticCalls.single.arguments, 'HapticFeedbackType.selectionClick');
+
+    await gesture.moveBy(
+      const Offset(20, 0),
+      timeStamp: const Duration(milliseconds: 550),
+    );
+    await tester.pump();
+    await gesture.moveBy(
+      const Offset(-20, 0),
+      timeStamp: const Duration(milliseconds: 600),
+    );
+    await tester.pump();
+    expect(hapticCalls, hasLength(1));
+
+    await gesture.up();
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('commits the inbox read-state action past the swipe threshold', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      await buildTestable(
+        readContexts: {'ch1': now, 'ch2': now, 'thread:root1': now},
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final row = find.byKey(const ValueKey('inbox-row-m1'));
+    await tester.drag(row, const Offset(-500, 0));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('inbox-unread-dot-m1')), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('inbox-swipe-background-m1')),
+      findsNothing,
+    );
   });
 
   testWidgets('falls back to short pubkey when user not cached', (
