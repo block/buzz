@@ -134,6 +134,52 @@ test("keeps the drawer open until the huddle is expanded", async ({ page }) => {
     name: "Stop transcript",
   });
   await expect(transcriptButton).toBeVisible();
+  const huddleShell = page.locator(".buzz-huddle-shell");
+  await expect(huddleShell).toHaveAttribute("data-huddle-open", "true");
+  const huddleBackdrop = page.locator(".buzz-huddle-drawer-backdrop");
+  await expect(huddleBackdrop).toHaveClass(/buzz-huddle-drawer-backdrop-open/);
+  const [huddleBackdropColor, huddleDrawerColor] = await Promise.all([
+    huddleBackdrop.evaluate(
+      (element) => getComputedStyle(element).backgroundColor,
+    ),
+    page
+      .locator(".buzz-huddle-drawer")
+      .first()
+      .evaluate((element) => getComputedStyle(element).backgroundColor),
+  ]);
+  expect(huddleBackdropColor).toBe(huddleDrawerColor);
+  await expect
+    .poll(() =>
+      huddleBackdrop.evaluate((element) => {
+        const shell = element.parentElement;
+        const appSurface = shell?.querySelector(".buzz-huddle-app-surface");
+        const terminal = shell?.querySelector(".buzz-terminal-substrate");
+        if (!appSurface || !terminal) return false;
+        const backdropStyle = getComputedStyle(element);
+        const appStyle = getComputedStyle(appSurface);
+        const terminalStyle = getComputedStyle(terminal);
+        return (
+          Number(backdropStyle.zIndex) > Number(terminalStyle.zIndex) &&
+          Number(backdropStyle.zIndex) < Number(appStyle.zIndex)
+        );
+      }),
+    )
+    .toBe(true);
+  const drawerAgentMenu = page.getByRole("button", {
+    name: "Voice settings for alice",
+  });
+  await expect(
+    drawerAgentMenu.getByTestId("huddle-participant-avatar"),
+  ).toBeVisible();
+  await drawerAgentMenu.click();
+  await expect(
+    page.getByText("Agent text-to-speech", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText("Agent voice", { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Remove alice from huddle" }),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
   await expect(page.getByTestId("profile-huddle-control")).toHaveCount(0);
   await page
     .getByRole("button", { name: "Open huddle in a new window" })
@@ -170,6 +216,11 @@ test("keeps the drawer open until the huddle is expanded", async ({ page }) => {
     name: /microphone/i,
   });
   await expect(compactMicButton).toBeVisible();
+  await expect(compactMicButton).toHaveClass(/bg-destructive\/15/);
+  await expect(compactMicButton).toHaveClass(/text-destructive/);
+  await expect(
+    huddleControl.getByRole("button", { name: "Audio settings" }),
+  ).not.toHaveClass(/bg-destructive\/15/);
   const [micContainerRadius, micHoverRadius] = await Promise.all([
     compactMicButton
       .locator("..")
@@ -516,6 +567,88 @@ test("animates the responding agent with the shared speaker ring", async ({
     .toBe("0");
 });
 
+test("stops the speaking agent from the huddle controls", async ({ page }) => {
+  await installMockBridge(page, {
+    windowLabel: `huddle-${HUDDLE_CHANNEL_ID}`,
+    huddle: {
+      parentChannelId: HUDDLE_PARENT_ID,
+      ephemeralChannelId: HUDDLE_CHANNEL_ID,
+      members: [
+        { pubkey: TEST_IDENTITIES.tyler.pubkey, role: "member" },
+        { pubkey: TEST_IDENTITIES.alice.pubkey, role: "bot" },
+      ],
+    },
+  });
+  await page.goto("/");
+  const roomMicButton = page.getByRole("button", {
+    name: "Microphone unavailable",
+  });
+  await expect(roomMicButton).toHaveClass(/bg-destructive\/35/);
+  await expect(roomMicButton).toHaveClass(/text-destructive/);
+  await expect(
+    page.getByRole("button", { name: "Audio settings" }),
+  ).not.toHaveClass(/bg-destructive\/35/);
+  const roomSpeakerButton = page.getByRole("button", {
+    name: "Unmute agent speech",
+  });
+  await expect(roomSpeakerButton).toHaveClass(/bg-destructive\/35/);
+  await expect(roomSpeakerButton).toHaveClass(/text-destructive/);
+  await expect(
+    page.getByRole("button", { name: "Speaker settings" }),
+  ).not.toHaveClass(/bg-destructive\/35/);
+  await waitForAnimations(page);
+  const agentTile = page
+    .getByTestId("huddle-participant-strip")
+    .getByTestId("huddle-participant-tile")
+    .nth(1);
+  const agentAvatar = page
+    .getByTestId("huddle-participant-strip")
+    .locator(".buzz-huddle-speaking-avatar")
+    .nth(1);
+  const labelSlots = page.getByTestId("huddle-participant-label-slot");
+  await expect(agentAvatar).toBeVisible();
+  await waitForAnimations(page);
+  const idleTileHeight = await agentTile.evaluate(
+    (element) => element.offsetHeight,
+  );
+  const idleAgentLabelBox = await labelSlots.nth(1).boundingBox();
+  const humanLabelBox = await labelSlots.nth(0).boundingBox();
+  expect(humanLabelBox?.y).toBe(idleAgentLabelBox?.y);
+  expect(humanLabelBox?.height).toBe(idleAgentLabelBox?.height);
+  expect(humanLabelBox?.width).toBe(idleAgentLabelBox?.width);
+  await page.evaluate(async (pubkey) => {
+    await window.__BUZZ_E2E_EMIT_MOCK_HUDDLE_TTS_SPEAKER__?.({
+      pubkey,
+      level: 0.8,
+    });
+  }, TEST_IDENTITIES.alice.pubkey);
+  await expect
+    .poll(() =>
+      agentAvatar.evaluate((element) =>
+        element.style.getPropertyValue("--buzz-huddle-speaker-opacity"),
+      ),
+    )
+    .toBe("0.890");
+
+  const stopButton = page.getByRole("button", { name: /^Stop .* speaking$/ });
+  await expect(stopButton).toBeVisible();
+  await expect(stopButton).toHaveClass(/bg-destructive\/15/);
+  expect(await labelSlots.nth(1).boundingBox()).toEqual(idleAgentLabelBox);
+  expect(await agentTile.evaluate((element) => element.offsetHeight)).toBe(
+    idleTileHeight,
+  );
+  await stopButton.click();
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).some(
+          (entry) => entry.command === "interrupt_huddle_speech",
+        ),
+      ),
+    )
+    .toBe(true);
+});
+
 test("assigns distinct agent voices and exposes compact per-agent controls", async ({
   page,
 }) => {
@@ -571,7 +704,7 @@ test("assigns distinct agent voices and exposes compact per-agent controls", asy
   });
   expect(new Set(assignedVoices).size).toBe(2);
 
-  await voiceMenus.first().click();
+  await voiceMenus.first().click({ force: true });
   await waitForAnimations(page);
   await expect(
     page.getByText("Agent text-to-speech", { exact: true }),
@@ -581,12 +714,15 @@ test("assigns distinct agent voices and exposes compact per-agent controls", asy
     "Vera",
   );
 
-  await page.getByTestId("huddle-agent-tts-toggle").click();
+  await page.getByTestId("huddle-agent-tts-toggle").click({ force: true });
   await expect(page.getByTestId("huddle-agent-voice-selector")).toHaveCount(0);
-  await page.getByTestId("huddle-agent-tts-toggle").click();
+  await page.getByTestId("huddle-agent-tts-toggle").click({ force: true });
   await expect(page.getByTestId("huddle-agent-tts-toggle")).toBeChecked();
-  await page.getByTestId("huddle-agent-voice-selector").click();
-  await page.getByRole("menuitemradio", { name: "Jane" }).click();
+  await expect(page.getByTestId("huddle-agent-voice-selector")).toBeEnabled();
+  await page.getByTestId("huddle-agent-voice-selector").click({ force: true });
+  await page
+    .getByRole("menuitemradio", { name: "Jane" })
+    .click({ force: true });
   await expect
     .poll(() =>
       page.evaluate(() => {
@@ -790,6 +926,39 @@ test("returns the companion transcript to the same channel in the main app", asy
   ).toHaveCount(0);
 });
 
+test("returns to the parent channel when leaving a huddle channel in view", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    huddle: {
+      parentChannelId: HUDDLE_PARENT_ID,
+      ephemeralChannelId: HUDDLE_CHANNEL_ID,
+      members: [{ pubkey: TEST_IDENTITIES.tyler.pubkey, role: "member" }],
+    },
+  });
+  await page.goto("/");
+
+  await expect(page.locator(".buzz-huddle-shell")).toHaveAttribute(
+    "data-huddle-open",
+    "true",
+  );
+  await page.evaluate(async () => {
+    await window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.("close_huddle_companion");
+  });
+  await expect(page).toHaveURL(
+    new RegExp(`/channels/${HUDDLE_CHANNEL_ID.replaceAll("-", "\\-")}`),
+  );
+
+  await page.getByRole("button", { name: "Leave huddle" }).click();
+
+  await expect(page).toHaveURL(
+    new RegExp(`/channels/${HUDDLE_PARENT_ID.replaceAll("-", "\\-")}`),
+  );
+  await expect(
+    page.locator(`[data-channel-id="${HUDDLE_CHANNEL_ID}"]`),
+  ).toHaveCount(0);
+});
+
 test("keeps the huddle avatar strip compact and exposes the full roster", async ({
   page,
 }) => {
@@ -825,6 +994,48 @@ test("keeps the huddle avatar strip compact and exposes the full roster", async 
   await expect(
     page.getByRole("button", { name: /Remove Agent .* from huddle/ }),
   ).toHaveCount(1);
+});
+
+test("removes an agent from its menu without showing an extra participant control", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    windowLabel: `huddle-${HUDDLE_CHANNEL_ID}`,
+    huddle: {
+      parentChannelId: HUDDLE_PARENT_ID,
+      ephemeralChannelId: HUDDLE_CHANNEL_ID,
+      members: [
+        { pubkey: TEST_IDENTITIES.tyler.pubkey, role: "member" },
+        { pubkey: TEST_IDENTITIES.alice.pubkey, role: "bot" },
+      ],
+    },
+  });
+  await page.goto("/");
+
+  await expect(
+    page.getByRole("button", { name: "Manage huddle participants" }),
+  ).toHaveCount(0);
+
+  await page.getByTestId("huddle-agent-voice-menu-trigger").click();
+  const removeButton = page.getByRole("button", {
+    name: "Remove alice from huddle",
+  });
+  await expect(removeButton).toBeVisible();
+  page.once("dialog", (dialog) => dialog.accept());
+  await removeButton.click({ force: true });
+
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).some(
+          (entry) => entry.command === "remove_agent_from_huddle",
+        ),
+      ),
+    )
+    .toBe(true);
+  await expect(page.getByTestId("huddle-agent-voice-menu-trigger")).toHaveCount(
+    0,
+  );
 });
 
 test("keeps a newer huddle event over a delayed hydration snapshot", async ({
@@ -945,6 +1156,72 @@ test("keeps a starting huddle in the drawer after its companion closes", async (
   await expect(
     page.locator(`[data-channel-id="${ephemeralChannelId}"]`),
   ).toBeVisible();
+});
+
+test("starts unmuted with Push to Talk while preserving manual microphone control", async ({
+  page,
+}) => {
+  await installFakeHuddleMicrophone(page);
+  await installMockBridge(page, {
+    openHuddleWindowDelayMs: 10_000,
+    startHuddleReturnDelayMs: 1_500,
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-alice-tyler").click();
+  await page.getByTestId("channel-start-huddle-trigger").click();
+
+  const muteButton = page.getByRole("button", { name: "Mute microphone" });
+  await expect(muteButton).toBeVisible();
+  await expect(muteButton).not.toHaveClass(/bg-destructive\/15/);
+  await expect(
+    page.getByRole("button", { name: "Audio settings" }),
+  ).not.toHaveClass(/bg-destructive\/15/);
+
+  await muteButton.click();
+  const unmuteButton = page.getByRole("button", {
+    name: "Unmute microphone",
+  });
+  await expect(unmuteButton).toBeVisible();
+  await expect(unmuteButton).toHaveClass(/bg-destructive\/15/);
+  await expect(unmuteButton).toHaveClass(/text-destructive/);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).findLast(
+            (entry) => entry.command === "set_huddle_manual_mic_unmuted",
+          )?.payload,
+      ),
+    )
+    .toEqual({ enabled: false });
+  await page.mouse.move(0, 0);
+  await unmuteButton.hover();
+  await expect(page.getByRole("tooltip")).toHaveAccessibleName(
+    /Click to unmute or hold .*Space/,
+  );
+
+  await page.evaluate(async () => {
+    await window.__BUZZ_E2E_EMIT_TAURI_EVENT__?.("ptt-state", true);
+  });
+  await expect(muteButton).toBeVisible();
+
+  await page.evaluate(async () => {
+    await window.__BUZZ_E2E_EMIT_TAURI_EVENT__?.("ptt-state", false);
+  });
+  await expect(unmuteButton).toBeVisible();
+
+  await unmuteButton.click();
+  await expect(muteButton).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).findLast(
+            (entry) => entry.command === "set_huddle_manual_mic_unmuted",
+          )?.payload,
+      ),
+    )
+    .toEqual({ enabled: true });
 });
 
 test("starts an agent DM huddle and hides its backing channel after it ends", async ({
@@ -1160,7 +1437,7 @@ test("closes add-agent dialog when parent membership is already satisfied", asyn
   await page.goto("/");
 
   await page.getByRole("button", { name: "Add agent to huddle" }).click();
-  const dialog = page.getByRole("dialog", { name: "Add Agent to Huddle" });
+  const dialog = page.getByRole("dialog", { name: "Add agents" });
   await expect(dialog).toBeVisible();
   await dialog.getByRole("button", { name: /bob/i }).click();
 
@@ -1168,4 +1445,59 @@ test("closes add-agent dialog when parent membership is already satisfied", asyn
   await expect(
     page.getByText("Added to huddle, but parent channel failed:"),
   ).toHaveCount(0);
+});
+
+test("starts an available stopped agent before adding it to the huddle", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    addAgentToHuddleResult: {
+      ephemeral_added: true,
+      parent_added: true,
+      parent_error: null,
+    },
+    huddle: {
+      parentChannelId: HUDDLE_PARENT_ID,
+      ephemeralChannelId: HUDDLE_CHANNEL_ID,
+      members: [{ pubkey: TEST_IDENTITIES.tyler.pubkey, role: "member" }],
+    },
+    managedAgents: [
+      {
+        avatarUrl: "https://example.com/bob.png",
+        pubkey: TEST_IDENTITIES.bob.pubkey,
+        name: "bob",
+        status: "stopped",
+      },
+    ],
+  });
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Add agent to huddle" }).click();
+  const dialog = page.getByRole("dialog", { name: "Add agents" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toHaveClass(/data-\[state=open\]:animate-in/);
+  await expect(dialog).toHaveClass(/data-\[state=open\]:fade-in-0/);
+  await expect(dialog).toHaveClass(/data-\[state=open\]:zoom-in-95/);
+  await expect(dialog).toHaveClass(/duration-200/);
+  await expect(dialog).toHaveClass(/motion-reduce:animate-none/);
+  await expect(
+    dialog.getByText("Choose an agent to join this huddle.", { exact: true }),
+  ).toBeVisible();
+  await expect(dialog.getByText("stopped", { exact: true })).toHaveCount(0);
+  await dialog.getByRole("button", { name: /bob/i }).click();
+
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window.__BUZZ_E2E_COMMAND_LOG__ ?? [])
+          .filter(
+            (entry) =>
+              entry.command === "start_managed_agent" ||
+              entry.command === "add_agent_to_huddle",
+          )
+          .map((entry) => entry.command),
+      ),
+    )
+    .toEqual(["start_managed_agent", "add_agent_to_huddle"]);
+  await expect(dialog).toHaveCount(0);
 });

@@ -9,6 +9,8 @@ export interface HuddleContextValue {
   micConnected: boolean;
   isMuted: boolean;
   toggleMute: () => void;
+  /** Interrupt current agent speech and discard queued TTS responses. */
+  interruptAgentSpeech: () => Promise<void>;
   micLevel: number;
   pttActive: boolean;
   voiceInputMode: VoiceInputMode;

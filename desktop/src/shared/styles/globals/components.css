@@ -10,10 +10,9 @@
     --buzz-huddle-drawer-radius: 24px;
     --buzz-huddle-drawer-ease: cubic-bezier(0.32, 0.72, 0, 1);
     --buzz-huddle-drawer-surface: var(--huddle-drawer-surface, 0 0% 0%);
-    /* The lifted app surface reveals this shell at its rounded corners. The
-     * Buzz theme paints its gradient here; the drawer remains responsible for
-     * its own dark surface below. */
-    background: transparent;
+    /* Keep the drawer surface behind the lifted app so the dark background
+     * remains visible through its rounded lower corners. */
+    background: hsl(var(--buzz-huddle-drawer-surface));
   }
 
   .buzz-huddle-app-surface {
@@ -58,6 +57,26 @@
   }
 
   .buzz-huddle-app-surface-open::after {
+    opacity: 1;
+  }
+
+  .buzz-huddle-drawer-backdrop {
+    background: hsl(var(--buzz-huddle-drawer-surface));
+    bottom: 0;
+    height: calc(
+      var(--buzz-huddle-drawer-height) +
+      var(--buzz-huddle-drawer-radius)
+    );
+    left: 0;
+    opacity: 0;
+    pointer-events: none;
+    position: absolute;
+    right: 0;
+    transition: opacity 260ms var(--buzz-huddle-drawer-ease);
+    z-index: 1;
+  }
+
+  .buzz-huddle-drawer-backdrop-open {
     opacity: 1;
   }
 
@@ -196,6 +215,10 @@
     }
 
     .buzz-huddle-app-surface {
+      transition: none;
+    }
+
+    .buzz-huddle-drawer-backdrop {
       transition: none;
     }
 

@@ -27,6 +27,7 @@ mod agent_tts_routing;
 pub mod agent_voice;
 pub mod agents;
 pub mod audio_output;
+mod commands;
 pub mod jitter;
 pub mod models;
 pub mod pipeline;
@@ -67,6 +68,9 @@ pub(super) fn drain_until_shutdown<T>(
 
 // ── Re-exports ────────────────────────────────────────────────────────────────
 
+pub use commands::{
+    interrupt_huddle_speech, remove_agent_from_huddle, set_huddle_manual_mic_unmuted,
+};
 pub use state::{HuddleJoinInfo, HuddlePhase, HuddleState, VoiceInputMode};
 pub use transcription::{set_huddle_transcription_enabled, start_stt_pipeline};
 pub use tts_settings::set_tts_enabled;

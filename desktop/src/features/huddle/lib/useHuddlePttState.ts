@@ -7,8 +7,8 @@ export type VoiceInputMode = "push_to_talk" | "voice_activity";
 export function useHuddlePttState(micConnected: boolean) {
   const [pttActive, setPttActive] = React.useState(false);
   const [voiceInputMode, setVoiceInputModeState] =
-    React.useState<VoiceInputMode>("voice_activity");
-  const voiceInputModeRef = React.useRef<VoiceInputMode>("voice_activity");
+    React.useState<VoiceInputMode>("push_to_talk");
+  const voiceInputModeRef = React.useRef<VoiceInputMode>("push_to_talk");
   voiceInputModeRef.current = voiceInputMode;
   const getVoiceInputMode = React.useCallback(
     () => voiceInputModeRef.current,
@@ -20,7 +20,7 @@ export function useHuddlePttState(micConnected: boolean) {
     invoke<VoiceInputMode>("get_voice_input_mode")
       .then(setVoiceInputModeState)
       .catch(() => {
-        /* best-effort — default is voice_activity */
+        /* best-effort — default is push_to_talk */
       });
   }, []);
 

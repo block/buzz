@@ -57,6 +57,13 @@ export function AppHuddleShell({
         >
           {isRoom ? null : terminal}
           <div
+            aria-hidden="true"
+            className={cn(
+              "buzz-huddle-drawer-backdrop",
+              isDrawerOpen && "buzz-huddle-drawer-backdrop-open",
+            )}
+          />
+          <div
             className={cn(
               "buzz-huddle-app-surface z-10 flex min-h-0 flex-row overflow-hidden bg-background",
               isDrawerOpen &&
@@ -69,7 +76,7 @@ export function AppHuddleShell({
             {children}
           </div>
           {isRoom || !isCompanionOpen ? (
-            <div className="absolute inset-x-0 bottom-0 z-0 h-(--buzz-huddle-drawer-height)">
+            <div className="absolute inset-x-0 bottom-0 z-[2] h-(--buzz-huddle-drawer-height)">
               <AppHuddleBar
                 mode={isRoom ? "room" : "main"}
                 onOpenHuddleWindow={isRoom ? undefined : onCompanionOpen}

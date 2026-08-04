@@ -333,6 +333,7 @@ export function AppShell() {
     notificationSettings: notificationSettings.settings,
     openSearchHit,
     pubkey: identityQuery.data?.pubkey,
+    silentChannelIds: huddleBackingChannelIds,
   });
   const {
     followedRootIds,
@@ -420,7 +421,6 @@ export function AppShell() {
     unreadThreadFeedItems,
   ]);
 
-  // Badge count consumes the shared NIP-RS read-state from useUnreadChannels.
   const { homeBadgeCount, homeBadgeCountExcludingHighPriority } =
     useHomeFeedNotificationState(
       homeFeedQuery.data,
@@ -439,8 +439,8 @@ export function AppShell() {
       getThreadReadAt,
       getMessageReadAt,
       channels,
+      huddleBackingChannelIds,
     );
-
   const dueReminderBadge = useDueReminderBadgeCount(
     identityQuery.data?.pubkey,
     notificationSettings.settings.homeBadgeEnabled,
