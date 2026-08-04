@@ -3,17 +3,17 @@ use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag, Timestamp};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::State;
+use tokio_util::sync::CancellationToken;
 
 use crate::app_state::AppState;
-use crate::relay::{
-    classify_request_error, parse_json_response, relay_api_base_url_with_override,
-    relay_error_message,
-};
+use crate::relay::{parse_json_response, relay_api_base_url_with_override, relay_error_message};
 
 use super::media_transcode::{
     has_heic_extension, is_heic_file, is_video_file, transcode_and_extract_poster,
-    transcode_heic_path_to_jpeg_bytes,
+    transcode_and_extract_poster_with_cancellation, transcode_heic_path_to_jpeg_bytes,
+    transcode_heic_path_to_jpeg_bytes_with_cancellation,
 };
+use super::media_upload_progress::{emit_media_upload_phase, send_upload_attempt, UploadAttempt};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlobDescriptor {
@@ -410,51 +410,6 @@ fn should_retry_legacy_upload(status: reqwest::StatusCode) -> bool {
     )
 }
 
-async fn send_upload_attempt(
-    state: &AppState,
-    url: String,
-    auth_header: &str,
-    mime: &str,
-    sha256: &str,
-    body: bytes::Bytes,
-    progress: Option<&(tauri::AppHandle, String)>,
-) -> Result<reqwest::Response, String> {
-    let req = state
-        .http_client
-        .put(url)
-        .header("Authorization", auth_header)
-        .header("Content-Type", mime)
-        .header("X-SHA-256", sha256);
-
-    let response = if let Some((app, progress_id)) = progress {
-        use tauri::Emitter;
-        let app = app.clone();
-        let progress_id = progress_id.clone();
-        let total = body.len() as u64;
-        let chunk_size = 64 * 1024;
-        let chunk_count = body.len().div_ceil(chunk_size);
-        let mut sent: u64 = 0;
-        let stream = futures_util::stream::iter((0..chunk_count).map(move |i| {
-            let start = i * chunk_size;
-            let end = usize::min(start + chunk_size, body.len());
-            let chunk = body.slice(start..end);
-            sent += chunk.len() as u64;
-            let _ = app.emit(
-                "media-upload-progress",
-                serde_json::json!({ "id": progress_id, "sent": sent, "total": total }),
-            );
-            Ok::<bytes::Bytes, std::io::Error>(chunk)
-        }));
-        req.header(reqwest::header::CONTENT_LENGTH, total)
-            .body(reqwest::Body::wrap_stream(stream))
-            .send()
-            .await
-    } else {
-        req.body(body).send().await
-    };
-    response.map_err(|error| classify_request_error(&error))
-}
-
 pub(crate) async fn upload_image_bytes(
     body: Vec<u8>,
     state: &AppState,
@@ -464,7 +419,7 @@ pub(crate) async fn upload_image_bytes(
         return Err("profile avatar must be an image".to_string());
     }
     let body = sanitize_image_for_upload(body, &mime)?;
-    do_upload(body, &mime, state, None).await
+    do_upload(body, &mime, state, None, None).await
 }
 
 async fn do_upload(
@@ -472,6 +427,7 @@ async fn do_upload(
     mime: &str,
     state: &AppState,
     progress: Option<(tauri::AppHandle, String)>,
+    cancellation: Option<&CancellationToken>,
 ) -> Result<BlobDescriptor, String> {
     let sha256 = hex::encode(Sha256::digest(&body));
 
@@ -494,25 +450,34 @@ async fn do_upload(
         URL_SAFE_NO_PAD.encode(auth_event.as_json().as_bytes())
     );
     let body = bytes::Bytes::from(body);
+    if let Some((app, progress_id)) = progress.as_ref() {
+        emit_media_upload_phase(app, Some(progress_id.as_str()), "uploading");
+    }
     let mut resp = send_upload_attempt(
         state,
-        format!("{base_url}/upload"),
-        &auth_header,
-        mime,
-        &sha256,
-        body.clone(),
-        progress.as_ref(),
+        UploadAttempt {
+            url: format!("{base_url}/upload"),
+            auth_header: &auth_header,
+            mime,
+            sha256: &sha256,
+            body: body.clone(),
+            progress: progress.as_ref(),
+            cancellation,
+        },
     )
     .await?;
     if should_retry_legacy_upload(resp.status()) {
         resp = send_upload_attempt(
             state,
-            format!("{base_url}/media/upload"),
-            &auth_header,
-            mime,
-            &sha256,
-            body,
-            progress.as_ref(),
+            UploadAttempt {
+                url: format!("{base_url}/media/upload"),
+                auth_header: &auth_header,
+                mime,
+                sha256: &sha256,
+                body,
+                progress: progress.as_ref(),
+                cancellation,
+            },
         )
         .await?;
     }
@@ -559,7 +524,7 @@ pub async fn upload_media(
 
     let mime = detect_and_validate_mime(&body)?;
     let body = sanitize_image_for_upload(body, &mime)?;
-    do_upload(body, &mime, &state, None).await
+    do_upload(body, &mime, &state, None, None).await
 }
 
 /// Read a picked path through the TOCTOU-safe pipeline (fd pin → sniff →
@@ -573,6 +538,7 @@ async fn process_picked_path(
     path: std::path::PathBuf,
     state: &AppState,
     images_only: bool,
+    progress: Option<(tauri::AppHandle, String)>,
 ) -> Result<BlobDescriptor, String> {
     // Pin the inode by opening the fd BEFORE spawn_blocking. This prevents a
     // local attacker from swapping the file between dialog return and read.
@@ -639,10 +605,9 @@ async fn process_picked_path(
 
     // Upload video first, then poster (best-effort). If poster upload fails,
     // the video descriptor is returned without an image field.
-    let mut descriptor = do_upload(body, &mime, state, None).await?;
-
+    let mut descriptor = do_upload(body, &mime, state, progress, None).await?;
     if let Some(poster) = poster_bytes {
-        match do_upload(poster, "image/jpeg", state, None).await {
+        match do_upload(poster, "image/jpeg", state, None, None).await {
             Ok(poster_desc) => descriptor.image = Some(poster_desc.url),
             Err(e) => eprintln!("buzz-desktop: poster upload failed (non-fatal): {e}"),
         }
@@ -675,6 +640,7 @@ async fn process_picked_path(
 #[tauri::command]
 pub async fn pick_and_upload_media(
     app: tauri::AppHandle,
+    progress_id: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<Vec<BlobDescriptor>, String> {
     use tauri_plugin_dialog::DialogExt;
@@ -694,7 +660,8 @@ pub async fn pick_and_upload_media(
     let mut descriptors = Vec::with_capacity(file_paths.len());
     for file_path in file_paths {
         let path = file_path.as_path().ok_or("invalid path")?.to_path_buf();
-        let descriptor = process_picked_path(path, &state, false).await?;
+        let progress = progress_id.clone().map(|id| (app.clone(), id));
+        let descriptor = process_picked_path(path, &state, false, progress).await?;
         descriptors.push(descriptor);
     }
 
@@ -735,30 +702,37 @@ pub async fn pick_and_upload_image(
     };
 
     let path = file_path.as_path().ok_or("invalid path")?.to_path_buf();
-    let descriptor = process_picked_path(path, &state, true).await?;
+    let descriptor = process_picked_path(path, &state, true, None).await?;
     Ok(Some(descriptor))
 }
 
-/// Upload raw bytes directly (for paste and drag-drop).
-///
-/// The renderer already has the bytes in memory from the clipboard/drag event.
-/// If the bytes are a video, they're written to a temp file, transcoded via
-/// ffmpeg, and the transcoded output is uploaded instead.
-#[tauri::command]
-pub async fn upload_media_bytes(
+pub(super) async fn upload_media_bytes_inner(
     data: Vec<u8>,
     filename: Option<String>,
     progress_id: Option<String>,
     app: tauri::AppHandle,
     state: State<'_, AppState>,
+    cancellation: Option<&CancellationToken>,
 ) -> Result<BlobDescriptor, String> {
     if data.is_empty() {
         return Err("empty upload".to_string());
     }
 
+    if cancellation.is_some_and(CancellationToken::is_cancelled) {
+        return Err("upload cancelled".to_string());
+    }
+
+    emit_media_upload_phase(&app, progress_id.as_deref(), "preparing");
+
+    let heic_by_extension = filename
+        .as_deref()
+        .is_some_and(|name| has_heic_extension(std::path::Path::new(name)));
+
     let (body, poster_bytes) = if is_video_file(&data) {
+        emit_media_upload_phase(&app, progress_id.as_deref(), "processing-video");
         // Video: write to temp → transcode + extract poster → read results.
         // All blocking I/O runs off the async runtime via spawn_blocking.
+        let cancellation = cancellation.cloned();
         tokio::task::spawn_blocking(move || -> Result<(Vec<u8>, Option<Vec<u8>>), String> {
             let tmp_input =
                 std::env::temp_dir().join(format!("buzz-drop-{}", uuid::Uuid::new_v4()));
@@ -766,17 +740,19 @@ pub async fn upload_media_bytes(
             let result = (|| {
                 std::fs::write(&tmp_input, &data)
                     .map_err(|e| format!("failed to write temp file: {e}"))?;
-                transcode_and_extract_poster(&tmp_input)
+                transcode_and_extract_poster_with_cancellation(&tmp_input, cancellation.as_ref())
             })();
             let _ = std::fs::remove_file(&tmp_input);
             result
         })
         .await
         .map_err(|e| format!("transcode task failed: {e}"))??
-    } else if is_heic_file(&data) {
+    } else if is_heic_file(&data) || heic_by_extension {
+        emit_media_upload_phase(&app, progress_id.as_deref(), "converting-image");
         // HEIC/HEIF still pasted/dropped: no filename here, so detection is
         // magic-bytes only. ffmpeg needs a path, so write to temp, transcode
         // to JPEG, and clean up. (Mirrors mobile's pre-upload transcode.)
+        let cancellation = cancellation.cloned();
         tokio::task::spawn_blocking(move || -> Result<(Vec<u8>, Option<Vec<u8>>), String> {
             let tmp_input =
                 std::env::temp_dir().join(format!("buzz-drop-{}", uuid::Uuid::new_v4()));
@@ -784,7 +760,11 @@ pub async fn upload_media_bytes(
             let result = (|| {
                 std::fs::write(&tmp_input, &data)
                     .map_err(|e| format!("failed to write temp file: {e}"))?;
-                transcode_heic_path_to_jpeg_bytes(&tmp_input).map(|jpeg| (jpeg, None))
+                transcode_heic_path_to_jpeg_bytes_with_cancellation(
+                    &tmp_input,
+                    cancellation.as_ref(),
+                )
+                .map(|jpeg| (jpeg, None))
             })();
             let _ = std::fs::remove_file(&tmp_input);
             result
@@ -799,11 +779,15 @@ pub async fn upload_media_bytes(
     let body = sanitize_image_for_upload(body, &mime)?;
 
     // Upload video first, then poster (best-effort).
-    let progress = progress_id.map(|id| (app, id));
-    let mut descriptor = do_upload(body, &mime, &state, progress).await?;
+    let progress = progress_id.as_ref().map(|id| (app.clone(), id.clone()));
+    if cancellation.is_some_and(CancellationToken::is_cancelled) {
+        return Err("upload cancelled".to_string());
+    }
+    let mut descriptor = do_upload(body, &mime, &state, progress, cancellation).await?;
 
+    emit_media_upload_phase(&app, progress_id.as_deref(), "finishing");
     if let Some(poster) = poster_bytes {
-        match do_upload(poster, "image/jpeg", &state, None).await {
+        match do_upload(poster, "image/jpeg", &state, None, cancellation).await {
             Ok(poster_desc) => descriptor.image = Some(poster_desc.url),
             Err(e) => eprintln!("buzz-desktop: poster upload failed (non-fatal): {e}"),
         }
