@@ -212,6 +212,23 @@ desktop-tauri-test: _ensure-sidecar-stubs
 desktop-terminal-performance-test:
     cargo test --manifest-path desktop/src-tauri/crates/buzz-terminal/Cargo.toml --release --test latency g3_renderer_acquire_stays_within_frame_budget -- --ignored --exact --nocapture
 
+# Verify compiled-flag behavior under both compile states (clean + internal).
+# Runs the auto-connect compiled-flag test twice with independently supplied
+# expected values; build.rs rerun-if-env-changed triggers recompilation.
+desktop-tauri-test-compiled-flags: _ensure-sidecar-stubs
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd desktop/src-tauri
+    echo "=== Clean build (no flag) → expect false ==="
+    env -u BUZZ_BUILD_AUTO_CONNECT_DEFAULT_RELAY \
+      BUZZ_TEST_EXPECTED_AUTO_CONNECT_DEFAULT_RELAY=false \
+      cargo test compiled_flag_matches_expected -- --ignored --nocapture
+    echo "=== Internal build (flag set) → expect true ==="
+    BUZZ_BUILD_AUTO_CONNECT_DEFAULT_RELAY=1 \
+      BUZZ_TEST_EXPECTED_AUTO_CONNECT_DEFAULT_RELAY=true \
+      cargo test compiled_flag_matches_expected -- --ignored --nocapture
+    echo "Both compiled states verified."
+
 # Build the full desktop Tauri app locally (unsigned, for testing)
 # Sidecar binary list must stay in sync with _ensure-sidecar-stubs above.
 # pnpm install is unconditional here: release builds must start from a clean dep tree.
