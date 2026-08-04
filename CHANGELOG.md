@@ -1,5 +1,55 @@
 # Changelog
 
+## v0.5.4
+
+### Desktop and shared changes
+
+- fix: report agent usage per provider round, not once per turn ([#4545](https://github.com/block/buzz/pull/4545)) ([`09c86c56e52651c017743268fc8ce708bb83b265`](https://github.com/block/buzz/commit/09c86c56e52651c017743268fc8ce708bb83b265))
+- fix(desktop): harden Windows installs against Defender block and orphaned Node ([#4382](https://github.com/block/buzz/pull/4382)) ([`80315ac1a68024c40b61f3a062c9cb6bf7d4efb5`](https://github.com/block/buzz/commit/80315ac1a68024c40b61f3a062c9cb6bf7d4efb5))
+- feat(desktop): improve channel template discovery ([#4549](https://github.com/block/buzz/pull/4549)) ([`c1b88af8d71d1cf6aaca517e92ce9e918cd0e8bd`](https://github.com/block/buzz/commit/c1b88af8d71d1cf6aaca517e92ce9e918cd0e8bd))
+- fix(desktop): save key backups to authorized path ([#4022](https://github.com/block/buzz/pull/4022)) ([`01c80aa9b3eaa569361966877994438ad84a280a`](https://github.com/block/buzz/commit/01c80aa9b3eaa569361966877994438ad84a280a))
+- Add channel activity hover menu ([#3935](https://github.com/block/buzz/pull/3935)) ([`b0c6d6f744e63ac88a1738f0e995680c163e1d13`](https://github.com/block/buzz/commit/b0c6d6f744e63ac88a1738f0e995680c163e1d13))
+- feat(desktop): show saved Run on settings when editing an agent ([#4539](https://github.com/block/buzz/pull/4539)) ([`f865c0054b0a400657126c9321b4d4cb7d9cc746`](https://github.com/block/buzz/commit/f865c0054b0a400657126c9321b4d4cb7d9cc746))
+- fix(desktop): disambiguate provider API key labels and annotate mint key ([#4406](https://github.com/block/buzz/pull/4406)) ([`5e0efb0bb95182f588390b55cc5affa09114c87e`](https://github.com/block/buzz/commit/5e0efb0bb95182f588390b55cc5affa09114c87e))
+- fix(desktop): make OpenAI key re-enterable after first save in card mint dialog ([#4140](https://github.com/block/buzz/pull/4140)) ([`f810a2f49e213d25119f2aa75b5b577655119b74`](https://github.com/block/buzz/commit/f810a2f49e213d25119f2aa75b5b577655119b74))
+- fix(config-bridge): add harness-definition env tier and fix equal-value model override ([#3580](https://github.com/block/buzz/pull/3580)) ([`be95a8a986d02319b27e8fb57aefe59e33a1eb13`](https://github.com/block/buzz/commit/be95a8a986d02319b27e8fb57aefe59e33a1eb13))
+- fix(desktop): stop the create-agent provider config probe from erasing keystrokes ([#4411](https://github.com/block/buzz/pull/4411)) ([`2c0ac2467437b30953a95e00f419143488bcfcc7`](https://github.com/block/buzz/commit/2c0ac2467437b30953a95e00f419143488bcfcc7))
+- feat(acp): deliver system prompt via _meta.systemPrompt for claude-agent-acp ([#4395](https://github.com/block/buzz/pull/4395)) ([`7ff5fc31895efe6265a379d01637c8ee301872e5`](https://github.com/block/buzz/commit/7ff5fc31895efe6265a379d01637c8ee301872e5))
+- fix(security): bump nostr crates for RUSTSEC-2026-0225..0232 + default sprig image to published digest ([#4392](https://github.com/block/buzz/pull/4392)) ([`318fbf896ec335bc7bcb40edafde0b6ebca53428`](https://github.com/block/buzz/commit/318fbf896ec335bc7bcb40edafde0b6ebca53428))
+- fix(desktop): back/forward via keyboard chords, mouse X1/X2 buttons, and swipe gestures ([#3778](https://github.com/block/buzz/pull/3778)) ([`f86cfc7369d4471f8939ed98be6f597b0a4b0bb2`](https://github.com/block/buzz/commit/f86cfc7369d4471f8939ed98be6f597b0a4b0bb2))
+- feat(k8s): Kubernetes backend plugin + desktop deploy path ([#4289](https://github.com/block/buzz/pull/4289)) ([`6530b58a61d4602d0a371100fedf80c5998b1e34`](https://github.com/block/buzz/commit/6530b58a61d4602d0a371100fedf80c5998b1e34))
+- feat(projects): add buzz projects CLI commands (NIP-MP kind:30621) ([#4020](https://github.com/block/buzz/pull/4020)) ([`b7bb15122e8a2053b545dc2210afc167f6c7a626`](https://github.com/block/buzz/commit/b7bb15122e8a2053b545dc2210afc167f6c7a626))
+- fix(desktop): keep thread-open affordance in archived channels ([#4012](https://github.com/block/buzz/pull/4012)) ([`8e81afa431deecd172f1ad6aab6f022f31cd812c`](https://github.com/block/buzz/commit/8e81afa431deecd172f1ad6aab6f022f31cd812c))
+- fix(desktop): point Oh My Pi preset at omp.sh ([#3516](https://github.com/block/buzz/pull/3516)) ([`3ade48d5030a8f7dbb9d3693f171e5544dcd8df1`](https://github.com/block/buzz/commit/3ade48d5030a8f7dbb9d3693f171e5544dcd8df1))
+- fix(mesh): stop restarting a busy or loading shared-compute node ([#3909](https://github.com/block/buzz/pull/3909)) ([`fa1a5b1a797870724f5c7e7e26931861a60f22cb`](https://github.com/block/buzz/commit/fa1a5b1a797870724f5c7e7e26931861a60f22cb))
+- fix(desktop): preserve first huddle speech ([#3962](https://github.com/block/buzz/pull/3962)) ([`45314fc504113aec7c54ae6520cfe5e1562aae40`](https://github.com/block/buzz/commit/45314fc504113aec7c54ae6520cfe5e1562aae40))
+- feat(desktop): Agent Trading Cards — mintable agent-snapshot card PNGs with optional NIP-44 lock ([#3278](https://github.com/block/buzz/pull/3278)) ([`eb049ddf815d48195e1713afe039d28c950d7933`](https://github.com/block/buzz/commit/eb049ddf815d48195e1713afe039d28c950d7933))
+- feat(relay): accept kind:30621 multi-repo projects at ingest ([#3171](https://github.com/block/buzz/pull/3171)) ([`cb9701cd30fb344bf134585634a09007f3155bfb`](https://github.com/block/buzz/commit/cb9701cd30fb344bf134585634a09007f3155bfb))
+
+### Other repository changes
+
+- test(mobile): assert follow boundary semantics ([#4559](https://github.com/block/buzz/pull/4559)) ([`6de85fe31d781122756aecf954bae7d357a56b9a`](https://github.com/block/buzz/commit/6de85fe31d781122756aecf954bae7d357a56b9a))
+- docs(release): align desktop handoff instructions ([#3988](https://github.com/block/buzz/pull/3988)) ([`44fa1e8e3af30d561de981a211ff7a79bfa36493`](https://github.com/block/buzz/commit/44fa1e8e3af30d561de981a211ff7a79bfa36493))
+- Polish mobile composer and messaging UI ([#3918](https://github.com/block/buzz/pull/3918)) ([`857e63c4ddfb76f95ab40bb691e00544413f6b81`](https://github.com/block/buzz/commit/857e63c4ddfb76f95ab40bb691e00544413f6b81))
+- ci(linux): enable mesh-llm feature in Linux release and canary builds ([#4524](https://github.com/block/buzz/pull/4524)) ([`83a285f1b1a0be862d55781fad9c75ec8813886d`](https://github.com/block/buzz/commit/83a285f1b1a0be862d55781fad9c75ec8813886d))
+- fix(mobile): recover and pace live subscriptions ([#3053](https://github.com/block/buzz/pull/3053)) ([`a5dbdf5e61e4c512acd99c219c79c154ddb57295`](https://github.com/block/buzz/commit/a5dbdf5e61e4c512acd99c219c79c154ddb57295))
+- fix(git): allow deleting the default branch ([#4297](https://github.com/block/buzz/pull/4297)) ([`fc598f5f8d70728d11d0712b9fa8e3acc44ea4c3`](https://github.com/block/buzz/commit/fc598f5f8d70728d11d0712b9fa8e3acc44ea4c3))
+- docs: formal spec for remote agents and their management ([#3748](https://github.com/block/buzz/pull/3748)) ([`28ae6cd2174309529305724e455c7ca082f6fe4b`](https://github.com/block/buzz/commit/28ae6cd2174309529305724e455c7ca082f6fe4b))
+- fix(nip-oa): accept raw Nostr tag form in parse_json_array ([#4203](https://github.com/block/buzz/pull/4203)) ([`89bf03c05df795a3575b7abbe648be898ef13388`](https://github.com/block/buzz/commit/89bf03c05df795a3575b7abbe648be898ef13388))
+- perf(relay): serve relay-membership checks from the read replica ([#4124](https://github.com/block/buzz/pull/4124)) ([`ac4fa13b8e4d947071d57deb6918dcf12bf74961`](https://github.com/block/buzz/commit/ac4fa13b8e4d947071d57deb6918dcf12bf74961))
+- chore(deps): bump nostr-relay-pool for RUSTSEC-2026-0224 ([#4139](https://github.com/block/buzz/pull/4139)) ([`9d6726e5b387310975f5809473ce8372f6fde0dc`](https://github.com/block/buzz/commit/9d6726e5b387310975f5809473ce8372f6fde0dc))
+- docs(nostr): document #h requirement for live reaction subscriptions ([#3487](https://github.com/block/buzz/pull/3487)) ([`756dd7f65d6f2995e9188a0ffe54294057f8ef4f`](https://github.com/block/buzz/commit/756dd7f65d6f2995e9188a0ffe54294057f8ef4f))
+- docs(chart): fix ArgoCD example for native OCI sources (full artifact repoURL + path) ([#3426](https://github.com/block/buzz/pull/3426)) ([`36cf932ff0105a4cf574fc687deb4c1cb01bc0d1`](https://github.com/block/buzz/commit/36cf932ff0105a4cf574fc687deb4c1cb01bc0d1))
+- docs(readme): clarify which release asset to download per platform ([#3481](https://github.com/block/buzz/pull/3481)) ([`8d5afb606763fcaffd3af811be2106e41cc7347d`](https://github.com/block/buzz/commit/8d5afb606763fcaffd3af811be2106e41cc7347d))
+- fix(relay): allow open relays to set their NIP-11 workspace icon (kind:9033) ([#3998](https://github.com/block/buzz/pull/3998)) ([`5765fc74b77224f0207ddd4b41736a5ff18d333d`](https://github.com/block/buzz/commit/5765fc74b77224f0207ddd4b41736a5ff18d333d))
+- docs: note that addressable channel events scope by d, not h ([#4103](https://github.com/block/buzz/pull/4103)) ([`3d7712cc36e8da563cb1c121fc58bfc505d38496`](https://github.com/block/buzz/commit/3d7712cc36e8da563cb1c121fc58bfc505d38496))
+- docs: fix stale kind count, quick-start numbering, and empty Further Reading ([#2613](https://github.com/block/buzz/pull/2613)) ([`909a3b2c318b2ec477a3438a998a3b611f5b6d6a`](https://github.com/block/buzz/commit/909a3b2c318b2ec477a3438a998a3b611f5b6d6a))
+- docs: add one-click Railway deploy for a hosted relay ([#2733](https://github.com/block/buzz/pull/2733)) ([`19d57b0d46baa55814ac737041a36d0b405c9f64`](https://github.com/block/buzz/commit/19d57b0d46baa55814ac737041a36d0b405c9f64))
+- fix(buzz-acp): thread cache-read tokens into NIP-AM kind:44200 events ([#3999](https://github.com/block/buzz/pull/3999)) ([`b1b283cd4c7f926e12eeee8ae1f38c7471922b16`](https://github.com/block/buzz/commit/b1b283cd4c7f926e12eeee8ae1f38c7471922b16))
+- fix(release): preserve main in desktop PR body ([#3979](https://github.com/block/buzz/pull/3979)) ([`e5e5bac2a932b2b2e4eb6b559d5545a992c21b96`](https://github.com/block/buzz/commit/e5e5bac2a932b2b2e4eb6b559d5545a992c21b96))
+
+[Compare desktop-v0.5.3...desktop-v0.5.4](https://github.com/block/buzz/compare/desktop-v0.5.3...desktop-v0.5.4)
+
 ## v0.5.3
 
 ### Desktop and shared changes

@@ -226,6 +226,7 @@ test.describe("global agent config screenshots", () => {
     await page
       .getByTestId("global-agent-default-harness-option-claude")
       .click();
+    await waitForAnimations(page);
     await expect(page.getByTestId("global-agent-model")).toHaveText(
       /Default model/,
     );

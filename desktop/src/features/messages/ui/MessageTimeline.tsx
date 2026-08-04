@@ -70,6 +70,14 @@ type MessageTimelineProps = {
   scrollContainerRef?: React.RefObject<HTMLDivElement | null>;
   /** True when the timeline has the composer overlay below it. */
   hasComposerOverlay?: boolean;
+  /** Companion huddle transcripts are live conversations, not channel history. */
+  hideDayDividers?: boolean;
+  /** Show speaker identity on every row instead of grouping consecutive messages. */
+  alwaysShowMessageIdentity?: boolean;
+  /** Hide agent access-policy badges in the purpose-built Huddle chat. */
+  hideAgentAccessBadges?: boolean;
+  /** Stable context rendered above the timeline, including when it is empty. */
+  pinnedIntro?: React.ReactNode;
   isFetchingOlder?: boolean;
   messageFooters?: Record<string, React.ReactNode>;
   /** Map from lowercase pubkey → persona display name for bot members. */
@@ -162,6 +170,10 @@ const MessageTimelineBase = React.forwardRef<
     currentPubkey,
     fetchOlder,
     hasComposerOverlay = true,
+    hideDayDividers = false,
+    alwaysShowMessageIdentity = false,
+    hideAgentAccessBadges = false,
+    pinnedIntro,
     hasOlderMessages = true,
     historyExhausted = false,
     isFetchingOlder = false,
@@ -275,7 +287,10 @@ const MessageTimelineBase = React.forwardRef<
 
   const timelineBodySurface = selectTimelineBodySurface({
     deferredCount: deferredMessages.length,
-    hasPersistentIntro: channelIntro !== null || directMessageIntro !== null,
+    hasPersistentIntro:
+      channelIntro !== null ||
+      directMessageIntro !== null ||
+      pinnedIntro != null,
     isLoading: isLoading || isDeferredSnapshotStale,
     liveCount: messages.length,
   });
@@ -418,11 +433,16 @@ const MessageTimelineBase = React.forwardRef<
     ? directMessageIntro
     : null;
   const activeChannelIntro = showChannelIntro ? channelIntro : null;
+  const activePinnedIntro = pinnedIntro ?? null;
   const showIntro =
-    activeDirectMessageIntro !== null || activeChannelIntro !== null;
+    activeDirectMessageIntro !== null ||
+    activeChannelIntro !== null ||
+    activePinnedIntro !== null;
   const showGenericEmpty = timelineBodySurface === "empty" && !showIntro;
   const showMessageList = timelineBodySurface === "list";
   const showChannelIntroOnly = activeChannelIntro !== null && !showMessageList;
+  const showPinnedIntroOnly = activePinnedIntro !== null && !showMessageList;
+  const omitHistoryLeadIn = showChannelIntroOnly || showPinnedIntroOnly;
 
   const prepareForOwnMessage = React.useCallback(() => {
     // The user's own send is the deliberate Zulip exception: release buffered
@@ -581,7 +601,9 @@ const MessageTimelineBase = React.forwardRef<
 
   const virtualizedLeadingContent = React.useMemo(
     () =>
-      activeChannelIntro ? (
+      activePinnedIntro ? (
+        <div className="pt-3">{activePinnedIntro}</div>
+      ) : activeChannelIntro ? (
         <ChannelIntroBlock className="pb-4 pt-2" intro={activeChannelIntro} />
       ) : activeDirectMessageIntro ? (
         <div
@@ -603,7 +625,7 @@ const MessageTimelineBase = React.forwardRef<
           </p>
         </div>
       ) : null,
-    [activeChannelIntro, activeDirectMessageIntro],
+    [activeChannelIntro, activeDirectMessageIntro, activePinnedIntro],
   );
 
   const handleVirtualizerRangeChanged = React.useCallback(() => {
@@ -630,6 +652,9 @@ const MessageTimelineBase = React.forwardRef<
       mainEntries={renderedMessages === messages ? mainEntries : undefined}
       leadingContent={virtualizedLeadingContent}
       historyExhausted={renderedHistoryExhausted}
+      hideDayDividers={hideDayDividers}
+      alwaysShowMessageIdentity={alwaysShowMessageIdentity}
+      hideAgentAccessBadges={hideAgentAccessBadges}
       threadSummaries={threadSummaries}
       messages={renderedMessages}
       onDelete={onDelete}
@@ -737,7 +762,7 @@ const MessageTimelineBase = React.forwardRef<
               )}
               ref={contentRef}
             >
-              {showChannelIntroOnly ? null : (
+              {omitHistoryLeadIn ? null : (
                 <div ref={topSentinelRef} aria-hidden className="h-px" />
               )}
 
@@ -745,9 +770,7 @@ const MessageTimelineBase = React.forwardRef<
                   stable across load-older fetches. The intro-only state has no
                   history to anchor, so omitting it matches the virtualized
                   leading row's top geometry when the first message arrives. */}
-              {showChannelIntroOnly ? null : (
-                <div aria-hidden className="h-8" />
-              )}
+              {omitHistoryLeadIn ? null : <div aria-hidden className="h-8" />}
 
               <div
                 className={cn(
@@ -782,6 +805,10 @@ const MessageTimelineBase = React.forwardRef<
                       .
                     </p>
                   </div>
+                ) : null}
+
+                {activePinnedIntro ? (
+                  <div className="pt-3">{activePinnedIntro}</div>
                 ) : null}
 
                 {activeChannelIntro ? (

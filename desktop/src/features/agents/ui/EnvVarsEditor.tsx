@@ -44,7 +44,9 @@ export function toRows(
  * Collapse an ordered row list back to a record, skipping rows with empty
  * keys. Exported for unit tests.
  */
-export function toRecord(rows: Row[]): EnvVarsValue {
+export function toRecord(
+  rows: readonly { key: string; value: string }[],
+): EnvVarsValue {
   const out: EnvVarsValue = {};
   for (const row of rows) {
     // Empty key = user is mid-edit; skip it so we don't poison the record.
@@ -178,6 +180,27 @@ type EnvVarsEditorProps = {
 type Row = { id: string; key: string; value: string };
 
 /**
+ * Pure record builder: merges `toRecord(nextRows)` with the current values of
+ * `requiredKeys` and `hiddenKeys` from `value`. Required and hidden keys are
+ * excluded from the row state (`skipKeys`), so this merge is the only place
+ * their current values survive an `onChange` emit cycle.
+ *
+ * Exported for unit testing. `EnvVarsEditor` calls this internally.
+ */
+export function buildRecord(
+  nextRows: readonly { key: string; value: string }[],
+  value: EnvVarsValue,
+  requiredKeys: readonly string[],
+  hiddenKeys: readonly string[],
+): EnvVarsValue {
+  const base: EnvVarsValue = {};
+  for (const key of [...requiredKeys, ...hiddenKeys]) {
+    if (key in value) base[key] = value[key];
+  }
+  return { ...base, ...toRecord(nextRows) };
+}
+
+/**
  * A flat key/value editor for environment variables.
  *
  * Maintains an ordered list of rows internally (so duplicate / empty keys
@@ -241,18 +264,6 @@ export function EnvVarsEditor({
     }
   }, [value, skipKeys]);
 
-  // Build the emitted record: normal rows + required-key values preserved
-  // from `value`. Required keys are never in `rows`, so `toRecord(rows)`
-  // would silently drop any required secret the user just typed unless we
-  // merge them back explicitly.
-  function buildRecord(nextRows: Row[]): EnvVarsValue {
-    const base: EnvVarsValue = {};
-    for (const key of [...requiredKeys, ...hiddenKeys]) {
-      if (key in value) base[key] = value[key];
-    }
-    return { ...base, ...toRecord(nextRows) };
-  }
-
   // Ref map: key → required-value Input element. Populated via callback refs
   // on each required-key row's value Input so focus can be dispatched directly
   // without any DOM walking through presentation classes.
@@ -294,7 +305,7 @@ export function EnvVarsEditor({
 
   function emit(next: Row[]) {
     setRows(next);
-    const record = buildRecord(next);
+    const record = buildRecord(next, value, requiredKeys, hiddenKeys);
     lastEmitted.current = record;
     onChange(record);
   }

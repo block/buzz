@@ -23,6 +23,7 @@ import {
 import type { UseMentionsResult } from "@/features/messages/lib/useMentions";
 import type { UseRichTextEditorResult } from "@/features/messages/lib/useRichTextEditor";
 import type { UseDraftsResult } from "@/features/messages/lib/useDrafts";
+import { invokeTauri } from "@/shared/api/tauri";
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 import type { AcpRuntime, ChannelType, ManagedAgent } from "@/shared/api/types";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
@@ -497,6 +498,23 @@ export function useMentionSendFlow({
           setNonMemberPromptError(message);
           toast.error(message);
           return;
+        }
+
+        if (preparedAgentPubkeys.length > 0 && sendChannelId) {
+          try {
+            await invokeTauri("sync_agents_to_active_huddle", {
+              channelId: sendChannelId,
+              agentPubkeys: preparedAgentPubkeys,
+            });
+          } catch (error) {
+            const message = `Could not add mentioned agent to the Huddle: ${getErrorMessage(
+              error,
+              "Huddle enrollment failed.",
+            )}`;
+            setNonMemberPromptError(message);
+            toast.error(message);
+            return;
+          }
         }
 
         const effectiveExplicitAgentPubkeys =
