@@ -747,3 +747,246 @@ mod corpus_tests {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Pricing lookup tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod pricing_tests {
+    use crate::generated_model_capabilities::lookup_pricing;
+
+    // -----------------------------------------------------------------------
+    // Anthropic models — authority: api.anthropic.com
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_lookup_pricing_anthropic_claude_fable5_returns_correct_rates() {
+        let p = lookup_pricing("api.anthropic.com", "claude-fable-5")
+            .expect("(api.anthropic.com, claude-fable-5) must have pricing");
+        assert_eq!(p.input_usd_per_mtok, 10.0);
+        assert_eq!(p.output_usd_per_mtok, 50.0);
+        assert_eq!(p.cache_read_usd_per_mtok, Some(1.0));
+        assert_eq!(p.cache_write_usd_per_mtok, Some(12.5));
+    }
+
+    #[test]
+    fn test_lookup_pricing_anthropic_claude_opus5_returns_correct_rates() {
+        let p = lookup_pricing("api.anthropic.com", "claude-opus-5")
+            .expect("(api.anthropic.com, claude-opus-5) must have pricing");
+        assert_eq!(p.input_usd_per_mtok, 5.0);
+        assert_eq!(p.output_usd_per_mtok, 25.0);
+        assert_eq!(p.cache_read_usd_per_mtok, Some(0.5));
+        assert_eq!(p.cache_write_usd_per_mtok, Some(6.25));
+    }
+
+    #[test]
+    fn test_lookup_pricing_anthropic_claude_sonnet5_returns_correct_rates() {
+        let p = lookup_pricing("api.anthropic.com", "claude-sonnet-5")
+            .expect("(api.anthropic.com, claude-sonnet-5) must have pricing");
+        assert_eq!(p.input_usd_per_mtok, 2.0);
+        assert_eq!(p.output_usd_per_mtok, 10.0);
+    }
+
+    #[test]
+    fn test_lookup_pricing_anthropic_claude_opus48_exact_match() {
+        // Exact match on the model string as returned by the Anthropic API
+        let p = lookup_pricing("api.anthropic.com", "claude-opus-4-8")
+            .expect("(api.anthropic.com, claude-opus-4-8) must have pricing");
+        assert_eq!(p.input_usd_per_mtok, 5.0);
+        assert_eq!(p.output_usd_per_mtok, 25.0);
+        assert_eq!(p.cache_read_usd_per_mtok, Some(0.5));
+        assert_eq!(p.cache_write_usd_per_mtok, Some(6.25));
+    }
+
+    #[test]
+    fn test_lookup_pricing_anthropic_claude_sonnet46_returns_correct_rates() {
+        let p = lookup_pricing("api.anthropic.com", "claude-sonnet-4-6")
+            .expect("(api.anthropic.com, claude-sonnet-4-6) must have pricing");
+        assert_eq!(p.input_usd_per_mtok, 3.0);
+        assert_eq!(p.output_usd_per_mtok, 15.0);
+        assert_eq!(p.cache_read_usd_per_mtok, Some(0.3));
+        assert_eq!(p.cache_write_usd_per_mtok, Some(3.75));
+    }
+
+    #[test]
+    fn test_lookup_pricing_anthropic_claude_haiku45_returns_correct_rates() {
+        let p = lookup_pricing("api.anthropic.com", "claude-haiku-4-5")
+            .expect("(api.anthropic.com, claude-haiku-4-5) must have pricing");
+        assert_eq!(p.input_usd_per_mtok, 1.0);
+        assert_eq!(p.output_usd_per_mtok, 5.0);
+        assert_eq!(p.cache_read_usd_per_mtok, Some(0.1));
+        assert_eq!(p.cache_write_usd_per_mtok, Some(1.25));
+    }
+
+    // -----------------------------------------------------------------------
+    // OpenAI models — authority: api.openai.com
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_lookup_pricing_openai_gpt56_returns_correct_rates() {
+        let p = lookup_pricing("api.openai.com", "gpt-5.6")
+            .expect("(api.openai.com, gpt-5.6) must have pricing");
+        assert_eq!(p.input_usd_per_mtok, 5.0);
+        assert_eq!(p.output_usd_per_mtok, 30.0);
+        assert_eq!(p.cache_read_usd_per_mtok, Some(0.5));
+        assert_eq!(p.cache_write_usd_per_mtok, Some(6.25));
+    }
+
+    #[test]
+    fn test_lookup_pricing_openai_gpt56_sol_returns_correct_rates() {
+        // gpt-5.6-sol is a separate exact record at the same price tier as gpt-5.6
+        let p = lookup_pricing("api.openai.com", "gpt-5.6-sol")
+            .expect("(api.openai.com, gpt-5.6-sol) must have pricing");
+        assert_eq!(p.input_usd_per_mtok, 5.0);
+        assert_eq!(p.output_usd_per_mtok, 30.0);
+    }
+
+    #[test]
+    fn test_lookup_pricing_openai_gpt56_luna_different_tier() {
+        // gpt-5.6-luna is a lower-cost tier within the gpt-5.6 family
+        let p = lookup_pricing("api.openai.com", "gpt-5.6-luna")
+            .expect("(api.openai.com, gpt-5.6-luna) must have pricing");
+        assert_eq!(p.input_usd_per_mtok, 0.2);
+        assert_eq!(p.output_usd_per_mtok, 1.2);
+    }
+
+    #[test]
+    fn test_lookup_pricing_openai_gpt55_cache_write_is_none() {
+        // gpt-5.5 has cache_read but no cache_write published
+        let p = lookup_pricing("api.openai.com", "gpt-5.5")
+            .expect("(api.openai.com, gpt-5.5) must have pricing");
+        assert_eq!(p.input_usd_per_mtok, 5.0);
+        assert_eq!(p.output_usd_per_mtok, 30.0);
+        assert_eq!(p.cache_read_usd_per_mtok, Some(0.5));
+        assert_eq!(p.cache_write_usd_per_mtok, None);
+    }
+
+    #[test]
+    fn test_lookup_pricing_openai_gpt5_pro_no_cache_fields() {
+        let p = lookup_pricing("api.openai.com", "gpt-5-pro")
+            .expect("(api.openai.com, gpt-5-pro) must have pricing");
+        assert_eq!(p.input_usd_per_mtok, 15.0);
+        assert_eq!(p.output_usd_per_mtok, 120.0);
+        assert_eq!(p.cache_read_usd_per_mtok, None);
+        assert_eq!(p.cache_write_usd_per_mtok, None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Null guards — unknown authority, unknown model, wrong authority,
+    // empty strings, custom base URL (not an allowlisted billing authority)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_lookup_pricing_unknown_authority_returns_none() {
+        // Custom base URL — not in the billing-authority allowlist
+        assert!(
+            lookup_pricing("custom.openai-compat.example.com", "gpt-5.6").is_none(),
+            "custom/unknown authority must return None"
+        );
+    }
+
+    #[test]
+    fn test_lookup_pricing_official_authority_custom_base_url_same_model_returns_none() {
+        // Same model string but via a gateway/custom endpoint — no billing proof
+        assert!(
+            lookup_pricing("gateway.internal.example.com", "claude-sonnet-4-6").is_none(),
+            "unknown authority with known model string must still return None"
+        );
+    }
+
+    #[test]
+    fn test_lookup_pricing_unknown_model_on_known_authority_returns_none() {
+        assert!(
+            lookup_pricing("api.anthropic.com", "claude-ultra-9000").is_none(),
+            "unknown model must return None, never Some(0)"
+        );
+    }
+
+    #[test]
+    fn test_lookup_pricing_empty_authority_returns_none() {
+        assert!(
+            lookup_pricing("", "claude-fable-5").is_none(),
+            "empty authority must return None"
+        );
+    }
+
+    #[test]
+    fn test_lookup_pricing_empty_model_returns_none() {
+        assert!(
+            lookup_pricing("api.anthropic.com", "").is_none(),
+            "empty model must return None"
+        );
+    }
+
+    #[test]
+    fn test_lookup_pricing_both_empty_returns_none() {
+        assert!(
+            lookup_pricing("", "").is_none(),
+            "both empty must return None"
+        );
+    }
+
+    #[test]
+    fn test_lookup_pricing_wrong_authority_for_known_model_returns_none() {
+        // claude-sonnet-4-6 is an Anthropic model; looking it up under openai authority returns None
+        assert!(
+            lookup_pricing("api.openai.com", "claude-sonnet-4-6").is_none(),
+            "Anthropic model under OpenAI authority must return None"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Exact-match guards — non-canonical casing returns None
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_lookup_pricing_uppercase_authority_returns_none() {
+        // Authority must be the exact registered lowercase token; uppercase is not canonicalized
+        assert!(
+            lookup_pricing("API.ANTHROPIC.COM", "claude-sonnet-4-6").is_none(),
+            "uppercase authority must return None — no case folding"
+        );
+    }
+
+    #[test]
+    fn test_lookup_pricing_mixed_case_authority_returns_none() {
+        assert!(
+            lookup_pricing("Api.Openai.Com", "gpt-5.6").is_none(),
+            "mixed-case authority must return None — no case folding"
+        );
+    }
+
+    #[test]
+    fn test_lookup_pricing_mixed_case_model_returns_none() {
+        // Model must match exactly as the provider API returns it
+        assert!(
+            lookup_pricing("api.anthropic.com", "Claude-Sonnet-4-6").is_none(),
+            "mixed-case model must return None — no normalization"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Databricks guard — Databricks routes are never priced by manifest
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_lookup_pricing_databricks_authority_returns_none() {
+        // Databricks is a corporate-internal route; its workspace URL is not
+        // a registered billing-authority token and must always return None.
+        assert!(
+            lookup_pricing("adb-1234567890.azuredatabricks.net", "claude-sonnet-4-6").is_none(),
+            "Databricks workspace URL must return None"
+        );
+    }
+
+    #[test]
+    fn test_lookup_pricing_databricks_route_returns_none() {
+        // Even if someone passed a known Databricks model string with an
+        // unknown authority, it must return None.
+        assert!(
+            lookup_pricing("databricks", "databricks-claude-sonnet-5").is_none(),
+            "Databricks route authority must return None"
+        );
+    }
+}

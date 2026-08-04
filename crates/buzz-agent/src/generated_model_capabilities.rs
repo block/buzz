@@ -1402,3 +1402,231 @@ fn gpt5_base_matches_rs(model: &str, token: &str) -> bool {
 #[cfg(test)]
 #[path = "generated_model_capabilities_tests.rs"]
 mod tests;
+
+// ---------------------------------------------------------------------------
+// Pricing axis — exact (authority, model) lookup
+// ---------------------------------------------------------------------------
+
+/// Per-model token pricing in USD per million tokens.
+/// All fields are USD / 1,000,000 tokens.
+///
+/// `None` fields mean the provider has not published a price for that token
+/// category — never treat them as zero.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ModelPricing {
+    pub input_usd_per_mtok: f64,
+    pub output_usd_per_mtok: f64,
+    /// Cache-read price, if published.
+    pub cache_read_usd_per_mtok: Option<f64>,
+    /// Cache-write (cache creation) price, if published.
+    /// Scoped to the default ephemeral cache class.
+    pub cache_write_usd_per_mtok: Option<f64>,
+}
+
+/// Look up pricing for an exact (billing authority, model) pair.
+///
+/// * `authority` — the registered billing-authority token, e.g.
+///   `"api.anthropic.com"`, `"api.openai.com"`. This is NOT the
+///   runtime transport `Provider` enum; it is the proven billing namespace.
+///   Match is exact — the caller must supply the exact registered token.
+/// * `model` — the exact model string returned by the provider API
+///   in its response body. Match is exact — no normalization applied.
+///
+/// Returns `None` when the (authority, model) pair has no pricing record
+/// — callers MUST treat `None` as "price unknown", never as "price zero".
+/// Unknown authorities and unknown models both return `None`; there is no
+/// family, prefix, or case-folding fallback.
+pub fn lookup_pricing(authority: &str, model: &str) -> Option<ModelPricing> {
+    match authority {
+        // authority: api.anthropic.com
+        "api.anthropic.com" => match model {
+            // (api.anthropic.com, claude-fable-5)
+            "claude-fable-5" => {
+                return Some(ModelPricing {
+                    input_usd_per_mtok: 10.0,
+                    output_usd_per_mtok: 50.0,
+                    cache_read_usd_per_mtok: Some(1.0_f64),
+                    cache_write_usd_per_mtok: Some(12.5_f64),
+                })
+            }
+            // (api.anthropic.com, claude-sonnet-5)
+            "claude-sonnet-5" => {
+                return Some(ModelPricing {
+                    input_usd_per_mtok: 2.0,
+                    output_usd_per_mtok: 10.0,
+                    cache_read_usd_per_mtok: Some(0.2_f64),
+                    cache_write_usd_per_mtok: Some(2.5_f64),
+                })
+            }
+            // (api.anthropic.com, claude-opus-5)
+            "claude-opus-5" => {
+                return Some(ModelPricing {
+                    input_usd_per_mtok: 5.0,
+                    output_usd_per_mtok: 25.0,
+                    cache_read_usd_per_mtok: Some(0.5_f64),
+                    cache_write_usd_per_mtok: Some(6.25_f64),
+                })
+            }
+            // (api.anthropic.com, claude-opus-4-8)
+            "claude-opus-4-8" => {
+                return Some(ModelPricing {
+                    input_usd_per_mtok: 5.0,
+                    output_usd_per_mtok: 25.0,
+                    cache_read_usd_per_mtok: Some(0.5_f64),
+                    cache_write_usd_per_mtok: Some(6.25_f64),
+                })
+            }
+            // (api.anthropic.com, claude-opus-4-7)
+            "claude-opus-4-7" => {
+                return Some(ModelPricing {
+                    input_usd_per_mtok: 5.0,
+                    output_usd_per_mtok: 25.0,
+                    cache_read_usd_per_mtok: Some(0.5_f64),
+                    cache_write_usd_per_mtok: Some(6.25_f64),
+                })
+            }
+            // (api.anthropic.com, claude-opus-4-6)
+            "claude-opus-4-6" => {
+                return Some(ModelPricing {
+                    input_usd_per_mtok: 5.0,
+                    output_usd_per_mtok: 25.0,
+                    cache_read_usd_per_mtok: Some(0.5_f64),
+                    cache_write_usd_per_mtok: Some(6.25_f64),
+                })
+            }
+            // (api.anthropic.com, claude-opus-4-5)
+            "claude-opus-4-5" => {
+                return Some(ModelPricing {
+                    input_usd_per_mtok: 5.0,
+                    output_usd_per_mtok: 25.0,
+                    cache_read_usd_per_mtok: Some(0.5_f64),
+                    cache_write_usd_per_mtok: Some(6.25_f64),
+                })
+            }
+            // (api.anthropic.com, claude-sonnet-4-6)
+            "claude-sonnet-4-6" => {
+                return Some(ModelPricing {
+                    input_usd_per_mtok: 3.0,
+                    output_usd_per_mtok: 15.0,
+                    cache_read_usd_per_mtok: Some(0.3_f64),
+                    cache_write_usd_per_mtok: Some(3.75_f64),
+                })
+            }
+            // (api.anthropic.com, claude-sonnet-4-5)
+            "claude-sonnet-4-5" => {
+                return Some(ModelPricing {
+                    input_usd_per_mtok: 3.0,
+                    output_usd_per_mtok: 15.0,
+                    cache_read_usd_per_mtok: Some(0.3_f64),
+                    cache_write_usd_per_mtok: Some(3.75_f64),
+                })
+            }
+            // (api.anthropic.com, claude-haiku-4-5)
+            "claude-haiku-4-5" => {
+                return Some(ModelPricing {
+                    input_usd_per_mtok: 1.0,
+                    output_usd_per_mtok: 5.0,
+                    cache_read_usd_per_mtok: Some(0.1_f64),
+                    cache_write_usd_per_mtok: Some(1.25_f64),
+                })
+            }
+            // (api.anthropic.com, claude-opus-4-1)
+            "claude-opus-4-1" => {
+                return Some(ModelPricing {
+                    input_usd_per_mtok: 15.0,
+                    output_usd_per_mtok: 75.0,
+                    cache_read_usd_per_mtok: Some(1.5_f64),
+                    cache_write_usd_per_mtok: Some(18.75_f64),
+                })
+            }
+            _ => {}
+        },
+        // authority: api.openai.com
+        "api.openai.com" => match model {
+            // (api.openai.com, gpt-5-pro)
+            "gpt-5-pro" => {
+                return Some(ModelPricing {
+                    input_usd_per_mtok: 15.0,
+                    output_usd_per_mtok: 120.0,
+                    cache_read_usd_per_mtok: None,
+                    cache_write_usd_per_mtok: None,
+                })
+            }
+            // (api.openai.com, gpt-5.6)
+            "gpt-5.6" => {
+                return Some(ModelPricing {
+                    input_usd_per_mtok: 5.0,
+                    output_usd_per_mtok: 30.0,
+                    cache_read_usd_per_mtok: Some(0.5_f64),
+                    cache_write_usd_per_mtok: Some(6.25_f64),
+                })
+            }
+            // (api.openai.com, gpt-5.6-sol)
+            "gpt-5.6-sol" => {
+                return Some(ModelPricing {
+                    input_usd_per_mtok: 5.0,
+                    output_usd_per_mtok: 30.0,
+                    cache_read_usd_per_mtok: Some(0.5_f64),
+                    cache_write_usd_per_mtok: Some(6.25_f64),
+                })
+            }
+            // (api.openai.com, gpt-5.6-luna)
+            "gpt-5.6-luna" => {
+                return Some(ModelPricing {
+                    input_usd_per_mtok: 0.2,
+                    output_usd_per_mtok: 1.2,
+                    cache_read_usd_per_mtok: Some(0.02_f64),
+                    cache_write_usd_per_mtok: Some(0.25_f64),
+                })
+            }
+            // (api.openai.com, gpt-5.6-terra)
+            "gpt-5.6-terra" => {
+                return Some(ModelPricing {
+                    input_usd_per_mtok: 2.0,
+                    output_usd_per_mtok: 12.0,
+                    cache_read_usd_per_mtok: Some(0.2_f64),
+                    cache_write_usd_per_mtok: Some(2.5_f64),
+                })
+            }
+            // (api.openai.com, gpt-5.5)
+            "gpt-5.5" => {
+                return Some(ModelPricing {
+                    input_usd_per_mtok: 5.0,
+                    output_usd_per_mtok: 30.0,
+                    cache_read_usd_per_mtok: Some(0.5_f64),
+                    cache_write_usd_per_mtok: None,
+                })
+            }
+            // (api.openai.com, gpt-5.4)
+            "gpt-5.4" => {
+                return Some(ModelPricing {
+                    input_usd_per_mtok: 2.5,
+                    output_usd_per_mtok: 15.0,
+                    cache_read_usd_per_mtok: Some(0.25_f64),
+                    cache_write_usd_per_mtok: None,
+                })
+            }
+            // (api.openai.com, gpt-5.1)
+            "gpt-5.1" => {
+                return Some(ModelPricing {
+                    input_usd_per_mtok: 1.25,
+                    output_usd_per_mtok: 10.0,
+                    cache_read_usd_per_mtok: Some(0.125_f64),
+                    cache_write_usd_per_mtok: None,
+                })
+            }
+            // (api.openai.com, gpt-5)
+            "gpt-5" => {
+                return Some(ModelPricing {
+                    input_usd_per_mtok: 1.25,
+                    output_usd_per_mtok: 10.0,
+                    cache_read_usd_per_mtok: Some(0.125_f64),
+                    cache_write_usd_per_mtok: None,
+                })
+            }
+            _ => {}
+        },
+        _ => {}
+    }
+    None
+}

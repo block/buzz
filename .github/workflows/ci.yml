@@ -149,21 +149,15 @@ jobs:
           node-version: '22'
           package-manager-cache: false
 
-      - name: Regenerate artifacts
-        run: node scripts/generate-model-capabilities.mjs
-
-      - name: Diff check — fail if generated files are stale
+      - name: Check generated artifacts are up to date
         run: |
-          if ! git diff --exit-code \
-            crates/buzz-agent/src/generated_model_capabilities.rs \
-            desktop/src/features/agents/ui/modelCapabilities.ts; then
+          if ! node scripts/generate-model-capabilities.mjs --check; then
             echo ""
             echo "ERROR: Generated model-capability files are stale."
             echo "Run: node scripts/generate-model-capabilities.mjs"
             echo "Then commit the regenerated files."
             exit 1
           fi
-          echo "✓ All generated files are up to date."
 
       - name: Run corpus (TS interpreter via --experimental-strip-types)
         run: node --experimental-strip-types scripts/run-corpus.mjs

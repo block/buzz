@@ -1397,44 +1397,337 @@ export function resolveModelCapabilities(
 // Write or check files
 // ---------------------------------------------------------------------------
 
-const outputs = [
+// Outputs are written after the pricing axis is built below — see outputsWithPricing.
+// (The outputs array is kept here as a reference; actual writing uses outputsWithPricing.)
+const _capabilityOnlyOutputs = [finalRustContent, tsContent]; // referenced below
+let checkFailed = false; // used by the pricing write loop below
+
+// ---------------------------------------------------------------------------
+// Pricing axis — exact (authority, model) lookup, no inference
+// ---------------------------------------------------------------------------
+//
+// Pricing is keyed on (billing-authority domain, exact model string) — both
+// as returned by the provider API. No prefix matching, no normalization,
+// no catalog-prefix stripping. "No applicable price" is a complete result.
+//
+// Databricks routes are corporate-internal and are not represented here.
+// The publisher (P2 scope) must omit PricingIdentity for those routes.
+// ---------------------------------------------------------------------------
+
+const pricingRecords = manifest.pricing_records ?? [];
+
+// ---------------------------------------------------------------------------
+// Pricing-record validation — every entry must be structurally complete.
+// No silent skips; any non-conforming entry is a hard error.
+// ---------------------------------------------------------------------------
+
+/** Registered billing-namespace identifiers (closed set; extends only by NIP amendment). */
+const REGISTERED_AUTHORITIES = new Set([
+  "api.anthropic.com",
+  "api.openai.com",
+  "openrouter.ai",
+]);
+
+/**
+ * Return true if the string contains any character that is unsafe in a
+ * generated Rust string literal or a TS composite key: control characters
+ * (U+0000–U+001F, U+007F), double-quotes, backslashes, or NUL.
+ */
+function hasUnsafeKeyChars(s) {
+  return /[\x00-\x1f\x7f"\\]/.test(s);
+}
+
+for (let i = 0; i < pricingRecords.length; i++) {
+  const rec = pricingRecords[i];
+  const loc = `pricing_records[${i}]`;
+
+  // Every entry must have authority and model — no comment-only entries allowed
+  // in the records array (top-level _comment_pricing is a separate key).
+  if (typeof rec.authority !== "string" || rec.authority.length === 0) {
+    throw new Error(`${loc}: missing or empty "authority" — every pricing record must have a registered authority`);
+  }
+  if (!REGISTERED_AUTHORITIES.has(rec.authority)) {
+    throw new Error(
+      `${loc}: unregistered authority "${rec.authority}". ` +
+      `Allowed values: ${[...REGISTERED_AUTHORITIES].join(", ")}. ` +
+      `The set extends only by NIP amendment.`,
+    );
+  }
+  if (typeof rec.model !== "string" || rec.model.length === 0) {
+    throw new Error(`${loc} (${rec.authority}): missing or empty "model"`);
+  }
+  if (hasUnsafeKeyChars(rec.authority)) {
+    throw new Error(`${loc}: authority "${rec.authority}" contains unsafe characters (control chars, quotes, backslashes)`);
+  }
+  if (hasUnsafeKeyChars(rec.model)) {
+    throw new Error(`${loc} (${rec.authority}, ${rec.model}): model contains unsafe characters (control chars, quotes, backslashes)`);
+  }
+
+  // usd_per_mtok must be present with finite nonnegative input and output
+  const p = rec.usd_per_mtok;
+  if (!p || typeof p !== "object") {
+    throw new Error(`${loc} (${rec.authority}, ${rec.model}): missing usd_per_mtok`);
+  }
+  if (typeof p.input !== "number" || !isFinite(p.input) || p.input < 0) {
+    throw new Error(`${loc} (${rec.authority}, ${rec.model}): usd_per_mtok.input must be a finite nonnegative number`);
+  }
+  if (typeof p.output !== "number" || !isFinite(p.output) || p.output < 0) {
+    throw new Error(`${loc} (${rec.authority}, ${rec.model}): usd_per_mtok.output must be a finite nonnegative number`);
+  }
+  for (const cacheField of ["cache_read", "cache_write"]) {
+    if (!Object.hasOwn(p, cacheField)) {
+      throw new Error(`${loc} (${rec.authority}, ${rec.model}): usd_per_mtok.${cacheField} is required (use null for unknown)`);
+    }
+    const v = p[cacheField];
+    if (v !== null) {
+      if (typeof v !== "number" || !isFinite(v) || v < 0) {
+        throw new Error(`${loc} (${rec.authority}, ${rec.model}): usd_per_mtok.${cacheField} must be null or a finite nonnegative number`);
+      }
+    }
+  }
+
+  // Provenance: _source must be present and non-empty
+  if (typeof rec._source !== "string" || rec._source.length === 0) {
+    throw new Error(`${loc} (${rec.authority}, ${rec.model}): missing "_source" provenance field`);
+  }
+}
+
+// Duplicate detection on the exact emitted (authority, model) identity — no transforms applied.
+const pricingKeysSeen = new Set();
+for (const rec of pricingRecords) {
+  const key = `${rec.authority}\0${rec.model}`;
+  if (pricingKeysSeen.has(key)) {
+    throw new Error(`duplicate pricing record for (${rec.authority}, ${rec.model})`);
+  }
+  pricingKeysSeen.add(key);
+}
+
+// ---------------------------------------------------------------------------
+// Rust pricing generation
+// ---------------------------------------------------------------------------
+
+function rustOptionFloat(v) {
+  if (v === null || v === undefined) return "None";
+  const f = Number(v);
+  const s = Number.isInteger(f) ? `${f}.0_f64` : `${f}_f64`;
+  return `Some(${s})`;
+}
+
+function rustFloat(v) {
+  const f = Number(v);
+  return Number.isInteger(f) ? `${f}.0` : `${f}`;
+}
+
+function emitRustPricingResult(p, indent = "    ") {
+  const i = indent;
+  return [
+    `${i}ModelPricing {`,
+    `${i}    input_usd_per_mtok: ${rustFloat(p.input)},`,
+    `${i}    output_usd_per_mtok: ${rustFloat(p.output)},`,
+    `${i}    cache_read_usd_per_mtok: ${rustOptionFloat(p.cache_read)},`,
+    `${i}    cache_write_usd_per_mtok: ${rustOptionFloat(p.cache_write)},`,
+    `${i}}`,
+  ].join("\n");
+}
+
+// Each record becomes one arm in a nested match: authority → model → prices
+// We group records by authority first for a readable nested match.
+/** @type {Map<string, Array>} */
+const byAuthority = new Map();
+for (const rec of pricingRecords) {
+  const auth = rec.authority;
+  if (!byAuthority.has(auth)) byAuthority.set(auth, []);
+  byAuthority.get(auth).push(rec);
+}
+
+function buildRustPricingBody() {
+  const authArms = [];
+  for (const [auth, recs] of byAuthority) {
+    const modelArms = recs.map((rec) => {
+      const m = rec.model;
+      return (
+        `            // (${auth}, ${m})\n` +
+        `            "${m}" => return Some(\n${emitRustPricingResult(rec.usd_per_mtok, "                ")}\n            ),`
+      );
+    });
+    authArms.push(
+      `        // authority: ${auth}\n` +
+      `        "${auth}" => match model {\n${modelArms.join("\n")}\n            _ => {}\n        },`
+    );
+  }
+  return authArms.join("\n");
+}
+
+const rustPricingContent = `
+// ---------------------------------------------------------------------------
+// Pricing axis — exact (authority, model) lookup
+// ---------------------------------------------------------------------------
+
+/// Per-model token pricing in USD per million tokens.
+/// All fields are USD / 1,000,000 tokens.
+///
+/// \`None\` fields mean the provider has not published a price for that token
+/// category — never treat them as zero.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ModelPricing {
+    pub input_usd_per_mtok: f64,
+    pub output_usd_per_mtok: f64,
+    /// Cache-read price, if published.
+    pub cache_read_usd_per_mtok: Option<f64>,
+    /// Cache-write (cache creation) price, if published.
+    /// Scoped to the default ephemeral cache class.
+    pub cache_write_usd_per_mtok: Option<f64>,
+}
+
+/// Look up pricing for an exact (billing authority, model) pair.
+///
+/// * \`authority\` — the registered billing-authority token, e.g.
+///   \`"api.anthropic.com"\`, \`"api.openai.com"\`. This is NOT the
+///   runtime transport \`Provider\` enum; it is the proven billing namespace.
+///   Match is exact — the caller must supply the exact registered token.
+/// * \`model\` — the exact model string returned by the provider API
+///   in its response body. Match is exact — no normalization applied.
+///
+/// Returns \`None\` when the (authority, model) pair has no pricing record
+/// — callers MUST treat \`None\` as "price unknown", never as "price zero".
+/// Unknown authorities and unknown models both return \`None\`; there is no
+/// family, prefix, or case-folding fallback.
+pub fn lookup_pricing(authority: &str, model: &str) -> Option<ModelPricing> {
+    match authority {
+${buildRustPricingBody()}
+        _ => {}
+    }
+    None
+}
+`;
+
+const finalRustPricingContent = rustfmt(rustContent + rustGpt5Helpers + rustPricingContent);
+
+// ---------------------------------------------------------------------------
+// TypeScript pricing generation
+// ---------------------------------------------------------------------------
+
+function tsPricingField(v) {
+  if (v === null || v === undefined) return "null";
+  return `${v}`;
+}
+
+function emitTsPricingResult(p, indent = "  ") {
+  const i = indent;
+  return [
+    `{`,
+    `${i}  inputUsdPerMtok: ${p.input},`,
+    `${i}  outputUsdPerMtok: ${p.output},`,
+    `${i}  cacheReadUsdPerMtok: ${tsPricingField(p.cache_read)},`,
+    `${i}  cacheWriteUsdPerMtok: ${tsPricingField(p.cache_write)},`,
+    `${i}}`,
+  ].join(`\n${i}`);
+}
+
+// Build TS pricing map entries: key is `${authority}\0${model}` (exact, no transforms)
+const tsPricingMapEntries = pricingRecords
+  .map((rec) => {
+    const key = `${rec.authority}\0${rec.model}`;
+    return `  [${JSON.stringify(key)}, ${emitTsPricingResult(rec.usd_per_mtok, "  ")}],`;
+  })
+  .join("\n");
+
+const tsPricingContent = `
+// ---------------------------------------------------------------------------
+// Pricing axis — exact (authority, model) lookup
+// ---------------------------------------------------------------------------
+
+/** Per-model token pricing, USD per million tokens. null = price not published. */
+export type ModelPricing = {
+  /** Input (fresh, non-cache) token price, USD/MTok. */
+  readonly inputUsdPerMtok: number;
+  /** Output token price, USD/MTok. */
+  readonly outputUsdPerMtok: number;
+  /** Cache-read token price, USD/MTok. null when provider has not published it. */
+  readonly cacheReadUsdPerMtok: number | null;
+  /**
+   * Cache-write (cache creation) token price, USD/MTok. null when not published.
+   * Scoped to the default ephemeral cache class.
+   */
+  readonly cacheWriteUsdPerMtok: number | null;
+};
+
+/**
+ * Composite key for pricing lookup: \`\${authority}\\0\${model}\` (exact strings, no transforms).
+ *
+ * authority — registered billing-authority token (e.g. "api.anthropic.com").
+ * model     — exact model string from the provider API response body.
+ */
+const PRICING_TABLE: Map<string, ModelPricing> = new Map([
+${tsPricingMapEntries}
+]);
+
+/**
+ * Look up pricing for an exact (billing authority, model) pair.
+ *
+ * Both arguments are matched exactly as supplied — no case normalization.
+ * The caller must supply the exact registered authority token and the exact
+ * provider-API model string. Returns \`null\` for unrecognised pairs — callers
+ * MUST treat null as "price unknown", never as zero cost. There is no family,
+ * prefix, or case-folding fallback.
+ *
+ * @param authority - Registered billing-authority token, e.g. "api.anthropic.com".
+ *   This is NOT the runtime provider name; it is the proven billing namespace.
+ * @param model - Exact model string returned by the provider API response body.
+ */
+export function lookupModelPricing(authority: string, model: string): ModelPricing | null {
+  const key = \`\${authority}\\0\${model}\`;
+  return PRICING_TABLE.get(key) ?? null;
+}
+`;
+
+// Standalone pricing TS file that does NOT import from modelCapabilities
+// (no normalization or catalog-prefix logic needed)
+const tsPricingFileContent = `// biome-ignore-all format: generated — do not edit by hand.
+// Regenerate with: node scripts/generate-model-capabilities.mjs
+// Source: scripts/model-capabilities.json
+//
+// Pricing axis: exact (authority, model) lookup for cost estimation.
+// Consumers: agent-usage aggregation (Phase 4 of Usage v2 plan).
+${tsPricingContent}`;
+
+const outputsWithPricing = [
   {
     path: outputDirOverride
       ? join(outputDirOverride, "generated_model_capabilities.rs")
       : join(repoRoot, "crates", "buzz-agent", "src", "generated_model_capabilities.rs"),
-    content: finalRustContent,
-    label: "Rust",
+    content: finalRustPricingContent,
+    label: "Rust (with pricing)",
   },
   {
     path: outputDirOverride
       ? join(outputDirOverride, "modelCapabilities.ts")
-      : join(
-          repoRoot,
-          "desktop",
-          "src",
-          "features",
-          "agents",
-          "ui",
-          "modelCapabilities.ts",
-        ),
+      : join(repoRoot, "desktop", "src", "features", "agents", "ui", "modelCapabilities.ts"),
     content: tsContent,
     label: "TypeScript",
   },
+  {
+    path: outputDirOverride
+      ? join(outputDirOverride, "modelPricing.ts")
+      : join(repoRoot, "desktop", "src", "features", "agents", "ui", "modelPricing.ts"),
+    content: tsPricingFileContent,
+    label: "TypeScript Pricing",
+  },
 ];
 
-let checkFailed = false;
-for (const { path, content, label } of outputs) {
+let checkFailedPricing = false;
+for (const { path, content, label } of outputsWithPricing) {
   if (CHECK_MODE) {
     if (!existsSync(path)) {
       console.error(`CHECK FAILED: ${label} file does not exist: ${path}`);
-      checkFailed = true;
+      checkFailedPricing = true;
       continue;
     }
     const existing = readFileSync(path, "utf8");
     if (existing !== content) {
       console.error(`CHECK FAILED: ${label} file is stale: ${path}`);
       console.error("Run: node scripts/generate-model-capabilities.mjs  to regenerate.");
-      checkFailed = true;
+      checkFailedPricing = true;
     } else {
       console.log(`OK: ${label}`);
     }
@@ -1444,9 +1737,9 @@ for (const { path, content, label } of outputs) {
   }
 }
 
-if (CHECK_MODE && checkFailed) {
+if ((CHECK_MODE && checkFailed) || (CHECK_MODE && checkFailedPricing)) {
   process.exit(1);
 }
 if (!CHECK_MODE) {
-  console.log("Done. Generated 3 files.");
+  console.log("Done. Generated 3 files (Rust capabilities + TS capabilities + TS pricing).");
 }

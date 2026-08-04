@@ -410,4 +410,261 @@ test("schema-negative: exact_record registry_label with unsafe chars is rejected
   );
 });
 
+// ===========================================================================
+// Pricing record validation rules
+// ===========================================================================
+
+// Helper: insert a bad pricing record (replaces the first real record)
+function mutatePricing(fn) {
+  return mutate((m) => {
+    const rec = JSON.parse(JSON.stringify(m.pricing_records[0]));
+    fn(rec, m);
+    m.pricing_records[0] = rec;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Rule: pricing record missing authority
+// ---------------------------------------------------------------------------
+test("schema-negative: pricing record missing authority is rejected", () => {
+  assertRejects(
+    "pricing record missing authority",
+    mutate((m) => {
+      m.pricing_records.push({
+        model: "some-model",
+        usd_per_mtok: { input: 1, output: 5, cache_read: null, cache_write: null },
+        _source: "test",
+      });
+    }),
+    "authority",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Rule: pricing record with unregistered authority is rejected
+// ---------------------------------------------------------------------------
+test("schema-negative: pricing record with path-bearing authority is rejected", () => {
+  assertRejects(
+    "path-bearing authority",
+    mutatePricing((rec) => {
+      rec.authority = "api.openai.com/v1";
+    }),
+    "unregistered authority",
+  );
+});
+
+test("schema-negative: pricing record with scheme in authority is rejected", () => {
+  assertRejects(
+    "scheme in authority",
+    mutatePricing((rec) => {
+      rec.authority = "https://api.anthropic.com";
+    }),
+    "unregistered authority",
+  );
+});
+
+test("schema-negative: pricing record with custom/unknown authority is rejected", () => {
+  assertRejects(
+    "unknown authority",
+    mutatePricing((rec) => {
+      rec.authority = "custom.openai-compat.example.com";
+    }),
+    "unregistered authority",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Rule: pricing record with empty model is rejected
+// ---------------------------------------------------------------------------
+test("schema-negative: pricing record with empty model is rejected", () => {
+  assertRejects(
+    "empty model",
+    mutatePricing((rec) => {
+      rec.model = "";
+    }),
+    "model",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Rule: unsafe characters in key fields are rejected
+// ---------------------------------------------------------------------------
+test("schema-negative: pricing record model with double-quote is rejected", () => {
+  assertRejects(
+    "model with double-quote",
+    mutatePricing((rec) => {
+      rec.model = 'bad"model';
+    }),
+    "unsafe",
+  );
+});
+
+test("schema-negative: pricing record model with backslash is rejected", () => {
+  assertRejects(
+    "model with backslash",
+    mutatePricing((rec) => {
+      rec.model = "bad\\model";
+    }),
+    "unsafe",
+  );
+});
+
+test("schema-negative: pricing record model with NUL character is rejected", () => {
+  assertRejects(
+    "model with NUL",
+    mutatePricing((rec) => {
+      rec.model = "bad\x00model";
+    }),
+    "unsafe",
+  );
+});
+
+test("schema-negative: pricing record model with control character is rejected", () => {
+  assertRejects(
+    "model with control char",
+    mutatePricing((rec) => {
+      rec.model = "bad\x01model";
+    }),
+    "unsafe",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Rule: malformed rates are rejected
+// ---------------------------------------------------------------------------
+test("schema-negative: pricing record missing output rate is rejected", () => {
+  assertRejects(
+    "missing output",
+    mutatePricing((rec) => {
+      delete rec.usd_per_mtok.output;
+    }),
+    "output",
+  );
+});
+
+test("schema-negative: pricing record with negative input rate is rejected", () => {
+  assertRejects(
+    "negative input",
+    mutatePricing((rec) => {
+      rec.usd_per_mtok.input = -1;
+    }),
+    "input",
+  );
+});
+
+test("schema-negative: pricing record with non-finite input rate is rejected", () => {
+  assertRejects(
+    "Infinity input",
+    mutatePricing((rec) => {
+      rec.usd_per_mtok.input = Infinity;
+    }),
+    "input",
+  );
+});
+
+test("schema-negative: pricing record with NaN output rate is rejected", () => {
+  assertRejects(
+    "NaN output",
+    mutatePricing((rec) => {
+      rec.usd_per_mtok.output = NaN;
+    }),
+    "output",
+  );
+});
+
+test("schema-negative: pricing record with negative cache_read rate is rejected", () => {
+  assertRejects(
+    "negative cache_read",
+    mutatePricing((rec) => {
+      rec.usd_per_mtok.cache_read = -0.5;
+    }),
+    "cache_read",
+  );
+});
+
+test("schema-negative: pricing record with string cache_write rate is rejected", () => {
+  // Note: Infinity/NaN cannot be tested via JSON mutation (they serialize to null,
+  // which is valid for cache fields meaning "not published"). Use a string value,
+  // which is also invalid and does survive JSON serialization.
+  assertRejects(
+    "string cache_write",
+    mutatePricing((rec) => {
+      rec.usd_per_mtok.cache_write = "not-a-number";
+    }),
+    "cache_write",
+  );
+});
+
+test("schema-negative: pricing record with deleted cache_read is rejected", () => {
+  assertRejects(
+    "deleted cache_read",
+    mutatePricing((rec) => {
+      delete rec.usd_per_mtok.cache_read;
+    }),
+    "cache_read",
+  );
+});
+
+test("schema-negative: pricing record with deleted cache_write is rejected", () => {
+  assertRejects(
+    "deleted cache_write",
+    mutatePricing((rec) => {
+      delete rec.usd_per_mtok.cache_write;
+    }),
+    "cache_write",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Rule: missing provenance is rejected
+// ---------------------------------------------------------------------------
+test("schema-negative: pricing record missing _source provenance is rejected", () => {
+  assertRejects(
+    "missing _source",
+    mutatePricing((rec) => {
+      delete rec._source;
+    }),
+    "_source",
+  );
+});
+
+test("schema-negative: pricing record with empty _source provenance is rejected", () => {
+  assertRejects(
+    "empty _source",
+    mutatePricing((rec) => {
+      rec._source = "";
+    }),
+    "_source",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Rule: duplicate (authority, model) pairs are rejected
+// ---------------------------------------------------------------------------
+test("schema-negative: duplicate pricing record (authority, model) is rejected", () => {
+  assertRejects(
+    "duplicate pricing record",
+    mutate((m) => {
+      // Add a record identical to the first one
+      m.pricing_records.push({ ...m.pricing_records[0] });
+    }),
+    "duplicate",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Rule: case-colliding pairs must not silently generate (they are rejected
+// at validation because all authorities are already lowercase registered
+// tokens; a record with uppercase authority is caught before emit)
+// ---------------------------------------------------------------------------
+test("schema-negative: pricing record with uppercase authority is rejected before emit", () => {
+  assertRejects(
+    "uppercase authority",
+    mutatePricing((rec) => {
+      rec.authority = "API.ANTHROPIC.COM";
+    }),
+    "unregistered authority",
+  );
+});
+
 console.log("\nSchema-negative validator tests complete.");
