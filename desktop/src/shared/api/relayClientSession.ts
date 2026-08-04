@@ -65,6 +65,7 @@ import {
   STALL_IDLE_TIMEOUT_MS,
 } from "@/shared/api/relayClientTimings";
 import { closeWebSocket } from "@/shared/api/relayWebSocketClose";
+import { AuthOkTracker } from "@/shared/api/relayAuthPolicy";
 import { buildThreadReferenceTags } from "@/features/messages/lib/threading";
 
 export class RelayClient {
@@ -92,6 +93,7 @@ export class RelayClient {
   private connectionGeneration = 0;
   private stabilityTimer: number | null = null;
   private visibleChannelId: string | null = null;
+  private authOkTracker = new AuthOkTracker();
 
   private terminal = false;
 
@@ -128,6 +130,7 @@ export class RelayClient {
     this.notifyReconnectListeners = false;
     this.terminal = false;
     this.visibleChannelId = null;
+    this.authOkTracker.reset();
     this.connectionStateEmitter.set("idle");
 
     if (this.wsId !== null) {
@@ -430,6 +433,7 @@ export class RelayClient {
     // reconnect also bypasses the current delay once; ordinary operations do
     // not, so background traffic cannot continuously defeat backoff.
     this.terminal = false;
+    this.authOkTracker.reset();
     this.keepAliveRequested = true;
     if (this.reconnectTimeout !== null) {
       window.clearTimeout(this.reconnectTimeout);
@@ -892,12 +896,14 @@ export class RelayClient {
       const authRequest = this.authRequest;
       this.authRequest = null;
 
-      if (success) {
+      // Decision table lives in relayAuthPolicy.ts.
+      const decision = this.authOkTracker.record(success, message);
+      if (decision === "authenticated") {
         authRequest.resolve();
       } else {
         const error = new Error(message || "Relay authentication rejected.");
         authRequest.reject(error);
-        this.resetConnection(error, { reconnect: false });
+        this.resetConnection(error, { reconnect: decision === "retry" });
       }
 
       return;
@@ -919,13 +925,7 @@ export class RelayClient {
   }
 
   private hasLiveSubscriptions() {
-    for (const subscription of this.subscriptions.values()) {
-      if (subscription.mode === "live") {
-        return true;
-      }
-    }
-
-    return false;
+    return [...this.subscriptions.values()].some((s) => s.mode === "live");
   }
 
   private async replayLiveSubscriptions() {
