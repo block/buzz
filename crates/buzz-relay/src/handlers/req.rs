@@ -133,9 +133,11 @@ pub async fn handle_req(
         let db_is_member = if !token_allows || accessible_channels.contains(&ch_id) {
             None
         } else {
+            // Visible-membership check: `hidden_pending` DM rows (deferred
+            // visibility) must not be repaired into read access here.
             match state
                 .db
-                .is_member(conn.tenant.community(), ch_id, &pubkey_bytes)
+                .is_visible_member(conn.tenant.community(), ch_id, &pubkey_bytes)
                 .await
             {
                 Ok(member) => {

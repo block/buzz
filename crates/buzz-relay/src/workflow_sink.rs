@@ -348,6 +348,20 @@ impl ActionSink for RelayActionSink {
             // 5. Post-persist side effects (fan-out, search, audit)
             //    Only if actually inserted (idempotency guard).
             if was_inserted {
+                // This insert bypasses ingest, so run the DM first-message
+                // reveal here too — a workflow message must not leave
+                // `hidden_pending` recipients unable to see a DM that now has
+                // content. Actor = the workflow owner the message is
+                // attributed to, not the relay signing key.
+                if channel.channel_type == "dm" {
+                    crate::handlers::side_effects::reveal_dm_members_on_first_message(
+                        &tenant,
+                        &state,
+                        channel_uuid,
+                        &author_pubkey_bytes,
+                    )
+                    .await;
+                }
                 let _ = dispatch_persistent_event(
                     &tenant,
                     &state,

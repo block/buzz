@@ -2826,6 +2826,23 @@ async fn ingest_event_inner(
         });
     }
 
+    // A DM's first real message reveals memberships auto-hidden at creation
+    // (kind:41010 fires on click, before anything is sent). See
+    // `is_dm_revealing_kind` for which kinds count as a first message.
+    if crate::handlers::side_effects::is_dm_revealing_kind(kind_u32)
+        && channel_row.as_ref().is_some_and(|c| c.channel_type == "dm")
+    {
+        if let Some(ch_id) = channel_id {
+            crate::handlers::side_effects::reveal_dm_members_on_first_message(
+                tenant,
+                state,
+                ch_id,
+                &pubkey_bytes,
+            )
+            .await;
+        }
+    }
+
     if crate::handlers::side_effects::is_side_effect_kind(kind_u32) {
         if let Err(e) =
             crate::handlers::side_effects::handle_side_effects(tenant, kind_u32, &event, state)

@@ -860,6 +860,289 @@ async fn test_dm_discovery_events_emitted() {
     client_a.disconnect().await.expect("disconnect");
 }
 
+/// True if the event carries a tag `[key, value, ...]`.
+fn has_tag(event: &nostr::Event, key: &str, value: &str) -> bool {
+    event.tags.iter().any(|t| {
+        let s = t.as_slice();
+        s.len() >= 2 && s[0] == key && s[1] == value
+    })
+}
+
+/// Query historical events of `kind` carrying single-letter tag `tag = value`,
+/// as the connected viewer. Subscribe → EOSE → close.
+async fn query_kind_by_tag(
+    client: &mut BuzzTestClient,
+    kind: u16,
+    tag: Alphabet,
+    value: &str,
+) -> Vec<nostr::Event> {
+    let sid = sub_id(&format!("query-{kind}"));
+    let filter = Filter::new()
+        .kind(Kind::Custom(kind))
+        .custom_tag(SingleLetterTag::lowercase(tag), value);
+    client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe query");
+    let events = client
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("query EOSE");
+    client
+        .close_subscription(&sid)
+        .await
+        .expect("close query sub");
+    events
+}
+
+/// Open a `#h`-scoped kind-9 REQ on `channel_id` and report whether the relay
+/// grants it (EOSE) or denies it (CLOSED). A `#h` REQ on a channel missing
+/// from the viewer's accessible set falls to the stale-cache membership
+/// repair path, which must not resurrect deferred-visibility DM memberships.
+async fn channel_read_granted(client: &mut BuzzTestClient, channel_id: &str) -> bool {
+    let sid = sub_id("h-scope-probe");
+    let filter = Filter::new()
+        .kind(Kind::Custom(9))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::H), channel_id);
+    client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe #h probe");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline
+            .checked_duration_since(tokio::time::Instant::now())
+            .unwrap_or(Duration::ZERO);
+        assert!(!remaining.is_zero(), "no EOSE/CLOSED for #h probe");
+        match client.recv_event(remaining).await.expect("recv #h probe") {
+            RelayMessage::Eose { subscription_id } if subscription_id == sid => {
+                client
+                    .close_subscription(&sid)
+                    .await
+                    .expect("close #h probe");
+                return true;
+            }
+            RelayMessage::Closed {
+                subscription_id, ..
+            } if subscription_id == sid => {
+                return false;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A DM opened via kind:41010 must stay INVISIBLE to the recipient until the
+/// first real message arrives — clicking a person in search must not pop an
+/// empty DM window on their end.
+///
+/// Relay semantics under test:
+/// 1. On create, only the CREATOR gets the kind:44100 membership notification;
+///    the recipient's membership starts hidden, so their globally-scoped
+///    queries (44100 by `#p`, 39000/39002 discovery) exclude the DM.
+/// 2. The first kind:9 message reveals the DM: the recipient receives a live
+///    kind:44100 for the channel and discovery queries now return it.
+/// 3. An explicit hide (kind:41012) stays sticky — later messages must NOT
+///    re-reveal the DM (only the create-time pending state auto-reveals).
+#[tokio::test]
+#[ignore]
+async fn test_dm_open_invisible_to_recipient_until_first_message() {
+    let url = relay_url();
+    let keys_a = Keys::generate();
+    let keys_b = Keys::generate();
+    let b_pubkey_hex = keys_b.public_key().to_hex();
+
+    // A clicks B in search → client fires kind:41010 immediately.
+    let channel_id = create_dm(&keys_a, &b_pubkey_hex).await;
+
+    let mut client_b = BuzzTestClient::connect(&url, &keys_b)
+        .await
+        .expect("client B connect");
+
+    // Phase 1 — before any message, B must see NOTHING about this DM.
+    let notifications = query_kind_by_tag(&mut client_b, 44100, Alphabet::P, &b_pubkey_hex).await;
+    assert!(
+        !notifications.iter().any(|e| has_tag(e, "h", &channel_id)),
+        "recipient must not receive kind:44100 for a DM with no messages yet"
+    );
+    let members = query_kind_by_tag(&mut client_b, 39002, Alphabet::P, &b_pubkey_hex).await;
+    assert!(
+        !members.iter().any(|e| has_tag(e, "d", &channel_id)),
+        "recipient must not discover kind:39002 members for a message-less DM"
+    );
+    let metadata = query_kind_by_tag(&mut client_b, 39000, Alphabet::D, &channel_id).await;
+    assert!(
+        metadata.is_empty(),
+        "recipient must not read kind:39000 metadata for a message-less DM, got {}",
+        metadata.len()
+    );
+    assert!(
+        !channel_read_granted(&mut client_b, &channel_id).await,
+        "a #h REQ by a pending recipient must be denied even if they know the channel id"
+    );
+
+    // Phase 2 — the first message must reveal the DM to B, delivered live.
+    let sid_live = sub_id("dm-reveal-44100");
+    let live_filter = Filter::new().kind(Kind::Custom(44100)).custom_tag(
+        SingleLetterTag::lowercase(Alphabet::P),
+        b_pubkey_hex.as_str(),
+    );
+    client_b
+        .subscribe(&sid_live, vec![live_filter])
+        .await
+        .expect("subscribe live membership");
+    // Drain history so the recv below can only match the live reveal.
+    client_b
+        .collect_until_eose(&sid_live, Duration::from_secs(5))
+        .await
+        .expect("live membership EOSE");
+
+    send_rest_message(&keys_a, &channel_id, "first contact").await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut got_reveal = false;
+    while tokio::time::Instant::now() < deadline {
+        match client_b.recv_event(Duration::from_secs(2)).await {
+            Ok(RelayMessage::Event { event, .. })
+                if event.kind == Kind::Custom(44100) && has_tag(&event, "h", &channel_id) =>
+            {
+                got_reveal = true;
+                break;
+            }
+            Ok(_) => {}
+            Err(_) => {}
+        }
+    }
+    assert!(
+        got_reveal,
+        "recipient must receive a live kind:44100 when the first DM message lands"
+    );
+    client_b
+        .close_subscription(&sid_live)
+        .await
+        .expect("close live sub");
+
+    let members = query_kind_by_tag(&mut client_b, 39002, Alphabet::P, &b_pubkey_hex).await;
+    assert!(
+        members.iter().any(|e| has_tag(e, "d", &channel_id)),
+        "recipient must discover the DM members event after the first message"
+    );
+    let metadata = query_kind_by_tag(&mut client_b, 39000, Alphabet::D, &channel_id).await;
+    assert!(
+        !metadata.is_empty(),
+        "recipient must read the DM metadata event after the first message"
+    );
+    assert!(
+        channel_read_granted(&mut client_b, &channel_id).await,
+        "a #h REQ by the recipient must be granted after the reveal"
+    );
+
+    // Phase 3 — an explicit hide stays sticky across further messages.
+    post_signed_event(
+        &keys_b,
+        41012,
+        vec![Tag::parse(["h", &channel_id]).unwrap()],
+    )
+    .await;
+    let hidden = read_hidden_dms(&mut client_b, &b_pubkey_hex).await;
+    assert!(
+        hidden.contains(&channel_id),
+        "explicit hide must appear in B's visibility snapshot: {hidden:?}"
+    );
+
+    send_rest_message(&keys_a, &channel_id, "second message").await;
+
+    let hidden_after = read_hidden_dms(&mut client_b, &b_pubkey_hex).await;
+    assert!(
+        hidden_after.contains(&channel_id),
+        "an explicitly hidden DM must NOT resurface on later messages: {hidden_after:?}"
+    );
+
+    client_b.disconnect().await.expect("disconnect B");
+}
+
+/// A kind:40008 diff as a DM's FIRST content must reveal the DM to the
+/// recipient exactly like a kind:9 text message. Diffs are rendered timeline
+/// messages (agents open review DMs with them), so gating the reveal on text
+/// kinds alone would leave the recipient hidden from a DM that has content.
+#[tokio::test]
+#[ignore]
+async fn test_dm_first_diff_message_reveals_recipient() {
+    let url = relay_url();
+    let keys_a = Keys::generate();
+    let keys_b = Keys::generate();
+    let b_pubkey_hex = keys_b.public_key().to_hex();
+
+    let channel_id = create_dm(&keys_a, &b_pubkey_hex).await;
+
+    let mut client_b = BuzzTestClient::connect(&url, &keys_b)
+        .await
+        .expect("client B connect");
+    assert!(
+        !channel_read_granted(&mut client_b, &channel_id).await,
+        "a #h REQ by a pending recipient must be denied before any message"
+    );
+
+    // Subscribe live before the diff lands so the reveal must arrive as an
+    // event, not via history replay.
+    let sid_live = sub_id("dm-diff-reveal-44100");
+    let live_filter = Filter::new().kind(Kind::Custom(44100)).custom_tag(
+        SingleLetterTag::lowercase(Alphabet::P),
+        b_pubkey_hex.as_str(),
+    );
+    client_b
+        .subscribe(&sid_live, vec![live_filter])
+        .await
+        .expect("subscribe live membership");
+    client_b
+        .collect_until_eose(&sid_live, Duration::from_secs(5))
+        .await
+        .expect("live membership EOSE");
+
+    let mut client_a = BuzzTestClient::connect(&url, &keys_a)
+        .await
+        .expect("client A connect");
+    let diff = EventBuilder::new(
+        Kind::Custom(40008),
+        "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-old\n+new\n",
+    )
+    .tags([
+        Tag::parse(["h", &channel_id]).unwrap(),
+        Tag::parse(["repo", "https://example.com/repo.git"]).unwrap(),
+        Tag::parse(["commit", "deadbeef00c0ffee"]).unwrap(),
+    ])
+    .sign_with_keys(&keys_a)
+    .expect("sign diff");
+    let ok = client_a.send_event(diff).await.expect("send diff");
+    assert!(ok.accepted, "relay rejected diff message: {}", ok.message);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut got_reveal = false;
+    while tokio::time::Instant::now() < deadline {
+        match client_b.recv_event(Duration::from_secs(2)).await {
+            Ok(RelayMessage::Event { event, .. })
+                if event.kind == Kind::Custom(44100) && has_tag(&event, "h", &channel_id) =>
+            {
+                got_reveal = true;
+                break;
+            }
+            Ok(_) => {}
+            Err(_) => {}
+        }
+    }
+    assert!(
+        got_reveal,
+        "recipient must receive a live kind:44100 when a first diff message lands"
+    );
+    assert!(
+        channel_read_granted(&mut client_b, &channel_id).await,
+        "a #h REQ by the recipient must be granted after a diff-first reveal"
+    );
+
+    client_a.disconnect().await.expect("disconnect A");
+    client_b.disconnect().await.expect("disconnect B");
+}
+
 /// Send a non-broadcast NIP-10 reply AND a broadcast (`["broadcast","1"]`)
 /// reply, then prove the relay's real top-level rule both directions.
 ///

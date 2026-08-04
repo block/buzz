@@ -561,7 +561,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 26);
+        assert_eq!(migrations.len(), 27);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -902,6 +902,10 @@ mod tests {
 
         let desired_schema = include_str!("../../../schema/schema.sql");
         assert!(
+            desired_schema.contains("hidden_pending BOOLEAN NOT NULL DEFAULT FALSE"),
+            "desired-state schema must carry the deferred-DM-visibility column",
+        );
+        assert!(
             desired_schema.contains("CREATE TABLE join_policy_acceptances"),
             "desired-state schema must include join-policy evidence used by invite claims",
         );
@@ -919,6 +923,18 @@ mod tests {
         assert!(heartbeat.contains("epoch"));
         assert!(heartbeat.contains("INSERT INTO replica_heartbeat (id) VALUES (1)"));
         assert!(heartbeat.contains("_operator_global_tables"));
+
+        // Deferred DM visibility (renumbered to 0027 after 0026_replica_heartbeat
+        // landed on main): additive column on channel_members marking recipients
+        // hidden until the DM's first real message. Never folded into 0001 —
+        // same brownfield checksum rule as above.
+        assert_eq!(migrations[26].version, 27);
+        let dm_hidden_pending = migrations[26].sql.as_str();
+        assert!(dm_hidden_pending.contains("ALTER TABLE channel_members"));
+        assert!(
+            dm_hidden_pending.contains("ADD COLUMN hidden_pending BOOLEAN NOT NULL DEFAULT FALSE")
+        );
+        assert!(!migrations[0].sql.as_str().contains("hidden_pending"));
     }
 
     #[test]

@@ -2248,6 +2248,17 @@ impl Db {
         channel::is_member(&self.pool, community_id, channel_id, pubkey).await
     }
 
+    /// Like [`Db::is_member`], but excludes `hidden_pending` DM memberships
+    /// (deferred visibility). For read-access repair paths.
+    pub async fn is_visible_member(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        pubkey: &[u8],
+    ) -> Result<bool> {
+        channel::is_visible_member(&self.pool, community_id, channel_id, pubkey).await
+    }
+
     /// Return the active (channel, pubkey) membership pairs among the given
     /// sets, in one statement.
     pub async fn membership_pairs(
@@ -2636,6 +2647,16 @@ impl Db {
         pubkey: &[u8],
     ) -> Result<()> {
         dm::unhide_dm(&self.pool, community_id, channel_id, pubkey).await
+    }
+
+    /// Reveal DM memberships auto-hidden at creation, returning the revealed
+    /// pubkeys. Explicit hides are left untouched.
+    pub async fn reveal_pending_dm_members(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+    ) -> Result<Vec<Vec<u8>>> {
+        dm::reveal_pending_dm_members(&self.pool, community_id, channel_id).await
     }
 
     /// List the channel IDs of all DMs the given user currently has hidden.

@@ -8,10 +8,11 @@ use uuid::Uuid;
 
 use buzz_core::kind::{
     event_kind_u32, is_parameterized_replaceable, KIND_AGENT_PROFILE, KIND_DM_VISIBILITY,
-    KIND_GIT_REPO_ANNOUNCEMENT, KIND_IA_ARCHIVED, KIND_IA_ARCHIVED_LIST, KIND_IA_UNARCHIVED,
-    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_NIP29_GROUP_ADMINS,
-    KIND_NIP29_GROUP_MEMBERS, KIND_NIP29_GROUP_METADATA, KIND_NIP43_MEMBERSHIP_LIST, KIND_REACTION,
-    KIND_THREAD_SUMMARY,
+    KIND_GIT_REPO_ANNOUNCEMENT, KIND_HUDDLE_STARTED, KIND_IA_ARCHIVED, KIND_IA_ARCHIVED_LIST,
+    KIND_IA_UNARCHIVED, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
+    KIND_NIP29_GROUP_ADMINS, KIND_NIP29_GROUP_MEMBERS, KIND_NIP29_GROUP_METADATA,
+    KIND_NIP43_MEMBERSHIP_LIST, KIND_REACTION, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_DIFF,
+    KIND_STREAM_MESSAGE_V2, KIND_THREAD_SUMMARY,
 };
 use buzz_core::StoredEvent;
 use buzz_db::channel::{MemberRecord, MemberRole};
@@ -890,6 +891,60 @@ pub fn emit_live_thread_summary(
         )
         .await;
     });
+}
+
+/// True for kinds that deliver a DM's first real content: text messages
+/// (9/40002), diff messages (40008), and huddle rings (48100). These are the
+/// kinds that reveal `hidden_pending` DM members. Edits, pins, scheduled
+/// requests, canvas writes, and system messages deliberately don't — none
+/// delivers a first message to the recipient.
+pub(crate) fn is_dm_revealing_kind(kind: u32) -> bool {
+    matches!(
+        kind,
+        KIND_STREAM_MESSAGE
+            | KIND_STREAM_MESSAGE_V2
+            | KIND_STREAM_MESSAGE_DIFF
+            | KIND_HUDDLE_STARTED
+    )
+}
+
+/// Reveal a DM's `hidden_pending` members after its first real message: clear
+/// the pending flag, invalidate membership caches, and emit each revealed
+/// member's deferred kind:44100 with the message author as actor. Best-effort
+/// by contract — every stored-message path that calls this must not reject the
+/// message on failure, so errors are logged here and not returned.
+pub(crate) async fn reveal_dm_members_on_first_message(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+    author_pubkey: &[u8],
+) {
+    match state
+        .db
+        .reveal_pending_dm_members(tenant.community(), channel_id)
+        .await
+    {
+        Ok(revealed) => {
+            for member in &revealed {
+                state.invalidate_membership(tenant, channel_id, member);
+                if let Err(e) = emit_membership_notification(
+                    tenant,
+                    state,
+                    channel_id,
+                    member,
+                    author_pubkey,
+                    KIND_MEMBER_ADDED_NOTIFICATION,
+                )
+                .await
+                {
+                    warn!(channel = %channel_id, "DM reveal: membership notification failed: {e}");
+                }
+            }
+        }
+        Err(e) => {
+            warn!(channel = %channel_id, "DM reveal failed: {e}");
+        }
+    }
 }
 
 /// Emit a relay-signed membership notification event stored globally (channel_id = None).

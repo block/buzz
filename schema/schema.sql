@@ -143,6 +143,9 @@ CREATE TABLE channel_members (
     removed_at  TIMESTAMPTZ,
     removed_by  BYTEA,
     hidden_at   TIMESTAMPTZ,
+    -- TRUE while a DM stays hidden from a recipient who has not received a
+    -- message yet; cleared on first message or explicit kind:41012 hide.
+    hidden_pending BOOLEAN NOT NULL DEFAULT FALSE,
     PRIMARY KEY (community_id, channel_id, pubkey),
     FOREIGN KEY (community_id, channel_id)
         REFERENCES channels (community_id, id) ON DELETE CASCADE

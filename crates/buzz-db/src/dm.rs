@@ -98,6 +98,8 @@ pub async fn find_dm_by_participants(
 /// - `participants` must contain 2-9 entries (enforced here).
 /// - `created_by` must be one of the participants.
 /// - The operation is idempotent: same participant set -> same channel returned.
+/// - Non-creator participants start hidden (`hidden_pending`) until the first
+///   message reveals the DM ([`reveal_pending_dm_members`]).
 pub async fn create_dm(
     pool: &PgPool,
     community_id: CommunityId,
@@ -178,22 +180,31 @@ pub async fn create_dm(
     .execute(&mut *tx)
     .await?;
 
-    // Add all participants as members with role='member'.
+    // Add all participants as members with role='member'. Non-creators start
+    // hidden with `hidden_pending = TRUE` so the DM stays invisible to them
+    // until the first real message reveals it (`reveal_pending_dm_members`) —
+    // opening a DM fires on click, before anything is sent.
     for pk in participants {
+        let is_creator = *pk == created_by;
         sqlx::query(
             r#"
-            INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
-            VALUES ($1, $2, $3, 'member', $4)
+            INSERT INTO channel_members
+                (community_id, channel_id, pubkey, role, invited_by, hidden_at, hidden_pending)
+            VALUES ($1, $2, $3, 'member', $4,
+                    CASE WHEN $5 THEN NULL ELSE NOW() END, NOT $5)
             ON CONFLICT (community_id, channel_id, pubkey) DO UPDATE SET
                 removed_at = NULL,
                 removed_by = NULL,
-                role = EXCLUDED.role
+                role = EXCLUDED.role,
+                hidden_at = EXCLUDED.hidden_at,
+                hidden_pending = EXCLUDED.hidden_pending
             "#,
         )
         .bind(community_id.as_uuid())
         .bind(id)
         .bind(*pk)
         .bind(created_by)
+        .bind(is_creator)
         .execute(&mut *tx)
         .await?;
     }
@@ -400,10 +411,12 @@ pub async fn hide_dm(
     channel_id: Uuid,
     pubkey: &[u8],
 ) -> Result<()> {
+    // `hidden_pending = FALSE` marks this as an explicit hide: sticky, never
+    // auto-revealed by later messages (unlike the create-time pending state).
     let result = sqlx::query(
         r#"
         UPDATE channel_members
-        SET hidden_at = NOW()
+        SET hidden_at = NOW(), hidden_pending = FALSE
         WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3 AND removed_at IS NULL
         "#,
     )
@@ -435,7 +448,7 @@ pub async fn unhide_dm(
     sqlx::query(
         r#"
         UPDATE channel_members
-        SET hidden_at = NULL
+        SET hidden_at = NULL, hidden_pending = FALSE
         WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3 AND removed_at IS NULL
         "#,
     )
@@ -448,9 +461,39 @@ pub async fn unhide_dm(
     Ok(())
 }
 
+/// Reveal memberships that were auto-hidden at DM creation (`hidden_pending`),
+/// returning the revealed pubkeys. Called when the first real message lands in
+/// a DM. Explicit hides have `hidden_pending = FALSE` and are left untouched,
+/// so they stay sticky across later messages.
+pub async fn reveal_pending_dm_members(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_id: Uuid,
+) -> Result<Vec<Vec<u8>>> {
+    let rows = sqlx::query(
+        r#"
+        UPDATE channel_members
+        SET hidden_at = NULL, hidden_pending = FALSE
+        WHERE community_id = $1 AND channel_id = $2
+          AND removed_at IS NULL AND hidden_pending
+        RETURNING pubkey
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|r| r.try_get::<Vec<u8>, _>("pubkey").map_err(Into::into))
+        .collect()
+}
+
 /// Return the channel IDs of all DMs the given user currently has hidden
 /// (`hidden_at IS NOT NULL`) while still being an active member. Used to build
-/// the relay-signed NIP-DV visibility snapshot.
+/// the relay-signed NIP-DV visibility snapshot. Excludes `hidden_pending`
+/// memberships: those DMs were never visible to the user, so listing them
+/// would leak the DM's existence before its first message.
 pub async fn list_hidden_dms(
     pool: &PgPool,
     community_id: CommunityId,
@@ -467,6 +510,7 @@ pub async fn list_hidden_dms(
           AND cm.pubkey = $2
           AND cm.removed_at IS NULL
           AND cm.hidden_at IS NOT NULL
+          AND NOT cm.hidden_pending
           AND c.channel_type = 'dm'
           AND c.deleted_at IS NULL
         ORDER BY cm.channel_id

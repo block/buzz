@@ -404,19 +404,22 @@ async fn handle_dm_open(
             warn!(channel = %channel.id, "DM open: discovery emission failed: {e}");
         }
 
-        for participant in &all_bytes {
-            if let Err(e) = emit_membership_notification(
-                tenant,
-                state,
-                channel.id,
-                participant,
-                &self_bytes,
-                KIND_MEMBER_ADDED_NOTIFICATION,
-            )
-            .await
-            {
-                warn!("DM open: membership notification failed: {e}");
-            }
+        // Notify only the creator. Other participants were created
+        // `hidden_pending` — a kind:41010 fires on click, before any message —
+        // and get their kind:44100 when the first message reveals the DM
+        // (`reveal_pending_dm_members` in ingest). 44100s are stored globally
+        // (channel_id = None), so notifying them here would leak the empty DM.
+        if let Err(e) = emit_membership_notification(
+            tenant,
+            state,
+            channel.id,
+            &self_bytes,
+            &self_bytes,
+            KIND_MEMBER_ADDED_NOTIFICATION,
+        )
+        .await
+        {
+            warn!("DM open: membership notification failed: {e}");
         }
     } else {
         // Re-open of an existing DM cleared the caller's hidden_at; refresh
@@ -548,19 +551,21 @@ async fn handle_dm_add_member(
             warn!(channel = %new_channel.id, "DM add_member: discovery emission failed: {e}");
         }
 
-        for participant_bytes in &all_bytes {
-            if let Err(e) = emit_membership_notification(
-                tenant,
-                state,
-                new_channel.id,
-                participant_bytes,
-                &self_bytes,
-                KIND_MEMBER_ADDED_NOTIFICATION,
-            )
-            .await
-            {
-                warn!("DM add_member: membership notification failed: {e}");
-            }
+        // Adding a member mints a NEW channel (DM sets are immutable), so the
+        // same deferred-visibility rule as handle_dm_open applies: everyone
+        // but the actor is `hidden_pending` and gets their kind:44100 when the
+        // first message reveals the expanded DM.
+        if let Err(e) = emit_membership_notification(
+            tenant,
+            state,
+            new_channel.id,
+            &self_bytes,
+            &self_bytes,
+            KIND_MEMBER_ADDED_NOTIFICATION,
+        )
+        .await
+        {
+            warn!("DM add_member: membership notification failed: {e}");
         }
     }
 

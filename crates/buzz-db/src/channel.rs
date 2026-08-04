@@ -656,6 +656,32 @@ pub async fn is_member(
     Ok(cnt > 0)
 }
 
+/// Like [`is_member`], but excludes `hidden_pending` DM memberships — the
+/// same rows [`get_accessible_channel_ids`] withholds. For the REQ/COUNT
+/// stale-cache repair path, so confirming membership against the DB cannot
+/// re-grant exactly the read access deferred DM visibility withholds.
+/// Explicitly hidden (non-pending) memberships still count as visible.
+pub async fn is_visible_member(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    pubkey: &[u8],
+) -> Result<bool> {
+    let row = sqlx::query(
+        "SELECT COUNT(*) as cnt FROM channel_members cm \
+         JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL \
+         WHERE cm.community_id = $1 AND cm.channel_id = $2 AND cm.pubkey = $3 \
+           AND cm.removed_at IS NULL AND NOT cm.hidden_pending",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .bind(pubkey)
+    .fetch_one(pool)
+    .await?;
+    let cnt: i64 = row.try_get("cnt")?;
+    Ok(cnt > 0)
+}
+
 /// Return which of the given (channel, pubkey) combinations are active
 /// memberships, restricted to non-deleted channels — one statement for any
 /// batch size (T2b). Semantics per pair match [`is_member`].
@@ -743,6 +769,11 @@ pub async fn get_members_bulk(
 ///
 /// Includes channels where the pubkey is an active member AND all open channels.
 /// Open channels must be included in REQ filter resolution.
+///
+/// Excludes `hidden_pending` DM memberships (auto-hidden at creation, awaiting
+/// the first message) so globally-scoped reads cannot surface a DM the user
+/// was never notified about. Explicitly hidden DMs remain accessible — clients
+/// filter those via the NIP-DV snapshot instead.
 pub async fn get_accessible_channel_ids(
     pool: &PgPool,
     community_id: CommunityId,
@@ -754,6 +785,7 @@ pub async fn get_accessible_channel_ids(
         FROM channel_members cm
         JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL
         WHERE cm.community_id = $1 AND cm.pubkey = $2 AND cm.removed_at IS NULL
+          AND NOT cm.hidden_pending
         UNION
         SELECT id AS channel_id
         FROM channels
