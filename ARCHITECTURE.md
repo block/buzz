@@ -686,6 +686,7 @@ Subcommands:
 | `list-members` | List all relay members |
 | `generate-key` | Generate a new Nostr keypair (for bootstrapping) |
 | `reconcile-channels` | Emit kind:39000/39002 discovery events for channels missing them (idempotent) |
+| `audit verify` | Verify the community's audit-log hash chain genesis-to-head (optional `--expect-head N` catches tail truncation); JSON report on stdout; exit 0 verified / 1 integrity failure / 5 operational error |
 
 The `buzz-admin` binary is shipped in the relay Docker image (`/usr/local/bin/buzz-admin`) and is the recommended way to manage relay membership in production. Use `./run.sh add-member`, `./run.sh remove-member`, and `./run.sh list-members` in Docker Compose deployments.
 
