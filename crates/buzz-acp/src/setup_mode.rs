@@ -590,7 +590,7 @@ fn build_setup_subscription_rules(config: &Config) -> Vec<filter::SubscriptionRu
     let kinds = config
         .kinds_override
         .clone()
-        .unwrap_or_else(|| vec![KIND_STREAM_MESSAGE, KIND_WORKFLOW_APPROVAL_REQUESTED]);
+        .unwrap_or_else(crate::config::default_mention_kinds);
 
     match &config.subscribe_mode {
         // Config mode: load the actual rules, but they will be filtered by
@@ -1034,6 +1034,15 @@ mod tests {
         assert!(setup_listener_admits(&build(&other, true), &agent));
         assert!(!setup_listener_admits(&build(&other, false), &agent));
         assert!(!setup_listener_admits(&build(&agent_keys, true), &agent));
+    }
+
+    #[test]
+    fn setup_listener_defaults_include_newly_mentioned_message_edits() {
+        // `build_setup_subscription_rules` defaults to these kinds.
+        assert!(
+            crate::config::default_mention_kinds().contains(&KIND_STREAM_MESSAGE_EDIT),
+            "setup listener shares the normal actionable-mention defaults"
+        );
     }
 
     #[test]
