@@ -14,6 +14,7 @@ import {
   joinChannel,
   leaveChannel,
   openDm,
+  invokeTauri,
   removeChannelMember,
   setCanvas,
   setChannelPurpose,
@@ -516,6 +517,21 @@ export function useAddChannelMembersMutation(channelId: string | null) {
       }
 
       return addChannelMembers({ ...rest, channelId: effectiveChannelId });
+    },
+    onSuccess: (result, variables) => {
+      const effectiveChannelId = variables.channelId ?? channelId;
+      if (
+        effectiveChannelId &&
+        variables.role === "bot" &&
+        result.added.length > 0
+      ) {
+        void invokeTauri("sync_agents_to_active_huddle", {
+          channelId: effectiveChannelId,
+          agentPubkeys: result.added,
+        }).catch((error) => {
+          console.warn("Could not sync added agents into Huddle:", error);
+        });
+      }
     },
     onSettled: async (_data, _err, variables) => {
       // Invalidate the effective channel (the one actually mutated) not the
