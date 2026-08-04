@@ -199,7 +199,7 @@ fn cursor_resets_when_retention_replaces_the_file_generation() {
     assert_eq!(decode_cursor(cursor, 42), (0, true));
     assert_eq!(decode_cursor(0, 42), (0, false));
     assert!(encode_cursor(1, CURSOR_OFFSET_MASK + 1).is_err());
-    assert!(cursor <= (1_u64 << 53) - 1, "cursor must be exact in JS");
+    assert!(cursor < (1_u64 << 53), "cursor must be exact in JS");
 }
 
 #[test]
