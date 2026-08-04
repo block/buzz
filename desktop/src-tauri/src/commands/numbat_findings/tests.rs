@@ -169,6 +169,7 @@ fn truncation_resets_a_stale_cursor() {
     assert_eq!(batch.findings.len(), 1);
 }
 
+#[cfg(unix)]
 #[test]
 fn continuous_retention_keeps_complete_recent_records() {
     let dir = tempfile::tempdir().expect("tempdir");

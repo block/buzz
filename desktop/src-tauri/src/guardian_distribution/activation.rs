@@ -368,11 +368,21 @@ fn safe_relative_path(path: &Path) -> Result<String, String> {
     {
         return Err("unsafe Guardian receipt path".into());
     }
-    let value = path
-        .to_str()
-        .filter(|value| !value.contains('\\') && !value.contains('\0'))
-        .ok_or("unsafe Guardian receipt path")?;
-    Ok(value.to_owned())
+    path.components()
+        .map(|component| match component {
+            Component::Normal(value) => value
+                .to_str()
+                .filter(|value| {
+                    !value.is_empty()
+                        && !value.contains('/')
+                        && !value.contains('\\')
+                        && !value.contains('\0')
+                })
+                .ok_or_else(|| "unsafe Guardian receipt path".to_owned()),
+            _ => Err("unsafe Guardian receipt path".to_owned()),
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(|components| components.join("/"))
 }
 
 fn validate_digest(value: &str) -> Result<(), String> {

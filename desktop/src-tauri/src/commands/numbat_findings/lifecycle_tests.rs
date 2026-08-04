@@ -27,6 +27,7 @@ fn test_health() -> NumbatGuardianHealth {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn retention_reader_preserves_a_record_appended_to_the_previous_generation() {
     let dir = tempfile::tempdir().expect("tempdir");
