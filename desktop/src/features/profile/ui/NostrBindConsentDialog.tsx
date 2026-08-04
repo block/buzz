@@ -1,5 +1,5 @@
 import * as DialogPrimitive from "@radix-ui/react-dialog";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalUrl } from "@/shared/lib/openExternalUrl";
 import { ChevronDown } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import * as React from "react";
@@ -123,7 +123,7 @@ async function notifySignedResponseReady(callbackUrl: string | undefined) {
     return;
   }
   try {
-    await openUrl(appendCallbackStatus(callbackUrl));
+    await openExternalUrl(appendCallbackStatus(callbackUrl));
   } catch (error) {
     console.warn("open nostr bind callback failed:", error);
   }
@@ -134,7 +134,7 @@ async function returnSignedResponseToBrowser(
   signedResponse: string,
 ): Promise<string | null> {
   try {
-    await openUrl(buildNostrBindCallbackUrl(callbackUrl, signedResponse));
+    await openExternalUrl(buildNostrBindCallbackUrl(callbackUrl, signedResponse));
     return null;
   } catch (error) {
     console.warn("return signed nostr binding response failed:", error);

@@ -13,6 +13,7 @@ mod identity_storage;
 mod initial_window;
 mod key_backup;
 mod linux_media;
+mod linux_url_opener;
 mod managed_agents;
 mod media_proxy;
 #[cfg(feature = "mesh-llm")]
@@ -667,6 +668,7 @@ pub fn run() {
             get_relay_http_url,
             get_media_proxy_port,
             fetch_link_preview_title,
+            linux_url_opener::open_external_url,
             discover_acp_auth_methods,
             discover_acp_providers,
             discover_git_bash_prerequisite,

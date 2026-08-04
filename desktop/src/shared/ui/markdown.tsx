@@ -9,7 +9,7 @@ import {
   ZoomOut,
 } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalUrl } from "@/shared/lib/openExternalUrl";
 import { toast } from "sonner";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
@@ -1331,7 +1331,7 @@ function ExternalLinkAnchor({
               label: "Open link",
               onSelect: () => {
                 closeMenu();
-                void openUrl(href).catch(() => {
+                void openExternalUrl(href).catch(() => {
                   toast.error("Failed to open link");
                 });
               },

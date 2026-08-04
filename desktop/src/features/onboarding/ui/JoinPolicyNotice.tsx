@@ -1,5 +1,5 @@
 import * as React from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalUrl } from "@/shared/lib/openExternalUrl";
 
 import { joinPolicyDocumentUrl, type JoinPolicy } from "@/shared/api/invites";
 import { Button } from "@/shared/ui/button";
@@ -77,7 +77,7 @@ export function JoinPolicyNotice({
                 className="h-auto p-0 align-baseline text-xs no-underline hover:underline focus-visible:no-underline"
                 onClick={(event) => {
                   event.preventDefault();
-                  void openUrl(joinPolicyDocumentUrl(relayWsUrl, "terms"));
+                  void openExternalUrl(joinPolicyDocumentUrl(relayWsUrl, "terms"));
                 }}
                 type="button"
                 variant="link"
@@ -91,7 +91,7 @@ export function JoinPolicyNotice({
                 className="h-auto p-0 align-baseline text-xs no-underline hover:underline focus-visible:no-underline"
                 onClick={(event) => {
                   event.preventDefault();
-                  void openUrl(joinPolicyDocumentUrl(relayWsUrl, "privacy"));
+                  void openExternalUrl(joinPolicyDocumentUrl(relayWsUrl, "privacy"));
                 }}
                 type="button"
                 variant="link"
