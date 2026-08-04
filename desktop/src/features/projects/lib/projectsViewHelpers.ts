@@ -3,6 +3,7 @@ import type {
   ProjectActivitySummary,
 } from "@/features/projects/hooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import { ownsAuthorAgent } from "@/features/profile/lib/identity";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
 export type ProjectsViewMode = "grid" | "list";
@@ -338,6 +339,21 @@ export function isProjectOwnedByCurrentUser(
   return currentPubkey
     ? normalizePubkey(project.owner) === normalizePubkey(currentPubkey)
     : false;
+}
+
+/** Whether the viewer may delete this repo from Desktop (matches relay auth). */
+export function canDeleteProject(
+  project: Project,
+  currentPubkey: string | undefined,
+  profiles?: UserProfileLookup,
+) {
+  if (isProjectOwnedByCurrentUser(project, currentPubkey)) {
+    return true;
+  }
+  return ownsAuthorAgent(
+    profiles?.[normalizePubkey(project.owner)],
+    currentPubkey,
+  );
 }
 
 export function projectHasAgent(

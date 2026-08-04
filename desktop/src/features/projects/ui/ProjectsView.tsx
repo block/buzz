@@ -41,7 +41,7 @@ import { hasLocalCheckout } from "@/features/projects/lib/projectLocalRepos";
 import {
   getProjectUpdatedAt,
   isProjectMine,
-  isProjectOwnedByCurrentUser,
+  canDeleteProject,
   projectHasAgent,
   projectOwnerIsUser,
   projectPeople,
@@ -465,7 +465,7 @@ export function ProjectsView() {
           const summary = activitySummariesQuery.data?.[project.repoAddress];
           return (
             <ProjectGridCard
-              canDelete={isProjectOwnedByCurrentUser(project, currentPubkey)}
+              canDelete={canDeleteProject(project, currentPubkey, profiles)}
               deleteDisabled={deleteProjectMutation.isPending}
               hasLocal={hasLocalCheckout(project, localRepoNames)}
               key={project.id}
@@ -489,7 +489,7 @@ export function ProjectsView() {
           const summary = activitySummariesQuery.data?.[project.repoAddress];
           return (
             <ProjectListRow
-              canDelete={isProjectOwnedByCurrentUser(project, currentPubkey)}
+              canDelete={canDeleteProject(project, currentPubkey, profiles)}
               deleteDisabled={deleteProjectMutation.isPending}
               hasLocal={hasLocalCheckout(project, localRepoNames)}
               key={project.id}

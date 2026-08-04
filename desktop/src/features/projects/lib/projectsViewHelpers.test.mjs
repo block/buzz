@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { relativeTime } from "./projectsViewHelpers.ts";
+import { relativeTime, canDeleteProject } from "./projectsViewHelpers.ts";
 
 const DAY_SECONDS = 24 * 60 * 60;
 
@@ -42,4 +42,31 @@ test("relativeTime includes the year only across a year boundary", () => {
     relativeTime(crossYearCreatedAt, crossYearNow),
     crossYearExpected,
   );
+});
+
+test("canDeleteProject allows the declared owner of an agent-owned repo", () => {
+  const agentPubkey = "aa".repeat(32);
+  const ownerPubkey = "bb".repeat(32);
+  const project = {
+    id: `${agentPubkey}:demo`,
+    dtag: "demo",
+    owner: agentPubkey,
+    name: "demo",
+    description: "",
+    cloneUrls: [],
+    webUrl: null,
+    contributors: [],
+    createdAt: 1,
+    projectChannelId: null,
+    status: "active",
+    defaultBranch: "main",
+    repoAddress: `30617:${agentPubkey}:demo`,
+  };
+
+  assert.equal(canDeleteProject(project, ownerPubkey, {
+    [agentPubkey]: { ownerPubkey, isAgent: true },
+  }), true);
+  assert.equal(canDeleteProject(project, "cc".repeat(32), {
+    [agentPubkey]: { ownerPubkey, isAgent: true },
+  }), false);
 });
