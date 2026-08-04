@@ -99,6 +99,10 @@ class SearchPage extends HookConsumerWidget {
     final searchSurfaceColor = navigationSearchSurface(context);
     final searchPrimaryColor = navigationPrimaryForeground(context);
     final searchPlaceholderColor = navigationSecondaryForeground(context);
+    final headerTitleStyle = context.textTheme.titleMedium?.copyWith(
+      fontSize: 22,
+      fontWeight: FontWeight.w600,
+    );
     final compactSearchFieldHeight = _searchFieldHeight(context);
     final idleSearchFieldHeight = _idleSearchFieldHeight(context);
     final searchHeaderFiltersHeight = _searchHeaderFiltersHeight(context);
@@ -114,6 +118,7 @@ class SearchPage extends HookConsumerWidget {
         : idleSearchFieldHeight + _searchIdleFieldTopInset + Grid.xxs;
     final topSectionHeight = frostedAppBarHeight(
       context,
+      titleStyle: headerTitleStyle,
       bottomHeight: searchHeaderBottomHeight,
     );
 
@@ -165,6 +170,7 @@ class SearchPage extends HookConsumerWidget {
         horizontalInset: Grid.twelve,
         showBottomDivider: true,
         bottomDividerOpacity: 0.06,
+        titleStyle: headerTitleStyle,
         // Keep this mounted through the search-field morph so it can fade in
         // beneath the returning field rather than popping in afterward.
         title: IgnorePointer(
@@ -176,10 +182,7 @@ class SearchPage extends HookConsumerWidget {
             child: Text(
               'Search',
               key: const ValueKey('search-header-title'),
-              style: context.textTheme.titleMedium?.copyWith(
-                fontSize: 22,
-                fontWeight: FontWeight.w600,
-              ),
+              style: headerTitleStyle,
             ),
           ),
         ),

@@ -186,6 +186,44 @@ void main() {
     expect(sectionTitle.style?.fontWeight, FontWeight.w600);
   });
 
+  testWidgets('sizes the community header for accessible text', (tester) async {
+    await tester.pumpWidget(
+      buildTestable(
+        textScaler: const TextScaler.linear(2),
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final appBar = tester.widget<FrostedAppBar>(
+      find.byType(FrostedAppBar).last,
+    );
+    final titleStyle = appBar.titleStyle!;
+    expect(titleStyle.fontSize, 22);
+    expect(
+      tester
+          .getSize(
+            find.descendant(
+              of: find.byType(FrostedAppBar).last,
+              matching: find.byType(ClipRect),
+            ),
+          )
+          .height,
+      closeTo(
+        frostedAppBarHeight(
+              tester.element(find.byType(FrostedAppBar).last),
+              titleStyle: titleStyle,
+              bottomHeight: appBar.bottomHeight,
+            ) -
+            1,
+        0.01,
+      ),
+    );
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('keeps the last channel above the floating tab bar', (
     tester,
   ) async {

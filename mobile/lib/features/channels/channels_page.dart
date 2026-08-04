@@ -169,6 +169,7 @@ class ChannelsPage extends HookConsumerWidget {
     );
     final topSectionHeight = frostedAppBarHeight(
       context,
+      titleStyle: headerTitleStyle,
       bottomHeight: _kTopSectionBottomPadding,
     );
     final channelsScrollController = useScrollController();
@@ -287,6 +288,7 @@ class ChannelsPage extends HookConsumerWidget {
             : 20,
         showBottomDivider: false,
         leading: _CommunityIndicator(onTap: openCommunitySwitcher),
+        titleStyle: headerTitleStyle,
         title: _CommunityHeaderTitle(
           style: headerTitleStyle,
           onTap: openCommunitySwitcher,

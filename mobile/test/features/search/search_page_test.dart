@@ -99,6 +99,29 @@ void main() {
     );
     await tester.pumpAndSettle();
 
+    final appBar = tester.widget<FrostedAppBar>(find.byType(FrostedAppBar));
+    final titleStyle = appBar.titleStyle!;
+    expect(titleStyle.fontSize, 22);
+    expect(
+      tester
+          .getSize(
+            find
+                .descendant(
+                  of: find.byType(FrostedAppBar),
+                  matching: find.byType(ClipRect),
+                )
+                .first,
+          )
+          .height,
+      closeTo(
+        frostedAppBarHeight(
+          tester.element(find.byType(FrostedAppBar)),
+          titleStyle: titleStyle,
+          bottomHeight: appBar.bottomHeight,
+        ),
+        0.01,
+      ),
+    );
     final emptyState = find.byKey(const Key('search-empty-state'));
     final searchField = find.byKey(const Key('search-field-container'));
     final searchFieldContext = tester.element(searchField);
