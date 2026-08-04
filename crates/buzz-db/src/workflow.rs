@@ -26,6 +26,16 @@ pub const LIST_DEFAULT_LIMIT: i64 = 100;
 /// Hard cap on rows returned by list queries.
 pub const LIST_MAX_LIMIT: i64 = 1000;
 
+/// Read the persisted workflow enable flag, preserving the schema default for
+/// definitions written before the field was added.
+fn enabled_from_definition(definition_json: &str) -> Result<bool> {
+    let definition: serde_json::Value = serde_json::from_str(definition_json)?;
+    Ok(definition
+        .get("enabled")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true))
+}
+
 /// SHA-256 hash of a raw approval token. Returns the 32-byte digest.
 ///
 /// Approval tokens are stored hashed so that a DB read does not expose
@@ -269,7 +279,7 @@ pub struct ApprovalRecord {
 // -- Workflow CRUD ------------------------------------------------------------
 
 /// Insert a new workflow record. Returns the new workflow's UUID.
-/// New workflows start as `active` and `enabled = TRUE`.
+/// New workflows start as `active` and use the definition's `enabled` flag.
 ///
 /// NOTE: see the cache-invalidation note on [`update_workflow`]. The relay's
 /// creation path is [`upsert_workflow`] via event ingest. (No current callers.)
@@ -283,12 +293,13 @@ pub async fn create_workflow(
     definition_hash: &[u8],
 ) -> Result<Uuid> {
     let id = Uuid::new_v4();
+    let enabled = enabled_from_definition(definition_json)?;
 
     sqlx::query(
         r#"
         INSERT INTO workflows
             (id, community_id, name, owner_pubkey, channel_id, definition, definition_hash, status, enabled)
-        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, 'active', TRUE)
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, 'active', $8)
         "#,
     )
     .bind(id)
@@ -298,6 +309,7 @@ pub async fn create_workflow(
     .bind(channel_id)
     .bind(definition_json)
     .bind(definition_hash)
+    .bind(enabled)
     .execute(pool)
     .await?;
 
@@ -320,6 +332,7 @@ pub async fn upsert_workflow(
     definition_json: &str,
     definition_hash: &[u8],
 ) -> Result<()> {
+    let enabled = enabled_from_definition(definition_json)?;
     let row = sqlx::query(
         r#"
         INSERT INTO workflows
@@ -329,6 +342,7 @@ pub async fn upsert_workflow(
         SET name = EXCLUDED.name,
             definition = EXCLUDED.definition,
             definition_hash = EXCLUDED.definition_hash,
+            enabled = EXCLUDED.enabled,
             updated_at = NOW()
         WHERE workflows.owner_pubkey = EXCLUDED.owner_pubkey
           AND workflows.channel_id IS NOT DISTINCT FROM EXCLUDED.channel_id
@@ -342,6 +356,7 @@ pub async fn upsert_workflow(
     .bind(channel_id)
     .bind(definition_json)
     .bind(definition_hash)
+    .bind(enabled)
     .fetch_optional(pool)
     .await?;
 
@@ -1447,6 +1462,18 @@ mod tests {
         };
         assert!(!record.enabled);
         assert_eq!(record.status, WorkflowStatus::Active);
+    }
+
+    #[test]
+    fn enabled_from_definition_honors_explicit_flag_and_default() {
+        assert!(!enabled_from_definition(r#"{"enabled":false}"#).expect("parse"));
+        assert!(enabled_from_definition(r#"{"enabled":true}"#).expect("parse"));
+        assert!(enabled_from_definition(r#"{"name":"legacy"}"#).expect("parse"));
+    }
+
+    #[test]
+    fn enabled_from_definition_rejects_invalid_json() {
+        assert!(enabled_from_definition("not-json").is_err());
     }
 
     // -- WorkflowRunRecord ----------------------------------------------------
