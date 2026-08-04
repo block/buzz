@@ -73,10 +73,32 @@ impl NostrWsConnection {
         auth_tag: Option<&Tag>,
     ) -> Result<(), WsClientError> {
         let challenge = self
-            .wait_for_auth_challenge(Duration::from_secs(AUTH_CHALLENGE_TIMEOUT_SECS))
+            .auth_challenge(Duration::from_secs(AUTH_CHALLENGE_TIMEOUT_SECS))
             .await?;
-
         let auth_event = build_auth_event(&challenge, &self.relay_url, keys, auth_tag)?;
+        self.authenticate_with_event(auth_event).await
+    }
+
+    /// Waits up to `timeout_dur` for the relay's NIP-42 AUTH challenge and
+    /// returns it for external signing.
+    ///
+    /// Use this together with [`Self::authenticate_with_event`] when the AUTH
+    /// event must be signed by something other than a local [`Keys`] pair —
+    /// for example an ephemeral NIP-AB pairing session key. Callers with
+    /// plain [`Keys`] should prefer [`Self::authenticate`].
+    pub async fn auth_challenge(&mut self, timeout_dur: Duration) -> Result<String, WsClientError> {
+        self.wait_for_auth_challenge(timeout_dur).await
+    }
+
+    /// Completes NIP-42 authentication with a pre-signed AUTH event.
+    ///
+    /// Sends the event as an `["AUTH", …]` frame and waits for the relay's OK
+    /// response. The event must sign the challenge returned by
+    /// [`Self::auth_challenge`] for this connection.
+    pub async fn authenticate_with_event(
+        &mut self,
+        auth_event: Event,
+    ) -> Result<(), WsClientError> {
         let event_id = auth_event.id.to_hex();
 
         self.send_raw(&json!(["AUTH", auth_event])).await?;
@@ -109,6 +131,30 @@ impl NostrWsConnection {
             return Ok(msg);
         }
         self.recv_one(timeout_dur).await
+    }
+
+    /// Wait for a subscription's end-of-stored-events marker without losing
+    /// events that arrive before the marker.
+    pub async fn wait_for_eose(
+        &mut self,
+        subscription_id: &str,
+        timeout_dur: Duration,
+    ) -> Result<(), WsClientError> {
+        let deadline = tokio::time::Instant::now() + timeout_dur;
+        loop {
+            let remaining = deadline
+                .checked_duration_since(tokio::time::Instant::now())
+                .unwrap_or(Duration::ZERO);
+            if remaining.is_zero() {
+                return Err(WsClientError::Timeout);
+            }
+            match self.recv_one(remaining).await? {
+                RelayMessage::Eose {
+                    subscription_id: id,
+                } if id == subscription_id => return Ok(()),
+                message => self.buffer.push_back(message),
+            }
+        }
     }
 
     /// Closes the WebSocket connection gracefully.

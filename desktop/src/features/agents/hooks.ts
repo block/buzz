@@ -39,6 +39,7 @@ import {
   saveCustomHarness,
   updateManagedAgent,
 } from "@/shared/api/tauri";
+import { listExecutionNodes } from "@/shared/api/tauriExecution";
 import type { HarnessDefinitionInput } from "@/shared/api/tauri";
 import {
   setManagedAgentAutoRestart,
@@ -112,6 +113,7 @@ export const acpRuntimesQueryKey = ["acp-runtimes"] as const;
 export const acpAuthMethodsQueryKey = ["acp-auth-methods"] as const;
 export const managedAgentPrereqsQueryKey = ["managed-agent-prereqs"] as const;
 export const backendProvidersQueryKey = ["backend-providers"] as const;
+export const executionNodesQueryKey = ["execution-nodes"] as const;
 export const gitBashPrerequisiteQueryKey = ["git-bash-prerequisite"] as const;
 
 type InvalidateAgentQueriesOptions = {
@@ -281,6 +283,17 @@ export function useBackendProvidersQuery(options?: { enabled?: boolean }) {
     queryKey: backendProvidersQueryKey,
     queryFn: discoverBackendProviders,
     staleTime: 30_000,
+  });
+}
+
+export function useExecutionNodesQuery(options?: { enabled?: boolean }) {
+  return useQuery({
+    enabled: options?.enabled ?? true,
+    queryKey: executionNodesQueryKey,
+    queryFn: listExecutionNodes,
+    staleTime: 15_000,
+    refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
   });
 }
 

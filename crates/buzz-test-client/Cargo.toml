@@ -22,7 +22,10 @@ tracing-subscriber = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 url = { workspace = true }
-rustls = "0.23"
+# `ring` is used directly by src/bin/mention.rs; without the explicit feature
+# a standalone `cargo build -p buzz-test-client` fails (workspace builds only
+# pass via feature unification with other members).
+rustls = { version = "0.23", features = ["ring"] }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }

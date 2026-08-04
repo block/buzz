@@ -63,6 +63,7 @@ import {
   buildInstanceInputForDefinition,
   type BackendIntent,
 } from "../lib/instanceInputForDefinition";
+import { createAndDeployExecutionNodeAgent } from "../lib/createAndDeployExecutionNodeAgent";
 
 type PersonaFeedbackSurface = "catalog" | "library";
 
@@ -237,6 +238,30 @@ export function usePersonaActions() {
           setPersonaDialogState(null);
           return true;
         }
+        if (startIntent?.type === "execution-node") {
+          const agentInput = await buildInstanceInputForDefinition(
+            persona,
+            runtime,
+            undefined,
+            startIntent,
+          );
+          const deployed = await createAndDeployExecutionNodeAgent({
+            input: agentInput,
+            createManagedAgent: createAgentMutation.mutateAsync,
+            nodeId: startIntent.nodeId,
+            channelId: targetChannel?.id,
+          });
+          await createdAgentAttachment.presentCreatedAgent(
+            deployed,
+            targetChannel,
+          );
+          setPersonaNoticeMessage(
+            `Deployed ${persona.displayName} to the execution node.`,
+          );
+          setPersonaDialogState(null);
+          return true;
+        }
+
         const agentInput = await buildInstanceInputForDefinition(
           persona,
           runtime,

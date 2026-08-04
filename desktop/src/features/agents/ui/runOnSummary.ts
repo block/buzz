@@ -18,6 +18,7 @@ export type RunOnConfigRow = {
 
 export type RunOnSummary =
   | { location: "local" }
+  | { location: "execution-node"; nodeId: string }
   | { location: "provider"; providerId: string; rows: RunOnConfigRow[] };
 
 /**
@@ -139,6 +140,11 @@ function compareKeys(a: string, b: string): number {
  */
 export function summarizeRunOn(backend: ManagedAgentBackend): RunOnSummary {
   if (backend.type === "local") return { location: "local" };
+  // Execution-node agents keep runtime details on the node ("keep secrets
+  // out of configuration") — there are no saved config rows to show.
+  if (backend.type === "execution_node") {
+    return { location: "execution-node", nodeId: backend.nodeId };
+  }
   const rows = Object.entries(backend.config ?? {})
     .sort(([a], [b]) => compareKeys(a, b))
     .map(([key, value]): RunOnConfigRow => {

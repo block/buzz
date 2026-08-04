@@ -1,0 +1,196 @@
+# syntax=docker/dockerfile:1.7
+#
+# Buzz agent body image — the remote workload run by the buzz-node Docker
+# substrate. Builds the `sprig` multicall binary (ACP harness + agent +
+# developer MCP in one ELF; see crates/sprig) and installs it with its
+# personality symlinks.
+#
+# The image comes in per-runtime variants selected by the RUNTIME build arg:
+#
+#   RUNTIME=none   (default) slim image: sprig + git + bash + CA certs only.
+#                  Runs the bundled `buzz-agent` runtime.
+#   RUNTIME=goose  slim base + the Goose CLI.
+#   RUNTIME=claude slim base + Node.js + the Claude Code CLI + the
+#                  @agentclientprotocol/claude-agent-acp npm adapter.
+#   RUNTIME=codex  slim base + Node.js + the Codex CLI + the
+#                  @agentclientprotocol/codex-acp npm adapter.
+#
+# Each variant layers exactly one runtime of the shared catalog
+# (crates/buzz-node/src/substrate/env.rs, mirroring
+# desktop/src-tauri/src/managed_agents/discovery.rs) on top of the same slim
+# base, installed with the SAME official installers the desktop's
+# auto-install runs; nothing beyond sprig is built here. All layers up to the
+# first RUNTIME reference are byte-identical across variants, so Docker
+# shares their storage between variants on the same host. Build via
+# `just agent-image [runtime]` (tags buzz-agent:local for the slim default,
+# buzz-agent:<runtime> for variants — the tags the buzz-node docker substrate
+# resolves per workload runtime).
+#
+# The image is configuration-free: the node injects everything via env vars
+# (BUZZ_PRIVATE_KEY, BUZZ_RELAY_URL, BUZZ_AUTH_TAG, BUZZ_ACP_*) at container
+# start.
+#
+# Base image reasoning:
+# - Builder is rust:1.95-bookworm (glibc), matching the relay Dockerfile.
+#   The workspace's native deps (ring, secp256k1) and cargo-chef caching are
+#   already proven on glibc here; a musl/alpine builder would make this the
+#   only musl artifact in the repo for a modest size win.
+# - Runtime is debian-slim, not distroless/scratch: buzz-dev-mcp's shell tool
+#   spawns `bash` (present in debian-slim), agents do git work through it
+#   (git-credential-nostr / git-sign-nostr are personalities of the same
+#   binary, shimmed onto PATH at runtime by buzz-dev-mcp itself, but `git`
+#   proper must be on PATH), and git-over-https needs system CA roots.
+#   Relay wss:// TLS uses rustls with compiled-in webpki roots, so
+#   ca-certificates is for git/subprocess traffic. Everything else is the
+#   single stripped sprig binary plus three symlinks.
+
+ARG RUST_VERSION=1.95
+ARG DEBIAN_VERSION=bookworm
+
+# Which single ACP runtime to layer on top of the slim base:
+# none (default) | goose | claude | codex.
+ARG RUNTIME=none
+
+# Optional extra CA bundle for builds behind a TLS-intercepting corporate proxy
+# (same mechanism as the relay Dockerfile; empty default = no-op).
+ARG EXTRA_CA_CERTS=
+
+# ─── Stage 1: cargo-chef base ───────────────────────────────────────────────
+FROM rust:${RUST_VERSION}-${DEBIAN_VERSION} AS chef
+# Trust an optional corporate-proxy CA before any network fetch (no-op if unset).
+ARG EXTRA_CA_CERTS
+COPY --chmod=0644 ${EXTRA_CA_CERTS:-Dockerfile.agent} /tmp/extra-ca/src
+RUN if [ -n "${EXTRA_CA_CERTS}" ]; then \
+        cp /tmp/extra-ca/src /usr/local/share/ca-certificates/extra-proxy-ca.crt \
+        && update-ca-certificates; \
+    fi
+ENV CARGO_HTTP_CAINFO=/etc/ssl/certs/ca-certificates.crt
+RUN cargo install cargo-chef --locked --version 0.1.71
+WORKDIR /build
+
+# ─── Stage 2: plan dependency graph ─────────────────────────────────────────
+# Only the manifests are needed to compute the recipe; this layer rebuilds
+# only when Cargo.{toml,lock} or crate manifests change, not on every source
+# edit.
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+# ─── Stage 3: cook dependencies, then build the binary ──────────────────────
+FROM chef AS builder
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        pkg-config \
+        libssl-dev \
+        ca-certificates \
+        git \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=planner /build/recipe.json recipe.json
+# Cook the full workspace recipe — sprig's deps include workspace siblings, so
+# scoping to -p sprig misses transitive deps and re-builds them later.
+RUN cargo chef cook --release --recipe-path recipe.json
+COPY . .
+RUN cargo build --release --locked -p sprig --bin sprig \
+    && strip target/release/sprig
+
+# ─── Stage 4: runtime ───────────────────────────────────────────────────────
+FROM debian:${DEBIAN_VERSION}-slim AS runtime
+
+# OCI annotations: org.opencontainers.image.source links the image to this
+# repo on GHCR so it inherits the repo's visibility.
+LABEL org.opencontainers.image.title="Buzz Agent" \
+      org.opencontainers.image.description="Buzz remote agent body — sprig ACP harness, agent, and developer MCP" \
+      org.opencontainers.image.source="https://github.com/block/buzz" \
+      org.opencontainers.image.url="https://github.com/block/buzz" \
+      org.opencontainers.image.documentation="https://github.com/block/buzz#readme" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
+# Layer order below is cacheability order: OS deps (rarest changes) →
+# per-RUNTIME variant installs → the sprig binary (changes on every source
+# edit) last.
+
+# Slim base: OS deps + the non-root user. bash for buzz-dev-mcp's shell tool,
+# git for agent git work, ca-certificates for TLS. This layer never
+# references RUNTIME, so it is byte-identical across every variant.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        git \
+        bash \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 1000 buzz \
+    && useradd  --system --uid 1000 --gid 1000 --home-dir /home/buzz \
+                --create-home --shell /usr/sbin/nologin buzz \
+    && mkdir -p /work && chown buzz:buzz /work
+
+# ─── Per-RUNTIME variant ─────────────────────────────────────────────────────
+ARG RUNTIME
+
+# Variant tooling (root): curl/bzip2/xz for the official installers, plus
+# Node.js LTS via nodesource — but ONLY where an npm ACP adapter needs it
+# (Debian bookworm's own nodejs is 18.x, past upstream EOL). The slim image
+# and the goose variant carry no Node, and the slim image carries none of
+# these download tools at all.
+RUN case "${RUNTIME}" in \
+        none) : ;; \
+        goose) \
+            apt-get update \
+            && apt-get install -y --no-install-recommends curl bzip2 xz-utils \
+            && rm -rf /var/lib/apt/lists/* ;; \
+        claude|codex) \
+            apt-get update \
+            && apt-get install -y --no-install-recommends curl bzip2 xz-utils \
+            && curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - \
+            && apt-get install -y --no-install-recommends nodejs \
+            && rm -rf /var/lib/apt/lists/* ;; \
+        *) echo "unsupported RUNTIME '${RUNTIME}' (expected none|goose|claude|codex)" >&2; exit 1 ;; \
+    esac
+
+# Runtime CLI, installed with the SAME official installer the desktop
+# auto-install runs (see KNOWN_ACP_RUNTIMES in
+# desktop/src-tauri/src/managed_agents/discovery.rs). The installers install
+# into the invoking user's home ($HOME/.local/bin), so they run as the buzz
+# user; that directory is appended to the image PATH below. The docker
+# substrate points CLAUDE_CODE_EXECUTABLE at the claude path installed here
+# (crates/buzz-node/src/substrate/docker.rs, CONTAINER_CLAUDE_CLI).
+USER buzz:buzz
+ENV HOME=/home/buzz
+# The installers download into the working directory, which must therefore be
+# writable by the buzz user (the goose script, for one, fails silently in /).
+WORKDIR /home/buzz
+RUN case "${RUNTIME}" in \
+        goose) \
+            curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh \
+            | CONFIGURE=false bash ;; \
+        claude) curl -fsSL https://claude.ai/install.sh | bash ;; \
+        codex) curl -fsSL https://chatgpt.com/codex/install.sh | sh ;; \
+        *) : ;; \
+    esac
+USER root
+ENV PATH="/home/buzz/.local/bin:${PATH}"
+
+# npm ACP adapter fronting the runtime CLI (global, root-owned) — claude and
+# codex variants only.
+RUN case "${RUNTIME}" in \
+        claude) npm install -g @agentclientprotocol/claude-agent-acp && npm cache clean --force ;; \
+        codex) npm install -g @agentclientprotocol/codex-acp && npm cache clean --force ;; \
+        *) : ;; \
+    esac
+
+# Multicall binary + personality symlinks. buzz-dev-mcp shims its helper
+# names (rg, tree, buzz, git-credential-nostr, git-sign-nostr) onto PATH at
+# runtime by symlinking back to this same binary.
+COPY --from=builder /build/target/release/sprig /usr/local/bin/sprig
+RUN ln -s sprig /usr/local/bin/buzz-acp \
+    && ln -s sprig /usr/local/bin/buzz-agent \
+    && ln -s sprig /usr/local/bin/buzz-dev-mcp
+
+# Diagnostic marker: which single ACP runtime this image carries.
+LABEL buzz.runtime="${RUNTIME}"
+ENV BUZZ_IMAGE_RUNTIME="${RUNTIME}"
+
+USER buzz:buzz
+WORKDIR /work
+
+ENTRYPOINT ["/usr/local/bin/buzz-acp"]

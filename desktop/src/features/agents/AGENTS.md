@@ -154,6 +154,13 @@ with a TypeScript lookup table or an id comparison in a component.
    expose `respond-to`, `allowlist`, Nostr, or harness jargon in primary UI
    copy.
 
+12. **Execution-node deployments retain the managed-agent contract.** An
+   execution-node backend is a first-class managed-agent backend, not a
+   persona-only shortcut. Create the managed-agent record first, then deploy
+   its public identity and persisted configuration through the execution-node
+   command. Keep the node workload ID in `backendAgentId` so deletion can
+   remove the remote workload before deleting the local record.
+
 ## The tests that enforce this
 
 - `lib/agentConfigCore.test.mjs` — field model per harness × scope, clearing

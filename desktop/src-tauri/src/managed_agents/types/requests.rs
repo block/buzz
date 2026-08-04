@@ -167,6 +167,11 @@ pub struct CreateManagedAgentRequest {
     pub avatar_url: Option<String>,
     pub model: Option<String>,
     pub provider: Option<String>,
+    /// Runtime selected for an execution-node body. The managed-agent record
+    /// is the source of truth after creation; remote deploy never accepts a
+    /// replacement runtime from a later IPC call.
+    #[serde(default)]
+    pub runtime: Option<String>,
     /// Environment variables for this agent. Layered on top of persona env.
     #[serde(default)]
     pub env_vars: BTreeMap<String, String>,
@@ -253,6 +258,33 @@ pub struct UpdateManagedAgentRequest {
     /// normalized server-side).
     #[serde(default)]
     pub respond_to_allowlist: Option<Vec<String>>,
+}
+
+/// Request to move an existing managed agent to a different backend.
+///
+/// A backend change is a lifecycle transition, not a field patch — it is
+/// deliberately NOT part of [`UpdateManagedAgentRequest`], whose contract is
+/// "save fields, never touch running bodies". See
+/// `commands::agent_backend::change_managed_agent_backend` for the
+/// teardown-then-adopt semantics.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeManagedAgentBackendRequest {
+    pub pubkey: String,
+    /// The backend to adopt. Same wire shape as
+    /// [`CreateManagedAgentRequest::backend`] (`nodeId` camelCase for
+    /// execution nodes).
+    pub backend: BackendKind,
+    /// Runtime id to persist for execution-node targets — the remote deploy
+    /// payload requires one (`WorkloadSpec::agent`). Absent = keep the
+    /// record's stored runtime. Ignored for local/provider targets.
+    #[serde(default)]
+    pub runtime: Option<String>,
+    /// Acknowledge that a deployed legacy provider body cannot be torn down
+    /// remotely (the provider protocol has no undeploy) and will be orphaned.
+    /// Mirrors `delete_managed_agent`'s `force_remote_delete` invariant.
+    #[serde(default)]
+    pub force: bool,
 }
 
 #[cfg(test)]

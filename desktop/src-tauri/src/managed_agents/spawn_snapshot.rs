@@ -32,7 +32,7 @@ use serde::Serialize;
 
 use super::{
     effective_config::{resolve_effective_config, EffectiveConfigResult},
-    known_acp_runtime, normalize_agent_args,
+    normalize_agent_args,
     persona_events::preview_prospective_persona_snapshot,
     readiness::EffectiveHarnessDescriptor,
     runtime::{resolve_session_title, SESSION_TITLE_ENV_VAR},
@@ -68,6 +68,10 @@ pub(crate) struct SpawnConfigInputs<'a> {
     pub descriptor: &'a EffectiveHarnessDescriptor,
     /// Resolved workspace/pair relay — never the record's legacy pin.
     pub relay_url: &'a str,
+    /// The launch contract's MCP command (`launch::effective_mcp_command`) —
+    /// taken as an input, not re-derived, so the snapshot captures the value
+    /// that actually fed the body.
+    pub mcp_command: Option<&'a str>,
     pub team_instructions: Option<&'a str>,
     pub system_prompt: Option<&'a str>,
     pub model: Option<&'a str>,
@@ -132,6 +136,7 @@ impl SpawnConfigSnapshot {
             record,
             descriptor,
             relay_url,
+            mcp_command,
             team_instructions,
             system_prompt,
             model,
@@ -141,10 +146,7 @@ impl SpawnConfigSnapshot {
             acp_command: record.acp_command.clone(),
             command: descriptor.command.clone(),
             args: descriptor.args.clone(),
-            mcp_command: known_acp_runtime(&descriptor.command)
-                .and_then(|runtime| runtime.mcp_command)
-                .unwrap_or("")
-                .to_string(),
+            mcp_command: mcp_command.unwrap_or("").to_string(),
             env: descriptor.env.clone(),
             relay_url: relay_url.to_string(),
             team_instructions: team_instructions.map(str::to_string),
@@ -252,6 +254,8 @@ pub(crate) fn prospective_spawn_config_snapshot(
         // Resolved, not stored: every record spawns on the workspace relay
         // (legacy pins ignored), so a workspace relay change must badge.
         relay_url: &crate::relay::effective_agent_relay_url(&record.relay_url, workspace_relay),
+        // The same derivation the launch contract carries.
+        mcp_command: super::launch::effective_mcp_command(&descriptor.command).as_deref(),
         team_instructions: effective_team_instructions(record, teams).as_deref(),
         system_prompt: prompt.as_deref(),
         model: model.as_deref(),

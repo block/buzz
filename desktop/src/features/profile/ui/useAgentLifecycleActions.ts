@@ -14,12 +14,14 @@ export function useAgentLifecycleActions({
   channels,
   managedAgent,
   relayAgents,
+  refreshManagedAgents,
   startManagedAgent,
   stopManagedAgent,
 }: {
   channels: readonly Channel[] | undefined;
   managedAgent: ManagedAgent | undefined;
   relayAgents: readonly RelayAgent[] | undefined;
+  refreshManagedAgents?: () => Promise<unknown>;
   startManagedAgent: (pubkey: string) => Promise<unknown>;
   stopManagedAgent: (pubkey: string) => Promise<unknown>;
 }) {
@@ -32,6 +34,7 @@ export function useAgentLifecycleActions({
           agent: managedAgent,
           channels: channels ?? [],
           relayAgents: relayAgents ?? [],
+          refreshManagedAgents,
           stopManagedAgent,
         });
         if (managedAgent.backend.type === "local") {
@@ -43,6 +46,7 @@ export function useAgentLifecycleActions({
 
       await startManagedAgentWithRules({
         agent: managedAgent,
+        refreshManagedAgents,
         startManagedAgent,
       });
       toast.success(
@@ -59,6 +63,7 @@ export function useAgentLifecycleActions({
     channels,
     managedAgent,
     relayAgents,
+    refreshManagedAgents,
     startManagedAgent,
     stopManagedAgent,
   ]);
@@ -71,6 +76,7 @@ export function useAgentLifecycleActions({
         agent: managedAgent,
         startManagedAgent,
         stopManagedAgent,
+        refreshManagedAgents,
         onStopped: () => clearActiveTurnsForAgentOnStop(managedAgent.pubkey),
       });
       toast.success(`Restarted ${managedAgent.name}.`);
@@ -79,7 +85,7 @@ export function useAgentLifecycleActions({
         error instanceof Error ? error.message : "Agent restart failed.",
       );
     }
-  }, [managedAgent, startManagedAgent, stopManagedAgent]);
+  }, [managedAgent, refreshManagedAgents, startManagedAgent, stopManagedAgent]);
 
   return { handleAgentPrimaryAction, handleAgentRestart };
 }

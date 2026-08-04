@@ -5,8 +5,14 @@ import {
   applyProbeResult,
   canSubmitWhereToRun,
   emptyWhereToRunDraft,
+  executionNodeRunOnValue,
+  isExecutionNodeRunOn,
+  parseExecutionNodeRunOn,
   providerConfigComplete,
+  resolveBackendChangeIntent,
   resolveBackendIntent,
+  resolveEffectiveBackendChange,
+  whereToRunDraftForBackend,
 } from "./whereToRunIntent.ts";
 
 const probed = {
@@ -61,6 +67,155 @@ test("provider draft resolves with coerced config values", () => {
   });
 });
 
+test("execution-node runOn values round-trip through the shared helpers", () => {
+  const nodeId = "b".repeat(64);
+  const runOn = executionNodeRunOnValue(nodeId);
+  assert.equal(runOn, `execution-node:${nodeId}`);
+  assert.equal(isExecutionNodeRunOn(runOn), true);
+  assert.equal(parseExecutionNodeRunOn(runOn), nodeId);
+  assert.equal(isExecutionNodeRunOn("local"), false);
+  assert.equal(parseExecutionNodeRunOn("blox"), null);
+});
+
+test("execution-node selection is immediately submittable and resolves to a node intent", () => {
+  const draft = {
+    ...emptyWhereToRunDraft,
+    runOn: `execution-node:${"a".repeat(64)}`,
+  };
+  assert.equal(canSubmitWhereToRun(draft), true);
+  assert.deepEqual(resolveBackendIntent(draft), {
+    type: "execution-node",
+    nodeId: "a".repeat(64),
+  });
+});
+
+test("edit draft pre-selects the agent's persisted backend", () => {
+  assert.deepEqual(
+    whereToRunDraftForBackend({ type: "local" }),
+    emptyWhereToRunDraft,
+  );
+  const nodeId = "c".repeat(64);
+  assert.equal(
+    whereToRunDraftForBackend({ type: "execution_node", nodeId }).runOn,
+    executionNodeRunOnValue(nodeId),
+  );
+  assert.equal(
+    whereToRunDraftForBackend({ type: "provider", id: "blox", config: {} })
+      .runOn,
+    "blox",
+  );
+});
+
+test("an unchanged selection resolves to no backend change", () => {
+  const nodeId = "c".repeat(64);
+  assert.equal(
+    resolveBackendChangeIntent(emptyWhereToRunDraft, { type: "local" }),
+    null,
+  );
+  assert.equal(
+    resolveBackendChangeIntent(
+      { ...emptyWhereToRunDraft, runOn: executionNodeRunOnValue(nodeId) },
+      { type: "execution_node", nodeId },
+    ),
+    null,
+  );
+  assert.equal(
+    resolveBackendChangeIntent(providerDraft(), {
+      type: "provider",
+      id: "blox",
+      config: {},
+    }),
+    null,
+  );
+});
+
+test("a changed selection resolves to the target backend, any direction", () => {
+  const nodeId = "c".repeat(64);
+  const nodeDraft = {
+    ...emptyWhereToRunDraft,
+    runOn: executionNodeRunOnValue(nodeId),
+  };
+  // local → node
+  assert.deepEqual(resolveBackendChangeIntent(nodeDraft, { type: "local" }), {
+    type: "execution-node",
+    nodeId,
+  });
+  // node → local (explicit local variant — create encodes local as null)
+  assert.deepEqual(
+    resolveBackendChangeIntent(emptyWhereToRunDraft, {
+      type: "execution_node",
+      nodeId,
+    }),
+    { type: "local" },
+  );
+  // node A → node B
+  const otherNodeId = "d".repeat(64);
+  assert.deepEqual(
+    resolveBackendChangeIntent(nodeDraft, {
+      type: "execution_node",
+      nodeId: otherNodeId,
+    }),
+    { type: "execution-node", nodeId },
+  );
+  // provider → node
+  assert.deepEqual(
+    resolveBackendChangeIntent(nodeDraft, {
+      type: "provider",
+      id: "blox",
+      config: {},
+    }),
+    { type: "execution-node", nodeId },
+  );
+  // local → provider
+  assert.deepEqual(
+    resolveBackendChangeIntent(providerDraft(), { type: "local" }),
+    {
+      type: "provider",
+      id: "blox",
+      config: { region: "us", size: 3 },
+    },
+  );
+});
+
+test("an undeployed execution-node agent converges to a re-deploy on save", () => {
+  const nodeId = "c".repeat(64);
+  const sameNodeDraft = {
+    ...emptyWhereToRunDraft,
+    runOn: executionNodeRunOnValue(nodeId),
+  };
+  // Half-deployed (backend persisted, no confirmed workload): re-deploy.
+  assert.deepEqual(
+    resolveEffectiveBackendChange(sameNodeDraft, {
+      backend: { type: "execution_node", nodeId },
+      backendAgentId: null,
+    }),
+    { type: "execution-node", nodeId },
+  );
+  // Fully deployed and unchanged: still a no-op.
+  assert.equal(
+    resolveEffectiveBackendChange(sameNodeDraft, {
+      backend: { type: "execution_node", nodeId },
+      backendAgentId: "workload-1",
+    }),
+    null,
+  );
+  // A real change wins over the convergence rule.
+  assert.deepEqual(
+    resolveEffectiveBackendChange(emptyWhereToRunDraft, {
+      backend: { type: "execution_node", nodeId },
+      backendAgentId: null,
+    }),
+    { type: "local" },
+  );
+  // Local agents never re-deploy.
+  assert.equal(
+    resolveEffectiveBackendChange(emptyWhereToRunDraft, {
+      backend: { type: "local" },
+      backendAgentId: null,
+    }),
+    null,
+  );
+});
 // ── applyProbeResult: probe resolution must merge, not overwrite ─────────────
 //
 // Pins the seam that fixed the "Typewriter Eraser" (agent-create dialog's

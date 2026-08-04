@@ -249,7 +249,7 @@ fn update_request_provider_tristate_value_means_set() {
     );
 }
 
-use super::{CreateManagedAgentRequest, RelayMeshConfig};
+use super::{BackendKind, CreateManagedAgentRequest, RelayMeshConfig};
 
 /// Wire-shape test: the create request arrives from TS as camelCase
 /// (`relayMesh: { modelRef }`). `rename_all = "camelCase"` on
@@ -285,6 +285,105 @@ fn relay_mesh_config_round_trips_snake_case() {
     assert_eq!(json, r#"{"model_ref":"Qwen3"}"#);
     let back: RelayMeshConfig = serde_json::from_str(&json).unwrap();
     assert_eq!(back, config);
+}
+
+/// The entire TS surface spells the execution-node field `nodeId`
+/// (`ManagedAgentBackend` in `shared/api/types.ts`), and the outer
+/// `rename_all = "snake_case"` on `BackendKind` only renames variant tags —
+/// so the variant carries its own `rename_all = "camelCase"`. Round trip
+/// must stay on `nodeId` in BOTH directions: create-request deserialization
+/// (TS → Rust) and summary serialization (Rust → TS `agent.backend.nodeId`).
+#[test]
+fn backend_kind_execution_node_round_trips_camel_case() {
+    let backend = BackendKind::ExecutionNode {
+        node_id: "f".repeat(64),
+    };
+    let json = serde_json::to_string(&backend).unwrap();
+    assert_eq!(
+        json,
+        format!(
+            r#"{{"type":"execution_node","nodeId":"{}"}}"#,
+            "f".repeat(64)
+        )
+    );
+    let back: BackendKind = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, backend);
+}
+
+/// Managed-agent records persisted before the camelCase rename stored the
+/// field as `node_id` (`BackendKind` lives inside `ManagedAgentRecord` JSON).
+/// The `alias = "node_id"` keeps those stores loading; the next write
+/// migrates them to `nodeId`.
+#[test]
+fn backend_kind_execution_node_accepts_legacy_snake_case_node_id() {
+    let backend: BackendKind =
+        serde_json::from_str(r#"{"type":"execution_node","node_id":"abc123"}"#)
+            .expect("legacy persisted node_id spelling should still deserialize");
+    assert_eq!(
+        backend,
+        BackendKind::ExecutionNode {
+            node_id: "abc123".to_string()
+        }
+    );
+}
+
+/// Pin the exact create payload the frontend sends for a remote deploy —
+/// `createManagedAgent` in `shared/api/tauri.ts` passes `input.backend`
+/// through verbatim as `{ type: "execution_node", nodeId }`. If the variant
+/// rename is dropped, this fails at the Tauri boundary with
+/// `missing field 'node_id'` and no execution-node agent can be created.
+#[test]
+fn create_request_deserializes_camel_case_execution_node_backend() {
+    let request: CreateManagedAgentRequest = serde_json::from_str(
+        r#"{
+            "name": "remote-agent",
+            "backend": { "type": "execution_node", "nodeId": "abc123" }
+        }"#,
+    )
+    .expect("camelCase execution-node backend payload from TS should deserialize");
+    assert_eq!(
+        request.backend,
+        BackendKind::ExecutionNode {
+            node_id: "abc123".to_string()
+        }
+    );
+}
+
+/// The edit dialog's backend swap sends the same camelCase execution-node
+/// shape as create (`{ backend: { type: "execution_node", nodeId } }`),
+/// plus the runtime the remote deploy payload requires. If the nested
+/// variant rename is dropped, the swap fails at the Tauri boundary and no
+/// agent can be moved onto a node.
+#[test]
+fn change_backend_request_deserializes_camel_case_execution_node() {
+    let request: super::ChangeManagedAgentBackendRequest = serde_json::from_str(
+        r#"{
+            "pubkey": "abcd1234",
+            "backend": { "type": "execution_node", "nodeId": "abc123" },
+            "runtime": "goose"
+        }"#,
+    )
+    .expect("camelCase execution-node swap payload from TS should deserialize");
+    assert_eq!(
+        request.backend,
+        BackendKind::ExecutionNode {
+            node_id: "abc123".to_string()
+        }
+    );
+    assert_eq!(request.runtime.as_deref(), Some("goose"));
+    assert!(!request.force, "absent force must default to false");
+}
+
+/// A swap back to local sends only pubkey + backend — runtime and force are
+/// optional and must default rather than fail deserialization.
+#[test]
+fn change_backend_request_minimal_local_payload_deserializes() {
+    let request: super::ChangeManagedAgentBackendRequest =
+        serde_json::from_str(r#"{ "pubkey": "abcd1234", "backend": { "type": "local" } }"#)
+            .expect("minimal local swap payload should deserialize");
+    assert_eq!(request.backend, BackendKind::Local);
+    assert_eq!(request.runtime, None);
+    assert!(!request.force);
 }
 
 // ── Packs → Teams serde alias backward compatibility ────────────────

@@ -11,7 +11,9 @@ import {
   UserRound,
 } from "lucide-react";
 import * as React from "react";
+import { useExecutionNodesQuery } from "@/features/agents/hooks";
 import { AgentStatusBadge } from "@/features/agents/ui/AgentStatusBadge";
+import type { ExecutionNodeTarget } from "@/shared/api/tauriExecution";
 import { truncatePubkey } from "@/shared/lib/pubkey";
 import { copyTextToClipboard } from "@/shared/lib/clipboard";
 import { PubKey } from "@/shared/ui/PubKey";
@@ -59,6 +61,7 @@ const AGENT_SETTINGS_LABELS = new Set([
   "Who can send instructions",
   "ACP command",
   "MCP command",
+  "Runs on",
   "Start on launch",
 ]);
 const DIAGNOSTICS_LABELS = new Set(["Status", "Last error"]);
@@ -110,11 +113,18 @@ export function useProfileFieldBuckets({
   pubkey: string | null;
   relayAgent: RelayAgent | undefined;
 }) {
+  // Node display names come from announcements; only fetch when the profiled
+  // agent actually runs on an execution node.
+  const executionNodesQuery = useExecutionNodesQuery({
+    enabled: managedAgent?.backend.type === "execution_node",
+  });
+  const executionNodes = executionNodesQuery.data;
   return React.useMemo(() => {
     const metadataFields = [
       ...buildPublicFields({ pubkey, profile, relayAgent, isBot, persona }),
       ...(ownerDisplayName || isOwner === true
         ? buildOwnerFields({
+            executionNodes,
             includeOperationalFields: isOwner === true,
             managedAgent,
             onOpenProfile,
@@ -132,6 +142,7 @@ export function useProfileFieldBuckets({
     ];
     return bucketProfileFields(metadataFields);
   }, [
+    executionNodes,
     isBot,
     isOwner,
     managedAgent,
@@ -217,6 +228,7 @@ export function buildPublicFields({
 }
 
 export function buildOwnerFields({
+  executionNodes,
   includeOperationalFields,
   managedAgent,
   onOpenProfile,
@@ -230,6 +242,7 @@ export function buildOwnerFields({
   presenceStatus,
   relayAgent,
 }: {
+  executionNodes?: readonly ExecutionNodeTarget[];
   includeOperationalFields: boolean;
   managedAgent: ManagedAgent | undefined;
   onOpenProfile?: (pubkey: string) => void;
@@ -378,6 +391,27 @@ export function buildOwnerFields({
   }
 
   if (managedAgent) {
+    const backend = managedAgent.backend;
+    const runsOn =
+      backend.type === "execution_node"
+        ? (() => {
+            const node = executionNodes?.find(
+              (candidate) => candidate.nodeId === backend.nodeId,
+            );
+            return node
+              ? `${node.displayName} (${node.availability})`
+              : `Execution node ${truncatePubkey(backend.nodeId)}`;
+          })()
+        : backend.type === "provider"
+          ? backend.id
+          : "This computer";
+    fields.push({
+      copyValue: backend.type === "execution_node" ? backend.nodeId : undefined,
+      displayValue: runsOn,
+      icon: Server,
+      label: "Runs on",
+      testId: "user-profile-runs-on",
+    });
     fields.push({
       displayValue: managedAgent.startOnAppLaunch ? "Yes" : "No",
       icon: Server,

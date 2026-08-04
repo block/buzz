@@ -6,7 +6,10 @@
 //! helper that identifies the agents to cascade-delete, using plain
 //! in-memory data structures (no `AppHandle` required).
 
-use super::{collect_cascade_pubkeys, collect_remote_deployed, commit_cascade_agents};
+use super::{
+    collect_cascade_pubkeys, collect_execution_node_targets, collect_remote_deployed,
+    commit_cascade_agents,
+};
 use crate::managed_agents::{BackendKind, ManagedAgentRecord, RespondTo};
 use std::collections::BTreeMap;
 use std::collections::HashSet;
@@ -22,7 +25,7 @@ fn make_agent(
         persona_id: persona_id.map(str::to_string),
         private_key_nsec: "".to_string(),
         auth_tag: None,
-        relay_url: "ws://localhost:3000".to_string(),
+        relay_url: "wss://relay.example".to_string(),
         avatar_url: None,
         acp_command: "buzz-acp".to_string(),
         agent_command: "buzz-agent".to_string(),
@@ -200,5 +203,59 @@ fn remote_deployed_cascade_target_blocks_delete() {
         blockers,
         vec!["Deployed Agent".to_string()],
         "only the deployed provider agent blocks the cascade"
+    );
+}
+
+/// Execution-node cleanup is planned from the already validated cascade, so a
+/// rejected persona deletion cannot remove an unrelated node workload.
+#[test]
+fn execution_cleanup_targets_only_linked_execution_agents() {
+    let mut execution = make_agent("pk-execution", Some(PERSONA_ID), None);
+    execution.backend = BackendKind::ExecutionNode {
+        node_id: "node-a".to_string(),
+    };
+    execution.backend_agent_id = Some("00000000-0000-4000-8000-000000000001".to_string());
+    let mut other = make_agent("pk-other", Some("custom:other"), None);
+    other.backend = BackendKind::ExecutionNode {
+        node_id: "node-b".to_string(),
+    };
+    other.backend_agent_id = Some("workload-b".to_string());
+    let agents = vec![execution, other];
+    let cascade: HashSet<String> = collect_cascade_pubkeys(&agents, PERSONA_ID)
+        .into_iter()
+        .collect();
+
+    assert_eq!(
+        collect_execution_node_targets(&agents, &cascade).expect("execution targets"),
+        vec![(
+            "node-a".to_string(),
+            "00000000-0000-4000-8000-000000000001".to_string()
+        )]
+    );
+}
+
+/// A successful remote deploy can precede the local backend-id projection. In
+/// that window cleanup must derive the same stable workload identity instead
+/// of silently skipping the node workload.
+#[test]
+fn execution_cleanup_derives_workload_id_before_projection() {
+    let pubkey = "a".repeat(64);
+    let mut execution = make_agent(&pubkey, Some(PERSONA_ID), None);
+    execution.backend = BackendKind::ExecutionNode {
+        node_id: "node-a".to_string(),
+    };
+    let agents = vec![execution];
+    let cascade: HashSet<String> = collect_cascade_pubkeys(&agents, PERSONA_ID)
+        .into_iter()
+        .collect();
+    let expected_workload_id =
+        buzz_core_pkg::execution::WorkloadId::stable_for_agent(&pubkey).expect("workload id");
+
+    assert_eq!(
+        collect_execution_node_targets(&agents, &cascade).expect("execution targets"),
+        vec![(
+            "node-a".to_string(),
+            expected_workload_id.as_str().to_string()
+        )]
     );
 }

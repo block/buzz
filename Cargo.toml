@@ -19,6 +19,7 @@ members = [
     "crates/buzz-media",
     "crates/buzz-cli",
     "crates/buzz-pairing-cli",
+    "crates/buzz-node",
     "crates/buzz-sdk",
     "crates/buzz-persona",
     "crates/git-credential-nostr",

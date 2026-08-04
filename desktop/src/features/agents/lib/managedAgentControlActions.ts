@@ -1,4 +1,9 @@
 import { sendChannelMessage } from "@/shared/api/tauri";
+import {
+  restartExecutionWorkload as restartRemoteExecutionWorkload,
+  startExecutionWorkload,
+  stopExecutionWorkload,
+} from "@/shared/api/tauriExecution";
 import type {
   Channel,
   ManagedAgent,
@@ -15,12 +20,19 @@ type DeleteManagedAgentInput = {
 type StartManagedAgent = (pubkey: string) => Promise<unknown>;
 type StopManagedAgent = (pubkey: string) => Promise<unknown>;
 type DeleteManagedAgent = (input: DeleteManagedAgentInput) => Promise<unknown>;
+type ExecutionWorkloadCommand = (input: {
+  nodeId: string;
+  workloadId: string;
+}) => Promise<unknown>;
+type RestartExecutionWorkload = ExecutionWorkloadCommand;
 
 type ManagedAgentChannelContext = {
   channels: readonly Channel[];
   preferredChannelId?: string | null;
   relayAgents: readonly RelayAgent[];
 };
+
+type RefreshManagedAgents = () => Promise<unknown>;
 
 type ManagedAgentActionContext = ManagedAgentChannelContext & {
   presenceLookup?: PresenceLookup | null;
@@ -31,12 +43,44 @@ export type ManagedAgentActionResult = {
   noticeMessage?: string;
 };
 
+/**
+ * Execution-node agents share one control shape: guard that the agent has a
+ * deployed workload, run the node-side workload command, then refresh the
+ * managed agent list. Returns `false` when the agent is not on an execution
+ * node so callers fall through to their local/provider paths.
+ */
+async function runExecutionNodeWorkloadCommand({
+  agent,
+  command,
+  refreshManagedAgents,
+}: {
+  agent: ManagedAgent;
+  command: ExecutionWorkloadCommand;
+  refreshManagedAgents?: RefreshManagedAgents;
+}): Promise<boolean> {
+  if (agent.backend.type !== "execution_node") {
+    return false;
+  }
+  if (!agent.backendAgentId) {
+    throw new Error("Agent has not been deployed to its execution node");
+  }
+  await command({
+    nodeId: agent.backend.nodeId,
+    workloadId: agent.backendAgentId,
+  });
+  await refreshManagedAgents?.();
+  return true;
+}
+
 export function isManagedAgentActive(agent: Pick<ManagedAgent, "status">) {
   return agent.status === "running" || agent.status === "deployed";
 }
 
 export function getManagedAgentPrimaryActionLabel(agent: ManagedAgent) {
-  if (agent.backend.type === "provider") {
+  if (
+    agent.backend.type === "provider" ||
+    agent.backend.type === "execution_node"
+  ) {
     return isManagedAgentActive(agent) ? "Shutdown" : "Deploy";
   }
 
@@ -78,13 +122,25 @@ export function resolveManagedAgentChannelId(
 export async function startManagedAgentWithRules({
   agent,
   startManagedAgent,
+  refreshManagedAgents,
 }: {
   agent: ManagedAgent;
   startManagedAgent: StartManagedAgent;
+  refreshManagedAgents?: RefreshManagedAgents;
 }) {
   // Relay-mesh agents are no longer blocked here: the backend start preflight
   // (ensure_relay_mesh_for_record) re-resolves a live serve target and dials
   // it, failing with an actionable error when no peer serves the model.
+  if (
+    await runExecutionNodeWorkloadCommand({
+      agent,
+      command: startExecutionWorkload,
+      refreshManagedAgents,
+    })
+  ) {
+    return;
+  }
+
   await startManagedAgent(agent.pubkey);
 }
 
@@ -92,15 +148,29 @@ export async function respawnManagedAgentWithRules({
   agent,
   startManagedAgent,
   stopManagedAgent,
+  restartExecutionWorkload = restartRemoteExecutionWorkload,
   onStopped,
+  refreshManagedAgents,
 }: {
   agent: ManagedAgent;
   startManagedAgent: StartManagedAgent;
   stopManagedAgent: StopManagedAgent;
+  restartExecutionWorkload?: RestartExecutionWorkload;
+  refreshManagedAgents?: RefreshManagedAgents;
   /** Called after a successful stop and before start begins — use this to
    * clear stale working badges at the right boundary. */
   onStopped?: () => void;
 }) {
+  if (
+    await runExecutionNodeWorkloadCommand({
+      agent,
+      command: restartExecutionWorkload,
+      refreshManagedAgents,
+    })
+  ) {
+    return;
+  }
+
   if (agent.backend.type === "local" && isManagedAgentActive(agent)) {
     await stopManagedAgent(agent.pubkey);
     onStopped?.();
@@ -115,9 +185,11 @@ export async function stopManagedAgentWithRules({
   preferredChannelId,
   relayAgents,
   stopManagedAgent,
+  refreshManagedAgents,
 }: {
   agent: ManagedAgent;
   stopManagedAgent: StopManagedAgent;
+  refreshManagedAgents?: RefreshManagedAgents;
 } & ManagedAgentChannelContext): Promise<ManagedAgentActionResult> {
   if (agent.backend.type === "provider") {
     const channelId = resolveManagedAgentChannelId(agent, {
@@ -135,6 +207,16 @@ export async function stopManagedAgentWithRules({
     return {
       noticeMessage: "Shutdown command sent. Agent will stop shortly.",
     };
+  }
+
+  if (
+    await runExecutionNodeWorkloadCommand({
+      agent,
+      command: stopExecutionWorkload,
+      refreshManagedAgents,
+    })
+  ) {
+    return {};
   }
 
   await stopManagedAgent(agent.pubkey);

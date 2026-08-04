@@ -28,6 +28,7 @@ import { useChannelsQuery } from "@/features/channels/hooks";
 import { resolveManagedAgentAvatarUrl } from "./ui/managedAgentAvatar";
 import type { AgentCreateIntent } from "./ui/agentCreateIntent";
 import { editPersonaDialogState } from "./ui/personaDialogState";
+import { createAndDeployExecutionNodeAgent } from "./lib/createAndDeployExecutionNodeAgent";
 import type {
   CreatePersonaInput,
   UpdatePersonaInput,
@@ -205,22 +206,43 @@ export function useAgentManagement() {
       });
 
       if (intent === "definition_start") {
-        const created = await createAgentMutation.mutateAsync(
-          await buildInstanceInputForDefinition(
-            persona,
-            runtime,
-            undefined,
-            backendIntent ?? undefined,
-          ),
-        );
-        if (created.spawnError) throw new Error(created.spawnError);
-        const targetChannel = (channelsQuery.data ?? []).find(
-          (channel) => channel.id === request.request.channelId,
-        );
-        await createdAgentAttachment.presentCreatedAgent(created, {
-          id: request.request.channelId,
-          name: targetChannel?.name ?? "this channel",
-        });
+        if (backendIntent?.type === "execution-node") {
+          const deployed = await createAndDeployExecutionNodeAgent({
+            input: await buildInstanceInputForDefinition(
+              persona,
+              runtime,
+              undefined,
+              backendIntent,
+            ),
+            createManagedAgent: createAgentMutation.mutateAsync,
+            nodeId: backendIntent.nodeId,
+            channelId: request.request.channelId,
+          });
+          const targetChannel = (channelsQuery.data ?? []).find(
+            (channel) => channel.id === request.request.channelId,
+          );
+          await createdAgentAttachment.presentCreatedAgent(deployed, {
+            id: request.request.channelId,
+            name: targetChannel?.name ?? "this channel",
+          });
+        } else {
+          const created = await createAgentMutation.mutateAsync(
+            await buildInstanceInputForDefinition(
+              persona,
+              runtime,
+              undefined,
+              backendIntent ?? undefined,
+            ),
+          );
+          if (created.spawnError) throw new Error(created.spawnError);
+          const targetChannel = (channelsQuery.data ?? []).find(
+            (channel) => channel.id === request.request.channelId,
+          );
+          await createdAgentAttachment.presentCreatedAgent(created, {
+            id: request.request.channelId,
+            name: targetChannel?.name ?? "this channel",
+          });
+        }
       }
 
       await Promise.all([

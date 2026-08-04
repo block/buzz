@@ -1,0 +1,31 @@
+[package]
+name = "buzz-node"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Standalone relay-native Buzz execution node"
+
+[[bin]]
+name = "buzz-node"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = "0.1"
+buzz-core = { workspace = true }
+buzz-ws-client = { workspace = true }
+chrono = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+futures-util = { workspace = true }
+hex = { workspace = true }
+nostr = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+zeroize = { workspace = true }

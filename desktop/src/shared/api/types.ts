@@ -302,7 +302,8 @@ export type ManagedAgentRuntimeStatus = {
 
 export type ManagedAgentBackend =
   | { type: "local" }
-  | { type: "provider"; id: string; config: Record<string, unknown> };
+  | { type: "provider"; id: string; config: Record<string, unknown> }
+  | { type: "execution_node"; nodeId: string };
 
 import type { RestartDiffEntry } from "./restartDiff";
 export type { JsonValue, RestartChange, RestartDiffEntry } from "./restartDiff";
@@ -431,6 +432,8 @@ export type CreateManagedAgentInput = {
   avatarUrl?: string;
   model?: string;
   provider?: string;
+  /** Runtime selected for an execution-node body. */
+  runtime?: string;
   envVars?: Record<string, string>;
   spawnAfterCreate?: boolean;
   startOnAppLaunch?: boolean;

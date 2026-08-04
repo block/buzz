@@ -81,6 +81,52 @@ test("ordinary local agents still start normally", async () => {
   assert.equal(calledWith, "deadbeef".repeat(8));
 });
 
+test("execution-node respawn uses remote restart rather than local start", async () => {
+  const remoteAgent = agent({
+    backend: {
+      type: "execution_node",
+      nodeId: "node-1",
+    },
+    backendAgentId: "workload-1",
+    status: "deployed",
+  });
+  const calls = [];
+
+  await respawnManagedAgentWithRules({
+    agent: remoteAgent,
+    startManagedAgent: async () => calls.push("start"),
+    stopManagedAgent: async () => calls.push("stop"),
+    restartExecutionWorkload: async () => calls.push("restart"),
+    refreshManagedAgents: async () => calls.push("refresh"),
+  });
+
+  assert.deepEqual(calls, ["restart", "refresh"]);
+});
+
+test("execution-node agents without a deployed workload reject instead of running commands", async () => {
+  const undeployedAgent = agent({
+    backend: {
+      type: "execution_node",
+      nodeId: "node-1",
+    },
+    backendAgentId: null,
+  });
+  const calls = [];
+
+  await assert.rejects(
+    respawnManagedAgentWithRules({
+      agent: undeployedAgent,
+      startManagedAgent: async () => calls.push("start"),
+      stopManagedAgent: async () => calls.push("stop"),
+      restartExecutionWorkload: async () => calls.push("restart"),
+      refreshManagedAgents: async () => calls.push("refresh"),
+    }),
+    /has not been deployed to its execution node/,
+  );
+
+  assert.deepEqual(calls, []);
+});
+
 // --- respawnManagedAgentWithRules: stop→clear→start boundary tests -----------
 
 test("test_respawn_stop_success_start_failure_onStopped_still_fires", async () => {

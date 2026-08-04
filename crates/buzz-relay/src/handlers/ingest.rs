@@ -15,7 +15,8 @@ use buzz_core::kind::{
     is_relay_admin_kind, KIND_AGENT_ENGRAM, KIND_AGENT_PROFILE, KIND_AGENT_TURN_METRIC,
     KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_AUTH, KIND_BOOKMARK_LIST, KIND_BOOKMARK_SET,
     KIND_CANVAS, KIND_CONTACT_LIST, KIND_DELETION, KIND_DM_ADD_MEMBER, KIND_DM_HIDE, KIND_DM_OPEN,
-    KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_EVENT_REMINDER, KIND_FOLLOW_SET, KIND_FORUM_COMMENT,
+    KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_EVENT_REMINDER, KIND_EXECUTION_NODE_ANNOUNCEMENT,
+    KIND_EXECUTION_NODE_COMMAND, KIND_EXECUTION_NODE_RECEIPT, KIND_FOLLOW_SET, KIND_FORUM_COMMENT,
     KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP, KIND_GIT_ISSUE, KIND_GIT_PATCH,
     KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE,
     KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN,
@@ -219,6 +220,9 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         }
         // NIP-AM: agent turn metrics are agent-authored global events (encrypted to owner).
         KIND_AGENT_TURN_METRIC => Ok(Scope::MessagesWrite),
+        KIND_EXECUTION_NODE_ANNOUNCEMENT
+        | KIND_EXECUTION_NODE_COMMAND
+        | KIND_EXECUTION_NODE_RECEIPT => Ok(Scope::MessagesWrite),
         // NIP-56 reports are ordinary member writes into the mod-only queue.
         // Ingest persists them to `moderation_reports` and suppresses public
         // storage/fanout; reports are signals, never enforcement triggers.
@@ -468,6 +472,13 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             // NIP-AM: agent turn metrics are owner-scoped global events.
             // Channel identity is encrypted inside the payload — no `h` tag.
             | KIND_AGENT_TURN_METRIC
+            // Execution-node announcements carry their own explicit safe
+            // projection and are never channel-scoped.
+            | KIND_EXECUTION_NODE_ANNOUNCEMENT
+            // Execution commands and receipts are addressed encrypted global
+            // events; channel tags must never route them into a channel.
+            | KIND_EXECUTION_NODE_COMMAND
+            | KIND_EXECUTION_NODE_RECEIPT
             // NIP-PL leases are author-owned, addressable global state.
             | super::push_lease::KIND_PUSH_LEASE
     )
@@ -1825,7 +1836,12 @@ async fn ingest_event_inner(
         ));
     }
 
-    if auth.is_http() && (kind_u32 == KIND_GIFT_WRAP || kind_u32 == KIND_PRESENCE_UPDATE) {
+    if auth.is_http()
+        && (kind_u32 == KIND_GIFT_WRAP
+            || kind_u32 == KIND_PRESENCE_UPDATE
+            || kind_u32 == KIND_EXECUTION_NODE_COMMAND
+            || kind_u32 == KIND_EXECUTION_NODE_RECEIPT)
+    {
         return Err(IngestError::Rejected(format!(
             "invalid: kind {kind_u32} is only accepted via WebSocket"
         )));
@@ -3267,6 +3283,9 @@ mod tests {
             KIND_TEAM,
             KIND_MANAGED_AGENT,
             KIND_AGENT_TURN_METRIC,
+            KIND_EXECUTION_NODE_ANNOUNCEMENT,
+            KIND_EXECUTION_NODE_COMMAND,
+            KIND_EXECUTION_NODE_RECEIPT,
         ];
         for kind in migrated {
             assert!(
@@ -3311,6 +3330,23 @@ mod tests {
             Scope::MessagesWrite,
             "kind:44200 requires MessagesWrite scope"
         );
+    }
+
+    #[test]
+    fn execution_node_events_are_global_messages() {
+        let dummy = make_dummy_event();
+        for kind in [
+            KIND_EXECUTION_NODE_ANNOUNCEMENT,
+            KIND_EXECUTION_NODE_COMMAND,
+            KIND_EXECUTION_NODE_RECEIPT,
+        ] {
+            assert!(is_global_only_kind(kind), "kind {kind} must be global-only");
+            assert!(!requires_h_channel_scope(kind));
+            assert_eq!(
+                required_scope_for_kind(kind, &dummy).ok(),
+                Some(Scope::MessagesWrite)
+            );
+        }
     }
 
     #[test]

@@ -82,11 +82,16 @@ export function resolveStartRuntimeForDefinition(
  *   is true because the preset commands deliberately override the
  *   definition's runtime preference.
  */
-export type BackendIntent = {
-  type: "provider";
-  id: string;
-  config: Record<string, unknown>;
-};
+export type BackendIntent =
+  | {
+      type: "provider";
+      id: string;
+      config: Record<string, unknown>;
+    }
+  | {
+      type: "execution-node";
+      nodeId: string;
+    };
 
 /**
  * The single definition→instance mapping (Phase 1B.3.5 rows 2–4). Every
@@ -135,6 +140,22 @@ export async function buildInstanceInputForDefinition(
         type: "provider",
         id: backendIntent.id,
         config: backendIntent.config,
+      },
+    };
+  }
+
+  if (backendIntent?.type === "execution-node") {
+    return {
+      ...base,
+      runtime: runtime.id,
+      systemPrompt: persona.systemPrompt,
+      model: persona.model ?? undefined,
+      provider: persona.provider ?? undefined,
+      spawnAfterCreate: false,
+      startOnAppLaunch: false,
+      backend: {
+        type: "execution_node",
+        nodeId: backendIntent.nodeId,
       },
     };
   }

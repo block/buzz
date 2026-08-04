@@ -5,6 +5,7 @@ import {
 } from "@/shared/api/tauri";
 import type {
   ManagedAgent,
+  ManagedAgentBackend,
   ManagedAgentRuntimeStatus,
 } from "@/shared/api/types";
 
@@ -45,6 +46,40 @@ export async function setManagedAgentAutoRestart(
     {
       pubkey,
       autoRestartOnConfigChange,
+    },
+  );
+  return fromRawManagedAgent(response);
+}
+
+export type ChangeManagedAgentBackendInput = {
+  pubkey: string;
+  backend: ManagedAgentBackend;
+  /** Runtime id persisted for execution-node targets (the deploy requires one). */
+  runtime?: string;
+  /** Acknowledge orphaning an already-deployed legacy provider body. */
+  force?: boolean;
+};
+
+/**
+ * Move an agent to a different backend. The Rust command tears the old body
+ * down first (stops the local process, or removes the old node's workload
+ * with a confirmed receipt) and then persists the new backend. Execution-node
+ * targets still need the follow-up authoritative deploy — call
+ * `applyManagedAgentBackendChange` (features/agents/lib) instead of using
+ * this directly.
+ */
+export async function changeManagedAgentBackend(
+  input: ChangeManagedAgentBackendInput,
+): Promise<ManagedAgent> {
+  const response = await invokeTauri<RawManagedAgent>(
+    "change_managed_agent_backend",
+    {
+      input: {
+        pubkey: input.pubkey,
+        backend: input.backend,
+        runtime: input.runtime,
+        force: input.force ?? false,
+      },
     },
   );
   return fromRawManagedAgent(response);

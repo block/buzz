@@ -460,8 +460,10 @@ fn deploy_payload_matches_the_shared_full_launch_fixture() {
         &[],
         None,
         Some("gpt-5"),
+        Some("openai"),
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    );
+    )
+    .expect("launch block");
     let agent = deploy_payload_json(
         &record,
         "wss://relay.example".into(),
