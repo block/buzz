@@ -14,24 +14,36 @@
 //! The DB ban row remains the durable backstop: even if a disconnect message is
 //! dropped, the next auth attempt is refused at the auth seam.
 
+use std::sync::Arc;
+
 use buzz_core::{CommunityId, TenantContext};
-use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use crate::community_topics::{
+    run_community_subscriber, CommunityChannelFamily, CommunityTopics, DesiredCommunities,
+};
 use crate::topic::BUZZ_PREFIX;
 
 /// Tenant-local Redis pub/sub channel suffix for connection-control messages.
 pub const CONN_CONTROL_SUFFIX: &str = "conn-control";
 
-/// Pattern the subscriber uses to receive connection-control messages for every
-/// community this pod may hold connections for.
-pub const CONN_CONTROL_PATTERN: &str = "buzz:*:conn-control";
+/// Log label for the connection-control subscriber.
+pub(crate) const CONN_CONTROL_NAME: &str = "conn-control";
 
 /// Redis pub/sub channel for connection-control messages under `ctx`.
 pub fn conn_control_channel(ctx: &TenantContext) -> String {
-    format!("{BUZZ_PREFIX}:{}:{CONN_CONTROL_SUFFIX}", ctx.community())
+    conn_control_channel_for(ctx.community())
+}
+
+/// Redis pub/sub channel for connection-control messages in `community`.
+///
+/// The subscriber needs this without a [`TenantContext`]: it subscribes to the
+/// exact channels of the communities holding live sockets on this pod, which are
+/// known only as ids.
+pub fn conn_control_channel_for(community: CommunityId) -> String {
+    format!("{BUZZ_PREFIX}:{community}:{CONN_CONTROL_SUFFIX}")
 }
 
 /// Parse a connection-control Redis channel into its scoped community id.
@@ -79,72 +91,47 @@ pub struct ScopedConnControl {
     pub command: ConnControl,
 }
 
-/// Initial reconnect backoff (1 second).
-const BACKOFF_INITIAL_SECS: u64 = 1;
-/// Maximum reconnect backoff (30 seconds).
-const BACKOFF_MAX_SECS: u64 = 30;
-
-/// Subscribes to `buzz:*:conn-control` and forwards scoped commands to the
-/// broadcast. Mirrors [`crate::cache_invalidation::run_cache_invalidation_subscriber`]:
-/// a reconnect loop with exponential backoff. Never returns.
+/// Subscribes to the exact `buzz:{community}:conn-control` channels for the
+/// communities holding live sockets on this pod and forwards scoped commands to
+/// the broadcast.
+///
+/// `desired` is re-read on every reconcile, so a community that gains or loses
+/// its last socket converges without any explicit command. Never returns. See
+/// [`crate::community_topics`] for the reconciliation contract.
 pub async fn run_conn_control_subscriber(
     redis_url: String,
     broadcast_tx: broadcast::Sender<ScopedConnControl>,
+    topics: Arc<CommunityTopics>,
+    desired: DesiredCommunities,
 ) {
-    let mut backoff_secs = BACKOFF_INITIAL_SECS;
-
-    loop {
-        match connect_and_subscribe(&redis_url, &broadcast_tx).await {
-            Ok(()) => {
-                backoff_secs = BACKOFF_INITIAL_SECS;
-                tracing::warn!(
-                    "Redis conn-control stream ended (clean disconnect) — reconnecting in {backoff_secs}s"
-                );
-            }
-            Err(e) => {
-                tracing::error!("Redis conn-control error: {e} — reconnecting in {backoff_secs}s");
-            }
-        }
-
-        tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
-        backoff_secs = (backoff_secs * 2).min(BACKOFF_MAX_SECS);
-
-        tracing::info!("Attempting to reconnect to Redis conn-control...");
-    }
+    run_community_subscriber(
+        redis_url,
+        ConnControlFamily { broadcast_tx },
+        topics,
+        desired,
+    )
+    .await;
 }
 
-async fn connect_and_subscribe(
-    redis_url: &str,
-    broadcast_tx: &broadcast::Sender<ScopedConnControl>,
-) -> Result<(), redis::RedisError> {
-    let client = redis::Client::open(redis_url)?;
-    let mut conn = client.get_async_pubsub().await?;
+struct ConnControlFamily {
+    broadcast_tx: broadcast::Sender<ScopedConnControl>,
+}
 
-    conn.psubscribe(CONN_CONTROL_PATTERN).await?;
+impl CommunityChannelFamily for ConnControlFamily {
+    fn channel(&self, community: CommunityId) -> String {
+        conn_control_channel_for(community)
+    }
 
-    tracing::info!("Redis conn-control subscriber connected — listening on {CONN_CONTROL_PATTERN}");
+    fn parse_channel(&self, channel: &str) -> Option<CommunityId> {
+        parse_conn_control_channel(channel)
+    }
 
-    let mut stream = conn.on_message();
-    while let Some(msg) = stream.next().await {
-        let channel = msg.get_channel_name();
-        let Some(community_id) = parse_conn_control_channel(channel) else {
-            tracing::warn!("Received conn-control message on unexpected channel: {channel}");
-            continue;
-        };
-
-        let payload: String = match msg.get_payload() {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!("Failed to get conn-control payload: {e}");
-                continue;
-            }
-        };
-
-        let command: ConnControl = match serde_json::from_str(&payload) {
+    fn deliver(&self, community_id: CommunityId, payload: &str) {
+        let command: ConnControl = match serde_json::from_str(payload) {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!("Failed to deserialize conn-control message: {e}");
-                continue;
+                return;
             }
         };
 
@@ -153,12 +140,10 @@ async fn connect_and_subscribe(
             command,
         };
 
-        if broadcast_tx.send(scoped).is_err() {
+        if self.broadcast_tx.send(scoped).is_err() {
             tracing::trace!("No conn-control receivers — message dropped");
         }
     }
-
-    Ok(())
 }
 
 #[cfg(test)]

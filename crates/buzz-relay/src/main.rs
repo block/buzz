@@ -380,17 +380,9 @@ async fn main() -> anyhow::Result<()> {
     let pubsub_for_sub = Arc::clone(&pubsub);
     tokio::spawn(async move { pubsub_for_sub.run_subscriber().await });
 
-    // Spawn Redis pub/sub subscriber for cross-pod cache-key invalidation.
-    // Membership / visibility changes on other pods are received here and the
-    // matching local moka caches are dropped (via the consumer loop below).
-    let pubsub_for_cache = Arc::clone(&pubsub);
-    tokio::spawn(async move { pubsub_for_cache.run_cache_invalidation_subscriber().await });
-
-    // Spawn Redis pub/sub subscriber for cross-pod connection-control commands.
-    // Bans recorded on other pods are received here and applied to any local
-    // sockets (via the consumer loop below), enforcing live disconnect fan-out.
-    let pubsub_for_conn_ctrl = Arc::clone(&pubsub);
-    tokio::spawn(async move { pubsub_for_conn_ctrl.run_conn_control_subscriber().await });
+    // The two community-scoped subscribers (cache invalidation, connection
+    // control) are spawned later, alongside their consumer loops: each needs a
+    // desired-community closure read off `AppState`, which does not exist yet.
 
     let auth = AuthService::new(config.auth.clone());
 
@@ -875,6 +867,21 @@ async fn main() -> anyhow::Result<()> {
     // changes) and apply the matching local moka drop. Uses the `*_local` drop
     // variants so a received drop is never re-published.
     {
+        // Exact per-community subscriptions, driven by cache residency: this pod
+        // must keep hearing a community's invalidations for as long as it can
+        // still serve a cached authorization decision under it. Reading the
+        // residency set through a closure (rather than snapshotting it) is what
+        // makes the subscriber level-triggered — see `buzz_pubsub::community_topics`.
+        let residency = Arc::clone(&state.cache_residency);
+        let pubsub_for_cache = Arc::clone(&state.pubsub);
+        tokio::spawn(async move {
+            pubsub_for_cache
+                .run_cache_invalidation_subscriber(Arc::new(move || {
+                    residency.resident_communities()
+                }))
+                .await
+        });
+
         let state_for_cache = Arc::clone(&state);
         let mut rx = state_for_cache.pubsub.subscribe_cache_invalidations();
         tokio::spawn(async move {
@@ -926,6 +933,17 @@ async fn main() -> anyhow::Result<()> {
     // ban row is the durable backstop; even a dropped command still refuses the
     // banned member's next auth attempt at the auth seam.
     {
+        // Exact per-community subscriptions, driven by connection ownership:
+        // this pod only needs a community's disconnect commands while it holds
+        // a socket a remote ban could have to close.
+        let registry = Arc::clone(&state.community_connections);
+        let pubsub_for_conn_ctrl = Arc::clone(&state.pubsub);
+        tokio::spawn(async move {
+            pubsub_for_conn_ctrl
+                .run_conn_control_subscriber(Arc::new(move || registry.bound_communities()))
+                .await
+        });
+
         let state_for_conn_ctrl = Arc::clone(&state);
         let mut rx = state_for_conn_ctrl.pubsub.subscribe_conn_control();
         tokio::spawn(async move {

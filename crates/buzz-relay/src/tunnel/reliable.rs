@@ -694,7 +694,8 @@ mod tests {
     }
 
     async fn clear_keys(directory: &SessionDirectory, community_id: CommunityId, session_id: Uuid) {
-        let base = format!("buzz:{}:tunnel:{}", community_id, session_id);
+        let base = format!("buzz:{{{session_id}}}:{community_id}:tunnel");
+        let legacy_base = format!("buzz:{community_id}:tunnel:{session_id}");
         let _ = directory
             .release(&SessionLease {
                 community_id,
@@ -705,9 +706,15 @@ mod tests {
             })
             .await;
         let mut conn = pool().get().await.expect("redis conn");
-        let _: () = redis::cmd("DEL")
+        let _: () = redis::pipe()
+            .cmd("DEL")
             .arg(format!("{base}:lease"))
+            .cmd("DEL")
             .arg(format!("{base}:generation"))
+            .cmd("DEL")
+            .arg(format!("{legacy_base}:lease"))
+            .cmd("DEL")
+            .arg(format!("{legacy_base}:generation"))
             .query_async(&mut *conn)
             .await
             .expect("clear keys");

@@ -71,6 +71,18 @@ pub async fn get_presence(
 }
 
 /// Returns `pubkey_hex → status` for all currently-set keys.
+///
+/// Issues one single-key `GET` per pubkey in a **non-atomic** pipeline: presence
+/// keys are per-pubkey, so on a cluster (ElastiCache Serverless included) they
+/// span slots and any multi-key command over them fails `CROSSSLOT`.
+///
+/// **Never call `.atomic()` on this pipeline.** `Pipeline::new` leaves
+/// `transaction_mode: false`; `.atomic()` sets it, which makes `query_async`
+/// wrap the batch in `MULTI`/`EXEC` and dispatch it as one unit — restoring
+/// exactly the cross-slot failure this replaces. A non-atomic pipeline is
+/// independent commands sharing one round trip, which is all this read needs:
+/// each key is fetched on its own and the entries are TTL'd anyway, so there is
+/// nothing for atomicity to protect.
 pub async fn get_presence_bulk(
     pool: &Pool,
     ctx: &TenantContext,
@@ -80,11 +92,22 @@ pub async fn get_presence_bulk(
         return Ok(HashMap::new());
     }
     let mut conn = pool.get().await?;
-    let keys: Vec<String> = pubkeys
-        .iter()
-        .map(|pubkey| presence_key(ctx, pubkey))
-        .collect();
-    let values: Vec<Option<String>> = redis::cmd("MGET").arg(&keys).query_async(&mut conn).await?;
+    let mut pipe = redis::pipe();
+    for pubkey in pubkeys {
+        pipe.cmd("GET").arg(presence_key(ctx, pubkey));
+    }
+    let values: Vec<Option<String>> = pipe.query_async(&mut conn).await?;
+
+    // Replies are positional — Redis returns values, not key names — so a reply
+    // of the wrong length would silently misattribute one pubkey's status to
+    // another under `zip`. Refuse instead.
+    if values.len() != pubkeys.len() {
+        return Err(PubSubError::PresenceReplyMismatch {
+            expected: pubkeys.len(),
+            got: values.len(),
+        });
+    }
+
     let result = pubkeys
         .iter()
         .zip(values.iter())
@@ -139,6 +162,49 @@ mod tests {
         );
     }
 
+    /// CRC16-XMODEM over the cluster hash-tag-free key, mod 16384 — the Redis
+    /// Cluster slot function. Test-local on purpose: production never computes
+    /// slots (we use a plain, non-cluster client), this exists only to assert a
+    /// key-design property.
+    fn key_slot(key: &str) -> u16 {
+        let mut crc: u16 = 0;
+        for byte in key.as_bytes() {
+            crc ^= (*byte as u16) << 8;
+            for _ in 0..8 {
+                crc = if crc & 0x8000 != 0 {
+                    (crc << 1) ^ 0x1021
+                } else {
+                    crc << 1
+                };
+            }
+        }
+        crc % 16384
+    }
+
+    #[test]
+    fn key_slot_matches_redis_cluster_reference_vector() {
+        // Redis Cluster spec's CRC16 check value: CRC16-XMODEM("123456789") =
+        // 0x31C3, which is below 16384 so the slot equals it outright.
+        assert_eq!(key_slot("123456789"), 0x31C3);
+    }
+
+    /// Presence keys carry no hash tag, so pubkeys in one community spread across
+    /// slots. That is deliberate: tagging them by community would pin an entire
+    /// community's presence to a single slot, against AWS's uniform-distribution
+    /// guidance and into the per-slot ECPU ceiling. It is also why the bulk read
+    /// must be single-key `GET`s rather than any multi-key command.
+    #[test]
+    fn presence_keys_in_one_community_span_multiple_slots() {
+        let ctx = ctx(0xaaaa, "a.example");
+        let slots: std::collections::HashSet<u16> = (0..16)
+            .map(|_| key_slot(&presence_key(&ctx, &make_pubkey())))
+            .collect();
+        assert!(
+            slots.len() > 1,
+            "presence keys must not co-slot; got {slots:?}"
+        );
+    }
+
     #[tokio::test]
     #[ignore = "requires Redis"]
     async fn test_presence_set_and_get() {
@@ -187,6 +253,91 @@ mod tests {
 
         clear_presence(&pool, &ctx, &pk1).await.unwrap();
         clear_presence(&pool, &ctx, &pk2).await.unwrap();
+    }
+
+    /// Asserts the **reassembled map**, not the reply vector or its length.
+    ///
+    /// The bulk read zips request positions against reply positions, so a
+    /// misalignment is count-correct and attributes one member's status to
+    /// another — silent server-side, and user-visible as other people's online
+    /// status. Every assertion here is `pubkey → status` for a *distinctly
+    /// valued* status, so any permutation of the reply fails.
+    #[tokio::test]
+    #[ignore = "requires Redis"]
+    async fn presence_bulk_reassembles_by_pubkey_across_slots() {
+        let pool = make_test_pool();
+        let ctx = ctx(0xb301, "b3.example");
+
+        // Distinct statuses so a shifted reply can't coincidentally match, and
+        // enough keys that they span multiple slots (see the slot unit test).
+        let present: Vec<(PublicKey, String)> = (0..12)
+            .map(|i| (make_pubkey(), format!("status-{i}")))
+            .collect();
+        let missing: Vec<PublicKey> = (0..4).map(|_| make_pubkey()).collect();
+
+        for (pk, status) in &present {
+            set_presence(&pool, &ctx, pk, status).await.unwrap();
+        }
+
+        let expected: HashMap<String, String> = present
+            .iter()
+            .map(|(pk, status)| (pk.to_hex(), status.clone()))
+            .collect();
+
+        // Interleave set and unset keys, so a `None` in the middle of the reply
+        // must not shift the keys after it.
+        let mut requested: Vec<PublicKey> = Vec::new();
+        for (i, (pk, _)) in present.iter().enumerate() {
+            requested.push(*pk);
+            if let Some(absent) = missing.get(i / 3) {
+                requested.push(*absent);
+            }
+        }
+
+        let got = get_presence_bulk(&pool, &ctx, &requested).await.unwrap();
+        assert_eq!(got, expected, "reassembled map must be keyed by pubkey");
+
+        // Same set, reversed order: the map is order-independent by definition,
+        // so this catches positional misalignment without needing to know which
+        // order is "right".
+        let mut reversed = requested.clone();
+        reversed.reverse();
+        let got_reversed = get_presence_bulk(&pool, &ctx, &reversed).await.unwrap();
+        assert_eq!(
+            got_reversed, expected,
+            "map must not depend on request order"
+        );
+
+        // Duplicate keys: the reply is one value per request position, and the
+        // map must collapse them rather than drift.
+        let duplicated: Vec<PublicKey> =
+            requested.iter().chain(requested.iter()).copied().collect();
+        let got_duplicated = get_presence_bulk(&pool, &ctx, &duplicated).await.unwrap();
+        assert_eq!(
+            got_duplicated, expected,
+            "duplicate requests must collapse to the same map"
+        );
+
+        // All-missing: no entries, no error.
+        assert!(get_presence_bulk(&pool, &ctx, &missing)
+            .await
+            .unwrap()
+            .is_empty());
+
+        for (pk, _) in &present {
+            clear_presence(&pool, &ctx, pk).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Redis"]
+    async fn presence_bulk_empty_request_returns_empty_map() {
+        let pool = make_test_pool();
+        let ctx = ctx(0xb302, "b3.example");
+        assert!(get_presence_bulk(&pool, &ctx, &[])
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]

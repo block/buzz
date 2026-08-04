@@ -10,28 +10,47 @@
 //! payload. The per-event access gate (`filter_fanout_by_access`) is the
 //! universal delivery-enforcement point, so dropping the stale key is
 //! sufficient: the next read re-fetches authoritative state from the DB.
+//!
+//! # Subscription scope
+//!
+//! This pod subscribes to the exact per-community channels of the communities
+//! whose entries it may hold — **cache residency**, not connection lifetime.
+//! Cached authorization outlives the socket that populated it, so scoping by
+//! live connections would leave a pod holding stale authz for a community it is
+//! no longer listening to. See [`crate::community_topics`] for the desired /
+//! established contract and why the caller must not insert a cache entry for a
+//! community that is not yet established.
+
+use std::sync::Arc;
 
 use buzz_core::{CommunityId, TenantContext};
-use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use crate::community_topics::{
+    run_community_subscriber, CommunityChannelFamily, CommunityTopics, DesiredCommunities,
+};
 use crate::topic::BUZZ_PREFIX;
 
 /// Tenant-local Redis pub/sub channel suffix for cache-invalidation messages.
 pub const CACHE_INVALIDATION_SUFFIX: &str = "cache-invalidate";
 
-/// Pattern used by the subscriber to receive cache invalidations for all
-/// communities this pod may have cached locally.
-pub const CACHE_INVALIDATION_PATTERN: &str = "buzz:*:cache-invalidate";
+/// Log label for the cache-invalidation subscriber.
+pub(crate) const CACHE_INVALIDATION_NAME: &str = "cache-invalidation";
 
 /// Redis pub/sub channel for cache-invalidation messages under `ctx`.
 pub fn cache_invalidation_channel(ctx: &TenantContext) -> String {
-    format!(
-        "{BUZZ_PREFIX}:{}:{CACHE_INVALIDATION_SUFFIX}",
-        ctx.community()
-    )
+    cache_invalidation_channel_for(ctx.community())
+}
+
+/// Redis pub/sub channel for cache-invalidation messages in `community`.
+///
+/// The subscriber needs this without a [`TenantContext`]: it subscribes to the
+/// exact channels of the communities whose cache entries this pod holds, and
+/// those are known only as ids.
+pub fn cache_invalidation_channel_for(community: CommunityId) -> String {
+    format!("{BUZZ_PREFIX}:{community}:{CACHE_INVALIDATION_SUFFIX}")
 }
 
 /// Parse a cache-invalidation Redis channel into its scoped community id.
@@ -87,78 +106,47 @@ pub struct ScopedCacheInvalidation {
     pub invalidation: CacheInvalidation,
 }
 
-/// Initial reconnect backoff (1 second).
-const BACKOFF_INITIAL_SECS: u64 = 1;
-/// Maximum reconnect backoff (30 seconds).
-const BACKOFF_MAX_SECS: u64 = 30;
-
-/// Subscribes to `buzz:*:cache-invalidate` and forwards scoped drops to the broadcast.
+/// Subscribes to the exact `buzz:{community}:cache-invalidate` channels this pod
+/// needs and forwards scoped drops to the broadcast.
 ///
-/// Mirrors `subscriber::run_subscriber`: a reconnect loop with exponential
-/// backoff (1s → 2s → 4s → … → 30s max). Never returns — runs for the lifetime
-/// of the relay.
+/// `desired` is the set of communities whose cache entries this pod may hold —
+/// re-read on every reconcile, never cached here. Never returns; runs for the
+/// lifetime of the relay. See [`crate::community_topics`] for the level-triggered
+/// reconciliation and establishment contract.
 pub async fn run_cache_invalidation_subscriber(
     redis_url: String,
     broadcast_tx: broadcast::Sender<ScopedCacheInvalidation>,
+    topics: Arc<CommunityTopics>,
+    desired: DesiredCommunities,
 ) {
-    let mut backoff_secs = BACKOFF_INITIAL_SECS;
-
-    loop {
-        match connect_and_subscribe(&redis_url, &broadcast_tx).await {
-            Ok(()) => {
-                backoff_secs = BACKOFF_INITIAL_SECS;
-                tracing::warn!(
-                    "Redis cache-invalidation stream ended (clean disconnect) — reconnecting in {backoff_secs}s"
-                );
-            }
-            Err(e) => {
-                tracing::error!(
-                    "Redis cache-invalidation error: {e} — reconnecting in {backoff_secs}s"
-                );
-            }
-        }
-
-        tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
-        backoff_secs = (backoff_secs * 2).min(BACKOFF_MAX_SECS);
-
-        tracing::info!("Attempting to reconnect to Redis cache-invalidation...");
-    }
+    run_community_subscriber(
+        redis_url,
+        CacheInvalidationFamily { broadcast_tx },
+        topics,
+        desired,
+    )
+    .await;
 }
 
-async fn connect_and_subscribe(
-    redis_url: &str,
-    broadcast_tx: &broadcast::Sender<ScopedCacheInvalidation>,
-) -> Result<(), redis::RedisError> {
-    let client = redis::Client::open(redis_url)?;
-    let mut conn = client.get_async_pubsub().await?;
+struct CacheInvalidationFamily {
+    broadcast_tx: broadcast::Sender<ScopedCacheInvalidation>,
+}
 
-    conn.psubscribe(CACHE_INVALIDATION_PATTERN).await?;
+impl CommunityChannelFamily for CacheInvalidationFamily {
+    fn channel(&self, community: CommunityId) -> String {
+        cache_invalidation_channel_for(community)
+    }
 
-    tracing::info!(
-        "Redis cache-invalidation subscriber connected — listening on {CACHE_INVALIDATION_PATTERN}"
-    );
+    fn parse_channel(&self, channel: &str) -> Option<CommunityId> {
+        parse_cache_invalidation_channel(channel)
+    }
 
-    let mut stream = conn.on_message();
-    while let Some(msg) = stream.next().await {
-        let channel = msg.get_channel_name();
-        let Some(community_id) = parse_cache_invalidation_channel(channel) else {
-            tracing::warn!("Received cache-invalidation message on unexpected channel: {channel}");
-            continue;
-        };
-
-        let payload: String = match msg.get_payload() {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!("Failed to get cache-invalidation payload: {e}");
-                continue;
-            }
-        };
-
-        let invalidation: CacheInvalidation = match serde_json::from_str(&payload) {
+    fn deliver(&self, community_id: CommunityId, payload: &str) {
+        let invalidation: CacheInvalidation = match serde_json::from_str(payload) {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!("Failed to deserialize cache-invalidation message: {e}");
-                continue;
+                return;
             }
         };
 
@@ -167,12 +155,10 @@ async fn connect_and_subscribe(
             invalidation,
         };
 
-        if broadcast_tx.send(scoped).is_err() {
+        if self.broadcast_tx.send(scoped).is_err() {
             tracing::trace!("No cache-invalidation receivers — message dropped");
         }
     }
-
-    Ok(())
 }
 
 #[cfg(test)]

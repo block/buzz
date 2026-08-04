@@ -23,6 +23,8 @@
 
 /// Cross-pod cache-key invalidation over Redis pub/sub.
 pub mod cache_invalidation;
+/// Level-triggered exact subscriptions for community-scoped channel families.
+pub mod community_topics;
 /// Cross-pod connection-control commands over Redis pub/sub.
 pub mod conn_control;
 /// Error types for pub/sub operations.
@@ -54,6 +56,7 @@ use tokio::sync::{broadcast, mpsc, Mutex};
 use crate::cache_invalidation::{
     cache_invalidation_channel, CacheInvalidation, ScopedCacheInvalidation,
 };
+use crate::community_topics::{CommunityTopics, DesiredCommunities};
 use crate::conn_control::{conn_control_channel, ConnControl, ScopedConnControl};
 pub use crate::topic::{channel_key, global_key, EventTopic, EventTopicKey};
 
@@ -110,6 +113,10 @@ pub struct PubSubManager {
     broadcast_tx: broadcast::Sender<ChannelEvent>,
     cache_invalidation_tx: broadcast::Sender<ScopedCacheInvalidation>,
     conn_control_tx: broadcast::Sender<ScopedConnControl>,
+    /// Communities whose cache-invalidation channel Redis has acknowledged.
+    cache_invalidation_topics: Arc<CommunityTopics>,
+    /// Communities whose connection-control channel Redis has acknowledged.
+    conn_control_topics: Arc<CommunityTopics>,
 }
 
 impl PubSubManager {
@@ -138,6 +145,10 @@ impl PubSubManager {
             broadcast_tx,
             cache_invalidation_tx,
             conn_control_tx,
+            cache_invalidation_topics: Arc::new(CommunityTopics::new(
+                cache_invalidation::CACHE_INVALIDATION_NAME,
+            )),
+            conn_control_topics: Arc::new(CommunityTopics::new(conn_control::CONN_CONTROL_NAME)),
         })
     }
 
@@ -162,22 +173,50 @@ impl PubSubManager {
 
     /// Starts the cache-invalidation subscriber loop with automatic
     /// reconnection. Runs forever — spawn this in a background task.
-    pub async fn run_cache_invalidation_subscriber(self: Arc<Self>) {
+    ///
+    /// `desired` returns the communities whose cache entries this pod may still
+    /// serve. It is re-read on every reconcile, never cached, so residency that
+    /// appears or lapses converges without any explicit command.
+    pub async fn run_cache_invalidation_subscriber(self: Arc<Self>, desired: DesiredCommunities) {
         cache_invalidation::run_cache_invalidation_subscriber(
             self.redis_url.clone(),
             self.cache_invalidation_tx.clone(),
+            self.cache_invalidation_topics.clone(),
+            desired,
         )
         .await;
     }
 
     /// Starts the connection-control subscriber loop with automatic
     /// reconnection. Runs forever — spawn this in a background task.
-    pub async fn run_conn_control_subscriber(self: Arc<Self>) {
+    ///
+    /// `desired` returns the communities holding live sockets on this pod.
+    pub async fn run_conn_control_subscriber(self: Arc<Self>, desired: DesiredCommunities) {
         conn_control::run_conn_control_subscriber(
             self.redis_url.clone(),
             self.conn_control_tx.clone(),
+            self.conn_control_topics.clone(),
+            desired,
         )
         .await;
+    }
+
+    /// Subscription state for the cache-invalidation family.
+    ///
+    /// The relay consults this before caching authorization for a community:
+    /// an entry inserted while the community's invalidation channel is not
+    /// established could not be dropped by a remote invalidation.
+    pub fn cache_invalidation_topics(&self) -> &Arc<CommunityTopics> {
+        &self.cache_invalidation_topics
+    }
+
+    /// Subscription state for the connection-control family.
+    ///
+    /// The relay's socket registry holds this to wake the reconciler when a new
+    /// community gains its first connection, so the subscribe does not wait for
+    /// the next tick.
+    pub fn conn_control_topics(&self) -> &Arc<CommunityTopics> {
+        &self.conn_control_topics
     }
 
     /// Returns a new broadcast receiver for locally-published channel events.
@@ -368,17 +407,84 @@ impl PubSubManager {
 
 #[cfg(test)]
 pub(crate) mod test_util {
+    /// The Redis endpoint under test. Honours `REDIS_URL` so the same
+    /// `--ignored` suite can be pointed at standalone Redis (the CI default) or
+    /// at a single-shard cluster-mode server, which is what enforces
+    /// `CROSSSLOT` locally.
+    ///
+    /// Every test that opens a connection must route through this — a
+    /// hardcoded URL alongside an env-var-driven one makes the pool and the
+    /// pub/sub client talk to *different servers*, which fails as a timeout and
+    /// reads like a cluster incompatibility.
+    pub fn test_redis_url() -> String {
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string())
+    }
+
     pub fn make_test_pool() -> deadpool_redis::Pool {
-        let cfg = deadpool_redis::Config::from_url("redis://127.0.0.1:6379");
+        let cfg = deadpool_redis::Config::from_url(test_redis_url());
         cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .expect("Failed to create Redis pool")
+    }
+
+    /// A fixed desired-community set, for tests that do not exercise churn.
+    pub fn fixed_desired(
+        communities: impl IntoIterator<Item = buzz_core::CommunityId>,
+    ) -> crate::community_topics::DesiredCommunities {
+        let set: std::collections::HashSet<_> = communities.into_iter().collect();
+        std::sync::Arc::new(move || set.clone())
+    }
+
+    /// Waits until `topics` reports every community in `expected` established,
+    /// then returns. Panics on timeout.
+    ///
+    /// Every Redis-backed test here waits on the acknowledgement rather than
+    /// sleeping a guessed interval: a fixed sleep either flakes under load or
+    /// passes vacuously when the subscribe silently never happened.
+    pub async fn await_established(
+        topics: &crate::community_topics::CommunityTopics,
+        expected: &[buzz_core::CommunityId],
+        what: &str,
+    ) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if expected.iter().all(|c| topics.is_established(*c)) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for {what} to be established \
+                 ({} of {} acked)",
+                topics.established_count(),
+                expected.len()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Waits until `topics` reports `community` NOT established. Panics on timeout.
+    pub async fn await_unestablished(
+        topics: &crate::community_topics::CommunityTopics,
+        community: buzz_core::CommunityId,
+        what: &str,
+    ) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if !topics.is_established(community) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for {what} to be unestablished"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::make_test_pool;
+    use crate::test_util::{await_established, fixed_desired, make_test_pool, test_redis_url};
     use buzz_core::{CommunityId, TenantContext};
     use nostr::{EventBuilder, Keys, Kind};
     use uuid::Uuid;
@@ -386,7 +492,7 @@ mod tests {
     async fn make_manager() -> Arc<PubSubManager> {
         let pool = make_test_pool();
         Arc::new(
-            PubSubManager::new("redis://127.0.0.1:6379", pool)
+            PubSubManager::new(&test_redis_url(), pool)
                 .await
                 .expect("Failed to create PubSubManager"),
         )
@@ -439,10 +545,24 @@ mod tests {
     async fn test_cache_invalidation_roundtrip() {
         let manager = make_manager().await;
         let mut rx = manager.subscribe_cache_invalidations();
+        let ctx = ctx(0xaaaa, "a.example");
 
         let manager_clone = manager.clone();
-        tokio::spawn(async move { manager_clone.run_cache_invalidation_subscriber().await });
-        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        let desired = fixed_desired([ctx.community()]);
+        tokio::spawn(async move {
+            manager_clone
+                .run_cache_invalidation_subscriber(desired)
+                .await
+        });
+        // Wait for the exact SUBSCRIBE to be acked rather than sleeping: with
+        // per-community channels, publishing before the ack is a lost message,
+        // not a late one.
+        await_established(
+            manager.cache_invalidation_topics(),
+            &[ctx.community()],
+            "cache-invalidation roundtrip",
+        )
+        .await;
 
         let channel_id = Uuid::new_v4();
         let pubkey = Keys::generate().public_key().to_bytes().to_vec();
@@ -450,8 +570,6 @@ mod tests {
             channel_id,
             pubkey: pubkey.clone(),
         };
-
-        let ctx = ctx(0xaaaa, "a.example");
 
         manager
             .publish_cache_invalidation(&ctx, &sent)
@@ -513,7 +631,7 @@ mod tests {
         let pool = make_test_pool();
         let manager = Arc::new(
             PubSubManager::with_config(
-                PubSubConfig::new("redis://127.0.0.1:6379")
+                PubSubConfig::new(test_redis_url())
                     .with_unsubscribe_debounce(Duration::from_millis(25)),
                 pool,
             )
@@ -593,8 +711,7 @@ mod tests {
     async fn retain_release_refcounts_and_debounces_last_release() {
         let pool = make_test_pool();
         let manager = PubSubManager::with_config(
-            PubSubConfig::new("redis://127.0.0.1:6379")
-                .with_unsubscribe_debounce(Duration::from_millis(1)),
+            PubSubConfig::new(test_redis_url()).with_unsubscribe_debounce(Duration::from_millis(1)),
             pool,
         )
         .await

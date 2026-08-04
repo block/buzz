@@ -152,6 +152,13 @@ pub struct Config {
     /// no-regression rollout.
     pub mesh: buzz_relay_mesh::MeshConfig,
 
+    /// Tunnel fence Redis key format used by the mesh session directory.
+    ///
+    /// Defaults to `legacy`; operators must explicitly select `tagged` only
+    /// after completing the drain phase documented in
+    /// `docs/tunnel-fence-key-migration.md`.
+    pub tunnel_fence_key_format: crate::tunnel::directory::SessionKeyFormat,
+
     /// Testbed-only reliable-stream echo consumer (`BUZZ_MESH_DEMO_ECHO`).
     /// When `on`, the owner side of an inbound reliable mesh stream echoes
     /// every validated `Data` frame back to the sender — a transport/
@@ -277,6 +284,18 @@ pub struct Config {
     /// Whether the configured web bundle serves Git browser routes in addition
     /// to the public invite landing page. Defaults to false.
     pub serve_git_web_gui: bool,
+}
+
+fn parse_tunnel_fence_key_format(
+    value: Option<&str>,
+) -> Result<crate::tunnel::directory::SessionKeyFormat, ConfigError> {
+    match value {
+        None | Some("legacy") => Ok(crate::tunnel::directory::SessionKeyFormat::Legacy),
+        Some("tagged") => Ok(crate::tunnel::directory::SessionKeyFormat::Tagged),
+        Some(value) => Err(ConfigError::InvalidValue(format!(
+            "BUZZ_TUNNEL_FENCE_KEY_FORMAT must be 'legacy' or 'tagged', got {value:?}"
+        ))),
+    }
 }
 
 fn parse_bind_addr(raw: &str) -> Result<SocketAddr, ConfigError> {
@@ -558,6 +577,16 @@ impl Config {
             enabled: mesh_enabled,
             bind_addr: mesh_bind_addr,
             registry_refresh: std::time::Duration::from_secs(15),
+        };
+
+        let tunnel_fence_key_format = match std::env::var("BUZZ_TUNNEL_FENCE_KEY_FORMAT") {
+            Ok(value) => parse_tunnel_fence_key_format(Some(&value))?,
+            Err(std::env::VarError::NotPresent) => parse_tunnel_fence_key_format(None)?,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(ConfigError::InvalidValue(
+                    "BUZZ_TUNNEL_FENCE_KEY_FORMAT must be valid Unicode".to_string(),
+                ));
+            }
         };
 
         // Demo echo opt-in: same strict pattern as BUZZ_MESH — explicit
@@ -956,6 +985,7 @@ impl Config {
             require_relay_membership,
             huddle_audio_available,
             mesh,
+            tunnel_fence_key_format,
             mesh_demo_echo,
             relay_owner_pubkey,
             relay_operator_api_origin,
@@ -996,6 +1026,25 @@ mod tests {
     // Parallel env-var mutation causes `defaults_are_valid` to see the invalid
     // value set by `invalid_bind_addr_returns_error`, causing a flaky failure.
     static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn tunnel_fence_key_format_is_default_off_and_strict() {
+        use crate::tunnel::directory::SessionKeyFormat;
+
+        assert_eq!(
+            parse_tunnel_fence_key_format(None).unwrap(),
+            SessionKeyFormat::Legacy
+        );
+        assert_eq!(
+            parse_tunnel_fence_key_format(Some("legacy")).unwrap(),
+            SessionKeyFormat::Legacy
+        );
+        assert_eq!(
+            parse_tunnel_fence_key_format(Some("tagged")).unwrap(),
+            SessionKeyFormat::Tagged
+        );
+        assert!(parse_tunnel_fence_key_format(Some("on")).is_err());
+    }
 
     #[test]
     fn defaults_are_valid() {

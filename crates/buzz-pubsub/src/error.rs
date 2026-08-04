@@ -26,6 +26,17 @@ pub enum PubSubError {
     /// A Redis channel key could not be parsed as a valid channel ID.
     #[error("Invalid channel key: {0}")]
     InvalidChannelKey(String),
+
+    /// A bulk presence read returned a different number of values than keys
+    /// requested. Reassembly is positional, so continuing would attribute one
+    /// pubkey's status to another.
+    #[error("Presence bulk read returned {got} values for {expected} keys")]
+    PresenceReplyMismatch {
+        /// Number of presence keys requested.
+        expected: usize,
+        /// Number of values Redis returned.
+        got: usize,
+    },
 }
 
 impl From<tokio::sync::broadcast::error::RecvError> for PubSubError {

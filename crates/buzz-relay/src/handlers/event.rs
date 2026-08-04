@@ -1692,7 +1692,7 @@ mod tests {
                 register_presence_sub(&receiver, "receiver-presence");
 
             // Under the community-scoped bus, Redis delivery is demand-driven:
-            // a relay only PSUBSCRIBEs `buzz:{community}:global` after it retains
+            // a relay only SUBSCRIBEs `buzz:{community}:global` after it retains
             // interest in that topic. Both relays share one explicit tenant and
             // retain Global before publishing — origin too, so the echo-
             // suppression assertion still exercises `mark_local_event` against a
@@ -1710,7 +1710,7 @@ mod tests {
                 .retain_topic(&tenant, EventTopic::Global)
                 .await;
 
-            // Match buzz-pubsub's own Redis round-trip test: give PSUBSCRIBE a
+            // Match buzz-pubsub's own Redis round-trip test: give SUBSCRIBE a
             // bounded moment to attach before publishing the single test event.
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 

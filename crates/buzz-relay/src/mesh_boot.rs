@@ -508,7 +508,11 @@ pub async fn boot_mesh(
     transport.set_inbound(Box::new(dispatcher.clone()));
 
     Ok(Some(MeshHandle {
-        directory: SessionDirectory::new(redis_pool),
+        directory: SessionDirectory::with_key_format(
+            redis_pool,
+            std::time::Duration::from_secs(30),
+            config.tunnel_fence_key_format,
+        ),
         transport,
         membership: membership_arc,
         local_runtime_id: runtime_id,
