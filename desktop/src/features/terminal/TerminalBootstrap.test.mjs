@@ -19,6 +19,8 @@ let resizeCallback;
 let canvasWidth = 840;
 let attachResolver = null;
 let deferResizes = false;
+let deferClose = false;
+let closeResolver = null;
 const pendingResizes = [];
 
 before(async () => {
@@ -108,6 +110,11 @@ before(async () => {
           pendingResizes.push(() => resolve(value));
         });
       }
+      if (command === "terminal_close" && deferClose) {
+        return new Promise((resolve) => {
+          closeResolver = resolve;
+        });
+      }
       return Promise.resolve();
     },
     transformCallback(callback) {
@@ -131,6 +138,8 @@ afterEach(async () => {
   canvasWidth = 840;
   attachResolver = null;
   deferResizes = false;
+  deferClose = false;
+  closeResolver = null;
   pendingResizes.length = 0;
 });
 
@@ -449,7 +458,7 @@ test("closing a tab while attach is pending closes the eventual session", async 
   view.unmount();
 });
 
-test("a successful close removes the tab even if the exit event is lost", async () => {
+test("closing removes the tab before native shutdown resolves", async () => {
   const { createElement } = await import("react");
   const { fireEvent, render, waitFor } = await import("@testing-library/react");
   const { ThemeProvider } = await import("@/shared/theme/ThemeProvider");
@@ -479,12 +488,15 @@ test("a successful close removes the tab even if the exit event is lost", async 
     assert.ok(view.queryByRole("tab", { name: /Terminal 1/ })),
   );
 
+  deferClose = true;
   fireEvent.click(view.getByLabelText("Close SHELL"));
 
   await waitFor(() =>
     assert.ok(calls.some(({ command }) => command === "terminal_close")),
   );
   await waitFor(() => assert.equal(view.queryByRole("tab"), null));
+  assert.equal(typeof closeResolver, "function");
+  closeResolver();
   view.unmount();
 });
 

@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Maximize2, Minimize2, X } from "lucide-react";
+import { ChevronRight, Maximize2, Minimize2, Plus, X } from "lucide-react";
 
 import { useTheme } from "@/shared/theme/ThemeProvider";
 import { cn } from "@/shared/lib/cn";
@@ -606,6 +606,15 @@ export function TerminalSubstrate({
               role="presentation"
             >
               <button
+                aria-label={`Close ${session.title}`}
+                className="buzz-terminal-close"
+                disabled={session.closing}
+                onClick={() => runTabAction(() => onCloseSession(session.id))}
+                type="button"
+              >
+                <X />
+              </button>
+              <button
                 aria-label={`Terminal ${index + 1}${session.closing ? ", closing" : session.title !== "SHELL" ? `, ${session.title}` : ""}`}
                 aria-selected={session.active}
                 className="buzz-terminal-tab-select"
@@ -615,20 +624,18 @@ export function TerminalSubstrate({
                 type="button"
               >
                 <span className="buzz-terminal-designator buzz-terminal-tab-title">
-                  {session.title === "SHELL" ? `› ${index + 1}` : session.title}
+                  {session.title === "SHELL" ? (
+                    <>
+                      <ChevronRight />
+                      <span>{index + 1}</span>
+                    </>
+                  ) : (
+                    session.title
+                  )}
                 </span>
                 {session.closing ? (
                   <span className="buzz-terminal-tab-title">Closing…</span>
                 ) : null}
-              </button>
-              <button
-                aria-label={`Close ${session.title}`}
-                className="buzz-terminal-close"
-                disabled={session.closing}
-                onClick={() => runTabAction(() => onCloseSession(session.id))}
-                type="button"
-              >
-                ×
               </button>
             </div>
           ))}
@@ -638,7 +645,7 @@ export function TerminalSubstrate({
             onClick={() => runTabAction(onNewSession)}
             type="button"
           >
-            +
+            <Plus />
           </button>
         </div>
         <div className="buzz-terminal-readout">
@@ -666,7 +673,7 @@ export function TerminalSubstrate({
       </div>
       {/* biome-ignore lint/a11y/noStaticElementInteractions: the hidden textarea owns keyboard semantics; this only preserves its focus across canvas clicks. */}
       <div
-        className="buzz-terminal-viewport"
+        className="buzz-terminal-viewport px-5 pt-2"
         onMouseDown={(event) => {
           // Preventing the canvas mousedown also suppresses selection. Revisit
           // this when the terminal gains mouse selection support.

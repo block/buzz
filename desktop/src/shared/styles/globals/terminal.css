@@ -14,9 +14,9 @@
 
   .buzz-terminal-contract-bar {
     align-items: center;
-    background: hsl(var(--background));
+    background: hsl(var(--secondary));
     border-bottom: 1px solid hsl(var(--border));
-    color: hsl(var(--foreground));
+    color: hsl(var(--secondary-foreground));
     display: flex;
     flex: 0 0 40px;
     font-family: inherit;
@@ -24,7 +24,7 @@
     gap: 8px;
     justify-content: space-between;
     min-width: 0;
-    padding: 4px 8px;
+    padding: 4px 1.25rem;
   }
 
   .buzz-terminal-tabs,
@@ -55,6 +55,7 @@
 
   .buzz-terminal-tabs {
     flex: 1 1 auto;
+    gap: 4px;
     overflow-x: auto;
     overflow-y: hidden;
     scrollbar-width: none;
@@ -65,7 +66,7 @@
   }
 
   .buzz-terminal-readout {
-    background: hsl(var(--background));
+    background: hsl(var(--secondary));
     flex: 0 0 auto;
     gap: 4px;
     padding: 0;
@@ -74,16 +75,50 @@
   }
 
   .buzz-terminal-tab {
+    background: hsl(var(--background));
+    border-radius: 4px;
     flex: 0 0 auto;
+    padding: 0;
   }
 
-  .buzz-terminal-tab + .buzz-terminal-tab {
-    border-left: 1px solid hsl(var(--border) / 0.55);
+  .buzz-terminal-tab-active {
+    background: hsl(var(--background));
+  }
+
+  .buzz-terminal-tab:hover,
+  .buzz-terminal-tab:focus-within {
+    background: hsl(var(--foreground) / 0.06);
   }
 
   .buzz-terminal-tab-select {
+    border-radius: inherit;
     max-width: 12rem;
     min-width: 0;
+    padding-left: 32px;
+  }
+
+  .buzz-terminal-tab-active .buzz-terminal-tab-select {
+    color: hsl(var(--foreground));
+  }
+
+  .buzz-terminal-new-tab:hover {
+    background: hsl(var(--foreground) / 0.06);
+    color: hsl(var(--foreground));
+  }
+
+  .buzz-terminal-new-tab {
+    align-items: center;
+    background: hsl(var(--background));
+    border-radius: 4px;
+    height: 30px;
+    justify-content: center;
+    padding: 7px;
+    width: 30px;
+  }
+
+  .buzz-terminal-new-tab svg {
+    height: 16px;
+    width: 16px;
   }
 
   .buzz-terminal-tab-title {
@@ -92,32 +127,40 @@
     white-space: nowrap;
   }
 
-  .buzz-terminal-tab-active .buzz-terminal-tab-select {
-    background: hsl(var(--secondary));
-    color: hsl(var(--secondary-foreground));
-  }
-
-  .buzz-terminal-tab-select:hover,
-  .buzz-terminal-new-tab:hover {
-    background: hsl(var(--accent));
-    color: hsl(var(--accent-foreground));
-  }
-
   .buzz-terminal-designator {
+    align-items: center;
+    display: inline-flex;
     font-size: 0.75rem;
+    gap: 2px;
     letter-spacing: 0;
   }
 
+  .buzz-terminal-designator svg {
+    height: 16px;
+    width: 16px;
+  }
+
   .buzz-terminal-close {
-    height: 24px;
+    height: 16px;
+    left: 8px;
     opacity: 0;
     padding: 0;
-    width: 24px;
+    pointer-events: none;
+    position: absolute;
+    width: 16px;
+    z-index: 1;
   }
 
   .buzz-terminal-tab:hover .buzz-terminal-close,
-  .buzz-terminal-close:focus {
+  .buzz-terminal-tab:focus-within .buzz-terminal-close {
+    color: hsl(var(--foreground));
     opacity: 1;
+    pointer-events: auto;
+  }
+
+  .buzz-terminal-close svg {
+    height: 16px;
+    width: 16px;
   }
 
   .buzz-terminal-readout {
@@ -240,13 +283,13 @@
 
   .buzz-terminal-window-action:hover,
   .buzz-terminal-window-action:focus-visible {
-    background: hsl(var(--accent));
-    color: hsl(var(--accent-foreground));
+    background: hsl(var(--foreground) / 0.06);
+    color: hsl(var(--foreground));
   }
 
   .buzz-terminal-window-action svg {
-    height: 15px;
-    width: 15px;
+    height: 16px;
+    width: 16px;
   }
 
   @media (prefers-reduced-motion: reduce) {

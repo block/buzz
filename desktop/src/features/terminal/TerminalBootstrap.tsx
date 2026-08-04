@@ -425,12 +425,14 @@ export function TerminalBootstrap({
         send(active?.connection?.focus(focused))
       }
       onViewportSize={handleSize}
-      sessions={channelSessions.map((session) => ({
-        active: session.key === activeKey,
-        closing: session.closing,
-        id: session.key,
-        title: session.title,
-      }))}
+      sessions={channelSessions
+        .filter((session) => !session.closing)
+        .map((session) => ({
+          active: session.key === activeKey,
+          closing: session.closing,
+          id: session.key,
+          title: session.title,
+        }))}
     />
   );
 }
