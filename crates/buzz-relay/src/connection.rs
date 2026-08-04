@@ -125,8 +125,8 @@ pub async fn handle_connection(
     state: Arc<AppState>,
     addr: SocketAddr,
     tenant: TenantContext,
+    conn_id: Uuid,
 ) {
-    let conn_id = Uuid::new_v4();
     let cancel = CancellationToken::new();
     let community_id = tenant.community();
     let registry = Arc::clone(&state.community_connections);
