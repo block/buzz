@@ -594,7 +594,7 @@ test.describe("channel activity hover preview", () => {
     await expect(page.getByTestId("channel-unread-dot-general")).toBeVisible();
     await expect(page.getByTestId("channel-general")).toHaveCSS(
       "font-weight",
-      "700",
+      "400",
     );
 
     await page.mouse.move(900, 680);
