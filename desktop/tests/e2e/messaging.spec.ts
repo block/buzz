@@ -272,6 +272,53 @@ test("supported link previews keep the message link visible", async ({
   await expectSmoothCorners(previewCard);
 });
 
+test("primary-modifier click on a message link opens it in the OS browser", async ({
+  page,
+}) => {
+  const url = `https://example.com/cmd-click-${Date.now()}`;
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  await page.getByTestId("message-input").fill(url);
+  await page.getByTestId("send-message").click();
+
+  const link = page
+    .getByTestId("message-row")
+    .last()
+    .getByRole("link", { exact: true, name: url });
+  await expect(link).toBeVisible();
+
+  const openedUrls = () =>
+    page.evaluate(
+      (href) =>
+        (
+          window as Window & {
+            __BUZZ_E2E_COMMAND_LOG__?: Array<{
+              command: string;
+              payload: unknown;
+            }>;
+          }
+        ).__BUZZ_E2E_COMMAND_LOG__?.filter(
+          (entry) =>
+            entry.command === "plugin:opener|open_url" &&
+            (entry.payload as { url?: string }).url === href,
+        ).length ?? 0,
+      url,
+    );
+
+  // Nothing has opened the URL yet.
+  expect(await openedUrls()).toBe(0);
+
+  // `ControlOrMeta` is Cmd on macOS and Ctrl elsewhere — exactly the platform
+  // primary modifier `hasPrimaryShortcutModifier` accepts. In a real WKWebView
+  // this gesture is otherwise swallowed; here we assert it routes to the opener.
+  await link.click({ modifiers: ["ControlOrMeta"] });
+
+  await expect.poll(openedUrls).toBe(1);
+});
+
 test("send multiple messages in sequence", async ({ page }) => {
   const ts = Date.now();
   const messages = [
