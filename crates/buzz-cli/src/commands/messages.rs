@@ -561,6 +561,15 @@ fn match_profiles_by_name(events: &[serde_json::Value], name: &str) -> Vec<(Stri
     matches
 }
 
+fn validate_message_content(content: &str) -> Result<(), CliError> {
+    if let Some(byte_offset) = content.find('\0') {
+        return Err(CliError::Usage(format!(
+            "content contains NUL byte at byte offset {byte_offset}"
+        )));
+    }
+    Ok(())
+}
+
 pub struct SendMessageParams {
     pub channel_id: String,
     pub content: String,
@@ -580,6 +589,7 @@ pub async fn cmd_send_message(
     // quoting — the source of countless self-inflicted command-substitution
     // bugs for agent and human users alike.
     p.content = read_or_stdin(&p.content)?;
+    validate_message_content(&p.content)?;
     validate_content_size(&p.content)?;
     if let Some(ref r) = p.reply_to {
         validate_hex64(r)?;
@@ -993,9 +1003,9 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        event_mention_pubkeys, find_root_from_tags, match_profiles_by_name, merge_message_mentions,
-        missing_members, normalize_explicit_mentions, parse_member_pubkeys,
-        resolve_names_to_pubkeys,
+        cmd_send_message, event_mention_pubkeys, find_root_from_tags, match_profiles_by_name,
+        merge_message_mentions, missing_members, normalize_explicit_mentions, parse_member_pubkeys,
+        resolve_names_to_pubkeys, SendMessageParams,
     };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
@@ -1005,6 +1015,37 @@ mod tests {
     const ID_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const ID_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const PUBKEY: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+    #[tokio::test]
+    async fn send_message_rejects_nul_locally_with_byte_offset() {
+        let client = crate::client::BuzzClient::new(
+            "http://127.0.0.1:9".into(),
+            nostr::Keys::generate(),
+            None,
+            None,
+        )
+        .unwrap();
+        let error = cmd_send_message(
+            &client,
+            SendMessageParams {
+                channel_id: uuid::Uuid::nil().to_string(),
+                content: "ab\0cd".into(),
+                kind: None,
+                reply_to: None,
+                broadcast: false,
+                files: vec![],
+                mentions: vec![],
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, crate::error::CliError::Usage(_)));
+        assert_eq!(
+            error.to_string(),
+            "content contains NUL byte at byte offset 2"
+        );
+    }
 
     // Three real pubkeys (lowercase 64-char hex) used by parse_member_pubkeys tests.
     // See the test's own comment on what `PublicKey::from_hex` actually validates.

@@ -1873,6 +1873,7 @@ async fn ingest_event_inner(
             event.content.len()
         )));
     }
+    validate_no_nul_bytes(&event)?;
 
     let is_gift_wrap = kind_u32 == KIND_GIFT_WRAP;
     if event.pubkey != *auth.pubkey() && !is_gift_wrap {
@@ -2903,6 +2904,26 @@ async fn ingest_event_inner(
     })
 }
 
+fn validate_no_nul_bytes(event: &Event) -> Result<(), IngestError> {
+    if let Some(byte_offset) = event.content.find('\0') {
+        return Err(IngestError::Rejected(format!(
+            "invalid: content contains NUL byte at byte offset {byte_offset}"
+        )));
+    }
+
+    for (tag_index, tag) in event.tags.iter().enumerate() {
+        for (value_index, value) in tag.as_slice().iter().enumerate() {
+            if let Some(byte_offset) = value.find('\0') {
+                return Err(IngestError::Rejected(format!(
+                    "invalid: tag {tag_index} value {value_index} contains NUL byte at byte offset {byte_offset}"
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
@@ -3516,6 +3537,44 @@ mod tests {
             .tags(nostr_tags)
             .sign_with_keys(&keys)
             .unwrap()
+    }
+
+    #[test]
+    fn event_text_validation_rejects_nul_in_content() {
+        let event = make_event_with_tags(KIND_STREAM_MESSAGE, "before\0after", &[]);
+        match validate_no_nul_bytes(&event) {
+            Err(IngestError::Rejected(message)) => assert_eq!(
+                message,
+                "invalid: content contains NUL byte at byte offset 6"
+            ),
+            other => panic!("content NUL must be rejected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn event_text_validation_rejects_nul_in_tag_value() {
+        let event = make_event_with_tags(
+            KIND_STREAM_MESSAGE,
+            "content without NUL",
+            &[&["h", "before\0after"]],
+        );
+        match validate_no_nul_bytes(&event) {
+            Err(IngestError::Rejected(message)) => assert_eq!(
+                message,
+                "invalid: tag 0 value 1 contains NUL byte at byte offset 6"
+            ),
+            other => panic!("tag-value NUL must be rejected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn event_text_validation_accepts_same_event_without_nul() {
+        let event = make_event_with_tags(
+            KIND_STREAM_MESSAGE,
+            "before-after",
+            &[&["h", "before-after"]],
+        );
+        assert!(validate_no_nul_bytes(&event).is_ok());
     }
 
     #[test]
