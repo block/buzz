@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
+import type { ReplyTargetAgent } from "@/features/messages/lib/replyTargetAgentMention";
 import type { MediaUploadController } from "@/features/messages/lib/useMediaUpload";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ChannelType } from "@/shared/api/types";
@@ -91,6 +92,11 @@ export type MessageComposerProps = {
     body: string;
     id: string;
   } | null;
+  /**
+   * Agent-authored effective reply target. When set, the composer auto-inserts
+   * a visible, removable `@Name` mention so the reply wakes the agent.
+   */
+  replyTargetAgent?: ReplyTargetAgent | null;
   showTopBorder?: boolean;
   toolbarExtraActions?: ReactNode;
   typingParentEventId?: string | null;

@@ -4,6 +4,7 @@ import { ArrowDown } from "lucide-react";
 import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
 import { HuddleTranscriptIntro } from "@/features/huddle/components/HuddleTranscriptIntro";
 import { orderMentionPubkeysByText } from "@/features/messages/lib/orderMentionPubkeys";
+import { resolveReplyTargetAgent } from "@/features/messages/lib/replyTargetAgentMention";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 import {
@@ -317,6 +318,24 @@ export function MessageThreadPanel({
         }
       : null;
 
+  // Auto-mention the agent whose message is being replied to: the effective
+  // target is the explicit reply target, falling back to the thread head
+  // (mirrors `parentEventId` in onCaptureSendContext above). DMs already
+  // p-tag every participant, so they never need the chip.
+  const knownAgentPubkeys = useKnownAgentPubkeys();
+  const effectiveReplyTarget =
+    channel?.channelType === "dm" ? null : (replyTargetMessage ?? threadHead);
+  const replyTargetAgent = React.useMemo(
+    () =>
+      resolveReplyTargetAgent(
+        effectiveReplyTarget,
+        knownAgentPubkeys,
+        profiles,
+        currentPubkey,
+      ),
+    [currentPubkey, effectiveReplyTarget, knownAgentPubkeys, profiles],
+  );
+
   const deferredThreadReplies = React.useDeferredValue(
     threadReplies,
     EMPTY_THREAD_REPLIES,
@@ -522,7 +541,6 @@ export function MessageThreadPanel({
     settleAtBottomAfterLayout,
   );
 
-  const knownAgentPubkeys = useKnownAgentPubkeys();
   const initialAgentPubkeys = React.useMemo(() => {
     if (
       !threadHead ||
@@ -903,6 +921,7 @@ export function MessageThreadPanel({
               }
               profiles={profiles}
               replyTarget={composerReplyTarget}
+              replyTargetAgent={replyTargetAgent}
               typingParentEventId={threadHead.id}
               typingRootEventId={threadHead.rootId}
             />

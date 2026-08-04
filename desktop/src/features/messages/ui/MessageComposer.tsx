@@ -53,6 +53,8 @@ import { ComposerDockToolbar } from "./ComposerDockToolbar";
 import { NonMemberMentionDialog } from "./NonMemberMentionDialog";
 import { useMentionSendFlow } from "./useMentionSendFlow";
 import { usePersistentAgentMentionHydration } from "./usePersistentAgentMentionHydration";
+import { useReplyTargetAgentMention } from "./useReplyTargetAgentMention";
+import { useComposerAutoSubmit } from "./useComposerAutoSubmit";
 import { useComposerContentState } from "./useComposerContentState";
 import { useDraftPersistLifecycle } from "./useDraftPersistSnapshot";
 
@@ -82,6 +84,7 @@ function MessageComposerImpl({
   placeholder,
   profiles,
   replyTarget = null,
+  replyTargetAgent = null,
   mediaController,
   showTopBorder = false,
   toolbarExtraActions,
@@ -155,7 +158,21 @@ function MessageComposerImpl({
     effectiveDraftKey,
     channelId,
     loadDraft: drafts.loadDraft,
-    persistDraft: drafts.persistDraft,
+    // An untouched auto-inserted reply-target mention is not an authored
+    // draft — persist it as empty (which clears the entry) so navigating
+    // away from an agent thread never strands a phantom "@Agent " draft.
+    persistDraft: (draftKey, content, draftChannelId, imeta, spoilered, refs) =>
+      drafts.persistDraft(
+        draftKey,
+        imeta.length === 0 &&
+          replyAgentMentionRef.current?.isUntouchedAutoMention()
+          ? ""
+          : content,
+        draftChannelId,
+        imeta,
+        spoilered,
+        refs,
+      ),
     getMentionRefs: mentions.getDraftMentionRefs,
     restoreMentionRefs: mentions.restoreDraftMentionRefs,
     livePendingImeta: media.pendingImeta,
@@ -261,6 +278,7 @@ function MessageComposerImpl({
       emojiAutocomplete.updateEmojiQuery(text, cursor);
 
       persistentMentionHydrationRef.current?.reconcile(text);
+      replyAgentMentionRef.current?.reconcile(text);
 
       if (text.trim().length > 0) {
         notifyTyping();
@@ -292,6 +310,15 @@ function MessageComposerImpl({
     persistentMentionHydration,
   );
   persistentMentionHydrationRef.current = persistentMentionHydration;
+
+  const replyAgentMention = useReplyTargetAgentMention({
+    isEditing: editTarget != null,
+    mentions,
+    richText,
+    target: replyTargetAgent,
+  });
+  const replyAgentMentionRef = React.useRef(replyAgentMention);
+  replyAgentMentionRef.current = replyAgentMention;
 
   const mentionSendFlow = useMentionSendFlow({
     channelId,
@@ -598,6 +625,7 @@ function MessageComposerImpl({
 
     onPreparingMentionSendChange?.(true);
     persistentMentionHydration.beginSubmit();
+    replyAgentMention.beginSubmit();
     try {
       await mentionSendFlow.sendMessageWithMentionFlow({
         capturedChannelId: channelId,
@@ -614,6 +642,7 @@ function MessageComposerImpl({
       });
     } finally {
       persistentMentionHydration.endSubmit();
+      replyAgentMention.endSubmit();
       onPreparingMentionSendChange?.(false);
     }
   }, [
@@ -636,47 +665,18 @@ function MessageComposerImpl({
     onPreparingMentionSendChange,
     audienceScope,
     persistentMentionHydration,
+    replyAgentMention,
     persistentAudience.generation,
     persistentAudience.revision,
   ]);
   submitMessageRef.current = submitMessage;
 
-  // ── Auto-submit on draft send ────────────────────────────────────────────
-  // When `autoSubmitDraftKey` is set (the user clicked "Send message" in the
-  // Drafts panel and confirmed), fire `submitMessage` once after mount so the
-  // draft is sent through the real send path (mention resolution, media, etc.).
-  //
-  // Guard: only fire when the effective draft key matches the trigger so a
-  // stale URL param on a different channel never fires a spurious send.
-  //
-  // Fires at most once per mount (empty dep array after the key check) — the
-  // `onAutoSubmitComplete` callback clears the trigger before `submitMessage`
-  // runs, preventing re-fire on re-render or back-navigation.
-  const onAutoSubmitCompleteRef = React.useRef(onAutoSubmitComplete);
-  onAutoSubmitCompleteRef.current = onAutoSubmitComplete;
-
-  // biome-ignore lint/correctness/useExhaustiveDependencies: intentionally fires once on mount only
-  React.useEffect(() => {
-    if (
-      autoSubmitDraftKey === null ||
-      autoSubmitDraftKey !== effectiveDraftKey
-    ) {
-      return;
-    }
-    // Clear the trigger BEFORE firing so any navigation from the send cannot
-    // loop back with the param still present.
-    onAutoSubmitCompleteRef.current?.();
-    // Defer by one macrotask so the draft-persist lifecycle effect (which runs
-    // synchronously after mount) has a chance to load the draft content into
-    // the Tiptap editor before we try to submit.
-    const timer = window.setTimeout(() => {
-      submitMessageRef.current();
-    }, 0);
-    return () => {
-      window.clearTimeout(timer);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // mount-only
+  useComposerAutoSubmit({
+    autoSubmitDraftKey,
+    effectiveDraftKey,
+    onAutoSubmitComplete,
+    submitMessageRef,
+  });
 
   const handleSubmit = React.useCallback(
     (event: React.FormEvent<HTMLFormElement>) => {
