@@ -635,6 +635,27 @@ export function useActiveAgentTurnsByChannel(): ActiveChannelTurnSummary[] {
 }
 
 /**
+ * Live observer turns one agent is running in one channel. The channel
+ * composer bar uses this to switch from a detailed single-turn status line to
+ * an aggregate ("2 threads") when parallel conversations would otherwise
+ * interleave in one line. Returns a primitive, so useSyncExternalStore
+ * reference stability is free.
+ */
+export function getActiveTurnCountForChannel(
+  agentPubkey: string | null | undefined,
+  channelId: string | null,
+): number {
+  if (!agentPubkey || !channelId) return 0;
+  const turns = activeTurnsByAgent.get(normalizePubkey(agentPubkey));
+  if (!turns) return 0;
+  let count = 0;
+  for (const turn of turns.values()) {
+    if (turn.channelId === channelId) count += 1;
+  }
+  return count;
+}
+
+/**
  * Agents with a live observer turn scoped to one thread. A turn qualifies
  * when its channel matches AND the thread root id begins with the turn's
  * `sessionId` (harnesses emit the root event id shortened, so prefix match is

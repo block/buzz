@@ -121,10 +121,21 @@ const USAGE_TEXT = /Tokens:\s*(\d+)\/(\d+)/;
 export function buildStableActivityStatus(
   transcript: TranscriptItem[],
   channelId: string | null,
+  threadRootId: string | null = null,
 ): StableActivityStatus {
-  const scoped = channelId
+  const channelScoped = channelId
     ? transcript.filter((item) => item.channelId === channelId)
     : transcript;
+  // Thread bars lock onto their own turn: the emitting harness stamps items
+  // with the thread root shortened as sessionId, so prefix match selects them.
+  const scoped = threadRootId
+    ? channelScoped.filter(
+        (item) =>
+          typeof item.sessionId === "string" &&
+          item.sessionId.length > 0 &&
+          threadRootId.startsWith(item.sessionId),
+      )
+    : channelScoped;
 
   let currentTurnId: string | null = null;
   for (let i = scoped.length - 1; i >= 0; i--) {

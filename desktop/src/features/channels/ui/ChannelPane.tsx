@@ -899,6 +899,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                     <BotActivityComposerAction
                       agents={activityAgents}
                       channelId={activeChannel?.id ?? null}
+                      threadRootId={openThreadHeadId ?? null}
                       onOpenAgentSession={onOpenAgentSession}
                       openAgentSessionPubkey={openAgentSessionPubkey}
                       profiles={profiles}

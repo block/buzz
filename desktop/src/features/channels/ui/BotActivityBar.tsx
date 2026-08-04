@@ -3,6 +3,10 @@ import { Loader2 } from "lucide-react";
 
 import { useAgentTranscript } from "@/features/agents/ui/useObserverEvents";
 import {
+  getActiveTurnCountForChannel,
+  subscribeActiveAgentTurns,
+} from "@/features/agents/activeAgentTurnsStore";
+import {
   getAgentWorkingState,
   subscribeAgentWorkingSignal,
 } from "@/features/agents/agentWorkingSignal";
@@ -28,6 +32,9 @@ export type BotActivityAgent = Pick<ManagedAgent, "pubkey" | "name">;
 type BotActivityBarProps = {
   agents: BotActivityAgent[];
   channelId?: string | null;
+  /** Thread root id when this bar lives in a thread composer — locks the
+   *  status detail onto that thread's turn instead of the channel's newest. */
+  threadRootId?: string | null;
   onOpenAgentSession: (pubkey: string, channelId?: string | null) => void;
   openAgentSessionPubkey: string | null;
   profiles?: UserProfileLookup;
@@ -41,6 +48,7 @@ const ELAPSED_TICK_MS = 1000;
 export function BotActivityComposerAction({
   agents,
   channelId = null,
+  threadRootId = null,
   onOpenAgentSession,
   openAgentSessionPubkey,
   profiles,
@@ -68,9 +76,9 @@ export function BotActivityComposerAction({
   const activityStatus = React.useMemo(
     () =>
       singleWorkingAgent
-        ? buildStableActivityStatus(transcript, channelId)
+        ? buildStableActivityStatus(transcript, channelId, threadRootId)
         : null,
-    [channelId, singleWorkingAgent, transcript],
+    [channelId, singleWorkingAgent, threadRootId, transcript],
   );
 
   // Turn-start anchor for the elapsed segment, observer-primary with a
@@ -100,6 +108,14 @@ export function BotActivityComposerAction({
       Number.POSITIVE_INFINITY,
     );
   }, [channelId, singleWorkingAgent, workingState]);
+
+  const channelTurnCount = React.useSyncExternalStore(
+    subscribeActiveAgentTurns,
+    React.useCallback(
+      () => getActiveTurnCountForChannel(singleWorkingPubkey, channelId),
+      [channelId, singleWorkingPubkey],
+    ),
+  );
 
   // Re-render once a second while a turn is running so the elapsed segment
   // ticks in place — the only part of the line that changes on its own.
@@ -163,14 +179,22 @@ export function BotActivityComposerAction({
     workingAgents.length === 1
       ? [
           workingAgents[0]?.name ?? "Agent",
-          formatStatusSegments(
-            activityStatus ?? {
-              activity: "Working",
-              toolCount: 0,
-              context: null,
-            },
-            elapsed,
-          ),
+          // Parallel turns in one channel would interleave in a single
+          // detailed line, so past one turn the channel bar aggregates;
+          // each thread's own bar still carries that thread's detail.
+          channelTurnCount > 1 && !threadRootId
+            ? [
+                `${channelTurnCount} threads`,
+                ...(elapsed ? [elapsed] : []),
+              ].join(" · ")
+            : formatStatusSegments(
+                activityStatus ?? {
+                  activity: "Working",
+                  toolCount: 0,
+                  context: null,
+                },
+                elapsed,
+              ),
         ].join(" · ")
       : `${workingAgents[0]?.name ?? "Agent"} +${workingAgents.length - 1}`;
 
