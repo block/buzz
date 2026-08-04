@@ -135,6 +135,7 @@ export function AppShell() {
   useManagedAgentRuntimeReconciliation(communitiesHook.communities); // sync storage snapshot
   const {
     goAgents,
+    goAttention,
     goChannel,
     goHome,
     goNewMessage,
@@ -607,10 +608,6 @@ export function AppShell() {
     },
     [goSettings],
   );
-  const handleCloseSettings = React.useCallback(
-    () => closeSettings(),
-    [closeSettings],
-  );
   // Section switches rewrite the settings entry rather than stacking one
   // history entry per section, so back always exits settings in one step.
   const handleSettingsSectionChange = React.useCallback(
@@ -703,7 +700,7 @@ export function AppShell() {
     settingsOpen,
   ]);
   useSettingsShortcuts({
-    onClose: handleCloseSettings,
+    onClose: closeSettings,
     onOpenSettings: handleOpenSettings,
     open: isHuddleRoom ? undefined : settingsOpen,
   });
@@ -815,7 +812,7 @@ export function AppShell() {
                         }
                         notificationPermission={notificationSettings.permission}
                         notificationSettings={notificationSettings.settings}
-                        onClose={handleCloseSettings}
+                        onClose={closeSettings}
                         onSectionChange={handleSettingsSectionChange}
                         onSetDesktopNotificationsEnabled={
                           notificationSettings.setDesktopEnabled
@@ -901,6 +898,7 @@ export function AppShell() {
                         searchChannels={channels}
                         searchFocusRequest={searchFocusRequest}
                         onSelectHome={() => void goHome()}
+                        onSelectAttention={() => void goAttention()}
                         onSelectProjects={() => void goProjects()}
                         onSelectPulse={() => void goPulse()}
                         onSelectSettings={handleOpenSettings}
