@@ -19,6 +19,10 @@ fn inert_pipeline(cancel: Arc<AtomicBool>) -> TtsPipeline {
         voice_cancel: Arc::new(AtomicBool::new(false)),
         voice: Arc::new(std::sync::Mutex::new("reference_sample".to_string())),
         voice_generation: Arc::new(AtomicU64::new(1)),
+        speaker_generations: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        active_speaker: Arc::new(std::sync::Mutex::new(None)),
+        speaker_cancel: Arc::new(std::sync::Mutex::new(None)),
+        playback_probe: PlaybackProbe::new(),
         voice_change_ack: Arc::new(std::sync::Mutex::new(None)),
         thread: Some(thread),
     }
@@ -168,6 +172,7 @@ fn an_in_hand_post_change_message_survives_cancellation() {
             generation: voice_generation.load(Ordering::Acquire),
             route_id: 1,
             speaker_pubkey: None,
+            speaker_generation: 0,
             voice_reference: None,
             text: "new message".to_string(),
         })
@@ -181,6 +186,7 @@ fn an_in_hand_post_change_message_survives_cancellation() {
             generation: 1,
             route_id: 2,
             speaker_pubkey: None,
+            speaker_generation: 0,
             voice_reference: None,
             text: "old message".to_string(),
         },
@@ -188,6 +194,7 @@ fn an_in_hand_post_change_message_survives_cancellation() {
             generation: voice_generation.load(Ordering::Acquire),
             route_id: 3,
             speaker_pubkey: None,
+            speaker_generation: 0,
             voice_reference: None,
             text: "later new message".to_string(),
         },
@@ -246,6 +253,7 @@ fn superseding_voice_change_removes_earlier_deferred_messages() {
         generation: voice_generation.load(Ordering::Acquire),
         route_id: 4,
         speaker_pubkey: None,
+        speaker_generation: 0,
         voice_reference: None,
         text: "message for Eve".to_string(),
     });
@@ -294,6 +302,7 @@ fn barge_in_clears_deferred_voice_change_messages() {
         generation: 2,
         route_id: 5,
         speaker_pubkey: None,
+        speaker_generation: 0,
         voice_reference: None,
         text: "deferred message".to_string(),
     }]);
@@ -337,6 +346,7 @@ fn barge_in_during_a_voice_change_clears_post_change_messages() {
         generation: voice_generation.load(Ordering::Acquire),
         route_id: 6,
         speaker_pubkey: None,
+        speaker_generation: 0,
         voice_reference: None,
         text: "post-change message".to_string(),
     });
@@ -365,6 +375,7 @@ fn a_sender_captured_before_voice_change_is_stale_even_if_it_sends_after_drain()
     let old_sender = TtsTextSender {
         text_tx,
         generation: voice_generation.load(Ordering::Acquire),
+        speaker_generations: Arc::new(std::sync::Mutex::new(HashMap::new())),
     };
     let shutdown = AtomicBool::new(false);
     let active = AtomicBool::new(true);
@@ -392,6 +403,7 @@ fn a_sender_captured_before_voice_change_is_stale_even_if_it_sends_after_drain()
         .send(
             7,
             "agent".to_string(),
+            0,
             "reference_sample".to_string(),
             "late old message".to_string(),
         )

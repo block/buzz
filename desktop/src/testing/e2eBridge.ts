@@ -266,6 +266,8 @@ type E2eConfig = {
       parent_added: boolean;
       parent_error: string | null;
     };
+    /** When set, the mocked `add_agent_to_huddle` command throws. */
+    addAgentToHuddleError?: string;
     /** Delay an invocation-time huddle snapshot to exercise hydration ordering. */
     huddleStateReadDelayMs?: number;
     /** Delay companion creation to expose the newly-started huddle handoff state. */
@@ -401,21 +403,6 @@ type E2eConfig = {
     // Seed rows returned by `list_save_subscriptions`. Each entry uses the same
     // snake_case wire shape the Rust backend returns so tests can drive the
     // LocalArchiveSettingsCard without a real SQLite database.
-    observerArchiveDefaultEnabled?: boolean;
-    /**
-     * Delay (ms) applied to `observer_archive_default_enabled` so E2E tests
-     * can exercise short-lived loading UI. 0/undefined = instant. Prefer the
-     * explicit defer/release seam for pending-state ordering assertions.
-     */
-    observerArchiveDefaultEnabledDelayMs?: number;
-    /** Hold the observer policy command until the E2E release seam is called. */
-    deferObserverArchiveDefaultEnabled?: boolean;
-    /**
-     * When set, `observer_archive_default_enabled` throws with this message
-     * instead of resolving — drives the fail-closed `.catch()` path in
-     * `useObserverArchiveReconciliation` / `LocalArchiveSettingsCard`.
-     */
-    observerArchiveDefaultEnabledError?: string;
     agentMetricArchiveDefaultEnabled?: boolean;
     saveSubscriptions?: Array<{
       scope_type: string;
@@ -1298,10 +1285,6 @@ declare global {
     /** Count of `get_event` invocations for the current defer-target ID since
      *  the last time `__BUZZ_E2E_DEFER_GET_EVENT__` was set. */
     __BUZZ_E2E_GET_EVENT_CALL_COUNT__?: number;
-    /** Release every deferred observer archive policy command. */
-    __BUZZ_E2E_RELEASE_OBSERVER_ARCHIVE_POLICY__?: () => number;
-    /** Number of observer archive policy commands currently held by the seam. */
-    __BUZZ_E2E_OBSERVER_ARCHIVE_POLICY_PENDING__?: number;
     /** Hold the next channel read until released. */
     __BUZZ_E2E_DEFER_NEXT_CHANNELS_READ__?: () => void;
     /** Disarm the latch and release the held channel read, if any. */
@@ -1411,7 +1394,6 @@ type DeferredGetEvent = {
   run: () => Promise<string>;
 };
 let deferredGetEventQueue: DeferredGetEvent[] = [];
-let deferredObserverArchivePolicyQueue: Array<() => void> = [];
 let deferNextChannelsRead = false;
 let deferredChannelsReadResolve: (() => void) | null = null;
 
@@ -2963,8 +2945,8 @@ let mockManagedAgentRuntimes: MockManagedAgentRuntimeRow[] = [];
 // mutated by `create_save_subscription` / `delete_save_subscription` /
 // `merge_save_subscription_kinds` / `remove_save_subscription_kind` exactly
 // as the real SQLite-backed Rust commands would (see `archive/store.rs`).
-// This lets E2E specs drive the fresh-internal-repair path (start from `[]`,
-// reconcile, observe a kind-24200 row appear) and OSS toggle ON/OFF, neither
+// This lets E2E specs drive the default-on seeding path (start from `[]`,
+// reconcile, observe a kind-24200 row appear) and toggle ON/OFF, neither
 // of which an immutable seed can represent.
 type MockSaveSubscriptionRow = {
   scope_type: string;
@@ -3063,7 +3045,7 @@ type MockHuddleState = {
   tts_enabled: boolean;
   transcription_enabled: boolean;
   is_creator: boolean;
-  voice_input_mode: "voice_activity";
+  voice_input_mode: "push_to_talk" | "voice_activity";
 };
 
 type PersistedMockHuddle = {
@@ -3178,7 +3160,7 @@ function initializeMockHuddle(
         tts_enabled: seed.ttsEnabled ?? false,
         transcription_enabled: seed.transcriptionEnabled ?? false,
         is_creator: seed.isCreator ?? true,
-        voice_input_mode: "voice_activity",
+        voice_input_mode: "push_to_talk",
       },
     };
   }
@@ -9995,14 +9977,6 @@ export function maybeInstallE2eTauriMocks() {
   window.__BUZZ_E2E_GET_EVENT_CALL_COUNT__ = 0;
   window.__BUZZ_E2E_DEFER_GET_EVENT__ = null;
   deferredGetEventQueue = [];
-  deferredObserverArchivePolicyQueue = [];
-  window.__BUZZ_E2E_OBSERVER_ARCHIVE_POLICY_PENDING__ = 0;
-  window.__BUZZ_E2E_RELEASE_OBSERVER_ARCHIVE_POLICY__ = () => {
-    const queued = deferredObserverArchivePolicyQueue.splice(0);
-    window.__BUZZ_E2E_OBSERVER_ARCHIVE_POLICY_PENDING__ = 0;
-    for (const resolve of queued) resolve();
-    return queued.length;
-  };
   deferNextChannelsRead = false;
   deferredChannelsReadResolve = null;
   window.__BUZZ_E2E_CHANNELS_READ_PENDING__ = 0;
@@ -10235,6 +10209,21 @@ export function maybeInstallE2eTauriMocks() {
         }
         return snapshot;
       }
+      case "get_voice_input_mode":
+        return mockHuddle?.state.voice_input_mode ?? "push_to_talk";
+      case "set_voice_input_mode": {
+        if (!mockHuddle) throw new Error("No active mock huddle.");
+        const mode = (payload as { mode?: unknown }).mode;
+        if (mode !== "push_to_talk" && mode !== "voice_activity") {
+          throw new Error("Missing voice input mode.");
+        }
+        mockHuddle.state.voice_input_mode = mode;
+        persistMockHuddle();
+        await emitMockHuddleState();
+        return null;
+      }
+      case "set_huddle_manual_mic_unmuted":
+        return null;
       case "get_huddle_agent_pubkeys":
         if (!mockHuddle) return [];
         return [...mockHuddle.state.agent_pubkeys];
@@ -10266,7 +10255,7 @@ export function maybeInstallE2eTauriMocks() {
             tts_enabled: false,
             transcription_enabled: false,
             is_creator: true,
-            voice_input_mode: "voice_activity",
+            voice_input_mode: "push_to_talk",
           },
         };
         refreshMockHuddleMembership(activeConfig);
@@ -10360,7 +10349,7 @@ export function maybeInstallE2eTauriMocks() {
           tts_enabled: false,
           transcription_enabled: false,
           is_creator: false,
-          voice_input_mode: "voice_activity",
+          voice_input_mode: "push_to_talk",
         });
         return null;
       case "set_huddle_transcription_enabled":
@@ -10441,11 +10430,32 @@ export function maybeInstallE2eTauriMocks() {
         return { matched_active_huddle: true, added };
       }
       case "add_agent_to_huddle": {
+        const error = activeConfig?.mock?.addAgentToHuddleError;
+        if (error) {
+          throw new Error(error);
+        }
         const result = activeConfig?.mock?.addAgentToHuddleResult;
         if (!result) {
           throw new Error("No mock add-agent result configured.");
         }
         return structuredClone(result);
+      }
+      case "remove_agent_from_huddle": {
+        const agentPubkey = (payload as { agentPubkey?: string })?.agentPubkey;
+        if (!mockHuddle || !agentPubkey) {
+          throw new Error("No active huddle agent to remove.");
+        }
+        const initialCount = mockHuddle.members.length;
+        mockHuddle.members = mockHuddle.members.filter(
+          (member) => member.role !== "bot" || member.pubkey !== agentPubkey,
+        );
+        if (mockHuddle.members.length === initialCount) {
+          throw new Error("Agent is not in this huddle.");
+        }
+        refreshMockHuddleMembership(activeConfig);
+        persistMockHuddle();
+        await emitMockHuddleState();
+        return;
       }
       case "get_model_status":
         return { stt: "ready", tts: "ready" };
@@ -10579,6 +10589,8 @@ export function maybeInstallE2eTauriMocks() {
         }
         return settings;
       }
+      case "interrupt_huddle_speech":
+        return;
       case "set_pocket_voice": {
         const voiceKey = (payload as { voiceKey?: string })?.voiceKey;
         if (!voiceKey) throw new Error("Missing Pocket voice key");
@@ -12633,7 +12645,7 @@ export function maybeInstallE2eTauriMocks() {
       // install); create/merge/delete/remove mutate it with the same
       // union / delete-row-when-empty semantics as the real Rust commands
       // (see `archive/store.rs::merge_owner_p_kinds` / `remove_owner_p_kind`)
-      // so specs can drive fresh-internal-repair and toggle ON/OFF flows.
+      // so specs can drive default-on seeding and toggle ON/OFF flows.
       case "list_save_subscriptions": {
         const win = window as unknown as Record<string, unknown>;
         if (!win.__BUZZ_E2E_IPC_COUNTERS__) {
@@ -12691,27 +12703,8 @@ export function maybeInstallE2eTauriMocks() {
       case "archive_events":
         // Returns the ArchiveBatchResult shape the UI expects.
         return { persisted: 0, dropped: 0 };
-      case "observer_archive_default_enabled": {
-        if (activeConfig?.mock?.deferObserverArchiveDefaultEnabled) {
-          await new Promise<void>((resolve) => {
-            deferredObserverArchivePolicyQueue.push(resolve);
-            window.__BUZZ_E2E_OBSERVER_ARCHIVE_POLICY_PENDING__ =
-              deferredObserverArchivePolicyQueue.length;
-          });
-        }
-        const delayMs =
-          activeConfig?.mock?.observerArchiveDefaultEnabledDelayMs;
-        if (delayMs && delayMs > 0) {
-          await new Promise((resolve) => window.setTimeout(resolve, delayMs));
-        }
-        const error = activeConfig?.mock?.observerArchiveDefaultEnabledError;
-        if (error) {
-          throw new Error(error);
-        }
-        return activeConfig?.mock?.observerArchiveDefaultEnabled ?? false;
-      }
       case "agent_metric_archive_default_enabled":
-        return activeConfig?.mock?.agentMetricArchiveDefaultEnabled ?? false;
+        return activeConfig?.mock?.agentMetricArchiveDefaultEnabled ?? true;
       case "set_prevent_sleep_active":
         return null;
       case "plugin:window|is_fullscreen":

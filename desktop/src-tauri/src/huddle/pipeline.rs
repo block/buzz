@@ -315,6 +315,7 @@ pub(crate) async fn maybe_start_stt_pipeline(
         expected_generation,
         stt_starting,
         ptt_active_for_stt,
+        manual_mic_unmuted_for_stt,
         old_stt,
     ) = {
         let mut hs = state.huddle()?;
@@ -338,6 +339,11 @@ pub(crate) async fn maybe_start_stt_pipeline(
         } else {
             None
         };
+        let manual_mic_unmuted = if hs.voice_input_mode == VoiceInputMode::PushToTalk {
+            Some(Arc::clone(&hs.manual_mic_unmuted))
+        } else {
+            None
+        };
         (
             Arc::clone(&hs.tts_active),
             Arc::clone(&hs.agent_pubkeys),
@@ -345,6 +351,7 @@ pub(crate) async fn maybe_start_stt_pipeline(
             hs.session_generation.load(Ordering::Acquire),
             stt_starting,
             ptt,
+            manual_mic_unmuted,
             old,
         )
     };
@@ -352,7 +359,12 @@ pub(crate) async fn maybe_start_stt_pipeline(
     drop(old_stt);
 
     let constructed = tokio::task::spawn_blocking(move || {
-        stt::SttPipeline::new(model_dir, tts_active, ptt_active_for_stt)
+        stt::SttPipeline::new(
+            model_dir,
+            tts_active,
+            ptt_active_for_stt,
+            manual_mic_unmuted_for_stt,
+        )
     })
     .await;
     let (pipeline, text_rx) = match constructed {
