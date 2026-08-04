@@ -171,11 +171,10 @@ fn run_boot_migrations_inner(app: &tauri::AppHandle, reset_completed: bool) {
     reconcile_legacy_command_names(app);
     // Fold personas.json into the unified store HERE: after the JSON-level
     // personas.json migrations above (which must see the legacy file), and
-    // before every consumer of the load/save_personas shims below —
-    // sync_team_personas would otherwise operate on an empty definition set.
-    // Post-fold readers of the runtime map (`load_persona_runtimes`) fall
-    // back to the unified store's definitions.
+    // before every consumer below — sync_team_personas would otherwise operate
+    // on an empty definition set.
     fold_personas_into_agent_store(app);
+    mcp_boundary::strip_legacy_agent_mcp_env(app);
     // Clean the legacy baked team-instructions suffix out of stored prompts
     // AFTER the fold (so definitions lifted out of personas.json are cleaned in
     // the same boot) and BEFORE backfill_standalone_agents (so a manufactured
@@ -1370,6 +1369,7 @@ pub fn migrate_persona_provider_to_runtime(app: &tauri::AppHandle) {
 mod materialize;
 pub use materialize::materialize_agent_runtimes;
 mod fold;
+mod mcp_boundary;
 pub use fold::fold_personas_into_agent_store;
 use fold::load_persona_runtimes;
 mod backfill;

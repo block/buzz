@@ -24,10 +24,11 @@ owner presses **Start**.
 3. Build `Dockerfile.fly-agent` and publish it to a registry Fly can pull.
    Give the reviewed build a unique release tag and record the resulting
    manifest digest. Fly CLI 0.4.77 rejects digest references in `machine run`,
-   so the pilot provider uses the unique `pilot-20260803` tag while retaining
-   the build digest in the deployment record.
-   The image contains Sprig plus `mcp-remote@0.1.38`; the package is never
-   fetched dynamically when an agent restarts.
+   so the pilot provider uses the unique
+   `pilot-20260804-project-mcp-boundary` tag while retaining the build digest
+   in the deployment record.
+   The image contains Sprig and does not fetch runtime packages when an agent
+   restarts.
 
 4. In Buzz Desktop, create an agent with the **Buzz Agent** runtime, select
    the **fly** backend, and save. The Desktop keeps the Nostr key and owner
@@ -36,45 +37,26 @@ owner presses **Start**.
 
 The provider defaults to Amsterdam (`ams`), 1 GB RAM, and a 5 GB encrypted volume
 with scheduled snapshots. It creates no public service or IP because the
-agent only makes outbound connections to the Buzz relay, model API, and MCP
-servers. The Machine uses `on-failure`, so crashes restart while an intentional
+agent only makes outbound connections to the Buzz relay and model API. The
+Machine uses `on-failure`, so crashes restart while an intentional
 clean `!shutdown` stays down. A minimal root entrypoint assigns a newly mounted
 volume to the unprivileged `agent` user, then permanently drops privileges
-before starting `buzz-acp` or any MCP process.
+before starting `buzz-acp` or any child process.
 
-## Add an MCP connection
+## Project connection boundary
 
-Copy `mcp-servers.example.json` to an agent-specific file and use its absolute
-path in **MCP profile file**. One profile can declare up to 15 additional
-servers when the built-in Buzz developer MCP is enabled.
+This provider intentionally does not accept agent-owned MCP endpoints or
+credentials. Project configuration owns the concrete connection, secret,
+health state, and discovered tools; an agent owns only a connection binding and
+optional tool allowlist. Those bindings are being developed in #4588 on the
+shared MCP schema from #4164 and the HTTP transport work in #4271.
 
-For a remote server, use the image-pinned `mcp-remote` command. Put account
-credentials in the agent's environment and reference their names through
-`inherit_env`; do not put the credential value in the shared profile:
-
-```json
-[
-  {
-    "name": "crm",
-    "command": "mcp-remote",
-    "args": [
-      "https://crm.example/mcp",
-      "--header",
-      "Authorization:${CRM_AUTH_HEADER}",
-      "--transport",
-      "http-only",
-      "--ignore-tool",
-      "delete*"
-    ],
-    "inherit_env": ["CRM_AUTH_HEADER"]
-  }
-]
-```
-
-Connecting the same MCP to two agents means two profiles or grants and two
-agent-scoped environment values. Nothing in one Fly app can select another
-agent's account. OAuth state created by `mcp-remote` persists under
-`/home/agent/.mcp-auth` on that agent's volume.
+Fly agents cannot execute a Desktop-local stdio connection. A future Project
+binding must therefore resolve to a cloud-reachable HTTP connection or a
+gateway. At deploy time, the control plane may materialize a scoped runtime
+copy of the Project credential into that Fly app's secret boundary, but the
+credential must never be serialized into the agent, persona, template, or
+snapshot.
 
 ## Operational checks
 

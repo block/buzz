@@ -80,20 +80,25 @@ fn resolve_linked(
     definition: &AgentDefinition,
     global: &GlobalAgentConfig,
 ) -> EffectiveAgentConfig {
-    let model = match non_blank(record.env_vars.get(MODEL_OVERRIDE_ENV_KEY).map(String::as_str)) {
+    let model = match non_blank(
+        record
+            .env_vars
+            .get(MODEL_OVERRIDE_ENV_KEY)
+            .map(String::as_str),
+    ) {
         Some(m) => ResolvedField {
             value: Some(m.to_owned()),
             source: ConfigSource::InstanceOverride,
         },
         None => match non_blank(definition.model.as_deref()) {
-        Some(m) => ResolvedField {
-            value: Some(m.to_owned()),
-            source: ConfigSource::Definition,
-        },
-        None => ResolvedField {
-            value: global.model.clone(),
-            source: ConfigSource::Global,
-        },
+            Some(m) => ResolvedField {
+                value: Some(m.to_owned()),
+                source: ConfigSource::Definition,
+            },
+            None => ResolvedField {
+                value: global.model.clone(),
+                source: ConfigSource::Global,
+            },
         },
     };
 
@@ -108,14 +113,14 @@ fn resolve_linked(
             source: ConfigSource::InstanceOverride,
         },
         None => match non_blank(definition.provider.as_deref()) {
-        Some(p) => ResolvedField {
-            value: Some(p.to_owned()),
-            source: ConfigSource::Definition,
-        },
-        None => ResolvedField {
-            value: global.provider.clone(),
-            source: ConfigSource::Global,
-        },
+            Some(p) => ResolvedField {
+                value: Some(p.to_owned()),
+                source: ConfigSource::Definition,
+            },
+            None => ResolvedField {
+                value: global.provider.clone(),
+                source: ConfigSource::Global,
+            },
         },
     };
 

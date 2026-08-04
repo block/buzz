@@ -30,10 +30,6 @@ pub struct McpServer {
     pub command: String,
     pub args: Vec<String>,
     pub env: Vec<EnvVar>,
-    /// Buzz extension: exact bare tool names this server may expose. Empty
-    /// preserves the ACP default of exposing every server tool.
-    #[serde(rename = "allowedTools", skip_serializing_if = "Vec::is_empty")]
-    pub allowed_tools: Vec<String>,
 }
 
 /// A single environment variable for an MCP server.
@@ -2446,7 +2442,6 @@ mod tests {
                     value: "nsec1abc".into(),
                 },
             ],
-            allowed_tools: vec![],
         };
         let serialized = serde_json::to_value(&server).unwrap();
         assert_eq!(serialized["name"].as_str(), Some("test-mcp"));

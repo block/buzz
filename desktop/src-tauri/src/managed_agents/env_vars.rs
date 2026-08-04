@@ -71,6 +71,9 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     "BUZZ_ACP_AGENT_COMMAND",
     "BUZZ_ACP_AGENT_ARGS",
     "BUZZ_ACP_MCP_COMMAND",
+    // Retired agent-owned MCP configuration. Project connections own MCP
+    // endpoints and credentials; legacy values must never reach a runtime.
+    "BUZZ_ACP_MCP_SERVERS",
     // Security gates: respond-to mode + allowlist + legacy owner-only
     // fallback. Overriding would make the running agent's gate diverge
     // from the saved/UI-visible settings.
@@ -97,6 +100,14 @@ pub(crate) fn is_reserved_env_key(key: &str) -> bool {
     RESERVED_ENV_KEYS
         .iter()
         .any(|reserved| reserved.eq_ignore_ascii_case(key))
+        || is_legacy_agent_mcp_env_key(key)
+}
+
+pub(crate) fn is_legacy_agent_mcp_env_key(key: &str) -> bool {
+    key.eq_ignore_ascii_case("BUZZ_ACP_MCP_SERVERS")
+        || key
+            .get(..9)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("BUZZ_MCP_"))
 }
 
 /// Returns true if `key` is a well-formed POSIX-shaped env var name:

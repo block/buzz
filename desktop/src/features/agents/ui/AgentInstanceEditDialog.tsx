@@ -90,13 +90,11 @@ import {
   usePendingHarnessSelection,
 } from "./addCustomHarness";
 import { AgentInstanceConfigurationSections } from "./AgentInstanceConfigurationSections";
-import { MCP_PROFILE_ENV_KEY, MCP_SECRET_PREFIX } from "./agentMcpConnections";
 import {
   MODEL_OVERRIDE_ENV_KEY,
   PROVIDER_OVERRIDE_ENV_KEY,
   applyLinkedModelProviderOverrides,
 } from "./agentInstanceOverrides";
-import { isBuzzAgentRuntime } from "./buzzAgentConfig";
 
 export function AgentInstanceEditDialog({
   agent,
@@ -146,7 +144,6 @@ export function AgentInstanceEditDialog({
     React.useState(false);
   const [envVars, setEnvVars] = React.useState<EnvVarsValue>(agent.envVars);
   const overrideTouched = React.useRef({ model: false, provider: false });
-  const [mcpConfigValid, setMcpConfigValid] = React.useState(true);
   const [autoRestartOnConfigChange, setAutoRestartOnConfigChange] =
     React.useState(agent.autoRestartOnConfigChange);
   const personasQuery = usePersonasQuery();
@@ -197,7 +194,6 @@ export function AgentInstanceEditDialog({
       setIsCustomProviderEditing(false);
       setEnvVars(agent.envVars);
       overrideTouched.current = { model: false, provider: false };
-      setMcpConfigValid(true);
       setAutoRestartOnConfigChange(agent.autoRestartOnConfigChange);
       setRespondTo(agent.respondTo);
       setRespondToAllowlist(agent.respondToAllowlist);
@@ -618,7 +614,6 @@ export function AgentInstanceEditDialog({
       requiredEnvKeyMissing,
     }) &&
     providerValid &&
-    mcpConfigValid &&
     !updateMutation.isPending &&
     !isAvatarUploadPending;
 
@@ -858,10 +853,8 @@ export function AgentInstanceEditDialog({
   const previewAvatarUrl = avatarUrl.trim() || null;
   const hiddenEnvKeys = [
     ...(topLevelSecretEnvVar ? [topLevelSecretEnvVar] : []),
-    MCP_PROFILE_ENV_KEY,
     MODEL_OVERRIDE_ENV_KEY,
     PROVIDER_OVERRIDE_ENV_KEY,
-    ...Object.keys(envVars).filter((key) => key.startsWith(MCP_SECRET_PREFIX)),
   ];
 
   return (
@@ -1165,74 +1158,44 @@ export function AgentInstanceEditDialog({
             />
 
             {/* Advanced settings */}
-            <div className="space-y-3">
-              <button
-                aria-expanded={showAdvancedFields}
-                className="inline-flex h-9 items-center gap-1.5 text-sm font-medium text-foreground transition-colors hover:text-foreground/80 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-                onClick={() => setShowAdvancedFields((current) => !current)}
-                type="button"
-              >
-                <span>Advanced</span>
-                <AdvancedRequiredBadge
-                  envVars={inheritedSubmission.envVars}
-                  requiredEnvKeys={advancedRequiredEnvKeys}
-                  testId="edit-agent-advanced-required-badge"
-                />
-                <ChevronDown
-                  className={cn(
-                    "h-4 w-4 text-muted-foreground transition-transform duration-150 ease-out",
-                    showAdvancedFields && "rotate-180",
-                  )}
-                />
-              </button>
-              <AnimatePresence initial={false}>
-                {showAdvancedFields ? (
-                  <motion.div
-                    animate={{ height: "auto", opacity: 1, scale: 1 }}
-                    className="origin-top overflow-hidden"
-                    exit={{ height: 0, opacity: 0, scale: 0.98 }}
-                    initial={{ height: 0, opacity: 0, scale: 0.98 }}
-                    key="edit-agent-advanced-fields"
-                    transition={advancedFieldsTransition}
-                  >
-                    <EditAgentAdvancedFields
-                      acpCommand={acpCommand}
-                      agentArgs={agentArgs}
-                      autoRestartOnConfigChange={autoRestartOnConfigChange}
-                      disabled={updateMutation.isPending}
-                      envVars={envVars}
-                      fileSatisfiedEnvKeys={fileSatisfiedEnvKeys}
-                      hiddenEnvKeys={
-                        topLevelSecretEnvVar ? [topLevelSecretEnvVar] : []
-                      }
-                      focusKey={
-                        initialFocus?.type === "env_key"
-                          ? initialFocus.key
-                          : undefined
-                      }
-                      inheritedEnvVars={inheritedEnvVarsForAdvanced}
-                      inheritHarness={inheritHarness}
-                      linkedPersona={linkedPersona}
-                      model={inheritedSubmission.model ?? ""}
-                      modelTuningRuntimeId={prospectiveRuntimeId}
-                      parallelism={parallelism}
-                      provider={effectiveProvider}
-                      requiredEnvKeys={advancedRequiredEnvKeys}
-                      catalogStatus={runtimeCatalogStatus}
-                      selectedRuntime={prospectiveRuntime}
-                      systemPrompt={systemPrompt}
-                      onAcpCommandChange={setAcpCommand}
-                      onAgentArgsChange={setAgentArgs}
-                      onAutoRestartChange={setAutoRestartOnConfigChange}
-                      onEnvVarsChange={setEnvVars}
-                      onInheritHarnessChange={setInheritHarness}
-                      onParallelismChange={setParallelism}
-                      onSystemPromptChange={setSystemPrompt}
-                    />
-                  </motion.div>
-                ) : null}
-              </AnimatePresence>
-            </div>
+            <AgentInstanceConfigurationSections
+              advancedFieldsProps={{
+                acpCommand,
+                agentArgs,
+                autoRestartOnConfigChange,
+                disabled: updateMutation.isPending,
+                envVars,
+                fileSatisfiedEnvKeys,
+                hiddenEnvKeys,
+                focusKey:
+                  initialFocus?.type === "env_key"
+                    ? initialFocus.key
+                    : undefined,
+                inheritedEnvVars: inheritedEnvVarsForAdvanced,
+                inheritHarness,
+                linkedPersona,
+                model: inheritedSubmission.model ?? "",
+                modelTuningRuntimeId: prospectiveRuntimeId,
+                parallelism,
+                provider: effectiveProvider,
+                requiredEnvKeys: advancedRequiredEnvKeys,
+                catalogStatus: runtimeCatalogStatus,
+                selectedRuntime: prospectiveRuntime,
+                systemPrompt,
+                onAcpCommandChange: setAcpCommand,
+                onAgentArgsChange: setAgentArgs,
+                onAutoRestartChange: setAutoRestartOnConfigChange,
+                onEnvVarsChange: setEnvVars,
+                onInheritHarnessChange: setInheritHarness,
+                onParallelismChange: setParallelism,
+                onSystemPromptChange: setSystemPrompt,
+              }}
+              badgeEnvVars={inheritedSubmission.envVars}
+              onShowAdvancedFieldsChange={setShowAdvancedFields}
+              requiredEnvKeys={advancedRequiredEnvKeys}
+              showAdvancedFields={showAdvancedFields}
+            />
+
             {/* Error */}
             {updateMutation.error instanceof Error ? (
               <p className="text-sm text-destructive">

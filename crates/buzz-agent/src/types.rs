@@ -361,10 +361,6 @@ pub struct McpServerStdio {
     pub args: Vec<String>,
     #[serde(default)]
     pub env: Vec<EnvVar>,
-    /// Buzz ACP extension. Exact bare tool names allowed from this server.
-    /// Empty keeps the standard ACP behavior and exposes every server tool.
-    #[serde(default, rename = "allowedTools")]
-    pub allowed_tools: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

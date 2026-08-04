@@ -119,21 +119,6 @@ struct ServerSpec {
     args: Vec<String>,
     env: Vec<(String, String)>,
     cwd: String,
-    allowed_tools: HashSet<String>,
-}
-
-fn retain_allowed_tools<T>(
-    tools: Vec<T>,
-    allowed_tools: &HashSet<String>,
-    name: impl Fn(&T) -> &str,
-) -> Vec<T> {
-    if allowed_tools.is_empty() {
-        return tools;
-    }
-    tools
-        .into_iter()
-        .filter(|tool| allowed_tools.contains(name(tool)))
-        .collect()
 }
 
 enum ClientState {
@@ -248,16 +233,6 @@ impl McpRegistry {
                     s.name
                 )));
             }
-            let mut allowed_tools = HashSet::new();
-            for tool in &s.allowed_tools {
-                if !valid_name(tool) || tool.contains("__") {
-                    return Err(AgentError::Mcp(format!(
-                        "invalid allowed tool name for server {}: {tool}",
-                        s.name
-                    )));
-                }
-                allowed_tools.insert(tool.clone());
-            }
             let spec = ServerSpec {
                 name: s.name.clone(),
                 command: s.command.clone(),
@@ -268,12 +243,8 @@ impl McpRegistry {
                     .map(|e| (e.name.clone(), e.value.clone()))
                     .collect(),
                 cwd: cwd.to_owned(),
-                allowed_tools,
             };
             let (client, pgid, tool_names, raw_tools) = spawn_one(&spec, reg.init_timeout).await?;
-            let tool_names = retain_allowed_tools(tool_names, &spec.allowed_tools, String::as_str);
-            let raw_tools =
-                retain_allowed_tools(raw_tools, &spec.allowed_tools, |tool| tool.name.as_ref());
             let server_idx = reg.servers.len();
             let server = Arc::new(Server {
                 name: spec.name.clone(),
@@ -726,8 +697,6 @@ impl McpRegistry {
         );
         match spawn_one(&server.spec, self.init_timeout).await {
             Ok((client, pgid, tool_names, _raw_tools)) => {
-                let tool_names =
-                    retain_allowed_tools(tool_names, &server.spec.allowed_tools, String::as_str);
                 server.client.store(Arc::new(ClientState::Healthy {
                     client: Arc::new(client),
                     pgid,
@@ -1107,29 +1076,6 @@ mod content_tests {
         }
     }
     use rmcp::model::Content;
-
-    #[test]
-    fn exact_allowlist_removes_unapproved_tools() {
-        let allowed = HashSet::from(["search".to_string(), "create_note".to_string()]);
-        let tools = vec![
-            "search".to_string(),
-            "delete_account".to_string(),
-            "create_note".to_string(),
-        ];
-        assert_eq!(
-            retain_allowed_tools(tools, &allowed, String::as_str),
-            ["search", "create_note"]
-        );
-    }
-
-    #[test]
-    fn empty_allowlist_preserves_standard_acp_behavior() {
-        let tools = vec!["search".to_string(), "delete_account".to_string()];
-        assert_eq!(
-            retain_allowed_tools(tools.clone(), &HashSet::new(), String::as_str),
-            tools
-        );
-    }
 
     #[cfg(windows)]
     #[test]

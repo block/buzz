@@ -1,6 +1,5 @@
 # syntax=docker/dockerfile:1.7
-# Buzz cloud-agent image: the pinned Sprig runtime plus a pinned bridge for
-# remote Streamable HTTP/SSE MCP servers.
+# Buzz cloud-agent image: the pinned Sprig runtime used by isolated Fly agents.
 FROM rust:1.95-alpine3.22@sha256:064dfc925d68d1a63f4fd2871bd7dc6e6ea56692989a487185855d62885d90aa AS builder
 
 RUN apk add --no-cache \
@@ -20,12 +19,7 @@ RUN cargo build --locked --profile sprig -p sprig \
 
 FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
 
-# mcp-remote is pinned: cloud agents must not execute the newest npm package
-# merely because a Machine restarted. Update this version through the normal
-# image review and rollout path.
-RUN apk add --no-cache bash ca-certificates curl git nodejs npm su-exec \
-    && npm install --global --ignore-scripts mcp-remote@0.1.38 \
-    && npm cache clean --force \
+RUN apk add --no-cache bash ca-certificates curl git su-exec \
     && adduser -D -h /home/agent agent \
     && install -d -o agent -g agent /workspace /home/agent \
     && git config --system gpg.format x509 \
@@ -43,7 +37,6 @@ RUN for name in \
     done
 
 ENV HOME=/home/agent \
-    MCP_REMOTE_CONFIG_DIR=/home/agent/.mcp-auth \
     PATH=/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
 WORKDIR /home/agent
 ENTRYPOINT ["/usr/local/bin/fly-agent-entrypoint"]

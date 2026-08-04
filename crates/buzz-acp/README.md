@@ -111,7 +111,6 @@ All configuration is via environment variables (or CLI flags — every env var h
 | `BUZZ_ACP_AGENT_COMMAND` | no | `goose` | Agent binary to spawn. |
 | `BUZZ_ACP_AGENT_ARGS` | no | `acp` | Agent arguments (comma-separated). |
 | `BUZZ_ACP_MCP_COMMAND` | no | `""` (empty) | Path to an optional MCP server binary to provide to the agent subprocess. |
-| `BUZZ_ACP_MCP_SERVERS` | no | — | JSON array of additional stdio MCP servers. Supports `name`, `command`, `args`, literal `env`, `inherit_env` names resolved from the harness environment, and optional exact `allowed_tools`. Maximum 16 total including `BUZZ_ACP_MCP_COMMAND`. |
 | `BUZZ_ACP_IDLE_TIMEOUT` | no | `620` | Idle timeout: max seconds of silence before cancelling a turn. Resets on any agent stdout activity. |
 | `BUZZ_ACP_MAX_TURN_DURATION` | no | `7200` | Absolute wall-clock cap per turn (safety valve). |
 | `BUZZ_API_TOKEN` | no | — | API token (required if relay enforces token auth). |
@@ -119,42 +118,6 @@ All configuration is via environment variables (or CLI flags — every env var h
 **Note:** `BUZZ_ACP_AGENT_ARGS` splits on commas. For args with values, use: `-c,key="value"`.
 
 **Legacy env vars:** `BUZZ_ACP_PRIVATE_KEY`, `BUZZ_ACP_API_TOKEN`, and `BUZZ_ACP_TURN_TIMEOUT` (replaced by `BUZZ_ACP_IDLE_TIMEOUT`) are still accepted as fallbacks.
-
-### Additional MCP servers
-
-`BUZZ_ACP_MCP_SERVERS` lets one agent attach multiple account-scoped MCP
-servers without rebuilding `buzz-acp`. Keep credential values in the process
-environment and name them through `inherit_env`; the harness resolves those
-values only when it starts the corresponding child process.
-
-```bash
-export CRM_AUTH_HEADER='Bearer account-specific-token'
-export BUZZ_ACP_MCP_SERVERS='[
-  {
-    "name": "crm",
-    "command": "mcp-remote",
-    "args": [
-      "https://crm.example/mcp",
-      "--header", "Authorization:${CRM_AUTH_HEADER}",
-      "--transport", "http-only"
-    ],
-    "inherit_env": ["CRM_AUTH_HEADER"],
-    "allowed_tools": ["search_contacts", "create_note"]
-  },
-  {
-    "name": "local_reporting",
-    "command": "/opt/mcp/reporting-server",
-    "args": ["--read-only"]
-  }
-]'
-```
-
-The server command must already exist in the agent image or host. Remote HTTP
-connections therefore use a pinned proxy such as `mcp-remote` only when that
-proxy is part of the trusted image; avoid pulling an unpinned package at agent
-startup. When `allowed_tools` is non-empty, Buzz Agent exposes only those exact
-bare tool names from that server. Omitting it preserves the ACP default of
-exposing every server tool.
 
 ### Parallel Agents & Heartbeat
 

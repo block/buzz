@@ -1,7 +1,6 @@
-use std::path::PathBuf;
-
 pub const DEFAULT_REGION: &str = "ams";
-pub const DEFAULT_IMAGE: &str = "registry.fly.io/buzz-agent-runtime-anneday:pilot-20260803";
+pub const DEFAULT_IMAGE: &str =
+    "registry.fly.io/buzz-agent-runtime-anneday:pilot-20260804-project-mcp-boundary";
 pub const DEFAULT_VM_SIZE: &str = "shared-cpu-1x";
 pub const DEFAULT_MEMORY_MB: u64 = 1024;
 pub const DEFAULT_VOLUME_GB: u64 = 5;
@@ -15,7 +14,6 @@ pub struct ProviderConfig {
     pub memory_mb: u64,
     pub volume_gb: u64,
     pub app_prefix: String,
-    pub mcp_profile_path: Option<PathBuf>,
 }
 
 fn optional_string(value: &serde_json::Value, field: &str) -> Result<Option<String>, String> {
@@ -147,17 +145,6 @@ pub fn parse(value: &serde_json::Value) -> Result<ProviderConfig, String> {
             "provider_config.app_prefix must be 1-20 lowercase letters, digits or '-'".to_string(),
         );
     }
-    let mcp_profile_path = optional_string(value, "mcp_profile_path")?
-        .map(PathBuf::from)
-        .map(|path| {
-            if path.is_absolute() {
-                Ok(path)
-            } else {
-                Err("provider_config.mcp_profile_path must be absolute so Desktop and the provider resolve the same file".to_string())
-            }
-        })
-        .transpose()?;
-
     Ok(ProviderConfig {
         organization,
         region,
@@ -166,7 +153,6 @@ pub fn parse(value: &serde_json::Value) -> Result<ProviderConfig, String> {
         memory_mb,
         volume_gb,
         app_prefix,
-        mcp_profile_path,
     })
 }
 
@@ -210,11 +196,6 @@ pub fn config_schema() -> serde_json::Value {
                 "type": "string",
                 "title": "App name prefix",
                 "default": "buzz-agent"
-            },
-            "mcp_profile_path": {
-                "type": "string",
-                "title": "MCP profile file",
-                "description": "Optional absolute path to a JSON MCP profile. Account credentials remain in the agent environment and are referenced with inherit_env."
             }
         },
         "required": ["organization", "region", "image"]
@@ -238,11 +219,5 @@ mod tests {
     fn rejects_tag_only_images() {
         let error = parse(&serde_json::json!({"image":"example/image:latest"})).unwrap_err();
         assert!(error.contains("digest-pinned"));
-    }
-
-    #[test]
-    fn requires_absolute_mcp_profile_path() {
-        let error = parse(&serde_json::json!({"mcp_profile_path":"relative.json"})).unwrap_err();
-        assert!(error.contains("must be absolute"));
     }
 }

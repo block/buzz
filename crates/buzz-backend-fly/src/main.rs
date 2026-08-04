@@ -62,14 +62,14 @@ fn deploy(request: &wire::DeployRequest) -> Result<String, String> {
     let pubkey = keys.public_key().to_hex();
     let app = format!("{}-{}", config.app_prefix, &pubkey[..16]);
 
-    // Validate and resolve the full environment, including the optional MCP
-    // profile, before creating any paid Fly resources.
+    // Validate and resolve the full environment before creating paid Fly resources.
     let env = env::build_env(&request.agent, &config)?;
 
     let fly = fly::FlyCli::discover()?;
     fly.require_auth()?;
     fly.ensure_app(&app, &config.organization)?;
     let volume_id = fly.ensure_volume(&app, &config)?;
+    fly.remove_legacy_mcp_secrets(&app)?;
     fly.import_secrets(&app, &env)?;
     let machine_id = fly.reconcile_machine(&app, &pubkey, &volume_id, &config)?;
     Ok(format!("{app}/{machine_id}"))

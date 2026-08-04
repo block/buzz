@@ -38,31 +38,6 @@ fn identity_component(value: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
 }
 
-fn normalize_mcp_profile(contents: &str, source: &str) -> Result<String, String> {
-    if contents.len() > 256 * 1024 {
-        return Err(format!(
-            "MCP profile {source} is {} bytes; the limit is 262144 bytes",
-            contents.len()
-        ));
-    }
-    let value: serde_json::Value = serde_json::from_str(contents)
-        .map_err(|error| format!("MCP profile {source} is not valid JSON: {error}"))?;
-    if !value.is_array() {
-        return Err(format!("MCP profile {source} must contain a JSON array"));
-    }
-    serde_json::to_string(&value)
-        .map_err(|error| format!("could not normalize MCP profile: {error}"))
-}
-
-fn read_mcp_profile(config: &ProviderConfig) -> Result<Option<String>, String> {
-    let Some(path) = &config.mcp_profile_path else {
-        return Ok(None);
-    };
-    let contents = std::fs::read_to_string(path)
-        .map_err(|error| format!("could not read MCP profile {}: {error}", path.display()))?;
-    normalize_mcp_profile(&contents, &path.display().to_string()).map(Some)
-}
-
 pub fn build_env(
     agent: &AgentPayload,
     config: &ProviderConfig,
@@ -76,8 +51,6 @@ pub fn build_env(
     } else {
         env.extend(agent.env_vars.clone());
     }
-    let agent_mcp_profile = env.get("BUZZ_ACP_MCP_SERVERS").cloned();
-
     for key in HOST_ONLY_KEYS {
         env.remove(*key);
     }
@@ -148,16 +121,6 @@ pub fn build_env(
         env.insert("BUZZ_ACP_AGENT_ARGS".into(), launch.args.join(","));
     }
     env.insert("BUZZ_ACP_MCP_COMMAND".into(), "buzz-dev-mcp".into());
-    let mcp_profile = match read_mcp_profile(config)? {
-        Some(profile) => Some(profile),
-        None => agent_mcp_profile
-            .as_deref()
-            .map(|profile| normalize_mcp_profile(profile, "from this agent's Buzz settings"))
-            .transpose()?,
-    };
-    if let Some(profile) = mcp_profile {
-        env.insert("BUZZ_ACP_MCP_SERVERS".into(), profile);
-    }
 
     if let Some(value) = agent.respond_to.as_deref().and_then(identity_component) {
         env.insert("BUZZ_ACP_RESPOND_TO".into(), value.to_string());
@@ -322,29 +285,13 @@ mod tests {
     }
 
     #[test]
-    fn preserves_agent_scoped_mcp_profile_when_provider_file_is_unset() {
+    fn drops_agent_owned_mcp_configuration() {
         let mut agent = agent();
         agent.launch.as_mut().unwrap().env.insert(
             "BUZZ_ACP_MCP_SERVERS".into(),
             r#"[{"name":"crm","command":"mcp-remote","args":["https://mcp.example"]}]"#.into(),
         );
         let env = build_env(&agent, &config()).unwrap();
-        assert_eq!(
-            env["BUZZ_ACP_MCP_SERVERS"],
-            r#"[{"args":["https://mcp.example"],"command":"mcp-remote","name":"crm"}]"#
-        );
-    }
-
-    #[test]
-    fn rejects_invalid_agent_scoped_mcp_profile_before_fly_access() {
-        let mut agent = agent();
-        agent
-            .launch
-            .as_mut()
-            .unwrap()
-            .env
-            .insert("BUZZ_ACP_MCP_SERVERS".into(), "not-json".into());
-        let error = build_env(&agent, &config()).unwrap_err();
-        assert!(error.contains("not valid JSON"));
+        assert!(!env.contains_key("BUZZ_ACP_MCP_SERVERS"));
     }
 }

@@ -69,6 +69,21 @@ impl FlyCli {
             })
     }
 
+    pub fn remove_legacy_mcp_secrets(&self, app: &str) -> Result<(), String> {
+        let output = self.run(&["secrets", "list", "--app", app, "--json"])?;
+        let names = legacy_mcp_secret_names(&output)?;
+        if names.is_empty() {
+            return Ok(());
+        }
+
+        let mut args = vec!["secrets", "unset", "--app", app, "--stage"];
+        args.extend(names.iter().map(String::as_str));
+        self.run(&args).map(|_| ()).map_err(|_| {
+            "could not remove legacy agent-owned MCP secrets from the Fly app; no secret values were included in this error. Retry Start before deploying this agent."
+                .to_string()
+        })
+    }
+
     pub fn ensure_volume(&self, app: &str, config: &ProviderConfig) -> Result<String, String> {
         let output = self.run(&["volumes", "list", "--app", app, "--json"])?;
         let value: serde_json::Value = serde_json::from_str(&output)
@@ -285,6 +300,30 @@ fn json_string<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<&'a st
         .find_map(|key| value.get(*key).and_then(serde_json::Value::as_str))
 }
 
+fn is_legacy_mcp_secret_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("BUZZ_ACP_MCP_SERVERS")
+        || name
+            .get(..9)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("BUZZ_MCP_"))
+}
+
+fn legacy_mcp_secret_names(output: &str) -> Result<Vec<String>, String> {
+    let value: serde_json::Value = serde_json::from_str(output)
+        .map_err(|error| format!("could not parse `fly secrets list --json`: {error}"))?;
+    let secrets = value
+        .as_array()
+        .ok_or_else(|| "`fly secrets list --json` did not return an array".to_string())?;
+    let mut names: Vec<String> = secrets
+        .iter()
+        .filter_map(|secret| json_string(secret, &["name", "Name"]))
+        .filter(|name| is_legacy_mcp_secret_name(name))
+        .map(str::to_string)
+        .collect();
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,5 +340,28 @@ mod tests {
         let upper = serde_json::json!({"ID":"vol_2"});
         assert_eq!(json_string(&lower, &["id", "ID"]), Some("vol_1"));
         assert_eq!(json_string(&upper, &["id", "ID"]), Some("vol_2"));
+    }
+
+    #[test]
+    fn legacy_mcp_secret_names_selects_only_retired_agent_owned_keys() {
+        let output = serde_json::json!([
+            {"Name":"BUZZ_ACP_MCP_SERVERS","Digest":"one"},
+            {"name":"BUZZ_MCP_CRM_AUTH_HEADER","digest":"two"},
+            {"name":"OPENAI_COMPAT_API_KEY","digest":"three"}
+        ])
+        .to_string();
+        assert_eq!(
+            legacy_mcp_secret_names(&output).unwrap(),
+            ["BUZZ_ACP_MCP_SERVERS", "BUZZ_MCP_CRM_AUTH_HEADER"]
+        );
+    }
+
+    #[test]
+    fn legacy_mcp_secret_names_is_case_insensitive_and_deduplicates() {
+        let output = r#"[{"name":"buzz_mcp_crm_token"},{"Name":"buzz_mcp_crm_token"}]"#;
+        assert_eq!(
+            legacy_mcp_secret_names(output).unwrap(),
+            ["buzz_mcp_crm_token"]
+        );
     }
 }
