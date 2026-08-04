@@ -4,7 +4,7 @@ import * as React from "react";
 import { relayClient } from "@/shared/api/relayClient";
 import { getRelaySelf } from "@/features/moderation/lib/relaySelf";
 import { getCachedRelayOrigin } from "@/shared/lib/mediaUrl";
-import { signRelayEvent } from "@/shared/api/tauri";
+import { getRelayHttpUrl, signRelayEvent } from "@/shared/api/tauri";
 import { getIdentity } from "@/shared/api/tauriIdentity";
 import {
   getProjectLocalRepoDiff,
@@ -40,7 +40,7 @@ import type {
 } from "@/shared/api/types";
 import { summarizeProjectActivityEvents } from "./projectActivity.mjs";
 import { resolveProjectDefaultBranch } from "./lib/projectBranches";
-import { effectiveCloneUrls } from "./lib/projectCloneUrl";
+import { effectiveCloneUrls, resolveRelayOrigin } from "./lib/projectCloneUrl";
 import type { ProjectIssue } from "./projectIssues.mjs";
 import { projectIssueEventsToIssues } from "./projectIssues.mjs";
 import type {
@@ -247,7 +247,7 @@ function dedup(events: RelayEvent[]): RelayEvent[] {
 }
 
 export async function fetchProjects(): Promise<Project[]> {
-  const [events, deletionEvents] = await Promise.all([
+  const [events, deletionEvents, relayOrigin] = await Promise.all([
     relayClient.fetchEvents({
       kinds: [KIND_REPO_ANNOUNCEMENT],
       limit: 200,
@@ -256,10 +256,11 @@ export async function fetchProjects(): Promise<Project[]> {
       kinds: [KIND_DELETION],
       limit: 500,
     }),
+    resolveRelayOrigin(getCachedRelayOrigin(), getRelayHttpUrl),
   ]);
 
   return dedup(events)
-    .map((event) => eventToProject(event, getCachedRelayOrigin()))
+    .map((event) => eventToProject(event, relayOrigin))
     .filter(
       (project) =>
         !isHiddenLocally(project) && !isDeletedByA(project, deletionEvents),
@@ -287,20 +288,21 @@ function parseProjectRouteId(projectId: string): {
 
 async function fetchProject(projectId: string): Promise<Project | null> {
   const { owner, dtag } = parseProjectRouteId(projectId);
-  const events = await relayClient.fetchEvents({
-    kinds: [KIND_REPO_ANNOUNCEMENT],
-    ...(owner ? { authors: [owner] } : {}),
-    "#d": [dtag],
-    limit: 10,
-  });
+  const [events, relayOrigin] = await Promise.all([
+    relayClient.fetchEvents({
+      kinds: [KIND_REPO_ANNOUNCEMENT],
+      ...(owner ? { authors: [owner] } : {}),
+      "#d": [dtag],
+      limit: 10,
+    }),
+    resolveRelayOrigin(getCachedRelayOrigin(), getRelayHttpUrl),
+  ]);
 
   const deduped = dedup(events).filter(
     (event) => !owner || event.pubkey.toLowerCase() === owner,
   );
   const project =
-    deduped.length > 0
-      ? eventToProject(deduped[0], getCachedRelayOrigin())
-      : null;
+    deduped.length > 0 ? eventToProject(deduped[0], relayOrigin) : null;
   if (!project) {
     return null;
   }

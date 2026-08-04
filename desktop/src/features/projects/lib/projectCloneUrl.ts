@@ -50,3 +50,22 @@ export function effectiveCloneUrls(
   const derived = deriveRelayCloneUrl(relayOrigin, owner, dtag);
   return derived ? [derived] : [];
 }
+
+/**
+ * Resolve the relay origin used by the missing-clone fallback. The media cache
+ * is only a fast path: project queries can run before its asynchronous startup
+ * probe completes, so a cache miss must resolve the origin directly instead of
+ * permanently mapping the announcement with an empty clone URL list.
+ */
+export async function resolveRelayOrigin(
+  cachedOrigin: string | null,
+  fetchRelayOrigin: () => Promise<string>,
+): Promise<string | null> {
+  if (cachedOrigin) return cachedOrigin;
+  try {
+    return await fetchRelayOrigin();
+  } catch {
+    // Preserve project discovery when the best-effort fallback lookup fails.
+    return null;
+  }
+}
