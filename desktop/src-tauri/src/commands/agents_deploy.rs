@@ -29,65 +29,32 @@ pub(crate) fn resolve_deploy_model_provider(
 
 /// Serialize the portable launch contract shared with provider-backed agents.
 ///
-/// `descriptor.env` is the authoritative six-layer environment. Policy values
-/// are deliberately separate because providers apply them below that layered
-/// environment, preserving the local spawn's power-user override semantics.
+/// Delegates to the shared resolver (`managed_agents::launch`) so providers
+/// and execution nodes carry the identical contract. `env` remains the
+/// authoritative six-layer environment; policy values stay separate because
+/// consumers apply them below that layered environment, preserving the local
+/// spawn's power-user override semantics. The serialized shape is consumed
+/// outside this repository (`sprout-backend-blox`) and may only evolve
+/// additively alongside `LaunchSpec::version`.
 pub(super) fn build_launch_block(
     record: &ManagedAgentRecord,
     descriptor: &crate::managed_agents::readiness::EffectiveHarnessDescriptor,
     teams: &[crate::managed_agents::TeamRecord],
     effective_prompt: Option<&str>,
     effective_model: Option<&str>,
+    effective_provider: Option<&str>,
     owner_pubkey: &str,
-) -> serde_json::Value {
-    use crate::managed_agents::{known_acp_runtime, resolve_session_title, SESSION_TITLE_ENV_VAR};
-
-    let runtime = known_acp_runtime(&descriptor.command);
-    let mut policy_env = BTreeMap::new();
-
-    if let Some(runtime) = runtime {
-        policy_env.extend(
-            runtime
-                .default_env
-                .iter()
-                .map(|(key, value)| ((*key).to_string(), (*value).to_string())),
-        );
-        if runtime.mcp_hooks {
-            policy_env.insert("MCP_HOOK_SERVERS".into(), "*".into());
-        }
-    }
-    policy_env.insert("BUZZ_ACP_RELAY_OBSERVER".into(), "true".into());
-    policy_env.insert("BUZZ_ACP_LAZY_POOL".into(), "true".into());
-    policy_env.insert("BUZZ_ACP_AGENTS".into(), record.parallelism.to_string());
-
-    if let Some(value) = effective_prompt {
-        policy_env.insert("BUZZ_ACP_SYSTEM_PROMPT".into(), value.to_string());
-    }
-    if let Some(value) = effective_model {
-        policy_env.insert("BUZZ_ACP_MODEL".into(), value.to_string());
-    }
-    if let Some(value) = record.idle_timeout_seconds {
-        policy_env.insert("BUZZ_ACP_IDLE_TIMEOUT".into(), value.to_string());
-    }
-    if let Some(value) = record.max_turn_duration_seconds {
-        policy_env.insert("BUZZ_ACP_MAX_TURN_DURATION".into(), value.to_string());
-    }
-    if let Some(value) = resolve_session_title(record.display_name.as_deref(), &record.name) {
-        policy_env.insert(SESSION_TITLE_ENV_VAR.into(), value);
-    }
-    if let Some(value) =
-        crate::managed_agents::spawn_hash::effective_team_instructions(record, teams)
-    {
-        policy_env.insert("BUZZ_ACP_TEAM_INSTRUCTIONS".into(), value);
-    }
-
-    serde_json::json!({
-        "command": descriptor.command,
-        "args": descriptor.args,
-        "env": descriptor.env,
-        "policy_env": policy_env,
-        "owner_pubkey": owner_pubkey,
-    })
+) -> Result<serde_json::Value, String> {
+    let launch = crate::managed_agents::launch::resolve_launch_spec(
+        record,
+        descriptor,
+        teams,
+        effective_prompt,
+        effective_model,
+        effective_provider,
+        Some(owner_pubkey),
+    )?;
+    serde_json::to_value(launch).map_err(|error| format!("serialize launch contract: {error}"))
 }
 
 pub(super) fn ensure_remote_provider_supported(provider: Option<&str>) -> Result<(), String> {
@@ -135,8 +102,9 @@ pub(super) fn build_deploy_payload(
         &teams,
         effective.system_prompt.value.as_deref(),
         effective.model.value.as_deref(),
+        effective.provider.value.as_deref(),
         &owner_pubkey,
-    );
+    )?;
 
     Ok(deploy_payload_json(
         record,
@@ -227,6 +195,7 @@ mod tests {
         let teams: Vec<TeamRecord> = serde_json::from_value(serde_json::json!([{
             "id": "team-1", "name": "Team", "instructions": "Coordinate", "persona_ids": [], "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
         }])).unwrap();
+        let owner = nostr::Keys::generate().public_key().to_hex();
 
         let launch = build_launch_block(
             &record,
@@ -234,9 +203,12 @@ mod tests {
             &teams,
             Some("prompt"),
             Some("model"),
-            "owner-hex",
-        );
+            Some("anthropic"),
+            &owner,
+        )
+        .expect("launch block");
 
+        assert_eq!(launch["version"], 1);
         assert_eq!(launch["command"], "goose");
         assert_eq!(launch["args"], serde_json::json!(["acp"]));
         assert_eq!(launch["env"]["GOOSE_MODE"], "custom");
@@ -252,9 +224,19 @@ mod tests {
         assert_eq!(launch["policy_env"]["BUZZ_ACP_SESSION_TITLE"], "Agent Name");
         assert_eq!(launch["policy_env"]["BUZZ_ACP_SYSTEM_PROMPT"], "prompt");
         assert_eq!(launch["policy_env"]["BUZZ_ACP_MODEL"], "model");
+        // Runtime-native model/provider injection mirrors local spawn.
+        assert_eq!(launch["policy_env"]["GOOSE_MODEL"], "model");
+        assert_eq!(launch["policy_env"]["GOOSE_PROVIDER"], "anthropic");
         assert_eq!(launch["policy_env"]["BUZZ_ACP_IDLE_TIMEOUT"], "17");
         assert_eq!(launch["policy_env"]["BUZZ_ACP_MAX_TURN_DURATION"], "23");
         assert_eq!(launch["policy_env"]["BUZZ_ACP_AGENTS"], "4");
-        assert_eq!(launch["owner_pubkey"], "owner-hex");
+        // Alignment values shared with local spawn and execution nodes.
+        assert_eq!(
+            launch["policy_env"]["BUZZ_ACP_MULTIPLE_EVENT_HANDLING"],
+            "steer"
+        );
+        assert_eq!(launch["policy_env"]["BUZZ_ACP_DEDUP"], "queue");
+        assert_eq!(launch["policy_env"]["BUZZ_ACP_RESPOND_TO"], "owner-only");
+        assert_eq!(launch["owner_pubkey"], owner);
     }
 }

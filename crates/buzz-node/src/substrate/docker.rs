@@ -541,13 +541,19 @@ impl DockerSubstrate {
         let relay_url = self
             .config
             .relay_url_for_containers(agent.relay_url.as_deref());
+        // Command names from the contract run as-is: the image's PATH
+        // carries them (see `container_runtime_launch`).
+        let commands = env::ResolvedCommands {
+            agent_command: &spec.launch.command,
+            mcp_command: spec.launch.mcp_command.as_deref(),
+        };
         let mut environment = env::harness_environment(
             spec,
             agent,
             owner,
             launch_key.as_str(),
             &relay_url,
-            &resolved.launch,
+            &commands,
             self.config.inactivity_seconds,
         );
         if resolved.wants_claude_cli {
@@ -803,53 +809,18 @@ impl Substrate for DockerSubstrate {
     }
 }
 
-/// Container-side resolution of one runtime identifier: how the harness
-/// launches it, and which agent body image variant carries it.
-struct ContainerLaunch<'a> {
-    /// Harness launch details (shared contract with the process substrate).
-    launch: env::RuntimeLaunch<'a>,
-    /// Whether to point the Claude adapter at [`CONTAINER_CLAUDE_CLI`].
-    wants_claude_cli: bool,
-    /// Image variant carrying the runtime; `None` runs the configured image.
-    image_variant: Option<&'static str>,
-}
-
-/// Launch details for runtimes bundled in the agent body image variants.
+/// Container-side adaptation of one runtime identifier: whether the adapter
+/// needs the in-image `claude` CLI, and which agent body image variant
+/// carries the runtime.
 ///
-/// Resolves against the shared runtime catalog ([`env::known_runtime`]) — the
-/// same one the process substrate and the desktop launcher use. Unlike the
-/// process substrate, nothing is resolved to a path here: each runtime's
-/// image variant (`Dockerfile.agent`, `RUNTIME` build arg) bakes its tooling
-/// onto the image's `PATH`, so command names travel as-is. Unknown runtime
-/// identifiers are attempted verbatim inside the configured image so custom
-/// images keep working; a missing command surfaces as the body's own launch
-/// failure.
-fn container_runtime_launch(runtime: &str) -> ContainerLaunch<'_> {
-    let normalized = runtime.trim().to_ascii_lowercase();
-    match env::known_runtime(&normalized) {
-        Some(known) => ContainerLaunch {
-            launch: env::RuntimeLaunch {
-                agent_command: known.command,
-                mcp_command: known.mcp,
-                default_env: known.default_env,
-                model_env: known.model_env,
-                provider_env: known.provider_env,
-            },
-            wants_claude_cli: known.wants_claude_cli,
-            image_variant: known.image_variant,
-        },
-        None => ContainerLaunch {
-            launch: env::RuntimeLaunch {
-                agent_command: runtime,
-                mcp_command: None,
-                default_env: &[],
-                model_env: None,
-                provider_env: None,
-            },
-            wants_claude_cli: false,
-            image_variant: None,
-        },
-    }
+/// Unlike the process substrate, nothing is resolved to a path here: each
+/// runtime's image variant (`Dockerfile.agent`, `RUNTIME` build arg) bakes
+/// its tooling onto the image's `PATH`, so the launch contract's command
+/// names travel as-is. Unknown runtime identifiers run inside the configured
+/// image so custom images keep working; a missing command surfaces as the
+/// body's own launch failure.
+fn container_runtime_launch(runtime: &str) -> env::KnownRuntime {
+    env::known_runtime(&runtime.trim().to_ascii_lowercase())
 }
 
 /// Rewrite a loopback URL host to `host.docker.internal`, returning `None`
@@ -993,10 +964,26 @@ exit 0
         )
     }
 
+    /// A resolved launch contract shaped like what Desktop produces for the
+    /// bundled `buzz-agent` runtime: developer MCP plus its model policy env.
+    fn test_launch(command: &str) -> buzz_core::execution::LaunchSpec {
+        buzz_core::execution::LaunchSpec::new(
+            command,
+            Vec::new(),
+            Some("buzz-dev-mcp".to_string()),
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::from([(
+                "BUZZ_AGENT_MODEL".to_string(),
+                "test-model".to_string(),
+            )]),
+            Some(nostr::Keys::generate().public_key().to_hex()),
+        )
+        .expect("launch contract")
+    }
+
     fn agent_spec(nsec: Option<&str>, pubkey: &str) -> WorkloadSpec {
         let mut agent =
-            AgentWorkloadContext::new(pubkey.to_string(), None, None, None, None, Vec::new(), None)
-                .expect("agent context");
+            AgentWorkloadContext::new(pubkey.to_string(), None, None, None).expect("agent context");
         if let Some(nsec) = nsec {
             agent = agent.with_private_key(nsec).expect("attach key");
         }
@@ -1007,6 +994,7 @@ exit 0
             Some("test-model".to_string()),
             None,
             Vec::new(),
+            test_launch("buzz-agent"),
         )
         .expect("workload spec");
         spec.agent = Some(agent);
@@ -1146,7 +1134,9 @@ exit 0
         let (nsec, pubkey) = generated_agent_key();
         let mut spec = agent_spec(Some(&nsec), &pubkey);
         let prompt = "You are helpful.\nAlways sign your work.";
-        spec.agent.as_mut().expect("agent").system_prompt = Some(prompt.to_string());
+        spec.launch
+            .policy_env
+            .insert("BUZZ_ACP_SYSTEM_PROMPT".to_string(), prompt.to_string());
 
         substrate.deploy("owner", &spec).await.expect("deploy");
 
@@ -1215,13 +1205,15 @@ exit 0
 
     /// Deploy one runtime against the stub daemon and return the captured
     /// env-file contents and the `docker run` invocation line.
-    async fn deploy_capture(runtime: &str) -> (String, String) {
+    async fn deploy_capture(runtime: &str, command: &str, mcp: Option<&str>) -> (String, String) {
         let dir = temp_dir();
         fs::write(dir.join("wait.code"), "0\n").expect("wait code");
         let (substrate, _exits) = connected_substrate(&dir).await;
         let (nsec, pubkey) = generated_agent_key();
         let mut spec = agent_spec(Some(&nsec), &pubkey);
         spec.runtime = runtime.to_string();
+        spec.launch.command = command.to_string();
+        spec.launch.mcp_command = mcp.map(str::to_string);
         substrate.deploy("owner", &spec).await.expect("deploy");
         let env_file = fs::read_to_string(dir.join("envfile.captured")).expect("captured env");
         let run_line = calls(&dir)
@@ -1234,43 +1226,43 @@ exit 0
     }
 
     #[tokio::test]
-    async fn catalog_runtimes_map_to_variant_images_and_harness_env() {
-        // Goose: the CLI itself is the ACP agent, non-interactive by default,
-        // model via GOOSE_MODEL. No developer MCP. Runs its own image
-        // variant, resolved from the dedicated variant repository (default
-        // `buzz-agent`), not from the configured base image.
-        let (goose, goose_run) = deploy_capture("goose").await;
+    async fn runtime_identifiers_map_to_variant_images_and_the_contract_supplies_commands() {
+        // The node no longer derives commands or env from the runtime
+        // identifier: the launch contract carries them, and the identifier
+        // only selects the agent-body image variant (plus the Claude CLI
+        // pointer, a substrate adaptation concern).
+
+        // Goose: its own image variant; the contract's command travels as-is.
+        let (goose, goose_run) = deploy_capture("goose", "goose", None).await;
         assert!(goose.contains("BUZZ_ACP_AGENT_COMMAND=goose\n"));
         assert!(goose.contains("BUZZ_ACP_MCP_COMMAND=\n"));
-        assert!(goose.contains("GOOSE_MODE=auto\n"));
-        assert!(goose.contains("GOOSE_MODEL=test-model\n"));
         assert!(goose_run.ends_with("buzz-agent:goose"), "{goose_run}");
 
         // Claude Code: the npm ACP adapter fronts the claude CLI, which the
         // adapter must find at its in-image path — never a host path.
-        let (claude, claude_run) = deploy_capture("claude").await;
+        let (claude, claude_run) = deploy_capture("claude", "claude-agent-acp", None).await;
         assert!(claude.contains("BUZZ_ACP_AGENT_COMMAND=claude-agent-acp\n"));
-        assert!(claude.contains("BUZZ_ACP_MCP_COMMAND=\n"));
         assert!(claude.contains(&format!("CLAUDE_CODE_EXECUTABLE={CONTAINER_CLAUDE_CLI}\n")));
         assert!(claude_run.ends_with("buzz-agent:claude"), "{claude_run}");
 
         // Runtime aliases resolve to the same image variant.
-        let (_, claude_alias_run) = deploy_capture("claude-code").await;
+        let (_, claude_alias_run) = deploy_capture("claude-code", "claude-agent-acp", None).await;
         assert!(
             claude_alias_run.ends_with("buzz-agent:claude"),
             "{claude_alias_run}"
         );
 
-        // Codex: npm ACP adapter plus the developer MCP.
-        let (codex, codex_run) = deploy_capture("codex").await;
+        // Codex: npm ACP adapter plus the developer MCP from the contract.
+        let (codex, codex_run) = deploy_capture("codex", "codex-acp", Some("buzz-dev-mcp")).await;
         assert!(codex.contains("BUZZ_ACP_AGENT_COMMAND=codex-acp\n"));
         assert!(codex.contains("BUZZ_ACP_MCP_COMMAND=buzz-dev-mcp\n"));
         assert!(!codex.contains("CLAUDE_CODE_EXECUTABLE="));
         assert!(codex_run.ends_with("buzz-agent:codex"), "{codex_run}");
 
-        // Bundled buzz-agent: developer MCP plus its model env. The slim
-        // configured image carries it.
-        let (buzz_agent, buzz_agent_run) = deploy_capture("buzz-agent").await;
+        // Bundled buzz-agent: the slim configured image carries it; policy
+        // env (its model variable) travels in the contract, not the catalog.
+        let (buzz_agent, buzz_agent_run) =
+            deploy_capture("buzz-agent", "buzz-agent", Some("buzz-dev-mcp")).await;
         assert!(buzz_agent.contains("BUZZ_ACP_AGENT_COMMAND=buzz-agent\n"));
         assert!(buzz_agent.contains("BUZZ_ACP_MCP_COMMAND=buzz-dev-mcp\n"));
         assert!(buzz_agent.contains("BUZZ_AGENT_MODEL=test-model\n"));
@@ -1279,9 +1271,9 @@ exit 0
             "{buzz_agent_run}"
         );
 
-        // Unknown runtimes are attempted verbatim inside the configured
-        // image, so custom images keep working.
-        let (custom, custom_run) = deploy_capture("my-custom-acp").await;
+        // Unknown runtimes run the configured image with the contract's
+        // command verbatim, so custom images keep working.
+        let (custom, custom_run) = deploy_capture("my-custom-acp", "my-custom-acp", None).await;
         assert!(custom.contains("BUZZ_ACP_AGENT_COMMAND=my-custom-acp\n"));
         assert!(custom.contains("BUZZ_ACP_MCP_COMMAND=\n"));
         assert!(!custom.contains("CLAUDE_CODE_EXECUTABLE="));

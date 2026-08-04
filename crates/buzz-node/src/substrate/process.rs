@@ -273,7 +273,7 @@ impl ProcessSubstrate {
             )
         })?;
         let harness = self.resolve_harness()?;
-        let plan = resolve_runtime_plan(&spec.runtime)?;
+        let plan = resolve_runtime_plan(&spec.runtime, &spec.launch)?;
 
         let workdir = self.workload_dir(&spec.workload_id);
         fs::create_dir_all(&workdir).map_err(|error| {
@@ -326,12 +326,9 @@ impl ProcessSubstrate {
             .relay_url
             .clone()
             .unwrap_or_else(|| self.config.relay_url.clone());
-        let launch = env::RuntimeLaunch {
+        let resolved = env::ResolvedCommands {
             agent_command: &plan.agent_command,
             mcp_command: plan.mcp_command.as_deref(),
-            default_env: plan.default_env,
-            model_env: plan.model_env,
-            provider_env: plan.provider_env,
         };
         for (name, value) in env::harness_environment(
             spec,
@@ -339,7 +336,7 @@ impl ProcessSubstrate {
             owner,
             launch_key.as_str(),
             &relay_url,
-            &launch,
+            &resolved,
             self.config.inactivity_seconds,
         ) {
             command.env(name, value.as_str());
@@ -570,39 +567,29 @@ impl Substrate for ProcessSubstrate {
     }
 }
 
-/// Per-runtime launch details, resolved from the shared runtime catalog
-/// ([`env::known_runtime`]) to host executable paths. Unknown runtime
-/// identifiers are attempted verbatim as a command name so custom harness
-/// setups keep working; if nothing resolves the deploy fails.
+/// The launch contract's command names resolved to host executable paths.
+/// The contract carries names, never paths — resolution is this substrate's
+/// half of the boundary. If the agent command does not resolve the deploy
+/// fails; a missing MCP helper degrades gracefully, matching the desktop
+/// launcher.
 #[derive(Debug)]
 struct RuntimeLaunchPlan {
     /// Resolved inner agent command the harness runs (`BUZZ_ACP_AGENT_COMMAND`).
     agent_command: String,
-    /// Resolved developer MCP command, when the runtime uses one.
+    /// Resolved developer MCP command, when the contract carries one.
     mcp_command: Option<String>,
-    /// Runtime-specific defaults, e.g. Goose's non-interactive mode.
-    default_env: &'static [(&'static str, &'static str)],
-    /// Env var the runtime reads its model from, when it has one.
-    model_env: Option<&'static str>,
-    /// Env var the runtime reads its provider from, when it is not locked.
-    provider_env: Option<&'static str>,
-    /// Whether to point the Claude adapter at a resolved `claude` CLI.
+    /// Whether to point the Claude adapter at a resolved `claude` CLI
+    /// (keyed by the runtime identifier, a substrate adaptation concern).
     wants_claude_cli: bool,
 }
 
-fn resolve_runtime_plan(runtime: &str) -> Result<RuntimeLaunchPlan, SubstrateError> {
+fn resolve_runtime_plan(
+    runtime: &str,
+    launch: &buzz_core::execution::LaunchSpec,
+) -> Result<RuntimeLaunchPlan, SubstrateError> {
     let normalized = runtime.trim().to_ascii_lowercase();
     let known = env::known_runtime(&normalized);
-    // Unknown runtime identifiers are attempted verbatim as a command name.
-    let command = known.as_ref().map_or(runtime, |known| known.command);
-    let env::KnownRuntime {
-        mcp,
-        default_env,
-        model_env,
-        provider_env,
-        wants_claude_cli,
-        ..
-    } = known.unwrap_or(env::UNKNOWN_RUNTIME);
+    let command = launch.command.as_str();
     let agent_command = resolve_executable(command)
         .map(|path| path.display().to_string())
         .ok_or_else(|| {
@@ -614,17 +601,15 @@ fn resolve_runtime_plan(runtime: &str) -> Result<RuntimeLaunchPlan, SubstrateErr
                 ),
             )
         })?;
-    // A missing MCP helper degrades gracefully, matching the desktop launcher.
-    let mcp_command = mcp
+    let mcp_command = launch
+        .mcp_command
+        .as_deref()
         .and_then(resolve_executable)
         .map(|path| path.display().to_string());
     Ok(RuntimeLaunchPlan {
         agent_command,
         mcp_command,
-        default_env,
-        model_env,
-        provider_env,
-        wants_claude_cli,
+        wants_claude_cli: known.wants_claude_cli,
     })
 }
 
@@ -732,10 +717,21 @@ mod tests {
         path
     }
 
+    fn test_launch(command: &str) -> buzz_core::execution::LaunchSpec {
+        buzz_core::execution::LaunchSpec::new(
+            command,
+            Vec::new(),
+            None,
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::new(),
+            Some(nostr::Keys::generate().public_key().to_hex()),
+        )
+        .expect("launch contract")
+    }
+
     fn agent_spec(nsec: Option<&str>, pubkey: &str) -> WorkloadSpec {
         let mut agent =
-            AgentWorkloadContext::new(pubkey.to_string(), None, None, None, None, Vec::new(), None)
-                .expect("agent context");
+            AgentWorkloadContext::new(pubkey.to_string(), None, None, None).expect("agent context");
         if let Some(nsec) = nsec {
             agent = agent.with_private_key(nsec).expect("attach key");
         }
@@ -748,6 +744,7 @@ mod tests {
             None,
             None,
             Vec::new(),
+            test_launch("sh"),
         )
         .expect("workload spec");
         spec.agent = Some(agent);
@@ -1038,9 +1035,12 @@ mod tests {
     }
 
     #[test]
-    fn unknown_runtime_that_does_not_resolve_fails_with_unsupported() {
-        let error = resolve_runtime_plan("definitely-not-a-real-runtime-binary")
-            .expect_err("unresolvable runtime");
+    fn a_launch_command_that_does_not_resolve_fails_with_unsupported() {
+        let error = resolve_runtime_plan(
+            "definitely-not-a-real-runtime-binary",
+            &test_launch("definitely-not-a-real-runtime-binary"),
+        )
+        .expect_err("unresolvable launch command");
         assert_eq!(error.code, SafeErrorCode::Unsupported);
     }
 }

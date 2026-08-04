@@ -1560,6 +1560,41 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
+    fn test_launch(command: &str) -> buzz_core::execution::LaunchSpec {
+        buzz_core::execution::LaunchSpec::new(
+            command,
+            Vec::new(),
+            None,
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::new(),
+            Some(Keys::generate().public_key().to_hex()),
+        )
+        .expect("launch contract")
+    }
+
+    /// Test wrapper: build an agent workload whose launch contract runs the
+    /// runtime identifier verbatim, matching what Desktop resolves for these
+    /// fixtures.
+    fn agent_workload(
+        workload_id: WorkloadId,
+        display_name: &str,
+        runtime: &str,
+        model: Option<String>,
+        provider: Option<String>,
+        credential_refs: Vec<CredentialRef>,
+    ) -> Result<WorkloadSpec, buzz_core::execution::ExecutionValidationError> {
+        let launch = test_launch(runtime);
+        WorkloadSpec::agent(
+            workload_id,
+            display_name,
+            runtime,
+            model,
+            provider,
+            credential_refs,
+            launch,
+        )
+    }
+
     fn temp_dir() -> PathBuf {
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1678,7 +1713,7 @@ mod tests {
         let owner = Keys::generate();
         let owners = paired_owner_store(&owner, &node, &dir);
         let workload_id = WorkloadId::random();
-        let workload = WorkloadSpec::agent(
+        let workload = agent_workload(
             workload_id,
             "Research agent",
             "fake-runtime",
@@ -1757,7 +1792,7 @@ mod tests {
             ExecutionCommand::Deploy {
                 supersedes_removal: None,
                 workload: Box::new(
-                    WorkloadSpec::agent(
+                    agent_workload(
                         WorkloadId::random(),
                         "Research agent",
                         "fake-runtime",
@@ -1811,7 +1846,7 @@ mod tests {
         let owners = paired_owner_store(&owner, &node, &dir);
         let workload_id = WorkloadId::random();
         let now = Utc::now();
-        let workload = WorkloadSpec::agent(
+        let workload = agent_workload(
             workload_id.clone(),
             "Lifecycle agent",
             "fake-runtime",
@@ -1896,7 +1931,7 @@ mod tests {
             ExecutionCommand::Deploy {
                 supersedes_removal: None,
                 workload: Box::new(
-                    WorkloadSpec::agent(
+                    agent_workload(
                         WorkloadId::random(),
                         "Original",
                         "fake-runtime",
@@ -1977,7 +2012,7 @@ mod tests {
             ExecutionCommand::Deploy {
                 supersedes_removal: None,
                 workload: Box::new(
-                    WorkloadSpec::agent(
+                    agent_workload(
                         workload_id.clone(),
                         "Auth agent",
                         "fake-runtime",
@@ -2288,7 +2323,7 @@ mod tests {
                 ExecutionCommand::Deploy {
                     supersedes_removal: None,
                     workload: Box::new(
-                        WorkloadSpec::agent(
+                        agent_workload(
                             WorkloadId::random(),
                             name,
                             "fake-runtime",
@@ -2350,7 +2385,7 @@ mod tests {
             ExecutionCommand::Deploy {
                 supersedes_removal: None,
                 workload: Box::new(
-                    WorkloadSpec::agent(
+                    agent_workload(
                         WorkloadId::random(),
                         "Research agent",
                         "fake-runtime",
@@ -2399,7 +2434,7 @@ mod tests {
         let owner = Keys::generate();
         let owners = paired_owner_store(&owner, &node, &dir);
         let workload_id = WorkloadId::random();
-        let workload = WorkloadSpec::agent(
+        let workload = agent_workload(
             workload_id.clone(),
             "Movable agent",
             "fake-runtime",
@@ -2606,7 +2641,7 @@ mod tests {
         let owner = Keys::generate();
         let owners = paired_owner_store(&owner, &node, &dir);
         let now = Utc::now();
-        let workload = WorkloadSpec::agent(
+        let workload = agent_workload(
             WorkloadId::random(),
             "Refused agent",
             "fake-runtime",
@@ -2652,7 +2687,7 @@ mod tests {
         let owners = paired_owner_store(&owner, &node, &dir);
         let now = Utc::now();
         let workload_id = WorkloadId::random();
-        let workload = WorkloadSpec::agent(
+        let workload = agent_workload(
             workload_id.clone(),
             "Sticky agent",
             "fake-runtime",
@@ -2758,7 +2793,7 @@ mod tests {
         let owners = paired_owner_store(&owner, &node, &dir);
         let now = Utc::now();
         let workload_id = WorkloadId::random();
-        let workload = WorkloadSpec::agent(
+        let workload = agent_workload(
             workload_id.clone(),
             "Tombstoned agent",
             "fake-runtime",
@@ -2870,7 +2905,7 @@ mod tests {
         let owner_hex = owner.public_key().to_hex();
         let now = Utc::now();
         let workload_id = WorkloadId::random();
-        let workload = WorkloadSpec::agent(
+        let workload = agent_workload(
             workload_id.clone(),
             "Self-reaping agent",
             "fake-runtime",
@@ -2982,7 +3017,7 @@ mod tests {
     #[test]
     fn removal_tombstones_round_trip_with_their_sequences() {
         let workload_id = WorkloadId::random();
-        let workload = WorkloadSpec::agent(
+        let workload = agent_workload(
             workload_id.clone(),
             "Round-trip agent",
             "fake-runtime",
@@ -3030,7 +3065,7 @@ mod tests {
             ExecutionCommand::Deploy {
                 supersedes_removal: None,
                 workload: Box::new(
-                    WorkloadSpec::agent(
+                    agent_workload(
                         WorkloadId::random(),
                         "Expired agent",
                         "fake-runtime",

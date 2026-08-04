@@ -504,7 +504,21 @@ pub fn spawn_agent_child(
                 )
             })?;
     let effective_command = &descriptor.command;
-    let agent_args = &descriptor.args;
+
+    // The shared launch contract — the same resolve provider deploys and
+    // execution-node deploys carry. Local spawn is one more consumer:
+    // policy_env below, descriptor env (launch.env) above it, with only
+    // host-path resolution and inherited-environment semantics local. Runs
+    // before any side effect so a refused resolve leaves no trace.
+    let launch = super::launch::resolve_launch_spec(
+        record,
+        &descriptor,
+        &teams,
+        effective_cfg.system_prompt.value.as_deref(),
+        effective_cfg.model.value.as_deref(),
+        effective_cfg.provider.value.as_deref(),
+        owner_hex,
+    )?;
 
     let log_path = super::managed_agent_runtime_log_path(app, &runtime_key)?;
     append_log_marker(
@@ -523,26 +537,21 @@ pub fn spawn_agent_child(
         .map_err(|error| format!("failed to clone log handle: {error}"))?;
     let resolved_acp_command = resolve_command(&record.acp_command)
         .ok_or_else(|| missing_command_message(&record.acp_command, "ACP harness command"))?;
-    let effective_mcp_command = known_acp_runtime(effective_command)
-        .and_then(|r| r.mcp_command)
-        .unwrap_or("");
-    let resolved_mcp_command: Option<std::path::PathBuf> = if effective_mcp_command.is_empty() {
-        None
-    } else {
-        match resolve_command(effective_mcp_command) {
+    // Host-path resolution of the contract's command names — the local half
+    // of the substrate boundary (DMG launches have minimal PATH).
+    let resolved_mcp_command: Option<std::path::PathBuf> = match launch.mcp_command.as_deref() {
+        None => None,
+        Some(mcp_command) => match resolve_command(mcp_command) {
             Some(path) => Some(path),
             None => {
-                eprintln!(
-                    "buzz-desktop: mcp_command {effective_mcp_command:?} not found, skipping"
-                );
+                eprintln!("buzz-desktop: mcp_command {mcp_command:?} not found, skipping");
                 None
             }
-        }
+        },
     };
-    // Resolve agent command to a full path (DMG launches have minimal PATH).
-    let resolved_agent_command = resolve_command(effective_command)
+    let resolved_agent_command = resolve_command(&launch.command)
         .map(|p| p.display().to_string())
-        .unwrap_or_else(|| effective_command.clone());
+        .unwrap_or_else(|| launch.command.clone());
 
     // The caller supplies the explicit canonical pair relay. This is the only
     // relay this child may connect to, regardless of the record/workspace default.
@@ -578,9 +587,8 @@ pub fn spawn_agent_child(
     command.env("RUST_LOG", child_rust_log_filter());
     command.env("BUZZ_PRIVATE_KEY", &record.private_key_nsec);
     command.env("BUZZ_RELAY_URL", &effective_relay_url);
-    command.env("BUZZ_ACP_LAZY_POOL", if lazy { "true" } else { "false" });
     command.env("BUZZ_ACP_AGENT_COMMAND", &resolved_agent_command);
-    command.env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","));
+    command.env("BUZZ_ACP_AGENT_ARGS", launch.args.join(","));
     match &resolved_mcp_command {
         Some(mcp_cmd) => {
             command.env("BUZZ_ACP_MCP_COMMAND", mcp_cmd);
@@ -589,12 +597,49 @@ pub fn spawn_agent_child(
             command.env("BUZZ_ACP_MCP_COMMAND", "");
         }
     }
-    // Enable MCP hook tools (_Stop, _PostCompact) for agents that need them.
-    // Uses "*" because build_mcp_servers() hard-codes the server name to "buzz-mcp".
     let runtime_meta = known_acp_runtime(effective_command);
-    if runtime_meta.is_some_and(|r| r.mcp_hooks) {
-        command.env("MCP_HOOK_SERVERS", "*");
+    // Baked buzz-agent provider defaults, written below the policy layer so
+    // the contract's runtime metadata (e.g. GOOSE_MODEL) keeps winning.
+    build_buzz_agent_provider_defaults(&mut command);
+
+    // ── The shared policy layer (contract tier 1). ────────────────────────────
+    //
+    // Two local-only adjustments preserve inherited-environment semantics —
+    // a child of the desktop inherits the parent process env, unlike a node
+    // body starting from an explicit allowlist:
+    //   * runtime default_env values (e.g. GOOSE_MODE) defer to an ambient
+    //     value the user exported in their shell, as local spawn always has;
+    //   * BUZZ_ACP_LAZY_POOL is the caller's decision here (interactive vs
+    //     restore), overriding the contract's remote default below.
+    let ambient_default_env = |key: &str| {
+        runtime_meta.is_some_and(|meta| {
+            meta.default_env
+                .iter()
+                .any(|(default_key, _)| *default_key == key)
+        }) && std::env::var(key).is_ok()
+    };
+    for (key, value) in &launch.policy_env {
+        if key == "BUZZ_ACP_LAZY_POOL" || ambient_default_env(key) {
+            continue;
+        }
+        command.env(key, value);
     }
+    // Policy-managed keys the resolver left unset must be cleared: the child
+    // inherits the desktop's environment, and a stale ambient value must not
+    // stand in for configuration this agent does not have.
+    for key in [
+        "BUZZ_ACP_SYSTEM_PROMPT",
+        "BUZZ_ACP_MODEL",
+        SESSION_TITLE_ENV_VAR,
+        "BUZZ_ACP_TEAM_INSTRUCTIONS",
+        "BUZZ_ACP_RESPOND_TO_ALLOWLIST",
+        "BUZZ_ACP_AGENT_OWNER",
+    ] {
+        if !launch.policy_env.contains_key(key) {
+            command.env_remove(key);
+        }
+    }
+    command.env("BUZZ_ACP_LAZY_POOL", if lazy { "true" } else { "false" });
 
     // ── Readiness check: set setup-payload if agent is not ready ─────────────
     //
@@ -712,83 +757,19 @@ pub fn spawn_agent_child(
             );
         }
     }
-    // Only emit BUZZ_ACP_IDLE_TIMEOUT when the user has explicitly set an
-    // override. When unset, the buzz-acp harness applies its own default
-    // (see `DEFAULT_IDLE_TIMEOUT_SECS` in crates/buzz-acp/src/config.rs),
-    // which is the single source of truth. The previously-emitted
-    // `BUZZ_ACP_TURN_TIMEOUT` is deprecated upstream and was pinning every
-    // agent to the desktop's stale default (320s), bypassing harness bumps.
-    if let Some(idle) = record.idle_timeout_seconds {
-        command.env("BUZZ_ACP_IDLE_TIMEOUT", idle.to_string());
-    }
-
-    if let Some(max_dur) = record.max_turn_duration_seconds {
-        command.env("BUZZ_ACP_MAX_TURN_DURATION", max_dur.to_string());
-    }
-    command.env("BUZZ_ACP_AGENTS", record.parallelism.to_string());
-    command.env("BUZZ_ACP_MULTIPLE_EVENT_HANDLING", "steer");
-    command.env("BUZZ_ACP_DEDUP", "queue");
-    if let Some(meta) = runtime_meta {
-        for (key, value) in meta.default_env {
-            if std::env::var(key).is_err() {
-                command.env(key, value);
-            }
-        }
-    }
-    let team_instructions = super::spawn_hash::effective_team_instructions(record, &teams);
-    if let Some(instructions) = &team_instructions {
-        command.env("BUZZ_ACP_TEAM_INSTRUCTIONS", instructions);
-    } else {
-        command.env_remove("BUZZ_ACP_TEAM_INSTRUCTIONS");
-    }
-
-    // Prompt, model, and provider all come from the single `effective_cfg`
-    // resolved at the top of this function — the SAME resolve `spawn_config_hash`
-    // performs below, so env write and restart badge cannot disagree. Linked
-    // instances never consult the record's own model/provider/prompt bytes;
-    // definition-less instances fall back to their own fields, then global.
+    // The prompt, model, provider, timeouts, audience gate, session title,
+    // team instructions, and runtime metadata env all arrived through the
+    // shared policy layer above — resolved once in `resolve_launch_spec`
+    // from the SAME `effective_cfg` that `spawn_config_hash` reads, so env
+    // write and restart badge cannot disagree.
     //
-    // Derive the mesh decision BEFORE moving fields out — `relay_mesh_model_id`
+    // Derive the mesh decision from the same resolve — `relay_mesh_model_id`
     // is the single authoritative gate; the mesh-llm block below MUST use it
-    // rather than re-deriving from `effective_provider` to keep preflight and
-    // spawn semantics in lock-step (see `EffectiveAgentConfig::relay_mesh_model_id`).
+    // rather than re-deriving from the provider to keep preflight and spawn
+    // semantics in lock-step (see `EffectiveAgentConfig::relay_mesh_model_id`).
     #[cfg(feature = "mesh-llm")]
     let mesh_model_id = effective_cfg.relay_mesh_model_id();
-    let effective_prompt = effective_cfg.system_prompt.value;
-    let effective_model = effective_cfg.model.value;
-    let effective_provider = effective_cfg.provider.value;
 
-    if let Some(prompt) = &effective_prompt {
-        command.env("BUZZ_ACP_SYSTEM_PROMPT", prompt);
-    } else {
-        command.env_remove("BUZZ_ACP_SYSTEM_PROMPT");
-    }
-    if let Some(model) = effective_model.as_deref() {
-        command.env("BUZZ_ACP_MODEL", model);
-    } else {
-        command.env_remove("BUZZ_ACP_MODEL");
-    }
-    // Session title for the harness to pass out-of-band on `session/new`. The
-    // adapter names the session after it; it never reaches the prompt, so this
-    // is display metadata only. `spawn_config_hash` hashes the same resolve, so
-    // a rename raises the restart badge instead of leaving the process stale.
-    if let Some(title) = resolve_session_title(record.display_name.as_deref(), &record.name) {
-        command.env(SESSION_TITLE_ENV_VAR, title);
-    } else {
-        command.env_remove(SESSION_TITLE_ENV_VAR);
-    }
-    build_buzz_agent_provider_defaults(&mut command);
-    if let Some(meta) = runtime_meta {
-        for (key, value) in runtime_metadata_env_vars(
-            meta.model_env_var,
-            meta.provider_env_var,
-            meta.provider_locked,
-            effective_model.as_deref(),
-            effective_provider.as_deref(),
-        ) {
-            command.env(key, value);
-        }
-    }
     command.env_remove("BUZZ_ACP_PRIVATE_KEY");
     command.env_remove("BUZZ_ACP_API_TOKEN");
     command.env_remove("BUZZ_API_TOKEN");
@@ -798,20 +779,6 @@ pub fn spawn_agent_child(
     } else {
         command.env_remove("BUZZ_AUTH_TAG");
     }
-
-    // Inbound author gate: who is this agent allowed to respond to?
-    // Validation is strict here — a malformed allowlist on disk fails before
-    // we spawn anything (the harness would also reject it, but we'd rather
-    // fail with a clear error than crash-loop the child).
-    let (gate_set, gate_remove) = build_respond_to_env(record, owner_hex)?;
-    for (key, value) in &gate_set {
-        command.env(key, value);
-    }
-    for key in &gate_remove {
-        command.env_remove(key);
-    }
-
-    command.env("BUZZ_ACP_RELAY_OBSERVER", "true");
 
     // ── Git credential helper for Buzz relay ──────────────────────────
     //
@@ -850,13 +817,13 @@ pub fn spawn_agent_child(
 
     // ── User env vars: definition floor + global + live persona + agent overrides ──
     //
-    // `descriptor.env` is the fully-layered result from `resolve_effective_harness_descriptor`:
+    // `launch.env` is the contract's authoritative layer (descriptor.env):
     // baked floor → runtime metadata → definition env (harness author defaults) →
     // global → live persona → per-agent, with reserved-key and malformed-key filtering
     // applied. Writing it last lets user-provided values win over every Buzz-set env
     // written above — reserved keys were already stripped from descriptor.env so they
     // cannot clobber BUZZ_PRIVATE_KEY, NOSTR_PRIVATE_KEY, etc.
-    for (key, value) in &descriptor.env {
+    for (key, value) in &launch.env {
         command.env(key, value);
     }
     configure_runtime_cli(&mut command, runtime_meta);

@@ -4,9 +4,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration as StdDuration;
 
 use buzz_core_pkg::execution::{
-    AgentRuntimeSettings, AgentWorkloadContext, ExecutionCapability, ExecutionCommand,
-    ExecutionCommandEnvelope, ExecutionNodeId, ExecutionNodeLifecycle, ExecutionNodeStatus,
-    ExecutionReceipt, ProviderAuthResponse, ProviderAuthSession, WorkloadSpec, WorkloadStatus,
+    AgentWorkloadContext, ExecutionCapability, ExecutionCommand, ExecutionCommandEnvelope,
+    ExecutionNodeId, ExecutionNodeLifecycle, ExecutionNodeStatus, ExecutionReceipt,
+    ProviderAuthResponse, ProviderAuthSession, WorkloadSpec, WorkloadStatus,
 };
 use buzz_core_pkg::kind::{
     KIND_EXECUTION_NODE_ANNOUNCEMENT, KIND_EXECUTION_NODE_COMMAND, KIND_EXECUTION_NODE_RECEIPT,
@@ -373,13 +373,22 @@ pub async fn deploy_managed_agent_to_execution_node(
             &personas,
             &global_config,
         )?;
-        let runtime_settings = AgentRuntimeSettings::new(
-            effective_harness.args,
-            record.idle_timeout_seconds,
-            record.max_turn_duration_seconds,
-            record.parallelism,
-        )
-        .map_err(|error| format!("invalid managed-agent runtime settings: {error}"))?;
+        let teams = crate::managed_agents::load_teams(&app).unwrap_or_default();
+        let owner_pubkey = state.signing_keys()?.public_key().to_hex();
+        // The same resolver providers consume — then stripped of provider
+        // credential variables at the node boundary: nodes inject those from
+        // the operator's own environment, and the launch env is persisted in
+        // the node's workload ledger.
+        let launch = crate::managed_agents::launch::resolve_launch_spec(
+            record,
+            &effective_harness,
+            &teams,
+            effective_config.system_prompt.value.as_deref(),
+            effective_config.model.value.as_deref(),
+            effective_config.provider.value.as_deref(),
+            Some(&owner_pubkey),
+        )?
+        .without_provider_credentials();
         let runtime = record
             .runtime
             .clone()
@@ -402,21 +411,17 @@ pub async fn deploy_managed_agent_to_execution_node(
             effective_config.model.value,
             effective_config.provider.value,
             Vec::new(),
+            launch,
         )
         .map_err(|error| format!("invalid managed-agent workload: {error}"))?;
         workload.agent = Some(
             AgentWorkloadContext::new(
                 record.pubkey.clone(),
-                effective_config.system_prompt.value,
                 Some(relay_url),
                 record.auth_tag.clone(),
-                Some(record.respond_to.as_str().to_string()),
-                record.respond_to_allowlist.clone(),
                 input.channel_id.clone(),
             )
             .map_err(|error| format!("invalid managed-agent context: {error}"))?
-            .with_runtime_settings(runtime_settings)
-            .map_err(|error| format!("invalid managed-agent runtime settings: {error}"))?
             .with_private_key(record.private_key_nsec.clone())
             .map_err(|error| format!("managed-agent key is unavailable: {error}"))?,
         );

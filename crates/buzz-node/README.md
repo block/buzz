@@ -85,12 +85,13 @@ node restarts and fail closed only once the container is gone. The node
 refuses to start a docker-substrate `run` when the Docker daemon is
 unreachable.
 
-Both substrates resolve agent runtimes against the same catalog the Desktop
-launcher uses: `goose`, `claude` (the `claude-agent-acp` npm adapter fronting
-the Claude Code CLI via `CLAUDE_CODE_EXECUTABLE`), `codex` (the `codex-acp`
-npm adapter plus `buzz-dev-mcp`), and the bundled `buzz-agent` (plus
-`buzz-dev-mcp`). The process substrate resolves these to executables on the
-node host; the docker substrate runs each catalog runtime in its own image
+Both substrates consume the workload's Desktop-resolved launch contract
+(`LaunchSpec` in `buzz-core`): command, arguments, MCP command, layered
+environment, and policy environment arrive resolved, and the node never
+reconstructs them from the runtime identifier. What stays substrate-local is
+adaptation: the process substrate resolves the contract's command names to
+executables on the node host; the docker substrate runs each catalog runtime
+(`goose`, `claude`, `codex`) in its own image
 variant (`Dockerfile.agent`, `RUNTIME` build arg — build with
 `just agent-image goose|claude|codex`), which bakes that runtime onto the
 container `PATH` using the same official installer the Desktop auto-install

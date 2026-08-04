@@ -12,7 +12,7 @@ use nostr::secp256k1::schnorr::Signature;
 use nostr::secp256k1::Message;
 use nostr::{Keys, PublicKey, SECP256K1};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::str::FromStr;
 use thiserror::Error;
@@ -21,6 +21,36 @@ use uuid::Uuid;
 /// The first released wire contract for execution-node commands, announcements,
 /// and receipts. Earlier values were unreleased development iterations.
 pub const EXECUTION_PROTOCOL_VERSION: u16 = 1;
+
+/// The first released launch-contract version carried inside workloads and
+/// provider deploy payloads. Evolves independently of
+/// [`EXECUTION_PROTOCOL_VERSION`]: the envelope version covers command
+/// transport, this version covers the resolved launch configuration.
+pub const LAUNCH_SPEC_VERSION: u32 = 1;
+
+/// LLM provider credential and endpoint variables that must never travel
+/// inside a workload's launch environment. Credential material remains local
+/// to the executing substrate: Desktop reads these from the user's own
+/// environment, `buzz-node` forwards them from the node operator's
+/// environment. Shared here so the Desktop-side strip and the node-side
+/// allowlist cannot drift.
+pub const PROVIDER_CREDENTIAL_ENV: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_BASE_URL",
+    "OPENAI_API_KEY",
+    "OPENAI_COMPAT_API_KEY",
+    "OPENAI_COMPAT_MODEL",
+    "OPENAI_COMPAT_BASE_URL",
+    "OPENAI_COMPAT_API",
+    "OPENROUTER_API_KEY",
+    "OPENROUTER_MODEL",
+    "OPENROUTER_BASE_URL",
+    "DATABRICKS_HOST",
+    "DATABRICKS_TOKEN",
+    "DATABRICKS_MODEL",
+];
 
 /// The maximum lifetime of a command envelope.
 pub const MAX_COMMAND_TTL: Duration = Duration::minutes(15);
@@ -31,13 +61,19 @@ const MAX_RUNTIME_BYTES: usize = 128;
 const MAX_SESSION_ID_BYTES: usize = 128;
 const MAX_AUTH_RESPONSE_BYTES: usize = 16 * 1024;
 const MAX_AUTH_TAG_BYTES: usize = 1024;
-const MAX_SYSTEM_PROMPT_BYTES: usize = 64 * 1024;
 const MAX_RELAY_URL_BYTES: usize = 2048;
 const MAX_PRIVATE_KEY_BYTES: usize = 128;
 const MAX_AGENT_ARGS: usize = 128;
 const MAX_AGENT_ARG_BYTES: usize = 4096;
 const MAX_AGENT_ARGS_BYTES: usize = 64 * 1024;
-const MAX_AGENT_PARALLELISM: u32 = 32;
+const MAX_LAUNCH_COMMAND_BYTES: usize = 1024;
+const MAX_LAUNCH_ENV_ENTRIES: usize = 512;
+const MAX_LAUNCH_ENV_KEY_BYTES: usize = 256;
+// The system prompt and team instructions travel as policy environment
+// values, so the per-value cap must fit a full prompt. The total budget
+// leaves headroom for real layered user environments on top of that.
+const MAX_LAUNCH_ENV_VALUE_BYTES: usize = 64 * 1024;
+const MAX_LAUNCH_ENV_TOTAL_BYTES: usize = 512 * 1024;
 
 /// Validation failures for execution protocol values.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -124,12 +160,21 @@ pub enum ExecutionValidationError {
     /// A managed-agent launch key was malformed or did not match its public identity.
     #[error("managed-agent launch key does not match its public identity")]
     InvalidAgentKey,
-    /// A managed-agent parallelism setting was outside the supported range.
-    #[error("managed-agent parallelism must be between 1 and {MAX_AGENT_PARALLELISM}")]
-    InvalidAgentParallelism,
     /// A managed-agent launch contained too many arguments.
     #[error("managed-agent contains too many launch arguments")]
     TooManyAgentArgs,
+    /// The launch contract version is not supported by this implementation.
+    #[error("unsupported launch contract version: {0}")]
+    UnsupportedLaunchVersion(u32),
+    /// A launch environment exceeded its entry count or byte budget.
+    #[error("launch environment exceeds the protocol limits")]
+    LaunchEnvTooLarge,
+    /// A launch environment key was empty or contained `=`.
+    #[error("launch environment contains an invalid variable name")]
+    InvalidLaunchEnvKey,
+    /// The launch owner identity was not a canonical Nostr public key.
+    #[error("launch owner identity is invalid")]
+    InvalidLaunchOwner,
 }
 
 /// Errors returned when decoding and validating a JSON command envelope.
@@ -401,87 +446,185 @@ impl CredentialRef {
     }
 }
 
-/// Non-secret runtime settings that must follow a managed agent to its body.
+/// The resolved, substrate-neutral launch contract for one agent body.
+///
+/// Desktop resolves this once — from the same effective-harness descriptor and
+/// policy helpers that drive local spawn — and every remote execution path
+/// consumes it as-is: provider deployments receive it as the `launch` block,
+/// execution nodes receive it inside the workload. Substrates adapt it to
+/// their runtime (resolving command names to host executables or in-image
+/// paths) but never reconstruct configuration from runtime identifiers.
+///
+/// Serialized with snake_case field names because this struct *is* the
+/// provider `launch` block consumed outside this repository
+/// (`sprout-backend-blox`); its shape may only evolve additively, signalled
+/// through `version`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AgentRuntimeSettings {
-    /// Effective harness arguments for this managed agent.
+#[serde(deny_unknown_fields)]
+pub struct LaunchSpec {
+    /// Launch contract version. See [`LAUNCH_SPEC_VERSION`].
+    pub version: u32,
+    /// Effective agent command name (e.g. `goose`). Substrates resolve it to
+    /// an executable; it is never a substrate-local path on the wire.
+    pub command: String,
+    /// Normalized effective arguments for `command`.
     #[serde(default)]
-    pub agent_args: Vec<String>,
-    /// ACP idle timeout in seconds.
+    pub args: Vec<String>,
+    /// Developer MCP command name, when the runtime uses one. Resolved by the
+    /// substrate like `command`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub idle_timeout_seconds: Option<u64>,
-    /// Absolute per-turn wall-clock cap in seconds.
+    pub mcp_command: Option<String>,
+    /// The authoritative layered environment (baked floor → runtime metadata →
+    /// harness definition → global → persona → agent). Applied *above*
+    /// `policy_env` so user-provided values keep winning, mirroring local
+    /// spawn. Reserved identity/transport keys are stripped before this
+    /// crosses a protocol boundary and again by the consuming substrate.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    /// Buzz-set policy values (harness contract, prompts, timeouts, audience
+    /// gate) applied *below* `env`, preserving power-user override semantics.
+    #[serde(default)]
+    pub policy_env: BTreeMap<String, String>,
+    /// Workspace owner identity the body treats as its operator. Optional to
+    /// match the provider wire contract (`deploy-no-owner`): without it or an
+    /// NIP-OA attestation the respond-to gate cannot resolve an owner, which
+    /// consumers handle rather than this type.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_turn_duration_seconds: Option<u64>,
-    /// Maximum concurrent turns for the agent.
-    #[serde(default = "default_agent_parallelism")]
-    pub parallelism: u32,
+    pub owner_pubkey: Option<String>,
 }
 
-fn default_agent_parallelism() -> u32 {
-    1
-}
-
-impl Default for AgentRuntimeSettings {
-    fn default() -> Self {
-        Self {
-            agent_args: Vec::new(),
-            idle_timeout_seconds: None,
-            max_turn_duration_seconds: None,
-            parallelism: default_agent_parallelism(),
-        }
-    }
-}
-
-impl AgentRuntimeSettings {
-    /// Build and validate the portable, non-secret runtime settings.
+impl LaunchSpec {
+    /// Build and validate a launch contract at the current version.
     pub fn new(
-        agent_args: Vec<String>,
-        idle_timeout_seconds: Option<u64>,
-        max_turn_duration_seconds: Option<u64>,
-        parallelism: u32,
+        command: impl Into<String>,
+        args: Vec<String>,
+        mcp_command: Option<String>,
+        env: BTreeMap<String, String>,
+        policy_env: BTreeMap<String, String>,
+        owner_pubkey: Option<String>,
     ) -> Result<Self, ExecutionValidationError> {
-        let settings = Self {
-            agent_args,
-            idle_timeout_seconds,
-            max_turn_duration_seconds,
-            parallelism,
+        let launch = Self {
+            version: LAUNCH_SPEC_VERSION,
+            command: command.into(),
+            args,
+            mcp_command,
+            env,
+            policy_env,
+            owner_pubkey,
         };
-        settings.validate()?;
-        Ok(settings)
+        launch.validate()?;
+        Ok(launch)
     }
 
-    fn validate(&self) -> Result<(), ExecutionValidationError> {
-        if !(1..=MAX_AGENT_PARALLELISM).contains(&self.parallelism) {
-            return Err(ExecutionValidationError::InvalidAgentParallelism);
+    /// Validate the launch contract before it crosses a protocol boundary.
+    pub fn validate(&self) -> Result<(), ExecutionValidationError> {
+        if self.version != LAUNCH_SPEC_VERSION {
+            return Err(ExecutionValidationError::UnsupportedLaunchVersion(
+                self.version,
+            ));
         }
-        if self.agent_args.len() > MAX_AGENT_ARGS {
+        validate_text(
+            "launch command",
+            &self.command,
+            MAX_LAUNCH_COMMAND_BYTES,
+            false,
+        )?;
+        if self.args.len() > MAX_AGENT_ARGS {
             return Err(ExecutionValidationError::TooManyAgentArgs);
         }
-        let mut total_bytes = 0;
-        for argument in &self.agent_args {
+        let mut total_arg_bytes = 0;
+        for argument in &self.args {
+            validate_text("launch argument", argument, MAX_AGENT_ARG_BYTES, true)?;
+            total_arg_bytes += argument.len();
+        }
+        if total_arg_bytes > MAX_AGENT_ARGS_BYTES {
+            return Err(ExecutionValidationError::TooManyAgentArgs);
+        }
+        if let Some(mcp_command) = &self.mcp_command {
             validate_text(
-                "managed-agent argument",
-                argument,
-                MAX_AGENT_ARG_BYTES,
-                true,
+                "launch MCP command",
+                mcp_command,
+                MAX_LAUNCH_COMMAND_BYTES,
+                false,
             )?;
-            total_bytes += argument.len();
         }
-        if total_bytes > MAX_AGENT_ARGS_BYTES {
-            return Err(ExecutionValidationError::TooManyAgentArgs);
+        validate_launch_env(&self.env)?;
+        validate_launch_env(&self.policy_env)?;
+        // Same canonical-hex check as `ExecutionNodeId`: the owner key is an
+        // identity reference, not a signing input, so hex shape is the
+        // protocol invariant (curve validity is the verifier's concern).
+        if let Some(owner_pubkey) = &self.owner_pubkey {
+            if owner_pubkey.len() != 64
+                || !owner_pubkey.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                return Err(ExecutionValidationError::InvalidLaunchOwner);
+            }
         }
         Ok(())
     }
+
+    /// Return the contract with provider credential variables removed.
+    ///
+    /// Execution nodes receive credentials from the node operator's own
+    /// environment ([`PROVIDER_CREDENTIAL_ENV`]), never through workload
+    /// configuration. Desktop strips them at the node boundary so they are
+    /// neither transmitted nor persisted in the node's workload ledger.
+    pub fn without_provider_credentials(mut self) -> Self {
+        for name in PROVIDER_CREDENTIAL_ENV {
+            self.env.remove(*name);
+            self.policy_env.remove(*name);
+        }
+        self
+    }
 }
 
-/// Identity and behavior context for a managed agent workload.
+fn validate_launch_env(env: &BTreeMap<String, String>) -> Result<(), ExecutionValidationError> {
+    if env.len() > MAX_LAUNCH_ENV_ENTRIES {
+        return Err(ExecutionValidationError::LaunchEnvTooLarge);
+    }
+    let mut total_bytes = 0;
+    for (key, value) in env {
+        if key.is_empty() || key.contains('=') {
+            return Err(ExecutionValidationError::InvalidLaunchEnvKey);
+        }
+        validate_text(
+            "launch environment key",
+            key,
+            MAX_LAUNCH_ENV_KEY_BYTES,
+            false,
+        )?;
+        // Values are deliberately looser than other protocol text: real user
+        // environments legitimately carry control characters (ANSI sequences,
+        // embedded escapes), and local spawn has always passed them through.
+        // Only NUL — which cannot cross an environment boundary at all — and
+        // the size budget are protocol invariants.
+        if value.contains('\0') {
+            return Err(ExecutionValidationError::NulByte {
+                field: "launch environment value",
+            });
+        }
+        if value.len() > MAX_LAUNCH_ENV_VALUE_BYTES {
+            return Err(ExecutionValidationError::TooLong {
+                field: "launch environment value",
+                max: MAX_LAUNCH_ENV_VALUE_BYTES,
+            });
+        }
+        total_bytes += key.len() + value.len();
+    }
+    if total_bytes > MAX_LAUNCH_ENV_TOTAL_BYTES {
+        return Err(ExecutionValidationError::LaunchEnvTooLarge);
+    }
+    Ok(())
+}
+
+/// Identity context for a managed agent workload.
 ///
-/// This is deliberately separate from runtime infrastructure and credential
-/// references: the node receives the same agent contract as Desktop, with the
-/// identity key as an encrypted one-time launch handoff. Process-launch
-/// details remain node-local.
+/// This carries only what the workload's launch contract cannot: the agent's
+/// identity (with the key as an encrypted one-time launch handoff), the relay
+/// binding, the NIP-OA authorization, and the deployment's channel context.
+/// Behavior configuration — prompt, audience gate, timeouts, parallelism —
+/// travels in the workload's [`LaunchSpec`] so every execution body consumes
+/// one resolved contract. Process-launch details remain node-local.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentWorkloadContext {
@@ -492,27 +635,15 @@ pub struct AgentWorkloadContext {
     /// workload state; it is not part of the durable Desktop record projection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub private_key_nsec: Option<String>,
-    /// System prompt belonging to the managed agent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub system_prompt: Option<String>,
     /// Relay configuration the managed agent should use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_url: Option<String>,
     /// NIP-OA profile authorization for the managed agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_tag: Option<String>,
-    /// Response audience mode for the managed agent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub response_mode: Option<String>,
-    /// Response audience allowlist for the managed agent.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub response_allowlist: Vec<String>,
     /// Channel context selected for this deployment, when one exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel_id: Option<String>,
-    /// Effective non-secret runtime settings for the managed agent.
-    #[serde(default)]
-    pub runtime_settings: AgentRuntimeSettings,
 }
 
 impl fmt::Debug for AgentWorkloadContext {
@@ -524,13 +655,9 @@ impl fmt::Debug for AgentWorkloadContext {
                 "private_key_nsec",
                 &self.private_key_nsec.as_ref().map(|_| "[redacted]"),
             )
-            .field("system_prompt", &self.system_prompt)
             .field("relay_url", &self.relay_url)
             .field("auth_tag", &self.auth_tag.as_ref().map(|_| "[redacted]"))
-            .field("response_mode", &self.response_mode)
-            .field("response_allowlist", &self.response_allowlist)
             .field("channel_id", &self.channel_id)
-            .field("runtime_settings", &self.runtime_settings)
             .finish()
     }
 }
@@ -539,37 +666,19 @@ impl AgentWorkloadContext {
     /// Build and validate the managed-agent context carried by a workload.
     pub fn new(
         pubkey: impl Into<String>,
-        system_prompt: Option<String>,
         relay_url: Option<String>,
         auth_tag: Option<String>,
-        response_mode: Option<String>,
-        response_allowlist: Vec<String>,
         channel_id: Option<String>,
     ) -> Result<Self, ExecutionValidationError> {
         let context = Self {
             pubkey: pubkey.into(),
             private_key_nsec: None,
-            system_prompt,
             relay_url,
             auth_tag,
-            response_mode,
-            response_allowlist,
             channel_id,
-            runtime_settings: AgentRuntimeSettings::default(),
         };
         context.validate()?;
         Ok(context)
-    }
-
-    /// Attach the effective non-secret runtime settings for this identity.
-    pub fn with_runtime_settings(
-        mut self,
-        runtime_settings: AgentRuntimeSettings,
-    ) -> Result<Self, ExecutionValidationError> {
-        runtime_settings.validate()?;
-        self.runtime_settings = runtime_settings;
-        self.validate()?;
-        Ok(self)
     }
 
     /// Attach and validate the private key required to launch this identity.
@@ -608,31 +717,11 @@ impl AgentWorkloadContext {
                 return Err(ExecutionValidationError::InvalidAgentKey);
             }
         }
-        if let Some(system_prompt) = &self.system_prompt {
-            validate_text(
-                "workload system prompt",
-                system_prompt,
-                MAX_SYSTEM_PROMPT_BYTES,
-                true,
-            )?;
-        }
         if let Some(relay_url) = &self.relay_url {
             validate_text("workload relay URL", relay_url, MAX_RELAY_URL_BYTES, false)?;
         }
         if let Some(auth_tag) = &self.auth_tag {
             validate_text("workload auth tag", auth_tag, MAX_AUTH_TAG_BYTES, false)?;
-        }
-        if let Some(response_mode) = &self.response_mode {
-            validate_text(
-                "workload response mode",
-                response_mode,
-                MAX_SESSION_ID_BYTES,
-                false,
-            )?;
-        }
-        for value in &self.response_allowlist {
-            PublicKey::from_hex(value)
-                .map_err(|_| ExecutionValidationError::InvalidAgentIdentity)?;
         }
         if let Some(channel_id) = &self.channel_id {
             validate_text(
@@ -642,7 +731,6 @@ impl AgentWorkloadContext {
                 false,
             )?;
         }
-        self.runtime_settings.validate()?;
         Ok(())
     }
 }
@@ -668,6 +756,10 @@ pub struct WorkloadSpec {
     pub provider: Option<String>,
     /// References to credentials already stored by the node.
     pub credential_refs: Vec<CredentialRef>,
+    /// The resolved launch contract this workload's body runs. `runtime`,
+    /// `model`, and `provider` above remain for display and substrate image
+    /// selection; the launch contract is the source of execution truth.
+    pub launch: LaunchSpec,
     /// The managed-agent contract, when this workload represents an agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentWorkloadContext>,
@@ -682,6 +774,7 @@ impl WorkloadSpec {
         model: Option<String>,
         provider: Option<String>,
         credential_refs: Vec<CredentialRef>,
+        launch: LaunchSpec,
     ) -> Result<Self, ExecutionValidationError> {
         let workload = Self {
             workload_id,
@@ -690,6 +783,7 @@ impl WorkloadSpec {
             model,
             provider,
             credential_refs,
+            launch,
             agent: None,
         };
         workload.validate()?;
@@ -711,6 +805,7 @@ impl WorkloadSpec {
         if let Some(provider) = &self.provider {
             validate_text("workload provider", provider, MAX_PROVIDER_BYTES, false)?;
         }
+        self.launch.validate()?;
         if let Some(agent) = &self.agent {
             agent.validate()?;
         }

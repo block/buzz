@@ -1,13 +1,14 @@
 use buzz_core::execution::{
-    AgentRuntimeSettings, AgentWorkloadContext, CredentialRef, ExecutionCapability,
-    ExecutionCommand, ExecutionCommandEnvelope, ExecutionNodeAttestation, ExecutionNodeId,
-    ExecutionNodeLifecycle, ExecutionNodeStatus, ExecutionReceipt, ExecutionValidationError,
+    AgentWorkloadContext, CredentialRef, ExecutionCapability, ExecutionCommand,
+    ExecutionCommandEnvelope, ExecutionNodeAttestation, ExecutionNodeId, ExecutionNodeLifecycle,
+    ExecutionNodeStatus, ExecutionReceipt, ExecutionValidationError, LaunchSpec,
     ProviderAuthResponse, ProviderAuthSession, ReceiptDetail, ReceiptOutcome, SafeErrorCode,
-    WorkloadId, WorkloadLifecycle, WorkloadSpec, WorkloadStatus,
+    WorkloadId, WorkloadLifecycle, WorkloadSpec, WorkloadStatus, LAUNCH_SPEC_VERSION,
 };
 use chrono::{Duration, TimeZone, Utc};
 use nostr::ToBech32;
 use serde_json::json;
+use std::collections::BTreeMap;
 
 fn node_id() -> ExecutionNodeId {
     ExecutionNodeId::new("A".repeat(64)).expect("valid node id")
@@ -48,37 +49,28 @@ fn managed_workload_round_trips_agent_identity_and_context() {
     let mut workload = workload();
     let agent_context = AgentWorkloadContext::new(
         owner.public_key().to_hex(),
-        Some("You are a careful coding agent.".into()),
         Some("wss://relay.example/community".into()),
         Some("[\"oa\",\"owner\"]".into()),
-        Some("allowlist".into()),
-        vec![owner.public_key().to_hex()],
         Some("channel-123".into()),
     )
     .expect("valid agent context")
-    .with_runtime_settings(
-        AgentRuntimeSettings::new(
-            vec!["--acp".into(), "--profile=careful".into()],
-            Some(30),
-            Some(600),
-            4,
-        )
-        .expect("runtime settings"),
-    )
-    .expect("attach runtime settings")
     .with_private_key(owner.secret_key().to_bech32().expect("nsec"))
     .expect("valid launch key");
     workload.agent = Some(agent_context.clone());
 
     let encoded = serde_json::to_value(&workload).expect("serialize workload");
     assert_eq!(encoded["agent"]["pubkey"], owner.public_key().to_hex());
+    assert_eq!(encoded["agent"]["channelId"], "channel-123");
+    // Behavior configuration travels in the launch contract, not the agent
+    // context. The launch block keeps its provider-facing snake_case shape.
+    assert_eq!(encoded["launch"]["version"], LAUNCH_SPEC_VERSION);
+    assert_eq!(encoded["launch"]["command"], "goose");
+    assert_eq!(encoded["launch"]["args"][0], "--acp");
     assert_eq!(
-        encoded["agent"]["systemPrompt"],
+        encoded["launch"]["policy_env"]["BUZZ_ACP_SYSTEM_PROMPT"],
         "You are a careful coding agent."
     );
-    assert_eq!(encoded["agent"]["channelId"], "channel-123");
-    assert_eq!(encoded["agent"]["runtimeSettings"]["parallelism"], 4);
-    assert_eq!(encoded["agent"]["runtimeSettings"]["agentArgs"][0], "--acp");
+    assert_eq!(encoded["launch"]["env"]["GOOSE_MODE"], "custom");
     assert!(encoded["agent"].get("privateKey").is_none());
     assert_eq!(
         encoded["agent"]["privateKeyNsec"],
@@ -96,19 +88,85 @@ fn managed_workload_round_trips_agent_identity_and_context() {
 }
 
 #[test]
-fn managed_agent_runtime_settings_reject_unsafe_values() {
+fn launch_contracts_reject_unsafe_values() {
+    let owner = nostr::Keys::generate().public_key().to_hex();
     assert!(matches!(
-        AgentRuntimeSettings::new(vec![], None, None, 0),
-        Err(ExecutionValidationError::InvalidAgentParallelism)
-    ));
-    assert!(matches!(
-        AgentRuntimeSettings::new(vec!["x".repeat(4097)], None, None, 1),
+        LaunchSpec::new(
+            "goose",
+            vec!["x".repeat(4097)],
+            None,
+            BTreeMap::new(),
+            BTreeMap::new(),
+            Some(owner.clone()),
+        ),
         Err(ExecutionValidationError::TooLong { .. })
     ));
+    assert!(matches!(
+        LaunchSpec::new(
+            "goose",
+            Vec::new(),
+            None,
+            BTreeMap::from([("BAD=KEY".to_string(), "value".to_string())]),
+            BTreeMap::new(),
+            Some(owner.clone()),
+        ),
+        Err(ExecutionValidationError::InvalidLaunchEnvKey)
+    ));
+    assert!(matches!(
+        LaunchSpec::new(
+            "goose",
+            Vec::new(),
+            None,
+            BTreeMap::new(),
+            BTreeMap::new(),
+            Some("not-a-pubkey".to_string()),
+        ),
+        Err(ExecutionValidationError::InvalidLaunchOwner)
+    ));
+    let mut wrong_version = launch_spec();
+    wrong_version.version = LAUNCH_SPEC_VERSION + 1;
+    assert!(matches!(
+        wrong_version.validate(),
+        Err(ExecutionValidationError::UnsupportedLaunchVersion(_))
+    ));
+}
+
+#[test]
+fn launch_contracts_strip_provider_credentials_at_the_node_boundary() {
+    let mut launch = launch_spec();
+    launch
+        .env
+        .insert("ANTHROPIC_API_KEY".to_string(), "sk-secret".to_string());
+    launch
+        .policy_env
+        .insert("OPENAI_API_KEY".to_string(), "sk-secret".to_string());
+    let stripped = launch.without_provider_credentials();
+    assert!(!stripped.env.contains_key("ANTHROPIC_API_KEY"));
+    assert!(!stripped.policy_env.contains_key("OPENAI_API_KEY"));
+    assert_eq!(
+        stripped.env.get("GOOSE_MODE").map(String::as_str),
+        Some("custom"),
+        "non-credential configuration must survive the strip"
+    );
 }
 
 fn workload_id() -> WorkloadId {
     WorkloadId::new("123e4567-e89b-12d3-a456-426614174000").expect("valid workload id")
+}
+
+fn launch_spec() -> LaunchSpec {
+    LaunchSpec::new(
+        "goose",
+        vec!["--acp".to_string(), "--profile=careful".to_string()],
+        Some("buzz-dev-mcp".to_string()),
+        BTreeMap::from([("GOOSE_MODE".to_string(), "custom".to_string())]),
+        BTreeMap::from([(
+            "BUZZ_ACP_SYSTEM_PROMPT".to_string(),
+            "You are a careful coding agent.".to_string(),
+        )]),
+        Some(nostr::Keys::generate().public_key().to_hex()),
+    )
+    .expect("valid launch contract")
 }
 
 fn workload() -> WorkloadSpec {
@@ -119,6 +177,7 @@ fn workload() -> WorkloadSpec {
         Some("claude-sonnet".to_string()),
         Some("anthropic".to_string()),
         vec![CredentialRef::new("anthropic", "primary").expect("valid credential reference")],
+        launch_spec(),
     )
     .expect("valid workload")
 }
@@ -219,6 +278,7 @@ fn envelope_rejects_expiry_and_malformed_payloads() {
         None::<String>,
         None::<String>,
         Vec::new(),
+        launch_spec(),
     );
     assert!(matches!(
         unsafe_workload,

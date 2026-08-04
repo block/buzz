@@ -6,21 +6,36 @@
 //! spawn) against a recomputation from current disk state and show a
 //! "restart required" badge only when a restart would change what runs.
 //!
+//! Since every execution path consumes the shared launch contract
+//! (`managed_agents::launch::resolve_launch_spec`), the badge question *is*
+//! the contract question: "restart needed" means "the contract changed".
+//! The hash therefore digests the contract's effective view — command, args,
+//! MCP command, and the merged environment (`policy_env` under `env`, user
+//! values winning, exactly as a body applies them) — plus the few spawn
+//! inputs that legitimately live outside the contract:
+//! - `record.acp_command`: the outer harness binary is host machinery, not
+//!   launch configuration;
+//! - the relay URL, hashed in resolved form (`effective_agent_relay_url`):
+//!   every record spawns against the active workspace relay (legacy
+//!   per-record pins are ignored), so a workspace relay change means a
+//!   restart would change what runs;
+//! - `auth_tag`: carried beside the contract, not inside it;
+//! - the resolved provider: a provider flip on a runtime with no provider
+//!   env var does not touch the contract, but the mesh-llm path derives
+//!   spawn-time transport env from it.
+//!
+//! Hashing the *merged* environment (not the two maps separately) is what
+//! keeps the badge honest under overrides: a session-title rename beneath a
+//! user `BUZZ_ACP_SESSION_TITLE` override changes `policy_env` but not what
+//! runs, and the merged view does not change either.
+//!
 //! Scope rules (decided in #centralize-personas-and-agents, revised in PR
-//! #1602 review):
-//! - Inputs mirror what a start would actually run: the start/restore paths
-//!   re-snapshot the linked persona's prompt/model/provider/env onto the
-//!   record immediately before spawning (`start_local_agent_with_preflight`,
-//!   `restore_managed_agents_on_launch`), so persona edits to those fields DO
-//!   apply on a plain restart and are hashed via the same prospective
-//!   re-snapshot. Harness command, args/mcp, env layering, and the record
-//!   fields the spawn env writes read are hashed as spawn resolves them.
-//! - The relay URL is hashed in resolved form (`effective_agent_relay_url`):
-//!   every record spawns against the active workspace relay (legacy per-record
-//!   pins are ignored), so a workspace relay change means a restart would
-//!   change what runs.
-//! - Channel membership is not an input: agents pick up channel changes live
-//!   (#1468), never via restart.
+//! #1602 review): inputs mirror what a start would actually run — the
+//! start/restore paths re-snapshot the linked persona onto the record
+//! immediately before spawning, so persona edits DO apply on a plain restart
+//! and are hashed via the same prospective re-snapshot. Channel membership
+//! is not an input: agents pick up channel changes live (#1468), never via
+//! restart.
 //!
 //! The hash never crosses a process or persistence boundary, so
 //! `DefaultHasher` (not stable across Rust releases) is sufficient.
@@ -29,9 +44,8 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 
 use super::{
     effective_config::{resolve_effective_config, EffectiveConfigResult},
-    known_acp_runtime, normalize_agent_args,
+    normalize_agent_args,
     persona_events::preview_prospective_persona_snapshot,
-    runtime::{resolve_session_title, SESSION_TITLE_ENV_VAR},
     types::{AgentDefinition, ManagedAgentRecord, TeamRecord},
     GlobalAgentConfig,
 };
@@ -86,32 +100,17 @@ pub(crate) fn spawn_config_hash(
                     env: Default::default(),
                 }
             });
-    let runtime_meta = known_acp_runtime(&descriptor.command);
 
     let mut hasher = DefaultHasher::new();
 
-    // Harness identity and derivations (live-persona-resolved, like spawn).
+    // Non-contract spawn inputs (see module docs).
     record.acp_command.hash(&mut hasher);
-    descriptor.command.hash(&mut hasher);
-    descriptor.args.hash(&mut hasher);
-    runtime_meta
-        .and_then(|r| r.mcp_command)
-        .unwrap_or("")
-        .hash(&mut hasher);
-
-    // Effective env layering (baked floor → runtime metadata → definition env
-    // → global → persona → agent). BTreeMap iteration is ordered, deterministic.
-    descriptor.env.hash(&mut hasher);
-
-    // Record fields the spawn env writes read directly. The relay is hashed
-    // resolved: every record spawns on the workspace relay (legacy pins
-    // ignored), so a workspace relay change must trip the badge.
     crate::relay::effective_agent_relay_url(&record.relay_url, workspace_relay).hash(&mut hasher);
-    // Team instructions use the same resolver as spawn.
-    effective_team_instructions(record, teams).hash(&mut hasher);
-    // Prompt, model, and provider all come from ONE `resolve_effective_config`
-    // call — the SAME resolve `spawn_agent_child` performs for the env write,
-    // so env write and this badge cannot disagree. An orphaned link (missing
+    record.auth_tag.hash(&mut hasher);
+
+    // Prompt, model, and provider come from ONE `resolve_effective_config`
+    // call — the SAME resolve `spawn_agent_child` feeds into the contract, so
+    // env write and this badge cannot disagree. An orphaned link (missing
     // definition) hashes as if all three were absent: `spawn_agent_child`
     // refuses to spawn an orphan regardless, so this is a display-only
     // convenience, not the spawn gate.
@@ -122,36 +121,45 @@ pub(crate) fn spawn_config_hash(
             }
             EffectiveConfigResult::OrphanedInstance { .. } => (None, None, None),
         };
-    resolved_prompt.hash(&mut hasher);
-    resolved_model.hash(&mut hasher);
+    // The provider outside the contract: the mesh-llm path derives spawn-time
+    // transport env from it even when the runtime exports no provider var.
     resolved_provider.hash(&mut hasher);
-    // Session title: the same resolve `spawn_agent_child` performs for its env
-    // write, so a rename raises the restart badge. Skipped when a user env
-    // override shadows it — spawn writes the title BEFORE the user env layer,
-    // so the override is what actually runs, and it already reaches this hash
-    // through `descriptor.env` above. Hashing the record-derived value under an
-    // override would badge a rename that changes nothing.
-    let effective_session_title = (!descriptor.env.contains_key(SESSION_TITLE_ENV_VAR))
-        .then(|| resolve_session_title(record.display_name.as_deref(), &record.name))
-        .flatten();
-    effective_session_title.hash(&mut hasher);
-    record.auth_tag.hash(&mut hasher);
-    record.respond_to.as_str().hash(&mut hasher);
-    // The allowlist is hashed as the env receives it: spawn sets
-    // BUZZ_ACP_RESPOND_TO_ALLOWLIST only in allowlist mode, and normalized
-    // (trim/lowercase/dedup via `validate_respond_to_allowlist`) — so edits
-    // that don't survive normalization, or edits while another mode is
-    // active, must not badge. A list spawn would reject hashes raw: the
-    // stamped hash comes from a successful spawn, so any invalid edit
-    // correctly compares unequal.
-    if record.respond_to == super::types::RespondTo::Allowlist {
-        super::types::validate_respond_to_allowlist(&record.respond_to_allowlist)
-            .unwrap_or_else(|_| record.respond_to_allowlist.clone())
-            .hash(&mut hasher);
+
+    // The launch contract's effective view. The owner is deliberately not an
+    // input (`owner_hex: None`): both the spawn-time stamp and every
+    // recompute use this same resolve, and an owner change never requires a
+    // restart badge — it is workspace identity, not agent configuration.
+    match super::launch::resolve_launch_spec(
+        record,
+        &descriptor,
+        teams,
+        resolved_prompt.as_deref(),
+        resolved_model.as_deref(),
+        resolved_provider.as_deref(),
+        None,
+    ) {
+        Ok(launch) => {
+            launch.command.hash(&mut hasher);
+            launch.args.hash(&mut hasher);
+            launch.mcp_command.hash(&mut hasher);
+            // Merged effective environment: policy below, user env above —
+            // the same precedence every body applies. Hashing the merged
+            // view (BTreeMap iteration is ordered and deterministic) is what
+            // keeps no-op edits quiet: a change beneath a user override does
+            // not change what runs, and does not change this map either.
+            let mut effective_env = launch.policy_env;
+            effective_env.extend(launch.env);
+            effective_env.hash(&mut hasher);
+        }
+        Err(error) => {
+            // A record the resolver refuses (e.g. a malformed allowlist
+            // edit) cannot produce the hash a successful spawn stamped, so
+            // it correctly compares unequal; hash the refusal itself so two
+            // differently-broken edits still differ.
+            error.hash(&mut hasher);
+            record.respond_to_allowlist.hash(&mut hasher);
+        }
     }
-    record.idle_timeout_seconds.hash(&mut hasher);
-    record.max_turn_duration_seconds.hash(&mut hasher);
-    record.parallelism.hash(&mut hasher);
 
     hasher.finish()
 }
