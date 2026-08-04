@@ -153,9 +153,14 @@ export function useChannelPaneHandlers({
       content: string,
       mediaTags?: string[][],
       mentionPubkeys?: string[],
+      // Explicit target, bypassing interactive edit mode: IRC-style
+      // `s/old/new/` self-correction edits the author's previous message
+      // without ever loading it into the composer. Defaults to the current
+      // edit-mode target.
+      eventId?: string,
     ) => {
-      const eventId = editTargetIdRef.current;
-      if (!eventId) {
+      const targetEventId = eventId ?? editTargetIdRef.current;
+      if (!targetEventId) {
         return;
       }
 
@@ -176,7 +181,7 @@ export function useChannelPaneHandlers({
       }
 
       await editMutateRef.current({
-        eventId,
+        eventId: targetEventId,
         content,
         mediaTags,
         mentionPubkeys,

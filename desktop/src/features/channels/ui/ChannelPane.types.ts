@@ -89,6 +89,9 @@ export type ChannelPaneProps = {
     content: string,
     mediaTags?: string[][],
     mentionPubkeys?: string[],
+    // Explicit target id, bypassing interactive edit mode — used by
+    // `s/old/new/` self-correction to edit the author's previous message.
+    eventId?: string,
   ) => Promise<void>;
   onMarkUnread?: (message: TimelineMessage) => void;
   onMarkRead?: (message: TimelineMessage) => void;
