@@ -409,6 +409,34 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_NO_BASE_PROMPT")]
     pub no_base_prompt: bool,
 
+    /// Auto-publish the agent's streamed assistant text as a channel reply when
+    /// a turn ends (`EndTurn`) without the agent itself calling
+    /// `buzz messages send` (or reacting).
+    ///
+    /// Some agent/model combinations reliably stream a text answer but never
+    /// invoke a publish tool — e.g. Goose on Gemini answering simple questions,
+    /// where the configured MCP server also failed to start (`buzz` has no
+    /// implicit MCP mode). Without this fallback the answer is silently
+    /// discarded: assistant text is never shown to channel members. When on,
+    /// the harness collects `agent_message_chunk` text during the turn and, if
+    /// nothing was published, posts it as a signed kind:45001 reply in the
+    /// triggering thread. Heartbeats are exempt. Default on.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_AUTO_PUBLISH_REPLY",
+        conflicts_with = "no_auto_publish_reply",
+        default_value_t = true
+    )]
+    pub auto_publish_reply: bool,
+
+    /// Disable auto-publishing the agent's streamed text as a fallback reply.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_NO_AUTO_PUBLISH_REPLY",
+        conflicts_with = "auto_publish_reply"
+    )]
+    pub no_auto_publish_reply: bool,
+
     /// Path to a custom base prompt file. Overrides the compiled-in default.
     /// Mutually exclusive with --no-base-prompt.
     #[arg(
@@ -579,6 +607,10 @@ pub struct Config {
     /// `from_cli()`. `None` when using the compiled-in default or when
     /// `--no-base-prompt` is set.
     pub base_prompt_content: Option<String>,
+    /// Whether auto-publishing the agent's streamed text as a fallback reply
+    /// is enabled. Resolved from the `--auto-publish-reply` /
+    /// `--no-auto-publish-reply` pair in `from_cli()`.
+    pub auto_publish_reply: bool,
 }
 
 /// Maximum length, in characters, of a session title sent to the adapter.
@@ -1122,6 +1154,7 @@ impl Config {
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
             no_base_prompt: args.no_base_prompt,
             base_prompt_content,
+            auto_publish_reply: args.auto_publish_reply && !args.no_auto_publish_reply,
         };
 
         Ok(config)
@@ -1143,7 +1176,7 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} auto_publish_reply={} {}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
@@ -1164,6 +1197,7 @@ impl Config {
             self.memory_enabled,
             self.model.as_deref().unwrap_or("(agent default)"),
             self.permission_mode,
+            self.auto_publish_reply,
             respond_to_detail,
             allowed_respond_to_detail,
         )
@@ -1494,6 +1528,7 @@ mod tests {
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
+            auto_publish_reply: false,
         }
     }
 

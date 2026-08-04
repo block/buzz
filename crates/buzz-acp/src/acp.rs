@@ -214,6 +214,14 @@ pub struct AcpClient {
     standard_usage: StandardUsageTracker,
     /// Known adapter identity for prompt-response usage mapping.
     standard_adapter: Option<StandardAdapterKind>,
+    /// Assistant text streamed via `agent_message_chunk` notifications during
+    /// the current (or most recent) `session/prompt`. Concatenated verbatim —
+    /// chunks are already in order. Consumed once per turn by
+    /// [`take_turn_text`](Self::take_turn_text); a turn that produces no
+    /// assistant text (only tool calls) leaves this empty. Used by the
+    /// harness's auto-publish-reply fallback so an agent that streams an
+    /// answer without calling a publish tool still delivers it to the channel.
+    turn_text: String,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -563,6 +571,7 @@ impl AcpClient {
             goose_usage: UsageTracker::default(),
             standard_usage: StandardUsageTracker::default(),
             standard_adapter,
+            turn_text: String::new(),
         })
     }
 
@@ -790,6 +799,10 @@ impl AcpClient {
         // misattributed to this turn.
         self.goose_usage.begin_turn(session_id);
         self.standard_usage.begin_turn(session_id);
+        // Reset the assistant-text accumulator for the same reason: chunks
+        // arriving before the prompt response would otherwise leak from a
+        // previous turn into this one's auto-publish-reply fallback.
+        self.turn_text.clear();
 
         self.last_prompt_id = Some(self.next_id);
         let id = self.next_id;
@@ -899,6 +912,28 @@ impl AcpClient {
     pub(crate) fn notify_session_spawned(&mut self, session_id: &str) {
         self.goose_usage.seed_zero_baseline(session_id);
         self.standard_usage.seed_zero_baseline(session_id);
+    }
+
+    /// Consume and return the assistant text streamed during the most recent
+    /// `session/prompt` (concatenated `agent_message_chunk` content).
+    ///
+    /// Returns `None` when the agent emitted no assistant text this turn (e.g.
+    /// a pure tool-call turn). Subsequent calls return `None` until chunks
+    /// arrive for the next turn. Consumed by the harness's
+    /// auto-publish-reply fallback: an agent that streams an answer without
+    /// calling a publish tool still delivers it to the channel.
+    pub fn take_turn_text(&mut self) -> Option<String> {
+        let trimmed = self.turn_text.trim();
+        if trimmed.is_empty() {
+            // Keep the buffer cleared either way so a non-empty remnant can't
+            // leak into the next turn if begin_turn() is skipped (e.g. an error
+            // path that returns before session_prompt_* runs).
+            self.turn_text.clear();
+            None
+        } else {
+            let taken = std::mem::take(&mut self.turn_text);
+            Some(taken)
+        }
     }
 
     /// Install a per-turn steer request channel for goose-native
@@ -1756,6 +1791,17 @@ impl AcpClient {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
                     tracing::info!(target: "acp::stream", "{text}");
+                    // Accumulate for the auto-publish-reply fallback. The turn
+                    // budget is reset in begin_turn(), so this never crosses a
+                    // turn boundary. Hard-cap at 32k chars to bound memory if a
+                    // runaway agent never stops streaming — the published reply
+                    // is best-effort and a 32k-char message is already far past
+                    // anything useful in chat.
+                    const TURN_TEXT_CAP: usize = 32_768;
+                    if self.turn_text.len() < TURN_TEXT_CAP {
+                        let remaining = TURN_TEXT_CAP - self.turn_text.len();
+                        self.turn_text.push_str(&text[..text.len().min(remaining)]);
+                    }
                 }
                 false
             }
@@ -3740,6 +3786,70 @@ mod tests {
             client.active_run_id(),
             Some("run-stable"),
             "non-string/non-null activeRunId must leave state untouched"
+        );
+    }
+
+    // ── take_turn_text (auto-publish-reply accumulator) ───────────────────
+
+    /// Build a `session/update` notification carrying an `agent_message_chunk`
+    /// with the given text. Mirrors the wire shape goose/buzz-agent emit.
+    fn agent_message_chunk_msg(text: &str) -> serde_json::Value {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "sess-test",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": { "type": "text", "text": text }
+                }
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn take_turn_text_concatenates_chunks_in_order() {
+        // Multiple chunks in one turn must concatenate verbatim, in arrival
+        // order — the auto-publish fallback posts this as the reply.
+        let mut client = spawn_inert_client().await;
+        let _ = client.handle_session_update(&agent_message_chunk_msg("2 + 27 "));
+        let _ = client.handle_session_update(&agent_message_chunk_msg("= 29."));
+        let text = client.take_turn_text().expect("accumulated text");
+        assert_eq!(text, "2 + 27 = 29.");
+        // Drained: a second take returns None.
+        assert!(client.take_turn_text().is_none());
+    }
+
+    #[tokio::test]
+    async fn take_turn_text_none_when_no_chunks() {
+        // A turn with only tool calls / thoughts (no agent_message_chunk)
+        // yields no text — the agent chose to act rather than narrate, and
+        // silence is a legitimate outcome.
+        let mut client = spawn_inert_client().await;
+        assert!(client.take_turn_text().is_none());
+    }
+
+    #[tokio::test]
+    async fn take_turn_text_none_when_only_whitespace() {
+        // Whitespace-only streams trim to empty: don't post a blank reply.
+        let mut client = spawn_inert_client().await;
+        let _ = client.handle_session_update(&agent_message_chunk_msg("   \n\t "));
+        assert!(client.take_turn_text().is_none());
+    }
+
+    #[tokio::test]
+    async fn take_turn_text_caps_at_32k_to_bound_memory() {
+        // A runaway agent that never stops streaming must not grow the buffer
+        // without limit. 32k chars is already far past any useful chat reply.
+        let mut client = spawn_inert_client().await;
+        let big = "x".repeat(40_000);
+        let _ = client.handle_session_update(&agent_message_chunk_msg(&big));
+        let text = client.take_turn_text().expect("capped text");
+        assert_eq!(
+            text.len(),
+            32_768,
+            "turn_text must be capped at 32768 chars, got {}",
+            text.len()
         );
     }
 

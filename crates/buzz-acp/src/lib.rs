@@ -2043,6 +2043,7 @@ async fn tokio_main() -> Result<()> {
         memory_enabled: config.memory_enabled,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
+        auto_publish_reply: config.auto_publish_reply,
     });
 
     if !config.memory_enabled {
@@ -3672,7 +3673,7 @@ fn spawn_failure_notice(
         let rest = rest.clone();
         let channel_id = batch.channel_id;
         tokio::spawn(async move {
-            pool::post_failure_notice(&rest, channel_id, &thread_tags, &content).await;
+            pool::post_channel_reply(&rest, channel_id, &thread_tags, &content).await;
         });
     }
 }
@@ -6538,6 +6539,7 @@ mod build_mcp_servers_tests {
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
+            auto_publish_reply: false,
         }
     }
 
@@ -6761,6 +6763,7 @@ mod error_outcome_emission_tests {
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
+            auto_publish_reply: false,
         }
     }
 
