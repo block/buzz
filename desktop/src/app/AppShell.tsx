@@ -774,7 +774,6 @@ export function AppShell() {
             onShowHuddleInMainApp={showHuddleInMainApp}
             onViewHuddleChannel={viewHuddleChannel}
             onVisibilityChange={handleHuddleVisibilityChange}
-            terminal={<TerminalBootstrap {...terminalContext} />}
           >
             {hasCommunityRail && !isHuddleRoom ? (
               <CommunityRail
@@ -942,6 +941,7 @@ export function AppShell() {
                       isHuddleRoom={isHuddleRoom}
                       isHuddleRoomStarting={isHuddleRoomStarting}
                       mainInsetRef={mainInsetRef}
+                      terminal={<TerminalBootstrap {...terminalContext} />}
                     >
                       <Outlet />
                     </AppShellChannelSurface>

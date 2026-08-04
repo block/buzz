@@ -202,6 +202,76 @@ pub(crate) fn preset_harness_ids() -> &'static [&'static str] {
         .as_slice()
 }
 
+/// Return the primary command for a preset harness by id, or `None` if the id
+/// is not a known preset.
+///
+/// Returns a `&'static str` so callers can use it without allocation.
+pub(super) fn preset_command_for_id(id: &str) -> Option<&'static str> {
+    PRESET_HARNESSES
+        .iter()
+        .find(|p| p.id == id)
+        .map(|p| p.command)
+}
+
+/// Return the primary harness command for a given runtime id, or `None`.
+///
+/// Checks static builtins, then the static preset list (always available,
+/// no registry warm-up required — covers openclaw, devin, cursor, etc.),
+/// then the loaded preset/custom registry.
+pub(crate) fn command_for_runtime_id(id: &str) -> Option<String> {
+    super::known_acp_runtime_exact(id)
+        .and_then(|r| r.commands.first().copied())
+        .map(str::to_string)
+        .or_else(|| preset_command_for_id(id).map(str::to_string))
+        .or_else(|| {
+            crate::managed_agents::custom_harnesses::lookup_loaded_harness_by_id(id)
+                .map(|d| d.command.clone())
+        })
+}
+
+/// Resolve a harness to its canonical command accepting either a runtime id or
+/// a command string (including path prefixes and aliases).
+///
+/// This is the pin-classification resolver for `apply_persona_snapshot`: the
+/// create-time override in `record.agent_command_override` can hold any of the
+/// forms a user or the harness selector might have stored — bare command
+/// ("goose"), alias ("claude-code-acp"), path ("/usr/local/bin/goose"), or the
+/// runtime id directly ("claude"). All three tiers are searched:
+///
+/// 1. **Builtins** — `known_acp_runtime(input)` matches by id, command, or
+///    alias in `KNOWN_ACP_RUNTIMES`; returns its first primary command.
+/// 2. **Static presets** — searched by id or by normalised command.
+/// 3. **Loaded registry** — searched by id or by normalised command.
+///
+/// Returns `None` for inputs that do not resolve to any known harness; those
+/// pins are treated as custom/unknown and always kept.
+pub(crate) fn canonical_harness_command(input: &str) -> Option<String> {
+    let normalized = super::normalize_command_identity(input);
+
+    // Tier 1: builtins — matched by id, command, or alias.
+    if let Some(rt) = super::known_acp_runtime(&normalized) {
+        if let Some(cmd) = rt.commands.first() {
+            return Some(cmd.to_string());
+        }
+    }
+
+    // Tier 2: static presets — matched by id or by normalized command.
+    if let Some(p) = PRESET_HARNESSES
+        .iter()
+        .find(|p| p.id == normalized || super::normalize_command_identity(p.command) == normalized)
+    {
+        return Some(p.command.to_string());
+    }
+
+    // Tier 3: loaded registry — matched by id or by normalized command.
+    let reg = crate::managed_agents::custom_harnesses::loaded_harness_registry()
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
+    reg.iter()
+        .find(|d| d.id == normalized || super::normalize_command_identity(&d.command) == normalized)
+        .map(|d| d.command.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;

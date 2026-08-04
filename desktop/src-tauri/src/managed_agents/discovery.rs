@@ -13,8 +13,11 @@ mod presets;
 mod runtime_metadata;
 #[macro_use]
 mod windows_install;
+pub(crate) use presets::{
+    canonical_harness_command, command_for_runtime_id, preset_harness_definitions,
+    preset_harness_ids,
+};
 use presets::{preset_catalog_entry, PRESET_HARNESSES};
-pub(crate) use presets::{preset_harness_definitions, preset_harness_ids};
 pub(crate) use runtime_metadata::KnownAcpRuntime;
 
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
@@ -233,7 +236,7 @@ fn executable_basename(command: &str) -> String {
     }
 }
 
-fn normalize_command_identity(command: &str) -> String {
+pub(crate) fn normalize_command_identity(command: &str) -> String {
     let normalized = command.trim().replace('\\', "/");
     let basename = normalized.rsplit('/').next().unwrap_or(normalized.as_str());
     let lower = basename
@@ -295,9 +298,10 @@ pub fn default_agent_command() -> String {
 ///
 /// Resolution order:
 ///   1. explicit override (non-empty) — a deliberate per-instance pin;
-///   2. the record's own `runtime` id mapped to its primary command —
-///      records materialize their runtime at create/migration time;
-///      checks both static builtins AND the loaded preset/custom registry;
+///   2. the record's own `runtime` id mapped to its primary command via the
+///      authoritative three-tier lookup (static builtins → static preset list
+///      → loaded registry) — preset harnesses (e.g. openclaw) resolve
+///      correctly even with a cold registry;
 ///   3. legacy fallback: the linked persona's `runtime` (records created
 ///      before the unified model carry `persona_id` but no `runtime`);
 ///   4. `default_agent_command()`.
@@ -315,15 +319,11 @@ pub fn record_agent_command(
     }
 
     if let Some(id) = record.runtime.as_deref() {
-        // Check static builtins first.
-        if let Some(command) = known_acp_runtime_exact(id).and_then(|r| r.commands.first().copied())
-        {
-            return command.to_string();
-        }
-        // Fall back to loaded registry for preset/custom harnesses.
-        if let Some(def) = crate::managed_agents::custom_harnesses::lookup_loaded_harness_by_id(id)
-        {
-            return def.command.clone();
+        // Three-tier lookup: static builtins → static presets → loaded registry.
+        // Using the shared resolver ensures preset harnesses (e.g. openclaw)
+        // resolve correctly even without a warm registry.
+        if let Some(cmd) = presets::command_for_runtime_id(id) {
+            return cmd;
         }
     }
 
@@ -336,8 +336,9 @@ pub fn record_agent_command(
 ///
 /// Resolution order:
 ///   1. explicit override (non-empty) — a deliberate per-instance pin;
-///   2. the linked persona's `runtime` id mapped to its primary command
-///      (checks builtins then loaded preset/custom registry);
+///   2. the linked persona's `runtime` id mapped to its primary command via
+///      the authoritative three-tier lookup (static builtins → static preset
+///      list → loaded registry);
 ///   3. `default_agent_command()` — no persona/runtime, or persona deleted.
 pub fn effective_agent_command(
     persona_id: Option<&str>,
@@ -356,15 +357,9 @@ pub fn effective_agent_command(
         .and_then(|persona| persona.runtime.as_deref());
 
     if let Some(id) = runtime_id {
-        // Check static builtins first.
-        if let Some(command) = known_acp_runtime_exact(id).and_then(|r| r.commands.first().copied())
-        {
-            return command.to_string();
-        }
-        // Check loaded preset/custom registry.
-        if let Some(def) = crate::managed_agents::custom_harnesses::lookup_loaded_harness_by_id(id)
-        {
-            return def.command.clone();
+        // Three-tier lookup: static builtins → static presets → loaded registry.
+        if let Some(cmd) = presets::command_for_runtime_id(id) {
+            return cmd;
         }
     }
 
@@ -423,12 +418,8 @@ pub fn try_record_agent_command(
 
     // Record-level runtime id: if set but unresolvable → typed error.
     if let Some(id) = record.runtime.as_deref() {
-        if let Some(cmd) = known_acp_runtime_exact(id).and_then(|r| r.commands.first().copied()) {
-            return Ok(cmd.to_string());
-        }
-        if let Some(def) = crate::managed_agents::custom_harnesses::lookup_loaded_harness_by_id(id)
-        {
-            return Ok(def.command.clone());
+        if let Some(cmd) = presets::command_for_runtime_id(id) {
+            return Ok(cmd);
         }
         return Err(format!("DANGLING_HARNESS_ID:{id}"));
     }
@@ -437,15 +428,8 @@ pub fn try_record_agent_command(
     if let Some(persona_id) = record.persona_id.as_deref() {
         if let Some(persona) = personas.iter().find(|p| p.id == persona_id) {
             if let Some(id) = persona.runtime.as_deref() {
-                if let Some(cmd) =
-                    known_acp_runtime_exact(id).and_then(|r| r.commands.first().copied())
-                {
-                    return Ok(cmd.to_string());
-                }
-                if let Some(def) =
-                    crate::managed_agents::custom_harnesses::lookup_loaded_harness_by_id(id)
-                {
-                    return Ok(def.command.clone());
+                if let Some(cmd) = presets::command_for_runtime_id(id) {
+                    return Ok(cmd);
                 }
                 return Err(format!("DANGLING_HARNESS_ID:{id}"));
             }

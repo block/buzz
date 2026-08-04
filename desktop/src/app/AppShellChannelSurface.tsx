@@ -11,6 +11,7 @@ type AppShellChannelSurfaceProps = {
   isHuddleRoom: boolean;
   isHuddleRoomStarting: boolean;
   mainInsetRef: React.RefObject<HTMLElement | null>;
+  terminal?: React.ReactNode;
 };
 
 export function AppShellChannelSurface({
@@ -18,6 +19,7 @@ export function AppShellChannelSurface({
   isHuddleRoom,
   isHuddleRoomStarting,
   mainInsetRef,
+  terminal,
 }: AppShellChannelSurfaceProps) {
   return (
     <MainInsetProvider mainInsetRef={mainInsetRef}>
@@ -34,7 +36,7 @@ export function AppShellChannelSurface({
         style={chromeCssVarDefaults as React.CSSProperties}
       >
         {isHuddleRoom && !isHuddleRoomStarting ? <HuddleRoomHeader /> : null}
-        <BuzzTheme.ContentSurface unframed={isHuddleRoom}>
+        <BuzzTheme.ContentSurface terminal={terminal} unframed={isHuddleRoom}>
           {isHuddleRoomStarting ? <HuddleStartingView /> : children}
         </BuzzTheme.ContentSurface>
       </SidebarInset>
