@@ -13,6 +13,8 @@
 //! action, which we forward to the frontend so it can focus the window and
 //! route to the notification target.
 
+pub(crate) const NATIVE_NOTIFICATION_ACTIVATED_EVENT: &str = "native-notification-activated";
+
 /// Show a desktop notification natively.
 ///
 /// Linux uses the connection-preserving D-Bus path described above. macOS uses
@@ -50,7 +52,6 @@ mod linux {
 
     /// Emitted to the frontend when the user clicks a native notification. The
     /// payload is the opaque target object the frontend passed in.
-    const ACTIVATE_EVENT: &str = "native-notification-activated";
 
     pub fn show(
         app: tauri::AppHandle,
@@ -102,7 +103,7 @@ mod linux {
 
                 // The frontend focuses the window on activation (the same path
                 // every other platform uses), so we only forward the target.
-                let _ = app.emit(ACTIVATE_EVENT, target);
+                let _ = app.emit(NATIVE_NOTIFICATION_ACTIVATED_EVENT, target);
             });
         });
     }
