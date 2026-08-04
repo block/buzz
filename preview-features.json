@@ -26,6 +26,12 @@
       "platforms": ["desktop"]
     },
     {
+      "id": "dictation",
+      "name": "Dictation",
+      "description": "Speak your message instead of typing it — transcribed on-device, nothing leaves your machine",
+      "platforms": ["desktop"]
+    },
+    {
       "id": "agentManagedProfiles",
       "name": "Agent-managed profiles",
       "description": "Let agents manage their own relay name and avatar instead of restoring the desktop copy",

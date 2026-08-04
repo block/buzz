@@ -303,6 +303,7 @@ pub fn run() {
         .manage(PendingCommunityDeepLinks::default())
         .manage(BuilderlabSession::default())
         .manage(BuilderlabLogin::default())
+        .manage(commands::DictationState::default())
         .manage(commands::pairing::PairingHandle::new())
         .manage(terminal_runtime::TerminalSessions::default())
         .setup(move |app| {
@@ -835,6 +836,10 @@ pub fn run() {
             close_huddle_companion,
             open_huddle_window,
             push_audio_pcm,
+            is_dictation_available,
+            start_dictation,
+            stop_dictation,
+            push_dictation_pcm,
             reconnect_huddle_audio,
             start_stt_pipeline,
             set_huddle_transcription_enabled,
