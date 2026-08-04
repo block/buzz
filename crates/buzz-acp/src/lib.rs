@@ -66,6 +66,109 @@ const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
 /// human interaction, so it must not share the short probe timeout.
 const AUTHENTICATE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
+/// Build a kind:10100 agent profile event for persistent directory discovery.
+fn build_agent_profile_event(
+    keys: &nostr::Keys,
+    agent_name: &str,
+    channel_ids: &HashSet<Uuid>,
+    respond_to: &RespondTo,
+    respond_to_allowlist: &HashSet<String>,
+) -> Result<nostr::Event, relay::RelayError> {
+    use buzz_core::kind::KIND_AGENT_PROFILE;
+    use nostr::{EventBuilder, Kind};
+
+    let mut channels: Vec<String> = channel_ids.iter().map(Uuid::to_string).collect();
+    channels.sort_unstable();
+    let mut allowlist: Vec<String> = if respond_to == &RespondTo::Allowlist {
+        respond_to_allowlist.iter().cloned().collect()
+    } else {
+        Vec::new()
+    };
+    allowlist.sort_unstable();
+    let content = serde_json::json!({
+        "name": agent_name,
+        "display_name": agent_name,
+        "agent_type": "agent",
+        "channels": channels.clone(),
+        "channel_ids": channels,
+        "capabilities": [],
+        "status": "online",
+        "respond_to": respond_to.to_string(),
+        "respond_to_allowlist": allowlist,
+    });
+    let content = serde_json::to_string(&content)
+        .map_err(|e| relay::RelayError::Http(format!("agent profile serialize error: {e}")))?;
+
+    EventBuilder::new(Kind::Custom(KIND_AGENT_PROFILE as u16), content)
+        .tags([])
+        .sign_with_keys(keys)
+        .map_err(|e| relay::RelayError::Http(format!("agent profile sign error: {e}")))
+}
+
+/// Publish a kind:10100 agent profile through the authenticated HTTP bridge.
+///
+/// Agent profiles are persistent replaceable events, so unlike presence they
+/// can use `POST /events` and remain available while the agent is offline.
+async fn publish_agent_profile(
+    rest_client: &relay::RestClient,
+    keys: &nostr::Keys,
+    agent_name: &str,
+    channel_ids: &HashSet<Uuid>,
+    respond_to: &RespondTo,
+    respond_to_allowlist: &HashSet<String>,
+) -> Result<(), relay::RelayError> {
+    let event = build_agent_profile_event(
+        keys,
+        agent_name,
+        channel_ids,
+        respond_to,
+        respond_to_allowlist,
+    )?;
+    rest_client.submit_event(&event).await?;
+    Ok(())
+}
+
+/// Extract the preferred agent display name from a kind:0 query response.
+fn agent_profile_name_from_kind0_response(
+    response: &serde_json::Value,
+) -> Result<Option<String>, relay::RelayError> {
+    let events = response.as_array().ok_or_else(|| {
+        relay::RelayError::Http("agent kind:0 query returned a non-array response".into())
+    })?;
+    let Some(event) = events.first() else {
+        return Ok(None);
+    };
+    let content = event
+        .get("content")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            relay::RelayError::Http("agent kind:0 profile has no content string".into())
+        })?;
+    let profile: serde_json::Value = serde_json::from_str(content)
+        .map_err(|e| relay::RelayError::Http(format!("agent kind:0 profile parse error: {e}")))?;
+
+    Ok(["display_name", "name"].into_iter().find_map(|field| {
+        profile
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .filter(|name| !name.trim().is_empty())
+            .map(str::to_owned)
+    }))
+}
+
+/// Resolve the agent's configured display name from its own kind:0 profile.
+async fn resolve_agent_profile_name(
+    rest_client: &relay::RestClient,
+    public_key: nostr::PublicKey,
+) -> Result<Option<String>, relay::RelayError> {
+    let filter = nostr::Filter::new()
+        .kind(nostr::Kind::Metadata)
+        .author(public_key)
+        .limit(1);
+    let response = rest_client.query(&[filter]).await?;
+    agent_profile_name_from_kind0_response(&response)
+}
+
 /// Publish a kind:20001 presence update event via the WebSocket connection.
 ///
 /// Ephemeral kinds (20000-29999) are rejected by the HTTP bridge, so presence
@@ -1361,6 +1464,27 @@ async fn tokio_main() -> Result<()> {
 
     let presence_publisher = relay.event_publisher();
     let presence_keys = config.keys.clone();
+    let agent_profile_rest_client = relay.rest_client();
+    let agent_profile_name = match resolve_agent_profile_name(
+        &agent_profile_rest_client,
+        presence_keys.public_key(),
+    )
+    .await
+    {
+        Ok(Some(name)) => name,
+        Ok(None) => {
+            tracing::warn!(
+                "agent kind:0 profile has no usable display name; falling back to runtime identity"
+            );
+            config::normalize_agent_command_identity(&config.agent_command)
+        }
+        Err(e) => {
+            tracing::warn!(
+                "failed to resolve agent name from kind:0 profile; falling back to runtime identity: {e}"
+            );
+            config::normalize_agent_command_identity(&config.agent_command)
+        }
+    };
 
     // Priority: BUZZ_AUTH_TAG (NIP-OA attestation) → --agent-owner flag.
     let startup_owner: Option<String> = resolve_agent_owner(&config);
@@ -1432,7 +1556,8 @@ async fn tokio_main() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("channel discovery error: {e}"))?;
 
     tracing::info!("discovered {} channel(s)", channel_info_map.len());
-    let channel_ids: Vec<Uuid> = channel_info_map.keys().copied().collect();
+    let mut discovered_channel_ids: HashSet<Uuid> = channel_info_map.keys().copied().collect();
+    let channel_ids: Vec<Uuid> = discovered_channel_ids.iter().copied().collect();
 
     let rules: Vec<SubscriptionRule> = match config.subscribe_mode {
         SubscribeMode::Mentions => {
@@ -1507,6 +1632,19 @@ async fn tokio_main() -> Result<()> {
     // connected. Publishing after channel subscriptions gives desktop callers
     // a durable readiness boundary before they send a startup mention.
     if config.presence_enabled {
+        match publish_agent_profile(
+            &agent_profile_rest_client,
+            &presence_keys,
+            &agent_profile_name,
+            &discovered_channel_ids,
+            &config.respond_to,
+            &config.respond_to_allowlist,
+        )
+        .await
+        {
+            Ok(_) => tracing::info!("agent profile published"),
+            Err(e) => tracing::warn!("failed to publish initial agent profile: {e}"),
+        }
         match publish_presence(&presence_publisher, &presence_keys, "online").await {
             Ok(_) => tracing::info!("presence set to online"),
             Err(e) => tracing::warn!("failed to set initial presence: {e}"),
@@ -1958,6 +2096,34 @@ async fn tokio_main() -> Result<()> {
                                     }
                                 }
                                 membership_newest_ts.insert(ch, ts);
+
+                                let profile_channels_changed =
+                                    if kind_u32 == KIND_MEMBER_ADDED_NOTIFICATION {
+                                        discovered_channel_ids.insert(ch)
+                                    } else {
+                                        discovered_channel_ids.remove(&ch)
+                                    };
+                                if profile_channels_changed && config.presence_enabled {
+                                    match publish_agent_profile(
+                                        &agent_profile_rest_client,
+                                        &presence_keys,
+                                        &agent_profile_name,
+                                        &discovered_channel_ids,
+                                        &config.respond_to,
+                                        &config.respond_to_allowlist,
+                                    )
+                                    .await
+                                    {
+                                        Ok(_) => tracing::info!(
+                                            channel_id = %ch,
+                                            "agent profile republished after membership change"
+                                        ),
+                                        Err(e) => tracing::warn!(
+                                            channel_id = %ch,
+                                            "failed to republish agent profile after membership change: {e}"
+                                        ),
+                                    }
+                                }
 
                                 if kind_u32 == KIND_MEMBER_ADDED_NOTIFICATION {
                                     // Clear removal tracking so sessions are not
@@ -4413,6 +4579,87 @@ mod owner_cache_tests {
     fn get_returns_cached_value() {
         let cache = OwnerCache::new(Some("ab".repeat(32)));
         assert_eq!(cache.get(), Some("ab".repeat(32)).as_deref());
+    }
+}
+
+#[cfg(test)]
+mod agent_profile_tests {
+    use super::*;
+
+    #[test]
+    fn agent_profile_event_contains_mobile_directory_fields() {
+        let keys = nostr::Keys::generate();
+        let first =
+            Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("valid test UUID");
+        let second =
+            Uuid::parse_str("22222222-2222-2222-2222-222222222222").expect("valid test UUID");
+        let channel_ids = HashSet::from([second, first]);
+        let first_allowlist_key = "aa".repeat(32);
+        let second_allowlist_key = "bb".repeat(32);
+        let respond_to_allowlist =
+            HashSet::from([second_allowlist_key.clone(), first_allowlist_key.clone()]);
+        let resolved_name = agent_profile_name_from_kind0_response(&serde_json::json!([
+            {
+                "content": r#"{"display_name":"Research Agent","name":"fallback-name"}"#,
+            }
+        ]))
+        .expect("profile response parses")
+        .expect("profile contains a display name");
+
+        let event = build_agent_profile_event(
+            &keys,
+            &resolved_name,
+            &channel_ids,
+            &RespondTo::Allowlist,
+            &respond_to_allowlist,
+        )
+        .expect("profile event signs");
+        let content: serde_json::Value =
+            serde_json::from_str(&event.content).expect("profile content is JSON");
+
+        assert_eq!(
+            event.kind.as_u16(),
+            buzz_core::kind::KIND_AGENT_PROFILE as u16
+        );
+        assert_eq!(event.pubkey, keys.public_key());
+        assert_eq!(
+            content,
+            serde_json::json!({
+                "name": "Research Agent",
+                "display_name": "Research Agent",
+                "agent_type": "agent",
+                "channels": [first.to_string(), second.to_string()],
+                "channel_ids": [first.to_string(), second.to_string()],
+                "capabilities": [],
+                "status": "online",
+                "respond_to": "allowlist",
+                "respond_to_allowlist": [first_allowlist_key, second_allowlist_key],
+            })
+        );
+    }
+
+    #[test]
+    fn agent_profile_event_falls_back_to_runtime_identity_without_kind0_profile() {
+        let keys = nostr::Keys::generate();
+        let fallback = config::normalize_agent_command_identity("/usr/local/bin/codex-acp");
+        let resolved_name = agent_profile_name_from_kind0_response(&serde_json::json!([]))
+            .expect("empty profile response is valid")
+            .unwrap_or(fallback);
+
+        let event = build_agent_profile_event(
+            &keys,
+            &resolved_name,
+            &HashSet::new(),
+            &RespondTo::Anyone,
+            &HashSet::new(),
+        )
+        .expect("profile event signs");
+        let content: serde_json::Value =
+            serde_json::from_str(&event.content).expect("profile content is JSON");
+
+        assert_eq!(content["name"], "codex-acp");
+        assert_eq!(content["display_name"], "codex-acp");
+        assert_eq!(content["respond_to_allowlist"], serde_json::json!([]));
     }
 }
 
