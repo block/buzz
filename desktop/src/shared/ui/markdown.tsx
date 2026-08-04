@@ -9,7 +9,6 @@ import {
   ZoomOut,
 } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
@@ -23,7 +22,6 @@ import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { invokeTauri } from "@/shared/api/tauri";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
 import { cn } from "@/shared/lib/cn";
-import { copyTextToClipboard } from "@/shared/lib/clipboard";
 import {
   extractSupportedLinkPreviews,
   parseSupportedLinkPreview,
@@ -108,7 +106,7 @@ import {
   visibleImageGalleryForTrigger,
 } from "./markdown/imageLightbox";
 import { MarkdownTable } from "./markdown/MarkdownTable";
-import { MaskedLinkTooltip } from "./markdown/MaskedLinkTooltip";
+import { ExternalLinkAnchor } from "./markdown/ExternalLinkAnchor";
 import { ProgressiveImage } from "./markdown/ProgressiveImage";
 import { MessageLinkPill } from "./markdown/MessageLinkPill";
 import { renderCachedMarkdown } from "./markdown/nodeCache";
@@ -1269,85 +1267,6 @@ function ImageMosaic({ children }: { children: React.ReactNode[] }) {
     >
       {children}
     </div>
-  );
-}
-
-/**
- * An external `[text](href)` link with a custom right-click menu.
- *
- * Buzz renders inside a native webview whose default context menu has no
- * useful link actions, so a plain right-click on a link is a no-op. This adds
- * an in-app menu with "Open link" (via the OS opener, matching the anchor's
- * left-click `target="_blank"` behavior) and "Copy link" (the real href, not
- * the masked display text).
- */
-function ExternalLinkAnchor({
-  anchorProps,
-  children,
-  href,
-  isLinearLink,
-  label,
-}: {
-  anchorProps: React.ComponentPropsWithoutRef<"a">;
-  children: React.ReactNode;
-  href: string | undefined;
-  isLinearLink: boolean;
-  label: string;
-}) {
-  const [menu, setMenu] = React.useState<MediaContextMenuPosition | null>(null);
-  const closeMenu = React.useCallback(() => setMenu(null), []);
-  useDismissMediaContextMenu(Boolean(menu), closeMenu);
-
-  const anchor = (
-    <a
-      {...anchorProps}
-      className={cn(
-        "font-medium underline underline-offset-4 transition-colors",
-        isLinearLink ? "linear-link" : "text-primary hover:text-primary/80",
-      )}
-      href={href}
-      onContextMenuCapture={(event) => {
-        if (!href) return;
-        event.preventDefault();
-        setMenu({ x: event.clientX, y: event.clientY });
-      }}
-      rel="noreferrer"
-      target="_blank"
-    >
-      {children}
-    </a>
-  );
-
-  return (
-    <>
-      <MaskedLinkTooltip disabled={isLinearLink} href={href} label={label}>
-        {anchor}
-      </MaskedLinkTooltip>
-      {menu && href ? (
-        <MediaContextMenu
-          dataAttributes={["data-link-context-menu"]}
-          items={[
-            {
-              label: "Open link",
-              onSelect: () => {
-                closeMenu();
-                void openUrl(href).catch(() => {
-                  toast.error("Failed to open link");
-                });
-              },
-            },
-            {
-              label: "Copy link",
-              onSelect: () => {
-                closeMenu();
-                copyTextToClipboard(href, "Link copied to clipboard");
-              },
-            },
-          ]}
-          position={menu}
-        />
-      ) : null}
-    </>
   );
 }
 

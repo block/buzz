@@ -17,6 +17,10 @@
     "core:window:allow-close",
     "notification:default",
     "opener:default",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [{ "url": "cursor:*" }, { "url": "vscode:*" }]
+    },
     "websocket:default",
     "window-state:default",
     "dialog:default",
