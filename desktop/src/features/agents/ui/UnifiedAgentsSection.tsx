@@ -1,20 +1,38 @@
 import * as React from "react";
 import {
   AlertTriangle,
+  Bot,
+  Code2,
   ChevronDown,
   ChevronRight,
+  Globe2,
+  Grid2X2,
+  ImageIcon,
+  List,
+  Music2,
+  Newspaper,
   RefreshCw,
+  ShieldCheck,
+  Sparkles,
+  Terminal,
+  Zap,
 } from "lucide-react";
 
 import { resolveAgentCardModelLabel } from "@/features/agents/lib/agentCardModelLabel";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import { useUserProfileQuery } from "@/features/profile/hooks";
-import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
+import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
+import type {
+  AgentPersona,
+  ManagedAgent,
+  RelayAgent,
+} from "@/shared/api/types";
 import type { ProfilePanelOpenOptions } from "@/shared/context/ProfilePanelContext";
 import { useFeedbackToasts } from "@/shared/hooks/useToastEffect";
 import { useFileImportZone } from "@/shared/hooks/useFileImportZone";
 import { Badge } from "@/shared/ui/badge";
+import { Button } from "@/shared/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -33,6 +51,7 @@ type UnifiedAgentsSectionProps = {
   actionErrorMessage: string | null;
   actionNoticeMessage: string | null;
   agents: ManagedAgent[];
+  remoteAgents: RelayAgent[];
   agentsError: Error | null;
   isActionPending: boolean;
   isAgentsLoading: boolean;
@@ -65,6 +84,21 @@ type UnifiedAgentsSectionProps = {
   onImportSnapshotFile: (fileBytes: number[], fileName: string) => void;
 };
 
+const REMOTE_AGENT_ICON_STORAGE_KEY = "buzz.remote-agent-icons";
+const REMOTE_AGENT_ICON_OPTIONS = [
+  { id: "bot", label: "Bot", icon: Bot },
+  { id: "image", label: "Image", icon: ImageIcon },
+  { id: "music", label: "Music", icon: Music2 },
+  { id: "news", label: "News", icon: Newspaper },
+  { id: "code", label: "Code", icon: Code2 },
+  { id: "sparkles", label: "Creative", icon: Sparkles },
+  { id: "shield", label: "Security", icon: ShieldCheck },
+  { id: "terminal", label: "Terminal", icon: Terminal },
+  { id: "globe", label: "Web", icon: Globe2 },
+  { id: "zap", label: "Fast", icon: Zap },
+] as const;
+type RemoteAgentIconId = (typeof REMOTE_AGENT_ICON_OPTIONS)[number]["id"];
+
 const AGENT_CARD_COLUMN_CLASS = "w-full";
 export const AGENT_CARD_GRID_COLUMNS_CLASS =
   "grid-cols-[repeat(auto-fill,minmax(220px,240px))]";
@@ -76,6 +110,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     actionNoticeMessage,
     defaultModel,
     agents,
+    remoteAgents,
     agentsError,
     isActionPending,
     isAgentsLoading,
@@ -106,6 +141,9 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     [personas, agents],
   );
   const [collapsed, setCollapsed] = React.useState<Set<string>>(new Set());
+  const [remoteView, setRemoteView] = React.useState<"cards" | "list">(
+    "cards",
+  );
   const {
     fileInputRef,
     isDragOver,
@@ -225,6 +263,65 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
         </div>
       ) : null}
 
+      {remoteAgents.length > 0 ? (
+        <section className="space-y-3" data-testid="remote-agents-section">
+          <div>
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="font-semibold text-foreground text-lg">
+                  Remote / DGX agents
+                </h2>
+                <p className="text-secondary-foreground text-sm">
+                  Agents running on your relay or another machine.
+                </p>
+              </div>
+              <div
+                aria-label="Remote agent view"
+                className="flex shrink-0 rounded-lg border border-border/70 p-0.5"
+                role="group"
+              >
+                <Button
+                  aria-label="Show remote agents as cards"
+                  aria-pressed={remoteView === "cards"}
+                  className="h-7 w-7"
+                  onClick={() => setRemoteView("cards")}
+                  size="icon"
+                  variant={remoteView === "cards" ? "secondary" : "ghost"}
+                >
+                  <Grid2X2 className="h-3.5 w-3.5" />
+                </Button>
+                <Button
+                  aria-label="Show remote agents as a list"
+                  aria-pressed={remoteView === "list"}
+                  className="h-7 w-7"
+                  onClick={() => setRemoteView("list")}
+                  size="icon"
+                  variant={remoteView === "list" ? "secondary" : "ghost"}
+                >
+                  <List className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            </div>
+          </div>
+          <div
+            className={
+              remoteView === "cards"
+                ? IDENTITY_CARD_GRID_CLASS
+                : "grid w-full grid-cols-1 gap-2"
+            }
+          >
+            {remoteAgents.map((agent) => (
+              <RemoteAgentCard
+                agent={agent}
+                compact={remoteView === "list"}
+                key={agent.pubkey}
+                onOpenProfile={onOpenAgentProfile}
+              />
+            ))}
+          </div>
+        </section>
+      ) : null}
+
       {agentsError ? (
         <p
           className={`${AGENT_CARD_COLUMN_CLASS} rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive`}
@@ -241,6 +338,176 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
       ) : null}
     </section>
   );
+}
+
+function RemoteAgentCard({
+  agent,
+  compact,
+  onOpenProfile,
+}: {
+  agent: RelayAgent;
+  compact: boolean;
+  onOpenProfile: (pubkey: string) => void;
+}) {
+  const profileQuery = useUserProfileQuery(agent.pubkey);
+  const statusLabel = agent.status === "online" ? "Online" : agent.status;
+  const avatarUrl = profileQuery.data?.avatarUrl;
+  const [selectedIcon, setSelectedIcon] = React.useState<RemoteAgentIconId | null>(
+    () => readRemoteAgentIcon(agent.pubkey),
+  );
+
+  React.useEffect(() => {
+    writeRemoteAgentIcon(agent.pubkey, selectedIcon);
+  }, [agent.pubkey, selectedIcon]);
+
+  return (
+    <AgentIdentityCard
+      ariaLabel={`${agent.name} remote agent profile`}
+      actions={
+        <RemoteAgentIconPicker
+          selectedIcon={selectedIcon}
+          onSelect={setSelectedIcon}
+        />
+      }
+      avatar={
+        selectedIcon ? (
+          <RemoteAgentIcon
+            iconId={selectedIcon}
+            seed={agent.pubkey}
+            type={agent.agentType}
+          />
+        ) : avatarUrl ? (
+          <ProfileAvatar
+            avatarUrl={avatarUrl}
+            className="h-full w-full border-[3px] border-background bg-muted shadow-none"
+            iconClassName="h-8 w-8"
+            label={agent.name}
+          />
+        ) : (
+          <RemoteAgentIcon seed={agent.pubkey} type={agent.agentType} />
+        )
+      }
+      avatarUrl={avatarUrl}
+      compact={compact}
+      dataTestId={`remote-agent-${agent.pubkey}`}
+      label={agent.name}
+      modelLabel={agent.agentType || "DGX agent"}
+      onClick={() => onOpenProfile(agent.pubkey)}
+      statusBadge={
+        <span className="text-secondary-foreground/75 text-xs">
+          {statusLabel}
+        </span>
+      }
+    />
+  );
+}
+
+function RemoteAgentIcon({
+  iconId,
+  seed,
+  type,
+}: {
+  iconId?: RemoteAgentIconId;
+  seed: string;
+  type: string;
+}) {
+  const normalizedType = type.toLowerCase();
+  const Icon = iconId
+    ? iconForId(iconId)
+    : normalizedType.includes("image")
+      ? ImageIcon
+      : normalizedType.includes("music") || normalizedType.includes("audio")
+        ? Music2
+        : normalizedType.includes("news") || normalizedType.includes("research")
+          ? Newspaper
+          : [Bot, ImageIcon, Music2, Newspaper][stableIconIndex(seed)];
+
+  return (
+    <span className="flex h-full w-full items-center justify-center rounded-full border-[3px] border-background bg-primary/15 text-primary shadow-sm">
+      <Icon className="h-10 w-10" />
+    </span>
+  );
+}
+
+function RemoteAgentIconPicker({
+  selectedIcon,
+  onSelect,
+}: {
+  selectedIcon: RemoteAgentIconId | null;
+  onSelect: (iconId: RemoteAgentIconId | null) => void;
+}) {
+  const SelectedIcon = selectedIcon ? iconForId(selectedIcon) : Sparkles;
+  return (
+    <DropdownMenu modal={false}>
+      <DropdownMenuTrigger asChild>
+        <Button
+          aria-label="Choose agent icon"
+          className="h-7 w-7 rounded-full bg-background/80 shadow-sm backdrop-blur-sm"
+          onClick={(event) => event.stopPropagation()}
+          size="icon"
+          variant="ghost"
+        >
+          <SelectedIcon className="h-3.5 w-3.5" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="min-w-40">
+        <DropdownMenuItem onClick={() => onSelect(null)}>
+          <Sparkles className="h-4 w-4" />
+          Auto
+        </DropdownMenuItem>
+        {REMOTE_AGENT_ICON_OPTIONS.map(({ icon: Icon, id, label }) => (
+          <DropdownMenuItem key={id} onClick={() => onSelect(id)}>
+            <Icon className="h-4 w-4" />
+            {label}
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+function iconForId(iconId: RemoteAgentIconId) {
+  return REMOTE_AGENT_ICON_OPTIONS.find((option) => option.id === iconId)?.icon ?? Bot;
+}
+
+function readRemoteAgentIcon(pubkey: string): RemoteAgentIconId | null {
+  try {
+    const saved = JSON.parse(
+      window.localStorage.getItem(REMOTE_AGENT_ICON_STORAGE_KEY) ?? "{}",
+    ) as Record<string, string>;
+    return REMOTE_AGENT_ICON_OPTIONS.some((option) => option.id === saved[pubkey])
+      ? (saved[pubkey] as RemoteAgentIconId)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeRemoteAgentIcon(
+  pubkey: string,
+  iconId: RemoteAgentIconId | null,
+) {
+  try {
+    const saved = JSON.parse(
+      window.localStorage.getItem(REMOTE_AGENT_ICON_STORAGE_KEY) ?? "{}",
+    ) as Record<string, string>;
+    if (iconId) saved[pubkey] = iconId;
+    else delete saved[pubkey];
+    window.localStorage.setItem(
+      REMOTE_AGENT_ICON_STORAGE_KEY,
+      JSON.stringify(saved),
+    );
+  } catch {
+    // Local icon preferences are optional; the UI still works if storage is unavailable.
+  }
+}
+
+function stableIconIndex(seed: string) {
+  let hash = 0;
+  for (const character of seed) {
+    hash = (hash * 31 + character.charCodeAt(0)) >>> 0;
+  }
+  return hash % 4;
 }
 
 function AgentPersonaCard({
