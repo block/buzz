@@ -1013,6 +1013,19 @@ pub async fn receive_pack(
     body: Body,
 ) -> Result<Response, Response> {
     let repo_name = validate_repo_id(&params.owner, &params.repo)?;
+
+    // A direct receive-pack POST does not have to be preceded by an
+    // info/refs request. Recheck current channel membership here before body
+    // decoding, permit acquisition, hydration, hook installation, or publish.
+    authorize_git_read(
+        &state.db,
+        auth.tenant.community(),
+        &auth.pubkey,
+        &params.owner,
+        repo_name,
+    )
+    .await?;
+
     let body = decode_git_request_body(&headers, body, state.config.git_max_pack_bytes);
     let pusher_hex = hex::encode(auth.pubkey.to_bytes());
     let _permit = acquire_git_permit(&state, "receive_pack")?;

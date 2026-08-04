@@ -2566,12 +2566,13 @@ async fn handle_git_repo_announcement(
     // Crucially, we do NOT return early on a same-owner existing row: the row
     // proves name *ownership*, not that the manifest pointer was actually
     // seeded. A concurrent same-owner announce could hold the row while its
-    // seed is still in flight (or failed and rolled back), so trusting the row
-    // alone would let this handler "accept" an uncloneable repo. Instead we
-    // fall through to `seed_manifest_pointer`, which is idempotent under
-    // concurrency (create-only `put_pointer(IfNoneMatchStar)`; a `LostRace` on
-    // the same empty digest is success, a different non-empty pointer is a
-    // hard error). So re-announce *ensures* the pointer rather than assuming it.
+    // seed is still in flight (or failed after retaining the reservation), so
+    // trusting the row alone would let this handler "accept" an uncloneable
+    // repo. Instead we fall through to `seed_manifest_pointer`, which is
+    // idempotent under concurrency (create-only
+    // `put_pointer(IfNoneMatchStar)`; a `LostRace` on the same empty digest is
+    // success, while a different non-empty pointer is a hard error). So
+    // re-announce *ensures* the pointer rather than assuming it.
     let outcome =
         if let Some(existing_owner) = state.db.repo_name_owner(community, &repo_id).await? {
             if existing_owner != owner_hex {
@@ -2612,11 +2613,9 @@ async fn handle_git_repo_announcement(
             }
         };
 
-    // Only a genuinely fresh claim by *this* attempt may be rolled back on a
-    // pointer failure. An `AlreadyOwned` outcome means the row is owned by some
-    // other attempt (a same-owner sibling, or a prior announce that has since
-    // pushed), and deleting it here would strand a repo whose pointer that
-    // other attempt already established.
+    // The outcome still selects strict fresh seeding versus tolerant same-owner
+    // repair. Neither path releases the reservation after failure because the
+    // announcement is durably live before this handler runs.
     let reserved_by_this_attempt = matches!(outcome, ReserveOutcome::Reserved);
 
     // Establish/confirm the manifest pointer, keeping the invariant
@@ -2633,35 +2632,38 @@ async fn handle_git_repo_announcement(
     //   re-announce must accept it untouched; only an absent pointer is
     //   repaired by seeding. Using the strict seed here would wrongly reject
     //   every re-announce after the first push.
-    let pointer_result = if reserved_by_this_attempt {
-        seed_manifest_pointer(state, tenant, &owner_hex, &repo_id).await
-    } else {
-        ensure_manifest_pointer(state, tenant, &owner_hex, &repo_id).await
-    };
-    if let Err(pointer_err) = pointer_result {
-        // A reserved name without a clone-able pointer is exactly the broken
-        // state this step exists to prevent — but ONLY roll back the
-        // reservation if this attempt is the one that freshly created it. A
-        // genuine failure from a fresh `Reserved` attempt means the pointer
-        // truly could not be established, so releasing our own just-inserted
-        // row is safe and correct (all-or-nothing). For an `AlreadyOwned`
-        // attempt we release nothing: the row belongs to another attempt that
-        // may have seeded (or pushed) successfully.
+    let provisioning_result = async {
         if reserved_by_this_attempt {
-            if let Err(release_err) = state
-                .db
-                .release_repo_name(community, &repo_id, &owner_hex)
-                .await
-            {
-                warn!(
-                    repo_id = %repo_id,
-                    error = %release_err,
-                    "failed to release repo name reservation after seed failure"
-                );
-            }
+            seed_manifest_pointer(state, tenant, &owner_hex, &repo_id).await?;
+        } else {
+            ensure_manifest_pointer(state, tenant, &owner_hex, &repo_id).await?;
         }
+
+        // Match the authenticated Git advertisement read seam: a pointer is
+        // not sufficient if its content-addressed manifest is absent, corrupt,
+        // or invalid. Do not acknowledge the announcement until the same
+        // verified load used by info/refs succeeds.
+        crate::api::git::hydrate::load_manifest_for_read(
+            &state.git_store,
+            tenant,
+            &owner_hex,
+            &repo_id,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("verify provisioned manifest: {e}"))?
+        .ok_or_else(|| anyhow::anyhow!("manifest pointer absent after provisioning"))?;
+
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+    if let Err(provisioning_err) = provisioning_result {
+        // The announcement is already the durable live replaceable head when
+        // side effects run. Keep even a fresh reservation on failure: releasing
+        // it would let another owner claim the same name while this owner's live
+        // kind:30617 remains authoritative. An exact replay can safely repair
+        // the retained same-owner reservation and manifest later.
         return Err(anyhow::anyhow!(
-            "failed to ensure manifest pointer: {pointer_err}"
+            "failed to provision repository: {provisioning_err}"
         ));
     }
 

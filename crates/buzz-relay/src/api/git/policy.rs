@@ -5,8 +5,8 @@
 //!
 //! 1. Validates HMAC signature + 30s TTL (fail-closed)
 //! 2. Resolves kind:30617 → protection rules
-//! 3. Grants owner authority to the repo key or its verified managed-agent owner
-//! 4. Otherwise resolves the pusher's channel role via buzz-channel binding
+//! 3. Requires exactly one canonical `buzz-channel` binding
+//! 4. Resolves the pusher's current active channel role (with no owner bypass)
 //! 5. Promotes Bot → Member (bots in a channel push as members)
 //! 6. Calls `buzz_core::git_perms::evaluate_push()`
 //! 7. Returns 200 (allow) or 403 (deny with reasons)
@@ -48,6 +48,7 @@ use buzz_core::git_perms::{
 };
 use buzz_db::EventQuery;
 
+use super::binding::{resolve_repo_binding, RepoBinding};
 use crate::state::AppState;
 
 /// Maximum age of a hook callback (seconds). Push is synchronous so 30s is generous.
@@ -256,7 +257,7 @@ pub async fn hook_policy_check(
     };
     let query = EventQuery {
         kinds: Some(vec![30617]),
-        pubkey: Some(owner_bytes.clone()),
+        pubkey: Some(owner_bytes),
         d_tag: Some(req.repo_id.clone()),
         global_only: true,
         limit: Some(1),
@@ -300,103 +301,60 @@ pub async fn hook_policy_check(
         }
     };
 
-    // 6. Resolve channel binding via the shared resolver (same first-tag,
-    // fail-closed semantics as the read gate) and check archived state
-    // (applies to ALL pushers including owner).
-    //
-    // `Broken` denies HERE, before owner resolution: a malformed or
-    // ambiguous first binding fails closed for *everyone*, exactly like the
-    // read gate. Letting it fall through as "unbound" would hand the owner
-    // short-circuit below a push path through a binding the read gate
-    // refuses to honor — the tri-state exists precisely so Broken and
-    // NotBound cannot collapse. Only genuinely-NotBound repos proceed, and
-    // only they may earn the remediation-token denial.
-    let channel_id = match crate::api::git::binding::resolve_repo_binding(&repo_event.event) {
-        crate::api::git::binding::RepoBinding::Bound(id) => Some(id),
-        crate::api::git::binding::RepoBinding::NotBound => None,
-        crate::api::git::binding::RepoBinding::Broken => {
+    // 6. Resolve exactly one canonical channel binding and check archived
+    // state. Missing, malformed, empty, or duplicate bindings fail closed for
+    // every pusher. Legacy `h` / `project-channel` tags never participate.
+    let channel_id = match resolve_repo_binding(&repo_event.event) {
+        RepoBinding::Bound(id) => id,
+        RepoBinding::NotBound => {
+            warn!(repo = %req.repo_id, "hook callback: no buzz-channel binding");
+            // Declared cross-component contract — see the const docs in
+            // buzz-core::git_perms for who consumes the token and why
+            // the body also repeats the legacy phrase.
+            return (StatusCode::FORBIDDEN, GIT_NO_CHANNEL_BINDING_BODY).into_response();
+        }
+        RepoBinding::Broken => {
             warn!(repo = %req.repo_id, "hook callback: broken buzz-channel binding");
-            // Deliberately NOT the no_channel_binding token body: the
-            // remediation contract is NotBound-only. A broken binding is
-            // ambiguity, and ambiguity gets a generic denial (matching the
-            // read gate's posture for the same announcement).
             return (StatusCode::FORBIDDEN, "invalid channel binding").into_response();
         }
     };
 
-    if let Some(ch_id) = channel_id {
-        match state.db.get_channel(community, ch_id).await {
-            Ok(ch) if ch.archived_at.is_some() => {
-                return (StatusCode::FORBIDDEN, "channel is archived (read-only)").into_response();
-            }
-            Err(e) => {
-                error!(error = %e, "hook callback: channel lookup failed");
-                return (StatusCode::FORBIDDEN, "internal error").into_response();
-            }
-            _ => {} // Channel exists and is not archived.
+    match state.db.get_channel(community, channel_id).await {
+        Ok(ch) if ch.archived_at.is_some() => {
+            return (StatusCode::FORBIDDEN, "channel is archived (read-only)").into_response();
         }
+        Err(e) => {
+            error!(error = %e, "hook callback: channel lookup failed");
+            return (StatusCode::FORBIDDEN, "internal error").into_response();
+        }
+        _ => {} // Channel exists and is not archived.
     }
 
-    // 7. Resolve pusher's role. A cryptographically verified managed-agent
-    // owner has the same repository authority as the agent key itself.
-    let repo_owner_hex = hex::encode(repo_event.event.pubkey.to_bytes());
+    // 7. Resolve the pusher's current active channel role. Repo ownership,
+    // announcement authorship, and managed-agent ownership confer no Git
+    // authority without active membership in this exact channel.
     let pusher_bytes = match hex::decode(&req.pusher_pubkey) {
         Ok(bytes) if bytes.len() == 32 => bytes,
         _ => return (StatusCode::FORBIDDEN, "invalid pusher pubkey").into_response(),
     };
-    let is_repo_owner = req.pusher_pubkey == repo_owner_hex;
-    let is_managed_agent_owner = if is_repo_owner {
-        false
-    } else {
-        match state
-            .db
-            .is_agent_owner(community, &owner_bytes, &pusher_bytes)
-            .await
-        {
-            Ok(is_owner) => is_owner,
-            Err(error) => {
-                error!(
-                    repo = %req.repo_id,
-                    error = %error,
-                    "hook callback: managed-agent owner lookup failed"
-                );
+    let role = match state
+        .db
+        .get_member_role(community, channel_id, &pusher_bytes)
+        .await
+    {
+        Ok(Some(role_str)) => match role_str.parse::<MemberRole>() {
+            Ok(role) => role,
+            Err(_) => {
+                error!(role = %role_str, "hook callback: unknown role");
                 return (StatusCode::FORBIDDEN, "internal error").into_response();
             }
+        },
+        Ok(None) => {
+            return (StatusCode::FORBIDDEN, "not a channel member").into_response();
         }
-    };
-    let role = if is_repo_owner || is_managed_agent_owner {
-        MemberRole::Owner
-    } else {
-        match channel_id {
-            None => {
-                warn!(repo = %req.repo_id, "hook callback: no buzz-channel binding");
-                // Declared cross-component contract — see the const docs in
-                // buzz-core::git_perms for who consumes the token and why
-                // the body also repeats the legacy phrase.
-                return (StatusCode::FORBIDDEN, GIT_NO_CHANNEL_BINDING_BODY).into_response();
-            }
-            Some(ch_id) => {
-                match state
-                    .db
-                    .get_member_role(community, ch_id, &pusher_bytes)
-                    .await
-                {
-                    Ok(Some(role_str)) => match role_str.parse::<MemberRole>() {
-                        Ok(role) => role,
-                        Err(_) => {
-                            error!(role = %role_str, "hook callback: unknown role");
-                            return (StatusCode::FORBIDDEN, "internal error").into_response();
-                        }
-                    },
-                    Ok(None) => {
-                        return (StatusCode::FORBIDDEN, "not a channel member").into_response();
-                    }
-                    Err(e) => {
-                        error!(error = %e, "hook callback: role lookup failed");
-                        return (StatusCode::FORBIDDEN, "internal error").into_response();
-                    }
-                }
-            }
+        Err(e) => {
+            error!(error = %e, "hook callback: role lookup failed");
+            return (StatusCode::FORBIDDEN, "internal error").into_response();
         }
     };
 
@@ -526,6 +484,47 @@ mod tests {
         assert!(
             GIT_NO_CHANNEL_BINDING_BODY.contains("no channel binding"),
             "shipped desktops prose-match this exact phrase (spaces, not underscores)"
+        );
+    }
+
+    #[test]
+    fn git_binding_requires_exactly_one_canonical_tag() {
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+
+        let channel = Uuid::new_v4();
+        let announcement = |tags: Vec<Tag>| {
+            EventBuilder::new(Kind::Custom(30617), "")
+                .tags(tags)
+                .sign_with_keys(&Keys::generate())
+                .expect("sign announcement")
+        };
+
+        let bound = announcement(vec![
+            Tag::parse(["d", "repo"]).unwrap(),
+            Tag::parse(["buzz-channel", &channel.to_string()]).unwrap(),
+        ]);
+        assert_eq!(resolve_repo_binding(&bound), RepoBinding::Bound(channel));
+
+        let duplicate = announcement(vec![
+            Tag::parse(["d", "repo"]).unwrap(),
+            Tag::parse(["buzz-channel", &channel.to_string()]).unwrap(),
+            Tag::parse(["buzz-channel", &channel.to_string()]).unwrap(),
+        ]);
+        assert_eq!(
+            resolve_repo_binding(&duplicate),
+            RepoBinding::Broken,
+            "even identical duplicate bindings are ambiguous"
+        );
+
+        let legacy_only = announcement(vec![
+            Tag::parse(["d", "repo"]).unwrap(),
+            Tag::parse(["h", &channel.to_string()]).unwrap(),
+            Tag::parse(["project-channel", &channel.to_string()]).unwrap(),
+        ]);
+        assert_eq!(
+            resolve_repo_binding(&legacy_only),
+            RepoBinding::NotBound,
+            "legacy rendering tags never authorize Git"
         );
     }
 
@@ -920,15 +919,12 @@ printf '%s' "$HMAC_INPUT" | openssl dgst -sha256 -hmac "{secret}" -hex 2>/dev/nu
         (status, String::from_utf8(bytes.to_vec()).expect("utf-8"))
     }
 
-    /// The tri-state trap the resolver exists to prevent: a broken (malformed
-    /// or ambiguous-first) binding must fail closed for EVERYONE on push —
-    /// including the announcement author — *before* the owner short-circuit
-    /// grants `MemberRole::Owner`. Collapsing `Broken` into "unbound" hands
-    /// the owner a push path through a binding the read gate refuses to
-    /// honor. The remediation token stays reserved for genuinely NotBound.
+    /// Missing, malformed, or duplicate bindings fail closed for EVERYONE on
+    /// push, including the announcement author. Repository authorship is not
+    /// channel authority.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn push_gate_denies_owner_through_broken_binding() {
+    async fn push_gate_denies_owner_without_exact_live_binding() {
         use nostr::{Keys, Tag};
 
         let state = policy_test_state().await;
@@ -965,10 +961,8 @@ printf '%s' "$HMAC_INPUT" | openssl dgst -sha256 -hmac "{secret}" -hex 2>/dev/nu
             "remediation token is NotBound-only; Broken must never earn it"
         );
 
-        // Control: the same owner pushing a genuinely NEVER-BOUND repo is
-        // allowed (owner authority over an unbound announcement is the
-        // long-standing push semantics). This pins the denial above to
-        // Broken specifically, not to some broader regression.
+        // Missing binding also denies. The response keeps the remediation
+        // token, but no owner bypass turns it into an authorization success.
         let response = owner_push_response(
             &state,
             community,
@@ -978,10 +972,7 @@ printf '%s' "$HMAC_INPUT" | openssl dgst -sha256 -hmac "{secret}" -hex 2>/dev/nu
         )
         .await;
         let (status, body) = body_string(response).await;
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "owner push to a never-bound repo must remain allowed (got body: {body})"
-        );
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body, GIT_NO_CHANNEL_BINDING_BODY);
     }
 }

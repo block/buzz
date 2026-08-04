@@ -49,6 +49,8 @@ use crate::conformance::{
     state_for_request, EmitGuard, TraceAction, Verdict,
 };
 
+const REPO_RECONCILED_MESSAGE: &str = "reconciled: repository provisioning ready";
+
 /// How the HTTP caller authenticated (for [`IngestAuth::Http`]).
 #[derive(Debug, Clone)]
 pub enum HttpAuthMethod {
@@ -2818,7 +2820,13 @@ async fn ingest_event_inner(
         }
     };
 
-    if !was_inserted {
+    let is_duplicate = !was_inserted;
+    let reconcile_repo_duplicate = if is_duplicate && kind_u32 == KIND_GIT_REPO_ANNOUNCEMENT {
+        is_current_repo_announcement(tenant, &event, state).await?
+    } else {
+        false
+    };
+    if is_duplicate && !reconcile_repo_duplicate {
         return Ok(IngestResult {
             event_id: event_id_hex,
             accepted: true,
@@ -2827,17 +2835,24 @@ async fn ingest_event_inner(
     }
 
     if crate::handlers::side_effects::is_side_effect_kind(kind_u32) {
-        if let Err(e) =
+        let result =
             crate::handlers::side_effects::handle_side_effects(tenant, kind_u32, &event, state)
-                .await
-        {
-            // error!, not warn!: the event was accepted but its side effects
-            // (channel creation, git repo seeding, …) did not run — the relay
-            // is now in a state the client believes it isn't. Production runs
-            // RUST_LOG=error, so warn! made these failures invisible during
-            // the #3527 triage.
-            error!(event_id = %event_id_hex, kind = kind_u32, "Side effect failed: {e}");
+                .await;
+        if let Err(error) = &result {
+            error!(event_id = %event_id_hex, kind = kind_u32, "Side effect failed: {error}");
         }
+        enforce_required_side_effect(kind_u32, result)?;
+    }
+
+    // An exact replay of the live kind:30617 head deliberately re-enters the
+    // idempotent provisioning handler. Report reconciliation distinctly so the
+    // create client can distinguish a repaired repo from a dominated duplicate.
+    if is_duplicate {
+        return Ok(IngestResult {
+            event_id: event_id_hex,
+            accepted: true,
+            message: REPO_RECONCILED_MESSAGE.into(),
+        });
     }
 
     // A freshly inserted reply changed its thread's counters (updated in the
@@ -2903,6 +2918,50 @@ async fn ingest_event_inner(
     })
 }
 
+/// Return whether a duplicate kind:30617 is the exact current replaceable head.
+/// Stale/dominated duplicates must remain zero-side-effect no-ops.
+async fn is_current_repo_announcement(
+    tenant: &TenantContext,
+    event: &Event,
+    state: &Arc<AppState>,
+) -> Result<bool, IngestError> {
+    let d_tag = buzz_db::event::extract_d_tag(event).unwrap_or_default();
+    let query = buzz_db::EventQuery {
+        kinds: Some(vec![KIND_GIT_REPO_ANNOUNCEMENT as i32]),
+        pubkey: Some(event.pubkey.to_bytes().to_vec()),
+        d_tag: Some(d_tag),
+        global_only: true,
+        limit: Some(1),
+        ..buzz_db::EventQuery::for_community(tenant.community())
+    };
+    let current = state.db.query_events(&query).await.map_err(|error| {
+        IngestError::Internal(format!(
+            "error: repository reconciliation head lookup failed: {error}"
+        ))
+    })?;
+
+    Ok(is_exact_current_repo_head(
+        event,
+        current.first().map(|stored| &stored.event),
+    ))
+}
+
+fn is_exact_current_repo_head(incoming: &Event, current: Option<&Event>) -> bool {
+    current.is_some_and(|head| head.id == incoming.id)
+}
+
+/// Most historical side effects remain best-effort after storage. Repository
+/// bootstrap is different: acknowledging it before Git advertisement can read
+/// the reserved repo's manifest would create a false-success, uncloneable repo.
+fn enforce_required_side_effect(kind: u32, result: anyhow::Result<()>) -> Result<(), IngestError> {
+    match result {
+        Err(error) if kind == KIND_GIT_REPO_ANNOUNCEMENT => Err(IngestError::Internal(format!(
+            "error: repository provisioning failed: {error}"
+        ))),
+        _ => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
@@ -2914,7 +2973,62 @@ mod tests {
         KIND_MANAGED_AGENT, KIND_PERSONA, KIND_PRESENCE_UPDATE, KIND_STREAM_MESSAGE,
         KIND_STREAM_MESSAGE_DIFF, KIND_TEAM, KIND_USER_STATUS,
     };
-    use nostr::{EventBuilder, Kind};
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    #[test]
+    fn repo_provisioning_failure_is_a_failed_write() {
+        let result = enforce_required_side_effect(
+            KIND_GIT_REPO_ANNOUNCEMENT,
+            Err(anyhow::anyhow!("object store unavailable")),
+        );
+
+        match result {
+            Err(IngestError::Internal(message)) => {
+                assert_eq!(
+                    message,
+                    "error: repository provisioning failed: object store unavailable"
+                );
+            }
+            _ => panic!("kind:30617 provisioning failure must not acknowledge success"),
+        }
+    }
+
+    #[test]
+    fn exact_repo_duplicate_retries_and_repairs_without_false_success() {
+        let repaired = enforce_required_side_effect(KIND_GIT_REPO_ANNOUNCEMENT, Ok(()));
+        assert!(repaired.is_ok());
+        assert_eq!(
+            REPO_RECONCILED_MESSAGE,
+            "reconciled: repository provisioning ready"
+        );
+
+        let still_broken = enforce_required_side_effect(
+            KIND_GIT_REPO_ANNOUNCEMENT,
+            Err(anyhow::anyhow!("manifest still unavailable")),
+        );
+        assert!(matches!(
+            still_broken,
+            Err(IngestError::Internal(message))
+                if message.contains("manifest still unavailable")
+        ));
+    }
+
+    #[test]
+    fn repo_duplicate_reconciliation_requires_exact_current_id() {
+        let keys = Keys::generate();
+        let announcement = |content: &str| {
+            EventBuilder::new(Kind::Custom(30617), content)
+                .tags([Tag::parse(["d", "repo"]).unwrap()])
+                .sign_with_keys(&keys)
+                .expect("sign announcement")
+        };
+        let incoming = announcement("incoming");
+        let other_head = announcement("other");
+
+        assert!(is_exact_current_repo_head(&incoming, Some(&incoming)));
+        assert!(!is_exact_current_repo_head(&incoming, Some(&other_head)));
+        assert!(!is_exact_current_repo_head(&incoming, None));
+    }
 
     /// A banned relay admin must be refused with the same wire prefix and
     /// transport status as every other durable-restriction refusal:

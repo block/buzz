@@ -7,14 +7,12 @@
 //! own code that agreed only by coincidence; the resolver makes the
 //! agreement structural.
 //!
-//! # First-tag, fail-closed semantics
+//! # Exact-one, fail-closed semantics
 //!
-//! Only the *first* `buzz-channel` tag is considered, and it must carry a
-//! valid UUID. A malformed first binding resolves to [`RepoBinding::Broken`]
-//! even if a later duplicate tag is valid — an ambiguous announcement must
-//! fail closed, not silently resolve to whichever duplicate happens to
-//! parse. If this ever became "find the first *parseable* tag", an author
-//! who can append a second `buzz-channel` tag would pick the channel.
+//! Exactly one `buzz-channel` tag must exist and carry a valid UUID. A missing
+//! tag resolves to [`RepoBinding::NotBound`]; a malformed or duplicate binding
+//! resolves to [`RepoBinding::Broken`]. Duplicate tags are ambiguous even when
+//! their values match, so every Git authorization door fails closed on them.
 //!
 //! # What this deliberately does NOT do
 //!
@@ -36,9 +34,9 @@ pub enum RepoBinding {
     /// identity that can rebind — 30617 is keyed by `(author, d)`) may be
     /// offered remediation; everyone else gets the generic denial.
     NotBound,
-    /// First `buzz-channel` tag carries a valid UUID.
+    /// The sole `buzz-channel` tag carries a valid UUID.
     Bound(Uuid),
-    /// First `buzz-channel` tag exists but its value is not a UUID.
+    /// The binding is malformed or more than one `buzz-channel` tag exists.
     /// Fail closed with the generic denial — never remediation, which
     /// would leak that the repo exists.
     Broken,
@@ -46,14 +44,17 @@ pub enum RepoBinding {
 
 /// Resolve the channel binding of a kind:30617 announcement from its tags.
 pub fn resolve_repo_binding(event: &nostr::Event) -> RepoBinding {
-    let Some(first) = event
+    let mut bindings = event
         .tags
         .iter()
-        .find(|t| t.as_slice().first().map(String::as_str) == Some("buzz-channel"))
-    else {
+        .filter(|t| t.as_slice().first().map(String::as_str) == Some("buzz-channel"));
+    let Some(binding) = bindings.next() else {
         return RepoBinding::NotBound;
     };
-    match first.as_slice().get(1).map(|v| Uuid::parse_str(v)) {
+    if bindings.next().is_some() {
+        return RepoBinding::Broken;
+    }
+    match binding.as_slice().get(1).map(|v| Uuid::parse_str(v)) {
         Some(Ok(id)) => RepoBinding::Bound(id),
         _ => RepoBinding::Broken,
     }
@@ -117,12 +118,21 @@ mod tests {
         ]);
         assert_eq!(resolve_repo_binding(&malformed_first), RepoBinding::Broken);
 
-        // Valid first + different second: first wins deterministically.
+        // Valid first + different second: duplicate bindings are ambiguous.
         let valid_first = announcement(vec![
             Tag::parse(["d", "repo"]).unwrap(),
             Tag::parse(["buzz-channel", &ch.to_string()]).unwrap(),
             Tag::parse(["buzz-channel", &other.to_string()]).unwrap(),
         ]);
-        assert_eq!(resolve_repo_binding(&valid_first), RepoBinding::Bound(ch));
+        assert_eq!(resolve_repo_binding(&valid_first), RepoBinding::Broken);
+
+        // Identical duplicates are still ambiguous; readers must not depend on
+        // tag ordering or silently accept a non-canonical announcement.
+        let identical = announcement(vec![
+            Tag::parse(["d", "repo"]).unwrap(),
+            Tag::parse(["buzz-channel", &ch.to_string()]).unwrap(),
+            Tag::parse(["buzz-channel", &ch.to_string()]).unwrap(),
+        ]);
+        assert_eq!(resolve_repo_binding(&identical), RepoBinding::Broken);
     }
 }
