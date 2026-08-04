@@ -209,6 +209,24 @@ just test-unit    # unit tests, no infrastructure needed
 just test         # full integration suite (requires Postgres + Redis)
 ```
 
+**Running a single test.** The suite uses `cargo-nextest`. Scope to one
+crate and match on a test-name substring:
+
+```bash
+cargo nextest run -p buzz-core event_verification   # one test by name substring
+cargo test -p buzz-test-client --test e2e_relay      # one integration test file
+cargo test --manifest-path desktop/src-tauri/Cargo.toml <name>  # desktop crate (outside root workspace)
+cd mobile && flutter test test/features/foo_test.dart           # one Flutter test
+```
+
+**`test-unit` is deliberately infra-free — mind the boundary.** The recipe
+hand-picks packages (`buzz-core`, `buzz-auth`, `buzz-db --lib`,
+`buzz-conformance`, `buzz-push-gateway`) because the Postgres-backed
+`buzz-db` tests are `#[ignore]`d and only the SQL-parsing `--lib` set runs
+without infra. A new test that needs Postgres/Redis added to one of those
+`--lib` targets ships **silently skipped** — put infra-dependent tests where
+`just test` (the integration suite) will actually run them.
+
 E2E tests live in `crates/buzz-test-client/tests/`:
 - `e2e_relay.rs` — WebSocket relay protocol
 - `e2e_media.rs` — media upload/download (Blossom)
