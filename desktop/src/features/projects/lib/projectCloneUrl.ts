@@ -50,3 +50,50 @@ export function effectiveCloneUrls(
   const derived = deriveRelayCloneUrl(relayOrigin, owner, dtag);
   return derived ? [derived] : [];
 }
+
+/**
+ * Whether Desktop's native git workflow may operate on this clone URL.
+ *
+ * Native project mutations intentionally accept only repositories hosted by
+ * the active workspace relay. Keep the UI capability check aligned with that
+ * boundary so external NIP-34 clone URLs never offer an action the backend
+ * must reject.
+ */
+export function isActiveRelayCloneUrl(
+  cloneUrl: string | null | undefined,
+  relayOrigin: string | null | undefined,
+  expectedOwner?: string | null,
+): boolean {
+  if (
+    !cloneUrl ||
+    !relayOrigin ||
+    (expectedOwner !== undefined &&
+      expectedOwner !== null &&
+      !/^[0-9a-fA-F]{64}$/.test(expectedOwner))
+  ) {
+    return false;
+  }
+
+  try {
+    const clone = new URL(cloneUrl);
+    const relay = new URL(relayOrigin);
+    if (clone.origin !== relay.origin) return false;
+
+    const relayPath = relay.pathname.replace(/\/+$/, "");
+    if (relayPath && !clone.pathname.startsWith(`${relayPath}/`)) return false;
+
+    const segments = clone.pathname.split("/").filter(Boolean);
+    const gitIndex = segments.lastIndexOf("git");
+    const cloneOwner = segments[gitIndex + 1];
+    return (
+      gitIndex >= 0 &&
+      segments.length === gitIndex + 3 &&
+      /^[0-9a-fA-F]{64}$/.test(cloneOwner ?? "") &&
+      (!expectedOwner ||
+        cloneOwner?.toLowerCase() === expectedOwner.toLowerCase()) &&
+      Boolean(segments[gitIndex + 2])
+    );
+  } catch {
+    return false;
+  }
+}

@@ -711,6 +711,41 @@ test("managed agent repository owner can merge", async ({ page }) => {
   });
 });
 
+test("external repository owner opens the provider instead of native merge", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await page.addInitScript(() => {
+    window.__BUZZ_E2E_PROJECT_CLONE_URL_OVERRIDE__ =
+      "https://github.com/block/buzz.git";
+    window.__BUZZ_E2E_PROJECT_WEB_URL_OVERRIDE__ =
+      "https://github.com/block/buzz";
+  });
+  await installMockBridge(page);
+  await openBuzzProject(page);
+
+  await page.getByRole("tab", { name: "Pull Request" }).click();
+  const aliceRow = page
+    .getByTestId("project-pull-request-row")
+    .filter({ hasText: "alice" })
+    .first();
+  await aliceRow.getByRole("button", { name: /^#/ }).click();
+
+  await expect(
+    page.getByRole("button", { name: "Merge", exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("link", { name: "Open on GitHub", exact: true }),
+  ).toHaveAttribute("href", "https://github.com/block/buzz");
+  const mergeCommandCount = await page.evaluate(
+    () =>
+      window.__BUZZ_E2E_COMMANDS__?.filter(
+        (command) => command === "merge_project_pull_request",
+      ).length ?? 0,
+  );
+  expect(mergeCommandCount).toBe(0);
+});
+
 test("viewer without repository ownership cannot merge", async ({ page }) => {
   await enableProjectsFeature(page);
   await page.addInitScript((owner) => {

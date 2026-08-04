@@ -1,5 +1,6 @@
 import {
   Check,
+  ExternalLink,
   GitPullRequest,
   GitPullRequestDraft,
   MoreHorizontal,
@@ -10,6 +11,7 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import { useIsManagedAgent } from "@/features/agent-memory/hooks";
+import { useCommunities } from "@/features/communities/useCommunities";
 import type { Project, ProjectPullRequest } from "@/features/projects/hooks";
 import { nextProjectPullRequestReviewCreatedAt } from "@/features/projects/projectPullRequests.mjs";
 import {
@@ -18,7 +20,10 @@ import {
   useUpdateProjectPullRequestStatusMutation,
 } from "@/features/projects/pullRequestReviews";
 import { useIdentityQuery } from "@/shared/api/hooks";
+import { relayHttpFromWs } from "@/shared/api/inviteHelpers";
+import { isActiveRelayCloneUrl } from "@/features/projects/lib/projectCloneUrl";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { isSafeUrl } from "@/shared/lib/url";
 import { Button } from "@/shared/ui/button";
 import {
   Dialog,
@@ -59,6 +64,15 @@ export function PullRequestReviewCard({
   const [approvalSummary, setApprovalSummary] = React.useState("");
   const reviewDecisionInFlightRef = React.useRef(false);
   const lastReviewDecisionCreatedAtRef = React.useRef(0);
+  const { activeCommunity } = useCommunities();
+  const relayOrigin = React.useMemo(() => {
+    if (!activeCommunity?.relayUrl) return null;
+    try {
+      return relayHttpFromWs(activeCommunity.relayUrl);
+    } catch {
+      return null;
+    }
+  }, [activeCommunity?.relayUrl]);
 
   const viewerPubkey = identityQuery.data?.pubkey ?? null;
   const viewer = viewerPubkey ? normalizePubkey(viewerPubkey) : null;
@@ -75,10 +89,39 @@ export function PullRequestReviewCard({
   );
   const canReview = canReviewProjectPullRequest(project, pullRequest, viewer);
   const canApprove = canReview && !hasApproved;
-  const canMerge =
+  const canActOnOpenPullRequest =
     (isOwner || isManagedAgentOwner) &&
     pullRequest.status === "Open" &&
     Boolean(pullRequest.branchName && pullRequest.commit);
+  const nativeTargetMergeSupported = isActiveRelayCloneUrl(
+    project.cloneUrls[0],
+    relayOrigin,
+    project.owner,
+  );
+  const nativeSourceMergeSupported = isActiveRelayCloneUrl(
+    pullRequest.cloneUrls[0] ?? project.cloneUrls[0],
+    relayOrigin,
+  );
+  const nativeMergeSupported =
+    nativeTargetMergeSupported && nativeSourceMergeSupported;
+  const canMerge = canActOnOpenPullRequest && nativeMergeSupported;
+  const externalRepositoryUrl =
+    canActOnOpenPullRequest &&
+    relayOrigin &&
+    !nativeMergeSupported &&
+    isSafeUrl(project.webUrl ?? undefined)
+      ? project.webUrl
+      : null;
+  const externalRepositoryLabel = (() => {
+    if (!externalRepositoryUrl) return "Open repository";
+    try {
+      return new URL(externalRepositoryUrl).hostname === "github.com"
+        ? "Open on GitHub"
+        : "Open repository";
+    } catch {
+      return "Open repository";
+    }
+  })();
 
   const handleStatusChange = React.useCallback(
     async (status: "open" | "draft" | "closed") => {
@@ -168,6 +211,7 @@ export function PullRequestReviewCard({
   const hasAvailableAction =
     canApprove ||
     canMerge ||
+    Boolean(externalRepositoryUrl) ||
     canMarkReady ||
     canConvertToDraft ||
     canClose ||
@@ -206,6 +250,24 @@ export function PullRequestReviewCard({
               project={project}
               pullRequest={pullRequest}
             />
+          ) : null}
+          {externalRepositoryUrl ? (
+            <Button
+              asChild
+              className="h-8 gap-1.5 px-3.5"
+              size="xs"
+              type="button"
+              variant="secondary"
+            >
+              <a
+                href={externalRepositoryUrl}
+                rel="noopener noreferrer"
+                target="_blank"
+              >
+                <ExternalLink className="h-3.5 w-3.5" />
+                {externalRepositoryLabel}
+              </a>
+            </Button>
           ) : null}
           {canMarkReady ? (
             <Button
