@@ -1178,7 +1178,7 @@ test("groups contiguous arrival activity with hidden names in the standard toolt
 
   const groupedRow = page
     .getByTestId("system-message-row")
-    .filter({ hasText: "joined the channel along with" });
+    .filter({ hasText: "added by Alice Chen, along with" });
   for (const visibleName of [
     "Erica Chapman",
     "Peter Griffin",
@@ -1187,15 +1187,15 @@ test("groups contiguous arrival activity with hidden names in the standard toolt
     await expect(groupedRow).toContainText(visibleName);
   }
   await expect(
-    groupedRow.locator("p").filter({ hasText: "joined the channel" }),
+    groupedRow.locator("p").filter({ hasText: "added by Alice Chen" }),
   ).toContainText(
-    "alice joined the channel along with Erica Chapman, Peter Griffin, Marcia Thomas, and 3 others",
+    "Erica Chapman added by Alice Chen, along with Peter Griffin, Marcia Thomas, Jordan Lee, and 2 others",
   );
   const avatarStack = groupedRow.getByTestId("system-message-avatar-stack");
   await expect(avatarStack).toHaveCount(1);
   await expect(avatarStack.getByTestId("system-message-avatar")).toHaveCount(5);
   await expect(
-    groupedRow.locator("p").filter({ hasText: "joined the channel" }),
+    groupedRow.locator("p").filter({ hasText: "added by Alice Chen" }),
   ).toHaveCSS("text-align", "left");
   await expect(groupedRow.locator("[data-mention]")).toHaveCount(0);
 
@@ -1204,7 +1204,7 @@ test("groups contiguous arrival activity with hidden names in the standard toolt
   await visibleName.hover();
   await expect(visibleName).toHaveCSS("text-decoration-line", "underline");
 
-  const othersTrigger = groupedRow.getByRole("button", { name: "3 others" });
+  const othersTrigger = groupedRow.getByRole("button", { name: "2 others" });
   // Park the pointer off-target first: the previous hover leaves the mouse at a
   // fixed viewport point, and any later reflow (new rows, scroll-to-bottom, a
   // different text wrap) can slide this button under it. Without this the
@@ -1215,7 +1215,6 @@ test("groups contiguous arrival activity with hidden names in the standard toolt
   await expect(othersTrigger).toHaveCSS("text-decoration-line", "underline");
 
   const tooltip = page.getByRole("tooltip");
-  await expect(tooltip).toContainText("Jordan Lee");
   await expect(tooltip).toContainText("Olivia Park");
   await expect(tooltip).toContainText("Sam Rivera");
 

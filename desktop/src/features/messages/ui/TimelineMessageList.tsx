@@ -365,10 +365,13 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   );
 });
 
-function timelineItemMessageId(item: TimelineNonDayItem): string | null {
+function timelineItemMessageIds(item: TimelineNonDayItem): string[] {
+  if (item.kind === "system-group") {
+    return item.entries.map((entry) => entry.message.id);
+  }
   return item.kind === "message" || item.kind === "system"
-    ? item.entry.message.id
-    : null;
+    ? [item.entry.message.id]
+    : [];
 }
 
 type VirtualizedTimelineRowsProps = {
@@ -633,8 +636,9 @@ function VirtualizedTimelineRows({
     const byId = new Map<string, number>();
     items.forEach((item, index) => {
       if (item.kind !== "timeline-item") return;
-      const messageId = timelineItemMessageId(item.item);
-      if (messageId) byId.set(messageId, index);
+      for (const messageId of timelineItemMessageIds(item.item)) {
+        byId.set(messageId, index);
+      }
     });
     return byId;
   }, [items]);
