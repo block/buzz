@@ -732,6 +732,7 @@ pub fn run() {
             fetch_media_bytes,
             copy_image_to_clipboard,
             copy_text_to_clipboard,
+            read_clipboard_text,
             fetch_snapshot_bytes,
             relay_requires_membership,
             list_relay_members,
