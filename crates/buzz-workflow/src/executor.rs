@@ -976,8 +976,10 @@ pub async fn execute_run(
 ) -> Result<ExecutionResult, (WorkflowError, crate::error::PartialProgress)> {
     // Honor `enabled: false` from the definition, fail-closed, before any
     // run side effects. The scheduler and event paths pre-filter this flag,
-    // but webhook, manual-trigger, and approval-resume paths do not, so this
-    // gate makes the YAML flag authoritative for every execution entry.
+    // and the webhook, manual-trigger, and approval-resume paths gate on the
+    // persisted `enabled` column, but nothing else reads the YAML flag at
+    // execution time, so this gate makes the definition authoritative for
+    // every execution entry.
     crate::ensure_workflow_enabled(def)
         .map_err(|e| (e, crate::error::PartialProgress::default()))?;
 
@@ -1033,8 +1035,9 @@ pub async fn execute_from_step(
 ) -> Result<ExecutionResult, (WorkflowError, crate::error::PartialProgress)> {
     // Honor `enabled: false` from the definition, fail-closed, before any
     // run side effects. The webhook, manual-trigger, and approval-resume
-    // paths gate only on the DB column, which the definition never writes;
-    // this gate makes the YAML flag authoritative here too.
+    // paths gate on the persisted `enabled` column, but nothing else reads
+    // the YAML flag at execution time; this gate makes the definition
+    // authoritative here too.
     crate::ensure_workflow_enabled(def)
         .map_err(|e| (e, crate::error::PartialProgress::default()))?;
 

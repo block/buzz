@@ -44,12 +44,12 @@ pub use schema::{ActionDef, Step, TriggerDef, WorkflowDef};
 /// `enabled: false` must never execute its steps, no matter which path
 /// created the run.
 ///
-/// The cron scheduler and event paths pre-filter on `def.enabled`, but the
-/// webhook, manual-trigger, and approval-resume paths gate only on the DB
-/// `enabled` column, which the definition never writes, so a YAML-disabled
-/// workflow could still execute through those entries. Both executor entry
-/// points call this before touching the run, making `enabled: false` honored
-/// everywhere regardless of the stored column.
+/// The cron scheduler and event paths pre-filter on `def.enabled`, and the
+/// webhook, manual-trigger, and approval-resume paths gate on the persisted
+/// `enabled` column, but nothing else reads the YAML flag at execution time,
+/// so a YAML-disabled workflow could still execute through those entries.
+/// Both executor entry points call this before touching the run, making
+/// `enabled: false` honored everywhere regardless of the stored column.
 pub(crate) fn ensure_workflow_enabled(def: &WorkflowDef) -> Result<(), WorkflowError> {
     if def.enabled {
         Ok(())
