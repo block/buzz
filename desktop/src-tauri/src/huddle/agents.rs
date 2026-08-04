@@ -9,13 +9,23 @@
 //! when it receives the kind:9000 membership notification. Huddle-specific
 //! env vars (interrupt mode, custom system prompt) are a post-MVP enhancement.
 
+use std::collections::HashSet;
+
 use serde::Serialize;
+use tauri::State;
 use uuid::Uuid;
 
 use crate::{
-    app_state::AppState, events, huddle::relay_api::fetch_channel_members_with_roles,
+    app_state::AppState,
+    events,
+    huddle::relay_api::{
+        fetch_channel_members, fetch_channel_members_with_roles, validate_pubkey_hex,
+        MAX_HUDDLE_AGENTS,
+    },
     relay::submit_event,
 };
+
+use super::{pipeline::start_auto_enabled_transcription, HuddlePhase};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -78,6 +88,21 @@ pub struct AgentAddResult {
     pub parent_error: Option<String>,
 }
 
+/// Result of reconciling channel agent additions into the active Huddle.
+#[derive(Debug, Serialize)]
+pub struct AgentHuddleSyncResult {
+    /// Whether `channel_id` belonged to the active Huddle.
+    pub matched_active_huddle: bool,
+    /// Agents newly enrolled in the Huddle's ephemeral channel.
+    pub added: Vec<String>,
+}
+
+// Multiple frontend mutation paths can observe the same membership addition
+// (for example, the member hook and the mention send flow). Serialize native
+// reconciliation so they share the first result instead of racing duplicate
+// membership events through a relay read that has not caught up yet.
+static AGENT_SYNC_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Add an agent to both the ephemeral and parent huddle channels.
 ///
 /// Returns `Err` only if the ephemeral-channel add fails (policy rejection or
@@ -132,6 +157,156 @@ pub async fn add_agent_to_huddle(
         parent_added,
         parent_error,
     })
+}
+
+/// Reconcile explicitly added channel agents into the active Huddle.
+///
+/// The source channel may be either the Huddle's parent or its ephemeral chat.
+/// Existing ephemeral membership is hydrated first so a mention sent from the
+/// Huddle chat does not publish a duplicate membership event. Missing agents
+/// are added through the same parent + ephemeral path as the Add agent picker.
+pub(crate) async fn sync_agents_for_active_huddle(
+    channel_id: &str,
+    agent_pubkeys: Vec<String>,
+    state: &AppState,
+) -> Result<AgentHuddleSyncResult, String> {
+    let mut seen = HashSet::new();
+    let mut requested = Vec::new();
+    for pubkey in agent_pubkeys {
+        let normalized = pubkey.to_ascii_lowercase();
+        validate_pubkey_hex(&normalized)?;
+        if seen.insert(normalized.clone()) {
+            requested.push(normalized);
+        }
+    }
+    if requested.is_empty() {
+        return Ok(AgentHuddleSyncResult {
+            matched_active_huddle: false,
+            added: Vec::new(),
+        });
+    }
+    let _sync_guard = AGENT_SYNC_LOCK.lock().await;
+
+    let (ephemeral_channel_id, parent_channel_id, huddle_generation, state_agents) = {
+        let huddle = state.huddle()?;
+        if !matches!(huddle.phase, HuddlePhase::Connected | HuddlePhase::Active) {
+            return Ok(AgentHuddleSyncResult {
+                matched_active_huddle: false,
+                added: Vec::new(),
+            });
+        }
+        let ephemeral_channel_id = huddle
+            .ephemeral_channel_id
+            .clone()
+            .ok_or("no ephemeral channel")?;
+        let parent_channel_id = huddle
+            .parent_channel_id
+            .clone()
+            .ok_or("no parent channel")?;
+        if channel_id != ephemeral_channel_id && channel_id != parent_channel_id {
+            return Ok(AgentHuddleSyncResult {
+                matched_active_huddle: false,
+                added: Vec::new(),
+            });
+        }
+        let state_agents = huddle
+            .agent_pubkeys
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        (
+            ephemeral_channel_id,
+            parent_channel_id,
+            huddle.huddle_generation,
+            state_agents,
+        )
+    };
+
+    // Membership reads can lag a just-accepted write, so merge the relay view
+    // with local state instead of allowing a stale snapshot to remove agents.
+    let fresh_agents = fetch_channel_members(&ephemeral_channel_id, Some("bot"), state)
+        .await
+        .unwrap_or_default();
+    let mut known_agents = HashSet::new();
+    let mut merged_agents = Vec::new();
+    for pubkey in state_agents.into_iter().chain(fresh_agents) {
+        let normalized = pubkey.to_ascii_lowercase();
+        if known_agents.insert(normalized.clone()) {
+            merged_agents.push(normalized);
+        }
+    }
+    let missing: Vec<String> = requested
+        .into_iter()
+        .filter(|pubkey| !known_agents.contains(pubkey))
+        .collect();
+    if known_agents.len() + missing.len() > MAX_HUDDLE_AGENTS {
+        return Err(format!(
+            "agent limit reached: {} requested with {} already present (max {})",
+            missing.len(),
+            known_agents.len(),
+            MAX_HUDDLE_AGENTS
+        ));
+    }
+
+    let ephemeral_uuid = Uuid::parse_str(&ephemeral_channel_id).map_err(|e| e.to_string())?;
+    let parent_uuid = Uuid::parse_str(&parent_channel_id).map_err(|e| e.to_string())?;
+    let mut added = Vec::new();
+    for pubkey in missing {
+        add_agent_to_huddle(ephemeral_uuid, parent_uuid, &pubkey, state).await?;
+        merged_agents.push(pubkey.clone());
+        added.push(pubkey);
+    }
+
+    let (roster_changed, transcription_auto_enabled) = {
+        let mut huddle = state.huddle()?;
+        if !huddle.is_current_huddle(&ephemeral_channel_id, huddle_generation) {
+            return Ok(AgentHuddleSyncResult {
+                matched_active_huddle: true,
+                added,
+            });
+        }
+        let mut roster_changed = false;
+        {
+            let mut current_agents = huddle
+                .agent_pubkeys
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if *current_agents != merged_agents {
+                *current_agents = merged_agents.clone();
+                roster_changed = true;
+            }
+        }
+        for pubkey in &merged_agents {
+            if !huddle.participants.contains(pubkey) {
+                huddle.participants.push(pubkey.clone());
+                roster_changed = true;
+            }
+        }
+        (
+            roster_changed,
+            huddle.maybe_auto_enable_transcription_for_agents(),
+        )
+    };
+
+    if transcription_auto_enabled {
+        start_auto_enabled_transcription(state, &ephemeral_channel_id).await;
+    } else if roster_changed {
+        state.emit_huddle_state_changed();
+    }
+
+    Ok(AgentHuddleSyncResult {
+        matched_active_huddle: true,
+        added,
+    })
+}
+
+#[tauri::command]
+pub async fn sync_agents_to_active_huddle(
+    channel_id: String,
+    agent_pubkeys: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<AgentHuddleSyncResult, String> {
+    sync_agents_for_active_huddle(&channel_id, agent_pubkeys, &state).await
 }
 
 fn contains_member(members: &[(String, Option<String>)], pubkey: &str) -> bool {

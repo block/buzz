@@ -64,11 +64,12 @@ export function buildVirtualizedItems(
   dayGroups: readonly TimelineDayGroup[],
   leadingContent: React.ReactNode | undefined,
   historyExhausted: boolean,
+  showDayDividers = true,
 ): VirtualizedTimelineItem[] {
   const timelineItems = dayGroups.flatMap((group, groupIndex) => {
     const boundaryProven = groupIndex > 0 || historyExhausted;
     const divider =
-      group.headingTimestamp !== null && boundaryProven
+      showDayDividers && group.headingTimestamp !== null && boundaryProven
         ? [
             {
               kind: "day-divider" as const,

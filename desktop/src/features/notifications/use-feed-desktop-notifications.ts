@@ -73,6 +73,7 @@ export function useFeedDesktopNotifications(
   pubkey: string | undefined,
   settings: NotificationSettings,
   setDesktopEnabled: (enabled: boolean) => Promise<boolean>,
+  enabled: boolean,
   profiles?: UserProfileLookup,
   mutedChannelIds?: ReadonlySet<string>,
   channels: readonly NotificationChannel[] = [],
@@ -133,7 +134,7 @@ export function useFeedDesktopNotifications(
   );
 
   React.useEffect(() => {
-    if (!feed) {
+    if (!enabled || !feed) {
       return;
     }
 
@@ -214,6 +215,7 @@ export function useFeedDesktopNotifications(
       void deliverFeedNotification(item, senderName);
     }
   }, [
+    enabled,
     feed,
     channels,
     mutedChannelIds,
