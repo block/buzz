@@ -345,8 +345,9 @@ export function TerminalSubstrate({
       setWelcomeVisible(false);
       return;
     }
-    if (!viewportReportingEnabled || !banner || !beginSplash()) return;
-  }, [banner, viewportReportingEnabled, visible]);
+    if (!showSplash || !viewportReportingEnabled || !banner || !beginSplash())
+      return;
+  }, [banner, showSplash, viewportReportingEnabled, visible]);
 
   React.useEffect(() => {
     if (!welcomeVisible) return;
