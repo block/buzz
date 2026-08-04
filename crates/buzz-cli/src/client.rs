@@ -1397,9 +1397,25 @@ pub fn create_response_with_id(resp: &str, id_key: &str, id_val: &str) -> String
     v.to_string()
 }
 
+/// Return a create-command response, injecting the entity ID **only** when the
+/// relay accepted the event (`"accepted": true`). When the relay rejected the
+/// event, emitting the locally-computed link would be misleading — callers
+/// that copy or share the link would reference an event that was never stored.
+pub fn create_response_with_id_if_accepted(resp: &str, id_key: &str, id_val: &str) -> String {
+    let mut v: serde_json::Value = serde_json::from_str(resp).unwrap_or(serde_json::json!({}));
+    let accepted = v.get("accepted").and_then(|a| a.as_bool()).unwrap_or(false);
+    if accepted {
+        v[id_key] = serde_json::json!(id_val);
+    }
+    v.to_string()
+}
+
 /// Print a create-command response, injecting the generated entity ID.
 pub fn print_create_response(resp: &str, id_key: &str, id_val: &str) {
-    println!("{}", create_response_with_id(resp, id_key, id_val));
+    println!(
+        "{}",
+        create_response_with_id_if_accepted(resp, id_key, id_val)
+    );
 }
 
 /// Extract a JSON field from relay write response messages shaped as

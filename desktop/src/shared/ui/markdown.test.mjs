@@ -521,9 +521,10 @@ test("rehypeImageGallery: leaves a single trailing image in the text flow", () =
 
 // Regression test: react-markdown's `defaultUrlTransform` strips unknown
 // schemes (returns `""`) before our `a` component override can see them,
-// which would break copy → paste → click for `buzz://message?…` links
-// end-to-end. We pass a custom `urlTransform` that delegates to the
-// default for `buzz://message` and legacy `buzz://message` hrefs.
+// which would break copy → paste → click for `buzz://message?…` links and
+// `buzz://pr|issue|repo?…` entity links end-to-end. We pass a custom
+// `urlTransform` (`buzzDeepLinkUrlTransform`) that preserves valid Buzz
+// deep links and delegates everything else to `defaultUrlTransform`.
 //
 // This test renders real `<ReactMarkdown>` with the production transform
 // and asserts the link href survives to the rendered DOM. Mirrors the
@@ -534,12 +535,18 @@ import { renderToStaticMarkup } from "react-dom/server";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 
 import { isMessageLink } from "../../features/messages/lib/messageLink.ts";
+import { parseEntityLink } from "../lib/entityLink.ts";
 import remarkSpoilers from "../lib/remarkSpoilers.ts";
 
-function messageLinkUrlTransform(value, key) {
-  if (key === "href" && isMessageLink(value)) {
-    return value;
-  }
+const OWNER_HEX =
+  "71d67180ba17e749ee825fc8819c9c6ee7003617e1c126504f9b658070ab9224";
+const EVENT_HEX =
+  "c3b589fa5713ba25bad6dc095e2de00a4ac8f50050fdea00fc6444e603be1dd1";
+
+function buzzDeepLinkUrlTransform(value, key) {
+  if (key !== "href") return defaultUrlTransform(value);
+  if (isMessageLink(value)) return value;
+  if (parseEntityLink(value).ok) return value;
   return defaultUrlTransform(value);
 }
 
@@ -547,7 +554,7 @@ function renderMarkdown(content) {
   return renderToStaticMarkup(
     React.createElement(
       ReactMarkdown,
-      { urlTransform: messageLinkUrlTransform },
+      { urlTransform: buzzDeepLinkUrlTransform },
       content,
     ),
   );
@@ -592,12 +599,49 @@ test("messageLinkUrlTransform: preserves legacy buzz://message href", () => {
   assert.match(html, /href="buzz:\/\/message\?channel=abc&(?:amp;)?id=xyz"/);
 });
 
-test("messageLinkUrlTransform: leaves non-message buzz:// schemes to default", () => {
+test("messageLinkUrlTransform: leaves non-entity buzz:// schemes to default", () => {
   // `buzz://connect?relay=…` is handled by a different code path (Tauri
   // single-instance). The markdown renderer should let it pass through
   // defaultUrlTransform (which strips it) since it's not clickable in-app.
   const html = renderMarkdown(
     "[connect](buzz://connect?relay=wss://relay.example)",
+  );
+  assert.match(html, /href=""/);
+});
+
+test("buzzDeepLinkUrlTransform: preserves buzz://pr entity link href", () => {
+  const prLink = `buzz://pr?id=${EVENT_HEX}&owner=${OWNER_HEX}&d=buzz-world`;
+  const html = renderMarkdown(`[My PR](${prLink})`);
+  // The href must survive — our transform preserves valid entity links.
+  assert.match(html, /href="buzz:\/\/pr\?/);
+  assert.doesNotMatch(html, /href=""/);
+});
+
+test("buzzDeepLinkUrlTransform: preserves buzz://pr autolink href", () => {
+  const prLink = `buzz://pr?id=${EVENT_HEX}&owner=${OWNER_HEX}&d=buzz-world`;
+  const html = renderMarkdown(`<${prLink}>`);
+  assert.match(html, /href="buzz:\/\/pr\?/);
+  assert.doesNotMatch(html, /href=""/);
+});
+
+test("buzzDeepLinkUrlTransform: preserves buzz://issue entity link href", () => {
+  const issueLink = `buzz://issue?id=${EVENT_HEX}&owner=${OWNER_HEX}&d=buzz-world`;
+  const html = renderMarkdown(`[Issue title](${issueLink})`);
+  assert.match(html, /href="buzz:\/\/issue\?/);
+  assert.doesNotMatch(html, /href=""/);
+});
+
+test("buzzDeepLinkUrlTransform: preserves buzz://repo entity link href", () => {
+  const repoLink = `buzz://repo?owner=${OWNER_HEX}&d=buzz-world`;
+  const html = renderMarkdown(`[My repo](${repoLink})`);
+  assert.match(html, /href="buzz:\/\/repo\?/);
+  assert.doesNotMatch(html, /href=""/);
+});
+
+test("buzzDeepLinkUrlTransform: strips malformed buzz://pr (unknown param)", () => {
+  // Strict parser rejects unknown params — transform falls back to default sanitizer.
+  const html = renderMarkdown(
+    `[link](buzz://pr?id=${EVENT_HEX}&owner=${OWNER_HEX}&d=buzz-world&extra=ignored)`,
   );
   assert.match(html, /href=""/);
 });

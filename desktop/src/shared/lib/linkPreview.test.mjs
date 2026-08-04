@@ -57,9 +57,11 @@ const BUZZ_OWNER =
   "71d67180ba17e749ee825fc8819c9c6ee7003617e1c126504f9b658070ab9224";
 
 test("parseSupportedLinkPreview parses Buzz relay git clone URLs", () => {
+  // Must pass the active relay origin for host validation.
   assert.deepEqual(
     parseSupportedLinkPreview(
       `https://buzz.block.builderlab.xyz/git/${BUZZ_OWNER}/buzz-world-galaxy`,
+      "https://buzz.block.builderlab.xyz",
     ),
     {
       kind: "buzz-repository",
@@ -69,12 +71,20 @@ test("parseSupportedLinkPreview parses Buzz relay git clone URLs", () => {
       typeLabel: "repo",
     },
   );
+  // Same URL without a matching origin stays external.
+  assert.equal(
+    parseSupportedLinkPreview(
+      `https://buzz.block.builderlab.xyz/git/${BUZZ_OWNER}/buzz-world-galaxy`,
+    ),
+    null,
+  );
 });
 
 test("parseSupportedLinkPreview strips .git suffix from clone URLs", () => {
   assert.deepEqual(
     parseSupportedLinkPreview(
       `http://localhost:3000/git/${BUZZ_OWNER}/buzz-world.git`,
+      "http://localhost:3000",
     ),
     {
       kind: "buzz-repository",
@@ -98,8 +108,40 @@ test("parseSupportedLinkPreview rejects malformed Buzz git URLs", () => {
     // Deeper transport paths are not repo links.
     `https://relay.example/git/${BUZZ_OWNER}/repo/info/refs`,
   ]) {
-    assert.equal(parseSupportedLinkPreview(href), null, href);
+    // Even with a matching origin, structural issues return null.
+    assert.equal(
+      parseSupportedLinkPreview(href, "https://relay.example"),
+      null,
+      href,
+    );
   }
+});
+
+test("parseSupportedLinkPreview rejects clone URLs from non-relay hosts", () => {
+  // Correct path shape but origin does not match the active relay.
+  assert.equal(
+    parseSupportedLinkPreview(
+      `https://evil.example/git/${BUZZ_OWNER}/my-repo`,
+      "https://buzz.block.builderlab.xyz",
+    ),
+    null,
+  );
+  // github.com sharing the path shape must never become a Buzz repo card.
+  assert.equal(
+    parseSupportedLinkPreview(
+      `https://github.com/git/${BUZZ_OWNER}/my-repo`,
+      "https://buzz.block.builderlab.xyz",
+    ),
+    null,
+  );
+  // No relay origin provided — stays external.
+  assert.equal(
+    parseSupportedLinkPreview(
+      `https://buzz.block.builderlab.xyz/git/${BUZZ_OWNER}/buzz-world`,
+      null,
+    ),
+    null,
+  );
 });
 
 const BUZZ_EVENT_ID =
@@ -230,6 +272,7 @@ test("extractSupportedLinkPreviews picks up bare Buzz clone URLs in prose", () =
   assert.deepEqual(
     extractSupportedLinkPreviews(
       `master pushed; clone: https://buzz.block.builderlab.xyz/git/${BUZZ_OWNER}/buzz-world-galaxy and review please.`,
+      "https://buzz.block.builderlab.xyz",
     ),
     [
       {
@@ -241,12 +284,20 @@ test("extractSupportedLinkPreviews picks up bare Buzz clone URLs in prose", () =
       },
     ],
   );
+  // Without a relay origin the URL is treated as an ordinary external link.
+  assert.deepEqual(
+    extractSupportedLinkPreviews(
+      `clone: https://buzz.block.builderlab.xyz/git/${BUZZ_OWNER}/buzz-world-galaxy`,
+    ),
+    [],
+  );
 });
 
 test("extractSupportedLinkPreviews uses markdown labels for Buzz repo links", () => {
   assert.deepEqual(
     extractSupportedLinkPreviews(
       `[Buzz World](https://relay.example/git/${BUZZ_OWNER}/buzz-world-galaxy)`,
+      "https://relay.example",
     ).map((preview) => preview.title),
     ["Buzz World"],
   );
@@ -259,6 +310,7 @@ test("extractSupportedLinkPreviews dedupes clone URL variants of one repo", () =
         `https://relay.example/git/${BUZZ_OWNER}/buzz-world-galaxy`,
         `https://relay.example/git/${BUZZ_OWNER}/buzz-world-galaxy.git`,
       ].join(" "),
+      "https://relay.example",
     ).map((preview) => preview.href),
     [`buzz://repo?owner=${BUZZ_OWNER}&d=buzz-world-galaxy`],
   );

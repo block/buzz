@@ -92,6 +92,16 @@ export function isEntityLink(href: string | undefined | null): boolean {
  * Parse a `buzz://pr|issue|repo?…` URL. Returns a discriminated result so
  * callers can fall back to plain-link rendering without throwing. All
  * identifiers are validated; hex values are lowercase-normalized.
+ *
+ * Strict canonical form to preserve forward-compatibility:
+ * - Empty or root path only (no `/extra/segments`)
+ * - No fragment
+ * - Each required parameter must appear exactly once
+ * - Unknown query parameters are rejected (callers that need to add
+ *   parameters must version the format or add them to the known-params set)
+ *
+ * This ensures old clients decline rather than silently misinterpret future
+ * extensions (e.g. the reserved `relay=` cross-community field).
  */
 export function parseEntityLink(url: string): EntityLinkParseResult {
   let parsed: URL;
@@ -108,6 +118,33 @@ export function parseEntityLink(url: string): EntityLinkParseResult {
   const host = parsed.hostname;
   if (host !== "pr" && host !== "issue" && host !== "repo") {
     return { ok: false, reason: "wrong-host" };
+  }
+
+  // Require empty/root path — path segments are reserved for future versioning.
+  if (parsed.pathname !== "" && parsed.pathname !== "/") {
+    return { ok: false, reason: "unexpected-path" };
+  }
+
+  // Reject fragments — not part of the canonical format.
+  if (parsed.hash) {
+    return { ok: false, reason: "unexpected-fragment" };
+  }
+
+  // Validate known params and reject unknown ones, and enforce single-instance.
+  const KNOWN_REPO_PARAMS = new Set(["owner", "d"]);
+  const KNOWN_EVENT_PARAMS = new Set(["id", "owner", "d"]);
+  const knownParams = host === "repo" ? KNOWN_REPO_PARAMS : KNOWN_EVENT_PARAMS;
+
+  for (const key of parsed.searchParams.keys()) {
+    if (!knownParams.has(key)) {
+      return { ok: false, reason: "unknown-param" };
+    }
+  }
+  for (const key of knownParams) {
+    const values = parsed.searchParams.getAll(key);
+    if (values.length > 1) {
+      return { ok: false, reason: "duplicate-param" };
+    }
   }
 
   const owner = parsed.searchParams.get("owner");
@@ -143,9 +180,15 @@ export function parseEntityLink(url: string): EntityLinkParseResult {
 }
 
 /**
- * Route id accepted by `/projects/$projectId` (`<owner-pubkey>:<dtag>`, see
- * `parseProjectRouteId` in `features/projects/hooks.ts`).
+ * Canonical NIP-34 repository coordinate (`30617:<owner>:<dtag>`) used as the
+ * route id for `/projects/$projectId`. Duncan's #4671 branch resolves 30617
+ * coordinates regardless of which explicit project contains the repository, so
+ * entity links remain stable when a repo's container project changes.
+ *
+ * Do NOT use the legacy `<owner>:<dtag>` form — it only matched implicit
+ * project cards and breaks for repos claimed by an explicit project with a
+ * different d-tag.
  */
 export function entityLinkProjectRouteId(link: ParsedEntityLink): string {
-  return `${link.owner}:${link.dtag}`;
+  return `30617:${link.owner}:${link.dtag}`;
 }

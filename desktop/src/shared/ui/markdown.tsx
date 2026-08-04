@@ -28,6 +28,7 @@ import {
 } from "@/shared/lib/linkPreview";
 import { useResolvedLinkPreviews } from "@/shared/lib/useResolvedLinkPreviews";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
+import { useRelayOrigin } from "@/shared/lib/useRelayOrigin";
 import { AttachmentGroup } from "@/shared/ui/attachment";
 import { ConfigNudgeCard } from "@/shared/ui/config-nudge-attachment";
 import { LinkPreviewAttachment } from "@/shared/ui/link-preview-attachment";
@@ -1293,6 +1294,7 @@ function createMarkdownComponents(
       onOpenEntityLink,
       onOpenMessageLink,
       onImportSnapshotFromUrl,
+      relayOrigin,
       snapshotSharedBy,
     } = useMarkdownRuntime();
     if (!interactive) {
@@ -1400,7 +1402,9 @@ function createMarkdownComponents(
     });
     if (entityAnchor) return entityAnchor;
 
-    const supportedLinkPreview = href ? parseSupportedLinkPreview(href) : null;
+    const supportedLinkPreview = href
+      ? parseSupportedLinkPreview(href, relayOrigin)
+      : null;
     const isLinearLink = supportedLinkPreview?.kind === "linear-issue";
 
     return (
@@ -1804,9 +1808,11 @@ function MarkdownInner({
     },
     [goChannel],
   );
+  const relayOrigin = useRelayOrigin();
   const linkPreviews = React.useMemo(
-    () => (interactive ? extractSupportedLinkPreviews(content) : []),
-    [content, interactive],
+    () =>
+      interactive ? extractSupportedLinkPreviews(content, relayOrigin) : [],
+    [content, interactive, relayOrigin],
   );
   const configNudge = React.useMemo(
     () => computeConfigNudge(content, interactive, configNudgeAuthorPubkey),
@@ -1821,6 +1827,7 @@ function MarkdownInner({
       onOpenChannel,
       onOpenEntityLink,
       onOpenMessageLink,
+      relayOrigin,
       snapshotSharedBy,
       onImportSnapshotFromUrl: (
         fileBytes: number[],
@@ -1839,6 +1846,7 @@ function MarkdownInner({
       onOpenChannel,
       onOpenEntityLink,
       onOpenMessageLink,
+      relayOrigin,
       snapshotSharedBy,
       goAgents,
     ],

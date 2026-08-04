@@ -22,6 +22,14 @@ const GOOGLE_FALLBACK_TITLES = new Set([
 ]);
 
 const titleCache = new Map<string, Promise<string | null> | string | null>();
+/**
+ * Generation counter incremented on every `resetLinkPreviewTitleCache` call.
+ * Each in-flight promise captures the generation at creation time and only
+ * writes back if no reset has happened since — preventing a resolved promise
+ * from a previous community from repopulating stale entries into the fresh
+ * cache of a new community.
+ */
+let cacheGeneration = 0;
 
 /**
  * Buzz entity titles come from relay events, so they are community-scoped —
@@ -29,6 +37,7 @@ const titleCache = new Map<string, Promise<string | null> | string | null>();
  * leaking titles across community switches.
  */
 export function resetLinkPreviewTitleCache(): void {
+  cacheGeneration += 1;
   titleCache.clear();
 }
 
@@ -40,20 +49,34 @@ function fetchLinkPreviewTitle(href: string): Promise<string | null> {
  * Resolve a Buzz PR/issue card title from the relay event's `subject` tag
  * (first content line as fallback — the same precedence the projects views
  * use).
+ *
+ * Security: the fetched event's canonical `a` tag must equal
+ * `30617:<owner>:<d>` from the link before we adopt its title. Without this
+ * check, a crafted link could pair the real title of a legitimate PR with an
+ * unrelated repository destination.
  */
 async function fetchBuzzEntityTitle(href: string): Promise<string | null> {
   const parsed = parseEntityLink(href);
   if (!parsed.ok || parsed.value.type === "repo") return null;
 
+  const { id, owner, dtag } = parsed.value;
+  const expectedCoordinate = `30617:${owner}:${dtag}`;
+
   const events = await relayClient.fetchEvents({
     kinds: [
       parsed.value.type === "pr" ? KIND_GIT_PULL_REQUEST : KIND_GIT_ISSUE,
     ],
-    ids: [parsed.value.id],
+    ids: [id],
     limit: 1,
   });
   const event = events[0];
   if (!event) return null;
+
+  // Verify the event belongs to the claimed repository coordinate.
+  const aTag = event.tags.find(
+    (tag) => tag[0] === "a" && tag[1] === expectedCoordinate,
+  );
+  if (!aTag) return null;
 
   const subject = event.tags.find((tag) => tag[0] === "subject")?.[1];
   return subject || event.content.split("\n")[0] || null;
@@ -84,13 +107,19 @@ function cacheTitle(preview: SupportedLinkPreview): Promise<string | null> {
   if (cached instanceof Promise) return cached;
   if (cached !== undefined) return Promise.resolve(cached);
 
+  const generation = cacheGeneration;
   const promise = resolveTitle(preview)
     .then((title) => {
-      titleCache.set(preview.href, title);
+      // Only write back if no community switch has happened since we started.
+      if (cacheGeneration === generation) {
+        titleCache.set(preview.href, title);
+      }
       return title;
     })
     .catch(() => {
-      titleCache.set(preview.href, null);
+      if (cacheGeneration === generation) {
+        titleCache.set(preview.href, null);
+      }
       return null;
     });
   titleCache.set(preview.href, promise);
@@ -139,7 +168,14 @@ export function useResolvedLinkPreviews(
     () =>
       previews.map((preview) => {
         const title = resolvedTitles[preview.href];
-        return title ? { ...preview, title } : preview;
+        // Only apply a relay-resolved title while the preview still has the
+        // fallback title (i.e. no markdown-label override). If the user edits
+        // a bare link into `[My label](same-link)`, `shouldResolveTitle`
+        // returns false and the label wins — the cached relay title is not
+        // applied to prevent it from silently overriding the explicit label.
+        return title && shouldResolveTitle(preview)
+          ? { ...preview, title }
+          : preview;
       }),
     [previews, resolvedTitles],
   );

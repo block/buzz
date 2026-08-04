@@ -341,8 +341,21 @@ const BUZZ_GIT_PATH_RE =
  * transport endpoint is not a browsable page, and the buzz:// href gives the
  * card the same in-app click navigation as explicit entity links (and
  * dedupes the two spellings of the same repository).
+ *
+ * Security: the URL origin must equal `activeRelayOrigin` (the currently
+ * connected relay). Path shape alone is not proof that a host belongs to the
+ * active Buzz relay — an arbitrary external URL sharing the path shape must
+ * remain an ordinary external link. Pass `null` when the relay origin is not
+ * yet resolved; the link stays external until it can be verified.
  */
-function parseBuzzGitLink(parsed: URL): SupportedLinkPreview | null {
+function parseBuzzGitLink(
+  parsed: URL,
+  activeRelayOrigin: string | null,
+): SupportedLinkPreview | null {
+  if (!activeRelayOrigin || parsed.origin !== activeRelayOrigin) {
+    return null;
+  }
+
   const match = BUZZ_GIT_PATH_RE.exec(parsed.pathname);
   if (!match) return null;
 
@@ -510,6 +523,7 @@ function parseGoogleDocsLink(parsed: URL): SupportedLinkPreview | null {
 /** Parse a supported external URL into a compact preview. */
 export function parseSupportedLinkPreview(
   href: string,
+  activeRelayOrigin?: string | null,
 ): SupportedLinkPreview | null {
   const candidate = trimUrlCandidate(href);
   if (isEntityLink(candidate)) {
@@ -530,7 +544,7 @@ export function parseSupportedLinkPreview(
   }
 
   return (
-    parseBuzzGitLink(parsed) ??
+    parseBuzzGitLink(parsed, activeRelayOrigin ?? null) ??
     parseGithubLink(parsed) ??
     parseLinearIssue(parsed) ??
     parseGoogleDriveLink(parsed) ??
@@ -541,16 +555,23 @@ export function parseSupportedLinkPreview(
 export function isSupportedLinkAutolinkLabel(
   label: string,
   preview: SupportedLinkPreview,
+  activeRelayOrigin?: string | null,
 ): boolean {
-  return parseSupportedLinkPreview(label)?.href === preview.href;
+  return (
+    parseSupportedLinkPreview(label, activeRelayOrigin)?.href === preview.href
+  );
 }
 
 function titleFromMarkdownLabel(
   label: string,
   preview: SupportedLinkPreview,
+  activeRelayOrigin: string | null,
 ): string | null {
   const title = label.replace(/\s+/g, " ").trim();
-  if (!title || isSupportedLinkAutolinkLabel(title, preview)) {
+  if (
+    !title ||
+    isSupportedLinkAutolinkLabel(title, preview, activeRelayOrigin)
+  ) {
     return null;
   }
   return title;
@@ -573,6 +594,7 @@ type LinkPreviewCandidate = {
 /** Extract supported link previews from message text, preserving first-seen order. */
 export function extractSupportedLinkPreviews(
   content: string,
+  activeRelayOrigin?: string | null,
 ): SupportedLinkPreview[] {
   const previews: SupportedLinkPreview[] = [];
   const seen = new Set<string>();
@@ -605,8 +627,9 @@ export function extractSupportedLinkPreviews(
 
   candidates.sort((a, b) => a.index - b.index || a.order - b.order);
 
+  const relayOrigin = activeRelayOrigin ?? null;
   for (const candidate of candidates) {
-    const preview = parseSupportedLinkPreview(candidate.href);
+    const preview = parseSupportedLinkPreview(candidate.href, relayOrigin);
     if (!preview || seen.has(preview.href)) continue;
 
     seen.add(preview.href);
@@ -614,7 +637,7 @@ export function extractSupportedLinkPreviews(
       withTitle(
         preview,
         candidate.label
-          ? titleFromMarkdownLabel(candidate.label, preview)
+          ? titleFromMarkdownLabel(candidate.label, preview, relayOrigin)
           : null,
       ),
     );

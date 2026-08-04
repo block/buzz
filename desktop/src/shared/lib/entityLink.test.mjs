@@ -96,10 +96,40 @@ test("isEntityLink matches entity hosts and excludes message links", () => {
   assert.equal(isEntityLink(null), false);
 });
 
-test("entityLinkProjectRouteId matches the /projects route id format", () => {
+test("entityLinkProjectRouteId emits the canonical 30617 coordinate route id", () => {
   const parsed = parseEntityLink(
     buildRepoLink({ owner: OWNER, dtag: "buzz-world" }),
   );
   assert.ok(parsed.ok);
-  assert.equal(entityLinkProjectRouteId(parsed.value), `${OWNER}:buzz-world`);
+  assert.equal(
+    entityLinkProjectRouteId(parsed.value),
+    `30617:${OWNER}:buzz-world`,
+  );
+});
+
+test("parseEntityLink rejects noncanonical extras", () => {
+  // Unexpected path segments — reserved for future versioning.
+  assert.deepEqual(
+    parseEntityLink(
+      `buzz://pr/ignored?id=${EVENT_ID}&owner=${OWNER}&d=buzz-world`,
+    ),
+    { ok: false, reason: "unexpected-path" },
+  );
+  // Fragment — not part of the canonical format.
+  assert.deepEqual(
+    parseEntityLink(`buzz://repo?owner=${OWNER}&d=buzz-world#section`),
+    { ok: false, reason: "unexpected-fragment" },
+  );
+  // Unknown query parameter — reject to preserve forward-compat posture.
+  assert.deepEqual(
+    parseEntityLink(
+      `buzz://repo?owner=${OWNER}&d=buzz-world&relay=wss%3A%2F%2Frelay.example`,
+    ),
+    { ok: false, reason: "unknown-param" },
+  );
+  // Duplicate required parameter — reject.
+  assert.deepEqual(
+    parseEntityLink(`buzz://repo?owner=${OWNER}&d=buzz-world&owner=${OWNER}`),
+    { ok: false, reason: "duplicate-param" },
+  );
 });
