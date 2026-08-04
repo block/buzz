@@ -96,7 +96,7 @@ test("image attachments can be marked and sent as hidden spoilers", async ({
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
-  await page.getByRole("button", { name: "Attach image" }).click();
+  await page.getByRole("button", { name: "Attach file" }).click();
 
   const composer = page.getByTestId("message-composer");
   await expect(composer.getByAltText("Attachment cccc")).toBeVisible();
@@ -137,7 +137,7 @@ test("text spoiler stays usable while attachment upload is pending", async ({
 
   // Kick off the (delayed) upload first — the attach button lives in the
   // passive toolbar, which is replaced while formatting is expanded.
-  await page.getByRole("button", { name: "Attach image" }).click();
+  await page.getByRole("button", { name: "Attach file" }).click();
 
   await page.getByRole("button", { name: "Toggle formatting" }).click();
   const spoilerButton = page.getByRole("button", {
