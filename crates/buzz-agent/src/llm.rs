@@ -410,7 +410,7 @@ fn anthropic_body(
                 messages.push(json!({ "role": "user",
                     "content": [{ "type": "text", "text": text }] }));
             }
-            HistoryItem::Assistant { text, tool_calls } => {
+            HistoryItem::Assistant { text, tool_calls, .. } => {
                 flush(&mut messages, &mut pending);
                 let mut content: Vec<Value> = Vec::new();
                 if !text.is_empty() {
@@ -502,7 +502,7 @@ fn openai_body(
                 flush_images(&mut messages, &mut pending_images);
                 messages.push(json!({ "role": "user", "content": text }));
             }
-            HistoryItem::Assistant { text, tool_calls } => {
+            HistoryItem::Assistant { text, tool_calls, reasoning } => {
                 flush_images(&mut messages, &mut pending_images);
                 let mut msg = serde_json::Map::new();
                 msg.insert("role".into(), json!("assistant"));
@@ -519,6 +519,12 @@ fn openai_body(
                         })
                         .collect();
                     msg.insert("tool_calls".into(), Value::Array(calls));
+                    // DeepSeek requires reasoning_content echoed back on assistant
+                    // messages that carry tool_calls, or it 400s.
+                    // https://api-docs.deepseek.com/guides/thinking_mode
+                    if !reasoning.is_empty() {
+                        msg.insert("reasoning_content".into(), json!(reasoning.as_str()));
+                    }
                 }
                 messages.push(Value::Object(msg));
             }
@@ -526,7 +532,9 @@ fn openai_body(
                 messages.push(json!({
                     "role": "tool", "tool_call_id": r.provider_id,
                     "content": openai_tool_text_content(&r.content) }));
-                pending_images.extend(openai_image_user_content(&r.content));
+                if cfg.supports_image_url {
+                    pending_images.extend(openai_image_user_content(&r.content));
+                }
             }
         }
     }
@@ -601,7 +609,7 @@ fn responses_body(
                 "role": "user",
                 "content": [{ "type": "input_text", "text": text }],
             })),
-            HistoryItem::Assistant { text, tool_calls } => {
+            HistoryItem::Assistant { text, tool_calls, .. } => {
                 if !text.is_empty() {
                     input.push(json!({
                         "role": "assistant",
@@ -636,7 +644,7 @@ fn responses_body(
                         ToolResultContent::Text(_) => None,
                     })
                     .collect();
-                if !images.is_empty() {
+                if cfg.supports_image_url && !images.is_empty() {
                     input.push(json!({ "role": "user", "content": images }));
                 }
             }
@@ -1264,6 +1272,7 @@ mod tests {
                     name: "dev__view_image".into(),
                     arguments: serde_json::json!({"source":"x.png"}),
                 }],
+                reasoning: String::new(),
             },
             HistoryItem::ToolResult(ToolResult {
                 provider_id: "toolu_1".into(),
@@ -1313,6 +1322,7 @@ mod tests {
                     name: "dev__shell".into(),
                     arguments: serde_json::json!({"command": "ls"}),
                 }],
+                reasoning: String::new(),
             },
             HistoryItem::ToolResult(ToolResult {
                 provider_id: "call_abc".into(),
@@ -1411,6 +1421,7 @@ mod tests {
                     name: "t".into(),
                     arguments: serde_json::json!({}),
                 }],
+                reasoning: String::new(),
             },
         ];
         let body = responses_body(&cfg_responses(), "system", &history, &[], "model", None);
@@ -1610,6 +1621,7 @@ mod tests {
                         arguments: serde_json::json!({"source": "b.png"}),
                     },
                 ],
+                reasoning: String::new(),
             },
             HistoryItem::ToolResult(ToolResult {
                 provider_id: "toolu_a".into(),

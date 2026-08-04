@@ -259,7 +259,7 @@ fn push_history_snippet(out: &mut String, item: &HistoryItem) {
             out.push_str(s);
             out.push('\n');
         }
-        HistoryItem::Assistant { text, tool_calls } => {
+        HistoryItem::Assistant { text, tool_calls, .. } => {
             out.push_str("[assistant] ");
             if !text.is_empty() {
                 out.push_str(text);

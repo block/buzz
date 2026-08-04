@@ -62,6 +62,7 @@ pub enum HistoryItem {
     Assistant {
         text: String,
         tool_calls: Vec<ToolCall>,
+        reasoning: String,
     },
     ToolResult(ToolResult),
 }

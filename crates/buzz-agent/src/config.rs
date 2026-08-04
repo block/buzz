@@ -723,6 +723,11 @@ pub struct Config {
     pub api_key: String,
     pub model: String,
     pub base_url: String,
+    /// When true, OpenAI-chat-compatible requests may include image_url content
+    /// parts in user messages (e.g. for multimodal providers). When false,
+    /// only text placeholder content is sent. Text-only providers such as
+    /// DeepSeek must set this to false to avoid 400s.
+    pub supports_image_url: bool,
     pub anthropic_api_version: String,
     /// OpenAI endpoint selection. See [`OpenAiApi`].
     pub openai_api: OpenAiApi,
@@ -823,6 +828,7 @@ impl Config {
             stop_max_rejections: parse_env("BUZZ_AGENT_STOP_MAX_REJECTIONS", 3u32)?,
             hook_servers: parse_hook_servers_env("MCP_HOOK_SERVERS"),
             hints_enabled: parse_env("BUZZ_AGENT_NO_HINTS", 0u8)? == 0,
+            supports_image_url: parse_env("BUZZ_AGENT_SUPPORTS_IMAGE_URL", 1u8)? != 0,
             thinking_effort: parse_thinking_effort(env("BUZZ_AGENT_THINKING_EFFORT").as_deref())?,
         };
         cfg.validate()?;
@@ -863,6 +869,7 @@ impl Config {
             stop_max_rejections: 0,
             hook_servers: HookServers::None,
             hints_enabled: false,
+            supports_image_url: true,
             thinking_effort: None,
         }
     }
