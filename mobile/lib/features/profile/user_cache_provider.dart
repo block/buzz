@@ -44,6 +44,11 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     _batchTimer ??= Timer(const Duration(milliseconds: 50), _flushPending);
   }
 
+  /// Replace a profile immediately after the current user publishes it.
+  void updateProfile(UserProfile profile) {
+    state = {...state, profile.pubkey.toLowerCase(): profile};
+  }
+
   void _scheduleFetch(String pubkey) {
     if (state.containsKey(pubkey) || _pending.contains(pubkey)) return;
     _pending.add(pubkey);
