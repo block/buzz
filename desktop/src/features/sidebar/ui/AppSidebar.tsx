@@ -45,6 +45,11 @@ import {
 } from "@/features/sidebar/ui/CustomChannelSection";
 import { CreateChannelDialog } from "@/features/sidebar/ui/CreateChannelDialog";
 import { SidebarProfileCard } from "@/features/sidebar/ui/SidebarProfileCard";
+import { HuddleProfileControl } from "@/features/huddle";
+import type {
+  CollapsibleSidebarGroup,
+  CreateChannelKind,
+} from "@/features/sidebar/ui/AppSidebar.types";
 import { SidebarRelayConnectionCard } from "@/features/sidebar/ui/SidebarRelayConnectionCard";
 import type { useSidebarRelayConnectionCard } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
 import {
@@ -73,14 +78,6 @@ import {
   SidebarRail,
   useSidebar,
 } from "@/shared/ui/sidebar";
-
-type CollapsibleSidebarGroup =
-  | "starred"
-  | "channels"
-  | "forums"
-  | "directMessages";
-
-type CreateChannelKind = "stream" | "forum";
 
 type AppSidebarProps = {
   addCommunityPrefill?: AddCommunityPrefillRequest | null;
@@ -166,6 +163,8 @@ type AppSidebarProps = {
   onNewMessage: () => void;
   onBackgroundClick?: () => void;
   isCreateChannelOpen?: boolean;
+  isHuddleCompanionOpen?: boolean;
+  onHuddleEnded?: (ephemeralChannelId: string | null) => void;
   onCreateChannelOpenChange?: (open: boolean) => void;
   mutedChannelIds?: ReadonlySet<string>;
   onMuteChannel?: (channelId: string) => void;
@@ -229,6 +228,8 @@ export function AppSidebar({
   isPresencePending,
   onNewMessage,
   isCreateChannelOpen: isCreateChannelOpenProp,
+  isHuddleCompanionOpen = false,
+  onHuddleEnded,
   onCreateChannelOpenChange,
   mutedChannelIds,
   onMuteChannel,
@@ -551,7 +552,7 @@ export function AppSidebar({
 
   return (
     <Sidebar
-      className="!border-r-0"
+      className="!z-[100] !border-r-0"
       collapsible="offcanvas"
       data-testid="app-sidebar"
       onClick={(event) => {
@@ -888,6 +889,11 @@ export function AppSidebar({
                 />
               </div>
             ) : null}
+            <HuddleProfileControl
+              channels={channels}
+              onHuddleEnded={onHuddleEnded}
+              visible={isHuddleCompanionOpen}
+            />
             <SidebarMenu>
               <SidebarMenuItem>
                 <SidebarProfileCard

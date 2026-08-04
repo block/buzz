@@ -36,6 +36,8 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/shared/ui/sidebar";
+import { ChannelActivityPopover } from "@/features/sidebar/ui/ChannelActivityPopover";
+import { useAppShell } from "@/app/AppShellContext";
 
 const SECTION_LABEL_BUTTON_CLASS =
   "group/section-label flex w-fit max-w-[calc(100%-3rem)] cursor-pointer appearance-none items-center gap-1 text-left transition-colors hover:text-sidebar-foreground focus-visible:text-sidebar-foreground";
@@ -138,7 +140,8 @@ function ChannelWorkingBadge({
   return (
     <span
       className={cn(
-        "hidden max-w-32 shrink-0 truncate rounded-full px-1.5 py-0.5 text-2xs font-medium leading-none tabular-nums motion-safe:animate-pulse group-data-[collapsible=icon]:hidden sm:inline-flex",
+        "max-w-32 shrink-0 truncate rounded-full px-1.5 py-0.5 text-2xs font-medium leading-none tabular-nums motion-safe:animate-pulse group-data-[collapsible=icon]:hidden",
+        "hidden sm:inline-flex",
         isActive
           ? "bg-sidebar-active-foreground/20 text-sidebar-active-foreground"
           : "bg-primary/10 text-primary",
@@ -250,7 +253,6 @@ export function ChannelMenuButton({
   label,
   isActive,
   hasUnread,
-  unreadCount = 0,
   activeWorking,
   isMuted,
   dmParticipants,
@@ -270,17 +272,37 @@ export function ChannelMenuButton({
 }) {
   const resolvedLabel = label ?? channel.name;
   const ephemeralDisplay = getEphemeralChannelDisplay(channel);
+  const {
+    hasSidebarUnreadProjections,
+    topLevelUnreadChannelIds,
+    unreadThreadChannelIds,
+  } = useAppShell();
+  const hasTopLevelUnread =
+    channel.channelType === "dm"
+      ? hasUnread
+      : hasSidebarUnreadProjections
+        ? topLevelUnreadChannelIds.has(channel.id)
+        : hasUnread;
+  const hasThreadUnread =
+    channel.channelType !== "dm" &&
+    (hasSidebarUnreadProjections
+      ? unreadThreadChannelIds.has(channel.id)
+      : hasUnread);
 
-  return (
+  const button = (
     <SidebarMenuButton
       className={cn(
         isActive
           ? "group-hover/menu-item:bg-sidebar-active group-hover/menu-item:text-sidebar-active-foreground"
           : "group-hover/menu-item:bg-sidebar-accent group-hover/menu-item:text-sidebar-accent-foreground",
         !isActive &&
-          hasUnread &&
+          hasTopLevelUnread &&
           "font-semibold text-sidebar-foreground hover:text-sidebar-foreground",
-        !isActive && isMuted && !hasUnread && "opacity-50",
+        !isActive &&
+          isMuted &&
+          !hasTopLevelUnread &&
+          !hasThreadUnread &&
+          "opacity-50",
       )}
       data-channel-id={channel.id}
       data-testid={`channel-${channel.name}`}
@@ -321,18 +343,20 @@ export function ChannelMenuButton({
           )}
         />
       ) : null}
-      {hasUnread && !isActive && channel.channelType !== "dm" ? (
-        unreadCount > 0 ? (
-          <UnreadCountBadge
-            channelName={channel.name}
-            className="ml-auto"
-            count={unreadCount}
-          />
-        ) : (
-          <UnreadDotBadge channelName={channel.name} className="ml-auto" />
-        )
+      {hasThreadUnread ? (
+        <UnreadDotBadge channelName={channel.name} className="ml-auto" />
       ) : null}
     </SidebarMenuButton>
+  );
+
+  if (!activeWorking && !hasThreadUnread) {
+    return button;
+  }
+
+  return (
+    <ChannelActivityPopover activeWorking={activeWorking} channel={channel}>
+      {button}
+    </ChannelActivityPopover>
   );
 }
 
