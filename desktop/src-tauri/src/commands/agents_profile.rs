@@ -30,6 +30,24 @@ pub(crate) struct ProfileReconcileData {
     pub(crate) persona_id: Option<String>,
 }
 
+impl ProfileReconcileData {
+    pub(crate) fn from_record(
+        record: &crate::managed_agents::ManagedAgentRecord,
+        personas: &[crate::managed_agents::AgentDefinition],
+    ) -> Self {
+        Self {
+            private_key_nsec: record.private_key_nsec.clone(),
+            name: record.name.clone(),
+            relay_url: record.relay_url.clone(),
+            avatar_url: record.avatar_url.clone(),
+            auth_tag: record.auth_tag.clone(),
+            pubkey: record.pubkey.clone(),
+            agent_command: crate::managed_agents::record_agent_command(record, personas),
+            persona_id: record.persona_id.clone(),
+        }
+    }
+}
+
 /// Resolve the avatar to backfill for a legacy agent record (pre-PR-921, no
 /// stored `avatar_url`).
 ///
@@ -49,37 +67,71 @@ pub(super) fn resolve_legacy_avatar(
         .unwrap_or_default()
 }
 
-/// Reconcile an agent's kind:0 profile on the relay.
+/// Reconcile an agent's kind:0 profile on its legacy effective relay.
 ///
-/// Queries the relay for the agent's existing profile and re-publishes if missing
-/// or stale (display_name or picture mismatch). This is fire-and-forget — errors
-/// are returned to the caller for logging but never block agent startup.
-///
-/// For legacy records (pre-PR-921) where `avatar_url` is `None`, this function
-/// backfills via `resolve_legacy_avatar` — preferring the persona record's avatar
-/// over the relay's `picture`, since the old code may have corrupted the relay
-/// profile — and persists the updated record. After backfill, normal
-/// reconciliation proceeds.
-///
-/// Query and publish target the relay returned by `effective_agent_relay_url`
-/// for every agent regardless of backend: an explicit per-agent `relay_url`
-/// wins, and a blank one falls back to the active workspace relay. This keeps
-/// reconciliation following the session's relay for never-pinned agents while
-/// honoring a deliberate pin wherever it points.
+/// UI-start and legacy restore callers still use the record/workspace relay
+/// selection. Pair-scoped runtime reconciliation must instead call
+/// [`reconcile_agent_profile_at_relay`] with the community relay explicitly.
 pub(crate) async fn reconcile_agent_profile(
     state: &AppState,
     app: &AppHandle,
     agent_pubkey: &str,
     data: &ProfileReconcileData,
 ) -> Result<(), String> {
-    use crate::relay::{query_agent_profile, sync_managed_agent_profile};
-
-    // An explicit per-agent relay wins; an empty one falls back to the active
-    // workspace relay. Resolved once and used for both the read and write-back.
     let relay_url = crate::relay::effective_agent_relay_url(
         &data.relay_url,
         &relay_ws_url_with_override(state),
     );
+    reconcile_agent_profile_at_relay(state, app, agent_pubkey, &relay_url, data, true).await
+}
+
+pub(super) fn profile_query_uses_agent_keys(auth_tag: Option<&str>) -> bool {
+    auth_tag.is_some()
+}
+
+pub(super) fn validate_profile_relay(relay_url: &str) -> Result<String, String> {
+    let relay_url = relay_url.trim().trim_end_matches('/');
+    let parsed = reqwest::Url::parse(relay_url).map_err(|e| format!("invalid relay URL: {e}"))?;
+    if parsed.scheme() != "ws" && parsed.scheme() != "wss" {
+        return Err("relay URL must use ws or wss".into());
+    }
+    if parsed.host().is_none() || !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("invalid relay URL authority".into());
+    }
+    let scheme_len = relay_url
+        .find("://")
+        .ok_or_else(|| "relay URL must include a scheme".to_string())?;
+    let mut normalized = relay_url.to_string();
+    normalized.replace_range(..scheme_len, parsed.scheme());
+    Ok(normalized)
+}
+
+/// Reconcile an agent's kind:0 profile on one explicit relay.
+///
+/// Queries that relay for the agent's existing profile and re-publishes if
+/// missing or stale (display_name or picture mismatch). Errors are returned to
+/// the caller so a multi-relay caller can isolate failures without blocking the
+/// remaining relays or agent startup.
+///
+/// For legacy records (pre-PR-921) where `avatar_url` is `None`, this function
+/// resolves the expected avatar via `resolve_legacy_avatar`. Callers on the
+/// agent's legacy effective relay may opt into persisting that backfill. Relay
+/// fan-out callers must not persist it: concurrent destination-relay reads can
+/// disagree, and a relay-local result is not authoritative for the single
+/// stored agent record.
+pub(crate) async fn reconcile_agent_profile_at_relay(
+    state: &AppState,
+    app: &AppHandle,
+    agent_pubkey: &str,
+    relay_url: &str,
+    data: &ProfileReconcileData,
+    persist_legacy_avatar: bool,
+) -> Result<(), String> {
+    use crate::relay::{
+        query_agent_profile, query_agent_profile_with_keys, sync_managed_agent_profile,
+    };
+
+    let relay_url = validate_profile_relay(relay_url)?;
 
     if !state
         .managed_agent_profile_reconcile_enabled
@@ -88,8 +140,30 @@ pub(crate) async fn reconcile_agent_profile(
         return Ok(());
     }
 
-    // Query the relay for the agent's existing kind:0 profile.
-    let existing = query_agent_profile(state, &relay_url, agent_pubkey).await?;
+    let agent_keys = if profile_query_uses_agent_keys(data.auth_tag.as_deref()) {
+        Some(
+            Keys::parse(&data.private_key_nsec)
+                .map_err(|e| format!("failed to parse agent keys: {e}"))?,
+        )
+    } else {
+        None
+    };
+
+    // NIP-OA agents query as themselves with owner delegation. Pre-NIP-OA
+    // records have no auth tag and retain the legacy owner-authenticated read:
+    // on closed relays the owner may be admitted while the old agent is not.
+    let existing = if let Some(agent_keys) = agent_keys.as_ref() {
+        query_agent_profile_with_keys(
+            state,
+            &relay_url,
+            agent_pubkey,
+            agent_keys,
+            data.auth_tag.as_deref(),
+        )
+        .await?
+    } else {
+        query_agent_profile(state, &relay_url, agent_pubkey).await?
+    };
 
     // Resolve the expected avatar — backfilling for legacy records that have no
     // stored avatar_url yet.
@@ -113,8 +187,10 @@ pub(crate) async fn reconcile_agent_profile(
                 &data.agent_command,
             );
 
-            // Persist the backfilled avatar so this migration only runs once.
-            if !backfilled.is_empty() {
+            // Only the legacy single-relay path may persist this migration.
+            // Fan-out tasks can observe different relay-local pictures and must
+            // not race to update the one global agent record.
+            if persist_legacy_avatar && !backfilled.is_empty() {
                 let _store_guard = state
                     .managed_agents_store_lock
                     .lock()
@@ -140,8 +216,11 @@ pub(crate) async fn reconcile_agent_profile(
         return Ok(());
     }
 
-    let agent_keys = Keys::parse(&data.private_key_nsec)
-        .map_err(|e| format!("failed to parse agent keys: {e}"))?;
+    let agent_keys = match agent_keys {
+        Some(keys) => keys,
+        None => Keys::parse(&data.private_key_nsec)
+            .map_err(|e| format!("failed to parse agent keys: {e}"))?,
+    };
 
     if !state
         .managed_agent_profile_reconcile_enabled
