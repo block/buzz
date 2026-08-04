@@ -125,6 +125,90 @@ test("lost boot offers phone recovery with a single-use QR", async ({
   ).toBe(true);
 });
 
+test("phone recovery uses the desktop pairing card semantics", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    { identityLost: true },
+    { skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  const card = page.getByTestId("identity-recovery-pairing");
+  const qrContainer = card.getByTestId("identity-recovery-qr-container");
+  const qrCode = card.getByTestId("identity-recovery-qr");
+  const copyButton = card.getByTestId("copy-identity-recovery-code");
+  await expect(qrCode).toBeVisible();
+  await expect(qrCode).toHaveAttribute("data-qr-matrix-size", "57");
+  await expect(qrCode.locator("[data-qr-finder-pattern]")).toHaveCount(3);
+  await expect(qrCode.locator(".buzz-qr-cell-reveal").first()).toHaveCSS(
+    "animation-name",
+    "buzz-qr-cell-reveal",
+  );
+  const qrBox = await qrContainer.boundingBox();
+  const copyBox = await copyButton.boundingBox();
+  expect(qrBox).not.toBeNull();
+  expect(copyBox).not.toBeNull();
+  expect(Math.abs((copyBox?.x ?? 0) - (qrBox?.x ?? 0))).toBeLessThan(0.5);
+  expect(Math.abs((copyBox?.width ?? 0) - (qrBox?.width ?? 0))).toBeLessThan(
+    0.5,
+  );
+
+  await page.evaluate(async () => {
+    await window.__TAURI_INTERNALS__?.invoke?.("plugin:event|emit", {
+      event: "pairing-sas-received",
+      payload: { sas: "123456" },
+    });
+  });
+
+  await expect(
+    card.getByText("Verify this code matches your mobile device"),
+  ).toBeVisible();
+  await expect(card.getByTestId("identity-recovery-sas")).toHaveText("123 456");
+  await expect(card.getByTestId("confirm-identity-recovery-sas")).toHaveText(
+    "Codes match",
+  );
+  await expect(card.getByTestId("deny-identity-recovery-sas")).toHaveText(
+    "Cancel",
+  );
+});
+
+test("canceling recovery uses the standard pairing cancellation state", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    { identityLost: true },
+    { skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await expect(page.getByTestId("identity-recovery-qr")).toBeVisible();
+
+  await page.evaluate(async () => {
+    await window.__TAURI_INTERNALS__?.invoke?.("plugin:event|emit", {
+      event: "pairing-sas-received",
+      payload: { sas: "123456" },
+    });
+  });
+  await page.getByTestId("deny-identity-recovery-sas").click();
+
+  await expect(
+    page.getByText("The codes didn't match. Pairing was canceled."),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Try again" })).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).filter(
+            ({ command }) => command === "cancel_pairing",
+          ).length,
+      ),
+    )
+    .toBeGreaterThan(0);
+});
+
 test("phone recovery continues to harness setup without creating or restarting", async ({
   page,
 }) => {

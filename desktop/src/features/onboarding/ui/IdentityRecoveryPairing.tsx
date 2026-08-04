@@ -6,6 +6,8 @@ import {
   LoaderCircle,
   RefreshCw,
   ShieldCheck,
+  TriangleAlert,
+  X,
 } from "lucide-react";
 
 import { cancelPairing, confirmPairingSas } from "@/shared/api/tauri";
@@ -123,6 +125,13 @@ export function IdentityRecoveryPairing({
     }
   }
 
+  async function deny() {
+    active.current = false;
+    await cancelPairing().catch(() => {});
+    setError("The codes didn't match. Pairing was canceled.");
+    setStep("error");
+  }
+
   async function confirm() {
     setStep("receiving");
     try {
@@ -142,63 +151,90 @@ export function IdentityRecoveryPairing({
 
   return (
     <div
-      className="mb-4 flex w-full max-w-[520px] flex-col items-center rounded-3xl border border-foreground/15 bg-background/55 p-4"
+      className="mb-4 flex w-fit max-w-full flex-col items-stretch gap-3 rounded-xl border border-foreground/15 bg-background/55 p-4"
       data-testid="identity-recovery-pairing"
     >
-      <div className="flex min-h-[220px] min-w-[220px] items-center justify-center rounded-2xl bg-white p-3">
+      <div
+        className="flex min-h-[266px] w-[266px] shrink-0 items-center justify-center rounded-lg border border-border/70 bg-white p-3"
+        data-testid="identity-recovery-qr-container"
+      >
         {step === "qr" && qrUri ? (
           <StyledQrCode
+            animate
             centerImageSrc="/app-icon@2x.png"
             data-testid="identity-recovery-qr"
-            size={196}
+            size={240}
             title="Desktop identity recovery QR code"
             value={qrUri}
           />
         ) : step === "sas" && sas ? (
-          <div className="flex flex-col items-center gap-4 text-foreground">
-            <ShieldCheck className="h-10 w-10" />
-            <p
-              className="font-mono text-4xl font-bold tracking-[0.25em]"
-              data-testid="identity-recovery-sas"
-            >
-              {sas.slice(0, 3)} {sas.slice(3)}
+          <div className="flex max-w-60 flex-col items-center gap-3 py-2 text-center text-foreground">
+            <ShieldCheck className="h-10 w-10 text-primary" />
+            <p className="text-sm font-medium">
+              Verify this code matches your mobile device
             </p>
-            <Button onClick={() => void confirm()}>
-              <Check className="mr-2 h-4 w-4" />
-              Codes match
-            </Button>
+            <div className="rounded-xl border-2 border-primary/30 bg-primary/5 px-5 py-3">
+              <p
+                className="font-mono text-3xl font-bold tracking-[0.25em]"
+                data-testid="identity-recovery-sas"
+              >
+                {sas.slice(0, 3)} {sas.slice(3)}
+              </p>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Your phone is about to transfer your Buzz identity to this
+              desktop. Only confirm if you initiated this pairing.
+            </p>
+            <div className="flex w-full gap-2">
+              <Button
+                className="flex-1"
+                data-testid="deny-identity-recovery-sas"
+                onClick={() => void deny()}
+                variant="outline"
+              >
+                <X className="mr-1.5 h-4 w-4" />
+                Cancel
+              </Button>
+              <Button
+                className="flex-1"
+                data-testid="confirm-identity-recovery-sas"
+                onClick={() => void confirm()}
+              >
+                <Check className="mr-1.5 h-4 w-4" />
+                Codes match
+              </Button>
+            </div>
           </div>
         ) : step === "done" ? (
           <div className="flex flex-col items-center gap-3 text-foreground">
-            <Check className="h-10 w-10" />
-            <p>Identity received securely</p>
+            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-green-100 dark:bg-green-900/30">
+              <Check className="h-6 w-6 text-green-600 dark:text-green-400" />
+            </div>
+            <p className="text-sm font-medium">Identity received securely</p>
           </div>
         ) : step === "error" ? (
-          <div className="max-w-52 text-center text-foreground">
+          <div className="flex max-w-52 flex-col items-center gap-3 text-center text-foreground">
+            <TriangleAlert className="h-6 w-6 text-destructive" />
             <p className="text-sm text-destructive">{error}</p>
-            <Button
-              className="mt-4"
-              onClick={() => void start()}
-              variant="outline"
-            >
-              <RefreshCw className="mr-2 h-4 w-4" />
+            <Button onClick={() => void start()} size="sm" variant="outline">
+              <RefreshCw className="mr-1.5 h-4 w-4" />
               Try again
             </Button>
           </div>
         ) : (
           <div className="flex flex-col items-center gap-3 text-foreground">
-            <LoaderCircle className="h-7 w-7 animate-spin" />
-            <p className="text-sm">
+            <LoaderCircle className="h-6 w-6 animate-spin text-muted-foreground" />
+            <p className="text-sm text-muted-foreground">
               {step === "receiving"
-                ? "Waiting for your phone to send…"
-                : "Creating secure code…"}
+                ? "Receiving identity from mobile device..."
+                : "Starting pairing..."}
             </p>
           </div>
         )}
       </div>
       {step === "qr" && qrUri ? (
         <Button
-          className="mt-3"
+          className="w-full"
           data-testid="copy-identity-recovery-code"
           onClick={() => void copyPairingCode()}
           size="sm"
@@ -206,21 +242,23 @@ export function IdentityRecoveryPairing({
           variant="outline"
         >
           {copied ? (
-            <Check className="mr-2 h-4 w-4" />
+            <Check className="mr-1.5 h-4 w-4" />
           ) : (
-            <Copy className="mr-2 h-4 w-4" />
+            <Copy className="mr-1.5 h-4 w-4" />
           )}
           {copied ? "Copied" : "Copy pairing code"}
         </Button>
       ) : null}
       {step === "qr" && error ? (
-        <p className="mt-2 text-xs text-destructive">{error}</p>
+        <p className="max-w-[266px] text-center text-xs text-destructive">
+          {error}
+        </p>
       ) : null}
-      <p className="mt-3 max-w-md text-sm leading-5 text-foreground/75">
+      <p className="max-w-[266px] text-sm leading-5 text-foreground/75">
         On your phone, open Settings → Send identity to desktop. This code
         expires shortly and works once.
       </p>
-      <p className="mt-1 max-w-md text-xs leading-4 text-foreground/65">
+      <p className="max-w-[266px] text-xs leading-4 text-foreground/65">
         Your phone will grant this desktop permanent access to your full Buzz
         identity. Only approve a desktop you trust and verify the six-digit code
         on both screens.
