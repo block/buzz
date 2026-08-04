@@ -9,6 +9,7 @@ import {
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
 import type { ProjectRepoCommit, ProjectRepoDiff } from "@/shared/api/types";
+import { withClockOptions } from "@/shared/lib/timeFormat";
 import { CopyCommitHashButton } from "./ProjectCommitCopyButton";
 import { PROJECT_DETAIL_PANEL_CLASS } from "./projectPanelStyles";
 import { ProfileIdentityButton } from "./ProjectProfileIdentity";
@@ -16,10 +17,13 @@ import { ProjectDiffFilesPanel } from "./ProjectPullRequestFilesChangedPanel";
 import { ProjectRichContent } from "./ProjectRichContent";
 
 function commitDateLabel(timestamp: number) {
-  return new Date(timestamp * 1_000).toLocaleString(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  });
+  return new Date(timestamp * 1_000).toLocaleString(
+    undefined,
+    withClockOptions({
+      dateStyle: "medium",
+      timeStyle: "short",
+    }),
+  );
 }
 
 /**

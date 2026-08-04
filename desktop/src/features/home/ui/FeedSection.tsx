@@ -18,12 +18,20 @@ import {
   KIND_REMINDER,
 } from "@/shared/constants/kinds";
 import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
+import { createClockFormatter } from "@/shared/lib/timeFormat";
 import { Button } from "@/shared/ui/button";
 import { Markdown } from "@/shared/ui/markdown";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 const relativeTimeFormatter = new Intl.RelativeTimeFormat("en-US", {
   numeric: "auto",
+});
+
+const formatAbsoluteFeedTime = createClockFormatter("en-US", {
+  month: "short",
+  day: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
 });
 
 function formatRelativeTime(unixSeconds: number) {
@@ -49,12 +57,7 @@ function formatRelativeTime(unixSeconds: number) {
     );
   }
 
-  return new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(new Date(unixSeconds * 1_000));
+  return formatAbsoluteFeedTime(new Date(unixSeconds * 1_000));
 }
 
 function feedHeadline(item: FeedItem) {

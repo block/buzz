@@ -11,6 +11,7 @@ import {
   isProjectInboxItem,
 } from "@/features/home/lib/projectInbox";
 import type { TimelineReaction } from "@/features/messages/types";
+import { createClockFormatter } from "@/shared/lib/timeFormat";
 import type {
   Channel,
   FeedItem,
@@ -103,12 +104,12 @@ export type InboxGroup = {
 
 type InboxChannel = Pick<Channel, "channelType" | "id" | "name">;
 
-const listTimeFormatter = new Intl.DateTimeFormat("en-US", {
+const formatListTime = createClockFormatter("en-US", {
   hour: "numeric",
   minute: "2-digit",
 });
 
-const fullTimeFormatter = new Intl.DateTimeFormat("en-US", {
+const formatFullTime = createClockFormatter("en-US", {
   month: "short",
   day: "numeric",
   year: "numeric",
@@ -450,7 +451,7 @@ function formatInboxTimestamp(unixSeconds: number) {
   const dayDiff = diffInDays(now, date);
 
   if (dayDiff === 0) {
-    return listTimeFormatter.format(date);
+    return formatListTime(date);
   }
 
   if (dayDiff === 1) {
@@ -465,7 +466,7 @@ function formatInboxTimestamp(unixSeconds: number) {
 }
 
 export function formatInboxFullTimestamp(unixSeconds: number) {
-  return fullTimeFormatter.format(new Date(unixSeconds * 1_000));
+  return formatFullTime(new Date(unixSeconds * 1_000));
 }
 
 export function relayEventFromFeedItem(item: FeedItem): RelayEvent {

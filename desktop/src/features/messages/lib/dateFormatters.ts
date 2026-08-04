@@ -1,22 +1,28 @@
 /**
  * Shared date/time formatters for the message timeline.
  *
- * - `formatTime` — short clock time ("2:34 PM"), used in message rows.
+ * - `formatTime` — short clock time ("2:34 PM", or "14:34" on a 24-hour clock),
+ *   used in message rows.
  * - `formatFullDateTime` — verbose string for tooltips
  *   ("Wednesday, April 2, 2026 at 2:34 PM").
  * - `formatDayHeading` — label for day dividers / sticky headers.
  *   Returns "Today", "Yesterday", or a date like "Monday, March 31st".
  * - `isSameDay` — compare two unix-second timestamps.
+ *
+ * Clock-bearing formatters follow the Appearance → Clock preference; see
+ * `@/shared/lib/timeFormat`.
  */
 
-const TIME_FORMATTER = new Intl.DateTimeFormat("en-US", {
+import { createClockFormatter } from "@/shared/lib/timeFormat";
+
+const formatClockTime = createClockFormatter("en-US", {
   hour: "numeric",
   minute: "2-digit",
 });
 
 const DAY_PERIOD_SUFFIX_RE = /[\s\u00a0\u202f]*(?:AM|PM)$/i;
 
-const FULL_DATE_TIME_FORMATTER = new Intl.DateTimeFormat("en-US", {
+const formatFullClockDateTime = createClockFormatter("en-US", {
   weekday: "long",
   year: "numeric",
   month: "long",
@@ -37,19 +43,22 @@ const SHORT_MONTH_FORMATTER = new Intl.DateTimeFormat("en-US", {
   month: "short",
 });
 
-/** Short clock time, e.g. "2:34 PM". */
+/** Short clock time, e.g. "2:34 PM" — or "14:34" on a 24-hour clock. */
 export function formatTime(unixSeconds: number): string {
-  return TIME_FORMATTER.format(new Date(unixSeconds * 1_000));
+  return formatClockTime(new Date(unixSeconds * 1_000));
 }
 
-/** Short clock time with the AM/PM marker removed, e.g. "2:34". */
+/**
+ * Short clock time with the AM/PM marker removed, e.g. "2:34". A 24-hour clock
+ * has no marker to strip, so such times pass through unchanged.
+ */
 export function formatTimeWithoutDayPeriod(time: string): string {
   return time.replace(DAY_PERIOD_SUFFIX_RE, "").trim();
 }
 
 /** Full date + time for tooltips, e.g. "Wednesday, April 2, 2026 at 2:34 PM". */
 export function formatFullDateTime(unixSeconds: number): string {
-  return FULL_DATE_TIME_FORMATTER.format(new Date(unixSeconds * 1_000));
+  return formatFullClockDateTime(new Date(unixSeconds * 1_000));
 }
 
 /**

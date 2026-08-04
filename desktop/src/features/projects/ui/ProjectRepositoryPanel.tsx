@@ -32,6 +32,7 @@ import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { UserSearchResult } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { withClockOptions } from "@/shared/lib/timeFormat";
 import { SyntaxHighlightedCode } from "@/shared/ui/markdown";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import {
@@ -51,12 +52,15 @@ function pluralize(count: number, singular: string) {
 
 export function formatLastChangedAt(timestamp: number | null) {
   if (!timestamp) return "—";
-  return new Date(timestamp * 1_000).toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
+  return new Date(timestamp * 1_000).toLocaleString(
+    undefined,
+    withClockOptions({
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    }),
+  );
 }
 
 function formatFileSize(size: number | null) {

@@ -38,6 +38,12 @@ import {
   type ThreadViewMode,
 } from "@/features/channels/lib/threadViewModePreference";
 import { cn } from "@/shared/lib/cn";
+import {
+  resolvesToHour12,
+  setTimeFormatPreference,
+  useTimeFormatPreference,
+  type TimeFormatPreference,
+} from "@/shared/lib/timeFormat";
 import { Button } from "@/shared/ui/button";
 import {
   DropdownMenu,
@@ -655,8 +661,102 @@ function ThemeSettingsCard() {
         </AnimatePresence>
       )}
 
+      <ClockFormatSetting />
       <ThreadLayoutSetting />
     </section>
+  );
+}
+
+const TIME_FORMAT_OPTIONS: {
+  value: TimeFormatPreference;
+  label: string;
+  description: string;
+}[] = [
+  {
+    value: "system",
+    label: "System",
+    description: "Match this device's clock",
+  },
+  {
+    value: "12-hour",
+    label: "12-hour",
+    description: "Times read like 1:30 PM",
+  },
+  {
+    value: "24-hour",
+    label: "24-hour",
+    description: "Times read like 13:30",
+  },
+];
+
+/**
+ * Clock picker: 12-hour or 24-hour times across the app — message rows, inbox
+ * labels, agent transcripts, project panels, search results. Mirrors
+ * {@link ThreadLayoutSetting}'s dropdown radio group so both Appearance rows
+ * share one vocabulary.
+ */
+function ClockFormatSetting() {
+  const timeFormatPreference = useTimeFormatPreference();
+  const activeOption =
+    TIME_FORMAT_OPTIONS.find(
+      (option) => option.value === timeFormatPreference,
+    ) ?? TIME_FORMAT_OPTIONS[0];
+
+  // "System" is otherwise opaque — say which clock this device resolves to.
+  const systemClockLabel = resolvesToHour12("system") ? "12-hour" : "24-hour";
+  const description =
+    timeFormatPreference === "system"
+      ? `Match this device's clock — ${systemClockLabel} here`
+      : activeOption.description;
+
+  return (
+    <SettingsOptionGroup className="mt-8">
+      <SettingsOptionRow>
+        <div className="min-w-0">
+          <p className="text-sm font-medium">Clock</p>
+          <p className="text-sm font-normal text-muted-foreground">
+            {description}
+          </p>
+        </div>
+        <DropdownMenu modal={false}>
+          <DropdownMenuTrigger asChild>
+            <Button
+              className="h-7 min-w-28 justify-between gap-1.5 rounded-full border border-border/50 bg-muted/45 px-2.5 text-xs font-medium text-foreground shadow-none hover:bg-muted/70"
+              data-testid="clock-format-trigger"
+              size="sm"
+              type="button"
+              variant="ghost"
+            >
+              <span className="truncate">{activeOption.label}</span>
+              <ChevronDown className="h-4 w-4 text-muted-foreground" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="min-w-72">
+            <DropdownMenuRadioGroup
+              onValueChange={(next) =>
+                setTimeFormatPreference(next as TimeFormatPreference)
+              }
+              value={timeFormatPreference}
+            >
+              {TIME_FORMAT_OPTIONS.map((option) => (
+                <DropdownMenuRadioItem
+                  data-testid={`clock-format-${option.value}`}
+                  key={option.value}
+                  value={option.value}
+                >
+                  <span className="flex min-w-0 flex-col">
+                    <span className="font-medium">{option.label}</span>
+                    <span className="text-2xs text-muted-foreground">
+                      {option.description}
+                    </span>
+                  </span>
+                </DropdownMenuRadioItem>
+              ))}
+            </DropdownMenuRadioGroup>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </SettingsOptionRow>
+    </SettingsOptionGroup>
   );
 }
 
