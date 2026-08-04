@@ -13,6 +13,31 @@ import '../profile/profile_provider.dart';
 import 'channel.dart';
 import 'channels_provider.dart';
 
+String _relayErrorMessage(Object error) =>
+    error.toString().replaceFirst('Exception: ', '');
+
+/// Raised when one or more kind:9000 adds were rejected, keyed by pubkey.
+///
+/// Callers surface [message] to the user — a relay rejection here (e.g. a plain
+/// member trying to add someone to a private channel) is a real outcome, not a
+/// crash to swallow.
+@immutable
+class AddMembersException implements Exception {
+  final Map<String, String> failures;
+
+  const AddMembersException(this.failures);
+
+  String get message => failures.entries
+      .map(
+        (entry) =>
+            '${entry.key.length > 8 ? '${entry.key.substring(0, 8)}…' : entry.key}: ${entry.value}',
+      )
+      .join('; ');
+
+  @override
+  String toString() => 'AddMembersException($message)';
+}
+
 @immutable
 class ChannelMember {
   final String pubkey;
@@ -565,21 +590,34 @@ class ChannelActions {
         if (pubkey.trim().isNotEmpty) pubkey.trim().toLowerCase(),
     };
     _ensureCommunityValid();
+    // Per-pubkey failures are collected rather than thrown on the spot: one
+    // relay rejection must not skip the remaining adds or the invalidation
+    // below, which would leave the members list stale for the adds that landed.
+    final failures = <String, String>{};
     for (final pubkey in normalizedPubkeys) {
+      // Outside the catch: a community switch mid-loop must abort the whole
+      // add, not be recorded as this pubkey's rejection.
       _ensureCommunityValid();
-      await _signedEventRelay.submit(
-        kind: 9000,
-        content: '',
-        tags: [
-          ['h', channelId],
-          ['p', pubkey],
-          ['role', normalizedRole],
-        ],
-      );
+      try {
+        await _signedEventRelay.submit(
+          kind: 9000,
+          content: '',
+          tags: [
+            ['h', channelId],
+            ['p', pubkey],
+            ['role', normalizedRole],
+          ],
+        );
+      } catch (error) {
+        failures[pubkey] = _relayErrorMessage(error);
+      }
     }
     _ensureCommunityValid();
     _ref.invalidate(channelMembersProvider(channelId));
     _ref.invalidate(channelBotPubkeysProvider(channelId));
+    if (failures.isNotEmpty) {
+      throw AddMembersException(failures);
+    }
   }
 
   void _ensureCommunityValid() {

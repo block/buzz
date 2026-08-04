@@ -15,6 +15,10 @@ import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useClassifiedMembers } from "@/features/channels/lib/useClassifiedMembers";
 import { formatMemberName } from "@/features/channels/lib/memberUtils";
 import {
+  canAddChannelMembers,
+  PRIVATE_CHANNEL_ADD_DENIED_MESSAGE,
+} from "@/features/channels/lib/channelMemberAdmission";
+import {
   useFlattenedUserSearchResults,
   useInfiniteUserSearchQuery,
   useUserSearchFetchMoreOnScroll,
@@ -240,9 +244,18 @@ export function MembersSidebar({
     () => new Set(rawMembers.map((member) => normalizePubkey(member.pubkey))),
     [rawMembers],
   );
-  const canAddMembers =
-    (selfMember !== null || channel?.visibility === "open") &&
-    channel?.channelType !== "dm";
+  const canAddMembers = canAddChannelMembers({
+    channelType: channel?.channelType,
+    visibility: channel?.visibility,
+    selfRole: selfMember?.role,
+  });
+  // Distinguish "you can't add here" from "nothing to add" so a plain member of
+  // a private channel gets the reason instead of a silently missing affordance.
+  const showPrivateAddDeniedNotice =
+    !canAddMembers &&
+    selfMember !== null &&
+    channel?.channelType !== "dm" &&
+    channel?.visibility !== "open";
   const userSearchQuery = useInfiniteUserSearchQuery(deferredSearchQuery, {
     allowEmpty: false,
     enabled:
@@ -723,6 +736,14 @@ export function MembersSidebar({
                 value={searchQuery}
               />
             </label>
+            {showPrivateAddDeniedNotice ? (
+              <p
+                className="pt-2 text-sm text-muted-foreground"
+                data-testid="members-sidebar-add-denied"
+              >
+                {PRIVATE_CHANNEL_ADD_DENIED_MESSAGE}
+              </p>
+            ) : null}
           </DialogHeader>
 
           <div className="max-h-[calc(100vh-12rem)] overflow-y-auto pb-6">
