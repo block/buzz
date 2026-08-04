@@ -88,6 +88,11 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     // ambient env var must not be able to forge setup mode (NotReady) on a
     // Ready agent or suppress it (empty/stale payload) on a NotReady one.
     "BUZZ_ACP_SETUP_PAYLOAD",
+    // MCP env-forwarding manifest: desktop derives the exact key names that
+    // buzz-acp forwards into the tool server from the layered env. A user
+    // override could smuggle unrelated process vars into the tool shell or
+    // suppress legitimate forwarding, so it is Buzz-controlled only.
+    "BUZZ_ACP_FORWARD_ENV",
     // Desktop ownership markers: these brand every spawned harness with the
     // launching Desktop instance. A user-supplied override would let a
     // definition masquerade as a different instance or fake the nonce used
@@ -316,6 +321,23 @@ pub(crate) fn merged_user_env(
         true
     });
     merged
+}
+
+/// Build the `BUZZ_ACP_FORWARD_ENV` manifest value: a comma-separated list of
+/// the env key NAMES to forward into the MCP tool server, derived from the
+/// fully-layered agent env (`descriptor.env`).
+///
+/// Returns `None` when there is nothing to forward, so the caller leaves the
+/// var unset and buzz-acp keeps its prior fixed-allowlist behavior. A
+/// well-formed POSIX env key (see [`is_well_formed_env_key`]) cannot contain a
+/// comma, so the joined list is unambiguous. Reserved identity/secret keys are
+/// already stripped from `descriptor.env`; buzz-acp additionally refuses to
+/// forward them, so no filtering is needed here.
+pub(crate) fn mcp_forward_env_manifest(env: &BTreeMap<String, String>) -> Option<String> {
+    if env.is_empty() {
+        return None;
+    }
+    Some(env.keys().map(String::as_str).collect::<Vec<_>>().join(","))
 }
 
 /// Look up the live env map of `persona_id` within an already-loaded persona

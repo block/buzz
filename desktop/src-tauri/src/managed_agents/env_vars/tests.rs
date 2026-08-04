@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use super::{
     display_invalid_key, is_derived_provider_model_key, is_reserved_env_key,
-    is_well_formed_env_key, merged_user_env, validate_user_env_keys,
+    is_well_formed_env_key, mcp_forward_env_manifest, merged_user_env, validate_user_env_keys,
     DERIVED_PROVIDER_MODEL_ENV_KEYS, MAX_ENV_TOTAL_BYTES, MAX_ENV_VALUE_BYTES, RESERVED_ENV_KEYS,
 };
 
@@ -496,4 +496,38 @@ fn deploy_model_precedence_none_when_both_absent() {
 
     let effective = persona_model.clone().or(record_model.clone());
     assert_eq!(effective, None);
+}
+
+// ── mcp_forward_env_manifest: BUZZ_ACP_FORWARD_ENV derivation ──────────
+
+#[test]
+fn forward_manifest_empty_env_returns_none() {
+    // No env → var left unset → buzz-acp keeps its fixed-allowlist behavior.
+    assert_eq!(mcp_forward_env_manifest(&BTreeMap::new()), None);
+}
+
+#[test]
+fn forward_manifest_lists_all_key_names_comma_separated() {
+    // BTreeMap iterates keys in sorted order, so the joined list is stable.
+    let env = map(&[
+        ("NOTION_FULL_TOKEN", "notion"),
+        ("ANTHROPIC_API_KEY", "anthropic"),
+    ]);
+    assert_eq!(
+        mcp_forward_env_manifest(&env).as_deref(),
+        Some("ANTHROPIC_API_KEY,NOTION_FULL_TOKEN"),
+        "manifest must carry every layered env key NAME, comma-separated"
+    );
+}
+
+#[test]
+fn forward_manifest_carries_names_only_not_values() {
+    // The manifest is names-only; secret values never appear in it.
+    let env = map(&[("NOTION_FULL_TOKEN", "super-secret-value")]);
+    let manifest = mcp_forward_env_manifest(&env).expect("non-empty env yields a manifest");
+    assert_eq!(manifest, "NOTION_FULL_TOKEN");
+    assert!(
+        !manifest.contains("super-secret-value"),
+        "the forward manifest must never embed env values"
+    );
 }
