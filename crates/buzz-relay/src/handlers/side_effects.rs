@@ -7,11 +7,11 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use buzz_core::kind::{
-    event_kind_u32, is_parameterized_replaceable, KIND_AGENT_PROFILE, KIND_DM_VISIBILITY,
-    KIND_GIT_REPO_ANNOUNCEMENT, KIND_IA_ARCHIVED, KIND_IA_ARCHIVED_LIST, KIND_IA_UNARCHIVED,
-    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_NIP29_GROUP_ADMINS,
-    KIND_NIP29_GROUP_MEMBERS, KIND_NIP29_GROUP_METADATA, KIND_NIP43_MEMBERSHIP_LIST, KIND_REACTION,
-    KIND_THREAD_SUMMARY,
+    event_kind_u32, is_parameterized_replaceable, KIND_AGENT_PROFILE, KIND_CHANNEL_ADD_POLICY,
+    KIND_DM_VISIBILITY, KIND_GIT_REPO_ANNOUNCEMENT, KIND_IA_ARCHIVED, KIND_IA_ARCHIVED_LIST,
+    KIND_IA_UNARCHIVED, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
+    KIND_NIP29_GROUP_ADMINS, KIND_NIP29_GROUP_MEMBERS, KIND_NIP29_GROUP_METADATA,
+    KIND_NIP43_MEMBERSHIP_LIST, KIND_REACTION, KIND_THREAD_SUMMARY,
 };
 use buzz_core::StoredEvent;
 use buzz_db::channel::{MemberRecord, MemberRole};
@@ -33,7 +33,7 @@ pub fn is_admin_kind(kind: u32) -> bool {
 /// handled in `ingest_event()` before storage so we can short-circuit on
 /// duplicates without storing the event at all.
 pub fn is_side_effect_kind(kind: u32) -> bool {
-    matches!(kind, 0 | 5 | 9000..=9022 | KIND_GIT_REPO_ANNOUNCEMENT | KIND_AGENT_PROFILE | 41001..=41003 | 40099)
+    matches!(kind, 0 | 5 | 9000..=9022 | KIND_GIT_REPO_ANNOUNCEMENT | KIND_AGENT_PROFILE | KIND_CHANNEL_ADD_POLICY | 41001..=41003 | 40099)
 }
 
 async fn evict_live_channel_subscriptions(
@@ -211,7 +211,15 @@ pub async fn handle_side_effects(
         9022 => handle_leave_request(tenant, event, state).await,
         // NIP-34: Git repo announcement → reserve name + seed manifest pointer.
         KIND_GIT_REPO_ANNOUNCEMENT => handle_git_repo_announcement(tenant, event, state).await,
-        KIND_AGENT_PROFILE => handle_agent_profile(tenant, event, state).await,
+        KIND_CHANNEL_ADD_POLICY => {
+            let policy = channel_add_policy_from_event(KIND_CHANNEL_ADD_POLICY, event)?
+                .ok_or_else(|| anyhow::anyhow!("kind:10101 missing channel_add_policy field"))?;
+            handle_channel_add_policy(tenant, event, state, &policy).await
+        }
+        KIND_AGENT_PROFILE => match channel_add_policy_from_event(KIND_AGENT_PROFILE, event)? {
+            Some(policy) => handle_channel_add_policy(tenant, event, state, &policy).await,
+            None => Ok(()),
+        },
         // kind:7 (reaction) handled inline in ingest_event() before storage.
         _ => Ok(()),
     }
@@ -1158,19 +1166,31 @@ pub async fn emit_group_discovery_events(
     Ok(())
 }
 
-async fn handle_agent_profile(
+fn channel_add_policy_from_event(kind: u32, event: &Event) -> anyhow::Result<Option<String>> {
+    let content: serde_json::Value = match serde_json::from_str(&event.content) {
+        Ok(content) => content,
+        Err(_) if kind == KIND_AGENT_PROFILE => return Ok(None),
+        Err(error) => return Err(anyhow::anyhow!("kind:{kind} content parse error: {error}")),
+    };
+
+    match content.get("channel_add_policy") {
+        Some(policy) => policy
+            .as_str()
+            .map(|policy| Some(policy.to_string()))
+            .ok_or_else(|| anyhow::anyhow!("kind:{kind} channel_add_policy must be a string")),
+        None if kind == KIND_AGENT_PROFILE => Ok(None),
+        None => Err(anyhow::anyhow!(
+            "kind:{kind} missing channel_add_policy field"
+        )),
+    }
+}
+
+async fn handle_channel_add_policy(
     tenant: &TenantContext,
     event: &Event,
     state: &Arc<AppState>,
+    policy: &str,
 ) -> anyhow::Result<()> {
-    let content: serde_json::Value = serde_json::from_str(&event.content)
-        .map_err(|e| anyhow::anyhow!("kind:10100 content parse error: {e}"))?;
-
-    let policy = content
-        .get("channel_add_policy")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("kind:10100 missing channel_add_policy field"))?;
-
     let pubkey_bytes = event.pubkey.to_bytes().to_vec();
     if state
         .db
@@ -1188,7 +1208,7 @@ async fn handle_agent_profile(
         .set_channel_add_policy(tenant.community(), &pubkey_bytes, policy)
         .await?;
 
-    info!(pubkey = %hex::encode(&pubkey_bytes), policy, "kind:10100 channel_add_policy updated");
+    info!(pubkey = %hex::encode(&pubkey_bytes), policy, "channel_add_policy updated");
     Ok(())
 }
 
@@ -3372,6 +3392,108 @@ fn topic_for_subscription(channel_id: Option<Uuid>) -> EventTopic {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
+
+    async fn channel_add_policy_test_state() -> Arc<AppState> {
+        let mut config = crate::config::Config::from_env().expect("default config loads");
+        config.require_relay_membership = false;
+        config.redis_url = "redis://127.0.0.1:1".to_string();
+        config.database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| TEST_DB_URL.to_string());
+        let pool = sqlx::PgPool::connect(&config.database_url)
+            .await
+            .expect("connect test DB");
+        let db = buzz_db::Db::from_pool(pool.clone());
+        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        let pubsub = Arc::new(
+            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                .await
+                .expect("pubsub manager"),
+        );
+        let audit = buzz_audit::AuditService::new(pool.clone());
+        let auth = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(pool.clone());
+        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+            db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let (state, _audit_shutdown) = AppState::new(
+            config,
+            db,
+            redis_pool,
+            audit,
+            pubsub,
+            auth,
+            search,
+            workflow_engine,
+            nostr::Keys::generate(),
+            media_storage,
+        );
+        Arc::new(state)
+    }
+
+    async fn channel_add_policy_tenant(state: &Arc<AppState>) -> TenantContext {
+        let host = format!("channel-add-policy-{}.example", Uuid::new_v4().simple());
+        let record = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("community");
+        TenantContext::resolved(record.id, host)
+    }
+
+    fn policy_event(kind: u32, content: &str) -> Event {
+        let keys = nostr::Keys::generate();
+        EventBuilder::new(Kind::Custom(kind as u16), content)
+            .sign_with_keys(&keys)
+            .expect("sign")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn legacy_agent_profile_channel_add_policy_still_applies_policy() {
+        let state = channel_add_policy_test_state().await;
+        let tenant = channel_add_policy_tenant(&state).await;
+        let event = policy_event(KIND_AGENT_PROFILE, r#"{"channel_add_policy":"owner_only"}"#);
+
+        handle_side_effects(&tenant, KIND_AGENT_PROFILE, &event, &state)
+            .await
+            .expect("legacy policy side effect");
+
+        let stored = state
+            .db
+            .get_agent_channel_policy(tenant.community(), &event.pubkey.to_bytes())
+            .await
+            .expect("read policy");
+        assert_eq!(
+            stored.map(|(policy, _)| policy),
+            Some("owner_only".to_string())
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn agent_profile_without_channel_add_policy_is_a_no_op() {
+        let state = channel_add_policy_test_state().await;
+        let tenant = channel_add_policy_tenant(&state).await;
+        let event = policy_event(KIND_AGENT_PROFILE, r#"{"name":"Directory agent"}"#);
+
+        handle_side_effects(&tenant, KIND_AGENT_PROFILE, &event, &state)
+            .await
+            .expect("agent profile side effect");
+
+        assert!(state
+            .db
+            .get_agent_channel_policy(tenant.community(), &event.pubkey.to_bytes())
+            .await
+            .expect("read policy")
+            .is_none());
+    }
 
     #[test]
     fn delete_tombstone_omits_absent_moderation_metadata() {
