@@ -62,7 +62,7 @@ git rev-parse -q --verify "refs/tags/$TAG" >/dev/null && fail "tag $TAG already 
 gh release view "$TAG" -R "$REPO" >/dev/null 2>&1 && fail "release $TAG already exists on $REPO"
 
 echo "--- Building sidecars"
-cargo build --release -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli
+cargo build --release -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli
 ./scripts/bundle-sidecars.sh
 
 echo "--- Writing devmode release config"
