@@ -1,4 +1,5 @@
 import AVFoundation
+import DeclaredAgeRange
 import Flutter
 import UIKit
 import UserNotifications
@@ -8,6 +9,7 @@ import UserNotifications
   private var mediaUploadChannel: FlutterMethodChannel?
   private var qrScannerChannel: FlutterMethodChannel?
   private var inlinePhotoPickerSupportChannel: FlutterMethodChannel?
+  private var ageSignalChannel: FlutterMethodChannel?
   private var nativeAttachmentPopoverCoordinator: NativeAttachmentPopoverCoordinator?
 
   override func application(
@@ -51,6 +53,21 @@ import UserNotifications
       }
     }
 
+    ageSignalChannel = FlutterMethodChannel(
+      name: "buzz/age_signal",
+      binaryMessenger: messenger
+    )
+    let ageSignalViewController = engineBridge.pluginRegistry.registrar(
+      forPlugin: "BuzzAgeSignal"
+    )?.viewController
+    ageSignalChannel?.setMethodCallHandler { [weak ageSignalViewController] call, result in
+      Self.handleAgeSignalMethodCall(
+        call,
+        viewController: ageSignalViewController,
+        result: result
+      )
+    }
+
     if let inlinePhotoPickerRegistrar = engineBridge.pluginRegistry.registrar(
       forPlugin: "BuzzInlinePhotoPicker"
     ) {
@@ -71,6 +88,46 @@ import UserNotifications
       parentViewController: nativeAttachmentRegistrar?.viewController
     )
   }
+
+  private static func handleAgeSignalMethodCall(
+    _ call: FlutterMethodCall,
+    viewController: UIViewController?,
+    result: @escaping FlutterResult
+  ) {
+    guard call.method == "requestAgeSignal" else {
+      result(FlutterMethodNotImplemented)
+      return
+    }
+    guard #available(iOS 26.0, *), let viewController else {
+      result(Self.noAgeSignalResponse)
+      return
+    }
+
+    Task { @MainActor in
+      do {
+        let response = try await AgeRangeService.shared.requestAgeRange(
+          ageGates: 18,
+          in: viewController
+        )
+        switch response {
+        case .declinedSharing:
+          result(Self.noAgeSignalResponse)
+        case .sharing(let range):
+          let ageUpper = range.upperBound.map { $0 as Any } ?? NSNull()
+          result(["status": "signal", "ageUpper": ageUpper])
+        @unknown default:
+          result(Self.noAgeSignalResponse)
+        }
+      } catch {
+        result(Self.noAgeSignalResponse)
+      }
+    }
+  }
+
+  private static let noAgeSignalResponse: [String: Any] = [
+    "status": "noSignal",
+    "ageUpper": NSNull(),
+  ]
 
   private static func handleQrScannerMethodCall(
     _ call: FlutterMethodCall,

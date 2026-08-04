@@ -125,6 +125,8 @@ android {
 }
 
 dependencies {
+    implementation("com.google.android.play:age-signals:0.0.4")
+
     testImplementation(kotlin("test"))
 
     androidTestImplementation(kotlin("test"))

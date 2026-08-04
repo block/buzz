@@ -1,9 +1,13 @@
+import 'dart:async';
+
 import 'package:app_badge_plus/app_badge_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import 'features/age_gate/age_restriction_page.dart';
+import 'features/age_gate/age_signal_provider.dart';
 import 'features/channels/unread_badge/unread_badge_provider.dart';
 import 'features/home/home_page.dart';
 import 'features/pairing/pairing_page.dart';
@@ -28,6 +32,14 @@ class App extends HookConsumerWidget {
     final accentIndex = ref.watch(accentProvider);
     final schemeName = ref.watch(schemeProvider);
     final authState = ref.watch(authProvider);
+    final ageRestricted = ref.watch(ageSignalProvider);
+
+    useEffect(() {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        unawaited(ref.read(ageSignalProvider.notifier).request());
+      });
+      return null;
+    }, const []);
 
     final resolved = resolveSchemes(schemeName, themeMode);
     final lightScheme = applyAccent(resolved.light, accentIndex);
@@ -90,11 +102,11 @@ class App extends HookConsumerWidget {
         topSectionGradient: buzzDarkGradient,
       ),
       themeMode: effectiveMode,
-      // Above the navigator, so a burst keeps playing over a pushed thread page
-      // or a modal sheet — the same reason desktop pins its canvas to the
-      // viewport rather than to the message row.
-      builder: (context, child) =>
-          EmojiBurstOverlay(child: child ?? const SizedBox.shrink()),
+      // Above the navigator, so an age restriction cannot be bypassed by a
+      // route that was pushed while the store signal request was in flight.
+      builder: (context, child) => ageRestricted
+          ? const AgeRestrictionPage()
+          : EmojiBurstOverlay(child: child ?? const SizedBox.shrink()),
       home: authState.when(
         loading: () => const _SplashScreen(),
         error: (_, _) => const PairingPage(),

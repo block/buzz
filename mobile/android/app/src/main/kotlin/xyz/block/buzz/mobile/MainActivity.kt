@@ -9,6 +9,11 @@ import android.media.MediaExtractor
 import android.media.MediaMuxer
 import android.os.Build
 import androidx.annotation.RequiresApi
+import com.google.android.play.agesignals.AgeSignalsAccessRequest
+import com.google.android.play.agesignals.AgeSignalsManager
+import com.google.android.play.agesignals.AgeSignalsManagerFactory
+import com.google.android.play.agesignals.AgeSignalsRequest
+import com.google.android.play.agesignals.model.AgeSignalsStatus
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -16,6 +21,20 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.ByteBuffer
 import java.util.UUID
+
+internal fun ageSignalPayload(ageUpper: Int?): Map<String, Any?> {
+    return mapOf(
+        "status" to "signal",
+        "ageUpper" to ageUpper,
+    )
+}
+
+internal fun noAgeSignalPayload(): Map<String, Any?> {
+    return mapOf(
+        "status" to "noSignal",
+        "ageUpper" to null,
+    )
+}
 
 internal object AndroidImageProcessor {
     fun decodeSrgbBitmap(bytes: ByteArray): Bitmap? {
@@ -78,6 +97,7 @@ internal object AndroidImageProcessor {
 
 class MainActivity : FlutterActivity() {
     private var mediaUploadChannel: MethodChannel? = null
+    private var ageSignalChannel: MethodChannel? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -104,6 +124,61 @@ class MainActivity : FlutterActivity() {
                 }
             }
         }
+
+        ageSignalChannel = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            AGE_SIGNAL_CHANNEL,
+        ).also { channel ->
+            channel.setMethodCallHandler { call, result ->
+                when (call.method) {
+                    REQUEST_AGE_SIGNAL_METHOD -> {
+                        handleRequestAgeSignal(
+                            AgeSignalsManagerFactory.create(applicationContext),
+                            result,
+                        )
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+        }
+    }
+
+    private fun handleRequestAgeSignal(
+        ageSignalsManager: AgeSignalsManager,
+        result: MethodChannel.Result,
+    ) {
+        val accessRequest = AgeSignalsAccessRequest.builder()
+            .setActivity(this)
+            .build()
+        ageSignalsManager.requestAgeSignalsAccess(accessRequest)
+            .addOnSuccessListener { accessResult ->
+                if (accessResult.ageSignalsStatus() != AgeSignalsStatus.SHARED) {
+                    replyWithNoAgeSignal(result)
+                    return@addOnSuccessListener
+                }
+
+                ageSignalsManager.checkAgeSignals(AgeSignalsRequest.builder().build())
+                    .addOnSuccessListener { ageSignalsResult ->
+                        replyWithAgeSignal(result, ageSignalsResult.ageUpper())
+                    }
+                    .addOnFailureListener {
+                        replyWithNoAgeSignal(result)
+                    }
+            }
+            .addOnFailureListener {
+                replyWithNoAgeSignal(result)
+            }
+    }
+
+    private fun replyWithAgeSignal(
+        result: MethodChannel.Result,
+        ageUpper: Int?,
+    ) {
+        result.success(ageSignalPayload(ageUpper))
+    }
+
+    private fun replyWithNoAgeSignal(result: MethodChannel.Result) {
+        result.success(noAgeSignalPayload())
     }
 
     private fun handleSanitizeImageForUpload(
@@ -284,6 +359,8 @@ class MainActivity : FlutterActivity() {
 
     companion object {
         private const val MEDIA_UPLOAD_CHANNEL = "buzz/media_upload"
+        private const val AGE_SIGNAL_CHANNEL = "buzz/age_signal"
+        private const val REQUEST_AGE_SIGNAL_METHOD = "requestAgeSignal"
         private const val SANITIZE_IMAGE_FOR_UPLOAD_METHOD = "sanitizeImageForUpload"
         private const val TRANSCODE_IMAGE_TO_JPEG_METHOD = "transcodeImageToJpeg"
         private const val TRANSCODE_VIDEO_TO_MP4_METHOD = "transcodeVideoToMp4"
