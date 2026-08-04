@@ -646,6 +646,90 @@ test("buzzDeepLinkUrlTransform: strips malformed buzz://pr (unknown param)", () 
   assert.match(html, /href=""/);
 });
 
+// ── renderEntityLinkAnchor: clone-URL anchor origin gating ───────────────────
+//
+// `renderEntityLinkAnchor` now accepts `relayOrigin` and passes it to
+// `parseSupportedLinkPreview`. A clone URL is only treated as an in-app entity
+// link when the URL origin exactly matches the active relay origin. This covers
+// the inline anchor click path (not just card extraction).
+
+import { renderEntityLinkAnchor } from "../ui/markdown/entityLinks.tsx";
+
+const CLONE_URL = `https://relay.example/git/${OWNER_HEX}/my-repo`;
+
+test("renderEntityLinkAnchor_matchingOriginCloneUrl_returnsEntityAnchor", () => {
+  // Origin matches active relay — anchor should navigate in-app (non-null).
+  const el = renderEntityLinkAnchor({
+    anchorProps: {},
+    children: React.createElement("span", null, "my-repo"),
+    href: CLONE_URL,
+    onOpenEntityLink: () => {},
+    relayOrigin: "https://relay.example",
+  });
+  assert.notEqual(
+    el,
+    null,
+    "matching-origin clone URL must produce an entity anchor",
+  );
+  const html = renderToStaticMarkup(el);
+  // The entity anchor must be rendered — it carries the original href (for display)
+  // and navigates in-app via onClick. Verify the anchor is present with the cursor style.
+  assert.match(
+    html,
+    /cursor-pointer/,
+    "entity anchor must have the in-app navigation cursor style",
+  );
+});
+
+test("renderEntityLinkAnchor_lookalikeDomainCloneUrl_returnsNull", () => {
+  // Origin does NOT match active relay — must fall through to ExternalLinkAnchor.
+  const el = renderEntityLinkAnchor({
+    anchorProps: {},
+    children: React.createElement("span", null, "my-repo"),
+    href: CLONE_URL,
+    onOpenEntityLink: () => {},
+    relayOrigin: "https://evil.example",
+  });
+  assert.equal(
+    el,
+    null,
+    "lookalike-origin clone URL must return null so the anchor falls through to external",
+  );
+});
+
+test("renderEntityLinkAnchor_noRelayOrigin_cloneUrlReturnsNull", () => {
+  // No known relay origin — must fail closed, not guess.
+  const el = renderEntityLinkAnchor({
+    anchorProps: {},
+    children: React.createElement("span", null, "my-repo"),
+    href: CLONE_URL,
+    onOpenEntityLink: () => {},
+    relayOrigin: null,
+  });
+  assert.equal(
+    el,
+    null,
+    "clone URL without a relay origin must return null (fail closed)",
+  );
+});
+
+test("renderEntityLinkAnchor_directEntityLink_returnsAnchorRegardlessOfOrigin", () => {
+  // A direct buzz://pr link always resolves in-app — it does not require origin.
+  const prLink = `buzz://pr?id=${EVENT_HEX}&owner=${OWNER_HEX}&d=buzz-world`;
+  const el = renderEntityLinkAnchor({
+    anchorProps: {},
+    children: React.createElement("span", null, "My PR"),
+    href: prLink,
+    onOpenEntityLink: () => {},
+    relayOrigin: null,
+  });
+  assert.notEqual(
+    el,
+    null,
+    "direct buzz://pr link must produce an entity anchor regardless of origin",
+  );
+});
+
 test("remarkSpoilers: block delimiter spoilers expose a block prop to React", () => {
   let spoilerProps;
   renderToStaticMarkup(

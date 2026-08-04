@@ -54,36 +54,43 @@ export function useEntityCardOpenHandlers(
 /**
  * Resolve an anchor href to a canonical `buzz://` entity link, accepting
  * both the deep-link scheme directly and HTTPS relay clone URLs (which the
- * preview parser normalizes onto `buzz://repo`).
+ * preview parser normalizes onto `buzz://repo` only when the URL origin
+ * matches the active relay origin).
  */
-function resolveEntityHref(href: string): string | null {
+function resolveEntityHref(
+  href: string,
+  relayOrigin: string | null,
+): string | null {
   if (isEntityLink(href)) return href;
   if (!/^https?:\/\//i.test(href)) return null;
 
-  const preview = parseSupportedLinkPreview(href);
+  const preview = parseSupportedLinkPreview(href, relayOrigin);
   return preview && isEntityLink(preview.href) ? preview.href : null;
 }
 
 /**
  * Render an inline anchor for a Buzz entity link (`buzz://pr|issue|repo` or
- * an HTTPS relay clone URL) that navigates in-app instead of handing the
- * URL to the OS. Returns null when the href is not a valid entity link so
- * the caller can fall through to its default anchor.
+ * an HTTPS relay clone URL whose origin matches the active relay) that
+ * navigates in-app instead of handing the URL to the OS. Returns null when
+ * the href is not a valid entity link so the caller can fall through to its
+ * default anchor.
  */
 export function renderEntityLinkAnchor({
   anchorProps,
   children,
   href,
   onOpenEntityLink,
+  relayOrigin,
 }: {
   anchorProps: React.ComponentPropsWithoutRef<"a">;
   children: React.ReactNode;
   href: string | undefined;
   onOpenEntityLink: (link: ParsedEntityLink) => void;
+  relayOrigin: string | null;
 }): React.ReactElement | null {
   if (!href) return null;
 
-  const canonicalHref = resolveEntityHref(href);
+  const canonicalHref = resolveEntityHref(href, relayOrigin);
   if (!canonicalHref) return null;
 
   const parsed = parseEntityLink(canonicalHref);

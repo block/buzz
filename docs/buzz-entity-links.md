@@ -171,13 +171,15 @@ both sources.
 ## Click handling and OS deep links
 
 **In-timeline click** *(implemented)*: navigate via
-`useAppNavigation.goProject()`. On `main` the `/projects/$projectId` route
-id is `<owner-pubkey>:<dtag>` (see `parseProjectRouteId` in
-`features/projects/hooks.ts`), which is exactly the link's coordinate — no
-read-model resolution step is needed:
+`useAppNavigation.goProject()`. The `/projects/$projectId` route id is the
+canonical `30617:<owner>:<d>` coordinate (see `entityLinkProjectRouteId` in
+`shared/lib/entityLink.ts`). Route resolution on the `feat/multi-repository-projects`
+branch (#4671) resolves this coordinate to the correct project and repository
+regardless of container grouping — **#4671 must merge before #4695** to avoid
+unresolved routes at runtime:
 
-- `pr` / `issue` → `/projects/<owner>:<d>?pullRequestId=<id>` (or `issueId`).
-- `repo` → `/projects/<owner>:<d>`.
+- `pr` / `issue` → `/projects/30617:<owner>:<d>?pullRequestId=<id>` (or `issueId`).
+- `repo` → `/projects/30617:<owner>:<d>`.
 
 If resolution fails (entity not visible in this community), show the same
 kind of toast fallback used for unresolvable message links.

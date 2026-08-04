@@ -41,6 +41,17 @@ export function resetLinkPreviewTitleCache(): void {
   titleCache.clear();
 }
 
+/**
+ * Returns the current cache generation counter. Used in tests to verify that
+ * `resetLinkPreviewTitleCache` increments the generation so stale in-flight
+ * promises cannot seed the new cache.
+ *
+ * @internal test-only export
+ */
+export function getLinkPreviewCacheGeneration(): number {
+  return cacheGeneration;
+}
+
 function fetchLinkPreviewTitle(href: string): Promise<string | null> {
   return invokeTauri<string | null>("fetch_link_preview_title", { href });
 }
@@ -82,7 +93,15 @@ async function fetchBuzzEntityTitle(href: string): Promise<string | null> {
   return subject || event.content.split("\n")[0] || null;
 }
 
-function shouldResolveTitle(preview: SupportedLinkPreview): boolean {
+/**
+ * Returns true when the preview's current title is still the auto-generated
+ * fallback and a relay lookup should be attempted to replace it. Returns false
+ * once the user has applied a markdown label (`[My label](link)`) so that the
+ * label wins over any cached relay title.
+ *
+ * Exported for unit testing of the label-must-win invariant.
+ */
+export function shouldResolveTitle(preview: SupportedLinkPreview): boolean {
   if (preview.kind === "buzz-pull-request" || preview.kind === "buzz-issue") {
     // A markdown-label override replaces the fallback title and must win
     // over the relay lookup.

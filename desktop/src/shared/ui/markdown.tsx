@@ -1399,6 +1399,7 @@ function createMarkdownComponents(
       children,
       href,
       onOpenEntityLink,
+      relayOrigin,
     });
     if (entityAnchor) return entityAnchor;
 
