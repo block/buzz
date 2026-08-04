@@ -654,12 +654,13 @@ pub async fn submit_event(
         submit_event_authed(&state, &tenant, &headers, &body, pubkey, event_id_bytes).await;
 
     match &outcome {
-        SubmitOutcome::Ok { accepted, .. } => {
+        SubmitOutcome::Ok { accepted, kind, .. } => {
             tracing::info!(
                 pubkey = %pubkey_hex,
                 route = "/events",
                 status = 200u16,
                 accepted,
+                kind,
                 "HTTP bridge request"
             );
         }
@@ -713,6 +714,7 @@ enum SubmitOutcome {
     /// Ingest pipeline ran and returned a result (accepted or not).
     Ok {
         accepted: bool,
+        kind: u32,
         response: Json<Value>,
     },
     /// JSON parse failure before ingest — log category/line/column, not msg.
@@ -843,6 +845,7 @@ async fn submit_event_authed(
             }));
             SubmitOutcome::Ok {
                 accepted: result.accepted,
+                kind: kind_u32,
                 response,
             }
         }
@@ -3760,6 +3763,69 @@ mod tests {
         assert_eq!(
             n, 1,
             "expected exactly 1 attribution line for IngestError::Rejected arm, got {n};\nlog:\n{log}"
+        );
+        assert!(
+            log.contains(&pubkey_hex[..16]),
+            "attribution line must carry the pubkey;\nlog:\n{log}"
+        );
+    }
+
+    /// T3c — accepted Ok arm: a POST /events with a valid global text note
+    /// (kind:1) must include `kind` in the single attribution log line.
+    ///
+    /// This is a focused regression test for block/buzz#4676: the Ok arm of
+    /// submit_event previously logged only `accepted`, so all accepted event
+    /// kinds produced identical `route:"/events", status:200, accepted:true`
+    /// lines.
+    ///
+    /// Discriminating: if the `kind` field is removed from the `SubmitOutcome::Ok`
+    /// match arm or the `tracing::info!` call, this test fails.
+    #[test]
+    #[ignore = "requires Postgres"]
+    fn submit_event_text_note_includes_kind_in_attribution_line() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current_thread runtime");
+
+        let state = rt
+            .block_on(bridge_handler_test_state())
+            .expect("local Postgres not reachable — start Postgres on 127.0.0.1:5432 before running ignored bridge handler tests");
+
+        let host = {
+            let h = format!("bridge-attr-{}.local", uuid::Uuid::new_v4().simple());
+            rt.block_on(state.db.ensure_configured_community(&h))
+                .expect("ensure community");
+            h
+        };
+
+        let client_keys = Keys::generate();
+        let pubkey_hex = client_keys.public_key().to_hex();
+
+        let text_note = EventBuilder::new(Kind::TextNote, "attribution kind test")
+            .sign_with_keys(&client_keys)
+            .expect("sign text note");
+        let event_json = serde_json::to_vec(&text_note).expect("serialize event");
+
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let (status, log) = metrics::with_local_recorder(&recorder, || {
+            run_and_capture(&rt, state, &host, &pubkey_hex, &event_json)
+        });
+
+        assert_eq!(
+            status,
+            axum::http::StatusCode::OK,
+            "valid text note must be accepted with 200"
+        );
+
+        let n = count_attribution_lines(&log);
+        assert_eq!(
+            n, 1,
+            "expected exactly 1 attribution line for accepted event, got {n};\nlog:\n{log}"
+        );
+        assert!(
+            log.contains("kind=1"),
+            "attribution line for accepted event must include kind;\nlog:\n{log}"
         );
         assert!(
             log.contains(&pubkey_hex[..16]),
