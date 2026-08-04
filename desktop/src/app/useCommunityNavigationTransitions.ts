@@ -12,6 +12,7 @@ import {
   markPendingCommunityRestore,
   saveCommunityDestination,
 } from "@/features/communities/communityNavigationStorage";
+import { markCommunityDiscoveryAfterLeave } from "@/features/communities/communityStorage";
 import type { useCommunities } from "@/features/communities/useCommunities";
 import { leaveCommunity } from "@/features/communities/leaveCommunity";
 
@@ -77,6 +78,10 @@ export function useCommunityNavigationTransitions({
       );
       if (!target) return;
 
+      const fallback = communities.communities.find(
+        (community) => community.id !== id,
+      );
+
       // Do not touch local state until this relay has explicitly accepted the
       // signed NIP-43 leave request. Rejections and timeouts bubble back to the
       // dialog so the person can retry without losing their community config.
@@ -89,11 +94,13 @@ export function useCommunityNavigationTransitions({
         communities.removeCommunity(id);
         return;
       }
-      const fallback = communities.communities.find(
-        (community) => community.id !== id,
-      );
 
       if (!fallback) {
+        if (!markCommunityDiscoveryAfterLeave()) {
+          throw new Error(
+            "Membership was removed, but community discovery state could not be saved. Restart Buzz and try again.",
+          );
+        }
         await goHome({ replace: true });
         communities.removeCommunity(id);
         return;

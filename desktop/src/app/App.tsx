@@ -41,6 +41,7 @@ import { PendingInviteGate } from "@/features/onboarding/ui/PendingInviteGate";
 import { KeyringLockedScreen } from "@/features/onboarding/ui/KeyringLockedScreen";
 import { RelaunchRequiredScreen } from "@/features/onboarding/ui/RelaunchRequiredScreen";
 import { ResetFailedScreen } from "@/features/onboarding/ui/ResetFailedScreen";
+import { loadCommunityDiscoveryAfterLeave } from "@/features/communities/communityStorage";
 import { useCommunityInit } from "@/features/communities/useCommunityInit";
 import { useNestNotifications } from "@/features/communities/useNestNotifications";
 import { useCommunities } from "@/features/communities/useCommunities";
@@ -319,12 +320,8 @@ function CommunityApp({
   const [isCommunityChangeOpen, setIsCommunityChangeOpen] = useState(false);
   const [resumeFirstCommunityPage, setResumeFirstCommunityPage] =
     useState<FirstCommunityPage | null>(null);
-  const hasConfiguredCommunityRef = useRef(activeCommunity !== null);
-  if (activeCommunity) {
-    hasConfiguredCommunityRef.current = true;
-  }
   const isFindingCommunityAfterLeave =
-    activeCommunity === null && hasConfiguredCommunityRef.current;
+    activeCommunity === null && loadCommunityDiscoveryAfterLeave();
 
   // Surface nest-related backend events (repos-dir errors, legacy migration)
   // as toasts. Mounted before useCommunityInit so the listeners are registered

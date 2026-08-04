@@ -769,6 +769,7 @@ test.describe("community rail", () => {
   });
 
   test("leaving the final community returns to setup without resetting identity", async ({
+    context,
     page,
   }) => {
     await installMockBridge(page, undefined, {
@@ -778,8 +779,13 @@ test.describe("community rail", () => {
     await seedCommunities(page, [COMMUNITY_A], COMMUNITY_A.id);
     await page.goto("/");
 
+    await expect
+      .poll(() =>
+        page.evaluate(() => typeof window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__),
+      )
+      .toBe("function");
     const identityBefore = await page.evaluate(async () =>
-      window.__TAURI_INTERNALS__.invoke("get_identity"),
+      window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__("get_identity"),
     );
     await page.getByTestId("sidebar-profile-avatar-button").click();
     await page.getByTestId("community-switcher").click();
@@ -798,8 +804,33 @@ test.describe("community rail", () => {
       .toBeNull();
     await expect
       .poll(() =>
-        page.evaluate(async () =>
-          window.__TAURI_INTERNALS__.invoke("get_identity"),
+        page.evaluate(() =>
+          window.localStorage.getItem("buzz-community-discovery-after-leave"),
+        ),
+      )
+      .toBe("1");
+
+    const relaunchPage = await context.newPage();
+    await installMockBridge(relaunchPage, undefined, {
+      autoConnectDefaultRelay: true,
+      skipCommunitySeed: true,
+    });
+    await relaunchPage.goto("/");
+    await expect(
+      relaunchPage.getByText("Join or create a community"),
+    ).toBeVisible();
+    await expect(relaunchPage.getByTestId("welcome-setup-back")).toHaveCount(0);
+    await expect
+      .poll(() =>
+        relaunchPage.evaluate(() =>
+          window.localStorage.getItem("buzz-communities"),
+        ),
+      )
+      .toBeNull();
+    await expect
+      .poll(() =>
+        relaunchPage.evaluate(async () =>
+          window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__("get_identity"),
         ),
       )
       .toEqual(identityBefore);
