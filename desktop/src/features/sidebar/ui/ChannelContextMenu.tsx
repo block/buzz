@@ -59,7 +59,7 @@ function MoveToSectionSubmenu({
     <ContextMenuSub>
       <ContextMenuSubTrigger>
         <ContextMenuIconSlot />
-        <span>Move to section</span>
+        <span>Move to category</span>
       </ContextMenuSubTrigger>
       <ContextMenuSubContent>
         {sections.map((section) => (
@@ -88,14 +88,14 @@ function MoveToSectionSubmenu({
           <ContextMenuIconSlot>
             <Plus className="h-4 w-4" />
           </ContextMenuIconSlot>
-          <span>New section...</span>
+          <span>New category...</span>
         </ContextMenuItem>
         {currentSectionId ? (
           <ContextMenuItem
             onSelect={() => deferMenuAction(() => onUnassignChannel(channelId))}
           >
             <ContextMenuIconSlot />
-            <span>Remove from section</span>
+            <span>Remove from category</span>
           </ContextMenuItem>
         ) : null}
       </ContextMenuSubContent>

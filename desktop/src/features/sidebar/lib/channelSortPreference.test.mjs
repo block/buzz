@@ -3,7 +3,10 @@ import test from "node:test";
 
 import {
   DEFAULT_SORT_MODE,
+  DEFAULT_STREAM_SORT_MODE,
   DEFAULT_STORE,
+  hasExplicitSortPreference,
+  isStreamSortGroup,
   parseChannelSortPayload,
   sectionSortGroupKey,
   sortChannelsForSidebar,
@@ -41,6 +44,16 @@ test("parseChannelSortPayload: valid per-group payload", () => {
       groups: { channels: "recent", dms: "alpha" },
     }),
     { version: 1, groups: { channels: "recent", dms: "alpha" } },
+  );
+});
+
+test("parseChannelSortPayload: manual is owned by the separate order store", () => {
+  assert.deepEqual(
+    parseChannelSortPayload({
+      version: 1,
+      groups: { channels: "manual", dms: "recent" },
+    }),
+    { version: 1, groups: { dms: "recent" } },
   );
 });
 
@@ -89,12 +102,38 @@ test("parseChannelSortPayload: non-object input returns null", () => {
 
 test("default sort mode is alpha and default store has no overrides", () => {
   assert.equal(DEFAULT_SORT_MODE, "alpha");
+  assert.equal(DEFAULT_STREAM_SORT_MODE, "manual");
   assert.deepEqual(DEFAULT_STORE.groups, {});
 });
 
-test("sortModeForGroup: unset group falls back to alpha", () => {
-  assert.equal(sortModeForGroup(DEFAULT_STORE, "channels"), "alpha");
+test("isStreamSortGroup: channels and section:* only", () => {
+  assert.equal(isStreamSortGroup("channels"), true);
+  assert.equal(isStreamSortGroup(sectionSortGroupKey("abc")), true);
+  assert.equal(isStreamSortGroup("starred"), false);
+  assert.equal(isStreamSortGroup("forums"), false);
+  assert.equal(isStreamSortGroup("dms"), false);
+});
+
+test("sortModeForGroup: unset stream groups default Manual; non-stream alpha", () => {
+  assert.equal(sortModeForGroup(DEFAULT_STORE, "channels"), "manual");
+  assert.equal(
+    sortModeForGroup(DEFAULT_STORE, sectionSortGroupKey("work")),
+    "manual",
+  );
   assert.equal(sortModeForGroup(DEFAULT_STORE, "dms"), "alpha");
+  assert.equal(sortModeForGroup(DEFAULT_STORE, "starred"), "alpha");
+  assert.equal(sortModeForGroup(DEFAULT_STORE, "forums"), "alpha");
+});
+
+test("sortModeForGroup: explicit A–Z is preserved (not collapsed into unset)", () => {
+  const store = {
+    version: 1,
+    groups: { channels: "alpha", [sectionSortGroupKey("work")]: "alpha" },
+  };
+  assert.equal(sortModeForGroup(store, "channels"), "alpha");
+  assert.equal(sortModeForGroup(store, sectionSortGroupKey("work")), "alpha");
+  assert.equal(hasExplicitSortPreference(store, "channels"), true);
+  assert.equal(hasExplicitSortPreference(DEFAULT_STORE, "channels"), false);
 });
 
 test("sortModeForGroup: set groups are independent", () => {
@@ -105,7 +144,8 @@ test("sortModeForGroup: set groups are independent", () => {
   assert.equal(sortModeForGroup(store, "channels"), "recent");
   assert.equal(sortModeForGroup(store, sectionSortGroupKey("abc")), "recent");
   assert.equal(sortModeForGroup(store, "forums"), "alpha");
-  assert.equal(sortModeForGroup(store, sectionSortGroupKey("xyz")), "alpha");
+  // Unset custom section defaults Manual (stream), not alpha.
+  assert.equal(sortModeForGroup(store, sectionSortGroupKey("xyz")), "manual");
 });
 
 test("sectionSortGroupKey: namespaced by section id", () => {

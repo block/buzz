@@ -357,3 +357,40 @@ test("parseChannelSectionPayload: omits icon field when empty or whitespace", ()
     { id: "s3", name: "C", order: 2 },
   ]);
 });
+
+test("parseChannelSectionPayload: optional channelsBlockIndex is kept when in range", () => {
+  const payload = {
+    version: 1,
+    sections: [
+      { id: "a", name: "A", order: 0 },
+      { id: "b", name: "B", order: 1 },
+    ],
+    assignments: {},
+    channelsBlockIndex: 1,
+  };
+  const result = parseChannelSectionPayload(payload);
+  assert.equal(result?.channelsBlockIndex, 1);
+});
+
+test("parseChannelSectionPayload: missing channelsBlockIndex omits field (legacy layout)", () => {
+  const result = parseChannelSectionPayload({
+    version: 1,
+    sections: [{ id: "a", name: "A", order: 0 }],
+    assignments: {},
+  });
+  assert.equal(result?.channelsBlockIndex, undefined);
+  assert.ok(!("channelsBlockIndex" in (result ?? {})));
+});
+
+test("parseChannelSectionPayload: malformed channelsBlockIndex is dropped", () => {
+  for (const bad of [-1, 99, "1", null, Number.NaN, 1.5, 0.9]) {
+    const result = parseChannelSectionPayload({
+      version: 1,
+      sections: [{ id: "a", name: "A", order: 0 }],
+      assignments: {},
+      channelsBlockIndex: bad,
+    });
+    // Non-integers are malformed — never truncates into a different position.
+    assert.equal(result?.channelsBlockIndex, undefined);
+  }
+});

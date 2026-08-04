@@ -3,7 +3,8 @@ import type { Channel } from "@/shared/api/types";
 
 const STORAGE_KEY_PREFIX = "buzz-channel-sort.v1";
 
-export type ChannelSortMode = "alpha" | "recent";
+export type ChannelSortMode = "alpha" | "recent" | "manual";
+type PersistedChannelSortMode = Exclude<ChannelSortMode, "manual">;
 
 /**
  * Key identifying a sidebar grouping that carries its own sort preference.
@@ -18,10 +19,19 @@ export type ChannelSortGroupKey =
 
 export type ChannelSortStore = {
   version: 1;
-  groups: Record<string, ChannelSortMode>;
+  groups: Record<string, PersistedChannelSortMode>;
 };
 
+/** Default for non-stream groups (starred / forums / dms). */
 export const DEFAULT_SORT_MODE: ChannelSortMode = "alpha";
+
+/**
+ * Default for stream groups (Channels + custom categories) when the user has
+ * never saved an explicit A–Z / Recent preference. Manual is implicit — it
+ * does not write sort prefs or seed the order store until the user reorders
+ * or chooses Manual explicitly.
+ */
+export const DEFAULT_STREAM_SORT_MODE: ChannelSortMode = "manual";
 
 export const DEFAULT_STORE: ChannelSortStore = Object.freeze({
   version: 1,
@@ -30,6 +40,19 @@ export const DEFAULT_STORE: ChannelSortStore = Object.freeze({
 
 export function sectionSortGroupKey(sectionId: string): ChannelSortGroupKey {
   return `section:${sectionId}`;
+}
+
+/** Stream sidebar groups that default to Manual when unset. */
+export function isStreamSortGroup(group: ChannelSortGroupKey): boolean {
+  return group === "channels" || group.startsWith("section:");
+}
+
+/** True when the user (or a remote peer) has saved A–Z or Recent for the group. */
+export function hasExplicitSortPreference(
+  store: ChannelSortStore,
+  group: ChannelSortGroupKey,
+): boolean {
+  return Object.hasOwn(store.groups, group);
 }
 
 /**
@@ -72,13 +95,13 @@ export function parseChannelSortPayload(
   if (typeof json !== "object" || json === null) return null;
   const obj = json as Record<string, unknown>;
   if (obj.version !== 1) return null;
-  const groups: Record<string, ChannelSortMode> =
+  const groups: Record<string, PersistedChannelSortMode> =
     typeof obj.groups === "object" &&
     obj.groups !== null &&
     !Array.isArray(obj.groups)
       ? Object.fromEntries(
           Object.entries(obj.groups as Record<string, unknown>).filter(
-            (entry): entry is [string, ChannelSortMode] =>
+            (entry): entry is [string, PersistedChannelSortMode] =>
               entry[1] === "alpha" || entry[1] === "recent",
           ),
         )
@@ -115,11 +138,22 @@ export function writeChannelSortStore(
   }
 }
 
+/**
+ * Effective sort mode for a group from the persisted alpha/recent map only.
+ * Does not consult the separate manual-order store — callers that track
+ * explicit Manual via `manualGroups` should treat that as higher priority.
+ *
+ * Unset stream groups return Manual; unset non-stream groups return A–Z.
+ * Explicit A–Z is distinguishable from unset via {@link hasExplicitSortPreference}.
+ */
 export function sortModeForGroup(
   store: ChannelSortStore,
   group: ChannelSortGroupKey,
 ): ChannelSortMode {
-  return store.groups[group] ?? DEFAULT_SORT_MODE;
+  const explicit = store.groups[group];
+  if (explicit === "alpha" || explicit === "recent") return explicit;
+  if (isStreamSortGroup(group)) return DEFAULT_STREAM_SORT_MODE;
+  return DEFAULT_SORT_MODE;
 }
 
 function channelRecencyMs(channel: Channel): number | null {
@@ -152,7 +186,7 @@ export function sortChannelsForSidebar(
   channels: Channel[],
   mode: ChannelSortMode,
 ): Channel[] {
-  if (mode === "alpha") {
+  if (mode === "alpha" || mode === "manual") {
     return [...channels].sort(compareChannelsByName);
   }
   return [...channels].sort((left, right) => {

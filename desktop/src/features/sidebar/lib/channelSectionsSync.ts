@@ -21,6 +21,51 @@ export type RemoteSections = {
   eventId: string;
 };
 
+/** NIP-78 plaintext shape. Optional channelsBlockIndex keeps v1 backward-readable. */
+export function serializeChannelSectionsPayload(store: ChannelSectionStore): {
+  version: 1;
+  sections: ChannelSection[];
+  assignments: Record<string, string>;
+  channelsBlockIndex?: number;
+} {
+  return {
+    version: 1,
+    sections: store.sections,
+    assignments: store.assignments,
+    ...(typeof store.channelsBlockIndex === "number"
+      ? { channelsBlockIndex: store.channelsBlockIndex }
+      : {}),
+  };
+}
+
+/** Equality used to skip no-op re-publishes (includes index-only moves). */
+export function channelSectionStoresEqual(
+  left: ChannelSectionStore,
+  right: ChannelSectionStore,
+): boolean {
+  if (left.sections.length !== right.sections.length) return false;
+  for (let i = 0; i < right.sections.length; i++) {
+    const a = left.sections[i] as ChannelSection | undefined;
+    const b = right.sections[i] as ChannelSection;
+    if (
+      !a ||
+      a.id !== b.id ||
+      a.name !== b.name ||
+      a.icon !== b.icon ||
+      a.order !== b.order
+    ) {
+      return false;
+    }
+  }
+  const leftKeys = Object.keys(left.assignments);
+  const rightKeys = Object.keys(right.assignments);
+  if (leftKeys.length !== rightKeys.length) return false;
+  for (const key of rightKeys) {
+    if (left.assignments[key] !== right.assignments[key]) return false;
+  }
+  return left.channelsBlockIndex === right.channelsBlockIndex;
+}
+
 async function decryptAndParse(
   event: RelayEvent,
 ): Promise<RemoteSections | null> {
@@ -58,10 +103,7 @@ export class ChannelSectionSyncManager {
       if (events[0].pubkey !== this.pubkey) return null;
       const result = await decryptAndParse(events[0]);
       if (result) {
-        this.lastRemoteCreatedAt = Math.max(
-          this.lastRemoteCreatedAt,
-          result.createdAt,
-        );
+        this.shouldApplyRemote(result);
       }
       return result;
     } catch {
@@ -80,6 +122,14 @@ export class ChannelSectionSyncManager {
     return this.pendingStore;
   }
 
+  shouldApplyRemote(remote: RemoteSections): boolean {
+    this.lastRemoteCreatedAt = Math.max(
+      this.lastRemoteCreatedAt,
+      remote.createdAt,
+    );
+    return this.pendingStore === null;
+  }
+
   publishSections(store: ChannelSectionStore): void {
     this.pendingStore = store;
     if (this.debounceTimer !== null) {
@@ -91,9 +141,7 @@ export class ChannelSectionSyncManager {
     }, DEBOUNCE_MS);
   }
 
-  private async fetchOwnBlobBeforePublish(
-    store: ChannelSectionStore,
-  ): Promise<ChannelSectionStore> {
+  private async refreshRemoteTimestampBeforePublish(): Promise<void> {
     try {
       const events = await relayClient.fetchEvents({
         kinds: [KIND_CHANNEL_SECTIONS],
@@ -101,63 +149,38 @@ export class ChannelSectionSyncManager {
         "#d": [D_TAG],
         limit: 1,
       });
-      if (events.length === 0 || events[0].pubkey !== this.pubkey) return store;
+      if (events.length === 0 || events[0].pubkey !== this.pubkey) return;
       const remote = await decryptAndParse(events[0]);
-      if (!remote) return store;
-      // Sections use whole-blob LWW: take whichever is newer
-      if (remote.createdAt > this.lastRemoteCreatedAt) {
-        this.lastRemoteCreatedAt = remote.createdAt;
-        return remote.store;
-      }
-      return store;
+      if (!remote) return;
+      this.lastRemoteCreatedAt = Math.max(
+        this.lastRemoteCreatedAt,
+        remote.createdAt,
+      );
     } catch {
-      return store;
+      // Publishing the explicit local edit is still safe: the event timestamp
+      // below is monotonic against every remote value this manager has seen.
     }
   }
 
   private isIdenticalToLastPublished(store: ChannelSectionStore): boolean {
     if (!this.lastPublishedStore) return false;
-    const lastSections = this.lastPublishedStore.sections;
-    const currentSections = store.sections;
-    if (lastSections.length !== currentSections.length) return false;
-    for (let i = 0; i < currentSections.length; i++) {
-      const last = lastSections[i] as ChannelSection | undefined;
-      const current = currentSections[i] as ChannelSection;
-      if (
-        !last ||
-        last.id !== current.id ||
-        last.name !== current.name ||
-        last.icon !== current.icon ||
-        last.order !== current.order
-      )
-        return false;
-    }
-    const lastAssignKeys = Object.keys(this.lastPublishedStore.assignments);
-    const currentAssignKeys = Object.keys(store.assignments);
-    if (lastAssignKeys.length !== currentAssignKeys.length) return false;
-    for (const key of currentAssignKeys) {
-      if (this.lastPublishedStore.assignments[key] !== store.assignments[key])
-        return false;
-    }
-    return true;
+    return channelSectionStoresEqual(this.lastPublishedStore, store);
   }
 
   private async doPublish(store: ChannelSectionStore): Promise<void> {
     try {
-      const merged = await this.fetchOwnBlobBeforePublish(store);
-      // Guard: manager may have been destroyed while fetchOwnBlobBeforePublish
+      await this.refreshRemoteTimestampBeforePublish();
+      // Guard: manager may have been destroyed while the remote timestamp
       // was awaited (community switch during in-flight fetch). If so, abort
       // before touching the relay.
       if (this.destroyed) return;
-      if (this.isIdenticalToLastPublished(merged)) {
+      if (this.isIdenticalToLastPublished(store)) {
         this.pendingStore = null;
         return;
       }
-      const payload = {
-        version: 1,
-        sections: merged.sections,
-        assignments: merged.assignments,
-      };
+      // Optional channelsBlockIndex keeps v1 payloads backward-readable:
+      // older clients ignore the field; omit when unset so legacy layout wins.
+      const payload = serializeChannelSectionsPayload(store);
       const ciphertext = await nip44EncryptToSelf(JSON.stringify(payload));
       const createdAt = Math.max(
         Math.floor(Date.now() / 1_000),
@@ -185,7 +208,7 @@ export class ChannelSectionSyncManager {
         this.lastRemoteCreatedAt,
         event.created_at,
       );
-      this.lastPublishedStore = merged;
+      this.lastPublishedStore = store;
       this.pendingStore = null;
     } catch (error) {
       console.warn("[channelSectionsSync] publish failed:", error);
@@ -206,10 +229,7 @@ export class ChannelSectionSyncManager {
         if (event.pubkey !== this.pubkey) return;
         void decryptAndParse(event).then((result) => {
           if (result) {
-            this.lastRemoteCreatedAt = Math.max(
-              this.lastRemoteCreatedAt,
-              result.createdAt,
-            );
+            this.shouldApplyRemote(result);
             onUpdate(result);
           }
         });

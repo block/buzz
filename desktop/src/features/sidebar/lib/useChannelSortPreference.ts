@@ -19,8 +19,8 @@ import type { RemoteSortPrefs } from "./channelSortSync";
  * Persistent per-group sidebar sort preferences, scoped by pubkey + relay so
  * they don't bleed across identities or communities (same scoping as channel
  * sections). Each sidebar grouping (starred, channels, forums, dms, and each
- * custom section) carries its own saved Recent/A–Z mode; unset groups default
- * to A–Z. Mirrors changes made in other windows via the storage event.
+ * custom section) carries its own saved Recent/A–Z/Manual mode; unset groups
+ * default to A–Z. Mirrors changes made in other windows via the storage event.
  *
  * Preferences sync across clients via encrypted NIP-78 app data (kind 30078,
  * d-tag `channel-sort`), following the channel-sections pattern: localStorage
@@ -169,7 +169,7 @@ export function useChannelSortPreference(
 
   const setSortModeFor = React.useCallback(
     (group: ChannelSortGroupKey, mode: ChannelSortMode) => {
-      if (!pubkey) return;
+      if (!pubkey || mode === "manual") return;
       setStore((prev) => {
         const withUpdate: ChannelSortStore = {
           ...prev,

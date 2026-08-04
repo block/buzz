@@ -13,7 +13,10 @@ import {
 import { useRef, useState } from "react";
 import type * as React from "react";
 
-import type { ChannelSortMode } from "@/features/sidebar/lib/channelSortPreference";
+import type {
+  ChannelSortGroupKey,
+  ChannelSortMode,
+} from "@/features/sidebar/lib/channelSortPreference";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -45,9 +48,12 @@ import { ChannelMenuButton } from "@/features/sidebar/ui/SidebarSection";
 import { ChannelContextMenuItems } from "@/features/sidebar/ui/ChannelContextMenu";
 import { deferMenuAction } from "@/features/sidebar/ui/sidebarMenuHelpers";
 import {
+  BlockDragHandle,
   DraggableChannelRow,
   DroppableSectionBody,
   DroppableUngroupedBody,
+  SortableChannelContext,
+  SortableChannelsBlockShell,
   SortableSectionShell,
 } from "@/features/sidebar/ui/SidebarDnd";
 import {
@@ -72,6 +78,7 @@ const SECTION_LABEL_CHEVRON_ICON_CLASS =
 const SORT_OPTIONS: { value: ChannelSortMode; label: string }[] = [
   { value: "recent", label: "Recent" },
   { value: "alpha", label: "A–Z" },
+  { value: "manual", label: "Manual" },
 ];
 
 /**
@@ -128,6 +135,7 @@ export function SectionActionsMenu({
   browseLabel,
   onCreate,
   createLabel,
+  onCreateCategory,
   onNewMessage,
   newMessageLabel,
   onRenameSection,
@@ -138,6 +146,7 @@ export function SectionActionsMenu({
   isLastSection,
   sortMode,
   onSortModeChange,
+  manualSortEnabled = false,
 }: {
   sectionLabel: string;
   testId?: string;
@@ -149,6 +158,7 @@ export function SectionActionsMenu({
   browseLabel?: string;
   onCreate?: () => void;
   createLabel?: string;
+  onCreateCategory?: () => void;
   onNewMessage?: () => void;
   newMessageLabel?: string;
   onRenameSection?: () => void;
@@ -159,9 +169,12 @@ export function SectionActionsMenu({
   isLastSection?: boolean;
   sortMode?: ChannelSortMode;
   onSortModeChange?: (mode: ChannelSortMode) => void;
+  manualSortEnabled?: boolean;
 }) {
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const skipFocusRestoreRef = useRef(false);
   const showSectionManagement = Boolean(onRenameSection || onDeleteSection);
+  const showMove = Boolean(onMoveSectionUp || onMoveSectionDown);
   const showSort = Boolean(sortMode && onSortModeChange);
 
   return (
@@ -182,8 +195,11 @@ export function SectionActionsMenu({
       <DropdownMenuContent
         align="end"
         onCloseAutoFocus={(event) => {
-          event.preventDefault();
-          triggerRef.current?.blur();
+          if (skipFocusRestoreRef.current) {
+            event.preventDefault();
+            triggerRef.current?.blur();
+            skipFocusRestoreRef.current = false;
+          }
         }}
       >
         {hasUnread && onMarkAllRead ? (
@@ -193,7 +209,16 @@ export function SectionActionsMenu({
           </DropdownMenuItem>
         ) : null}
         {onNewMessage ? (
-          <DropdownMenuItem onSelect={() => deferMenuAction(onNewMessage)}>
+          <DropdownMenuItem
+            onSelect={() => {
+              // The deferred New Message route focuses its recipient input.
+              // Do not let Radix restore focus to the sidebar trigger after
+              // that route mounts. Other menu/dialog flows retain the normal
+              // accessible trigger-focus restoration.
+              skipFocusRestoreRef.current = true;
+              deferMenuAction(onNewMessage);
+            }}
+          >
             <Plus className="h-4 w-4" />
             <span>{newMessageLabel ?? "New message"}</span>
           </DropdownMenuItem>
@@ -213,14 +238,30 @@ export function SectionActionsMenu({
             <span>{createLabel ?? "Create channel"}</span>
           </DropdownMenuItem>
         ) : null}
-        {showSectionManagement ? (
+        {onCreateCategory ? (
+          <DropdownMenuItem
+            onSelect={() =>
+              deferMenuAction(() => {
+                // Pin focus on the live trigger before the dialog opens so
+                // Radix's focus stack (and our restore selector) target it —
+                // not a detached menu item — after Escape/cancel.
+                triggerRef.current?.focus();
+                onCreateCategory();
+              })
+            }
+          >
+            <Plus className="h-4 w-4" />
+            <span>New category...</span>
+          </DropdownMenuItem>
+        ) : null}
+        {showSectionManagement || showMove ? (
           <>
             {onRenameSection ? (
               <DropdownMenuItem
                 onSelect={() => deferMenuAction(onRenameSection)}
               >
                 <Pencil className="h-4 w-4" />
-                <span>Rename section</span>
+                <span>Rename category</span>
               </DropdownMenuItem>
             ) : null}
             {onMoveSectionUp ? (
@@ -258,7 +299,9 @@ export function SectionActionsMenu({
                   }
                   value={sortMode}
                 >
-                  {SORT_OPTIONS.map((option) => (
+                  {SORT_OPTIONS.filter(
+                    (option) => manualSortEnabled || option.value !== "manual",
+                  ).map((option) => (
                     <DropdownMenuRadioItem
                       key={option.value}
                       value={option.value}
@@ -279,7 +322,7 @@ export function SectionActionsMenu({
               onSelect={() => deferMenuAction(onDeleteSection)}
             >
               <Trash2 className="h-4 w-4" />
-              <span>Delete section</span>
+              <span>Delete category</span>
             </DropdownMenuItem>
           </>
         ) : null}
@@ -291,6 +334,7 @@ export function SectionActionsMenu({
 function ChannelSectionHeader({
   contentId,
   isCollapsed,
+  isMovable,
   onToggleCollapsed,
   title,
   testId,
@@ -298,6 +342,7 @@ function ChannelSectionHeader({
 }: {
   contentId: string;
   isCollapsed: boolean;
+  isMovable?: boolean;
   onToggleCollapsed: () => void;
   title: string;
   testId: string;
@@ -309,7 +354,10 @@ function ChannelSectionHeader({
         <button
           aria-controls={contentId}
           aria-expanded={!isCollapsed}
-          className={SECTION_LABEL_BUTTON_CLASS}
+          className={cn(
+            SECTION_LABEL_BUTTON_CLASS,
+            isMovable && "max-w-[calc(100%-5.25rem)]",
+          )}
           data-testid={`${testId}-section-label`}
           onClick={onToggleCollapsed}
           type="button"
@@ -336,6 +384,11 @@ export function ChannelGroupSection({
   browseLabel,
   createLabel,
   draggable,
+  blockId,
+  isFirstBlock,
+  isLastBlock,
+  onMoveBlockUp,
+  onMoveBlockDown,
   groupClassName,
   hasUnread,
   isCollapsed,
@@ -365,6 +418,7 @@ export function ChannelGroupSection({
   onAssignChannel,
   onUnassignChannel,
   onCreateSectionForChannel,
+  onCreateCategory,
   mutedChannelIds,
   onMuteChannel,
   onUnmuteChannel,
@@ -373,10 +427,18 @@ export function ChannelGroupSection({
   onUnstarChannel,
   onDeleteChannel,
   onLeaveChannel,
+  groupKey = "channels",
+  manualSortEnabled = false,
 }: {
   browseLabel?: string;
   createLabel?: string;
   draggable?: boolean;
+  /** When set, the whole group is a movable sidebar block (Channels lane). */
+  blockId?: string;
+  isFirstBlock?: boolean;
+  isLastBlock?: boolean;
+  onMoveBlockUp?: () => void;
+  onMoveBlockDown?: () => void;
   groupClassName?: string;
   isCollapsed: boolean;
   isActiveChannel: boolean;
@@ -415,6 +477,7 @@ export function ChannelGroupSection({
   onAssignChannel?: (channelId: string, sectionId: string) => void;
   onUnassignChannel?: (channelId: string) => void;
   onCreateSectionForChannel?: (channelId: string) => void;
+  onCreateCategory?: () => void;
   mutedChannelIds?: ReadonlySet<string>;
   onMuteChannel?: (channelId: string) => void;
   onUnmuteChannel?: (channelId: string) => void;
@@ -423,19 +486,48 @@ export function ChannelGroupSection({
   onUnstarChannel?: (channelId: string) => void;
   onDeleteChannel?: (channel: Channel) => void;
   onLeaveChannel?: (channel: Channel) => void;
+  groupKey?: ChannelSortGroupKey;
+  manualSortEnabled?: boolean;
 }) {
   const contentId = `sidebar-${listTestId}`;
   const [actionsMenuOpen, setActionsMenuOpen] = useState(false);
 
   const channelList =
     items.length > 0 ? (
-      <SidebarMenu data-testid={listTestId}>
-        {items.map((channel) => (
-          <ContextMenu key={channel.id}>
-            <ContextMenuTrigger asChild>
-              <SidebarMenuItem className="content-visibility-auto-row">
-                {draggable ? (
-                  <DraggableChannelRow channelId={channel.id}>
+      <SortableChannelContext channelIds={items.map((channel) => channel.id)}>
+        <SidebarMenu data-testid={listTestId}>
+          {items.map((channel) => (
+            <ContextMenu key={channel.id}>
+              <ContextMenuTrigger asChild>
+                {/* WKWebView can retain a stale skipped-paint state when
+                    content-visibility and dnd-kit transforms reorder the same
+                    row. Manual lists are small, so keep draggable rows live. */}
+                <SidebarMenuItem
+                  className={
+                    draggable ? undefined : "content-visibility-auto-row"
+                  }
+                >
+                  {draggable ? (
+                    <DraggableChannelRow
+                      channelId={channel.id}
+                      channelName={channel.name}
+                      groupKey={groupKey}
+                    >
+                      <ChannelMenuButton
+                        channel={channel}
+                        activeWorking={activeWorkingByChannelId?.get(
+                          channel.id,
+                        )}
+                        hasUnread={unreadChannelIds.has(channel.id)}
+                        unreadCount={unreadChannelCounts.get(channel.id) ?? 0}
+                        isMuted={mutedChannelIds?.has(channel.id)}
+                        isActive={
+                          isActiveChannel && selectedChannelId === channel.id
+                        }
+                        onSelectChannel={onSelectChannel}
+                      />
+                    </DraggableChannelRow>
+                  ) : (
                     <ChannelMenuButton
                       channel={channel}
                       activeWorking={activeWorkingByChannelId?.get(channel.id)}
@@ -447,56 +539,49 @@ export function ChannelGroupSection({
                       }
                       onSelectChannel={onSelectChannel}
                     />
-                  </DraggableChannelRow>
-                ) : (
-                  <ChannelMenuButton
-                    channel={channel}
-                    activeWorking={activeWorkingByChannelId?.get(channel.id)}
-                    hasUnread={unreadChannelIds.has(channel.id)}
-                    unreadCount={unreadChannelCounts.get(channel.id) ?? 0}
-                    isMuted={mutedChannelIds?.has(channel.id)}
-                    isActive={
-                      isActiveChannel && selectedChannelId === channel.id
-                    }
-                    onSelectChannel={onSelectChannel}
-                  />
-                )}
-              </SidebarMenuItem>
-            </ContextMenuTrigger>
-            <ContextMenuContent>
-              <ChannelContextMenuItems
-                channel={channel}
-                hasUnread={unreadChannelIds.has(channel.id)}
-                isMuted={mutedChannelIds?.has(channel.id)}
-                isStarred={starredChannelIds?.has(channel.id)}
-                sections={sections}
-                assignments={assignments}
-                onMarkChannelRead={onMarkChannelRead}
-                onMarkChannelUnread={onMarkChannelUnread}
-                onMuteChannel={onMuteChannel}
-                onUnmuteChannel={onUnmuteChannel}
-                onStarChannel={onStarChannel}
-                onUnstarChannel={onUnstarChannel}
-                onAssignChannel={onAssignChannel}
-                onUnassignChannel={onUnassignChannel}
-                onCreateSectionForChannel={onCreateSectionForChannel}
-                onDeleteChannel={onDeleteChannel}
-                onLeaveChannel={onLeaveChannel}
-              />
-            </ContextMenuContent>
-          </ContextMenu>
-        ))}
-      </SidebarMenu>
+                  )}
+                </SidebarMenuItem>
+              </ContextMenuTrigger>
+              <ContextMenuContent>
+                <ChannelContextMenuItems
+                  channel={channel}
+                  hasUnread={unreadChannelIds.has(channel.id)}
+                  isMuted={mutedChannelIds?.has(channel.id)}
+                  isStarred={starredChannelIds?.has(channel.id)}
+                  sections={sections}
+                  assignments={assignments}
+                  onMarkChannelRead={onMarkChannelRead}
+                  onMarkChannelUnread={onMarkChannelUnread}
+                  onMuteChannel={onMuteChannel}
+                  onUnmuteChannel={onUnmuteChannel}
+                  onStarChannel={onStarChannel}
+                  onUnstarChannel={onUnstarChannel}
+                  onAssignChannel={onAssignChannel}
+                  onUnassignChannel={onUnassignChannel}
+                  onCreateSectionForChannel={onCreateSectionForChannel}
+                  onDeleteChannel={onDeleteChannel}
+                  onLeaveChannel={onLeaveChannel}
+                />
+              </ContextMenuContent>
+            </ContextMenu>
+          ))}
+        </SidebarMenu>
+      </SortableChannelContext>
     ) : null;
 
-  const sectionContent = (
+  const renderSectionContent = (blockDragHandle?: React.ReactNode) => (
     <SidebarGroup
-      className={cn("group/sidebar-section select-none", groupClassName)}
+      className={cn(
+        "group/sidebar-section select-none",
+        groupClassName,
+        blockId && "relative",
+      )}
       data-section-actions-open={actionsMenuOpen || undefined}
     >
       <ChannelSectionHeader
         contentId={contentId}
         isCollapsed={isCollapsed}
+        isMovable={Boolean(blockDragHandle)}
         onToggleCollapsed={onToggleCollapsed}
         title={title}
         testId={listTestId}
@@ -521,9 +606,16 @@ export function ChannelGroupSection({
               browseLabel={browseLabel}
               onCreate={onCreateClick}
               createLabel={createLabel}
+              onCreateCategory={onCreateCategory}
+              onMoveSectionUp={onMoveBlockUp}
+              onMoveSectionDown={onMoveBlockDown}
+              isFirstSection={isFirstBlock}
+              isLastSection={isLastBlock}
               sortMode={sortMode}
               onSortModeChange={onSortModeChange}
+              manualSortEnabled={manualSortEnabled}
             />
+            {blockDragHandle}
           </>
         }
       />
@@ -533,10 +625,32 @@ export function ChannelGroupSection({
     </SidebarGroup>
   );
 
-  return draggable ? (
-    <DroppableUngroupedBody>{sectionContent}</DroppableUngroupedBody>
-  ) : (
-    sectionContent
+  const wrapDroppable = (content: React.ReactNode) =>
+    draggable ? (
+      <DroppableUngroupedBody>{content}</DroppableUngroupedBody>
+    ) : (
+      content
+    );
+
+  if (!blockId) return wrapDroppable(renderSectionContent());
+
+  return (
+    <SortableChannelsBlockShell blockId={blockId}>
+      {({ dragHandleProps, isDragging }) => (
+        <div className={cn("relative", isDragging && "opacity-30")}>
+          {wrapDroppable(
+            renderSectionContent(
+              <BlockDragHandle
+                dragHandleProps={dragHandleProps}
+                isDragging={isDragging}
+                label={title}
+                testId={`block-drag-${blockId}`}
+              />,
+            ),
+          )}
+        </div>
+      )}
+    </SortableChannelsBlockShell>
   );
 }
 
@@ -634,16 +748,14 @@ export function CustomChannelSection({
           >
             <ContextMenu>
               <ContextMenuTrigger asChild>
-                <div className="relative" {...dragHandleProps}>
-                  <SidebarGroupLabel
-                    asChild
-                    className={section.icon ? undefined : "pl-8"}
-                  >
+                <div className="relative">
+                  <SidebarGroupLabel asChild>
                     <button
                       aria-controls={contentId}
                       aria-expanded={!isCollapsed}
                       className={cn(
                         SECTION_LABEL_BUTTON_CLASS,
+                        "max-w-[calc(100%-5.25rem)]",
                         section.icon && "gap-2",
                       )}
                       onClick={onToggleCollapsed}
@@ -701,6 +813,13 @@ export function CustomChannelSection({
                       isLastSection={isLast}
                       sortMode={sortMode}
                       onSortModeChange={onSortModeChange}
+                      manualSortEnabled
+                    />
+                    <BlockDragHandle
+                      dragHandleProps={dragHandleProps}
+                      isDragging={isDragging}
+                      label={section.name}
+                      testId={`block-drag-${section.id}`}
                     />
                   </div>
                 </div>
@@ -708,7 +827,7 @@ export function CustomChannelSection({
               <ContextMenuContent>
                 <ContextMenuItem onClick={onRenameSection}>
                   <Pencil className="h-4 w-4" />
-                  Rename section
+                  Rename category
                 </ContextMenuItem>
                 <ContextMenuItem disabled={isFirst} onClick={onMoveSectionUp}>
                   <ArrowUp className="h-4 w-4" />
@@ -724,65 +843,80 @@ export function CustomChannelSection({
                   onClick={onDeleteSection}
                 >
                   <Trash2 className="h-4 w-4" />
-                  Delete section
+                  Delete category
                 </ContextMenuItem>
               </ContextMenuContent>
             </ContextMenu>
             {!isCollapsed ? (
               <SidebarGroupContent id={contentId}>
                 {channels.length > 0 ? (
-                  <SidebarMenu>
-                    {channels.map((channel) => (
-                      <ContextMenu key={channel.id}>
-                        <ContextMenuTrigger asChild>
-                          <SidebarMenuItem>
-                            <DraggableChannelRow channelId={channel.id}>
-                              <ChannelMenuButton
-                                channel={channel}
-                                activeWorking={activeWorkingByChannelId?.get(
-                                  channel.id,
-                                )}
-                                hasUnread={unreadChannelIds.has(channel.id)}
-                                unreadCount={
-                                  unreadChannelCounts.get(channel.id) ?? 0
-                                }
-                                isMuted={mutedChannelIds?.has(channel.id)}
-                                isActive={
-                                  isActiveChannel &&
-                                  selectedChannelId === channel.id
-                                }
-                                onSelectChannel={onSelectChannel}
-                              />
-                            </DraggableChannelRow>
-                          </SidebarMenuItem>
-                        </ContextMenuTrigger>
-                        <ContextMenuContent>
-                          <ChannelContextMenuItems
-                            channel={channel}
-                            hasUnread={unreadChannelIds.has(channel.id)}
-                            isMuted={mutedChannelIds?.has(channel.id)}
-                            isStarred={starredChannelIds?.has(channel.id)}
-                            sections={sections}
-                            assignments={assignments}
-                            onMarkChannelRead={onMarkChannelRead}
-                            onMarkChannelUnread={onMarkChannelUnread}
-                            onMuteChannel={onMuteChannel}
-                            onUnmuteChannel={onUnmuteChannel}
-                            onStarChannel={onStarChannel}
-                            onUnstarChannel={onUnstarChannel}
-                            onAssignChannel={onAssignChannel}
-                            onUnassignChannel={onUnassignChannel}
-                            onCreateSectionForChannel={
-                              onCreateSectionForChannel
-                            }
-                            onDeleteChannel={onDeleteChannel}
-                            onLeaveChannel={onLeaveChannel}
-                          />
-                        </ContextMenuContent>
-                      </ContextMenu>
-                    ))}
-                  </SidebarMenu>
-                ) : null}
+                  <SortableChannelContext
+                    channelIds={channels.map((channel) => channel.id)}
+                  >
+                    <SidebarMenu data-testid={`section-list-${section.id}`}>
+                      {channels.map((channel) => (
+                        <ContextMenu key={channel.id}>
+                          <ContextMenuTrigger asChild>
+                            <SidebarMenuItem>
+                              <DraggableChannelRow
+                                channelId={channel.id}
+                                channelName={channel.name}
+                                groupKey={`section:${section.id}`}
+                              >
+                                <ChannelMenuButton
+                                  channel={channel}
+                                  activeWorking={activeWorkingByChannelId?.get(
+                                    channel.id,
+                                  )}
+                                  hasUnread={unreadChannelIds.has(channel.id)}
+                                  unreadCount={
+                                    unreadChannelCounts.get(channel.id) ?? 0
+                                  }
+                                  isMuted={mutedChannelIds?.has(channel.id)}
+                                  isActive={
+                                    isActiveChannel &&
+                                    selectedChannelId === channel.id
+                                  }
+                                  onSelectChannel={onSelectChannel}
+                                />
+                              </DraggableChannelRow>
+                            </SidebarMenuItem>
+                          </ContextMenuTrigger>
+                          <ContextMenuContent>
+                            <ChannelContextMenuItems
+                              channel={channel}
+                              hasUnread={unreadChannelIds.has(channel.id)}
+                              isMuted={mutedChannelIds?.has(channel.id)}
+                              isStarred={starredChannelIds?.has(channel.id)}
+                              sections={sections}
+                              assignments={assignments}
+                              onMarkChannelRead={onMarkChannelRead}
+                              onMarkChannelUnread={onMarkChannelUnread}
+                              onMuteChannel={onMuteChannel}
+                              onUnmuteChannel={onUnmuteChannel}
+                              onStarChannel={onStarChannel}
+                              onUnstarChannel={onUnstarChannel}
+                              onAssignChannel={onAssignChannel}
+                              onUnassignChannel={onUnassignChannel}
+                              onCreateSectionForChannel={
+                                onCreateSectionForChannel
+                              }
+                              onDeleteChannel={onDeleteChannel}
+                              onLeaveChannel={onLeaveChannel}
+                            />
+                          </ContextMenuContent>
+                        </ContextMenu>
+                      ))}
+                    </SidebarMenu>
+                  </SortableChannelContext>
+                ) : (
+                  <div
+                    className="px-8 py-1 text-xs text-sidebar-foreground/45"
+                    data-testid={`section-empty-${section.id}`}
+                  >
+                    Drop channels here
+                  </div>
+                )}
               </SidebarGroupContent>
             ) : null}
           </SidebarGroup>

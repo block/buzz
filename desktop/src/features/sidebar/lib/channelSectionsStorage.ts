@@ -1,4 +1,5 @@
 import { normalizeRelayUrl } from "@/features/profile/lib/selfProfileStorage";
+import { normalizeChannelsBlockIndex } from "./channelSectionsHelpers";
 
 const STORAGE_KEY_PREFIX = "buzz-channel-sections.v1";
 
@@ -13,6 +14,12 @@ export type ChannelSectionStore = {
   version: 1;
   sections: ChannelSection[];
   assignments: Record<string, string>;
+  /**
+   * Optional insertion index of the built-in uncategorized Channels block
+   * among custom categories (0 = above all categories). Omitted / invalid
+   * values mean "after all categories" so older v1 payloads keep their layout.
+   */
+  channelsBlockIndex?: number;
 };
 
 export const DEFAULT_STORE: ChannelSectionStore = Object.freeze({
@@ -89,7 +96,16 @@ export function parseChannelSectionPayload(
           ),
         )
       : {};
-  return stripOrphanedAssignments({ version: 1, sections, assignments });
+  const channelsBlockIndex = normalizeChannelsBlockIndex(
+    obj.channelsBlockIndex,
+    sections.length,
+  );
+  return stripOrphanedAssignments({
+    version: 1,
+    sections,
+    assignments,
+    ...(channelsBlockIndex !== undefined ? { channelsBlockIndex } : {}),
+  });
 }
 
 function parseRaw(raw: string | null): ChannelSectionStore | null {

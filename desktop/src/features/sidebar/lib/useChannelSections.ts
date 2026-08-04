@@ -9,7 +9,13 @@ import {
 } from "./channelSectionsStorage";
 import { ChannelSectionSyncManager } from "./channelSectionsSync";
 import type { RemoteSections } from "./channelSectionsSync";
-import { swapSectionOrder } from "./channelSectionsHelpers";
+import {
+  appendSectionToStore,
+  getSidebarBlockOrder,
+  applySidebarBlockOrder,
+  removeSectionFromStore,
+  swapBlockOrder,
+} from "./channelSectionsHelpers";
 
 export type { ChannelSection } from "./channelSectionsStorage";
 
@@ -24,12 +30,17 @@ export function useChannelSections(
 ): {
   sections: ChannelSection[];
   assignments: Record<string, string>;
+  blockOrder: string[];
   createSection: (name: string, icon?: string) => ChannelSection | null;
   renameSection: (sectionId: string, newName: string, icon?: string) => void;
   deleteSection: (sectionId: string) => void;
+  moveBlockUp: (blockId: string) => void;
+  moveBlockDown: (blockId: string) => void;
+  /** @deprecated Prefer moveBlockUp */
   moveSectionUp: (sectionId: string) => void;
+  /** @deprecated Prefer moveBlockDown */
   moveSectionDown: (sectionId: string) => void;
-  reorderSections: (orderedIds: string[]) => void;
+  reorderBlocks: (orderedBlockIds: string[]) => void;
   assignChannel: (channelId: string, sectionId: string) => void;
   unassignChannel: (channelId: string) => void;
 } {
@@ -84,6 +95,8 @@ export function useChannelSections(
     ): ((prev: ChannelSectionStore) => ChannelSectionStore) => {
       return (prev) => {
         if (!pubkey) return prev;
+        if (managerRef.current?.shouldApplyRemote(remote) === false)
+          return prev;
         if (remote.createdAt < lastAppliedRemoteTs.current) return prev;
         if (
           remote.createdAt === lastAppliedRemoteTs.current &&
@@ -171,6 +184,9 @@ export function useChannelSections(
   const createSection = React.useCallback(
     (name: string, icon?: string): ChannelSection | null => {
       if (!pubkey) return null;
+      // Read current store so returned section.order matches what we persist.
+      // Append after the existing lane; does not shift Channels among
+      // categories that already sit above/below it.
       const prev = readChannelSectionsStore(pubkey, relayUrl);
       const maxOrder =
         prev.sections.length > 0
@@ -183,10 +199,7 @@ export function useChannelSections(
         order: maxOrder + 1,
       };
       setStore((current) => {
-        const next: ChannelSectionStore = {
-          ...current,
-          sections: [...current.sections, section],
-        };
+        const next = appendSectionToStore(current, section);
         if (!writeChannelSectionsStore(pubkey, next, relayUrl)) return current;
         managerRef.current?.publishSections(next);
         return next;
@@ -231,17 +244,7 @@ export function useChannelSections(
         return;
       }
       setStore((prev) => {
-        const assignments = { ...prev.assignments };
-        for (const channelId of Object.keys(assignments)) {
-          if (assignments[channelId] === sectionId) {
-            delete assignments[channelId];
-          }
-        }
-        const next: ChannelSectionStore = {
-          ...prev,
-          sections: prev.sections.filter((s) => s.id !== sectionId),
-          assignments,
-        };
+        const next = removeSectionFromStore(prev, sectionId);
         if (!writeChannelSectionsStore(pubkey, next, relayUrl)) {
           return prev;
         }
@@ -252,11 +255,11 @@ export function useChannelSections(
     [pubkey, relayUrl],
   );
 
-  const moveSectionUp = React.useCallback(
-    (sectionId: string) => {
+  const moveBlockUp = React.useCallback(
+    (blockId: string) => {
       if (!pubkey) return;
       setStore((prev) => {
-        const next = swapSectionOrder(prev, sectionId, "up");
+        const next = swapBlockOrder(prev, blockId, "up");
         if (!next || !writeChannelSectionsStore(pubkey, next, relayUrl))
           return prev;
         managerRef.current?.publishSections(next);
@@ -266,11 +269,11 @@ export function useChannelSections(
     [pubkey, relayUrl],
   );
 
-  const moveSectionDown = React.useCallback(
-    (sectionId: string) => {
+  const moveBlockDown = React.useCallback(
+    (blockId: string) => {
       if (!pubkey) return;
       setStore((prev) => {
-        const next = swapSectionOrder(prev, sectionId, "down");
+        const next = swapBlockOrder(prev, blockId, "down");
         if (!next || !writeChannelSectionsStore(pubkey, next, relayUrl))
           return prev;
         managerRef.current?.publishSections(next);
@@ -280,15 +283,14 @@ export function useChannelSections(
     [pubkey, relayUrl],
   );
 
-  const reorderSections = React.useCallback(
-    (orderedIds: string[]) => {
+  const moveSectionUp = moveBlockUp;
+  const moveSectionDown = moveBlockDown;
+
+  const reorderBlocks = React.useCallback(
+    (orderedBlockIds: string[]) => {
       if (!pubkey) return;
       setStore((prev) => {
-        const sections = prev.sections.map((s) => {
-          const newOrder = orderedIds.indexOf(s.id);
-          return newOrder === -1 ? s : { ...s, order: newOrder };
-        });
-        const next: ChannelSectionStore = { ...prev, sections };
+        const next = applySidebarBlockOrder(prev, orderedBlockIds);
         if (!writeChannelSectionsStore(pubkey, next, relayUrl)) return prev;
         managerRef.current?.publishSections(next);
         return next;
@@ -336,15 +338,20 @@ export function useChannelSections(
     [pubkey, relayUrl],
   );
 
+  const blockOrder = React.useMemo(() => getSidebarBlockOrder(store), [store]);
+
   return {
     sections,
     assignments: store.assignments,
+    blockOrder,
     createSection,
     renameSection,
     deleteSection,
+    moveBlockUp,
+    moveBlockDown,
     moveSectionUp,
     moveSectionDown,
-    reorderSections,
+    reorderBlocks,
     assignChannel,
     unassignChannel,
   };

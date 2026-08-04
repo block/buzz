@@ -152,17 +152,22 @@ test.describe("list virtualization", () => {
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
 
-    // dnd-kit marks each section's wrapping row with role="button" +
-    // aria-roledescription="sortable" and spreads the drag listeners there, so
-    // the row itself is the handle. Scoping to that attribute reads the live
-    // section order and excludes the inner disclosure button and the (hidden)
-    // assign-to-section context-menu items that reuse the same names.
-    const headers = page.locator('[aria-roledescription="sortable"]');
-    const topHeader = headers.filter({ hasText: "Priority" });
-    const bottomHeader = headers.filter({ hasText: "Archive" });
+    // Each category keeps a stable dnd block wrapper while its dedicated,
+    // accessible grip owns the drag listeners. Scope the live order to the two
+    // seeded custom blocks so the movable built-in Channels block is excluded.
+    const headers = page.locator(
+      '[data-dnd-block="sec-top"], [data-dnd-block="sec-bottom"]',
+    );
+    const topHeader = page.locator('[data-dnd-block="sec-top"]');
+    const bottomHeader = page.locator('[data-dnd-block="sec-bottom"]');
+    const topHandle = page.getByTestId("block-drag-sec-top");
     await expect(topHeader).toBeVisible();
     await expect(bottomHeader).toBeVisible();
+    await expect(topHandle).toBeAttached();
     await expect(headers).toHaveCount(2);
+    await topHeader.evaluate((element) =>
+      element.scrollIntoView({ block: "center" }),
+    );
 
     const sectionOrder = async () =>
       headers.evaluateAll((rows) =>
@@ -173,10 +178,9 @@ test.describe("list virtualization", () => {
         ),
       );
     expect(await sectionOrder()).toEqual(["Priority", "Archive"]);
-
     // Drag "Priority" past "Archive" — onDragEnd commits arrayMove and persists
     // the new order. The drop must land for the order to flip.
-    await dragOver(page, topHeader, bottomHeader);
+    await dragOver(page, topHandle, bottomHeader);
 
     // The drop landed: order flipped. A no-op drag would leave it unchanged.
     await expect.poll(sectionOrder).toEqual(["Archive", "Priority"]);
