@@ -15,10 +15,17 @@ WORKTREE_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 BASE_PORT=$(python3 -c "import hashlib,sys; h=int(hashlib.sha256(sys.argv[1].encode()).hexdigest(), 16); print(10000 + h % 55000)" "$WORKTREE_ROOT")
 export BUZZ_VITE_PORT=$BASE_PORT
 export BUZZ_HMR_PORT=$((BASE_PORT + 1))
-export BUZZ_RELAY_PORT=3000
+# Derive the relay port from BUZZ_BIND_ADDR the same way the `dev` recipe does,
+# so a remapped relay port reaches the desktop app too. Hardcoding 3000 here
+# pointed the app at whatever else owned that port while the relay listened
+# elsewhere, which surfaces as a connection failure rather than a port mismatch.
+_bind_addr="${BUZZ_BIND_ADDR:-0.0.0.0:3000}"
+_relay_port="${_bind_addr##*:}"
+[[ "${_relay_port}" =~ ^[0-9]+$ ]] || _relay_port=3000
+export BUZZ_RELAY_PORT="${BUZZ_RELAY_PORT:-${_relay_port}}"
 export VITE_PORT="$BUZZ_VITE_PORT"
 export VITE_HMR_PORT="$BUZZ_HMR_PORT"
-export BUZZ_RELAY_URL="${BUZZ_RELAY_URL:-ws://localhost:3000}"
+export BUZZ_RELAY_URL="${BUZZ_RELAY_URL:-ws://localhost:${BUZZ_RELAY_PORT}}"
 
 DEV_URL="http://localhost:${BUZZ_VITE_PORT}"
 if [[ "${BUZZ_RESET_WEBVIEW_STATE:-0}" == "1" ]]; then
