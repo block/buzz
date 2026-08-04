@@ -2345,8 +2345,10 @@ fn openai_ordinary_400() -> Value {
 /// what makes it permanent rather than transient: a failed request reports no
 /// usage, so `last_request_input_tokens` stays frozen at the last SUCCESSFUL
 /// (sub-threshold) reading, `should_handoff()` therefore returns false forever,
-/// and the session is persisted with the same oversized history. Every later
-/// prompt fails identically — across restarts.
+/// and the in-memory session keeps the same oversized history. Every later
+/// prompt in that session fails identically, for the life of the session.
+/// (Restarting the agent clears it — history is not written to disk — which is
+/// why the only workaround today is a restart.)
 ///
 /// The sequence here reproduces exactly that state: request 1 succeeds and
 /// reports usage well UNDER the threshold (so the proactive gate is provably
@@ -2431,6 +2433,136 @@ async fn context_window_400_recovers_instead_of_sticking() {
     assert!(
         stderr.contains("provider reported context overflow; forcing handoff"),
         "expected the forced-handoff log line, got: {stderr}"
+    );
+    h.shutdown().await;
+}
+
+/// A successful recovery must actually send the recovered completion, even when
+/// `max_rounds` is finite. `round` is incremented BEFORE the completion that
+/// gets rejected, so a naive `continue` after recovery re-enters the loop with
+/// the rejected attempt already charged against the cap: with
+/// `BUZZ_AGENT_MAX_ROUNDS=1` the turn would return `max_turn_requests` after
+/// destructively resetting history, having never sent the retry. That silently
+/// converts "recovered" into "history destroyed, question unanswered" — worse
+/// than the error it replaced, because the user gets a stop reason rather than a
+/// failure.
+///
+/// The default `max_rounds` is 0 (unbounded), which is why the rest of the
+/// matrix cannot see this: the cap check at the top of the loop never fires.
+///
+/// `max_rounds=1` is also the tightest possible setting, so it pins the
+/// boundary: exactly one round is authorized, the rejected request must not
+/// consume it, and the retry must be the request that spends it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recovery_retry_is_sent_under_a_finite_round_cap() {
+    let llm = spawn_capturing_llm_with_status(vec![
+        // req 1: the overflow rejection (round 1 charged before it is sent).
+        (400, openai_context_length_error()),
+        // req 2: the forced handoff's summarize() call.
+        (200, openai_text("recovered handoff summary")),
+        // req 3: the retried completion. Under the bug this is never sent.
+        (200, openai_text_with_usage("done after recovery", 10)),
+    ])
+    .await;
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[
+            ("BUZZ_AGENT_MAX_CONTEXT_TOKENS", "200000"),
+            ("BUZZ_AGENT_MAX_OUTPUT_TOKENS", "8192"),
+            (
+                "BUZZ_AGENT_MAX_HISTORY_BYTES",
+                &(16 * 1024 * 1024).to_string(),
+            ),
+            ("BUZZ_AGENT_MAX_HANDOFFS", "0"),
+            // The whole point: a finite cap, at its tightest.
+            ("BUZZ_AGENT_MAX_ROUNDS", "1"),
+        ],
+    )
+    .await;
+    let sid = init_session(&mut h, json!([])).await;
+
+    let p0 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text": large_prompt("overflows-under-finite-cap")}]}),
+        )
+        .await;
+    let r0 = h.recv_until(|v| v["id"] == json!(p0)).await;
+    assert!(
+        r0.get("error").is_none(),
+        "context-window 400 must be recovered in-loop: {r0} stderr={}",
+        h.stderr_text()
+    );
+    // The discriminator. `max_turn_requests` here means recovery ran, history
+    // was reset, and the turn ended without ever asking the model again.
+    assert_eq!(
+        r0["result"]["stopReason"],
+        "end_turn",
+        "a recovered turn must finish by answering, not by hitting the round cap: {r0} \
+         stderr={}",
+        h.stderr_text()
+    );
+    // 3 requests = reject + summarize + retry. 2 would mean the retry was
+    // never sent (the bug); the outcome assertion alone cannot tell those apart
+    // if the stop reason were ever produced some other way.
+    let captured = llm.captured.lock().await.len();
+    assert_eq!(
+        captured,
+        3,
+        "expected reject + summarize + retry (3 reqs), saw {captured} — stderr={}",
+        h.stderr_text()
+    );
+    h.shutdown().await;
+}
+
+/// The finite round cap must still bind for ORDINARY rounds — the recovery
+/// refund must not become a general amnesty. With `max_rounds=1` and no context
+/// overflow anywhere, a model that keeps requesting tool calls gets exactly one
+/// completion and then `max_turn_requests`.
+///
+/// Without this arm, "make the recovered retry possible" is satisfiable by
+/// deleting the cap, and the test above would still pass.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn finite_round_cap_still_binds_without_a_context_overflow() {
+    let llm = spawn_capturing_llm_with_status(vec![
+        // Round 1: a tool call, which would normally drive another round.
+        (
+            200,
+            openai_tool_call("tc1", "dev__shell", json!({"command": "true"})),
+        ),
+        // Never reached: the cap must stop the turn before a second completion.
+        (200, openai_text_with_usage("should not be sent", 10)),
+    ])
+    .await;
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[
+            ("BUZZ_AGENT_MAX_CONTEXT_TOKENS", "200000"),
+            ("BUZZ_AGENT_MAX_ROUNDS", "1"),
+        ],
+    )
+    .await;
+    let sid = init_session(&mut h, json!([])).await;
+
+    let p0 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"drive a tool call"}]}),
+        )
+        .await;
+    let r0 = h.recv_until(|v| v["id"] == json!(p0)).await;
+    assert_eq!(
+        r0["result"]["stopReason"],
+        "max_turn_requests",
+        "an ordinary finite cap must still bind: {r0} stderr={}",
+        h.stderr_text()
+    );
+    let captured = llm.captured.lock().await.len();
+    assert_eq!(
+        captured,
+        1,
+        "exactly one completion is authorized by max_rounds=1, saw {captured} — stderr={}",
+        h.stderr_text()
     );
     h.shutdown().await;
 }
@@ -2764,6 +2896,104 @@ async fn recovery_shrinks_the_summarize_prompt_below_the_rejected_size() {
         (summarize as f64) < 0.75 * (rejected as f64),
         "rescue summarize prompt ({summarize} bytes) must be materially smaller than the \
          rejected request ({rejected} bytes) — the ladder is not shrinking"
+    );
+    h.shutdown().await;
+}
+
+/// The ladder must shrink between RUNGS, not just once on entry.
+///
+/// This arm exists because a mutant that pins `shift` to `1` — deleting the
+/// `attempts` dependence, so every rung rebuilds the same budget — SURVIVED the
+/// whole suite. It had to: `attempts` is 0 on the first rung, so `shift = 1` IS
+/// production there, and every other arm stops at rung 1. The single-rung shrink
+/// arm above cannot see this; only a fixture that forces a SECOND rung can.
+///
+/// The forcing move is the realistic one the ladder was designed for: the
+/// summarize call travels the same provider path, so rung 1's summarize is
+/// itself rejected for context overflow (`Skipped`), and rung 2 must come back
+/// with a materially smaller summarizer prompt.
+///
+/// Budgets: history is ~64 KB, so rung 1 asks for ~32 KB and rung 2 for ~16 KB,
+/// both comfortably above the 4 KiB floor — the floor must not be what
+/// separates them, or this would measure the wrong mechanism.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recovery_shrinks_further_on_each_rung() {
+    let llm = spawn_capturing_llm_with_status(vec![
+        // 1: the completion that overflows.
+        (400, openai_context_length_error()),
+        // 2: rung-1 summarize, rejected the same way -> Skipped -> next rung.
+        (400, openai_context_length_error()),
+        // 3: rung-2 summarize succeeds.
+        (200, openai_text("summary")),
+        // 4: the retried completion.
+        (200, openai_text_with_usage("done", 10)),
+    ])
+    .await;
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[
+            ("BUZZ_AGENT_MAX_CONTEXT_TOKENS", "200000"),
+            (
+                "BUZZ_AGENT_MAX_HISTORY_BYTES",
+                &(16 * 1024 * 1024).to_string(),
+            ),
+            ("BUZZ_AGENT_MAX_HANDOFFS", "0"),
+        ],
+    )
+    .await;
+    let sid = init_session(&mut h, json!([])).await;
+    let p0 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text": large_prompt("rung-shrink-probe")}]}),
+        )
+        .await;
+    let r0 = h.recv_until(|v| v["id"] == json!(p0)).await;
+    assert!(
+        r0.get("error").is_none(),
+        "expected recovery on the second rung: {r0}"
+    );
+
+    // The second rung must actually have been taken — otherwise the byte
+    // comparison below would compare rung 1 against the retry.
+    let stderr = h.stderr_text();
+    assert!(
+        stderr.contains("did not run; shrinking further"),
+        "rung 1 must have been Skipped so rung 2 runs; got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("below the"),
+        "the prompt FLOOR must not be involved in this fixture; got: {stderr}"
+    );
+
+    let captured = llm.captured.lock().await.clone();
+    assert_eq!(
+        captured.len(),
+        4,
+        "expected reject + rung1 summarize + rung2 summarize + retry, saw {}",
+        captured.len()
+    );
+    let content_bytes = |req: &Value| -> usize {
+        req["messages"]
+            .as_array()
+            .map(|ms| {
+                ms.iter()
+                    .filter_map(|m| m["content"].as_str())
+                    .map(str::len)
+                    .sum()
+            })
+            .unwrap_or(0)
+    };
+    let rung1 = content_bytes(&captured[1]);
+    let rung2 = content_bytes(&captured[2]);
+    assert!(
+        rung1 > 0 && rung2 > 0,
+        "empty measurement is not a result: rung1={rung1} rung2={rung2}"
+    );
+    assert!(
+        (rung2 as f64) < 0.75 * (rung1 as f64),
+        "each rung must shrink: rung2 ({rung2} bytes) is not materially smaller than rung1 \
+         ({rung1} bytes) — the budget is not tracking `attempts`"
     );
     h.shutdown().await;
 }

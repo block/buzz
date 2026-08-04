@@ -288,9 +288,12 @@ impl RunCtx<'_> {
                 // reports no usage, so `last_request_input_tokens` stays frozen
                 // at the last SUCCESSFUL (sub-threshold) reading and
                 // `should_handoff()` returns false forever. Without this arm the
-                // error propagates out of `run()`, the session is persisted with
-                // the same oversized history, and every later prompt fails the
-                // same way — a permanent stick that outlives the process.
+                // error propagates out of `run()`, the in-memory session keeps
+                // the same oversized history, and every later prompt in that
+                // session fails the same way — a stick that persists across
+                // turns for the life of the session. (Restarting the agent DOES
+                // clear it: history lives only in the in-memory session map, so
+                // a restart is the manual workaround, not an exception to it.)
                 //
                 // Retried in-loop rather than returned so the recovered context
                 // continues the turn the user is waiting on.
@@ -300,6 +303,22 @@ impl RunCtx<'_> {
                         .await
                     {
                         ContextRecovery::Recovered => {
+                            // Refund the round the rejected request consumed.
+                            // `round` is incremented before `complete()`, so
+                            // without this a finite `max_rounds` is spent by a
+                            // request the provider refused to serve: the loop
+                            // would re-enter, hit the cap at the top, and return
+                            // `MaxTurnRequests` having destroyed history and
+                            // never asked the model again — a worse outcome than
+                            // the error it replaced.
+                            //
+                            // This cannot become an unbounded amnesty: refunds
+                            // happen only on a *successful* recovery, and
+                            // recoveries are independently capped by
+                            // `MAX_CONTEXT_RECOVERIES_PER_RUN`, so at most that
+                            // many rounds can ever be refunded in one turn. An
+                            // ordinary round is never refunded.
+                            round = round.saturating_sub(1);
                             // Same reset as the proactive path (see
                             // `HandoffOutcome::Performed` above): the frozen
                             // token reading describes history that no longer
