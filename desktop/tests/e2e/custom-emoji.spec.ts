@@ -19,6 +19,7 @@ import { waitForAnimations } from "../helpers/animations";
 // live even in mock-bridge mode (the mock only intercepts Tauri commands), so
 // this spec uses the simpler mock-bridge setup like messaging.spec.ts.
 const SHORTCODE = "buzz";
+const MOCK_MEDIA_PROXY_PORT = 54321;
 
 async function waitForMockLiveSubscription(
   page: import("@playwright/test").Page,
@@ -59,6 +60,16 @@ test.beforeEach(async ({ page }) => {
       contentType: "image/svg+xml",
       body: '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect width="32" height="32" fill="#22c55e"/></svg>',
     }),
+  );
+  // Keep the reaction fixture deliberately non-square so the real renderer can
+  // prove object-contain letterboxes it inside the fixed square glyph box.
+  await page.route(
+    `http://127.0.0.1:${MOCK_MEDIA_PROXY_PORT}/media/**`,
+    (route) =>
+      route.fulfill({
+        contentType: "image/svg+xml",
+        body: '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><rect width="40" height="20" fill="#22c55e"/></svg>',
+      }),
   );
 });
 
@@ -236,7 +247,6 @@ test("native emoji-only messages leave space below the author metadata", async (
 // real 127.0.0.1 URL rather than the buzz-media:// fallback.
 
 const REACTION_SHORTCODE = "react";
-const MOCK_MEDIA_PROXY_PORT = 54321;
 const SELECTED_ACTION_CLASS = /(^|\s)bg-secondary(\s|$)/;
 // A seeded message in `general` with a real 64-hex id — the only reactable
 // target in mock mode (getReactionTargetId() requires a 64-hex `e` tag, which
@@ -336,6 +346,25 @@ test("reacting with a custom emoji renders via the loopback media proxy", async 
       `^http://127\\.0\\.0\\.1:${MOCK_MEDIA_PROXY_PORT}/media/[\\da-f]{64}\\.png$`,
     ),
   );
+  await expect(reactionPill).toHaveCSS("height", "28px");
+  await expect(reactionImg).toHaveCSS("height", "14px");
+  await expect(reactionImg).toHaveCSS("width", "14px");
+  await expect(reactionImg).toHaveCSS("object-fit", "contain");
+  await expect(reactionImg).toHaveCSS("transform", "none");
+  await expect
+    .poll(() =>
+      reactionImg.evaluate((image) => {
+        const imageRect = image.getBoundingClientRect();
+        const pillRect = image.closest("button")?.getBoundingClientRect();
+        if (!(image instanceof HTMLImageElement) || !pillRect) return null;
+        return {
+          naturalHeight: image.naturalHeight,
+          naturalWidth: image.naturalWidth,
+          topOffset: imageRect.top - pillRect.top,
+        };
+      }),
+    )
+    .toEqual({ naturalHeight: 20, naturalWidth: 40, topOffset: 7 });
 
   await expect
     .poll(() => quickReactionStorageContains(page, `:${REACTION_SHORTCODE}:`))
@@ -348,6 +377,15 @@ test("reacting with a custom emoji renders via the loopback media proxy", async 
   );
 
   const inlineAddReactionButton = row.getByLabel("Add reaction");
+  // The picker closes with the pointer/focus position depending on animation
+  // timing. Put the row into a deterministic idle state before checking the
+  // pill's pre-existing hidden behavior.
+  await page.mouse.move(0, 0);
+  await page.evaluate(() => {
+    if (document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur();
+    }
+  });
   await expect
     .poll(() =>
       inlineAddReactionButton.evaluate((button) => {
