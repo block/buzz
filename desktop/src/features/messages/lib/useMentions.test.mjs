@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { getMentionOffset, hasMention } from "./hasMention.ts";
+import {
+  getMentionOffset,
+  hasMention,
+  hasUnambiguousMention,
+} from "./hasMention.ts";
 
 // ── Plain @mention ────────────────────────────────────────────────────
 
@@ -20,6 +24,33 @@ test("matches the first member in a parenthesized team expansion", () => {
 
 test("matches @Name at end of string", () => {
   assert.equal(hasMention("hello @Alice", "Alice"), true);
+});
+
+test("resolves one uniquely named agent mention before autocomplete selection", () => {
+  assert.equal(
+    hasUnambiguousMention("Can you check this @Bumble", "Bumble", [
+      "Bumble",
+      "Atlas",
+    ]),
+    true,
+  );
+  assert.equal(
+    hasUnambiguousMention("@Bumble, can you check this?", "Bumble", [
+      "Bumble",
+      "Atlas",
+    ]),
+    true,
+  );
+});
+
+test("does not guess between agents with the same display name", () => {
+  assert.equal(
+    hasUnambiguousMention("Can you check this @Bumble", "Bumble", [
+      "Bumble",
+      "Bumble",
+    ]),
+    false,
+  );
 });
 
 test("match is case-insensitive", () => {
