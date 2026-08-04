@@ -173,9 +173,12 @@ mod tests {
             .query_async::<String>(&mut *conn)
             .await
             .ok()?;
+        // Keep test leases well above QUIC setup + task-spawn latency under
+        // full-suite parallelism so the owner lease cannot expire mid-forward
+        // (#2458). Production default is 30s; tests do not exercise expiry.
         Some(SessionDirectory::with_lease_ttl(
             pool,
-            Duration::from_secs(5),
+            Duration::from_secs(60),
         ))
     }
 
