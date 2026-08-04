@@ -31,6 +31,20 @@ pub(crate) const SESSION_TITLE_ENV_VAR: &str = "BUZZ_ACP_SESSION_TITLE";
 /// attribution and private-conversation provenance.
 pub(crate) const DISPLAY_NAME_ENV_VAR: &str = "BUZZ_ACP_DISPLAY_NAME";
 
+/// Apply the shared stable agent name to both session display metadata and
+/// git attribution, clearing both keys when no usable name is available.
+pub(crate) fn apply_agent_display_env(command: &mut std::process::Command, title: Option<String>) {
+    if let Some(title) = title {
+        command
+            .env(SESSION_TITLE_ENV_VAR, &title)
+            .env(DISPLAY_NAME_ENV_VAR, title);
+    } else {
+        command
+            .env_remove(SESSION_TITLE_ENV_VAR)
+            .env_remove(DISPLAY_NAME_ENV_VAR);
+    }
+}
+
 /// Resolve the session title for an agent: its `display_name` when it has one,
 /// otherwise its unique `name` handle. `None` when both are blank, so the
 /// caller clears the env var rather than exporting an empty title.
