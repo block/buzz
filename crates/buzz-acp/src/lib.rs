@@ -4347,7 +4347,14 @@ async fn run_complete(args: CompleteArgs) -> Result<()> {
     let setup_result = tokio::time::timeout(COMPLETE_SETUP_TIMEOUT, async {
         client.initialize().await?;
         let session = client
-            .session_new_full(&cwd, vec![], args.system_prompt.as_deref(), None)
+            .session_new_full(
+                &cwd,
+                vec![],
+                args.system_prompt
+                    .as_deref()
+                    .map(crate::acp::SystemPromptTransport::Field),
+                None,
+            )
             .await?;
         Ok::<_, acp::AcpError>(session.session_id)
     })
