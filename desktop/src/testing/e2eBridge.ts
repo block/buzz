@@ -12678,10 +12678,10 @@ export function maybeInstallE2eTauriMocks() {
         if (error) {
           throw new Error(error);
         }
-        return activeConfig?.mock?.observerArchiveDefaultEnabled ?? false;
+        return activeConfig?.mock?.observerArchiveDefaultEnabled ?? true;
       }
       case "agent_metric_archive_default_enabled":
-        return activeConfig?.mock?.agentMetricArchiveDefaultEnabled ?? false;
+        return activeConfig?.mock?.agentMetricArchiveDefaultEnabled ?? true;
       case "set_prevent_sleep_active":
         return null;
       case "plugin:window|is_fullscreen":

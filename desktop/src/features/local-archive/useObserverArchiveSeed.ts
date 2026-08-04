@@ -1,29 +1,21 @@
 import * as React from "react";
 
 import { KIND_AGENT_OBSERVER_FRAME } from "@/shared/constants/kinds";
-import {
-  mergeSaveSubscriptionKinds,
-  observerArchiveDefaultEnabled,
-} from "@/shared/api/tauriArchive";
+import { mergeSaveSubscriptionKinds } from "@/shared/api/tauriArchive";
 
 export interface ObserverArchiveSeedDeps {
-  observerArchiveDefaultEnabled: () => Promise<boolean>;
   mergeSaveSubscriptionKinds: (kind: number) => Promise<void>;
 }
 
 const defaultDeps: ObserverArchiveSeedDeps = {
-  observerArchiveDefaultEnabled,
   mergeSaveSubscriptionKinds,
 };
 
 /**
  * Reconcile observer-feed archive state for the current identity.
  *
- * Internal builds (policy flag ON): unconditionally ensure kind 24200 exists
- * in the DB subscription.
- *
- * OSS builds (policy flag OFF): no-op. The Settings toggle is the only
- * mutation path for OSS users.
+ * Archive defaults to enabled for all builds. This unconditionally ensures
+ * kind 24200 exists in the DB subscription via an atomic DB-side merge.
  *
  * Rejects on failure — callers must not open archive listeners against
  * unreconciled state.
@@ -31,9 +23,6 @@ const defaultDeps: ObserverArchiveSeedDeps = {
 export async function reconcileObserverArchive(
   deps: ObserverArchiveSeedDeps = defaultDeps,
 ): Promise<void> {
-  const policyOn = await deps.observerArchiveDefaultEnabled();
-  if (!policyOn) return;
-
   await deps.mergeSaveSubscriptionKinds(KIND_AGENT_OBSERVER_FRAME);
 }
 

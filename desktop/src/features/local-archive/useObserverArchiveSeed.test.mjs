@@ -10,19 +10,11 @@ import { ArchiveSyncManager } from "./archiveSyncManager.ts";
 
 // ── Fake deps factory ────────────────────────────────────────────────────────
 
-function makeDeps({
-  policyOn = false,
-  mergeShouldFail = false,
-  flagShouldFail = false,
-} = {}) {
+function makeDeps({ mergeShouldFail = false } = {}) {
   const calls = { merge: [] };
 
   return {
     calls,
-    observerArchiveDefaultEnabled: async () => {
-      if (flagShouldFail) throw new Error("flag check failed");
-      return policyOn;
-    },
     mergeSaveSubscriptionKinds: async (kind) => {
       if (mergeShouldFail) throw new Error("merge failed");
       calls.merge.push({ kind });
@@ -35,50 +27,32 @@ function tick() {
   return new Promise((r) => setTimeout(r, 0));
 }
 
-// ── Internal policy build ────────────────────────────────────────────────────
+// ── Reconciliation always seeds 24200 ────────────────────────────────────────
 
-test("test_internal_policy_seeds_24200", async () => {
-  const deps = makeDeps({ policyOn: true });
+test("test_reconcile_always_seeds_24200", async () => {
+  const deps = makeDeps();
   await reconcileObserverArchive(deps);
 
   assert.equal(deps.calls.merge.length, 1);
   assert.equal(deps.calls.merge[0].kind, 24200);
 });
 
-// ── OSS build — policy-off is a pure no-op ──────────────────────────────────
-
-test("test_oss_policy_off_no_merge", async () => {
-  const deps = makeDeps({ policyOn: false });
-  await reconcileObserverArchive(deps);
-
-  assert.equal(deps.calls.merge.length, 0, "OSS must not merge");
-});
-
 // ── Failure behavior ─────────────────────────────────────────────────────────
 
 test("test_merge_failure_rejects", async () => {
-  const deps = makeDeps({ policyOn: true, mergeShouldFail: true });
+  const deps = makeDeps({ mergeShouldFail: true });
 
   await assert.rejects(() => reconcileObserverArchive(deps), {
     message: "merge failed",
   });
 });
 
-test("test_flag_check_failure_rejects", async () => {
-  const deps = makeDeps({ flagShouldFail: true });
-
-  await assert.rejects(() => reconcileObserverArchive(deps), {
-    message: "flag check failed",
-  });
-  assert.equal(deps.calls.merge.length, 0);
-});
-
 // ── Startup ordering (real ArchiveSyncManager + real reconciler) ─────────────
 
 test("test_archive_sync_blocked_until_reconciliation", async () => {
-  let resolveFlag;
-  const flagPromise = new Promise((resolve) => {
-    resolveFlag = resolve;
+  let resolveMerge;
+  const mergePromise = new Promise((resolve) => {
+    resolveMerge = resolve;
   });
 
   const subscribeCalls = [];
@@ -90,8 +64,7 @@ test("test_archive_sync_blocked_until_reconciliation", async () => {
   };
 
   const reconcilerDeps = {
-    observerArchiveDefaultEnabled: () => flagPromise,
-    mergeSaveSubscriptionKinds: async () => {},
+    mergeSaveSubscriptionKinds: () => mergePromise,
   };
 
   const manager = new ArchiveSyncManager({
@@ -110,7 +83,7 @@ test("test_archive_sync_blocked_until_reconciliation", async () => {
     onSubscriptionChange: () => () => {},
   });
 
-  // Start reconciliation (pending — flag check not yet resolved).
+  // Start reconciliation (pending — merge not yet resolved).
   const reconciling = reconcileObserverArchive(reconcilerDeps);
 
   // Before reconciliation resolves, manager must not have been started.
@@ -122,7 +95,7 @@ test("test_archive_sync_blocked_until_reconciliation", async () => {
   );
 
   // Resolve reconciliation — now start the manager (simulating the gate).
-  resolveFlag(true);
+  resolveMerge();
   await reconciling;
   await manager.start();
 
@@ -139,7 +112,7 @@ test("test_archive_sync_blocked_until_reconciliation", async () => {
 });
 
 test("test_archive_sync_blocked_on_reconciliation_rejection", async () => {
-  const reconcilerDeps = makeDeps({ policyOn: true, mergeShouldFail: true });
+  const reconcilerDeps = makeDeps({ mergeShouldFail: true });
 
   const subscribeCalls = [];
   const fakeRelay = {
@@ -207,7 +180,7 @@ test("test_identity_change_resets_readiness", async () => {
   let reconciledPubkey = null;
 
   // Identity A reconciles successfully.
-  const depsA = makeDeps({ policyOn: true });
+  const depsA = makeDeps();
   await reconcileObserverArchive(depsA);
   reconciledPubkey = "pkA";
   assert.equal(
@@ -224,7 +197,7 @@ test("test_identity_change_resets_readiness", async () => {
   );
 
   // B reconciles successfully.
-  const depsB = makeDeps({ policyOn: true });
+  const depsB = makeDeps();
   await reconcileObserverArchive(depsB);
   reconciledPubkey = "pkB";
   assert.equal(
@@ -243,12 +216,12 @@ test("test_identity_change_b_failure_stays_closed", async () => {
   let reconciledPubkey = null;
 
   // Identity A reconciles successfully.
-  const depsA = makeDeps({ policyOn: true });
+  const depsA = makeDeps();
   await reconcileObserverArchive(depsA);
   reconciledPubkey = "pkA";
 
   // Identity changes to B — B's reconciliation fails.
-  const depsB = makeDeps({ policyOn: true, mergeShouldFail: true });
+  const depsB = makeDeps({ mergeShouldFail: true });
   try {
     await reconcileObserverArchive(depsB);
     reconciledPubkey = "pkB";
@@ -272,7 +245,7 @@ test("test_identity_change_b_failure_stays_closed", async () => {
 // re-running an effect with new deps (identity switch).
 
 test("test_startReconciliation_calls_onReady_after_success", async () => {
-  const deps = makeDeps({ policyOn: true });
+  const deps = makeDeps();
   const readyCalls = [];
 
   startReconciliation("pk1", deps, (pubkey) => readyCalls.push(pubkey));
@@ -283,13 +256,12 @@ test("test_startReconciliation_calls_onReady_after_success", async () => {
 });
 
 test("test_startReconciliation_unmount_before_resolve_suppresses_onReady", async () => {
-  let resolveFlag;
-  const flagPromise = new Promise((resolve) => {
-    resolveFlag = resolve;
+  let resolveMerge;
+  const mergePromise = new Promise((resolve) => {
+    resolveMerge = resolve;
   });
   const deps = {
-    observerArchiveDefaultEnabled: () => flagPromise,
-    mergeSaveSubscriptionKinds: async () => {},
+    mergeSaveSubscriptionKinds: () => mergePromise,
   };
   const readyCalls = [];
 
@@ -297,9 +269,9 @@ test("test_startReconciliation_unmount_before_resolve_suppresses_onReady", async
     readyCalls.push(pubkey),
   );
 
-  // Unmount (or re-run effect) before the flag check resolves.
+  // Unmount (or re-run effect) before the merge resolves.
   cancel();
-  resolveFlag(true);
+  resolveMerge();
   await tick();
 
   assert.deepEqual(
@@ -310,15 +282,14 @@ test("test_startReconciliation_unmount_before_resolve_suppresses_onReady", async
 });
 
 test("test_startReconciliation_identity_switch_stale_completion_suppressed", async () => {
-  let resolveFlagA;
-  const flagPromiseA = new Promise((resolve) => {
-    resolveFlagA = resolve;
+  let resolveMergeA;
+  const mergePromiseA = new Promise((resolve) => {
+    resolveMergeA = resolve;
   });
   const depsA = {
-    observerArchiveDefaultEnabled: () => flagPromiseA,
-    mergeSaveSubscriptionKinds: async () => {},
+    mergeSaveSubscriptionKinds: () => mergePromiseA,
   };
-  const depsB = makeDeps({ policyOn: true });
+  const depsB = makeDeps();
   const readyCalls = [];
   const onReady = (pubkey) => readyCalls.push(pubkey);
 
@@ -330,8 +301,8 @@ test("test_startReconciliation_identity_switch_stale_completion_suppressed", asy
   cancelA();
   startReconciliation("pkB", depsB, onReady);
 
-  // A's flag check now resolves late — its stale completion must not fire.
-  resolveFlagA(true);
+  // A's merge now resolves late — its stale completion must not fire.
+  resolveMergeA();
   await tick();
 
   assert.deepEqual(
@@ -342,7 +313,7 @@ test("test_startReconciliation_identity_switch_stale_completion_suppressed", asy
 });
 
 test("test_startReconciliation_failure_does_not_call_onReady", async () => {
-  const deps = makeDeps({ policyOn: true, mergeShouldFail: true });
+  const deps = makeDeps({ mergeShouldFail: true });
   const readyCalls = [];
 
   startReconciliation("pk1", deps, (pubkey) => readyCalls.push(pubkey));
@@ -354,7 +325,7 @@ test("test_startReconciliation_failure_does_not_call_onReady", async () => {
 // ── Metric seed independence ─────────────────────────────────────────────────
 
 test("test_metric_seed_remains_independently_deferrable", async () => {
-  const deps = makeDeps({ policyOn: true });
+  const deps = makeDeps();
   await reconcileObserverArchive(deps);
 
   assert.equal(deps.calls.merge.length, 1);
