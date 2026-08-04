@@ -974,6 +974,13 @@ pub async fn execute_run(
     def: &WorkflowDef,
     trigger_ctx: &TriggerContext,
 ) -> Result<ExecutionResult, (WorkflowError, crate::error::PartialProgress)> {
+    // Honor `enabled: false` from the definition, fail-closed, before any
+    // run side effects. The scheduler and event paths pre-filter this flag,
+    // but webhook, manual-trigger, and approval-resume paths do not, so this
+    // gate makes the YAML flag authoritative for every execution entry.
+    crate::ensure_workflow_enabled(def)
+        .map_err(|e| (e, crate::error::PartialProgress::default()))?;
+
     // Fail fast if all concurrency permits are in use — no queuing.
     let _permit = engine.run_semaphore.try_acquire().map_err(|_| {
         (
@@ -1024,6 +1031,13 @@ pub async fn execute_from_step(
     start_index: usize,
     initial_outputs: Option<HashMap<String, JsonValue>>,
 ) -> Result<ExecutionResult, (WorkflowError, crate::error::PartialProgress)> {
+    // Honor `enabled: false` from the definition, fail-closed, before any
+    // run side effects. The webhook, manual-trigger, and approval-resume
+    // paths gate only on the DB column, which the definition never writes;
+    // this gate makes the YAML flag authoritative here too.
+    crate::ensure_workflow_enabled(def)
+        .map_err(|e| (e, crate::error::PartialProgress::default()))?;
+
     // Fail fast if all concurrency permits are in use — no queuing.
     let _permit = engine.run_semaphore.try_acquire().map_err(|_| {
         (
