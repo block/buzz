@@ -1,6 +1,8 @@
 import * as React from "react";
 import { toast } from "sonner";
 
+import { substituteResolvedMentions } from "@/features/messages/lib/hasMention";
+import { safeNpub } from "@/shared/lib/nostrUtils";
 import {
   type CreateChannelManagedAgentInput,
   useAttachManagedAgentToChannelMutation,
@@ -110,6 +112,28 @@ type UseMentionSendFlowOptions = {
   }) => void;
   resolvePostSendContent?: (effectiveExplicitAgentPubkeys: string[]) => string;
 };
+
+/**
+ * Build a map from resolved display name → `nostr:npub1…` replacement string
+ * for every @mention that autocomplete resolved to a public key in `text`.
+ * Used to perform the NIP-27 outbound substitution before the message is sent.
+ */
+function buildMentionNpubMap(
+  text: string,
+  extractMentionPubkeys: (t: string) => string[],
+  getMentionDisplayName: (pubkey: string) => string | null,
+): Map<string, string> {
+  const pubkeys = extractMentionPubkeys(text);
+  const map = new Map<string, string>();
+  for (const pubkey of pubkeys) {
+    const name = getMentionDisplayName(pubkey);
+    if (!name) continue;
+    const npub = safeNpub(pubkey);
+    if (!npub) continue;
+    map.set(name, `nostr:${npub}`);
+  }
+  return map;
+}
 
 function mergeOutgoingTagsWithReferenceMentions(
   outgoingTags: string[][] | undefined,
@@ -721,8 +745,17 @@ export function useMentionSendFlow({
             createdPersonaAgentPubkeySet.has(pubkey),
         );
         const pubkeys = explicitMentionPubkeys;
-        const { content: finalContent, mediaTags } = buildOutgoingMessage(
+        // Substitute resolved @mentions with canonical nostr:npub1… references
+        // before building the outgoing message body. Routing tags are derived
+        // from the original @-mention scan so p-tag notification semantics are
+        // unaffected by the NIP-27 encoding.
+        const npubMap = buildMentionNpubMap(
           trimmed,
+          mentions.extractMentionPubkeys,
+          mentions.getMentionDisplayName,
+        );
+        const { content: finalContent, mediaTags } = buildOutgoingMessage(
+          substituteResolvedMentions(trimmed, npubMap),
           pendingImeta,
           spoileredAttachmentUrls,
         );
@@ -791,6 +824,7 @@ export function useMentionSendFlow({
       getNonMemberMentionPubkeys,
       getDmThreadAgentMentionError,
       mentions.extractMentionPubkeys,
+      mentions.getMentionDisplayName,
       mentions.isAgentPubkey,
       mentions.isManagedAgentPubkey,
       onPrepareSendChannel,

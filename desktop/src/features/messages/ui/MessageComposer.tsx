@@ -23,8 +23,10 @@ import {
 import { useAttachmentEditing } from "@/features/messages/lib/useAttachmentEditing";
 import { useMediaUpload } from "@/features/messages/lib/useMediaUpload";
 import { useMentions } from "@/features/messages/lib/useMentions";
+import { substituteResolvedMentions } from "@/features/messages/lib/hasMention";
 import { diffAddedMentionPubkeys } from "@/features/messages/lib/threading";
 import { getPersistentAgentAudienceScope } from "@/features/messages/lib/persistentAgentAudience";
+import { safeNpub } from "@/shared/lib/nostrUtils";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import {
   hasMentionClipboardHtml,
@@ -188,6 +190,7 @@ function MessageComposerImpl({
   const onEditLastOwnMessageRef = React.useRef(onEditLastOwnMessage);
   const editTargetRef = React.useRef(editTarget);
   const extractMentionPubkeysRef = React.useRef(mentions.extractMentionPubkeys);
+  const getMentionDisplayNameRef = React.useRef(mentions.getMentionDisplayName);
   const ownerPubkeyRef = React.useRef(ownerPubkey);
   disabledRef.current = disabled;
   isSendingRef.current = isSending;
@@ -197,6 +200,7 @@ function MessageComposerImpl({
   onEditLastOwnMessageRef.current = onEditLastOwnMessage;
   editTargetRef.current = editTarget;
   extractMentionPubkeysRef.current = mentions.extractMentionPubkeys;
+  getMentionDisplayNameRef.current = mentions.getMentionDisplayName;
   ownerPubkeyRef.current = ownerPubkey;
 
   const isAutocompleteOpenRef = React.useRef(false);
@@ -517,12 +521,29 @@ function MessageComposerImpl({
       // attachments) flows through to onEditSave as empty content, which
       // deletes the message instead of publishing it (see handleEditSave).
 
+      // Build the NIP-27 substitution map for resolved @mentions before
+      // encoding the outgoing body. Scan `trimmed` (pre-substitution) so
+      // mention pubkey extraction still works against @-name patterns, then
+      // apply the substitution to the content that is sent.
+      const editMentionPubkeys = extractMentionPubkeysRef.current(trimmed);
+      const editNpubMap = new Map<string, string>();
+      for (const pubkey of editMentionPubkeys) {
+        const name = getMentionDisplayNameRef.current(pubkey);
+        if (!name) continue;
+        const npub = safeNpub(pubkey);
+        if (npub) editNpubMap.set(name, `nostr:${npub}`);
+      }
+      const substitutedEditBody = substituteResolvedMentions(
+        trimmed,
+        editNpubMap,
+      );
+
       // Build the edit's body + imeta tag set. Coerce `mediaTags ?? []`
       // because edit semantics use `[]` as the explicit "wipe all
       // attachments" signal — the receiver overlay drops imeta when the
       // edit carries an empty (but defined) set.
       const { content: finalContent, mediaTags } = buildOutgoingMessage(
-        trimmed,
+        substitutedEditBody,
         currentPendingImeta,
         spoileredAttachmentUrls,
       );
@@ -540,11 +561,12 @@ function MessageComposerImpl({
 
       // Notify only mentions this edit *newly adds* (see
       // diffAddedMentionPubkeys): a typo-fix edit that leaves the mention set
-      // unchanged emits no `p` tags and re-wakes nobody. Computed before the
-      // composer state is cleared below.
+      // unchanged emits no `p` tags and re-wakes nobody. Use pubkeys extracted
+      // from the pre-substitution `trimmed` so @-name scanning still works
+      // after the final body has been NIP-27 encoded.
       const addedMentionPubkeys = diffAddedMentionPubkeys(
         extractMentionPubkeysRef.current(editTargetRef.current.body),
-        extractMentionPubkeysRef.current(finalContent),
+        editMentionPubkeys,
         ownerPubkeyRef.current ?? "",
       );
 
