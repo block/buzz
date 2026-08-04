@@ -227,6 +227,26 @@ test("shouldHideAgentFromMentions: shows member agents with unknown invocability
   );
 });
 
+test("shouldHideAgentFromMentions: #4187 shows a channel-member agent managed by another Desktop instance", () => {
+  // Regression for #4187: a managed agent running on another Desktop instance
+  // appears here as a channel member (isAgent via role "bot") that is neither
+  // in this client's managed-agent list nor in the relay directory
+  // (mentionableAgentPubkeys/directoryAgentPubkeys both empty). It MUST remain
+  // visible in the mention picker. The mention path (useMentions) must rely on
+  // this policy alone and not additionally pre-filter with
+  // isAgentIdentityInManagedList, which would drop it.
+  assert.equal(
+    shouldHideAgentFromMentions({
+      isAgent: true,
+      isMember: true,
+      pubkey: PUB_A,
+      mentionableAgentPubkeys: new Set(),
+      directoryAgentPubkeys: new Set(),
+    }),
+    false,
+  );
+});
+
 test("shouldHideAgentFromMentions: normalizes the pubkey before lookup", () => {
   const mixedCase = "Ab".repeat(32);
   const normalized = mixedCase.toLowerCase();
