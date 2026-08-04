@@ -6,8 +6,9 @@
 //! 1. Validates HMAC signature + 30s TTL (fail-closed)
 //! 2. Resolves kind:30617 → protection rules
 //! 3. Requires exactly one canonical `buzz-channel` binding
-//! 4. Resolves the pusher's current active channel role (with no owner bypass)
-//! 5. Promotes Bot → Member (bots in a channel push as members)
+//! 4. Resolves the pusher's current active channel role
+//! 5. Delegates repository-Owner Git authority to the active repository author;
+//!    otherwise promotes Bot → Member
 //! 6. Calls `buzz_core::git_perms::evaluate_push()`
 //! 7. Returns 200 (allow) or 403 (deny with reasons)
 //!
@@ -18,6 +19,18 @@
 //! designation (what it is), not a permission tier (what it can do). The
 //! promotion is scoped to this module; the core `MemberRole::Bot` hierarchy
 //! is unchanged.
+//!
+//! # Repository Author Delegation
+//!
+//! The kind:30617 author is the repository authority and the only principal
+//! accepted by the exact-main synchronization CLI. The author can already
+//! republish kind:30617 and rewrite its role thresholds, so denying that same
+//! principal a role threshold protects nothing; those thresholds constrain
+//! other channel members. While the author is an active Member, Admin, Owner,
+//! or Bot in the bound channel, Git policy therefore treats it as repository
+//! Owner. This repository-scoped delegation does not change the channel role,
+//! admit non-members or Guests, or bypass non-role protection rules such as
+//! `no-force-push`.
 //!
 //! # Security invariants
 //!
@@ -169,6 +182,20 @@ fn verify_hmac(secret: &[u8], req: &HookCallbackRequest) -> bool {
     // Constant-time comparison.
     use subtle::ConstantTimeEq;
     expected.ct_eq(&provided).into()
+}
+
+/// Map an active channel role to the role used only for repository Git policy.
+///
+/// This is called only after active membership has been proved. Guests remain
+/// read-only. Every other actor keeps the existing role mapping, including
+/// Bot → Member.
+fn effective_git_role(active_role: MemberRole, is_repo_author: bool) -> MemberRole {
+    match (active_role, is_repo_author) {
+        (MemberRole::Guest, _) => MemberRole::Guest,
+        (_, true) => MemberRole::Owner,
+        (MemberRole::Bot, false) => MemberRole::Member,
+        (role, false) => role,
+    }
 }
 
 /// `POST /internal/git/policy` — pre-receive hook callback.
@@ -330,14 +357,14 @@ pub async fn hook_policy_check(
         _ => {} // Channel exists and is not archived.
     }
 
-    // 7. Resolve the pusher's current active channel role. Repo ownership,
-    // announcement authorship, and managed-agent ownership confer no Git
-    // authority without active membership in this exact channel.
+    // 7. Resolve the pusher's current active channel role. Repository
+    // authorship never admits a non-member, and managed-agent ownership never
+    // confers Git authority.
     let pusher_bytes = match hex::decode(&req.pusher_pubkey) {
         Ok(bytes) if bytes.len() == 32 => bytes,
         _ => return (StatusCode::FORBIDDEN, "invalid pusher pubkey").into_response(),
     };
-    let role = match state
+    let active_role = match state
         .db
         .get_member_role(community, channel_id, &pusher_bytes)
         .await
@@ -358,13 +385,12 @@ pub async fn hook_policy_check(
         }
     };
 
-    // 8. Effective git role: bots intentionally added to a channel push as members.
-    // Protection rules (push:admin, no-force-push, require-patch, etc.) still apply.
-    // Bot is a designation (what it is), not a permission tier (what it can do).
-    let git_role = match role {
-        MemberRole::Bot => MemberRole::Member,
-        other => other,
-    };
+    // 8. Effective Git role. The repository author gets repository-scoped
+    // Owner authority only after active membership is proved. This closes the
+    // exact-main import/mirror authorization graph without changing channel
+    // authority or weakening protection rules for any other actor.
+    let is_repo_author = req.pusher_pubkey == repo_event.event.pubkey.to_hex();
+    let git_role = effective_git_role(active_role, is_repo_author);
 
     // 9. Classify ref updates and evaluate policy.
     let updates: Vec<RefUpdate> = req
@@ -485,6 +511,82 @@ mod tests {
             GIT_NO_CHANNEL_BINDING_BODY.contains("no channel binding"),
             "shipped desktops prose-match this exact phrase (spaces, not underscores)"
         );
+    }
+
+    #[test]
+    fn active_repo_author_can_create_admin_protected_main() {
+        let role = effective_git_role(MemberRole::Member, true);
+        assert_eq!(role, MemberRole::Owner);
+
+        let rules = vec![buzz_core::git_perms::parse_protection_tag(&[
+            "refs/heads/main",
+            "push:admin",
+            "no-force-push",
+        ])
+        .expect("valid protection")];
+        let update = RefUpdate {
+            ref_name: "refs/heads/main".to_string(),
+            kind: UpdateKind::Create,
+            old_oid: "0".repeat(40),
+            new_oid: "1".repeat(40),
+        };
+
+        assert!(evaluate_push(std::slice::from_ref(&update), role, &rules).is_ok());
+        assert!(
+            evaluate_push(
+                std::slice::from_ref(&update),
+                effective_git_role(MemberRole::Member, false),
+                &rules,
+            )
+            .is_err(),
+            "non-author member remains denied by push:admin"
+        );
+        assert!(
+            evaluate_push(
+                &[update],
+                effective_git_role(MemberRole::Admin, false),
+                &rules,
+            )
+            .is_ok(),
+            "non-author admin keeps the normal allowed path"
+        );
+    }
+
+    #[test]
+    fn repo_author_delegation_excludes_guest() {
+        assert_eq!(
+            effective_git_role(MemberRole::Guest, true),
+            MemberRole::Guest
+        );
+        for active_role in [
+            MemberRole::Member,
+            MemberRole::Admin,
+            MemberRole::Owner,
+            MemberRole::Bot,
+        ] {
+            assert_eq!(
+                effective_git_role(active_role, true),
+                MemberRole::Owner,
+                "active repository author with channel role {active_role}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_author_git_roles_keep_existing_mapping() {
+        for (active_role, expected) in [
+            (MemberRole::Owner, MemberRole::Owner),
+            (MemberRole::Admin, MemberRole::Admin),
+            (MemberRole::Member, MemberRole::Member),
+            (MemberRole::Guest, MemberRole::Guest),
+            (MemberRole::Bot, MemberRole::Member),
+        ] {
+            assert_eq!(
+                effective_git_role(active_role, false),
+                expected,
+                "non-author with channel role {active_role}"
+            );
+        }
     }
 
     #[test]
@@ -917,6 +1019,122 @@ printf '%s' "$HMAC_INPUT" | openssl dgst -sha256 -hmac "{secret}" -hex 2>/dev/nu
             .await
             .expect("read body");
         (status, String::from_utf8(bytes.to_vec()).expect("utf-8"))
+    }
+
+    async fn create_bound_channel(
+        state: &Arc<AppState>,
+        community: buzz_core::CommunityId,
+        author: &nostr::Keys,
+        author_role: Option<MemberRole>,
+    ) -> Uuid {
+        let creator = nostr::Keys::generate();
+        let creator_pk = creator.public_key().to_bytes().to_vec();
+        let author_pk = author.public_key().to_bytes().to_vec();
+        state
+            .db
+            .ensure_user(community, &creator_pk)
+            .await
+            .expect("creator user");
+        state
+            .db
+            .ensure_user(community, &author_pk)
+            .await
+            .expect("author user");
+
+        let channel_id = Uuid::new_v4();
+        state
+            .db
+            .create_channel_with_id(
+                community,
+                channel_id,
+                &format!("git-policy-{}", channel_id.simple()),
+                buzz_db::channel::ChannelType::Stream,
+                buzz_db::channel::ChannelVisibility::Open,
+                None,
+                &creator_pk,
+                None,
+            )
+            .await
+            .expect("channel");
+        if let Some(role) = author_role {
+            state
+                .db
+                .add_member(community, channel_id, &author_pk, role, Some(&creator_pk))
+                .await
+                .expect("author membership");
+        }
+        channel_id
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn hook_allows_active_member_author_on_admin_main() {
+        use nostr::{Keys, Tag};
+
+        let state = policy_test_state().await;
+        let host = format!("policy-{}.example", Uuid::new_v4().simple());
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("community")
+            .id;
+        let author = Keys::generate();
+        let channel_id =
+            create_bound_channel(&state, community, &author, Some(MemberRole::Member)).await;
+
+        let response = owner_push_response(
+            &state,
+            community,
+            &author,
+            &format!("repo-{}", Uuid::new_v4().simple()),
+            vec![
+                Tag::parse(["buzz-channel", &channel_id.to_string()]).unwrap(),
+                Tag::parse([
+                    "buzz-protect",
+                    "refs/heads/main",
+                    "push:admin",
+                    "no-force-push",
+                ])
+                .unwrap(),
+            ],
+        )
+        .await;
+        let (status, body) = body_string(response).await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert!(body.contains("\"allowed\":true"), "body: {body}");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn hook_denies_nonmember_author_before_delegation() {
+        use nostr::{Keys, Tag};
+
+        let state = policy_test_state().await;
+        let host = format!("policy-{}.example", Uuid::new_v4().simple());
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("community")
+            .id;
+        let author = Keys::generate();
+        let channel_id = create_bound_channel(&state, community, &author, None).await;
+
+        let response = owner_push_response(
+            &state,
+            community,
+            &author,
+            &format!("repo-{}", Uuid::new_v4().simple()),
+            vec![
+                Tag::parse(["buzz-channel", &channel_id.to_string()]).unwrap(),
+                Tag::parse(["buzz-protect", "refs/heads/main", "push:admin"]).unwrap(),
+            ],
+        )
+        .await;
+        let (status, body) = body_string(response).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body, "not a channel member");
     }
 
     /// Missing, malformed, or duplicate bindings fail closed for EVERYONE on
