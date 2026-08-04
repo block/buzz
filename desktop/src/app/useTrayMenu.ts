@@ -15,17 +15,13 @@ import { useNow } from "@/shared/lib/useNow";
 import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
 import type { Channel } from "@/shared/api/types";
 import {
+  keepOpenableTrayActivities,
+  type TrayAgentActivity,
+} from "@/app/trayActivities";
+import {
   subscribeToTrayActions,
   type TrayAction,
 } from "@/app/trayActionConsumer";
-
-type TrayAgentActivity = {
-  activityId: string;
-  agentName: string;
-  channelId: string;
-  channelName: string;
-  elapsed: string;
-};
 
 const MAX_RECENT_TRAY_ACTIVITIES = 5;
 
@@ -53,6 +49,10 @@ export function useTrayMenu({
     TrayAgentActivity[]
   >([]);
 
+  const channelIds = React.useMemo(
+    () => new Set(channels.map((channel) => channel.id)),
+    [channels],
+  );
   const activities = React.useMemo<TrayAgentActivity[]>(() => {
     const channelNames = new Map(
       channels.map((channel) => [channel.id, channel.name]),
@@ -62,7 +62,7 @@ export function useTrayMenu({
       agentNames.set(normalizePubkey(agent.pubkey), agent.name);
     }
 
-    return activeTurns.flatMap((channelTurn) =>
+    const currentActivities = activeTurns.flatMap((channelTurn) =>
       channelTurn.agentPubkeys.map((pubkey) => {
         const agentTurn = getActiveTurnsForAgent(pubkey).find(
           (turn) => turn.channelId === channelTurn.channelId,
@@ -82,7 +82,8 @@ export function useTrayMenu({
         };
       }),
     );
-  }, [activeTurns, channels, managedAgents, now, relayAgents]);
+    return keepOpenableTrayActivities(currentActivities, channelIds);
+  }, [activeTurns, channelIds, channels, managedAgents, now, relayAgents]);
 
   React.useEffect(() => {
     const currentActivities = new Map(
@@ -106,15 +107,20 @@ export function useTrayMenu({
     previousActivitiesRef.current = currentActivities;
   }, [activities]);
 
+  const openableRecentActivities = React.useMemo(
+    () => keepOpenableTrayActivities(recentActivities, channelIds),
+    [channelIds, recentActivities],
+  );
+
   React.useEffect(() => {
     if (!isTauri()) return;
     void invoke("update_tray_agent_activity", {
       activities,
-      recentActivities,
+      recentActivities: openableRecentActivities,
     }).catch((error) => {
       console.error("Failed to update the macOS tray menu", error);
     });
-  }, [activities, recentActivities]);
+  }, [activities, openableRecentActivities]);
 
   React.useEffect(() => {
     if (!isTauri()) return;
