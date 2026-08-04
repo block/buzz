@@ -55,13 +55,22 @@ export function getMentionableAgentPubkeys({
 }
 
 export function isAgentIdentityInManagedList(
-  candidate: { isAgent?: boolean; pubkey: string },
+  candidate: { isAgent?: boolean; pubkey: string; ownerPubkey?: string | null },
   managedAgentPubkeys: ReadonlySet<string>,
+  currentPubkey?: string | null,
 ) {
-  return (
-    candidate.isAgent !== true ||
-    managedAgentPubkeys.has(normalizePubkey(candidate.pubkey))
-  );
+  if (candidate.isAgent !== true) return true;
+  if (managedAgentPubkeys.has(normalizePubkey(candidate.pubkey))) return true;
+  // Only gate agents the current user owns: an agent identity that proves our
+  // ownership (verified NIP-OA tag) but is absent from our managed list is a
+  // stale incarnation of one of our own agents — hide it. Agents owned by
+  // someone else (or with unknown ownership) are not ours to prune; they fall
+  // through to shouldHideAgentFromMentions, which applies directory policy.
+  const owner = candidate.ownerPubkey
+    ? normalizePubkey(candidate.ownerPubkey)
+    : null;
+  const current = currentPubkey ? normalizePubkey(currentPubkey) : null;
+  return owner === null || current === null || owner !== current;
 }
 
 export function shouldHideAgentFromMentions({
