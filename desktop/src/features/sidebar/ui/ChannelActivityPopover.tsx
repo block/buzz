@@ -21,6 +21,10 @@ import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 const HOVER_OPEN_DELAY_MS = 250;
 const HOVER_CLOSE_DELAY_MS = 180;
+const ACTIVITY_POPOVER_MOTION_STYLE = {
+  "--tw-enter-scale": "1",
+  "--tw-exit-scale": "1",
+} as React.CSSProperties;
 
 function buildChannelActivityFeed(items: FeedItem[]): HomeFeedResponse {
   return {
@@ -365,19 +369,17 @@ export function ChannelActivityPopover({
 
   return (
     <Popover onOpenChange={setOpen} open={open}>
-      <PopoverAnchor asChild>
-        {/* biome-ignore lint/a11y/noStaticElementInteractions: hover/focus events bubble from the nested channel button while this wrapper supplies the popover anchor box. */}
-        <div
-          className="w-full min-w-0"
-          onBlur={closeWithDelay}
-          onContextMenu={() => setOpen(false)}
-          onFocus={openImmediately}
-          onMouseEnter={openWithDelay}
-          onMouseLeave={closeWithDelay}
-        >
-          {children}
-        </div>
-      </PopoverAnchor>
+      {/* biome-ignore lint/a11y/noStaticElementInteractions: hover/focus events bubble from the nested channel button while the wrapper keeps the preview interactive. */}
+      <div
+        className="w-full min-w-0"
+        onBlur={closeWithDelay}
+        onContextMenu={() => setOpen(false)}
+        onFocus={openImmediately}
+        onMouseEnter={openWithDelay}
+        onMouseLeave={closeWithDelay}
+      >
+        <PopoverAnchor asChild>{children}</PopoverAnchor>
+      </div>
       <PopoverContent
         align="start"
         className="w-96 overflow-hidden p-0"
@@ -387,7 +389,8 @@ export function ChannelActivityPopover({
         onMouseLeave={closeWithDelay}
         onOpenAutoFocus={(event) => event.preventDefault()}
         side="right"
-        sideOffset={8}
+        sideOffset={0}
+        style={ACTIVITY_POPOVER_MOTION_STYLE}
       >
         <section
           aria-label="Channel activity"
