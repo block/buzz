@@ -50,8 +50,18 @@ function shortPreview(preview: string): string {
   return out;
 }
 
-/** "Bash: npm test" — the emitted tool title plus a clamped preview. */
+/**
+ * "Bash: Run the test suite" — the emitted tool title plus a clamped preview.
+ * A human-authored `description` argument (Claude Code sends one with every
+ * shell call) beats the raw command line: the bar is a status line, not a
+ * terminal, and `sed -n '420,432p' …` reads as noise there. The session panel
+ * still shows the full command.
+ */
 function toolActivity(item: ToolItem): string {
+  const description = item.args?.description;
+  if (typeof description === "string" && description.trim().length > 0) {
+    return `${item.title}: ${shortPreview(description.trim())}`;
+  }
   const preview = item.descriptor?.preview;
   if (typeof preview === "string" && preview.trim().length > 0) {
     return `${item.title}: ${shortPreview(preview.trim())}`;
