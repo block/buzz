@@ -1186,6 +1186,12 @@ declare global {
     };
     __BUZZ_E2E_SET_RELAY_CONNECTION_STATE__?: (state: ConnectionState) => void;
     __BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?: () => ConnectionState;
+    /** Queue deterministic mock AUTH outcomes, consumed in order. */
+    __BUZZ_E2E_QUEUE_AUTH_RESPONSES__?: (
+      responses: Array<{ success: boolean; message: string }>,
+    ) => void;
+    /** Inject CLOSED into every active mock live subscription. */
+    __BUZZ_E2E_CLOSE_LIVE_SUBSCRIPTIONS__?: (reason: string) => number;
     __BUZZ_E2E_SET_STALL_WEBSOCKET_SENDS__?: (stall: boolean) => void;
     __BUZZ_E2E_DISCONNECT_MOCK_WEBSOCKETS__?: () => number;
     __BUZZ_E2E_RESTART_MOCK_WEBSOCKETS__?: () => number;
@@ -2942,6 +2948,7 @@ const mockReminderEvents: RelayEvent[] = [];
 const mockPersonaEvents: RelayEvent[] = [];
 let mockRelayMembers: RawRelayMember[] = [];
 const mockSockets = new Map<number, MockSocket>();
+const mockAuthResponses: Array<{ success: boolean; message: string }> = [];
 let mockWebsocketUnavailable = false;
 const relayWebsocketConnectAttemptStarts: number[] = [];
 let mockWebsocketSendMutexWedged = false;
@@ -9443,7 +9450,16 @@ function sendToMockSocket(args: {
 
   if (type === "AUTH") {
     const event = rest[0] as RelayEvent;
-    sendWsText(socket.handler, ["OK", event.id, true, ""]);
+    const response = mockAuthResponses.shift() ?? {
+      success: true,
+      message: "",
+    };
+    sendWsText(socket.handler, [
+      "OK",
+      event.id,
+      response.success,
+      response.message,
+    ]);
     return;
   }
 
@@ -9806,6 +9822,7 @@ export function maybeInstallE2eTauriMocks() {
 
   mockClosedChannelLiveSubscription = false;
   mockWebsocketUnavailable = false;
+  mockAuthResponses.length = 0;
   relayWebsocketConnectAttemptStarts.length = 0;
   mockGlobalAgentConfig = config.mock?.globalAgentConfig
     ? { ...config.mock.globalAgentConfig }
@@ -10053,6 +10070,20 @@ export function maybeInstallE2eTauriMocks() {
   };
   window.__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__ = () =>
     relayClient.getConnectionState();
+  window.__BUZZ_E2E_QUEUE_AUTH_RESPONSES__ = (responses) => {
+    mockAuthResponses.push(...responses);
+  };
+  window.__BUZZ_E2E_CLOSE_LIVE_SUBSCRIPTIONS__ = (reason) => {
+    let closed = 0;
+    for (const socket of mockSockets.values()) {
+      for (const subId of [...socket.subscriptions.keys()]) {
+        sendWsText(socket.handler, ["CLOSED", subId, reason]);
+        socket.subscriptions.delete(subId);
+        closed += 1;
+      }
+    }
+    return closed;
+  };
 
   window.__BUZZ_E2E_SEED_MOCK_REMINDERS__ = (reminders) => {
     mockReminderEvents.length = 0;
