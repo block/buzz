@@ -1314,3 +1314,31 @@ fn restart_eligible_false_when_orphan_has_no_drift() {
 fn restart_eligible_false_when_non_orphan_has_no_drift() {
     assert!(!super::restart_eligible(false, false, false));
 }
+
+// ── child_connect_relay_url tests ───────────────────────────────────────
+
+#[test]
+fn child_connect_relay_url_preserves_configured_loopback_authority() {
+    // Regression: relay tenancy is Host-header-derived, so handing the child
+    // the canonical runtime-key form (localhost → 127.0.0.1) parks every
+    // spawned agent in a different, empty community than the desktop's
+    // ws://localhost:3000 workspace — the harness logs "discovered 0
+    // channel(s)" and never sees a mention.
+    let key = super::ManagedAgentRuntimeKey::new("a".repeat(64), "ws://localhost:3000")
+        .expect("valid runtime key");
+    assert_eq!(key.relay_url, "ws://127.0.0.1:3000");
+    assert_eq!(
+        super::child_connect_relay_url("ws://localhost:3000", &key),
+        "ws://localhost:3000",
+    );
+}
+
+#[test]
+fn child_connect_relay_url_is_identity_for_non_loopback_relays() {
+    let key = super::ManagedAgentRuntimeKey::new("a".repeat(64), "wss://relay.example.com")
+        .expect("valid runtime key");
+    assert_eq!(
+        super::child_connect_relay_url("wss://relay.example.com", &key),
+        "wss://relay.example.com",
+    );
+}
