@@ -447,12 +447,10 @@ export function ProjectsView() {
     );
   }
 
-  if (projects.length === 0) {
-    return <EmptyState />;
-  }
-
   const repositoryItems =
-    visibleProjects.length === 0 ? (
+    projects.length === 0 ? (
+      <EmptyState />
+    ) : visibleProjects.length === 0 ? (
       <EmptyFilteredState />
     ) : viewMode === "grid" ? (
       <div
