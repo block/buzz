@@ -14,6 +14,10 @@ import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import { useNow } from "@/shared/lib/useNow";
 import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
 import type { Channel } from "@/shared/api/types";
+import {
+  subscribeToTrayActions,
+  type TrayAction,
+} from "@/app/trayActionConsumer";
 
 type TrayAgentActivity = {
   activityId: string;
@@ -22,10 +26,6 @@ type TrayAgentActivity = {
   channelName: string;
   elapsed: string;
 };
-
-type TrayAction =
-  | { kind: "newChannel" }
-  | { kind: "openChannel"; channelId: string };
 
 const MAX_RECENT_TRAY_ACTIVITIES = 5;
 
@@ -119,42 +119,24 @@ export function useTrayMenu({
   React.useEffect(() => {
     if (!isTauri()) return;
 
-    let disposed = false;
-    let unlisten: (() => void) | undefined;
-
-    const handlePendingActions = async () => {
-      if (disposed) return;
-      const actions = await invoke<TrayAction[]>("take_tray_actions");
-      if (disposed) {
-        if (actions.length > 0) {
-          await invoke("requeue_tray_actions", { actions });
-        }
-        return;
-      }
-      for (const action of actions) {
+    return subscribeToTrayActions({
+      addFocusListener: (listener) => {
+        // Native queues before restoring the window, so focus is the durable
+        // wake-up if WebKit dropped the earlier event while Buzz was hidden.
+        window.addEventListener("focus", listener);
+        return () => window.removeEventListener("focus", listener);
+      },
+      listenForAvailable: (listener) =>
+        listen("tray-action-available", listener),
+      takePendingActions: () => invoke<TrayAction[]>("take_tray_actions"),
+      requeueActions: (actions) => invoke("requeue_tray_actions", { actions }),
+      handleAction: (action) => {
         if (action.kind === "newChannel") {
           openCreateChannel();
         } else {
           void goChannel(action.channelId);
         }
-      }
-    };
-
-    void (async () => {
-      const nextUnlisten = await listen("tray-action-available", () => {
-        void handlePendingActions();
-      });
-      if (disposed) {
-        nextUnlisten();
-        return;
-      }
-      unlisten = nextUnlisten;
-      await handlePendingActions();
-    })();
-
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
+      },
+    });
   }, [goChannel, openCreateChannel]);
 }
