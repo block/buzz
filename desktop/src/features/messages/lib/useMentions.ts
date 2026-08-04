@@ -246,7 +246,8 @@ export function useMentions(
       if (isArchivedDiscovery(pubkey)) {
         return;
       }
-      if (!isAgentIdentityInManagedList(candidate, managedAgentPubkeys)) {
+      // Invocable set, not the managed one — see the gate tests for why.
+      if (!isAgentIdentityInManagedList(candidate, mentionableAgentPubkeys)) {
         return;
       }
       if (
@@ -420,7 +421,6 @@ export function useMentions(
     managedAgentNamesByPubkey,
     managedAgentPersonaIds,
     managedAgentPersonaIdsByPubkey,
-    managedAgentPubkeys,
     managedAgentsQuery.data,
     memberPubkeys,
     members,

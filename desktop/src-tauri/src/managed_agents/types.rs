@@ -193,21 +193,6 @@ impl ManagedAgentRecord {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RelayAgentInfo {
-    pub pubkey: String,
-    pub name: String,
-    pub agent_type: String,
-    pub channels: Vec<String>,
-    #[serde(default)]
-    pub channel_ids: Vec<String>,
-    pub capabilities: Vec<String>,
-    pub status: String,
-    #[serde(default)]
-    pub respond_to: Option<RespondTo>,
-    #[serde(default)]
-    pub respond_to_allowlist: Vec<String>,
-}
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ManagedAgentRecord {
     pub pubkey: String,
@@ -992,6 +977,8 @@ pub fn resolve_mint_behavioral_defaults(
 
 mod catalog_source;
 pub use catalog_source::CatalogSource;
+mod relay_agent_info;
+pub use relay_agent_info::RelayAgentInfo;
 mod requests;
 pub use requests::*;
 

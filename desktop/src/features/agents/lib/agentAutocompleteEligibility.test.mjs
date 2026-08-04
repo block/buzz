@@ -306,3 +306,144 @@ test("coalesceAgentAutocompleteCandidates: leaves non-agents alone", () => {
 
   assert.deepEqual(coalesce([first, second]), [first, second]);
 });
+
+// ── Gate composition (mirrors useMentions.addCandidate) ────────────────
+//
+// `useMentions` runs two gates in order: `isAgentIdentityInManagedList`, then
+// `shouldHideAgentFromMentions`. The first was originally passed the
+// locally-managed set, which dropped every relay-published (headless/BYO)
+// agent before the directory-aware second gate could admit it — so such an
+// agent was never mentionable regardless of its kind:10100 entry. The call
+// site now passes the invocable set; these tests pin that composition.
+
+function survivesMentionGates({
+  candidate,
+  managedAgentPubkeys,
+  relayAgents,
+  sharedChannelIds,
+  currentPubkey = CURRENT_PUBKEY,
+}) {
+  const mentionableAgentPubkeys = getMentionableAgentPubkeys({
+    currentPubkey,
+    managedAgentPubkeys,
+    relayAgents,
+    sharedChannelIds,
+  });
+  const directoryAgentPubkeys = new Set(
+    relayAgents.map((agent) => agent.pubkey),
+  );
+
+  // Gate 1 — must use the invocable set, not the locally-managed one.
+  if (!isAgentIdentityInManagedList(candidate, mentionableAgentPubkeys)) {
+    return false;
+  }
+  // Gate 2 — the directory-aware policy.
+  return !shouldHideAgentFromMentions({
+    isAgent: candidate.isAgent === true,
+    isMember: candidate.isMember === true,
+    pubkey: candidate.pubkey,
+    mentionableAgentPubkeys,
+    directoryAgentPubkeys,
+  });
+}
+
+test("mention gates: a shared relay agent survives without being locally managed", () => {
+  const relayAgents = [
+    {
+      pubkey: PUB_B,
+      channelIds: ["chan-1"],
+      respondTo: "anyone",
+      respondToAllowlist: [],
+    },
+  ];
+
+  assert.equal(
+    survivesMentionGates({
+      candidate: { isAgent: true, isMember: true, pubkey: PUB_B },
+      managedAgentPubkeys: new Set(),
+      relayAgents,
+      sharedChannelIds: new Set(["chan-1"]),
+    }),
+    true,
+    "a relay agent advertising respond_to=anyone in a shared channel must be mentionable",
+  );
+});
+
+test("mention gates: an allowlisted relay agent survives for the listed user", () => {
+  const relayAgents = [
+    {
+      pubkey: PUB_B,
+      channelIds: ["chan-1"],
+      respondTo: "allowlist",
+      respondToAllowlist: [CURRENT_PUBKEY],
+    },
+  ];
+
+  assert.equal(
+    survivesMentionGates({
+      candidate: { isAgent: true, isMember: true, pubkey: PUB_B },
+      managedAgentPubkeys: new Set(),
+      relayAgents,
+      sharedChannelIds: new Set(["chan-1"]),
+    }),
+    true,
+  );
+});
+
+test("mention gates: a non-invocable relay agent is still dropped", () => {
+  const relayAgents = [
+    {
+      pubkey: PUB_B,
+      channelIds: ["chan-other"],
+      respondTo: "anyone",
+      respondToAllowlist: [],
+    },
+  ];
+
+  assert.equal(
+    survivesMentionGates({
+      candidate: { isAgent: true, isMember: true, pubkey: PUB_B },
+      managedAgentPubkeys: new Set(),
+      relayAgents,
+      sharedChannelIds: new Set(["chan-1"]),
+    }),
+    false,
+    "widening gate 1 must not admit agents that share no channel with us",
+  );
+});
+
+test("mention gates: locally managed agents keep working", () => {
+  assert.equal(
+    survivesMentionGates({
+      candidate: { isAgent: true, isMember: true, pubkey: PUB_A },
+      managedAgentPubkeys: new Set([PUB_A]),
+      relayAgents: [],
+      sharedChannelIds: new Set(),
+    }),
+    true,
+  );
+});
+
+// The composition tests above pin the *policy*, but they call the gates
+// directly — they cannot catch the call site in `useMentions` narrowing gate 1
+// back to the locally-managed set, which is exactly the regression that made
+// every relay-published agent un-mentionable. Guard the call site itself, in
+// the spirit of desktop/scripts/check-px-text.mjs.
+test("useMentions gates agent identities on the invocable set, not the managed set", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(
+    new URL("../../messages/lib/useMentions.ts", import.meta.url),
+    "utf8",
+  );
+
+  const call = source.match(
+    /isAgentIdentityInManagedList\(\s*candidate,\s*(\w+)/,
+  );
+  assert.ok(call, "expected an isAgentIdentityInManagedList call site");
+  assert.equal(
+    call[1],
+    "mentionableAgentPubkeys",
+    "gate 1 must receive the invocable set; passing managedAgentPubkeys drops " +
+      "every relay-published agent before the directory-aware gate runs",
+  );
+});
