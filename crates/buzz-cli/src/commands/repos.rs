@@ -112,13 +112,7 @@ fn tag_values(tag: &Tag) -> &[String] {
 }
 
 fn github_mirror(url: &str) -> bool {
-    url::Url::parse(url)
-        .ok()
-        .and_then(|url| {
-            url.host_str()
-                .map(|host| host.eq_ignore_ascii_case("github.com"))
-        })
-        .unwrap_or(false)
+    super::repo_sync::validate_github_clone(url).is_ok()
 }
 
 fn existing_github_mirror(existing: Option<&Event>) -> Option<String> {
@@ -1197,6 +1191,28 @@ mod tests {
         .err()
         .expect("malformed secondary clone must fail");
         assert!(matches!(malformed, crate::error::CliError::Usage(_)));
+
+        for unsafe_clone in [
+            "https://token@github.com/example/demo.git",
+            "https://github.com/example/demo.git?ref=main",
+            "http://github.com/example/demo.git",
+        ] {
+            let error = plan_repo_announcement(
+                None,
+                "demo",
+                &"a".repeat(64),
+                "https://relay.example",
+                None,
+                None,
+                &[unsafe_clone.to_string()],
+                None,
+                &[],
+                &uuid::Uuid::new_v4().to_string(),
+            )
+            .err()
+            .expect("unsafe GitHub clone must fail");
+            assert!(matches!(error, crate::error::CliError::Usage(_)));
+        }
     }
 
     #[test]

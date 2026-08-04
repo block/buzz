@@ -184,10 +184,13 @@ it by number or URL thereafter, never by title. Keep review discussion and
 status decisions on the Buzz PR. GitHub supplies only CI, protected-main
 enforcement, and merge.
 
-After GitHub merges, read back the exact merge commit and `main` SHA. Verify the
-merged commit is on `main`, then record Buzz PR `merged` and Buzz issue
-`resolved` status events with that exact SHA. The GitHub `main` readback, not a
-Buzz status assertion, determines what shipped.
+After GitHub merges, read back the exact merge commit and `main` SHA. The
+protected-`main` readback is the post-merge mirror trigger: before publishing
+either lifecycle status, initialize an absent Buzz `main` or fast-forward the
+observed Buzz `main` to that exact GitHub SHA under a lease, then require Buzz
+`main` and `HEAD` to read back at the same commit. Only after that succeeds may
+the Buzz PR be marked `merged` and the Buzz issue `resolved`. The GitHub `main`
+readback, not a Buzz status assertion, determines what shipped.
 
 Sign both Buzz status events as the corresponding root author or the repository
 owner. Other signers may reach the relay, but trusted clients ignore their
@@ -201,6 +204,18 @@ MAIN_SHA="$(git rev-parse 'refs/remotes/origin/main^{commit}')"
 MERGE_SHA="$(gh pr view "$GH_PR_NUMBER" --repo "$GH_REPO" \
   --json mergeCommit --jq '.mergeCommit.oid')"
 git merge-base --is-ancestor "$MERGE_SHA" "$MAIN_SHA"
+
+buzz repos status --id "$REPO_ID" | tee "$state_dir/repo-status-before.json"
+BUZZ_MAIN="$(jq -r '.buzz_main // ""' "$state_dir/repo-status-before.json")"
+if test -z "$BUZZ_MAIN"; then
+  buzz repos import-main --id "$REPO_ID" --commit "$MAIN_SHA"
+else
+  buzz repos mirror-main --id "$REPO_ID" --commit "$MAIN_SHA" \
+    --expected-buzz-main "$BUZZ_MAIN"
+fi | tee "$state_dir/repo-mirror.json"
+jq -e --arg sha "$MAIN_SHA" \
+  '.github_main == $sha and .buzz_main == $sha and .buzz_head == $sha' \
+  "$state_dir/repo-mirror.json"
 
 buzz pr status --pr "$PR_EVENT_ID" --status merged \
   --repo-owner "$REPO_OWNER" --repo-id "$REPO_ID" \

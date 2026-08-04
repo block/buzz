@@ -69,10 +69,7 @@ fn exact_oid(value: &str, flag: &str) -> Result<String, CliError> {
     Ok(value.to_ascii_lowercase())
 }
 
-fn exact_tag_values<'a>(
-    event: &'a Event,
-    name: &str,
-) -> Result<Option<Vec<&'a str>>, CliError> {
+fn exact_tag_values<'a>(event: &'a Event, name: &str) -> Result<Option<Vec<&'a str>>, CliError> {
     let mut matching = event
         .tags
         .iter()
@@ -86,15 +83,11 @@ fn exact_tag_values<'a>(
         )));
     }
     Ok(Some(
-        tag.as_slice()
-            .iter()
-            .skip(1)
-            .map(String::as_str)
-            .collect(),
+        tag.as_slice().iter().skip(1).map(String::as_str).collect(),
     ))
 }
 
-fn validate_github_clone(value: &str) -> Result<(), CliError> {
+pub(super) fn validate_github_clone(value: &str) -> Result<(), CliError> {
     let url = url::Url::parse(value)
         .map_err(|_| CliError::Usage("GitHub clone URL must be a valid HTTPS URL".into()))?;
     let path_is_repo = url
@@ -105,7 +98,10 @@ fn validate_github_clone(value: &str) -> Result<(), CliError> {
         })
         .unwrap_or(false);
     if url.scheme() != "https"
-        || url.host_str().map(|host| host.eq_ignore_ascii_case("github.com")) != Some(true)
+        || url
+            .host_str()
+            .map(|host| host.eq_ignore_ascii_case("github.com"))
+            != Some(true)
         || !url.username().is_empty()
         || url.password().is_some()
         || url.query().is_some()
@@ -155,10 +151,10 @@ fn derive_remotes(client: &BuzzClient, announcement: &Event) -> Result<RepoRemot
         .skip(1)
         .copied()
         .filter(|value| {
-            url::Url::parse(value)
-                .ok()
-                .and_then(|url| url.host_str().map(|host| host.eq_ignore_ascii_case("github.com")))
-                == Some(true)
+            url::Url::parse(value).ok().and_then(|url| {
+                url.host_str()
+                    .map(|host| host.eq_ignore_ascii_case("github.com"))
+            }) == Some(true)
         })
         .collect();
     if clones.len() != github.len() + 1 {
@@ -320,7 +316,11 @@ impl GitRepo {
     }
 
     fn rev_parse(&self, reference: &str) -> Result<String, CliError> {
-        let output = self.output(false, "resolve commit", ["rev-parse", "--verify", reference])?;
+        let output = self.output(
+            false,
+            "resolve commit",
+            ["rev-parse", "--verify", reference],
+        )?;
         let value = std::str::from_utf8(&output.stdout)
             .map_err(|_| CliError::Other("git returned invalid commit data".into()))?
             .trim();
@@ -454,14 +454,20 @@ fn execute_import(
     }
     let buzz_after = repo.ls_remote(&remotes.buzz_url, true)?;
     require_exact_head(&buzz_after, commit)?;
+    let buzz_main = buzz_after
+        .main
+        .ok_or_else(|| CliError::Other("Buzz main missing after exact readback".into()))?;
+    let buzz_head = buzz_after
+        .head
+        .ok_or_else(|| CliError::Other("Buzz HEAD missing after exact readback".into()))?;
     Ok(WriteOutput {
         repo_id: remotes.repo_id.clone(),
         direction: "github-to-buzz",
         commit: commit.to_owned(),
         changed,
         github_main: github_after,
-        buzz_main: buzz_after.main.expect("checked exact main"),
-        buzz_head: buzz_after.head.expect("checked exact HEAD"),
+        buzz_main,
+        buzz_head,
     })
 }
 
@@ -511,14 +517,20 @@ fn execute_mirror(
     }
     let buzz_after = repo.ls_remote(&remotes.buzz_url, true)?;
     require_exact_head(&buzz_after, commit)?;
+    let buzz_main = buzz_after
+        .main
+        .ok_or_else(|| CliError::Other("Buzz main missing after exact readback".into()))?;
+    let buzz_head = buzz_after
+        .head
+        .ok_or_else(|| CliError::Other("Buzz HEAD missing after exact readback".into()))?;
     Ok(WriteOutput {
         repo_id: remotes.repo_id.clone(),
         direction: "github-to-buzz",
         commit: commit.to_owned(),
         changed,
         github_main: github_after,
-        buzz_main: buzz_after.main.expect("checked exact main"),
-        buzz_head: buzz_after.head.expect("checked exact HEAD"),
+        buzz_main,
+        buzz_head,
     })
 }
 
@@ -737,13 +749,8 @@ mod tests {
     fn delegated_auth_owner_does_not_replace_repository_event_author() {
         let keys = Keys::generate();
         let auth_owner = Keys::generate().public_key().to_hex();
-        let auth_tag = Tag::parse([
-            "auth",
-            auth_owner.as_str(),
-            "",
-            &"0".repeat(128),
-        ])
-        .expect("syntactically valid auth tag");
+        let auth_tag = Tag::parse(["auth", auth_owner.as_str(), "", &"0".repeat(128)])
+            .expect("syntactically valid auth tag");
         let relay = "https://relay.example";
         let repo_owner = keys.public_key().to_hex();
         let buzz = format!("{relay}/git/{repo_owner}/fixture");
@@ -782,13 +789,8 @@ mod tests {
         );
 
         let second = fixture.next_commit();
-        let mirrored = execute_mirror(
-            &fixture.remotes(),
-            Fixture::auth(),
-            &second,
-            &fixture.first,
-        )
-        .expect("mirror main");
+        let mirrored = execute_mirror(&fixture.remotes(), Fixture::auth(), &second, &fixture.first)
+            .expect("mirror main");
         assert!(mirrored.changed);
         assert_eq!(
             git(Path::new(&fixture.buzz), ["show-ref"]),
