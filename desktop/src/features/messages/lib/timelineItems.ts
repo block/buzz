@@ -127,7 +127,8 @@ function membershipChangesCanGroup(
  * Compatible membership activities stay together while they are contiguous.
  * Self-joins and additions from one administrator each form their own summary;
  * a self-join immediately followed by that member leaving becomes a single
- * lifecycle summary. Groups do not cross the one-hour activity window.
+ * lifecycle summary. Each adjacent event must fall within the one-hour activity
+ * window, so uninterrupted activity can extend beyond an hour overall.
  */
 function buildMembershipGroups(
   entries: readonly MainTimelineEntry[],
@@ -146,13 +147,14 @@ function buildMembershipGroups(
     let start = end;
     while (start > 0) {
       const candidate = entries[start - 1];
+      const nextEntry = entries[start];
       const candidatePayload = parseMembershipChangePayload(candidate);
       if (
         barrierIndexes.has(start) ||
         !candidatePayload ||
         !membershipChangesCanGroup(candidatePayload, newestPayload) ||
         newestEntry.message.createdAt < candidate.message.createdAt ||
-        newestEntry.message.createdAt - candidate.message.createdAt > 60 * 60
+        nextEntry.message.createdAt - candidate.message.createdAt > 60 * 60
       ) {
         break;
       }

@@ -173,11 +173,11 @@ test("buildTimelineItems: prepending membership history preserves the loaded suf
   const prependedKeys = prependedItems.slice(1).map((item) => item.key);
 
   assert.deepEqual(loadedKeys, ["c", "message"]);
-  assert.deepEqual(prependedKeys, ["a", "c", "message"]);
+  assert.deepEqual(prependedKeys, ["c", "message"]);
   assert.deepEqual(prependedKeys.slice(-loadedKeys.length), loadedKeys);
 });
 
-test("buildTimelineItems: membership groups stop after one hour", () => {
+test("buildTimelineItems: contiguous member additions extend a group outside one hour", () => {
   const start = dayAt(2026, 6, 14);
   const entries = [
     memberAddedEntry({ id: "a", target: "target-a", createdAt: start }),
@@ -186,11 +186,11 @@ test("buildTimelineItems: membership groups stop after one hour", () => {
   ];
 
   const { items } = buildTimelineItems(entries, null);
-  assert.deepEqual(kinds(items), ["day-divider", "system", "system-group"]);
+  assert.deepEqual(kinds(items), ["day-divider", "system-group"]);
   const group = items.find((item) => item.kind === "system-group");
   assert.deepEqual(
     group?.entries.map((groupEntry) => groupEntry.message.id),
-    ["b", "c"],
+    ["a", "b", "c"],
   );
 });
 
