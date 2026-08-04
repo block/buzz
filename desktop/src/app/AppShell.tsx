@@ -632,8 +632,7 @@ export function AppShell() {
     unreadChannelIds,
     unreadChannelNotificationCount,
   });
-  // Dispatch `buzz://message` deep links only from the main window. The
-  // companion is dedicated to its active Huddle route.
+  // Dispatch `buzz://message` deep links only from the main window; the companion is dedicated to its active Huddle route.
   useMessageDeepLinks(!isHuddleRoom);
   const handleOpenCreateChannel = React.useCallback(
     () => setIsCreateChannelOpen(true),
@@ -929,6 +928,7 @@ export function AppShell() {
                         selectedChannelId={selectedChannelId}
                         selectedView={selectedView}
                         unreadChannelIds={unreadChannelIds}
+                        previewActivityChannelIds={unreadThreadChannelIds}
                         unreadChannelCounts={unreadChannelCounts}
                         mutedChannelIds={mutedChannelIds}
                         onMuteChannel={muteChannel}
