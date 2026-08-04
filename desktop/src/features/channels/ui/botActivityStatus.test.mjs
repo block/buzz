@@ -204,3 +204,28 @@ describe("buildStableActivityStatus previews", () => {
     assert.equal(status.activity, "Bash: Read the store cache");
   });
 });
+
+describe("buildStableActivityStatus thread scoping", () => {
+  it("locks onto the thread's turn when threadRootId is given", () => {
+    const status = buildStableActivityStatus(
+      [
+        tool({
+          sessionId: "aaaa000011112222",
+          turnId: "t-a",
+          status: "executing",
+          descriptor: { preview: "thread-a-work" },
+        }),
+        tool({
+          sessionId: "bbbb000011112222",
+          turnId: "t-b",
+          status: "executing",
+          descriptor: { preview: "thread-b-work" },
+        }),
+      ],
+      CHANNEL,
+      "aaaa000011112222deadbeefdeadbeef",
+    );
+    assert.equal(status.activity, "Bash: thread-a-work");
+    assert.equal(status.toolCount, 1);
+  });
+});
