@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { after, afterEach, before, test } from "node:test";
+import { after, afterEach, before, beforeEach, test } from "node:test";
 
 import { JSDOM } from "jsdom";
+import { setTerminalPanelMode } from "./terminalPanelStore.ts";
 
 // `pretendToBeVisual` is what gives jsdom requestAnimationFrame. The banner's
 // animation loop needs it; without it the loop silently never runs and every
@@ -115,7 +116,11 @@ before(async () => {
 });
 
 after(() => dom.window.close());
-afterEach(() => {
+beforeEach(() => setTerminalPanelMode("docked"));
+afterEach(async () => {
+  const { cleanup } = await import("@testing-library/react");
+  cleanup();
+  setTerminalPanelMode("closed");
   calls.length = 0;
   canvasWidth = 840;
   attachResolver = null;
@@ -300,11 +305,6 @@ test("opening a tab keeps terminal ownership while its attachment is pending", a
     await Promise.resolve();
   });
   const substrate = view.container.querySelector(".buzz-terminal-substrate");
-  const chord = { bubbles: true, code: "KeyJ", metaKey: true };
-  act(() => {
-    window.dispatchEvent(new KeyboardEvent("keydown", chord));
-    window.dispatchEvent(new KeyboardEvent("keyup", chord));
-  });
   await waitFor(() =>
     assert.equal(substrate.dataset.terminalOwner, "terminal"),
   );

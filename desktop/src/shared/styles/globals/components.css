@@ -867,3 +867,67 @@
     width: 1px;
   }
 }
+
+@layer components {
+  .buzz-terminal-dock-host:has(.buzz-terminal-substrate) {
+    display: flex;
+    flex: 0 0 auto;
+    min-height: 0;
+  }
+
+  .buzz-terminal-dock-host:has([data-terminal-mode="maximized"]) {
+    flex: 1 1 auto;
+  }
+
+  .buzz-content-primary:has(
+    + .buzz-terminal-dock-host [data-terminal-mode="maximized"]
+  ) {
+    display: none;
+  }
+
+  .buzz-terminal-substrate {
+    border-top: 1px solid hsl(var(--border));
+    inset: auto;
+    min-height: 180px;
+    position: relative;
+    width: 100%;
+    z-index: 20;
+  }
+
+  .buzz-terminal-dock-host [data-terminal-mode="maximized"] {
+    flex: 1 1 auto;
+    height: 100%;
+  }
+
+  .buzz-terminal-resize-handle {
+    cursor: ns-resize;
+    height: 5px;
+    left: 0;
+    position: absolute;
+    right: 0;
+    top: -3px;
+    z-index: 2;
+  }
+
+  .buzz-terminal-window-action {
+    align-items: center;
+    background: transparent;
+    border: 0;
+    color: inherit;
+    display: inline-flex;
+    height: 24px;
+    justify-content: center;
+    opacity: 0.62;
+    width: 24px;
+  }
+
+  .buzz-terminal-window-action:hover,
+  .buzz-terminal-window-action:focus-visible {
+    opacity: 1;
+  }
+
+  .buzz-terminal-window-action svg {
+    height: 13px;
+    width: 13px;
+  }
+}

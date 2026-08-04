@@ -11,6 +11,12 @@ import {
   TerminalSubstrate,
   type TerminalViewportSize,
 } from "./TerminalSubstrate";
+import {
+  setTerminalPanelMode,
+  setTerminalSessionChannels,
+  toggleTerminalPanel,
+  useTerminalPanel,
+} from "./terminalPanelStore";
 
 type TerminalContext = {
   channelId: string;
@@ -27,6 +33,7 @@ type Session = {
   frame: TerminalFrameMessage | undefined;
   title: string;
   closing: boolean;
+  context: TerminalContext;
 };
 
 const INITIAL_SIZE: TerminalViewportSize = {
@@ -71,9 +78,33 @@ export function TerminalBootstrap({
   const [sessions, setSessions] = React.useState<Session[]>([]);
   const [activeKey, setActiveKey] = React.useState<string | null>(null);
   const [available, setAvailable] = React.useState(() => isTauri());
+  const panel = useTerminalPanel();
   const acknowledgedSequenceRef = React.useRef(new Map<string, number>());
   const sessionsRef = React.useRef(sessions);
   sessionsRef.current = sessions;
+
+  React.useEffect(() => {
+    const toggle = (event: KeyboardEvent) => {
+      if (
+        panel.mode !== "closed" ||
+        event.code !== "KeyJ" ||
+        (!event.metaKey && !event.ctrlKey) ||
+        event.altKey ||
+        event.shiftKey ||
+        event.isComposing
+      )
+        return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (event.type === "keyup") toggleTerminalPanel();
+    };
+    window.addEventListener("keydown", toggle, true);
+    window.addEventListener("keyup", toggle, true);
+    return () => {
+      window.removeEventListener("keydown", toggle, true);
+      window.removeEventListener("keyup", toggle, true);
+    };
+  }, [panel.mode]);
 
   const fail = React.useCallback((error: unknown) => {
     report(error);
@@ -102,6 +133,7 @@ export function TerminalBootstrap({
       frame: undefined,
       title: "SHELL",
       closing: false,
+      context: spawnContext,
     };
     setSessions((current) => [...current, initial]);
     setActiveKey(key);
@@ -166,9 +198,36 @@ export function TerminalBootstrap({
       });
   }, [available, fail, removeSession]);
 
+  const contextChannelId = context?.channelId ?? null;
+  const channelSessions = React.useMemo(
+    () =>
+      contextChannelId
+        ? sessions.filter(
+            (session) => session.context.channelId === contextChannelId,
+          )
+        : [],
+    [contextChannelId, sessions],
+  );
+
   React.useEffect(() => {
-    if (available && context && sessions.length === 0) createSession();
-  }, [available, context, createSession, sessions.length]);
+    setTerminalSessionChannels(
+      sessions.map((session) => session.context.channelId),
+    );
+  }, [sessions]);
+
+  React.useEffect(() => {
+    if (panel.mode === "closed" || !available || !context) return;
+    if (channelSessions.length === 0) createSession();
+    else if (!channelSessions.some((session) => session.key === activeKey))
+      setActiveKey(channelSessions.at(-1)?.key ?? null);
+  }, [
+    activeKey,
+    available,
+    channelSessions,
+    context,
+    createSession,
+    panel.mode,
+  ]);
 
   React.useEffect(() => {
     mountedRef.current = true;
@@ -180,7 +239,10 @@ export function TerminalBootstrap({
     };
   }, []);
 
-  const active = sessions.find((session) => session.key === activeKey) ?? null;
+  const active =
+    channelSessions.find((session) => session.key === activeKey) ??
+    channelSessions.at(-1) ??
+    null;
   const send = (operation: Promise<void> | undefined) => operation?.catch(fail);
 
   const handleSize = React.useCallback(
@@ -205,14 +267,20 @@ export function TerminalBootstrap({
     [activeKey, fail],
   );
 
+  if (panel.mode === "closed") return null;
+
   return (
     <TerminalSubstrate
       bracketedPaste={active?.frame?.bracketedPaste ?? false}
-      channelName={channelName}
-      enabled={available && Boolean(active)}
+      channelName={active?.context.channelName ?? channelName}
+      enabled={available && Boolean(context)}
+      mode={panel.mode}
+      onHide={() => setTerminalPanelMode("closed")}
+      onModeChange={setTerminalPanelMode}
+      onToggle={toggleTerminalPanel}
       focusReportingEnabled={active?.frame?.focusReporting ?? false}
       frame={active?.frame}
-      sessionFrames={sessions.flatMap((session) =>
+      sessionFrames={channelSessions.flatMap((session) =>
         session.frame ? [{ sessionId: session.key, frame: session.frame }] : [],
       )}
       onCloseSession={(key) => {
@@ -263,7 +331,7 @@ export function TerminalBootstrap({
         send(active?.connection?.focus(focused))
       }
       onViewportSize={handleSize}
-      sessions={sessions.map((session) => ({
+      sessions={channelSessions.map((session) => ({
         active: session.key === activeKey,
         closing: session.closing,
         id: session.key,

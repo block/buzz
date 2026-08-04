@@ -1,9 +1,9 @@
 import * as React from "react";
+import { Maximize2, Minimize2, X } from "lucide-react";
 
 import { useTheme } from "@/shared/theme/ThemeProvider";
 import { cn } from "@/shared/lib/cn";
 import { isMacPlatform } from "@/shared/lib/platform";
-import { FadeController } from "./fadeController";
 import {
   INITIAL_HANDOFF_STATE,
   accumulateScrollLines,
@@ -15,7 +15,6 @@ import {
 } from "./terminalState";
 import { buildTerminalBanner } from "./terminalBanner";
 import { paintTerminalBanner } from "./terminalBannerPainter";
-import { buildBannerColorTable, phaseAt } from "./terminalBannerWave";
 import {
   TERMINAL_CELL_METRICS,
   type TerminalFrame,
@@ -37,7 +36,6 @@ export type TerminalSessionTab = {
 };
 
 type TerminalSubstrateProps = {
-  appSurfaceRef?: React.RefObject<HTMLDivElement | null>;
   channelName: string | null;
   frame?: TerminalFrame;
   sessionFrames?: readonly { sessionId: string; frame: TerminalFrame }[];
@@ -45,6 +43,10 @@ type TerminalSubstrateProps = {
   bracketedPaste: boolean;
   focusReportingEnabled: boolean;
   enabled?: boolean;
+  mode?: "docked" | "maximized";
+  onHide?: () => void;
+  onModeChange?: (mode: "docked" | "maximized") => void;
+  onToggle?: () => void;
   onFrameConsumed?: (frame: TerminalFrame) => void;
   onViewportSize?: (size: TerminalViewportSize) => void;
   onInput: (text: string) => void;
@@ -66,6 +68,7 @@ function isToggleChord(event: KeyboardEvent): boolean {
 }
 
 const { width: CELL_WIDTH, height: CELL_HEIGHT } = TERMINAL_CELL_METRICS;
+const NOOP = () => {};
 
 function hasVisibleOutput(frame: TerminalFrame): boolean {
   return frame.rows.some((row) =>
@@ -76,7 +79,6 @@ function hasVisibleOutput(frame: TerminalFrame): boolean {
 }
 
 export function TerminalSubstrate({
-  appSurfaceRef,
   channelName,
   frame,
   sessionFrames,
@@ -84,6 +86,10 @@ export function TerminalSubstrate({
   bracketedPaste,
   focusReportingEnabled,
   enabled = true,
+  mode = "docked",
+  onHide = NOOP,
+  onModeChange = NOOP,
+  onToggle,
   onFrameConsumed,
   onViewportSize,
   onInput,
@@ -97,14 +103,12 @@ export function TerminalSubstrate({
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
   const bannerCanvasRef = React.useRef<HTMLCanvasElement>(null);
   const textareaRef = React.useRef<HTMLTextAreaElement>(null);
-  const fadeRef = React.useRef<FadeController | null>(null);
   const handoffRef = React.useRef(INITIAL_HANDOFF_STATE);
   const gridsRef = React.useRef(new Map<string, TerminalGrid>());
   const appliedFramesRef = React.useRef(new WeakSet<TerminalFrame>());
   const gridRef = React.useRef<TerminalGrid | null>(null);
   const paintedPaletteRef = React.useRef(terminalPalette);
   const paintedSessionRef = React.useRef<string | null>(null);
-  const previousFocusRef = React.useRef<HTMLElement | null>(null);
   const reportedFocusRef = React.useRef<boolean | null>(null);
   const scrollBySessionRef = React.useRef(new Map<string, number>());
   const revealedRef = React.useRef(false);
@@ -127,12 +131,13 @@ export function TerminalSubstrate({
   const shortcutLabel = /Mac|iPhone|iPad/.test(navigator.platform)
     ? "⌘J"
     : "CTRL+J";
-  const getAppSurface = React.useCallback(
-    () =>
-      appSurfaceRef?.current ??
-      document.querySelector<HTMLDivElement>(".buzz-huddle-app-surface"),
-    [appSurfaceRef],
-  );
+  const [dockHeight, setDockHeight] = React.useState(() => {
+    const stored = Number.parseInt(
+      window.localStorage.getItem("buzz-terminal-dock-height") ?? "",
+      10,
+    );
+    return Number.isFinite(stored) ? stored : 320;
+  });
   const banner = React.useMemo(
     () =>
       buildTerminalBanner(
@@ -149,32 +154,9 @@ export function TerminalSubstrate({
       } as React.CSSProperties)
     : undefined;
 
-  const commitOwner = React.useEffectEvent((next: "buzz" | "terminal") => {
-    const appSurface = getAppSurface();
-    if (!appSurface) return;
-    if (next === "terminal") {
-      revealedRef.current = true;
-      previousFocusRef.current =
-        document.activeElement instanceof HTMLElement
-          ? document.activeElement
-          : null;
-      appSurface.inert = true;
-      appSurface.setAttribute("aria-hidden", "true");
-      textareaRef.current?.focus({ preventScroll: true });
-    } else {
-      appSurface.inert = false;
-      appSurface.removeAttribute("aria-hidden");
-      const previous = previousFocusRef.current;
-      if (previous?.isConnected) previous.focus({ preventScroll: true });
-      else appSurface.focus({ preventScroll: true });
-    }
-    setOwner(next);
-  });
-
   const forceBuzzFallback = React.useEffectEvent(() => {
     handoffRef.current = { ...INITIAL_HANDOFF_STATE };
-    commitOwner("buzz");
-    fadeRef.current?.settle("conceal");
+    setOwner("buzz");
   });
 
   const sendInput = React.useEffectEvent((text: string) => {
@@ -284,118 +266,58 @@ export function TerminalSubstrate({
   }, [focusReportingEnabled, onTerminalFocusChange, owner]);
 
   React.useLayoutEffect(() => {
-    const appSurface = getAppSurface();
-    if (!appSurface) return;
-    fadeRef.current = new FadeController(appSurface);
+    if (!enabled) {
+      forceBuzzFallback();
+      return;
+    }
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (!enabled) return;
       if (runTabChord(event)) {
         event.preventDefault();
         event.stopImmediatePropagation();
         return;
       }
-      if (!isToggleChord(event)) return;
-      if (event.isComposing) {
-        handoffRef.current = reduceHandoff(handoffRef.current, {
-          type: "focus-lost",
-        }).state;
-        return;
-      }
+      if (!isToggleChord(event) || event.isComposing) return;
       event.preventDefault();
       event.stopImmediatePropagation();
-      const result = reduceHandoff(handoffRef.current, {
-        type: "chord-down",
-        repeat: event.repeat,
-      });
-      handoffRef.current = result.state;
     };
     const handleKeyUp = (event: KeyboardEvent) => {
-      if (!enabled || !isToggleChord(event)) return;
+      if (!isToggleChord(event) || event.isComposing) return;
       event.preventDefault();
       event.stopImmediatePropagation();
-      if (event.isComposing) return;
-      const result = reduceHandoff(handoffRef.current, { type: "chord-up" });
-      handoffRef.current = result.state;
-      if (!result.toggled) return;
-      commitOwner(result.state.owner);
-      fadeRef.current?.toggle(
-        window.matchMedia("(prefers-reduced-motion: reduce)").matches,
-      );
-    };
-    const cancelChord = () => {
-      handoffRef.current = reduceHandoff(handoffRef.current, {
-        type: "focus-lost",
-      }).state;
+      if (onToggle) onToggle();
+      else {
+        setOwner((current) => {
+          const next = current === "terminal" ? "buzz" : "terminal";
+          if (next === "terminal") {
+            revealedRef.current = true;
+            textareaRef.current?.focus({ preventScroll: true });
+          }
+          return next;
+        });
+      }
     };
     window.addEventListener("keydown", handleKeyDown, true);
     window.addEventListener("keyup", handleKeyUp, true);
-    window.addEventListener("blur", cancelChord);
-    document.addEventListener("visibilitychange", cancelChord);
+    if (onToggle) {
+      revealedRef.current = true;
+      setOwner("terminal");
+      textareaRef.current?.focus({ preventScroll: true });
+    }
     return () => {
-      fadeRef.current?.settle("conceal");
-      fadeRef.current = null;
-      appSurface.inert = false;
-      appSurface.removeAttribute("aria-hidden");
       window.removeEventListener("keydown", handleKeyDown, true);
       window.removeEventListener("keyup", handleKeyUp, true);
-      window.removeEventListener("blur", cancelChord);
-      document.removeEventListener("visibilitychange", cancelChord);
     };
-  }, [enabled, getAppSurface]);
+  }, [enabled, onToggle]);
 
-  // The banner's animation loop. It runs only while the splash is ON SCREEN,
-  // which needs BOTH conditions below — they are different questions:
-  //   - `welcomeVisible`: the splash has not been dismissed by terminal output.
-  //   - `owner === "terminal"`: the terminal layer is revealed at all.
-  //
-  // `owner` is the load-bearing one and it is not optional. This substrate is
-  // mounted unconditionally by AppShell on every route and merely CSS-concealed
-  // in Buzz mode (`.buzz-terminal-substrate` is `position:absolute; inset:0`),
-  // and `welcomeVisible` starts `true` and only clears on terminal INPUT. So a
-  // loop gated on `welcomeVisible` alone runs forever behind the whole app for
-  // anyone who never opens the terminal — measured at 120 rAF/s in the channel
-  // view, repainting a canvas nobody can see and slowing every other paint.
-  //
-  // Deliberately NOT gated on `enabled`: that is `available && Boolean(active)`
-  // where `available` is `isTauri()`, and a session is auto-created on channel
-  // open (TerminalBootstrap), so `enabled` is true while still concealed in the
-  // app and permanently false in the browser — it would gate the tests green
-  // and leave real users paying the cost. `owner` is user-gestured in both.
-  //
-  // `prefers-reduced-motion` takes the STATIC path (no motion argument), which
-  // is the shipped painter call, not a paused animation. Those are different:
-  // a stopped loop still parks on whatever phase it halted at.
+  // The panel can remain open beside chat indefinitely. Paint the welcome
+  // banner once instead of running a permanent animation loop in the dock.
   React.useEffect(() => {
     const canvas = bannerCanvasRef.current;
     if (!canvas || !banner || !terminalPalette || !welcomeVisible) return;
-    if (owner !== "terminal") return;
-
     const dpr = window.devicePixelRatio || 1;
-    if (reducedMotion) {
-      if (!paintTerminalBanner(canvas, banner, terminalPalette, dpr))
-        setWelcomeVisible(false);
-      return;
-    }
-
-    // Built once per palette, not per frame: the table is phase-independent.
-    const table = buildBannerColorTable(terminalPalette);
-    const start = performance.now();
-    let frame = 0;
-    const tick = (now: number) => {
-      if (
-        !paintTerminalBanner(canvas, banner, terminalPalette, dpr, {
-          phase: phaseAt((now - start) / 1000),
-          table,
-        })
-      ) {
-        setWelcomeVisible(false);
-        return;
-      }
-      frame = window.requestAnimationFrame(tick);
-    };
-    frame = window.requestAnimationFrame(tick);
-    return () => window.cancelAnimationFrame(frame);
-  }, [banner, owner, reducedMotion, terminalPalette, welcomeVisible]);
+    if (!paintTerminalBanner(canvas, banner, terminalPalette, dpr))
+      setWelcomeVisible(false);
+  }, [banner, terminalPalette, welcomeVisible]);
 
   React.useEffect(() => {
     for (const delivered of frames) {
@@ -432,10 +354,7 @@ export function TerminalSubstrate({
 
     const canvas = canvasRef.current;
     if (!canvas) return;
-    if (!terminalPalette) {
-      forceBuzzFallback();
-      return;
-    }
+    if (!terminalPalette) return;
     const context = canvas.getContext("2d", { alpha: false });
     if (!context) {
       forceBuzzFallback();
@@ -486,8 +405,12 @@ export function TerminalSubstrate({
     <section
       aria-label="Buzz Term"
       className="buzz-terminal-substrate"
+      data-terminal-mode={mode}
       data-terminal-owner={owner}
-      style={terminalStyle}
+      style={{
+        ...terminalStyle,
+        ...(mode === "docked" ? { height: dockHeight } : undefined),
+      }}
       onWheel={(event) => {
         event.preventDefault();
         const sessionId = activeSession?.id;
@@ -507,6 +430,56 @@ export function TerminalSubstrate({
         if (result.lines !== 0) onScroll(result.lines);
       }}
     >
+      {mode === "docked" ? (
+        <hr
+          aria-label="Resize Buzz Term"
+          aria-orientation="horizontal"
+          aria-valuemax={Math.round(window.innerHeight * 0.7)}
+          aria-valuemin={180}
+          aria-valuenow={Math.round(dockHeight)}
+          className="buzz-terminal-resize-handle"
+          onKeyDown={(event) => {
+            if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+            event.preventDefault();
+            const delta = event.key === "ArrowUp" ? 16 : -16;
+            const next = Math.max(
+              180,
+              Math.min(window.innerHeight * 0.7, dockHeight + delta),
+            );
+            setDockHeight(next);
+            window.localStorage.setItem(
+              "buzz-terminal-dock-height",
+              String(Math.round(next)),
+            );
+          }}
+          onPointerDown={(event) => {
+            event.currentTarget.setPointerCapture(event.pointerId);
+            const startY = event.clientY;
+            const startHeight = dockHeight;
+            const move = (moveEvent: PointerEvent) => {
+              const next = Math.max(
+                180,
+                Math.min(
+                  window.innerHeight * 0.7,
+                  startHeight + startY - moveEvent.clientY,
+                ),
+              );
+              setDockHeight(next);
+              window.localStorage.setItem(
+                "buzz-terminal-dock-height",
+                String(Math.round(next)),
+              );
+            };
+            const up = () => {
+              window.removeEventListener("pointermove", move);
+              window.removeEventListener("pointerup", up);
+            };
+            window.addEventListener("pointermove", move);
+            window.addEventListener("pointerup", up, { once: true });
+          }}
+          tabIndex={0}
+        />
+      ) : null}
       <div className="buzz-terminal-contract-bar">
         <div className="buzz-terminal-tabs" role="tablist">
           {sessions.map((session, index) => (
@@ -554,14 +527,33 @@ export function TerminalSubstrate({
         <div className="buzz-terminal-readout">
           <span>{channelName ? `#${channelName}` : "BUZZ"}</span>
           <span>LOCAL PTY · PRIVATE</span>
-          <span>{shortcutLabel} BUZZ</span>
+          <span>{shortcutLabel} HIDE</span>
+          <button
+            aria-label={
+              mode === "maximized" ? "Restore Buzz Term" : "Maximize Buzz Term"
+            }
+            className="buzz-terminal-window-action"
+            onClick={() =>
+              onModeChange(mode === "maximized" ? "docked" : "maximized")
+            }
+            type="button"
+          >
+            {mode === "maximized" ? <Minimize2 /> : <Maximize2 />}
+          </button>
+          <button
+            aria-label="Hide Buzz Term"
+            className="buzz-terminal-window-action"
+            onClick={onHide}
+            type="button"
+          >
+            <X />
+          </button>
         </div>
       </div>
       {/* biome-ignore lint/a11y/noStaticElementInteractions: the hidden textarea owns keyboard semantics; this only preserves its focus across canvas clicks. */}
       <div
         className="buzz-terminal-viewport"
         onMouseDown={(event) => {
-          if (owner !== "terminal") return;
           // Preventing the canvas mousedown also suppresses selection. Revisit
           // this when the terminal gains mouse selection support.
           event.preventDefault();
@@ -616,7 +608,7 @@ export function TerminalSubstrate({
           }}
           ref={textareaRef}
           spellCheck={false}
-          tabIndex={owner === "terminal" ? 0 : -1}
+          tabIndex={0}
         />
       </div>
       <div aria-live="polite" className="sr-only">
