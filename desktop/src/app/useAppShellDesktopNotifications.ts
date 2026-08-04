@@ -1,5 +1,7 @@
 import * as React from "react";
 
+import { useQueryClient } from "@tanstack/react-query";
+
 import {
   shouldBounceForChannelNotification,
   toSearchHit,
@@ -21,7 +23,61 @@ import {
   playNotificationSound,
   resolveSlotSound,
 } from "@/features/notifications/lib/sound";
-import type { Channel, RelayEvent } from "@/shared/api/types";
+import { resolveUserLabel } from "@/features/profile/lib/identity";
+import type {
+  Channel,
+  Profile,
+  RelayEvent,
+  UserProfileSummary,
+} from "@/shared/api/types";
+import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
+
+/**
+ * Resolve a sender's display name for the thread-reply toast title, mirroring
+ * the home-feed notification path (use-feed-desktop-notifications.ts): resolve
+ * via `resolveUserLabel`, then discard the truncated-pubkey fallback so a raw
+ * pubkey/npub never lands in an OS notification title.
+ *
+ * Returns `undefined` when no usable name exists (caller falls back to the
+ * bare "Reply" prefix).
+ */
+export function resolveThreadReplySenderName(
+  pubkey: string,
+  profile:
+    | Pick<UserProfileSummary, "displayName" | "nip05Handle">
+    | null
+    | undefined,
+): string | undefined {
+  if (!profile) return undefined;
+  const label = resolveUserLabel({
+    pubkey,
+    profiles: {
+      [normalizePubkey(pubkey)]: {
+        displayName: profile.displayName,
+        avatarUrl: null,
+        nip05Handle: profile.nip05Handle,
+        ownerPubkey: null,
+      },
+    },
+    preferResolvedSelfLabel: true,
+  });
+  return label !== truncatePubkey(pubkey) ? label : undefined;
+}
+
+/**
+ * Thread-reply toast title: `"{Sender} replied in #channel"` when the sender's
+ * profile is cached, otherwise today's `"Reply in #channel"` fallback. Channel
+ * label omitted when unresolved (see {@link formatNotificationTitle}).
+ */
+export function threadReplyNotificationTitle(
+  senderName: string | undefined,
+  channelLabel: string | null,
+): string {
+  return formatNotificationTitle({
+    prefix: senderName ? `${senderName} replied` : "Reply",
+    channelLabel,
+  });
+}
 
 export function useAppShellDesktopNotifications({
   channels,
@@ -42,6 +98,14 @@ export function useAppShellDesktopNotifications({
   ) => Promise<unknown>;
   pubkey?: string;
 }) {
+  // Sender names come from the shared react-query profile cache rather than a
+  // new prop from AppShell: `useUsersBatchQuery` (which backs message
+  // timelines, the home feed, and DM metadata) seeds a `["user-profile", pk]`
+  // entry for every profile it resolves, so reading it here is a pure cache
+  // hit. A miss just means the profile hasn't been fetched this session — the
+  // toast falls back to the nameless "Reply" prefix.
+  const queryClient = useQueryClient();
+
   const handleChannelNotification = React.useEffectEvent(
     (_channelId: string, event: RelayEvent) => {
       if (!enabled) return;
@@ -108,11 +172,18 @@ export function useAppShellDesktopNotifications({
       // channelLabel is "#name" for the toast title; channelName is the raw
       // name stored in the navigation target for click-through routing.
       const channelLabel = channelName ? `#${channelName}` : null;
+      const senderName = resolveThreadReplySenderName(
+        event.pubkey,
+        queryClient.getQueryData<Profile>([
+          "user-profile",
+          normalizePubkey(event.pubkey),
+        ]),
+      );
       const body = truncateNotificationBody(event.content, "New reply");
       const threadRootId = getThreadReference(event.tags).rootId ?? null;
 
       void sendDesktopNotification({
-        title: formatNotificationTitle({ prefix: "Reply", channelLabel }),
+        title: threadReplyNotificationTitle(senderName, channelLabel),
         body,
         target: {
           channelId,
