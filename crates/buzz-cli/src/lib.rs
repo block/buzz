@@ -351,7 +351,7 @@ buzz agents archived"
 pub enum MessagesCmd {
     /// Send a message to a channel
     #[command(
-        after_help = "Examples:\n  buzz messages send --channel <UUID> --content \"hello\"\n  buzz messages send --channel <UUID> --content \"@alice check this\"\n  echo \"hello from stdin\" | buzz messages send --channel <UUID> --content -"
+        after_help = "Examples:\n  buzz messages send --channel <UUID> --content \"hello\"\n  buzz messages send --channel <UUID> --content \"@alice check this\"\n  buzz messages send --channel <FORUM_UUID> --kind 45001 --content \"new forum thread\"\n  buzz messages send --channel <FORUM_UUID> --kind 45003 --reply-to <event-id> --content \"forum reply\"\n  echo \"hello from stdin\" | buzz messages send --channel <UUID> --content -"
     )]
     Send {
         /// Channel UUID (from 'buzz channels list')
@@ -547,7 +547,7 @@ pub enum ChannelsCmd {
     },
     /// Create a new channel
     #[command(
-        after_help = "Examples:\n  buzz channels create --name general --type stream --visibility open\n  buzz channels create --name design --type forum --visibility open --description \"Design discussions\"\n  buzz channels create --name standup --type stream --visibility open --ttl 3600  # ephemeral, archived after 1h idle\n  buzz channels create --name project-x --template \"Buzz Team\"  # type/visibility/canvas/roster from the template; explicit flags override"
+        after_help = "Examples:\n  buzz channels create --name general --type stream --visibility open\n  buzz channels create --name standup --type stream --visibility open --ttl 3600  # ephemeral, archived after 1h idle\n  buzz channels create --name project-x --template \"Buzz Team\"  # type/visibility/canvas/roster from the template; explicit flags override\n\nUse stream unless the owner explicitly requests a forum. Forum channels are a preview feature and may be hidden for owners who have not enabled them."
     )]
     Create {
         /// Channel name

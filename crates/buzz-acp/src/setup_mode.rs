@@ -36,7 +36,8 @@ use std::collections::HashSet;
 
 use anyhow::Result;
 use buzz_core::kind::{
-    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_STREAM_MESSAGE,
+    KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_MEMBER_ADDED_NOTIFICATION,
+    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_STREAM_MESSAGE, KIND_STREAM_REMINDER,
     KIND_WORKFLOW_APPROVAL_REQUESTED,
 };
 use nostr::EventId;
@@ -410,7 +411,7 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
         }
 
         // Ignore non-message kinds (relay housekeeping, etc.).
-        if kind_u32 != KIND_STREAM_MESSAGE && kind_u32 != KIND_WORKFLOW_APPROVAL_REQUESTED {
+        if !is_setup_message_kind(kind_u32) {
             continue;
         }
 
@@ -463,6 +464,7 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
         // Build and publish the setup nudge.
         if let Err(e) = publish_setup_nudge(
             &publisher,
+            &rest_client,
             &config.keys,
             buzz_event.channel_id,
             &buzz_event.event,
@@ -512,6 +514,17 @@ pub(crate) fn should_nudge_for_event(
     true
 }
 
+fn is_setup_message_kind(kind: u32) -> bool {
+    matches!(
+        kind,
+        KIND_STREAM_MESSAGE
+            | KIND_STREAM_REMINDER
+            | KIND_FORUM_POST
+            | KIND_FORUM_COMMENT
+            | KIND_WORKFLOW_APPROVAL_REQUESTED
+    )
+}
+
 /// Build the subscription rules used in setup mode.
 ///
 /// Always uses "mentions" mode: setup mode must not react to every event.
@@ -521,10 +534,15 @@ pub(crate) fn should_nudge_for_event(
 fn build_setup_subscription_rules(config: &Config) -> Vec<filter::SubscriptionRule> {
     use crate::config::SubscribeMode;
 
-    let kinds = config
-        .kinds_override
-        .clone()
-        .unwrap_or_else(|| vec![KIND_STREAM_MESSAGE, KIND_WORKFLOW_APPROVAL_REQUESTED]);
+    let kinds = config.kinds_override.clone().unwrap_or_else(|| {
+        vec![
+            KIND_STREAM_MESSAGE,
+            KIND_STREAM_REMINDER,
+            KIND_FORUM_POST,
+            KIND_FORUM_COMMENT,
+            KIND_WORKFLOW_APPROVAL_REQUESTED,
+        ]
+    });
 
     match &config.subscribe_mode {
         // Config mode: load the actual rules, but they will be filtered by
@@ -588,50 +606,104 @@ async fn handle_setup_membership(
     }
 }
 
+fn setup_nudge_root_kind(
+    triggering_event: &nostr::Event,
+    has_explicit_root: bool,
+    looked_up_root_kind: Option<u32>,
+) -> Option<u32> {
+    if has_explicit_root {
+        looked_up_root_kind
+    } else if triggering_event.kind.as_u16() as u32 == KIND_FORUM_COMMENT {
+        Some(KIND_FORUM_POST)
+    } else {
+        Some(triggering_event.kind.as_u16() as u32)
+    }
+}
+
+fn build_setup_nudge_event(
+    channel_id: Uuid,
+    triggering_event: &nostr::Event,
+    root_kind: u32,
+    payload: &SetupPayload,
+) -> Result<nostr::EventBuilder> {
+    use buzz_sdk::ThreadRef;
+
+    let thread_tags = crate::queue::parse_thread_tags(triggering_event);
+    let root_id = if let Some(root_str) = &thread_tags.root_event_id {
+        nostr::EventId::from_hex(root_str)
+            .map_err(|e| anyhow::anyhow!("invalid root event id: {e}"))?
+    } else {
+        triggering_event.id
+    };
+    let thread_ref = ThreadRef {
+        root_event_id: root_id,
+        parent_event_id: root_id,
+    };
+    let body = payload.nudge_body();
+    let author_hex = triggering_event.pubkey.to_hex();
+
+    let builder = if root_kind == KIND_FORUM_POST {
+        buzz_sdk::build_forum_comment(channel_id, &body, &thread_ref, &[&author_hex], &[])
+    } else {
+        buzz_sdk::build_message(
+            channel_id,
+            &body,
+            Some(&thread_ref),
+            &[&author_hex],
+            false,
+            &[],
+        )
+    }
+    .map_err(|e| anyhow::anyhow!("failed to build setup nudge: {e}"))?;
+
+    Ok(builder)
+}
+
 /// Build and publish a setup nudge reply to the triggering event.
 ///
 /// Threading: flat reply to the thread root if one exists; otherwise reply
-/// to the triggering event itself. P-tags the asker.
+/// to the triggering event itself. P-tags the asker. Forum triggers produce
+/// forum-comment nudges so the reply kind matches the forum thread.
 async fn publish_setup_nudge(
     publisher: &RelayEventPublisher,
+    rest: &crate::relay::RestClient,
     keys: &nostr::Keys,
     channel_id: Uuid,
     triggering_event: &nostr::Event,
     payload: &SetupPayload,
 ) -> Result<()> {
-    use buzz_sdk::ThreadRef;
-
-    // Parse NIP-10 thread tags to determine reply target.
     let thread_tags = crate::queue::parse_thread_tags(triggering_event);
-
-    let thread_ref = if let Some(root_str) = &thread_tags.root_event_id {
-        // Threaded event: reply flat to the root.
-        let root_id = nostr::EventId::from_hex(root_str)
+    let looked_up_root_kind = if let Some(root) = thread_tags.root_event_id.as_deref() {
+        let root_id = nostr::EventId::from_hex(root)
             .map_err(|e| anyhow::anyhow!("invalid root event id: {e}"))?;
-        Some(ThreadRef {
-            root_event_id: root_id,
-            parent_event_id: root_id,
-        })
+        let filter = crate::pool::root_message_filter(root_id, channel_id);
+        match tokio::time::timeout(std::time::Duration::from_secs(5), rest.query(&[filter])).await {
+            Ok(Ok(json)) => json
+                .as_array()
+                .and_then(|events| events.first())
+                .and_then(|event| event.get("kind"))
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|kind| u32::try_from(kind).ok()),
+            Ok(Err(e)) => {
+                tracing::debug!(channel = %channel_id, "setup nudge: root kind lookup failed: {e}");
+                None
+            }
+            Err(_) => {
+                tracing::debug!(channel = %channel_id, "setup nudge: root kind lookup timed out");
+                None
+            }
+        }
     } else {
-        // Top-level event: reply to the triggering event.
-        Some(ThreadRef {
-            root_event_id: triggering_event.id,
-            parent_event_id: triggering_event.id,
-        })
+        None
     };
-
-    let body = payload.nudge_body();
-    let author_hex = triggering_event.pubkey.to_hex();
-
-    let event_builder = buzz_sdk::build_message(
-        channel_id,
-        &body,
-        thread_ref.as_ref(),
-        &[&author_hex], // p-tag the asker
-        false,
-        &[],
-    )
-    .map_err(|e| anyhow::anyhow!("failed to build setup nudge: {e}"))?;
+    let Some(root_kind) = setup_nudge_root_kind(
+        triggering_event,
+        thread_tags.root_event_id.is_some(),
+        looked_up_root_kind,
+    ) else {
+        anyhow::bail!("root kind is unknown; refusing to guess setup nudge reply semantics");
+    };
+    let event_builder = build_setup_nudge_event(channel_id, triggering_event, root_kind, payload)?;
 
     let signed = event_builder
         .sign_with_keys(keys)
@@ -650,6 +722,88 @@ async fn publish_setup_nudge(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn setup_mode_accepts_stream_and_forum_message_kinds() {
+        assert!(is_setup_message_kind(KIND_STREAM_MESSAGE));
+        assert!(is_setup_message_kind(KIND_STREAM_REMINDER));
+        assert!(is_setup_message_kind(KIND_FORUM_POST));
+        assert!(is_setup_message_kind(KIND_FORUM_COMMENT));
+        assert!(is_setup_message_kind(KIND_WORKFLOW_APPROVAL_REQUESTED));
+        assert!(!is_setup_message_kind(KIND_MEMBER_ADDED_NOTIFICATION));
+    }
+
+    #[test]
+    fn setup_nudge_prefers_looked_up_root_kind() {
+        let trigger = nostr::EventBuilder::new(
+            nostr::Kind::Custom(KIND_STREAM_MESSAGE as u16),
+            "legacy malformed forum reply",
+        )
+        .sign_with_keys(&nostr::Keys::generate())
+        .unwrap();
+
+        assert_eq!(
+            setup_nudge_root_kind(&trigger, true, Some(KIND_FORUM_POST)),
+            Some(KIND_FORUM_POST)
+        );
+        assert_eq!(
+            setup_nudge_root_kind(&trigger, false, None),
+            Some(KIND_STREAM_MESSAGE)
+        );
+        assert_eq!(setup_nudge_root_kind(&trigger, true, None), None);
+
+        let forum_comment = nostr::EventBuilder::new(
+            nostr::Kind::Custom(KIND_FORUM_COMMENT as u16),
+            "forum reply",
+        )
+        .sign_with_keys(&nostr::Keys::generate())
+        .unwrap();
+        assert_eq!(
+            setup_nudge_root_kind(&forum_comment, false, None),
+            Some(KIND_FORUM_POST)
+        );
+    }
+
+    #[test]
+    fn setup_nudge_kind_matches_trigger_thread_kind() {
+        let channel_id = Uuid::new_v4();
+        let author = nostr::Keys::generate();
+        let payload = SetupPayload {
+            agent_name: "Fizz".to_string(),
+            agent_pubkey: "test".to_string(),
+            requirements: vec![],
+        };
+
+        for (trigger_kind, expected_nudge_kind) in [
+            (KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE),
+            (KIND_FORUM_POST, KIND_FORUM_COMMENT),
+            (KIND_FORUM_COMMENT, KIND_FORUM_COMMENT),
+        ] {
+            let trigger = nostr::EventBuilder::new(
+                nostr::Kind::Custom(trigger_kind as u16),
+                "please wake up",
+            )
+            .sign_with_keys(&author)
+            .unwrap();
+            let root_kind = if trigger_kind == KIND_STREAM_MESSAGE {
+                KIND_STREAM_MESSAGE
+            } else {
+                KIND_FORUM_POST
+            };
+            let nudge = build_setup_nudge_event(channel_id, &trigger, root_kind, &payload)
+                .unwrap()
+                .sign_with_keys(&nostr::Keys::generate())
+                .unwrap();
+
+            assert_eq!(nudge.kind.as_u16() as u32, expected_nudge_kind);
+            let thread_tags = crate::queue::parse_thread_tags(&nudge);
+            let trigger_hex = trigger.id.to_hex();
+            assert_eq!(
+                thread_tags.root_event_id.as_deref(),
+                Some(trigger_hex.as_str())
+            );
+        }
+    }
 
     #[test]
     fn setup_payload_from_raw_returns_none_when_absent() {

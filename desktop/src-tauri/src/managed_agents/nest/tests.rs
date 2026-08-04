@@ -42,6 +42,25 @@ fn nest_skill_contains_safe_mention_workflow() {
 }
 
 #[test]
+fn nest_skill_defaults_channel_creation_to_stream() {
+    assert!(BUZZ_CLI_SKILL_MD.contains("buzz channels create --type stream"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("unless the owner explicitly requests a forum"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("may be hidden for owners who have not enabled them"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("ask before using `--type forum`"));
+}
+
+#[test]
+fn nest_skill_contains_forum_workflow() {
+    assert!(BUZZ_CLI_SKILL_MD.contains("forum root as kind `45001`"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("forum reply as kind `45003`"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("reply kind must match the thread root"));
+    assert!(BUZZ_CLI_SKILL_MD.contains(
+        "legacy kind-`40002`, reminder kind-`40007`, kind-`40008` diff, and workflow approval kind-`46010` stream roots"
+    ));
+    assert!(BUZZ_CLI_SKILL_MD.contains("Never use kind `45003` beneath stream roots"));
+}
+
+#[test]
 fn ensure_nest_creates_all_dirs_and_agents_md() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join(".buzz");
