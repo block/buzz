@@ -29,10 +29,25 @@ import 'search_provider.dart';
 enum _SearchFilter { all, messages, channels, people }
 
 const _searchFieldMinHeight = 36.0;
+const _searchIdleFieldHeight = 45.0;
+const _searchIdleIconSize = 26.0;
+const _searchCompactIconSize = 18.0;
+const _searchIdleTextSize = 15.0;
 const _searchFieldVerticalPadding = Grid.xxs;
-const _searchFieldHint = 'Search messages, channels, people\u2026';
-const _searchCancelEnterDuration = Duration(milliseconds: 160);
-const _searchCancelExitDuration = Duration(milliseconds: 120);
+const _searchFieldHint = 'Search messages, channels, and people';
+const _searchFieldMoveDuration = Duration(milliseconds: 160);
+const _searchTitleReturnDuration = Duration(milliseconds: 80);
+const _searchCancelEnterDuration = Duration(milliseconds: 80);
+const _searchCancelExitDuration = Duration(milliseconds: 60);
+const _searchIdleFieldTopInset = Grid.half;
+const _searchHeaderFiltersHeight = Grid.xl;
+const _searchIdleIconInset = Grid.xxs;
+const _searchIdleTextInset =
+    _searchIdleIconInset + _searchIdleIconSize + Grid.xxs;
+const _searchCompactTextInset =
+    _searchIdleIconInset + _searchCompactIconSize + Grid.xxs;
+const _searchActiveFieldTopOffset = 42.0;
+const _searchActiveFieldRightInset = 72.0;
 
 double _searchFieldHeight(BuildContext context) {
   const style = searchInputTextStyle;
@@ -44,6 +59,18 @@ double _searchFieldHeight(BuildContext context) {
   return contentHeight > _searchFieldMinHeight
       ? contentHeight
       : _searchFieldMinHeight;
+}
+
+double _idleSearchFieldHeight(BuildContext context) {
+  final scaledFontSize = MediaQuery.textScalerOf(
+    context,
+  ).scale(_searchIdleTextSize);
+  final contentHeight =
+      scaledFontSize * (20 / _searchIdleTextSize) +
+      _searchFieldVerticalPadding * 2;
+  return contentHeight > _searchIdleFieldHeight
+      ? contentHeight
+      : _searchIdleFieldHeight;
 }
 
 class SearchPage extends HookConsumerWidget {
@@ -59,208 +86,374 @@ class SearchPage extends HookConsumerWidget {
     final activeFilter = useState(_SearchFilter.all);
     final textController = useTextEditingController();
     final focusNode = useFocusNode();
-    final isSearchFocused = useListenableSelector(
-      focusNode,
-      () => focusNode.hasFocus,
-    );
+    final isSearchEditing = useState(false);
+    final showSearchTitle = useState(true);
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
-    final isBuzzTheme = context.appColors.topSectionGradient != null;
-    final buzzSearchColor = context.theme.brightness == Brightness.dark
-        ? Colors.white
-        : Colors.black;
-    final searchSurfaceColor = isBuzzTheme
-        ? buzzSearchColor.withValues(alpha: 0.04)
-        : context.colors.surfaceContainerHighest;
-    final searchMutedColor = isBuzzTheme
-        ? buzzSearchColor.withValues(alpha: 0.4)
-        : context.colors.onSurfaceVariant;
-    final headerTitleStyle = context.textTheme.titleMedium?.copyWith(
-      fontSize: 22,
-      fontWeight: FontWeight.w600,
-    );
-    final searchFieldHeight = _searchFieldHeight(context);
-    final searchControlHeight = searchFieldHeight > Grid.xl
-        ? searchFieldHeight
+    final searchSurfaceColor = navigationSearchSurface(context);
+    final searchPrimaryColor = navigationPrimaryForeground(context);
+    final searchPlaceholderColor = navigationSecondaryForeground(context);
+    final compactSearchFieldHeight = _searchFieldHeight(context);
+    final idleSearchFieldHeight = _idleSearchFieldHeight(context);
+    // Cancel remains an accessible target without giving the text action a
+    // visual button treatment.
+    final searchControlHeight = compactSearchFieldHeight > Grid.xl
+        ? compactSearchFieldHeight
         : Grid.xl;
-    final searchHeaderBottomHeight = searchControlHeight + Grid.twelve;
+    final searchHeaderBottomHeight = isSearchEditing.value
+        ? _searchHeaderFiltersHeight
+        : idleSearchFieldHeight + _searchIdleFieldTopInset + Grid.xxs;
+    final topSectionHeight = frostedAppBarHeight(
+      context,
+      bottomHeight: searchHeaderBottomHeight,
+    );
+
+    void activateSearch() {
+      showSearchTitle.value = false;
+      isSearchEditing.value = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (context.mounted && isSearchEditing.value) {
+          focusNode.requestFocus();
+        }
+      });
+    }
+
+    void deactivateSearch() {
+      if (!isSearchEditing.value) return;
+      // The field is painted above the title while it returns to its idle
+      // position. Start this fade now so the title is already there beneath it
+      // and is revealed by the field's motion instead of arriving afterward.
+      showSearchTitle.value = true;
+      isSearchEditing.value = false;
+    }
+
+    useEffect(() {
+      void resetIdlePromptWhenFocusLeaves() {
+        if (!focusNode.hasFocus) deactivateSearch();
+      }
+
+      focusNode.addListener(resetIdlePromptWhenFocusLeaves);
+      return () => focusNode.removeListener(resetIdlePromptWhenFocusLeaves);
+    }, [focusNode]);
 
     void runRecentSearch(String query) {
       textController.value = TextEditingValue(
         text: query,
         selection: TextSelection.collapsed(offset: query.length),
       );
-      focusNode.requestFocus();
+      activateSearch();
       ref.read(recentSearchesProvider.notifier).record(query);
       ref.read(searchProvider.notifier).search(query);
     }
 
     return FrostedScaffold(
-      backgroundColor: Colors.transparent,
+      backgroundColor: context.colors.surface,
       // Keep the empty state centered in the page rather than the portion left
       // above the keyboard.
       resizeToAvoidBottomInset: false,
       appBar: FrostedAppBar(
         automaticallyImplyLeading: false,
-        gradient: context.appColors.topSectionGradient,
-        title: const Text('Search'),
-        titleStyle: headerTitleStyle,
-        bottomHeight: searchHeaderBottomHeight,
-        bottom: Padding(
-          padding: const EdgeInsets.fromLTRB(
-            Grid.gutter,
-            0,
-            Grid.gutter,
-            Grid.twelve,
+        horizontalInset: Grid.twelve,
+        showBottomDivider: true,
+        bottomDividerOpacity: 0.06,
+        // Keep this mounted through the search-field morph so it can fade in
+        // beneath the returning field rather than popping in afterward.
+        title: IgnorePointer(
+          child: AnimatedOpacity(
+            key: const Key('search-header-title-opacity'),
+            duration: reduceMotion ? Duration.zero : _searchTitleReturnDuration,
+            curve: Curves.easeOutCubic,
+            opacity: showSearchTitle.value ? 1 : 0,
+            child: Text(
+              'Search',
+              key: const ValueKey('search-header-title'),
+              style: context.textTheme.titleMedium?.copyWith(
+                fontSize: 22,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
           ),
-          child: Row(
-            children: [
-              Expanded(
-                child: Container(
-                  key: const Key('search-field-container'),
-                  height: searchFieldHeight,
-                  padding: const EdgeInsets.symmetric(horizontal: Grid.half),
-                  decoration: BoxDecoration(
-                    color: searchSurfaceColor,
-                    borderRadius: BorderRadius.circular(Radii.lg),
-                  ),
-                  child: TextField(
-                    key: const Key('search-field'),
-                    controller: textController,
-                    focusNode: focusNode,
-                    decoration: InputDecoration(
-                      hintText: isSearchFocused ? null : _searchFieldHint,
-                      hintStyle: searchInputTextStyle.copyWith(
-                        color: searchMutedColor,
-                      ),
-                      prefixIcon: Icon(
-                        LucideIcons.search,
-                        size: 16,
-                        color: searchMutedColor,
-                      ),
-                      prefixIconConstraints: const BoxConstraints(minWidth: 32),
-                      border: InputBorder.none,
-                      enabledBorder: InputBorder.none,
-                      focusedBorder: InputBorder.none,
-                      isDense: true,
-                      contentPadding: const EdgeInsets.symmetric(
-                        vertical: _searchFieldVerticalPadding,
-                      ),
-                    ),
-                    style: searchInputTextStyle.copyWith(
-                      color: context.colors.onSurface,
-                    ),
-                    textInputAction: TextInputAction.search,
-                    onChanged: (value) =>
-                        ref.read(searchProvider.notifier).search(value),
-                    onSubmitted: (value) {
-                      final query = value.trim();
-                      if (query.isEmpty) return;
-                      ref.read(recentSearchesProvider.notifier).record(query);
-                    },
+        ),
+        actions: [
+          AnimatedSwitcher(
+            duration: reduceMotion ? Duration.zero : _searchCancelEnterDuration,
+            reverseDuration: reduceMotion
+                ? Duration.zero
+                : _searchCancelExitDuration,
+            transitionBuilder: (child, animation) {
+              final curvedAnimation = CurvedAnimation(
+                parent: animation,
+                curve: Curves.easeOutCubic,
+                reverseCurve: Curves.easeInCubic,
+              );
+              return SizeTransition(
+                sizeFactor: curvedAnimation,
+                axis: Axis.horizontal,
+                axisAlignment: 1,
+                child: FadeTransition(
+                  opacity: curvedAnimation,
+                  child: SlideTransition(
+                    position: Tween<Offset>(
+                      begin: const Offset(0.35, 0),
+                      end: Offset.zero,
+                    ).animate(curvedAnimation),
+                    child: child,
                   ),
                 ),
-              ),
-              AnimatedSwitcher(
-                duration: reduceMotion
-                    ? Duration.zero
-                    : _searchCancelEnterDuration,
-                reverseDuration: reduceMotion
-                    ? Duration.zero
-                    : _searchCancelExitDuration,
-                transitionBuilder: (child, animation) {
-                  final curvedAnimation = CurvedAnimation(
-                    parent: animation,
-                    curve: Curves.easeOutCubic,
-                    reverseCurve: Curves.easeInCubic,
-                  );
-                  return SizeTransition(
-                    sizeFactor: curvedAnimation,
-                    axis: Axis.horizontal,
-                    axisAlignment: 1,
-                    child: FadeTransition(
-                      opacity: curvedAnimation,
-                      child: SlideTransition(
-                        position: Tween<Offset>(
-                          begin: const Offset(0.35, 0),
-                          end: Offset.zero,
-                        ).animate(curvedAnimation),
-                        child: child,
-                      ),
-                    ),
-                  );
-                },
-                child: isSearchFocused
-                    ? Padding(
-                        key: const ValueKey('search-cancel-visible'),
-                        padding: const EdgeInsets.only(left: Grid.xxs),
-                        child: TextButton(
-                          key: const Key('search-cancel'),
-                          onPressed: () {
-                            textController.clear();
-                            ref.read(searchProvider.notifier).clear();
-                            focusNode.unfocus();
-                          },
-                          style: TextButton.styleFrom(
-                            foregroundColor: context.colors.primary,
-                            minimumSize: Size(0, searchControlHeight),
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: Grid.half,
-                              vertical: Grid.xxs,
-                            ),
-                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              );
+            },
+            child: isSearchEditing.value
+                ? Semantics(
+                    key: const Key('search-cancel'),
+                    button: true,
+                    label: 'Cancel search',
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: () {
+                        textController.clear();
+                        ref.read(searchProvider.notifier).clear();
+                        deactivateSearch();
+                        focusNode.unfocus();
+                      },
+                      child: SizedBox(
+                        height: searchControlHeight,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: Grid.half,
                           ),
-                          child: Text(
-                            'Cancel',
-                            style: filterChipTextStyle.copyWith(
-                              color: context.colors.primary,
-                              fontWeight: FontWeight.w500,
+                          child: Center(
+                            child: Text(
+                              'Cancel',
+                              style: filterChipTextStyle.copyWith(
+                                color: context.colors.primary,
+                                fontWeight: FontWeight.w500,
+                              ),
                             ),
                           ),
                         ),
+                      ),
+                    ),
+                  )
+                : const SizedBox.shrink(key: ValueKey('search-cancel-hidden')),
+          ),
+        ],
+        bottomHeight: searchHeaderBottomHeight,
+        bottom: Stack(
+          clipBehavior: Clip.none,
+          children: [
+            AnimatedPositioned(
+              duration: reduceMotion ? Duration.zero : _searchFieldMoveDuration,
+              curve: Curves.easeInOutCubic,
+              left: Grid.gutter,
+              right: isSearchEditing.value
+                  ? _searchActiveFieldRightInset
+                  : Grid.gutter,
+              top: isSearchEditing.value
+                  ? -_searchActiveFieldTopOffset
+                  : _searchIdleFieldTopInset,
+              height: isSearchEditing.value
+                  ? compactSearchFieldHeight
+                  : idleSearchFieldHeight,
+              // Do not key this subtree by the visual state: replacing the
+              // TextField immediately after its first tap can detach its
+              // native input connection before the keyboard is shown.
+              child: SizedBox(
+                key: const Key('search-field-container'),
+                child: _SearchMotionField(
+                  controller: textController,
+                  focusNode: focusNode,
+                  iconColor: searchPrimaryColor,
+                  inputColor: searchPrimaryColor,
+                  placeholderColor: searchPlaceholderColor,
+                  surfaceColor: searchSurfaceColor,
+                  isSearchEditing: isSearchEditing.value,
+                  reduceMotion: reduceMotion,
+                  onTap: activateSearch,
+                  onChanged: (value) =>
+                      ref.read(searchProvider.notifier).search(value),
+                  onSubmitted: (value) {
+                    final query = value.trim();
+                    if (query.isEmpty) return;
+                    ref.read(recentSearchesProvider.notifier).record(query);
+                  },
+                ),
+              ),
+            ),
+            Positioned.fill(
+              child: AnimatedSwitcher(
+                duration: reduceMotion
+                    ? Duration.zero
+                    : _searchCancelEnterDuration,
+                switchInCurve: Curves.easeOutCubic,
+                switchOutCurve: Curves.easeInCubic,
+                transitionBuilder: (child, animation) => FadeTransition(
+                  opacity: animation,
+                  child: SlideTransition(
+                    position: Tween<Offset>(
+                      begin: const Offset(0, 0.2),
+                      end: Offset.zero,
+                    ).animate(animation),
+                    child: child,
+                  ),
+                ),
+                child: isSearchEditing.value
+                    ? SizedBox(
+                        key: const ValueKey('search-header-filters'),
+                        height: _searchHeaderFiltersHeight,
+                        child: FilterChipBar<_SearchFilter>(
+                          expandItems: true,
+                          visualDensity: const VisualDensity(horizontal: -2),
+                          chipVerticalPadding: Grid.xxs,
+                          barVerticalPadding: Grid.xxs,
+                          selected: activeFilter.value,
+                          onSelected: (f) => activeFilter.value = f,
+                          items: [
+                            for (final f in _SearchFilter.values)
+                              FilterChipItem(id: f, label: f.label),
+                          ],
+                        ),
                       )
                     : const SizedBox.shrink(
-                        key: ValueKey('search-cancel-hidden'),
+                        key: ValueKey('search-header-filters-hidden'),
                       ),
               ),
-            ],
-          ),
+            ),
+          ],
         ),
-        actions: const [],
       ),
       body: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          SizedBox(
-            height: frostedAppBarHeight(
-              context,
-              bottomHeight: searchHeaderBottomHeight,
-              titleStyle: headerTitleStyle,
-            ),
-          ),
-          FilterChipBar<_SearchFilter>(
-            expandItems: true,
-            visualDensity: const VisualDensity(horizontal: -2),
-            chipVerticalPadding: Grid.xxs,
-            barVerticalPadding: Grid.twelve,
-            selected: activeFilter.value,
-            onSelected: (f) => activeFilter.value = f,
-            items: [
-              for (final f in _SearchFilter.values)
-                FilterChipItem(id: f, label: f.label),
-            ],
-          ),
+          SizedBox(height: topSectionHeight),
           Expanded(
-            child: _SearchBody(
-              state: searchState,
-              filter: activeFilter.value,
-              currentPubkey: currentPubkey,
-              onRecentSearchSelected: runRecentSearch,
+            child: ClipRRect(
+              borderRadius: const BorderRadius.vertical(
+                top: Radius.circular(Radii.dialog),
+              ),
+              child: ColoredBox(
+                color: context.colors.surface,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Expanded(
+                      child: _SearchBody(
+                        state: searchState,
+                        filter: activeFilter.value,
+                        currentPubkey: currentPubkey,
+                        onRecentSearchSelected: runRecentSearch,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             ),
           ),
         ],
       ),
     );
   }
+}
+
+class _SearchMotionField extends StatelessWidget {
+  final TextEditingController controller;
+  final FocusNode focusNode;
+  final Color iconColor;
+  final Color inputColor;
+  final Color placeholderColor;
+  final Color surfaceColor;
+  final bool isSearchEditing;
+  final bool reduceMotion;
+  final VoidCallback onTap;
+  final ValueChanged<String> onChanged;
+  final ValueChanged<String> onSubmitted;
+
+  const _SearchMotionField({
+    required this.controller,
+    required this.focusNode,
+    required this.iconColor,
+    required this.inputColor,
+    required this.placeholderColor,
+    required this.surfaceColor,
+    required this.isSearchEditing,
+    required this.reduceMotion,
+    required this.onTap,
+    required this.onChanged,
+    required this.onSubmitted,
+  });
+
+  @override
+  Widget build(BuildContext context) => DecoratedBox(
+    decoration: BoxDecoration(
+      color: surfaceColor,
+      borderRadius: BorderRadius.circular(Radii.lg),
+    ),
+    child: Stack(
+      children: [
+        Positioned.fill(
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: SizedBox(
+              width: double.infinity,
+              child: TextField(
+                key: const Key('search-field'),
+                controller: controller,
+                focusNode: focusNode,
+                decoration: InputDecoration(
+                  hintText: isSearchEditing ? null : _searchFieldHint,
+                  hintStyle: searchInputTextStyle.copyWith(
+                    color: placeholderColor,
+                    fontSize: _searchIdleTextSize,
+                    height: 20 / _searchIdleTextSize,
+                  ),
+                  border: InputBorder.none,
+                  enabledBorder: InputBorder.none,
+                  focusedBorder: InputBorder.none,
+                  isDense: true,
+                  contentPadding: EdgeInsets.only(
+                    left: isSearchEditing
+                        ? _searchCompactTextInset
+                        : _searchIdleTextInset,
+                    right: Grid.xxs,
+                    top: isSearchEditing ? _searchFieldVerticalPadding : 0,
+                    bottom: isSearchEditing ? _searchFieldVerticalPadding : 0,
+                  ),
+                ),
+                style: searchInputTextStyle.copyWith(color: inputColor),
+                textAlignVertical: TextAlignVertical.center,
+                textAlign: TextAlign.start,
+                textInputAction: TextInputAction.search,
+                onTap: onTap,
+                onChanged: onChanged,
+                onSubmitted: onSubmitted,
+              ),
+            ),
+          ),
+        ),
+        IgnorePointer(
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: Padding(
+              padding: const EdgeInsets.only(left: _searchIdleIconInset),
+              child: AnimatedScale(
+                duration: reduceMotion
+                    ? Duration.zero
+                    : _searchFieldMoveDuration,
+                curve: Curves.easeInOutCubic,
+                scale: isSearchEditing
+                    ? _searchCompactIconSize / _searchIdleIconSize
+                    : 1,
+                child: Icon(
+                  LucideIcons.search,
+                  key: const Key('search-moving-icon'),
+                  size: _searchIdleIconSize,
+                  color: iconColor,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
 }
 
 class _SearchBody extends ConsumerWidget {

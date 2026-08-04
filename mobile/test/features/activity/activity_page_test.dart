@@ -181,8 +181,14 @@ void main() {
     await tester.pumpWidget(await buildTestable());
     await tester.pumpAndSettle();
 
-    final appBar = tester.widget<FrostedAppBar>(find.byType(FrostedAppBar));
+    final appBar = tester.widget<FrostedAppBar>(
+      find.byType(FrostedAppBar).last,
+    );
     expect(appBar.automaticallyImplyLeading, isFalse);
+    expect(appBar.gradient, isNull);
+    expect(appBar.frosted, isTrue);
+    expect(appBar.showBottomDivider, isTrue);
+    expect(appBar.bottomHeight, Grid.xxs);
     expect(find.byTooltip('Back'), findsNothing);
   });
 
@@ -200,8 +206,13 @@ void main() {
     expect(safeArea.top, isFalse);
     expect(safeArea.bottom, isFalse);
 
-    final list = tester.widget<ListView>(find.byType(ListView));
-    expect(list.padding, const EdgeInsets.fromLTRB(0, Grid.xxs, 0, 96));
+    final padding = tester.widget<SliverPadding>(
+      find.descendant(
+        of: find.byType(CustomScrollView),
+        matching: find.byType(SliverPadding),
+      ),
+    );
+    expect(padding.padding, const EdgeInsets.fromLTRB(0, Grid.xxs, 0, 96));
   });
 
   testWidgets('shows error view with retry button', (tester) async {

@@ -11,6 +11,7 @@ import 'package:buzz/features/search/search_page.dart';
 import 'package:buzz/features/search/search_provider.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
+import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -18,6 +19,55 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import '../../helpers/widget_helpers.dart';
 
 void main() {
+  testWidgets('uses the shared frosted navigation surface', (tester) async {
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          searchProvider.overrideWith(
+            () => _FakeSearchNotifier(const SearchState.initial()),
+          ),
+          recentSearchesProvider.overrideWith(
+            () => _FakeRecentSearchesNotifier(const []),
+          ),
+          profileProvider.overrideWith(() => _FakeProfileNotifier()),
+        ],
+        child: const SearchPage(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final appBar = tester.widget<FrostedAppBar>(find.byType(FrostedAppBar));
+    expect(appBar.gradient, isNull);
+    expect(appBar.frosted, isTrue);
+    expect(appBar.showBottomDivider, isTrue);
+    expect(appBar.bottomDividerOpacity, 0.06);
+    expect(appBar.bottomHeight, 57);
+    expect(appBar.leading, isNull);
+    expect(find.text('Search'), findsOneWidget);
+    final promptText = find.descendant(
+      of: find.byKey(const Key('search-field-container')),
+      matching: find.byType(Text),
+    );
+    expect(
+      tester.getRect(promptText).left,
+      closeTo(
+        tester.getRect(find.byKey(const Key('search-moving-icon'))).right +
+            Grid.xxs,
+        0.01,
+      ),
+    );
+    expect(
+      tester.getRect(promptText).center.dy,
+      closeTo(
+        tester
+            .getRect(find.byKey(const Key('search-field-container')))
+            .center
+            .dy,
+        0.5,
+      ),
+    );
+  });
+
   testWidgets('empty state preserves large accessible text scaling', (
     tester,
   ) async {
@@ -50,7 +100,6 @@ void main() {
     await tester.pumpAndSettle();
 
     final emptyState = find.byKey(const Key('search-empty-state'));
-    final message = find.text('Search messages, channels, and people');
     final searchField = find.byKey(const Key('search-field-container'));
     final searchFieldContext = tester.element(searchField);
     final bodyStyle = Theme.of(searchFieldContext).textTheme.bodyMedium!;
@@ -66,12 +115,21 @@ void main() {
       tester.getSize(searchField).height,
       greaterThanOrEqualTo(scaledLineHeight + Grid.xxs * 2),
     );
-    final input = tester.widget<TextField>(
-      find.byKey(const Key('search-field')),
+    final prompt = tester.widget<Text>(
+      find.descendant(
+        of: find.byKey(const Key('search-field-container')),
+        matching: find.byType(Text),
+      ),
     );
-    expect(input.style?.fontSize, searchInputTextStyle.fontSize);
-    expect(input.style?.height, searchInputTextStyle.height);
-    expect(tester.getSize(message).height, greaterThan(32));
+    expect(prompt.style?.fontSize, 15);
+    expect(prompt.maxLines, 1);
+    expect(prompt.overflow, TextOverflow.ellipsis);
+    expect(
+      tester
+          .getSize(find.descendant(of: emptyState, matching: find.byType(Text)))
+          .height,
+      greaterThan(32),
+    );
     expect(tester.takeException(), isNull);
   });
 
@@ -93,20 +151,12 @@ void main() {
     await tester.pumpAndSettle();
 
     final searchField = find.byKey(const Key('search-field'));
+    final editingField = find.byType(TextField);
     final searchFieldContainer = find.byKey(
       const Key('search-field-container'),
     );
     final unfocusedWidth = tester.getSize(searchFieldContainer).width;
     expect(find.byKey(const Key('search-cancel')), findsNothing);
-    expect(
-      tester.widget<TextField>(searchField).decoration?.hintText,
-      'Search messages, channels, people\u2026',
-    );
-    expect(
-      tester.widget<TextField>(searchField).textInputAction,
-      TextInputAction.search,
-    );
-
     await tester.tap(searchField);
     await tester.pump();
 
@@ -117,7 +167,14 @@ void main() {
       greaterThanOrEqualTo(Grid.xl),
       reason: 'Cancel must keep a 48dp touch target.',
     );
-    expect(tester.widget<TextField>(searchField).decoration?.hintText, isNull);
+    final input = tester.widget<TextField>(editingField);
+    expect(input.decoration?.hintText, isNull);
+    expect(input.textInputAction, TextInputAction.search);
+    expect(
+      input.focusNode?.hasFocus,
+      isTrue,
+      reason: 'Tapping the idle search field opens the native keyboard.',
+    );
     final enteringSlide = tester.widget<SlideTransition>(
       find.ancestor(of: cancel, matching: find.byType(SlideTransition)).first,
     );
@@ -126,31 +183,85 @@ void main() {
     await tester.pump(const Duration(milliseconds: 160));
     final focusedWidth = tester.getSize(searchFieldContainer).width;
     expect(focusedWidth, lessThan(unfocusedWidth));
+    expect(find.byKey(const Key('search-header-filters')), findsOneWidget);
     final settledSlide = tester.widget<SlideTransition>(
       find.ancestor(of: cancel, matching: find.byType(SlideTransition)).first,
     );
     expect(settledSlide.position.value, Offset.zero);
+    final movingIcon = find.byKey(const Key('search-moving-icon'));
+    final iconScale = tester.widget<AnimatedScale>(
+      find.ancestor(of: movingIcon, matching: find.byType(AnimatedScale)),
+    );
+    final movingField = tester.widget<AnimatedPositioned>(
+      find.ancestor(of: movingIcon, matching: find.byType(AnimatedPositioned)),
+    );
+    expect(iconScale.scale, lessThan(1));
+    expect(movingField.top, lessThan(0));
 
-    await tester.enterText(searchField, 'design');
+    await tester.enterText(editingField, 'design');
     await tester.tap(cancel);
     await tester.pump();
-    await tester.pump(const Duration(milliseconds: 60));
-    final exitingWidth = tester.getSize(searchFieldContainer).width;
-    expect(exitingWidth, greaterThan(focusedWidth));
-    expect(exitingWidth, lessThan(unfocusedWidth));
+
+    final titleOpacity = tester.widget<AnimatedOpacity>(
+      find.byKey(const Key('search-header-title-opacity')),
+    );
+    expect(
+      titleOpacity.opacity,
+      1,
+      reason:
+          'The title fades beneath the returning field instead of appearing after it.',
+    );
+    await tester.pump(const Duration(milliseconds: 159));
+    expect(
+      tester
+          .widget<AnimatedOpacity>(
+            find.byKey(const Key('search-header-title-opacity')),
+          )
+          .opacity,
+      1,
+    );
     await tester.pumpAndSettle();
 
-    final input = tester.widget<TextField>(searchField);
-    expect(input.controller?.text, isEmpty);
-    expect(input.focusNode?.hasFocus, isFalse);
-    expect(
-      input.decoration?.hintText,
-      'Search messages, channels, people\u2026',
-    );
     expect(find.byKey(const Key('search-cancel')), findsNothing);
     expect(
       tester.getSize(searchFieldContainer).width,
       closeTo(unfocusedWidth, 0.01),
+    );
+  });
+
+  testWidgets('keeps the search prompt calm until it is focused', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          searchProvider.overrideWith(
+            () => _FakeSearchNotifier(const SearchState.initial()),
+          ),
+          recentSearchesProvider.overrideWith(
+            () => _FakeRecentSearchesNotifier(const []),
+          ),
+          profileProvider.overrideWith(() => _FakeProfileNotifier()),
+        ],
+        child: const SearchPage(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final searchField = find.byKey(const Key('search-field'));
+    final searchFieldContainer = find.byKey(
+      const Key('search-field-container'),
+    );
+    expect(find.text('Messages'), findsNothing);
+    expect(tester.getSize(searchFieldContainer).height, greaterThan(36));
+
+    await tester.tap(searchField);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Messages'), findsOneWidget);
+    expect(
+      tester.getSize(searchFieldContainer).height,
+      greaterThanOrEqualTo(36),
     );
   });
 
@@ -243,7 +354,13 @@ void main() {
     await tester.tap(find.byKey(const Key('clear-recent-searches')));
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('recent-searches-list')), findsNothing);
-    expect(find.text('Search messages, channels, and people'), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('search-empty-state')),
+        matching: find.text('Search messages, channels, and people'),
+      ),
+      findsOneWidget,
+    );
   });
 
   testWidgets('keeps recent searches scrollable above the keyboard', (

@@ -70,6 +70,11 @@ class ActivityPage extends HookConsumerWidget {
     final headerTitleStyle = context.textTheme.titleMedium?.copyWith(
       fontSize: 22,
       fontWeight: FontWeight.w600,
+      color: navigationPrimaryForeground(context),
+    );
+    final topSectionHeight = frostedAppBarHeight(
+      context,
+      bottomHeight: Grid.xxs,
     );
 
     final readState = ref.watch(readStateProvider);
@@ -244,7 +249,8 @@ class ActivityPage extends HookConsumerWidget {
       ]);
     }
 
-    final Widget body;
+    late final Widget body;
+    var bodyRidesOverTopSection = false;
     if (filter.value == InboxFilter.reminders) {
       body = _RemindersList(onOpen: openReminder, onRefresh: refresh);
     } else if (filter.value == InboxFilter.drafts) {
@@ -274,54 +280,71 @@ class ActivityPage extends HookConsumerWidget {
           ? firstReadIndex
           : -1;
 
+      bodyRidesOverTopSection = true;
       body = RefreshIndicator(
+        edgeOffset: topSectionHeight,
         onRefresh: refresh,
-        child: ListView.builder(
-          padding: _activityScrollPadding(context),
-          itemCount: visibleItems.length,
-          itemBuilder: (context, index) {
-            final item = visibleItems[index];
-            final channel = item.item.channelId != null
-                ? channelById[item.item.channelId]
-                : null;
-            return Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                if (index == newBoundaryIndex) const _NewBoundaryDivider(),
-                _InboxRow(
-                  key: ValueKey(item.id),
-                  item: item,
-                  channel: channel,
-                  currentPubkey: myPk,
-                  isDone: isDone(item),
-                  onTap: () => openItem(item),
-                  onMarkRead: () => markItemRead(item),
-                  onMarkUnread: () => markItemUnread(item),
+        child: CustomScrollView(
+          slivers: [
+            SliverToBoxAdapter(child: SizedBox(height: topSectionHeight)),
+            DecoratedSliver(
+              decoration: BoxDecoration(
+                color: context.colors.surface,
+                borderRadius: const BorderRadius.vertical(
+                  top: Radius.circular(Radii.dialog),
                 ),
-              ],
-            );
-          },
+              ),
+              sliver: SliverPadding(
+                padding: _activityScrollPadding(context),
+                sliver: SliverList.builder(
+                  itemCount: visibleItems.length,
+                  itemBuilder: (context, index) {
+                    final item = visibleItems[index];
+                    final channel = item.item.channelId != null
+                        ? channelById[item.item.channelId]
+                        : null;
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        if (index == newBoundaryIndex)
+                          const _NewBoundaryDivider(),
+                        _InboxRow(
+                          key: ValueKey(item.id),
+                          item: item,
+                          channel: channel,
+                          currentPubkey: myPk,
+                          isDone: isDone(item),
+                          onTap: () => openItem(item),
+                          onMarkRead: () => markItemRead(item),
+                          onMarkUnread: () => markItemUnread(item),
+                        ),
+                      ],
+                    );
+                  },
+                ),
+              ),
+            ),
+          ],
         ),
       );
     }
 
     return FrostedScaffold(
-      backgroundColor: Colors.transparent,
+      backgroundColor: context.colors.surface,
       appBar: FrostedAppBar(
-        gradient: context.appColors.topSectionGradient,
         automaticallyImplyLeading: false,
-        title: const Text('Activity'),
-        titleStyle: headerTitleStyle,
+        horizontalInset: Grid.gutter,
+        showBottomDivider: true,
+        bottomDividerOpacity: 0.06,
+        title: Text('Activity', style: headerTitleStyle),
         actions: [
-          _FilterMenuButton(
+          _ActivityActionsPill(
             filter: filter.value,
             dueReminderCount: dueReminderCount,
             draftCount: drafts.length,
-            onChanged: (f) => filter.value = f,
-          ),
-          _InboxOptionsButton(
             unreadOnly: unreadOnly.value,
             unreadCount: unreadVisibleCount,
+            onFilterChanged: (f) => filter.value = f,
             onUnreadOnlyChanged: (v) => unreadOnly.value = v,
             onMarkAllRead: () {
               for (final item in visibleItems) {
@@ -330,17 +353,19 @@ class ActivityPage extends HookConsumerWidget {
             },
           ),
         ],
+        bottomHeight: Grid.xxs,
+        bottom: const SizedBox.expand(),
       ),
       body: SafeArea(
         key: const ValueKey('activity-content-safe-area'),
         top: false,
         bottom: false,
-        child: Padding(
-          padding: EdgeInsets.only(
-            top: frostedAppBarHeight(context, titleStyle: headerTitleStyle),
-          ),
-          child: body,
-        ),
+        child: bodyRidesOverTopSection
+            ? body
+            : Padding(
+                padding: EdgeInsets.only(top: topSectionHeight),
+                child: body,
+              ),
       ),
     );
   }

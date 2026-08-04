@@ -36,6 +36,22 @@ double _barContentHeight(
       : _kBarContentMinHeight;
 }
 
+/// Height for a compact title rail below the app bar's action row.
+///
+/// The rail normally stays at 40dp, but grows with an accessible title rather
+/// than clipping text at larger system text sizes.
+double frostedAppBarLowerTitleHeight(
+  BuildContext context, {
+  TextStyle? titleStyle,
+}) {
+  final style = _effectiveTitleStyle(context, titleStyle);
+  final scaledFontSize = MediaQuery.textScalerOf(
+    context,
+  ).scale(style.fontSize ?? 20);
+  final titleHeight = scaledFontSize * (style.height ?? 1);
+  return titleHeight > 40 ? titleHeight : 40;
+}
+
 /// Returns the total height of the [FrostedAppBar] including safe area padding.
 ///
 /// Use this to add top spacing to body content so it starts below the bar.
@@ -96,6 +112,24 @@ class FrostedAppBar extends StatelessWidget {
   /// top section — see [buzzTopSectionGradient].
   final Gradient? gradient;
 
+  /// Whether to apply the translucent blur treatment behind the app bar.
+  ///
+  /// A page can leave its painted backdrop exposed at rest, then turn this on
+  /// when scrolling moves content beneath the controls.
+  final bool frosted;
+
+  /// Opacity of the frosted surface above the blurred backdrop.
+  final double frostedSurfaceOpacity;
+
+  /// Blur strength of the frosted backdrop.
+  final double frostedBlurSigma;
+
+  /// Whether to draw a divider below the app bar.
+  final bool showBottomDivider;
+
+  /// Opacity of the divider below the app bar.
+  final double bottomDividerOpacity;
+
   const FrostedAppBar({
     super.key,
     this.leading,
@@ -109,7 +143,14 @@ class FrostedAppBar extends StatelessWidget {
     this.horizontalInset = Grid.quarter,
     this.iconColor,
     this.gradient,
-  }) : assert(bottom == null || bottomHeight > 0);
+    this.frosted = true,
+    this.frostedSurfaceOpacity = 0.5,
+    this.frostedBlurSigma = 20,
+    this.showBottomDivider = true,
+    this.bottomDividerOpacity = 0.15,
+  }) : assert(bottom == null || bottomHeight > 0),
+       assert(frostedBlurSigma >= 0),
+       assert(bottomDividerOpacity >= 0 && bottomDividerOpacity <= 1);
 
   @override
   Widget build(BuildContext context) {
@@ -137,86 +178,93 @@ class FrostedAppBar extends StatelessWidget {
               )
             : null);
 
-    return Positioned(
-      top: 0,
-      left: 0,
-      right: 0,
-      child: ClipRect(
-        child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
-          child: Container(
-            key: const ValueKey('frosted-app-bar-background'),
-            padding: EdgeInsets.only(top: topPadding),
-            decoration: BoxDecoration(
-              // A gradient and a color cannot both paint, so the gradient
-              // replaces the frosted surface fill when one is supplied.
-              color: gradient == null
-                  ? context.colors.surface.withValues(alpha: 0.5)
-                  : null,
-              gradient: gradient,
-              border: Border(
-                bottom: BorderSide(
-                  color: context.colors.outlineVariant.withValues(alpha: 0.3),
-                  width: _kBottomBorderWidth,
+    final content = DirectionalTransitionMotion(
+      transformKey: const ValueKey(
+        'frosted-app-bar-content-transition-transform',
+      ),
+      opacityKey: const ValueKey('frosted-app-bar-content-transition-opacity'),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SizedBox(
+            height: barContentHeight,
+            child: Padding(
+              padding: EdgeInsets.symmetric(horizontal: horizontalInset),
+              child: IconTheme.merge(
+                data: IconThemeData(color: iconColor),
+                child: Row(
+                  children: [
+                    ?effectiveLeading,
+                    if (title != null)
+                      Expanded(
+                        child: Padding(
+                          padding: EdgeInsets.only(
+                            left: effectiveLeading != null
+                                ? 0
+                                : horizontalInset < Grid.gutter
+                                ? Grid.gutter - horizontalInset
+                                : 0,
+                            right: actions.isEmpty
+                                ? horizontalInset < Grid.gutter
+                                      ? Grid.gutter - horizontalInset
+                                      : 0
+                                : 0,
+                          ),
+                          child: DefaultTextStyle.merge(
+                            style: effectiveTitleStyle,
+                            overflow: TextOverflow.ellipsis,
+                            maxLines: 1,
+                            child: title!,
+                          ),
+                        ),
+                      )
+                    else
+                      const Spacer(),
+                    ...actions,
+                  ],
                 ),
               ),
             ),
-            child: DirectionalTransitionMotion(
-              transformKey: const ValueKey(
-                'frosted-app-bar-content-transition-transform',
-              ),
-              opacityKey: const ValueKey(
-                'frosted-app-bar-content-transition-opacity',
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  SizedBox(
-                    height: barContentHeight,
-                    child: Padding(
-                      padding: EdgeInsets.symmetric(
-                        horizontal: horizontalInset,
-                      ),
-                      child: IconTheme.merge(
-                        data: IconThemeData(color: iconColor),
-                        child: Row(
-                          children: [
-                            ?effectiveLeading,
-                            if (title != null)
-                              Expanded(
-                                child: Padding(
-                                  padding: EdgeInsets.only(
-                                    left: effectiveLeading != null
-                                        ? 0
-                                        : Grid.gutter - Grid.quarter,
-                                    right: actions.isEmpty
-                                        ? Grid.gutter - Grid.quarter
-                                        : 0,
-                                  ),
-                                  child: DefaultTextStyle.merge(
-                                    style: effectiveTitleStyle,
-                                    overflow: TextOverflow.ellipsis,
-                                    maxLines: 1,
-                                    child: title!,
-                                  ),
-                                ),
-                              )
-                            else
-                              const Spacer(),
-                            ...actions,
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                  if (bottom != null)
-                    SizedBox(height: bottomHeight, child: bottom),
-                ],
-              ),
-            ),
           ),
-        ),
+          if (bottom != null) SizedBox(height: bottomHeight, child: bottom),
+        ],
       ),
     );
+
+    final background = Container(
+      key: const ValueKey('frosted-app-bar-background'),
+      padding: EdgeInsets.only(top: topPadding),
+      decoration: BoxDecoration(
+        color: !frosted
+            ? Colors.transparent
+            : gradient == null
+            ? context.colors.surface.withValues(alpha: frostedSurfaceOpacity)
+            : null,
+        gradient: gradient,
+        border: showBottomDivider
+            ? Border(
+                bottom: BorderSide(
+                  color: navigationDivider(context, bottomDividerOpacity),
+                  width: _kBottomBorderWidth,
+                ),
+              )
+            : null,
+      ),
+      child: content,
+    );
+
+    final child = ClipRect(
+      child: frosted
+          ? BackdropFilter(
+              filter: ImageFilter.blur(
+                sigmaX: frostedBlurSigma,
+                sigmaY: frostedBlurSigma,
+              ),
+              child: background,
+            )
+          : background,
+    );
+
+    return Positioned(top: 0, left: 0, right: 0, child: child);
   }
 }

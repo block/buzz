@@ -5,6 +5,7 @@ import 'package:buzz/features/profile/user_status.dart';
 import 'package:buzz/features/profile/user_status_provider.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
 import 'package:buzz/shared/widgets/masked_avatar_badge.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -35,6 +36,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
+    expect(find.byType(Hero), findsNothing);
     final badge = find.byType(MaskedAvatarBadge);
     expect(
       find.descendant(of: badge, matching: find.text(missingShortcode)),

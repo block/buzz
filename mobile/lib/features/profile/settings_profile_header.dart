@@ -31,7 +31,7 @@ class SettingsProfileHeader extends ConsumerWidget {
         showSetStatusSheet(context, currentStatus: status);
 
     return Padding(
-      padding: const EdgeInsets.only(top: Grid.xxs, bottom: Grid.sm),
+      padding: const EdgeInsets.only(top: Grid.sm, bottom: Grid.sm),
       child: Column(
         children: [
           MaskedAvatarBadge(

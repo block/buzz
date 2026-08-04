@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:hooks_riverpod/misc.dart';
@@ -22,6 +23,8 @@ import 'package:buzz/shared/community/community_icon_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/avatar_image.dart';
+import 'package:buzz/shared/widgets/frosted_app_bar.dart';
+import 'package:buzz/shared/widgets/masked_avatar_badge.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
 
 void main() {
@@ -34,6 +37,7 @@ void main() {
     Map<String, String?> communityIcons = const {},
     ValueChanged<String>? onCommunityIconLoad,
     TextScaler textScaler = TextScaler.noScaling,
+    Gradient? topSectionGradient,
   }) {
     return ProviderScope(
       overrides: [
@@ -50,7 +54,7 @@ void main() {
         ...overrides,
       ],
       child: MaterialApp(
-        theme: AppTheme.light(),
+        theme: AppTheme.light(topSectionGradient: topSectionGradient),
         builder: (context, child) => MediaQuery(
           data: MediaQuery.of(context).copyWith(
             disableAnimations: disableAnimations,
@@ -161,7 +165,22 @@ void main() {
       final text = tester.widget<Text>(find.text(label));
       expect(text.style?.fontSize, contentListTitleTextStyle.fontSize);
       expect(text.style?.height, contentListTitleTextStyle.height);
+      expect(
+        text.style?.color,
+        Theme.of(
+          tester.element(find.text(label)),
+        ).colorScheme.onSurface.withValues(alpha: 0.8),
+      );
     }
+    final channelIcon = tester.widget<Icon>(
+      find.byKey(const ValueKey('channel-icon-1')),
+    );
+    expect(
+      channelIcon.color,
+      Theme.of(
+        tester.element(find.byKey(const ValueKey('channel-icon-1'))),
+      ).colorScheme.onSurface.withValues(alpha: 0.8),
+    );
     final sectionTitle = tester.widget<Text>(find.text('Channels'));
     expect(sectionTitle.style?.fontSize, contentListTitleTextStyle.fontSize);
     expect(sectionTitle.style?.fontWeight, FontWeight.w600);
@@ -188,6 +207,110 @@ void main() {
       ),
     );
     expect((padding.padding as EdgeInsets).bottom, footerClearance);
+  });
+
+  testWidgets('balances an expanded section around its following divider', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final lastChannel = tester.getRect(find.text('general'));
+    final divider = tester.getRect(find.byType(Divider).last);
+    final nextSectionHeader = tester.getRect(find.text('DMs'));
+
+    expect(
+      divider.top - lastChannel.bottom,
+      closeTo(nextSectionHeader.top - divider.bottom, 0.01),
+    );
+  });
+
+  testWidgets('keeps the Buzz background fixed behind the channels list', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      buildTestable(
+        topSectionGradient: const LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [Colors.yellow, Colors.blue],
+        ),
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey('frosted-scaffold-pinned-gradient')),
+      findsOneWidget,
+    );
+    expect(find.byType(DecoratedSliver), findsNothing);
+    final gradientBackground = tester.widget<DecoratedBox>(
+      find.byKey(const ValueKey('frosted-scaffold-pinned-gradient')),
+    );
+    final gradient =
+        (gradientBackground.decoration as BoxDecoration).gradient
+            as LinearGradient;
+    expect(gradient.end, Alignment.bottomCenter);
+
+    final appBar = tester.widget<FrostedAppBar>(
+      find.byType(FrostedAppBar).last,
+    );
+    expect(appBar.frosted, isFalse);
+    expect(appBar.frostedSurfaceOpacity, 0);
+    expect(appBar.frostedBlurSigma, 0);
+    expect(appBar.showBottomDivider, isFalse);
+    expect(appBar.bottomHeight, Grid.xxs);
+  });
+
+  testWidgets('builds Home header frost progressively while scrolling', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(320, 160);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(
+      buildTestable(
+        topSectionGradient: const LinearGradient(
+          colors: [Colors.yellow, Colors.blue],
+        ),
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final scrollable = tester.state<ScrollableState>(
+      find
+          .descendant(
+            of: find.byType(CustomScrollView),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+    );
+    expect(scrollable.position.maxScrollExtent, greaterThanOrEqualTo(Grid.xxl));
+
+    scrollable.position.jumpTo(Grid.xl / 2);
+    await tester.pump();
+    var appBar = tester.widget<FrostedAppBar>(find.byType(FrostedAppBar).last);
+    expect(appBar.frosted, isTrue);
+    expect(appBar.frostedSurfaceOpacity, 0);
+    expect(appBar.frostedBlurSigma, closeTo(8.67, 0.001));
+
+    scrollable.position.jumpTo(Grid.xxl);
+    await tester.pump();
+    appBar = tester.widget<FrostedAppBar>(find.byType(FrostedAppBar).last);
+    expect(appBar.frostedSurfaceOpacity, 0);
+    expect(appBar.frostedBlurSigma, 23.12);
   });
 
   testWidgets('truncates long custom section names beside the menu', (
@@ -322,7 +445,9 @@ void main() {
     final topLabelX = tester.getTopLeft(find.text('Community')).dx;
     final sectionLabelX = tester.getTopLeft(find.text('Channels')).dx;
     final rowLabelX = tester.getTopLeft(find.text('general')).dx;
-    expect(topLabelX, sectionLabelX);
+    // The community title shares the leading row with its avatar. Channel
+    // labels stay aligned below it.
+    expect(topLabelX, Grid.twelve + 40 + Grid.xxs);
     expect(sectionLabelX, rowLabelX);
 
     relaySession.setReconnecting();
@@ -342,6 +467,32 @@ void main() {
         .dx;
     expect(skeletonSectionLabelX, skeletonRowLabelX);
     expect(skeletonSectionLabelX, sectionLabelX);
+  });
+
+  testWidgets('matches the community and profile avatar circle sizes', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final appBar = find.byType(FrostedAppBar).last;
+    final communityAvatar = find.descendant(
+      of: appBar,
+      matching: find.byType(AvatarImage),
+    );
+    final profileAvatar = find.descendant(
+      of: appBar,
+      matching: find.byType(MaskedAvatarBadge),
+    );
+
+    expect(tester.getSize(communityAvatar), const Size.square(40));
+    expect(tester.getSize(profileAvatar), const Size.square(40));
   });
 
   testWidgets('reveals channel content from same-slot reconnect skeletons', (
@@ -451,10 +602,51 @@ void main() {
     );
     await tester.pumpAndSettle();
 
+    expect(find.byType(Hero), findsNothing);
     await tester.tap(find.byType(ProfileAvatar));
     await tester.pumpAndSettle();
 
     expect(find.text('Injected settings'), findsOneWidget);
+    final route = ModalRoute.of(tester.element(find.text('Injected settings')));
+    expect(route, isNot(isA<MaterialPageRoute<void>>()));
+    expect(route?.opaque, isFalse);
+  });
+
+  testWidgets('gives feedback for the profile and community controls', (
+    tester,
+  ) async {
+    final hapticCalls = <MethodCall>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+          if (call.method == 'HapticFeedback.vibrate') hapticCalls.add(call);
+          return null;
+        });
+    addTearDown(
+      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, null),
+    );
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byType(ProfileAvatar));
+    await tester.pumpAndSettle();
+    expect(hapticCalls.single.arguments, 'HapticFeedbackType.lightImpact');
+
+    Navigator.of(tester.element(find.text('Injected settings'))).pop();
+    await tester.pumpAndSettle();
+    final communityAvatar = find.descendant(
+      of: find.byType(FrostedAppBar).last,
+      matching: find.byType(AvatarImage),
+    );
+    await tester.tap(communityAvatar);
+    await tester.pump();
+    expect(hapticCalls.last.arguments, 'HapticFeedbackType.selectionClick');
   });
 
   testWidgets('community switcher separates selection from edit removal', (
@@ -1359,6 +1551,10 @@ void main() {
     expect(
       tester.widget<Text>(find.text('general')).style?.fontWeight,
       FontWeight.w700,
+    );
+    expect(
+      tester.widget<Text>(find.text('general')).style?.color,
+      Theme.of(tester.element(find.text('general'))).colorScheme.onSurface,
     );
 
     readState.markContextRead('1', 20);
