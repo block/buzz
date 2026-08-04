@@ -881,3 +881,80 @@ fn draft_agent_model_discovery_env_layers_all_three_tiers_in_order() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// In-process HTTP discovery must not depend on the ACP harness binary (#3750)
+// ---------------------------------------------------------------------------
+
+/// Serve a canned `GET /models` response for one connection and return the
+/// base URL to point discovery at. The listener thread exits after the
+/// single connection is handled.
+fn spawn_openai_models_server() -> (String, std::thread::JoinHandle<()>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test server");
+    let addr = listener.local_addr().expect("listener address");
+    let handle = std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let body = r#"{"data":[{"id":"gpt-5.4","created":1},{"id":"o4-mini","created":2}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    (format!("http://{addr}/v1"), handle)
+}
+
+/// Regression test for #3750: a user who skipped the ACP install must still
+/// get a populated model list from provider HTTP APIs. The whole
+/// `discover_in_process_models` chain runs with no ACP binary involved.
+#[tokio::test]
+async fn in_process_discovery_returns_openai_models_without_acp_binary() {
+    let (base_url, server) = spawn_openai_models_server();
+
+    let client = reqwest::Client::new();
+    let env = BTreeMap::from([
+        ("OPENAI_COMPAT_API_KEY".to_string(), "sk-test".to_string()),
+        ("OPENAI_COMPAT_BASE_URL".to_string(), base_url),
+    ]);
+    let provider = effective_discovery_provider(Some("openai"), None, &BTreeMap::new());
+
+    let response = discover_in_process_models(&client, &provider, &env, None)
+        .await
+        .expect("HTTP discovery succeeds without any ACP binary")
+        .expect("openai provider matches and returns a model list");
+
+    let ids = response
+        .models
+        .iter()
+        .map(|model| model.id.as_str())
+        .collect::<Vec<_>>();
+    // Sorted by `created` desc, agent text models only.
+    assert_eq!(ids, vec!["o4-mini", "gpt-5.4"]);
+
+    server.join().expect("test server thread");
+}
+
+/// The ACP binary is required only on the subprocess fallback path — pin the
+/// error so a future refactor cannot re-gate HTTP discovery behind it.
+#[tokio::test]
+async fn discovery_fallback_reports_missing_acp_binary() {
+    let err = run_agent_models_discovery_fallback(
+        "/nonexistent/buzz-acp",
+        "goose".to_string(),
+        Vec::new(),
+        None,
+        BTreeMap::new(),
+    )
+    .await
+    .expect_err("missing ACP binary must surface on the subprocess fallback path only");
+
+    assert!(
+        err.contains("ACP harness command"),
+        "expected an ACP harness command error, got: {err}"
+    );
+}

@@ -28,17 +28,20 @@ use crate::{
     util::now_iso,
 };
 
-/// Query available models from an agent via `buzz-acp models --json`.
+/// Query available models for a managed agent.
 ///
-/// Spawns a short-lived subprocess (no relay connection needed). The subprocess
-/// starts the agent, queries its model catalog, and exits. ~2-5s total.
+/// Runs provider HTTP discovery in-process first (OpenRouter, OpenAI,
+/// Anthropic, Databricks — no ACP binary needed, see #3750). Only when no
+/// provider matches does it fall back to `buzz-acp models --json`: a
+/// short-lived subprocess (no relay connection needed) that starts the agent,
+/// queries its model catalog, and exits. ~2-5s total on the fallback path.
 #[tauri::command]
 pub async fn get_agent_models(
     pubkey: String,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<AgentModelsResponse, String> {
-    let (resolved_acp, agent_command, discovery) = {
+    let (acp_command, agent_command, discovery) = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -62,8 +65,12 @@ pub async fn get_agent_models(
             .find(|r| r.pubkey == pubkey)
             .ok_or_else(|| format!("agent {pubkey} not found"))?;
 
-        let resolved = resolve_command(&record.acp_command)
-            .ok_or_else(|| missing_command_message(&record.acp_command, "ACP harness command"))?;
+        // The ACP harness binary is NOT resolved here — in-process HTTP
+        // discovery (OpenRouter/OpenAI/Anthropic/Databricks) does not need it,
+        // and a user who skipped the ACP install must still be able to populate
+        // the model picker (#3750). `run_agent_models_discovery_fallback`
+        // resolves it lazily, only when the subprocess catalog is actually used.
+        let acp_command = record.acp_command.clone();
 
         // Resolve the effective harness from the linked persona (mirrors spawn),
         // so model discovery runs against the persona's current harness, not the
@@ -82,7 +89,7 @@ pub async fn get_agent_models(
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| discovery.command.clone());
 
-        (resolved, resolved_agent, discovery)
+        (acp_command, resolved_agent, discovery)
     }; // store lock released — subprocess runs without holding the lock
 
     let AgentModelDiscoveryConfig {
@@ -99,7 +106,7 @@ pub async fn get_agent_models(
     // so a build-provided provider still gets live discovery.
     let effective_provider =
         effective_discovery_provider(saved_provider.as_deref(), provider_env_var, &merged_env);
-    if let Some(models) = discover_openrouter_models(
+    if let Some(models) = discover_in_process_models(
         &state.http_client,
         &effective_provider,
         &merged_env,
@@ -110,41 +117,8 @@ pub async fn get_agent_models(
         return Ok(models);
     }
 
-    if let Some(models) = discover_openai_compatible_models(
-        &state.http_client,
-        &effective_provider,
-        &merged_env,
-        persisted_model.clone(),
-    )
-    .await?
-    {
-        return Ok(models);
-    }
-
-    if let Some(models) = discover_anthropic_models(
-        &state.http_client,
-        &effective_provider,
-        &merged_env,
-        persisted_model.clone(),
-    )
-    .await?
-    {
-        return Ok(models);
-    }
-
-    if let Some(models) = discover_databricks_models(
-        &state.http_client,
-        &effective_provider,
-        &merged_env,
-        persisted_model.clone(),
-    )
-    .await?
-    {
-        return Ok(models);
-    }
-
-    run_agent_models_command(
-        resolved_acp,
+    run_agent_models_discovery_fallback(
+        &acp_command,
         agent_command,
         agent_args,
         persisted_model,
@@ -203,14 +177,18 @@ pub async fn discover_agent_models(
     // Also validate definition_env (caller-supplied, same trust level as env_vars).
     crate::managed_agents::validate_user_env_keys(&input.definition_env)?;
 
+    // The ACP harness binary is NOT resolved here: the in-process HTTP
+    // discovery below (OpenRouter/OpenAI/Anthropic/Databricks) talks to the
+    // provider APIs directly and must work even when the ACP adapters are not
+    // installed (e.g. the onboarding install step was skipped — #3750). The
+    // command is resolved lazily by `run_agent_models_discovery_fallback`,
+    // which genuinely needs it.
     let acp_command = input
         .acp_command
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or(DEFAULT_ACP_COMMAND);
-    let resolved_acp = resolve_command(acp_command)
-        .ok_or_else(|| missing_command_message(acp_command, "ACP harness command"))?;
 
     let agent_command = input.agent_command.trim();
     if agent_command.is_empty() {
@@ -283,38 +261,14 @@ pub async fn discover_agent_models(
     }
 
     if let Some(models) =
-        discover_openrouter_models(&state.http_client, &effective_provider, &merged_env, None)
+        discover_in_process_models(&state.http_client, &effective_provider, &merged_env, None)
             .await?
     {
         return Ok(models);
     }
 
-    if let Some(models) = discover_openai_compatible_models(
-        &state.http_client,
-        &effective_provider,
-        &merged_env,
-        None,
-    )
-    .await?
-    {
-        return Ok(models);
-    }
-
-    if let Some(models) =
-        discover_anthropic_models(&state.http_client, &effective_provider, &merged_env, None)
-            .await?
-    {
-        return Ok(models);
-    }
-
-    if let Some(models) =
-        discover_databricks_models(&state.http_client, &effective_provider, &merged_env, None)
-            .await?
-    {
-        return Ok(models);
-    }
-
-    run_agent_models_command(resolved_acp, resolved_agent, agent_args, None, merged_env).await
+    run_agent_models_discovery_fallback(acp_command, resolved_agent, agent_args, None, merged_env)
+        .await
 }
 
 #[derive(Debug, Deserialize)]
@@ -771,6 +725,76 @@ async fn discover_databricks_models(
         selected_model,
         supports_switching: true,
     }))
+}
+
+/// Run the in-process HTTP model discovery chain for a provider.
+///
+/// Each `discover_*` helper returns `Ok(None)` when the provider does not
+/// match it, so the chain falls through to the next provider type. An `Err`
+/// from a matching provider (bad key, HTTP failure) propagates to the caller,
+/// matching the behaviour of the individual calls it replaces.
+///
+/// This must run *before* any ACP harness resolution: OpenRouter, OpenAI,
+/// Anthropic, and Databricks model lists come straight from their HTTP APIs,
+/// so discovery works even when the ACP adapters are not installed (e.g. the
+/// onboarding install step was skipped — #3750). The ACP binary is only
+/// required by the `buzz-acp models` subprocess fallback, which
+/// [`run_agent_models_discovery_fallback`] resolves lazily.
+async fn discover_in_process_models(
+    client: &reqwest::Client,
+    provider: &DiscoveryProvider,
+    env: &BTreeMap<String, String>,
+    selected_model: Option<String>,
+) -> Result<Option<AgentModelsResponse>, String> {
+    if let Some(models) =
+        discover_openrouter_models(client, provider, env, selected_model.clone()).await?
+    {
+        return Ok(Some(models));
+    }
+
+    if let Some(models) =
+        discover_openai_compatible_models(client, provider, env, selected_model.clone()).await?
+    {
+        return Ok(Some(models));
+    }
+
+    if let Some(models) =
+        discover_anthropic_models(client, provider, env, selected_model.clone()).await?
+    {
+        return Ok(Some(models));
+    }
+
+    if let Some(models) = discover_databricks_models(client, provider, env, selected_model).await? {
+        return Ok(Some(models));
+    }
+
+    Ok(None)
+}
+
+/// Fall back to the `buzz-acp models` subprocess catalog.
+///
+/// Resolves the ACP harness command lazily, so the in-process HTTP discovery
+/// ([`discover_in_process_models`]) is never gated on a binary the user has
+/// not installed. A missing ACP command surfaces the standard
+/// `missing_command_message` error — the same copy the old eager resolution
+/// produced, only now reachable exclusively on the subprocess path.
+async fn run_agent_models_discovery_fallback(
+    acp_command: &str,
+    agent_command: String,
+    agent_args: Vec<String>,
+    persisted_model: Option<String>,
+    merged_env: BTreeMap<String, String>,
+) -> Result<AgentModelsResponse, String> {
+    let resolved_acp = resolve_command(acp_command)
+        .ok_or_else(|| missing_command_message(acp_command, "ACP harness command"))?;
+    run_agent_models_command(
+        resolved_acp,
+        agent_command,
+        agent_args,
+        persisted_model,
+        merged_env,
+    )
+    .await
 }
 
 /// Apply an `UpdateManagedAgentRequest`'s model/provider/system_prompt patch
