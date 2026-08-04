@@ -345,6 +345,26 @@ Examples:\n  \
 buzz agents archived"
     )]
     Archived,
+    /// Publish this agent's kind:10100 profile to the relay agent directory
+    #[command(
+        name = "set-profile",
+        after_help = "Signs and submits a kind:10100 agent profile event as the current \
+identity. The profile is what agent directories (and clients on other \
+machines) use to discover this agent by name.\n\n\
+Examples:\n  \
+buzz agents set-profile --name Kiku"
+    )]
+    SetProfile {
+        /// Display name shown in agent directories
+        #[arg(long)]
+        name: String,
+        /// Who this agent responds to: anyone | owner-only | allowlist
+        #[arg(long)]
+        respond_to: Option<String>,
+        /// Channel UUID this agent is a member of (repeatable)
+        #[arg(long = "channel")]
+        channels: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]

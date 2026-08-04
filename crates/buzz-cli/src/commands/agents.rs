@@ -148,7 +148,75 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
         }
 
         AgentsCmd::Archived => cmd_archived(client).await,
+
+        AgentsCmd::SetProfile {
+            name,
+            respond_to,
+            channels,
+        } => cmd_set_profile(client, &name, respond_to.as_deref(), &channels).await,
     }
+}
+
+/// Publish this identity's kind:10100 agent profile — sign and submit a
+/// replaceable event whose content carries the directory display name, the
+/// respond-to policy, and the channels the agent is a member of.
+///
+/// Clients discover relay agents by querying kind:10100 (see the desktop's
+/// `list_relay_agents`); mention eligibility additionally requires the
+/// profile to declare `respond_to` and a channel shared with the viewer.
+/// An agent that never publishes a profile is invisible to agent
+/// directories on machines other than its host.
+async fn cmd_set_profile(
+    client: &BuzzClient,
+    name: &str,
+    respond_to: Option<&str>,
+    channels: &[String],
+) -> Result<(), CliError> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(CliError::Usage("--name must not be empty".into()));
+    }
+    if let Some(policy) = respond_to {
+        match policy {
+            "anyone" | "owner-only" | "allowlist" => {}
+            _ => {
+                return Err(CliError::Usage(format!(
+                    "--respond-to must be 'anyone', 'owner-only', or 'allowlist' (got: {policy})"
+                )))
+            }
+        }
+    }
+    for channel in channels {
+        parse_uuid_arg(channel)?;
+    }
+
+    let mut content = serde_json::Map::new();
+    content.insert("name".into(), json!(trimmed));
+    if let Some(policy) = respond_to {
+        content.insert("respond_to".into(), json!(policy));
+    }
+    if !channels.is_empty() {
+        content.insert("channel_ids".into(), json!(channels));
+    }
+    let content = serde_json::Value::Object(content).to_string();
+
+    use nostr::{EventBuilder, Kind};
+    let builder = EventBuilder::new(
+        Kind::Custom(buzz_sdk::kind::KIND_AGENT_PROFILE as u16),
+        &content,
+    )
+    .tags([]);
+    let event = client.sign_event(builder)?;
+
+    let response = client.submit_event(event).await?;
+    println!("{response}");
+    Ok(())
+}
+
+fn parse_uuid_arg(value: &str) -> Result<(), CliError> {
+    uuid::Uuid::parse_str(value)
+        .map(|_| ())
+        .map_err(|e| CliError::Usage(format!("invalid --channel UUID '{value}': {e}")))
 }
 
 /// Require `BUZZ_AUTH_TAG` and parse the owner pubkey from it. Used only by

@@ -13,6 +13,7 @@ import {
 } from "@/features/agents/hooks";
 import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRuntime";
 import { useAddChannelMembersMutation } from "@/features/channels/hooks";
+import { usePresenceQuery } from "@/features/presence/hooks";
 import { filterEffectiveExplicitAgentPubkeys } from "@/features/messages/lib/effectiveExplicitAgentPubkeys";
 import type { UseChannelLinksResult } from "@/features/messages/lib/useChannelLinks";
 import type { UseEmojiAutocompleteResult } from "@/features/messages/lib/useEmojiAutocomplete";
@@ -199,6 +200,18 @@ export function useMentionSendFlow({
   const managedAgentsQuery = useManagedAgentsQuery();
   const relayAgentsQuery = useRelayAgentsQuery();
   const startAgentMutation = useStartManagedAgentMutation();
+  // Presence for known managed agents — used to skip local start attempts for
+  // agents that are already live on the relay (hosted by another machine).
+  const managedAgentPresencePubkeys = React.useMemo(
+    () =>
+      (managedAgentsQuery.data ?? []).map((agent) =>
+        normalizePubkey(agent.pubkey),
+      ),
+    [managedAgentsQuery.data],
+  );
+  const managedAgentsPresenceQuery = usePresenceQuery(
+    managedAgentPresencePubkeys,
+  );
 
   const getManagedAgentsByPubkey = React.useCallback(async () => {
     const agents =
@@ -265,6 +278,15 @@ export function useMentionSendFlow({
 
         try {
           if (participantPubkeys.has(pubkey)) {
+            // An agent that is already online on the relay is hosted and
+            // running somewhere — possibly on another machine where this
+            // desktop cannot (and must not) start a second instance. Tag it
+            // without touching the local runtime.
+            const presenceStatus = managedAgentsPresenceQuery.data?.[pubkey];
+            if (presenceStatus === "online") {
+              pubkeys.push(pubkey);
+              continue;
+            }
             if (isProviderBackedAgent(agent)) {
               if (agent.status !== "deployed") {
                 await startAgentMutation.mutateAsync(agent.pubkey);
@@ -298,6 +320,7 @@ export function useMentionSendFlow({
     [
       attachAgentMutation,
       getManagedAgentsByPubkey,
+      managedAgentsPresenceQuery.data,
       mentions.memberPubkeys,
       startAgentMutation,
     ],
