@@ -51,11 +51,12 @@ import {
 } from "./MentionAutocomplete";
 import { ComposerDockToolbar } from "./ComposerDockToolbar";
 import { NonMemberMentionDialog } from "./NonMemberMentionDialog";
+import { ComposerAudienceHint } from "./ComposerAudienceHint";
+import { useComposerAgentAudience } from "./useComposerAgentAudience";
 import { useMentionSendFlow } from "./useMentionSendFlow";
 import { usePersistentAgentMentionHydration } from "./usePersistentAgentMentionHydration";
 import { useComposerContentState } from "./useComposerContentState";
 import { useDraftPersistLifecycle } from "./useDraftPersistSnapshot";
-
 import type { MessageComposerProps } from "./MessageComposer.types";
 
 function MessageComposerImpl({
@@ -124,7 +125,6 @@ function MessageComposerImpl({
       : null;
   const effectiveDraftKeyRef = React.useRef(effectiveDraftKey);
   effectiveDraftKeyRef.current = effectiveDraftKey;
-  // Snapshot composer state before edit mode so cancel can restore it.
   const preEditSnapshotRef = React.useRef<{
     content: string;
     pendingImeta: ImetaMedia[];
@@ -287,11 +287,27 @@ function MessageComposerImpl({
     mentions,
     richText,
   });
-  const persistentAudience = persistentMentionHydration.audience;
   const persistentMentionHydrationRef = React.useRef(
     persistentMentionHydration,
   );
   persistentMentionHydrationRef.current = persistentMentionHydration;
+
+  const {
+    composerAudienceHint,
+    audienceGeneration,
+    audienceRevision,
+    resolveComposerAudience,
+    onSuccessfulExplicitAgentAudience,
+    resolvePostSendContent,
+  } = useComposerAgentAudience({
+    audienceThreadRootId,
+    channelType,
+    editTarget,
+    mentions,
+    ownerPubkey,
+    persistentMentionHydration,
+    richText,
+  });
 
   const mentionSendFlow = useMentionSendFlow({
     channelId,
@@ -309,18 +325,11 @@ function MessageComposerImpl({
     setIsEmojiPickerOpen,
     setPendingImeta: media.setPendingImeta,
     setSpoileredAttachmentUrls,
-    onSuccessfulExplicitAgentAudience:
-      persistentAudience.enabled && audienceContext && ownerPubkey
-        ? ({ channelId: successfulChannelId, ...promotion }) => {
-            const scope = getPersistentAgentAudienceScope({
-              ownerPubkey,
-              channelId: successfulChannelId,
-              threadRootId: audienceThreadRootId,
-            });
-            persistentAudience.promotePubkeys({ ...promotion, scope });
-          }
-        : undefined,
-    resolvePostSendContent: persistentMentionHydration.resolvePostSendContent,
+    onSuccessfulExplicitAgentAudience: audienceContext
+      ? onSuccessfulExplicitAgentAudience
+      : undefined,
+    resolvePostSendContent,
+    resolveComposerAudience,
   });
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: editTarget?.id is the trigger
@@ -474,7 +483,6 @@ function MessageComposerImpl({
     [richText.editor, mentions.clearMentions, customEmoji],
   );
 
-  // ── @ mention picker (toolbar button) ───────────────────────────────
   const openMentionPicker = React.useCallback(() => {
     if (!richText.editor) return;
     const { text, cursor } = richText.getPlainTextAndCursor();
@@ -505,11 +513,9 @@ function MessageComposerImpl({
     mentions.updateMentionQuery,
   ]);
 
-  // ── Submit message ──────────────────────────────────────────────────
   const submitMessage = React.useCallback(async () => {
     const trimmed = syncComposerContentFromEditor().trim();
 
-    // Edit mode
     if (editTargetRef.current && onEditSaveRef.current) {
       if (isSendingRef.current || isUploadingRef.current) return;
       const currentPendingImeta = media.pendingImetaRef.current;
@@ -575,7 +581,6 @@ function MessageComposerImpl({
       return;
     }
 
-    // Normal send
     const currentPendingImeta = media.pendingImetaRef.current;
     const hasMedia = currentPendingImeta.length > 0;
     if (
@@ -609,8 +614,8 @@ function MessageComposerImpl({
         ),
         spoileredAttachmentUrls,
         trimmed,
-        audienceGeneration: persistentAudience.generation,
-        audienceRevision: audienceScope ? persistentAudience.revision : null,
+        audienceGeneration,
+        audienceRevision: audienceScope ? audienceRevision : null,
       });
     } finally {
       persistentMentionHydration.endSubmit();
@@ -635,21 +640,15 @@ function MessageComposerImpl({
     onCaptureSendContext,
     onPreparingMentionSendChange,
     audienceScope,
+    audienceGeneration,
+    audienceRevision,
     persistentMentionHydration,
-    persistentAudience.generation,
-    persistentAudience.revision,
   ]);
   submitMessageRef.current = submitMessage;
 
-  // ── Auto-submit on draft send ────────────────────────────────────────────
-  // When `autoSubmitDraftKey` is set (the user clicked "Send message" in the
-  // Drafts panel and confirmed), fire `submitMessage` once after mount so the
-  // draft is sent through the real send path (mention resolution, media, etc.).
-  //
-  // Guard: only fire when the effective draft key matches the trigger so a
-  // stale URL param on a different channel never fires a spurious send.
-  //
-  // Fires at most once per mount (empty dep array after the key check) — the
+  // Auto-submit draft once when Drafts panel confirms send.
+  // Guard: effective draft key must match trigger (no cross-channel fire).
+  // Fires at most once per mount — the
   // `onAutoSubmitComplete` callback clears the trigger before `submitMessage`
   // runs, preventing re-fire on re-render or back-navigation.
   const onAutoSubmitCompleteRef = React.useRef(onAutoSubmitComplete);
@@ -688,7 +687,6 @@ function MessageComposerImpl({
 
   // ── Keyboard handling ───────────────────────────────────────────────
   // Tiptap handles formatting shortcuts (⌘B, ⌘I, etc.) natively.
-  // Plain Enter → submit is now handled inside the Tiptap `submitOnEnter`
   // extension (fires before ProseMirror's splitBlock). This wrapper only
   // handles autocomplete arrow/enter keys and Escape for edit mode.
   const handleEditorKeyDown = React.useCallback(
@@ -955,6 +953,8 @@ function MessageComposerImpl({
                 </button>
               </div>
             ) : null}
+
+            <ComposerAudienceHint hint={composerAudienceHint} />
 
             {(media.pendingImeta.length > 0 || media.isUploading) && (
               <div className="mb-2 flex items-center gap-2">

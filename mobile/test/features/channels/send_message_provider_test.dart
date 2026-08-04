@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/channels/send_message_provider.dart';
+import 'package:buzz/shared/contextual_agent/contextual_agent_conversation_policy.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
 void main() {
@@ -24,6 +25,9 @@ void main() {
         addLocalMessage: (_, event) => localMessages.add(event),
         completeLocalMessage: (_, eventId) => completedIds.add(eventId),
         removeLocalMessage: (_, eventId) => removedIds.add(eventId),
+        readUnaddressedMode: () => UnaddressedChannelAgentMode.mentionsOnly,
+        fetchAgentDirectory: () async => const [],
+        readChannel: (_) => null,
       );
 
       final result = send(channelId: _channelId, content: 'hello');
@@ -57,6 +61,9 @@ void main() {
       addLocalMessage: (_, event) => localMessages.add(event),
       completeLocalMessage: (_, eventId) => completedIds.add(eventId),
       removeLocalMessage: (_, eventId) => removedIds.add(eventId),
+      readUnaddressedMode: () => UnaddressedChannelAgentMode.mentionsOnly,
+      fetchAgentDirectory: () async => const [],
+      readChannel: (_) => null,
     );
 
     final result = send(channelId: _channelId, content: 'hello');

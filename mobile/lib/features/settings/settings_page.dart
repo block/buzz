@@ -7,6 +7,8 @@ import 'package:package_info_plus/package_info_plus.dart';
 
 import '../../shared/auth/auth.dart';
 import '../../shared/clipboard_utils.dart';
+import '../../shared/contextual_agent/contextual_agent_conversation_policy.dart';
+import '../../shared/contextual_agent/unaddressed_channel_agent_mode.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/app_list.dart';
@@ -16,6 +18,7 @@ import '../../shared/widgets/frosted_scaffold.dart';
 import 'accent_picker_page.dart';
 import 'theme_picker_page.dart';
 
+part 'settings_page/agents_section.dart';
 part 'settings_page/appearance_section.dart';
 part 'settings_page/connection_section.dart';
 
@@ -42,6 +45,7 @@ class SettingsPage extends HookConsumerWidget {
               children: [
                 profileHeader,
                 const _AppearanceSection(),
+                const _AgentsSection(),
                 const _ConnectionSection(),
                 const _RemoveCommunitySection(),
               ],

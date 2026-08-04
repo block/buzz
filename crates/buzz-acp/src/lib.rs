@@ -2,6 +2,7 @@
 
 mod acp;
 mod config;
+mod contextual_conversation;
 mod engram_fetch;
 mod filter;
 mod observer;
@@ -12,6 +13,11 @@ mod relay;
 mod setup_mode;
 mod usage;
 
+pub use contextual_conversation::{
+    reply_placement_anchor, resolve_acp_turn_placement, resolve_contextual_agent_conversation,
+    AcpTurnPlacementInput, ContextualAgentConversationDecision, ContextualAgentConversationInput,
+    ReplyPlacement, UnaddressedChannelAgentMode,
+};
 pub use usage::TurnUsage;
 
 use std::collections::{HashMap, HashSet, VecDeque};

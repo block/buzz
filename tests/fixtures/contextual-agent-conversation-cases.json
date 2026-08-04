@@ -1,0 +1,446 @@
+{
+  "version": 1,
+  "description": "Test-only contract for contextual agent audience selection and reply placement. Shared by Desktop (TypeScript), ACP (Rust), and Flutter (Dart). Do not use as runtime protocol.",
+  "storageKey": "buzz:unaddressed-channel-agent-mode:v1",
+  "defaultMode": "all-channel-agents",
+  "modes": ["all-channel-agents", "mentions-only"],
+  "replyPlacementKinds": ["top-level", "thread-root", "unconstrained"],
+  "actors": {
+    "human": "1111111111111111111111111111111111111111111111111111111111111111",
+    "agentA": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "agentB": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "agentCUnverified": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "agentOutsideChannel": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  },
+  "events": {
+    "threadRoot": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "agentReplyInThread": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+  },
+  "cases": [
+    {
+      "id": "direct-top-level-flat",
+      "description": "Direct conversation, top-level human message: address current agent; agent response is top-level (no reply e tag).",
+      "input": {
+        "conversation": "direct",
+        "messagePosition": "top-level",
+        "senderClass": "human",
+        "unaddressedMode": "all-channel-agents",
+        "keepAddressedAgentsActive": false,
+        "explicitMentionPubkeys": [],
+        "currentAgentPubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "channelMemberPubkeys": [
+          "1111111111111111111111111111111111111111111111111111111111111111",
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "verifiedChannelAgentPubkeys": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "threadRootEventId": null,
+        "persistentThreadAudience": [],
+        "manualRemovedPubkeys": [],
+        "recipientLoadError": false
+      },
+      "expected": {
+        "audiencePubkeys": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "replyPlacement": { "kind": "top-level" },
+        "sharedThread": false,
+        "retainDraft": false
+      }
+    },
+    {
+      "id": "direct-threaded-stays-at-root",
+      "description": "Direct conversation already in a thread continues at the existing root.",
+      "input": {
+        "conversation": "direct",
+        "messagePosition": "in-thread",
+        "senderClass": "human",
+        "unaddressedMode": "all-channel-agents",
+        "keepAddressedAgentsActive": false,
+        "explicitMentionPubkeys": [],
+        "currentAgentPubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "channelMemberPubkeys": [
+          "1111111111111111111111111111111111111111111111111111111111111111",
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "verifiedChannelAgentPubkeys": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "threadRootEventId": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "persistentThreadAudience": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "manualRemovedPubkeys": [],
+        "recipientLoadError": false
+      },
+      "expected": {
+        "audiencePubkeys": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "replyPlacement": {
+          "kind": "thread-root",
+          "eventId": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "sharedThread": false,
+        "retainDraft": false
+      }
+    },
+    {
+      "id": "channel-one-agent-unaddressed-flat",
+      "description": "Unaddressed channel message with one verified current-channel agent: address that agent; flat top-level response.",
+      "input": {
+        "conversation": "channel",
+        "messagePosition": "top-level",
+        "senderClass": "human",
+        "unaddressedMode": "all-channel-agents",
+        "keepAddressedAgentsActive": false,
+        "explicitMentionPubkeys": [],
+        "currentAgentPubkey": null,
+        "channelMemberPubkeys": [
+          "1111111111111111111111111111111111111111111111111111111111111111",
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "verifiedChannelAgentPubkeys": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "threadRootEventId": null,
+        "persistentThreadAudience": [],
+        "manualRemovedPubkeys": [],
+        "recipientLoadError": false
+      },
+      "expected": {
+        "audiencePubkeys": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "replyPlacement": { "kind": "top-level" },
+        "sharedThread": false,
+        "retainDraft": false
+      }
+    },
+    {
+      "id": "channel-multi-agent-unaddressed-shared-thread",
+      "description": "Unaddressed channel message with multiple verified agents: address all; one shared thread; depth-one sibling replies.",
+      "input": {
+        "conversation": "channel",
+        "messagePosition": "top-level",
+        "senderClass": "human",
+        "unaddressedMode": "all-channel-agents",
+        "keepAddressedAgentsActive": false,
+        "explicitMentionPubkeys": [],
+        "currentAgentPubkey": null,
+        "channelMemberPubkeys": [
+          "1111111111111111111111111111111111111111111111111111111111111111",
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ],
+        "verifiedChannelAgentPubkeys": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ],
+        "threadRootEventId": null,
+        "persistentThreadAudience": [],
+        "manualRemovedPubkeys": [],
+        "recipientLoadError": false
+      },
+      "expected": {
+        "audiencePubkeys": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ],
+        "replyPlacement": {
+          "kind": "thread-root",
+          "eventId": "human-message-id"
+        },
+        "sharedThread": true,
+        "retainDraft": false
+      }
+    },
+    {
+      "id": "explicit-mentions-override-implicit",
+      "description": "Explicit @mentions override implicit all-channel-agents broadcast.",
+      "input": {
+        "conversation": "channel",
+        "messagePosition": "top-level",
+        "senderClass": "human",
+        "unaddressedMode": "all-channel-agents",
+        "keepAddressedAgentsActive": false,
+        "explicitMentionPubkeys": [
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ],
+        "currentAgentPubkey": null,
+        "channelMemberPubkeys": [
+          "1111111111111111111111111111111111111111111111111111111111111111",
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ],
+        "verifiedChannelAgentPubkeys": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ],
+        "threadRootEventId": null,
+        "persistentThreadAudience": [],
+        "manualRemovedPubkeys": [],
+        "recipientLoadError": false
+      },
+      "expected": {
+        "audiencePubkeys": [
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ],
+        "replyPlacement": { "kind": "top-level" },
+        "sharedThread": false,
+        "retainDraft": false
+      }
+    },
+    {
+      "id": "mentions-only-disables-implicit",
+      "description": "Mentions-only mode: unaddressed channel message addresses no agents.",
+      "input": {
+        "conversation": "channel",
+        "messagePosition": "top-level",
+        "senderClass": "human",
+        "unaddressedMode": "mentions-only",
+        "keepAddressedAgentsActive": false,
+        "explicitMentionPubkeys": [],
+        "currentAgentPubkey": null,
+        "channelMemberPubkeys": [
+          "1111111111111111111111111111111111111111111111111111111111111111",
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ],
+        "verifiedChannelAgentPubkeys": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ],
+        "threadRootEventId": null,
+        "persistentThreadAudience": [],
+        "manualRemovedPubkeys": [],
+        "recipientLoadError": false
+      },
+      "expected": {
+        "audiencePubkeys": [],
+        "replyPlacement": { "kind": "top-level" },
+        "sharedThread": false,
+        "retainDraft": false
+      }
+    },
+    {
+      "id": "keep-addressed-agents-persistent",
+      "description": "When Keep addressed agents active is enabled, prior addressed agents join the audience without explicit re-mention.",
+      "input": {
+        "conversation": "channel",
+        "messagePosition": "top-level",
+        "senderClass": "human",
+        "unaddressedMode": "mentions-only",
+        "keepAddressedAgentsActive": true,
+        "explicitMentionPubkeys": [],
+        "currentAgentPubkey": null,
+        "channelMemberPubkeys": [
+          "1111111111111111111111111111111111111111111111111111111111111111",
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ],
+        "verifiedChannelAgentPubkeys": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ],
+        "threadRootEventId": null,
+        "persistentThreadAudience": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "manualRemovedPubkeys": [],
+        "recipientLoadError": false
+      },
+      "expected": {
+        "audiencePubkeys": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "replyPlacement": { "kind": "top-level" },
+        "sharedThread": false,
+        "retainDraft": false
+      }
+    },
+    {
+      "id": "manual-removal-wins",
+      "description": "Manual audience removal wins over persistent Keep-addressed for the current composition.",
+      "input": {
+        "conversation": "channel",
+        "messagePosition": "top-level",
+        "senderClass": "human",
+        "unaddressedMode": "mentions-only",
+        "keepAddressedAgentsActive": true,
+        "explicitMentionPubkeys": [],
+        "currentAgentPubkey": null,
+        "channelMemberPubkeys": [
+          "1111111111111111111111111111111111111111111111111111111111111111",
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ],
+        "verifiedChannelAgentPubkeys": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ],
+        "threadRootEventId": null,
+        "persistentThreadAudience": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ],
+        "manualRemovedPubkeys": [
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ],
+        "recipientLoadError": false
+      },
+      "expected": {
+        "audiencePubkeys": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "replyPlacement": { "kind": "top-level" },
+        "sharedThread": false,
+        "retainDraft": false
+      }
+    },
+    {
+      "id": "exclude-unverified-and-non-members",
+      "description": "Implicit audience excludes non-members and unverified relay agents; never community-wide fanout.",
+      "input": {
+        "conversation": "channel",
+        "messagePosition": "top-level",
+        "senderClass": "human",
+        "unaddressedMode": "all-channel-agents",
+        "keepAddressedAgentsActive": false,
+        "explicitMentionPubkeys": [],
+        "currentAgentPubkey": null,
+        "channelMemberPubkeys": [
+          "1111111111111111111111111111111111111111111111111111111111111111",
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "verifiedChannelAgentPubkeys": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "unverifiedAgentPubkeys": [
+          "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        ],
+        "nonMemberAgentPubkeys": [
+          "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        ],
+        "threadRootEventId": null,
+        "persistentThreadAudience": [],
+        "manualRemovedPubkeys": [],
+        "recipientLoadError": false
+      },
+      "expected": {
+        "audiencePubkeys": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "replyPlacement": { "kind": "top-level" },
+        "sharedThread": false,
+        "retainDraft": false
+      }
+    },
+    {
+      "id": "recipient-load-error-retains-draft",
+      "description": "Recipient-loading errors fail closed and retain the draft.",
+      "input": {
+        "conversation": "channel",
+        "messagePosition": "top-level",
+        "senderClass": "human",
+        "unaddressedMode": "all-channel-agents",
+        "keepAddressedAgentsActive": false,
+        "explicitMentionPubkeys": [],
+        "currentAgentPubkey": null,
+        "channelMemberPubkeys": [
+          "1111111111111111111111111111111111111111111111111111111111111111",
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "verifiedChannelAgentPubkeys": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "threadRootEventId": null,
+        "persistentThreadAudience": [],
+        "manualRemovedPubkeys": [],
+        "recipientLoadError": true
+      },
+      "expected": {
+        "audiencePubkeys": [],
+        "replyPlacement": { "kind": "top-level" },
+        "sharedThread": false,
+        "retainDraft": true
+      }
+    },
+    {
+      "id": "human-followup-in-thread-targets-root",
+      "description": "Human follow-up inside a multi-agent thread targets the root and never nests under an agent reply (no depth two).",
+      "input": {
+        "conversation": "channel",
+        "messagePosition": "in-thread",
+        "senderClass": "human",
+        "unaddressedMode": "all-channel-agents",
+        "keepAddressedAgentsActive": true,
+        "explicitMentionPubkeys": [],
+        "currentAgentPubkey": null,
+        "channelMemberPubkeys": [
+          "1111111111111111111111111111111111111111111111111111111111111111",
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ],
+        "verifiedChannelAgentPubkeys": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ],
+        "threadRootEventId": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "replyingUnderEventId": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "persistentThreadAudience": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ],
+        "manualRemovedPubkeys": [],
+        "recipientLoadError": false
+      },
+      "expected": {
+        "audiencePubkeys": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ],
+        "replyPlacement": {
+          "kind": "thread-root",
+          "eventId": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "sharedThread": true,
+        "retainDraft": false,
+        "nestUnderAgentReply": false
+      }
+    },
+    {
+      "id": "agent-authored-traffic-unchanged",
+      "description": "Agent-only traffic preserves unconstrained placement and existing audience behavior.",
+      "input": {
+        "conversation": "channel",
+        "messagePosition": "top-level",
+        "senderClass": "agent",
+        "unaddressedMode": "all-channel-agents",
+        "keepAddressedAgentsActive": false,
+        "explicitMentionPubkeys": [],
+        "currentAgentPubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "channelMemberPubkeys": [
+          "1111111111111111111111111111111111111111111111111111111111111111",
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ],
+        "verifiedChannelAgentPubkeys": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ],
+        "threadRootEventId": null,
+        "persistentThreadAudience": [],
+        "manualRemovedPubkeys": [],
+        "recipientLoadError": false
+      },
+      "expected": {
+        "audiencePubkeys": [],
+        "replyPlacement": { "kind": "unconstrained" },
+        "sharedThread": false,
+        "retainDraft": false
+      }
+    }
+  ]
+}

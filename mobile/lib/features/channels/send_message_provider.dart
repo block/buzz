@@ -1,10 +1,16 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/contextual_agent/composer_send_audience.dart';
+import '../../shared/contextual_agent/contextual_agent_conversation_policy.dart';
+import '../../shared/contextual_agent/unaddressed_channel_agent_mode.dart';
+import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../channels/channel_management_provider.dart';
 import '../profile/user_cache_provider.dart';
 import '../profile/user_profile.dart';
+import 'channel.dart';
 import 'channel_messages_provider.dart';
+import 'channels_provider.dart';
 
 /// Sends messages by signing an event with the user's nsec and publishing it
 /// over the relay's NIP-42-authenticated WebSocket session.
@@ -16,6 +22,9 @@ class SendMessage {
   final void Function(String channelId, String eventId) _completeLocalMessage;
   final void Function(String channelId, String eventId) _removeLocalMessage;
   final bool Function()? _isDeliveryValid;
+  final UnaddressedChannelAgentMode Function() _readUnaddressedMode;
+  final Future<List<AgentDirectoryEntry>> Function() _fetchAgentDirectory;
+  final Channel? Function(String channelId) _readChannel;
 
   SendMessage({
     required SignedEventRelay signedEventRelay,
@@ -27,13 +36,19 @@ class SendMessage {
     completeLocalMessage,
     required void Function(String channelId, String eventId) removeLocalMessage,
     bool Function()? isDeliveryValid,
+    required UnaddressedChannelAgentMode Function() readUnaddressedMode,
+    required Future<List<AgentDirectoryEntry>> Function() fetchAgentDirectory,
+    required Channel? Function(String channelId) readChannel,
   }) : _signedEventRelay = signedEventRelay,
        _fetchMembers = fetchMembers,
        _readUserCache = readUserCache,
        _addLocalMessage = addLocalMessage,
        _completeLocalMessage = completeLocalMessage,
        _removeLocalMessage = removeLocalMessage,
-       _isDeliveryValid = isDeliveryValid;
+       _isDeliveryValid = isDeliveryValid,
+       _readUnaddressedMode = readUnaddressedMode,
+       _fetchAgentDirectory = fetchAgentDirectory,
+       _readChannel = readChannel;
 
   /// Send a text message to a channel.
   ///
@@ -61,10 +76,17 @@ class SendMessage {
     // the desktop's normalizeMentionPubkeys).
     final selfLower = authorPubkey?.toLowerCase();
     final seenMentions = <String>{?selfLower};
-    final normalizedMentions = <String>[
+    final explicitMentions = <String>[
       for (final pk in resolvedMentions)
-        if (seenMentions.add(pk.toLowerCase())) pk,
+        if (seenMentions.add(pk.toLowerCase())) pk.toLowerCase(),
     ];
+
+    final normalizedMentions = await _mergeContextualAudience(
+      channelId: channelId,
+      explicitMentions: explicitMentions,
+      parentEventId: parentEventId,
+      rootEventId: rootEventId,
+    );
 
     final tags = <List<String>>[
       ['h', channelId],
@@ -153,6 +175,74 @@ class SendMessage {
     return pubkeys.toList();
   }
 
+  /// Merge explicit mentions with the unaddressed-channel agent policy.
+  Future<List<String>> _mergeContextualAudience({
+    required String channelId,
+    required List<String> explicitMentions,
+    String? parentEventId,
+    String? rootEventId,
+  }) async {
+    List<ChannelMember> members;
+    var memberLoadError = false;
+    try {
+      members = await _fetchMembers(channelId);
+    } catch (_) {
+      memberLoadError = true;
+      members = const [];
+    }
+
+    final directory = await _fetchAgentDirectory();
+    final directoryPubkeys = {
+      for (final agent in directory) agent.pubkey.toLowerCase(),
+    };
+    final memberPubkeys = [for (final m in members) m.pubkey.toLowerCase()];
+    final verifiedAgents = [
+      for (final m in members)
+        if (m.isBot || directoryPubkeys.contains(m.pubkey.toLowerCase()))
+          m.pubkey.toLowerCase(),
+    ];
+    final explicitAgentPubkeys = [
+      for (final pk in explicitMentions)
+        if (verifiedAgents.contains(pk) || directoryPubkeys.contains(pk)) pk,
+    ];
+
+    final channel = _readChannel(channelId);
+    final isDm = channel?.isDm == true;
+    final conversation = isDm ? 'direct' : 'channel';
+    final messagePosition = parentEventId != null ? 'in-thread' : 'top-level';
+    String? currentAgent;
+    if (isDm) {
+      final self = _signedEventRelay.pubkey?.toLowerCase();
+      final others = [
+        for (final pk in verifiedAgents)
+          if (pk != self) pk,
+      ];
+      currentAgent = others.isEmpty ? null : others.first;
+    }
+
+    final result = resolveComposerSendAudience(
+      conversation: conversation,
+      messagePosition: messagePosition,
+      unaddressedMode: _readUnaddressedMode(),
+      keepAddressedAgentsActive: false,
+      explicitMentionPubkeys: explicitMentions,
+      explicitAgentPubkeys: explicitAgentPubkeys,
+      currentAgentPubkey: currentAgent,
+      channelMemberPubkeys: memberPubkeys,
+      verifiedChannelAgentPubkeys: verifiedAgents,
+      persistentThreadAudience: const [],
+      threadRootEventId: rootEventId ?? parentEventId,
+      recipientLoadError: memberLoadError && !isDm,
+    );
+
+    if (result.retainDraft) {
+      throw StateError(
+        'Could not resolve agent audience. Your draft was kept.',
+      );
+    }
+    return result.mentionPubkeys;
+  }
+
   /// Build `e`-tags for a thread reply, matching the desktop convention:
   /// - Direct reply to thread head: `["e", id, "", "reply"]`
   /// - Nested reply: `["e", rootId, "", "root"]` + `["e", parentId, "", "reply"]`
@@ -196,6 +286,22 @@ final sendMessageProvider = Provider<SendMessage>((ref) {
       final currentConfig = ref.read(relayConfigProvider);
       return currentConfig.baseUrl == config.baseUrl &&
           currentConfig.nsec == config.nsec;
+    },
+    readUnaddressedMode: () => ref.read(unaddressedChannelAgentModeProvider),
+    fetchAgentDirectory: () async {
+      try {
+        return await ref.read(agentDirectoryProvider.future);
+      } catch (_) {
+        return const [];
+      }
+    },
+    readChannel: (channelId) {
+      final channels = ref.read(channelsProvider).asData?.value;
+      if (channels == null) return null;
+      for (final c in channels) {
+        if (c.id == channelId) return c;
+      }
+      return null;
     },
   );
 });

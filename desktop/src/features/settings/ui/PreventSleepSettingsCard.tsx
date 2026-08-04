@@ -1,16 +1,28 @@
 import { usePreventSleepContext } from "@/features/agents/usePreventSleep";
-import { Switch } from "@/shared/ui/switch";
-import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
+import type { UnaddressedChannelAgentMode } from "@/features/channels/lib/contextualAgentConversationPolicy";
+import { useUnaddressedChannelAgentMode } from "@/features/channels/lib/unaddressedChannelAgentMode";
 import {
   setPersistentAgentAudienceEnabled,
   usePersistentAgentAudience,
 } from "@/features/messages/lib/persistentAgentAudience";
+import { Switch } from "@/shared/ui/switch";
+import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
+
+const UNADDRESSED_MODE_OPTIONS: {
+  value: UnaddressedChannelAgentMode;
+  label: string;
+}[] = [
+  { value: "all-channel-agents", label: "Notify all channel agents" },
+  { value: "mentions-only", label: "Mentions only" },
+];
 
 export function PreventSleepSettingsCard() {
   const { enabled, setEnabled, hasRunningAgents, expired, clearExpired } =
     usePreventSleepContext();
   const persistentAudience = usePersistentAgentAudience(null);
+  const { mode: unaddressedMode, setMode: setUnaddressedMode } =
+    useUnaddressedChannelAgentMode();
 
   return (
     <section className="min-w-0" data-testid="settings-agents">
@@ -20,6 +32,47 @@ export function PreventSleepSettingsCard() {
       />
 
       <SettingsOptionGroup>
+        <SettingsOptionRow className="items-start">
+          <div className="min-w-0 flex-1">
+            <p
+              className="text-sm font-medium"
+              id="unaddressed-channel-agents-label"
+            >
+              Unaddressed channel messages
+            </p>
+            <p className="text-sm font-normal text-muted-foreground">
+              When you post in a channel without @mentioning anyone, choose who
+              is notified. Direct messages always address their current agent.
+            </p>
+            <div
+              aria-labelledby="unaddressed-channel-agents-label"
+              className="mt-3 flex flex-col gap-2"
+              data-testid="unaddressed-channel-agent-mode"
+              role="radiogroup"
+            >
+              {UNADDRESSED_MODE_OPTIONS.map((option) => (
+                <label
+                  className="flex cursor-pointer items-center gap-2 text-sm"
+                  htmlFor={`unaddressed-mode-${option.value}`}
+                  key={option.value}
+                >
+                  <input
+                    checked={unaddressedMode === option.value}
+                    className="size-4 accent-primary"
+                    data-testid={`unaddressed-mode-${option.value}`}
+                    id={`unaddressed-mode-${option.value}`}
+                    name="unaddressed-channel-agent-mode"
+                    onChange={() => setUnaddressedMode(option.value)}
+                    type="radio"
+                    value={option.value}
+                  />
+                  <span>{option.label}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+        </SettingsOptionRow>
+
         <SettingsOptionRow>
           <div className="min-w-0">
             <label
