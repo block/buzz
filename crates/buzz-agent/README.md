@@ -155,7 +155,9 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 | `BUZZ_AGENT_MAX_ROUNDS` | `0` | Tool-loop iteration cap. 0 = unlimited. |
 | `BUZZ_AGENT_MAX_OUTPUT_TOKENS` | `32768` | Per LLM call. Headroom for large tool-call inputs (e.g. file writes via heredoc); Sonnet 4 / Opus 4 cap at 64K. |
 | `BUZZ_AGENT_MAX_CONTEXT_TOKENS` | `200000` | Provider context window used by the handoff gate. |
-| `BUZZ_AGENT_MAX_HANDOFFS` | `10` | Max context handoffs per session before falling back to truncation. |
+| `BUZZ_AGENT_HANDOFF_PERCENT` | `90` | Share of the context window at which handoff fires, 1–100. Lower it on large-window models so one compaction doesn't have to summarize the whole window. |
+| `BUZZ_AGENT_HANDOFF_AT_TOKENS` | `272000` | Absolute ceiling on the handoff threshold, in input tokens. Handoff fires at whichever binds first, this or the percentage. Inert at a 200K window; `0` disables it. |
+| `BUZZ_AGENT_MAX_HANDOFFS` | `80` | Max context handoffs per session before falling back to truncation. A backstop against a compaction loop, not a session length limit — hitting it degrades to dropping the oldest turns. |
 | `BUZZ_AGENT_LLM_TIMEOUT_SECS` | `240` | Max seconds with no response bytes before abandoning an LLM call (per-read inactivity, not wall-clock). |
 | `BUZZ_AGENT_TOOL_TIMEOUT_SECS` | `660` | Per-tool call timeout in seconds |
 | `BUZZ_AGENT_MAX_PARALLEL_TOOLS` | `8` | Max concurrent tool calls per turn (1 = sequential) |

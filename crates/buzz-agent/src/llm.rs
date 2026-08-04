@@ -2351,6 +2351,8 @@ mod tests {
             max_history_bytes: 16 * 1024 * 1024,
             max_tool_result_text_bytes: 50 * 1024,
             max_context_tokens: 200_000,
+            handoff_percent: crate::config::DEFAULT_HANDOFF_PERCENT,
+            handoff_at_tokens: crate::config::DEFAULT_HANDOFF_AT_TOKENS,
             max_handoffs: 1,
             max_parallel_tools: 1,
             hook_timeout: Duration::from_secs(1),

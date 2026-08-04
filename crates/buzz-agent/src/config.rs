@@ -651,7 +651,27 @@ pub const MAX_TOOL_RESULT_BYTES: usize = 8 * 1024 * 1024;
 pub const DEFAULT_TOOL_RESULT_TEXT_BYTES: usize = 50 * 1024;
 pub const MAX_TOOL_CALLS_PER_TURN: usize = 64;
 
-pub const HANDOFF_MAX_OUTPUT_TOKENS: u32 = 8192;
+pub const HANDOFF_MAX_OUTPUT_TOKENS: u32 = 32_000;
+
+/// Share of the context window at which handoff fires. Historically
+/// hard-coded; kept as the default so 200k-window deployments behave
+/// identically. Override with `BUZZ_AGENT_HANDOFF_PERCENT`.
+pub const DEFAULT_HANDOFF_PERCENT: u8 = 90;
+
+/// Default absolute ceiling on the handoff threshold, in input tokens.
+///
+/// Inert at 200k, where 90% (180k) binds first. It exists for large windows:
+/// at 1M, 90% would mean summarising ~900k tokens of history in a single call
+/// — more expensive than most whole sessions, and it discards detail the agent
+/// was still using.
+///
+/// 272k specifically because that is OpenAI's input boundary above which the
+/// higher long-context rates apply. Compacting just under it keeps every
+/// request in the cheaper tier, so the ceiling buys a pricing guarantee on top
+/// of a bounded summarisation cost. Providers with a different boundary want a
+/// different value; set `BUZZ_AGENT_HANDOFF_AT_TOKENS=0` to remove the ceiling
+/// entirely and let the percentage decide.
+pub const DEFAULT_HANDOFF_AT_TOKENS: u64 = 272_000;
 
 pub const HANDOFF_ORIGINAL_TASK_MAX_BYTES: usize = 16 * 1024;
 
@@ -714,6 +734,37 @@ pub struct Config {
     /// operators lower/raise it for other models. Set via
     /// `BUZZ_AGENT_MAX_CONTEXT_TOKENS`.
     pub max_context_tokens: u64,
+    /// Fraction of the context window at which handoff fires, as a percentage.
+    /// Default 90. Set via `BUZZ_AGENT_HANDOFF_PERCENT`.
+    ///
+    /// 90% is a good default at a 200k window and a poor one at 1M: a single
+    /// compaction near the top of a 1M window has to summarise ~900k tokens of
+    /// history in one call, which is expensive and throws away detail the agent
+    /// was still using. Lower this (or set [`Self::handoff_at_tokens`]) on
+    /// large-window models.
+    pub handoff_percent: u8,
+    /// Absolute ceiling on the handoff threshold, in input tokens. Handoff
+    /// fires at whichever comes first, this or [`Self::handoff_percent`].
+    /// Default [`DEFAULT_HANDOFF_AT_TOKENS`]; `0` disables the ceiling and
+    /// leaves the percentage in sole control. Set via
+    /// `BUZZ_AGENT_HANDOFF_AT_TOKENS`.
+    ///
+    /// A ceiling rather than an override because the two knobs answer
+    /// different questions. The percentage protects the window; this protects
+    /// the *summarisation call*, whose cost scales with how much history it has
+    /// to read. At 200k the percentage binds (90% = 180k) and this is inert; at
+    /// 1M this binds and keeps one compaction from having to digest 900k
+    /// tokens. One default therefore covers both without per-model config.
+    pub handoff_at_tokens: u64,
+    /// Compactions allowed per session before falling back to byte truncation.
+    /// Default 80. Set via `BUZZ_AGENT_MAX_HANDOFFS`.
+    ///
+    /// This is a backstop against a pathological compaction loop, not a session
+    /// length limit — reaching it does not stop the agent, it silently degrades
+    /// it to dropping its oldest turns, which loses strictly more than
+    /// compacting again would. A long autonomous run can legitimately compact
+    /// dozens of times, so a cap low enough to hit in normal operation turns the
+    /// degraded path into the common one.
     pub max_handoffs: usize,
     pub max_parallel_tools: usize,
     pub hook_timeout: Duration,
@@ -857,7 +908,12 @@ impl Config {
                 DEFAULT_TOOL_RESULT_TEXT_BYTES,
             )?,
             max_context_tokens: parse_env("BUZZ_AGENT_MAX_CONTEXT_TOKENS", 200_000u64)?,
-            max_handoffs: parse_env("BUZZ_AGENT_MAX_HANDOFFS", 10)?,
+            handoff_percent: parse_env("BUZZ_AGENT_HANDOFF_PERCENT", DEFAULT_HANDOFF_PERCENT)?,
+            handoff_at_tokens: parse_env(
+                "BUZZ_AGENT_HANDOFF_AT_TOKENS",
+                DEFAULT_HANDOFF_AT_TOKENS,
+            )?,
+            max_handoffs: parse_env("BUZZ_AGENT_MAX_HANDOFFS", 80)?,
             max_parallel_tools: parse_env("BUZZ_AGENT_MAX_PARALLEL_TOOLS", 8usize)?,
             hook_timeout: Duration::from_millis(parse_env("BUZZ_AGENT_HOOK_TIMEOUT_MS", 2500u64)?),
             stop_max_rejections: parse_env("BUZZ_AGENT_STOP_MAX_REJECTIONS", 3u32)?,
@@ -900,6 +956,8 @@ impl Config {
             max_history_bytes: 16 * 1024 * 1024,
             max_tool_result_text_bytes: 50 * 1024,
             max_context_tokens: 200_001,
+            handoff_percent: DEFAULT_HANDOFF_PERCENT,
+            handoff_at_tokens: DEFAULT_HANDOFF_AT_TOKENS,
             max_handoffs: 0,
             max_parallel_tools: 1,
             hook_timeout: Duration::from_secs(1),
@@ -927,6 +985,15 @@ impl Config {
                 self.max_context_tokens, self.max_output_tokens
             ));
         }
+        if self.handoff_percent < 1 || self.handoff_percent > 100 {
+            return Err(format!(
+                "config: BUZZ_AGENT_HANDOFF_PERCENT ({}) must be between 1 and 100",
+                self.handoff_percent
+            ));
+        }
+        // No check that handoff_at_tokens fits inside the window: it is a
+        // ceiling, so one larger than the window is inert, not wrong. That is
+        // exactly the default at a 200k window.
         if self.max_history_bytes < MIN_HISTORY_BYTES {
             return Err(format!(
                 "config: BUZZ_AGENT_MAX_HISTORY_BYTES must be >= {MIN_HISTORY_BYTES}"
