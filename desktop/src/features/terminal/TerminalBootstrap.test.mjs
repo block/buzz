@@ -34,7 +34,10 @@ before(async () => {
   dom.window.localStorage.setItem("buzz-follow-system", "false");
   dom.window.isTauri = true;
   dom.window.matchMedia = () => ({
-    matches: false,
+    // This suite exercises bootstrap/IPC behavior, not banner motion. Keeping
+    // animation disabled avoids competing perpetual rAF loops under the full
+    // parallel test runner; motion itself is covered by TerminalSubstrate.
+    matches: true,
     addEventListener() {},
     removeEventListener() {},
   });
