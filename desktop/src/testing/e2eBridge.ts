@@ -88,6 +88,7 @@ export type MockManagedAgentSeed = {
   lastError?: string | null;
   lastErrorCode?: number | null;
   needsRestart?: boolean;
+  restartDiff?: Array<{ field: string; change: unknown }>;
   autoRestartOnConfigChange?: boolean;
   respondTo?: RawManagedAgent["respond_to"];
   respondToAllowlist?: string[];
@@ -369,6 +370,8 @@ type E2eConfig = {
     // (e.g. a generic PDF) without a real upload pipeline. See
     // tests/helpers/bridge.ts:MockBridgeOptions.uploadDescriptors.
     uploadDelayMs?: number;
+    /** Exercise the production composer path that queues files until send. */
+    deferredComposerUploads?: boolean;
     /** Delay (ms) applied to `encode_agent_snapshot_for_send` so E2E tests can
      *  observe the "preparing" phase before the upload begins. 0/undefined = instant. */
     encodeDelayMs?: number;
@@ -401,11 +404,12 @@ type E2eConfig = {
     observerArchiveDefaultEnabled?: boolean;
     /**
      * Delay (ms) applied to `observer_archive_default_enabled` so E2E tests
-     * can observe the pending-reconciliation state (toggle disabled, no
-     * archive-manager `list_save_subscriptions` call) before the policy
-     * resolves. 0/undefined = instant.
+     * can exercise short-lived loading UI. 0/undefined = instant. Prefer the
+     * explicit defer/release seam for pending-state ordering assertions.
      */
     observerArchiveDefaultEnabledDelayMs?: number;
+    /** Hold the observer policy command until the E2E release seam is called. */
+    deferObserverArchiveDefaultEnabled?: boolean;
     /**
      * When set, `observer_archive_default_enabled` throws with this message
      * instead of resolving — drives the fail-closed `.catch()` path in
@@ -823,6 +827,7 @@ type RawManagedAgent = {
   last_error: string | null;
   last_error_code: number | null;
   needs_restart?: boolean;
+  restart_diff?: Array<{ field: string; change: unknown }>;
   log_path: string;
   start_on_app_launch: boolean;
   auto_restart_on_config_change?: boolean;
@@ -1065,6 +1070,15 @@ declare global {
       command: string;
       payload: unknown;
     }>;
+    __BUZZ_E2E_EMIT_MEDIA_UPLOAD_PHASE__?: (input: {
+      id: string;
+      phase: string;
+    }) => Promise<void>;
+    __BUZZ_E2E_EMIT_MEDIA_UPLOAD_PROGRESS__?: (input: {
+      id: string;
+      sent: number;
+      total: number;
+    }) => Promise<void>;
     __BUZZ_E2E_EMIT_MOCK_HUDDLE_TTS_SPEAKER__?: (payload: {
       pubkey: string | null;
       level: number;
@@ -1278,6 +1292,16 @@ declare global {
     /** Count of `get_event` invocations for the current defer-target ID since
      *  the last time `__BUZZ_E2E_DEFER_GET_EVENT__` was set. */
     __BUZZ_E2E_GET_EVENT_CALL_COUNT__?: number;
+    /** Release every deferred observer archive policy command. */
+    __BUZZ_E2E_RELEASE_OBSERVER_ARCHIVE_POLICY__?: () => number;
+    /** Number of observer archive policy commands currently held by the seam. */
+    __BUZZ_E2E_OBSERVER_ARCHIVE_POLICY_PENDING__?: number;
+    /** Hold the next channel read until released. */
+    __BUZZ_E2E_DEFER_NEXT_CHANNELS_READ__?: () => void;
+    /** Disarm the latch and release the held channel read, if any. */
+    __BUZZ_E2E_RELEASE_CHANNELS_READ__?: () => number;
+    /** Number of channel reads currently held by the seam. */
+    __BUZZ_E2E_CHANNELS_READ_PENDING__?: number;
   }
 }
 
@@ -1381,6 +1405,9 @@ type DeferredGetEvent = {
   run: () => Promise<string>;
 };
 let deferredGetEventQueue: DeferredGetEvent[] = [];
+let deferredObserverArchivePolicyQueue: Array<() => void> = [];
+let deferNextChannelsRead = false;
+let deferredChannelsReadResolve: (() => void) | null = null;
 
 const mockDisplayNames = new Map<string, string>([
   [MOCK_IDENTITY_PUBKEY, DEFAULT_MOCK_IDENTITY.display_name],
@@ -1602,6 +1629,7 @@ function cloneManagedAgent(agent: MockManagedAgent): RawManagedAgent {
     last_error: agent.last_error,
     last_error_code: agent.last_error_code,
     needs_restart: agent.needs_restart ?? false,
+    restart_diff: agent.restart_diff ? [...agent.restart_diff] : [],
     log_path: agent.log_path,
     start_on_app_launch: agent.start_on_app_launch,
     auto_restart_on_config_change: agent.auto_restart_on_config_change ?? true,
@@ -2155,6 +2183,7 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     last_error: seed.lastError ?? null,
     last_error_code: seed.lastErrorCode ?? null,
     needs_restart: seed.needsRestart ?? false,
+    restart_diff: seed.restartDiff ?? [],
     log_path: `/tmp/mock-agent-${seed.pubkey}.log`,
     start_on_app_launch: true,
     auto_restart_on_config_change: seed.autoRestartOnConfigChange ?? true,
@@ -8792,7 +8821,7 @@ async function resolveMockUploadDescriptors(
 }
 
 async function resolveMockUploadDescriptorForBytes(
-  args: { data: number[]; filename?: string | null },
+  args: { data: number[] | Uint8Array; filename?: string | null },
   config: E2eConfig | undefined,
 ): Promise<RawBlobDescriptor> {
   const configured = config?.mock?.uploadDescriptors;
@@ -9806,6 +9835,12 @@ export function maybeInstallE2eTauriMocks() {
     emit("huddle-tts-speaker-level", payload);
   window.__BUZZ_E2E_SIGNED_EVENTS__ = [];
   window.__BUZZ_E2E_WEBVIEW_ZOOM__ = 1;
+  window.__BUZZ_E2E_EMIT_MEDIA_UPLOAD_PHASE__ = async (input) => {
+    await emit("media-upload-phase", input);
+  };
+  window.__BUZZ_E2E_EMIT_MEDIA_UPLOAD_PROGRESS__ = async (input) => {
+    await emit("media-upload-progress", input);
+  };
   window.__BUZZ_E2E_SET_MOCK_HUDDLE_SNAPSHOT__ = async ({
     members,
     transcriptionEnabled,
@@ -9944,6 +9979,31 @@ export function maybeInstallE2eTauriMocks() {
   window.__BUZZ_E2E_GET_EVENT_CALL_COUNT__ = 0;
   window.__BUZZ_E2E_DEFER_GET_EVENT__ = null;
   deferredGetEventQueue = [];
+  deferredObserverArchivePolicyQueue = [];
+  window.__BUZZ_E2E_OBSERVER_ARCHIVE_POLICY_PENDING__ = 0;
+  window.__BUZZ_E2E_RELEASE_OBSERVER_ARCHIVE_POLICY__ = () => {
+    const queued = deferredObserverArchivePolicyQueue.splice(0);
+    window.__BUZZ_E2E_OBSERVER_ARCHIVE_POLICY_PENDING__ = 0;
+    for (const resolve of queued) resolve();
+    return queued.length;
+  };
+  deferNextChannelsRead = false;
+  deferredChannelsReadResolve = null;
+  window.__BUZZ_E2E_CHANNELS_READ_PENDING__ = 0;
+  window.__BUZZ_E2E_DEFER_NEXT_CHANNELS_READ__ = () => {
+    if (deferredChannelsReadResolve) {
+      throw new Error("a channel read is already deferred");
+    }
+    deferNextChannelsRead = true;
+  };
+  window.__BUZZ_E2E_RELEASE_CHANNELS_READ__ = () => {
+    deferNextChannelsRead = false;
+    const resolve = deferredChannelsReadResolve;
+    deferredChannelsReadResolve = null;
+    window.__BUZZ_E2E_CHANNELS_READ_PENDING__ = 0;
+    resolve?.();
+    return resolve ? 1 : 0;
+  };
   window.__BUZZ_E2E_RELEASE_GET_EVENT__ = () => {
     const queued = deferredGetEventQueue.splice(0);
     for (const entry of queued) {
@@ -10121,6 +10181,9 @@ export function maybeInstallE2eTauriMocks() {
     const identity = getActiveIdentity(activeConfig);
     window.__BUZZ_E2E_COMMANDS__?.push(command);
     const loggedPayload = (() => {
+      if (payload instanceof Uint8Array) {
+        return { rawByteLength: payload.byteLength };
+      }
       try {
         return JSON.parse(JSON.stringify(payload ?? null));
       } catch {
@@ -11468,8 +11531,20 @@ export function maybeInstallE2eTauriMocks() {
           payload as Parameters<typeof handleDiscoverManagedAgentPrereqs>[0],
           activeConfig,
         );
-      case "get_channels":
-        return handleGetChannels(activeConfig);
+      case "get_channels": {
+        // Claim the one-shot before starting the read, then hold only that
+        // invocation's completion. Later reads pass through and cannot join it.
+        const deferred = deferNextChannelsRead;
+        deferNextChannelsRead = false;
+        const channels = handleGetChannels(activeConfig);
+        if (deferred) {
+          await new Promise<void>((resolve) => {
+            deferredChannelsReadResolve = resolve;
+            window.__BUZZ_E2E_CHANNELS_READ_PENDING__ = 1;
+          });
+        }
+        return channels;
+      }
       case "get_feed":
         return handleGetFeed(
           (payload as Parameters<typeof handleGetFeed>[0]) ?? {},
@@ -12243,6 +12318,13 @@ export function maybeInstallE2eTauriMocks() {
           payload as { data: number[]; filename?: string | null },
           activeConfig,
         );
+      case "upload_media_bytes_raw":
+        return resolveMockUploadDescriptorForBytes(
+          {
+            data: payload as Uint8Array,
+          },
+          activeConfig,
+        );
       case "fetch_media_bytes": {
         // The real command fetches relay media through Rust reqwest and
         // replies with raw bytes (`tauri::ipc::Response` → ArrayBuffer). In
@@ -12580,6 +12662,13 @@ export function maybeInstallE2eTauriMocks() {
         // Returns the ArchiveBatchResult shape the UI expects.
         return { persisted: 0, dropped: 0 };
       case "observer_archive_default_enabled": {
+        if (activeConfig?.mock?.deferObserverArchiveDefaultEnabled) {
+          await new Promise<void>((resolve) => {
+            deferredObserverArchivePolicyQueue.push(resolve);
+            window.__BUZZ_E2E_OBSERVER_ARCHIVE_POLICY_PENDING__ =
+              deferredObserverArchivePolicyQueue.length;
+          });
+        }
         const delayMs =
           activeConfig?.mock?.observerArchiveDefaultEnabledDelayMs;
         if (delayMs && delayMs > 0) {

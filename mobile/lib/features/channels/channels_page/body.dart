@@ -148,11 +148,6 @@ class _SliverChannelsList extends HookConsumerWidget {
             readState.effectiveTimestamp(channelId) != null)
           channelId,
     };
-    final unreadChannelCounts = {
-      for (final entry in unreadState.counts.entries)
-        if (unreadChannelIds.contains(entry.key)) entry.key: entry.value,
-    };
-
     // Build sorted user-defined sections and compute which stream channels
     // belong to each section. Channels not assigned to any valid section fall
     // through to the built-in "Channels" list.
@@ -226,7 +221,6 @@ class _SliverChannelsList extends HookConsumerWidget {
                 onToggle: () => starredExpanded.value = !starredExpanded.value,
                 channels: starredStreamChannels,
                 unreadChannelIds: unreadChannelIds,
-                unreadChannelCounts: unreadChannelCounts,
                 mutedChannelIds: mutedChannelIds,
                 currentPubkey: currentPubkey,
                 emptyLabel: '',
@@ -249,7 +243,6 @@ class _SliverChannelsList extends HookConsumerWidget {
                   sortState.sortModeFor(sectionSortGroupKey(section.id)),
                 ),
                 unreadChannelIds: unreadChannelIds,
-                unreadChannelCounts: unreadChannelCounts,
                 mutedChannelIds: mutedChannelIds,
                 currentPubkey: currentPubkey,
                 expanded: sectionExpanded(section.id),
@@ -340,7 +333,6 @@ class _SliverChannelsList extends HookConsumerWidget {
               onToggle: () => channelsExpanded.value = !channelsExpanded.value,
               channels: ungroupedStreamChannels,
               unreadChannelIds: unreadChannelIds,
-              unreadChannelCounts: unreadChannelCounts,
               mutedChannelIds: mutedChannelIds,
               currentPubkey: currentPubkey,
               emptyLabel: 'No stream channels yet',
@@ -356,7 +348,6 @@ class _SliverChannelsList extends HookConsumerWidget {
               onToggle: () => dmsExpanded.value = !dmsExpanded.value,
               channels: sortedDmChannels,
               unreadChannelIds: unreadChannelIds,
-              unreadChannelCounts: unreadChannelCounts,
               mutedChannelIds: mutedChannelIds,
               currentPubkey: currentPubkey,
               emptyLabel: 'No direct messages yet',

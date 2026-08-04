@@ -316,10 +316,15 @@ type MockBridgeOptions = {
   observerArchiveDefaultEnabled?: boolean;
   /**
    * Delay (ms) applied to `observer_archive_default_enabled` so specs can
-   * assert the pending-reconciliation state (toggle disabled, no
-   * `list_save_subscriptions` call yet) before the policy resolves.
+   * exercise short-lived loading UI. Prefer the explicit defer/release seam
+   * when asserting behavior while the policy check is pending.
    */
   observerArchiveDefaultEnabledDelayMs?: number;
+  /**
+   * Hold `observer_archive_default_enabled` until the test calls
+   * `__BUZZ_E2E_RELEASE_OBSERVER_ARCHIVE_POLICY__`.
+   */
+  deferObserverArchiveDefaultEnabled?: boolean;
   /**
    * When set, `observer_archive_default_enabled` throws with this message —
    * drives the fail-closed path when the policy check itself fails.
@@ -355,6 +360,8 @@ type MockBridgeOptions = {
    * explicit `[]` is honoured (models a picker cancel / no files selected).
    */
   uploadDelayMs?: number;
+  /** Exercise the production composer path that queues files until send. */
+  deferredComposerUploads?: boolean;
   /** Delay (ms) applied to `encode_agent_snapshot_for_send` so E2E tests can
    *  observe the "preparing" phase before the upload begins. 0/undefined = instant. */
   encodeDelayMs?: number;

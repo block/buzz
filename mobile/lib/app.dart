@@ -4,6 +4,9 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import 'features/activity/activity_provider.dart';
+import 'features/activity/inbox_local_state_provider.dart';
+import 'features/activity/inbox_read_state.dart';
 import 'features/channels/unread_badge/unread_badge_provider.dart';
 import 'features/home/home_page.dart';
 import 'features/pairing/pairing_page.dart';
@@ -16,8 +19,31 @@ import 'shared/auth/auth.dart';
 import 'shared/deeplink/pending_deep_link_provider.dart';
 import 'shared/emoji/emoji_burst.dart';
 import 'shared/relay/relay.dart';
+import 'shared/read_state/read_state_provider.dart';
 import 'shared/theme/theme.dart';
 import 'shared/widgets/buzz_loading_indicator.dart';
+
+/// App-shell projection that joins Activity state for the Home navigation.
+///
+/// This belongs at the composition root because it deliberately aggregates
+/// Activity feature providers for a sibling navigation surface.
+final _unreadInboxItemCountProvider = Provider<int>((ref) {
+  final readState = ref.watch(readStateProvider);
+  if (!readState.isReady) return 0;
+
+  final localState = ref.watch(inboxLocalStateProvider);
+  final items = ref.watch(inboxItemsProvider);
+  return items
+      .where(
+        (item) => !isInboxItemDone(
+          item,
+          markerOf: readState.effectiveTimestamp,
+          localUnreadOverrides: localState.unreadIds,
+          localDoneSet: localState.doneIds,
+        ),
+      )
+      .length;
+});
 
 class App extends HookConsumerWidget {
   const App({super.key});
@@ -50,11 +76,13 @@ class App extends HookConsumerWidget {
 
     // Eagerly initialize websocket session and lifecycle observer when
     // authenticated. These providers connect and manage the websocket.
+    var hasUnreadInbox = false;
     if (authState.value?.status == AuthStatus.authenticated) {
       ref.watch(relaySessionProvider);
       ref.watch(observerRelayProvider);
       ref.watch(appLifecycleProvider);
       ref.watch(userStatusCacheProvider);
+      hasUnreadInbox = ref.watch(_unreadInboxItemCountProvider) > 0;
     }
 
     // Start listening for buzz:// links immediately (even pre-auth) so a
@@ -99,8 +127,11 @@ class App extends HookConsumerWidget {
         loading: () => const _SplashScreen(),
         error: (_, _) => const PairingPage(),
         data: (state) => switch (state.status) {
-          AuthStatus.authenticated => const DeepLinkDispatcher(
-            child: HomePage(settingsPageBuilder: _buildSettingsPage),
+          AuthStatus.authenticated => DeepLinkDispatcher(
+            child: HomePage(
+              settingsPageBuilder: _buildSettingsPage,
+              hasUnreadInbox: hasUnreadInbox,
+            ),
           ),
           _ => const DeepLinkDispatcher(
             dispatchMessageLinks: false,

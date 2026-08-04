@@ -1,4 +1,5 @@
 #![recursion_limit = "256"] // Deep Tauri command futures exceed the default layout query depth.
+mod app_menu;
 mod app_state;
 mod archive;
 mod builderlab;
@@ -33,6 +34,9 @@ mod reset;
 mod secret_store;
 mod shutdown;
 mod templates;
+mod terminal_runtime;
+#[cfg_attr(not(test), allow(dead_code))]
+mod terminal_transport;
 #[cfg(target_os = "macos")]
 mod tray_menu;
 mod util;
@@ -105,7 +109,6 @@ pub fn run() {
             eprintln!("buzz-mesh: failed to build big-stack tokio runtime, using default: {error}");
         }
     }
-
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             // Focus the existing window when a duplicate instance launches.
@@ -287,10 +290,7 @@ pub fn run() {
         builder.plugin(tauri_plugin_updater::Builder::new().build())
     };
 
-    #[cfg(not(buzz_updater_enabled))]
-    let builder = builder;
-
-    let app = builder
+    let app = app_menu::install(builder)
         .register_asynchronous_uri_scheme_protocol("buzz-media", |ctx, request, responder| {
             let app = ctx.app_handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -304,6 +304,7 @@ pub fn run() {
         .manage(BuilderlabSession::default())
         .manage(BuilderlabLogin::default())
         .manage(commands::pairing::PairingHandle::new())
+        .manage(terminal_runtime::TerminalSessions::default())
         .setup(move |app| {
             let app_handle = app.handle().clone();
             #[cfg(target_os = "macos")]
@@ -595,10 +596,18 @@ pub fn run() {
                     }
                 });
             }
-
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            terminal_runtime::terminal_attach,
+            terminal_runtime::terminal_detach,
+            terminal_runtime::terminal_close,
+            terminal_runtime::terminal_input,
+            terminal_runtime::terminal_resize,
+            terminal_runtime::terminal_scroll,
+            terminal_runtime::terminal_ack,
+            terminal_runtime::terminal_viewport_ready,
+            terminal_runtime::terminal_focus,
             take_pending_community_deep_link,
             acknowledge_pending_community_deep_link,
             start_builderlab_login,
@@ -714,6 +723,8 @@ pub fn run() {
             pick_and_upload_media,
             pick_and_upload_image,
             upload_media_bytes,
+            upload_media_bytes_raw,
+            cancel_media_upload,
             download_image,
             save_png_data_url,
             download_file,
@@ -888,7 +899,6 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
-
     let shutdown_done = Arc::new(AtomicBool::new(false));
 
     #[cfg(unix)]

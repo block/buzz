@@ -751,3 +751,119 @@
     }
   }
 }
+
+@layer components {
+  .buzz-terminal-substrate {
+    background: var(--buzz-terminal-background, #101014);
+    color: var(--buzz-terminal-foreground, #e8e8ec);
+    display: flex;
+    flex-direction: column;
+    font-family: "JetBrains Mono", monospace;
+    font-variant-ligatures: none;
+    inset: 0;
+    position: absolute;
+    user-select: none;
+    z-index: 0;
+  }
+
+  .buzz-terminal-contract-bar {
+    align-items: stretch;
+    border-bottom: 1px solid hsl(var(--border));
+    display: flex;
+    flex: 0 0 32px;
+    justify-content: space-between;
+    min-width: 0;
+  }
+
+  .buzz-terminal-tabs,
+  .buzz-terminal-readout {
+    align-items: center;
+    display: flex;
+    min-width: 0;
+  }
+
+  .buzz-terminal-tab,
+  .buzz-terminal-tab-select,
+  .buzz-terminal-close,
+  .buzz-terminal-new-tab {
+    align-items: center;
+    background: transparent;
+    border: 0;
+    color: inherit;
+    display: flex;
+    font: inherit;
+    gap: 8px;
+    height: 100%;
+    opacity: 0.62;
+    padding: 0 10px;
+    position: relative;
+  }
+
+  .buzz-terminal-tab-active {
+    opacity: 1;
+  }
+
+  .buzz-terminal-tab-active::after {
+    background: hsl(var(--buzz-selected-accent));
+    bottom: 0;
+    content: "";
+    height: 1px;
+    left: 0;
+    position: absolute;
+    right: 0;
+  }
+
+  .buzz-terminal-designator,
+  .buzz-terminal-readout {
+    font-size: 0.5625rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+
+  .buzz-terminal-close {
+    opacity: 0;
+  }
+
+  .buzz-terminal-tab:hover .buzz-terminal-close,
+  .buzz-terminal-close:focus {
+    opacity: 1;
+  }
+
+  .buzz-terminal-readout {
+    gap: 14px;
+    padding: 0 12px;
+    white-space: nowrap;
+  }
+
+  .buzz-terminal-viewport,
+  .buzz-terminal-viewport canvas {
+    height: 100%;
+    min-height: 0;
+    width: 100%;
+  }
+
+  .buzz-terminal-viewport {
+    overflow: hidden;
+    position: relative;
+  }
+
+  .buzz-terminal-viewport canvas {
+    display: block;
+  }
+
+  .buzz-terminal-welcome {
+    inset: 0;
+    pointer-events: none;
+    position: absolute;
+    z-index: 1;
+  }
+
+  .buzz-terminal-input {
+    height: 1px;
+    left: -10000px;
+    opacity: 0;
+    position: absolute;
+    top: 0;
+    width: 1px;
+  }
+}

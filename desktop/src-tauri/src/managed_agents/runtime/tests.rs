@@ -1271,7 +1271,13 @@ fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRun
     let process = crate::managed_agents::ManagedAgentProcess {
         child,
         log_path: std::path::PathBuf::new(),
-        spawn_config_hash: 0,
+        spawn_config: crate::managed_agents::spawn_snapshot::prospective_spawn_config_snapshot(
+            &minimal_record(&"cc".repeat(32)),
+            &[],
+            &[],
+            "wss://relay.example",
+            &Default::default(),
+        ),
         setup_mode: false,
         adapter_availability: None,
         start_nonce: "test-nonce".to_string(),
@@ -1279,38 +1285,4 @@ fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRun
         job: None,
     };
     crate::managed_agents::ManagedAgentPairRuntime::starting(process)
-}
-
-// ── restart_eligible tests ──────────────────────────────────────────────
-
-#[test]
-fn restart_eligible_true_when_non_orphan_has_hash_drift() {
-    assert!(super::restart_eligible(false, true, false));
-}
-
-#[test]
-fn restart_eligible_true_when_non_orphan_has_availability_drift() {
-    assert!(super::restart_eligible(false, false, true));
-}
-
-#[test]
-fn restart_eligible_false_when_orphan_has_hash_drift() {
-    // An orphan can never be restarted successfully — spawn refuses it —
-    // so hash drift alone must not surface "Restart required".
-    assert!(!super::restart_eligible(true, true, false));
-}
-
-#[test]
-fn restart_eligible_false_when_orphan_has_availability_drift() {
-    assert!(!super::restart_eligible(true, false, true));
-}
-
-#[test]
-fn restart_eligible_false_when_orphan_has_no_drift() {
-    assert!(!super::restart_eligible(true, false, false));
-}
-
-#[test]
-fn restart_eligible_false_when_non_orphan_has_no_drift() {
-    assert!(!super::restart_eligible(false, false, false));
 }
