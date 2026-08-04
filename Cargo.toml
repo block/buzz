@@ -119,6 +119,9 @@ moka    = { version = "0.12", features = ["sync"] }
 # Async stream utilities
 futures-util = "0.3"
 
+# Terminal tables — `buzz --format table` human-friendly list rendering (buzz-cli)
+comfy-table = "7"
+
 # WebSocket client (test client)
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 url = "2"

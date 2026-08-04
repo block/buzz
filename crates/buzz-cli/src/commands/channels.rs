@@ -94,21 +94,28 @@ pub async fn cmd_list_channels(
         .collect();
     let output = match format {
         crate::OutputFormat::Compact => {
-            let compact: Vec<serde_json::Value> = channels
-                .iter()
-                .map(|c| {
-                    serde_json::json!({
-                        "channel_id": c.get("channel_id").cloned().unwrap_or_default(),
-                        "name": c.get("name").cloned().unwrap_or_default(),
-                    })
-                })
-                .collect();
-            serde_json::to_string(&compact).unwrap_or_default()
+            serde_json::to_string(&compact_channels(&channels)).unwrap_or_default()
+        }
+        crate::OutputFormat::Table => {
+            crate::output::render_rows(&["channel_id", "name"], &compact_channels(&channels))
         }
         crate::OutputFormat::Json => serde_json::to_string(&channels).unwrap_or_default(),
     };
     println!("{output}");
     Ok(())
+}
+
+/// Reduced channel fields shared by `--format compact` and `--format table`.
+fn compact_channels(channels: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    channels
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "channel_id": c.get("channel_id").cloned().unwrap_or_default(),
+                "name": c.get("name").cloned().unwrap_or_default(),
+            })
+        })
+        .collect()
 }
 
 /// Search channels by human-readable name (kind:39000 group metadata).

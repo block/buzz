@@ -332,22 +332,29 @@ fn parse_member_pubkeys(event: &serde_json::Value) -> Vec<String> {
 fn format_events(normalized: &str, format: &crate::OutputFormat) -> String {
     match format {
         crate::OutputFormat::Compact => {
-            let events: Vec<serde_json::Value> =
-                serde_json::from_str(normalized).unwrap_or_default();
-            let compact: Vec<serde_json::Value> = events
-                .iter()
-                .map(|e| {
-                    serde_json::json!({
-                        "id": e.get("id").cloned().unwrap_or_default(),
-                        "content": e.get("content").cloned().unwrap_or_default(),
-                        "created_at": e.get("created_at").cloned().unwrap_or_default(),
-                    })
-                })
-                .collect();
-            serde_json::to_string(&compact).unwrap_or_default()
+            serde_json::to_string(&compact_events(normalized)).unwrap_or_default()
         }
+        crate::OutputFormat::Table => crate::output::render_rows(
+            &["id", "content", "created_at"],
+            &compact_events(normalized),
+        ),
         crate::OutputFormat::Json => normalized.to_string(),
     }
+}
+
+/// Reduced message fields shared by `--format compact` and `--format table`.
+fn compact_events(normalized: &str) -> Vec<serde_json::Value> {
+    let events: Vec<serde_json::Value> = serde_json::from_str(normalized).unwrap_or_default();
+    events
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "id": e.get("id").cloned().unwrap_or_default(),
+                "content": e.get("content").cloned().unwrap_or_default(),
+                "created_at": e.get("created_at").cloned().unwrap_or_default(),
+            })
+        })
+        .collect()
 }
 
 pub async fn cmd_get_messages(

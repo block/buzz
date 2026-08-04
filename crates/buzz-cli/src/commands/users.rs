@@ -69,14 +69,10 @@ pub async fn cmd_get_users(
         .collect();
     let output = match format {
         crate::OutputFormat::Compact => {
-            let compact: Vec<serde_json::Value> = profiles
-                .iter()
-                .map(|p| serde_json::json!({
-                    "pubkey": p.get("pubkey").cloned().unwrap_or_default(),
-                    "display_name": p.get("display_name").or_else(|| p.get("name")).cloned().unwrap_or_default(),
-                }))
-                .collect();
-            serde_json::to_string(&compact).unwrap_or_default()
+            serde_json::to_string(&compact_profiles(&profiles)).unwrap_or_default()
+        }
+        crate::OutputFormat::Table => {
+            crate::output::render_rows(&["pubkey", "display_name"], &compact_profiles(&profiles))
         }
         crate::OutputFormat::Json => serde_json::to_string(&profiles).unwrap_or_default(),
     };
@@ -84,6 +80,21 @@ pub async fn cmd_get_users(
     Ok(())
 }
 
+<<<<<<< HEAD
+/// Reduced user fields shared by `--format compact` and `--format table`.
+fn compact_profiles(profiles: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    profiles
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "pubkey": p.get("pubkey").cloned().unwrap_or_default(),
+                "display_name": p
+                    .get("display_name")
+                    .or_else(|| p.get("name"))
+                    .cloned()
+                    .unwrap_or_default(),
+            })
+=======
 fn effective_owner(client: &BuzzClient) -> String {
     client
         .auth_tag_owner_hex()
@@ -174,10 +185,15 @@ fn name_search_profiles(events: &[serde_json::Value], query: &str) -> Vec<serde_
                     .unwrap_or("")),
             );
             Some(serde_json::Value::Object(profile))
+>>>>>>> origin/main
         })
         .collect()
 }
 
+<<<<<<< HEAD
+/// Search for users by display name via NIP-50 full-text search on kind:0 profiles.
+/// Returns [] if the relay does not implement NIP-50 search.
+=======
 fn auth_tag_values(event: &serde_json::Value) -> Vec<&serde_json::Value> {
     event
         .get("tags")
@@ -284,6 +300,7 @@ fn owner_scoped_profiles(
 
 /// Search for users by display name. Owner-scoped searches resolve managed-agent records
 /// and verify their profiles; unscoped searches use NIP-50 and return [] if unsupported.
+>>>>>>> origin/main
 async fn search_by_name(
     client: &BuzzClient,
     query: &str,
@@ -331,6 +348,12 @@ async fn search_by_name(
     };
     let output = match format {
         crate::OutputFormat::Compact => {
+<<<<<<< HEAD
+            serde_json::to_string(&compact_profiles(&profiles)).unwrap_or_default()
+        }
+        crate::OutputFormat::Table => {
+            crate::output::render_rows(&["pubkey", "display_name"], &compact_profiles(&profiles))
+=======
             let compact: Vec<serde_json::Value> = profiles
                 .iter()
                 .map(|p| {
@@ -349,6 +372,7 @@ async fn search_by_name(
                 })
                 .collect();
             serde_json::to_string(&compact).unwrap_or_default()
+>>>>>>> origin/main
         }
         crate::OutputFormat::Json => serde_json::to_string(&profiles).unwrap_or_default(),
     };
