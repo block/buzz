@@ -12,7 +12,7 @@ import 'package:buzz/features/channels/channel_sections/channel_sections_provide
 import 'package:buzz/features/channels/channel_sections/channel_sections_storage.dart';
 import 'package:buzz/features/channels/channels_page.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
-import 'package:buzz/features/channels/read_state/read_state_provider.dart';
+import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/features/profile/profile_avatar.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
@@ -135,6 +135,27 @@ void main() {
     expect(find.text('DMs'), findsOneWidget);
     expect(find.text('Community'), findsOneWidget);
     expect(find.byTooltip('Create or start conversation'), findsOneWidget);
+    expect(find.byTooltip('Channels options'), findsOneWidget);
+    expect(find.byIcon(LucideIcons.ellipsisVertical), findsWidgets);
+    expect(find.byIcon(LucideIcons.arrowUpDown), findsNothing);
+    expect(find.byTooltip('DMs options'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Channels options'));
+    await tester.pumpAndSettle();
+    expect(find.text('Sort: Recent'), findsOneWidget);
+    expect(find.text('Sort: A–Z'), findsOneWidget);
+    final popover = find.byKey(const ValueKey('sort-popover-Channels'));
+    expect(popover, findsOneWidget);
+    expect(
+      find.descendant(of: popover, matching: find.byType(PopupMenuDivider)),
+      findsNothing,
+    );
+    final selectedCheck = find.byKey(const ValueKey('sort-selected-check'));
+    expect(selectedCheck, findsOneWidget);
+    expect(
+      tester.getCenter(selectedCheck).dx,
+      greaterThan(tester.getCenter(find.text('Sort: A–Z')).dx),
+    );
 
     for (final label in ['general', 'Alice']) {
       final text = tester.widget<Text>(find.text(label));
@@ -249,16 +270,25 @@ void main() {
       );
     }
 
-    final menuItems = tester.widgetList<PopupMenuItem<String>>(
-      find.descendant(
-        of: popover,
-        matching: find.byWidgetPredicate(
-          (widget) => widget is PopupMenuItem<String>,
-        ),
-      ),
-    );
-    expect(menuItems, hasLength(4));
-    for (final item in menuItems) {
+    final actionMenuItems = tester
+        .widgetList<PopupMenuItem<String>>(
+          find.descendant(
+            of: popover,
+            matching: find.byWidgetPredicate(
+              (widget) => widget is PopupMenuItem<String>,
+            ),
+          ),
+        )
+        .where(
+          (item) => const {
+            'rename',
+            'move_up',
+            'move_down',
+            'delete',
+          }.contains(item.value),
+        );
+    expect(actionMenuItems, hasLength(4));
+    for (final item in actionMenuItems) {
       expect(
         item.padding,
         const EdgeInsets.fromLTRB(Grid.xs, 0, Grid.twelve, 0),
@@ -484,7 +514,13 @@ void main() {
     expect(find.text('alpha.example.com'), findsOneWidget);
     expect(find.text('bravo.example.com'), findsOneWidget);
     expect(find.text('Rename'), findsNothing);
-    expect(find.byIcon(LucideIcons.ellipsisVertical), findsNothing);
+    expect(
+      find.descendant(
+        of: options,
+        matching: find.byIcon(LucideIcons.ellipsisVertical),
+      ),
+      findsNothing,
+    );
     expect(find.text('Edit'), findsOneWidget);
     expect(find.byIcon(LucideIcons.trash2), findsNothing);
     expect(
@@ -1276,7 +1312,7 @@ void main() {
     expect(find.text('Retry'), findsOneWidget);
   });
 
-  testWidgets('renders and clears unread dot indicator', (tester) async {
+  testWidgets('bolds and clears unread channel labels', (tester) async {
     final channels = [
       Channel(
         id: '1',
@@ -1320,15 +1356,21 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.byKey(const Key('channel-unread-dot-1')), findsOneWidget);
+    expect(
+      tester.widget<Text>(find.text('general')).style?.fontWeight,
+      FontWeight.w700,
+    );
 
     readState.markContextRead('1', 20);
     await tester.pump();
 
-    expect(find.byKey(const Key('channel-unread-dot-1')), findsNothing);
+    expect(
+      tester.widget<Text>(find.text('general')).style?.fontWeight,
+      FontWeight.w400,
+    );
   });
 
-  testWidgets('renders numeric unread count for counted events', (
+  testWidgets('bolds channels with unread thread activity without a badge', (
     tester,
   ) async {
     final channels = [
@@ -1387,9 +1429,10 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.byKey(const Key('channel-unread-1')), findsOneWidget);
-    expect(find.text('2'), findsOneWidget);
-    expect(find.byKey(const Key('channel-unread-dot-1')), findsNothing);
+    expect(
+      tester.widget<Text>(find.text('general')).style?.fontWeight,
+      FontWeight.w700,
+    );
   });
 
   testWidgets('seeds first loaded channels as read', (tester) async {
@@ -1431,7 +1474,10 @@ void main() {
 
     expect(readState.seededContexts, {'1': 20});
     expect(readState.markedContexts, isEmpty);
-    expect(find.byKey(const Key('channel-unread-1')), findsNothing);
+    expect(
+      tester.widget<Text>(find.text('general')).style?.fontWeight,
+      FontWeight.w400,
+    );
   });
 
   testWidgets('waits for read-state readiness before initial seeding', (

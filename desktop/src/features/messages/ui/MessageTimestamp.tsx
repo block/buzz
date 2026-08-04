@@ -37,6 +37,7 @@ export function MessageTimestamp({
               "shrink-0 cursor-default whitespace-nowrap text-xs font-normal leading-4 tabular-nums text-muted-foreground/55",
               className,
             )}
+            data-testid="message-timestamp"
           >
             {displayTime}
           </p>
