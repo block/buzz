@@ -63,6 +63,32 @@ test("upload a file and see a FileCard in the timeline", async ({ page }) => {
     .toContain("download_file");
 });
 
+test("keyboard users can remove a composer file attachment", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+
+  await page.getByRole("button", { name: "Attach image" }).click();
+  await expect(page.getByTestId("message-composer")).toContainText(
+    "quarterly-report.pdf",
+  );
+
+  const removeButton = page.getByTestId("composer-file-attachment-remove");
+
+  // The control may be visually quiet until hover/focus, but must remain in
+  // the tab order. Moving away and back with Tab proves it is keyboard reachable.
+  await removeButton.focus();
+  await page.keyboard.press("Shift+Tab");
+  await page.keyboard.press("Tab");
+  await expect(removeButton).toBeFocused();
+
+  await page.keyboard.press("Enter");
+  await expect(page.getByTestId("message-composer")).not.toContainText(
+    "quarterly-report.pdf",
+  );
+});
+
 test("dropping a file on the channel column attaches it to the composer", async ({
   page,
 }) => {
