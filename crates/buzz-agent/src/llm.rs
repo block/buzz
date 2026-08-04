@@ -96,9 +96,9 @@ pub struct Llm {
     /// Mixture-of-Agents model. A TTL, confirmation count, and failure cooldown
     /// let long-running agents adapt without bouncing as peers briefly flap.
     mesh_auto_state: Mutex<MeshAutoState>,
-    /// Effective model IDs that have explicitly rejected image input during
-    /// this process. Images remain intact in history and are degraded only
-    /// while serializing requests for a model in this set.
+    /// Request model IDs that have explicitly rejected image input during this
+    /// process. Images remain intact in history and are degraded only while
+    /// serializing requests for the exact resolved model in this set.
     image_unsupported_models: Mutex<HashSet<String>>,
     /// Bearer-token source for OpenAI-family requests. Static for OpenAI
     /// (the `OPENAI_COMPAT_API_KEY` env var) and Databricks-with-token
@@ -140,11 +140,16 @@ impl Llm {
         tools: &[ToolDef],
         effective_model: &str,
     ) -> Result<LlmResponse, AgentError> {
-        let send_images = !self
-            .image_unsupported_models
-            .lock()
-            .await
-            .contains(effective_model);
+        // OpenAI-family requests resolve their concrete route inside
+        // `openai_request`, so their image policy is applied there. Other
+        // providers send the configured effective model unchanged.
+        let resolved_image_policy = matches!(cfg.provider, Provider::OpenAi | Provider::Databricks);
+        let send_images = resolved_image_policy
+            || !self
+                .image_unsupported_models
+                .lock()
+                .await
+                .contains(effective_model);
         let mut result = self
             .complete_once(
                 cfg,
@@ -156,7 +161,8 @@ impl Llm {
             )
             .await;
 
-        if send_images
+        if !resolved_image_policy
+            && send_images
             && history_contains_image(history)
             && result.as_ref().is_err_and(is_image_capability_400)
         {
@@ -175,10 +181,14 @@ impl Llm {
 
         // Stamp the effective model into Llm errors so log lines carry
         // `llm: (model-name) 404 Not Found: …` instead of the bare status.
+        // Typed recovery errors also keep the model that produced them.
         result.map_err(|e| match e {
             AgentError::Llm(s) => AgentError::Llm(format!("({effective_model}) {s}")),
             AgentError::LlmModelNotFound(s) => {
                 AgentError::LlmModelNotFound(format!("({effective_model}) {s}"))
+            }
+            AgentError::LlmContextExceeded(s) => {
+                AgentError::LlmContextExceeded(format!("({effective_model}) {s}"))
             }
             other => other,
         })
@@ -237,7 +247,8 @@ impl Llm {
                     cfg,
                     effective_model,
                     !tools.is_empty(),
-                    |use_responses, request_model| {
+                    history_contains_image(history),
+                    |use_responses, request_model, send_images| {
                         // Normalize effort for model-specific availability. Startup no longer rejects
                         // `max` for pure OpenAI/Databricks; this per-model table is the single authority
                         // — it keeps `max` for gpt-5.6, clamps `max`→`xhigh` for other OpenAI-shaped
@@ -370,7 +381,8 @@ impl Llm {
                         cfg,
                         effective_model,
                         false,
-                        |use_responses, request_model| {
+                        false,
+                        |use_responses, request_model, _send_images| {
                             if use_responses {
                                 (
                                     json!({
@@ -462,17 +474,23 @@ impl Llm {
         cfg: &Config,
         effective_model: &str,
         tools_supplied: bool,
+        history_contains_image: bool,
         mut build: F,
     ) -> Result<LlmResponse, AgentError>
     where
-        F: FnMut(bool, &str) -> (Value, OpenAiParse) + Send,
+        F: FnMut(bool, &str, bool) -> (Value, OpenAiParse) + Send,
     {
         let request_model = self.resolve_openai_model(cfg, effective_model).await;
         let adaptive_mesh =
             effective_model == MESH_AUTO_MODEL_ID && request_model == MESH_VIRTUAL_MODEL_ID;
 
         let first = self
-            .openai_request_for_model(cfg, &request_model, &mut build)
+            .openai_request_for_model_with_image_policy(
+                cfg,
+                &request_model,
+                history_contains_image,
+                &mut build,
+            )
             .await;
         match first {
             Err(PostError::MeshFallback(detail)) if adaptive_mesh => {
@@ -484,9 +502,14 @@ impl Llm {
                     provider_message = detail,
                     "relay-mesh auto: collective request failed; retrying once with auto"
                 );
-                self.openai_request_for_model(cfg, MESH_AUTO_MODEL_ID, &mut build)
-                    .await
-                    .map_err(PostError::into_agent)
+                self.openai_request_for_model_with_image_policy(
+                    cfg,
+                    MESH_AUTO_MODEL_ID,
+                    history_contains_image,
+                    &mut build,
+                )
+                .await
+                .map_err(PostError::into_agent)
             }
             Ok(response)
                 if adaptive_mesh
@@ -501,9 +524,14 @@ impl Llm {
                     fallback_model = MESH_AUTO_MODEL_ID,
                     "relay-mesh auto: collective response emitted unstructured tool markup; retrying once with auto"
                 );
-                self.openai_request_for_model(cfg, MESH_AUTO_MODEL_ID, &mut build)
-                    .await
-                    .map_err(PostError::into_agent)
+                self.openai_request_for_model_with_image_policy(
+                    cfg,
+                    MESH_AUTO_MODEL_ID,
+                    history_contains_image,
+                    &mut build,
+                )
+                .await
+                .map_err(PostError::into_agent)
             }
             Ok(response) => Ok(response),
             Err(error) => Err(error.into_agent()),
@@ -652,24 +680,25 @@ impl Llm {
         &self,
         cfg: &Config,
         request_model: &str,
+        send_images: bool,
         build: &mut F,
     ) -> Result<LlmResponse, PostError>
     where
-        F: FnMut(bool, &str) -> (Value, OpenAiParse) + Send,
+        F: FnMut(bool, &str, bool) -> (Value, OpenAiParse) + Send,
     {
         let use_responses = self.auto_upgraded.load(Ordering::Relaxed)
             || matches!(cfg.openai_api, OpenAiApi::Responses)
             || matches!(cfg.openai_api, OpenAiApi::Auto) && is_openai_host(&cfg.base_url);
 
         if use_responses {
-            let (body, parse) = build(true, request_model);
+            let (body, parse) = build(true, request_model, send_images);
             return parse(
                 self.post_openai(cfg, "/responses", &body, request_model)
                     .await?,
             )
             .map_err(PostError::from);
         }
-        let (body, parse) = build(false, request_model);
+        let (body, parse) = build(false, request_model, send_images);
         match self
             .post_openai(cfg, "/chat/completions", &body, request_model)
             .await
@@ -678,7 +707,7 @@ impl Llm {
             Err(PostError::Agent(error))
                 if cfg.openai_api == OpenAiApi::Auto && self.try_upgrade(&error) =>
             {
-                let (body, parse) = build(true, request_model);
+                let (body, parse) = build(true, request_model, send_images);
                 parse(
                     self.post_openai(cfg, "/responses", &body, request_model)
                         .await?,
@@ -687,6 +716,50 @@ impl Llm {
             }
             Err(error) => Err(error),
         }
+    }
+
+    /// Dispatch one already-resolved OpenAI request with the image policy
+    /// keyed to that concrete route. This keeps virtual `auto` routing from
+    /// leaking a rejection between `mesh` and ordinary `auto`.
+    async fn openai_request_for_model_with_image_policy<F>(
+        &self,
+        cfg: &Config,
+        request_model: &str,
+        history_contains_image: bool,
+        build: &mut F,
+    ) -> Result<LlmResponse, PostError>
+    where
+        F: FnMut(bool, &str, bool) -> (Value, OpenAiParse) + Send,
+    {
+        let send_images = !self
+            .image_unsupported_models
+            .lock()
+            .await
+            .contains(request_model);
+        let mut result = self
+            .openai_request_for_model(cfg, request_model, send_images, build)
+            .await;
+
+        if send_images
+            && history_contains_image
+            && result.as_ref().is_err_and(
+                |error| matches!(error, PostError::Agent(error) if is_image_capability_400(error)),
+            )
+        {
+            self.image_unsupported_models
+                .lock()
+                .await
+                .insert(request_model.to_string());
+            tracing::warn!(
+                model = request_model,
+                "llm: model rejected image input; retrying with text placeholders"
+            );
+            result = self
+                .openai_request_for_model(cfg, request_model, false, build)
+                .await;
+        }
+
+        result
     }
 
     async fn databricks_v2_request<F>(
@@ -3384,6 +3457,59 @@ mod tests {
         assert_eq!(
             posted_models(&requests),
             vec!["text-model", "text-model", "text-model", "image-model"]
+        );
+    }
+
+    #[tokio::test]
+    async fn mesh_auto_route_change_preserves_images_for_capable_route() {
+        let (base_url, captured) = spawn_sequence_stub(vec![
+            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
+            StubHttpResponse::ok(chat_response("warmup")),
+            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
+            StubHttpResponse::error(400, "Image input is not supported for this endpoint: mesh."),
+            StubHttpResponse::ok(chat_response("mesh fallback succeeded")),
+            StubHttpResponse::ok(model_catalog(&["model-a"])),
+            StubHttpResponse::ok(chat_response("auto preserved image")),
+        ])
+        .await;
+        let mut config = cfg(Provider::OpenAi);
+        config.base_url = base_url;
+        config.prefer_mesh_for_auto = true;
+        let llm = Llm::new(&config).unwrap();
+
+        complete_model(&llm, &config, "auto").await.unwrap();
+        expire_mesh_catalog_check(&llm).await;
+        assert_eq!(
+            complete_model_with_image(&llm, &config, "auto")
+                .await
+                .unwrap()
+                .text,
+            "mesh fallback succeeded"
+        );
+        expire_mesh_catalog_check(&llm).await;
+        assert_eq!(
+            complete_model_with_image(&llm, &config, "auto")
+                .await
+                .unwrap()
+                .text,
+            "auto preserved image"
+        );
+
+        let requests = captured.lock().await;
+        let posts = requests
+            .iter()
+            .filter(|request| request.method == "POST")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            posted_models(&requests),
+            vec!["auto", "mesh", "mesh", "auto"]
+        );
+        assert!(request_body_contains_binary_image(posts[1]));
+        assert!(!request_body_contains_binary_image(posts[2]));
+        assert!(request_body_contains_image_placeholder(posts[2]));
+        assert!(
+            request_body_contains_binary_image(posts[3]),
+            "a rejection learned for resolved mesh must not degrade later auto routing"
         );
     }
 
