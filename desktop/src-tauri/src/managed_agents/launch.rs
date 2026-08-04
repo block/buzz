@@ -18,6 +18,16 @@ use super::{
     known_acp_runtime, resolve_session_title, ManagedAgentRecord, TeamRecord, SESSION_TITLE_ENV_VAR,
 };
 
+/// The developer MCP command for one effective agent command — the single
+/// derivation shared by the launch contract and the spawn-config snapshot,
+/// so the restart badge can never disagree with what a body actually runs.
+pub(crate) fn effective_mcp_command(effective_command: &str) -> Option<String> {
+    known_acp_runtime(effective_command)
+        .and_then(|meta| meta.mcp_command)
+        .filter(|command| !command.is_empty())
+        .map(str::to_string)
+}
+
 /// Resolve the portable launch contract for one managed agent.
 ///
 /// `descriptor` is the single authoritative command/args/env resolution from
@@ -97,10 +107,7 @@ pub(crate) fn resolve_launch_spec(
 
     // Vestigial-but-live MCP server binary (see `KnownAcpRuntime::mcp_command`):
     // carried as a command *name*; substrates resolve it like `command`.
-    let mcp_command = runtime_meta
-        .and_then(|meta| meta.mcp_command)
-        .filter(|command| !command.is_empty())
-        .map(str::to_string);
+    let mcp_command = effective_mcp_command(&descriptor.command);
 
     LaunchSpec::new(
         descriptor.command.clone(),
