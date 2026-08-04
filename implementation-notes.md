@@ -36,3 +36,21 @@
   Docker Desktop daemon was unavailable at
   `/Users/justinperea/.docker/run/docker.sock`. The relay's new fast unit test
   and all 636 `buzz-acp` library tests passed without Docker.
+
+## 2026-08-04 refresh
+
+- Preserve the original tested branch and create
+  `fix/workflow-owner-only-agent-wake-v2` from current `origin/main` instead of
+  rebasing or force-pushing the existing review artifact.
+- The original commit cherry-picked cleanly onto `feccf4eab`; this is a source
+  refresh only. The trust contract remains unchanged.
+- An earlier upstream commit used a similar dedicated `workflow-owner` tag,
+  but it is not an ancestor of current `origin/main` and the current source no
+  longer contains that path. Do not treat commit history alone as proof that
+  the fix ships today.
+- Justin's fork `main` remains at the original base commit, so the refreshed
+  branch must target the fork deliberately and must not be mistaken for a
+  production deployment.
+- Live acceptance still requires two separately deployed artifacts: the relay
+  must emit the dedicated actor tag and the installed ACP harness must verify
+  it. A passing source branch cannot substitute for that end-to-end check.
