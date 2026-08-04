@@ -25,7 +25,7 @@ pub(crate) fn runtime_metadata_env_vars<'a>(
 }
 
 /// Env var carrying the session title to the harness. Shared with
-/// `spawn_hash` so the restart badge hashes the same key the spawn writes.
+/// `spawn_snapshot` so the restart badge records the same key the spawn writes.
 pub(crate) const SESSION_TITLE_ENV_VAR: &str = "BUZZ_ACP_SESSION_TITLE";
 
 /// Resolve the session title for an agent: its `display_name` when it has one,

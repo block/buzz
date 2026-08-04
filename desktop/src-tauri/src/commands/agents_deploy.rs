@@ -76,7 +76,7 @@ pub(super) fn build_launch_block(
         policy_env.insert(SESSION_TITLE_ENV_VAR.into(), value);
     }
     if let Some(value) =
-        crate::managed_agents::spawn_hash::effective_team_instructions(record, teams)
+        crate::managed_agents::spawn_snapshot::effective_team_instructions(record, teams)
     {
         policy_env.insert("BUZZ_ACP_TEAM_INSTRUCTIONS".into(), value);
     }
