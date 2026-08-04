@@ -260,6 +260,67 @@ test("persistent agents restore through the native inline mention UI", async ({
   await expect(input.locator(".agent-mention-highlight")).toHaveCount(1);
 });
 
+test("audience chips remove and explicitly restore one persistent agent", async ({
+  page,
+}) => {
+  await seedAudience(page, [AGENT_A, AGENT_B]);
+  await installAudienceFixtures(page);
+  await openThread(page);
+
+  const composer = threadComposer(page);
+  const input = composer.getByTestId("message-input");
+  await expect(composer.getByTestId("composer-audience-chips")).toBeVisible();
+  await expect(
+    composer.getByTestId(`composer-audience-chip-${AGENT_A}`),
+  ).toContainText("Morgarita");
+  await expect(
+    composer.getByTestId(`composer-audience-chip-${AGENT_B}`),
+  ).toContainText("Vogue");
+
+  await composer
+    .getByTestId(`composer-audience-chip-remove-${AGENT_A}`)
+    .click();
+  await expect(
+    composer.getByTestId(`composer-audience-chip-${AGENT_A}`),
+  ).toHaveCount(0);
+  await expect(input).not.toContainText("@Morgarita");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (scope) =>
+          JSON.parse(
+            localStorage.getItem("buzz:persistent-agent-audiences:v2") ?? "{}",
+          )[scope] ?? [],
+        SCOPE,
+      ),
+    )
+    .toEqual([AGENT_B]);
+
+  await input.pressSequentially("@Mor");
+  await composer
+    .getByTestId("mention-autocomplete")
+    .getByText("Morgarita", { exact: true })
+    .click();
+  await input.pressSequentially(" please continue");
+  await composer.getByTestId("send-message").click();
+
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (scope) =>
+          JSON.parse(
+            localStorage.getItem("buzz:persistent-agent-audiences:v2") ?? "{}",
+          )[scope] ?? [],
+        SCOPE,
+      ),
+    )
+    .toEqual([AGENT_A, AGENT_B]);
+  await expect(input).toContainText("@Morgarita");
+  await expect(input).toContainText("@Vogue");
+  await waitForAnimations(page);
+  await composer.screenshot({ path: `${SHOTS}/removable-audience-chips.png` });
+});
+
 for (const theme of ["buzz", "buzz-dark"]) {
   test(`captures native persistent mentions in ${theme}`, async ({ page }) => {
     await seedAudience(page, [AGENT_A, AGENT_B], theme);

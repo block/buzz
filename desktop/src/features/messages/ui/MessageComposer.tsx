@@ -50,6 +50,7 @@ import {
   type MentionSuggestion,
 } from "./MentionAutocomplete";
 import { ComposerDockToolbar } from "./ComposerDockToolbar";
+import { ComposerAudienceChips } from "./ComposerAudienceChips";
 import { NonMemberMentionDialog } from "./NonMemberMentionDialog";
 import { useMentionSendFlow } from "./useMentionSendFlow";
 import { usePersistentAgentMentionHydration } from "./usePersistentAgentMentionHydration";
@@ -292,7 +293,6 @@ function MessageComposerImpl({
     persistentMentionHydration,
   );
   persistentMentionHydrationRef.current = persistentMentionHydration;
-
   const mentionSendFlow = useMentionSendFlow({
     channelId,
     channelLinks,
@@ -609,8 +609,8 @@ function MessageComposerImpl({
         ),
         spoileredAttachmentUrls,
         trimmed,
-        audienceGeneration: persistentAudience.generation,
-        audienceRevision: audienceScope ? persistentAudience.revision : null,
+        audienceGeneration: persistentMentionHydration.audience.generation,
+        audienceRevision: persistentMentionHydration.getAudienceRevision(),
       });
     } finally {
       persistentMentionHydration.endSubmit();
@@ -634,10 +634,7 @@ function MessageComposerImpl({
     syncComposerContentFromEditor,
     onCaptureSendContext,
     onPreparingMentionSendChange,
-    audienceScope,
     persistentMentionHydration,
-    persistentAudience.generation,
-    persistentAudience.revision,
   ]);
   submitMessageRef.current = submitMessage;
 
@@ -955,6 +952,9 @@ function MessageComposerImpl({
                 </button>
               </div>
             ) : null}
+            <ComposerAudienceChips
+              {...persistentMentionHydration.audienceChipsProps}
+            />
 
             {(media.pendingImeta.length > 0 || media.isUploading) && (
               <div className="mb-2 flex items-center gap-2">
