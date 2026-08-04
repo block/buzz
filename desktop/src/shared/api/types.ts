@@ -1,3 +1,5 @@
+import type { GuardianProtection } from "@/shared/api/guardianProtection";
+
 export type ChannelType = "stream" | "forum" | "dm";
 export type ChannelVisibility = "open" | "private";
 export type ChannelRole = "owner" | "admin" | "member" | "guest" | "bot";
@@ -536,18 +538,7 @@ export type AcpRuntimeCatalogEntry = {
    * UI — only "custom" entries can be edited or deleted.
    */
   source: "builtin" | "preset" | "custom";
-  guardianProtection: {
-    level: "l0" | "l1" | "l2" | "l3";
-    summary: string;
-    lockdownAllowed: boolean;
-  };
-  /**
-   * Definition-level environment variables for `source: custom` entries.
-   *
-   * Populated by the backend from `HarnessDefinition.env` so the edit form can
-   * read them back without losing existing env vars on save. Always absent/empty
-   * for `builtin` and `preset` entries.
-   */
+  guardianProtection: GuardianProtection;
   definitionEnv?: Record<string, string>;
 };
 

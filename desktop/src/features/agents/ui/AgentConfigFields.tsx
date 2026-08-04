@@ -55,7 +55,7 @@ import {
 import { SettingsOptionGroup } from "@/features/settings/ui/SettingsOptionGroup";
 import { AdvancedRequiredBadge } from "./AdvancedRequiredBadge";
 import { GuardianPolicyField } from "./GuardianPolicyField";
-import { GUARDIAN_POLICY_ENV } from "./guardianPolicy";
+import { getGenericEnvVars, mergeGenericEnvVars } from "./guardianPolicy";
 import { getGlobalAgentCredentialState } from "./globalAgentCredentialState";
 export const EMPTY_GLOBAL_CONFIG: GlobalAgentConfig = {
   env_vars: {},
@@ -63,33 +63,6 @@ export const EMPTY_GLOBAL_CONFIG: GlobalAgentConfig = {
   model: null,
   preferred_runtime: null,
 };
-/** Baked env keys that route to structured controls, not the generic env editor. */
-const BAKED_STRUCTURED_KEYS = new Set([
-  "BUZZ_AGENT_PROVIDER",
-  "BUZZ_AGENT_MODEL",
-  BUZZ_AGENT_THINKING_EFFORT,
-  GUARDIAN_POLICY_ENV,
-]);
-
-export function getGenericEnvVars(
-  envVars: Record<string, string>,
-): Record<string, string> {
-  return Object.fromEntries(
-    Object.entries(envVars).filter(([key]) => !BAKED_STRUCTURED_KEYS.has(key)),
-  );
-}
-
-export function mergeGenericEnvVars(
-  current: Record<string, string>,
-  nextGeneric: Record<string, string>,
-): Record<string, string> {
-  const merged = { ...nextGeneric };
-  for (const key of BAKED_STRUCTURED_KEYS) {
-    const value = current[key];
-    if (value !== undefined) merged[key] = value;
-  }
-  return merged;
-}
 const PROGRESSIVE_FIELDS_TRANSITION = {
   duration: 0.22,
   ease: [0.23, 1, 0.32, 1],

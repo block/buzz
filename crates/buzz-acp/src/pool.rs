@@ -1008,7 +1008,7 @@ async fn create_session_and_apply_model(
 
     // Keep a harness-side enforcement fallback when an adapter cannot apply
     // its native mode.
-    agent.acp.set_permission_mode(ctx.permission_mode.clone());
+    agent.acp.set_permission_mode(ctx.permission_mode);
 
     // Apply permission mode if not the agent's built-in default AND the agent
     // advertises the requested mode in session/new. Agents that don't support

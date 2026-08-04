@@ -20,13 +20,12 @@ import test from "node:test";
 
 import {
   CANONICAL_CONFIG_BEHAVIORS,
-  getGenericEnvVars,
-  mergeGenericEnvVars,
   resolveDisclosure,
   shouldRevealDependentConfigFields,
   shouldRenderModelControl,
   shouldShowModelStatusMessage,
 } from "./AgentConfigFields.tsx";
+import { getGenericEnvVars, mergeGenericEnvVars } from "./guardianPolicy.ts";
 
 test("structured settings cannot be edited through the raw environment editor", () => {
   const current = {

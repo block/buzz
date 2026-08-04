@@ -391,17 +391,14 @@ pub fn run() {
             };
 
             if reset_outcome.failed {
-                // Surface reset-failed state — skip identity resolution and
-                // all side-effecting setup. The webview still loads so the
-                // frontend can show the recovery screen via get_identity.
+                // Skip identity resolution and setup, but load the webview so the frontend can
+                // show the recovery screen via get_identity.
                 let state = app_handle.state::<AppState>();
                 state
                     .reset_failed
                     .store(true, std::sync::atomic::Ordering::Release);
                 return Ok(());
             }
-
-            // Run all pre-identity data migrations before state loads from disk.
             if reset_outcome.completed {
                 migration::run_boot_migrations_after_reset(&app_handle);
             } else {

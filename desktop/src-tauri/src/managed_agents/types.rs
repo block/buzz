@@ -629,25 +629,6 @@ pub enum HarnessSource {
     Custom,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-// L1/L3 are part of the versioned wire contract even before an adapter earns
-// either qualification in the checked-in conformance matrix.
-#[allow(dead_code)]
-pub enum GuardianProtectionLevel {
-    L0,
-    L1,
-    L2,
-    L3,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct GuardianRuntimeProtection {
-    pub level: GuardianProtectionLevel,
-    pub summary: String,
-    pub lockdown_allowed: bool,
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub struct AcpRuntimeCatalogEntry {
     pub id: String,
@@ -682,11 +663,8 @@ pub struct AcpRuntimeCatalogEntry {
     /// Whether this entry came from the compiled-in catalog or a user-supplied
     /// JSON file in `custom_harnesses/`. The UI uses this to decide editability.
     pub source: HarnessSource,
-    /// Strongest protection proven for this runtime entry. Product names alone
-    /// never elevate this value.
-    pub guardian_protection: GuardianRuntimeProtection,
-    /// Definition-level environment variables for `source: custom` entries.
-    ///
+    pub guardian_protection: super::guardian_protection::GuardianRuntimeProtection,
+    /// Definition-level environment variables for custom entries.
     /// Populated from `HarnessDefinition.env` so the edit form can read them
     /// back and the user doesn't silently lose env vars when saving.  Always
     /// empty for `builtin` and `preset` entries (those env values come from the

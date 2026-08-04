@@ -1,10 +1,8 @@
 use std::collections::BTreeMap;
 
-use crate::managed_agents::types::{
-    GuardianProtectionLevel, GuardianRuntimeProtection, HarnessSource,
-};
 use crate::managed_agents::{
     discovery::known_acp_runtime, normalize_agent_args, types::ManagedAgentRecord,
+    GuardianProtectionLevel, GuardianRuntimeProtection, HarnessSource,
 };
 
 use super::resolve_effective_agent_env_with_def;
@@ -178,7 +176,7 @@ mod tests {
         guardian_runtime_protection, resolve_guardian_policy, validate_guardian_launch,
         EffectiveHarnessDescriptor, GuardianPermissionPolicy,
     };
-    use crate::managed_agents::types::{GuardianProtectionLevel, HarnessSource};
+    use crate::managed_agents::{GuardianProtectionLevel, HarnessSource};
     use std::collections::BTreeMap;
 
     fn layer(value: &str) -> BTreeMap<String, String> {

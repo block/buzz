@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 
 use crate::managed_agents::{
     buzz_managed_command_path, buzz_managed_node_bin_dir, buzz_managed_npm_bin_dir,
-    AcpAvailabilityStatus, AcpRuntimeCatalogEntry, AuthStatus, CommandAvailabilityInfo,
-    HarnessSource,
+    readiness::guardian_runtime_protection, AcpAvailabilityStatus, AcpRuntimeCatalogEntry,
+    AuthStatus, CommandAvailabilityInfo, HarnessSource,
 };
 
 mod presets;
@@ -1423,11 +1423,7 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntr
             auth_status: AuthStatus::Unknown,
             login_hint: None,
             source: HarnessSource::Builtin,
-            guardian_protection: crate::managed_agents::readiness::guardian_runtime_protection(
-                runtime.id,
-                HarnessSource::Builtin,
-            ),
-            // Builtin entries have no user-editable env; definition_env is empty.
+            guardian_protection: guardian_runtime_protection(runtime.id, HarnessSource::Builtin),
             definition_env: Default::default(),
         },
     }
@@ -1586,12 +1582,8 @@ pub fn discover_acp_runtimes_from(
                 auth_status: AuthStatus::NotApplicable,
                 login_hint: None,
                 source: HarnessSource::Custom,
-                guardian_protection: crate::managed_agents::readiness::guardian_runtime_protection(
-                    &def.id,
-                    HarnessSource::Custom,
-                ),
-                // Carry definition env into the catalog so the edit form can
-                // read it back — prevents silently erasing env on save.
+                guardian_protection: guardian_runtime_protection(&def.id, HarnessSource::Custom),
+                // Preserve custom environment variables for editing.
                 definition_env: def.env.clone(),
             });
         }

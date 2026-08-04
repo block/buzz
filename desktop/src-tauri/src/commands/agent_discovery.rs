@@ -3,6 +3,7 @@ use tauri::State;
 use crate::{
     app_state::AppState,
     managed_agents::{
+        readiness::guardian_runtime_protection,
         command_availability, is_npm_global_install, AcpRuntimeCatalogEntry,
         DiscoverManagedAgentPrereqsRequest, InstallRuntimeResult, ManagedAgentPrereqsInfo,
         RelayAgentInfo, DEFAULT_ACP_COMMAND,
@@ -10,7 +11,6 @@ use crate::{
     nostr_convert,
     relay::query_relay,
 };
-
 mod post_install_verification;
 
 fn active_installs() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
@@ -186,11 +186,7 @@ pub async fn save_custom_harness(
         auth_status: AuthStatus::NotApplicable,
         login_hint: None,
         source: HarnessSource::Custom,
-        guardian_protection: crate::managed_agents::readiness::guardian_runtime_protection(
-            &definition.id,
-            HarnessSource::Custom,
-        ),
-        // Carry definition env back so the edit form can read and preserve it.
+        guardian_protection: guardian_runtime_protection(&definition.id, HarnessSource::Custom),
         definition_env: definition.env,
     })
 }
