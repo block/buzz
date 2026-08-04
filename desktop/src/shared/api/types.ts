@@ -126,6 +126,9 @@ export type UserProfileSummary = {
    * `display_name` *or* `name` at send time). */
   name?: string | null;
   avatarUrl: string | null;
+  /** Kind-0 `about` — one-line role/description shown in the @-mention
+   * selector for agents. */
+  about?: string | null;
   nip05Handle: string | null;
   ownerPubkey: string | null;
   isAgent?: boolean;
@@ -140,6 +143,10 @@ export type UserSearchResult = {
   pubkey: string;
   displayName: string | null;
   avatarUrl: string | null;
+  /** Kind-0 `about` — one-line role/description shown in the @-mention
+   * selector for agents. Optional: synthetic results (e.g. locally known
+   * agents folded into search) omit it. */
+  about?: string | null;
   nip05Handle: string | null;
   ownerPubkey: string | null;
   isAgent: boolean;

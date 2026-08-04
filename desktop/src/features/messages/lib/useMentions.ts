@@ -282,6 +282,9 @@ export function useMentions(
         role: current.role ?? candidate.role ?? null,
         secondaryLabel:
           current.secondaryLabel ?? candidate.secondaryLabel ?? null,
+        // `??` (not `?? null`) so both-undefined stays undefined — that is
+        // the "still unknown, resolve from the profile lookup" signal.
+        description: current.description ?? candidate.description,
         ownerPubkey:
           current.ownerPubkey ??
           candidate.ownerPubkey ??
@@ -379,6 +382,7 @@ export function useMentions(
             relayAgentNamesByPubkey.has(pubkey),
           personaName: personaNameByPubkey.get(pubkey) ?? null,
           secondaryLabel: formatSearchUserSecondaryLabel(user),
+          description: user.about ?? null,
           ownerPubkey: user.ownerPubkey ?? null,
           isGlobalSearchResult: true,
           isManagedAgent: managedAgentNamesByPubkey.has(pubkey),
@@ -456,6 +460,40 @@ export function useMentions(
   const ownerProfilesQuery = useUsersBatchQuery(ownerPubkeys, {
     enabled: ownerPubkeys.length > 0,
   });
+
+  // Agent candidates whose kind-0 `about` is not already known — neither
+  // resolved at candidate-build time (search results) nor present in the
+  // caller's profile lookup. Batch-resolve them so the selector can show a
+  // role line even for agents who haven't authored anything in the loaded
+  // timeline. The per-pubkey entry cache behind useUsersBatchQuery keeps
+  // repeat lookups off the network.
+  const agentProfilePubkeys = React.useMemo(
+    () => [
+      ...new Set(
+        mentionCandidates
+          .filter(
+            (candidate) =>
+              candidate.isAgent &&
+              candidate.pubkey &&
+              candidate.description === undefined &&
+              !profiles?.[candidate.pubkey],
+          )
+          .map((candidate) => candidate.pubkey as string),
+      ),
+    ],
+    [mentionCandidates, profiles],
+  );
+  const agentProfilesQuery = useUsersBatchQuery(agentProfilePubkeys, {
+    enabled: agentProfilePubkeys.length > 0,
+  });
+  const mentionProfiles = React.useMemo<UserProfileLookup | undefined>(() => {
+    const agentProfiles = agentProfilesQuery.data?.profiles;
+    if (!agentProfiles || Object.keys(agentProfiles).length === 0) {
+      return profiles;
+    }
+    // Caller-provided profiles win on conflict.
+    return { ...agentProfiles, ...profiles };
+  }, [agentProfilesQuery.data?.profiles, profiles]);
 
   const searchableNames = React.useMemo<string[]>(() => {
     const names: string[] = [];
@@ -551,17 +589,17 @@ export function useMentions(
           channelType: options?.channelType,
           currentPubkey,
           ownerProfiles: ownerProfilesQuery.data?.profiles,
-          profiles,
+          profiles: mentionProfiles,
         }),
       );
   }, [
     activePersonaIds,
     currentPubkey,
     mentionCandidatesWithTeams,
+    mentionProfiles,
     mentionQuery,
     options?.channelType,
     ownerProfilesQuery.data?.profiles,
-    profiles,
   ]);
 
   const fetchMoreSuggestions = React.useCallback(() => {
@@ -930,7 +968,7 @@ export function useMentions(
             channelType: options?.channelType,
             currentPubkey,
             ownerProfiles: ownerProfilesQuery.data?.profiles,
-            profiles,
+            profiles: mentionProfiles,
           });
           if (flushed?.type === "match") {
             flushedMentionStartIndexRef.current = flushed.startIndex;
@@ -960,10 +998,10 @@ export function useMentions(
       currentPubkey,
       isMentionOpen,
       mentionCandidatesWithTeams,
+      mentionProfiles,
       mentionSelectedIndex,
       options?.channelType,
       ownerProfilesQuery.data?.profiles,
-      profiles,
       suggestions,
     ],
   );

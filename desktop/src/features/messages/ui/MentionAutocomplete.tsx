@@ -25,6 +25,8 @@ export type MentionSuggestion = {
   notInChannel?: boolean;
   ownerLabel?: string | null;
   role?: string | null;
+  /** One-line agent role/description from the kind-0 `about` field. */
+  description?: string | null;
 };
 
 type MentionAutocompleteProps = {
@@ -163,13 +165,23 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                         team · {suggestion.teamMembers?.length ?? 0} agents
                       </span>
                     ) : suggestion.isAgent ? (
-                      <span className="inline-flex shrink-0 items-center gap-1">
+                      <span className="inline-flex min-w-0 items-center gap-1">
                         <Bot
                           aria-hidden="true"
-                          className="h-3.5 w-3.5"
+                          className="h-3.5 w-3.5 shrink-0"
                           data-testid="mention-agent-icon"
                         />
-                        {agentLabel}
+                        {suggestion.description ? (
+                          <span
+                            className="min-w-0 truncate"
+                            data-testid="mention-agent-description"
+                            title={suggestion.description}
+                          >
+                            {suggestion.description}
+                          </span>
+                        ) : (
+                          agentLabel
+                        )}
                       </span>
                     ) : suggestion.role ? (
                       <Badge
