@@ -41,6 +41,7 @@ import type {
 import { summarizeProjectActivityEvents } from "./projectActivity.mjs";
 import { resolveProjectDefaultBranch } from "./lib/projectBranches";
 import { effectiveCloneUrls } from "./lib/projectCloneUrl";
+import { isProjectDeletedByAddress } from "./lib/projectDeletion";
 import type { ProjectIssue } from "./projectIssues.mjs";
 import { projectIssueEventsToIssues } from "./projectIssues.mjs";
 import type {
@@ -170,13 +171,18 @@ function isHiddenLocally(project: Project): boolean {
 }
 
 function isDeletedByA(project: Project, deletionEvents: RelayEvent[]): boolean {
-  const coordinate = projectCoordinate(project);
-  // NIP-09: a deletion is only valid when signed by the author of the
-  // referenced event — otherwise anyone could hide someone else's project.
-  return deletionEvents.some(
-    (event) =>
-      event.pubkey.toLowerCase() === project.owner.toLowerCase() &&
-      event.tags.some((tag) => tag[0] === "a" && tag[1] === coordinate),
+  // NIP-09: only the announcement author can tombstone the address, and only
+  // while the delete is at least as new as the current announcement. An older
+  // delete must not hide a later re-announce of the same d-tag (delete →
+  // recreate with the same name).
+  return isProjectDeletedByAddress(
+    KIND_REPO_ANNOUNCEMENT,
+    {
+      owner: project.owner,
+      dtag: project.dtag,
+      createdAt: project.createdAt,
+    },
+    deletionEvents,
   );
 }
 
