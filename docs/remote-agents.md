@@ -1573,25 +1573,17 @@ Desktop- and harness-side, discovered during this design:
    environment through unmodified; combined with launchd's minimal PATH this
    breaks kubeconfig exec plugins. Mitigated provider-side (§K8s Auth);
    a desktop-side PATH augmentation would fix the class.
-3. **Deploy payload launch resolution and provider redaction** (the
-   prerequisite this spec names for §Launch data — a desktop code change, not
-   spec text). At `c1bca1b56`, `deploy_payload_json` serialized raw record
-   bytes and a three-layer `merged_user_env` where local spawn used
-   `resolve_effective_harness_descriptor`'s six-layer resolution. The current
-   desktop correction now emits the resolved `launch` block, including the
+3. **Deploy payload launch resolution and provider redaction — resolved.**
+   The desktop correction now emits the resolved `launch` block, including the
    command, args, layered env, policy env, and owner key needed for a
-   semantics-preserving remote launch. The historical consequences were: (a)
-   no per-runtime model/provider env; (b) persona-derived command and
-   definition-provided args serialized incorrectly; (c) no owner key for
-   null-auth-tag shutdown; (d) missing spawn policy; and (e) mesh-provider
-   loopback deployment not refused.
-
-   **Remaining security gate:** because launch maps can contain credentials,
-   provider redaction must collect non-empty string values from
-   `agent.env_vars`, `agent.launch.env`, and `agent.launch.policy_env` before
-   formatting provider stderr or structured errors. The current correction
-   must be independently tested against both error surfaces. A provider that
-   echoes a launch-only secret into an error must come back redacted.
+   semantics-preserving remote launch. Provider error formatting now collects
+   non-empty string values from `agent.env_vars`, `agent.launch.env`, and
+   `agent.launch.policy_env` before formatting provider stderr or structured
+   errors. Backend regressions cover both error surfaces and malformed request
+   shapes; the Rust 1.95 library run passed the new redaction tests. This
+   closes the launch-map redaction gate. The historical payload gap at
+   `c1bca1b56` and any unrelated harness/provider prerequisites remain separate
+   defects below.
 4. **The I5 reaper does not exist, and its natural home is a trap**
    (harness code prerequisite). `BUZZ_ACP_EXIT_AFTER_INACTIVITY` appears
    nowhere in the harness at `c1bca1b56`; §Auto-Stop is a design, not a

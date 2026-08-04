@@ -682,8 +682,7 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("provider temp directory");
         let path = dir.path().join("fake-provider");
-        std::fs::write(&path, format!("#!/bin/sh\nset -eu\n{body}\n"))
-            .expect("provider script");
+        std::fs::write(&path, format!("#!/bin/sh\nset -eu\n{body}\n")).expect("provider script");
         let mut permissions = std::fs::metadata(&path)
             .expect("provider metadata")
             .permissions();

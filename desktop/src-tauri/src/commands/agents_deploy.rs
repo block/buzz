@@ -130,10 +130,44 @@ pub(super) fn build_deploy_payload(
 
     Ok(deploy_payload_json(
         record,
-        crate::relay::effective_agent_relay_url(
-            &record.relay_url,
-            &relay_ws_url_with_override(state),
-        ),
+        DeployPayloadContext {
+            relay_url: crate::relay::effective_agent_relay_url(
+                &record.relay_url,
+                &relay_ws_url_with_override(state),
+            ),
+            effective_model,
+            effective_provider,
+            effective_prompt,
+            reply_placement,
+            merged_env,
+            launch,
+            policy_env,
+            owner_pubkey,
+        },
+    ))
+}
+
+pub(super) struct DeployPayloadContext {
+    pub(super) relay_url: String,
+    pub(super) effective_model: Option<String>,
+    pub(super) effective_provider: Option<String>,
+    pub(super) effective_prompt: Option<String>,
+    pub(super) reply_placement: ReplyPlacement,
+    pub(super) merged_env: std::collections::BTreeMap<String, String>,
+    pub(super) launch: EffectiveHarnessDescriptor,
+    pub(super) policy_env: std::collections::BTreeMap<String, String>,
+    pub(super) owner_pubkey: Option<String>,
+}
+
+/// Pure serialization half of [`build_deploy_payload`] — every field the
+/// provider harness receives is deliberately listed here, so payload
+/// completeness is testable without an `AppHandle`.
+pub(super) fn deploy_payload_json(
+    record: &ManagedAgentRecord,
+    context: DeployPayloadContext,
+) -> serde_json::Value {
+    let DeployPayloadContext {
+        relay_url,
         effective_model,
         effective_provider,
         effective_prompt,
@@ -142,24 +176,8 @@ pub(super) fn build_deploy_payload(
         launch,
         policy_env,
         owner_pubkey,
-    ))
-}
+    } = context;
 
-/// Pure serialization half of [`build_deploy_payload`] — every field the
-/// provider harness receives is deliberately listed here, so payload
-/// completeness is testable without an `AppHandle`.
-pub(super) fn deploy_payload_json(
-    record: &ManagedAgentRecord,
-    relay_url: String,
-    effective_model: Option<String>,
-    effective_provider: Option<String>,
-    effective_prompt: Option<String>,
-    reply_placement: ReplyPlacement,
-    merged_env: std::collections::BTreeMap<String, String>,
-    launch: EffectiveHarnessDescriptor,
-    policy_env: std::collections::BTreeMap<String, String>,
-    owner_pubkey: Option<String>,
-) -> serde_json::Value {
     // The shared descriptor resolver already strips reserved keys while
     // layering user env, but enforce the same invariant at the provider wire
     // boundary so hand-built/legacy descriptors cannot smuggle a policy gate

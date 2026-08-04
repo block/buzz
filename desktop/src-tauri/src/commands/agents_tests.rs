@@ -1,3 +1,4 @@
+use super::deploy::DeployPayloadContext;
 use super::*;
 use crate::managed_agents::AgentDefinition;
 
@@ -442,18 +443,20 @@ fn deploy_payload_carries_the_full_behavioral_quad() {
     };
     let payload = deploy_payload_json(
         &record,
-        "wss://relay.example".to_string(),
-        Some("gpt-x".to_string()),
-        Some("openai".to_string()),
-        None,
-        crate::managed_agents::ReplyPlacement::Thread,
-        std::collections::BTreeMap::new(),
-        launch,
-        std::collections::BTreeMap::from([(
-            "BUZZ_ACP_SYSTEM_PROMPT".to_string(),
-            "policy-prompt".to_string(),
-        )]),
-        Some("owner-proof".to_string()),
+        DeployPayloadContext {
+            relay_url: "wss://relay.example".to_string(),
+            effective_model: Some("gpt-x".to_string()),
+            effective_provider: Some("openai".to_string()),
+            effective_prompt: None,
+            reply_placement: crate::managed_agents::ReplyPlacement::Thread,
+            merged_env: std::collections::BTreeMap::new(),
+            launch,
+            policy_env: std::collections::BTreeMap::from([(
+                "BUZZ_ACP_SYSTEM_PROMPT".to_string(),
+                "policy-prompt".to_string(),
+            )]),
+            owner_pubkey: Some("owner-proof".to_string()),
+        },
     );
 
     assert_eq!(payload["parallelism"], 4);
@@ -493,19 +496,21 @@ fn deploy_payload_carries_each_reply_placement_to_provider_launch_env() {
             .expect("provider deploy mode should resolve through the shared helper");
         let payload = deploy_payload_json(
             &record,
-            "wss://relay.example".to_string(),
-            None,
-            None,
-            None,
-            resolved_mode,
-            std::collections::BTreeMap::new(),
-            crate::managed_agents::EffectiveHarnessDescriptor {
-                command: "goose".to_string(),
-                args: vec![],
-                env: std::collections::BTreeMap::new(),
+            DeployPayloadContext {
+                relay_url: "wss://relay.example".to_string(),
+                effective_model: None,
+                effective_provider: None,
+                effective_prompt: None,
+                reply_placement: resolved_mode,
+                merged_env: std::collections::BTreeMap::new(),
+                launch: crate::managed_agents::EffectiveHarnessDescriptor {
+                    command: "goose".to_string(),
+                    args: vec![],
+                    env: std::collections::BTreeMap::new(),
+                },
+                policy_env: std::collections::BTreeMap::new(),
+                owner_pubkey: Some("owner-proof".to_string()),
             },
-            std::collections::BTreeMap::new(),
-            Some("owner-proof".to_string()),
         );
 
         assert_eq!(payload["reply_placement"], wire);
@@ -739,18 +744,20 @@ print(json.dumps({"ok": True, "agent_id": "fake-provider"}))
         ]);
         let payload = deploy_payload_json(
             &bare_agent_record(None, None, None),
-            "wss://relay.example".to_string(),
-            None,
-            None,
-            None,
-            mode,
-            std::collections::BTreeMap::from([(
-                "BUZZ_ACP_REPLY_PLACEMENT".to_string(),
-                "thread".to_string(),
-            )]),
-            launch,
-            policy_env,
-            Some("owner-proof".to_string()),
+            DeployPayloadContext {
+                relay_url: "wss://relay.example".to_string(),
+                effective_model: None,
+                effective_provider: None,
+                effective_prompt: None,
+                reply_placement: mode,
+                merged_env: std::collections::BTreeMap::from([(
+                    "BUZZ_ACP_REPLY_PLACEMENT".to_string(),
+                    "thread".to_string(),
+                )]),
+                launch,
+                policy_env,
+                owner_pubkey: Some("owner-proof".to_string()),
+            },
         );
 
         let agent_id = provider_deploy(&provider_path, &payload, &serde_json::json!({}))
