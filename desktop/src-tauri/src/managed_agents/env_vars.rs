@@ -224,6 +224,28 @@ pub fn validate_user_env_keys(env_vars: &BTreeMap<String, String>) -> Result<(),
     Ok(())
 }
 
+/// Returns `true` when `key` is safe to show verbatim — not a credential.
+///
+/// Default-deny: every key NOT in this explicit allowlist is masked. Callers
+/// that display env values (baked-env UI, spawn-diff tooltip) share this
+/// single authority — no second list.
+///
+/// Allowlist (case-insensitive):
+/// - `BUZZ_AGENT_PROVIDER`, `BUZZ_AGENT_MODEL` — agent runtime selection
+/// - `BUZZ_AGENT_THINKING_EFFORT` — non-secret enum (none/minimal/low/medium/high/xhigh/max)
+/// - `DATABRICKS_HOST`, `DATABRICKS_MODEL` — Block non-secret defaults
+pub(crate) fn is_safe_to_reveal(key: &str) -> bool {
+    const SAFE_KEYS: &[&str] = &[
+        "BUZZ_AGENT_PROVIDER",
+        "BUZZ_AGENT_MODEL",
+        "BUZZ_AGENT_THINKING_EFFORT",
+        "DATABRICKS_HOST",
+        "DATABRICKS_MODEL",
+    ];
+    let upper = key.to_ascii_uppercase();
+    SAFE_KEYS.iter().any(|safe| upper == *safe)
+}
+
 /// Per-value byte cap for env values. 32 KiB is generous for credentials,
 /// JWT-ish tokens, certs etc., but small enough that a malformed IPC
 /// caller can't blow up the persona/agent JSON file. Tune up if real

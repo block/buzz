@@ -12,10 +12,10 @@ use crate::{
                 RuntimeConfigSurface, SessionConfigCache,
             },
         },
-        current_instance_id, is_reserved_env_key, is_well_formed_env_key, known_acp_runtime,
-        load_managed_agents, load_personas, save_managed_agents, sync_managed_agent_processes,
-        AgentDefinition, GlobalAgentConfig, KnownAcpRuntime, ManagedAgentRecord,
-        ManagedAgentRuntimeKey, MAX_ENV_VALUE_BYTES,
+        current_instance_id, is_reserved_env_key, is_safe_to_reveal, is_well_formed_env_key,
+        known_acp_runtime, load_managed_agents, load_personas, save_managed_agents,
+        sync_managed_agent_processes, AgentDefinition, GlobalAgentConfig, KnownAcpRuntime,
+        ManagedAgentRecord, ManagedAgentRuntimeKey, MAX_ENV_VALUE_BYTES,
     },
 };
 
@@ -207,27 +207,6 @@ pub struct BakedEnvEntry {
     pub value: String,
     /// `true` when the value was replaced by the mask placeholder.
     pub masked: bool,
-}
-
-/// Returns `true` when a baked-env key is safe to display unmasked in the UI.
-///
-/// This uses an explicit allowlist of keys that are known safe (non-secret).
-/// Any key NOT in this set is masked — default-deny for a security surface.
-///
-/// Allowlist (case-insensitive):
-/// - `BUZZ_AGENT_PROVIDER`, `BUZZ_AGENT_MODEL` — agent runtime selection
-/// - `BUZZ_AGENT_THINKING_EFFORT` — non-secret enum (none/minimal/low/medium/high/xhigh/max)
-/// - `DATABRICKS_HOST`, `DATABRICKS_MODEL` — Block non-secret defaults
-fn is_safe_to_reveal(key: &str) -> bool {
-    const SAFE_KEYS: &[&str] = &[
-        "BUZZ_AGENT_PROVIDER",
-        "BUZZ_AGENT_MODEL",
-        "BUZZ_AGENT_THINKING_EFFORT",
-        "DATABRICKS_HOST",
-        "DATABRICKS_MODEL",
-    ];
-    let upper = key.to_ascii_uppercase();
-    SAFE_KEYS.iter().any(|safe| upper == *safe)
 }
 
 /// Expose the baked build env to the frontend with values shown, but any

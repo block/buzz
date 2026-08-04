@@ -304,6 +304,8 @@ export type ManagedAgentBackend =
   | { type: "local" }
   | { type: "provider"; id: string; config: Record<string, unknown> };
 
+import type { RestartDiffEntry } from "./restartDiff";
+export type { JsonValue, RestartChange, RestartDiffEntry } from "./restartDiff";
 export type ManagedAgent = {
   pubkey: string;
   name: string;
@@ -357,6 +359,8 @@ export type ManagedAgent = {
    * Always `false` for stopped agents.
    */
   needsRestart: boolean;
+  /** Non-empty iff `needsRestart` is true. Empty when Rust omits the field. */
+  restartDiff: RestartDiffEntry[];
   /** Per-agent env vars. Layered on top of persona envVars. */
   envVars: Record<string, string>;
   status: "running" | "stopped" | "deployed" | "not_deployed";
@@ -382,11 +386,7 @@ export type ManagedAgent = {
   respondToAllowlist: string[];
 };
 
-/**
- * Inbound author gate mode. Mirrors `buzz-acp`'s `--respond-to` CLI flag.
- * `"nobody"` is supported by the harness but not surfaced through this API —
- * it's a heartbeat-only mode without a meaningful GUI use case.
- */
+/** Inbound author gate mode. Mirrors buzz-acp's --respond-to CLI flag. */
 export type RespondToMode = "owner-only" | "allowlist" | "anyone";
 
 export type BackendProviderCandidate = {

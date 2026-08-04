@@ -221,7 +221,7 @@ test.describe("unread pill & divider", () => {
     // Forced channel unread uses channel-name emphasis, not the thread dot.
     await expect(page.getByTestId("channel-general")).toHaveCSS(
       "font-weight",
-      "600",
+      "700",
     );
     await expect(page.getByTestId("channel-unread-dot-general")).toHaveCount(0);
 
