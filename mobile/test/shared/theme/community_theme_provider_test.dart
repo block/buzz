@@ -75,8 +75,10 @@ void main() {
       storage.read(keys.public, 'https://relay.example')?.theme,
       'dracula',
     );
+    final privateHex = nostr.Nip19.decode(payload: keys.nsec).data;
+    final key = getConversationKey(privateHex, keys.public);
     expect(
-      storage.readOutbox(keys.public, 'https://relay.example')?.theme,
+      jsonDecode(nip44Decrypt(key, session.published!.content))['theme'],
       'dracula',
     );
   });
