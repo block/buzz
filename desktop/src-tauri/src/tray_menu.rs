@@ -235,8 +235,6 @@ pub(crate) fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
-/// Queues an action before the main window is restored. The frontend drains on
-/// focus as well as the emitted event, so hidden WebKit cannot strand it.
 fn queue_tray_action<R: Runtime>(app: &AppHandle<R>, mut action: TrayAction) {
     let state = app.state::<TrayMenuState<R>>();
     let Ok(mut queue) = state.action_queue.lock() else {
@@ -448,14 +446,15 @@ fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
     match id {
         OPEN_BUZZ_ID => show_main_window(app),
         NEW_CHANNEL_ID => {
-            queue_tray_action(app, TrayAction::NewChannel);
             show_main_window(app);
+            queue_tray_action(app, TrayAction::NewChannel);
         }
         QUIT_ID => app.exit(0),
         _ => {
             let Some(channel_id) = id.strip_prefix(OPEN_CHANNEL_PREFIX) else {
                 return;
             };
+            show_main_window(app);
             let channel_id = channel_id
                 .split_once(OPEN_CHANNEL_ACTIVITY_SEPARATOR)
                 .map(|(channel_id, _)| channel_id)
@@ -467,7 +466,6 @@ fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
                     community_generation: 0,
                 },
             );
-            show_main_window(app);
         }
     }
 }
