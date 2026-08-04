@@ -1360,7 +1360,7 @@ pub async fn delete_managed_agent(
 mod deploy;
 use deploy::build_deploy_payload;
 #[cfg(test)]
-use deploy::deploy_payload_json;
+use deploy::{deploy_payload_json, DeployProjections};
 #[cfg(test)]
 use deploy::{ensure_remote_provider_supported, resolve_deploy_model_provider};
 
