@@ -94,9 +94,11 @@ pub fn verify_nip98_event(
         .and_then(|t| t.content())
         .ok_or_else(|| AuthError::Nip98Invalid("missing `u` tag".to_string()))?;
 
-    if normalize_url(u_tag) != normalize_url(expected_url) {
+    let norm_u = normalize_url(u_tag);
+    let norm_expected = normalize_url(expected_url);
+    if norm_u != norm_expected {
         return Err(AuthError::Nip98Invalid(format!(
-            "URL mismatch: event has `{u_tag}`, expected `{expected_url}`"
+            "URL mismatch: event has `{u_tag}` (normalized: `{norm_u}`), expected `{expected_url}` (normalized: `{norm_expected}`)"
         )));
     }
 

@@ -46,6 +46,8 @@ const KNOWN_LLM_PROVIDER_IDS = [
   "anthropic",
   "databricks",
   "databricks_v2",
+  "deepseek",
+  "groq",
   "openai",
   "openai-compat",
   "openrouter",
@@ -135,6 +137,14 @@ const PROVIDER_CREDENTIAL_CONFIG: Partial<
     secretEnvVar: "OPENROUTER_API_KEY",
     apiKeyLabel: "OpenRouter API Key",
   },
+  deepseek: {
+    requiredEnvKeys: ["DEEPSEEK_API_KEY"],
+    secretEnvVar: "DEEPSEEK_API_KEY",
+  },
+  groq: {
+    requiredEnvKeys: ["GROQ_API_KEY"],
+    secretEnvVar: "GROQ_API_KEY",
+  },
 };
 
 const DEFAULT_MODEL_OPTION: PersonaModelOption = {
@@ -146,6 +156,8 @@ export const PERSONA_LLM_PROVIDER_OPTIONS: readonly PersonaModelOption[] = [
   { id: "anthropic", label: "Anthropic" },
   { id: "openai", label: "OpenAI" },
   { id: "openai-compat", label: "OpenAI-compatible" },
+  { id: "deepseek", label: "DeepSeek" },
+  { id: "groq", label: "Groq" },
   { id: "openrouter", label: "OpenRouter" },
   { id: "relay-mesh", label: "Buzz shared compute" },
   { id: "databricks", label: "Databricks" },
@@ -307,7 +319,9 @@ export function providerRequiresExplicitModel(
     trimmedProvider === "anthropic" ||
     trimmedProvider === "openai" ||
     trimmedProvider === "openai-compat" ||
-    trimmedProvider === "openrouter"
+    trimmedProvider === "openrouter" ||
+    trimmedProvider === "deepseek" ||
+    trimmedProvider === "groq"
   );
 }
 

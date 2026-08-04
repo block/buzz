@@ -1,14 +1,7 @@
-//! Databricks model catalog discovery.
+//! Databricks and DeepSeek model catalog discovery.
 //!
-//! Exposes [`discover_databricks_models`] — an async helper that lists
-//! available models for the `databricks` and `databricks_v2` providers
-//! without triggering a browser OAuth flow. Auth is acquired in-process via
-//! [`build_token_source`](crate::llm::build_token_source):
-//!
-//! - Static bearer (`DATABRICKS_TOKEN`): returned immediately.
-//! - PKCE cache hit: returned from disk without a network round-trip.
-//! - PKCE cache empty / no token: returns `Err(AgentError::LlmAuth)` — the
-//!   caller degrades gracefully; no browser, no hang.
+//! Exposes [`discover_databricks_models`] and [`discover_deepseek_models`] — async
+//! helpers that list available models without triggering a browser OAuth flow.
 
 use reqwest::Client;
 
@@ -387,6 +380,60 @@ pub(crate) fn parse_v2_endpoints_page(
         .map(str::to_string);
 
     Ok((models, next_page_token))
+}
+
+// ---------------------------------------------------------------------------
+/// Discover available models for DeepSeek via `GET /models` at the configured
+/// base URL. The response is OpenAI-compatible: `{ "data": [{ "id": "...", ... }] }`.
+///
+/// Returns a non-empty `Vec<ModelEntry>` on success. Returns
+/// `Err(AgentError::Llm)` when the request fails — callers should degrade
+/// gracefully rather than hanging.
+pub async fn discover_deepseek_models(cfg: &Config) -> Result<Vec<ModelEntry>, AgentError> {
+    let http = Client::new();
+    let url = format!("{}/models", cfg.base_url.trim_end_matches('/'));
+    let response = http
+        .get(&url)
+        .bearer_auth(&cfg.api_key)
+        .send()
+        .await
+        .map_err(|e| AgentError::Llm(format!("DeepSeek model discovery request failed: {e}")))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(AgentError::Llm(format!(
+            "DeepSeek model discovery HTTP {status}: {body}"
+        )));
+    }
+
+    let json: serde_json::Value = response.json().await.map_err(|e| {
+        AgentError::Llm(format!(
+            "DeepSeek model discovery response parse failed: {e}"
+        ))
+    })?;
+
+    let data = json
+        .get("data")
+        .and_then(|d| d.as_array())
+        .ok_or_else(|| AgentError::Llm("DeepSeek /models missing 'data' array".into()))?;
+
+    let models: Vec<ModelEntry> = data
+        .iter()
+        .filter_map(|m| {
+            let id = m.get("id")?.as_str()?;
+            Some(ModelEntry {
+                id: id.to_string(),
+                name: id.to_string(),
+            })
+        })
+        .collect();
+
+    if models.is_empty() {
+        return Err(AgentError::Llm("DeepSeek /models returned no models".into()));
+    }
+
+    Ok(models)
 }
 
 // ---------------------------------------------------------------------------
