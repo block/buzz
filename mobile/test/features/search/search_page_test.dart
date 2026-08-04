@@ -196,7 +196,12 @@ void main() {
       find.ancestor(of: movingIcon, matching: find.byType(AnimatedPositioned)),
     );
     expect(iconScale.scale, lessThan(1));
-    expect(movingField.top, lessThan(0));
+    expect(movingField.top, Grid.half);
+    expect(
+      tester.getRect(searchField).top,
+      greaterThanOrEqualTo(tester.getRect(find.byType(FrostedAppBar)).top),
+      reason: 'The active field remains inside the app bar hit-test box.',
+    );
 
     await tester.enterText(editingField, 'design');
     await tester.tap(cancel);

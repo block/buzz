@@ -39,7 +39,6 @@ const _searchCancelEnterDuration = Duration(milliseconds: 80);
 const _searchCancelExitDuration = Duration(milliseconds: 60);
 const _searchIdleFieldTopInset = Grid.half;
 const _searchHeaderFiltersHeight = Grid.xl;
-const _searchActiveFieldTopOffset = 42.0;
 const _searchActiveFieldRightInset = 72.0;
 
 double _searchFieldHeight(BuildContext context) {
@@ -93,7 +92,9 @@ class SearchPage extends HookConsumerWidget {
         ? compactSearchFieldHeight
         : Grid.xl;
     final searchHeaderBottomHeight = isSearchEditing.value
-        ? _searchHeaderFiltersHeight
+        ? _searchIdleFieldTopInset +
+              compactSearchFieldHeight +
+              _searchHeaderFiltersHeight
         : idleSearchFieldHeight + _searchIdleFieldTopInset + Grid.xxs;
     final topSectionHeight = frostedAppBarHeight(
       context,
@@ -240,9 +241,7 @@ class SearchPage extends HookConsumerWidget {
               right: isSearchEditing.value
                   ? _searchActiveFieldRightInset
                   : Grid.gutter,
-              top: isSearchEditing.value
-                  ? -_searchActiveFieldTopOffset
-                  : _searchIdleFieldTopInset,
+              top: _searchIdleFieldTopInset,
               height: isSearchEditing.value
                   ? compactSearchFieldHeight
                   : idleSearchFieldHeight,
@@ -290,20 +289,32 @@ class SearchPage extends HookConsumerWidget {
                   ),
                 ),
                 child: isSearchEditing.value
-                    ? SizedBox(
-                        key: const ValueKey('search-header-filters'),
-                        height: _searchHeaderFiltersHeight,
-                        child: FilterChipBar<_SearchFilter>(
-                          expandItems: true,
-                          visualDensity: const VisualDensity(horizontal: -2),
-                          chipVerticalPadding: Grid.xxs,
-                          barVerticalPadding: Grid.xxs,
-                          selected: activeFilter.value,
-                          onSelected: (f) => activeFilter.value = f,
-                          items: [
-                            for (final f in _SearchFilter.values)
-                              FilterChipItem(id: f, label: f.label),
-                          ],
+                    ? Align(
+                        alignment: Alignment.topCenter,
+                        child: Padding(
+                          padding: EdgeInsets.only(
+                            top:
+                                _searchIdleFieldTopInset +
+                                compactSearchFieldHeight,
+                          ),
+                          child: SizedBox(
+                            key: const ValueKey('search-header-filters'),
+                            height: _searchHeaderFiltersHeight,
+                            child: FilterChipBar<_SearchFilter>(
+                              expandItems: true,
+                              visualDensity: const VisualDensity(
+                                horizontal: -2,
+                              ),
+                              chipVerticalPadding: Grid.xxs,
+                              barVerticalPadding: Grid.xxs,
+                              selected: activeFilter.value,
+                              onSelected: (f) => activeFilter.value = f,
+                              items: [
+                                for (final f in _SearchFilter.values)
+                                  FilterChipItem(id: f, label: f.label),
+                              ],
+                            ),
+                          ),
                         ),
                       )
                     : const SizedBox.shrink(
