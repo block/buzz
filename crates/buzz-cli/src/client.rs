@@ -61,19 +61,84 @@ pub fn build_imeta_tag(d: &BlobDescriptor) -> Vec<String> {
 }
 
 /// MIME types accepted for upload.
+///
+/// This mirrors what the relay's upload pipelines actually accept:
+///   - image and video paths — canonical media MIMEs.
+///   - generic-file path — documents, archives, and text-family types that
+///     the relay stores as attachments served with `nosniff` +
+///     `Content-Disposition: attachment` + `CSP: default-src 'none'`.
+///
+/// The CLI treats this list as a friendly pre-flight; the relay remains the
+/// authoritative validator.
 const ALLOWED_MIMES: &[&str] = &[
+    // Images (thumbnailed path).
     "image/jpeg",
     "image/png",
     "image/gif",
     "image/webp",
+    // Video (streaming path).
     "video/mp4",
+    // Documents.
+    "application/pdf",
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.ms-powerpoint",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/vnd.oasis.opendocument.text",
+    "application/vnd.oasis.opendocument.spreadsheet",
+    "application/vnd.oasis.opendocument.presentation",
+    "application/rtf",
+    "application/epub+zip",
+    // Archives.
+    "application/zip",
+    "application/gzip",
+    "application/x-tar",
+    "application/x-7z-compressed",
+    "application/x-rar-compressed",
+    "application/vnd.rar",
+    "application/x-bzip2",
+    "application/x-xz",
+    "application/zstd",
+    // Text-family — no magic bytes, resolved from file extension.
+    "text/plain",
+    "text/markdown",
+    "text/csv",
+    "application/json",
 ];
+
+/// Text-family MIMEs — no magic bytes; resolved from file extension.
+///
+/// This is the CLI-side mirror of the relay's text-family hint allowlist
+/// (`buzz-media::validation::hinted_text_family_mime`). If you extend one,
+/// extend the other — the relay only honors these four MIMEs as `Content-Type`
+/// hints, and anything else will be flattened to `application/octet-stream`
+/// server-side.
+///
+/// `.md` maps to `text/markdown` per RFC 7763.
+fn mime_from_extension(path: &std::path::Path) -> Option<&'static str> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "md" | "markdown" => "text/markdown",
+        "txt" | "log" => "text/plain",
+        "csv" => "text/csv",
+        "json" => "application/json",
+        _ => return None,
+    })
+}
 
 /// Maximum file size for image uploads (50 MB).
 const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Maximum file size for video uploads (500 MB).
 const MAX_VIDEO_BYTES: u64 = 500 * 1024 * 1024;
+
+/// Maximum file size for generic (non-image, non-video) uploads (100 MB).
+///
+/// Mirrors the relay's `MediaConfig::max_file_bytes` default. The relay
+/// enforces the authoritative cap.
+const MAX_FILE_BYTES: u64 = 100 * 1024 * 1024;
 
 /// Sign a NIP-98 HTTP auth event (kind:27235) and return the Authorization header value.
 ///
@@ -1108,20 +1173,33 @@ impl BuzzClient {
         let bytes = std::fs::read(file_path)
             .map_err(|e| CliError::Other(format!("failed to read {file_path}: {e}")))?;
 
-        // 2. Detect MIME from magic bytes
+        // 2. Detect MIME. Magic bytes first (authoritative); fall back to the
+        //    file extension for text-family types that have no signature
+        //    (.md, .txt, .csv, .json). Anything still unknown is rejected
+        //    early — the relay would flatten it to application/octet-stream
+        //    anyway, and refusing here gives a clearer error.
         let mime = infer::get(&bytes)
             .map(|t| t.mime_type().to_string())
-            .unwrap_or_else(|| "application/octet-stream".to_string());
+            .or_else(|| {
+                mime_from_extension(std::path::Path::new(file_path)).map(str::to_string)
+            })
+            .ok_or_else(|| {
+                CliError::Usage(format!(
+                    "cannot determine MIME type for {file_path}: no magic bytes and unrecognised extension"
+                ))
+            })?;
 
         if !ALLOWED_MIMES.contains(&mime.as_str()) {
             return Err(CliError::Usage(format!("unsupported file type: {mime}")));
         }
 
-        // 3. Size check
+        // 3. Size check — pick the cap that matches the destination pipeline.
         let max = if mime.starts_with("video/") {
             MAX_VIDEO_BYTES
-        } else {
+        } else if mime.starts_with("image/") {
             MAX_IMAGE_BYTES
+        } else {
+            MAX_FILE_BYTES
         };
         if bytes.len() as u64 > max {
             return Err(CliError::Usage(format!(
@@ -2297,9 +2375,11 @@ mod retry_policy_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        advance_query_cursor, create_response_with_id, extract_relay_response_field, BuzzClient,
+        advance_query_cursor, create_response_with_id, extract_relay_response_field,
+        mime_from_extension, BuzzClient,
     };
     use nostr::{EventBuilder, Keys, Kind, Tag};
+    use std::path::Path;
 
     #[test]
     fn query_cursor_uses_last_events_composite_sort_key() {
@@ -2327,6 +2407,64 @@ mod tests {
             &[serde_json::json!({"id": "not-an-event-id", "created_at": 10})]
         )
         .is_err());
+    }
+
+    #[test]
+    fn mime_from_extension_maps_markdown() {
+        assert_eq!(
+            mime_from_extension(Path::new("plan.md")),
+            Some("text/markdown")
+        );
+        assert_eq!(
+            mime_from_extension(Path::new("plan.markdown")),
+            Some("text/markdown")
+        );
+    }
+
+    #[test]
+    fn mime_from_extension_maps_text_family() {
+        assert_eq!(
+            mime_from_extension(Path::new("notes.txt")),
+            Some("text/plain")
+        );
+        assert_eq!(
+            mime_from_extension(Path::new("run.log")),
+            Some("text/plain")
+        );
+        assert_eq!(mime_from_extension(Path::new("rows.csv")), Some("text/csv"));
+        assert_eq!(
+            mime_from_extension(Path::new("blob.json")),
+            Some("application/json")
+        );
+    }
+
+    #[test]
+    fn mime_from_extension_is_case_insensitive() {
+        assert_eq!(
+            mime_from_extension(Path::new("PLAN.MD")),
+            Some("text/markdown")
+        );
+        assert_eq!(
+            mime_from_extension(Path::new("Data.JSON")),
+            Some("application/json")
+        );
+    }
+
+    #[test]
+    fn mime_from_extension_ignores_unrelated_extensions() {
+        assert_eq!(mime_from_extension(Path::new("plan.exe")), None);
+        assert_eq!(mime_from_extension(Path::new("plan.html")), None);
+        assert_eq!(mime_from_extension(Path::new("plan")), None);
+        // A leading dot is not an extension per std::path::Path.
+        assert_eq!(mime_from_extension(Path::new(".hidden")), None);
+    }
+
+    #[test]
+    fn mime_from_extension_handles_multiple_dots() {
+        assert_eq!(
+            mime_from_extension(Path::new("archive.tar.md")),
+            Some("text/markdown")
+        );
     }
 
     #[test]
