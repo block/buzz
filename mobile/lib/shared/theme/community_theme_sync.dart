@@ -249,6 +249,17 @@ class CommunityThemeSyncManager {
       if (published == null) {
         throw StateError('Signed event coordinate unavailable');
       }
+      final publishedCoordinateIsStale =
+          _lastCreatedAt > published.createdAt ||
+          (_lastCreatedAt == published.createdAt &&
+              _lastEventId.isNotEmpty &&
+              _lastEventId.compareTo(published.id) < 0);
+      if (publishedCoordinateIsStale) {
+        _lastPublished = null;
+        _publishRetryAttempt = 0;
+        if (_pending == preference) _schedulePublish(Duration.zero);
+        return;
+      }
       _lastCreatedAt = published.createdAt;
       _lastEventId = published.id;
       _lastPublished = preference;

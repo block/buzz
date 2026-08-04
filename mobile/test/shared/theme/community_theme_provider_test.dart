@@ -42,6 +42,45 @@ void main() {
     );
   });
 
+  test('edit during delayed absence seed wins durable state', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final keys = nostr.Keys.generate();
+    final history = Completer<List<NostrEvent>>();
+    final session = _ThemeRelaySession(
+      keys.nsec,
+      keys.public,
+      historyFuture: history.future,
+    );
+    final storage = _DelayedThemeStorage(prefs);
+    final container = ProviderContainer(
+      overrides: [
+        communityThemeStorageProvider.overrideWithValue(storage),
+        relayConfigProvider.overrideWith(() => _RelayConfig(keys.nsec)),
+        relaySessionProvider.overrideWith(() => session),
+      ],
+    );
+    addTearDown(container.dispose);
+    container.listen(communityThemeProvider, (_, _) {}, fireImmediately: true);
+
+    history.complete([]);
+    await storage.cacheWriteStarted.future;
+    container.read(communityThemeProvider.notifier).setTheme('dracula');
+    storage.allowCacheWrite.complete();
+    storage.allowOutboxWrite.complete();
+    await _waitUntil(() => session.published != null);
+
+    expect(container.read(communityThemeProvider).theme, 'dracula');
+    expect(
+      storage.read(keys.public, 'https://relay.example')?.theme,
+      'dracula',
+    );
+    expect(
+      storage.readOutbox(keys.public, 'https://relay.example')?.theme,
+      'dracula',
+    );
+  });
+
   test(
     'local edit stays authoritative before persistence through exact ack',
     () async {
@@ -101,6 +140,7 @@ class _DelayedThemeStorage extends CommunityThemeStorage {
 
   final allowCacheWrite = Completer<void>();
   final allowOutboxWrite = Completer<void>();
+  final cacheWriteStarted = Completer<void>();
   final outboxWriteStarted = Completer<void>();
 
   @override
@@ -109,6 +149,7 @@ class _DelayedThemeStorage extends CommunityThemeStorage {
     String relayUrl,
     CommunityThemePreference preference,
   ) async {
+    if (!cacheWriteStarted.isCompleted) cacheWriteStarted.complete();
     await allowCacheWrite.future;
     return super.write(pubkey, relayUrl, preference);
   }

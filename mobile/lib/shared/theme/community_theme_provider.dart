@@ -16,6 +16,8 @@ class CommunityThemeNotifier extends Notifier<CommunityThemePreference> {
   late CommunityThemeStorage _storage;
   String? _pubkey;
   String? _relayUrl;
+  Future<void> _persistenceQueue = Future<void>.value();
+  int _localRevision = 0;
 
   @override
   CommunityThemePreference build() {
@@ -62,12 +64,21 @@ class CommunityThemeNotifier extends Notifier<CommunityThemePreference> {
         final result = await manager.initialize();
         if (_manager != manager) return;
         if (result.status == CommunityThemeRemoteStatus.absent) {
-          final currentDirty = _storage.readOutbox(pubkey, config.baseUrl);
-          final seed =
-              currentDirty ?? _storage.read(pubkey, config.baseUrl) ?? state;
-          await _storage.write(pubkey, config.baseUrl, seed);
-          await _storage.writeOutbox(pubkey, config.baseUrl, seed);
-          if (_manager == manager) manager.publish(seed);
+          final seedRevision = _localRevision;
+          await _enqueuePersistence(() async {
+            if (_manager != manager || _localRevision != seedRevision) return;
+            final currentDirty = _storage.readOutbox(pubkey, config.baseUrl);
+            final seed =
+                currentDirty ?? _storage.read(pubkey, config.baseUrl) ?? state;
+            if (!await _storage.write(pubkey, config.baseUrl, seed)) return;
+            if (_manager != manager || _localRevision != seedRevision) return;
+            if (!await _storage.writeOutbox(pubkey, config.baseUrl, seed)) {
+              return;
+            }
+            if (_manager == manager && _localRevision == seedRevision) {
+              manager.publish(seed);
+            }
+          });
         }
         if (result.status == CommunityThemeRemoteStatus.valid ||
             result.status == CommunityThemeRemoteStatus.absent) {
@@ -120,6 +131,7 @@ class CommunityThemeNotifier extends Notifier<CommunityThemePreference> {
   void _save(CommunityThemePreference preference) {
     if (preference == state) return;
     state = preference;
+    _localRevision++;
     final pubkey = _pubkey;
     final relayUrl = _relayUrl;
     if (pubkey == null || relayUrl == null) {
@@ -127,7 +139,17 @@ class CommunityThemeNotifier extends Notifier<CommunityThemePreference> {
       return;
     }
     _manager?.stage(preference);
-    unawaited(_persistAndPublish(pubkey, relayUrl, preference));
+    unawaited(
+      _enqueuePersistence(
+        () => _persistAndPublish(pubkey, relayUrl, preference),
+      ),
+    );
+  }
+
+  Future<void> _enqueuePersistence(Future<void> Function() operation) {
+    final result = _persistenceQueue.then((_) => operation());
+    _persistenceQueue = result.catchError((Object _) {});
+    return result;
   }
 
   Future<void> _persistAndPublish(

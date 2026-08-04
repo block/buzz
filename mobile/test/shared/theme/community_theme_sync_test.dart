@@ -221,6 +221,50 @@ void main() {
     expect(manager.pending, isNull);
   });
 
+  test(
+    'republishes above remote observed while publish is in flight',
+    () async {
+      final firstSubmission = Completer<void>();
+      final relay = _FakeSignedRelay(
+        firstSubmissionGate: firstSubmission.future,
+      );
+      final session = _FakeSession();
+      final acknowledgements = <CommunityThemePreference>[];
+      final manager = _manager(
+        session,
+        relay,
+        onPublished: acknowledgements.add,
+      );
+      await manager.initialize();
+      manager.publish(local);
+      final firstFlush = manager.flush();
+      await _waitUntil(() => relay.attempts == 1);
+
+      session.emit(
+        _event(
+          id: 'remote-winner',
+          createdAt: 2000000000,
+          content: jsonEncode(
+            const CommunityThemePreference(
+              theme: 'dracula',
+              accent: '#ef4444',
+              followSystem: false,
+            ).toJson(),
+          ),
+        ),
+      );
+      firstSubmission.complete();
+      await firstFlush;
+
+      expect(acknowledgements, isEmpty);
+      expect(manager.pending, local);
+      await _waitUntil(() => relay.attempts == 2);
+      expect(relay.submittedEvents[1].createdAt, 2000000001);
+      expect(acknowledgements, [local]);
+      expect(manager.pending, isNull);
+    },
+  );
+
   test('remote coordinate advances pending local publish timestamp', () async {
     final relay = _FakeSignedRelay();
     final session = _FakeSession();
