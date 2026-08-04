@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { fetchProjectsWorkItems } from "./projectWorkItems.ts";
+
 // ── Work-item deduplication ─────────────────────────────────────────────────
 //
 // NIP-MP §Multiple membership: a repository may belong to several projects.
 // When it does, global issue/PR lists must produce exactly one row per work
-// item — not one row per project membership. This test exercises the case
-// that was failing before the `(repoAddress, event id)` dedupe was added.
+// item — not one row per project membership. These tests call the exported
+// production function with a stubbed fetchEvents to verify the dedup contract
+// end-to-end, not just the filter algorithm in isolation.
 
 const REPO_OWNER = "a".repeat(64);
 const REPO_DTAG = "relay";
@@ -14,68 +17,123 @@ const REPO_ADDRESS = `30617:${REPO_OWNER}:${REPO_DTAG}`;
 
 const ISSUE_ID = "i".repeat(64);
 const PR_ID = "p".repeat(64);
+const PR_ID_2 = "q".repeat(64);
 
-// (No relay stub needed — this test only exercises the dedup filter logic
-// directly, without requiring a live relay or module import.)
+// Two projects that both contain the same repository.
+const projectA = {
+  repositories: [{ repoAddress: REPO_ADDRESS }],
+};
+const projectB = {
+  repositories: [{ repoAddress: REPO_ADDRESS }],
+};
+
+// Minimal valid NIP-34 issue event for the shared repo.
+function makeIssue(id, updatedAt = 100) {
+  return {
+    id,
+    kind: 1621,
+    pubkey: REPO_OWNER,
+    created_at: updatedAt,
+    content: "An issue",
+    tags: [
+      ["a", REPO_ADDRESS],
+      ["subject", "Fix the thing"],
+    ],
+  };
+}
+
+// Minimal valid NIP-34 pull request event for the shared repo.
+function makePR(id, updatedAt = 100) {
+  return {
+    id,
+    kind: 1618, // KIND_GIT_PULL_REQUEST
+    pubkey: REPO_OWNER,
+    created_at: updatedAt,
+    content: "A PR",
+    tags: [
+      ["a", REPO_ADDRESS],
+      ["subject", "Add a feature"],
+    ],
+  };
+}
+
+// fetchEvents stub: returns the given root events (issues + PRs) and empty
+// arrays for all other query kinds (updates, comments, statuses).
+function makeFetchEvents(rootEvents) {
+  return async (filter) => {
+    const { kinds } = filter;
+    // Root issues (kind 1621) + PRs (kind 1618)
+    if (kinds?.includes(1621) || kinds?.includes(1618)) {
+      return rootEvents.filter((e) => kinds.includes(e.kind));
+    }
+    // Everything else (PR updates, comments, statuses) — empty
+    return [];
+  };
+}
 
 test("fetchProjectsWorkItems deduplicates issues from a shared repository", async () => {
-  // We cannot import and stub the relay here without a full test harness,
-  // so we exercise the shape by checking that the internal groupBy logic
-  // never double-counts when two projects share one repoAddress.
-  //
-  // This is a unit test of the groupByRepoAddress + dedup contract. The
-  // relay stub is omitted; the functional behaviour is proved by the
-  // filter closure exercised by a flat scan.
+  const issue = makeIssue(ISSUE_ID);
+  const fetchEvents = makeFetchEvents([issue]);
 
-  const seen = new Set();
-  const items = [
-    {
-      repository: { repoAddress: REPO_ADDRESS },
-      issue: { id: ISSUE_ID, updatedAt: 100 },
-    },
-    {
-      repository: { repoAddress: REPO_ADDRESS },
-      issue: { id: ISSUE_ID, updatedAt: 100 },
-    }, // duplicate
-  ].filter((item) => {
-    const key = `${item.repository.repoAddress}:${item.issue.id}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  const result = await fetchProjectsWorkItems(
+    [projectA, projectB],
+    fetchEvents,
+  );
 
   assert.equal(
-    items.length,
+    result.issues.items.length,
     1,
     "duplicate issue from shared repo must collapse to one row",
   );
+  assert.equal(result.issues.items[0].issue.id, ISSUE_ID);
 });
 
 test("fetchProjectsWorkItems deduplicates pull requests from a shared repository", async () => {
-  const seen = new Set();
-  const items = [
-    {
-      repository: { repoAddress: REPO_ADDRESS },
-      pullRequest: { id: PR_ID, updatedAt: 100 },
-    },
-    {
-      repository: { repoAddress: REPO_ADDRESS },
-      pullRequest: { id: PR_ID, updatedAt: 100 },
-    }, // duplicate
-    {
-      repository: { repoAddress: REPO_ADDRESS },
-      pullRequest: { id: "q".repeat(64), updatedAt: 90 },
-    },
-  ].filter((item) => {
-    const key = `${item.repository.repoAddress}:${item.pullRequest.id}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  const pr1 = makePR(PR_ID, 100);
+  const pr2 = makePR(PR_ID_2, 90);
+  const fetchEvents = makeFetchEvents([pr1, pr2]);
+
+  const result = await fetchProjectsWorkItems(
+    [projectA, projectB],
+    fetchEvents,
+  );
 
   assert.equal(
-    items.length,
+    result.pullRequests.items.length,
     2,
-    "only genuine duplicates collapse; distinct PRs are kept",
+    "distinct PRs must survive dedup; only exact-id duplicates collapse",
   );
+  const ids = result.pullRequests.items.map((item) => item.pullRequest.id);
+  assert.ok(ids.includes(PR_ID), "first PR must be present");
+  assert.ok(ids.includes(PR_ID_2), "second PR must be present");
+});
+
+test("fetchProjectsWorkItems returns a single row for a PR present in both project contexts", async () => {
+  // Same PR id returned twice (once per project's relay query).
+  const pr = makePR(PR_ID, 100);
+  // The stub returns the same event for every root query, simulating
+  // the relay returning the same PR for both projects' repo addresses.
+  let callCount = 0;
+  const fetchEvents = async (filter) => {
+    if (filter.kinds?.includes(1618)) {
+      callCount += 1;
+      return [pr];
+    }
+    return [];
+  };
+
+  const result = await fetchProjectsWorkItems(
+    [projectA, projectB],
+    fetchEvents,
+  );
+
+  // The relay was queried once per unique repo address — but even if it
+  // returned the same id twice across the two project contexts, dedupe fires.
+  assert.equal(
+    result.pullRequests.items.length,
+    1,
+    "same PR id appearing in both project contexts must produce one row",
+  );
+  // Sanity: the stub was actually called (proves we ran the production path).
+  assert.ok(callCount >= 1, "fetchEvents must have been called");
 });

@@ -641,3 +641,188 @@ test("pull request and issue feeds share the commit row structure", async ({
     path: `${SHOTS}/04-issues-feed.png`,
   });
 });
+
+test("adding a repository retries and reports an error when the 30617 publication is rejected", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  // Reject the repository-announcement event on every attempt so the mutation
+  // exhausts its retry and surfaces a partial-write error.
+  await page.addInitScript(() => {
+    // Reject kind 30617 twice (initial attempt + one retry).
+    window.__BUZZ_E2E_REJECT_PROJECT_EVENT_KINDS__ = [30617, 30617];
+  });
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-projects-view").click();
+  await page.getByTestId("projects-section-projects").click();
+  await page
+    .locator(
+      '[data-testid="project-card-buzz"], [data-testid="project-row-buzz"]',
+    )
+    .first()
+    .click();
+
+  await page.getByTestId("add-project-repository").click();
+  await page.getByTestId("create-project-repository").click();
+  await page.getByTestId("add-project-repository-name").fill("rejected-repo");
+  await page.getByTestId("add-project-repository-submit").click();
+
+  // The project event (30621) is published; the repository event (30617) is
+  // rejected on both attempts. The dialog must surface the partial-write error.
+  await expect(page.getByTestId("add-project-repository-dialog")).toBeVisible();
+  await expect(
+    page.getByText(/repository could not be created/i),
+  ).toBeVisible();
+
+  // The 30621 must have been published (project was updated).
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          window.__BUZZ_E2E_ACCEPTED_PROJECT_EVENTS__?.some(
+            (event) =>
+              event.kind === 30621 &&
+              event.tags.some(
+                (tag) => tag[0] === "a" && tag[1]?.endsWith(":rejected-repo"),
+              ),
+          ) ?? false,
+      ),
+    )
+    .toBe(true);
+
+  // The 30617 must NOT have been accepted (both attempts were rejected).
+  const acceptedRepo = await page.evaluate(
+    () =>
+      window.__BUZZ_E2E_ACCEPTED_PROJECT_EVENTS__?.some(
+        (event) =>
+          event.kind === 30617 &&
+          event.tags.some(
+            (tag) => tag[0] === "d" && tag[1] === "rejected-repo",
+          ),
+      ) ?? false,
+  );
+  expect(
+    acceptedRepo,
+    "30617 must not be accepted when the relay rejects both attempts",
+  ).toBe(false);
+});
+
+test("adding a repository treats a lost 30617 acknowledgement as success", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  // The relay will accept the 30617 but fail to deliver the ACK, then on the
+  // retry query the event will be found — the mutation must succeed.
+  await page.addInitScript(() => {
+    window.__BUZZ_E2E_FAIL_PROJECT_EVENT_ACK_KINDS__ = [30617];
+  });
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-projects-view").click();
+  await page.getByTestId("projects-section-projects").click();
+  await page
+    .locator(
+      '[data-testid="project-card-buzz"], [data-testid="project-row-buzz"]',
+    )
+    .first()
+    .click();
+
+  const picker = page.getByTestId("project-repository-picker");
+
+  await page.getByTestId("add-project-repository").click();
+  await page.getByTestId("create-project-repository").click();
+  await page.getByTestId("add-project-repository-name").fill("lost-ack-repo");
+  await page.getByTestId("add-project-repository-submit").click();
+
+  // The dialog should close — the operation recovered from the lost ACK.
+  await expect(page.getByTestId("add-project-repository-dialog")).toBeHidden();
+  // The repository picker must reflect the newly added repository.
+  await expect(picker).toContainText("lost-ack-repo");
+
+  // Both events must have been accepted: the 30621 (project update) and the
+  // 30617 (repository — accepted by relay even though ACK was lost).
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          window.__BUZZ_E2E_ACCEPTED_PROJECT_EVENTS__?.filter((event) =>
+            event.tags.some(
+              (tag) => tag[0] === "d" && tag[1] === "lost-ack-repo",
+            ),
+          ).length ?? 0,
+      ),
+    )
+    .toBeGreaterThanOrEqual(1);
+});
+
+test("adding a repository blocks when a standalone 30617 already exists at that coordinate", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  // Seed a standalone 30617 (not a project member) owned by the mock identity.
+  // The add-repo mutation must block unconditionally when this coordinate exists,
+  // even though it is not yet in the "buzz" project's member list.
+  const MOCK_OWNER = "deadbeef".repeat(8);
+  const STANDALONE_DTAG = "existing-standalone";
+  await page.addInitScript(
+    ({ owner, dtag }) => {
+      window.__BUZZ_E2E_EXTRA_PROJECT_EVENTS__ = [
+        {
+          id: "standalone00".padEnd(64, "0"),
+          kind: 30617,
+          pubkey: owner,
+          created_at: Math.floor(Date.now() / 1000) - 3600,
+          content: "A standalone repository that exists outside any project.",
+          tags: [
+            ["d", dtag],
+            ["name", "Existing Standalone"],
+            ["clone", "https://git.example.com/standalone.git"],
+          ],
+        },
+      ];
+    },
+    { owner: MOCK_OWNER, dtag: STANDALONE_DTAG },
+  );
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-projects-view").click();
+  await page.getByTestId("projects-section-projects").click();
+  await page
+    .locator(
+      '[data-testid="project-card-buzz"], [data-testid="project-row-buzz"]',
+    )
+    .first()
+    .click();
+
+  await page.getByTestId("add-project-repository").click();
+  await page.getByTestId("create-project-repository").click();
+  // Use the same name — the dtag will match the seeded standalone 30617.
+  await page
+    .getByTestId("add-project-repository-name")
+    .fill("Existing Standalone");
+  await page.getByTestId("add-project-repository-submit").click();
+
+  // The dialog must remain open with a clobber error.
+  await expect(page.getByTestId("add-project-repository-dialog")).toBeVisible();
+  await expect(
+    page.getByText(/already exists.*standalone.*another project/i),
+  ).toBeVisible();
+
+  // Neither a 30621 (project update) nor a 30617 (new repo) must have been published.
+  const publishedForStandalone = await page.evaluate(
+    ({ dtag }) =>
+      window.__BUZZ_E2E_ACCEPTED_PROJECT_EVENTS__?.some(
+        (event) =>
+          event.tags.some((tag) => tag[0] === "d" && tag[1] === dtag) ||
+          event.tags.some(
+            (tag) => tag[0] === "a" && tag[1]?.endsWith(`:${dtag}`),
+          ),
+      ) ?? false,
+    { dtag: STANDALONE_DTAG },
+  );
+  expect(
+    publishedForStandalone,
+    "neither project nor repository event must be published when clobber guard fires",
+  ).toBe(false);
+});

@@ -61,6 +61,7 @@ import {
 } from "@/features/projects/lib/projectBranches";
 import { normalizeRepositoryUrl } from "@/features/projects/lib/projectsViewHelpers";
 import { selectProjectRepository } from "@/features/projects/projectModels";
+import { KIND_REPO_ANNOUNCEMENT } from "@/shared/constants/kinds";
 import { useProjectRepoPresentation } from "@/features/projects/useProjectRepoHost";
 import { WorkspaceTabs } from "./ProjectWorkspaceTabs";
 import type { RepoSourceHeaderControls } from "./ProjectRepositorySource";
@@ -114,7 +115,20 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
   const projectQuery = useProjectQuery(projectId);
   const projectsQuery = useProjectsQuery();
   const project = projectQuery.data;
-  const repository = selectProjectRepository(project, repositoryId);
+  // When the projectId is a canonical 30617:<owner>:<d> coordinate (emitted by
+  // entity links in #4695), derive the repository selection directly from the
+  // <owner>:<d> portion rather than falling back to the project's primary
+  // repository. Repository.id is "<owner>:<dtag>", so stripping the kind+colon
+  // prefix gives the exact repository id. This ensures a linked PR/issue on a
+  // non-primary member opens from the correct repository instead of the primary.
+  const routeRepositoryId: string | undefined = React.useMemo(() => {
+    if (repositoryId) return repositoryId;
+    const kindStr = `${String(KIND_REPO_ANNOUNCEMENT)}:`;
+    if (!projectId.startsWith(kindStr)) return undefined;
+    // projectId is "30617:<owner>:<dtag>" — strip "30617:" to get "<owner>:<dtag>"
+    return projectId.slice(kindStr.length);
+  }, [projectId, repositoryId]);
+  const repository = selectProjectRepository(project, routeRepositoryId);
   const repoRemote = useProjectRepoPresentation(repository);
   const { applyPatch: applyRepositorySearch } = useHistorySearchState(
     PROJECT_REPOSITORY_SEARCH_KEYS,

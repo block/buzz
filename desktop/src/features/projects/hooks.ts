@@ -163,23 +163,47 @@ export function eventToProject(
 }
 
 export async function fetchProjects(): Promise<Project[]> {
-  const [projectEvents, repositoryEvents, deletionEvents] = await Promise.all([
+  // Enumerate tombstones exhaustively per NIP-MP §Deletion enumeration rules:
+  // a fixed-limit query silently omits deletions 2001+, resurrecting deleted
+  // heads on history-retaining relays. A failed tombstone query must mark
+  // results as incomplete rather than substituting an empty set (which would
+  // resurrect every deleted head the relay still serves).
+  //
+  // NIP-OA owner-authorized deletion (NIP-MP §157-165, §328-331): The Buzz
+  // relay suppresses tombstones from registered NIP-OA owners server-side
+  // before serving them to clients. Desktop therefore narrows its client-side
+  // authorization check to the self-signed case (event.pubkey === coordinate
+  // owner) and relies on the relay for cross-owner owner-authorized deletions.
+  // This is the explicit choice: implementing NIP-OA client-side requires
+  // attestation data (the NIP-OA owner registry) that is not available in the
+  // current `fetchProjects` context. The relay-side suppression is the
+  // authoritative gate; client-side rejects only the owner's own tombstones.
+  const [projectEvents, repositoryEvents, tombstoneResult] = await Promise.all([
     fetchProjectEventsExhaustively([KIND_PROJECT_ANNOUNCEMENT]),
     fetchProjectEventsExhaustively([KIND_REPO_ANNOUNCEMENT]),
-    // NIP-09 tombstones: fetch all kind:5 events that name a project or
-    // repository coordinate. The relay's soft-delete already filters these on
-    // the main Buzz relay, but a client that relies exclusively on server-side
-    // deletion resurrects deleted heads on any relay that retains them alongside
-    // their tombstones. Fetching deletions is the conformant NIP-MP client fold.
-    relayClient
-      .fetchEvents({ kinds: [KIND_DELETION], limit: 2_000 })
-      .catch((): RelayEvent[] => []),
+    fetchProjectEventsExhaustively([KIND_DELETION]).then(
+      (events) => ({ ok: true as const, events }),
+      (error: unknown) => ({
+        ok: false as const,
+        message: error instanceof Error ? error.message : "Unknown error",
+      }),
+    ),
   ]);
+
+  // If tombstone enumeration failed, we cannot safely present any projects
+  // whose deletion status is unknown — but we also must not silently resurrect
+  // all deleted heads. Surface an error so the query layer can retry rather
+  // than caching a stale read model.
+  if (!tombstoneResult.ok) {
+    throw new Error(
+      `Could not fetch project deletion records: ${tombstoneResult.message} — refresh to retry.`,
+    );
+  }
 
   return buildProjectReadModels({
     projectEvents,
     repositoryEvents,
-    deletionEvents,
+    deletionEvents: tombstoneResult.events,
     relayOrigin: getCachedRelayOrigin(),
     hiddenAddresses: new Set(readHiddenProjectCards()),
   }).sort((a, b) => b.createdAt - a.createdAt);

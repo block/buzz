@@ -6,7 +6,7 @@ import {
   type Repository,
 } from "@/features/projects/hooks";
 import { addRepositoryToProject } from "@/features/projects/projectModels";
-import { buildAttachedRepositoryPatchTemplate } from "@/features/projects/projectRepositoryCreation";
+import { buildProjectPatchTemplate } from "@/features/projects/projectRepositoryCreation";
 import { relayClient } from "@/shared/api/relayClient";
 import { signRelayEvent } from "@/shared/api/tauri";
 import { getIdentity } from "@/shared/api/tauriIdentity";
@@ -48,11 +48,13 @@ async function attachProjectRepository({
     .filter((tag) => tag[0] === "a" && tag[1])
     .map((tag) => tag[1] as string);
 
-  const template = buildAttachedRepositoryPatchTemplate({
+  if (liveAddresses.includes(repository.repoAddress)) {
+    throw new Error("This repository is already part of the project.");
+  }
+  const template = buildProjectPatchTemplate({
     liveHead,
     ownerPubkey: identity.pubkey,
-    existingAddresses: liveAddresses,
-    newRepositoryAddress: repository.repoAddress,
+    repositoryAddresses: [...liveAddresses, repository.repoAddress],
   });
   const projectEvent = await signRelayEvent({
     ...template,

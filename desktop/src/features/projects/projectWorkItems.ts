@@ -69,9 +69,14 @@ function groupByRepoAddress(events: RelayEvent[]): Map<string, RelayEvent[]> {
   return grouped;
 }
 
+type FetchEventsInput = Parameters<(typeof relayClient)["fetchEvents"]>[0];
+
 /** Loads aggregate issue and pull-request data with bounded relay fan-out. */
 export async function fetchProjectsWorkItems<TProject extends ProjectReference>(
   projects: TProject[],
+  fetchEvents: (
+    filter: FetchEventsInput,
+  ) => Promise<RelayEvent[]> = relayClient.fetchEvents.bind(relayClient),
 ): Promise<ProjectsWorkItemsResult<TProject>> {
   const repoAddresses = [
     ...new Set(
@@ -82,22 +87,22 @@ export async function fetchProjectsWorkItems<TProject extends ProjectReference>(
   ];
   const [rootResult, updateResult, commentResult, statusResult] =
     await Promise.allSettled([
-      relayClient.fetchEvents({
+      fetchEvents({
         kinds: [KIND_GIT_ISSUE, KIND_GIT_PULL_REQUEST],
         "#a": repoAddresses,
         limit: 2_000,
       }),
-      relayClient.fetchEvents({
+      fetchEvents({
         kinds: [KIND_GIT_PR_UPDATE],
         "#a": repoAddresses,
         limit: 2_000,
       }),
-      relayClient.fetchEvents({
+      fetchEvents({
         kinds: [KIND_TEXT_NOTE],
         "#a": repoAddresses,
         limit: 2_000,
       }),
-      relayClient.fetchEvents({
+      fetchEvents({
         kinds: [
           KIND_GIT_STATUS_OPEN,
           KIND_GIT_STATUS_MERGED,

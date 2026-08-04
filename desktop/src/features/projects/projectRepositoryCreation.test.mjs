@@ -2,67 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  buildAddedRepositoryEventTemplates,
-  buildAttachedRepositoryProjectEventTemplate,
   buildRepositoryChannelBindingTemplate,
   buildProjectPatchTemplate,
   buildAddedRepositoryEventTemplatesFromHead,
 } from "./projectRepositoryCreation.ts";
+import { validateProjectEventEnvelope } from "./projectModels.ts";
 
 const OWNER = "a".repeat(64);
-const OTHER_OWNER = "b".repeat(64);
-
-const project = {
-  id: `${OWNER}:buzz`,
-  dtag: "buzz",
-  name: "Buzz",
-  description: "A multi-repository workspace",
-  owner: OWNER,
-  createdAt: 1,
-  projectChannelId: "11111111-1111-4111-8111-111111111111",
-  status: "active",
-  projectAddress: `30621:${OWNER}:buzz`,
-  primaryRepositoryAddress: `30617:${OWNER}:desktop`,
-  repositoryAddresses: [`30617:${OWNER}:desktop`, `30617:${OTHER_OWNER}:relay`],
-  repositoryRelayHints: {
-    [`30617:${OTHER_OWNER}:relay`]: "wss://relay.example",
-  },
-  repositories: [],
-  unavailableRepositoryAddresses: [],
-  visibility: "listed",
-  legacy: false,
-};
-
-test("buildAddedRepositoryEventTemplates preserves NIP-MP project metadata and membership", () => {
-  const templates = buildAddedRepositoryEventTemplates({
-    accessChannelId: "11111111-1111-4111-8111-111111111111",
-    project,
-    ownerPubkey: OWNER,
-    name: "Mobile App",
-    description: "Flutter client",
-    cloneUrl: "https://relay.example/git/mobile-app.git",
-  });
-
-  assert.equal(templates.repository.kind, 30617);
-  assert.deepEqual(templates.repository.tags, [
-    ["d", "mobile-app"],
-    ["name", "Mobile App"],
-    ["buzz-channel", "11111111-1111-4111-8111-111111111111"],
-    ["description", "Flutter client"],
-    ["clone", "https://relay.example/git/mobile-app.git"],
-  ]);
-  assert.equal(templates.project.kind, 30621);
-  assert.deepEqual(templates.project.tags, [
-    ["d", "buzz"],
-    ["name", "Buzz"],
-    ["description", "A multi-repository workspace"],
-    ["buzz-channel", "11111111-1111-4111-8111-111111111111"],
-    ["a", `30617:${OWNER}:desktop`],
-    ["a", `30617:${OWNER}:mobile-app`],
-    ["a", `30617:${OTHER_OWNER}:relay`, "wss://relay.example"],
-  ]);
-  assert.equal(templates.project.content, "");
-});
 
 test("buildRepositoryChannelBindingTemplate preserves repository metadata", () => {
   const repository = {
@@ -93,32 +39,6 @@ test("buildRepositoryChannelBindingTemplate preserves repository metadata", () =
     ["x-custom", "preserve-me"],
     ["buzz-channel", "11111111-1111-4111-8111-111111111111"],
   ]);
-});
-
-test("buildAttachedRepositoryProjectEventTemplate links an existing repository", () => {
-  const repositoryAddress = `30617:${"c".repeat(64)}:design-system`;
-  const template = buildAttachedRepositoryProjectEventTemplate({
-    project,
-    ownerPubkey: OWNER,
-    repositoryAddress,
-  });
-
-  assert.equal(template.kind, 30621);
-  assert.equal(template.content, "");
-  assert.deepEqual(template.tags.at(-1), ["a", repositoryAddress]);
-});
-
-test("buildAddedRepositoryEventTemplates rejects updates by another owner", () => {
-  assert.throws(
-    () =>
-      buildAddedRepositoryEventTemplates({
-        accessChannelId: "11111111-1111-4111-8111-111111111111",
-        project,
-        ownerPubkey: OTHER_OWNER,
-        name: "Mobile",
-      }),
-    /Only the project owner/,
-  );
 });
 
 // ── buildProjectPatchTemplate: unknown-tag preservation ────────────────────
@@ -279,5 +199,149 @@ test("buildAddedRepositoryEventTemplatesFromHead detects a concurrent add via th
         ownerPubkey: OWNER,
       }),
     /already contains.*mobile.*another session/,
+  );
+});
+
+// ── validateProjectEventEnvelope: shared full-envelope validator ─────────────
+// These tests pin the NIP-MP validation rules through the WRITE helper so that
+// a nonconforming live head (e.g. from a permissive relay) is caught before
+// Desktop signs and re-submits it.
+
+test("validateProjectEventEnvelope accepts a valid minimal envelope", () => {
+  assert.doesNotThrow(() =>
+    validateProjectEventEnvelope([["d", "platform"]], ""),
+  );
+});
+
+test("validateProjectEventEnvelope rejects missing d tag", () => {
+  assert.throws(
+    () => validateProjectEventEnvelope([["name", "X"]], ""),
+    /NIP-MP.*'d'/,
+  );
+});
+
+test("validateProjectEventEnvelope rejects duplicate d tags", () => {
+  assert.throws(
+    () =>
+      validateProjectEventEnvelope(
+        [
+          ["d", "a"],
+          ["d", "b"],
+        ],
+        "",
+      ),
+    /NIP-MP.*'d'/,
+  );
+});
+
+test("validateProjectEventEnvelope rejects duplicate name tags", () => {
+  assert.throws(
+    () =>
+      validateProjectEventEnvelope(
+        [
+          ["d", "platform"],
+          ["name", "X"],
+          ["name", "Y"],
+        ],
+        "",
+      ),
+    /NIP-MP.*duplicate.*'name'/,
+  );
+});
+
+test("validateProjectEventEnvelope rejects a name tag that exceeds 256 bytes", () => {
+  const longName = "x".repeat(257);
+  assert.throws(
+    () =>
+      validateProjectEventEnvelope(
+        [
+          ["d", "platform"],
+          ["name", longName],
+        ],
+        "",
+      ),
+    /NIP-MP.*'name'.*256/,
+  );
+});
+
+test("validateProjectEventEnvelope rejects a description tag that exceeds 2048 bytes", () => {
+  const longDesc = "x".repeat(2049);
+  assert.throws(
+    () =>
+      validateProjectEventEnvelope(
+        [
+          ["d", "platform"],
+          ["description", longDesc],
+        ],
+        "",
+      ),
+    /NIP-MP.*'description'.*2048/,
+  );
+});
+
+test("validateProjectEventEnvelope rejects more than 64 a-tags", () => {
+  const tags = [["d", "wide"]];
+  for (let i = 0; i < 65; i++) {
+    tags.push([
+      "a",
+      `30617:${"a".repeat(64)}:repo-${String(i).padStart(2, "0")}`,
+    ]);
+  }
+  assert.throws(() => validateProjectEventEnvelope(tags, ""), /NIP-MP.*64/);
+});
+
+test("validateProjectEventEnvelope rejects a member address with uppercase owner hex", () => {
+  const upperAddr = `30617:${"A".repeat(64)}:desktop`;
+  assert.throws(
+    () =>
+      validateProjectEventEnvelope(
+        [
+          ["d", "platform"],
+          ["a", upperAddr],
+        ],
+        "",
+      ),
+    /NIP-MP.*invalid.*address/,
+  );
+});
+
+test("validateProjectEventEnvelope rejects duplicate a-tag addresses", () => {
+  const addr = `30617:${"a".repeat(64)}:desktop`;
+  assert.throws(
+    () =>
+      validateProjectEventEnvelope(
+        [
+          ["d", "platform"],
+          ["a", addr],
+          ["a", addr],
+        ],
+        "",
+      ),
+    /NIP-MP.*duplicate.*address/,
+  );
+});
+
+test("buildProjectPatchTemplate catches duplicate d in live head via full-envelope validation", () => {
+  // A relay that accepted a nonconforming event could serve a head with two d tags.
+  // buildProjectPatchTemplate must catch this before signing.
+  const badLiveHead = {
+    id: "e".repeat(64),
+    kind: 30621,
+    pubkey: OWNER,
+    created_at: 100,
+    content: "",
+    tags: [
+      ["d", "platform"],
+      ["d", "extra"],
+    ],
+  };
+  assert.throws(
+    () =>
+      buildProjectPatchTemplate({
+        liveHead: badLiveHead,
+        ownerPubkey: OWNER,
+        repositoryAddresses: [],
+      }),
+    /NIP-MP.*'d'/,
   );
 });

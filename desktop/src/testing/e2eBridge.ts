@@ -1160,6 +1160,21 @@ declare global {
     __BUZZ_E2E_UNSUPPORTED_PROJECT_ANNOUNCEMENTS__?: boolean;
     /** Project event kinds accepted once but reported as failed to test lost acknowledgements. */
     __BUZZ_E2E_FAIL_PROJECT_EVENT_ACK_KINDS__?: number[];
+    /**
+     * Extra project events appended to the mock store on first access.
+     * Use to seed standalone repositories (kind 30617) or other project-scoped
+     * events before a test interaction, without mutating the fixed seed data.
+     * Events must be complete RelayEvent shapes; id is a required field so that
+     * id-keyed queries (e.g. lost-ACK recovery) can match them.
+     */
+    __BUZZ_E2E_EXTRA_PROJECT_EVENTS__?: Array<{
+      id: string;
+      kind: number;
+      pubkey: string;
+      created_at: number;
+      content: string;
+      tags: string[][];
+    }>;
     /** Structured merge error returned by the mock native merge command. */
     __BUZZ_E2E_PROJECT_MERGE_ERROR__?: {
       code: string;
@@ -5431,7 +5446,16 @@ function buildMockProjectEvents(): RelayEvent[] {
 }
 
 function getMockProjectEventStore(): RelayEvent[] {
-  mockProjectEventStore ??= buildMockProjectEvents();
+  if (!mockProjectEventStore) {
+    mockProjectEventStore = buildMockProjectEvents();
+    // Append any extra events injected by the test via addInitScript before
+    // the app boots. This lets a test seed standalone repositories or other
+    // project-scoped events without modifying the fixed seed data.
+    const extras = window.__BUZZ_E2E_EXTRA_PROJECT_EVENTS__;
+    if (extras && extras.length > 0) {
+      mockProjectEventStore.push(...(extras as RelayEvent[]));
+    }
+  }
   return mockProjectEventStore;
 }
 
@@ -5450,12 +5474,16 @@ function isMockProjectScopedEvent(event: RelayEvent): boolean {
 
 function filterMockProjectEvents(filter: MockFilter): RelayEvent[] {
   const authors = filter.authors?.map((author) => author.toLowerCase());
+  const idsSet =
+    filter.ids && filter.ids.length > 0 ? new Set(filter.ids) : null;
   return getMockProjectEventStore()
     .filter((event) => {
       if (filter.kinds && !filter.kinds.includes(event.kind)) return false;
       if (authors && !authors.includes(event.pubkey.toLowerCase())) {
         return false;
       }
+      // Filter by event ids when present — required for lost-ACK recovery queries.
+      if (idsSet && !idsSet.has(event.id)) return false;
       if (
         filter["#d"] &&
         !event.tags.some(

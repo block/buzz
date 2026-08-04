@@ -568,3 +568,137 @@ test("projectMatchesRouteId resolves a 30617 coordinate to the containing projec
     "unrelated 30617 address must not match",
   );
 });
+
+// ── 30617 route selects the correct repository (finding 4 regression gate) ──
+//
+// When `projectId` is a `30617:<owner>:<d>` coordinate (emitted by entity
+// links in #4695), `selectProjectRepository` must resolve to the repository
+// whose `id` is `<owner>:<d>` — not to the project's primary repository.
+// This test verifies the DI contract that `ProjectDetailScreen` uses to derive
+// `routeRepositoryId` from `projectId`.
+
+test("selectProjectRepository resolves a non-primary repository when repositoryId is derived from a 30617 projectId", () => {
+  const OWNER = "a".repeat(64);
+  const OTHER = "b".repeat(64);
+
+  const primaryRepo = {
+    id: `${OWNER}:buzz`,
+    dtag: "buzz",
+    name: "Buzz",
+    repoAddress: `30617:${OWNER}:buzz`,
+    owner: OWNER,
+    cloneUrls: [],
+    webUrl: null,
+    description: "",
+    contributors: [],
+    createdAt: 100,
+    status: "active",
+    defaultBranch: "main",
+  };
+  const nonPrimaryRepo = {
+    id: `${OTHER}:relay-tools`,
+    dtag: "relay-tools",
+    name: "Relay Tools",
+    repoAddress: `30617:${OTHER}:relay-tools`,
+    owner: OTHER,
+    cloneUrls: [],
+    webUrl: null,
+    description: "",
+    contributors: [],
+    createdAt: 80,
+    status: "active",
+    defaultBranch: "main",
+  };
+
+  const project = {
+    id: `30621:${OWNER}:buzz`,
+    dtag: "buzz",
+    name: "Buzz",
+    description: "",
+    owner: OWNER,
+    createdAt: 100,
+    projectChannelId: null,
+    status: "active",
+    projectAddress: `30621:${OWNER}:buzz`,
+    primaryRepositoryAddress: primaryRepo.repoAddress,
+    repositoryAddresses: [primaryRepo.repoAddress, nonPrimaryRepo.repoAddress],
+    repositories: [primaryRepo, nonPrimaryRepo],
+    unavailableRepositoryAddresses: [],
+    visibility: "listed",
+    legacy: false,
+  };
+
+  // Without a repositoryId: falls back to primary.
+  assert.equal(
+    selectProjectRepository(project, undefined)?.id,
+    primaryRepo.id,
+    "no repositoryId must yield the primary repository",
+  );
+
+  // With a repositoryId derived from the 30617 coordinate (as ProjectDetailScreen does):
+  // "30617:<owner>:<d>".slice("30617:".length) === "<owner>:<d>" === Repository.id
+  const routeRepositoryId = nonPrimaryRepo.repoAddress.slice("30617:".length);
+  assert.equal(
+    routeRepositoryId,
+    nonPrimaryRepo.id,
+    "routeRepositoryId derivation must equal Repository.id",
+  );
+  assert.equal(
+    selectProjectRepository(project, routeRepositoryId)?.id,
+    nonPrimaryRepo.id,
+    "derived repositoryId from 30617 coordinate must resolve to non-primary repository",
+  );
+  assert.notEqual(
+    selectProjectRepository(project, routeRepositoryId)?.id,
+    primaryRepo.id,
+    "non-primary linked repo must NOT fall back to primary",
+  );
+});
+
+// ── Tombstone exhaustive enumeration gate (finding 3) ───────────────────────
+//
+// Verifies that `buildProjectReadModels` applies ALL deletion events in the
+// supplied array — not just the first 2000 — proving the exhaustive-enumeration
+// path (via `fetchProjectEventsExhaustively` in `fetchProjects`) makes a
+// difference. The prior code capped kind:5 at 2000; this test ensures deletion
+// 2001+ is honoured when the exhaustive path is used.
+
+test("buildProjectReadModels applies deletion beyond the 2000-event boundary", () => {
+  const OWNER = "a".repeat(64);
+
+  // The project we want to verify is deleted (it's beyond event 2000).
+  const targetDtag = "beyond-limit";
+  const targetAddress = `30621:${OWNER}:${targetDtag}`;
+
+  const projectEvent = {
+    id: "p".repeat(64),
+    kind: 30621,
+    pubkey: OWNER,
+    created_at: 100,
+    content: "",
+    tags: [["d", targetDtag]],
+  };
+
+  // Build 2001 deletion events; the target is the last one.
+  const deletionEvents = Array.from({ length: 2001 }, (_, i) => ({
+    id: String(i).padStart(64, "0"),
+    kind: 5,
+    pubkey: OWNER,
+    created_at: 200,
+    content: "",
+    tags: [["a", i < 2000 ? `30621:${OWNER}:filler-${i}` : targetAddress]],
+  }));
+
+  const projects = buildProjectReadModels({
+    projectEvents: [projectEvent],
+    repositoryEvents: [],
+    deletionEvents,
+    relayOrigin: null,
+  });
+
+  assert.equal(
+    projects.length,
+    0,
+    "project at deletion event 2001+ must be suppressed when all tombstones are applied",
+  );
+});

@@ -72,8 +72,11 @@ async function addProjectRepository({
     ownerPubkey: identity.pubkey,
   });
 
-  // Cross-project d-tag clobber guard: check if the owner already has a
-  // different standalone or project-scoped 30617 at this coordinate.
+  // Cross-project d-tag clobber guard: if the owner already has a 30617
+  // at this coordinate — whether as a standalone repo or in another project —
+  // block the write unconditionally unless it is already a member of this
+  // project (in which case the earlier duplicate-address check would have
+  // thrown before we reach here).
   const existingRepoHeads = await relayClient.fetchEvents({
     kinds: [KIND_REPO_ANNOUNCEMENT],
     authors: [identity.pubkey],
@@ -81,17 +84,9 @@ async function addProjectRepository({
     limit: 1,
   });
   if (existingRepoHeads.length > 0) {
-    const existingAddress = `${KIND_REPO_ANNOUNCEMENT}:${identity.pubkey.toLowerCase()}:${templates.repositoryDtag}`;
-    // If it's already in this project, the earlier duplicate-address check would
-    // have thrown. If it's a different project or standalone repo, alert the user.
-    if (
-      !project.repositoryAddresses.includes(existingAddress) &&
-      existingAddress !== templates.repositoryAddress
-    ) {
-      throw new Error(
-        `A repository named "${templates.repositoryDtag}" already exists (as a standalone repository or in another project). Choose a different name to avoid overwriting it.`,
-      );
-    }
+    throw new Error(
+      `A repository named "${templates.repositoryDtag}" already exists (as a standalone repository or in another project). Choose a different name to avoid overwriting it.`,
+    );
   }
 
   const [projectEvent, repositoryEvent] = await Promise.all([
@@ -123,31 +118,73 @@ async function addProjectRepository({
   }
 
   // If the repository publish fails, the project event is already live with a
-  // dangling member. Persist the repository address so the caller can surface
-  // the partial state (e.g., the "unavailable repository" affordance) and the
-  // user can retry via the repair dialog.
+  // dangling member. Attempt to recover automatically before surfacing an error:
+  //
+  // 1. Query the relay by event id to distinguish two failure modes:
+  //    - Rejected ("OK false"): the relay explicitly refused the event. Retry
+  //      once; if the retry also fails, the operation is genuinely unrecoverable.
+  //    - Lost acknowledgement ("OK false" with ok:false but the relay stored it):
+  //      the event reached the relay but the transport-level ACK was lost. A
+  //      subsequent id-keyed query will find it; treat that as success.
+  //
+  // This keeps the mutation idempotent: re-submitting the same signed event is
+  // safe because event ids are deterministic hashes of the content+pubkey+timestamp.
   let repository: Repository | null = null;
-  try {
+  const publishRepository = async (): Promise<void> => {
     await relayClient.publishEvent(
       repositoryEvent,
       "Timed out creating the repository.",
       "Failed to create the repository.",
     );
+  };
+  try {
+    await publishRepository();
     repository = eventToRepository(repositoryEvent, getCachedRelayOrigin());
     if (!repository) {
       throw new Error("The repository was created but could not be read.");
     }
-  } catch (repoError) {
-    // Surface a meaningful partial-write error. The project already lists the
-    // repository coordinate; the user can see it as "unavailable" and retry.
-    const message =
-      repoError instanceof Error
-        ? repoError.message
-        : "Failed to create the repository.";
-    throw new Error(
-      `The project was updated but the repository could not be created: ${message} ` +
-        `The incomplete repository will appear as unavailable — use the repair dialog to retry.`,
-    );
+  } catch (_repoError) {
+    // Query by event id: if the relay already has this event, the ACK was
+    // merely lost — the write succeeded and we can proceed normally.
+    let alreadyStored = false;
+    try {
+      const stored = await relayClient.fetchEvents({
+        ids: [repositoryEvent.id],
+        kinds: [KIND_REPO_ANNOUNCEMENT],
+        limit: 1,
+      });
+      alreadyStored = stored.length > 0;
+    } catch {
+      // Ignore — if the query itself fails we fall through to the retry.
+    }
+    if (alreadyStored) {
+      repository = eventToRepository(repositoryEvent, getCachedRelayOrigin());
+    } else {
+      // The relay rejected or never received the event. Retry once with the
+      // same signed event (safe — deterministic id).
+      try {
+        await publishRepository();
+        repository = eventToRepository(repositoryEvent, getCachedRelayOrigin());
+      } catch (retryError) {
+        const message =
+          retryError instanceof Error
+            ? retryError.message
+            : "Failed to create the repository.";
+        // The project already lists the coordinate. Surface a partial-write
+        // error with the event id so the user (or a future repair pass) can
+        // query the relay directly and re-submit the signed event if needed.
+        throw new Error(
+          `The project was updated but the repository could not be created (event ${repositoryEvent.id.slice(0, 8)}…): ${message} ` +
+            `The incomplete repository will appear as unavailable — retry by opening the project and re-submitting from the repository management panel.`,
+        );
+      }
+    }
+    if (!repository) {
+      repository = eventToRepository(repositoryEvent, getCachedRelayOrigin());
+    }
+    if (!repository) {
+      throw new Error("The repository was created but could not be read.");
+    }
   }
 
   return {

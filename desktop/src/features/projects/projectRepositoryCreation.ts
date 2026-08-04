@@ -1,21 +1,15 @@
 import type { RelayEvent } from "@/shared/api/types";
-import type { Project, Repository } from "@/features/projects/hooks";
+import type { Repository } from "@/features/projects/hooks";
 import {
   isValidProjectChannelId,
   MAX_PROJECT_MEMBERS,
+  validateProjectEventEnvelope,
 } from "@/features/projects/projectModels";
 import {
   KIND_PROJECT_ANNOUNCEMENT,
   KIND_REPO_ANNOUNCEMENT,
 } from "@/shared/constants/kinds";
 import type { ProjectEventTemplate } from "./projectCreation";
-
-export type AddedRepositoryEventTemplates = {
-  project: ProjectEventTemplate;
-  repository: ProjectEventTemplate;
-  repositoryAddress: string;
-  repositoryDtag: string;
-};
 
 function repositoryDtagFromName(name: string): string {
   return name
@@ -31,8 +25,10 @@ function repositoryDtagFromName(name: string): string {
  * satisfying NIP-MP's extension-tag preservation rule and preventing a cached
  * UI projection from silently erasing unknown tags.
  *
- * Performs full NIP-MP envelope validation before returning so that the relay
- * and this client agree on which heads are valid.
+ * Performs full NIP-MP envelope validation on the patched output via the shared
+ * `validateProjectEventEnvelope` validator — the same checks applied by the
+ * read parser — so Desktop's write path agrees with its read path on which
+ * heads are valid regardless of the relay in use.
  */
 function buildProjectPatchTemplate({
   liveHead,
@@ -78,106 +74,21 @@ function buildProjectPatchTemplate({
     return hint ? ["a", address, hint] : ["a", address];
   });
 
+  const patchedTags = [...nonMemberTags, ...memberTags];
+  const content = liveHead.content;
+
+  // Validate the full patched envelope against NIP-MP rules. This catches
+  // nonconforming live heads (e.g., from a relay that accepted a malformed
+  // event) before we sign and re-submit, and pins the write path to the same
+  // spec the read parser enforces: duplicate `d`, duplicate/oversized
+  // metadata, malformed member arity, and the 64-member boundary.
+  validateProjectEventEnvelope(patchedTags, content);
+
   return {
     kind: KIND_PROJECT_ANNOUNCEMENT,
-    content: liveHead.content,
-    tags: [...nonMemberTags, ...memberTags],
+    content,
+    tags: patchedTags,
   };
-}
-
-/** @deprecated Use `buildProjectPatchTemplate` with a live head instead. */
-function buildProjectReplacementTemplate({
-  ownerPubkey,
-  project,
-  repositoryAddresses,
-}: {
-  ownerPubkey: string;
-  project: Project;
-  repositoryAddresses: string[];
-}): ProjectEventTemplate {
-  const normalizedOwner = ownerPubkey.trim().toLowerCase();
-  if (normalizedOwner !== project.owner.toLowerCase()) {
-    throw new Error("Only the project owner can add repositories.");
-  }
-  if (repositoryAddresses.length > MAX_PROJECT_MEMBERS) {
-    throw new Error(
-      `A project cannot contain more than ${MAX_PROJECT_MEMBERS} repositories.`,
-    );
-  }
-  if (new Set(repositoryAddresses).size !== repositoryAddresses.length) {
-    throw new Error("A project cannot contain duplicate repositories.");
-  }
-  if (
-    repositoryAddresses.some(
-      (address) => !/^30617:[0-9a-f]{64}:.+$/i.test(address),
-    )
-  ) {
-    throw new Error("Repository address is invalid.");
-  }
-
-  const tags: string[][] = [
-    ["d", project.dtag],
-    ["name", project.name],
-  ];
-  if (project.description) tags.push(["description", project.description]);
-  if (project.projectChannelId) {
-    tags.push(["buzz-channel", project.projectChannelId]);
-  }
-  if (project.visibility === "unlisted") {
-    tags.push(["buzz-visibility", "unlisted"]);
-  }
-  for (const address of repositoryAddresses.sort()) {
-    const relayHint = project.repositoryRelayHints?.[address];
-    tags.push(relayHint ? ["a", address, relayHint] : ["a", address]);
-  }
-  return { kind: KIND_PROJECT_ANNOUNCEMENT, content: "", tags };
-}
-
-export function buildAttachedRepositoryProjectEventTemplate({
-  ownerPubkey,
-  project,
-  repositoryAddress,
-}: {
-  ownerPubkey: string;
-  project: Project;
-  repositoryAddress: string;
-}): ProjectEventTemplate {
-  if (project.repositoryAddresses.includes(repositoryAddress)) {
-    throw new Error("This repository is already part of the project.");
-  }
-  return buildProjectReplacementTemplate({
-    ownerPubkey,
-    project,
-    repositoryAddresses: [...project.repositoryAddresses, repositoryAddress],
-  });
-}
-
-/**
- * Builds a project-replacement template from a live head, adding
- * `newRepositoryAddress` to the existing `a` tag set while preserving all
- * other tags and content verbatim. Use this in place of
- * `buildAttachedRepositoryProjectEventTemplate` when you have the live head
- * already fetched (the preferred write path).
- */
-export function buildAttachedRepositoryPatchTemplate({
-  liveHead,
-  ownerPubkey,
-  existingAddresses,
-  newRepositoryAddress,
-}: {
-  liveHead: RelayEvent;
-  ownerPubkey: string;
-  existingAddresses: string[];
-  newRepositoryAddress: string;
-}): ProjectEventTemplate {
-  if (existingAddresses.includes(newRepositoryAddress)) {
-    throw new Error("This repository is already part of the project.");
-  }
-  return buildProjectPatchTemplate({
-    liveHead,
-    ownerPubkey,
-    repositoryAddresses: [...existingAddresses, newRepositoryAddress],
-  });
 }
 
 export { buildProjectPatchTemplate };
@@ -313,85 +224,6 @@ export function buildAddedRepositoryEventTemplatesFromHead({
     liveHead,
     ownerPubkey,
     repositoryAddresses: newAddresses,
-  });
-
-  return {
-    project: projectTemplate,
-    repository: {
-      kind: KIND_REPO_ANNOUNCEMENT,
-      content: normalizedDescription,
-      tags: repositoryTags,
-    },
-    repositoryAddress,
-    repositoryDtag,
-  };
-}
-
-export function buildAddedRepositoryEventTemplates({
-  accessChannelId,
-  cloneUrl,
-  description,
-  name,
-  ownerPubkey,
-  project,
-  webUrl,
-}: {
-  accessChannelId?: string;
-  cloneUrl?: string;
-  description?: string;
-  name: string;
-  ownerPubkey: string;
-  project: Project;
-  webUrl?: string;
-}): AddedRepositoryEventTemplates {
-  const normalizedOwner = ownerPubkey.trim().toLowerCase();
-
-  const normalizedName = name.trim();
-  if (!normalizedName) throw new Error("Repository name is required.");
-  const repositoryDtag = repositoryDtagFromName(normalizedName);
-  if (!repositoryDtag) {
-    throw new Error("Repository name must include letters or numbers.");
-  }
-
-  const repositoryAddress = `${KIND_REPO_ANNOUNCEMENT}:${normalizedOwner}:${repositoryDtag}`;
-  const isUnavailableMember =
-    project.unavailableRepositoryAddresses?.includes(repositoryAddress) ??
-    false;
-  if (
-    project.repositoryAddresses.includes(repositoryAddress) &&
-    !isUnavailableMember
-  ) {
-    throw new Error(`This project already contains "${repositoryDtag}".`);
-  }
-  const normalizedDescription = description?.trim() ?? "";
-  const repositoryTags: string[][] = [
-    ["d", repositoryDtag],
-    ["name", normalizedName],
-  ];
-  const normalizedAccessChannelId = accessChannelId?.trim();
-  if (!normalizedAccessChannelId) {
-    throw new Error(
-      "This project has no repository access channel to inherit.",
-    );
-  }
-  if (!isValidProjectChannelId(normalizedAccessChannelId)) {
-    throw new Error("Repository access channel is invalid.");
-  }
-  repositoryTags.push(["buzz-channel", normalizedAccessChannelId]);
-  if (normalizedDescription) {
-    repositoryTags.push(["description", normalizedDescription]);
-  }
-  const normalizedCloneUrl = cloneUrl?.trim();
-  if (normalizedCloneUrl) repositoryTags.push(["clone", normalizedCloneUrl]);
-  const normalizedWebUrl = webUrl?.trim();
-  if (normalizedWebUrl) repositoryTags.push(["web", normalizedWebUrl]);
-
-  const projectTemplate = buildProjectReplacementTemplate({
-    ownerPubkey,
-    project,
-    repositoryAddresses: isUnavailableMember
-      ? [...project.repositoryAddresses]
-      : [...project.repositoryAddresses, repositoryAddress],
   });
 
   return {
