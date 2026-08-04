@@ -34,3 +34,25 @@ pub fn with_clipboard<T>(
     operation(stored.as_mut().expect("clipboard initialized"))
         .map_err(|e| format!("clipboard error: {e}"))
 }
+
+/// Read the system clipboard image, treating a non-image clipboard as an
+/// expected empty result rather than an error. WebKitGTK does not always
+/// surface Wayland image clipboard offers as `ClipboardEvent` file items.
+pub fn read_system_clipboard_image(
+    app: &tauri::AppHandle,
+) -> Result<Option<arboard::ImageData<'static>>, String> {
+    let state = app.state::<ClipboardState>();
+    let mut stored = state
+        .0
+        .lock()
+        .map_err(|_| "clipboard state lock poisoned".to_string())?;
+    if stored.is_none() {
+        *stored = Some(arboard::Clipboard::new().map_err(|e| format!("clipboard error: {e}"))?);
+    }
+
+    match stored.as_mut().expect("clipboard initialized").get_image() {
+        Ok(image) => Ok(Some(image)),
+        Err(arboard::Error::ContentNotAvailable) => Ok(None),
+        Err(error) => Err(format!("clipboard error: {error}")),
+    }
+}
