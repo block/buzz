@@ -14,7 +14,7 @@ jobs:
   # create the release objects all four platform jobs upload into.
   setup:
     name: Setup
-    if: github.repository == 'block/buzz'
+    if: github.repository == 'block/buzz' || github.repository == 'atlas-maxjb/buzz'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -51,7 +51,7 @@ jobs:
 
   release:
     name: Release
-    if: github.repository == 'block/buzz'
+    if: github.repository == 'block/buzz' || github.repository == 'atlas-maxjb/buzz'
     runs-on: macos-latest
     needs: setup
     timeout-minutes: 60
@@ -264,7 +264,7 @@ jobs:
 
   release-macos-x64:
     name: Release macOS (Intel)
-    if: github.repository == 'block/buzz'
+    if: github.repository == 'block/buzz' || github.repository == 'atlas-maxjb/buzz'
     runs-on: macos-latest
     needs: setup
     timeout-minutes: 60
@@ -425,7 +425,7 @@ jobs:
 
   release-linux:
     name: Release Linux
-    if: github.repository == 'block/buzz'
+    if: github.repository == 'block/buzz' || github.repository == 'atlas-maxjb/buzz'
     runs-on: ubuntu-latest
     # Digest-pinned like the SHA-pinned actions below; Renovate keeps it fresh.
     container: ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
