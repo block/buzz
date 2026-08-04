@@ -263,7 +263,13 @@ function StatusPill({ status }: { status: string }) {
   );
 }
 
-export function EmptyState() {
+export function EmptyState({
+  onCreateProject,
+  isCreating,
+}: {
+  onCreateProject?: () => void;
+  isCreating?: boolean;
+}) {
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-3 px-4 py-16 text-center">
       <FolderGit2 className="h-10 w-10 text-muted-foreground/40" />
@@ -273,6 +279,17 @@ export function EmptyState() {
           Projects published to this relay will appear here.
         </p>
       </div>
+      {onCreateProject ? (
+        <Button
+          disabled={isCreating}
+          onClick={onCreateProject}
+          size="sm"
+          type="button"
+        >
+          <FolderGit2 className="h-4 w-4" />
+          New Project
+        </Button>
+      ) : null}
     </div>
   );
 }
