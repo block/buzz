@@ -135,6 +135,55 @@ void main() {
       expect(storage.readOutbox(keys.public, 'https://relay.example'), isNull);
     },
   );
+
+  test(
+    'provider rebuild preserves delayed local edit and publishes on replacement manager',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final keys = nostr.Keys.generate();
+      final session = _ThemeRelaySession(keys.nsec, keys.public);
+      final storage = _DelayedThemeStorage(prefs);
+      final container = ProviderContainer(
+        overrides: [
+          communityThemeStorageProvider.overrideWithValue(storage),
+          relayConfigProvider.overrideWith(() => _RelayConfig(keys.nsec)),
+          relaySessionProvider.overrideWith(() => session),
+        ],
+      );
+      addTearDown(container.dispose);
+      final subscription = container.listen(
+        communityThemeProvider,
+        (_, _) {},
+        fireImmediately: true,
+      );
+      addTearDown(subscription.close);
+      await session.subscribed.future;
+
+      container.read(communityThemeProvider.notifier).setTheme('dracula');
+      expect(container.read(communityThemeProvider).theme, 'dracula');
+      await storage.cacheWriteStarted.future;
+
+      session.setStatus(SessionStatus.reconnecting);
+      await _pumpEventQueue();
+      expect(container.read(communityThemeProvider).theme, 'dracula');
+      session.setStatus(SessionStatus.connected);
+      await _waitUntil(() => session.subscribeCalls == 2);
+      expect(container.read(communityThemeProvider).theme, 'dracula');
+
+      storage.allowCacheWrite.complete();
+      storage.allowOutboxWrite.complete();
+      await _waitUntil(() => session.published != null);
+
+      final privateHex = nostr.Nip19.decode(payload: keys.nsec).data;
+      final key = getConversationKey(privateHex, keys.public);
+      expect(
+        jsonDecode(nip44Decrypt(key, session.published!.content))['theme'],
+        'dracula',
+      );
+      expect(container.read(communityThemeProvider).theme, 'dracula');
+    },
+  );
 }
 
 class _DelayedThemeStorage extends CommunityThemeStorage {
@@ -185,6 +234,7 @@ class _ThemeRelaySession extends RelaySessionNotifier {
   final String pubkey;
   final Future<List<NostrEvent>>? historyFuture;
   final subscribed = Completer<void>();
+  int subscribeCalls = 0;
   void Function(NostrEvent)? _listener;
   NostrEvent? published;
 
@@ -203,6 +253,7 @@ class _ThemeRelaySession extends RelaySessionNotifier {
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
   }) async {
+    subscribeCalls++;
     _listener = onEvent;
     if (!subscribed.isCompleted) subscribed.complete();
     return () => _listener = null;
@@ -218,6 +269,10 @@ class _ThemeRelaySession extends RelaySessionNotifier {
   }
 
   void emit(NostrEvent event) => _listener?.call(event);
+
+  void setStatus(SessionStatus status) {
+    state = SessionState(status: status);
+  }
 
   NostrEvent remoteEvent({required String theme, required String id}) {
     final privateHex = nostr.Nip19.decode(payload: nsec).data;

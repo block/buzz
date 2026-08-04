@@ -54,6 +54,7 @@ class CommunityThemeSyncManager {
   CommunityThemePreference? _lastPublished;
   int _lastCreatedAt = 0;
   String _lastEventId = '';
+  RemoteCommunityTheme? _lastRemote;
   int _subscriptionEpoch = 0;
   int _subscriptionRetryAttempt = 0;
   int _publishRetryAttempt = 0;
@@ -100,12 +101,29 @@ class CommunityThemeSyncManager {
   }
 
   Future<CommunityThemeRemoteResult> initialize() async {
+    final subscribed = await _startLiveSubscription();
+    if (_disposed) {
+      return const CommunityThemeRemoteResult(
+        CommunityThemeRemoteStatus.unavailable,
+      );
+    }
     final result = await fetchRemote();
     if (_disposed) return result;
     if (result.status == CommunityThemeRemoteStatus.valid) {
       _accept(result.remote!);
     }
-    await _startLiveSubscription();
+    final remote = _lastRemote;
+    if (remote != null) {
+      return CommunityThemeRemoteResult(
+        CommunityThemeRemoteStatus.valid,
+        remote,
+      );
+    }
+    if (!subscribed && result.status == CommunityThemeRemoteStatus.absent) {
+      return const CommunityThemeRemoteResult(
+        CommunityThemeRemoteStatus.unavailable,
+      );
+    }
     return result;
   }
 
@@ -317,6 +335,7 @@ class CommunityThemeSyncManager {
     }
     _lastCreatedAt = remote.createdAt;
     _lastEventId = remote.eventId;
+    _lastRemote = remote;
     if (_pending != null) {
       _lastPublished = null;
       return;

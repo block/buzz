@@ -18,6 +18,9 @@ class CommunityThemeNotifier extends Notifier<CommunityThemePreference> {
   String? _relayUrl;
   Future<void> _persistenceQueue = Future<void>.value();
   int _localRevision = 0;
+  CommunityThemePreference? _scopedLocalPreference;
+  String? _scopedLocalPubkey;
+  String? _scopedLocalRelayUrl;
 
   @override
   CommunityThemePreference build() {
@@ -39,10 +42,19 @@ class CommunityThemeNotifier extends Notifier<CommunityThemePreference> {
 
     final cached = _storage.read(pubkey, config.baseUrl);
     final dirty = _storage.readOutbox(pubkey, config.baseUrl);
+    final inMemoryLocal =
+        _scopedLocalPubkey == pubkey && _scopedLocalRelayUrl == config.baseUrl
+        ? _scopedLocalPreference
+        : null;
+    if (inMemoryLocal == null) {
+      _scopedLocalPreference = null;
+      _scopedLocalPubkey = pubkey;
+      _scopedLocalRelayUrl = config.baseUrl;
+    }
     final fallback = _storage.hasMigrated(pubkey)
         ? defaultCommunityTheme
         : _storage.legacyPreference();
-    final initial = dirty ?? cached ?? fallback;
+    final initial = inMemoryLocal ?? dirty ?? cached ?? fallback;
 
     if (session.status == SessionStatus.connected) {
       late final CommunityThemeSyncManager manager;
@@ -55,11 +67,18 @@ class CommunityThemeNotifier extends Notifier<CommunityThemePreference> {
         ),
         crypto: _crypto(config.nsec!, pubkey),
         onRemote: (remote) => _applyRemote(manager, remote),
-        onPublished: (preference) =>
-            unawaited(_storage.clearOutbox(pubkey, config.baseUrl, preference)),
+        onPublished: (preference) {
+          if (_scopedLocalPubkey == pubkey &&
+              _scopedLocalRelayUrl == config.baseUrl &&
+              _scopedLocalPreference == preference) {
+            _scopedLocalPreference = null;
+          }
+          unawaited(_storage.clearOutbox(pubkey, config.baseUrl, preference));
+        },
       );
       _manager = manager;
-      if (dirty != null) manager.publish(dirty);
+      final pending = inMemoryLocal ?? dirty;
+      if (pending != null) manager.publish(pending);
       Future.microtask(() async {
         final result = await manager.initialize();
         if (_manager != manager) return;
@@ -138,6 +157,9 @@ class CommunityThemeNotifier extends Notifier<CommunityThemePreference> {
       unawaited(_storage.writeLegacy(preference));
       return;
     }
+    _scopedLocalPreference = preference;
+    _scopedLocalPubkey = pubkey;
+    _scopedLocalRelayUrl = relayUrl;
     _manager?.stage(preference);
     unawaited(
       _enqueuePersistence(
@@ -160,7 +182,11 @@ class CommunityThemeNotifier extends Notifier<CommunityThemePreference> {
     if (!await _storage.write(pubkey, relayUrl, preference)) return;
     if (!await _storage.writeOutbox(pubkey, relayUrl, preference)) return;
     if (_pubkey == pubkey && _relayUrl == relayUrl) {
-      _manager?.publishStaged(preference);
+      final manager = _manager;
+      if (manager != null) {
+        manager.stage(preference);
+        manager.publishStaged(preference);
+      }
     }
   }
 

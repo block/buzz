@@ -34,6 +34,42 @@ void main() {
     expect(jsonDecode(relay.submissions.single.content), local.toJson());
   });
 
+  test(
+    'live replacement closes the history-to-subscription absence gap',
+    () async {
+      const replacement = CommunityThemePreference(
+        theme: 'dracula',
+        accent: '#ef4444',
+        followSystem: false,
+      );
+      final applied = <CommunityThemePreference>[];
+      late final _FakeSession session;
+      session = _FakeSession(
+        onFetchHistory: () {
+          session.emit(
+            _event(
+              id: 'replacement',
+              createdAt: 100,
+              content: jsonEncode(replacement.toJson()),
+            ),
+          );
+        },
+      );
+      final manager = _manager(
+        session,
+        _FakeSignedRelay(),
+        onRemote: (remote) => applied.add(remote.preference),
+      );
+
+      final result = await manager.initialize();
+
+      expect(session.subscribeCalls, 1);
+      expect(result.status, CommunityThemeRemoteStatus.valid);
+      expect(result.remote?.preference, replacement);
+      expect(applied, [replacement]);
+    },
+  );
+
   test('invalid and unavailable records never seed', () async {
     for (final session in [
       _FakeSession(history: [_event(content: '{bad json')]),
@@ -392,10 +428,12 @@ class _FakeSession extends RelaySessionNotifier {
     List<NostrEvent> history = const [],
     this.historyFuture,
     this.error,
+    this.onFetchHistory,
   }) : history = List.of(history);
   List<NostrEvent> history;
   final Future<List<NostrEvent>>? historyFuture;
   final Object? error;
+  final void Function()? onFetchHistory;
   int subscribeCalls = 0;
   final List<void Function(NostrEvent)> _listeners = [];
   final List<void Function(String)> _closedCallbacks = [];
@@ -410,6 +448,7 @@ class _FakeSession extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     if (error != null) throw error!;
+    onFetchHistory?.call();
     if (historyFuture != null) return historyFuture!;
     return history;
   }
