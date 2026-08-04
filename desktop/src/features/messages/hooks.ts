@@ -465,9 +465,10 @@ export function useSendMessageMutation(
         mentionPubkeys,
       );
 
-      // Messages carrying media OR custom-emoji tags MUST go through REST so
-      // the relay's tag validation runs. The WebSocket path emits no extra
-      // tags, so emoji-only messages would otherwise lose their emoji tag.
+      // Messages carrying media or custom-emoji tags MUST go through REST so
+      // the relay's tag validation runs. Explicit mention reference tags are
+      // supported by the WebSocket path and should stay there so DM expansion
+      // and its test bridge observe the normal send flow.
       if (parentEventId || imetaTags.length > 0 || emojiTags.length > 0) {
         const cachedMessages =
           queryClient.getQueryData<RelayEvent[]>(

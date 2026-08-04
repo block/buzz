@@ -44,6 +44,8 @@ import {
   requestHistoryGated,
 } from "@/shared/api/relayGateBoundary";
 import { RelayConnectionStateEmitter } from "@/shared/api/relayConnectionStateEmitter";
+import { handleRelayNoticeFrame } from "@/shared/api/relayNotices";
+import { withMentionReferenceTags } from "@/shared/lib/mentionReferenceTags";
 import {
   isServiceRestartClose,
   isWebSocketClose,
@@ -257,9 +259,7 @@ export class RelayClient {
     for (const pubkey of mentionPubkeys) {
       tags.push(["p", pubkey]);
     }
-    for (const tag of extraTags) {
-      tags.push(tag);
-    }
+    tags.push(...withMentionReferenceTags(extraTags, mentionPubkeys));
 
     const event = await signRelayEvent({
       kind: KIND_STREAM_MESSAGE,
@@ -776,6 +776,7 @@ export class RelayClient {
     }
 
     const [type, ...rest] = data;
+    if (type === "NOTICE" && handleRelayNoticeFrame(data)) return;
     if (type === "AUTH" && typeof rest[0] === "string") {
       await this.handleAuthChallenge(rest[0], generation);
       return;
@@ -818,9 +819,8 @@ export class RelayClient {
     }
 
     if (type === "NOTICE" && typeof rest[0] === "string") {
-      const notice: string = rest[0];
-      // Relay back-pressure signal — activate the gate so pending operations
-      // back off until the window expires.
+      const notice = rest[0];
+      // Relay back-pressure signal — activate the gate while operations back off.
       if (notice.startsWith("rate-limited:")) {
         activateRateLimit(parseRateLimitHint(notice));
       }
