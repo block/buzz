@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use super::{
-    display_invalid_key, is_derived_provider_model_key, is_reserved_env_key,
-    is_well_formed_env_key, merged_user_env, validate_user_env_keys,
+    display_invalid_key, is_derived_provider_model_key, is_legacy_agent_mcp_env_key,
+    is_reserved_env_key, is_well_formed_env_key, merged_user_env, validate_user_env_keys,
     DERIVED_PROVIDER_MODEL_ENV_KEYS, MAX_ENV_TOTAL_BYTES, MAX_ENV_VALUE_BYTES, RESERVED_ENV_KEYS,
 };
 
@@ -458,6 +458,21 @@ fn is_derived_key_does_not_match_unrelated_keys() {
     assert!(!is_derived_provider_model_key("BUZZ_PRIVATE_KEY"));
     assert!(!is_derived_provider_model_key("MODEL"));
     assert!(!is_derived_provider_model_key("PROVIDER"));
+}
+
+#[test]
+fn legacy_agent_mcp_keys_are_reserved_case_insensitively() {
+    for key in [
+        "BUZZ_ACP_MCP_SERVERS",
+        "buzz_acp_mcp_servers",
+        "BUZZ_MCP_CRM_AUTH_HEADER",
+        "buzz_mcp_crm_token",
+    ] {
+        assert!(is_legacy_agent_mcp_env_key(key));
+        assert!(is_reserved_env_key(key));
+    }
+    assert!(!is_legacy_agent_mcp_env_key("BUZZ_ACP_MCP_COMMAND"));
+    assert!(!is_legacy_agent_mcp_env_key("OPENAI_COMPAT_API_KEY"));
 }
 
 // ── deploy payload model precedence ────────────────────────────────

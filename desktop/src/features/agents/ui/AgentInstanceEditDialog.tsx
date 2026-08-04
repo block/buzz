@@ -1,6 +1,4 @@
 import * as React from "react";
-import { ChevronDown } from "lucide-react";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { toast } from "sonner";
 
 import {
@@ -24,9 +22,7 @@ import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
 import { Dialog } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
 import { setManagedAgentAutoRestart } from "@/shared/api/tauriManagedAgents";
-import { EditAgentAdvancedFields } from "./EditAgentAdvancedFields";
 import {
-  ADVANCED_FIELDS_MOTION_TRANSITION,
   AUTO_PROVIDER_DROPDOWN_VALUE,
   BLOCK_BUILD_HIDDEN_PROVIDER_IDS,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
@@ -86,7 +82,6 @@ import { AgentAiDefaultsNotice } from "./AgentAiDefaults";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
 import { useProviderApiKeyFieldState } from "./providerApiKeyFieldState";
 import { resolveModelFieldStatusMessage } from "./agentConfigControls";
-import { AdvancedRequiredBadge } from "./AdvancedRequiredBadge";
 import { showAgentProfileSyncWarning } from "./agentProfileSyncWarning";
 import { AddCustomHarnessDialog } from "./AddCustomHarnessDialog";
 import {
@@ -94,6 +89,12 @@ import {
   runtimeDropdownAction,
   usePendingHarnessSelection,
 } from "./addCustomHarness";
+import { AgentInstanceConfigurationSections } from "./AgentInstanceConfigurationSections";
+import {
+  MODEL_OVERRIDE_ENV_KEY,
+  PROVIDER_OVERRIDE_ENV_KEY,
+  applyLinkedModelProviderOverrides,
+} from "./agentInstanceOverrides";
 
 export function AgentInstanceEditDialog({
   agent,
@@ -142,6 +143,7 @@ export function AgentInstanceEditDialog({
   const [isCustomProviderEditing, setIsCustomProviderEditing] =
     React.useState(false);
   const [envVars, setEnvVars] = React.useState<EnvVarsValue>(agent.envVars);
+  const overrideTouched = React.useRef({ model: false, provider: false });
   const [autoRestartOnConfigChange, setAutoRestartOnConfigChange] =
     React.useState(agent.autoRestartOnConfigChange);
   const personasQuery = usePersonasQuery();
@@ -164,7 +166,6 @@ export function AgentInstanceEditDialog({
   const [isAvatarUploadPending, setIsAvatarUploadPending] =
     React.useState(false);
   const [isAddHarnessOpen, setIsAddHarnessOpen] = React.useState(false);
-  const shouldReduceMotion = useReducedMotion();
 
   // Runtime selector: defaults to "custom" until the dialog opens and the
   // catalog loads. The open-effect re-derives the correct id from the catalog.
@@ -192,6 +193,7 @@ export function AgentInstanceEditDialog({
       setProvider(agent.provider ?? "");
       setIsCustomProviderEditing(false);
       setEnvVars(agent.envVars);
+      overrideTouched.current = { model: false, provider: false };
       setAutoRestartOnConfigChange(agent.autoRestartOnConfigChange);
       setRespondTo(agent.respondTo);
       setRespondToAllowlist(agent.respondToAllowlist);
@@ -503,6 +505,7 @@ export function AgentInstanceEditDialog({
     // Mark that the user has made an explicit runtime choice. The catalog-arrival
     // effect will no longer overwrite selectedRuntimeId after this point.
     runtimeTouched.current = true;
+    overrideTouched.current = { model: true, provider: true };
 
     const resolvedRuntimeId = nextRuntimeId || "custom";
     setSelectedRuntimeId(resolvedRuntimeId);
@@ -554,6 +557,7 @@ export function AgentInstanceEditDialog({
   );
 
   function handleProviderDropdownChange(nextValue: string) {
+    overrideTouched.current.provider = true;
     const nextProvider =
       nextValue === AUTO_PROVIDER_DROPDOWN_VALUE ? "" : nextValue;
     if (nextProvider === "relay-mesh" && selectedRuntimeId !== "buzz-agent") {
@@ -574,6 +578,7 @@ export function AgentInstanceEditDialog({
   }
 
   function handleModelDropdownChange(nextValue: string) {
+    overrideTouched.current.model = true;
     applySelection(
       selectionOnModelDropdownChange(selection, {
         nextValue,
@@ -651,7 +656,14 @@ export function AgentInstanceEditDialog({
       // (same values the credential gate validates), so gate ↔ record ↔ spawn
       // all agree. See resolveInheritedRuntimeSubmission.
       const normalizedSubmitProvider = inheritedSubmission.provider;
-      const submitEnvVars = inheritedSubmission.envVars;
+      const submitEnvVars = applyLinkedModelProviderOverrides({
+        envVars: inheritedSubmission.envVars,
+        linked: linkedPersona != null,
+        model: normalizedModel,
+        modelTouched: overrideTouched.current.model,
+        provider: normalizedSubmitProvider,
+        providerTouched: overrideTouched.current.provider,
+      });
       const input: UpdateManagedAgentInput = {
         pubkey: agent.pubkey,
         name: name.trim() !== agent.name ? name.trim() : undefined,
@@ -839,9 +851,11 @@ export function AgentInstanceEditDialog({
 
   const previewLabel = name.trim() || "Agent name";
   const previewAvatarUrl = avatarUrl.trim() || null;
-  const advancedFieldsTransition = shouldReduceMotion
-    ? { duration: 0 }
-    : ADVANCED_FIELDS_MOTION_TRANSITION;
+  const hiddenEnvKeys = [
+    ...(topLevelSecretEnvVar ? [topLevelSecretEnvVar] : []),
+    MODEL_OVERRIDE_ENV_KEY,
+    PROVIDER_OVERRIDE_ENV_KEY,
+  ];
 
   return (
     <Dialog onOpenChange={handleOpenChange} open={open}>
@@ -1144,74 +1158,43 @@ export function AgentInstanceEditDialog({
             />
 
             {/* Advanced settings */}
-            <div className="space-y-3">
-              <button
-                aria-expanded={showAdvancedFields}
-                className="inline-flex h-9 items-center gap-1.5 text-sm font-medium text-foreground transition-colors hover:text-foreground/80 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-                onClick={() => setShowAdvancedFields((current) => !current)}
-                type="button"
-              >
-                <span>Advanced</span>
-                <AdvancedRequiredBadge
-                  envVars={inheritedSubmission.envVars}
-                  requiredEnvKeys={advancedRequiredEnvKeys}
-                  testId="edit-agent-advanced-required-badge"
-                />
-                <ChevronDown
-                  className={cn(
-                    "h-4 w-4 text-muted-foreground transition-transform duration-150 ease-out",
-                    showAdvancedFields && "rotate-180",
-                  )}
-                />
-              </button>
-              <AnimatePresence initial={false}>
-                {showAdvancedFields ? (
-                  <motion.div
-                    animate={{ height: "auto", opacity: 1, scale: 1 }}
-                    className="origin-top overflow-hidden"
-                    exit={{ height: 0, opacity: 0, scale: 0.98 }}
-                    initial={{ height: 0, opacity: 0, scale: 0.98 }}
-                    key="edit-agent-advanced-fields"
-                    transition={advancedFieldsTransition}
-                  >
-                    <EditAgentAdvancedFields
-                      acpCommand={acpCommand}
-                      agentArgs={agentArgs}
-                      autoRestartOnConfigChange={autoRestartOnConfigChange}
-                      disabled={updateMutation.isPending}
-                      envVars={envVars}
-                      fileSatisfiedEnvKeys={fileSatisfiedEnvKeys}
-                      hiddenEnvKeys={
-                        topLevelSecretEnvVar ? [topLevelSecretEnvVar] : []
-                      }
-                      focusKey={
-                        initialFocus?.type === "env_key"
-                          ? initialFocus.key
-                          : undefined
-                      }
-                      inheritedEnvVars={inheritedEnvVarsForAdvanced}
-                      inheritHarness={inheritHarness}
-                      linkedPersona={linkedPersona}
-                      model={inheritedSubmission.model ?? ""}
-                      modelTuningRuntimeId={prospectiveRuntimeId}
-                      parallelism={parallelism}
-                      provider={effectiveProvider}
-                      requiredEnvKeys={advancedRequiredEnvKeys}
-                      catalogStatus={runtimeCatalogStatus}
-                      selectedRuntime={prospectiveRuntime}
-                      systemPrompt={systemPrompt}
-                      onAcpCommandChange={setAcpCommand}
-                      onAgentArgsChange={setAgentArgs}
-                      onAutoRestartChange={setAutoRestartOnConfigChange}
-                      onEnvVarsChange={setEnvVars}
-                      onInheritHarnessChange={setInheritHarness}
-                      onParallelismChange={setParallelism}
-                      onSystemPromptChange={setSystemPrompt}
-                    />
-                  </motion.div>
-                ) : null}
-              </AnimatePresence>
-            </div>
+            <AgentInstanceConfigurationSections
+              advancedFieldsProps={{
+                acpCommand,
+                agentArgs,
+                autoRestartOnConfigChange,
+                disabled: updateMutation.isPending,
+                envVars,
+                fileSatisfiedEnvKeys,
+                hiddenEnvKeys,
+                focusKey:
+                  initialFocus?.type === "env_key"
+                    ? initialFocus.key
+                    : undefined,
+                inheritedEnvVars: inheritedEnvVarsForAdvanced,
+                inheritHarness,
+                linkedPersona,
+                model: inheritedSubmission.model ?? "",
+                modelTuningRuntimeId: prospectiveRuntimeId,
+                parallelism,
+                provider: effectiveProvider,
+                requiredEnvKeys: advancedRequiredEnvKeys,
+                catalogStatus: runtimeCatalogStatus,
+                selectedRuntime: prospectiveRuntime,
+                systemPrompt,
+                onAcpCommandChange: setAcpCommand,
+                onAgentArgsChange: setAgentArgs,
+                onAutoRestartChange: setAutoRestartOnConfigChange,
+                onEnvVarsChange: setEnvVars,
+                onInheritHarnessChange: setInheritHarness,
+                onParallelismChange: setParallelism,
+                onSystemPromptChange: setSystemPrompt,
+              }}
+              badgeEnvVars={inheritedSubmission.envVars}
+              onShowAdvancedFieldsChange={setShowAdvancedFields}
+              requiredEnvKeys={advancedRequiredEnvKeys}
+              showAdvancedFields={showAdvancedFields}
+            />
 
             {/* Error */}
             {updateMutation.error instanceof Error ? (

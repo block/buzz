@@ -34,6 +34,7 @@ secrets/
 Thumbs.db
 
 # CI artifacts and tooling that the image doesn't need
+.hermit/
 .cache/
 coverage/
 dist/

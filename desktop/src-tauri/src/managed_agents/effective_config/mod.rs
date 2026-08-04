@@ -14,8 +14,12 @@ use super::types::{AgentDefinition, ManagedAgentRecord};
 pub enum ConfigSource {
     Definition,
     Global,
+    InstanceOverride,
     InstanceLegacy,
 }
+
+pub const MODEL_OVERRIDE_ENV_KEY: &str = "BUZZ_DESKTOP_MODEL_OVERRIDE";
+pub const PROVIDER_OVERRIDE_ENV_KEY: &str = "BUZZ_DESKTOP_PROVIDER_OVERRIDE";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedField<T> {
@@ -72,28 +76,51 @@ fn non_blank(v: Option<&str>) -> Option<&str> {
 }
 
 fn resolve_linked(
+    record: &ManagedAgentRecord,
     definition: &AgentDefinition,
     global: &GlobalAgentConfig,
 ) -> EffectiveAgentConfig {
-    let model = match non_blank(definition.model.as_deref()) {
+    let model = match non_blank(
+        record
+            .env_vars
+            .get(MODEL_OVERRIDE_ENV_KEY)
+            .map(String::as_str),
+    ) {
         Some(m) => ResolvedField {
             value: Some(m.to_owned()),
-            source: ConfigSource::Definition,
+            source: ConfigSource::InstanceOverride,
         },
-        None => ResolvedField {
-            value: global.model.clone(),
-            source: ConfigSource::Global,
+        None => match non_blank(definition.model.as_deref()) {
+            Some(m) => ResolvedField {
+                value: Some(m.to_owned()),
+                source: ConfigSource::Definition,
+            },
+            None => ResolvedField {
+                value: global.model.clone(),
+                source: ConfigSource::Global,
+            },
         },
     };
 
-    let provider = match non_blank(definition.provider.as_deref()) {
+    let provider = match non_blank(
+        record
+            .env_vars
+            .get(PROVIDER_OVERRIDE_ENV_KEY)
+            .map(String::as_str),
+    ) {
         Some(p) => ResolvedField {
             value: Some(p.to_owned()),
-            source: ConfigSource::Definition,
+            source: ConfigSource::InstanceOverride,
         },
-        None => ResolvedField {
-            value: global.provider.clone(),
-            source: ConfigSource::Global,
+        None => match non_blank(definition.provider.as_deref()) {
+            Some(p) => ResolvedField {
+                value: Some(p.to_owned()),
+                source: ConfigSource::Definition,
+            },
+            None => ResolvedField {
+                value: global.provider.clone(),
+                source: ConfigSource::Global,
+            },
         },
     };
 
@@ -251,7 +278,7 @@ pub fn resolve_effective_config(
 ) -> EffectiveConfigResult {
     match &record.persona_id {
         Some(pid) => match definitions.iter().find(|d| d.id == *pid) {
-            Some(def) => EffectiveConfigResult::Resolved(resolve_linked(def, global)),
+            Some(def) => EffectiveConfigResult::Resolved(resolve_linked(record, def, global)),
             None => EffectiveConfigResult::OrphanedInstance {
                 record_pubkey: record.pubkey.clone(),
                 missing_persona_id: pid.clone(),

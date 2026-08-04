@@ -1,0 +1,27 @@
+# Copy to fly.toml and set a globally unique app name before deploying.
+app = "replace-with-buzz-agent-app"
+primary_region = "ams"
+kill_signal = "SIGTERM"
+kill_timeout = "60s"
+
+[build]
+  dockerfile = "../../Dockerfile.fly-agent"
+
+[env]
+  BUZZ_ACP_AGENT_COMMAND = "buzz-agent"
+  BUZZ_ACP_AGENT_ARGS = ""
+  BUZZ_ACP_AGENTS = "1"
+  BUZZ_ACP_LAZY_POOL = "true"
+  BUZZ_ACP_MCP_COMMAND = "buzz-dev-mcp"
+  BUZZ_ACP_RESPOND_TO = "owner-only"
+  BUZZ_AGENT_PROVIDER = "openai"
+  OPENAI_COMPAT_BASE_URL = "https://api.openai.com/v1"
+
+[[mounts]]
+  source = "agent_data"
+  destination = "/home/agent"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"
+  cpus = 1

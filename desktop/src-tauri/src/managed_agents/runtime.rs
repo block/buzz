@@ -768,10 +768,7 @@ pub fn spawn_agent_child(
     } else {
         command.env_remove("BUZZ_ACP_MODEL");
     }
-    // Session title for the harness to pass out-of-band on `session/new`. The
-    // adapter names the session after it; it never reaches the prompt, so this
-    // is display metadata only. `spawn_config_hash` hashes the same resolve, so
-    // a rename raises the restart badge instead of leaving the process stale.
+    // Display-only title; hashing the same resolve keeps restart state accurate.
     if let Some(title) = resolve_session_title(record.display_name.as_deref(), &record.name) {
         command.env(SESSION_TITLE_ENV_VAR, title);
     } else {
@@ -789,6 +786,9 @@ pub fn spawn_agent_child(
             command.env(key, value);
         }
     }
+    // Record-only Desktop metadata must not leak to agent/MCP subprocesses.
+    command.env_remove(super::effective_config::MODEL_OVERRIDE_ENV_KEY);
+    command.env_remove(super::effective_config::PROVIDER_OVERRIDE_ENV_KEY);
     command.env_remove("BUZZ_ACP_PRIVATE_KEY");
     command.env_remove("BUZZ_ACP_API_TOKEN");
     command.env_remove("BUZZ_API_TOKEN");

@@ -136,6 +136,35 @@ fn linked_definition_model_wins_over_stale_record() {
 }
 
 #[test]
+fn linked_instance_override_wins_without_reinterpreting_snapshot_fields() {
+    let mut rec = record(
+        Some("d1"),
+        Some("stale-model"),
+        Some("stale-prov"),
+        Some("stale prompt"),
+    );
+    rec.env_vars
+        .insert(MODEL_OVERRIDE_ENV_KEY.into(), "claude-opus".into());
+    rec.env_vars
+        .insert(PROVIDER_OVERRIDE_ENV_KEY.into(), "anthropic".into());
+    let defs = vec![definition(
+        "d1",
+        Some("gpt-default"),
+        Some("openai"),
+        "def prompt",
+    )];
+
+    let cfg = resolve_effective_config(&rec, &defs, &global(None, None))
+        .require_resolved()
+        .unwrap();
+    assert_eq!(cfg.model.value.as_deref(), Some("claude-opus"));
+    assert_eq!(cfg.model.source, ConfigSource::InstanceOverride);
+    assert_eq!(cfg.provider.value.as_deref(), Some("anthropic"));
+    assert_eq!(cfg.provider.source, ConfigSource::InstanceOverride);
+    assert_eq!(cfg.system_prompt.value.as_deref(), Some("def prompt"));
+}
+
+#[test]
 fn linked_inherit_global_when_definition_blank() {
     let rec = record(
         Some("d1"),
