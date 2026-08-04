@@ -15,10 +15,11 @@ import {
 
 import { useIdentityQuery } from "@/shared/api/hooks";
 import {
-  HOSTED_COMMUNITY_LIMIT as MAX_COMMUNITIES,
+  DEFAULT_HOSTED_COMMUNITY_LIMIT,
   HOSTED_COMMUNITY_SUFFIX as HOST_SUFFIX,
   hostedCommunityErrorMessage as errorMessage,
   hostedCommunityRelayUrl as relayUrl,
+  resolveHostedCommunityLimit,
   type BuilderlabAuth,
   type HostedCommunityAvailabilityResponse as AvailabilityResponse,
   type HostedCommunitiesResponse as CommunitiesResponse,
@@ -69,6 +70,9 @@ export function HostedCommunitiesSettingsCard() {
   const localPubkey = useIdentityQuery().data?.pubkey ?? null;
   const [auth, setAuth] = React.useState<BuilderlabAuth | null>(null);
   const [communities, setCommunities] = React.useState<HostedCommunity[]>([]);
+  const [communityLimit, setCommunityLimit] = React.useState(
+    DEFAULT_HOSTED_COMMUNITY_LIMIT,
+  );
   const [identity, setIdentity] = React.useState<NostrIdentity | null>(null);
   const [name, setName] = React.useState("");
   const [availability, setAvailability] = React.useState<boolean | null>(null);
@@ -110,6 +114,7 @@ export function HostedCommunitiesSettingsCard() {
     }
     setIdentity(identityResponse.identity ?? null);
     setCommunities(communitiesResponse.communities ?? []);
+    setCommunityLimit(resolveHostedCommunityLimit(communitiesResponse));
   }, []);
 
   React.useEffect(() => {
@@ -309,6 +314,7 @@ export function HostedCommunitiesSettingsCard() {
             response.error,
             response.correlation_id,
             "Could not transfer ownership.",
+            communityLimit,
           ),
         );
       }
@@ -360,7 +366,7 @@ export function HostedCommunitiesSettingsCard() {
       !validName ||
       !identity ||
       identityMismatch ||
-      communities.length >= MAX_COMMUNITIES
+      communities.length >= communityLimit
     )
       return;
     void run("Creating community…", async () => {
@@ -388,6 +394,7 @@ export function HostedCommunitiesSettingsCard() {
             response.error,
             response.correlation_id,
             "Could not create the community.",
+            communityLimit,
           ),
         );
       }
@@ -412,7 +419,7 @@ export function HostedCommunitiesSettingsCard() {
   };
 
   const busy = action != null;
-  const atCommunityLimit = communities.length >= MAX_COMMUNITIES;
+  const atCommunityLimit = communities.length >= communityLimit;
 
   return (
     <section className="space-y-6" data-testid="hosted-communities-settings">
@@ -555,7 +562,7 @@ export function HostedCommunitiesSettingsCard() {
               <h3 className="font-medium">
                 Your communities
                 <span className="ml-2 text-xs font-normal text-muted-foreground">
-                  {communities.length} of {MAX_COMMUNITIES} used
+                  {communities.length} of {communityLimit} used
                 </span>
               </h3>
               <Button
@@ -619,7 +626,7 @@ export function HostedCommunitiesSettingsCard() {
             </div>
             {atCommunityLimit ? (
               <p className="text-sm text-muted-foreground">
-                You&apos;ve reached the limit of {MAX_COMMUNITIES} hosted
+                You&apos;ve reached the limit of {communityLimit} hosted
                 communities. Transfer one to free up a slot before creating
                 another.
               </p>

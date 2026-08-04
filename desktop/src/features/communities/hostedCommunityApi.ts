@@ -1,7 +1,16 @@
 import { invoke } from "@tauri-apps/api/core";
 
+import {
+  DEFAULT_HOSTED_COMMUNITY_LIMIT,
+  resolveHostedCommunityLimit,
+} from "./hostedCommunityLimit";
+
+export {
+  DEFAULT_HOSTED_COMMUNITY_LIMIT,
+  resolveHostedCommunityLimit,
+} from "./hostedCommunityLimit";
+
 export const HOSTED_COMMUNITY_SUFFIX = "communities.buzz.xyz";
-export const HOSTED_COMMUNITY_LIMIT = 5;
 export const VALID_HOSTED_COMMUNITY_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 export type BuilderlabAuth = {
@@ -38,6 +47,8 @@ export type HostedCommunity = {
 
 export type HostedCommunitiesResponse = {
   communities?: HostedCommunity[];
+  /** Effective per-owner limit reported by the relay (absent on old servers). */
+  max_communities_per_owner?: number;
   error?: HostedCommunityApiError;
   correlation_id?: string;
 };
@@ -51,6 +62,8 @@ export type HostedCommunityAvailabilityResponse = {
 
 export type HostedCommunityMutationResponse = {
   community?: HostedCommunity;
+  /** Effective per-owner limit reported by the relay (absent on old servers). */
+  max_communities_per_owner?: number;
   error?: HostedCommunityApiError;
   correlation_id?: string;
 };
@@ -58,18 +71,21 @@ export type HostedCommunityMutationResponse = {
 export type HostedCommunityAccount = {
   communities: HostedCommunity[];
   identity: HostedNostrIdentity | null;
+  /** Effective per-owner community limit resolved from the relay response. */
+  communityLimit: number;
 };
 
 export function hostedCommunityErrorMessage(
   error: HostedCommunityApiError | undefined,
   correlationId: string | undefined,
   fallback: string,
+  communityLimit: number = DEFAULT_HOSTED_COMMUNITY_LIMIT,
 ) {
   const messages: Record<string, string> = {
     missing_mapping: "Connect your Buzz identity before creating a community.",
     invalid_name: "Use lowercase letters, numbers, and hyphens.",
     taken: "That Buzz address is already taken.",
-    limit_reached: `You've reached the limit of ${HOSTED_COMMUNITY_LIMIT} hosted communities.`,
+    limit_reached: `You've reached the limit of ${communityLimit} hosted communities.`,
     relay_unavailable: "Community provisioning is temporarily unavailable.",
     identity_already_bound:
       "This Builderlab account is connected to another Buzz identity.",
@@ -136,6 +152,7 @@ export async function loadHostedCommunityAccount(): Promise<HostedCommunityAccou
   return {
     identity: identityResponse.identity ?? null,
     communities: communitiesResponse.communities ?? [],
+    communityLimit: resolveHostedCommunityLimit(communitiesResponse),
   };
 }
 

@@ -7,9 +7,9 @@ import {
   checkHostedCommunityName,
   clearBuilderlabAuth,
   createHostedCommunity,
+  DEFAULT_HOSTED_COMMUNITY_LIMIT,
   deleteBuilderlabIdentity,
   getBuilderlabAuth,
-  HOSTED_COMMUNITY_LIMIT,
   HOSTED_COMMUNITY_SUFFIX,
   hostedCommunityErrorMessage,
   hostedCommunityRelayUrl,
@@ -45,6 +45,9 @@ export function HostedCommunityCreateFlow({
     null,
   );
   const [communities, setCommunities] = React.useState<HostedCommunity[]>([]);
+  const [communityLimit, setCommunityLimit] = React.useState(
+    DEFAULT_HOSTED_COMMUNITY_LIMIT,
+  );
   const [name, setName] = React.useState("");
   const [availability, setAvailability] = React.useState<boolean | null>(null);
   const [checkingName, setCheckingName] = React.useState(false);
@@ -58,6 +61,7 @@ export function HostedCommunityCreateFlow({
     const account = await loadHostedCommunityAccount();
     setIdentity(account.identity);
     setCommunities(account.communities);
+    setCommunityLimit(account.communityLimit);
   }, []);
 
   React.useEffect(() => {
@@ -189,7 +193,7 @@ export function HostedCommunityCreateFlow({
   const validName =
     normalizedName.length <= 63 &&
     VALID_HOSTED_COMMUNITY_NAME.test(normalizedName);
-  const atCommunityLimit = communities.length >= HOSTED_COMMUNITY_LIMIT;
+  const atCommunityLimit = communities.length >= communityLimit;
   const ready = Boolean(auth && identity && !identityMismatch);
 
   React.useEffect(() => {
@@ -242,6 +246,7 @@ export function HostedCommunityCreateFlow({
             response.error,
             response.correlation_id,
             "Could not create the community.",
+            communityLimit,
           ),
         );
       }
@@ -372,7 +377,7 @@ export function HostedCommunityCreateFlow({
   }
 
   const feedback = atCommunityLimit
-    ? `You’ve reached the limit of ${HOSTED_COMMUNITY_LIMIT} hosted communities.`
+    ? `You’ve reached the limit of ${communityLimit} hosted communities.`
     : name && !validName
       ? "Use lowercase letters, numbers, and single hyphens."
       : checkingName
