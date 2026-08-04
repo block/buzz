@@ -41,12 +41,30 @@ type LimitBearingResponse = {
 };
 
 /**
- * Resolve the effective hosted-community limit from a server response.
+ * Read the limit a server response actually reports, or `null` when it reports
+ * none.
  *
- * A positive-integer `max_communities_per_owner` wins; anything else (absent
- * response, absent field, non-number, non-integer, or non-positive value)
- * falls back to `fallback` — the same fallback rules the relay applies to its
- * own env override.
+ * A positive-integer `max_communities_per_owner` is a limit; anything else
+ * (absent response, absent field, non-number, non-integer, or non-positive
+ * value) is not — the same rules the relay applies to its own env override.
+ *
+ * This is the shape to use when a caller already holds a limit and only wants
+ * to replace it with a better one (`next ?? previous`): responses that omit the
+ * field are indistinguishable from ones that predate it, so they must leave a
+ * known-good value alone rather than reset it.
+ */
+export function readHostedCommunityLimit(
+  response: LimitBearingResponse | null | undefined,
+): number | null {
+  const limit = response?.max_communities_per_owner;
+  return typeof limit === "number" && Number.isInteger(limit) && limit > 0
+    ? limit
+    : null;
+}
+
+/**
+ * Resolve the effective hosted-community limit from a server response, falling
+ * back when it reports none.
  *
  * Pass the limit already in hand as `fallback` when resolving a response that
  * may omit the field (e.g. a mutation reply) so a known-good value from an
@@ -57,23 +75,21 @@ export function resolveHostedCommunityLimit(
   response: LimitBearingResponse | null | undefined,
   fallback: number = DEFAULT_HOSTED_COMMUNITY_LIMIT,
 ): number {
-  const limit = response?.max_communities_per_owner;
-  return typeof limit === "number" && Number.isInteger(limit) && limit > 0
-    ? limit
-    : fallback;
+  return readHostedCommunityLimit(response) ?? fallback;
 }
 
 /**
- * User-facing copy for a `limit_reached` rejection.
+ * User-facing copy for a `limit_reached` rejection — the single owner of this
+ * sentence, so the surfaces that render it cannot drift apart.
  *
  * Names a number only when the caller resolved one from a server response.
  * There is deliberately no default: a limit this deployment may not use is
  * worse than copy that omits the number.
  */
 export function hostedCommunityLimitReachedMessage(
-  communityLimit?: number,
+  communityLimit?: number | null,
 ): string {
   return communityLimit
-    ? `You've reached the limit of ${communityLimit} hosted communities.`
-    : "You've reached your limit of hosted communities.";
+    ? `You’ve reached the limit of ${communityLimit} hosted communities.`
+    : "You’ve reached your limit of hosted communities.";
 }

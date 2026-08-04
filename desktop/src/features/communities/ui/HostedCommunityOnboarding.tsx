@@ -13,6 +13,7 @@ import {
   getBuilderlabAuth,
   HOSTED_COMMUNITY_SUFFIX,
   hostedCommunityErrorMessage,
+  hostedCommunityLimitReachedMessage,
   hostedCommunityRelayUrl,
   type BuilderlabAuth,
   type HostedCommunity,
@@ -101,7 +102,7 @@ export function HostedCommunityOnboarding({
     const account = await loadHostedCommunityAccount();
     setIdentity(account.identity);
     setCommunities(account.communities);
-    setCommunityLimit(account.communityLimit);
+    setCommunityLimit((previous) => account.communityLimit ?? previous);
   }, []);
 
   React.useEffect(() => {
@@ -364,7 +365,7 @@ export function HostedCommunityOnboarding({
   ) : null;
 
   const creationFeedback = atCommunityLimit
-    ? `You’ve reached the limit of ${communityLimit} hosted communities.`
+    ? hostedCommunityLimitReachedMessage(communityLimit)
     : name && !validName
       ? "Use lowercase letters, numbers, and single hyphens."
       : checkingName

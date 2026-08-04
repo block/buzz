@@ -14,6 +14,7 @@ import test from "node:test";
 import {
   DEFAULT_HOSTED_COMMUNITY_LIMIT,
   hostedCommunityLimitReachedMessage,
+  readHostedCommunityLimit,
   resolveHostedCommunityLimit,
 } from "./hostedCommunityLimit.ts";
 
@@ -162,6 +163,66 @@ test("mutation_reply_without_the_field_keeps_the_loaded_limit", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Nullable read. `loadHostedCommunityAccount` reports what the list response
+// carried rather than a pre-applied fallback, so a reload obeys the same
+// "an omitted field never clobbers a known one" rule as a mutation reply.
+// ---------------------------------------------------------------------------
+
+test("read_returns_null_when_the_response_reports_no_limit", () => {
+  assert.equal(readHostedCommunityLimit(undefined), null);
+  assert.equal(readHostedCommunityLimit(null), null);
+  assert.equal(readHostedCommunityLimit({}), null);
+  assert.equal(readHostedCommunityLimit({ communities: [] }), null);
+  assert.equal(
+    readHostedCommunityLimit({ max_communities_per_owner: 0 }),
+    null,
+  );
+  assert.equal(
+    readHostedCommunityLimit({ max_communities_per_owner: -5 }),
+    null,
+  );
+  assert.equal(
+    readHostedCommunityLimit({ max_communities_per_owner: 2.5 }),
+    null,
+  );
+  assert.equal(
+    readHostedCommunityLimit({ max_communities_per_owner: "7" }),
+    null,
+  );
+});
+
+test("read_returns_the_server_value_when_reported", () => {
+  assert.equal(readHostedCommunityLimit({ max_communities_per_owner: 7 }), 7);
+  assert.equal(readHostedCommunityLimit({ max_communities_per_owner: 1 }), 1);
+});
+
+test("reload_without_the_field_keeps_the_adopted_limit", () => {
+  // A 409 reports 7 and the UI adopts it; the reload that follows a successful
+  // create/transfer omits the field. `next ?? previous` must hold 7 — resolving
+  // the reload against the stock default would re-gate the owner at 5, the
+  // exact #4160 regression.
+  const adopted = resolveHostedCommunityLimit(
+    { error: { code: "limit_reached" }, max_communities_per_owner: 7 },
+    DEFAULT_HOSTED_COMMUNITY_LIMIT,
+  );
+  const reload = { communities: [] };
+  assert.equal(readHostedCommunityLimit(reload) ?? adopted, 7);
+});
+
+test("reload_with_a_new_limit_replaces_the_adopted_one", () => {
+  // Stickiness must not outrank a fresh server value in either direction.
+  const adopted = 7;
+  assert.equal(
+    readHostedCommunityLimit({ max_communities_per_owner: 3 }) ?? adopted,
+    3,
+  );
+  assert.equal(
+    readHostedCommunityLimit({ max_communities_per_owner: 9 }) ?? adopted,
+    9,
+  );
+});
+
+// ---------------------------------------------------------------------------
 // The `limit_reached` copy must never invent a number: without a
 // server-resolved limit it omits the count instead of asserting 5.
 // ---------------------------------------------------------------------------
@@ -169,18 +230,18 @@ test("mutation_reply_without_the_field_keeps_the_loaded_limit", () => {
 test("limit_reached_copy_names_the_resolved_limit", () => {
   assert.equal(
     hostedCommunityLimitReachedMessage(7),
-    "You've reached the limit of 7 hosted communities.",
+    "You’ve reached the limit of 7 hosted communities.",
   );
   assert.equal(
     hostedCommunityLimitReachedMessage(3),
-    "You've reached the limit of 3 hosted communities.",
+    "You’ve reached the limit of 3 hosted communities.",
   );
 });
 
 test("limit_reached_copy_omits_the_number_when_unresolved", () => {
-  for (const unresolved of [undefined, 0]) {
+  for (const unresolved of [undefined, null, 0]) {
     const message = hostedCommunityLimitReachedMessage(unresolved);
-    assert.equal(message, "You've reached your limit of hosted communities.");
+    assert.equal(message, "You’ve reached your limit of hosted communities.");
     assert.equal(
       /\d/.test(message),
       false,

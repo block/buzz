@@ -2,11 +2,13 @@ import { invoke } from "@tauri-apps/api/core";
 
 import {
   hostedCommunityLimitReachedMessage,
-  resolveHostedCommunityLimit,
+  readHostedCommunityLimit,
 } from "./hostedCommunityLimit";
 
 export {
   DEFAULT_HOSTED_COMMUNITY_LIMIT,
+  hostedCommunityLimitReachedMessage,
+  readHostedCommunityLimit,
   resolveHostedCommunityLimit,
 } from "./hostedCommunityLimit";
 
@@ -50,7 +52,8 @@ export type HostedCommunitiesResponse = {
   /**
    * Effective per-owner limit originating at the relay, forwarded by
    * Builderlab. Absent until that hop forwards it (and on older relays), so
-   * always read it through `resolveHostedCommunityLimit`.
+   * always read it through `readHostedCommunityLimit` /
+   * `resolveHostedCommunityLimit`.
    */
   max_communities_per_owner?: number;
   error?: HostedCommunityApiError;
@@ -79,8 +82,14 @@ export type HostedCommunityMutationResponse = {
 export type HostedCommunityAccount = {
   communities: HostedCommunity[];
   identity: HostedNostrIdentity | null;
-  /** Effective per-owner community limit resolved from the relay response. */
-  communityLimit: number;
+  /**
+   * Per-owner community limit this response reported, or `null` when it
+   * reported none. Apply it over the limit already in hand (`next ?? previous`)
+   * — same rule as {@link HostedCommunityMutationResponse}, so a reload that
+   * omits the field never drags an adopted limit back to
+   * {@link DEFAULT_HOSTED_COMMUNITY_LIMIT}.
+   */
+  communityLimit: number | null;
 };
 
 export function hostedCommunityErrorMessage(
@@ -163,7 +172,7 @@ export async function loadHostedCommunityAccount(): Promise<HostedCommunityAccou
   return {
     identity: identityResponse.identity ?? null,
     communities: communitiesResponse.communities ?? [],
-    communityLimit: resolveHostedCommunityLimit(communitiesResponse),
+    communityLimit: readHostedCommunityLimit(communitiesResponse),
   };
 }
 

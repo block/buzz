@@ -18,6 +18,7 @@ import {
   DEFAULT_HOSTED_COMMUNITY_LIMIT,
   HOSTED_COMMUNITY_SUFFIX as HOST_SUFFIX,
   hostedCommunityErrorMessage as errorMessage,
+  hostedCommunityLimitReachedMessage as limitReachedMessage,
   hostedCommunityRelayUrl as relayUrl,
   loadHostedCommunityAccount,
   resolveHostedCommunityLimit,
@@ -86,7 +87,7 @@ export function HostedCommunitiesSettingsCard() {
     const account = await loadHostedCommunityAccount();
     setIdentity(account.identity);
     setCommunities(account.communities);
-    setCommunityLimit(account.communityLimit);
+    setCommunityLimit((previous) => account.communityLimit ?? previous);
   }, []);
 
   React.useEffect(() => {
@@ -605,9 +606,8 @@ export function HostedCommunitiesSettingsCard() {
             </div>
             {atCommunityLimit ? (
               <p className="text-sm text-muted-foreground">
-                You&apos;ve reached the limit of {communityLimit} hosted
-                communities. Transfer one to free up a slot before creating
-                another.
+                {limitReachedMessage(communityLimit)} Transfer one to free up a
+                slot before creating another.
               </p>
             ) : null}
             <div className="flex max-w-xl items-center gap-2">
