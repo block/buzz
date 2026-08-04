@@ -524,9 +524,10 @@ test("the travel gate catches a real reversal and a sign error", () => {
 test("the two waves have different periods and neither is instant", () => {
   assert.notEqual(FIELD_PERIOD_SECONDS, WORDMARK_PERIOD_SECONDS);
   // 'Slow' means slow. Ambience, not a screensaver: a full traversal must take
-  // more than ten seconds on both waves.
-  assert.ok(FIELD_PERIOD_SECONDS > 10);
-  assert.ok(WORDMARK_PERIOD_SECONDS > 10);
+  // more than five seconds on both waves. (Floor halved from 10s with Tyler's
+  // "double the animation speed" amendment, msg 4e7abbc8.)
+  assert.ok(FIELD_PERIOD_SECONDS > 5);
+  assert.ok(WORDMARK_PERIOD_SECONDS > 5);
 });
 
 test("phase wraps into [0,1) and advances monotonically within a cycle", () => {
@@ -633,7 +634,7 @@ test("the field still fades monotonically outward at every phase", () => {
  * 1. WRONG SAMPLING RATE. It first compared ADJACENT HUE BUCKETS, steps of
  *    1/128 in hue. Nothing on screen samples the axis that finely — adjacent
  *    field cells are ~1/112 apart in projected position and one 60Hz frame
- *    advances the phase by 1/(26*60). It was reporting an inherited property of
+ *    advances the phase by 1/(13*60). It was reporting an inherited property of
  *    the ramp's steep stretch, and failed on 24 themes while the pixels were fine.
  *
  * 2. WRONG THRESHOLD. An absolute 8-unit bound was never a standard the shipped
@@ -785,7 +786,7 @@ test("the hue axis has no seam at the phase wrap", () => {
       previousField = field;
     }
     // Per-sample bound of 3 dE00 at 1200 samples per cycle, finer than 60Hz over
-    // a 19s period, so a real seam cannot hide between samples. Generous against
+    // a 9.5s period, so a real seam cannot hide between samples. Generous against
     // sampling noise, brutal against a full-palette discontinuity: the unfolded
     // seam measured 182.5 sRGB / 55.6 dE00 on buzz-dark.
     if (max > 3) offenders.push(`${name} ${max.toFixed(2)}`);
@@ -1110,10 +1111,12 @@ test("successive frames differ and a full cycle returns to the start", () => {
     return target.draws.map((draw) => draw.color).join("");
   };
   const a = frame(0);
-  // One second of a 26s traversal is ~4 columns of drift: visible, not static.
+  // One second of a 13s traversal is ~8 columns of drift: visible, not static.
   assert.notEqual(a, frame(1));
   // Seamless loop: the least common period of the two waves returns both to 0.
-  assert.equal(a, frame(FIELD_PERIOD_SECONDS * WORDMARK_PERIOD_SECONDS));
+  // With 13s and 9.5s periods that is 247s (13*19 = 9.5*26), NOT the raw
+  // product 123.5, which is 9.5 field cycles — half a cycle off.
+  assert.equal(a, frame(2 * FIELD_PERIOD_SECONDS * WORDMARK_PERIOD_SECONDS));
 });
 
 /** The table is what makes this affordable, and its shape is load-bearing. */

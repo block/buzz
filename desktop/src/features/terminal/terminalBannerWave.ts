@@ -68,7 +68,7 @@ export type BannerWaveConfig = {
   /**
    * Seconds for one full traversal of the colour ramp. BIGGER = SLOWER.
    * This is ambience, not a screensaver: the direction gate is indifferent to
-   * this value but the "slow" gate requires it to stay above 10s.
+   * this value but the "slow" gate requires it to stay above 5s.
    */
   seconds: number;
   /**
@@ -106,10 +106,14 @@ export type BannerWaveConfig = {
  * Tyler: field originates BOTTOM-RIGHT and travels to TOP-LEFT, so the
  * direction vector points up-and-left. The wordmark keeps its own
  * left-to-right sweep, anchored to the letters rather than the viewport.
+ *
+ * Tyler, amendment (msg 4e7abbc8): "double the animation speed on the buzz
+ * term splash screen". Both periods halved from the original 26s/19s; the
+ * "slow" gate's floor moved from 10s to 5s to match.
  */
 export const FIELD_WAVE: BannerWaveConfig = {
   direction: { x: -1, y: -1 },
-  seconds: 26,
+  seconds: 13,
   wavelength: 0.5,
   intensity: 1,
 };
@@ -118,7 +122,7 @@ export const WORDMARK_WAVE: BannerWaveConfig = {
   // Left-to-right along the mark's own ink span; y is unused for the wordmark,
   // whose axis is the geometry's `t`, not a screen position.
   direction: { x: 1, y: 0 },
-  seconds: 19,
+  seconds: 9.5,
   wavelength: 0.5,
   intensity: 1,
 };
