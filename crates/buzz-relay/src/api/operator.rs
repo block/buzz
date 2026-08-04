@@ -18,7 +18,7 @@ use uuid::Uuid;
 use buzz_core::{CommunityId, TenantContext};
 
 use crate::handlers::community_provisioning::{
-    normalize_candidate_host, validate_pubkey_hex, ProvisionCommunityRequest,
+    limit_reached_error, normalize_candidate_host, validate_pubkey_hex, ProvisionCommunityRequest,
 };
 use crate::state::AppState;
 
@@ -330,6 +330,10 @@ pub async fn list_owned_communities(
 
     Ok(Json(serde_json::json!({
         "owner_pubkey": owner_pubkey,
+        // Effective per-owner community limit, so clients render limit gates
+        // and copy from the deployment's configuration instead of hardcoding
+        // the stock default (#4160).
+        "max_communities_per_owner": buzz_db::relay_members::max_communities_per_owner(),
         "communities": rows.into_iter().map(|row| serde_json::json!({
             "community_id": row.id.to_string(),
             "host": row.host,
@@ -423,7 +427,7 @@ pub async fn transfer_community(
         buzz_db::relay_members::TransferResult::LimitReached => {
             return Err(api_error(
                 StatusCode::CONFLICT,
-                "limit_reached: transferee already owns the maximum number of communities",
+                &limit_reached_error("transferee already owns the maximum number of communities"),
             ));
         }
     };
@@ -1083,7 +1087,7 @@ mod tests {
             return;
         };
 
-        for _ in 0..buzz_db::relay_members::MAX_COMMUNITIES_PER_OWNER {
+        for _ in 0..buzz_db::relay_members::max_communities_per_owner() {
             let host = format!("community-{}.example", Uuid::new_v4().simple());
             assert_eq!(
                 provision_community(state.clone(), &operator, &host, &owner)
@@ -1106,6 +1110,140 @@ mod tests {
             .await
             .expect("look up rejected fresh host")
             .is_none());
+    }
+
+    /// Every operator response that clients derive limit UI from must carry
+    /// the effective per-owner limit (#4160). Asserted against the env-aware
+    /// `max_communities_per_owner()` function, never a literal — the value is
+    /// deployment-configurable and the desktop only falls back to its own
+    /// default when the field is absent.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn list_and_provision_responses_report_effective_owner_limit() {
+        let operator = Keys::generate();
+        let owner = Keys::generate();
+        let Some(state) = operator_test_state(std::slice::from_ref(&operator)).await else {
+            return;
+        };
+        let effective_limit = buzz_db::relay_members::max_communities_per_owner();
+
+        let host = format!("community-{}.example", Uuid::new_v4().simple());
+        let create_response = provision_community(state.clone(), &operator, &host, &owner).await;
+        assert_eq!(create_response.status(), StatusCode::OK);
+        let create_json = read_json(create_response).await;
+        assert_eq!(
+            create_json
+                .get("max_communities_per_owner")
+                .and_then(Value::as_i64),
+            Some(effective_limit)
+        );
+
+        let owner_hex = owner.public_key().to_hex();
+        let query = format!("owner_pubkey={owner_hex}");
+        let list_response = signed_operator_request(
+            state,
+            &operator,
+            "GET",
+            &format!("/operator/communities?{query}"),
+            None,
+        )
+        .await;
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let list_json = read_json(list_response).await;
+        assert_eq!(
+            list_json
+                .get("max_communities_per_owner")
+                .and_then(Value::as_i64),
+            Some(effective_limit)
+        );
+    }
+
+    /// Both `limit_reached:` rejections (create and transfer) must embed the
+    /// effective limit after the routing prefix so clients can surface the
+    /// deployment's real number (#4160). The prefix stays intact for the
+    /// `starts_with`-based 409 routing.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn limit_reached_rejections_embed_effective_limit() {
+        let operator = Keys::generate();
+        let full_owner = Keys::generate();
+        let other_owner = Keys::generate();
+        let Some(state) = operator_test_state(std::slice::from_ref(&operator)).await else {
+            return;
+        };
+        let effective_limit = buzz_db::relay_members::max_communities_per_owner();
+        let embedded_limit = format!("({effective_limit})");
+
+        for _ in 0..effective_limit {
+            let host = format!("community-{}.example", Uuid::new_v4().simple());
+            assert_eq!(
+                provision_community(state.clone(), &operator, &host, &full_owner)
+                    .await
+                    .status(),
+                StatusCode::OK
+            );
+        }
+
+        // Create rejection embeds the number.
+        let host = format!("community-{}.example", Uuid::new_v4().simple());
+        let create_response =
+            provision_community(state.clone(), &operator, &host, &full_owner).await;
+        assert_eq!(create_response.status(), StatusCode::CONFLICT);
+        let create_error = read_json(create_response).await["error"]
+            .as_str()
+            .expect("create rejection error string")
+            .to_string();
+        assert!(
+            create_error.starts_with("limit_reached:"),
+            "error: {create_error}"
+        );
+        assert!(
+            create_error.contains(&embedded_limit),
+            "error: {create_error}"
+        );
+
+        // Transfer rejection embeds the number too: hand a fresh community to
+        // the already-full owner.
+        let transferable_host = format!("community-{}.example", Uuid::new_v4().simple());
+        assert_eq!(
+            provision_community(state.clone(), &operator, &transferable_host, &other_owner)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let community = state
+            .db
+            .lookup_community_by_host(&transferable_host)
+            .await
+            .expect("lookup transferable community")
+            .expect("transferable community exists");
+        let transfer_body = serde_json::json!({
+            "community_id": community.id.to_string(),
+            "new_owner_pubkey": full_owner.public_key().to_hex(),
+            "expected_owner_pubkey": other_owner.public_key().to_hex(),
+        })
+        .to_string();
+        let transfer_response = signed_operator_request(
+            state,
+            &operator,
+            "POST",
+            "/operator/communities/transfer",
+            Some(transfer_body),
+        )
+        .await;
+        assert_eq!(transfer_response.status(), StatusCode::CONFLICT);
+        let transfer_error = read_json(transfer_response).await["error"]
+            .as_str()
+            .expect("transfer rejection error string")
+            .to_string();
+        assert!(
+            transfer_error.starts_with("limit_reached:"),
+            "error: {transfer_error}"
+        );
+        assert!(
+            transfer_error.contains(&embedded_limit),
+            "error: {transfer_error}"
+        );
     }
 
     /// Happy path: POST /operator/communities/transfer swaps ownership, demotes
