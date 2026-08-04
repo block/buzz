@@ -156,6 +156,8 @@ type MockBridgeOptions = {
   pocketVoiceImportResult?: "success" | "cancel" | "invalid";
   /** Advertised HEAD for the first mock project without adding that branch. */
   projectHeadBranch?: string;
+  /** Serve zero projects so the Projects empty state can be exercised. */
+  emptyProjects?: boolean;
   /** Relay NIP-11 identity used to sign authoritative repository state. */
   relaySelf?: string | null;
   /** Native-like huddle state seeded from authoritative role-bearing membership. */
