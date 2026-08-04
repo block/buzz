@@ -292,6 +292,40 @@ class _EmptyPhotoLibrary implements PhotoLibrary {
       const [];
 }
 
+class _FakeVideoUploadService extends MediaUploadService {
+  final XFile video;
+  XFile? uploadedVideo;
+
+  _FakeVideoUploadService(this.video)
+    : super(
+        baseUrl: 'https://relay.example',
+        nsec: null,
+        pickGalleryImage: () async => null,
+        pickGalleryVideo: () async => null,
+      );
+
+  @override
+  Future<XFile?> pickGalleryVideo() async => video;
+
+  @override
+  Future<BlobDescriptor> uploadVideo(
+    XFile pickedVideo, {
+    ValueChanged<double>? onProgress,
+    UploadCancellationToken? cancellationToken,
+  }) async {
+    uploadedVideo = pickedVideo;
+    onProgress?.call(1);
+    return const BlobDescriptor(
+      url: 'https://relay.example/media/test.mp4',
+      sha256:
+          '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+      size: 32,
+      type: 'video/mp4',
+      uploaded: 1,
+    );
+  }
+}
+
 class _FakePhotoLibrary implements PhotoLibrary {
   final List<RecentPhoto> photos;
 
@@ -3146,85 +3180,49 @@ void main() {
       expect(find.byTooltip('Remove attachment'), findsOneWidget);
     });
 
-    // Skip: video upload relies on native platform bridging
-    // (transcodeVideoToMp4) that can't be fully mocked in widget tests.
-    testWidgets('taps Video in chooser sheet and uploads video', skip: true, (
+    testWidgets('taps Video in chooser sheet and uploads video', (
       tester,
     ) async {
-      final keychain = nostr.Keys.generate();
-      final nsec = keychain.nsec;
+      final pickedVideo = XFile.fromData(
+        Uint8List.fromList([0, 1, 2, 3]),
+        mimeType: 'video/mp4',
+        name: 'clip.mp4',
+      );
+      final uploadService = _FakeVideoUploadService(pickedVideo);
 
-      // Build a temp file with a valid MP4 ftyp header (isom brand).
-      final mp4Bytes = Uint8List(32);
-      mp4Bytes[3] = 32;
-      mp4Bytes[4] = 0x66; // f
-      mp4Bytes[5] = 0x74; // t
-      mp4Bytes[6] = 0x79; // y
-      mp4Bytes[7] = 0x70; // p
-      mp4Bytes[8] = 0x69; // i
-      mp4Bytes[9] = 0x73; // s
-      mp4Bytes[10] = 0x6F; // o
-      mp4Bytes[11] = 0x6D; // m
-      final tempDir = await Directory.systemTemp.createTemp('compose_video_');
-      final tempFile = File('${tempDir.path}/clip.mp4');
-      await tempFile.writeAsBytes(mp4Bytes);
+      String? sentContent;
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: uploadService,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {
+                sentContent = content;
+              },
+        ),
+      );
 
-      try {
-        final uploadService = MediaUploadService(
-          baseUrl: 'https://relay.example',
-          nsec: nsec,
-          httpClient: http_testing.MockClient((request) async {
-            return http.Response(
-              jsonEncode({
-                'url': 'https://relay.example/media/test.mp4',
-                'sha256':
-                    '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
-                'size': 1024,
-                'type': 'video/mp4',
-                'uploaded': 1,
-              }),
-              200,
-            );
-          }),
-          pickGalleryVideo: () async => XFile(tempFile.path),
-          pickGalleryImage: () async => null,
-        );
+      await _openAttachmentMenu(tester);
+      await tester.tap(find.text('Video'));
+      await tester.pumpAndSettle();
 
-        String? sentContent;
-        await tester.pumpWidget(
-          _buildComposeBar(
-            uploadService: uploadService,
-            onSend:
-                (
-                  content,
-                  mentionPubkeys, {
-                  mediaTags = const <List<String>>[],
-                }) async {
-                  sentContent = content;
-                },
-          ),
-        );
+      expect(find.byIcon(LucideIcons.video), findsOneWidget);
 
-        await _openAttachmentMenu(tester);
-        await tester.tap(find.text('Video'));
-        // Pump enough frames for the async file read + upload to complete.
-        // Can't use pumpAndSettle here — the upload spinner's animation
-        // prevents settling while the async upload is in-flight.
-        for (var i = 0; i < 10; i++) {
-          await tester.pump(const Duration(milliseconds: 100));
-        }
+      final sendButton = find
+          .ancestor(
+            of: find.byIcon(LucideIcons.arrowUp),
+            matching: find.byType(IconButton),
+          )
+          .hitTestable();
+      expect(sendButton, findsOneWidget);
+      await tester.tap(sendButton);
+      await tester.pumpAndSettle();
 
-        // Video attachment should show a video icon (not a broken image).
-        expect(find.byIcon(LucideIcons.video), findsOneWidget);
-
-        await tester.tap(find.byIcon(LucideIcons.arrowUp));
-        await tester.pump();
-        await tester.pumpAndSettle();
-
-        expect(sentContent, '\n![video](https://relay.example/media/test.mp4)');
-      } finally {
-        await tempDir.delete(recursive: true);
-      }
+      expect(uploadService.uploadedVideo, same(pickedVideo));
+      expect(sentContent, '\n![video](https://relay.example/media/test.mp4)');
     });
   });
 
