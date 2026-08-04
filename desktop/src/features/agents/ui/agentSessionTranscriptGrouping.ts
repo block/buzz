@@ -15,7 +15,20 @@ export type TranscriptTurnSegment =
 
 export type TranscriptDisplayBlock =
   | { kind: "single"; item: TranscriptItem }
-  | { kind: "turn"; turnId: string; segments: TranscriptTurnSegment[] }
+  | {
+      kind: "turn";
+      turnId: string;
+      /**
+       * The `id` of the first turn-bound `TranscriptItem` in this block.
+       * A turn's items can be split across session runs (e.g. a session
+       * restart mid-turn), producing multiple turn blocks with the same
+       * `turnId` — this field keeps their React keys distinct. Stable while
+       * a live turn streams (segments append after the first item) and
+       * across archive prepends (older runs don't reorder this run's items).
+       */
+      firstItemId: string;
+      segments: TranscriptTurnSegment[];
+    }
   | {
       /**
        * Session boundary divider injected between consecutive session runs.
@@ -689,6 +702,7 @@ function buildBlocksForRun(
       blocks.push({
         kind: "turn",
         turnId: entry.turnId,
+        firstItemId: bucket.items[0].id,
         segments,
       });
     }
@@ -760,7 +774,9 @@ export function getDisplayBlockKey(block: TranscriptDisplayBlock): string {
     // older sessions are prepended, causing unnecessary boundary remounts).
     return `session-boundary:${block.sessionId}:${block.firstItemId}`;
   }
-  return `turn:${block.turnId}`;
+  // firstItemId disambiguates fragments of a turn split across session runs
+  // (same turnId, different runs) — see the field doc on the turn block type.
+  return `turn:${block.turnId}:${block.firstItemId}`;
 }
 
 /**
