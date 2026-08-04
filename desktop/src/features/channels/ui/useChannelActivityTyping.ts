@@ -1,7 +1,9 @@
 import * as React from "react";
 
 import { reportChannelBotTyping } from "@/features/agents/agentWorkingSignal";
+import { combineObserverIngestionAgents } from "@/features/agents/useAgentObserverIngestion";
 import type { TypingIndicatorEntry } from "@/features/messages/useChannelTyping";
+import { useUsersBatchQuery } from "@/features/profile/hooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type {
   Channel,
@@ -20,12 +22,25 @@ import {
  * channel-scoped entries (`threadHeadId === null`) count — thread-only typing
  * must not light channel-level surfaces (composer bar, sidebar, profile);
  * thread surfaces apply their own `threadHeadId` filter.
+ *
+ * When `ownedPubkeys` is supplied, entries are additionally narrowed to agents
+ * the current identity owns (normalized pubkeys). The working timer/badge is a
+ * "my agents are busy" affordance, so another member's agent typing in a shared
+ * channel must not light it — only the owner sees their own agents' activity.
+ * Omitting `ownedPubkeys` keeps every channel-scoped entry (used by surfaces
+ * that legitimately show all agents, e.g. the in-channel "typing…" row).
  */
 export function channelScopedBotTypingPubkeyKey(
   entries: readonly Pick<TypingIndicatorEntry, "pubkey" | "threadHeadId">[],
+  ownedPubkeys?: ReadonlySet<string>,
 ): string {
   return entries
-    .filter((entry) => entry.threadHeadId === null)
+    .filter(
+      (entry) =>
+        entry.threadHeadId === null &&
+        (ownedPubkeys === undefined ||
+          ownedPubkeys.has(normalizePubkey(entry.pubkey))),
+    )
     .map((entry) => entry.pubkey.toLowerCase())
     .sort()
     .join(",");
@@ -35,6 +50,7 @@ export function useChannelActivityTyping({
   activeChannel,
   activeChannelId,
   channelMembers,
+  currentPubkey,
   managedAgents,
   openThreadHeadId,
   relayAgents,
@@ -43,6 +59,7 @@ export function useChannelActivityTyping({
   activeChannel: Channel | null;
   activeChannelId: string | null;
   channelMembers?: ChannelMember[];
+  currentPubkey: string | null | undefined;
   managedAgents: ManagedAgent[];
   openThreadHeadId: string | null;
   relayAgents: RelayAgent[];
@@ -101,12 +118,51 @@ export function useChannelActivityTyping({
     return { botTypingEntries, humanTypingPubkeys };
   }, [channelAgentPubkeys, typingEntries]);
 
+  // Agents the current identity owns: locally managed agents plus relay agents
+  // whose declared owner (NIP-OA) is me. Reuses the exact owned-set rule the
+  // observer-turn ingestion applies (combineObserverIngestionAgents), so both
+  // feeds of the working signal agree on "my agents". The relay-agent owner
+  // lookup shares React Query's cache with the observer ingestion's identical
+  // query, so this adds no extra fetch.
+  const relayAgentPubkeys = React.useMemo(
+    () => relayAgents.map((agent) => agent.pubkey),
+    [relayAgents],
+  );
+  const ownerProfilesQuery = useUsersBatchQuery(relayAgentPubkeys, {
+    enabled: Boolean(currentPubkey) && relayAgentPubkeys.length > 0,
+  });
+  const ownerProfiles = ownerProfilesQuery.data?.profiles;
+  const ownedAgentPubkeys = React.useMemo(() => {
+    const ownerByPubkey = new Map<string, string>();
+    for (const [pubkey, summary] of Object.entries(ownerProfiles ?? {})) {
+      if (summary.ownerPubkey) {
+        ownerByPubkey.set(
+          normalizePubkey(pubkey),
+          normalizePubkey(summary.ownerPubkey),
+        );
+      }
+    }
+    return new Set(
+      combineObserverIngestionAgents(
+        managedAgents,
+        relayAgentPubkeys,
+        ownerByPubkey,
+        currentPubkey,
+      ).map((agent) => normalizePubkey(agent.pubkey)),
+    );
+  }, [managedAgents, relayAgentPubkeys, ownerProfiles, currentPubkey]);
+
   // Mirror bot typing into the unified working signal so surfaces that read
   // agentWorkingSignal (sidebar badges, activity panel, composer bar) get the
   // typing fallback. Entries follow the typing TTL because this effect
   // re-reports whenever botTypingEntries changes. Thread-only typing is
-  // excluded — see channelScopedBotTypingPubkeyKey.
-  const botTypingPubkeyKey = channelScopedBotTypingPubkeyKey(botTypingEntries);
+  // excluded, and — unlike the in-channel typing row — only agents *I own* are
+  // mirrored, so another member's agent never lights my working timer (see
+  // channelScopedBotTypingPubkeyKey).
+  const botTypingPubkeyKey = channelScopedBotTypingPubkeyKey(
+    botTypingEntries,
+    ownedAgentPubkeys,
+  );
   React.useEffect(() => {
     if (!activeChannelId) {
       return;
