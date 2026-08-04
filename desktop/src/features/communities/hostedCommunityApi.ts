@@ -2,12 +2,14 @@ import { invoke } from "@tauri-apps/api/core";
 
 import {
   hostedCommunityLimitReachedMessage,
+  type HostedCommunityLimitSubject,
   readHostedCommunityLimit,
 } from "./hostedCommunityLimit";
 
 export {
   DEFAULT_HOSTED_COMMUNITY_LIMIT,
   hostedCommunityLimitReachedMessage,
+  type HostedCommunityLimitSubject,
   readHostedCommunityLimit,
   resolveHostedCommunityLimit,
 } from "./hostedCommunityLimit";
@@ -92,17 +94,38 @@ export type HostedCommunityAccount = {
   communityLimit: number | null;
 };
 
+/**
+ * Request-shaped context the generic error copy cannot infer from the payload.
+ */
+export type HostedCommunityErrorContext = {
+  /**
+   * Effective per-owner limit this surface resolved from a server response, so
+   * `limit_reached` copy names the deployment's real number instead of a
+   * hardcoded one.
+   */
+  communityLimit?: number;
+  /**
+   * Which party the `limit_reached` rejection is about. Defaults to the
+   * requester; transfers must pass `"transferee"` because the relay rejects
+   * them on the *recipient's* quota.
+   */
+  limitSubject?: HostedCommunityLimitSubject;
+};
+
 export function hostedCommunityErrorMessage(
   error: HostedCommunityApiError | undefined,
   correlationId: string | undefined,
   fallback: string,
-  communityLimit?: number,
+  { communityLimit, limitSubject }: HostedCommunityErrorContext = {},
 ) {
   const messages: Record<string, string> = {
     missing_mapping: "Connect your Buzz identity before creating a community.",
     invalid_name: "Use lowercase letters, numbers, and hyphens.",
     taken: "That Buzz address is already taken.",
-    limit_reached: hostedCommunityLimitReachedMessage(communityLimit),
+    limit_reached: hostedCommunityLimitReachedMessage(
+      communityLimit,
+      limitSubject,
+    ),
     relay_unavailable: "Community provisioning is temporarily unavailable.",
     identity_already_bound:
       "This Builderlab account is connected to another Buzz identity.",

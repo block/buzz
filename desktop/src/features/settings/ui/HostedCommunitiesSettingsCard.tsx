@@ -15,13 +15,11 @@ import {
 
 import { useIdentityQuery } from "@/shared/api/hooks";
 import {
-  DEFAULT_HOSTED_COMMUNITY_LIMIT,
   HOSTED_COMMUNITY_SUFFIX as HOST_SUFFIX,
   hostedCommunityErrorMessage as errorMessage,
   hostedCommunityLimitReachedMessage as limitReachedMessage,
   hostedCommunityRelayUrl as relayUrl,
   loadHostedCommunityAccount,
-  resolveHostedCommunityLimit,
   type BuilderlabAuth,
   type HostedCommunityAvailabilityResponse as AvailabilityResponse,
   type HostedCommunity,
@@ -32,6 +30,7 @@ import {
 } from "@/features/communities/hostedCommunityApi";
 import { CommunityIconSettingsCard } from "@/features/communities/ui/CommunityIconSettingsCard";
 import { useCommunities } from "@/features/communities/useCommunities";
+import { useHostedCommunityLimit } from "@/features/communities/useHostedCommunityLimit";
 import { safeNpub } from "@/shared/lib/nostrUtils";
 import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
 import {
@@ -71,9 +70,8 @@ export function HostedCommunitiesSettingsCard() {
   const localPubkey = useIdentityQuery().data?.pubkey ?? null;
   const [auth, setAuth] = React.useState<BuilderlabAuth | null>(null);
   const [communities, setCommunities] = React.useState<HostedCommunity[]>([]);
-  const [communityLimit, setCommunityLimit] = React.useState(
-    DEFAULT_HOSTED_COMMUNITY_LIMIT,
-  );
+  const { communityLimit, applyFromAccount, adoptFromResponse } =
+    useHostedCommunityLimit();
   const [identity, setIdentity] = React.useState<NostrIdentity | null>(null);
   const [name, setName] = React.useState("");
   const [availability, setAvailability] = React.useState<boolean | null>(null);
@@ -87,8 +85,8 @@ export function HostedCommunitiesSettingsCard() {
     const account = await loadHostedCommunityAccount();
     setIdentity(account.identity);
     setCommunities(account.communities);
-    setCommunityLimit((previous) => account.communityLimit ?? previous);
-  }, []);
+    applyFromAccount(account);
+  }, [applyFromAccount]);
 
   React.useEffect(() => {
     let active = true;
@@ -284,15 +282,15 @@ export function HostedCommunitiesSettingsCard() {
       if (response.error) {
         // A rejection carries the relay's effective limit; adopt it so the copy
         // and the gate reflect the server rather than whatever was current at
-        // load time.
-        const limit = resolveHostedCommunityLimit(response, communityLimit);
-        setCommunityLimit(limit);
+        // load time. The relay rejects a transfer on the *recipient's* quota,
+        // so the copy has to name them and not the owner giving it away.
+        const limit = adoptFromResponse(response);
         throw new Error(
           errorMessage(
             response.error,
             response.correlation_id,
             "Could not transfer ownership.",
-            limit,
+            { communityLimit: limit, limitSubject: "transferee" },
           ),
         );
       }
@@ -367,14 +365,13 @@ export function HostedCommunitiesSettingsCard() {
         { name: normalizedName },
       );
       if (response.error || !response.community) {
-        const limit = resolveHostedCommunityLimit(response, communityLimit);
-        setCommunityLimit(limit);
+        const limit = adoptFromResponse(response);
         throw new Error(
           errorMessage(
             response.error,
             response.correlation_id,
             "Could not create the community.",
-            limit,
+            { communityLimit: limit },
           ),
         );
       }

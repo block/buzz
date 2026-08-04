@@ -7,7 +7,6 @@ import {
   checkHostedCommunityName,
   clearBuilderlabAuth,
   createHostedCommunity,
-  DEFAULT_HOSTED_COMMUNITY_LIMIT,
   deleteBuilderlabIdentity,
   getBuilderlabAuth,
   HOSTED_COMMUNITY_SUFFIX,
@@ -18,10 +17,10 @@ import {
   type HostedCommunity,
   type HostedNostrIdentity,
   loadHostedCommunityAccount,
-  resolveHostedCommunityLimit,
   startBuilderlabLogin,
   VALID_HOSTED_COMMUNITY_NAME,
 } from "@/features/communities/hostedCommunityApi";
+import { useHostedCommunityLimit } from "@/features/communities/useHostedCommunityLimit";
 import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
 import {
   CHANNEL_FORM_FIELD_CONTROL_CLASS,
@@ -47,9 +46,8 @@ export function HostedCommunityCreateFlow({
     null,
   );
   const [communities, setCommunities] = React.useState<HostedCommunity[]>([]);
-  const [communityLimit, setCommunityLimit] = React.useState(
-    DEFAULT_HOSTED_COMMUNITY_LIMIT,
-  );
+  const { communityLimit, applyFromAccount, adoptFromResponse } =
+    useHostedCommunityLimit();
   const [name, setName] = React.useState("");
   const [availability, setAvailability] = React.useState<boolean | null>(null);
   const [checkingName, setCheckingName] = React.useState(false);
@@ -63,8 +61,8 @@ export function HostedCommunityCreateFlow({
     const account = await loadHostedCommunityAccount();
     setIdentity(account.identity);
     setCommunities(account.communities);
-    setCommunityLimit((previous) => account.communityLimit ?? previous);
-  }, []);
+    applyFromAccount(account);
+  }, [applyFromAccount]);
 
   React.useEffect(() => {
     let active = true;
@@ -246,14 +244,13 @@ export function HostedCommunityCreateFlow({
         // A rejection carries the relay's effective limit; adopt it so the copy
         // and the gate reflect the server rather than whatever was current at
         // load time.
-        const limit = resolveHostedCommunityLimit(response, communityLimit);
-        setCommunityLimit(limit);
+        const limit = adoptFromResponse(response);
         throw new Error(
           hostedCommunityErrorMessage(
             response.error,
             response.correlation_id,
             "Could not create the community.",
-            limit,
+            { communityLimit: limit },
           ),
         );
       }

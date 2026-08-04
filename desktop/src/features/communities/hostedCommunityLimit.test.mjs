@@ -249,3 +249,47 @@ test("limit_reached_copy_omits_the_number_when_unresolved", () => {
     );
   }
 });
+
+// ---------------------------------------------------------------------------
+// The relay rejects a transfer on the *transferee's* quota, not the requesting
+// owner's, and Builderlab collapses both rejections onto one `limit_reached`
+// code — so the copy must name whichever party the call site knows about.
+// ---------------------------------------------------------------------------
+
+test("transfer_limit_reached_copy_names_the_recipient", () => {
+  const message = hostedCommunityLimitReachedMessage(7, "transferee");
+  assert.equal(
+    message,
+    "That person already owns the limit of 7 hosted communities, so they can’t receive another.",
+  );
+  assert.equal(
+    /you/i.test(message),
+    false,
+    `transfer copy must not blame the owner giving the community away: ${message}`,
+  );
+});
+
+test("transfer_limit_reached_copy_omits_the_number_when_unresolved", () => {
+  for (const unresolved of [undefined, null, 0]) {
+    const message = hostedCommunityLimitReachedMessage(
+      unresolved,
+      "transferee",
+    );
+    assert.equal(
+      message,
+      "That person already owns their limit of hosted communities, so they can’t receive another.",
+    );
+    assert.equal(
+      /\d/.test(message),
+      false,
+      `copy must not fabricate a limit: ${message}`,
+    );
+  }
+});
+
+test("limit_reached_copy_defaults_to_the_requesting_owner", () => {
+  assert.equal(
+    hostedCommunityLimitReachedMessage(7, "owner"),
+    hostedCommunityLimitReachedMessage(7),
+  );
+});

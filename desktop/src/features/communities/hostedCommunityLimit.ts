@@ -79,6 +79,20 @@ export function resolveHostedCommunityLimit(
 }
 
 /**
+ * Whose quota a `limit_reached` rejection is about.
+ *
+ * The relay rejects a create when the *owner* is at the limit and a transfer
+ * when the *transferee* is (`transfer_community` in
+ * `crates/buzz-relay/src/api/operator.rs`), but both rejections carry the same
+ * `limit_reached:` message prefix and Builderlab collapses them onto a single
+ * `limit_reached` code. The requesting call site is therefore the only place
+ * that knows which party the number describes — telling an owner who is giving
+ * a community away that *they* are out of slots sends them right back to the
+ * action that just failed.
+ */
+export type HostedCommunityLimitSubject = "owner" | "transferee";
+
+/**
  * User-facing copy for a `limit_reached` rejection — the single owner of this
  * sentence, so the surfaces that render it cannot drift apart.
  *
@@ -88,7 +102,13 @@ export function resolveHostedCommunityLimit(
  */
 export function hostedCommunityLimitReachedMessage(
   communityLimit?: number | null,
+  subject: HostedCommunityLimitSubject = "owner",
 ): string {
+  if (subject === "transferee") {
+    return communityLimit
+      ? `That person already owns the limit of ${communityLimit} hosted communities, so they can’t receive another.`
+      : "That person already owns their limit of hosted communities, so they can’t receive another.";
+  }
   return communityLimit
     ? `You’ve reached the limit of ${communityLimit} hosted communities.`
     : "You’ve reached your limit of hosted communities.";
