@@ -400,6 +400,11 @@ export type BackendProviderProbeResult = {
   version?: string;
   description?: string;
   config_schema?: Record<string, unknown>;
+  enrollment?: {
+    operation: "enroll";
+    one_time: true;
+    credential_fields?: string[];
+  };
 };
 
 export type RelayMeshConfig = {

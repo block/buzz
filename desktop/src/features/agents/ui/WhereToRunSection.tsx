@@ -95,7 +95,7 @@ export function WhereToRunSection({
           <option value="local">This computer</option>
           {backendProviders.map((provider) => (
             <option key={provider.id} value={provider.id}>
-              {provider.id}
+              {provider.id === "openclaw" ? "OpenClaw" : provider.id}
             </option>
           ))}
         </select>
@@ -117,6 +117,13 @@ export function WhereToRunSection({
           {probeError ? (
             <p className="rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
               Could not probe provider: {probeError}
+            </p>
+          ) : null}
+          {draft.probedProvider?.enrollment ? (
+            <p className="rounded-2xl border border-primary/30 bg-primary/5 px-4 py-3 text-sm">
+              This provider uses a one-time enrollment import. Buzz Desktop
+              hands the agent identity to the trusted provider and keeps no
+              runtime connection to the remote host.
             </p>
           ) : null}
           {draft.probedProvider?.config_schema ? (
