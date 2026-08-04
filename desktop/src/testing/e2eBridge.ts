@@ -12516,6 +12516,8 @@ export function maybeInstallE2eTauriMocks() {
       case "copy_text_to_clipboard":
         await navigator.clipboard.writeText((payload as { text: string }).text);
         return;
+      case "read_clipboard_text":
+        return navigator.clipboard.readText();
       case "get_event":
         return handleGetEvent(
           payload as Parameters<typeof handleGetEvent>[0],
