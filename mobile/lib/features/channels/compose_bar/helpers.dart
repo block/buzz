@@ -1,6 +1,47 @@
 part of '../compose_bar.dart';
 
 const _typingThrottleMs = 3000;
+
+class _ComposerKeyboardMetricsObserver with WidgetsBindingObserver {
+  final FlutterView view;
+  final VoidCallback onKeyboardHidden;
+  bool _wasVisible;
+
+  _ComposerKeyboardMetricsObserver({
+    required this.view,
+    required this.onKeyboardHidden,
+  }) : _wasVisible = view.viewInsets.bottom > 0;
+
+  @override
+  void didChangeMetrics() {
+    final isVisible = view.viewInsets.bottom > 0;
+    if (_wasVisible && !isVisible) onKeyboardHidden();
+    _wasVisible = isVisible;
+  }
+}
+
+void _runComposerAction(VoidCallback action) {
+  unawaited(HapticFeedback.selectionClick());
+  action();
+}
+
+void _showComposerEmojiPicker(
+  BuildContext context,
+  ValueChanged<String> onSelect,
+  VoidCallback onDismiss,
+) {
+  showEmojiPicker(
+    context: context,
+    onSelect: (emoji) => _runComposerAction(() => onSelect(emoji)),
+    onDismiss: onDismiss,
+  );
+}
+
+void _dismissComposerKeyboard(FocusNode focusNode) {
+  focusNode.unfocus();
+  unawaited(SystemChannels.textInput.invokeMethod<void>('TextInput.hide'));
+}
+
 const _pastedImageMimeTypes = <String>[
   'image/jpeg',
   'image/jpg',
@@ -176,5 +217,42 @@ void _sendTypingIndicator(
     session.sendRaw(['EVENT', event.toMap()]);
   } catch (_) {
     // Fire-and-forget — typing indicator failure is non-fatal.
+  }
+}
+
+/// Reports a send that was cancelled because the active community changed.
+///
+/// The send path is fire-and-forget, so a `StateError` escaping it would be
+/// silent. The composer's own error line cannot carry this message either: the
+/// identity change that causes the failure also resets that state on the next
+/// frame, so [messenger] must be resolved before the send's first `await`.
+void _reportSendCancelledByCommunitySwitch(ScaffoldMessengerState? messenger) {
+  messenger?.showSnackBar(
+    const SnackBar(content: Text('Message not sent: the community changed')),
+  );
+}
+
+/// Adds mentioned non-members to the channel before a send.
+///
+/// Agents are added silently with the `bot` role; humans are only passed here
+/// after they have been explicitly invited from the mention prompt.
+Future<void> _addMentionedNonMembers(
+  ChannelActions channelActions, {
+  required String channelId,
+  required List<String> agentPubkeys,
+  required List<String> humanPubkeys,
+}) async {
+  if (agentPubkeys.isNotEmpty) {
+    await channelActions.addMembers(
+      channelId: channelId,
+      pubkeys: agentPubkeys,
+      role: 'bot',
+    );
+  }
+  if (humanPubkeys.isNotEmpty) {
+    await channelActions.addMembers(
+      channelId: channelId,
+      pubkeys: humanPubkeys,
+    );
   }
 }

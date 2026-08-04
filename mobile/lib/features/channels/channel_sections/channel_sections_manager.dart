@@ -9,7 +9,7 @@ import 'package:uuid/uuid.dart';
 
 import '../../../shared/crypto/nip44.dart';
 import '../../../shared/relay/relay.dart';
-import '../read_state/read_state_time.dart';
+import '../../../shared/read_state/read_state_time.dart';
 import 'channel_sections_storage.dart';
 
 const _uuid = Uuid();

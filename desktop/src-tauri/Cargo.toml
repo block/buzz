@@ -1,8 +1,13 @@
 [workspace]
+# Explicit: membership must NOT be inferred from the path-dependency edge below.
+# With a bare `[workspace]` and no `members`, `cargo test/check --workspace`
+# expands to a set that excludes this crate, and its gates pass green-and-empty
+# over a real defect. Verified: Sami Arm A/D, Dawn `.scratch/armA`.
+members = ["crates/buzz-terminal"]
 
 [package]
 name = "buzz-desktop"
-version = "0.5.3"
+version = "0.5.4"
 description = "Buzz desktop app"
 authors = ["you"]
 edition = "2021"
@@ -100,6 +105,8 @@ buzz_persona_pkg = { package = "buzz-persona", path = "../../crates/buzz-persona
 buzz_sdk_pkg = { package = "buzz-sdk", path = "../../crates/buzz-sdk" }
 buzz_agent_pkg = { package = "buzz-agent", path = "../../crates/buzz-agent" }
 buzz_voice_pkg = { package = "buzz-voice", path = "../../crates/buzz-voice" }
+buzz_terminal = { package = "buzz-terminal", path = "crates/buzz-terminal" }
+portable-pty = "0.9"
 iroh = { version = "1.0.2", optional = true }
 mesh-llm-sdk = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.74.0", package = "mesh-llm-sdk", default-features = false, features = ["client", "serving"], optional = true }
 mesh-llm-host-runtime = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.74.0", package = "mesh-llm-host-runtime", default-features = false, features = ["dynamic-native-runtime"], optional = true }

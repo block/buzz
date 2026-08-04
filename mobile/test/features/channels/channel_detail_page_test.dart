@@ -21,7 +21,8 @@ import 'package:buzz/features/channels/thread_detail_page.dart';
 import 'package:buzz/features/channels/thread_replies_provider.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
-import 'package:buzz/features/channels/read_state/read_state_provider.dart';
+import 'package:buzz/shared/read_state/read_state_provider.dart';
+import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/features/channels/small_avatar.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/features/profile/user_cache_provider.dart';
@@ -29,6 +30,7 @@ import 'package:buzz/features/profile/user_profile.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -82,6 +84,25 @@ NostrEvent _systemMsg({
     ['h', _channelId],
   ],
   content: jsonEncode(payload),
+  sig: '',
+);
+
+NostrEvent _huddleMsg({
+  required String id,
+  required int kind,
+  String pubkey = 'alice',
+  int createdAt = 1000,
+}) => NostrEvent(
+  id: id,
+  pubkey: pubkey,
+  createdAt: createdAt,
+  kind: kind,
+  tags: [
+    ['h', _channelId],
+  ],
+  content: jsonEncode({
+    'ephemeral_channel_id': '8d764100-fd8f-44cf-9c98-6d8fbd739b8c',
+  }),
   sig: '',
 );
 
@@ -158,6 +179,7 @@ Widget _buildTestable({
   Map<String, List<NostrEvent>> threadReplies = const {},
   Map<String, Future<List<NostrEvent>>> pendingThreadReplies = const {},
   TextScaler textScaler = TextScaler.noScaling,
+  bool disableAnimations = false,
   RelaySessionNotifier? relaySessionNotifier,
 }) {
   final resolvedChannel = channel ?? _testChannel;
@@ -216,7 +238,10 @@ Widget _buildTestable({
     child: MaterialApp(
       theme: AppTheme.light(),
       builder: (context, child) => MediaQuery(
-        data: MediaQuery.of(context).copyWith(textScaler: textScaler),
+        data: MediaQuery.of(context).copyWith(
+          textScaler: textScaler,
+          disableAnimations: disableAnimations,
+        ),
         child: child!,
       ),
       navigatorObservers: navigatorObservers,
@@ -225,6 +250,55 @@ Widget _buildTestable({
         initialMessageId: initialMessageId,
         initialThreadRootId: initialThreadRootId,
       ),
+    ),
+  );
+}
+
+Widget _buildNavigationTestable({
+  required Channel channelA,
+  required Channel channelB,
+  required RelaySessionNotifier relaySession,
+}) {
+  return ProviderScope(
+    overrides: [
+      relaySessionProvider.overrideWith(() => relaySession),
+      channelMessagesProvider(
+        channelA.id,
+      ).overrideWith(() => _FakeMessagesNotifier([], channelId: channelA.id)),
+      channelMessagesProvider(
+        channelB.id,
+      ).overrideWith(() => _FakeMessagesNotifier([], channelId: channelB.id)),
+      channelTypingProvider(
+        channelA.id,
+      ).overrideWith(() => _FakeTypingNotifier([], channelId: channelA.id)),
+      channelTypingProvider(
+        channelB.id,
+      ).overrideWith(() => _FakeTypingNotifier([], channelId: channelB.id)),
+      channelDetailsProvider(
+        channelA.id,
+      ).overrideWith((ref) async => ChannelDetails.fromChannel(channelA)),
+      channelDetailsProvider(
+        channelB.id,
+      ).overrideWith((ref) async => ChannelDetails.fromChannel(channelB)),
+      channelMembersProvider(
+        channelA.id,
+      ).overrideWith((ref) async => const <ChannelMember>[]),
+      channelMembersProvider(
+        channelB.id,
+      ).overrideWith((ref) async => const <ChannelMember>[]),
+      userCacheProvider.overrideWith(() => _FakeUserCacheNotifier({})),
+      profileProvider.overrideWith(() => _FakeProfileNotifier()),
+      channelsProvider.overrideWith(
+        () => _FakeChannelsNotifier([channelA, channelB]),
+      ),
+      relayClientProvider.overrideWithValue(
+        RelayClient(baseUrl: 'http://localhost:3000'),
+      ),
+      savedPrefsProvider.overrideWithValue(_testPrefs),
+    ],
+    child: MaterialApp(
+      theme: AppTheme.light(),
+      home: ChannelDetailPage(channel: channelA),
     ),
   );
 }
@@ -262,6 +336,103 @@ void main() {
   });
 
   group('ChannelDetailPage', () {
+    testWidgets(
+      'restores the previous channel replay priority after a nested pop',
+      (tester) async {
+        final channelA = _channel(id: 'channel-a', name: 'channel A');
+        final channelB = _channel(id: 'channel-b', name: 'channel B');
+        final socket = _RecordingRelaySocket();
+        final relaySession = RelaySessionNotifier();
+        relaySession.debugAttachSocketForTest(socket);
+
+        final subscribeB = relaySession.subscribe(
+          _filterForChannel(channelB.id),
+          (_) {},
+        );
+        relaySession.debugHandleMessage(['EOSE', 'l-1']);
+        await subscribeB;
+        final subscribeA = relaySession.subscribe(
+          _filterForChannel(channelA.id),
+          (_) {},
+        );
+        relaySession.debugHandleMessage(['EOSE', 'l-2']);
+        await subscribeA;
+
+        await tester.pumpWidget(
+          _buildNavigationTestable(
+            channelA: channelA,
+            channelB: channelB,
+            relaySession: relaySession,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final navigator = Navigator.of(
+          tester.element(find.byType(ChannelDetailPage)),
+        );
+        navigator.push(
+          MaterialPageRoute<void>(
+            builder: (_) => ChannelDetailPage(channel: channelB),
+          ),
+        );
+        await tester.pumpAndSettle();
+        navigator.pop();
+        await tester.pumpAndSettle();
+
+        socket.messages.clear();
+        await relaySession.debugReplayLiveSubscriptions();
+
+        expect(_replayedChannelIds(socket), [channelA.id, channelB.id]);
+      },
+    );
+
+    testWidgets(
+      'keeps replacement channel replay priority after old route disposal',
+      (tester) async {
+        final channelA = _channel(id: 'channel-a', name: 'channel A');
+        final channelB = _channel(id: 'channel-b', name: 'channel B');
+        final socket = _RecordingRelaySocket();
+        final relaySession = RelaySessionNotifier();
+        relaySession.debugAttachSocketForTest(socket);
+
+        final subscribeA = relaySession.subscribe(
+          _filterForChannel(channelA.id),
+          (_) {},
+        );
+        relaySession.debugHandleMessage(['EOSE', 'l-1']);
+        await subscribeA;
+        final subscribeB = relaySession.subscribe(
+          _filterForChannel(channelB.id),
+          (_) {},
+        );
+        relaySession.debugHandleMessage(['EOSE', 'l-2']);
+        await subscribeB;
+
+        await tester.pumpWidget(
+          _buildNavigationTestable(
+            channelA: channelA,
+            channelB: channelB,
+            relaySession: relaySession,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        Navigator.of(
+          tester.element(find.byType(ChannelDetailPage)),
+        ).pushReplacement(
+          MaterialPageRoute<void>(
+            builder: (_) => ChannelDetailPage(channel: channelB),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        socket.messages.clear();
+        await relaySession.debugReplayLiveSubscriptions();
+
+        expect(_replayedChannelIds(socket), [channelB.id, channelA.id]);
+      },
+    );
+
     testWidgets('debounces same-slot reconnect skeletons before revealing', (
       tester,
     ) async {
@@ -583,6 +754,53 @@ void main() {
       );
     });
 
+    testWidgets('clears the composer inset when membership is revoked', (
+      tester,
+    ) async {
+      final channelsNotifier = _FakeChannelsNotifier([_testChannel]);
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(
+              id: 'msg1',
+              pubkey: 'alice',
+              content: 'Hello',
+              createdAt: 1000,
+            ),
+          ],
+          channelsNotifier: channelsNotifier,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final messageListFinder = find.byKey(
+        const ValueKey('channel-message-list'),
+      );
+      expect(
+        tester
+            .widget<ScrollablePositionedList>(messageListFinder)
+            .padding!
+            .bottom,
+        greaterThan(0),
+      );
+      expect(
+        find.byKey(const ValueKey('channel-composer-dock')),
+        findsOneWidget,
+      );
+
+      channelsNotifier.setChannels([_testChannel.copyWith(isMember: false)]);
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('channel-composer-dock')), findsNothing);
+      expect(
+        tester
+            .widget<ScrollablePositionedList>(messageListFinder)
+            .padding!
+            .bottom,
+        0,
+      );
+    });
+
     testWidgets('updates detail page state after joining a channel', (
       tester,
     ) async {
@@ -612,7 +830,14 @@ void main() {
       );
       expect(find.text('Message…'), findsNothing);
 
-      await tester.tap(find.byTooltip('Manage channel'));
+      await tester.tap(find.byTooltip('Channel actions'));
+      await tester.pumpAndSettle();
+      await tester.drag(
+        find.byType(SingleChildScrollView).last,
+        const Offset(0, -300),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Manage channel').last);
       await tester.pumpAndSettle();
       await tester.tap(find.text('Join channel'));
       await tester.pumpAndSettle();
@@ -623,6 +848,27 @@ void main() {
         findsNothing,
       );
       expect(find.text('Message #general'), findsOneWidget);
+    });
+
+    testWidgets('detail-header manage leave closes the detail page', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          createChannelActions: (ref) => _FakeChannelActions(ref),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('Channel actions'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Manage channel').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Leave channel').last);
+      await tester.pumpAndSettle();
+
+      expect(find.byTooltip('Channel actions'), findsNothing);
     });
 
     testWidgets('keeps manage sheet dismissible with a long canvas', (
@@ -644,11 +890,18 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.tap(find.byTooltip('Manage channel'));
+      await tester.tap(find.byTooltip('Channel actions'));
+      await tester.pumpAndSettle();
+      await tester.drag(
+        find.byType(SingleChildScrollView).last,
+        const Offset(0, -300),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Manage channel').last);
       await tester.pumpAndSettle();
 
-      final sheet = find.byType(BottomSheet);
-      expect(sheet, findsOneWidget);
+      final sheet = find.byType(BottomSheet).last;
+      expect(find.byType(BottomSheet), findsNWidgets(2));
       expect(tester.getSize(sheet).height, lessThanOrEqualTo(720));
 
       final sheetTop = tester.getTopLeft(sheet).dy;
@@ -658,7 +911,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(sheet, findsNothing);
+      expect(find.text('Manage channel'), findsOneWidget);
     });
 
     testWidgets('shows empty state when no messages', (tester) async {
@@ -740,7 +993,15 @@ void main() {
       final messageList = tester.widget<ScrollablePositionedList>(
         find.byKey(const ValueKey('channel-message-list')),
       );
-      expect(messageList.padding!.bottom, 0);
+      final composerDock = find.byKey(const ValueKey('channel-composer-dock'));
+      final composerDockHeight = tester.getSize(composerDock).height;
+      expect(messageList.padding!.bottom, composerDockHeight);
+      expect(
+        tester
+            .getBottomLeft(find.byKey(const ValueKey('channel-message-list')))
+            .dy,
+        greaterThan(tester.getTopLeft(composerDock).dy),
+      );
       final newestMessageGroup = tester.widget<Padding>(
         find.byKey(const ValueKey('channel-message-group-msg2')),
       );
@@ -923,6 +1184,580 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
+    testWidgets('jumps to the oldest unread with compact inverse controls', (
+      tester,
+    ) async {
+      final messages = [
+        for (var i = 0; i < 40; i++)
+          _textMsg(
+            id: 'msg$i',
+            pubkey: 'alice',
+            content: 'Message $i',
+            createdAt: 1000 + i,
+          ),
+      ];
+      final channelsNotifier = _FakeChannelsNotifier(
+        [_testChannel],
+        observedUnread: {
+          _channelId: [
+            makeObservedUnreadEvent(
+              id: 'msg21',
+              createdAt: 1021,
+              rootId: null,
+              highPriority: false,
+              channelType: 'stream',
+              isThreadedReply: false,
+            ),
+          ],
+        },
+      );
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {_channelId: 1020},
+          version: 0,
+        ),
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: messages,
+          channelsNotifier: channelsNotifier,
+          readStateNotifier: readState,
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final unreadButton = find.byKey(
+        const ValueKey('channel-jump-to-oldest-unread'),
+      );
+      expect(unreadButton, findsOneWidget);
+      expect(find.byTooltip('Jump to oldest unread message'), findsOneWidget);
+      expect(find.byIcon(LucideIcons.chevronUp), findsOneWidget);
+      expect(tester.getSize(unreadButton), const Size.square(48));
+      final unreadRect = tester.getRect(unreadButton);
+      expect(
+        unreadRect.top,
+        frostedAppBarHeight(tester.element(unreadButton)) + Grid.xs,
+      );
+      expect(find.text('Latest'), findsNothing);
+
+      await tester.tap(unreadButton);
+      await tester.pumpAndSettle();
+
+      expect(findRichText('Message 21'), findsOneWidget);
+      expect(unreadButton, findsNothing);
+      expect(
+        find.byKey(const ValueKey('channel-jump-to-latest')),
+        findsOneWidget,
+      );
+      expect(find.text('Latest'), findsOneWidget);
+      expect(find.byIcon(LucideIcons.arrowDown), findsOneWidget);
+    });
+
+    testWidgets('loads history through the oldest unread boundary', (
+      tester,
+    ) async {
+      final newestPage = [
+        for (var i = 50; i < 100; i++)
+          _textMsg(
+            id: 'msg$i',
+            pubkey: 'alice',
+            content: 'Message $i',
+            createdAt: 1000 + i,
+          ),
+      ];
+      final olderPage = [
+        for (var i = 0; i < 50; i++)
+          _textMsg(
+            id: 'msg$i',
+            pubkey: 'alice',
+            content: 'Message $i',
+            createdAt: 1000 + i,
+          ),
+      ];
+      final messagesNotifier = _FakeMessagesNotifier(
+        newestPage,
+        olderPages: [olderPage],
+      );
+      final channelsNotifier = _FakeChannelsNotifier(
+        [_testChannel],
+        observedUnread: {
+          _channelId: [
+            makeObservedUnreadEvent(
+              id: 'msg21',
+              createdAt: 1021,
+              rootId: null,
+              highPriority: false,
+              channelType: 'stream',
+              isThreadedReply: false,
+            ),
+          ],
+        },
+      );
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {_channelId: 1020},
+          version: 0,
+        ),
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          messagesNotifier: messagesNotifier,
+          channelsNotifier: channelsNotifier,
+          readStateNotifier: readState,
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(
+        find.byKey(const ValueKey('channel-jump-to-oldest-unread')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(findRichText('Message 21'), findsOneWidget);
+      expect(findRichText('Message 50'), findsNothing);
+      expect(messagesNotifier.fetchOlderCalls, 1);
+    });
+
+    testWidgets('does not load history for threaded-only unread events', (
+      tester,
+    ) async {
+      final newestPage = [
+        for (var i = 50; i < 100; i++)
+          _textMsg(
+            id: 'msg$i',
+            pubkey: 'alice',
+            content: 'Message $i',
+            createdAt: 1000 + i,
+          ),
+      ];
+      final olderPage = [
+        for (var i = 0; i < 50; i++)
+          _textMsg(
+            id: 'msg$i',
+            pubkey: 'alice',
+            content: 'Message $i',
+            createdAt: 1000 + i,
+          ),
+      ];
+      final messagesNotifier = _FakeMessagesNotifier(
+        newestPage,
+        olderPages: [olderPage],
+      );
+      final channelsNotifier = _FakeChannelsNotifier(
+        [_testChannel],
+        observedUnread: {
+          _channelId: [
+            makeObservedUnreadEvent(
+              id: 'thread-reply',
+              createdAt: 1021,
+              rootId: 'thread-root',
+              highPriority: true,
+              channelType: 'stream',
+              isThreadedReply: true,
+            ),
+          ],
+        },
+      );
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {_channelId: 1020},
+          version: 0,
+        ),
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          messagesNotifier: messagesNotifier,
+          channelsNotifier: channelsNotifier,
+          readStateNotifier: readState,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(messagesNotifier.fetchOlderCalls, 0);
+      expect(
+        find.byKey(const ValueKey('channel-jump-to-oldest-unread')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('caps unread target history loading', (tester) async {
+      final newestPage = [
+        for (var i = 250; i < 300; i++)
+          _textMsg(
+            id: 'msg$i',
+            pubkey: 'alice',
+            content: 'Message $i',
+            createdAt: 1000 + i,
+          ),
+      ];
+      final olderPages = [
+        for (var page = 4; page >= 0; page--)
+          [
+            for (var i = page * 50; i < (page + 1) * 50; i++)
+              _textMsg(
+                id: 'msg$i',
+                pubkey: 'alice',
+                content: 'Message $i',
+                createdAt: 1000 + i,
+              ),
+          ],
+      ];
+      final messagesNotifier = _FakeMessagesNotifier(
+        newestPage,
+        olderPages: olderPages,
+      );
+      final channelsNotifier = _FakeChannelsNotifier(
+        [_testChannel],
+        observedUnread: {
+          _channelId: [
+            makeObservedUnreadEvent(
+              id: 'missing-target',
+              createdAt: 1001,
+              rootId: null,
+              highPriority: false,
+              channelType: 'stream',
+              isThreadedReply: false,
+            ),
+            makeObservedUnreadEvent(
+              id: 'msg275',
+              createdAt: 1275,
+              rootId: null,
+              highPriority: false,
+              channelType: 'stream',
+              isThreadedReply: false,
+            ),
+          ],
+        },
+      );
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {},
+          version: 0,
+        ),
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          messagesNotifier: messagesNotifier,
+          channelsNotifier: channelsNotifier,
+          readStateNotifier: readState,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(messagesNotifier.fetchOlderCalls, 4);
+      final unreadButton = find.byKey(
+        const ValueKey('channel-jump-to-oldest-unread'),
+      );
+      expect(unreadButton, findsOneWidget);
+      await tester.tap(unreadButton);
+      await tester.pumpAndSettle();
+      expect(findRichText('Message 275'), findsOneWidget);
+    });
+
+    testWidgets('stops loading the unread boundary after a failed page', (
+      tester,
+    ) async {
+      final messages = [
+        for (var i = 50; i < 100; i++)
+          _textMsg(
+            id: 'msg$i',
+            pubkey: 'alice',
+            content: 'Message $i',
+            createdAt: 1000 + i,
+          ),
+      ];
+      final messagesNotifier = _FakeMessagesNotifier(
+        messages,
+        failOlderFetch: true,
+      );
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {_channelId: 1020},
+          version: 0,
+          forcedUnreadContexts: {_channelId: _channelId},
+        ),
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          messagesNotifier: messagesNotifier,
+          readStateNotifier: readState,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('channel-jump-to-oldest-unread')),
+        findsNothing,
+      );
+      expect(find.bySemanticsLabel('Loading older messages'), findsNothing);
+    });
+
+    testWidgets('falls back when the oldest unread row is deleted', (
+      tester,
+    ) async {
+      final messagesNotifier = _FakeMessagesNotifier([
+        _textMsg(
+          id: 'deleted-oldest',
+          pubkey: 'alice',
+          content: 'Deleted oldest',
+          createdAt: 1021,
+        ),
+        _textMsg(
+          id: 'reachable-unread',
+          pubkey: 'alice',
+          content: 'Reachable unread',
+          createdAt: 1022,
+        ),
+        _deletion(
+          id: 'delete-oldest',
+          targetIds: ['deleted-oldest'],
+          createdAt: 1023,
+        ),
+      ]);
+      final channelsNotifier = _FakeChannelsNotifier(
+        [_testChannel],
+        observedUnread: {
+          _channelId: [
+            makeObservedUnreadEvent(
+              id: 'deleted-oldest',
+              createdAt: 1021,
+              rootId: null,
+              highPriority: false,
+              channelType: 'stream',
+              isThreadedReply: false,
+            ),
+            makeObservedUnreadEvent(
+              id: 'reachable-unread',
+              createdAt: 1022,
+              rootId: null,
+              highPriority: false,
+              channelType: 'stream',
+              isThreadedReply: false,
+            ),
+          ],
+        },
+      );
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {_channelId: 1020},
+          version: 0,
+        ),
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          messagesNotifier: messagesNotifier,
+          channelsNotifier: channelsNotifier,
+          readStateNotifier: readState,
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final unreadButton = find.byKey(
+        const ValueKey('channel-jump-to-oldest-unread'),
+      );
+      expect(unreadButton, findsOneWidget);
+      await tester.tap(unreadButton);
+      await tester.pumpAndSettle();
+      expect(findRichText('Reachable unread'), findsOneWidget);
+    });
+
+    testWidgets('pages past a loaded forced unread for an older target', (
+      tester,
+    ) async {
+      final newestPage = [
+        for (var i = 50; i < 100; i++)
+          _textMsg(
+            id: 'msg$i',
+            pubkey: 'alice',
+            content: 'Message $i',
+            createdAt: 1000 + i,
+          ),
+      ];
+      final olderPage = [
+        for (var i = 0; i < 50; i++)
+          _textMsg(
+            id: 'msg$i',
+            pubkey: 'alice',
+            content: 'Message $i',
+            createdAt: 1000 + i,
+          ),
+      ];
+      final messagesNotifier = _FakeMessagesNotifier(
+        newestPage,
+        olderPages: [olderPage],
+      );
+      final channelsNotifier = _FakeChannelsNotifier(
+        [_testChannel],
+        observedUnread: {
+          _channelId: [
+            makeObservedUnreadEvent(
+              id: 'msg21',
+              createdAt: 1021,
+              rootId: null,
+              highPriority: false,
+              channelType: 'stream',
+              isThreadedReply: false,
+            ),
+          ],
+        },
+      );
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {_channelId: 1020},
+          version: 0,
+          forcedUnreadContexts: {'msg:msg75': _channelId},
+        ),
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          messagesNotifier: messagesNotifier,
+          channelsNotifier: channelsNotifier,
+          readStateNotifier: readState,
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(messagesNotifier.fetchOlderCalls, 1);
+      await tester.tap(
+        find.byKey(const ValueKey('channel-jump-to-oldest-unread')),
+      );
+      await tester.pumpAndSettle();
+      expect(findRichText('Message 21'), findsOneWidget);
+      expect(findRichText('Message 75'), findsNothing);
+    });
+
+    testWidgets('targets the oldest message-level forced unread', (
+      tester,
+    ) async {
+      final messages = [
+        for (var i = 0; i < 40; i++)
+          _textMsg(
+            id: 'msg$i',
+            pubkey: 'alice',
+            content: 'Message $i',
+            createdAt: 1000 + i,
+          ),
+      ];
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {_channelId: 2000},
+          version: 0,
+          forcedUnreadContexts: {
+            'msg:msg20': _channelId,
+            'msg:msg5': _channelId,
+          },
+        ),
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: messages,
+          readStateNotifier: readState,
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(
+        find.byKey(const ValueKey('channel-jump-to-oldest-unread')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(findRichText('Message 5'), findsOneWidget);
+      expect(findRichText('Message 20'), findsNothing);
+    });
+
+    testWidgets('ignores newer events absent from observed unread state', (
+      tester,
+    ) async {
+      final messages = [
+        _textMsg(
+          id: 'read-message',
+          pubkey: 'alice',
+          content: 'Already read',
+          createdAt: 1000,
+        ),
+        _textMsg(
+          id: 'self-message',
+          pubkey: 'self',
+          content: 'My own newer message',
+          createdAt: 1100,
+        ),
+        _systemMsg(
+          id: 'system-message',
+          payload: const {'type': 'channel_created'},
+          createdAt: 1200,
+        ),
+      ];
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {_channelId: 1000},
+          version: 0,
+        ),
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: messages,
+          readStateNotifier: readState,
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('channel-jump-to-oldest-unread')),
+        findsNothing,
+      );
+    });
+
     testWidgets('can jump back to latest after a non-drag user scroll', (
       tester,
     ) async {
@@ -967,6 +1802,26 @@ void main() {
       await tester.pumpAndSettle();
       expect(
         find.byKey(const ValueKey('channel-jump-to-latest')),
+        findsOneWidget,
+      );
+      final latestSurface = tester.widget<Container>(
+        find.byKey(const ValueKey('channel-jump-to-latest-surface')),
+      );
+      final latestDecoration = latestSurface.decoration! as BoxDecoration;
+      expect(latestDecoration.borderRadius, BorderRadius.circular(Radii.full));
+      expect(
+        latestDecoration.color,
+        AppTheme.light().colorScheme.surface.withValues(alpha: 0.5),
+      );
+      expect(
+        (latestDecoration.border! as Border).top.color,
+        Colors.black.withValues(alpha: 0.04),
+      );
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('channel-jump-to-latest')),
+          matching: find.byType(BackdropFilter),
+        ),
         findsOneWidget,
       );
 
@@ -1050,7 +1905,20 @@ void main() {
         ]);
         await tester.pumpAndSettle();
 
-        expect(findRichText('Newest live update'), findsNothing);
+        // Cache-extent mounting varies by platform, so assert the reversed
+        // list's semantic boundary rather than whether item 0 is mounted.
+        final positions = tester
+            .widget<ScrollablePositionedList>(messageList)
+            .itemPositionsNotifier!
+            .itemPositions
+            .value;
+        expect(
+          positions.any(
+            (position) =>
+                position.index == 0 && position.itemLeadingEdge.abs() < 0.01,
+          ),
+          isFalse,
+        );
         expect(
           find.byKey(const ValueKey('channel-jump-to-latest')),
           findsOneWidget,
@@ -1105,6 +1973,67 @@ void main() {
       expect(findRichText('Message 5'), findsOneWidget);
       expect(findRichText('Newest live update'), findsNothing);
     });
+
+    testWidgets(
+      'gives an initial deep link precedence over unread navigation',
+      (tester) async {
+        final initialMessages = [
+          for (var i = 0; i < 40; i++)
+            _textMsg(
+              id: 'msg$i',
+              pubkey: 'alice',
+              content: 'Message $i',
+              createdAt: 1000 + i,
+            ),
+        ];
+        final messagesNotifier = _FakeMessagesNotifier(initialMessages);
+        final channelsNotifier = _FakeChannelsNotifier(
+          [_testChannel],
+          observedUnread: {
+            _channelId: [
+              makeObservedUnreadEvent(
+                id: 'msg5',
+                createdAt: 1005,
+                rootId: null,
+                highPriority: false,
+                channelType: 'stream',
+                isThreadedReply: false,
+              ),
+            ],
+          },
+        );
+        final readState = _SynchronousReadStateNotifier(
+          const ReadStateState(
+            isReady: true,
+            pubkey: 'self',
+            contexts: {_channelId: 1004},
+            version: 0,
+          ),
+        );
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: const [],
+            messagesNotifier: messagesNotifier,
+            channelsNotifier: channelsNotifier,
+            readStateNotifier: readState,
+            initialMessageId: 'msg20',
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(findRichText('Message 20'), findsOneWidget);
+        expect(findRichText('Message 5'), findsNothing);
+        expect(
+          find.byKey(const ValueKey('channel-jump-to-oldest-unread')),
+          findsNothing,
+        );
+        expect(messagesNotifier.fetchOlderCalls, 0);
+      },
+    );
 
     testWidgets(
       'keeps a deep-linked message in view when its page arrives after a '
@@ -1297,6 +2226,31 @@ void main() {
       expect(
         effectiveFontSizeForText(createdText.text, 'created this channel'),
         systemMessageBodyTextStyle.fontSize,
+      );
+    });
+
+    testWidgets('renders a huddle event like a regular message row', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [_huddleMsg(id: 'huddle-1', kind: EventKind.huddleStarted)],
+          users: {
+            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Alice'), findsOneWidget);
+      expect(findRichText('started a huddle'), findsOneWidget);
+      expect(
+        tester.getSize(find.byType(CircleAvatar)),
+        const Size.square(messageAvatarSize),
+      );
+      expect(
+        find.byKey(const ValueKey('system-message-timestamp-alice')),
+        findsOneWidget,
       );
     });
 
@@ -1865,7 +2819,8 @@ void main() {
           },
         ),
       );
-      await tester.pumpAndSettle();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
 
       expect(find.text('Alice is typing…'), findsOneWidget);
 
@@ -1884,7 +2839,15 @@ void main() {
       expect(decoration.border, isA<Border>());
       expect(
         tester.widget<Text>(find.text('Alice is typing…')).style?.color,
-        AppTheme.light().colorScheme.primary,
+        AppTheme.light().colorScheme.onSurfaceVariant,
+      );
+      expect(
+        tester.widget<Text>(find.text('Alice is typing…')).style?.fontStyle,
+        isNot(FontStyle.italic),
+      );
+      expect(
+        find.byKey(const ValueKey('channel-typing-shimmer')),
+        findsOneWidget,
       );
       expect(tester.widget<SmallAvatar>(find.byType(SmallAvatar)).size, 24);
     });
@@ -1909,7 +2872,8 @@ void main() {
           },
         ),
       );
-      await tester.pumpAndSettle();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
 
       expect(find.text('Alice and Bob are typing…'), findsOneWidget);
     });
@@ -1939,9 +2903,38 @@ void main() {
           },
         ),
       );
-      await tester.pumpAndSettle();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
 
       expect(find.text('Alice and 2 others are typing…'), findsOneWidget);
+    });
+
+    testWidgets('keeps typing text static when motion is reduced', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [],
+          typing: [
+            TypingEntry(
+              pubkey: 'alice',
+              expiresAtMs: DateTime.now().millisecondsSinceEpoch + 8000,
+            ),
+          ],
+          users: {
+            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+          disableAnimations: true,
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('Alice is typing…'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('channel-typing-shimmer')),
+        findsNothing,
+      );
     });
   });
 
@@ -1953,7 +2946,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.byType(TextField), findsNothing);
-      expect(find.byIcon(LucideIcons.arrowUp).hitTestable(), findsNothing);
+      expect(find.byIcon(LucideIcons.arrowUp).hitTestable(), findsOneWidget);
 
       await tester.tap(find.text('Message #general'));
       await tester.pumpAndSettle();
@@ -2334,7 +3327,10 @@ void main() {
         find.byKey(const ValueKey('thread-message-list')),
       );
       expect(threadList.reverse, isFalse);
-      expect(threadList.padding!.bottom, Grid.xs);
+      final threadComposerDockHeight = tester
+          .getSize(find.byKey(const ValueKey('thread-composer-dock')))
+          .height;
+      expect(threadList.padding!.bottom, Grid.xs + threadComposerDockHeight);
       final newestThreadGroup = tester.widget<Padding>(
         find.byKey(const ValueKey('thread-message-group-reply-next-day')),
       );
@@ -2359,6 +3355,96 @@ void main() {
           .dy;
       expect(headY, lessThan(oldestReplyY));
       expect(oldestReplyY, lessThan(newestReplyY));
+    });
+
+    testWidgets('thread keeps its tail above a growing composer dock', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final rootEvent = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final replies = [
+        for (var i = 0; i < 20; i++)
+          _textMsg(
+            id: 'reply-$i',
+            pubkey: 'bob',
+            content: 'Reply $i',
+            createdAt: 1100 + i,
+            extraTags: const [
+              ['e', 'thread-root', '', 'reply'],
+            ],
+          ),
+      ];
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [rootEvent],
+          threadReplies: {'thread-root': replies},
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final threadHead = formatTimeline([rootEvent]).single;
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: threadHead,
+            allMessages: [threadHead],
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+            initialMessageId: 'reply-19',
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final dock = find.byKey(const ValueKey('thread-composer-dock'));
+      final latestReply = find.byKey(
+        const ValueKey('thread-message-group-reply-19'),
+      );
+      final composerSurface = find.byKey(const ValueKey('composer-surface'));
+      final compactDockHeight = tester.getSize(dock).height;
+      expect(latestReply, findsOneWidget);
+      expect(
+        tester.getBottomLeft(latestReply).dy,
+        lessThanOrEqualTo(tester.getTopLeft(composerSurface).dy),
+      );
+
+      await tester.tap(find.text('Reply in thread…').hitTestable());
+      await tester.pumpAndSettle();
+
+      expect(tester.getSize(dock).height, greaterThan(compactDockHeight));
+      expect(latestReply, findsOneWidget);
+      expect(
+        tester.getBottomLeft(latestReply).dy,
+        lessThanOrEqualTo(tester.getTopLeft(composerSurface).dy),
+      );
+
+      // The dock size change above is separate from the later Scaffold
+      // viewport resize caused by the keyboard. Keep following the tail after
+      // that metrics change too.
+      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+      addTearDown(tester.view.reset);
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.getBottomLeft(latestReply).dy,
+        lessThanOrEqualTo(tester.getTopLeft(composerSurface).dy),
+      );
     });
 
     testWidgets(
@@ -2426,6 +3512,81 @@ void main() {
           find.byKey(const ValueKey('thread-message-group-reply-29')),
           findsNothing,
         );
+      },
+    );
+
+    testWidgets(
+      'deep-linking an older reply does not resume tail following on keyboard resize',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        addTearDown(tester.view.reset);
+
+        final rootEvent = _textMsg(
+          id: 'thread-root',
+          pubkey: 'alice',
+          content: 'Thread root',
+          createdAt: 1000,
+        );
+        final replies = [
+          for (var i = 0; i < 30; i++)
+            _textMsg(
+              id: 'reply-$i',
+              pubkey: 'bob',
+              content: 'Reply $i',
+              createdAt: 1100 + i,
+              extraTags: const [
+                ['e', 'thread-root', '', 'reply'],
+              ],
+            ),
+        ];
+        final completer = Completer<List<NostrEvent>>();
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [rootEvent],
+            pendingThreadReplies: {'thread-root': completer.future},
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final threadHead = formatTimeline([rootEvent]).single;
+        final provisionalTarget = formatTimeline([replies[5]]).single;
+        Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+          MaterialPageRoute<void>(
+            builder: (_) => ThreadDetailPage(
+              threadHead: threadHead,
+              allMessages: [threadHead, provisionalTarget],
+              channelId: _channelId,
+              currentPubkey: 'self',
+              isMember: true,
+              isArchived: false,
+              initialMessageId: 'reply-5',
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        completer.complete(replies);
+        await tester.pumpAndSettle();
+
+        final target = find.byKey(
+          const ValueKey('thread-message-group-reply-5'),
+        );
+        expect(target, findsOneWidget);
+
+        await tester.tap(find.text('Reply in thread…').hitTestable());
+        await tester.pumpAndSettle();
+        tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+        await tester.pumpAndSettle();
+
+        expect(target, findsOneWidget);
       },
     );
 
@@ -2663,10 +3824,19 @@ Channel _channel({required String id, required String name}) => Channel(
 class _FakeMessagesNotifier extends ChannelMessagesNotifier {
   List<NostrEvent> _messages;
   bool _hasLoadedMessages;
+  final List<List<NostrEvent>> _olderPages;
+  final bool failOlderFetch;
+  int fetchOlderCalls = 0;
 
-  _FakeMessagesNotifier(this._messages, {bool hasLoadedMessages = true})
-    : _hasLoadedMessages = hasLoadedMessages,
-      super(_channelId);
+  _FakeMessagesNotifier(
+    this._messages, {
+    String channelId = _channelId,
+    bool hasLoadedMessages = true,
+    List<List<NostrEvent>> olderPages = const [],
+    this.failOlderFetch = false,
+  }) : _hasLoadedMessages = hasLoadedMessages,
+       _olderPages = [...olderPages],
+       super(channelId);
 
   @override
   AsyncValue<List<NostrEvent>> build() => AsyncData(_messages);
@@ -2675,10 +3845,17 @@ class _FakeMessagesNotifier extends ChannelMessagesNotifier {
   bool get hasLoadedMessages => _hasLoadedMessages;
 
   @override
-  bool get reachedOldest => true;
+  bool get reachedOldest => _olderPages.isEmpty && !failOlderFetch;
 
   @override
-  Future<bool> fetchOlder() async => false;
+  Future<bool> fetchOlder() async {
+    fetchOlderCalls += 1;
+    if (failOlderFetch || _olderPages.isEmpty) return false;
+    _messages = [..._olderPages.removeAt(0), ..._messages]
+      ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    state = AsyncData(_messages);
+    return true;
+  }
 
   void setMessages(List<NostrEvent> messages) {
     _messages = messages;
@@ -2713,7 +3890,8 @@ class _ReconnectingRelaySession extends RelaySessionNotifier {
 
 class _FakeTypingNotifier extends ChannelTypingNotifier {
   final List<TypingEntry> _entries;
-  _FakeTypingNotifier(this._entries) : super(_channelId);
+  _FakeTypingNotifier(this._entries, {String channelId = _channelId})
+    : super(channelId);
 
   @override
   List<TypingEntry> build() => _entries;
@@ -2758,7 +3936,19 @@ class _FakeUserCacheNotifier extends UserCacheNotifier {
 
 class _FakeChannelsNotifier extends ChannelsNotifier {
   List<Channel> _channels;
-  _FakeChannelsNotifier(this._channels);
+  final Map<String, Map<String, ObservedUnreadEvent>> _observedUnread;
+
+  _FakeChannelsNotifier(
+    this._channels, {
+    Map<String, List<ObservedUnreadEvent>> observedUnread = const {},
+  }) : _observedUnread = {
+         for (final entry in observedUnread.entries)
+           entry.key: {for (final event in entry.value) event.id: event},
+       };
+
+  @override
+  Map<String, Map<String, ObservedUnreadEvent>>
+  get observedUnreadEventsByChannel => _observedUnread;
 
   @override
   Future<List<Channel>> build() => SynchronousFuture(_channels);
@@ -2793,6 +3983,42 @@ class _FakeChannelActions extends ChannelActions {
     return;
   }
 }
+
+class _RecordingRelaySocket extends RelaySocket {
+  _RecordingRelaySocket()
+    : super(
+        wsUrl: 'wss://relay.example',
+        nsec: null,
+        onMessage: (_) {},
+        onConnected: () {},
+        onDisconnected: (_) {},
+      );
+
+  final List<List<dynamic>> messages = [];
+
+  @override
+  void send(List<dynamic> payload) => messages.add(payload);
+
+  @override
+  void dispose() {}
+}
+
+NostrFilter _filterForChannel(String channelId) => NostrFilter(
+  kinds: EventKind.channelEventKinds,
+  tags: {
+    '#h': [channelId],
+  },
+  limit: 0,
+);
+
+List<String> _replayedChannelIds(_RecordingRelaySocket socket) => socket
+    .messages
+    .where((message) => message.first == 'REQ')
+    .map(
+      (message) =>
+          ((message[2] as Map<String, dynamic>)['#h'] as List).single as String,
+    )
+    .toList();
 
 class _TestNavigatorObserver extends NavigatorObserver {
   int pushCount = 0;

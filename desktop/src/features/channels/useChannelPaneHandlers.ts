@@ -7,6 +7,7 @@ import type {
   useToggleReactionMutation,
 } from "@/features/messages/hooks";
 import { resolveThreadReplyTarget } from "@/features/messages/hooks";
+import type { TimelineMessage } from "@/features/messages/types";
 
 /**
  * Stable callback references for ChannelPane so that keystroke-driven
@@ -24,6 +25,7 @@ export function useChannelPaneHandlers({
   getFirstReplyIdForMessage,
   getReplyDescendantIdsForMessage,
   markRevealedRepliesRead,
+  recordThreadInteraction,
   onOptimisticOpenThreadHeadIdChange,
   onRequestEmptyEditDelete,
   openThreadHeadId,
@@ -43,6 +45,7 @@ export function useChannelPaneHandlers({
   getFirstReplyIdForMessage: (messageId: string) => string | null;
   getReplyDescendantIdsForMessage: (messageId: string) => string[];
   markRevealedRepliesRead: (messageId: string) => void;
+  recordThreadInteraction: (rootId: string) => void;
   onOptimisticOpenThreadHeadIdChange: React.Dispatch<
     React.SetStateAction<string | null | undefined>
   >;
@@ -75,9 +78,6 @@ export function useChannelPaneHandlers({
 
   const deleteMutateRef = React.useRef(deleteMessageMutation.mutateAsync);
   deleteMutateRef.current = deleteMessageMutation.mutateAsync;
-
-  const editMutateRef = React.useRef(editMessageMutation.mutateAsync);
-  editMutateRef.current = editMessageMutation.mutateAsync;
 
   const toggleMutateRef = React.useRef(toggleReactionMutation.mutateAsync);
   toggleMutateRef.current = toggleReactionMutation.mutateAsync;
@@ -150,8 +150,9 @@ export function useChannelPaneHandlers({
       content: string,
       mediaTags?: string[][],
       mentionPubkeys?: string[],
+      capturedEventId?: string,
     ) => {
-      const eventId = editTargetIdRef.current;
+      const eventId = capturedEventId ?? editTargetIdRef.current;
       if (!eventId) {
         return;
       }
@@ -172,15 +173,19 @@ export function useChannelPaneHandlers({
         return;
       }
 
-      await editMutateRef.current({
+      await editMessageMutation.mutateAsync({
         eventId,
         content,
         mediaTags,
         mentionPubkeys,
       });
-      setEditTargetId(null);
+      setEditTargetId((current) => (current === eventId ? null : current));
     },
-    [onRequestEmptyEditDelete, setEditTargetId],
+    [
+      editMessageMutation.mutateAsync,
+      onRequestEmptyEditDelete,
+      setEditTargetId,
+    ],
   );
 
   const handleOpenThread = React.useCallback(
@@ -344,14 +349,21 @@ export function useChannelPaneHandlers({
   );
 
   const handleToggleReaction = React.useCallback(
-    async (message: { id: string }, emoji: string, remove: boolean) => {
+    async (
+      message: Pick<TimelineMessage, "id" | "rootId">,
+      emoji: string,
+      remove: boolean,
+    ) => {
       await toggleMutateRef.current({
         emoji,
         eventId: message.id,
         remove,
       });
+      if (!remove) {
+        recordThreadInteraction(message.rootId ?? message.id);
+      }
     },
-    [],
+    [recordThreadInteraction],
   );
 
   return {

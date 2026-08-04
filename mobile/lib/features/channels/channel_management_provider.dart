@@ -479,21 +479,38 @@ List<List<String>> buildCreateChannelTags({
   ];
 }
 
+/// Builds the relay tags for setting the archived state of [channelId].
+List<List<String>> buildSetChannelArchivedTags(
+  String channelId, {
+  required bool archived,
+}) => [
+  ['h', channelId],
+  ['archived', archived.toString()],
+];
+
+/// Builds the relay tags for deleting [channelId].
+List<List<String>> buildDeleteChannelTags(String channelId) => [
+  ['h', channelId],
+];
+
 class ChannelActions {
   final Ref _ref;
   final RelaySessionNotifier _session;
   final SignedEventRelay _signedEventRelay;
   final String? _currentPubkey;
+  final bool Function()? _isCommunityValid;
 
   ChannelActions({
     required Ref ref,
     required RelaySessionNotifier session,
     required SignedEventRelay signedEventRelay,
     required String? currentPubkey,
+    bool Function()? isCommunityValid,
   }) : _ref = ref,
        _session = session,
        _signedEventRelay = signedEventRelay,
-       _currentPubkey = currentPubkey;
+       _currentPubkey = currentPubkey,
+       _isCommunityValid = isCommunityValid;
 
   Future<Channel> createChannel({
     required String name,
@@ -547,7 +564,9 @@ class ChannelActions {
       for (final pubkey in pubkeys)
         if (pubkey.trim().isNotEmpty) pubkey.trim().toLowerCase(),
     };
+    _ensureCommunityValid();
     for (final pubkey in normalizedPubkeys) {
+      _ensureCommunityValid();
       await _signedEventRelay.submit(
         kind: 9000,
         content: '',
@@ -558,8 +577,17 @@ class ChannelActions {
         ],
       );
     }
+    _ensureCommunityValid();
     _ref.invalidate(channelMembersProvider(channelId));
     _ref.invalidate(channelBotPubkeysProvider(channelId));
+  }
+
+  void _ensureCommunityValid() {
+    if (_isCommunityValid?.call() == false) {
+      throw StateError(
+        'Channel action cancelled because the active community changed',
+      );
+    }
   }
 
   Future<void> joinChannel(String channelId) async {
@@ -580,6 +608,36 @@ class ChannelActions {
       tags: [
         ['h', channelId],
       ],
+    );
+    await _refreshChannelState(channelId);
+  }
+
+  /// Archives the channel and refreshes its cached state.
+  Future<void> archiveChannel(String channelId) =>
+      _setChannelArchived(channelId, archived: true);
+
+  /// Unarchives the channel and refreshes its cached state.
+  Future<void> unarchiveChannel(String channelId) =>
+      _setChannelArchived(channelId, archived: false);
+
+  Future<void> _setChannelArchived(
+    String channelId, {
+    required bool archived,
+  }) async {
+    await _signedEventRelay.submit(
+      kind: 9002,
+      content: '',
+      tags: buildSetChannelArchivedTags(channelId, archived: archived),
+    );
+    await _refreshChannelState(channelId);
+  }
+
+  /// Deletes the channel and refreshes its cached state.
+  Future<void> deleteChannel(String channelId) async {
+    await _signedEventRelay.submit(
+      kind: 9008,
+      content: '',
+      tags: buildDeleteChannelTags(channelId),
     );
     await _refreshChannelState(channelId);
   }
@@ -752,5 +810,10 @@ final channelActionsProvider = Provider<ChannelActions>((ref) {
       nsec: relayConfig.nsec,
     ),
     currentPubkey: currentPubkey,
+    isCommunityValid: () {
+      final currentConfig = ref.read(relayConfigProvider);
+      return currentConfig.baseUrl == relayConfig.baseUrl &&
+          currentConfig.nsec == relayConfig.nsec;
+    },
   );
 });

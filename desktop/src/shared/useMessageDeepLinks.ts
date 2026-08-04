@@ -17,10 +17,12 @@ import { listenForMessageDeepLinks } from "@/shared/deep-link";
  * the channel route's existing scroll-into-view + getEventById backfill
  * resolve the target (works for both stream replies and forum threads).
  */
-export function useMessageDeepLinks() {
+export function useMessageDeepLinks(enabled = true) {
   const { goChannel } = useAppNavigation();
 
   React.useEffect(() => {
+    if (!enabled) return;
+
     let cancelled = false;
     const unlistenPromise = listenForMessageDeepLinks((payload) => {
       if (cancelled) return;
@@ -33,5 +35,5 @@ export function useMessageDeepLinks() {
       cancelled = true;
       void unlistenPromise.then((fn) => fn());
     };
-  }, [goChannel]);
+  }, [enabled, goChannel]);
 }
