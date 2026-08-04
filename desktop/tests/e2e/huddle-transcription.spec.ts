@@ -704,25 +704,31 @@ test("assigns distinct agent voices and exposes compact per-agent controls", asy
   });
   expect(new Set(assignedVoices).size).toBe(2);
 
-  await voiceMenus.first().click({ force: true });
+  await page.getByRole("button", { name: "Voice settings for alice" }).click();
   await waitForAnimations(page);
-  await expect(
-    page.getByText("Agent text-to-speech", { exact: true }),
-  ).toBeVisible();
-  await expect(page.getByTestId("huddle-agent-tts-toggle")).toBeChecked();
-  await expect(page.getByTestId("huddle-agent-voice-selector")).toContainText(
-    "Vera",
+  const voiceMenu = page.locator(
+    '[data-testid="huddle-agent-voice-menu-content"][data-state="open"]',
   );
+  await expect(voiceMenu).toBeVisible();
+  await expect(
+    voiceMenu.getByText("Agent text-to-speech", { exact: true }),
+  ).toBeVisible();
+  const ttsToggle = voiceMenu.getByTestId("huddle-agent-tts-toggle");
+  await expect(ttsToggle).toBeChecked();
+  await expect(
+    voiceMenu.getByTestId("huddle-agent-voice-selector"),
+  ).toContainText("Vera");
 
-  await page.getByTestId("huddle-agent-tts-toggle").click({ force: true });
-  await expect(page.getByTestId("huddle-agent-voice-selector")).toHaveCount(0);
-  await page.getByTestId("huddle-agent-tts-toggle").click({ force: true });
-  await expect(page.getByTestId("huddle-agent-tts-toggle")).toBeChecked();
-  await expect(page.getByTestId("huddle-agent-voice-selector")).toBeEnabled();
-  await page.getByTestId("huddle-agent-voice-selector").click({ force: true });
-  await page
-    .getByRole("menuitemradio", { name: "Jane" })
-    .click({ force: true });
+  await ttsToggle.click();
+  await expect(
+    voiceMenu.getByTestId("huddle-agent-voice-selector"),
+  ).toHaveCount(0);
+  await ttsToggle.click();
+  await expect(ttsToggle).toBeChecked();
+  const voiceSelector = voiceMenu.getByTestId("huddle-agent-voice-selector");
+  await expect(voiceSelector).toBeEnabled();
+  await voiceSelector.click();
+  await page.getByRole("menuitemradio", { name: "Jane" }).click();
   await expect
     .poll(() =>
       page.evaluate(() => {
@@ -1216,6 +1222,23 @@ test("starts unmuted with Push to Talk while preserving manual microphone contro
     )
     .toEqual({ enabled: false });
 
+  await page.evaluate(async () => {
+    await window.__BUZZ_E2E_EMIT_TAURI_EVENT__?.("ptt-state", false);
+  });
+  await expect(unmuteButton).toBeVisible();
+
+  await page.getByRole("button", { name: "Audio settings" }).click();
+  await page.getByRole("button", { name: "Turn off Push to Talk" }).click();
+  await page.evaluate(async () => {
+    await window.__BUZZ_E2E_EMIT_TAURI_EVENT__?.("ptt-state", true);
+  });
+  await expect(unmuteButton).toBeVisible();
+  await page.getByRole("button", { name: "Turn on Push to Talk" }).click();
+  await expect(unmuteButton).toBeVisible();
+  await page.evaluate(async () => {
+    await window.__BUZZ_E2E_EMIT_TAURI_EVENT__?.("ptt-state", true);
+  });
+  await expect(muteButton).toBeVisible();
   await page.evaluate(async () => {
     await window.__BUZZ_E2E_EMIT_TAURI_EVENT__?.("ptt-state", false);
   });

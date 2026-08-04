@@ -29,8 +29,10 @@ export function useHuddlePttState(micConnected: boolean) {
     let unlisten: (() => void) | null = null;
     listen<boolean>("ptt-state", (event) => {
       if (cancelled) return;
-      setPttActive(event.payload);
-      if (!micConnected) return;
+      const acceptsPtt =
+        micConnected && voiceInputModeRef.current === "push_to_talk";
+      setPttActive(acceptsPtt ? event.payload : false);
+      if (!acceptsPtt) return;
       try {
         if (
           !pttAudioCtxRef.current ||
@@ -63,6 +65,12 @@ export function useHuddlePttState(micConnected: boolean) {
       }
     };
   }, [micConnected]);
+
+  React.useEffect(() => {
+    if (!micConnected || voiceInputMode !== "push_to_talk") {
+      setPttActive(false);
+    }
+  }, [micConnected, voiceInputMode]);
 
   return {
     getVoiceInputMode,

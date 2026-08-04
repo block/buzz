@@ -101,6 +101,7 @@ export function AgentVoiceMenu({
       <PopoverContent
         align={contentAlign}
         className={cn("w-64 space-y-3 p-3", contentClassName)}
+        data-testid="huddle-agent-voice-menu-content"
         side={contentSide}
         sideOffset={8}
       >
