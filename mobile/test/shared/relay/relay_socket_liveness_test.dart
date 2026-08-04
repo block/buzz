@@ -108,4 +108,43 @@ void main() {
     await socket.disconnect();
     await server.close(force: true);
   });
+
+  test('bounds a handshake that never completes', () async {
+    RelaySocket.debugConnectTimeout = const Duration(milliseconds: 200);
+    addTearDown(() {
+      RelaySocket.debugConnectTimeout = RelaySocket.connectTimeout;
+    });
+
+    // Accept the TCP connection but never answer the websocket upgrade —
+    // the shape of a half-open path after a resume across a network change.
+    final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    server.listen((client) {
+      client.listen((_) {}, onError: (_) {}, onDone: () {});
+    });
+
+    final disconnected = Completer<Object?>();
+    final socket = RelaySocket(
+      wsUrl: 'ws://127.0.0.1:${server.port}',
+      nsec: null,
+      onMessage: (_) {},
+      onConnected: () {},
+      onDisconnected: (error) {
+        if (!disconnected.isCompleted) disconnected.complete(error);
+      },
+    );
+    unawaited(socket.connect());
+
+    final error = await disconnected.future.timeout(
+      const Duration(seconds: 5),
+      onTimeout: () => fail(
+        'connect never gave up: the handshake must fail once '
+        'debugConnectTimeout elapses',
+      ),
+    );
+    expect(error, isA<TimeoutException>());
+    expect(socket.state, SocketState.disconnected);
+
+    socket.dispose();
+    await server.close();
+  });
 }
