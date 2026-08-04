@@ -190,7 +190,9 @@ export function WorkspaceTabs({
       ? {
           relayUrl: activeCommunity.relayUrl,
           operatorPubkey: identityQuery.data.pubkey,
-          repoAddress: project.repoAddress,
+          // Legacy Projects are one repository. NIP-MP Projects pass their
+          // own address here once the multi-repository model lands.
+          projectAddress: project.repoAddress,
         }
       : null;
   const localCheckoutSnapshot = localSnapshot?.snapshot ?? null;

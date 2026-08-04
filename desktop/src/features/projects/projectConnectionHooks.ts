@@ -17,7 +17,7 @@ export const projectConnectionsQueryKey = (
     "project-connections",
     projectScope?.relayUrl ?? "",
     projectScope?.operatorPubkey ?? "",
-    projectScope?.repoAddress ?? "",
+    projectScope?.projectAddress ?? "",
   ] as const;
 
 export function useProjectConnectionsQuery(
