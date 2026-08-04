@@ -6,7 +6,10 @@
 //! in `userInfo`, so there are no per-notification listeners, waiter threads,
 //! or request maps to leak when Notification Center clears a notification.
 
-use std::sync::mpsc;
+use std::{
+    collections::VecDeque,
+    sync::{Mutex, OnceLock},
+};
 
 use block2::{Block, RcBlock};
 use objc2::{
@@ -26,6 +29,9 @@ use tauri::{AppHandle, Emitter};
 use crate::commands::NATIVE_NOTIFICATION_ACTIVATED_EVENT;
 
 const TARGET_USER_INFO_KEY: &str = "buzzNotificationTarget";
+const MAX_PENDING_ACTIVATIONS: usize = 64;
+
+static PENDING_ACTIVATIONS: OnceLock<Mutex<VecDeque<serde_json::Value>>> = OnceLock::new();
 
 struct NotificationDelegateIvars {
     app: AppHandle,
@@ -51,10 +57,9 @@ define_class!(
             _notification: &objc2_user_notifications::UNNotification,
             completion_handler: &Block<dyn Fn(UNNotificationPresentationOptions)>,
         ) {
-            // Preserve the prior macOS behavior: foreground notifications are
-            // recorded by Notification Center without interrupting the user
-            // with a banner while Buzz is active.
-            completion_handler.call((UNNotificationPresentationOptions::empty(),));
+            // Preserve the prior macOS behavior: keep foreground notifications
+            // in Notification Center without interrupting the user with a banner.
+            completion_handler.call((UNNotificationPresentationOptions::List,));
         }
 
         #[unsafe(method(userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:))]
@@ -66,11 +71,12 @@ define_class!(
         ) {
             if &*response.actionIdentifier() == unsafe { UNNotificationDefaultActionIdentifier } {
                 if let Some(target) = target_from_response(response) {
+                    queue_activation(target);
                     crate::tray_menu::show_main_window(&self.ivars().app);
                     if let Err(error) = self
                         .ivars()
                         .app
-                        .emit(NATIVE_NOTIFICATION_ACTIVATED_EVENT, target)
+                        .emit(NATIVE_NOTIFICATION_ACTIVATED_EVENT, ())
                     {
                         eprintln!(
                             "buzz-desktop: failed to emit macOS notification activation: {error}"
@@ -166,20 +172,35 @@ pub(crate) fn show(
     let identifier = NSString::from_str(&uuid::Uuid::new_v4().to_string());
     let request =
         UNNotificationRequest::requestWithIdentifier_content_trigger(&identifier, &content, None);
-    let (sender, receiver) = mpsc::sync_channel(1);
-    let delivery_handler = RcBlock::new(move |error: *mut NSError| {
-        let result = if let Some(error) = unsafe { error.as_ref() } {
-            Err(format!("failed to deliver macOS notification: {error}"))
-        } else {
-            Ok(())
-        };
-        let _ = sender.send(result);
+    let delivery_handler = RcBlock::new(|error: *mut NSError| {
+        if let Some(error) = unsafe { error.as_ref() } {
+            eprintln!("buzz-desktop: failed to deliver macOS notification: {error}");
+        }
     });
     UNUserNotificationCenter::currentNotificationCenter()
         .addNotificationRequest_withCompletionHandler(&request, Some(&delivery_handler));
-    receiver
-        .recv()
-        .map_err(|error| format!("macOS notification delivery callback failed: {error}"))?
+    Ok(())
+}
+
+fn queue_activation(target: serde_json::Value) {
+    let queue = PENDING_ACTIVATIONS.get_or_init(Default::default);
+    let Ok(mut queue) = queue.lock() else {
+        eprintln!("buzz-desktop: macOS notification activation queue is unavailable");
+        return;
+    };
+    if queue.len() == MAX_PENDING_ACTIVATIONS {
+        queue.pop_front();
+    }
+    queue.push_back(target);
+}
+
+#[tauri::command]
+pub(crate) fn take_pending_activations() -> Result<Vec<serde_json::Value>, String> {
+    let queue = PENDING_ACTIVATIONS.get_or_init(Default::default);
+    let mut queue = queue
+        .lock()
+        .map_err(|_| "macOS notification activation queue is unavailable".to_string())?;
+    Ok(queue.drain(..).collect())
 }
 
 fn is_bundled_application() -> bool {
@@ -200,7 +221,25 @@ fn parse_target(serialized: &str) -> Option<serde_json::Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_bundled_application, parse_target};
+    use super::{
+        is_bundled_application, parse_target, queue_activation, take_pending_activations,
+        MAX_PENDING_ACTIVATIONS,
+    };
+
+    #[test]
+    fn activation_queue_is_bounded_and_drained() {
+        let _ = take_pending_activations();
+        for index in 0..=MAX_PENDING_ACTIVATIONS {
+            queue_activation(serde_json::json!({ "index": index }));
+        }
+
+        let activations = take_pending_activations().expect("activation queue");
+        assert_eq!(activations.len(), MAX_PENDING_ACTIVATIONS);
+        assert_eq!(activations[0]["index"], 1);
+        assert!(take_pending_activations()
+            .expect("drained activation queue")
+            .is_empty());
+    }
 
     #[test]
     fn cargo_test_process_is_not_treated_as_bundled() {

@@ -50,9 +50,6 @@ pub fn show_native_notification(
 mod linux {
     use tauri::Emitter;
 
-    /// Emitted to the frontend when the user clicks a native notification. The
-    /// payload is the opaque target object the frontend passed in.
-
     pub fn show(
         app: tauri::AppHandle,
         title: String,

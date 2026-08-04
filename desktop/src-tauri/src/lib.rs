@@ -725,6 +725,8 @@ pub fn run() {
             remove_reaction,
             get_event,
             show_native_notification,
+            #[cfg(target_os = "macos")]
+            macos_notifications::take_pending_activations,
             upload_media,
             pick_and_upload_media,
             pick_and_upload_image,
