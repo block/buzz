@@ -364,8 +364,17 @@ test("returns a signed response in the callback fragment after consent", async (
   await expect(page.getByTestId("nostr-bind-finish-step")).toBeVisible();
 
   await expect(
-    page.getByRole("heading", { name: "Continue in your browser" }),
+    page.getByRole("heading", { name: "Check Run402 in your browser" }),
   ).toBeVisible();
+  await expect(
+    page.getByText(
+      "The Run402 tab showing the six-digit code is the only place that can confirm whether co-ownership completed.",
+    ),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Run402 didn’t receive the approval?"),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Close" })).toBeVisible();
   const manualFallback = page.getByTestId("nostr-bind-manual-fallback");
   await expect(manualFallback).not.toHaveAttribute("open", "");
   await expect(page.getByTestId("nostr-bind-signed-response")).toBeHidden();

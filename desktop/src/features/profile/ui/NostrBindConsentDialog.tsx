@@ -11,6 +11,7 @@ import type { NostrBindDeepLinkPayload } from "@/shared/deep-link";
 import { listenForNostrBindDeepLinks } from "@/shared/deep-link";
 import { OnboardingSlideTransition } from "@/features/onboarding/ui/OnboardingSlideTransition";
 import { buildNostrBindCallbackUrl } from "@/features/profile/lib/nostrBindCallback";
+import { nostrBindBrowserFinishState } from "@/features/profile/lib/nostrBindFinishState";
 import { signNostrIdentityBinding } from "@/features/profile/lib/nostrIdentityBinding";
 import { cn } from "@/shared/lib/cn";
 import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
@@ -636,6 +637,11 @@ export function NostrBindConsentDialog() {
     signedResponse,
   ]);
 
+  const browserFinishState =
+    payload?.returnMode === "browser_fragment_v1"
+      ? nostrBindBrowserFinishState(error)
+      : null;
+
   return (
     <DialogPrimitive.Root
       onOpenChange={handleOpenChange}
@@ -666,17 +672,14 @@ export function NostrBindConsentDialog() {
                   transitionKey="nostr-bind-finish"
                 >
                   <DialogPrimitive.Title className="mt-6 text-3xl font-semibold tracking-tight">
-                    {payload.returnMode === "browser_fragment_v1"
-                      ? "Continue in your browser"
-                      : "Finish on the Buzz website"}
+                    {browserFinishState?.title ?? "Finish on the Buzz website"}
                   </DialogPrimitive.Title>
                   <DialogPrimitive.Description
                     className="mt-3 max-w-[440px] text-sm leading-6 text-muted-foreground"
                     id="nostr-bind-description"
                   >
-                    {payload.returnMode === "browser_fragment_v1"
-                      ? "Buzz opened your browser to finish verification."
-                      : "Copy the response below, then paste it into the Buzz website to finish verification."}
+                    {browserFinishState?.description ??
+                      "Copy the response below, then paste it into the Buzz website to finish verification."}
                   </DialogPrimitive.Description>
 
                   {error ? (
@@ -695,7 +698,7 @@ export function NostrBindConsentDialog() {
                       open={isManualFallbackOpen}
                     >
                       <summary className="flex cursor-pointer list-none items-center justify-between gap-4 px-4 py-3 text-sm font-medium transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
-                        <span>Pairing didn’t finish automatically?</span>
+                        <span>{browserFinishState?.fallbackLabel}</span>
                         <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground transition-transform duration-150 group-open:rotate-180" />
                       </summary>
                       <div className="space-y-4 border-t border-border/55 p-4">
@@ -728,7 +731,7 @@ export function NostrBindConsentDialog() {
                       type="button"
                       variant="ghost"
                     >
-                      Continue
+                      {browserFinishState?.closeLabel ?? "Continue"}
                     </Button>
                   </div>
                 </OnboardingSlideTransition>
