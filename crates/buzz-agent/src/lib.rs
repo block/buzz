@@ -55,8 +55,9 @@ struct App {
     sessions: Mutex<HashMap<String, Session>>,
     /// Cached model catalog for Databricks providers. Populated lazily on the
     /// first successful `session/new` discovery call. Failed discovery is never
-    /// cached: authentication errors reject session creation, while non-auth errors
-    /// use the configured model for that response and retry on the next session.
+    /// cached: static-token authentication errors reject session creation, while
+    /// OAuth authentication and non-auth errors use the configured model for that
+    /// response and retry on the next session.
     models_cache: tokio::sync::OnceCell<Vec<ModelEntry>>,
 }
 
@@ -322,6 +323,18 @@ async fn resolve_models_catalog(
     cache.get_or_try_init(|| discover).await.cloned()
 }
 
+/// Return the configured model as a one-entry catalog for this response.
+///
+/// This value is never written to `models_cache`; failed discovery must be retried by
+/// the next session rather than pinning degraded state for the process lifetime.
+fn configured_model_fallback(model: &str) -> Vec<ModelEntry> {
+    let model = model.trim().to_string();
+    vec![ModelEntry {
+        id: model.clone(),
+        name: model,
+    }]
+}
+
 async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSender) {
     let p: SessionNewParams = match decode(params, "session/new") {
         Ok(p) => p,
@@ -384,9 +397,10 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
         Arc::from(prompt)
     };
     // Resolve the model catalog before spawning MCP servers or registering a
-    // session. Authentication failures reject before allocation so Desktop can
-    // drive sign-in. Other catalog failures must not make the invocation path
-    // unavailable; return the configured model without caching the fallback.
+    // session. A configured static credential cannot recover interactively, so
+    // its authentication failure rejects before allocation. OAuth authentication
+    // failures and other catalog failures use only the configured model for this
+    // response, without caching, so session/prompt can run the existing PKCE flow.
     let available_models: Vec<Value> = {
         use crate::config::Provider;
         match app.cfg.provider {
@@ -398,20 +412,23 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
                 .await
                 {
                     Ok(models) => models,
-                    Err(error @ AgentError::LlmAuth(_)) => {
+                    Err(error @ AgentError::LlmAuth(_)) if !app.cfg.api_key.is_empty() => {
                         return reject(wire_tx, id, error.json_rpc_code(), &error.to_string())
                             .await;
+                    }
+                    Err(error @ AgentError::LlmAuth(_)) => {
+                        tracing::warn!(
+                            error = %error,
+                            "Databricks OAuth model catalog unavailable; using configured model"
+                        );
+                        configured_model_fallback(&app.cfg.model)
                     }
                     Err(error) => {
                         tracing::warn!(
                             error = %error,
                             "Databricks model catalog unavailable; using configured model"
                         );
-                        let configured_model = app.cfg.model.trim().to_string();
-                        vec![ModelEntry {
-                            id: configured_model.clone(),
-                            name: configured_model,
-                        }]
+                        configured_model_fallback(&app.cfg.model)
                     }
                 };
                 models
@@ -912,7 +929,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn models_catalog_surfaces_auth_failure_without_fallback() {
+    async fn models_catalog_does_not_cache_oauth_auth_fallback() {
         let cache: tokio::sync::OnceCell<Vec<ModelEntry>> = tokio::sync::OnceCell::new();
         let error = crate::resolve_models_catalog(&cache, async {
             Err::<Vec<ModelEntry>, AgentError>(AgentError::LlmAuth("sign in again".into()))
@@ -922,5 +939,29 @@ mod tests {
 
         assert!(matches!(error, AgentError::LlmAuth(_)));
         assert!(cache.get().is_none());
+
+        let discovered = vec![ModelEntry {
+            id: "authenticated-model".into(),
+            name: "authenticated-model".into(),
+        }];
+        let result = crate::resolve_models_catalog(&cache, async {
+            Ok::<Vec<ModelEntry>, AgentError>(discovered.clone())
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(result, discovered);
+        assert_eq!(cache.get(), Some(&discovered));
+    }
+
+    #[test]
+    fn configured_model_fallback_is_trimmed_and_singular() {
+        assert_eq!(
+            crate::configured_model_fallback("  configured-model  "),
+            vec![ModelEntry {
+                id: "configured-model".into(),
+                name: "configured-model".into(),
+            }]
+        );
     }
 }

@@ -20,6 +20,7 @@ use axum::{routing::get, routing::post, Json, Router};
 use buzz_agent::auth::{PkceOAuthConfig, PkceOAuthTokenSource, TokenSource};
 use serde::Deserialize;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 #[derive(Deserialize)]
@@ -457,6 +458,7 @@ struct AgentHarness {
     stdin: tokio::process::ChildStdin,
     stdout: BufReader<tokio::process::ChildStdout>,
     next_id: i64,
+    _home: Option<TempDir>,
 }
 
 impl Drop for AgentHarness {
@@ -467,7 +469,16 @@ impl Drop for AgentHarness {
 
 impl AgentHarness {
     async fn spawn_provider(provider: &str, base_url: &str, model: &str) -> Self {
-        Self::spawn_provider_with_max_sessions(provider, base_url, model, 1).await
+        Self::spawn_provider_with_options(provider, base_url, model, 1, Some("test-bearer")).await
+    }
+
+    async fn spawn_oauth_provider(
+        provider: &str,
+        base_url: &str,
+        model: &str,
+        max_sessions: usize,
+    ) -> Self {
+        Self::spawn_provider_with_options(provider, base_url, model, max_sessions, None).await
     }
 
     async fn spawn_provider_with_max_sessions(
@@ -476,12 +487,32 @@ impl AgentHarness {
         model: &str,
         max_sessions: usize,
     ) -> Self {
+        Self::spawn_provider_with_options(
+            provider,
+            base_url,
+            model,
+            max_sessions,
+            Some("test-bearer"),
+        )
+        .await
+    }
+
+    async fn spawn_provider_with_options(
+        provider: &str,
+        base_url: &str,
+        model: &str,
+        max_sessions: usize,
+        token: Option<&str>,
+    ) -> Self {
         let bin = env!("CARGO_BIN_EXE_buzz-agent");
+        let home = token
+            .is_none()
+            .then(|| TempDir::new().expect("create isolated OAuth home"));
         let mut cmd = tokio::process::Command::new(bin);
         cmd.env("BUZZ_AGENT_PROVIDER", provider)
             .env("DATABRICKS_HOST", base_url)
             .env("DATABRICKS_MODEL", model)
-            .env("DATABRICKS_TOKEN", "test-bearer")
+            .env_remove("DATABRICKS_TOKEN")
             .env("BUZZ_AGENT_LLM_TIMEOUT_SECS", "5")
             .env("BUZZ_AGENT_TOOL_TIMEOUT_SECS", "5")
             .env("BUZZ_AGENT_MAX_ROUNDS", "2")
@@ -491,6 +522,12 @@ impl AgentHarness {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
+        if let Some(token) = token {
+            cmd.env("DATABRICKS_TOKEN", token);
+        }
+        if let Some(home) = &home {
+            cmd.env("HOME", home.path());
+        }
         let mut child = cmd.spawn().expect("spawn buzz-agent");
         let stdin = child.stdin.take().unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap());
@@ -499,7 +536,15 @@ impl AgentHarness {
             stdin,
             stdout,
             next_id: 1,
+            _home: home,
         }
+    }
+
+    fn oauth_home(&self) -> &std::path::Path {
+        self._home
+            .as_ref()
+            .expect("harness was not started in OAuth mode")
+            .path()
     }
 
     async fn send(&mut self, method: &str, params: serde_json::Value) -> i64 {
@@ -993,6 +1038,113 @@ async fn model_discovery_surfaces_rejected_static_token_as_auth_failure() {
     );
 }
 
+fn databricks_oauth_cache_path(home: &std::path::Path, host: &str) -> std::path::PathBuf {
+    let discovery_url = format!(
+        "{}/oidc/.well-known/oauth-authorization-server",
+        host.trim_end_matches('/')
+    );
+    let mut hasher = Sha256::new();
+    hasher.update(discovery_url.as_bytes());
+    hasher.update(b"|");
+    hasher.update(b"databricks-cli");
+    hasher.update(b"|");
+    hasher.update(b"all-apis,offline_access");
+    let hash = hex::encode(hasher.finalize());
+    home.join(".config")
+        .join("buzz-agent")
+        .join("oauth")
+        .join("databricks")
+        .join(format!("{hash}.json"))
+}
+
+fn write_cached_oauth_token(home: &std::path::Path, host: &str, access_token: &str) {
+    let path = databricks_oauth_cache_path(home, host);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        path,
+        serde_json::to_vec(&json!({
+            "access_token": access_token,
+            "refresh_token": null,
+            "expires_at": SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                + 3600,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn oauth_missing_token_uses_configured_model_then_retries_discovery() {
+    let attempts = Arc::new(AtomicU64::new(0));
+    let attempts_for_route = attempts.clone();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let host = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new().route(
+        "/api/ai-gateway/v2/endpoints",
+        get(move || {
+            let attempts = attempts_for_route.clone();
+            async move {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Json(json!({
+                    "endpoints": [{"name": "authenticated-model"}],
+                    "next_page_token": null,
+                }))
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let configured_model = "  configured-model  ";
+    let mut h =
+        AgentHarness::spawn_oauth_provider("databricks_v2", &host, configured_model, 2).await;
+    let initialize = h
+        .send(
+            "initialize",
+            json!({ "protocolVersion": 1, "clientCapabilities": {} }),
+        )
+        .await;
+    assert!(h.recv_for(initialize).await.get("result").is_some());
+
+    let first = h
+        .send("session/new", json!({ "cwd": "/tmp", "mcpServers": [] }))
+        .await;
+    let first_response = h.recv_for(first).await;
+    assert!(
+        first_response["result"]["sessionId"].is_string(),
+        "missing OAuth token blocked session creation: {first_response}"
+    );
+    assert_eq!(
+        first_response["result"]["models"]["availableModels"],
+        json!([{"modelId": "configured-model", "name": "configured-model"}])
+    );
+    assert_eq!(attempts.load(Ordering::SeqCst), 0);
+
+    write_cached_oauth_token(h.oauth_home(), &host, "cached-bearer");
+
+    let second = h
+        .send("session/new", json!({ "cwd": "/tmp", "mcpServers": [] }))
+        .await;
+    let second_response = h.recv_for(second).await;
+    assert!(
+        second_response["result"]["sessionId"].is_string(),
+        "later authenticated session failed: {second_response}"
+    );
+    assert_eq!(
+        second_response["result"]["models"]["availableModels"],
+        json!([{"modelId": "authenticated-model", "name": "authenticated-model"}])
+    );
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        1,
+        "OAuth fallback was cached instead of retrying discovery"
+    );
+}
+
 #[tokio::test]
 async fn non_auth_discovery_failure_uses_configured_model_without_caching_fallback() {
     use axum::http::StatusCode;
@@ -1046,7 +1198,7 @@ async fn non_auth_discovery_failure_uses_configured_model_without_caching_fallba
 }
 
 #[tokio::test]
-async fn failed_discovery_does_not_consume_session_capacity() {
+async fn rejected_static_token_does_not_consume_capacity_or_spawn_mcp() {
     use axum::http::StatusCode;
 
     let attempts = Arc::new(AtomicU64::new(0));
@@ -1082,11 +1234,39 @@ async fn failed_discovery_does_not_consume_session_capacity() {
         .await;
     assert!(h.recv_for(initialize).await.get("result").is_some());
 
+    let pid_dir = TempDir::new().unwrap();
+    let pid_file = pid_dir.path().join("mcp.pid");
+    let fake_mcp = env!("CARGO_BIN_EXE_fake-mcp");
+    let mcp_servers = json!([{
+        "name": "must-not-spawn",
+        "command": fake_mcp,
+        "args": [],
+        "env": [{
+            "name": "FAKE_MCP_PID_FILE",
+            "value": pid_file.to_string_lossy(),
+        }],
+    }]);
+
     let failed = h
-        .send("session/new", json!({ "cwd": "/tmp", "mcpServers": [] }))
+        .send(
+            "session/new",
+            json!({ "cwd": "/tmp", "mcpServers": mcp_servers }),
+        )
         .await;
     let failed_response = h.recv_for(failed).await;
     assert!(failed_response.get("error").is_some(), "{failed_response}");
+    assert!(
+        failed_response["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("llm auth"),
+        "rejected static token did not retain auth semantics: {failed_response}"
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !pid_file.exists(),
+        "MCP process spawned before failed discovery was resolved"
+    );
 
     let retry = h
         .send("session/new", json!({ "cwd": "/tmp", "mcpServers": [] }))
