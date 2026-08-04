@@ -1,5 +1,7 @@
 part of '../channels_page.dart';
 
+const _sectionMenuItemPadding = EdgeInsets.fromLTRB(Grid.xs, 0, Grid.twelve, 0);
+
 class _CustomChannelSection extends StatelessWidget {
   final ChannelSection section;
   final List<Channel> channels;
@@ -80,7 +82,7 @@ class _CustomChannelSection extends StatelessWidget {
   }
 }
 
-class _CustomSectionHeader extends StatelessWidget {
+class _CustomSectionHeader extends ConsumerWidget {
   final ChannelSection section;
   final bool expanded;
   final bool isFirst;
@@ -104,8 +106,12 @@ class _CustomSectionHeader extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final sectionColor = context.colors.primary;
+    final icon = section.icon;
+    final customEmoji = icon == null
+        ? null
+        : _resolveCustomEmoji(icon, ref.watch(customEmojiListProvider));
 
     return GestureDetector(
       onTap: onToggle,
@@ -123,64 +129,107 @@ class _CustomSectionHeader extends StatelessWidget {
               width: _kChannelLeadingWidth,
               child: Align(
                 alignment: Alignment.centerLeft,
-                child: Icon(
-                  LucideIcons.folder,
-                  size: _kChannelIconSize,
-                  color: sectionColor,
-                ),
+                child: icon == null || icon.isEmpty
+                    ? Icon(
+                        LucideIcons.folder,
+                        size: _kChannelIconSize,
+                        color: sectionColor,
+                      )
+                    : customEmoji != null
+                    ? CustomEmojiImage(
+                        shortcode: customEmoji.shortcode,
+                        url: customEmoji.url,
+                        size: _kChannelIconSize,
+                      )
+                    : Text(
+                        icon,
+                        maxLines: 1,
+                        overflow: TextOverflow.visible,
+                        style: TextStyle(
+                          fontSize: _kChannelIconSize,
+                          height: 1,
+                          color: sectionColor,
+                        ),
+                      ),
               ),
             ),
             const SizedBox(width: _kChannelLabelGap),
-            Text(
-              section.name,
-              style: context.textTheme.bodyMedium?.copyWith(
-                color: sectionColor,
-                fontWeight: FontWeight.w600,
+            Expanded(
+              child: Text(
+                section.name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: contentListTitleTextStyle.copyWith(
+                  color: sectionColor,
+                  fontWeight: FontWeight.w600,
+                ),
               ),
             ),
-            const Spacer(),
-            GestureDetector(
-              onTapUp: (details) async {
-                final overlay =
-                    Overlay.of(context).context.findRenderObject()!
-                        as RenderBox;
-                final position = RelativeRect.fromRect(
-                  details.globalPosition & Size.zero,
-                  Offset.zero & overlay.size,
-                );
-                final value = await showMenu<String>(
-                  context: context,
-                  position: position,
-                  items: [
-                    const PopupMenuItem(value: 'rename', child: Text('Rename')),
-                    PopupMenuItem(
-                      value: 'move_up',
-                      enabled: !isFirst,
-                      child: const Text('Move Up'),
-                    ),
-                    PopupMenuItem(
-                      value: 'move_down',
-                      enabled: !isLast,
-                      child: const Text('Move Down'),
-                    ),
-                    const PopupMenuItem(value: 'delete', child: Text('Delete')),
-                  ],
-                );
-                switch (value) {
-                  case 'rename':
-                    onRename();
-                  case 'move_up':
-                    onMoveUp();
-                  case 'move_down':
-                    onMoveDown();
-                  case 'delete':
-                    onDelete();
-                }
-              },
-              child: Icon(
-                LucideIcons.ellipsisVertical,
-                size: _kChannelIconSize,
-                color: sectionColor,
+            Builder(
+              builder: (buttonContext) => IconButton(
+                key: ValueKey('section-menu-${section.id}'),
+                tooltip: '${section.name} options',
+                visualDensity: VisualDensity.compact,
+                icon: Icon(
+                  LucideIcons.ellipsisVertical,
+                  size: _kChannelIconSize,
+                  color: sectionColor,
+                ),
+                onPressed: () async {
+                  final value = await showAnchoredPopover<String>(
+                    context: buttonContext,
+                    width: 216,
+                    alignment: AnchoredPopoverAlignment.end,
+                    surfaceKey: ValueKey('section-popover-${section.id}'),
+                    items: [
+                      const PopupMenuItem(
+                        value: 'rename',
+                        padding: _sectionMenuItemPadding,
+                        child: _SectionMenuItemContent(
+                          icon: LucideIcons.pencil,
+                          label: 'Rename section',
+                        ),
+                      ),
+                      PopupMenuItem(
+                        value: 'move_up',
+                        enabled: !isFirst,
+                        padding: _sectionMenuItemPadding,
+                        child: const _SectionMenuItemContent(
+                          icon: LucideIcons.arrowUp,
+                          label: 'Move up',
+                        ),
+                      ),
+                      PopupMenuItem(
+                        value: 'move_down',
+                        enabled: !isLast,
+                        padding: _sectionMenuItemPadding,
+                        child: const _SectionMenuItemContent(
+                          icon: LucideIcons.arrowDown,
+                          label: 'Move down',
+                        ),
+                      ),
+                      PopupMenuItem(
+                        value: 'delete',
+                        padding: _sectionMenuItemPadding,
+                        child: _SectionMenuItemContent(
+                          icon: LucideIcons.trash2,
+                          label: 'Delete section',
+                          color: context.colors.error,
+                        ),
+                      ),
+                    ],
+                  );
+                  switch (value) {
+                    case 'rename':
+                      onRename();
+                    case 'move_up':
+                      onMoveUp();
+                    case 'move_down':
+                      onMoveDown();
+                    case 'delete':
+                      onDelete();
+                  }
+                },
               ),
             ),
             const SizedBox(width: Grid.quarter),
@@ -190,6 +239,46 @@ class _CustomSectionHeader extends StatelessWidget {
       ),
     );
   }
+}
+
+class _SectionMenuItemContent extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final Color? color;
+
+  const _SectionMenuItemContent({
+    required this.icon,
+    required this.label,
+    this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Icon(icon, size: 16, color: color),
+        const SizedBox(width: Grid.xxs),
+        Flexible(
+          child: Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: color == null ? null : TextStyle(color: color),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+CustomEmoji? _resolveCustomEmoji(String icon, List<CustomEmoji> palette) {
+  if (!icon.startsWith(':') || !icon.endsWith(':')) return null;
+  final shortcode = normalizeShortcode(icon);
+  if (shortcode == null) return null;
+  for (final emoji in palette) {
+    if (emoji.shortcode == shortcode) return emoji;
+  }
+  return null;
 }
 
 class _SectionNameDialog extends HookWidget {
@@ -287,7 +376,7 @@ class _ChannelSection extends StatelessWidget {
                   ),
                   child: Text(
                     emptyLabel,
-                    style: context.textTheme.bodySmall?.copyWith(
+                    style: contentListBodyTextStyle.copyWith(
                       color: context.colors.onSurfaceVariant,
                     ),
                   ),
@@ -399,7 +488,7 @@ class _SectionHeader extends StatelessWidget {
             const SizedBox(width: _kChannelLabelGap),
             Text(
               label,
-              style: context.textTheme.bodyMedium?.copyWith(
+              style: contentListTitleTextStyle.copyWith(
                 color: sectionColor,
                 fontWeight: FontWeight.w600,
               ),

@@ -481,7 +481,10 @@ export function ProjectsView() {
         })}
       </div>
     ) : (
-      <div className={PROJECT_LIST_CONTAINER_CLASS}>
+      <div
+        className={PROJECT_LIST_CONTAINER_CLASS}
+        data-testid="projects-list-container"
+      >
         {visibleProjects.map((project) => {
           const summary = activitySummariesQuery.data?.[project.repoAddress];
           return (

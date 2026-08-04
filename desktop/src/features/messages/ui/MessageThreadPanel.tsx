@@ -2,6 +2,7 @@ import * as React from "react";
 import { ArrowDown } from "lucide-react";
 
 import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
+import { HuddleTranscriptIntro } from "@/features/huddle/components/HuddleTranscriptIntro";
 import { orderMentionPubkeysByText } from "@/features/messages/lib/orderMentionPubkeys";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
@@ -38,6 +39,8 @@ import {
 import { Button } from "@/shared/ui/button";
 import { Separator } from "@/shared/ui/separator";
 import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
+import { ComposerActivityAccessory } from "./ComposerActivityAccessory";
+import { ComposerDockBackdrop } from "./ComposerDockBackdrop";
 import { MessageComposer } from "./MessageComposer";
 import { ThreadMessageSkeleton } from "./MessageThreadPanelSkeleton";
 import { MessageRow, type ThreadDepthGuideAction } from "./MessageRow";
@@ -57,6 +60,8 @@ type MessageThreadPanelProps = ThreadPanelLayoutProps & {
   firstUnreadReplyId?: string | null;
   huddleMemberPubkeys?: readonly string[];
   huddleMemberPubkeysPending?: boolean;
+  /** Present the huddle's parent-channel thread as a dedicated live chat. */
+  isHuddleTranscript?: boolean;
   editTarget?: {
     author: string;
     body: string;
@@ -79,6 +84,7 @@ type MessageThreadPanelProps = ThreadPanelLayoutProps & {
   onMarkRead?: (message: TimelineMessage) => void;
   onExpandReplies: (message: TimelineMessage) => void;
   onScrollTargetResolved: () => void;
+  onScrollTargetSettled?: (messageId: string) => void;
   scrollTargetHighlights?: boolean;
   onSelectReplyTarget: (message: TimelineMessage) => void;
   onSend: (
@@ -105,8 +111,9 @@ type MessageThreadPanelProps = ThreadPanelLayoutProps & {
   threadUnreadCount?: number;
   threadReplyUnreadCounts?: ReadonlyMap<string, number>;
   threadTypingPubkeys: string[];
-  threadHeadVideoReviewContext?: VideoReviewContext;
-  toolbarExtraActions?: React.ReactNode;
+  videoReviewContextsByMessageId?: ReadonlyMap<string, VideoReviewContext>;
+  activityAccessoryContent?: React.ReactNode;
+  activityAccessoryVisible: boolean;
   widthPx: number;
   isFollowingThread?: boolean;
   isMessageUnreadById?: (messageId: string) => boolean;
@@ -187,6 +194,7 @@ export function MessageThreadPanel({
   firstUnreadReplyId,
   huddleMemberPubkeys,
   huddleMemberPubkeysPending = false,
+  isHuddleTranscript = false,
   layout = "standalone",
   editTarget,
   headerLeading,
@@ -207,6 +215,7 @@ export function MessageThreadPanel({
   onMarkRead,
   onExpandReplies,
   onScrollTargetResolved,
+  onScrollTargetSettled,
   onSelectReplyTarget,
   onSend,
   onToggleReaction,
@@ -216,13 +225,14 @@ export function MessageThreadPanel({
   scrollTargetId,
   scrollTargetHighlights = true,
   threadHead,
-  threadHeadVideoReviewContext,
+  videoReviewContextsByMessageId,
   threadReplies,
   threadRepliesPending = false,
   threadUnreadCount,
   threadReplyUnreadCounts,
   threadTypingPubkeys,
-  toolbarExtraActions,
+  activityAccessoryContent,
+  activityAccessoryVisible,
   widthPx,
   transparentChrome = false,
   autoSendDraftKey = null,
@@ -239,13 +249,15 @@ export function MessageThreadPanel({
   >(null);
   const isOverlay = useIsThreadPanelOverlay();
   const threadHeadId = threadHead?.id ?? null;
-  useEscapeKey(onClose, isOverlay || isSinglePanelView || isFocusMode);
-  const hasConstrainedColumn = columnMaxWidthPx != null;
-  useComposerHeightPadding(
-    threadBodyRef,
-    threadComposerWrapperRef,
-    isSinglePanelView,
+  useEscapeKey(
+    onClose,
+    !isHuddleTranscript && (isOverlay || isSinglePanelView || isFocusMode),
   );
+  const hasConstrainedColumn = columnMaxWidthPx != null;
+  // Whether the composer dock trades its quiet-state spacer for the
+  // conditional activity accessory (agent working and/or someone typing).
+  const hasComposerBottomActivity =
+    activityAccessoryVisible || threadTypingPubkeys.length > 0;
 
   // Live ref so onCaptureSendContext can read reply state at submit time
   // (before any async mention-flow awaits change navigation state).
@@ -354,7 +366,9 @@ export function MessageThreadPanel({
   // card and the streaming-in `pending` state would both leave a rule hanging
   // over an empty region or a placeholder.
   const showThreadHeadDivider =
-    isFocusMode && (threadRepliesPending || repliesRenderState === "list");
+    !isHuddleTranscript &&
+    isFocusMode &&
+    (threadRepliesPending || repliesRenderState === "list");
 
   const threadMessages = React.useMemo(
     () => deferredThreadReplies.map((entry) => entry.message),
@@ -450,6 +464,7 @@ export function MessageThreadPanel({
       const startsUnreadSection =
         index > 0 && entry.message.id === firstUnreadReplyId;
       const isContinuation =
+        !isHuddleTranscript &&
         !startsUnreadSection &&
         entry.summary === null &&
         hasSameMessageAuthor(previousGroupMessage, entry.message) &&
@@ -477,20 +492,35 @@ export function MessageThreadPanel({
     deferredThreadReplies,
     firstUnreadReplyId,
     hoveredCollapseBranchId,
+    isHuddleTranscript,
     threadHead,
   ]);
 
-  const { isAtBottom, newMessageCount, onScroll, scrollToBottom } =
-    useAnchoredScroll({
-      channelId: threadHeadId,
-      contentRef: threadContentRef,
-      isLoading: threadRepliesPending || repliesRenderState === "pending",
-      messages: threadMessages,
-      highlightTargetMessage: scrollTargetHighlights,
-      onTargetReached: onScrollTargetResolved,
-      scrollContainerRef: threadBodyRef,
-      targetMessageId: scrollTargetId,
-    });
+  const {
+    isAtBottom,
+    newMessageCount,
+    onScroll,
+    scrollToBottom,
+    settleAtBottomAfterLayout,
+  } = useAnchoredScroll({
+    channelId: threadHeadId,
+    contentRef: threadContentRef,
+    isLoading: threadRepliesPending || repliesRenderState === "pending",
+    messages: threadMessages,
+    highlightTargetMessage: scrollTargetHighlights,
+    onTargetReached: onScrollTargetResolved,
+    onTargetSettled: onScrollTargetSettled,
+    pinTargetCentered: !scrollTargetHighlights,
+    scrollContainerRef: threadBodyRef,
+    targetMessageId: scrollTargetId,
+  });
+  useComposerHeightPadding(
+    threadBodyRef,
+    threadComposerWrapperRef,
+    isSinglePanelView,
+    "padding",
+    settleAtBottomAfterLayout,
+  );
 
   const knownAgentPubkeys = useKnownAgentPubkeys();
   const initialAgentPubkeys = React.useMemo(() => {
@@ -525,7 +555,9 @@ export function MessageThreadPanel({
       className="overflow-y-auto overflow-x-hidden overscroll-contain pb-24"
       data-buzz-conversation-scroll
       data-testid="message-thread-body"
+      mode={isHuddleTranscript ? "panel" : undefined}
       onScroll={onScroll}
+      tabIndex={-1}
       ref={threadBodyRef}
     >
       <div
@@ -535,55 +567,63 @@ export function MessageThreadPanel({
           hasConstrainedColumn ? { maxWidth: columnMaxWidthPx } : undefined
         }
       >
-        <div
-          className={cn(THREAD_PANEL_MESSAGE_GUTTER_CLASS, "pb-1 pt-0")}
-          data-testid="message-thread-head"
-        >
-          <div className="rounded-2xl">
-            <MessageRow
-              actionBarPlacement="inside"
-              channelId={channelId}
-              huddleMemberPubkeys={huddleMemberPubkeys}
-              huddleMemberPubkeysPending={huddleMemberPubkeysPending}
-              isFollowingThread={isFollowingThread}
-              isUnread={isMessageUnreadById?.(threadHead.id)}
-              layoutVariant="thread-reply"
-              message={threadHead}
-              onDelete={
-                onDelete &&
-                canManageMessageForCurrentUser(
-                  threadHead,
-                  currentPubkey,
-                  profiles,
-                )
-                  ? onDelete
-                  : undefined
-              }
-              onEdit={
-                onEdit &&
-                canManageMessageForCurrentUser(
-                  threadHead,
-                  currentPubkey,
-                  profiles,
-                )
-                  ? onEdit
-                  : undefined
-              }
-              onFollowThread={
-                onFollowThread ? (_msg) => onFollowThread() : undefined
-              }
-              onMarkUnread={onMarkUnread}
-              onMarkRead={onMarkRead}
-              onToggleReaction={onToggleReaction}
-              onUnfollowThread={
-                onUnfollowThread ? (_msg) => onUnfollowThread() : undefined
-              }
-              profiles={profiles}
-              showDepthGuides={shouldShowThreadBranchGuides}
-              videoReviewContext={threadHeadVideoReviewContext}
-            />
+        {isHuddleTranscript ? (
+          <div className={cn(THREAD_PANEL_MESSAGE_GUTTER_CLASS, "pb-2 pt-4")}>
+            <HuddleTranscriptIntro />
           </div>
-        </div>
+        ) : (
+          <div
+            className={cn(THREAD_PANEL_MESSAGE_GUTTER_CLASS, "pb-1 pt-0")}
+            data-testid="message-thread-head"
+          >
+            <div className="rounded-2xl">
+              <MessageRow
+                actionBarPlacement="inside"
+                channelId={channelId}
+                huddleMemberPubkeys={huddleMemberPubkeys}
+                huddleMemberPubkeysPending={huddleMemberPubkeysPending}
+                isFollowingThread={isFollowingThread}
+                isUnread={isMessageUnreadById?.(threadHead.id)}
+                layoutVariant="thread-reply"
+                message={threadHead}
+                onDelete={
+                  onDelete &&
+                  canManageMessageForCurrentUser(
+                    threadHead,
+                    currentPubkey,
+                    profiles,
+                  )
+                    ? onDelete
+                    : undefined
+                }
+                onEdit={
+                  onEdit &&
+                  canManageMessageForCurrentUser(
+                    threadHead,
+                    currentPubkey,
+                    profiles,
+                  )
+                    ? onEdit
+                    : undefined
+                }
+                onFollowThread={
+                  onFollowThread ? (_msg) => onFollowThread() : undefined
+                }
+                onMarkUnread={onMarkUnread}
+                onMarkRead={onMarkRead}
+                onToggleReaction={onToggleReaction}
+                onUnfollowThread={
+                  onUnfollowThread ? (_msg) => onUnfollowThread() : undefined
+                }
+                profiles={profiles}
+                showDepthGuides={shouldShowThreadBranchGuides}
+                videoReviewContext={videoReviewContextsByMessageId?.get(
+                  threadHead.id,
+                )}
+              />
+            </div>
+          </div>
+        )}
 
         {showThreadHeadDivider ? (
           <div
@@ -598,7 +638,7 @@ export function MessageThreadPanel({
           className={cn(THREAD_PANEL_MESSAGE_GUTTER_CLASS, "pb-3 pt-0")}
           data-testid="message-thread-replies"
         >
-          {threadRepliesPending ? (
+          {threadRepliesPending && !isHuddleTranscript ? (
             <div
               className="space-y-2.5 pt-1"
               data-testid="message-thread-replies-loading"
@@ -736,6 +776,9 @@ export function MessageThreadPanel({
                         onToggleReaction={onToggleReaction}
                         profiles={profiles}
                         showDepthGuides={shouldShowThreadBranchGuides}
+                        videoReviewContext={videoReviewContextsByMessageId?.get(
+                          entry.message.id,
+                        )}
                       />
                       {entry.summary ? (
                         <MessageThreadSummaryRow
@@ -768,7 +811,7 @@ export function MessageThreadPanel({
                 })}
               </div>
             )
-          ) : repliesRenderState === "empty" ? (
+          ) : repliesRenderState === "empty" && !isHuddleTranscript ? (
             // Only show the empty state when the thread is GENUINELY empty.
             // Keying off `deferredThreadReplies` would flash "No replies" for a
             // frame while a non-empty list streams in on the deferred commit.
@@ -815,65 +858,79 @@ export function MessageThreadPanel({
         ref={threadComposerWrapperRef}
       >
         <div
-          className={cn(
-            "composer-overlay-corner-masks pointer-events-auto",
-            hasConstrainedColumn && THREAD_PANEL_COLUMN_CLASS,
-          )}
+          className={cn(hasConstrainedColumn && THREAD_PANEL_COLUMN_CLASS)}
           style={
             hasConstrainedColumn ? { maxWidth: columnMaxWidthPx } : undefined
           }
         >
-          <MessageComposer
-            audienceContext={{
-              type: "thread",
-              threadRootId: threadHead.id,
-              initialAgentPubkeys,
-            }}
-            channelId={channelId}
-            channelName={channelName}
-            channelType={channel?.channelType ?? null}
-            containerClassName={THREAD_PANEL_COMPOSER_GUTTER_CLASS}
-            disabled={disabled || isSending || !channelId}
-            draftKey={`thread:${threadHead.id}`}
-            autoSubmitDraftKey={autoSendDraftKey}
-            onAutoSubmitComplete={onAutoSubmitComplete}
-            editTarget={editTarget}
-            isSending={isSending}
-            onCancelEdit={onCancelEdit}
-            onCancelReply={composerReplyTarget ? onCancelReply : undefined}
-            onCaptureSendContext={onCaptureSendContext}
-            onEditLastOwnMessage={onEditLastOwnMessage}
-            onEditSave={onEditSave}
-            onSend={onSend}
-            placeholder={`Reply in thread to ${threadHead.author}`}
-            profiles={profiles}
-            replyTarget={composerReplyTarget}
-            typingParentEventId={threadHead.id}
-            typingRootEventId={threadHead.rootId}
-          />
           <div
             className={cn(
-              "min-h-8 bg-background pb-1.5 pt-0",
-              THREAD_PANEL_COMPOSER_GUTTER_CLASS,
+              "composer-dock composer-overlay-corner-masks relative pointer-events-auto",
+              hasComposerBottomActivity && "composer-dock--with-activity",
             )}
           >
-            <div className="mx-auto flex h-full w-full max-w-4xl items-center gap-2 overflow-visible">
-              {toolbarExtraActions ? (
-                <div className="flex min-w-0 flex-1 overflow-visible">
-                  {toolbarExtraActions}
-                </div>
-              ) : null}
-              {threadTypingPubkeys.length > 0 ? (
-                <TypingIndicatorRow
-                  channel={channel}
-                  className="min-w-0 flex-1 py-0 pl-[calc(0.75rem+1px)] pr-0 sm:pl-[calc(1rem+1px)]"
-                  currentPubkey={currentPubkey}
-                  profiles={profiles}
-                  typingPubkeys={threadTypingPubkeys}
-                  variant="activity"
-                />
-              ) : null}
-            </div>
+            <ComposerDockBackdrop gutterClassName="inset-x-5" />
+            <MessageComposer
+              audienceContext={{
+                type: "thread",
+                threadRootId: threadHead.id,
+                initialAgentPubkeys,
+              }}
+              channelId={channelId}
+              channelName={channelName}
+              channelType={channel?.channelType ?? null}
+              containerClassName={cn(
+                THREAD_PANEL_COMPOSER_GUTTER_CLASS,
+                "pb-0",
+              )}
+              layoutMode="dock"
+              disabled={disabled || isSending || !channelId}
+              draftKey={`thread:${threadHead.id}`}
+              autoSubmitDraftKey={autoSendDraftKey}
+              onAutoSubmitComplete={onAutoSubmitComplete}
+              editTarget={editTarget}
+              isSending={isSending}
+              onCancelEdit={onCancelEdit}
+              onCancelReply={composerReplyTarget ? onCancelReply : undefined}
+              onCaptureSendContext={onCaptureSendContext}
+              onEditLastOwnMessage={onEditLastOwnMessage}
+              onEditSave={onEditSave}
+              onSend={onSend}
+              placeholder={
+                isHuddleTranscript
+                  ? "Message the huddle"
+                  : `Reply in thread to ${threadHead.author}`
+              }
+              profiles={profiles}
+              replyTarget={composerReplyTarget}
+              typingParentEventId={threadHead.id}
+              typingRootEventId={threadHead.rootId}
+            />
+            {/* The activity accessory is anchored in the dock's reserved bottom
+              rail, so fading it cannot change the observed overlay height or
+              move the conversation. Its natural content height remains responsive. */}
+            <ComposerActivityAccessory
+              className={THREAD_PANEL_COMPOSER_GUTTER_CLASS}
+              visible={hasComposerBottomActivity}
+            >
+              <div className="mx-auto flex w-full max-w-4xl items-center gap-2 overflow-visible pl-2">
+                {activityAccessoryVisible && activityAccessoryContent ? (
+                  <div className="flex min-w-0 flex-1 overflow-visible">
+                    {activityAccessoryContent}
+                  </div>
+                ) : null}
+                {threadTypingPubkeys.length > 0 ? (
+                  <TypingIndicatorRow
+                    channel={channel}
+                    className="min-w-0 flex-1 py-0 pl-[calc(0.75rem+1px)] pr-0 sm:pl-[calc(1rem+1px)]"
+                    currentPubkey={currentPubkey}
+                    profiles={profiles}
+                    typingPubkeys={threadTypingPubkeys}
+                    variant="activity"
+                  />
+                ) : null}
+              </div>
+            </ComposerActivityAccessory>
           </div>
         </div>
       </div>
@@ -904,7 +961,9 @@ export function MessageThreadPanel({
       enterMotion={!isFocusMode}
       footer={threadFooter}
       header={
-        <AuxiliaryPanelHeader>{threadHeaderContent}</AuxiliaryPanelHeader>
+        isHuddleTranscript ? undefined : (
+          <AuxiliaryPanelHeader>{threadHeaderContent}</AuxiliaryPanelHeader>
+        )
       }
       isSinglePanelView={isSinglePanelView}
       layout={layout}

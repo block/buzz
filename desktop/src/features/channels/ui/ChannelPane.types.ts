@@ -49,6 +49,8 @@ export type ChannelPaneProps = {
   /** True when the loaded window provably starts at the channel's beginning. */
   historyExhausted?: boolean;
   isFetchingOlder?: boolean;
+  /** A companion huddle window presents the channel only as a transcript. */
+  isHuddleTranscript?: boolean;
   isJoining?: boolean;
   isSinglePanelView?: boolean;
   isSending: boolean;
@@ -151,6 +153,7 @@ export type ChannelPaneProps = {
   profilePanelTab: ProfilePanelTab;
   profilePanelView: ProfilePanelView;
   threadHeadMessage: TimelineMessage | null;
+  threadAllMessages: TimelineMessage[];
   threadMessages: MainTimelineEntry[];
   threadMessagesPending?: boolean;
   threadPanelWidthPx: number;

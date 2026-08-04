@@ -1,4 +1,5 @@
 import {
+  Bot,
   Copy,
   MessageSquare,
   MoreHorizontal,
@@ -199,8 +200,8 @@ function TemplateRow({
   onDuplicate: () => void;
   onDelete: () => void;
 }) {
-  const agentCount =
-    template.agents.personas.length + template.agents.teams.length;
+  const personaCount = template.agents.personas.length;
+  const teamCount = template.agents.teams.length;
 
   return (
     <div className="group flex items-center gap-3 rounded-lg px-3 py-2.5 hover:bg-muted/50">
@@ -219,10 +220,16 @@ function TemplateRow({
           </p>
         ) : null}
         <div className="mt-1 flex items-center gap-3 text-xs text-muted-foreground">
-          {agentCount > 0 ? (
+          {personaCount > 0 ? (
+            <span className="flex items-center gap-1">
+              <Bot className="h-4 w-4" />
+              {personaCount} {personaCount === 1 ? "agent" : "agents"}
+            </span>
+          ) : null}
+          {teamCount > 0 ? (
             <span className="flex items-center gap-1">
               <Users className="h-4 w-4" />
-              {agentCount} {agentCount === 1 ? "agent" : "agents"}
+              {teamCount} {teamCount === 1 ? "team" : "teams"}
             </span>
           ) : null}
           {template.canvasTemplate ? (
@@ -269,14 +276,16 @@ function TemplateRow({
   );
 }
 
-function TemplateFormDialog({
+export function TemplateFormDialog({
   template,
   open,
   onOpenChange,
+  onCreated,
 }: {
   template: ChannelTemplate | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  onCreated?: (template: ChannelTemplate) => void;
 }) {
   const isEditing = template !== null;
   const createMutation = useCreateChannelTemplateMutation();
@@ -381,8 +390,9 @@ function TemplateFormDialog({
       };
 
       createMutation.mutate(input, {
-        onSuccess: () => {
+        onSuccess: (created) => {
           toast.success(`Created "${trimmedName}"`);
+          onCreated?.(created);
           onOpenChange(false);
         },
         onError: (error) => {

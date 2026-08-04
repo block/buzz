@@ -5,6 +5,7 @@ import {
   managedAgentsQueryKey,
   useManagedAgentsQuery,
 } from "@/features/agents/hooks";
+import { clearActiveTurnsForAgentOnStop } from "@/features/agents/managedAgentRuntimeHooks";
 import {
   startManagedAgent,
   stopManagedAgent,
@@ -109,6 +110,7 @@ export function useAutoRestartPolicy() {
             return;
           }
           await stopManagedAgent(agent.pubkey);
+          clearActiveTurnsForAgentOnStop(agent.pubkey);
           await startManagedAgent(agent.pubkey);
         } catch {
           // Failed attempt: edge stays consumed — badge-only until the

@@ -155,9 +155,9 @@ pub(crate) fn sanitize_filename(name: &str) -> String {
 
 /// Return true when a PNG/WebP payload declares animation.
 ///
-/// Animated payloads are left byte-identical here so frame timing, looping,
-/// and disposal semantics are preserved. The relay's structural validator is
-/// still the authority that rejects any metadata-bearing animation.
+/// Animated payloads use structural sanitizers so frame timing, looping, and
+/// disposal semantics are preserved without flattening the image. The relay's
+/// validator remains the final authority for the sanitized container.
 fn is_animated_image(body: &[u8], mime: &str) -> bool {
     match mime {
         "image/png" if body.starts_with(b"\x89PNG\r\n\x1a\n") => {
@@ -212,17 +212,67 @@ fn is_animated_image(body: &[u8], mime: &str) -> bool {
     }
 }
 
-fn sanitize_image_for_upload(body: Vec<u8>, mime: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn sanitize_image_for_upload(body: Vec<u8>, mime: &str) -> Result<Vec<u8>, String> {
     let format = match mime {
         "image/jpeg" => image::ImageFormat::Jpeg,
         "image/png" => image::ImageFormat::Png,
         "image/webp" => image::ImageFormat::WebP,
+        // GIF is never re-encoded (that would destroy animation timing);
+        // metadata extensions are stripped structurally instead. Unparseable
+        // payloads pass through — the relay's validator is the authority.
+        "image/gif" => {
+            let stripped = super::media_gif::strip_gif_metadata(&body);
+            return Ok(stripped.unwrap_or(body));
+        }
         _ => return Ok(body),
     };
 
     if is_animated_image(&body, mime) {
-        return Ok(body);
+        let oriented_format = match mime {
+            "image/png" if super::media_animated::animated_png_uses_exif_orientation(&body) => {
+                Some("PNG")
+            }
+            "image/webp" if super::media_animated::animated_webp_uses_exif_orientation(&body) => {
+                Some("WebP")
+            }
+            _ => None,
+        };
+        if let Some(format) = oriented_format {
+            return Err(format!(
+                "animated {format} with EXIF orientation cannot be uploaded without changing its appearance"
+            ));
+        }
+        let color_profile_format = match mime {
+            "image/png" if super::media_animated::animated_png_uses_icc_profile(&body) => {
+                Some("PNG")
+            }
+            "image/webp" if super::media_animated::animated_webp_uses_icc_profile(&body) => {
+                Some("WebP")
+            }
+            _ => None,
+        };
+        if let Some(format) = color_profile_format {
+            return Err(format!(
+                "animated {format} with an ICC profile cannot be uploaded without changing its colors"
+            ));
+        }
+        let stripped = match mime {
+            "image/png" => super::media_animated::strip_animated_png_metadata(&body),
+            "image/webp" => super::media_animated::strip_animated_webp_metadata(&body),
+            _ => None,
+        };
+        return Ok(stripped.unwrap_or(body));
     }
+
+    // Agent/team snapshot PNGs carry their manifest in a tEXt chunk that the
+    // re-encode below would destroy. Pull it out first and re-inject it after
+    // sanitizing — all other metadata is still stripped, and the relay
+    // allowlists exactly this chunk.
+    let snapshot_chunk = if format == image::ImageFormat::Png {
+        super::media_snapshot_png::extract_snapshot_text_chunk(&body)
+    } else {
+        None
+    };
 
     use image::ImageDecoder;
     let reader = image::ImageReader::with_format(std::io::Cursor::new(&body), format);
@@ -242,7 +292,11 @@ fn sanitize_image_for_upload(body: Vec<u8>, mime: &str) -> Result<Vec<u8>, Strin
     image
         .write_to(&mut output, format)
         .map_err(|_| "failed to encode image without metadata".to_string())?;
-    Ok(output.into_inner())
+    let sanitized = output.into_inner();
+    match snapshot_chunk {
+        Some(chunk) => super::media_snapshot_png::inject_snapshot_text_chunk(sanitized, &chunk),
+        None => Ok(sanitized),
+    }
 }
 
 pub(crate) fn detect_and_validate_mime(body: &[u8]) -> Result<String, String> {
@@ -357,7 +411,7 @@ fn should_retry_legacy_upload(status: reqwest::StatusCode) -> bool {
 }
 
 async fn send_upload_attempt(
-    state: &State<'_, AppState>,
+    state: &AppState,
     url: String,
     auth_header: &str,
     mime: &str,
@@ -401,10 +455,22 @@ async fn send_upload_attempt(
     response.map_err(|error| classify_request_error(&error))
 }
 
+pub(crate) async fn upload_image_bytes(
+    body: Vec<u8>,
+    state: &AppState,
+) -> Result<BlobDescriptor, String> {
+    let mime = detect_and_validate_mime(&body)?;
+    if !mime.starts_with("image/") {
+        return Err("profile avatar must be an image".to_string());
+    }
+    let body = sanitize_image_for_upload(body, &mime)?;
+    do_upload(body, &mime, state, None).await
+}
+
 async fn do_upload(
     body: Vec<u8>,
     mime: &str,
-    state: &State<'_, AppState>,
+    state: &AppState,
     progress: Option<(tauri::AppHandle, String)>,
 ) -> Result<BlobDescriptor, String> {
     let sha256 = hex::encode(Sha256::digest(&body));
@@ -505,7 +571,7 @@ pub async fn upload_media(
 /// files from ever leaving the client on image-only surfaces.
 async fn process_picked_path(
     path: std::path::PathBuf,
-    state: &State<'_, AppState>,
+    state: &AppState,
     images_only: bool,
 ) -> Result<BlobDescriptor, String> {
     // Pin the inode by opening the fd BEFORE spawn_blocking. This prevents a
@@ -893,18 +959,12 @@ mod tests {
         apng.extend_from_slice(&[0; 8]);
         apng.extend_from_slice(&[0; 4]);
         assert!(is_animated_image(&apng, "image/png"));
-        assert_eq!(
-            sanitize_image_for_upload(apng.clone(), "image/png").unwrap(),
-            apng
-        );
+        assert!(sanitize_image_for_upload(apng, "image/png").is_ok());
 
         let mut webp = b"RIFF\x0c\0\0\0WEBPANIM".to_vec();
         webp.extend_from_slice(&0u32.to_le_bytes());
         assert!(is_animated_image(&webp, "image/webp"));
-        assert_eq!(
-            sanitize_image_for_upload(webp.clone(), "image/webp").unwrap(),
-            webp
-        );
+        assert!(sanitize_image_for_upload(webp, "image/webp").is_ok());
     }
 
     #[test]

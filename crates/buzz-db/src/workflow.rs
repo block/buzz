@@ -707,6 +707,36 @@ pub async fn set_workflow_enabled(
     Ok(())
 }
 
+/// Disable all of `owner_pubkey`'s workflows in a channel (SEC-006).
+///
+/// Called when the owner loses channel membership (kind 9001 removal or kind
+/// 9022 leave) so their workflows stop firing durably — across pods and
+/// restarts — rather than only until the per-fire authority gate happens to
+/// run. Idempotent; returns the number of workflows disabled so the caller
+/// can decide whether a trigger-cache invalidation is needed.
+pub async fn disable_workflows_for_owner_in_channel(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    owner_pubkey: &[u8],
+) -> Result<u64> {
+    let affected = sqlx::query(
+        r#"
+        UPDATE workflows
+        SET enabled = FALSE
+        WHERE community_id = $1 AND channel_id = $2 AND owner_pubkey = $3 AND enabled = TRUE
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .bind(owner_pubkey)
+    .execute(pool)
+    .await?
+    .rows_affected();
+
+    Ok(affected)
+}
+
 /// Delete a workflow and all its runs/approvals (CASCADE).
 ///
 /// NOTE: see the cache-invalidation note on [`update_workflow`]. The relay's
@@ -2270,6 +2300,102 @@ mod tests {
             after_b.status,
             ApprovalStatus::Pending,
             "B's approval must remain pending after A is granted"
+        );
+    }
+
+    // -- SEC-006: disable-on-membership-loss primitive -------------------------
+
+    /// `disable_workflows_for_owner_in_channel` must disable exactly the
+    /// departing owner's enabled workflows in that channel — not other owners'
+    /// workflows, not the same owner's workflows in other channels — and be
+    /// idempotent. Disabled workflows must drop out of the trigger-path list.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn disable_for_owner_scopes_to_owner_and_channel() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+
+        let departing = vec![0xd1; 32];
+        let staying = vec![0xd2; 32];
+        ensure_user(&pool, community, &departing)
+            .await
+            .expect("ensure departing");
+        ensure_user(&pool, community, &staying)
+            .await
+            .expect("ensure staying");
+
+        let channel_a = make_channel(&pool, community, &departing).await;
+        let channel_b = make_channel(&pool, community, &departing).await;
+
+        let def = r#"{"trigger":{"on":"message_posted"},"steps":[]}"#;
+        let wf_departing_a = create_workflow(
+            &pool,
+            community,
+            Some(channel_a),
+            &departing,
+            "departing-a",
+            def,
+            &[0u8; 32],
+        )
+        .await
+        .expect("wf departing a");
+        let wf_departing_b = create_workflow(
+            &pool,
+            community,
+            Some(channel_b),
+            &departing,
+            "departing-b",
+            def,
+            &[0u8; 32],
+        )
+        .await
+        .expect("wf departing b");
+        let wf_staying_a = create_workflow(
+            &pool,
+            community,
+            Some(channel_a),
+            &staying,
+            "staying-a",
+            def,
+            &[0u8; 32],
+        )
+        .await
+        .expect("wf staying a");
+
+        let disabled =
+            disable_workflows_for_owner_in_channel(&pool, community, channel_a, &departing)
+                .await
+                .expect("disable");
+        assert_eq!(
+            disabled, 1,
+            "exactly the departing owner's channel-A workflow"
+        );
+
+        // Idempotent: second call finds nothing enabled.
+        let again = disable_workflows_for_owner_in_channel(&pool, community, channel_a, &departing)
+            .await
+            .expect("disable again");
+        assert_eq!(again, 0, "second disable must be a no-op");
+
+        let enabled_a = list_enabled_channel_workflows(&pool, community, channel_a)
+            .await
+            .expect("list channel a");
+        let enabled_a_ids: Vec<Uuid> = enabled_a.iter().map(|w| w.id).collect();
+        assert!(
+            !enabled_a_ids.contains(&wf_departing_a),
+            "departing owner's workflow must no longer be trigger-eligible"
+        );
+        assert!(
+            enabled_a_ids.contains(&wf_staying_a),
+            "other owners' workflows in the channel must be untouched"
+        );
+
+        let enabled_b = list_enabled_channel_workflows(&pool, community, channel_b)
+            .await
+            .expect("list channel b");
+        assert!(
+            enabled_b.iter().any(|w| w.id == wf_departing_b),
+            "same owner's workflow in a different channel must be untouched"
         );
     }
 }

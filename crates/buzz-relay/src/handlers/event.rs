@@ -7,8 +7,8 @@ use tracing::{debug, error, info, warn};
 
 use buzz_core::event::StoredEvent;
 use buzz_core::kind::{
-    event_kind_u32, is_ephemeral, AUTHOR_ONLY_KINDS, KIND_AGENT_OBSERVER_FRAME, KIND_GIFT_WRAP,
-    KIND_PRESENCE_UPDATE,
+    event_kind_u32, is_ephemeral, is_unshared_gated_event, AUTHOR_ONLY_KINDS,
+    KIND_AGENT_OBSERVER_FRAME, KIND_GIFT_WRAP, KIND_PRESENCE_UPDATE,
 };
 use buzz_core::observer::{
     content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -24,11 +24,11 @@ use crate::connection::{AuthState, ConnectionState};
 use crate::protocol::RelayMessage;
 use crate::state::AppState;
 
-use super::ingest::{IngestAuth, IngestError};
+use super::ingest::{reject_with_transport, IngestAuth, IngestError};
 
 /// Increment the rejection counter with a bounded reason label.
 fn reject(reason: &'static str) {
-    metrics::counter!("buzz_events_rejected_total", "reason" => reason).increment(1);
+    reject_with_transport("ws", reason);
 }
 
 /// Bound the `kind` label to prevent cardinality explosion from arbitrary Nostr kinds.
@@ -145,6 +145,29 @@ pub async fn filter_fanout_by_access(
                     .conn_manager
                     .pubkey_for_conn(*conn_id)
                     .is_some_and(|pk| pk == author)
+            })
+            .collect()
+    } else {
+        matches
+    };
+
+    // Shared-read gate (fan-out): SHARED_GATED_KINDS events fan out to all
+    // connections only when carrying ["shared","true"]. Unshared ones are
+    // delivered only to the author's own connections, matching REQ semantics.
+    let matches = if buzz_core::kind::is_shared_gated_kind(event_kind_u32(&stored_event.event)) {
+        let author = stored_event.event.pubkey.to_bytes();
+        matches
+            .into_iter()
+            .filter(|(conn_id, _)| {
+                let Some(pk) = state.conn_manager.pubkey_for_conn(*conn_id) else {
+                    return false;
+                };
+                // Author always receives their own events.
+                if pk == author {
+                    return true;
+                }
+                // Foreign connection: allowed only if the event is shared.
+                !is_unshared_gated_event(&stored_event.event, &pk)
             })
             .collect()
     } else {

@@ -178,7 +178,7 @@ export function MergePullRequestButton({
     <div className="contents">
       <AlertDialog onOpenChange={setConfirmOpen} open={confirmOpen}>
         <Button
-          className="h-8 gap-1.5 bg-purple-600 px-3.5 text-white shadow-sm hover:bg-purple-700"
+          className="h-8 gap-1.5 px-3.5"
           disabled={mergeMutation.isPending || publishMergedMutation.isPending}
           onClick={() => {
             if (unpublishedStatusEvent) {

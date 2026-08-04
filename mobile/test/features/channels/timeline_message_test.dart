@@ -243,7 +243,7 @@ void main() {
         actorPubkey: 'pk1',
         targetPubkey: 'pk2',
       );
-      expect(event.describe(resolve), 'Alice added Bob to the channel');
+      expect(event.describe(resolve), 'Bob was added by Alice');
     });
 
     test('member_left', () {
@@ -284,6 +284,53 @@ void main() {
       expect(
         event.describe(resolve),
         'Alice changed the purpose to "Daily standups"',
+      );
+    });
+
+    // The relay reports a clear as a change carrying an empty string, so
+    // without the cleared branch this reads: changed the topic to "".
+    test('a blank topic or purpose reads as cleared', () {
+      for (final blank in [null, '', '   \n\t ']) {
+        expect(
+          SystemEvent(
+            type: SystemEventType.topicChanged,
+            actorPubkey: 'pk1',
+            topic: blank,
+          ).describe(resolve),
+          'Alice cleared the topic',
+        );
+        expect(
+          SystemEvent(
+            type: SystemEventType.purposeChanged,
+            actorPubkey: 'pk1',
+            purpose: blank,
+          ).describe(resolve),
+          'Alice cleared the purpose',
+        );
+      }
+    });
+
+    test('no caption announces empty quotes', () {
+      for (final value in [null, '', ' ', 'Real topic']) {
+        expect(
+          SystemEvent(
+            type: SystemEventType.topicChanged,
+            actorPubkey: 'pk1',
+            topic: value,
+          ).describe(resolve),
+          isNot(contains('""')),
+        );
+      }
+    });
+
+    test('surrounding whitespace is trimmed out of the quotes', () {
+      expect(
+        SystemEvent(
+          type: SystemEventType.topicChanged,
+          actorPubkey: 'pk1',
+          topic: '  Release v2  ',
+        ).describe(resolve),
+        'Alice changed the topic to "Release v2"',
       );
     });
 
@@ -776,6 +823,7 @@ void main() {
       expect(entries[0].summary, isNotNull);
       expect(entries[0].summary!.replyCount, 2);
       expect(entries[0].summary!.threadHeadId, 'a');
+      expect(entries[0].summary!.lastReplyAt, 3000);
     });
 
     test('summary counts only direct children, not nested replies', () {
@@ -826,6 +874,156 @@ void main() {
 
     test('empty input returns empty', () {
       expect(buildMainTimelineEntries([]), isEmpty);
+    });
+  });
+
+  group('groupMembershipTimelineEntries', () {
+    List<MainTimelineEntry> entries(List<NostrEvent> events) =>
+        buildMainTimelineEntries(formatTimeline(events));
+
+    test('groups consecutive additions by one actor within five minutes', () {
+      final grouped = groupMembershipTimelineEntries(
+        entries([
+          _systemMsg(
+            id: 'a',
+            payload: {
+              'type': 'member_joined',
+              'actor': 'alice',
+              'target': 'bob',
+            },
+            createdAt: 1000,
+          ),
+          _systemMsg(
+            id: 'b',
+            payload: {
+              'type': 'member_joined',
+              'actor': 'alice',
+              'target': 'carol',
+            },
+            createdAt: 1060,
+          ),
+          _systemMsg(
+            id: 'c',
+            payload: {
+              'type': 'member_joined',
+              'actor': 'alice',
+              'target': 'dave',
+            },
+            createdAt: 1300,
+          ),
+        ]),
+      );
+
+      expect(grouped, hasLength(1));
+      expect(grouped.single.map((entry) => entry.message.id), ['a', 'b', 'c']);
+    });
+
+    test('groups self-joins from different people', () {
+      final grouped = groupMembershipTimelineEntries(
+        entries([
+          _systemMsg(
+            id: 'a',
+            payload: {
+              'type': 'member_joined',
+              'actor': 'alice',
+              'target': 'alice',
+            },
+            createdAt: 1000,
+          ),
+          _systemMsg(
+            id: 'b',
+            payload: {'type': 'member_joined', 'actor': 'bob', 'target': 'bob'},
+            createdAt: 1060,
+          ),
+        ]),
+      );
+
+      expect(grouped.single, hasLength(2));
+    });
+
+    test('uses a fixed window anchored on the newest addition', () {
+      final grouped = groupMembershipTimelineEntries(
+        entries([
+          _systemMsg(
+            id: 'a',
+            payload: {
+              'type': 'member_joined',
+              'actor': 'alice',
+              'target': 'bob',
+            },
+            createdAt: 1000,
+          ),
+          _systemMsg(
+            id: 'b',
+            payload: {
+              'type': 'member_joined',
+              'actor': 'alice',
+              'target': 'carol',
+            },
+            createdAt: 1240,
+          ),
+          _systemMsg(
+            id: 'c',
+            payload: {
+              'type': 'member_joined',
+              'actor': 'alice',
+              'target': 'dave',
+            },
+            createdAt: 1301,
+          ),
+        ]),
+      );
+
+      expect(grouped.map((group) => group.length), [1, 2]);
+    });
+
+    test('actor changes, messages, and day boundaries break groups', () {
+      final dayOne =
+          DateTime(2026, 7, 14, 23, 59).millisecondsSinceEpoch ~/ 1000;
+      final dayTwo = DateTime(2026, 7, 15).millisecondsSinceEpoch ~/ 1000;
+      final grouped = groupMembershipTimelineEntries(
+        entries([
+          _systemMsg(
+            id: 'a',
+            payload: {
+              'type': 'member_joined',
+              'actor': 'alice',
+              'target': 'bob',
+            },
+            createdAt: dayOne,
+          ),
+          _systemMsg(
+            id: 'b',
+            payload: {
+              'type': 'member_joined',
+              'actor': 'carol',
+              'target': 'dave',
+            },
+            createdAt: dayOne + 30,
+          ),
+          _textMsg(id: 'message', createdAt: dayOne + 40),
+          _systemMsg(
+            id: 'c',
+            payload: {
+              'type': 'member_joined',
+              'actor': 'carol',
+              'target': 'erin',
+            },
+            createdAt: dayOne + 50,
+          ),
+          _systemMsg(
+            id: 'd',
+            payload: {
+              'type': 'member_joined',
+              'actor': 'carol',
+              'target': 'frank',
+            },
+            createdAt: dayTwo,
+          ),
+        ]),
+      );
+
+      expect(grouped.map((group) => group.length), [1, 1, 1, 1, 1]);
     });
   });
 }

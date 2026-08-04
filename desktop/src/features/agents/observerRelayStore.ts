@@ -4,6 +4,7 @@ import { subscribeToAgentObserverFrames } from "@/shared/api/observerRelay";
 import type { RelayEvent, ManagedAgent } from "@/shared/api/types";
 import type { ControlResultFrame } from "@/shared/api/types";
 import { putAgentSessionConfig } from "@/shared/api/tauri";
+import { putManagedAgentRuntimeLifecycle } from "@/shared/api/tauriManagedAgents";
 import { getIdentity } from "@/shared/api/tauriIdentity";
 import { decryptObserverEvent } from "@/shared/api/tauriObserver";
 import {
@@ -402,6 +403,12 @@ async function handleRelayObserverEvent(
       onSessionConfigCaptured?.(agentPubkey);
     } else if (parsed.kind === "control_result") {
       dispatchControlResult(agentPubkey, parsed.payload);
+    } else if (parsed.kind === "managed_agent_runtime_lifecycle") {
+      void putManagedAgentRuntimeLifecycle(agentPubkey, parsed.payload).catch(
+        (error) => {
+          console.debug("Late/untracked lifecycle frame dropped:", error);
+        },
+      );
     }
   } catch (error) {
     if (activeGeneration !== generation) {
@@ -583,17 +590,17 @@ export function getAgentTranscript(
   return state?.items ?? EMPTY_TRANSCRIPT;
 }
 
+export function shouldObserveManagedAgents(
+  agents: readonly Pick<ManagedAgent, "pubkey">[],
+): boolean {
+  return agents.length > 0;
+}
+
 export function useManagedAgentObserverBridge(
   agents: readonly Pick<ManagedAgent, "pubkey" | "status">[],
 ) {
   const subscriptionId = React.useId();
-  const hasActiveAgent = React.useMemo(
-    () =>
-      agents.some(
-        (agent) => agent.status === "running" || agent.status === "deployed",
-      ),
-    [agents],
-  );
+  const hasManagedAgent = shouldObserveManagedAgents(agents);
 
   const agentPubkeys = React.useMemo(
     () => agents.map((agent) => agent.pubkey),
@@ -611,11 +618,11 @@ export function useManagedAgentObserverBridge(
   }, [subscriptionId, agentPubkeys]);
 
   React.useEffect(() => {
-    if (!hasActiveAgent) {
+    if (!hasManagedAgent) {
       return;
     }
     void ensureRelayObserverSubscription();
-  }, [hasActiveAgent]);
+  }, [hasManagedAgent]);
 
   // Wire up config-surface query invalidation when session_config_captured fires.
   const queryClient = useQueryClient();

@@ -56,19 +56,18 @@ pub fn relay_api_base_url_with_override(state: &AppState) -> String {
 
 /// Selects the relay a managed agent should use for a relay operation.
 ///
-/// An explicit per-agent `relay_url` always wins (highest precedence), pinning
-/// the agent to that relay regardless of the active workspace. An empty or
-/// whitespace-only `relay_url` falls back to the active workspace relay, which
-/// resolves at read-time so a never-set record reconciles, spawns, and re-syncs
-/// on the session's relay instead of a stale stored value. Uniform for both
-/// Local and Provider backends.
-pub fn effective_agent_relay_url(record_relay: &str, workspace_relay: &str) -> String {
-    let pinned = record_relay.trim();
-    if pinned.is_empty() {
-        workspace_relay.to_string()
-    } else {
-        pinned.to_string()
-    }
+/// Always the active workspace relay. The legacy per-record `relay_url` pin is
+/// deliberately IGNORED (agents-everywhere, #2122): every agent is eligible on
+/// every community, and the pair the caller is acting on is identified by the
+/// workspace relay, never by a stored pin. The record field is still parsed
+/// and persisted untouched — old records need no migration and a rollback to a
+/// pin-honoring build reads the same file — so the parameter stays in the
+/// signature as documentation of what is being ignored at the one choke point
+/// all agent relay resolution flows through. Resolving at read-time also means
+/// a stale stored value can never leak into reconcile, spawn, or profile sync.
+/// Uniform for both Local and Provider backends.
+pub fn effective_agent_relay_url(_record_relay: &str, workspace_relay: &str) -> String {
+    workspace_relay.to_string()
 }
 
 pub fn relay_http_base_url(relay_url: &str) -> String {
@@ -341,6 +340,37 @@ pub async fn query_relay_at(
     parse_json_response(response).await
 }
 
+pub async fn query_relay_at_with_keys(
+    state: &AppState,
+    api_base_url: &str,
+    filters: &[serde_json::Value],
+    keys: &Keys,
+    auth_tag: Option<&str>,
+) -> Result<Vec<nostr::Event>, String> {
+    crate::relay_admission::wait_for_rate_limit().await;
+    let url = format!("{}/query", api_base_url);
+    let body_bytes =
+        serde_json::to_vec(filters).map_err(|e| format!("filter serialization failed: {e}"))?;
+    let auth = build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes)?;
+    let mut request = state
+        .http_client
+        .post(&url)
+        .header("Authorization", auth)
+        .header("Content-Type", "application/json");
+    if let Some(tag) = auth_tag {
+        request = request.header("x-auth-tag", tag);
+    }
+    let response = request
+        .body(body_bytes)
+        .send()
+        .await
+        .map_err(|e| classify_request_error(&e))?;
+    if !response.status().is_success() {
+        return Err(relay_error_message(response).await);
+    }
+    parse_json_response(response).await
+}
+
 // ── Command response parsing ────────────────────────────────────────────────
 
 /// Parse a command-event OK message of the form `"response:<json>"`.
@@ -420,6 +450,7 @@ pub async fn sync_managed_agent_profile(
     let event = build_profile_event(agent_keys, display_name, avatar_url, auth_tag)?;
     let event_json = event.as_json();
     let body_bytes = event_json.into_bytes();
+    crate::egress_guard::assert_no_key_backup_bytes(&body_bytes, "agent profile sync")?;
 
     let url = format!("{}/events", relay_http_base_url(relay_url));
     let auth = build_nip98_auth_header_for_keys(agent_keys, &Method::POST, &url, &body_bytes)?;
@@ -441,7 +472,7 @@ pub async fn sync_managed_agent_profile(
     if !response.status().is_success() {
         let msg = relay_error_message(response).await;
         return Err(format!(
-            "Created the agent, but could not sync its profile metadata: {msg}"
+            "Could not sync the agent's profile metadata: {msg}"
         ));
     }
 
@@ -454,9 +485,8 @@ pub async fn sync_managed_agent_profile(
 ///
 /// Queries the relay identified by `relay_url`. Callers uniformly pass the
 /// relay resolved by `effective_agent_relay_url` for every agent regardless of
-/// backend — an explicit per-agent pin, or the active workspace relay when the
-/// agent has none — so the query targets the host the profile is actually
-/// published to.
+/// backend — always the active workspace relay — so the query targets the host
+/// the profile is actually published to.
 ///
 /// Returns the parsed profile content (display_name, picture) if a kind:0 event
 /// exists for the given pubkey, or `None` if no profile is published.
@@ -502,98 +532,10 @@ pub struct AgentProfileInfo {
 
 // ── Signed-event submission ─────────────────────────────────────────────────
 
-/// Response from `POST /events`.
-#[derive(Debug, Deserialize, serde::Serialize)]
-pub struct SubmitEventResponse {
-    pub event_id: String,
-    pub accepted: bool,
-    pub message: String,
-}
-
-/// Build an `EventBuilder` from the events module, sign it with the user's keys,
-/// and POST the signed event to `/events` with NIP-98 auth.
-pub async fn submit_event(
-    builder: nostr::EventBuilder,
-    state: &AppState,
-) -> Result<SubmitEventResponse, String> {
-    crate::relay_admission::wait_for_rate_limit().await;
-    // All synchronous work (signing) must complete before any .await
-    // so the MutexGuard is dropped and the future remains Send.
-    let url = format!("{}/events", relay_api_base_url_with_override(state));
-    let (auth_header, body_bytes) = {
-        let keys = state.signing_keys()?;
-        let event = builder
-            .sign_with_keys(&keys)
-            .map_err(|e| format!("failed to sign event: {e}"))?;
-        let body = event.as_json().into_bytes();
-        let auth = build_nip98_auth_header_for_keys(&keys, &Method::POST, &url, &body)?;
-        (auth, body)
-    }; // keys dropped here
-
-    let response = state
-        .http_client
-        .post(&url)
-        .header("Authorization", auth_header)
-        .header("Content-Type", "application/json")
-        .body(body_bytes)
-        .send()
-        .await
-        .map_err(|e| classify_request_error(&e))?;
-
-    if !response.status().is_success() {
-        return Err(relay_error_message(response).await);
-    }
-
-    let result: SubmitEventResponse = parse_json_response(response).await?;
-
-    if !result.accepted {
-        return Err(format!("relay rejected event: {}", result.message));
-    }
-
-    Ok(result)
-}
-
-/// POST an already-signed event to `/events` with NIP-98 auth.
-///
-/// The persona flush loop drains pre-signed events from the retention store,
-/// so it must publish them verbatim — re-signing through `submit_event` would
-/// mint a new `created_at`/signature and break the compare-and-clear that
-/// `mark_synced` relies on. Only the NIP-98 request auth is signed here (with
-/// the owner keys), and that lock is dropped before the `.await`.
-pub async fn submit_signed_event(
-    event: &nostr::Event,
-    state: &AppState,
-) -> Result<SubmitEventResponse, String> {
-    crate::relay_admission::wait_for_rate_limit().await;
-    let url = format!("{}/events", relay_api_base_url_with_override(state));
-    let body_bytes = event.as_json().into_bytes();
-    let auth_header = {
-        let keys = state.signing_keys()?;
-        build_nip98_auth_header_for_keys(&keys, &Method::POST, &url, &body_bytes)?
-    }; // keys dropped here
-
-    let response = state
-        .http_client
-        .post(&url)
-        .header("Authorization", auth_header)
-        .header("Content-Type", "application/json")
-        .body(body_bytes)
-        .send()
-        .await
-        .map_err(|e| classify_request_error(&e))?;
-
-    if !response.status().is_success() {
-        return Err(relay_error_message(response).await);
-    }
-
-    let result: SubmitEventResponse = parse_json_response(response).await?;
-
-    if !result.accepted {
-        return Err(format!("relay rejected event: {}", result.message));
-    }
-
-    Ok(result)
-}
+mod submit;
+pub use submit::{
+    submit_event, submit_event_at_with_keys, submit_signed_event_at_with_keys, SubmitEventResponse,
+};
 
 /// Sign an event with explicit keys and POST it to `/events` with NIP-98 auth.
 ///
@@ -625,6 +567,7 @@ pub async fn submit_signed_event_with_keys(
     crate::relay_admission::wait_for_rate_limit().await;
     let url = format!("{}/events", relay_api_base_url_with_override(state));
     let body_bytes = event.as_json().into_bytes();
+    crate::egress_guard::assert_no_key_backup_bytes(&body_bytes, "signed event submit (keys)")?;
     let auth_header = build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes)?;
 
     let mut request = state
@@ -761,29 +704,20 @@ mod tests {
         );
     }
 
-    // ── effective_agent_relay_url: per-agent override precedence ─────────────
+    // ── effective_agent_relay_url: legacy pin ignored ─────────────────────────
 
     #[test]
-    fn explicit_relay_wins_over_workspace() {
-        // An explicit per-agent relay pins the agent there regardless of the
-        // active workspace — this is the override taking highest precedence.
+    fn stored_relay_pin_is_ignored() {
+        // Zero-touch cutover (#2122): a creation-era per-record relay pin is
+        // parsed and persisted but never consulted — the workspace relay wins.
         assert_eq!(
             effective_agent_relay_url("wss://relay.other.com", "wss://staging.example.com"),
-            "wss://relay.other.com"
-        );
-    }
-
-    #[test]
-    fn explicit_relay_wins_even_when_equal_to_workspace() {
-        // No special-casing when the pin happens to match the active workspace.
-        assert_eq!(
-            effective_agent_relay_url("wss://staging.example.com", "wss://staging.example.com"),
             "wss://staging.example.com"
         );
     }
 
     #[test]
-    fn empty_relay_falls_back_to_workspace() {
+    fn empty_relay_resolves_to_workspace() {
         // A never-set record resolves to the active workspace relay at read-time,
         // so a stale stored default can never make it load-bearing.
         assert_eq!(
@@ -793,8 +727,8 @@ mod tests {
     }
 
     #[test]
-    fn whitespace_only_relay_falls_back_to_workspace() {
-        // Whitespace-only is treated as unset, same as empty.
+    fn whitespace_only_relay_resolves_to_workspace() {
+        // Whitespace-only behaves identically — no value survives.
         assert_eq!(
             effective_agent_relay_url("   ", "wss://staging.example.com"),
             "wss://staging.example.com"

@@ -132,8 +132,12 @@ export async function attachManagedAgentToChannel(
   if (ensureRunning) {
     // Running agents (local or provider) auto-discover new channel membership
     // via the harness's membership notifications — no restart needed. Only
-    // not-yet-running agents need a start/deploy call before the first
-    // mention can reach them.
+    // not-yet-running agents need a start/deploy call before the first mention
+    // can reach them. For a local agent the status check and the start are both
+    // pair-scoped to the active community: `agent.status` reflects that
+    // community's (agent, relay) pair, and `startManagedAgent` spawns that same
+    // pair — so this ensures the pair the caller is attaching to, never
+    // another community's.
     const isRemote = input.agent.backend.type === "provider";
     if (isRemote && input.agent.status !== "deployed") {
       agent = await startManagedAgent(input.agent.pubkey);
@@ -229,7 +233,9 @@ export async function ensureChannelAgentPresetInChannel(
     name: expectedName,
     acpCommand: "buzz-acp",
     agentCommand: input.runtime.command,
-    agentArgs: input.runtime.defaultArgs,
+    // Do NOT seed agentArgs from runtime.defaultArgs (see instanceInputForDefinition.ts
+    // for the rationale — empty args let spawn resolve definition args live).
+    agentArgs: [],
     mcpCommand: input.runtime.mcpCommand ?? "",
     spawnAfterCreate: false,
   });
@@ -350,7 +356,9 @@ export async function provisionChannelManagedAgent(
     acpCommand: "buzz-acp",
     agentCommand: input.runtime.command,
     harnessOverride: input.harnessOverride ?? false,
-    agentArgs: input.runtime.defaultArgs,
+    // Do NOT seed agentArgs from runtime.defaultArgs (see instanceInputForDefinition.ts
+    // for the rationale — empty args let spawn resolve definition args live).
+    agentArgs: [],
     mcpCommand: input.runtime.mcpCommand ?? "",
     personaId: input.personaId ?? undefined,
     teamId: input.teamId ?? undefined,

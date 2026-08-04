@@ -14,6 +14,7 @@ import {
   joinChannel,
   leaveChannel,
   openDm,
+  invokeTauri,
   removeChannelMember,
   setCanvas,
   setChannelPurpose,
@@ -148,7 +149,7 @@ export function reconcileRefreshedCachedChannel(
   return upsertCachedChannel(refreshed, refreshedChannel ?? channel);
 }
 
-async function invalidateChannelState(
+export async function invalidateChannelState(
   queryClient: ReturnType<typeof useQueryClient>,
   channelId: string | null | undefined,
 ) {
@@ -348,13 +349,10 @@ export function useUpdateChannelMutation(channelId: string | null) {
 
       return updateChannel({ ...input, channelId });
     },
+    onMutate: () => ({ channelId }),
     onSuccess: (updatedChannel) => {
-      if (!channelId) {
-        return;
-      }
-
       queryClient.setQueryData<ChannelDetail>(
-        channelDetailQueryKey(channelId),
+        channelDetailQueryKey(updatedChannel.id),
         updatedChannel,
       );
       queryClient.setQueryData<Channel[]>(channelsQueryKey, (current = []) =>
@@ -365,7 +363,7 @@ export function useUpdateChannelMutation(channelId: string | null) {
         ),
       );
     },
-    onSettled: () => {
+    onSettled: (_data, _error, _variables, context) => {
       // refetchType "none": onSuccess already cached the relay-returned detail;
       // awaiting the full channel-list refetch kept the edit dialog stuck on
       // "Saving..." (same failure #1360 fixed for create).
@@ -373,9 +371,9 @@ export function useUpdateChannelMutation(channelId: string | null) {
         queryKey: channelsQueryKey,
         refetchType: "none",
       });
-      if (channelId) {
+      if (context?.channelId) {
         void queryClient.invalidateQueries({
-          queryKey: channelDetailQueryKey(channelId),
+          queryKey: channelDetailQueryKey(context.channelId),
           refetchType: "none",
         });
       }
@@ -519,6 +517,21 @@ export function useAddChannelMembersMutation(channelId: string | null) {
       }
 
       return addChannelMembers({ ...rest, channelId: effectiveChannelId });
+    },
+    onSuccess: (result, variables) => {
+      const effectiveChannelId = variables.channelId ?? channelId;
+      if (
+        effectiveChannelId &&
+        variables.role === "bot" &&
+        result.added.length > 0
+      ) {
+        void invokeTauri("sync_agents_to_active_huddle", {
+          channelId: effectiveChannelId,
+          agentPubkeys: result.added,
+        }).catch((error) => {
+          console.warn("Could not sync added agents into Huddle:", error);
+        });
+      }
     },
     onSettled: async (_data, _err, variables) => {
       // Invalidate the effective channel (the one actually mutated) not the

@@ -26,6 +26,7 @@ import type {
   ProjectRepoFile,
   ProjectRepoSnapshot,
 } from "@/features/projects/hooks";
+import { relativeTime } from "@/features/projects/lib/projectsViewHelpers";
 import { useUserSearchQuery } from "@/features/profile/hooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { UserSearchResult } from "@/shared/api/types";
@@ -34,36 +35,15 @@ import { normalizePubkey } from "@/shared/lib/pubkey";
 import { SyntaxHighlightedCode } from "@/shared/ui/markdown";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import {
+  PROJECT_DETAIL_PANEL_CLASS,
+  PROJECT_DETAIL_PANEL_MESSAGE_CLASS,
+} from "./projectPanelStyles";
+import {
   type RepoSourceHeaderControls,
   RepoSourceDropdown,
   RepoSyncActionButton,
   RepositoryBranchDropdown,
 } from "./ProjectRepositorySource";
-
-function relativeCommitTime(createdAt: number) {
-  const elapsedSeconds = Math.max(
-    1,
-    Math.floor(Date.now() / 1_000 - createdAt),
-  );
-  const units = [
-    { label: "year", seconds: 365 * 24 * 60 * 60 },
-    { label: "month", seconds: 30 * 24 * 60 * 60 },
-    { label: "week", seconds: 7 * 24 * 60 * 60 },
-    { label: "day", seconds: 24 * 60 * 60 },
-    { label: "hour", seconds: 60 * 60 },
-    { label: "minute", seconds: 60 },
-    { label: "second", seconds: 1 },
-  ];
-
-  for (const unit of units) {
-    const value = Math.floor(elapsedSeconds / unit.seconds);
-    if (value >= 1) {
-      return `${value} ${unit.label}${value === 1 ? "" : "s"} ago`;
-    }
-  }
-
-  return "just now";
-}
 
 function pluralize(count: number, singular: string) {
   return `${count} ${singular}${count === 1 ? "" : "s"}`;
@@ -574,7 +554,7 @@ function FileContentPanel({
   const directorySegments = pathSegments.slice(0, -1);
 
   return (
-    <div className="overflow-hidden rounded-xl border border-border/60 bg-card">
+    <div className={PROJECT_DETAIL_PANEL_CLASS} data-project-detail-panel>
       <div className="flex min-h-14 items-center gap-1 border-border/50 border-b bg-muted/20 px-3 py-3">
         <BreadcrumbButton onClick={() => onOpenPath("")}>
           Files
@@ -711,13 +691,16 @@ export function RepositoryFilesPanel({
   if (stateMessage) {
     if (!sourceControls) {
       return (
-        <div className="rounded-xl border border-border/60 bg-card p-4 text-sm text-muted-foreground">
+        <div
+          className={PROJECT_DETAIL_PANEL_MESSAGE_CLASS}
+          data-project-detail-panel
+        >
           {stateMessage}
         </div>
       );
     }
     return (
-      <div className="overflow-hidden rounded-xl border border-border/60 bg-card">
+      <div className={PROJECT_DETAIL_PANEL_CLASS} data-project-detail-panel>
         <div className="flex min-h-14 min-w-0 items-center gap-1 border-border/50 border-b px-3 py-3">
           <RepoSourceDropdown controls={sourceControls} />
           <RepositoryBranchDropdown
@@ -757,7 +740,7 @@ export function RepositoryFilesPanel({
   }
 
   return (
-    <div className="overflow-hidden rounded-xl border border-border/60 bg-card">
+    <div className={PROJECT_DETAIL_PANEL_CLASS} data-project-detail-panel>
       <div className="flex min-h-14 min-w-0 items-center gap-1 border-border/50 border-b px-3 py-3">
         {sourceControls ? (
           <>
@@ -852,7 +835,7 @@ export function RepositoryFilesPanel({
                         latestCommit.timestamp * 1_000,
                       ).toISOString()}
                     >
-                      {relativeCommitTime(latestCommit.timestamp)}
+                      {relativeTime(latestCommit.timestamp)}
                     </time>
                   </div>
                 ) : (
@@ -905,7 +888,7 @@ export function RepositoryFilesPanel({
                           latestCommit.timestamp * 1_000,
                         ).toISOString()}
                       >
-                        {relativeCommitTime(latestCommit.timestamp)}
+                        {relativeTime(latestCommit.timestamp)}
                       </time>
                     ) : (
                       "—"

@@ -74,6 +74,8 @@ pub struct CustomEmoji {
     pub url: String,
 }
 
+/// Return a channel name without client-rendered leading hash prefixes.
+pub use buzz_core::channel::canonical_channel_name;
 /// Channel type.
 pub use buzz_core::channel::ChannelType as ChannelKind;
 /// Channel visibility.

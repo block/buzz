@@ -5,7 +5,7 @@ use std::pin::Pin;
 
 use buzz_core::tenant::{CommunityId, TenantContext};
 
-use crate::config::MediaConfig;
+use crate::config::{MediaConfig, S3AddressingStyle};
 use crate::error::MediaError;
 use bytes::Bytes;
 use s3::creds::Credentials;
@@ -61,8 +61,11 @@ impl MediaStorage {
         }
         .map_err(|e| MediaError::StorageError(e.to_string()))?;
         let bucket = Bucket::new(&config.s3_bucket, region, creds)
-            .map_err(|e| MediaError::StorageError(e.to_string()))?
-            .with_path_style();
+            .map_err(|e| MediaError::StorageError(e.to_string()))?;
+        let bucket = match config.s3_addressing_style {
+            S3AddressingStyle::Path => bucket.with_path_style(),
+            S3AddressingStyle::Virtual => bucket,
+        };
         Ok(Self { bucket })
     }
 
@@ -230,6 +233,40 @@ impl MediaStorage {
             .ok()
             .map(|m| m.mime_type)
     }
+
+    /// One page of a full-bucket listing, for the storage sweep. Wraps
+    /// rust-s3's manual `list_page` (NOT the auto-paginating `list`, which
+    /// has no cap) and converts the result into the storage-agnostic
+    /// [`crate::bucket_index::Page`] shape the pure fold consumes.
+    ///
+    /// `max_keys` bounds one HTTP response, not the sweep's total object
+    /// cap — the caller (`fold_bucket_listing`) enforces the cumulative cap
+    /// across pages.
+    pub async fn list_page(
+        &self,
+        continuation_token: Option<String>,
+        max_keys: usize,
+    ) -> Result<crate::bucket_index::Page, MediaError> {
+        let (result, _status) = self
+            .bucket
+            .list_page(
+                String::new(),
+                None,
+                continuation_token,
+                None,
+                Some(max_keys),
+            )
+            .await?;
+        Ok(crate::bucket_index::Page {
+            objects: result
+                .contents
+                .into_iter()
+                .map(|obj| (obj.key, obj.size))
+                .collect(),
+            next_continuation_token: result.next_continuation_token,
+            is_truncated: result.is_truncated,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -251,6 +288,7 @@ mod tests {
             s3_secret_key: secret.to_string(),
             s3_bucket: "buzz-media".to_string(),
             s3_region: "us-west-2".to_string(),
+            s3_addressing_style: S3AddressingStyle::Path,
             max_image_bytes: 50 * 1024 * 1024,
             max_gif_bytes: 10 * 1024 * 1024,
             max_video_bytes: 524_288_000,
@@ -273,6 +311,23 @@ mod tests {
             Region::Custom { ref region, .. } => assert_eq!(region, "us-west-2"),
             other => panic!("expected Custom region, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn client_constructor_applies_both_addressing_styles() {
+        let path = MediaStorage::new(&storage_config("buzz_dev", "buzz_dev_secret"))
+            .expect("path-style client");
+        assert!(path.bucket.is_path_style());
+        assert_eq!(path.bucket.url(), "http://localhost:9000/buzz-media");
+
+        let mut virtual_config = storage_config("buzz_dev", "buzz_dev_secret");
+        virtual_config.s3_addressing_style = S3AddressingStyle::Virtual;
+        let virtual_hosted = MediaStorage::new(&virtual_config).expect("virtual-hosted client");
+        assert!(virtual_hosted.bucket.is_subdomain_style());
+        assert_eq!(
+            virtual_hosted.bucket.url(),
+            "http://buzz-media.localhost:9000"
+        );
     }
 
     #[test]

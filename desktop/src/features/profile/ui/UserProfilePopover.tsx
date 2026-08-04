@@ -5,6 +5,7 @@ import { toast } from "sonner";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useHuddle } from "@/features/huddle";
+import { formatHuddleActionError } from "@/features/huddle/lib/huddleError";
 import {
   channelsQueryKey,
   useChannelsQuery,
@@ -259,11 +260,18 @@ export function UserProfilePopover({
   const selfProfileQuery = useProfileQuery(open && showProfileActions);
   const isCurrentUserOwner = ownsAuthorAgent(profile, currentPubkey);
   const viewerIsOwner = isCurrentUserOwner || isOwner === true;
+  const showHuddleAction =
+    showHumanProfileActions ||
+    (showProfileActions &&
+      isBotProfile &&
+      viewerIsOwner &&
+      !isAgentClassificationPending);
   const showMessageAction =
     showProfileActions &&
     !isAgentClassificationPending &&
     (!isBotProfile || viewerIsOwner);
-  const showAnyProfileActions = showHumanProfileActions || showMessageAction;
+  const showAnyProfileActions =
+    showHumanProfileActions || showMessageAction || showHuddleAction;
   const canViewActivity =
     isBotProfile && viewerIsOwner && canOpenAgentActivity(pubkey);
   const presenceStatus = presenceQuery.data?.[pubkey.toLowerCase()];
@@ -355,7 +363,7 @@ export function UserProfilePopover({
   const handleHuddle = React.useCallback(async () => {
     if (
       !showProfileActions ||
-      !showHumanProfileActions ||
+      !showHuddleAction ||
       pendingAction !== null ||
       isStartingHuddle
     ) {
@@ -368,15 +376,13 @@ export function UserProfilePopover({
     try {
       const dm = await openDmMutation.mutateAsync({ pubkeys: [pubkey] });
       await goChannel(dm.id);
-      await startHuddle(dm.id, []);
+      await startHuddle(dm.id, isBotProfile ? [pubkey] : []);
       await queryClient.invalidateQueries({ queryKey: channelsQueryKey });
       if (isMountedRef.current) {
         setOpen(false);
       }
     } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : "Failed to start huddle.",
-      );
+      toast.error(formatHuddleActionError(error, "start"));
     } finally {
       if (isMountedRef.current) {
         setPendingAction(null);
@@ -390,7 +396,8 @@ export function UserProfilePopover({
     pendingAction,
     pubkey,
     queryClient,
-    showHumanProfileActions,
+    isBotProfile,
+    showHuddleAction,
     showProfileActions,
     startHuddle,
   ]);
@@ -723,7 +730,7 @@ export function UserProfilePopover({
                       Message
                     </Button>
                   ) : null}
-                  {showHumanProfileActions ? (
+                  {showHuddleAction ? (
                     <Button
                       className="min-w-0 flex-1"
                       data-testid={`user-profile-popover-huddle-${pubkey}`}

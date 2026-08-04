@@ -115,6 +115,7 @@ function TeamAvatarRow({
 }) {
   const visiblePersonas = personas.slice(0, MAX_VISIBLE_MEMBER_AVATARS);
   const overflowCount = Math.max(0, memberCount - visiblePersonas.length);
+  const stackItemCount = visiblePersonas.length + (overflowCount > 0 ? 1 : 0);
 
   if (visiblePersonas.length === 0 && overflowCount === 0) {
     return (
@@ -130,16 +131,26 @@ function TeamAvatarRow({
     <div className="absolute inset-x-0 top-0 bottom-12 flex items-center justify-center">
       <div
         aria-label={`${teamName} member avatars`}
-        className="flex max-w-full items-center justify-center gap-2 px-4"
+        className="flex max-w-full items-center justify-center px-4"
         role="img"
       >
         {visiblePersonas.map((persona, index) => (
-          <TeamAvatarItem index={index} key={persona.id} persona={persona} />
+          <TeamAvatarItem
+            index={index}
+            isFollowedByAnother={index < stackItemCount - 1}
+            key={persona.id}
+            persona={persona}
+          />
         ))}
         {overflowCount > 0 ? (
-          <span className="flex h-14 w-14 items-center justify-center rounded-full border-[3px] border-background bg-card text-sm font-semibold text-muted-foreground shadow-sm">
-            +{overflowCount}
-          </span>
+          <div
+            className={visiblePersonas.length > 0 ? "-ml-5" : ""}
+            style={{ zIndex: stackItemCount }}
+          >
+            <span className="flex h-14 w-14 items-center justify-center rounded-full bg-card text-sm font-semibold text-muted-foreground">
+              +{overflowCount}
+            </span>
+          </div>
         ) : null}
       </div>
     </div>
@@ -148,25 +159,39 @@ function TeamAvatarRow({
 
 function TeamAvatarItem({
   index,
+  isFollowedByAnother,
   persona,
 }: {
   index: number;
+  isFollowedByAnother: boolean;
   persona: AgentPersona;
 }) {
   const avatarUrl = persona.avatarUrl?.trim() ?? null;
 
   return (
-    <div className="h-14 w-14" data-team-member-avatar="avatar">
+    <div
+      className={`h-14 w-14 ${index > 0 ? "-ml-5" : ""}`}
+      data-team-member-avatar="avatar"
+      style={{
+        zIndex: index + 1,
+        ...(isFollowedByAnother && {
+          mask: "radial-gradient(circle 32px at calc(100% + 8px) 50%, transparent 99%, #fff 100%)",
+          WebkitMask:
+            "radial-gradient(circle 32px at calc(100% + 8px) 50%, transparent 99%, #fff 100%)",
+        }),
+      }}
+    >
       {avatarUrl ? (
         <ProfileAvatar
           avatarUrl={avatarUrl}
-          className="h-full w-full border-[3px] border-background bg-muted shadow-sm"
+          className="h-full w-full bg-muted shadow-none"
           iconClassName="h-6 w-6"
           label={persona.displayName}
           testId={`team-member-avatar-${persona.id}`}
         />
       ) : (
         <IdentityInitialsAvatar
+          className="border-0 shadow-none"
           colorIndex={index}
           label={persona.displayName}
           size={56}

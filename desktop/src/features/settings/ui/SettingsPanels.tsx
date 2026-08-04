@@ -11,7 +11,6 @@ import {
   FlaskConical,
   Keyboard,
   LayoutTemplate,
-  LockKeyhole,
   MessagesSquare,
   MonitorCog,
   Moon,
@@ -20,7 +19,9 @@ import {
   Smile,
   Sun,
   SunMoon,
+  Ticket,
   UserRound,
+  Volume2,
   type LucideIcon,
 } from "lucide-react";
 import type {
@@ -69,7 +70,7 @@ import {
   withAccentPreviewVars,
 } from "@/shared/theme/useThemePreviewVars";
 import { ChannelTemplatesSettingsCard } from "./ChannelTemplatesSettingsCard";
-import { DoctorSettingsPanel } from "./DoctorSettingsPanel";
+import { HarnessesSettingsPanel } from "./HarnessesSettingsPanel";
 import { ExperimentalFeaturesCard } from "./ExperimentalFeaturesCard";
 import { KeyboardShortcutsCard } from "./KeyboardShortcutsCard";
 import { MeshComputeSettingsCard } from "@/features/mesh-compute/ui/MeshComputeSettingsCard";
@@ -83,10 +84,12 @@ import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
 import { ProfileSettingsCard } from "./ProfileSettingsCard";
 import { UpdateChecker } from "../UpdateChecker";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
+import { VoiceSettingsCard } from "./VoiceSettingsCard";
 
 export type SettingsSection =
   | "profile"
   | "notifications"
+  | "voice"
   | "experimental"
   | "agents"
   | "channel-templates"
@@ -106,6 +109,7 @@ export const DEFAULT_SETTINGS_SECTION: SettingsSection = "profile";
 const SETTINGS_SECTION_VALUES: readonly SettingsSection[] = [
   "profile",
   "notifications",
+  "voice",
   "experimental",
   "agents",
   "channel-templates",
@@ -168,6 +172,11 @@ export const settingsSections: SettingsSectionDescriptor[] = [
     icon: BellRing,
   },
   {
+    value: "voice",
+    label: "Voice",
+    icon: Volume2,
+  },
+  {
     value: "experimental",
     label: "Experiments",
     icon: FlaskConical,
@@ -180,7 +189,7 @@ export const settingsSections: SettingsSectionDescriptor[] = [
   },
   {
     value: "channel-templates",
-    label: "Templates",
+    label: "Channel templates",
     icon: LayoutTemplate,
     featureGate: "channel-templates",
   },
@@ -201,8 +210,8 @@ export const settingsSections: SettingsSectionDescriptor[] = [
   },
   {
     value: "community-members",
-    label: "Community access",
-    icon: LockKeyhole,
+    label: "Invites",
+    icon: Ticket,
   },
   {
     value: "moderation",
@@ -807,13 +816,15 @@ export function renderSettingsSection(
           onSetSoundForSlot={props.onSetSoundForSlot}
         />
       );
+    case "voice":
+      return <VoiceSettingsCard />;
     case "experimental":
       return <ExperimentalFeaturesCard />;
     case "agents":
       return (
         <div className="space-y-12">
           <PreventSleepSettingsCard />
-          <DoctorSettingsPanel />
+          <HarnessesSettingsPanel />
           <AgentDefaultsSettingsCard />
         </div>
       );

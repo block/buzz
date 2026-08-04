@@ -17,6 +17,7 @@
 import { mergeTimelineHistoryMessages } from "@/features/messages/lib/messageQueryKeys";
 import { normalizeRelayUrl } from "@/features/profile/lib/selfProfileStorage";
 import type { RelayEvent } from "@/shared/api/types";
+import { setLocalStorageItemWithRecovery } from "@/shared/lib/localStorageQuota";
 
 const STORAGE_KEY_PREFIX = "buzz-channel-messages.v1";
 
@@ -147,7 +148,7 @@ export function writeMessageSnapshot(
     }
 
     evictOldestSnapshots(relayPrefix(relayUrl), key);
-    window.localStorage.setItem(
+    setLocalStorageItemWithRecovery(
       key,
       JSON.stringify({
         version: 1,

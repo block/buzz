@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     io::Write,
     sync::{
-        atomic::{AtomicBool, AtomicU16},
+        atomic::{AtomicBool, AtomicU16, AtomicU8},
         Arc, Mutex,
     },
 };
@@ -13,10 +13,15 @@ use tauri::{AppHandle, Manager};
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::huddle::HuddleState;
+pub(crate) use crate::identity_storage::{IdentityStorage, RecoveryState, ResolvedIdentity};
 use crate::managed_agents::config_bridge::SessionConfigCache;
-use crate::managed_agents::ManagedAgentProcess;
+use crate::managed_agents::{ManagedAgentPairRuntime, ManagedAgentRuntimeKey};
+
 pub struct AppState {
     pub keys: Mutex<Keys>,
+    /// Durable backend holding `keys`. Updated after the key write and before
+    /// recovery flags are cleared so `get_identity` reports a consistent state.
+    pub(crate) identity_storage: AtomicU8,
     pub http_client: reqwest::Client,
     /// A no-redirect client for authenticated relay media fetches (download,
     /// clipboard copy, snapshot, editor). Every caller pre-validates the URL
@@ -40,22 +45,21 @@ pub struct AppState {
     pub managed_agent_profile_reconcile_enabled: AtomicBool,
     /// Shared shutdown signal checked by launch-time agent restoration.
     pub shutdown_started: AtomicBool,
-    /// Serializes the restore spawn/register transition with shutdown cleanup,
-    /// preventing an agent from spawning after shutdown has swept processes.
-    pub managed_agent_restore_transition: Mutex<()>,
+    /// Serializes every managed-runtime transition that changes the protected
+    /// PID set: spawn/register, adoption, stop, shutdown, and sweep snapshots.
+    /// Never perform network I/O while holding this lock.
+    pub managed_agent_runtime_transition: Mutex<()>,
     pub managed_agents_store_lock: Mutex<()>,
     pub channel_templates_store_lock: Mutex<()>,
-    pub managed_agent_processes: Mutex<HashMap<String, ManagedAgentProcess>>,
+    pub managed_agent_processes: Mutex<HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>>,
     pub huddle_state: Mutex<HuddleState>,
+    pub huddle_audio: crate::huddle::tts_settings::HuddleAudioSettingsState,
     /// Tauri app handle — stored after setup so huddle commands can emit
     /// `huddle-state-changed` events without needing the handle threaded
     /// through every call site.
     ///
     /// Set once during `setup()` in `lib.rs`; never cleared.
     pub app_handle: Mutex<Option<AppHandle>>,
-    /// Selected audio output device name. `None` = system default.
-    /// Used by `connect_audio_relay` and TTS pipeline when opening sinks.
-    pub audio_output_device: Mutex<Option<String>>,
     /// Port of the localhost media streaming proxy (set during setup).
     pub media_proxy_port: AtomicU16,
     /// Set when identity resolution detected a "keyring-locked" state: the
@@ -98,14 +102,17 @@ pub struct AppState {
     /// Ordering: written once in `setup()` with `Ordering::Release`; read in
     /// `get_identity` with `Ordering::Acquire`.
     pub reset_failed: AtomicBool,
-    /// Cached ACP session config from running agents, keyed by agent pubkey.
+    /// Cached ACP session config from running agents, keyed by canonical
+    /// `(agent pubkey, relay URL)` runtime identity.
     /// Populated when the harness emits `session_config_captured` observer events.
-    pub session_config_cache: Mutex<HashMap<String, SessionConfigCache>>,
+    pub session_config_cache: Mutex<HashMap<ManagedAgentRuntimeKey, SessionConfigCache>>,
     /// IOKit power assertion state — prevents idle sleep while agents run.
     pub prevent_sleep: Arc<Mutex<crate::prevent_sleep::PreventSleepState>>,
     /// In-process mesh-llm node started by Buzz Desktop.
     #[cfg(feature = "mesh-llm")]
     pub mesh_llm_runtime: AsyncMutex<Option<crate::mesh_llm::DesktopMeshRuntime>>,
+    #[cfg(feature = "mesh-llm")]
+    pub mesh_recovery: crate::mesh_llm::MeshRecoveryState,
     /// Runtime-owned shared-compute coordinator. It publishes member-signed
     /// discovery status and reconciles MeshLLM's admission roster; MeshLLM
     /// itself owns direct QUIC/iroh connection establishment.
@@ -174,19 +181,20 @@ pub fn build_media_fetch_client() -> reqwest::Result<reqwest::Client> {
 pub fn build_app_state() -> AppState {
     // Env var takes precedence (dev/CI). If absent, resolve_persisted_identity()
     // in setup() will replace the ephemeral placeholder with a persisted key.
-    let keys = match identity_from_env() {
+    let (keys, identity_storage) = match identity_from_env() {
         Some(keys) => {
             eprintln!(
                 "buzz-desktop: configured identity pubkey {}",
                 keys.public_key().to_hex()
             );
-            keys
+            (keys, IdentityStorage::Environment)
         }
-        None => Keys::generate(),
+        None => (Keys::generate(), IdentityStorage::Ephemeral),
     };
 
     AppState {
         keys: Mutex::new(keys),
+        identity_storage: AtomicU8::new(identity_storage as u8),
         http_client: reqwest::Client::builder()
             .resolve("localhost", std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
             .pool_idle_timeout(std::time::Duration::from_secs(10))
@@ -202,15 +210,15 @@ pub fn build_app_state() -> AppState {
         managed_agent_restore_pending: AtomicBool::new(false),
         managed_agent_profile_reconcile_enabled: AtomicBool::new(true),
         shutdown_started: AtomicBool::new(false),
-        managed_agent_restore_transition: Mutex::new(()),
+        managed_agent_runtime_transition: Mutex::new(()),
         identity_mutation: Mutex::new(()),
         managed_agents_store_lock: Mutex::new(()),
         channel_templates_store_lock: Mutex::new(()),
         managed_agent_processes: Mutex::new(HashMap::new()),
         session_config_cache: Mutex::new(HashMap::new()),
         huddle_state: Mutex::new(HuddleState::default()),
+        huddle_audio: Default::default(),
         app_handle: Mutex::new(None),
-        audio_output_device: Mutex::new(None),
         media_proxy_port: AtomicU16::new(0),
         prevent_sleep: Arc::new(Mutex::new(
             crate::prevent_sleep::PreventSleepState::default(),
@@ -220,6 +228,8 @@ pub fn build_app_state() -> AppState {
         reset_failed: AtomicBool::new(false),
         #[cfg(feature = "mesh-llm")]
         mesh_llm_runtime: AsyncMutex::new(None),
+        #[cfg(feature = "mesh-llm")]
+        mesh_recovery: crate::mesh_llm::MeshRecoveryState::default(),
         #[cfg(feature = "mesh-llm")]
         mesh_coordinator: AsyncMutex::new(None),
         pending_owned_channels: Mutex::new(std::collections::HashSet::new()),
@@ -236,19 +246,25 @@ impl AppState {
         self.huddle_state.lock().map_err(|e| e.to_string())
     }
 
-    pub fn get_session_cache(&self, pubkey: &str) -> Option<SessionConfigCache> {
-        self.session_config_cache.lock().ok()?.get(pubkey).cloned()
+    pub fn get_session_cache(&self, key: &ManagedAgentRuntimeKey) -> Option<SessionConfigCache> {
+        self.session_config_cache.lock().ok()?.get(key).cloned()
     }
 
-    pub fn put_session_cache(&self, pubkey: &str, cache: SessionConfigCache) {
+    pub fn put_session_cache(&self, key: ManagedAgentRuntimeKey, cache: SessionConfigCache) {
         if let Ok(mut map) = self.session_config_cache.lock() {
-            map.insert(pubkey.to_string(), cache);
+            map.insert(key, cache);
         }
     }
 
-    pub fn clear_session_cache(&self, pubkey: &str) {
+    pub fn clear_agent_session_cache(&self, key: &ManagedAgentRuntimeKey) {
         if let Ok(mut map) = self.session_config_cache.lock() {
-            map.remove(pubkey);
+            map.remove(key);
+        }
+    }
+
+    pub fn clear_agent_session_caches(&self, pubkey: &str) {
+        if let Ok(mut map) = self.session_config_cache.lock() {
+            map.retain(|key, _| key.pubkey != pubkey);
         }
     }
 
@@ -354,9 +370,13 @@ pub fn resolve_persisted_identity(app: &AppHandle, state: &AppState) -> Result<(
     std::fs::create_dir_all(&data_dir).map_err(|e| format!("create app data dir: {e}"))?;
 
     let resolved = load_or_create_identity(&data_dir)?;
-    // Write keys before setting the recovery flags (Release) so any thread
-    // that reads a flag as false with Acquire is guaranteed to see the keys.
-    *state.keys.lock().map_err(|e| e.to_string())? = resolved.keys;
+    // Write keys and storage before setting the recovery flags (Release) so
+    // any thread that reads a flag as false with Acquire sees consistent data.
+    {
+        let mut active_keys = state.keys.lock().map_err(|e| e.to_string())?;
+        *active_keys = resolved.keys;
+        state.set_identity_storage(resolved.storage);
+    }
     state.identity_lost.store(
         resolved.recovery == RecoveryState::Lost,
         std::sync::atomic::Ordering::Release,
@@ -381,26 +401,6 @@ const IDENTITY_KEY_NAME: &str = "identity";
 /// (no key anywhere, generating is correct) from a post-migration boot whose
 /// keyring is merely unreachable (the key IS in the keyring, must NOT generate).
 const MIGRATION_MARKER_NAME: &str = "identity.migrated";
-
-/// Recovery state produced by identity resolution. `None` means the app has
-/// a real, usable identity. `Lost` means the keyring was reachable-but-empty
-/// despite a prior successful migration — the key vanished externally. `KeyringLocked`
-/// means the keyring is unreachable this boot but was used in the past
-/// (marker present, no file) — the key still exists but is temporarily
-/// inaccessible. Both non-`None` variants boot with an ephemeral key; the
-/// frontend shows a different recovery screen for each.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RecoveryState {
-    None,
-    Lost,
-    KeyringLocked,
-}
-
-/// The output of identity resolution.
-struct ResolvedIdentity {
-    keys: Keys,
-    recovery: RecoveryState,
-}
 
 /// The keyring operations the identity resolution flow needs. Abstracted so the
 /// corrupt-keyring recovery decision ([`recover_from_keyring`]) can be
@@ -453,6 +453,7 @@ fn load_or_create_identity(data_dir: &std::path::Path) -> Result<ResolvedIdentit
         return Ok(ResolvedIdentity {
             keys,
             recovery: RecoveryState::None,
+            storage: IdentityStorage::LocalFile,
         });
     }
 
@@ -502,7 +503,7 @@ fn resolve_identity_with_store(
                                     // fails. A transient keyring failure must not abort
                                     // boot — the file key is safe and adoption retries next
                                     // boot when the keyring is reachable again.
-                                    if let Err(e) = persist_identity_to_keyring(
+                                    let storage = if let Err(e) = persist_identity_to_keyring(
                                         store,
                                         &file_keys,
                                         legacy_path,
@@ -512,10 +513,14 @@ fn resolve_identity_with_store(
                                             "buzz-desktop: keyring adoption of identity.key \
                                              failed ({e}); using file key, will retry next boot"
                                         );
-                                    }
+                                        IdentityStorage::LocalFile
+                                    } else {
+                                        IdentityStorage::SystemKeyring
+                                    };
                                     return Ok(ResolvedIdentity {
                                         keys: file_keys,
                                         recovery: RecoveryState::None,
+                                        storage,
                                     });
                                 }
                                 // Corrupt file — keyring is authoritative. Log before
@@ -555,6 +560,7 @@ fn resolve_identity_with_store(
                         return Ok(ResolvedIdentity {
                             keys: keyring_keys,
                             recovery: RecoveryState::None,
+                            storage: IdentityStorage::SystemKeyring,
                         });
                     }
                     // The corruption is in the KEYRING, not the file. Clear the
@@ -583,6 +589,7 @@ fn resolve_identity_with_store(
                     return Ok(ResolvedIdentity {
                         keys,
                         recovery: RecoveryState::None,
+                        storage: IdentityStorage::SystemKeyring,
                     });
                 }
             } else if migration_marker_path(data_dir).exists() {
@@ -603,6 +610,7 @@ fn resolve_identity_with_store(
                 return Ok(ResolvedIdentity {
                     keys: ephemeral,
                     recovery: RecoveryState::Lost,
+                    storage: IdentityStorage::Ephemeral,
                 });
             }
         }
@@ -631,20 +639,23 @@ fn resolve_identity_with_store(
                 return Ok(ResolvedIdentity {
                     keys: ephemeral,
                     recovery: RecoveryState::KeyringLocked,
+                    storage: IdentityStorage::Ephemeral,
                 });
             }
             let keys = load_file_or_generate(legacy_path, data_dir)?;
             return Ok(ResolvedIdentity {
                 keys,
                 recovery: RecoveryState::None,
+                storage: IdentityStorage::LocalFile,
             });
         }
     }
 
-    let keys = generate_and_persist(store, legacy_path, data_dir)?;
+    let (keys, storage) = generate_and_persist(store, legacy_path, data_dir)?;
     Ok(ResolvedIdentity {
         keys,
         recovery: RecoveryState::None,
+        storage,
     })
 }
 
@@ -670,6 +681,7 @@ fn recover_from_keyring(
             return Ok(ResolvedIdentity {
                 keys,
                 recovery: RecoveryState::None,
+                storage: IdentityStorage::SystemKeyring,
             });
         }
     }
@@ -687,13 +699,15 @@ fn recover_from_keyring(
         return Ok(ResolvedIdentity {
             keys: ephemeral,
             recovery: RecoveryState::Lost,
+            storage: IdentityStorage::Ephemeral,
         });
     }
     // No marker: genuine first launch with a corrupt keyring. Generate fresh.
-    let keys = generate_and_persist(store, legacy_path, data_dir)?;
+    let (keys, storage) = generate_and_persist(store, legacy_path, data_dir)?;
     Ok(ResolvedIdentity {
         keys,
         recovery: RecoveryState::None,
+        storage,
     })
 }
 
@@ -860,15 +874,16 @@ fn persist_imported_identity_impl(
     keys: &Keys,
     legacy_path: &std::path::Path,
     data_dir: &std::path::Path,
-) -> Result<(), String> {
+) -> Result<IdentityStorage, String> {
     match persist_identity_to_keyring(store, keys, legacy_path, data_dir) {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(IdentityStorage::SystemKeyring),
         Err(e) => {
             eprintln!(
                 "buzz-desktop: keyring write failed during import ({e}), \
                  falling back to identity.key"
             );
-            save_key_file(legacy_path, keys)
+            save_key_file(legacy_path, keys)?;
+            Ok(IdentityStorage::LocalFile)
         }
     }
 }
@@ -880,7 +895,7 @@ pub(crate) fn persist_imported_identity(
     keys: &Keys,
     legacy_path: &std::path::Path,
     data_dir: &std::path::Path,
-) -> Result<(), String> {
+) -> Result<IdentityStorage, String> {
     persist_imported_identity_impl(store, keys, legacy_path, data_dir)
 }
 
@@ -908,15 +923,6 @@ fn write_migration_marker(marker_path: &std::path::Path) -> Result<(), String> {
         .map_err(|e| format!("commit migration marker: {e}"))
 }
 
-/// Which backend [`store_key_preferring_keyring`] wrote to. The caller writes
-/// the migration marker only after a keyring success — on the file-fallback arm
-/// the key is on disk and a marker would wrongly trip the next Unreachable boot
-/// into failing closed.
-enum PersistBackend {
-    Keyring,
-    File,
-}
-
 /// Generate a fresh identity, persist it through the store, return it.
 ///
 /// On a keyring-backed persist no file is written, so a later
@@ -928,9 +934,10 @@ fn generate_and_persist(
     store: &impl IdentityKeyStore,
     legacy_path: &std::path::Path,
     data_dir: &std::path::Path,
-) -> Result<Keys, String> {
+) -> Result<(Keys, IdentityStorage), String> {
     let keys = Keys::generate();
-    if let PersistBackend::Keyring = store_key_preferring_keyring(store, &keys, legacy_path)? {
+    let storage = store_key_preferring_keyring(store, &keys, legacy_path)?;
+    if storage == IdentityStorage::SystemKeyring {
         let marker_path = migration_marker_path(data_dir);
         if let Err(e) = write_migration_marker(&marker_path) {
             eprintln!(
@@ -944,7 +951,7 @@ fn generate_and_persist(
         "buzz-desktop: generated and saved identity pubkey {}",
         keys.public_key().to_hex()
     );
-    Ok(keys)
+    Ok((keys, storage))
 }
 
 /// Persist `keys` through the store, silently falling back to the `0o600` file
@@ -956,17 +963,17 @@ fn store_key_preferring_keyring(
     store: &impl IdentityKeyStore,
     keys: &Keys,
     legacy_path: &std::path::Path,
-) -> Result<PersistBackend, String> {
+) -> Result<IdentityStorage, String> {
     let nsec = keys
         .secret_key()
         .to_bech32()
         .map_err(|e| format!("encode nsec: {e}"))?;
     match store.store(IDENTITY_KEY_NAME, &nsec) {
-        Ok(()) => Ok(PersistBackend::Keyring),
+        Ok(()) => Ok(IdentityStorage::SystemKeyring),
         Err(keyring_err) => {
             eprintln!("buzz-desktop: keyring write failed ({keyring_err}), using file fallback");
             save_key_file(legacy_path, keys)?;
-            Ok(PersistBackend::File)
+            Ok(IdentityStorage::LocalFile)
         }
     }
 }

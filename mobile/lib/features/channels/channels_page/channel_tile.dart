@@ -41,20 +41,19 @@ class _ChannelTile extends ConsumerWidget {
         ),
         child: Row(
           children: [
-            if (channel.isDm)
-              _DmAvatar(channel: channel, currentPubkey: currentPubkey)
-            else
-              SizedBox(
-                width: _kChannelLeadingWidth,
-                child: Align(
-                  alignment: Alignment.centerLeft,
-                  child: Icon(
-                    channelIcon(channel),
-                    size: _kChannelIconSize,
-                    color: context.colors.onSurface,
-                  ),
-                ),
+            SizedBox(
+              width: _kChannelLeadingWidth,
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: channel.isDm
+                    ? _DmAvatar(channel: channel, currentPubkey: currentPubkey)
+                    : Icon(
+                        channelIcon(channel),
+                        size: _kChannelIconSize,
+                        color: context.colors.onSurface,
+                      ),
               ),
+            ),
             const SizedBox(width: _kChannelLabelGap),
             Expanded(
               child: Column(
@@ -67,7 +66,7 @@ class _ChannelTile extends ConsumerWidget {
                     ),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: context.textTheme.bodyMedium?.copyWith(
+                    style: contentListTitleTextStyle.copyWith(
                       color: context.colors.onSurface,
                       fontWeight: isUnread ? FontWeight.w700 : FontWeight.w400,
                     ),
@@ -119,205 +118,12 @@ class _ChannelTile extends ConsumerWidget {
   }
 
   void _showChannelActions(BuildContext context, WidgetRef ref) {
-    showModalBottomSheet<void>(
+    showChannelActionsSheet(
       context: context,
-      showDragHandle: true,
-      builder: (sheetContext) {
-        final sections = ref.read(channelSectionsProvider).store.sections
-          ..sort((a, b) => a.order.compareTo(b.order));
-        final isStarred =
-            ref
-                .read(channelStarsProvider)
-                .store
-                .channels[channel.id]
-                ?.starred ==
-            true;
-
-        return SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(
-              Grid.gutter,
-              0,
-              Grid.gutter,
-              Grid.xs,
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                ListTile(
-                  leading: Icon(
-                    isStarred ? LucideIcons.starOff : LucideIcons.star,
-                  ),
-                  title: Text(isStarred ? 'Unstar channel' : 'Star channel'),
-                  onTap: () {
-                    Navigator.of(sheetContext).pop();
-                    if (isStarred) {
-                      ref
-                          .read(channelStarsProvider.notifier)
-                          .unstarChannel(channel.id);
-                    } else {
-                      ref
-                          .read(channelStarsProvider.notifier)
-                          .starChannel(channel.id);
-                    }
-                  },
-                ),
-                ListTile(
-                  leading: const Icon(LucideIcons.folderInput),
-                  title: const Text('Move to section'),
-                  onTap: () async {
-                    Navigator.of(sheetContext).pop();
-                    await _showMoveSectionSheet(context, ref, sections);
-                  },
-                ),
-                ListTile(
-                  leading: Icon(
-                    isMuted ? LucideIcons.bell : LucideIcons.bellOff,
-                  ),
-                  title: Text(isMuted ? 'Unmute channel' : 'Mute channel'),
-                  onTap: () {
-                    Navigator.of(sheetContext).pop();
-                    if (isMuted) {
-                      ref
-                          .read(channelMutesProvider.notifier)
-                          .unmuteChannel(channel.id);
-                    } else {
-                      ref
-                          .read(channelMutesProvider.notifier)
-                          .muteChannel(channel.id);
-                    }
-                  },
-                ),
-                ListTile(
-                  leading: Icon(
-                    isUnread ? LucideIcons.checkCheck : LucideIcons.circleDot,
-                  ),
-                  title: Text(isUnread ? 'Mark as read' : 'Mark as unread'),
-                  onTap: () {
-                    Navigator.of(sheetContext).pop();
-                    final ts = dateTimeToUnixSeconds(channel.lastMessageAt);
-                    if (ts != null) {
-                      if (isUnread) {
-                        onMarkRead?.call();
-                        ref
-                            .read(readStateProvider.notifier)
-                            .markContextRead(channel.id, ts);
-                        ref
-                            .read(channelsProvider.notifier)
-                            .clearObservedUnreadCoveredByRead(channel.id, ts);
-                      } else {
-                        ref
-                            .read(readStateProvider.notifier)
-                            .markContextUnread(channel.id);
-                      }
-                    }
-                  },
-                ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  Future<void> _showMoveSectionSheet(
-    BuildContext context,
-    WidgetRef ref,
-    List<ChannelSection> sections,
-  ) async {
-    await showModalBottomSheet<void>(
-      context: context,
-      showDragHandle: true,
-      builder: (sheetContext) {
-        return SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(
-              Grid.gutter,
-              0,
-              Grid.gutter,
-              Grid.xs,
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                for (final section in sections)
-                  ListTile(
-                    leading: Icon(
-                      LucideIcons.folder,
-                      color: sectionId == section.id
-                          ? sheetContext.colors.primary
-                          : null,
-                    ),
-                    title: Text(section.name),
-                    trailing: sectionId == section.id
-                        ? Icon(
-                            LucideIcons.check,
-                            color: sheetContext.colors.primary,
-                          )
-                        : null,
-                    onTap: () {
-                      Navigator.of(sheetContext).pop();
-                      ref
-                          .read(channelSectionsProvider.notifier)
-                          .assignChannel(channel.id, section.id);
-                    },
-                  ),
-                ListTile(
-                  leading: const Icon(LucideIcons.folderPlus),
-                  title: const Text('New section…'),
-                  onTap: () async {
-                    Navigator.of(sheetContext).pop();
-                    if (!context.mounted) return;
-                    final name = await showDialog<String>(
-                      context: context,
-                      builder: (_) => const _SectionNameDialog(
-                        title: 'New Section',
-                        confirmLabel: 'Create',
-                      ),
-                    );
-                    if (name != null && name.isNotEmpty) {
-                      ref
-                          .read(channelSectionsProvider.notifier)
-                          .createSection(name);
-                      // Assign after create — sections list has been mutated,
-                      // re-read to find the new section by name.
-                      final newSection = ref
-                          .read(channelSectionsProvider)
-                          .store
-                          .sections
-                          .lastWhere(
-                            (s) => s.name == name.trim(),
-                            orElse: () => const ChannelSection(
-                              id: '',
-                              name: '',
-                              order: -1,
-                            ),
-                          );
-                      if (newSection.id.isNotEmpty) {
-                        ref
-                            .read(channelSectionsProvider.notifier)
-                            .assignChannel(channel.id, newSection.id);
-                      }
-                    }
-                  },
-                ),
-                if (sectionId != null)
-                  ListTile(
-                    leading: const Icon(LucideIcons.folderMinus),
-                    title: const Text('Remove from section'),
-                    onTap: () {
-                      Navigator.of(sheetContext).pop();
-                      ref
-                          .read(channelSectionsProvider.notifier)
-                          .unassignChannel(channel.id);
-                    },
-                  ),
-              ],
-            ),
-          ),
-        );
-      },
+      channel: channel,
+      isUnread: isUnread,
+      onMarkRead: onMarkRead,
+      sectionId: sectionId,
     );
   }
 }
@@ -343,8 +149,8 @@ class _DmAvatar extends ConsumerWidget {
 
     if (visiblePubkeys.length > 1) {
       return Container(
-        width: 22,
-        height: 22,
+        width: _kDmAvatarSize,
+        height: _kDmAvatarSize,
         alignment: Alignment.center,
         decoration: BoxDecoration(
           color: context.colors.surfaceContainerHighest,
@@ -354,7 +160,7 @@ class _DmAvatar extends ConsumerWidget {
         child: Text(
           '${visiblePubkeys.length}',
           style: context.textTheme.labelSmall?.copyWith(
-            fontSize: 10,
+            fontSize: 9,
             color: context.colors.onSurface,
             fontWeight: FontWeight.w600,
             height: 1,
@@ -385,14 +191,14 @@ class _DmAvatar extends ConsumerWidget {
         : 'offline';
 
     return SizedBox(
-      width: 22,
-      height: 22,
+      width: _kDmAvatarSize,
+      height: _kDmAvatarSize,
       child: Stack(
         clipBehavior: Clip.none,
         children: [
           AvatarImage(
             imageUrl: avatarUrl,
-            radius: 10,
+            radius: _kDmAvatarSize / 2,
             backgroundColor: context.colors.primaryContainer,
             fallback: Text(
               initial,
@@ -407,8 +213,8 @@ class _DmAvatar extends ConsumerWidget {
             right: -1,
             bottom: -1,
             child: Container(
-              width: 9,
-              height: 9,
+              width: 8,
+              height: 8,
               decoration: BoxDecoration(
                 color: _presenceColor(context, presence),
                 shape: BoxShape.circle,

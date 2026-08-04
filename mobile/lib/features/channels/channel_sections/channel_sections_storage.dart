@@ -7,19 +7,27 @@ String channelSectionsKey(String pubkey) => 'buzz.channel-sections.v1:$pubkey';
 class ChannelSection {
   final String id;
   final String name;
+  final String? icon;
   final int order;
 
   const ChannelSection({
     required this.id,
     required this.name,
+    this.icon,
     required this.order,
   });
 
-  Map<String, dynamic> toJson() => {'id': id, 'name': name, 'order': order};
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'name': name,
+    if (icon != null) 'icon': icon,
+    'order': order,
+  };
 
   factory ChannelSection.fromJson(Map<String, dynamic> json) => ChannelSection(
     id: json['id'] as String,
     name: json['name'] as String,
+    icon: json['icon'] is String ? json['icon'] as String : null,
     order: json['order'] as int,
   );
 }

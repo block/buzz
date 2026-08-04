@@ -9,6 +9,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
+#[path = "tts_tests/token_split.rs"]
+mod token_split;
+
 // ── Remote interrupt tracker ──────────────────────────────────────────────
 //
 // Models the per-peer frame counting logic in the recv task of
@@ -29,6 +32,19 @@ use std::sync::{Arc, Mutex};
 //   - Counters reset on the 500ms window (Instant-based in production,
 //     on_tick() in tests — logically equivalent).
 //   - Uses Acquire for tts_active reads, Release for tts_cancel writes.
+
+#[test]
+fn tts_speaker_activity_uses_the_playback_waveform() {
+    let mut samples = vec![0.0; 1_200];
+    samples.extend(vec![0.25; 1_200]);
+
+    let frames = build_tts_speaker_activity_frames(&samples, "agent-pubkey", 24_000);
+
+    assert_eq!(frames.len(), 2);
+    assert_eq!(frames[0].pubkey, "agent-pubkey");
+    assert_eq!(frames[0].level, 0.0);
+    assert!(frames[1].level > 0.5);
+}
 //
 use crate::huddle::relay_api::REMOTE_SPEECH_THRESHOLD;
 
@@ -281,24 +297,6 @@ fn cancel_already_true_is_harmless() {
     assert!(
         tts_cancel.load(Ordering::Acquire),
         "tts_cancel should still be true (idempotent store)",
-    );
-}
-
-// ── Regression: local-only interrupt still works ──────────────────────────
-
-/// The existing local barge-in path (STT detects speech → sets tts_cancel)
-/// must continue to work independently of remote frame counting.
-#[test]
-fn local_barge_in_still_works_without_remote_frames() {
-    let _tts_active = AtomicBool::new(true);
-    let tts_cancel = AtomicBool::new(false);
-
-    // Simulate local STT barge-in (stt.rs after BARGE_IN_DEBOUNCE_FRAMES).
-    tts_cancel.store(true, Ordering::Release);
-
-    assert!(
-        tts_cancel.load(Ordering::Acquire),
-        "local barge-in should set tts_cancel",
     );
 }
 
@@ -785,16 +783,6 @@ fn apply_fade_out_single_sample() {
     assert_eq!(samples[0], 1.0);
 }
 
-/// Sanity-check the per-sentence cushion length: 20 ms at 24 kHz must
-/// land at exactly 480 samples. This is a const computation, so the
-/// real value of this test is documenting *why* 20 ms was chosen — it
-/// covers a typical CoreAudio buffer turnover (256–1024 samples)
-/// without being audible as user-facing latency.
-#[test]
-fn sentence_lead_in_is_sane() {
-    assert_eq!(SENTENCE_LEAD_IN_SAMPLES, 480, "20 ms × 24 kHz");
-}
-
 // ── build_sentence_append_buffer tests ───────────────────────────────────
 
 /// REGRESSION: every chunk needs an onset cushion; synthesized chunks
@@ -812,6 +800,8 @@ fn lead_in_pad_is_present_for_every_sentence_chunk() {
             &mut first,
             vec![0.5_f32; SENTENCE_AUDIO_LEN],
             SILENCE_BUF_LEN,
+            true,
+            true,
         );
 
         assert_eq!(buf.len(), SENTENCE_AUDIO_LEN + SILENCE_BUF_LEN);
@@ -840,11 +830,11 @@ fn lead_in_pad_is_present_for_every_sentence_chunk() {
 #[test]
 fn build_sentence_append_buffer_flips_first_append() {
     let mut first = true;
-    let _ = build_sentence_append_buffer(&mut first, vec![0.5; 100], 2400);
+    let _ = build_sentence_append_buffer(&mut first, vec![0.5; 100], 2400, true, true);
     assert!(!first, "first call must flip the flag");
 
     // Subsequent call: still has a per-sentence lead-in, flag stays false.
-    let buf = build_sentence_append_buffer(&mut first, vec![0.5; 100], 2400);
+    let buf = build_sentence_append_buffer(&mut first, vec![0.5; 100], 2400, true, true);
     assert!(buf[..SENTENCE_LEAD_IN_SAMPLES].iter().all(|&s| s == 0.0));
     assert!(!first);
 }
@@ -853,7 +843,7 @@ fn build_sentence_append_buffer_flips_first_append() {
 #[test]
 fn first_sentence_leading_silence_is_exactly_lead_in() {
     let mut first = true;
-    let buf = build_sentence_append_buffer(&mut first, vec![0.5; 100], 2400);
+    let buf = build_sentence_append_buffer(&mut first, vec![0.5; 100], 2400, true, true);
     assert!(buf[..SENTENCE_LEAD_IN_SAMPLES].iter().all(|&s| s == 0.0));
     assert_eq!(buf[SENTENCE_LEAD_IN_SAMPLES], 0.5);
 }
@@ -863,8 +853,10 @@ fn first_sentence_leading_silence_is_exactly_lead_in() {
 fn sentence_gap_budget_is_preserved() {
     let mut first = true;
     let silence_buf_len = 2400;
-    let first_buf = build_sentence_append_buffer(&mut first, vec![0.5; 100], silence_buf_len);
-    let second_buf = build_sentence_append_buffer(&mut first, vec![0.5; 100], silence_buf_len);
+    let first_buf =
+        build_sentence_append_buffer(&mut first, vec![0.5; 100], silence_buf_len, true, true);
+    let second_buf =
+        build_sentence_append_buffer(&mut first, vec![0.5; 100], silence_buf_len, true, true);
 
     let first_tail = &first_buf[SENTENCE_LEAD_IN_SAMPLES + 100..];
     let second_lead = &second_buf[..SENTENCE_LEAD_IN_SAMPLES];
@@ -877,7 +869,7 @@ fn sentence_gap_budget_is_preserved() {
 #[test]
 fn sentence_append_buffer_is_one_contiguous_source() {
     let mut first = true;
-    let buf = build_sentence_append_buffer(&mut first, vec![0.5; 100], 2400);
+    let buf = build_sentence_append_buffer(&mut first, vec![0.5; 100], 2400, true, true);
 
     assert_eq!(buf.len(), 2400 + 100);
     assert!(buf[..SENTENCE_LEAD_IN_SAMPLES].iter().all(|&s| s == 0.0));
@@ -914,4 +906,80 @@ fn clamp_to_full_scale_clamps_outliers() {
 fn clamp_to_full_scale_empty_buffer() {
     let out = clamp_to_full_scale(Vec::new());
     assert!(out.is_empty());
+}
+
+// ── group_sentences_into_chunks tests ─────────────────────────────────────
+
+fn s(v: &[&str]) -> Vec<String> {
+    v.iter().map(|x| x.to_string()).collect()
+}
+
+/// The first sentence always stands alone — it bounds time-to-first-audio.
+/// Even when the whole message would fit in one chunk, sentence one must
+/// not wait on synthesis of the rest.
+#[test]
+fn chunk_grouping_first_sentence_is_always_alone() {
+    let chunks = group_sentences_into_chunks(&s(&["Hi there.", "Short.", "Tiny."]), 200);
+    assert_eq!(chunks[0], "Hi there.");
+    assert_eq!(chunks.len(), 2);
+    assert_eq!(chunks[1], "Short. Tiny.");
+}
+
+/// Sentences after the first pack greedily up to the char budget, then
+/// spill into a new chunk. Fewer generate() calls = fewer prosody seams.
+#[test]
+fn chunk_grouping_packs_up_to_budget_then_spills() {
+    let a = "A".repeat(50) + ".";
+    let b = "B".repeat(50) + ".";
+    let c = "C".repeat(50) + ".";
+    let d = "D".repeat(50) + ".";
+    // Budget of 110: b+c fits (51+1+51 = 103), adding d (103+1+51) does not.
+    let chunks = group_sentences_into_chunks(&s(&[&a, &b, &c, &d]), 110);
+    assert_eq!(chunks.len(), 3, "chunks: {chunks:?}");
+    assert_eq!(chunks[0], a);
+    assert_eq!(chunks[1], format!("{b} {c}"));
+    assert_eq!(chunks[2], d);
+}
+
+/// A single sentence longer than the coarse budget is passed through here;
+/// the loaded April engine subsequently enforces its exact 50-token limit.
+#[test]
+fn chunk_grouping_oversized_sentence_passes_through() {
+    let long = "word ".repeat(60).trim_end().to_string() + ".";
+    assert!(long.len() > 200);
+    let chunks = group_sentences_into_chunks(&s(&["First.", &long]), 200);
+    assert_eq!(chunks, vec!["First.".to_string(), long]);
+}
+
+/// Single-sentence messages — the common huddle case, since agents are
+/// prompted to send one sentence per message — are unaffected by grouping.
+#[test]
+fn chunk_grouping_single_sentence_unchanged() {
+    let chunks = group_sentences_into_chunks(&s(&["Just one sentence here."]), 200);
+    assert_eq!(chunks, vec!["Just one sentence here.".to_string()]);
+}
+
+/// Empty and whitespace-only entries are dropped, and never produce
+/// empty chunks (which would synthesize as garbage).
+#[test]
+fn chunk_grouping_skips_blank_sentences() {
+    let chunks = group_sentences_into_chunks(&s(&["", "  ", "Real sentence.", "   ", "Two."]), 200);
+    assert_eq!(chunks[0], "Real sentence.");
+    assert_eq!(chunks.len(), 2);
+    assert_eq!(chunks[1], "Two.");
+}
+
+/// Empty input produces no chunks (the worker loop then synthesizes nothing).
+#[test]
+fn chunk_grouping_empty_input() {
+    assert!(group_sentences_into_chunks(&[], 200).is_empty());
+}
+
+/// Chunks joined with a single space preserve each sentence's terminal
+/// punctuation — the model sees natural multi-sentence prose, matching the
+/// shape upstream's ~50-token chunker produces.
+#[test]
+fn chunk_grouping_preserves_punctuation_at_joins() {
+    let chunks = group_sentences_into_chunks(&s(&["Lead.", "Really?", "Yes!", "Good."]), 200);
+    assert_eq!(chunks[1], "Really? Yes! Good.");
 }

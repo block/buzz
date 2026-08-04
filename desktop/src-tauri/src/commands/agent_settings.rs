@@ -42,7 +42,7 @@ pub async fn set_managed_agent_start_on_app_launch(
             save_managed_agents(&app, &records)?;
         }
         for pubkey in &exited_pubkeys {
-            state.clear_session_cache(pubkey);
+            state.clear_agent_session_caches(pubkey);
         }
 
         {
@@ -57,7 +57,13 @@ pub async fn set_managed_agent_start_on_app_launch(
             .find(|record| record.pubkey == pubkey)
             .ok_or_else(|| format!("agent {pubkey} not found"))?;
         let personas = load_personas(&app).unwrap_or_default();
-        build_managed_agent_summary(&app, record, &runtimes, &personas)
+        build_managed_agent_summary(
+            &app,
+            record,
+            &runtimes,
+            &personas,
+            &crate::managed_agents::load_global_agent_config(&app).unwrap_or_default(),
+        )
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
@@ -87,7 +93,7 @@ pub async fn set_managed_agent_auto_restart(
             save_managed_agents(&app, &records)?;
         }
         for pubkey in &exited_pubkeys {
-            state.clear_session_cache(pubkey);
+            state.clear_agent_session_caches(pubkey);
         }
 
         {
@@ -102,7 +108,13 @@ pub async fn set_managed_agent_auto_restart(
             .find(|record| record.pubkey == pubkey)
             .ok_or_else(|| format!("agent {pubkey} not found"))?;
         let personas = load_personas(&app).unwrap_or_default();
-        build_managed_agent_summary(&app, record, &runtimes, &personas)
+        build_managed_agent_summary(
+            &app,
+            record,
+            &runtimes,
+            &personas,
+            &crate::managed_agents::load_global_agent_config(&app).unwrap_or_default(),
+        )
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?

@@ -5,6 +5,7 @@ import type {
   ProjectPullRequest,
   ProjectPullRequestListItem,
 } from "@/features/projects/hooks";
+import { relativeTime } from "@/features/projects/lib/projectsViewHelpers";
 import type { ProjectWorkItemSection } from "@/features/projects/projectWorkItems";
 import {
   resolveUserLabel,
@@ -60,25 +61,6 @@ type ProjectsPullRequestsListProps = {
   viewMode: "grid" | "list";
 };
 
-function formatRelativeTime(createdAt: number) {
-  const elapsedSeconds = Math.max(
-    1,
-    Math.floor(Date.now() / 1_000 - createdAt),
-  );
-  const units = [
-    { label: "year", seconds: 365 * 24 * 60 * 60 },
-    { label: "month", seconds: 30 * 24 * 60 * 60 },
-    { label: "day", seconds: 24 * 60 * 60 },
-    { label: "hour", seconds: 60 * 60 },
-    { label: "minute", seconds: 60 },
-  ];
-  const unit =
-    units.find((item) => elapsedSeconds >= item.seconds) ??
-    units[units.length - 1];
-  const value = Math.max(1, Math.floor(elapsedSeconds / unit.seconds));
-  return `${value} ${unit.label}${value === 1 ? "" : "s"} ago`;
-}
-
 function nextStepLabel(status: ProjectPullRequest["status"]) {
   if (status === "Draft") return "View draft";
   if (status === "Merged") return "View merge";
@@ -103,7 +85,10 @@ function PullRequestGridCard({
   });
 
   return (
-    <Card className="group relative flex min-h-40 flex-col overflow-hidden border-border/60 bg-card p-4 shadow-none transition-colors duration-150 hover:bg-muted/20">
+    <Card
+      className="group relative flex min-h-40 flex-col overflow-hidden border-border/60 bg-transparent p-4 shadow-none transition-colors duration-150 hover:bg-muted/20"
+      data-projects-grid-card
+    >
       <button
         className="absolute inset-0"
         onClick={() => onOpen(project, pullRequest)}
@@ -152,7 +137,7 @@ function PullRequestGridCard({
             <span className="font-medium text-foreground">
               {pullRequest.status}
             </span>
-            <span>created {formatRelativeTime(pullRequest.createdAt)}</span>
+            <span>created {relativeTime(pullRequest.createdAt)}</span>
             <span>
               by{" "}
               <AuthorNameButton
@@ -243,7 +228,7 @@ function PullRequestListRow({
             data-testid="projects-row-date"
             title={new Date(pullRequest.createdAt * 1_000).toLocaleString()}
           >
-            {formatRelativeTime(pullRequest.createdAt)}
+            {relativeTime(pullRequest.createdAt)}
           </span>
           <ProjectListRowMenu label={`More options for ${pullRequest.title}`}>
             <DropdownMenuItem onSelect={() => onOpen(project, pullRequest)}>
@@ -323,7 +308,10 @@ export function ProjectsPullRequestsList({
   return (
     <div className="space-y-3">
       {loadNotice}
-      <div className={PROJECT_LIST_CONTAINER_CLASS}>
+      <div
+        className={PROJECT_LIST_CONTAINER_CLASS}
+        data-testid="projects-list-container"
+      >
         {pullRequests.map(({ project, pullRequest }) => (
           <PullRequestListRow
             key={pullRequest.id}

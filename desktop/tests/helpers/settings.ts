@@ -3,11 +3,13 @@ import { expect, type Page } from "@playwright/test";
 type SettingsSection =
   | "profile"
   | "notifications"
+  | "voice"
   | "agents"
   | "channel-templates"
   | "compute"
   | "appearance"
   | "shortcuts"
+  | "hosted-communities"
   | "tokens"
   | "community-members"
   | "mobile"

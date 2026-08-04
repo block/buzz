@@ -3,8 +3,11 @@ import test from "node:test";
 
 import {
   clearCommunityOnboardingTransaction,
+  isTransactionStillConnecting,
   loadCommunityOnboardingTransaction,
   markCommunityOnboardingComplete,
+  resolveProfileCheckAction,
+  shouldSkipCommunityOnboarding,
   startCommunityOnboarding,
   updateCommunityOnboardingTransaction,
   updateCurrentCommunityOnboardingTransaction,
@@ -146,4 +149,196 @@ test("completion is scoped by relay and pubkey and preserves legacy gate", () =>
     "true",
   );
   assert.equal(storage.getItem("buzz-onboarding-complete.v1:pubkey"), "true");
+});
+
+// ── shouldSkipCommunityOnboarding ────────────────────────────────────────────
+
+/** Minimal Profile stub — only the fields the helper inspects. */
+function makeProfile(hasProfileEvent, overrides = {}) {
+  return {
+    pubkey: "aabbcc",
+    displayName: null,
+    avatarUrl: null,
+    about: null,
+    nip05Handle: null,
+    ownerPubkey: null,
+    hasProfileEvent,
+    ...overrides,
+  };
+}
+
+test("shouldSkipCommunityOnboarding_hasProfileEvent_returnsTrue", () => {
+  assert.equal(
+    shouldSkipCommunityOnboarding(makeProfile(true)),
+    true,
+    "existing kind:0 ⇒ skip onboarding",
+  );
+});
+
+test("shouldSkipCommunityOnboarding_noProfileEvent_returnsFalse", () => {
+  assert.equal(
+    shouldSkipCommunityOnboarding(makeProfile(false)),
+    false,
+    "no kind:0 ⇒ show profile step",
+  );
+});
+
+test("shouldSkipCommunityOnboarding_fetchError_returnsFalse", () => {
+  // fetch error is represented as null — must never block onboarding
+  assert.equal(
+    shouldSkipCommunityOnboarding(null),
+    false,
+    "fetch error ⇒ show profile step (safe fallback)",
+  );
+});
+
+// ── resolveProfileCheckAction — async orchestration ──────────────────────────
+
+/**
+ * Returns a fake scheduleTimeout that captures registered callbacks so tests
+ * can fire or skip them manually without real timers.
+ */
+function makeScheduler() {
+  const callbacks = [];
+  return {
+    schedule: (fn, _ms) => callbacks.push(fn),
+    fireTimeout: () => {
+      const fn = callbacks.shift();
+      if (fn) fn();
+    },
+    pendingCount: () => callbacks.length,
+  };
+}
+
+test("resolveProfileCheckAction_hasProfileEvent_returnsSkipWithProfile", async () => {
+  const profile = makeProfile(true, { pubkey: "aabbcc" });
+  const result = await resolveProfileCheckAction(
+    () => Promise.resolve(profile),
+    10_000,
+    makeScheduler().schedule,
+  );
+  assert.equal(result.action, "skip");
+  assert.equal(result.profile.pubkey, "aabbcc");
+});
+
+test("resolveProfileCheckAction_noProfileEvent_returnsShowProfile", async () => {
+  const result = await resolveProfileCheckAction(
+    () => Promise.resolve(makeProfile(false)),
+    10_000,
+    makeScheduler().schedule,
+  );
+  assert.equal(result.action, "show-profile");
+});
+
+test("resolveProfileCheckAction_fetchRejects_returnsShowProfile", async () => {
+  const result = await resolveProfileCheckAction(
+    () => Promise.reject(new Error("network error")),
+    10_000,
+    makeScheduler().schedule,
+  );
+  assert.equal(result.action, "show-profile");
+});
+
+test("resolveProfileCheckAction_timeout_returnsShowProfile", async () => {
+  // Fetch never settles; scheduler fires the timeout immediately.
+  const scheduler = makeScheduler();
+  const result = await resolveProfileCheckAction(
+    () => new Promise(() => {}), // hangs forever
+    10_000,
+    (fn, ms) => {
+      scheduler.schedule(fn, ms);
+      // Fire synchronously so the test does not wait for a real timer.
+      scheduler.fireTimeout();
+    },
+  );
+  assert.equal(
+    result.action,
+    "show-profile",
+    "timeout ⇒ show-profile (never strands onboarding)",
+  );
+});
+
+test("resolveProfileCheckAction_lateSuccessAfterTimeout_doesNotSkip", async () => {
+  // Fetch resolves AFTER the timeout has already fired.
+  // resolveProfileCheckAction must return show-profile from the timeout path,
+  // and the late fetch result must have no effect.
+  let resolveFetch;
+  const fetchPromise = new Promise((resolve) => {
+    resolveFetch = resolve;
+  });
+
+  const scheduler = makeScheduler();
+  const resultPromise = resolveProfileCheckAction(
+    () => fetchPromise,
+    10_000,
+    scheduler.schedule,
+  );
+
+  // Fire the timeout — race settles with the timeout rejection.
+  scheduler.fireTimeout();
+
+  // Now resolve the fetch with a kind:0 profile.
+  resolveFetch(makeProfile(true));
+
+  const result = await resultPromise;
+  assert.equal(
+    result.action,
+    "show-profile",
+    "late success after timeout must not complete onboarding",
+  );
+});
+
+// ── isTransactionStillConnecting — stale-transaction guard ───────────────────
+
+/**
+ * Builds a minimal transaction stub for testing the guard predicate.
+ * Only `id` and `stage` are inspected by isTransactionStillConnecting.
+ */
+function makeTransaction(id, stage) {
+  return {
+    id,
+    stage,
+    source: "add-community",
+    relayUrl: "wss://relay.example",
+    communityName: "test",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+test("isTransactionStillConnecting_matchingIdAndStage_returnsTrue", () => {
+  assert.equal(
+    isTransactionStillConnecting(makeTransaction("tx-a", "connecting"), "tx-a"),
+    true,
+    "same id + connecting stage → guard passes",
+  );
+});
+
+test("isTransactionStillConnecting_replacedTransaction_returnsFalse", () => {
+  // Transaction B replaced A while the fetch was in flight.
+  // The callback for A must not clear B.
+  assert.equal(
+    isTransactionStillConnecting(makeTransaction("tx-b", "connecting"), "tx-a"),
+    false,
+    "different id (replacement) → guard rejects stale success",
+  );
+});
+
+test("isTransactionStillConnecting_cancelWithNoReplacement_returnsFalse", () => {
+  // User cancelled without starting a new transaction; ref is null.
+  assert.equal(
+    isTransactionStillConnecting(null, "tx-a"),
+    false,
+    "null ref (cancel without replacement) → guard rejects stale success",
+  );
+});
+
+test("isTransactionStillConnecting_stagePastConnecting_returnsFalse", () => {
+  // Fallback already advanced the transaction to 'profile' before the skip
+  // result arrived — double-completion must not occur.
+  assert.equal(
+    isTransactionStillConnecting(makeTransaction("tx-a", "profile"), "tx-a"),
+    false,
+    "stage advanced past connecting → guard rejects late action",
+  );
 });
