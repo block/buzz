@@ -269,18 +269,29 @@ fn findings_generation(path: &Path) -> Result<u64, String> {
 
 #[cfg(windows)]
 fn findings_generation(path: &Path) -> Result<u64, String> {
-    use std::os::windows::fs::MetadataExt as _;
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
 
-    path.metadata()
-        .map(|metadata| {
+    File::open(path)
+        .and_then(|file| {
+            let mut info = BY_HANDLE_FILE_INFORMATION::default();
+            // SAFETY: `file` owns a valid handle for the duration of the call,
+            // and `info` points to writable storage of the required type.
+            let result = unsafe {
+                GetFileInformationByHandle(file.as_raw_handle().cast(), &mut info)
+            };
+            if result == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+
             // A rename preserves timestamps on Windows. The volume/file index
             // identifies the replacement file instead, matching Unix inode
             // semantics and invalidating stale cursors after retention rotates.
-            let volume = u64::from(metadata.volume_serial_number().unwrap_or_default());
-            let index = metadata
-                .file_index()
-                .unwrap_or_else(|| metadata.creation_time() ^ metadata.file_size().rotate_left(17));
-            (index ^ volume.rotate_left(32)) & CURSOR_GENERATION_MASK
+            let volume = u64::from(info.dwVolumeSerialNumber);
+            let index = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
+            Ok((index ^ volume.rotate_left(32)) & CURSOR_GENERATION_MASK)
         })
         .or_else(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
