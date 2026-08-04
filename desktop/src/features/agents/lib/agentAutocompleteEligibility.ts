@@ -54,26 +54,75 @@ export function getMentionableAgentPubkeys({
   return pubkeys;
 }
 
+/**
+ * Whether an autocomplete candidate that is an agent identity may be shown.
+ *
+ * Agents are hidden unless we can reach them, so a mention never silently
+ * fails. Two things make an agent reachable by the current user:
+ *
+ * 1. It is in this machine's managed-agent list (we can spawn it on demand).
+ * 2. It is a member of this channel **and** the current user owns it. #1243
+ *    set out to "scope mention/add autocomplete to reachable identities" and
+ *    described an eligible agent as "my managed/owned agent", but only the
+ *    managed list was ever consulted. Membership supplies the reachability
+ *    evidence that ownership alone does not: the agent is in the channel and
+ *    answering, so it is running somewhere. Ownership then supplies the
+ *    permission, and it does not depend on which machine hosts the process —
+ *    an agent left on the default `respond_to: owner-only` accepts its owner
+ *    by definition, so hiding it from that owner is backwards.
+ *
+ * Deliberately NOT extended to non-member owned agents: a profile-only agent
+ * we own has no evidence of running anywhere, and #1243 hides it on purpose.
+ *
+ * `currentPubkey` is optional so existing callers keep their behaviour; pass
+ * it to enable the ownership branch.
+ */
 export function isAgentIdentityInManagedList(
-  candidate: { isAgent?: boolean; pubkey: string },
+  candidate: {
+    isAgent?: boolean;
+    isMember?: boolean;
+    pubkey: string;
+    ownerPubkey?: string | null;
+  },
   managedAgentPubkeys: ReadonlySet<string>,
+  currentPubkey?: string | null,
 ) {
+  if (candidate.isAgent !== true) {
+    return true;
+  }
+  if (managedAgentPubkeys.has(normalizePubkey(candidate.pubkey))) {
+    return true;
+  }
   return (
-    candidate.isAgent !== true ||
-    managedAgentPubkeys.has(normalizePubkey(candidate.pubkey))
+    candidate.isMember === true &&
+    isOwnedByCurrentUser(candidate.ownerPubkey, currentPubkey)
   );
+}
+
+function isOwnedByCurrentUser(
+  ownerPubkey: string | null | undefined,
+  currentPubkey: string | null | undefined,
+) {
+  if (!ownerPubkey || !currentPubkey) {
+    return false;
+  }
+  return normalizePubkey(ownerPubkey) === normalizePubkey(currentPubkey);
 }
 
 export function shouldHideAgentFromMentions({
   isAgent,
   isMember,
   pubkey,
+  ownerPubkey,
+  currentPubkey,
   mentionableAgentPubkeys,
   directoryAgentPubkeys,
 }: {
   isAgent: boolean;
   isMember: boolean;
   pubkey: string;
+  ownerPubkey?: string | null;
+  currentPubkey?: string | null;
   mentionableAgentPubkeys: ReadonlySet<string>;
   directoryAgentPubkeys: ReadonlySet<string>;
 }) {
@@ -83,6 +132,14 @@ export function shouldHideAgentFromMentions({
   if (mentionableAgentPubkeys.has(normalized)) return false;
   // Non-member, non-invocable => hide (preserves prior behavior).
   if (!isMember) return true;
+  // A member we own => invocable, wherever its process runs.
+  // `mentionableAgentPubkeys` only admits relay agents whose `respond_to` is
+  // `anyone` or an allowlist naming us, so an agent left on the default
+  // `owner-only` never lands there — yet `owner-only` is precisely the mode
+  // that always accepts its owner. Without this, the directory check below
+  // reads that agent's kind:10100 entry as an explicit not-invocable signal
+  // and hides it from the one person guaranteed to be able to invoke it.
+  if (isOwnedByCurrentUser(ownerPubkey, currentPubkey)) return false;
   // Member (Option B): hide only when we have an explicit not-invocable
   // signal — a relay directory (kind:10100) entry that excludes us.
   // Unknown invocability (not in directory) => show.
@@ -95,6 +152,91 @@ export function shouldHideAgentFromMentions({
   // mentionability is still loading could be hidden prematurely — keep the
   // two sets derived from the same query.
   return directoryAgentPubkeys.has(normalized);
+}
+
+/**
+ * Agent pubkeys the current user can address even though the relay directory
+ * never marks them invocable: in-channel agents they own.
+ *
+ * `getMentionableAgentPubkeys` only admits `respond_to: anyone` or an
+ * allowlist naming us, so an `owner-only` agent is absent from it. That set
+ * also drives downstream agent classification (`isAgentPubkey`), which decides
+ * whether a sent mention is kept as the persistent agent audience. Offering
+ * such an agent in autocomplete without adding it here would surface it and
+ * then fail to treat it as an agent once addressed.
+ *
+ * Derived from the same ownership rule as `isAgentIdentityInManagedList`, so
+ * eligibility and classification cannot drift apart.
+ */
+export function getOwnedMemberAgentPubkeys(
+  candidates: readonly {
+    isAgent?: boolean;
+    isMember?: boolean;
+    pubkey?: string;
+    ownerPubkey?: string | null;
+  }[],
+  currentPubkey?: string | null,
+) {
+  const pubkeys = new Set<string>();
+  for (const candidate of candidates) {
+    if (
+      candidate.isAgent !== true ||
+      candidate.isMember !== true ||
+      !candidate.pubkey
+    ) {
+      continue;
+    }
+    if (isOwnedByCurrentUser(candidate.ownerPubkey, currentPubkey)) {
+      pubkeys.add(normalizePubkey(candidate.pubkey));
+    }
+  }
+  return pubkeys;
+}
+
+/**
+ * The single eligibility decision for an @-mention autocomplete candidate.
+ *
+ * The two predicates above encode one policy but are ordered: the managed-list
+ * gate runs first and can reject a candidate before the invocability gate ever
+ * applies its "invocable => show" rule. Composing them here keeps that order
+ * explicit and in one place, so a caller cannot chain them the other way round
+ * or apply only half the policy.
+ */
+export function isAgentMentionEligible({
+  candidate,
+  currentPubkey,
+  directoryAgentPubkeys,
+  managedAgentPubkeys,
+  mentionableAgentPubkeys,
+}: {
+  candidate: {
+    isAgent?: boolean;
+    isMember?: boolean;
+    pubkey: string;
+    ownerPubkey?: string | null;
+  };
+  currentPubkey?: string | null;
+  directoryAgentPubkeys: ReadonlySet<string>;
+  managedAgentPubkeys: ReadonlySet<string>;
+  mentionableAgentPubkeys: ReadonlySet<string>;
+}) {
+  if (candidate.isAgent !== true) {
+    return true;
+  }
+  if (
+    !isAgentIdentityInManagedList(candidate, managedAgentPubkeys, currentPubkey)
+  ) {
+    return false;
+  }
+  return !shouldHideAgentFromMentions({
+    currentPubkey,
+    directoryAgentPubkeys,
+    isAgent: true,
+    isMember: candidate.isMember === true,
+    mentionableAgentPubkeys,
+    ownerPubkey: candidate.ownerPubkey,
+    pubkey: candidate.pubkey,
+  });
 }
 
 type AgentAutocompleteCandidate = {

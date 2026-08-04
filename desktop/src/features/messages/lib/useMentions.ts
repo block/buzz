@@ -15,9 +15,9 @@ import {
   coalesceAgentAutocompleteCandidates,
   coalesceAutocompleteCandidatesByKey,
   getMentionableAgentPubkeys,
+  getOwnedMemberAgentPubkeys,
   getSharedChannelIds,
-  isAgentIdentityInManagedList,
-  shouldHideAgentFromMentions,
+  isAgentMentionEligible,
 } from "@/features/agents/lib/agentAutocompleteEligibility";
 import {
   useInfiniteUserSearchQuery,
@@ -220,7 +220,6 @@ export function useMentions(
     }
     return lookup;
   }, [managedAgentsQuery.data, personasQuery.data]);
-  const knownAgentPubkeys = mentionableAgentPubkeys;
   const activePersonas = React.useMemo(
     () => (personasQuery.data ?? []).filter((persona) => persona.isActive),
     [personasQuery.data],
@@ -246,16 +245,13 @@ export function useMentions(
       if (isArchivedDiscovery(pubkey)) {
         return;
       }
-      if (!isAgentIdentityInManagedList(candidate, managedAgentPubkeys)) {
-        return;
-      }
       if (
-        shouldHideAgentFromMentions({
-          isAgent: candidate.isAgent === true,
-          isMember: candidate.isMember === true,
-          pubkey,
-          mentionableAgentPubkeys,
+        !isAgentMentionEligible({
+          candidate: { ...candidate, pubkey },
+          currentPubkey,
           directoryAgentPubkeys,
+          managedAgentPubkeys,
+          mentionableAgentPubkeys,
         })
       ) {
         return;
@@ -430,6 +426,18 @@ export function useMentions(
     relayAgentNamesByPubkey,
     relayAgentsQuery.data,
   ]);
+
+  // Autocomplete admits in-channel agents we own even when the relay directory
+  // never marks them invocable (`respond_to: owner-only`). Downstream agent
+  // classification reads this set, so it has to admit them too — otherwise an
+  // offered agent stops counting as one the moment it is addressed.
+  const knownAgentPubkeys = React.useMemo(() => {
+    const owned = getOwnedMemberAgentPubkeys(mentionCandidates, currentPubkey);
+    if (owned.size === 0) {
+      return mentionableAgentPubkeys;
+    }
+    return new Set([...mentionableAgentPubkeys, ...owned]);
+  }, [currentPubkey, mentionCandidates, mentionableAgentPubkeys]);
 
   const mentionCandidatesWithTeams = React.useMemo(
     () => [
