@@ -193,8 +193,8 @@ export function AppShell() {
   // guard here would drop managed-agent coverage during startup.
   useAgentObserverIngestion();
   // Kind 24200 is relay-ephemeral, so reconciliation runs eagerly (not
-  // deferred) and unconditionally repairs the DB subscription on internal
-  // builds — otherwise frames emitted before the listener opens are lost.
+  // deferred): seeds kind 24200 for fresh identities, no-ops for explicit
+  // opt-outs. Frames before the listener opens are permanently lost.
   const observerReconciled = useObserverArchiveReconciliation(
     identityQuery.data?.pubkey,
   );

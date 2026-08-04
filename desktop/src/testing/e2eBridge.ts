@@ -2936,8 +2936,8 @@ let mockManagedAgentRuntimes: MockManagedAgentRuntimeRow[] = [];
 // mutated by `create_save_subscription` / `delete_save_subscription` /
 // `merge_save_subscription_kinds` / `remove_save_subscription_kind` exactly
 // as the real SQLite-backed Rust commands would (see `archive/store.rs`).
-// This lets E2E specs drive the fresh-internal-repair path (start from `[]`,
-// reconcile, observe a kind-24200 row appear) and OSS toggle ON/OFF, neither
+// This lets E2E specs drive the default-on seeding path (start from `[]`,
+// reconcile, observe a kind-24200 row appear) and toggle ON/OFF, neither
 // of which an immutable seed can represent.
 type MockSaveSubscriptionRow = {
   scope_type: string;
@@ -12575,7 +12575,7 @@ export function maybeInstallE2eTauriMocks() {
       // install); create/merge/delete/remove mutate it with the same
       // union / delete-row-when-empty semantics as the real Rust commands
       // (see `archive/store.rs::merge_owner_p_kinds` / `remove_owner_p_kind`)
-      // so specs can drive fresh-internal-repair and toggle ON/OFF flows.
+      // so specs can drive default-on seeding and toggle ON/OFF flows.
       case "list_save_subscriptions": {
         const win = window as unknown as Record<string, unknown>;
         if (!win.__BUZZ_E2E_IPC_COUNTERS__) {

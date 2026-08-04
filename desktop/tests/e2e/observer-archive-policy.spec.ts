@@ -65,9 +65,20 @@ test.describe("observer archive policy — Settings toggle", () => {
   test("explicit opt-out persists across reload: toggle stays OFF", async ({
     page,
   }) => {
-    // Simulate a user who already clicked OFF and whose opt-out is persisted
-    // (no owner_p/24200 row in the DB). The toggle must remain unchecked
-    // and enabled (user can re-enable) rather than re-seeding on load.
+    // Simulate a user who previously clicked OFF: the identity-scoped opt-out
+    // is recorded in localStorage ("0") and the owner_p/24200 subscription row
+    // is absent.  Reconciliation must honour the stored choice and leave the
+    // toggle unchecked (user can re-enable via the toggle).
+    const MOCK_PUBKEY = "deadbeef".repeat(8);
+    await page.addInitScript(
+      ({ storageKey }) => {
+        window.localStorage.setItem(storageKey, "0");
+      },
+      {
+        storageKey: `buzz:observer-archive-default-seeded:${MOCK_PUBKEY}`,
+      },
+    );
+
     await installMockBridge(page, {
       saveSubscriptions: [],
     });
@@ -79,9 +90,12 @@ test.describe("observer archive policy — Settings toggle", () => {
     await expect(toggle).not.toBeChecked();
   });
 
-  test("no subscriptions: toggle ON merges kind 24200, toggle OFF removes it", async ({
+  test("no subscriptions, no stored choice: defaults ON then OFF removes, ON re-creates", async ({
     page,
   }) => {
+    // A fresh identity with no stored choice and an empty subscription table
+    // must be seeded to ON by reconciliation.  Thereafter the toggle must
+    // function: OFF removes kind 24200, ON re-creates it.
     await installMockBridge(page, {
       saveSubscriptions: [],
     });
@@ -89,17 +103,15 @@ test.describe("observer archive policy — Settings toggle", () => {
     const card = await openLocalArchiveSettings(page);
     const toggle = card.getByTestId("local-archive-observer-toggle");
     await expect(toggle).toBeVisible({ timeout: 5_000 });
-    await expect(toggle).not.toBeChecked();
 
-    // ON: merges kind 24200 into a fresh owner_p row.
-    await toggle.click();
+    // Default-on: reconciliation seeds the row, toggle must be checked.
     await expect(toggle).toBeChecked();
 
-    // OFF: removes kind 24200 (row-delete-on-empty edge).
+    // OFF: removes kind 24200.
     await toggle.click();
     await expect(toggle).not.toBeChecked();
 
-    // ON again: re-creates the row, proving the delete was real.
+    // ON again: re-creates the row from empty.
     await toggle.click();
     await expect(toggle).toBeChecked();
   });
