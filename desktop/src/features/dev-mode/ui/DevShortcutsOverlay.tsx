@@ -27,6 +27,7 @@ const SHORTCUT_GROUPS: {
       { keys: "⌘T", action: "new side chat in the open channel" },
       { keys: "⌘⇧T", action: "new tab (sub-channel)" },
       { keys: "⇧⌘[ / ⇧⌘]", action: "previous / next tab" },
+      { keys: "⌘1 – ⌘9", action: "jump to tab (⌘9: last tab)" },
       { keys: "⌘⇧D", action: "switch to standard ui" },
     ],
   },
