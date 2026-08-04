@@ -104,7 +104,11 @@ export function AppSidebarPrimaryMenu({
             tooltip="Inbox"
             type="button"
           >
-            <Inbox className="h-4 w-4" />
+            <Inbox
+              className={
+                selectedView !== "home" ? "h-4 w-4 opacity-80" : "h-4 w-4"
+              }
+            />
             <SidebarMenuLabel
               className={selectedView !== "home" ? "opacity-80" : undefined}
             >
@@ -157,7 +161,11 @@ export function AppSidebarPrimaryMenu({
             tooltip="Agents"
             type="button"
           >
-            <Bot className="h-4 w-4" />
+            <Bot
+              className={
+                selectedView !== "agents" ? "h-4 w-4 opacity-80" : "h-4 w-4"
+              }
+            />
             <SidebarMenuLabel
               className={selectedView !== "agents" ? "opacity-80" : undefined}
             >

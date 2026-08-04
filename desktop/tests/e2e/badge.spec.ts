@@ -163,6 +163,7 @@ test("light mode reserves full opacity for unread text and avatars", async ({
     "opacity",
     "0.8",
   );
+  await expect(inbox.locator("svg")).toHaveCSS("opacity", "0.8");
   await expect(directMessage).toHaveCSS("opacity", "1");
   await expect(directMessage.locator("[data-sidebar-row-label]")).toHaveCSS(
     "opacity",
@@ -203,6 +204,10 @@ test("dark mode keeps selected labels regular and channel-level unread labels bo
   await expect(
     page.getByTestId("open-agents-view").locator("[data-sidebar=menu-label]"),
   ).toHaveCSS("opacity", "0.8");
+  await expect(page.getByTestId("open-agents-view").locator("svg")).toHaveCSS(
+    "opacity",
+    "0.8",
+  );
 
   await page.getByTestId("channel-general").click();
   await expect(inbox).toHaveCSS("opacity", "1");
@@ -225,6 +230,9 @@ test("dark mode keeps selected labels regular and channel-level unread labels bo
     .getByTestId("channel-engineering")
     .locator("[data-sidebar-row-label]");
   await expect(engineeringLabel).toHaveCSS("opacity", "0.8");
+  await expect(
+    page.getByTestId("channel-engineering").locator("svg"),
+  ).toHaveCSS("opacity", "0.8");
   await expect(unreadChannel.locator("[data-sidebar-row-label]")).toHaveCSS(
     "opacity",
     "1",

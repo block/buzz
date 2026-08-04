@@ -214,10 +214,12 @@ function DmChannelIcon({
 
 function SidebarChannelIcon({
   channel,
+  className,
   dmParticipants,
   presenceStatus,
 }: {
   channel: Channel;
+  className?: string;
   dmParticipants?: SidebarDmParticipant[];
   presenceStatus?: PresenceStatus;
 }) {
@@ -238,14 +240,14 @@ function SidebarChannelIcon({
   }
 
   if (channel.visibility === "private") {
-    return <Lock className="h-4 w-4" />;
+    return <Lock className={cn("h-4 w-4", className)} />;
   }
 
   if (channel.channelType === "forum") {
-    return <FileText className="h-4 w-4" />;
+    return <FileText className={cn("h-4 w-4", className)} />;
   }
 
-  return <Hash className="h-4 w-4" />;
+  return <Hash className={cn("h-4 w-4", className)} />;
 }
 
 export function ChannelMenuButton({
@@ -288,6 +290,14 @@ export function ChannelMenuButton({
     (hasSidebarUnreadProjections
       ? unreadThreadChannelIds.has(channel.id)
       : hasUnread);
+  const inactiveContentOpacity = cn(
+    !isActive && !hasTopLevelUnread && !isMuted && "opacity-80",
+    !isActive &&
+      isMuted &&
+      !hasTopLevelUnread &&
+      !hasThreadUnread &&
+      "opacity-50 dark:opacity-45",
+  );
 
   const button = (
     <SidebarMenuButton
@@ -308,19 +318,14 @@ export function ChannelMenuButton({
     >
       <SidebarChannelIcon
         channel={channel}
+        className={
+          channel.channelType === "dm" ? undefined : inactiveContentOpacity
+        }
         dmParticipants={dmParticipants}
         presenceStatus={presenceStatus}
       />
       <span
-        className={cn(
-          "min-w-0 flex-1 truncate",
-          !isActive && !hasTopLevelUnread && !isMuted && "opacity-80",
-          !isActive &&
-            isMuted &&
-            !hasTopLevelUnread &&
-            !hasThreadUnread &&
-            "opacity-50 dark:opacity-45",
-        )}
+        className={cn("min-w-0 flex-1 truncate", inactiveContentOpacity)}
         data-sidebar-row-label
       >
         {resolvedLabel}

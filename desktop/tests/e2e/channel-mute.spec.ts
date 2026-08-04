@@ -86,6 +86,7 @@ test.describe("channel muting", () => {
       "opacity",
       "0.5",
     );
+    await expect(engRow.locator("svg")).toHaveCSS("opacity", "0.5");
     await expect(engRow.locator("svg.lucide-bell-off")).toHaveCount(1);
   });
 
