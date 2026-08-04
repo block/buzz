@@ -13,10 +13,13 @@ import {
   PopoverTrigger,
 } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import type { AudioInputDevice } from "../lib/useAudioDevices";
 
 type VoiceInputMode = "push_to_talk" | "voice_activity";
 
 type MicControlsProps = {
+  /** Compact split-button treatment for the sidebar huddle card. */
+  compact?: boolean;
   isMuted: boolean;
   onToggleMute: () => void;
   isPttMode: boolean;
@@ -24,7 +27,7 @@ type MicControlsProps = {
   micConnected: boolean;
   micLevel: number;
   onSelectVoiceInputMode: (mode: VoiceInputMode) => void | Promise<void>;
-  audioDevices: MediaDeviceInfo[];
+  audioDevices: AudioInputDevice[];
   selectedDeviceId: string;
   onSelectDevice: (id: string) => void;
   micGain: number;
@@ -86,6 +89,7 @@ function usePrefersReducedMotion(): boolean {
 }
 
 export function MicControls({
+  compact = false,
   isMuted,
   onToggleMute,
   isPttMode,
@@ -116,12 +120,24 @@ export function MicControls({
       : isPttMode
         ? "Force mute (overrides PTT)"
         : "Mute microphone";
+  const iconButtonClass = compact
+    ? "h-8 w-8 shrink-0 rounded-l-md rounded-r-none px-0 py-0 text-sidebar-foreground/70 !shadow-none hover:bg-sidebar-foreground/5 hover:text-sidebar-foreground/70"
+    : splitIconButtonClass;
+  const chevronButtonClass = compact
+    ? "buzz-huddle-split-chevron group h-8 w-5 shrink-0 rounded-l-none rounded-r-md border-l border-sidebar-border/80 px-0.5 py-0 text-sidebar-foreground/70 !shadow-none hover:bg-sidebar-foreground/5 hover:text-sidebar-foreground/70"
+    : splitChevronButtonClass;
+  const compactMutedClass =
+    compact && (isMuted || micUnavailable)
+      ? "bg-destructive text-white hover:bg-[color-mix(in_srgb,hsl(var(--destructive))_92%,white)] hover:text-white"
+      : null;
 
   return (
     <Popover>
       <div
         className={cn(
           "flex items-center rounded-md",
+          compact &&
+            "overflow-hidden border border-sidebar-border/80 bg-transparent text-sidebar-foreground/70 shadow-none",
           isPttMode &&
             pttActive &&
             !isMuted &&
@@ -136,7 +152,8 @@ export function MicControls({
               aria-label={micButtonLabel}
               aria-pressed={micConnected ? isMuted : true}
               className={cn(
-                splitIconButtonClass,
+                iconButtonClass,
+                compactMutedClass,
                 !isMuted && !micUnavailable && "buzz-huddle-split-main",
               )}
               onClick={() => {
@@ -144,7 +161,13 @@ export function MicControls({
                 onToggleMute();
               }}
               size="icon"
-              variant={isMuted || micUnavailable ? "destructive" : "secondary"}
+              variant={
+                compact
+                  ? "ghost"
+                  : isMuted || micUnavailable
+                    ? "destructive"
+                    : "secondary"
+              }
             >
               {isMuted || micUnavailable ? (
                 <MicOff className="h-4 w-4" />
@@ -162,11 +185,11 @@ export function MicControls({
         <PopoverTrigger asChild>
           <Button
             aria-label="Audio settings"
-            className={splitChevronButtonClass}
+            className={chevronButtonClass}
             size="icon"
-            variant="secondary"
+            variant={compact ? "ghost" : "secondary"}
           >
-            {showMicMeter ? (
+            {showMicMeter && !compact ? (
               <span
                 aria-hidden="true"
                 className="relative flex h-5 w-5 items-center justify-center"

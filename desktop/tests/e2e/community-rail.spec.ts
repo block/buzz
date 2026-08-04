@@ -51,6 +51,15 @@ test.describe("community rail", () => {
 
     const rail = page.getByTestId("community-rail");
     await expect(rail).toBeVisible();
+    await expect(page.getByTestId("app-sidebar-layer")).toHaveCSS(
+      "z-index",
+      "10",
+    );
+    await expect(page.getByTestId("app-sidebar-layer")).toHaveCSS(
+      "overflow",
+      "visible",
+    );
+    await expect(rail).toHaveCSS("z-index", "0");
 
     const buttonA = page.getByTestId(`community-rail-button-${COMMUNITY_A.id}`);
     const buttonB = page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`);
