@@ -57,10 +57,21 @@ export function getMentionableAgentPubkeys({
 export function isAgentIdentityInManagedList(
   candidate: { isAgent?: boolean; pubkey: string },
   managedAgentPubkeys: ReadonlySet<string>,
+  mentionableAgentPubkeys: ReadonlySet<string> = new Set(),
 ) {
+  if (candidate.isAgent !== true) {
+    return true;
+  }
+  const normalized = normalizePubkey(candidate.pubkey);
+  // An agent that is invocable via the relay directory (kind:10100 profile
+  // with respond_to + a shared channel) is a valid mention target even when
+  // this machine's local registry has no record of it — the agent may be
+  // hosted by another desktop. Without this, cross-device agent mentions
+  // are impossible: the local-registry gate vetoes every remote agent
+  // before eligibility is ever consulted.
   return (
-    candidate.isAgent !== true ||
-    managedAgentPubkeys.has(normalizePubkey(candidate.pubkey))
+    managedAgentPubkeys.has(normalized) ||
+    mentionableAgentPubkeys.has(normalized)
   );
 }
 

@@ -162,6 +162,40 @@ test("isAgentIdentityInManagedList: keeps people and only current managed agent 
   );
 });
 
+test("isAgentIdentityInManagedList: keeps directory-invocable agents missing from the local registry", () => {
+  const managedAgentPubkeys = new Set([PUB_A]);
+  const mentionableAgentPubkeys = new Set([PUB_B]);
+
+  // Hosted by another machine but invocable via its kind:10100 profile —
+  // must survive the gate or cross-device mentions are impossible.
+  assert.equal(
+    isAgentIdentityInManagedList(
+      { isAgent: true, pubkey: PUB_B },
+      managedAgentPubkeys,
+      mentionableAgentPubkeys,
+    ),
+    true,
+  );
+  // Mentionable lookup is normalized like the managed lookup.
+  assert.equal(
+    isAgentIdentityInManagedList(
+      { isAgent: true, pubkey: PUB_B.toUpperCase() },
+      managedAgentPubkeys,
+      mentionableAgentPubkeys,
+    ),
+    true,
+  );
+  // Unknown to both the registry and the directory still hides.
+  assert.equal(
+    isAgentIdentityInManagedList(
+      { isAgent: true, pubkey: PUB_C },
+      managedAgentPubkeys,
+      mentionableAgentPubkeys,
+    ),
+    false,
+  );
+});
+
 test("shouldHideAgentFromMentions: never hides non-agents", () => {
   assert.equal(
     shouldHideAgentFromMentions({
