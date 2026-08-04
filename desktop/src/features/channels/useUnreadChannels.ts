@@ -827,9 +827,9 @@ export function useUnreadChannels(
     relayClient,
   ]);
 
-  // Unread = channels (excluding active) that have either been manually
-  // marked unread this session, or whose observed latest external trigger
-  // timestamp is strictly newer than their NIP-RS read marker.
+  // Unread = inactive channels, plus any channel manually marked unread this
+  // session. A manually marked active channel must remain visible as unread
+  // until the user explicitly marks it read again.
   // High-priority unread = DMs or channels with a mention/broadcast newer
   // than the read marker. Forced-unread channels are dot tier only (not
   // high-priority). Both sets share identical deps and always invalidate
@@ -854,12 +854,11 @@ export function useUnreadChannels(
       let unreadChannelNotificationCount = 0;
 
       for (const channel of channels) {
-        if (channel.id === activeChannelId) continue;
-
         const isForcedUnread = Object.hasOwn(
           forcedUnreadRef.current,
           channel.id,
         );
+        if (channel.id === activeChannelId && !isForcedUnread) continue;
 
         const observedEvents = observedUnreadEventsByChannelRef.current.get(
           channel.id,

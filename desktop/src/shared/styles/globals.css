@@ -30,3 +30,6 @@
    Must stay below every `@import`: CSS requires `@import` to precede other
    at-rules, so placing this above them silently drops the rest of the sheet. */
 @custom-variant hover (&:hover);
+/* The app persists its selected theme on the root `.dark` class. Use that
+   class, rather than the system preference, for every `dark:` utility. */
+@custom-variant dark (&:where(.dark, .dark *));
