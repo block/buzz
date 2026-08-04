@@ -131,6 +131,7 @@ class ChannelDetailPage extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final composerDockHeight = useState(0.0);
+    final typingIndicatorHeight = useState(0.0);
     final sendMessage = ref.read(sendMessageProvider);
     final detailsAsync = ref.watch(channelDetailsProvider(channel.id));
     final channelsAsync = ref.watch(channelsProvider);
@@ -461,7 +462,8 @@ class ChannelDetailPage extends HookConsumerWidget {
                               appBarTitleContentHeight:
                                   appBarTitleContentHeight,
                               composerBottomInset: showsComposer
-                                  ? composerDockHeight.value
+                                  ? composerDockHeight.value +
+                                        typingIndicatorHeight.value
                                   : 0,
                             );
                           },
@@ -487,6 +489,36 @@ class ChannelDetailPage extends HookConsumerWidget {
             ],
           ),
           if (showsComposer)
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: composerDockHeight.value,
+              child: ComposerDockSizeReporter(
+                key: const ValueKey('channel-typing-overlay'),
+                onHeightChanged: (height) {
+                  if ((typingIndicatorHeight.value - height).abs() < 0.5) {
+                    return;
+                  }
+                  typingIndicatorHeight.value = height;
+                },
+                child: IgnorePointer(
+                  child: AnimatedSwitcher(
+                    duration: MediaQuery.disableAnimationsOf(context)
+                        ? Duration.zero
+                        : const Duration(milliseconds: 180),
+                    child: typingEntries.isEmpty
+                        ? const SizedBox.shrink(
+                            key: ValueKey('channel-typing-hidden'),
+                          )
+                        : ChannelTypingIndicator(
+                            key: const ValueKey('channel-typing-visible'),
+                            entries: typingEntries,
+                          ),
+                  ),
+                ),
+              ),
+            ),
+          if (showsComposer)
             Align(
               alignment: Alignment.bottomCenter,
               child: ComposerDockSizeReporter(
@@ -495,19 +527,11 @@ class ChannelDetailPage extends HookConsumerWidget {
                   if ((composerDockHeight.value - height).abs() < 0.5) return;
                   composerDockHeight.value = height;
                 },
+                // Keep remote typing status outside the editable dock. Its
+                // appearance must not invalidate iOS's native Paste menu.
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    AnimatedSize(
-                      duration: MediaQuery.disableAnimationsOf(context)
-                          ? Duration.zero
-                          : const Duration(milliseconds: 180),
-                      curve: Curves.easeOutCubic,
-                      alignment: Alignment.bottomCenter,
-                      child: typingEntries.isEmpty
-                          ? const SizedBox.shrink()
-                          : ChannelTypingIndicator(entries: typingEntries),
-                    ),
                     ComposeBar(
                       channelId: channel.id,
                       channelName: resolvedChannel.isDm

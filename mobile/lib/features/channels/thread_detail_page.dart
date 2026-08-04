@@ -60,6 +60,7 @@ class ThreadDetailPage extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final composerDockHeight = useState(0.0);
+    final typingIndicatorHeight = useState(0.0);
     final sendMessage = ref.read(sendMessageProvider);
     // Relay thread queries are keyed by the outermost root, even when this
     // page displays a nested branch. Query that root, then select this head's
@@ -364,7 +365,10 @@ class ThreadDetailPage extends HookConsumerWidget {
                       left: Grid.gutter,
                       right: Grid.gutter,
                       top: frostedAppBarHeight(context),
-                      bottom: Grid.xs + composerDockHeight.value,
+                      bottom:
+                          Grid.xs +
+                          composerDockHeight.value +
+                          typingIndicatorHeight.value,
                     ),
                     itemCount: replies.length + 1, // +1 for thread head
                     itemBuilder: (context, index) {
@@ -506,24 +510,47 @@ class ThreadDetailPage extends HookConsumerWidget {
             ],
           ),
           if (isMember && !isArchived)
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: composerDockHeight.value,
+              child: ComposerDockSizeReporter(
+                key: const ValueKey('thread-typing-overlay'),
+                onHeightChanged: (height) {
+                  if ((typingIndicatorHeight.value - height).abs() < 0.5) {
+                    return;
+                  }
+                  typingIndicatorHeight.value = height;
+                },
+                child: IgnorePointer(
+                  child: AnimatedSwitcher(
+                    duration: MediaQuery.disableAnimationsOf(context)
+                        ? Duration.zero
+                        : const Duration(milliseconds: 180),
+                    child: threadTyping.isEmpty
+                        ? const SizedBox.shrink(
+                            key: ValueKey('thread-typing-hidden'),
+                          )
+                        : ChannelTypingIndicator(
+                            key: const ValueKey('thread-typing-visible'),
+                            entries: threadTyping,
+                          ),
+                  ),
+                ),
+              ),
+            ),
+          if (isMember && !isArchived)
             Align(
               alignment: Alignment.bottomCenter,
               child: ComposerDockSizeReporter(
                 key: const ValueKey('thread-composer-dock'),
                 onHeightChanged: updateComposerDockHeight,
+                // The typing indicator is an independent overlay above this
+                // dock. Remote typing updates must not resize an editable
+                // ancestor: iOS dismisses its native Paste menu on that churn.
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    AnimatedSize(
-                      duration: MediaQuery.disableAnimationsOf(context)
-                          ? Duration.zero
-                          : const Duration(milliseconds: 180),
-                      curve: Curves.easeOutCubic,
-                      alignment: Alignment.bottomCenter,
-                      child: threadTyping.isEmpty
-                          ? const SizedBox.shrink()
-                          : ChannelTypingIndicator(entries: threadTyping),
-                    ),
                     ComposeBar(
                       channelId: channelId,
                       hintText: 'Reply in thread\u2026',

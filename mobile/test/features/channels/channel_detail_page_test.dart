@@ -163,6 +163,7 @@ NostrEvent _edit({
 Widget _buildTestable({
   required List<NostrEvent> messages,
   List<TypingEntry> typing = const [],
+  _FakeTypingNotifier? typingNotifier,
   Map<String, UserProfile> users = const {},
   List<ChannelMember> members = const [],
   Channel? channel,
@@ -194,7 +195,7 @@ Widget _buildTestable({
       ).overrideWith(() => fakeMessagesNotifier),
       channelTypingProvider(
         _channelId,
-      ).overrideWith(() => _FakeTypingNotifier(typing)),
+      ).overrideWith(() => typingNotifier ?? _FakeTypingNotifier(typing)),
       userCacheProvider.overrideWith(() => _FakeUserCacheNotifier(users)),
       profileProvider.overrideWith(() => _FakeProfileNotifier()),
       channelsProvider.overrideWith(() => fakeChannelsNotifier),
@@ -2804,6 +2805,180 @@ void main() {
   });
 
   group('Typing indicator', () {
+    testWidgets(
+      'channel typing updates do not resize a focused composer dock',
+      (tester) async {
+        final typingNotifier = _FakeTypingNotifier([]);
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [
+              _textMsg(
+                id: 'channel-message',
+                pubkey: 'alice',
+                content: 'Channel message',
+              ),
+            ],
+            typingNotifier: typingNotifier,
+            users: const {
+              'jarvis': UserProfile(pubkey: 'jarvis', displayName: 'Jarvis'),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Message #general'));
+        await tester.pumpAndSettle();
+
+        final textField = find.byType(TextField);
+        final composerDock = find.byKey(
+          const ValueKey('channel-composer-dock'),
+        );
+        final messageList = find.byKey(const ValueKey('channel-message-list'));
+        await tester.enterText(textField, 'pasted channel text');
+        await tester.pump();
+        final field = tester.widget<TextField>(textField);
+        final controller = field.controller!;
+        final focusNode = field.focusNode!;
+        final selection = controller.selection;
+        final composerTop = tester.getTopLeft(textField).dy;
+        final composerDockHeight = tester.getSize(composerDock).height;
+        final initialListBottomPadding =
+            (tester.widget<ScrollablePositionedList>(messageList).padding!)
+                .bottom;
+
+        typingNotifier.setEntries([
+          TypingEntry(
+            pubkey: 'jarvis',
+            expiresAtMs: DateTime.now().millisecondsSinceEpoch + 8000,
+          ),
+        ]);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 200));
+
+        expect(find.text('Jarvis is typing…'), findsOneWidget);
+        expect(tester.getTopLeft(textField).dy, composerTop);
+        expect(tester.getSize(composerDock).height, composerDockHeight);
+        expect(controller.text, 'pasted channel text');
+        expect(controller.selection, selection);
+        expect(focusNode.hasFocus, isTrue);
+        expect(
+          (tester.widget<ScrollablePositionedList>(messageList).padding!)
+              .bottom,
+          greaterThan(initialListBottomPadding),
+        );
+
+        typingNotifier.setEntries([]);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 200));
+        await tester.pump();
+
+        expect(find.text('Jarvis is typing…'), findsNothing);
+        expect(tester.getTopLeft(textField).dy, composerTop);
+        expect(tester.getSize(composerDock).height, composerDockHeight);
+        expect(controller.text, 'pasted channel text');
+        expect(controller.selection, selection);
+        expect(focusNode.hasFocus, isTrue);
+        expect(
+          (tester.widget<ScrollablePositionedList>(messageList).padding!)
+              .bottom,
+          initialListBottomPadding,
+        );
+      },
+    );
+
+    testWidgets('thread typing updates do not move a focused composer', (
+      tester,
+    ) async {
+      final rootEvent = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'Thread root',
+      );
+      final typingNotifier = _FakeTypingNotifier([]);
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [rootEvent],
+          typingNotifier: typingNotifier,
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'jarvis': UserProfile(pubkey: 'jarvis', displayName: 'Jarvis'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final threadHead = formatTimeline([rootEvent]).single;
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: threadHead,
+            allMessages: [threadHead],
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Reply in thread…'));
+      await tester.pumpAndSettle();
+
+      final textField = find.byType(TextField);
+      final composerDock = find.byKey(const ValueKey('thread-composer-dock'));
+      final messageList = find.byKey(const ValueKey('thread-message-list'));
+      expect(textField, findsOneWidget);
+      expect(composerDock, findsOneWidget);
+      await tester.enterText(textField, 'pasted thread text');
+      await tester.pump();
+      final field = tester.widget<TextField>(textField);
+      final controller = field.controller!;
+      final focusNode = field.focusNode!;
+      final selection = controller.selection;
+      final composerTop = tester.getTopLeft(textField).dy;
+      final composerDockHeight = tester.getSize(composerDock).height;
+      final initialListBottomPadding =
+          (tester.widget<ScrollablePositionedList>(messageList).padding!)
+              .bottom;
+
+      typingNotifier.setEntries([
+        TypingEntry(
+          pubkey: 'jarvis',
+          threadHeadId: 'thread-root',
+          expiresAtMs: DateTime.now().millisecondsSinceEpoch + 8000,
+        ),
+      ]);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
+
+      expect(find.text('Jarvis is typing…'), findsOneWidget);
+      expect(tester.getTopLeft(textField).dy, composerTop);
+      expect(tester.getSize(composerDock).height, composerDockHeight);
+      expect(controller.text, 'pasted thread text');
+      expect(controller.selection, selection);
+      expect(focusNode.hasFocus, isTrue);
+      expect(
+        (tester.widget<ScrollablePositionedList>(messageList).padding!).bottom,
+        greaterThan(initialListBottomPadding),
+      );
+
+      typingNotifier.setEntries([]);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
+      await tester.pump();
+
+      expect(find.text('Jarvis is typing…'), findsNothing);
+      expect(tester.getTopLeft(textField).dy, composerTop);
+      expect(tester.getSize(composerDock).height, composerDockHeight);
+      expect(controller.text, 'pasted thread text');
+      expect(controller.selection, selection);
+      expect(focusNode.hasFocus, isTrue);
+      expect(
+        (tester.widget<ScrollablePositionedList>(messageList).padding!).bottom,
+        initialListBottomPadding,
+      );
+    });
+
     testWidgets('shows single typer', (tester) async {
       await tester.pumpWidget(
         _buildTestable(
@@ -3889,12 +4064,17 @@ class _ReconnectingRelaySession extends RelaySessionNotifier {
 }
 
 class _FakeTypingNotifier extends ChannelTypingNotifier {
-  final List<TypingEntry> _entries;
+  List<TypingEntry> _entries;
   _FakeTypingNotifier(this._entries, {String channelId = _channelId})
     : super(channelId);
 
   @override
   List<TypingEntry> build() => _entries;
+
+  void setEntries(List<TypingEntry> entries) {
+    _entries = entries;
+    state = entries;
+  }
 }
 
 class _SynchronousReadStateNotifier extends ReadStateNotifier {
