@@ -3,6 +3,10 @@ import * as React from "react";
 
 import { relayClient } from "@/shared/api/relayClient";
 import { getRelaySelf } from "@/features/moderation/lib/relaySelf";
+import {
+  isDeletedByA,
+  projectCoordinate,
+} from "@/features/projects/lib/projectDeletions";
 import { getCachedRelayOrigin } from "@/shared/lib/mediaUrl";
 import { signRelayEvent } from "@/shared/api/tauri";
 import { getIdentity } from "@/shared/api/tauriIdentity";
@@ -144,10 +148,6 @@ function getCloneUrls(event: RelayEvent): string[] {
   return tag ? tag.slice(1) : [];
 }
 
-function projectCoordinate(project: Pick<Project, "owner" | "dtag">): string {
-  return `${KIND_REPO_ANNOUNCEMENT}:${project.owner}:${project.dtag}`;
-}
-
 function readHiddenProjectCards(): string[] {
   if (typeof window === "undefined") {
     return [];
@@ -167,17 +167,6 @@ function readHiddenProjectCards(): string[] {
 
 function isHiddenLocally(project: Project): boolean {
   return readHiddenProjectCards().includes(projectCoordinate(project));
-}
-
-function isDeletedByA(project: Project, deletionEvents: RelayEvent[]): boolean {
-  const coordinate = projectCoordinate(project);
-  // NIP-09: a deletion is only valid when signed by the author of the
-  // referenced event — otherwise anyone could hide someone else's project.
-  return deletionEvents.some(
-    (event) =>
-      event.pubkey.toLowerCase() === project.owner.toLowerCase() &&
-      event.tags.some((tag) => tag[0] === "a" && tag[1] === coordinate),
-  );
 }
 
 /**
