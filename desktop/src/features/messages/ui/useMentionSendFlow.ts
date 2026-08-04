@@ -21,6 +21,7 @@ import {
   mergeOutgoingTags,
 } from "@/features/messages/lib/imetaMediaMarkdown";
 import type { UseMentionsResult } from "@/features/messages/lib/useMentions";
+import { buildNip27WireBody } from "@/features/messages/lib/collectMentionPubkeys";
 import type { UseRichTextEditorResult } from "@/features/messages/lib/useRichTextEditor";
 import type { UseDraftsResult } from "@/features/messages/lib/useDrafts";
 import { invokeTauri } from "@/shared/api/tauri";
@@ -721,8 +722,13 @@ export function useMentionSendFlow({
             createdPersonaAgentPubkeySet.has(pubkey),
         );
         const pubkeys = explicitMentionPubkeys;
-        const { content: finalContent, mediaTags } = buildOutgoingMessage(
+        const wireBody = buildNip27WireBody(
           trimmed,
+          pubkeys,
+          mentions.getMentionDisplayName,
+        );
+        const { content: finalContent, mediaTags } = buildOutgoingMessage(
+          wireBody,
           pendingImeta,
           spoileredAttachmentUrls,
         );
@@ -791,6 +797,7 @@ export function useMentionSendFlow({
       getNonMemberMentionPubkeys,
       getDmThreadAgentMentionError,
       mentions.extractMentionPubkeys,
+      mentions.getMentionDisplayName,
       mentions.isAgentPubkey,
       mentions.isManagedAgentPubkey,
       onPrepareSendChannel,

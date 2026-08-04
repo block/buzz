@@ -70,11 +70,21 @@ pub async fn get_channel_workflows(
 ///
 /// The Workflows overview screen previously issued one `get_channel_workflows`
 /// query per member channel (`Promise.all` fanout in `WorkflowsView`), i.e. N
-/// relay POSTs. A nostr `#h` filter matches ANY of its listed values, so one
-/// query with all channel ids returns the same set. Each `WorkflowWire` carries
-/// its own `channel_id` (from the event's `h` tag), so the frontend can still
-/// group results by channel. Neither this nor the per-channel command sets a
-/// `limit`, so batching does not change result completeness.
+/// relay POSTs. One HTTP `/query` can carry multiple NIP-01 filters; we send
+/// one filter object per channel id (single-value `#h`) instead of one filter
+/// with a multi-value `#h`.
+///
+/// Buzz's relay historically collapsed multi-value `#h` to the first UUID when
+/// building the SQL predicate (`extract_channel_id_from_filter`), so a batched
+/// multi-value query silently dropped workflows on every channel after the
+/// first — Desktop showed "No workflows yet" while per-channel CLI queries
+/// still worked. One filter per id keeps the single round-trip and matches
+/// NIP-01 OR semantics even against relays that still collapse multi-value `#h`.
+///
+/// Each `WorkflowWire` carries its own `channel_id` (from the event's `h` tag),
+/// so the frontend can still group results by channel. Neither this nor the
+/// per-channel command sets a `limit`, so batching does not change result
+/// completeness.
 #[tauri::command]
 pub async fn get_channels_workflows(
     channel_ids: Vec<String>,
@@ -84,14 +94,17 @@ pub async fn get_channels_workflows(
         return Ok(Vec::new());
     }
 
-    let events = query_relay(
-        &state,
-        &[serde_json::json!({
-            "kinds": [30620],
-            "#h": channel_ids,
-        })],
-    )
-    .await?;
+    let filters: Vec<serde_json::Value> = channel_ids
+        .into_iter()
+        .map(|channel_id| {
+            serde_json::json!({
+                "kinds": [30620],
+                "#h": [channel_id],
+            })
+        })
+        .collect();
+
+    let events = query_relay(&state, &filters).await?;
 
     Ok(events.iter().map(workflow_from_event).collect())
 }
