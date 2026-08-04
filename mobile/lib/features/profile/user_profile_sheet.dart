@@ -40,7 +40,7 @@ class UserProfileSheet extends HookConsumerWidget {
         ref.watch(userCacheProvider.select((cache) => cache[pk])) ??
         ref.read(userCacheProvider.notifier).get(pk);
     final presenceMap = ref.watch(presenceCacheProvider);
-    final presence = presenceMap[pk] ?? 'offline';
+    final presence = presenceMap[pk];
     final statusCache = ref.watch(userStatusCacheProvider);
     final userStatus = statusCache[pk];
 
@@ -76,12 +76,14 @@ class UserProfileSheet extends HookConsumerWidget {
     final presenceColor = switch (presence) {
       'online' => context.appColors.success,
       'away' => context.appColors.warning,
-      _ => context.colors.outline,
+      'offline' => context.colors.outline,
+      _ => context.colors.outlineVariant,
     };
     final presenceLabel = switch (presence) {
       'online' => 'Online',
       'away' => 'Away',
-      _ => 'Offline',
+      'offline' => 'Offline',
+      _ => 'Status unknown',
     };
 
     return SizedBox(

@@ -24,6 +24,7 @@ import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/features/channels/small_avatar.dart';
+import 'package:buzz/features/profile/presence_cache_provider.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/features/profile/user_cache_provider.dart';
 import 'package:buzz/features/profile/user_profile.dart';
@@ -181,6 +182,7 @@ Widget _buildTestable({
   TextScaler textScaler = TextScaler.noScaling,
   bool disableAnimations = false,
   RelaySessionNotifier? relaySessionNotifier,
+  Map<String, String>? presence,
 }) {
   final resolvedChannel = channel ?? _testChannel;
   final fakeChannelsNotifier =
@@ -197,6 +199,10 @@ Widget _buildTestable({
       ).overrideWith(() => _FakeTypingNotifier(typing)),
       userCacheProvider.overrideWith(() => _FakeUserCacheNotifier(users)),
       profileProvider.overrideWith(() => _FakeProfileNotifier()),
+      if (presence != null)
+        presenceCacheProvider.overrideWith(
+          () => _FakePresenceCacheNotifier(presence),
+        ),
       channelsProvider.overrideWith(() => fakeChannelsNotifier),
       channelDetailsProvider(_channelId).overrideWith(
         (ref) async => ChannelDetails.fromChannel(resolvedChannel),
@@ -432,6 +438,72 @@ void main() {
         expect(_replayedChannelIds(socket), [channelB.id, channelA.id]);
       },
     );
+
+    testWidgets('does not label missing DM presence as offline', (
+      tester,
+    ) async {
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: '',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: const ['Self', 'Fable'],
+        participantPubkeys: const ['self', 'fable'],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: dmChannel,
+          users: const {
+            'fable': UserProfile(pubkey: 'fable', displayName: 'Fable'),
+          },
+          presence: const {},
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Status unknown'), findsOneWidget);
+      expect(find.text('Offline'), findsNothing);
+    });
+
+    testWidgets('labels an explicit DM offline event as offline', (
+      tester,
+    ) async {
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: '',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: const ['Self', 'Fable'],
+        participantPubkeys: const ['self', 'fable'],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: dmChannel,
+          users: const {
+            'fable': UserProfile(pubkey: 'fable', displayName: 'Fable'),
+          },
+          presence: const {'fable': 'offline'},
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Offline'), findsOneWidget);
+      expect(find.text('Status unknown'), findsNothing);
+    });
 
     testWidgets('debounces same-slot reconnect skeletons before revealing', (
       tester,
@@ -3921,6 +3993,18 @@ class _FakeProfileNotifier extends ProfileNotifier {
   @override
   Future<UserProfile?> build() async =>
       const UserProfile(pubkey: 'self', displayName: 'Self');
+}
+
+class _FakePresenceCacheNotifier extends PresenceCacheNotifier {
+  final Map<String, String> _presence;
+
+  _FakePresenceCacheNotifier(this._presence);
+
+  @override
+  Map<String, String> build() => _presence;
+
+  @override
+  void track(List<String> pubkeys) {}
 }
 
 class _FakeUserCacheNotifier extends UserCacheNotifier {
