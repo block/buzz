@@ -229,6 +229,15 @@ fn agents_referencing_team<'a>(
         .collect()
 }
 
+fn team_in_use_deletion_error(team_id: &str, agent_names: &[&str]) -> String {
+    format!(
+        "Cannot delete team \"{team_id}\": {} agent(s) still reference it ({}). \
+         Edit the team to remove those agents, then delete or reconfigure their instances.",
+        agent_names.len(),
+        agent_names.join(", ")
+    )
+}
+
 /// Delete a team, cascading removal of its sourced personas and backing dir.
 ///
 /// Returns the d-tags of the personas removed by the cascade so the caller can
@@ -248,12 +257,7 @@ pub fn delete_team_with_cascade(app: &AppHandle, team_id: &str) -> Result<Vec<St
     let agents = crate::managed_agents::load_managed_agents(app)?;
     let referencing = agents_referencing_team(&agents, team);
     if !referencing.is_empty() {
-        return Err(format!(
-            "Cannot delete team \"{team_id}\": {} agent(s) still reference it ({}). \
-             Delete or reconfigure them first.",
-            referencing.len(),
-            referencing.join(", ")
-        ));
+        return Err(team_in_use_deletion_error(team_id, &referencing));
     }
 
     let mut cascaded_persona_d_tags = Vec::new();

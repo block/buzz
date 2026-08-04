@@ -5,6 +5,7 @@ import {
   type ManagedAgentActionResult,
 } from "@/features/agents/lib/managedAgentControlActions";
 import { removeChannelMember } from "@/shared/api/tauri";
+import { listTeams } from "@/shared/api/tauriTeams";
 import type {
   AgentPersona,
   Channel,
@@ -72,7 +73,7 @@ export function useProfileAgentDeletion({
   );
 
   const deleteManagedAgentRecord = React.useCallback(
-    (agentToDelete: ManagedAgent) =>
+    async (agentToDelete: ManagedAgent) =>
       deleteProfileManagedAgent(agentToDelete, {
         channels: channels ?? [],
         deleteManagedAgent,
@@ -80,6 +81,7 @@ export function useProfileAgentDeletion({
         relayAgents: relayAgents ?? [],
         removeAgentFromAllChannels,
         skipRemoteDeleteConfirm: true,
+        teams: await listTeams(),
       }),
     [
       channels,
@@ -91,7 +93,7 @@ export function useProfileAgentDeletion({
   );
 
   const deleteManagedAgentsForPersona = React.useCallback(
-    (persona: AgentPersona) =>
+    async (persona: AgentPersona) =>
       deleteProfileManagedAgentsForPersona(persona, {
         channels: channels ?? [],
         deleteManagedAgent,
@@ -100,6 +102,7 @@ export function useProfileAgentDeletion({
         relayAgents: relayAgents ?? [],
         removeAgentFromAllChannels,
         selectedAgent: managedAgent,
+        teams: await listTeams(),
       }),
     [
       channels,

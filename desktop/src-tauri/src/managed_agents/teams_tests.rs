@@ -5,7 +5,7 @@
 
 use super::{
     agents_referencing_team, load_teams_readonly, merge_teams, merge_teams_impl, sort_teams,
-    validate_team_deletion, BuiltInTeam,
+    team_in_use_deletion_error, validate_team_deletion, BuiltInTeam,
 };
 use crate::managed_agents::{ManagedAgentRecord, TeamRecord};
 
@@ -259,6 +259,15 @@ fn agents_referencing_team_empty_when_no_matches() {
     let agents = vec![managed_agent("Agent A"), managed_agent("Agent B")];
 
     assert!(agents_referencing_team(&agents, &t).is_empty());
+}
+
+#[test]
+fn team_in_use_error_explains_the_cleanup_order() {
+    assert_eq!(
+        team_in_use_deletion_error("team-1", &["Fizz", "Honey"]),
+        "Cannot delete team \"team-1\": 2 agent(s) still reference it (Fizz, Honey). \
+         Edit the team to remove those agents, then delete or reconfigure their instances."
+    );
 }
 
 // Migration pins — exercise the real merge_teams wrapper (with production consts).
