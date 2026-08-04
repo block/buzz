@@ -10,7 +10,7 @@ use crate::{
     action::AuditAction,
     entry::{AuditEntry, NewAuditEntry},
     error::AuditError,
-    hash::{compute_hash, to_storage_precision},
+    hash::{compute_hash, to_storage_precision, CURRENT_HASH_VERSION, HASH_ENCODING_V2},
 };
 
 /// The `created_at` stamped on a new entry.
@@ -121,6 +121,9 @@ impl AuditService {
             object_id: entry.object_id,
             detail: entry.detail,
             created_at,
+            // Structurally the current version: `NewAuditEntry` has no slot
+            // for it, so no caller can ever write the legacy v1 encoding.
+            hash_version: CURRENT_HASH_VERSION,
         };
 
         audit_entry.hash = compute_hash(&audit_entry)?.to_vec();
@@ -130,8 +133,8 @@ impl AuditService {
         sqlx::query(
             r#"
             INSERT INTO audit_log
-                (community_id, seq, hash, prev_hash, action, actor_pubkey, object_id, detail, created_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                (community_id, seq, hash, prev_hash, action, actor_pubkey, object_id, detail, created_at, hash_version)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             "#,
         )
         .bind(audit_entry.community_id)
@@ -143,6 +146,7 @@ impl AuditService {
         .bind(audit_entry.object_id.as_deref())
         .bind(&audit_entry.detail)
         .bind(audit_entry.created_at)
+        .bind(audit_entry.hash_version)
         .execute(&mut *tx)
         .await?;
 
@@ -156,6 +160,18 @@ impl AuditService {
     /// Reads exactly that community's chain — it can never observe another
     /// community's entries or head. Returns `Ok(false)` if the range is empty,
     /// `Ok(true)` if the segment is internally consistent.
+    ///
+    /// Each row's digest is recomputed under its **stored** `hash_version`,
+    /// so chains written before the v2 encoding keep verifying — including
+    /// chains with v1 rows *after* v2 rows, which every rolling deploy
+    /// across the 0027 upgrade legitimately produces (pre-column pods keep
+    /// writing correctly-hashed v1 rows while upgraded pods stamp v2, and
+    /// those rows persist). A v1-after-v2 row is therefore surfaced as a
+    /// warning, never a failure: outside a deploy window it can indicate a
+    /// forged insertion reopening the legacy encoding's boundary-shift
+    /// collision (#4173), but a hard error would permanently brand every
+    /// mixed-deploy chain as tampered — and a baseline false positive makes
+    /// `HashMismatch` carry no signal (#2637's lesson).
     #[instrument(skip(self))]
     pub async fn verify_chain(
         &self,
@@ -166,7 +182,7 @@ impl AuditService {
         let rows = sqlx::query(
             r#"
             SELECT community_id, seq, hash, prev_hash, action, actor_pubkey,
-                   object_id, detail, created_at
+                   object_id, detail, created_at, hash_version
             FROM audit_log
             WHERE community_id = $1 AND seq BETWEEN $2 AND $3
             ORDER BY seq ASC
@@ -183,9 +199,20 @@ impl AuditService {
         }
 
         let mut expected_prev: Option<Vec<u8>> = None;
+        let mut v2_seen = false;
 
         for row in &rows {
             let entry = row_to_audit_entry(row)?;
+
+            if entry.hash_version >= HASH_ENCODING_V2 {
+                v2_seen = true;
+            } else if v2_seen {
+                warn!(
+                    seq = entry.seq,
+                    "audit chain: v1-encoded entry follows a v2 entry; expected only from \
+                     pre-upgrade writers during a rolling deploy, otherwise worth investigating"
+                );
+            }
 
             if let Some(ref expected) = expected_prev {
                 // The previous entry's hash must equal this entry's prev_hash.
@@ -218,7 +245,7 @@ impl AuditService {
         let rows = sqlx::query(
             r#"
             SELECT community_id, seq, hash, prev_hash, action, actor_pubkey,
-                   object_id, detail, created_at
+                   object_id, detail, created_at, hash_version
             FROM audit_log
             WHERE community_id = $1 AND seq >= $2
             ORDER BY seq ASC
@@ -252,6 +279,7 @@ fn row_to_audit_entry(row: &sqlx::postgres::PgRow) -> Result<AuditEntry, AuditEr
         object_id: row.get("object_id"),
         detail: row.get("detail"),
         created_at: row.get("created_at"),
+        hash_version: row.get("hash_version"),
     })
 }
 
@@ -364,6 +392,10 @@ mod tests {
         assert!(e1.prev_hash.is_none());
         assert_eq!(e2.prev_hash.as_deref(), Some(e1.hash.as_slice()));
         assert_eq!(e3.prev_hash.as_deref(), Some(e2.hash.as_slice()));
+        // New entries are stamped with the current (length-framed) encoding.
+        assert!([e1.hash_version, e2.hash_version, e3.hash_version]
+            .iter()
+            .all(|v| *v == CURRENT_HASH_VERSION));
         assert!(svc
             .verify_chain(CommunityId::from_uuid(c), 1, 3)
             .await
@@ -507,6 +539,69 @@ mod tests {
         // won't match A's stored hash → HashMismatch. The forge is rejected.
         let r = svc.verify_chain(CommunityId::from_uuid(b), 1, 1).await;
         assert!(matches!(r, Err(AuditError::HashMismatch { seq: 1 })));
+    }
+
+    /// A correctly-hashed v1 row *after* a v2 row must still verify: every
+    /// rolling deploy across the 0027 upgrade produces exactly this shape
+    /// (pre-column pods keep INSERTing without the column — DEFAULT 1 —
+    /// after upgraded pods have written v2 rows), and those rows persist in
+    /// the chain forever. A hard error here would permanently brand every
+    /// mixed-deploy chain as tampered, which is the baseline-false-positive
+    /// failure #2637 taught this crate to avoid. The regression is surfaced
+    /// as a `warn!` instead.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn mixed_version_chain_verifies() {
+        let _g = db_lock().lock().await;
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let svc = AuditService::new(pool.clone());
+        let c = make_community(&pool).await;
+
+        let e1 = svc
+            .log(new_entry(c, AuditAction::EventCreated))
+            .await
+            .unwrap();
+        assert_eq!(e1.hash_version, CURRENT_HASH_VERSION);
+
+        // Simulate a pre-upgrade pod appending next: it computes the legacy
+        // v1 digest and its INSERT does not name hash_version (DEFAULT 1).
+        let mut old_pod_row = AuditEntry {
+            community_id: c,
+            seq: e1.seq + 1,
+            hash: Vec::new(),
+            prev_hash: Some(e1.hash.clone()),
+            action: AuditAction::EventDeleted,
+            actor_pubkey: Some(vec![0xab; 32]),
+            object_id: Some("old-pod".into()),
+            detail: serde_json::json!({"test": true}),
+            created_at: to_storage_precision(chrono::Utc::now()),
+            hash_version: crate::hash::HASH_ENCODING_V1,
+        };
+        old_pod_row.hash = compute_hash(&old_pod_row).unwrap().to_vec();
+        sqlx::query(
+            "INSERT INTO audit_log (community_id, seq, hash, prev_hash, action, actor_pubkey, object_id, detail, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        )
+        .bind(old_pod_row.community_id)
+        .bind(old_pod_row.seq)
+        .bind(&old_pod_row.hash)
+        .bind(old_pod_row.prev_hash.as_deref())
+        .bind(old_pod_row.action.as_str())
+        .bind(old_pod_row.actor_pubkey.as_deref())
+        .bind(old_pod_row.object_id.as_deref())
+        .bind(&old_pod_row.detail)
+        .bind(old_pod_row.created_at)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let r = svc.verify_chain(CommunityId::from_uuid(c), 1, 2).await;
+        assert!(
+            r.unwrap(),
+            "a legitimate mixed-version chain from a rolling deploy must verify"
+        );
     }
 
     #[tokio::test]

@@ -31,5 +31,7 @@ pub mod service;
 pub use action::AuditAction;
 pub use entry::{AuditEntry, NewAuditEntry};
 pub use error::AuditError;
-pub use hash::{compute_hash, GENESIS_HASH};
+pub use hash::{
+    compute_hash, CURRENT_HASH_VERSION, GENESIS_HASH, HASH_ENCODING_V1, HASH_ENCODING_V2,
+};
 pub use service::AuditService;

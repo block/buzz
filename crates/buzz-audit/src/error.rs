@@ -35,6 +35,16 @@ pub enum AuditError {
     #[error("unknown audit action in database")]
     UnknownAction,
 
+    /// An entry carries a `hash_version` this build does not implement — the
+    /// digest can be neither written nor verified. Failing hard beats
+    /// guessing an encoding: a hash must never silently stand in for one
+    /// computed differently.
+    #[error("unsupported audit hash_version {version}")]
+    UnsupportedHashVersion {
+        /// The unrecognised version value.
+        version: i16,
+    },
+
     /// A JSON serialization error occurred (e.g. while canonicalising `detail`).
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
@@ -69,6 +79,7 @@ mod tests {
             AuditError::ChainViolation { seq: 7 },
             AuditError::HashMismatch { seq: 42 },
             AuditError::UnknownAction,
+            AuditError::UnsupportedHashVersion { version: 9 },
         ];
 
         for err in &domain_errors {

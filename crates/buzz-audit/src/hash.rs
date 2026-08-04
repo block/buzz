@@ -4,8 +4,11 @@ use sha2::{Digest, Sha256};
 use crate::entry::AuditEntry;
 use crate::error::AuditError;
 
-/// The 32-byte sentinel hashed in place of `prev_hash` for a community's first
-/// entry. Stored as `prev_hash = NULL`; hashed as all-zero bytes.
+/// The 32-byte sentinel the **v1 encoding** hashes in place of `prev_hash`
+/// for a community's first entry. Stored as `prev_hash = NULL`; hashed as
+/// all-zero bytes. The v2 encoding uses a presence tag instead (see
+/// `compute_hash_v2`), because the sentinel makes `None` indistinguishable
+/// from a literal `Some(GENESIS_HASH)`.
 pub const GENESIS_HASH: [u8; 32] = [0u8; 32];
 
 /// Reduce a timestamp to the precision the audit store round-trips.
@@ -23,11 +26,26 @@ pub fn to_storage_precision(created_at: DateTime<Utc>) -> DateTime<Utc> {
     created_at.trunc_subsecs(6)
 }
 
-/// SHA-256 over the entry's identity, chain, and context fields.
+/// The legacy hash encoding: fields concatenated with no length framing.
 ///
-/// Field order is fixed — changing it invalidates all existing chains. The
-/// `community_id` is hashed first so chain identity carries the tenant: an entry
-/// cannot be lifted out of one community's chain and re-verified inside another.
+/// **Verify-only.** Adjacent variable-length fields (most acutely
+/// `object_id` ‖ `canonical_json(detail)`) share no boundary marker, so two
+/// distinct entries can collide — `("x", 12)` and `("x1", 2)` hash
+/// identically (#4173). Kept byte-for-byte so rows written before
+/// `hash_version` existed keep verifying; the write path never emits it.
+pub const HASH_ENCODING_V1: i16 = 1;
+/// The current hash encoding: every variable-length field length-prefixed.
+pub const HASH_ENCODING_V2: i16 = 2;
+/// The encoding stamped onto (and hashed into) every newly written entry.
+pub const CURRENT_HASH_VERSION: i16 = HASH_ENCODING_V2;
+
+/// SHA-256 over the entry's identity, chain, and context fields, using the
+/// encoding named by `entry.hash_version`.
+///
+/// Within an encoding, field order is fixed — changing it invalidates all
+/// chains written with that encoding. The `community_id` leads the fields so
+/// chain identity carries the tenant: an entry cannot be lifted out of one
+/// community's chain and re-verified inside another.
 ///
 /// `created_at` is normalized through [`to_storage_precision`] here rather than
 /// hashed as given. Write paths truncate before storing so the row matches the
@@ -38,8 +56,20 @@ pub fn to_storage_precision(created_at: DateTime<Utc>) -> DateTime<Utc> {
 ///
 /// `detail` is serialized via [`canonical_json`] (sorted keys) so the hash is
 /// stable across machines and Rust versions. A serialization failure is a hard
-/// error, never silently hashed as empty.
+/// error, never silently hashed as empty — and so is an unrecognised
+/// `hash_version`: guessing an encoding would make a forged digest
+/// indistinguishable from a build skew.
 pub fn compute_hash(entry: &AuditEntry) -> Result<[u8; 32], AuditError> {
+    match entry.hash_version {
+        HASH_ENCODING_V1 => compute_hash_v1(entry),
+        HASH_ENCODING_V2 => compute_hash_v2(entry),
+        version => Err(AuditError::UnsupportedHashVersion { version }),
+    }
+}
+
+/// Legacy unframed encoding — see [`HASH_ENCODING_V1`]. Byte-for-byte the
+/// pre-`hash_version` preimage; never change it, only verify with it.
+fn compute_hash_v1(entry: &AuditEntry) -> Result<[u8; 32], AuditError> {
     let mut hasher = Sha256::new();
     // Tenant binding: community_id leads the hash.
     hasher.update(entry.community_id.as_bytes());
@@ -68,6 +98,65 @@ pub fn compute_hash(entry: &AuditEntry) -> Result<[u8; 32], AuditError> {
     match &entry.prev_hash {
         Some(h) => hasher.update(h),
         None => hasher.update(GENESIS_HASH),
+    }
+    Ok(hasher.finalize().into())
+}
+
+/// Length-framed encoding — see [`HASH_ENCODING_V2`].
+///
+/// Same field order as v1, three differences:
+/// - a leading version byte, so the two preimages can never be confused
+///   byte-for-byte (defense in depth — dispatch keys on the stored
+///   `hash_version` column, not on preimage sniffing; the column itself is
+///   covered by digest divergence, not by inclusion: re-labelling a stored
+///   row's version changes the recomputed preimage and surfaces as
+///   [`crate::error::AuditError::HashMismatch`]);
+/// - every variable-length field is prefixed with its byte length (u64 BE),
+///   so no field boundary can shift into a neighbour (#4173). Fixed-width
+///   fields (`community_id`, `seq`) stay unframed;
+/// - `prev_hash` gets a presence tag like the other optional fields. In v1,
+///   `None` hashes as [`GENESIS_HASH`], indistinguishable from
+///   `Some(GENESIS_HASH)` — a fake-genesis ambiguity v2 closes while the
+///   encoding is still new enough to change.
+fn compute_hash_v2(entry: &AuditEntry) -> Result<[u8; 32], AuditError> {
+    fn framed(hasher: &mut Sha256, bytes: &[u8]) {
+        hasher.update((bytes.len() as u64).to_be_bytes());
+        hasher.update(bytes);
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update([2u8]);
+    // Tenant binding: community_id leads the fields.
+    hasher.update(entry.community_id.as_bytes());
+    hasher.update(entry.seq.to_be_bytes());
+    framed(
+        &mut hasher,
+        to_storage_precision(entry.created_at)
+            .to_rfc3339()
+            .as_bytes(),
+    );
+    framed(&mut hasher, entry.action.as_str().as_bytes());
+    match &entry.actor_pubkey {
+        Some(pk) => {
+            hasher.update([1u8]);
+            framed(&mut hasher, pk);
+        }
+        None => hasher.update([0u8]),
+    }
+    match &entry.object_id {
+        Some(id) => {
+            hasher.update([1u8]);
+            framed(&mut hasher, id.as_bytes());
+        }
+        None => hasher.update([0u8]),
+    }
+    framed(&mut hasher, canonical_json(&entry.detail)?.as_bytes());
+    match &entry.prev_hash {
+        Some(h) => {
+            hasher.update([1u8]);
+            framed(&mut hasher, h);
+        }
+        None => hasher.update([0u8]),
     }
     Ok(hasher.finalize().into())
 }
@@ -122,6 +211,9 @@ mod tests {
     use chrono::Utc;
     use uuid::Uuid;
 
+    /// Legacy-encoding fixture: the pre-`hash_version` preimage the existing
+    /// tests below pin byte-for-byte. New-encoding tests use
+    /// [`sample_entry_v2`].
     fn sample_entry() -> AuditEntry {
         AuditEntry {
             community_id: Uuid::from_u128(1),
@@ -135,6 +227,14 @@ mod tests {
             created_at: chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
+            hash_version: HASH_ENCODING_V1,
+        }
+    }
+
+    fn sample_entry_v2() -> AuditEntry {
+        AuditEntry {
+            hash_version: HASH_ENCODING_V2,
+            ..sample_entry()
         }
     }
 
@@ -261,6 +361,147 @@ mod tests {
         let mut empty = sample_entry();
         empty.actor_pubkey = Some(Vec::new());
         assert_ne!(compute_hash(&none).unwrap(), compute_hash(&empty).unwrap());
+    }
+
+    /// The defect that motivated the v2 encoding (#4173), pinned as behavior:
+    /// v1 concatenates `object_id` and `canonical_json(detail)` with no
+    /// framing, so shifting the boundary yields the same preimage. v2's
+    /// length prefixes make the same pair distinct.
+    #[test]
+    fn v1_boundary_shift_collides_and_v2_does_not() {
+        let mut a = sample_entry();
+        a.object_id = Some("x".into());
+        a.detail = serde_json::json!(12);
+        let mut b = sample_entry();
+        b.object_id = Some("x1".into());
+        b.detail = serde_json::json!(2);
+        // The legacy encoding cannot tell these apart — a detail edit that
+        // shifts the boundary survives verification.
+        assert_eq!(compute_hash(&a).unwrap(), compute_hash(&b).unwrap());
+
+        let a2 = AuditEntry {
+            hash_version: HASH_ENCODING_V2,
+            ..a
+        };
+        let b2 = AuditEntry {
+            hash_version: HASH_ENCODING_V2,
+            ..b
+        };
+        assert_ne!(compute_hash(&a2).unwrap(), compute_hash(&b2).unwrap());
+    }
+
+    #[test]
+    fn v2_deterministic_and_distinct_from_v1() {
+        let entry = sample_entry_v2();
+        assert_eq!(compute_hash(&entry).unwrap(), compute_hash(&entry).unwrap());
+        assert_eq!(compute_hash(&entry).unwrap().len(), 32);
+        // Same logical entry, different encoding → different digest.
+        assert_ne!(
+            compute_hash(&sample_entry()).unwrap(),
+            compute_hash(&sample_entry_v2()).unwrap()
+        );
+    }
+
+    #[test]
+    fn v2_sensitive_to_each_field() {
+        let base = sample_entry_v2();
+        let h0 = compute_hash(&base).unwrap();
+
+        let mut e = base.clone();
+        e.community_id = Uuid::from_u128(2);
+        assert_ne!(h0, compute_hash(&e).unwrap());
+
+        let mut e = base.clone();
+        e.seq = 2;
+        assert_ne!(h0, compute_hash(&e).unwrap());
+
+        let mut e = base.clone();
+        e.action = AuditAction::EventDeleted;
+        assert_ne!(h0, compute_hash(&e).unwrap());
+
+        let mut e = base.clone();
+        e.actor_pubkey = Some(vec![0xcd; 32]);
+        assert_ne!(h0, compute_hash(&e).unwrap());
+
+        let mut e = base.clone();
+        e.object_id = Some("different".into());
+        assert_ne!(h0, compute_hash(&e).unwrap());
+
+        let mut e = base.clone();
+        e.detail = serde_json::json!({"key": "value"});
+        assert_ne!(h0, compute_hash(&e).unwrap());
+
+        let mut e = base.clone();
+        e.prev_hash = Some(vec![0xff; 32]);
+        assert_ne!(h0, compute_hash(&e).unwrap());
+    }
+
+    #[test]
+    fn v2_presence_tag_distinguishes_none_from_empty() {
+        // Length framing alone would make None and Some(empty) adjacent
+        // zero-length runs; the presence tag keeps them distinct in v2 just
+        // as in v1.
+        let mut none = sample_entry_v2();
+        none.actor_pubkey = None;
+        let mut empty = sample_entry_v2();
+        empty.actor_pubkey = Some(Vec::new());
+        assert_ne!(compute_hash(&none).unwrap(), compute_hash(&empty).unwrap());
+
+        let mut none = sample_entry_v2();
+        none.object_id = None;
+        let mut empty = sample_entry_v2();
+        empty.object_id = Some(String::new());
+        assert_ne!(compute_hash(&none).unwrap(), compute_hash(&empty).unwrap());
+    }
+
+    /// Legacy chains must keep verifying: the v1 digest of a fixed entry is
+    /// pinned to a literal so no edit can silently move the v1 preimage. If
+    /// this assertion ever reds, v1 rows in the field can no longer be
+    /// verified — that is a data-compatibility break, not a test to update.
+    #[test]
+    fn v1_digest_is_byte_stable() {
+        assert_eq!(
+            hex::encode(compute_hash(&sample_entry()).unwrap()),
+            "5fd6c48ddbd39979bd7fcc94357d78b5fcffa0d1443a0cdda997ad7e22f4f2ce"
+        );
+    }
+
+    /// v1's genesis sentinel makes `prev_hash: None` collide with a literal
+    /// `Some(GENESIS_HASH)`; v2's presence tag distinguishes them.
+    #[test]
+    fn v2_distinguishes_genesis_none_from_literal_genesis_prev_hash() {
+        let mut none = sample_entry();
+        none.prev_hash = None;
+        let mut literal = sample_entry();
+        literal.prev_hash = Some(GENESIS_HASH.to_vec());
+        // v1: the documented ambiguity, pinned so it stays remembered.
+        assert_eq!(
+            compute_hash(&none).unwrap(),
+            compute_hash(&literal).unwrap()
+        );
+
+        let none_v2 = AuditEntry {
+            hash_version: HASH_ENCODING_V2,
+            ..none
+        };
+        let literal_v2 = AuditEntry {
+            hash_version: HASH_ENCODING_V2,
+            ..literal
+        };
+        assert_ne!(
+            compute_hash(&none_v2).unwrap(),
+            compute_hash(&literal_v2).unwrap()
+        );
+    }
+
+    #[test]
+    fn unknown_hash_version_is_a_hard_error() {
+        let mut entry = sample_entry();
+        entry.hash_version = 99;
+        assert!(matches!(
+            compute_hash(&entry),
+            Err(AuditError::UnsupportedHashVersion { version: 99 })
+        ));
     }
 
     #[test]

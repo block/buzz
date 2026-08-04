@@ -561,7 +561,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 26);
+        assert_eq!(migrations.len(), 27);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -919,6 +919,21 @@ mod tests {
         assert!(heartbeat.contains("epoch"));
         assert!(heartbeat.contains("INSERT INTO replica_heartbeat (id) VALUES (1)"));
         assert!(heartbeat.contains("_operator_global_tables"));
+
+        // Audit hash-encoding version (#4173): selects, per row, the preimage
+        // encoding verify_chain recomputes with. Existing rows stay 1 (legacy
+        // unframed encoding, verify-only); the relay write path stamps 2.
+        // DEFAULT 1 is load-bearing for rolling deploys — pre-upgrade pods
+        // INSERT without naming the column — and is dropped only in a later
+        // cleanup once no such writers remain.
+        assert_eq!(migrations[26].version, 27);
+        let audit_hash_version = migrations[26].sql.as_str();
+        assert!(audit_hash_version.contains("ALTER TABLE audit_log"));
+        assert!(audit_hash_version.contains("ADD COLUMN hash_version SMALLINT NOT NULL DEFAULT 1"));
+        assert!(
+            desired_schema.contains("hash_version    SMALLINT NOT NULL DEFAULT 1"),
+            "desired-state schema must carry the audit hash_version column CI provisions from",
+        );
     }
 
     #[test]
