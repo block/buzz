@@ -1,4 +1,6 @@
 import { expect, test } from "@playwright/test";
+import { hexToBytes } from "@noble/hashes/utils.js";
+import { finalizeEvent, getPublicKey } from "nostr-tools/pure";
 
 import type { RelayEvent } from "@/shared/api/types";
 
@@ -6,10 +8,12 @@ import { emojiAvatarDataUrl } from "@/features/profile/ui/ProfileAvatarEditor.ut
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
+import { seedActiveIdentity } from "../helpers/onboarding";
 
 function createCatalogEvent(input: {
   eventId?: string;
   ownerPubkey: string;
+  ownerPrivateKey?: string;
   sourcePersonaId: string;
   displayName: string;
   systemPrompt: string;
@@ -17,29 +21,40 @@ function createCatalogEvent(input: {
   shared?: boolean;
   avatarUrl?: string;
 }): RelayEvent {
-  return {
-    id: input.eventId ?? "1".repeat(64),
-    pubkey: input.ownerPubkey,
-    created_at: input.createdAt ?? 1_721_750_400,
-    kind: 30175,
-    tags: [
-      ["d", input.sourcePersonaId],
-      ...(input.shared === false ? [] : [["shared", "true"]]),
-    ],
-    content: JSON.stringify({
-      display_name: input.displayName,
-      system_prompt: input.systemPrompt,
-      avatar_url: input.avatarUrl ?? null,
-      runtime: null,
-      model: null,
-      provider: null,
-      name_pool: [],
-    }),
-    sig: "2".repeat(128),
-  };
+  const ownerPrivateKey =
+    input.ownerPrivateKey ??
+    Object.values(TEST_IDENTITIES).find(
+      (identity) => identity.pubkey === input.ownerPubkey,
+    )?.privateKey;
+  if (!ownerPrivateKey) {
+    throw new Error(`No test private key for ${input.ownerPubkey}`);
+  }
+
+  return finalizeEvent(
+    {
+      created_at: input.createdAt ?? 1_721_750_400,
+      kind: 30175,
+      tags: [
+        ["d", input.sourcePersonaId],
+        ["test-id", input.eventId ?? "default-catalog-event"],
+        ...(input.shared === false ? [] : [["shared", "true"]]),
+      ],
+      content: JSON.stringify({
+        display_name: input.displayName,
+        system_prompt: input.systemPrompt,
+        avatar_url: input.avatarUrl ?? null,
+        runtime: null,
+        model: null,
+        provider: null,
+        name_pool: [],
+      }),
+    },
+    hexToBytes(ownerPrivateKey),
+  );
 }
 
 test.beforeEach(async ({ page }) => {
+  await seedActiveIdentity(page, TEST_IDENTITIES.tyler);
   await installMockBridge(page);
 });
 
@@ -1697,6 +1712,7 @@ test("catalog exposes exact instructions and rejects hidden Unicode controls", a
   page,
 }) => {
   const visiblePersonaId = "literal-instruction-reviewer";
+  const emojiPersonaId = "emoji-sequence-reviewer";
   const zeroWidthPersonaId = "zero-width-reviewer";
   const bidiPersonaId = "bidi-reviewer";
   const visiblePrompt = `Visible instruction.
@@ -1726,6 +1742,13 @@ test("catalog exposes exact instructions and rejects hidden Unicode controls", a
         displayName: "Bidi\u202eReviewer",
         systemPrompt: "Review changes.",
       }),
+      createCatalogEvent({
+        eventId: "rendered-emoji-sequence",
+        ownerPubkey: TEST_IDENTITIES.alice.pubkey,
+        sourcePersonaId: emojiPersonaId,
+        displayName: "Emoji Reviewer 👩‍💻",
+        systemPrompt: "Review changes with care ❤️",
+      }),
     ],
   });
   await gotoApp(page);
@@ -1733,6 +1756,7 @@ test("catalog exposes exact instructions and rejects hidden Unicode controls", a
   await openPersonaCatalog(page);
 
   const visibleCatalogId = `catalog:${TEST_IDENTITIES.alice.pubkey}:${visiblePersonaId}`;
+  const emojiCatalogId = `catalog:${TEST_IDENTITIES.alice.pubkey}:${emojiPersonaId}`;
   const zeroWidthCatalogId = `catalog:${TEST_IDENTITIES.alice.pubkey}:${zeroWidthPersonaId}`;
   const bidiCatalogId = `catalog:${TEST_IDENTITIES.alice.pubkey}:${bidiPersonaId}`;
 
@@ -1740,12 +1764,16 @@ test("catalog exposes exact instructions and rejects hidden Unicode controls", a
     page.getByTestId(`persona-catalog-list-item-${visibleCatalogId}`),
   ).toBeVisible();
   await expect(
+    page.getByTestId(`persona-catalog-list-item-${emojiCatalogId}`),
+  ).toContainText("Emoji Reviewer 👩‍💻");
+  await expect(
     page.getByTestId(`persona-catalog-list-item-${zeroWidthCatalogId}`),
   ).toHaveCount(0);
   await expect(
     page.getByTestId(`persona-catalog-list-item-${bidiCatalogId}`),
   ).toHaveCount(0);
 
+  await selectCatalogPersona(page, visibleCatalogId);
   const exactInstructions = page.getByTestId(
     "persona-catalog-exact-instructions",
   );
@@ -1753,6 +1781,11 @@ test("catalog exposes exact instructions and rejects hidden Unicode controls", a
     useInnerText: false,
   });
   await expect(exactInstructions.locator("a, img, .spoiler")).toHaveCount(0);
+
+  await selectCatalogPersona(page, emojiCatalogId);
+  await expect(exactInstructions).toHaveText("Review changes with care ❤️", {
+    useInnerText: false,
+  });
 });
 
 test("a catalog entry keeps the owner's emoji avatar", async ({ page }) => {
@@ -1874,13 +1907,14 @@ test("catalog detail shows Community member when the publisher profile cannot be
 }) => {
   // A pubkey that is not in the mock profile registry — profile resolution
   // will fail and the detail pane must fall back gracefully.
-  const unknownPubkey =
-    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const unknownPrivateKey = "1".repeat(64);
+  const unknownPubkey = getPublicKey(hexToBytes(unknownPrivateKey));
   const personaId = "unresolvable-reviewer";
   await installMockBridge(page, {
     personaCatalogEvents: [
       createCatalogEvent({
         ownerPubkey: unknownPubkey,
+        ownerPrivateKey: unknownPrivateKey,
         sourcePersonaId: personaId,
         displayName: "Mystery Agent",
         systemPrompt: "Published by someone whose profile cannot be fetched.",

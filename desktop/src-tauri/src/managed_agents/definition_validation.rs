@@ -5,8 +5,16 @@
 //! consume input bytes without a visible glyph break that review invariant and
 //! are rejected rather than silently stripped.
 
+use regex::Regex;
+use std::sync::LazyLock;
+
 const MAX_DISPLAY_NAME_CHARS: usize = 128;
 const MAX_SYSTEM_PROMPT_BYTES: usize = 64 * 1024;
+const EMOJI_VARIATION_SELECTOR: char = '\u{FE0F}';
+const ZERO_WIDTH_JOINER: char = '\u{200D}';
+
+static EXTENDED_PICTOGRAPHIC: LazyLock<Option<Regex>> =
+    LazyLock::new(|| Regex::new(r"^\p{Extended_Pictographic}$").ok());
 
 /// Validate the human-visible fields of an agent definition.
 pub(crate) fn validate_agent_definition_text(
@@ -38,9 +46,13 @@ fn validate_visible_text(
     label: &str,
     allow_layout_controls: bool,
 ) -> Result<(), String> {
-    for character in value.chars() {
+    let characters = value.chars().collect::<Vec<_>>();
+    for (index, &character) in characters.iter().enumerate() {
         let allowed_layout_control = allow_layout_controls && matches!(character, '\n' | '\t');
-        if (!allowed_layout_control && character.is_control()) || is_default_ignorable(character) {
+        let allowed_emoji_format = is_allowed_emoji_format(&characters, index);
+        if (!allowed_layout_control && character.is_control())
+            || (is_default_ignorable(character) && !allowed_emoji_format)
+        {
             return Err(format!(
                 "{label} contains prohibited invisible or formatting character U+{:04X}",
                 character as u32
@@ -50,12 +62,55 @@ fn validate_visible_text(
     Ok(())
 }
 
+fn is_allowed_emoji_format(characters: &[char], index: usize) -> bool {
+    match characters[index] {
+        EMOJI_VARIATION_SELECTOR => index
+            .checked_sub(1)
+            .and_then(|previous| characters.get(previous))
+            .is_some_and(|&character| is_emoji_variation_base(character)),
+        ZERO_WIDTH_JOINER => {
+            has_preceding_emoji_base(characters, index)
+                && characters
+                    .get(index + 1)
+                    .is_some_and(|&character| is_extended_pictographic(character))
+        }
+        _ => false,
+    }
+}
+
+fn has_preceding_emoji_base(characters: &[char], index: usize) -> bool {
+    let mut previous = index.checked_sub(1);
+    while let Some(previous_index) = previous {
+        let character = characters[previous_index];
+        if character != EMOJI_VARIATION_SELECTOR && !is_emoji_modifier(character) {
+            return is_extended_pictographic(character);
+        }
+        previous = previous_index.checked_sub(1);
+    }
+    false
+}
+
+fn is_emoji_variation_base(character: char) -> bool {
+    matches!(character, '#' | '*' | '0'..='9') || is_extended_pictographic(character)
+}
+
+fn is_emoji_modifier(character: char) -> bool {
+    matches!(character as u32, 0x1F3FB..=0x1F3FF)
+}
+
+fn is_extended_pictographic(character: char) -> bool {
+    let mut encoded = [0; 4];
+    let character = character.encode_utf8(&mut encoded);
+    EXTENDED_PICTOGRAPHIC
+        .as_ref()
+        .is_some_and(|pattern| pattern.is_match(character))
+}
+
 /// Unicode `Default_Ignorable_Code_Point` ranges (DerivedCoreProperties).
 ///
-/// This deliberately includes joiners and variation selectors. They can be
-/// legitimate in prose, but they are not faithfully reviewable in a prompt
-/// that will later execute with the host's access. Shared agent definitions
-/// prefer an explicit rejection over a display/execution mismatch.
+/// Joiners and variation selectors remain in this set. The validation pass
+/// makes a narrow contextual exception for rendered emoji composition while
+/// rejecting detached instances and every other default-ignorable character.
 fn is_default_ignorable(character: char) -> bool {
     matches!(
         character as u32,
@@ -93,17 +148,27 @@ mod tests {
     }
 
     #[test]
+    fn accepts_rendered_emoji_sequences_in_names_and_prompts() {
+        for emoji in ["❤️", "☕️", "👩‍💻", "🧑🏽‍💻", "👨‍👩‍👧‍👦", "1️⃣"]
+        {
+            assert!(validate_agent_definition_text(
+                &format!("Reviewer {emoji}"),
+                &format!("Review changes {emoji}")
+            )
+            .is_ok());
+        }
+    }
+
+    #[test]
     fn rejects_default_ignorable_characters_in_name_or_prompt() {
         for character in [
             '\u{00AD}',
             '\u{034F}',
             '\u{200B}',
-            '\u{200D}',
             '\u{202E}',
             '\u{2060}',
             '\u{2066}',
             '\u{3164}',
-            '\u{FE0F}',
             '\u{E007F}',
         ] {
             let name = format!("Review{character}er");
@@ -111,6 +176,31 @@ mod tests {
             assert!(validate_agent_definition_text(&name, "Review code.").is_err());
             assert!(validate_agent_definition_text("Reviewer", &prompt).is_err());
         }
+    }
+
+    #[test]
+    fn rejects_detached_or_text_embedded_emoji_formatting() {
+        for value in [
+            "Review\u{FE0F}er",
+            "Review\u{200D}er",
+            "Review code.\u{200D}",
+        ] {
+            assert!(validate_agent_definition_text(value, "Review code.").is_err());
+            assert!(validate_agent_definition_text("Reviewer", value).is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_emoji_tag_sequences() {
+        let tagged_flag = "\u{1F3F4}\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F}";
+        assert!(
+            validate_agent_definition_text(&format!("Reviewer {tagged_flag}"), "Review code.")
+                .is_err()
+        );
+        assert!(
+            validate_agent_definition_text("Reviewer", &format!("Review code. {tagged_flag}"))
+                .is_err()
+        );
     }
 
     #[test]
