@@ -390,31 +390,9 @@ export function TerminalSubstrate({
     return () => window.cancelAnimationFrame(frame);
   }, [banner, reducedMotion, terminalPalette, visible, welcomeVisible]);
 
-  React.useEffect(() => {
-    for (const delivered of frames) {
-      if (appliedFramesRef.current.has(delivered.frame)) continue;
-      appliedFramesRef.current.add(delivered.frame);
-      let grid = gridsRef.current.get(delivered.sessionId);
-      if (!grid) {
-        grid = new TerminalGrid(delivered.frame.viewport);
-        gridsRef.current.set(delivered.sessionId, grid);
-      } else if (
-        grid.viewport.generation !== delivered.frame.viewport.generation ||
-        grid.viewport.columns !== delivered.frame.viewport.columns ||
-        grid.viewport.screenLines !== delivered.frame.viewport.screenLines
-      ) {
-        grid.resize(delivered.frame.viewport);
-      }
-      grid.apply(delivered.frame);
-      consumeFrame(delivered.frame);
-    }
-    gridRef.current = activeSessionId
-      ? (gridsRef.current.get(activeSessionId) ?? null)
-      : null;
-
+  const paintTerminal = React.useEffectEvent(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
-    if (!terminalPalette) return;
+    if (!canvas || !terminalPalette) return;
     const context = canvas.getContext("2d", { alpha: false });
     if (!context) {
       forceBuzzFallback();
@@ -452,6 +430,34 @@ export function TerminalSubstrate({
     }
     gridRef.current?.setCursorPainted(cursorPainted);
     gridRef.current?.paint(context, TERMINAL_CELL_METRICS, terminalPalette);
+  });
+
+  // Palette and blink changes must trigger a repaint; paintTerminal is an
+  // Effect Event, so the dependency analyzer cannot see those reads.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: visual-only inputs intentionally trigger this paint effect.
+  React.useEffect(() => {
+    for (const delivered of frames) {
+      if (appliedFramesRef.current.has(delivered.frame)) continue;
+      appliedFramesRef.current.add(delivered.frame);
+      let grid = gridsRef.current.get(delivered.sessionId);
+      if (!grid) {
+        grid = new TerminalGrid(delivered.frame.viewport);
+        gridsRef.current.set(delivered.sessionId, grid);
+      } else if (
+        grid.viewport.generation !== delivered.frame.viewport.generation ||
+        grid.viewport.columns !== delivered.frame.viewport.columns ||
+        grid.viewport.screenLines !== delivered.frame.viewport.screenLines
+      ) {
+        grid.resize(delivered.frame.viewport);
+      }
+      grid.apply(delivered.frame);
+      consumeFrame(delivered.frame);
+    }
+    gridRef.current = activeSessionId
+      ? (gridsRef.current.get(activeSessionId) ?? null)
+      : null;
+
+    paintTerminal();
   }, [activeSessionId, cursorPainted, frames, terminalPalette]);
 
   const runTabAction = (action: () => void) => {
@@ -533,6 +539,11 @@ export function TerminalSubstrate({
             const applyHeight = () => {
               frame = 0;
               substrate.style.height = `${nextHeight}px`;
+              // Repaint the canvas at its new CSS size in the same visual
+              // frame. PTY geometry is still reported only on release, but
+              // leaving the old backing bitmap in a `height: 100%` canvas
+              // makes the browser stretch terminal rows during the drag.
+              paintTerminal();
             };
             const cleanup = () => {
               window.cancelAnimationFrame(frame);

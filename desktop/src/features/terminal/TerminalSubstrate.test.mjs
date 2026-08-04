@@ -254,6 +254,49 @@ test("drag resize batches visual updates and commits state only on release", asy
   assert.equal(window.localStorage.getItem("buzz-terminal-dock-height"), "380");
 });
 
+test("drag resize repaints the canvas without reporting PTY geometry until release", async () => {
+  let canvasHeight = 280;
+  const viewportSizes = [];
+  dom.window.HTMLCanvasElement.prototype.getBoundingClientRect = () => ({
+    bottom: canvasHeight,
+    height: canvasHeight,
+    left: 0,
+    right: 940.8,
+    top: 0,
+    width: 940.8,
+    x: 0,
+    y: 0,
+    toJSON() {},
+  });
+  const { view } = fixture({
+    mode: "docked",
+    onViewportSize(size) {
+      viewportSizes.push(size);
+    },
+  });
+  await ready(view);
+  const canvas = view.container.querySelector(
+    ".buzz-terminal-viewport > canvas:not(.buzz-terminal-welcome)",
+  );
+  const handle = view.getByLabelText("Resize Buzz Term");
+  await waitFor(() => assert.equal(canvas.height, 280));
+  const reportsBeforeDrag = viewportSizes.length;
+
+  fireEvent.pointerDown(handle, { clientY: 500, pointerId: 1 });
+  canvasHeight = 340;
+  fireEvent.pointerMove(handle, { clientY: 440, pointerId: 1 });
+
+  await waitFor(() => assert.equal(canvas.height, 340));
+  assert.equal(
+    viewportSizes.length,
+    reportsBeforeDrag,
+    "visual repaint must not resize the PTY during drag",
+  );
+
+  fireEvent.pointerUp(handle, { clientY: 440, pointerId: 1 });
+  await waitFor(() => assert.equal(viewportSizes.at(-1).pixelHeight, 340));
+});
+
 test("unmount cancels a queued drag update", async () => {
   const { view } = fixture({ mode: "docked" });
   await ready(view);
