@@ -64,6 +64,8 @@ use audio::*;
 #[path = "tts_activity.rs"]
 mod activity;
 use activity::*;
+#[path = "tts_pipeline_controls.rs"]
+mod pipeline_controls;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -126,7 +128,12 @@ const MAX_CHUNK_CHARS: usize = 200;
 /// Injected as a silent buffer between each synthesized sentence chunk.
 const INTER_SENTENCE_SILENCE: f32 = 0.1;
 
-type WorkerControlState = (Arc<AtomicBool>, Arc<AtomicBool>, WorkerCancelSignals);
+type WorkerControlState = (
+    Arc<AtomicBool>,
+    Arc<AtomicBool>,
+    WorkerCancelSignals,
+    SpeakerGenerations,
+);
 
 // ── Public pipeline handle ────────────────────────────────────────────────────
 
@@ -154,6 +161,9 @@ pub struct TtsPipeline {
     voice: Arc<Mutex<String>>,
     /// Tags messages so a voice change drops only pre-change queue entries.
     voice_generation: Arc<AtomicU64>,
+    /// Per-agent generations let removal invalidate that agent's queued and
+    /// in-flight text without poisoning speech queued after the agent rejoins.
+    speaker_generations: SpeakerGenerations,
     /// Completed after the worker drains pre-change text and installs the new style.
     voice_change_ack: VoiceChangeAck,
     /// Worker thread handle — taken on drop to join cleanly.
@@ -187,6 +197,8 @@ impl TtsPipeline {
         let voice_worker = Arc::clone(&voice);
         let voice_generation = Arc::new(AtomicU64::new(1));
         let worker_voice_generation = Arc::clone(&voice_generation);
+        let speaker_generations = Arc::new(Mutex::new(HashMap::new()));
+        let worker_speaker_generations = Arc::clone(&speaker_generations);
         let voice_change_ack = Arc::new(Mutex::new(None));
         let worker_voice_change_ack = Arc::clone(&voice_change_ack);
         let model_dir_worker = model_dir.clone();
@@ -207,6 +219,7 @@ impl TtsPipeline {
                         tts_active_worker,
                         shutdown_worker,
                         (cancel_worker, worker_voice_cancel),
+                        worker_speaker_generations,
                     ),
                     output_device,
                     activity_app,
@@ -224,78 +237,10 @@ impl TtsPipeline {
             voice_cancel,
             voice,
             voice_generation,
+            speaker_generations,
             voice_change_ack,
             thread: Some(handle),
         })
-    }
-
-    /// Queue `text` for TTS synthesis and playback.
-    ///
-    /// Non-blocking. Returns `Err` if the queue is full (bounded at
-    /// `TEXT_QUEUE_DEPTH`) — caller may log and discard.
-    pub fn speak(&self, text: String) -> Result<(), String> {
-        self.text_tx
-            .try_send(QueuedText {
-                generation: self.voice_generation.load(Ordering::Acquire),
-                route_id: 0,
-                speaker_pubkey: None,
-                voice_reference: None,
-                text,
-            })
-            .map_err(|e| {
-                eprintln!("buzz-desktop: TTS queue saturated, dropping message: {e}");
-                format!("TTS queue full, dropping: {e}")
-            })
-    }
-
-    /// Clone the bounded queue sender so callers can apply backpressure without
-    /// holding the huddle mutex. Disabling TTS drops the receiver and unblocks
-    /// any waiting sender while the shared cancellation flag stops playback.
-    pub(crate) fn text_sender(&self) -> TtsTextSender {
-        TtsTextSender {
-            text_tx: self.text_tx.clone(),
-            generation: self.voice_generation.load(Ordering::Acquire),
-        }
-    }
-
-    /// Select a bundled Pocket voice for subsequent speech.
-    ///
-    /// Current playback and queued text are cancelled immediately so content
-    /// cannot continue in the old voice. The worker keeps its warmed inference
-    /// engine and reloads only the reference style before the next utterance.
-    pub fn select_voice(&self, voice: &str) -> Option<tokio::sync::oneshot::Receiver<()>> {
-        let acknowledged = begin_voice_change(
-            &self.voice,
-            &self.voice_generation,
-            &self.voice_cancel,
-            &self.voice_change_ack,
-            voice,
-        );
-        if acknowledged.is_some() {
-            eprintln!("buzz-desktop: tts stage=cancellation reason=voice_switch route_id=0");
-        }
-        acknowledged
-    }
-
-    /// Reconcile the voice of a pipeline that has not been published yet.
-    ///
-    /// No caller can enqueue text before publication, so raising the shared
-    /// cancellation flag here would create a race that could discard the first
-    /// message queued immediately after installation.
-    pub(crate) fn select_voice_before_publish(&self, voice: &str) {
-        *self.voice.lock().unwrap_or_else(|error| error.into_inner()) = voice.to_string();
-    }
-
-    /// Signal the worker thread to stop.
-    pub fn shutdown(&self) {
-        eprintln!("buzz-desktop: tts stage=cancellation reason=shutdown route_id=0");
-        self.shutdown.store(true, Ordering::Release);
-    }
-
-    /// Returns `true` if the worker thread has exited (init failure, crash, or normal exit).
-    /// Used by hot-start to detect dead pipelines and clear them for retry.
-    pub fn is_finished(&self) -> bool {
-        self.thread.as_ref().is_none_or(|h| h.is_finished())
     }
 }
 
@@ -322,7 +267,7 @@ fn tts_worker(
     startup_tx: mpsc::SyncSender<Result<(), String>>,
 ) {
     let (selected_voice, voice_generation, voice_change_ack) = voice_state;
-    let (tts_active, shutdown, cancel_signals) = control_state;
+    let (tts_active, shutdown, cancel_signals, speaker_generations) = control_state;
     let (cancel, voice_cancel) = cancel_signals;
     // ── 1. Initialise TTS engine ──────────────────────────────────────────────
     let model_dir_str = model_dir.to_string_lossy().to_string();
@@ -564,7 +509,8 @@ fn tts_worker(
     let mut deferred_text = VecDeque::new();
     let append_audio = |prepared: PreparedModelAudio,
                         route_id: u64,
-                        speaker_pubkey: Option<&str>| {
+                        speaker_pubkey: Option<&str>,
+                        speaker_generation: u64| {
         let _ops = lock_player_ops(&player_ops);
         if cancel.load(Ordering::Acquire)
             || voice_cancel.load(Ordering::Acquire)
@@ -579,6 +525,25 @@ fn tts_worker(
             };
             eprintln!(
                 "buzz-desktop: tts stage=synthesis status=cancelled reason={reason} route_id={route_id}"
+            );
+            return false;
+        }
+        let speaker_generation_guard = speaker_pubkey.map(|_| {
+            speaker_generations
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+        });
+        let speaker_is_current = speaker_pubkey.is_none_or(|pubkey| {
+            speaker_generation_guard
+                .as_ref()
+                .and_then(|generations| generations.get(&pubkey.to_ascii_lowercase()))
+                .copied()
+                .unwrap_or(0)
+                == speaker_generation
+        });
+        if !speaker_is_current {
+            eprintln!(
+                "buzz-desktop: tts stage=synthesis status=cancelled reason=speaker_removed route_id={route_id}"
             );
             return false;
         }
@@ -679,6 +644,13 @@ fn tts_worker(
         let Some(queued_text) = queued_text else {
             continue;
         };
+        if !queued_speaker_is_current(&speaker_generations, &queued_text) {
+            eprintln!(
+                "buzz-desktop: tts stage=queue status=dropped reason=speaker_removed route_id={}",
+                queued_text.route_id
+            );
+            continue;
+        }
         if queued_text.generation < voice_generation.load(Ordering::Acquire) {
             eprintln!(
                 "buzz-desktop: tts stage=queue status=dropped reason=voice_switch route_id={}",
@@ -694,6 +666,7 @@ fn tts_worker(
         });
         let raw_text = queued_text.text;
         let speaker_pubkey = queued_text.speaker_pubkey;
+        let speaker_generation = queued_text.speaker_generation;
         let route_id = queued_text.route_id;
         eprintln!("buzz-desktop: tts stage=synthesis status=started route_id={route_id}");
 
@@ -846,7 +819,12 @@ fn tts_worker(
                             silence_buf_len,
                             player.empty(),
                         ) {
-                            if !append_audio(prepared, route_id, speaker_pubkey.as_deref()) {
+                            if !append_audio(
+                                prepared,
+                                route_id,
+                                speaker_pubkey.as_deref(),
+                                speaker_generation,
+                            ) {
                                 first_append = true;
                                 synthesis_outcome = "cancelled";
                                 break 'playback_chunks;
@@ -872,7 +850,12 @@ fn tts_worker(
             if let Some(prepared) =
                 playback_audio.finish(&mut first_append, silence_buf_len, player.empty())
             {
-                if !append_audio(prepared, route_id, speaker_pubkey.as_deref()) {
+                if !append_audio(
+                    prepared,
+                    route_id,
+                    speaker_pubkey.as_deref(),
+                    speaker_generation,
+                ) {
                     first_append = true;
                     synthesis_outcome = "cancelled";
                     break 'playback_chunks;

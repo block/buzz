@@ -1,6 +1,9 @@
 //! Small Huddle controls that mutate an active session.
 
-use std::sync::atomic::Ordering;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use tauri::State;
 use uuid::Uuid;
@@ -30,15 +33,23 @@ pub fn set_huddle_manual_mic_unmuted(
 /// text waiting to be synthesized.
 #[tauri::command]
 pub fn interrupt_huddle_speech(state: State<'_, AppState>) -> Result<(), String> {
-    let cancel = {
+    let (active, cancel) = {
         let huddle = state.huddle()?;
         if !matches!(huddle.phase, HuddlePhase::Connected | HuddlePhase::Active) {
             return Err("no active huddle".to_string());
         }
-        huddle.tts_cancel.clone()
+        (huddle.tts_active.clone(), huddle.tts_cancel.clone())
     };
-    cancel.store(true, Ordering::Release);
+    request_speech_interrupt(&active, &cancel);
     Ok(())
+}
+
+fn request_speech_interrupt(active: &AtomicBool, cancel: &AtomicBool) -> bool {
+    if !active.load(Ordering::Acquire) {
+        return false;
+    }
+    cancel.store(true, Ordering::Release);
+    true
 }
 
 /// Remove an agent from the active huddle without removing its parent-channel
@@ -84,10 +95,10 @@ pub async fn remove_agent_from_huddle(
     )
     .await?;
 
-    let roster_changed = {
+    let (roster_changed, tts_pipeline) = {
         let mut huddle = state.huddle()?;
         if !huddle.is_current_huddle(&ephemeral_channel_id, huddle_generation) {
-            false
+            (false, None)
         } else {
             let mut agent_pubkeys = huddle
                 .agent_pubkeys
@@ -111,13 +122,45 @@ pub async fn remove_agent_from_huddle(
                     huddle.agent_voice_settings.remove(&settings_pubkey);
                 }
             }
-            changed
+            let tts_pipeline = changed
+                .then_some(huddle.tts_pipeline.as_ref())
+                .flatten()
+                .map(Arc::clone);
+            (changed, tts_pipeline)
         }
     };
 
+    if let Some(tts_pipeline) = tts_pipeline {
+        tts_pipeline.cancel_speaker(&agent_pubkey);
+    }
     if roster_changed {
         state.emit_huddle_state_changed();
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stale_stop_does_not_cancel_the_next_utterance() {
+        let active = AtomicBool::new(false);
+        let cancel = AtomicBool::new(false);
+
+        assert!(!request_speech_interrupt(&active, &cancel));
+        active.store(true, Ordering::Release);
+
+        assert!(!cancel.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn stop_cancels_active_speech() {
+        let active = AtomicBool::new(true);
+        let cancel = AtomicBool::new(false);
+
+        assert!(request_speech_interrupt(&active, &cancel));
+        assert!(cancel.load(Ordering::Acquire));
+    }
 }

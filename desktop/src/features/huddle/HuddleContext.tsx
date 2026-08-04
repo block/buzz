@@ -246,10 +246,8 @@ export function HuddleProvider({
     [ownsAudioSession, setVoiceInputModeState],
   );
 
-  // Ref-track the current audio track so disconnectMedia is stable (no
-  // dependency on localAudioTrack state). This prevents the unmount-cleanup
-  // effect from re-firing mid-startup when setLocalAudioTrack triggers a
-  // leaveHuddle dependency chain update.
+  // Keep disconnectMedia stable so setting the track cannot re-fire the
+  // unmount cleanup during startup.
   const audioTrackRef = React.useRef<MediaStreamTrack | null>(null);
   audioTrackRef.current = localAudioTrack;
 
@@ -283,12 +281,19 @@ export function HuddleProvider({
       return;
     }
 
-    setIsMuted((previous) => {
-      const next = !previous;
-      void invoke("set_huddle_manual_mic_unmuted", { enabled: !next });
-      return next;
+    // Set the effective state promised by the button instead of inverting the
+    // hidden manual preference, which can differ while PTT is held.
+    const requestedMuted = !locallyMuted;
+    setIsMuted(requestedMuted);
+    void invoke("set_huddle_manual_mic_unmuted", {
+      enabled: !requestedMuted,
     });
-  }, [mirroredAudioState?.isMuted, ownsAudioSession, voiceInputMode]);
+  }, [
+    locallyMuted,
+    mirroredAudioState?.isMuted,
+    ownsAudioSession,
+    voiceInputMode,
+  ]);
 
   const interruptAgentSpeech = React.useCallback(async () => {
     await invoke("interrupt_huddle_speech");

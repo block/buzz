@@ -19,6 +19,7 @@ pub(super) struct PendingVoiceChange {
 pub(super) type VoiceChangeAck = Arc<Mutex<Option<PendingVoiceChange>>>;
 pub(super) type WorkerVoiceState = (Arc<Mutex<String>>, Arc<AtomicU64>, VoiceChangeAck);
 pub(super) type WorkerCancelSignals = (Arc<AtomicBool>, Arc<AtomicBool>);
+pub(super) type SpeakerGenerations = Arc<Mutex<HashMap<String, u64>>>;
 pub(super) type CancelTextState<'a> = (
     &'a mpsc::Receiver<QueuedText>,
     &'a mut VecDeque<QueuedText>,
@@ -31,6 +32,7 @@ pub(super) struct QueuedText {
     pub(super) generation: u64,
     pub(super) route_id: u64,
     pub(super) speaker_pubkey: Option<String>,
+    pub(super) speaker_generation: u64,
     pub(super) voice_reference: Option<String>,
     pub(super) text: String,
 }
@@ -39,6 +41,7 @@ pub(super) struct QueuedText {
 pub(crate) struct TtsTextSender {
     pub(super) text_tx: SyncSender<QueuedText>,
     pub(super) generation: u64,
+    pub(super) speaker_generations: SpeakerGenerations,
 }
 
 impl TtsTextSender {
@@ -46,6 +49,7 @@ impl TtsTextSender {
         &self,
         route_id: u64,
         speaker_pubkey: String,
+        speaker_generation: u64,
         voice_reference: String,
         text: String,
     ) -> Result<(), String> {
@@ -54,11 +58,54 @@ impl TtsTextSender {
                 generation: self.generation,
                 route_id,
                 speaker_pubkey: Some(speaker_pubkey),
+                speaker_generation,
                 voice_reference: Some(voice_reference),
                 text,
             })
             .map_err(|error| error.to_string())
     }
+
+    pub(crate) fn speaker_generation(&self, speaker_pubkey: &str) -> u64 {
+        current_speaker_generation(&self.speaker_generations, speaker_pubkey)
+    }
+}
+
+pub(super) fn current_speaker_generation(
+    generations: &SpeakerGenerations,
+    speaker_pubkey: &str,
+) -> u64 {
+    generations
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(&speaker_pubkey.to_ascii_lowercase())
+        .copied()
+        .unwrap_or(0)
+}
+
+pub(super) fn advance_speaker_generation(
+    generations: &SpeakerGenerations,
+    speaker_pubkey: &str,
+) -> u64 {
+    let mut generations = generations
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let generation = generations
+        .entry(speaker_pubkey.to_ascii_lowercase())
+        .or_default();
+    *generation = generation.saturating_add(1);
+    *generation
+}
+
+pub(super) fn queued_speaker_is_current(
+    generations: &SpeakerGenerations,
+    queued: &QueuedText,
+) -> bool {
+    queued
+        .speaker_pubkey
+        .as_deref()
+        .is_none_or(|speaker_pubkey| {
+            current_speaker_generation(generations, speaker_pubkey) == queued.speaker_generation
+        })
 }
 
 pub(super) fn has_pending_voice_change(voice_change_ack: &VoiceChangeAck) -> bool {
@@ -257,4 +304,36 @@ pub(super) fn retain_cancelled_text(
 
 fn log_cancelled_route(route_id: u64, reason: &str) {
     eprintln!("buzz-desktop: tts stage=queue status=dropped reason={reason} route_id={route_id}");
+}
+
+#[cfg(test)]
+mod speaker_generation_tests {
+    use super::*;
+
+    fn queued_speech(speaker_pubkey: &str, speaker_generation: u64) -> QueuedText {
+        QueuedText {
+            generation: 1,
+            route_id: 1,
+            speaker_pubkey: Some(speaker_pubkey.to_string()),
+            speaker_generation,
+            voice_reference: Some("pocket:mary".to_string()),
+            text: "Hello".to_string(),
+        }
+    }
+
+    #[test]
+    fn removing_a_speaker_invalidates_only_that_speakers_queued_text() {
+        let generations = Arc::new(Mutex::new(HashMap::new()));
+        let alice = queued_speech("ALICE", current_speaker_generation(&generations, "alice"));
+        let bob = queued_speech("bob", current_speaker_generation(&generations, "bob"));
+
+        advance_speaker_generation(&generations, "alice");
+
+        assert!(!queued_speaker_is_current(&generations, &alice));
+        assert!(queued_speaker_is_current(&generations, &bob));
+
+        let rejoined_alice =
+            queued_speech("alice", current_speaker_generation(&generations, "alice"));
+        assert!(queued_speaker_is_current(&generations, &rejoined_alice));
+    }
 }

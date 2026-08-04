@@ -1204,6 +1204,17 @@ test("starts unmuted with Push to Talk while preserving manual microphone contro
     await window.__BUZZ_E2E_EMIT_TAURI_EVENT__?.("ptt-state", true);
   });
   await expect(muteButton).toBeVisible();
+  await muteButton.click();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).findLast(
+            (entry) => entry.command === "set_huddle_manual_mic_unmuted",
+          )?.payload,
+      ),
+    )
+    .toEqual({ enabled: false });
 
   await page.evaluate(async () => {
     await window.__BUZZ_E2E_EMIT_TAURI_EVENT__?.("ptt-state", false);

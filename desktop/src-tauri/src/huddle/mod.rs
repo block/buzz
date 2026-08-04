@@ -872,11 +872,27 @@ pub async fn speak_agent_message(
 
     let sender = {
         let hs = state.huddle()?;
+        let agent_is_present = hs
+            .agent_pubkeys
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .any(|pubkey| pubkey.eq_ignore_ascii_case(&speaker_pubkey));
+        if !agent_is_present {
+            eprintln!(
+                "buzz-desktop: tts stage=queue status=dropped reason=speaker_removed route_id={route_id}"
+            );
+            return Ok(());
+        }
         hs.tts_pipeline
             .as_ref()
             .map(|pipeline| pipeline.text_sender())
+            .map(|sender| {
+                let speaker_generation = sender.speaker_generation(&speaker_pubkey);
+                (sender, speaker_generation)
+            })
     };
-    let Some(sender) = sender else {
+    let Some((sender, speaker_generation)) = sender else {
         eprintln!(
             "buzz-desktop: tts stage=invoke status=failed reason=unavailable route_id={route_id}"
         );
@@ -884,7 +900,13 @@ pub async fn speak_agent_message(
     };
     enqueue_agent_tts_text(route_id, text, move |route_id, text| {
         sender
-            .send(route_id, speaker_pubkey, voice_reference, text)
+            .send(
+                route_id,
+                speaker_pubkey,
+                speaker_generation,
+                voice_reference,
+                text,
+            )
             .map_err(|error| format!("TTS queue closed while waiting to enqueue: {error}"))
     })
     .await
