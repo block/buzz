@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import 'directional_transition_scope.dart';
 import 'frosted_app_bar.dart';
 
 /// A convenience [Scaffold] that overlays a [FrostedAppBar] on top of its body.
@@ -40,7 +41,20 @@ class FrostedScaffold extends StatelessWidget {
       backgroundColor: backgroundColor,
       resizeToAvoidBottomInset: resizeToAvoidBottomInset,
       floatingActionButton: floatingActionButton,
-      body: Stack(children: [body, appBar]),
+      body: Stack(
+        children: [
+          DirectionalTransitionMotion(
+            transformKey: const ValueKey(
+              'frosted-scaffold-body-transition-transform',
+            ),
+            opacityKey: const ValueKey(
+              'frosted-scaffold-body-transition-opacity',
+            ),
+            child: body,
+          ),
+          appBar,
+        ],
+      ),
     );
   }
 }

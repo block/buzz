@@ -89,6 +89,7 @@ export type MockManagedAgentSeed = {
   lastError?: string | null;
   lastErrorCode?: number | null;
   needsRestart?: boolean;
+  restartDiff?: Array<{ field: string; change: unknown }>;
   autoRestartOnConfigChange?: boolean;
   respondTo?: RawManagedAgent["respond_to"];
   respondToAllowlist?: string[];
@@ -370,6 +371,8 @@ type E2eConfig = {
     // (e.g. a generic PDF) without a real upload pipeline. See
     // tests/helpers/bridge.ts:MockBridgeOptions.uploadDescriptors.
     uploadDelayMs?: number;
+    /** Exercise the production composer path that queues files until send. */
+    deferredComposerUploads?: boolean;
     /** Delay (ms) applied to `encode_agent_snapshot_for_send` so E2E tests can
      *  observe the "preparing" phase before the upload begins. 0/undefined = instant. */
     encodeDelayMs?: number;
@@ -825,6 +828,7 @@ type RawManagedAgent = {
   last_error: string | null;
   last_error_code: number | null;
   needs_restart?: boolean;
+  restart_diff?: Array<{ field: string; change: unknown }>;
   log_path: string;
   start_on_app_launch: boolean;
   auto_restart_on_config_change?: boolean;
@@ -1067,6 +1071,15 @@ declare global {
       command: string;
       payload: unknown;
     }>;
+    __BUZZ_E2E_EMIT_MEDIA_UPLOAD_PHASE__?: (input: {
+      id: string;
+      phase: string;
+    }) => Promise<void>;
+    __BUZZ_E2E_EMIT_MEDIA_UPLOAD_PROGRESS__?: (input: {
+      id: string;
+      sent: number;
+      total: number;
+    }) => Promise<void>;
     __BUZZ_E2E_EMIT_MOCK_HUDDLE_TTS_SPEAKER__?: (payload: {
       pubkey: string | null;
       level: number;
@@ -1627,6 +1640,7 @@ function cloneManagedAgent(agent: MockManagedAgent): RawManagedAgent {
     last_error: agent.last_error,
     last_error_code: agent.last_error_code,
     needs_restart: agent.needs_restart ?? false,
+    restart_diff: agent.restart_diff ? [...agent.restart_diff] : [],
     log_path: agent.log_path,
     start_on_app_launch: agent.start_on_app_launch,
     auto_restart_on_config_change: agent.auto_restart_on_config_change ?? true,
@@ -2180,6 +2194,7 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     last_error: seed.lastError ?? null,
     last_error_code: seed.lastErrorCode ?? null,
     needs_restart: seed.needsRestart ?? false,
+    restart_diff: seed.restartDiff ?? [],
     log_path: `/tmp/mock-agent-${seed.pubkey}.log`,
     start_on_app_launch: true,
     auto_restart_on_config_change: seed.autoRestartOnConfigChange ?? true,
@@ -8838,7 +8853,7 @@ async function resolveMockUploadDescriptors(
 }
 
 async function resolveMockUploadDescriptorForBytes(
-  args: { data: number[]; filename?: string | null },
+  args: { data: number[] | Uint8Array; filename?: string | null },
   config: E2eConfig | undefined,
 ): Promise<RawBlobDescriptor> {
   const configured = config?.mock?.uploadDescriptors;
@@ -9888,6 +9903,12 @@ export function maybeInstallE2eTauriMocks() {
     emit("huddle-tts-speaker-level", payload);
   window.__BUZZ_E2E_SIGNED_EVENTS__ = [];
   window.__BUZZ_E2E_WEBVIEW_ZOOM__ = 1;
+  window.__BUZZ_E2E_EMIT_MEDIA_UPLOAD_PHASE__ = async (input) => {
+    await emit("media-upload-phase", input);
+  };
+  window.__BUZZ_E2E_EMIT_MEDIA_UPLOAD_PROGRESS__ = async (input) => {
+    await emit("media-upload-progress", input);
+  };
   window.__BUZZ_E2E_SET_MOCK_HUDDLE_SNAPSHOT__ = async ({
     members,
     transcriptionEnabled,
@@ -10228,6 +10249,9 @@ export function maybeInstallE2eTauriMocks() {
     const identity = getActiveIdentity(activeConfig);
     window.__BUZZ_E2E_COMMANDS__?.push(command);
     const loggedPayload = (() => {
+      if (payload instanceof Uint8Array) {
+        return { rawByteLength: payload.byteLength };
+      }
       try {
         return JSON.parse(JSON.stringify(payload ?? null));
       } catch {
@@ -12360,6 +12384,13 @@ export function maybeInstallE2eTauriMocks() {
       case "upload_media_bytes":
         return resolveMockUploadDescriptorForBytes(
           payload as { data: number[]; filename?: string | null },
+          activeConfig,
+        );
+      case "upload_media_bytes_raw":
+        return resolveMockUploadDescriptorForBytes(
+          {
+            data: payload as Uint8Array,
+          },
           activeConfig,
         );
       case "fetch_media_bytes": {

@@ -4,6 +4,7 @@ import 'dart:math' show max, min, pi;
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:flutter/physics.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -41,10 +42,10 @@ import 'channel_sort/channel_sort_provider.dart';
 import 'channel_sort/channel_sort_storage.dart';
 import 'channel_stars/channel_stars_provider.dart';
 import 'channels_provider.dart';
-import 'read_state/deferred_read_state_update.dart';
-import 'read_state/read_state_format.dart';
-import 'read_state/read_state_provider.dart';
-import 'read_state/read_state_time.dart';
+import '../../shared/read_state/deferred_read_state_update.dart';
+import '../../shared/read_state/read_state_format.dart';
+import '../../shared/read_state/read_state_provider.dart';
+import '../../shared/read_state/read_state_time.dart';
 import 'unread_badge/observed_unread_event.dart';
 
 part 'channels_page/body.dart';
@@ -92,9 +93,8 @@ const double _kSectionCollapsedScaleY = 0.98;
 
 class _UnreadChannelState {
   final Set<String> ids;
-  final Map<String, int> counts;
 
-  const _UnreadChannelState({required this.ids, required this.counts});
+  const _UnreadChannelState({required this.ids});
 }
 
 _UnreadChannelState _computeUnreadChannelState({
@@ -103,19 +103,17 @@ _UnreadChannelState _computeUnreadChannelState({
   required ChannelsNotifier channelsNotifier,
 }) {
   if (!readState.isReady) {
-    return const _UnreadChannelState(ids: {}, counts: {});
+    return const _UnreadChannelState(ids: {});
   }
 
   final latestObservedByChannel = channelsNotifier.latestObservedByChannel;
   final observedEventsByChannel =
       channelsNotifier.observedUnreadEventsByChannel;
   final ids = <String>{};
-  final counts = <String, int>{};
 
   for (final channel in channels) {
     if (readState.locallyForcedChannelIds.contains(channel.id)) {
       ids.add(channel.id);
-      counts[channel.id] = 1;
       continue;
     }
 
@@ -141,13 +139,9 @@ _UnreadChannelState _computeUnreadChannelState({
     if (unreadCount == 0) continue;
 
     ids.add(channel.id);
-    counts[channel.id] = countUnreadBadgeObservedEvents(
-      observedEvents,
-      readAtForObservedEvent,
-    );
   }
 
-  return _UnreadChannelState(ids: ids, counts: counts);
+  return _UnreadChannelState(ids: ids);
 }
 
 class ChannelsPage extends HookConsumerWidget {

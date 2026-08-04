@@ -2,7 +2,6 @@ part of '../channels_page.dart';
 
 class _ChannelTile extends ConsumerWidget {
   final Channel channel;
-  final int? unreadCount;
   final bool isUnread;
   final bool isMuted;
   final String? currentPubkey;
@@ -17,7 +16,6 @@ class _ChannelTile extends ConsumerWidget {
 
   const _ChannelTile({
     required this.channel,
-    this.unreadCount,
     required this.isUnread,
     required this.currentPubkey,
     required this.onTap,
@@ -85,10 +83,6 @@ class _ChannelTile extends ConsumerWidget {
                 size: 12,
                 color: context.colors.onSurfaceVariant,
               ),
-            ],
-            if (isUnread && !channel.isDm) ...[
-              const SizedBox(width: Grid.xxs),
-              _UnreadBadge(channelId: channel.id, count: unreadCount ?? 0),
             ],
             if (!channel.isMember && !channel.isDm)
               Padding(
