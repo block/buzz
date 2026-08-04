@@ -35,8 +35,11 @@ import {
   DEFAULT_EPHEMERAL_TTL_SECONDS,
   formatTtlDuration,
 } from "@/features/channels/lib/ephemeralChannel";
+import { ownsAuthorAgent } from "@/features/profile/lib/identity";
+import { useUsersBatchQuery } from "@/features/profile/hooks";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import { useTheme } from "@/shared/theme/ThemeProvider";
 import { Button } from "@/shared/ui/button";
 import {
@@ -68,6 +71,7 @@ import {
   CHANNEL_FORM_FIELD_CONTROL_CLASS,
   CHANNEL_FORM_FIELD_SHELL_CLASS,
 } from "./channelFormStyles";
+import { AgentBehaviorSettings } from "./AgentBehaviorSettings";
 import { ChannelTypeSettings } from "./ChannelTypeSettings";
 import { ChannelPermissionsSettings } from "./ChannelPermissionsSettings";
 import {
@@ -140,6 +144,45 @@ export function ChannelManagementSheet({
 
   const { canDeleteChannel, canManageChannel } =
     useChannelModerationCapabilities(membersQuery.data, currentPubkey, open);
+  const dmOtherParticipantPubkeys = React.useMemo(() => {
+    if (detail?.channelType !== "dm") {
+      return [];
+    }
+
+    const normalizedCurrentPubkey = currentPubkey
+      ? normalizePubkey(currentPubkey)
+      : null;
+
+    const participantPubkeys =
+      detail.participantPubkeys?.length > 0
+        ? detail.participantPubkeys
+        : channel?.participantPubkeys?.length
+          ? channel.participantPubkeys
+          : members.map((member) => member.pubkey);
+
+    return participantPubkeys.filter(
+      (pubkey) => normalizePubkey(pubkey) !== normalizedCurrentPubkey,
+    );
+  }, [channel, currentPubkey, detail, members]);
+  const dmParticipantProfilesQuery = useUsersBatchQuery(
+    dmOtherParticipantPubkeys,
+    {
+      enabled:
+        open &&
+        detail?.channelType === "dm" &&
+        !canManageChannel &&
+        dmOtherParticipantPubkeys.length > 0,
+    },
+  );
+  const canEditOwnedAgentDm =
+    detail?.channelType === "dm" &&
+    dmOtherParticipantPubkeys.some((pubkey) =>
+      ownsAuthorAgent(
+        dmParticipantProfilesQuery.data?.profiles[normalizePubkey(pubkey)],
+        currentPubkey,
+      ),
+    );
+  const canEditChannelSettings = canManageChannel || canEditOwnedAgentDm;
   const canEditNarrative =
     canManageChannel && selfMember !== null && detail?.channelType !== "dm";
   const isArchived =
@@ -165,6 +208,10 @@ export function ChannelManagementSheet({
   const [ttlSecondsDraft, setTtlSecondsDraft] = React.useState(
     DEFAULT_EPHEMERAL_TTL_SECONDS,
   );
+  const [agentRepliesInThreadsDraft, setAgentRepliesInThreadsDraft] =
+    React.useState(true);
+  const [dmRequireMentionDraft, setDmRequireMentionDraft] =
+    React.useState(true);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = React.useState(false);
   const [isEditDialogOpen, setIsEditDialogOpen] = React.useState(false);
   const [isConvertingVisibility, setIsConvertingVisibility] =
@@ -202,6 +249,8 @@ export function ChannelManagementSheet({
     setIsPrivateDraft(detail.visibility === "private");
     setIsEphemeralDraft(detail.ttlSeconds !== null);
     setTtlSecondsDraft(detail.ttlSeconds ?? DEFAULT_EPHEMERAL_TTL_SECONDS);
+    setAgentRepliesInThreadsDraft(detail.agentReplyMode !== "inline");
+    setDmRequireMentionDraft(detail.dmRequireMention);
     setHasUserEditedChannelDraft(false);
     setActiveView("summary");
   }, [detail, open]);
@@ -242,16 +291,27 @@ export function ChannelManagementSheet({
   const nextTtlSeconds: number | null = isEphemeralDraft
     ? ttlSecondsDraft
     : null;
+  const resolvedChannel = detail ?? channel;
+  const nextAgentReplyMode = agentRepliesInThreadsDraft ? "thread" : "inline";
+  const currentAgentReplyMode = resolvedChannel.agentReplyMode;
+  const agentReplyModeDirty = nextAgentReplyMode !== currentAgentReplyMode;
+  const dmRequireMentionDirty =
+    resolvedChannel.channelType === "dm" &&
+    dmRequireMentionDraft !== resolvedChannel.dmRequireMention;
   const lifecycleDirty =
     nextVisibility !== currentVisibility ||
     nextTtlSeconds !== currentTtlSeconds;
 
-  const resolvedChannel = detail ?? channel;
   const nameDirty = nameDraft.trim() !== resolvedChannel.name.trim();
   const descriptionDirty =
     descriptionDraft.trim() !== resolvedChannel.description.trim();
   const isSavingChannelEdits = updateChannelDetailsMutation.isPending;
-  const hasChannelEditChanges = nameDirty || descriptionDirty || lifecycleDirty;
+  const hasChannelEditChanges =
+    nameDirty ||
+    descriptionDirty ||
+    lifecycleDirty ||
+    agentReplyModeDirty ||
+    dmRequireMentionDirty;
   const canSaveChannelEdits =
     nameDraft.trim().length > 0 &&
     hasUserEditedChannelDraft &&
@@ -270,6 +330,10 @@ export function ChannelManagementSheet({
       setDescriptionDraft(resolvedChannel.description);
       setIsEphemeralDraft(currentTtlSeconds !== null);
       setTtlSecondsDraft(currentTtlSeconds ?? DEFAULT_EPHEMERAL_TTL_SECONDS);
+      setAgentRepliesInThreadsDraft(
+        resolvedChannel.agentReplyMode !== "inline",
+      );
+      setDmRequireMentionDraft(resolvedChannel.dmRequireMention);
       setHasUserEditedChannelDraft(false);
     }
 
@@ -278,12 +342,16 @@ export function ChannelManagementSheet({
 
   async function handleSaveChannelEdits() {
     try {
-      if (nameDirty || descriptionDirty || lifecycleDirty) {
+      if (hasChannelEditChanges) {
         await updateChannelDetailsMutation.mutateAsync({
           description: descriptionDirty ? descriptionDraft.trim() : undefined,
           name: nameDirty ? nameDraft.trim() : undefined,
           ttlSeconds:
             nextTtlSeconds !== currentTtlSeconds ? nextTtlSeconds : undefined,
+          agentReplyMode: agentReplyModeDirty ? nextAgentReplyMode : undefined,
+          dmRequireMention: dmRequireMentionDirty
+            ? dmRequireMentionDraft
+            : undefined,
           visibility:
             lifecycleDirty && nextVisibility !== currentVisibility
               ? nextVisibility
@@ -354,6 +422,7 @@ export function ChannelManagementSheet({
             canEditNarrative={canEditNarrative}
             canJoin={canJoin}
             canLeave={canLeave}
+            canEditChannelSettings={canEditChannelSettings}
             canManageChannel={canManageChannel}
             canOpenCanvas={canOpenCanvas}
             canvasPreview={canvasPreview}
@@ -400,6 +469,7 @@ export function ChannelManagementSheet({
               canEditNarrative={canEditNarrative}
               canJoin={canJoin}
               canLeave={canLeave}
+              canEditChannelSettings={canEditChannelSettings}
               canManageChannel={canManageChannel}
               canOpenCanvas={canOpenCanvas}
               canvasPreview={canvasPreview}
@@ -429,7 +499,7 @@ export function ChannelManagementSheet({
         </DialogPrimitive.Portal>
       )}
 
-      {canManageChannel ? (
+      {canEditChannelSettings ? (
         <Dialog
           onOpenChange={handleEditDialogOpenChange}
           open={isEditDialogOpen}
@@ -441,68 +511,73 @@ export function ChannelManagementSheet({
             <div className="flex max-h-[85vh] flex-col">
               <DialogHeader className="shrink-0 border-b border-border/60 px-6 py-5 pr-14">
                 <DialogTitle>
-                  Edit {currentVisibility === "private" ? "private" : "public"}{" "}
-                  channel
+                  {resolvedChannel.channelType === "dm"
+                    ? "Edit DM"
+                    : `Edit ${
+                        currentVisibility === "private" ? "private" : "public"
+                      } channel`}
                 </DialogTitle>
               </DialogHeader>
 
               <div className="min-h-0 flex-1 space-y-6 overflow-y-auto px-6 py-5">
-                <div className="space-y-5">
-                  <div className="space-y-1.5">
-                    <label
-                      className="text-sm font-medium text-foreground"
-                      htmlFor="channel-name"
-                    >
-                      Name
-                    </label>
-                    <div
-                      className={cn(
-                        "flex min-h-11 items-center px-3",
-                        CHANNEL_FORM_FIELD_SHELL_CLASS,
-                      )}
-                    >
-                      <Input
+                {resolvedChannel.channelType !== "dm" ? (
+                  <div className="space-y-5">
+                    <div className="space-y-1.5">
+                      <label
+                        className="text-sm font-medium text-foreground"
+                        htmlFor="channel-name"
+                      >
+                        Name
+                      </label>
+                      <div
                         className={cn(
-                          "h-8 px-0 py-0 leading-6",
-                          CHANNEL_FORM_FIELD_CONTROL_CLASS,
+                          "flex min-h-11 items-center px-3",
+                          CHANNEL_FORM_FIELD_SHELL_CLASS,
                         )}
-                        data-testid="channel-management-name"
-                        disabled={isSavingChannelEdits}
-                        id="channel-name"
-                        onChange={(event) => {
-                          setNameDraft(event.target.value);
-                          setHasUserEditedChannelDraft(true);
-                        }}
-                        value={nameDraft}
-                      />
+                      >
+                        <Input
+                          className={cn(
+                            "h-8 px-0 py-0 leading-6",
+                            CHANNEL_FORM_FIELD_CONTROL_CLASS,
+                          )}
+                          data-testid="channel-management-name"
+                          disabled={isSavingChannelEdits}
+                          id="channel-name"
+                          onChange={(event) => {
+                            setNameDraft(event.target.value);
+                            setHasUserEditedChannelDraft(true);
+                          }}
+                          value={nameDraft}
+                        />
+                      </div>
+                    </div>
+                    <div className="space-y-1.5">
+                      <label
+                        className="text-sm font-medium text-foreground"
+                        htmlFor="channel-description"
+                      >
+                        Description
+                      </label>
+                      <div className={CHANNEL_FORM_FIELD_SHELL_CLASS}>
+                        <Textarea
+                          className={cn(
+                            "min-h-20 resize-none px-3 py-3 leading-5",
+                            CHANNEL_FORM_FIELD_CONTROL_CLASS,
+                          )}
+                          data-testid="channel-management-description"
+                          disabled={isSavingChannelEdits}
+                          id="channel-description"
+                          onChange={(event) => {
+                            setDescriptionDraft(event.target.value);
+                            setHasUserEditedChannelDraft(true);
+                          }}
+                          rows={2}
+                          value={descriptionDraft}
+                        />
+                      </div>
                     </div>
                   </div>
-                  <div className="space-y-1.5">
-                    <label
-                      className="text-sm font-medium text-foreground"
-                      htmlFor="channel-description"
-                    >
-                      Description
-                    </label>
-                    <div className={CHANNEL_FORM_FIELD_SHELL_CLASS}>
-                      <Textarea
-                        className={cn(
-                          "min-h-20 resize-none px-3 py-3 leading-5",
-                          CHANNEL_FORM_FIELD_CONTROL_CLASS,
-                        )}
-                        data-testid="channel-management-description"
-                        disabled={isSavingChannelEdits}
-                        id="channel-description"
-                        onChange={(event) => {
-                          setDescriptionDraft(event.target.value);
-                          setHasUserEditedChannelDraft(true);
-                        }}
-                        rows={2}
-                        value={descriptionDraft}
-                      />
-                    </div>
-                  </div>
-                </div>
+                ) : null}
 
                 {resolvedChannel.channelType !== "dm" ? (
                   <div
@@ -534,6 +609,21 @@ export function ChannelManagementSheet({
                     />
                   </div>
                 ) : null}
+
+                <AgentBehaviorSettings
+                  agentRepliesInThreads={agentRepliesInThreadsDraft}
+                  disabled={isSavingChannelEdits}
+                  dmRequireMention={dmRequireMentionDraft}
+                  isDm={resolvedChannel.channelType === "dm"}
+                  onAgentRepliesInThreadsChange={(checked) => {
+                    setAgentRepliesInThreadsDraft(checked);
+                    setHasUserEditedChannelDraft(true);
+                  }}
+                  onDmRequireMentionChange={(checked) => {
+                    setDmRequireMentionDraft(checked);
+                    setHasUserEditedChannelDraft(true);
+                  }}
+                />
 
                 {updateChannelDetailsMutation.error instanceof Error ? (
                   <p className="rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
@@ -581,6 +671,7 @@ type ChannelManagementPanelContentProps = {
   canEditNarrative: boolean;
   canJoin: boolean;
   canLeave: boolean;
+  canEditChannelSettings: boolean;
   canManageChannel: boolean;
   canOpenCanvas: boolean;
   canvasPreview?: string;
@@ -613,6 +704,7 @@ function ChannelManagementPanelContent({
   canEditNarrative,
   canJoin,
   canLeave,
+  canEditChannelSettings,
   canManageChannel,
   canOpenCanvas,
   canvasPreview,
@@ -747,7 +839,7 @@ function ChannelManagementPanelContent({
                   testId="channel-management-leave"
                 />
               ) : null}
-              {canManageChannel ? (
+              {canEditChannelSettings ? (
                 <ChannelQuickAction
                   icon={Pencil}
                   label="Edit"

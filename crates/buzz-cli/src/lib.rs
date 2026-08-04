@@ -576,7 +576,10 @@ pub enum ChannelsCmd {
         #[arg(long, value_name = "PATH")]
         templates_file: Option<String>,
     },
-    /// Update channel name, description, or ephemeral TTL
+    /// Update channel name, description, ephemeral TTL, or agent behavior policy
+    #[command(
+        after_help = "Examples:\n  buzz channels update --channel <UUID> --name planning\n  buzz channels update --channel <UUID> --agent-reply-mode inline\n  buzz channels update --channel <DM_UUID> --no-dm-require-mention"
+    )]
     Update {
         /// Channel UUID
         #[arg(long)]
@@ -594,6 +597,19 @@ pub enum ChannelsCmd {
         /// Clear an existing TTL, making the channel permanent.
         #[arg(long)]
         no_ttl: bool,
+        /// Agent reply placement policy: thread or inline.
+        #[arg(long, value_parser = ["thread", "inline"])]
+        agent_reply_mode: Option<String>,
+        /// Require explicit @mentions to wake agents in DMs.
+        #[arg(
+            long,
+            default_value_t = false,
+            conflicts_with = "no_dm_require_mention"
+        )]
+        dm_require_mention: bool,
+        /// Allow direct messages to wake agents without explicit @mentions.
+        #[arg(long, default_value_t = false)]
+        no_dm_require_mention: bool,
     },
     /// Set the channel topic
     Topic {

@@ -157,6 +157,11 @@ pub fn channel_info_from_event(
     // Ephemeral channel TTL — relay emits ["ttl", "<seconds>"] and ["ttl_deadline", "<iso>"].
     let ttl_seconds = first_tag_value(event, "ttl").and_then(|v| v.parse::<i32>().ok());
     let ttl_deadline = first_tag_value(event, "ttl_deadline").map(str::to_string);
+    let agent_reply_mode = match first_tag_value(event, "agent_reply_mode") {
+        Some("inline") => "inline".to_string(),
+        _ => "thread".to_string(),
+    };
+    let dm_require_mention = first_tag_value(event, "dm_require_mention") != Some("false");
 
     Ok(ChannelInfo {
         id,
@@ -175,6 +180,8 @@ pub fn channel_info_from_event(
         is_member: is_member.unwrap_or(true),
         ttl_seconds,
         ttl_deadline,
+        agent_reply_mode,
+        dm_require_mention,
     })
 }
 
@@ -237,6 +244,11 @@ pub fn channel_detail_from_event(event: &Event) -> Result<ChannelDetailInfo, Str
         nip29_group_id: None,
         ttl_seconds: first_tag_value(event, "ttl").and_then(|v| v.parse::<i32>().ok()),
         ttl_deadline: first_tag_value(event, "ttl_deadline").map(str::to_string),
+        agent_reply_mode: match first_tag_value(event, "agent_reply_mode") {
+            Some("inline") => "inline".to_string(),
+            _ => "thread".to_string(),
+        },
+        dm_require_mention: first_tag_value(event, "dm_require_mention") != Some("false"),
     })
 }
 
@@ -715,6 +727,8 @@ mod tests {
                 vec!["visibility", "private"],
                 vec!["ttl", "86400"],
                 vec!["ttl_deadline", "2026-06-11T00:00:00Z"],
+                vec!["agent_reply_mode", "inline"],
+                vec!["dm_require_mention", "false"],
             ],
         );
         let d = channel_detail_from_event(&e).unwrap();
@@ -725,6 +739,8 @@ mod tests {
         assert_eq!(d.visibility, "private");
         assert_eq!(d.ttl_seconds, Some(86400));
         assert_eq!(d.ttl_deadline.as_deref(), Some("2026-06-11T00:00:00Z"));
+        assert_eq!(d.agent_reply_mode, "inline");
+        assert!(!d.dm_require_mention);
         assert!(d.created_at.ends_with("Z"));
         assert_eq!(d.created_by, e.pubkey.to_hex());
     }

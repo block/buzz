@@ -179,7 +179,7 @@ pub fn build_leave(channel_id: Uuid) -> Result<EventBuilder, String> {
     Ok(EventBuilder::new(Kind::Custom(9022), "").tags(tags))
 }
 
-/// Kind 9002 — update channel name/description/visibility/ttl.
+/// Kind 9002 — update channel name/description/visibility/ttl/agent behavior.
 ///
 /// `ttl`: outer `None` leaves it unchanged; `Some(Some(secs))` sets the
 /// ephemeral timeout; `Some(None)` clears it (emits `["ttl", ""]`).
@@ -189,9 +189,20 @@ pub fn build_update_channel(
     about: Option<&str>,
     visibility: Option<&str>,
     ttl: Option<Option<i32>>,
+    agent_reply_mode: Option<&str>,
+    dm_require_mention: Option<bool>,
 ) -> Result<EventBuilder, String> {
-    if name.is_none() && about.is_none() && visibility.is_none() && ttl.is_none() {
-        return Err("at least one of name, about, visibility, or ttl must be provided".into());
+    if name.is_none()
+        && about.is_none()
+        && visibility.is_none()
+        && ttl.is_none()
+        && agent_reply_mode.is_none()
+        && dm_require_mention.is_none()
+    {
+        return Err(
+            "at least one of name, about, visibility, ttl, agent_reply_mode, or dm_require_mention must be provided"
+                .into(),
+        );
     }
     if let Some(v) = visibility {
         if v != "open" && v != "private" {
@@ -201,6 +212,11 @@ pub fn build_update_channel(
     let name = name.map(buzz_sdk_pkg::canonical_channel_name);
     if name.is_some_and(|name| name.trim().is_empty()) {
         return Err("channel name is required".into());
+    }
+    if let Some(mode) = agent_reply_mode {
+        if mode != "thread" && mode != "inline" {
+            return Err("agent_reply_mode must be \"thread\" or \"inline\"".into());
+        }
     }
     let mut tags = vec![tag(vec!["h", &channel_id.to_string()])?];
     if let Some(n) = name {
@@ -217,6 +233,15 @@ pub fn build_update_channel(
             Some(secs) => tags.push(tag(vec!["ttl", &secs.to_string()])?),
             None => tags.push(tag(vec!["ttl", ""])?),
         }
+    }
+    if let Some(mode) = agent_reply_mode {
+        tags.push(tag(vec!["agent_reply_mode", mode])?);
+    }
+    if let Some(require_mention) = dm_require_mention {
+        tags.push(tag(vec![
+            "dm_require_mention",
+            if require_mention { "true" } else { "false" },
+        ])?);
     }
     Ok(EventBuilder::new(Kind::Custom(9002), "").tags(tags))
 }
@@ -854,7 +879,9 @@ mod tests {
     fn channel_builders_reject_hash_only_names() {
         let channel_id = Uuid::new_v4();
         assert!(build_create_channel(channel_id, "###", "open", "stream", None, None).is_err());
-        assert!(build_update_channel(channel_id, Some("###"), None, None, None).is_err());
+        assert!(
+            build_update_channel(channel_id, Some("###"), None, None, None, None, None).is_err()
+        );
     }
     /// Builder layout regression for the NIP-IA owner-of-agent archive flow.
     /// Compares against `docs/nips/NIP-IA.md` §Vector 1.

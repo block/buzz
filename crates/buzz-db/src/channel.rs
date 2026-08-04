@@ -63,6 +63,10 @@ pub struct ChannelRecord {
     pub ttl_seconds: Option<i32>,
     /// Deadline by which a new message must arrive or the channel is auto-archived.
     pub ttl_deadline: Option<DateTime<Utc>>,
+    /// Agent reply placement policy: `"thread"` or `"inline"`.
+    pub agent_reply_mode: String,
+    /// Whether agent DMs require explicit @mentions to wake the agent.
+    pub dm_require_mention: bool,
 }
 
 /// A channel membership row as returned from the database.
@@ -153,7 +157,8 @@ pub async fn create_channel(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline
+               ttl_seconds, ttl_deadline,
+               agent_reply_mode, dm_require_mention
         FROM channels WHERE community_id = $1 AND id = $2
         "#,
     )
@@ -253,7 +258,8 @@ pub async fn create_channel_with_id(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline
+               ttl_seconds, ttl_deadline,
+               agent_reply_mode, dm_require_mention
         FROM channels WHERE community_id = $1 AND id = $2
         "#,
     )
@@ -281,7 +287,8 @@ pub async fn get_channel(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline
+               ttl_seconds, ttl_deadline,
+               agent_reply_mode, dm_require_mention
         FROM channels WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL
         "#,
     )
@@ -788,7 +795,8 @@ pub async fn list_channels(
                    nip29_group_id, topic_required, max_members,
                    topic, topic_set_by, topic_set_at,
                    purpose, purpose_set_by, purpose_set_at,
-                   ttl_seconds, ttl_deadline
+                   ttl_seconds, ttl_deadline,
+                   agent_reply_mode, dm_require_mention
             FROM channels
             WHERE community_id = $1 AND deleted_at IS NULL AND visibility::text = $2
             ORDER BY created_at DESC
@@ -808,7 +816,8 @@ pub async fn list_channels(
                    nip29_group_id, topic_required, max_members,
                    topic, topic_set_by, topic_set_at,
                    purpose, purpose_set_by, purpose_set_at,
-                   ttl_seconds, ttl_deadline
+                   ttl_seconds, ttl_deadline,
+                   agent_reply_mode, dm_require_mention
             FROM channels
             WHERE community_id = $1 AND deleted_at IS NULL
             ORDER BY created_at DESC
@@ -856,7 +865,8 @@ async fn get_channel_tx(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline
+               ttl_seconds, ttl_deadline,
+               agent_reply_mode, dm_require_mention
         FROM channels WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL
         "#,
     )
@@ -959,6 +969,7 @@ pub async fn get_accessible_channels(
                c.topic, c.topic_set_by, c.topic_set_at,
                c.purpose, c.purpose_set_by, c.purpose_set_at,
                c.ttl_seconds, c.ttl_deadline,
+               c.agent_reply_mode, c.dm_require_mention,
                (cm.channel_id IS NOT NULL) AS is_member
         FROM channels c
         LEFT JOIN channel_members cm
@@ -1095,6 +1106,10 @@ fn row_to_channel_record(row: sqlx::postgres::PgRow) -> Result<ChannelRecord> {
     let purpose_set_at: Option<DateTime<Utc>> = row.try_get("purpose_set_at").unwrap_or(None);
     let ttl_seconds: Option<i32> = row.try_get("ttl_seconds").unwrap_or(None);
     let ttl_deadline: Option<DateTime<Utc>> = row.try_get("ttl_deadline").unwrap_or(None);
+    let agent_reply_mode: String = row
+        .try_get("agent_reply_mode")
+        .unwrap_or_else(|_| "thread".to_string());
+    let dm_require_mention: bool = row.try_get("dm_require_mention").unwrap_or(true);
 
     Ok(ChannelRecord {
         id,
@@ -1119,6 +1134,8 @@ fn row_to_channel_record(row: sqlx::postgres::PgRow) -> Result<ChannelRecord> {
         purpose_set_at,
         ttl_seconds,
         ttl_deadline,
+        agent_reply_mode,
+        dm_require_mention,
     })
 }
 
@@ -1149,6 +1166,10 @@ pub struct ChannelUpdate {
     /// ephemeral TTL (channel becomes permanent), `Some(Some(secs))` sets it.
     /// On any change the `ttl_deadline` is reset to `NOW() + ttl_seconds`.
     pub ttl_seconds: Option<Option<i32>>,
+    /// Agent reply placement policy: `"thread"` or `"inline"`.
+    pub agent_reply_mode: Option<String>,
+    /// Whether agent DMs require explicit @mentions to wake the agent.
+    pub dm_require_mention: Option<bool>,
 }
 
 /// Updates channel metadata dynamically.
@@ -1165,6 +1186,8 @@ pub async fn update_channel(
         && updates.description.is_none()
         && updates.visibility.is_none()
         && updates.ttl_seconds.is_none()
+        && updates.agent_reply_mode.is_none()
+        && updates.dm_require_mention.is_none()
     {
         return Err(DbError::InvalidData(
             "at least one field must be provided for update".to_string(),
@@ -1175,6 +1198,13 @@ pub async fn update_channel(
         *name = buzz_core::channel::canonical_channel_name(name).to_owned();
         if name.is_empty() {
             return Err(DbError::InvalidData("channel name is required".into()));
+        }
+    }
+    if let Some(mode) = updates.agent_reply_mode.as_ref() {
+        if mode != "thread" && mode != "inline" {
+            return Err(DbError::InvalidData(
+                "agent_reply_mode must be \"thread\" or \"inline\"".into(),
+            ));
         }
     }
 
@@ -1206,6 +1236,14 @@ pub async fn update_channel(
             None => set_parts.push("ttl_deadline = NULL".to_string()),
         }
     }
+    if updates.agent_reply_mode.is_some() {
+        set_parts.push(format!("agent_reply_mode = ${param_idx}"));
+        param_idx += 1;
+    }
+    if updates.dm_require_mention.is_some() {
+        set_parts.push(format!("dm_require_mention = ${param_idx}"));
+        param_idx += 1;
+    }
     let channel_param_idx = param_idx + 1;
     let sql = format!(
         "UPDATE channels SET {}, updated_at = NOW() WHERE community_id = ${param_idx} AND id = ${channel_param_idx} AND deleted_at IS NULL",
@@ -1224,6 +1262,12 @@ pub async fn update_channel(
     }
     if let Some(ref ttl) = updates.ttl_seconds {
         q = q.bind(*ttl);
+    }
+    if let Some(ref mode) = updates.agent_reply_mode {
+        q = q.bind(mode);
+    }
+    if let Some(require_mention) = updates.dm_require_mention {
+        q = q.bind(require_mention);
     }
     q = q.bind(community_id.as_uuid());
     q = q.bind(channel_id);

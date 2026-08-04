@@ -179,15 +179,6 @@ export function useMentions(
       ),
     [relayAgentsQuery.data],
   );
-  const directoryAgentPubkeys = React.useMemo(
-    () =>
-      new Set(
-        (relayAgentsQuery.data ?? []).map((agent) =>
-          normalizePubkey(agent.pubkey),
-        ),
-      ),
-    [relayAgentsQuery.data],
-  );
   const sharedChannelIds = React.useMemo(
     () => getSharedChannelIds(channelsQuery.data),
     [channelsQuery.data],
@@ -255,7 +246,6 @@ export function useMentions(
           isMember: candidate.isMember === true,
           pubkey,
           mentionableAgentPubkeys,
-          directoryAgentPubkeys,
         })
       ) {
         return;
@@ -415,7 +405,6 @@ export function useMentions(
     userSearchResults,
     canSearchGlobalUsers,
     currentPubkey,
-    directoryAgentPubkeys,
     isArchivedDiscovery,
     managedAgentNamesByPubkey,
     managedAgentPersonaIds,

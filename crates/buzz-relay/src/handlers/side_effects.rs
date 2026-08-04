@@ -301,6 +301,45 @@ async fn actor_owns_any_owner_agent(
     Ok(false)
 }
 
+/// Returns `true` if `actor_bytes` is the NIP-OA owner of any active member in
+/// `members`. This is intentionally broader than [`actor_owns_any_owner_agent`]
+/// and is only used for DM agent-behavior settings, where there is no useful
+/// owner/admin role hierarchy but the owning human still needs to tune how their
+/// own agent wakes and replies.
+async fn actor_owns_any_member_agent(
+    state: &Arc<AppState>,
+    community_id: buzz_core::CommunityId,
+    members: &[buzz_db::channel::MemberRecord],
+    actor_bytes: &[u8],
+) -> anyhow::Result<bool> {
+    for member in members {
+        if state
+            .db
+            .is_agent_owner(community_id, &member.pubkey, actor_bytes)
+            .await?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn edit_metadata_is_agent_behavior_only(event: &Event) -> bool {
+    event.tags.iter().all(|t| {
+        let k = t.kind().to_string();
+        k != "name"
+            && k != "about"
+            && k != "archived"
+            && k != "topic"
+            && k != "purpose"
+            && k != "visibility"
+            && k != "ttl"
+    }) && event.tags.iter().any(|t| {
+        let k = t.kind().to_string();
+        k == "agent_reply_mode" || k == "dm_require_mention"
+    })
+}
+
 /// Validate an admin kind event BEFORE storage.
 pub async fn validate_admin_event(
     tenant: &TenantContext,
@@ -500,6 +539,8 @@ pub async fn validate_admin_event(
                 "purpose",
                 "visibility",
                 "ttl",
+                "agent_reply_mode",
+                "dm_require_mention",
             ];
             let has_recognized = event
                 .tags
@@ -507,7 +548,7 @@ pub async fn validate_admin_event(
                 .any(|t| RECOGNIZED_TAGS.contains(&t.kind().to_string().as_str()));
             if !has_recognized {
                 return Err(anyhow::anyhow!(
-                    "kind:9002 must include at least one metadata tag (name, about, archived, topic, purpose, visibility, ttl)"
+                    "kind:9002 must include at least one metadata tag (name, about, archived, topic, purpose, visibility, ttl, agent_reply_mode, dm_require_mention)"
                 ));
             }
 
@@ -586,11 +627,48 @@ pub async fn validate_admin_event(
                 }
             }
 
-            // name/about/archived/visibility/ttl require owner/admin;
+            for t in event.tags.iter() {
+                if t.kind().to_string() == "agent_reply_mode" {
+                    match t.content() {
+                        Some("thread") | Some("inline") => {}
+                        Some(v) => {
+                            return Err(anyhow::anyhow!(
+                                "invalid agent_reply_mode value: {v} (must be \"thread\" or \"inline\")"
+                            ));
+                        }
+                        None => {
+                            return Err(anyhow::anyhow!("agent_reply_mode tag must have a value"));
+                        }
+                    }
+                }
+                if t.kind().to_string() == "dm_require_mention" {
+                    match t.content() {
+                        Some("true") | Some("false") => {}
+                        Some(v) => {
+                            return Err(anyhow::anyhow!(
+                                "invalid dm_require_mention value: {v} (must be \"true\" or \"false\")"
+                            ));
+                        }
+                        None => {
+                            return Err(anyhow::anyhow!(
+                                "dm_require_mention tag must have a value"
+                            ));
+                        }
+                    }
+                }
+            }
+
+            // name/about/archived/visibility/ttl/agent behavior require owner/admin;
             // topic/purpose allow any member.
             let has_privileged_tag = event.tags.iter().any(|t| {
                 let k = t.kind().to_string();
-                k == "name" || k == "about" || k == "archived" || k == "visibility" || k == "ttl"
+                k == "name"
+                    || k == "about"
+                    || k == "archived"
+                    || k == "visibility"
+                    || k == "ttl"
+                    || k == "agent_reply_mode"
+                    || k == "dm_require_mention"
             });
             if has_privileged_tag {
                 let members = state.db.get_members(tenant.community(), channel_id).await?;
@@ -611,8 +689,20 @@ pub async fn validate_admin_event(
                         {
                             return Ok(());
                         }
+                        if channel.channel_type == "dm"
+                            && edit_metadata_is_agent_behavior_only(event)
+                            && actor_owns_any_member_agent(
+                                state,
+                                tenant.community(),
+                                &members,
+                                &actor_bytes,
+                            )
+                            .await?
+                        {
+                            return Ok(());
+                        }
                         Err(anyhow::anyhow!(
-                            "actor not authorized for name/about/archived/visibility/ttl changes"
+                            "actor not authorized for name/about/archived/visibility/ttl/agent behavior changes"
                         ))
                     }
                 }
@@ -1105,6 +1195,15 @@ pub async fn emit_group_discovery_events(
         if let Some(ref deadline) = channel.ttl_deadline {
             tags.push(Tag::parse(["ttl_deadline", &deadline.to_rfc3339()])?);
         }
+        tags.push(Tag::parse(["agent_reply_mode", &channel.agent_reply_mode])?);
+        tags.push(Tag::parse([
+            "dm_require_mention",
+            if channel.dm_require_mention {
+                "true"
+            } else {
+                "false"
+            },
+        ])?);
         emit_addressable_discovery_event(
             tenant,
             state,
@@ -1566,6 +1665,51 @@ async fn handle_edit_metadata(
                         channel_id,
                         serde_json::json!({
                             "type": "ttl_changed", "actor": actor_hex, "ttl_seconds": ttl_change
+                        }),
+                    )
+                    .await?;
+                }
+                "agent_reply_mode" => {
+                    state
+                        .db
+                        .update_channel(
+                            tenant.community(),
+                            channel_id,
+                            buzz_db::channel::ChannelUpdate {
+                                agent_reply_mode: Some(val.to_string()),
+                                ..Default::default()
+                            },
+                        )
+                        .await?;
+                    emit_system_message(
+                        tenant,
+                        state,
+                        channel_id,
+                        serde_json::json!({
+                            "type": "agent_reply_mode_changed", "actor": actor_hex, "agent_reply_mode": val
+                        }),
+                    )
+                    .await?;
+                }
+                "dm_require_mention" => {
+                    let require_mention = val == "true";
+                    state
+                        .db
+                        .update_channel(
+                            tenant.community(),
+                            channel_id,
+                            buzz_db::channel::ChannelUpdate {
+                                dm_require_mention: Some(require_mention),
+                                ..Default::default()
+                            },
+                        )
+                        .await?;
+                    emit_system_message(
+                        tenant,
+                        state,
+                        channel_id,
+                        serde_json::json!({
+                            "type": "dm_require_mention_changed", "actor": actor_hex, "dm_require_mention": require_mention
                         }),
                     )
                     .await?;
@@ -3449,5 +3593,44 @@ mod tests {
         }];
 
         assert!(actor_is_channel_owner_or_admin(&members, &actor));
+    }
+
+    #[test]
+    fn edit_metadata_agent_behavior_only_accepts_agent_policy_tags() {
+        let keys = nostr::Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(9002), "")
+            .tags([
+                Tag::parse(["h", &Uuid::new_v4().to_string()]).unwrap(),
+                Tag::parse(["agent_reply_mode", "inline"]).unwrap(),
+                Tag::parse(["dm_require_mention", "false"]).unwrap(),
+            ])
+            .sign_with_keys(&keys)
+            .expect("sign");
+
+        assert!(edit_metadata_is_agent_behavior_only(&event));
+    }
+
+    #[test]
+    fn edit_metadata_agent_behavior_only_rejects_mixed_topic_or_name_update() {
+        let keys = nostr::Keys::generate();
+        let with_topic = EventBuilder::new(Kind::Custom(9002), "")
+            .tags([
+                Tag::parse(["h", &Uuid::new_v4().to_string()]).unwrap(),
+                Tag::parse(["agent_reply_mode", "inline"]).unwrap(),
+                Tag::parse(["topic", "ops"]).unwrap(),
+            ])
+            .sign_with_keys(&keys)
+            .expect("sign");
+        let with_name = EventBuilder::new(Kind::Custom(9002), "")
+            .tags([
+                Tag::parse(["h", &Uuid::new_v4().to_string()]).unwrap(),
+                Tag::parse(["dm_require_mention", "false"]).unwrap(),
+                Tag::parse(["name", "renamed"]).unwrap(),
+            ])
+            .sign_with_keys(&keys)
+            .expect("sign");
+
+        assert!(!edit_metadata_is_agent_behavior_only(&with_topic));
+        assert!(!edit_metadata_is_agent_behavior_only(&with_name));
     }
 }

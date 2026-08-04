@@ -30,6 +30,8 @@ export type RawChannel = {
   is_member?: boolean;
   ttl_seconds: number | null;
   ttl_deadline: string | null;
+  agent_reply_mode?: Channel["agentReplyMode"];
+  dm_require_mention?: boolean;
 };
 
 type RawChannelDetail = RawChannel & {
@@ -71,11 +73,13 @@ export function fromRawChannel(channel: RawChannel): Channel {
     memberPubkeys: channel.member_pubkeys ?? [],
     lastMessageAt: channel.last_message_at,
     archivedAt: channel.archived_at,
-    participants: channel.participants,
-    participantPubkeys: channel.participant_pubkeys,
+    participants: channel.participants ?? [],
+    participantPubkeys: channel.participant_pubkeys ?? [],
     isMember: channel.is_member ?? true,
     ttlSeconds: channel.ttl_seconds,
     ttlDeadline: channel.ttl_deadline,
+    agentReplyMode: channel.agent_reply_mode ?? "thread",
+    dmRequireMention: channel.dm_require_mention ?? true,
   };
 }
 

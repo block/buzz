@@ -695,6 +695,10 @@ pub struct UpdateChannelInput {
     /// Absent = leave unchanged, `null` = clear (permanent), seconds = set.
     #[serde(default, deserialize_with = "crate::util::double_option")]
     pub ttl_seconds: Option<Option<i32>>,
+    #[serde(default)]
+    pub agent_reply_mode: Option<String>,
+    #[serde(default)]
+    pub dm_require_mention: Option<bool>,
 }
 
 #[tauri::command]
@@ -709,6 +713,8 @@ pub async fn update_channel(
         input.description.as_deref(),
         input.visibility.as_deref(),
         input.ttl_seconds,
+        input.agent_reply_mode.as_deref(),
+        input.dm_require_mention,
     )?;
     submit_event(builder, &state).await?;
 

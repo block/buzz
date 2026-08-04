@@ -597,7 +597,7 @@ pub fn build_leave(channel_id: Uuid) -> Result<EventBuilder, SdkError> {
     Ok(EventBuilder::new(Kind::Custom(9022), "").tags(tags))
 }
 
-/// Build a NIP-29 edit-metadata event for name/about/visibility/ttl (kind 9002).
+/// Build a NIP-29 edit-metadata event for name/about/visibility/ttl/agent behavior (kind 9002).
 ///
 /// `ttl`: outer `None` leaves it unchanged; `Some(Some(secs))` sets the
 /// ephemeral timeout; `Some(None)` clears it (emits `["ttl", ""]`).
@@ -607,10 +607,18 @@ pub fn build_update_channel(
     about: Option<&str>,
     visibility: Option<&str>,
     ttl: Option<Option<i32>>,
+    agent_reply_mode: Option<&str>,
+    dm_require_mention: Option<bool>,
 ) -> Result<EventBuilder, SdkError> {
-    if name.is_none() && about.is_none() && visibility.is_none() && ttl.is_none() {
+    if name.is_none()
+        && about.is_none()
+        && visibility.is_none()
+        && ttl.is_none()
+        && agent_reply_mode.is_none()
+        && dm_require_mention.is_none()
+    {
         return Err(SdkError::InvalidTag(
-            "at least one of name, about, visibility, or ttl must be provided".into(),
+            "at least one of name, about, visibility, ttl, agent_reply_mode, or dm_require_mention must be provided".into(),
         ));
     }
     if let Some(v) = visibility {
@@ -625,6 +633,13 @@ pub fn build_update_channel(
         .is_some_and(|name| name.trim().is_empty())
     {
         return Err(SdkError::InvalidTag("channel name is required".into()));
+    }
+    if let Some(mode) = agent_reply_mode {
+        if mode != "thread" && mode != "inline" {
+            return Err(SdkError::InvalidTag(
+                "agent_reply_mode must be \"thread\" or \"inline\"".into(),
+            ));
+        }
     }
     let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
     if let Some(n) = name {
@@ -644,6 +659,15 @@ pub fn build_update_channel(
             Some(secs) => tags.push(tag(&["ttl", &secs.to_string()])?),
             None => tags.push(tag(&["ttl", ""])?),
         }
+    }
+    if let Some(mode) = agent_reply_mode {
+        tags.push(tag(&["agent_reply_mode", mode])?);
+    }
+    if let Some(require_mention) = dm_require_mention {
+        tags.push(tag(&[
+            "dm_require_mention",
+            if require_mention { "true" } else { "false" },
+        ])?);
     }
     Ok(EventBuilder::new(Kind::Custom(9002), "").tags(tags))
 }
@@ -2763,7 +2787,16 @@ mod tests {
     fn update_channel_name_and_about() {
         let cid = uuid();
         let ev = sign(
-            build_update_channel(cid, Some("new-name"), Some("new about"), None, None).unwrap(),
+            build_update_channel(
+                cid,
+                Some("new-name"),
+                Some("new about"),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap(),
         );
         assert_eq!(ev.kind.as_u16(), 9002);
         assert!(has_tag(&ev, "name", "new-name"));
@@ -2772,15 +2805,25 @@ mod tests {
 
     #[test]
     fn update_channel_strips_all_leading_hashes_from_name() {
-        let ev =
-            sign(build_update_channel(uuid(), Some("  ###new-name  "), None, None, None).unwrap());
+        let ev = sign(
+            build_update_channel(
+                uuid(),
+                Some("  ###new-name  "),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
         assert!(has_tag(&ev, "name", "new-name"));
     }
 
     #[test]
     fn update_channel_rejects_hash_only_name() {
         assert!(matches!(
-            build_update_channel(uuid(), Some("  ###  "), None, None, None),
+            build_update_channel(uuid(), Some("  ###  "), None, None, None, None, None),
             Err(SdkError::InvalidTag(_))
         ));
     }
@@ -2788,8 +2831,18 @@ mod tests {
     #[test]
     fn update_channel_visibility_and_ttl() {
         let cid = uuid();
-        let ev =
-            sign(build_update_channel(cid, None, None, Some("private"), Some(Some(3600))).unwrap());
+        let ev = sign(
+            build_update_channel(
+                cid,
+                None,
+                None,
+                Some("private"),
+                Some(Some(3600)),
+                None,
+                None,
+            )
+            .unwrap(),
+        );
         assert_eq!(ev.kind.as_u16(), 9002);
         assert!(has_tag(&ev, "visibility", "private"));
         assert!(has_tag(&ev, "ttl", "3600"));
@@ -2798,7 +2851,7 @@ mod tests {
     #[test]
     fn update_channel_clears_ttl() {
         let cid = uuid();
-        let ev = sign(build_update_channel(cid, None, None, None, Some(None)).unwrap());
+        let ev = sign(build_update_channel(cid, None, None, None, Some(None), None, None).unwrap());
         assert!(has_tag(&ev, "ttl", ""));
     }
 
@@ -2806,7 +2859,27 @@ mod tests {
     fn update_channel_invalid_visibility_rejected() {
         let cid = uuid();
         assert!(matches!(
-            build_update_channel(cid, None, None, Some("secret"), None),
+            build_update_channel(cid, None, None, Some("secret"), None, None, None),
+            Err(SdkError::InvalidTag(_))
+        ));
+    }
+
+    #[test]
+    fn update_channel_agent_behavior() {
+        let cid = uuid();
+        let ev = sign(
+            build_update_channel(cid, None, None, None, None, Some("inline"), Some(false)).unwrap(),
+        );
+        assert_eq!(ev.kind.as_u16(), 9002);
+        assert!(has_tag(&ev, "agent_reply_mode", "inline"));
+        assert!(has_tag(&ev, "dm_require_mention", "false"));
+    }
+
+    #[test]
+    fn update_channel_invalid_agent_reply_mode_rejected() {
+        let cid = uuid();
+        assert!(matches!(
+            build_update_channel(cid, None, None, None, None, Some("sideways"), None),
             Err(SdkError::InvalidTag(_))
         ));
     }
@@ -2815,7 +2888,7 @@ mod tests {
     fn update_channel_no_fields_rejected() {
         let cid = uuid();
         assert!(matches!(
-            build_update_channel(cid, None, None, None, None),
+            build_update_channel(cid, None, None, None, None, None, None),
             Err(SdkError::InvalidTag(_))
         ));
     }

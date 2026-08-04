@@ -55,11 +55,12 @@ export function getMentionableAgentPubkeys({
 }
 
 export function isAgentIdentityInManagedList(
-  candidate: { isAgent?: boolean; pubkey: string },
+  candidate: { isAgent?: boolean; isMember?: boolean; pubkey: string },
   managedAgentPubkeys: ReadonlySet<string>,
 ) {
   return (
     candidate.isAgent !== true ||
+    candidate.isMember === true ||
     managedAgentPubkeys.has(normalizePubkey(candidate.pubkey))
   );
 }
@@ -69,32 +70,22 @@ export function shouldHideAgentFromMentions({
   isMember,
   pubkey,
   mentionableAgentPubkeys,
-  directoryAgentPubkeys,
 }: {
   isAgent: boolean;
   isMember: boolean;
   pubkey: string;
   mentionableAgentPubkeys: ReadonlySet<string>;
-  directoryAgentPubkeys: ReadonlySet<string>;
 }) {
   if (!isAgent) return false;
   const normalized = normalizePubkey(pubkey);
   // Invocable => always show.
   if (mentionableAgentPubkeys.has(normalized)) return false;
+  // Channel membership is an explicit local invitation. Keep member agents
+  // mentionable even if the relay-agent directory has stale or incomplete
+  // invocability metadata for an external/self-hosted agent.
+  if (isMember) return false;
   // Non-member, non-invocable => hide (preserves prior behavior).
-  if (!isMember) return true;
-  // Member (Option B): hide only when we have an explicit not-invocable
-  // signal — a relay directory (kind:10100) entry that excludes us.
-  // Unknown invocability (not in directory) => show.
-  //
-  // NOTE: this assumes `directoryAgentPubkeys` and `mentionableAgentPubkeys`
-  // share the same source query (`relayAgentsQuery.data`), so directory
-  // presence without membership in `mentionableAgentPubkeys` is a real
-  // explicit-exclusion signal. If a future change sources the directory set
-  // from a different query, an agent that's directory-present but whose
-  // mentionability is still loading could be hidden prematurely — keep the
-  // two sets derived from the same query.
-  return directoryAgentPubkeys.has(normalized);
+  return true;
 }
 
 type AgentAutocompleteCandidate = {

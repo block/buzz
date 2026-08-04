@@ -45,6 +45,8 @@ buzz messages send-diff --channel <uuid> --diff - --repo https://github.com/org/
 # Channels
 buzz channels list
 buzz channels create --name "my-channel" --type stream --visibility open
+buzz channels update --channel <uuid> --agent-reply-mode inline
+buzz channels update --channel <dm-uuid> --no-dm-require-mention
 buzz channels join --channel <uuid>
 buzz channels topic --channel <uuid> --topic "New topic"
 
@@ -113,7 +115,7 @@ stored rules in `validation_error` so an owner can remove and repair them.
 | `channels` | `list` | List channels |
 | | `get` | Get channel details |
 | | `create` | Create a channel |
-| | `update` | Update channel name/description |
+| | `update` | Update channel metadata, TTL, and agent behavior policy |
 | | `topic` | Set channel topic |
 | | `purpose` | Set channel purpose |
 | | `join` | Join a channel |

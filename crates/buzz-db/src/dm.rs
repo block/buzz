@@ -511,6 +511,10 @@ fn row_to_channel_record(row: sqlx::postgres::PgRow) -> Result<ChannelRecord> {
         purpose_set_at: row.try_get("purpose_set_at").unwrap_or(None),
         ttl_seconds: row.try_get("ttl_seconds").unwrap_or(None),
         ttl_deadline: row.try_get("ttl_deadline").unwrap_or(None),
+        agent_reply_mode: row
+            .try_get("agent_reply_mode")
+            .unwrap_or_else(|_| "thread".to_string()),
+        dm_require_mention: row.try_get("dm_require_mention").unwrap_or(true),
     })
 }
 
