@@ -271,7 +271,7 @@ fn findings_generation(path: &Path) -> Result<u64, String> {
 fn findings_generation(path: &Path) -> Result<u64, String> {
     use std::os::windows::io::AsRawHandle as _;
     use windows_sys::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
     };
 
     File::open(path)
@@ -279,9 +279,8 @@ fn findings_generation(path: &Path) -> Result<u64, String> {
             let mut info = BY_HANDLE_FILE_INFORMATION::default();
             // SAFETY: `file` owns a valid handle for the duration of the call,
             // and `info` points to writable storage of the required type.
-            let result = unsafe {
-                GetFileInformationByHandle(file.as_raw_handle().cast(), &mut info)
-            };
+            let result =
+                unsafe { GetFileInformationByHandle(file.as_raw_handle().cast(), &mut info) };
             if result == 0 {
                 return Err(std::io::Error::last_os_error());
             }
