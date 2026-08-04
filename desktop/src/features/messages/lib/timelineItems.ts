@@ -141,7 +141,8 @@ function buildMembershipGroups(
         barrierIndexes.has(start) ||
         !candidatePayload ||
         !membershipChangesCanGroup(candidatePayload, newestPayload) ||
-        newestEntry.message.createdAt < candidate.message.createdAt
+        newestEntry.message.createdAt < candidate.message.createdAt ||
+        newestEntry.message.createdAt - candidate.message.createdAt > 60 * 60
       ) {
         break;
       }

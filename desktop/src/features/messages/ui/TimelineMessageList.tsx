@@ -787,7 +787,9 @@ function VirtualizedTimelineRows({
         className={cn(
           "pointer-events-none absolute inset-x-0 z-20",
           channelChrome.stickyTimelineTop,
-          pinnedDay.label ? "opacity-100" : "opacity-0",
+          pinnedDay.label || pinnedDay.incomingLabel
+            ? "opacity-100"
+            : "opacity-0",
         )}
         data-day-label={pinnedDay.label ?? undefined}
         data-testid="message-timeline-sticky-day-divider"

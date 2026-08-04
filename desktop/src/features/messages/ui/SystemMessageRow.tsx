@@ -120,11 +120,7 @@ function buildGroupedMembershipPayload(
       candidateActor === actor && candidateActor !== target,
   );
   if (!isSameAdderGroup) {
-    return {
-      type: "members_joined",
-      target: targets[0],
-      targets,
-    };
+    return null;
   }
 
   return {
@@ -151,6 +147,7 @@ function buildJoinedThenLeftPayload(
     arrival?.type !== "member_joined" ||
     departure?.type !== "member_left" ||
     !arrivalTarget ||
+    normalizePubkey(arrival.actor) !== arrivalTarget ||
     arrivalTarget !== departureActor
   ) {
     return null;
