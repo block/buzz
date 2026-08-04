@@ -942,6 +942,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
+ "buzz-client",
  "buzz-core",
  "buzz-persona",
  "buzz-sdk",
@@ -961,6 +962,27 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "buzz-client"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "buzz-sdk",
+ "bytes",
+ "hex",
+ "nostr",
+ "rand 0.10.1",
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
  "thiserror 2.0.18",
  "tokio",
  "url",
