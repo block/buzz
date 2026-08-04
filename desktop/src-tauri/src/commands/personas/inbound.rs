@@ -102,14 +102,20 @@ fn reconcile_inbound_persona_event_blocking(
 
     // The d-tag identifies the record within its kind. Persona derives it from
     // the parsed record (`persona_d_tag`); team/agent carry it as the event's
-    // d-tag directly. The persona is parsed once here and reused in the apply
-    // branch below — team/agent content is parsed in-branch since their d-tag
-    // comes from the event tag, not the content.
+    // d-tag directly. Definition-bearing content is parsed and validated once
+    // here, before retention, then reused in the apply branch below. This keeps
+    // an unsafe event out of both the retention database and the local store.
     let inbound_persona = (kind == KIND_PERSONA)
         .then(|| persona_from_event(&event))
         .transpose()?;
     if let Some(persona) = &inbound_persona {
         validate_inbound_persona_definition(persona)?;
+    }
+    let inbound_managed_agent = (kind == KIND_MANAGED_AGENT)
+        .then(|| managed_agent_content_from_event(&event))
+        .transpose()?;
+    if let Some(managed_agent) = &inbound_managed_agent {
+        validate_inbound_managed_agent_definition(managed_agent)?;
     }
     let d_tag = match &inbound_persona {
         Some(persona) => persona_d_tag(persona),
@@ -167,11 +173,10 @@ fn reconcile_inbound_persona_event_blocking(
         }
         KIND_MANAGED_AGENT => {
             let mut agents = load_managed_agents(&app)?;
-            apply_inbound_managed_agent(
-                &mut agents,
-                &d_tag,
-                managed_agent_content_from_event(&event)?,
-            );
+            let managed_agent = inbound_managed_agent.ok_or_else(|| {
+                "managed-agent content was not parsed before retention".to_string()
+            })?;
+            apply_inbound_managed_agent(&mut agents, &d_tag, managed_agent);
             save_managed_agents(&app, &agents)?;
         }
         _ => unreachable!("kind gated above"),
@@ -191,6 +196,21 @@ fn validate_inbound_persona_definition(persona: &AgentDefinition) -> Result<(), 
         &persona.system_prompt,
     )
     .map_err(|error| format!("Inbound persona definition is unsafe: {error}"))
+}
+
+fn validate_inbound_managed_agent_definition(
+    managed_agent: &ManagedAgentEventContent,
+) -> Result<(), String> {
+    // Slimmed, definition-linked events resolve their prompt through the
+    // already-validated persona. Legacy definition-less records carry their
+    // executable prompt directly on kind:30177 and must validate it here.
+    let system_prompt = if managed_agent.persona_id.is_none() {
+        managed_agent.system_prompt.as_deref().unwrap_or_default()
+    } else {
+        ""
+    };
+    crate::managed_agents::validate_agent_definition_text(&managed_agent.name, system_prompt)
+        .map_err(|error| format!("Inbound managed-agent definition is unsafe: {error}"))
 }
 
 /// Parse an inbound wire event and enforce the signature gate. Everything
