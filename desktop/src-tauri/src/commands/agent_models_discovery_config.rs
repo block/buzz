@@ -60,8 +60,10 @@ pub(super) fn agent_model_discovery_config(
     personas: &[crate::managed_agents::AgentDefinition],
     global: &crate::managed_agents::GlobalAgentConfig,
 ) -> Result<AgentModelDiscoveryConfig, String> {
-    let descriptor =
-        crate::managed_agents::resolve_effective_harness_descriptor(record, personas, global)?;
+    // Model discovery is relay-agnostic — resolve without the community layer.
+    let descriptor = crate::managed_agents::resolve_effective_harness_descriptor(
+        record, personas, global, None,
+    )?;
     let (model, provider) =
         crate::managed_agents::resolve_effective_model_provider(record, personas, global);
     let provider_env_var =

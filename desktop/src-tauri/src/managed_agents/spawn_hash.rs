@@ -75,17 +75,25 @@ pub(crate) fn spawn_config_hash(
     // as spawn_agent_child.  Dangling harness id falls back to the infallible
     // record_agent_command (no-op: a dangling harness can't be spawned, so the
     // hash never matters for that agent).
-    let descriptor =
-        crate::managed_agents::resolve_effective_harness_descriptor(record, personas, global)
-            .unwrap_or_else(|_| {
-                let cmd = crate::managed_agents::record_agent_command(record, personas);
-                let args = normalize_agent_args(&cmd, record.agent_args.clone());
-                crate::managed_agents::readiness::EffectiveHarnessDescriptor {
-                    command: cmd,
-                    args,
-                    env: Default::default(),
-                }
-            });
+    // Same relay resolution as the spawn path, so the hash covers the exact
+    // community env layer a restart would inject.
+    let effective_relay =
+        crate::relay::effective_agent_relay_url(&record.relay_url, workspace_relay);
+    let descriptor = crate::managed_agents::resolve_effective_harness_descriptor(
+        record,
+        personas,
+        global,
+        Some(&effective_relay),
+    )
+    .unwrap_or_else(|_| {
+        let cmd = crate::managed_agents::record_agent_command(record, personas);
+        let args = normalize_agent_args(&cmd, record.agent_args.clone());
+        crate::managed_agents::readiness::EffectiveHarnessDescriptor {
+            command: cmd,
+            args,
+            env: Default::default(),
+        }
+    });
     let runtime_meta = known_acp_runtime(&descriptor.command);
 
     let mut hasher = DefaultHasher::new();

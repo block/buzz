@@ -55,7 +55,8 @@ fn status_for_with(
     let StatusInputs { personas, global } = inputs;
     let command = record_agent_command(record, personas);
     let metadata = super::known_acp_runtime(&command);
-    let effective = resolve_effective_agent_env(record, personas, metadata, global);
+    let effective =
+        resolve_effective_agent_env(record, personas, metadata, global, Some(&key.relay_url));
     let local_setup = matches!(agent_readiness(&effective), AgentReadiness::Ready);
     ManagedAgentRuntimeStatus {
         pubkey: key.pubkey.clone(),
@@ -433,7 +434,8 @@ fn unkeyable_failed_status(
 ) -> ManagedAgentRuntimeStatus {
     let command = record_agent_command(record, personas);
     let metadata = super::known_acp_runtime(&command);
-    let effective = resolve_effective_agent_env(record, personas, metadata, global);
+    let effective =
+        resolve_effective_agent_env(record, personas, metadata, global, Some(&requested));
     ManagedAgentRuntimeStatus {
         pubkey: record.pubkey.clone(),
         relay_url: requested.clone(),

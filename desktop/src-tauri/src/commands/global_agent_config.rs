@@ -191,19 +191,32 @@ fn collect_restart_candidates(
             if record.backend != BackendKind::Local {
                 return false;
             }
-            let has_live_runtime = runtimes.iter_mut().any(|(key, runtime)| {
-                key.pubkey.eq_ignore_ascii_case(&record.pubkey)
-                    && runtime.child.try_wait().ok().flatten().is_none()
+            // Capture the live pair's relay so the old/new env diff includes
+            // the community layer the running process was spawned with.
+            let live_relay = runtimes.iter_mut().find_map(|(key, runtime)| {
+                (key.pubkey.eq_ignore_ascii_case(&record.pubkey)
+                    && runtime.child.try_wait().ok().flatten().is_none())
+                .then(|| key.relay_url.clone())
             });
-            if !has_live_runtime {
+            let Some(live_relay) = live_relay else {
                 return false;
-            }
+            };
             let effective_cmd = record_agent_command(record, &all_personas);
             let runtime_meta = known_acp_runtime(&effective_cmd);
-            let old_effective =
-                resolve_effective_agent_env(record, &all_personas, runtime_meta, old_global);
-            let new_effective =
-                resolve_effective_agent_env(record, &all_personas, runtime_meta, new_global);
+            let old_effective = resolve_effective_agent_env(
+                record,
+                &all_personas,
+                runtime_meta,
+                old_global,
+                Some(&live_relay),
+            );
+            let new_effective = resolve_effective_agent_env(
+                record,
+                &all_personas,
+                runtime_meta,
+                new_global,
+                Some(&live_relay),
+            );
             let old_ready = matches!(agent_readiness(&old_effective), AgentReadiness::Ready);
             let new_ready = matches!(agent_readiness(&new_effective), AgentReadiness::Ready);
             // For a Ready+running agent: the process must be alive now and the
@@ -308,10 +321,23 @@ async fn restart_local_agent_on_config_change(
         // per agent when the save-command personas haven't changed.
         let effective_cmd = record_agent_command(record, &personas_owned);
         let runtime_meta = known_acp_runtime(&effective_cmd);
-        let old_effective =
-            resolve_effective_agent_env(record, &personas_owned, runtime_meta, &old_global_clone);
-        let new_effective =
-            resolve_effective_agent_env(record, &personas_owned, runtime_meta, &new_global_clone);
+        // Use the first live pair's relay for the community layer — the same
+        // relay the pre-filter diffed against.
+        let pair_relay = runtime_keys.first().map(|key| key.relay_url.as_str());
+        let old_effective = resolve_effective_agent_env(
+            record,
+            &personas_owned,
+            runtime_meta,
+            &old_global_clone,
+            pair_relay,
+        );
+        let new_effective = resolve_effective_agent_env(
+            record,
+            &personas_owned,
+            runtime_meta,
+            &new_global_clone,
+            pair_relay,
+        );
         let old_ready = matches!(agent_readiness(&old_effective), AgentReadiness::Ready);
         let new_ready = matches!(agent_readiness(&new_effective), AgentReadiness::Ready);
         // Under lock, the alive check was already done above via process_is_running.

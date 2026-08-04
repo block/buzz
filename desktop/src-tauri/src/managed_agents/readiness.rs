@@ -99,7 +99,7 @@ pub(crate) struct EffectiveHarnessDescriptor {
     /// the harness definition's args apply.
     pub args: Vec<String>,
     /// The full layered process env: baked floor → runtime metadata → definition
-    /// env → global → persona → agent.
+    /// env → global → community (relay-scoped) → persona → agent.
     pub env: BTreeMap<String, String>,
 }
 
@@ -122,10 +122,15 @@ pub(crate) struct EffectiveHarnessDescriptor {
 /// * `record` — the managed agent record
 /// * `personas` — all current personas (for command/env resolution)
 /// * `global` — global agent config defaults
+/// * `relay_url` — the *effective* relay this resolution is for, when the
+///   caller has one (spawn, hash, per-pair status/summary). Enables the
+///   community env layer; `None` resolves without it (e.g. relay-agnostic
+///   model probes).
 pub(crate) fn resolve_effective_harness_descriptor(
     record: &ManagedAgentRecord,
     personas: &[crate::managed_agents::types::AgentDefinition],
     global: &crate::managed_agents::GlobalAgentConfig,
+    relay_url: Option<&str>,
 ) -> Result<EffectiveHarnessDescriptor, String> {
     let effective_command = crate::managed_agents::try_record_agent_command(record, personas)?;
     let runtime_meta = known_acp_runtime(&effective_command);
@@ -163,8 +168,14 @@ pub(crate) fn resolve_effective_harness_descriptor(
 
     // Env: full layered resolution (same as resolve_effective_agent_env).
     // Pass harness_def directly to avoid a second lookup.
-    let effective_env =
-        resolve_effective_agent_env_with_def(record, personas, runtime_meta, global, harness_def);
+    let effective_env = resolve_effective_agent_env_with_def(
+        record,
+        personas,
+        runtime_meta,
+        global,
+        harness_def,
+        relay_url,
+    );
 
     Ok(EffectiveHarnessDescriptor {
         command: effective_command,
@@ -183,11 +194,14 @@ pub(crate) fn resolve_effective_harness_descriptor(
 /// * `runtime` — the `KnownAcpRuntime` for the effective command, if any
 /// * `global` — global agent config defaults (lowest user layer; pass
 ///   `&GlobalAgentConfig::default()` in tests that don't need global config)
+/// * `relay_url` — the effective relay for the community env layer, when the
+///   caller has one (`None` skips the community layer)
 pub(crate) fn resolve_effective_agent_env(
     record: &ManagedAgentRecord,
     personas: &[AgentDefinition],
     runtime: Option<&KnownAcpRuntime>,
     global: &GlobalAgentConfig,
+    relay_url: Option<&str>,
 ) -> EffectiveAgentEnv {
     // Look up the harness definition for definition-level env (preset/custom).
     // Same resolution logic as spawn_agent_child: record runtime id first, then
@@ -208,7 +222,7 @@ pub(crate) fn resolve_effective_agent_env(
         crate::managed_agents::custom_harnesses::lookup_loaded_harness_by_id(runtime_id)
     };
 
-    resolve_effective_agent_env_with_def(record, personas, runtime, global, harness_def)
+    resolve_effective_agent_env_with_def(record, personas, runtime, global, harness_def, relay_url)
 }
 
 /// Inner implementation that accepts a pre-fetched `harness_def` to avoid a
@@ -220,6 +234,7 @@ fn resolve_effective_agent_env_with_def(
     runtime: Option<&KnownAcpRuntime>,
     global: &GlobalAgentConfig,
     harness_def: Option<std::sync::Arc<crate::managed_agents::custom_harnesses::HarnessDefinition>>,
+    relay_url: Option<&str>,
 ) -> EffectiveAgentEnv {
     let effective_command = crate::managed_agents::record_agent_command(record, personas);
 
@@ -258,6 +273,18 @@ fn resolve_effective_agent_env_with_def(
     // filtering to the global map for free.
     let global_env = merged_user_env(&BTreeMap::new(), &global.env_vars);
     env.extend(global_env);
+
+    // Layer 3a': community env vars — location-scoped defaults for the
+    // effective relay this resolution is for. Injected after global and
+    // before persona/agent so identity-scoped values win on collision.
+    // `merged_user_env` with an empty lower map applies reserved/malformed-key
+    // filtering, same as the global layer above.
+    if let Some(relay) = relay_url {
+        if let Some(community_env) = super::global_config::community_env_for(global, relay) {
+            let community_env = merged_user_env(&BTreeMap::new(), community_env);
+            env.extend(community_env);
+        }
+    }
 
     // Layer 3b: merged user env — live persona env under the record's own
     // overrides (last-wins), after reserved/malformed-key filtering. Reading
@@ -1533,7 +1560,8 @@ mod tests {
         };
 
         let runtime = known_acp_runtime_exact("buzz-agent");
-        let effective = resolve_effective_agent_env(&record, &[], runtime, &Default::default());
+        let effective =
+            resolve_effective_agent_env(&record, &[], runtime, &Default::default(), None);
 
         // User env_vars must be present in the output (last-write-wins).
         assert_eq!(

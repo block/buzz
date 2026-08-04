@@ -275,6 +275,7 @@ pub fn build_managed_agent_summary(
         record,
         personas,
         global_config,
+        pair_key.as_ref().map(|key| key.relay_url.as_str()),
     )
     .unwrap_or_else(|e| {
         // Dangling harness — surface the missing id so the UI tells the same
@@ -494,15 +495,19 @@ pub fn spawn_agent_child(
     // model probes all consume this descriptor rather than assembling values inline.
     // Like the orphan refusal above, this runs before any side effect so a refused
     // spawn leaves no trace.
-    let descriptor =
-        crate::managed_agents::resolve_effective_harness_descriptor(record, &personas, &global)
-            .map_err(|e| {
-                format!(
-                    "cannot spawn agent {}: {}",
-                    record.pubkey,
-                    crate::managed_agents::user_facing_harness_error(&e)
-                )
-            })?;
+    let descriptor = crate::managed_agents::resolve_effective_harness_descriptor(
+        record,
+        &personas,
+        &global,
+        Some(&runtime_key.relay_url),
+    )
+    .map_err(|e| {
+        format!(
+            "cannot spawn agent {}: {}",
+            record.pubkey,
+            crate::managed_agents::user_facing_harness_error(&e)
+        )
+    })?;
     let effective_command = &descriptor.command;
     let agent_args = &descriptor.args;
 

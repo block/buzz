@@ -53,6 +53,26 @@ pub struct GlobalAgentConfig {
     #[serde(default)]
     pub env_vars: BTreeMap<String, String>,
 
+    /// Community-scoped env vars, keyed by relay URL.
+    ///
+    /// Under agents-everywhere (#2122) any agent record may spawn into any
+    /// community, so per-record `env_vars` cannot safely carry
+    /// community-specific credentials — they follow the agent into every
+    /// community it spawns on. This map is the location-scoped complement:
+    /// entries under a relay key are injected only into agents spawned for
+    /// that community's relay.
+    ///
+    /// Precedence: `global env_vars < community < persona < per-agent`
+    /// (a community entry is a more specific global default; identity-scoped
+    /// layers still win on collision).
+    ///
+    /// Relay keys are matched against the *effective* spawn relay after
+    /// trimming whitespace and trailing `/` on both sides. Reserved and
+    /// derived keys are rejected at save time and stripped at spawn time,
+    /// same as every other env tier.
+    #[serde(default)]
+    pub community_env_vars: BTreeMap<String, BTreeMap<String, String>>,
+
     /// Global fallback provider (e.g. `"databricks_v2"`, `"anthropic"`).
     ///
     /// Used only when neither the agent record nor the linked persona specifies
@@ -118,6 +138,35 @@ pub fn validate_global_config(config: &GlobalAgentConfig) -> Result<(), String> 
         ));
     }
 
+    // Community env maps: same key rules as the global map, per community.
+    for (relay, community_env) in &config.community_env_vars {
+        if relay.trim().is_empty() {
+            return Err("community env vars must be keyed by a non-empty relay URL".to_string());
+        }
+        let non_empty: BTreeMap<String, String> = community_env
+            .iter()
+            .filter(|(_, v)| !v.is_empty())
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        validate_user_env_keys(&non_empty).map_err(|e| format!("community `{relay}`: {e}"))?;
+        let derived: Vec<&str> = non_empty
+            .keys()
+            .filter(|k| {
+                DERIVED_PROVIDER_MODEL_ENV_KEYS
+                    .iter()
+                    .any(|d| d.eq_ignore_ascii_case(k.as_str()))
+            })
+            .map(String::as_str)
+            .collect();
+        if !derived.is_empty() {
+            return Err(format!(
+                "community `{relay}`: the following keys must be set via the structured \
+                 provider/model fields, not as env vars: {}",
+                derived.join(", ")
+            ));
+        }
+    }
+
     // Validate the structured provider and model fields.
     for (field, value) in [("provider", &config.provider), ("model", &config.model)] {
         if let Some(v) = value {
@@ -150,6 +199,40 @@ pub fn validate_global_config(config: &GlobalAgentConfig) -> Result<(), String> 
 /// caller that clears a row cannot accidentally shadow global.
 pub fn strip_empty_env_vars(config: &mut GlobalAgentConfig) {
     config.env_vars.retain(|_, v| !v.is_empty());
+    for community_env in config.community_env_vars.values_mut() {
+        community_env.retain(|_, v| !v.is_empty());
+    }
+    config
+        .community_env_vars
+        .retain(|relay, community_env| !relay.trim().is_empty() && !community_env.is_empty());
+}
+
+/// Normalize a relay URL for community-env matching: trim whitespace and
+/// trailing `/`. Applied to both the stored key and the effective spawn relay
+/// so `wss://relay.example.com` and `wss://relay.example.com/` match.
+fn normalize_community_relay(relay: &str) -> &str {
+    relay.trim().trim_end_matches('/')
+}
+
+/// Look up the community env map for an effective spawn relay, if any.
+///
+/// `None` when the config has no entry for the relay (or `relay_url` is
+/// blank). Matching is exact after [`normalize_community_relay`] on both
+/// sides — no host/scheme heuristics, so a key can never accidentally match
+/// a different community.
+pub fn community_env_for<'a>(
+    config: &'a GlobalAgentConfig,
+    relay_url: &str,
+) -> Option<&'a BTreeMap<String, String>> {
+    let target = normalize_community_relay(relay_url);
+    if target.is_empty() {
+        return None;
+    }
+    config
+        .community_env_vars
+        .iter()
+        .find(|(key, _)| normalize_community_relay(key) == target)
+        .map(|(_, env)| env)
 }
 
 /// Normalize `provider` and `model` to `None` when blank or whitespace-only.

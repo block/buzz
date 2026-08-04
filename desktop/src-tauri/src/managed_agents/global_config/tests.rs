@@ -264,6 +264,10 @@ fn default_config_is_all_none_empty() {
 fn roundtrip_serialization() {
     let config = GlobalAgentConfig {
         env_vars: BTreeMap::from([("ANTHROPIC_API_KEY".to_string(), "sk-test".to_string())]),
+        community_env_vars: BTreeMap::from([(
+            "wss://work.example.com".to_string(),
+            BTreeMap::from([("MEMORY_API_KEY".to_string(), "work-key".to_string())]),
+        )]),
         provider: Some("anthropic".to_string()),
         model: Some("claude-opus-4".to_string()),
         preferred_runtime: Some("claude".to_string()),
@@ -495,6 +499,7 @@ fn inherited_shared_compute_translates_to_supported_agent_transport() {
         &personas,
         Some(runtime),
         &global,
+        None,
     );
 
     assert_eq!(
@@ -589,6 +594,14 @@ fn populated_global_config_round_trips() {
         env_vars: [("ANTHROPIC_API_KEY".to_string(), "sk-test".to_string())]
             .into_iter()
             .collect(),
+        community_env_vars: [(
+            "wss://work.example.com".to_string(),
+            [("MEMORY_API_KEY".to_string(), "work-key".to_string())]
+                .into_iter()
+                .collect(),
+        )]
+        .into_iter()
+        .collect(),
         provider: Some("anthropic".to_string()),
         model: Some("claude-opus-4-5".to_string()),
         preferred_runtime: None,
@@ -647,5 +660,207 @@ fn record_runtime_wins_over_persona_runtime_for_command_resolution() {
     assert_eq!(
         cmd, "claude-agent-acp",
         "record runtime must override persona runtime in command resolution"
+    );
+}
+
+// ── community_env_vars ────────────────────────────────────────────────────────
+
+fn config_with_community_env(relay: &str, pairs: &[(&str, &str)]) -> GlobalAgentConfig {
+    let mut community_env_vars: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    community_env_vars.insert(
+        relay.to_string(),
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+    );
+    GlobalAgentConfig {
+        community_env_vars,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn validate_accepts_valid_community_env_vars() {
+    let config = config_with_community_env(
+        "wss://work.example.com",
+        &[
+            ("MEMORY_API_KEY", "work-key"),
+            ("CLAUDE_CONFIG_DIR", "/home/u/.claude-work"),
+        ],
+    );
+    assert!(validate_global_config(&config).is_ok());
+}
+
+#[test]
+fn validate_rejects_reserved_key_in_community_env() {
+    let config =
+        config_with_community_env("wss://work.example.com", &[("BUZZ_PRIVATE_KEY", "nope")]);
+    let err = validate_global_config(&config).unwrap_err();
+    assert!(
+        err.contains("wss://work.example.com"),
+        "error must name the community: {err}"
+    );
+}
+
+#[test]
+fn validate_rejects_derived_key_in_community_env() {
+    let config =
+        config_with_community_env("wss://work.example.com", &[("GOOSE_PROVIDER", "openai")]);
+    let err = validate_global_config(&config).unwrap_err();
+    assert!(
+        err.contains("structured provider/model"),
+        "derived keys must be rejected per community: {err}"
+    );
+}
+
+#[test]
+fn validate_rejects_blank_community_relay_key() {
+    let config = config_with_community_env("  ", &[("SOME_KEY", "v")]);
+    let err = validate_global_config(&config).unwrap_err();
+    assert!(err.contains("non-empty relay"), "{err}");
+}
+
+#[test]
+fn strip_empty_removes_empty_community_values_and_empty_communities() {
+    let mut config =
+        config_with_community_env("wss://work.example.com", &[("KEEP", "v"), ("DROP", "")]);
+    config
+        .community_env_vars
+        .insert("wss://all-empty.example.com".to_string(), {
+            let mut m = BTreeMap::new();
+            m.insert("ONLY".to_string(), String::new());
+            m
+        });
+    strip_empty_env_vars(&mut config);
+    let work = config
+        .community_env_vars
+        .get("wss://work.example.com")
+        .expect("community with a real value survives");
+    assert_eq!(work.get("KEEP").map(String::as_str), Some("v"));
+    assert!(!work.contains_key("DROP"), "empty value must be stripped");
+    assert!(
+        !config
+            .community_env_vars
+            .contains_key("wss://all-empty.example.com"),
+        "community with no surviving values must be dropped"
+    );
+}
+
+#[test]
+fn community_env_for_matches_with_trailing_slash_normalization() {
+    let config = config_with_community_env("wss://work.example.com/", &[("K", "v")]);
+    assert!(
+        super::community_env_for(&config, "wss://work.example.com").is_some(),
+        "stored trailing slash must not defeat the match"
+    );
+    assert!(
+        super::community_env_for(&config, "wss://work.example.com/").is_some(),
+        "queried trailing slash must not defeat the match"
+    );
+    assert!(
+        super::community_env_for(&config, "wss://other.example.com").is_none(),
+        "different community must not match"
+    );
+    assert!(
+        super::community_env_for(&config, "").is_none(),
+        "blank relay must never match"
+    );
+}
+
+/// Community layer sits between global and persona/agent: it overrides a
+/// colliding global value, and a per-agent value still overrides it.
+#[test]
+fn community_env_layers_between_global_and_agent() {
+    let mut record = bare_record();
+    record
+        .env_vars
+        .insert("AGENT_WINS".to_string(), "agent-value".to_string());
+
+    let mut config = config_with_community_env(
+        "wss://work.example.com",
+        &[
+            ("COMMUNITY_ONLY", "community-value"),
+            ("GLOBAL_COLLIDES", "community-value"),
+            ("AGENT_WINS", "community-value"),
+        ],
+    );
+    config
+        .env_vars
+        .insert("GLOBAL_COLLIDES".to_string(), "global-value".to_string());
+    config
+        .env_vars
+        .insert("GLOBAL_ONLY".to_string(), "global-value".to_string());
+
+    let effective = super::super::readiness::resolve_effective_agent_env(
+        &record,
+        &[],
+        None,
+        &config,
+        Some("wss://work.example.com"),
+    );
+    assert_eq!(
+        effective.env.get("COMMUNITY_ONLY").map(String::as_str),
+        Some("community-value")
+    );
+    assert_eq!(
+        effective.env.get("GLOBAL_COLLIDES").map(String::as_str),
+        Some("community-value"),
+        "community must override global on collision"
+    );
+    assert_eq!(
+        effective.env.get("GLOBAL_ONLY").map(String::as_str),
+        Some("global-value")
+    );
+    assert_eq!(
+        effective.env.get("AGENT_WINS").map(String::as_str),
+        Some("agent-value"),
+        "per-agent env must override community on collision"
+    );
+
+    // A different relay gets none of the community layer.
+    let other = super::super::readiness::resolve_effective_agent_env(
+        &record,
+        &[],
+        None,
+        &config,
+        Some("wss://other.example.com"),
+    );
+    assert!(!other.env.contains_key("COMMUNITY_ONLY"));
+    assert_eq!(
+        other.env.get("GLOBAL_COLLIDES").map(String::as_str),
+        Some("global-value"),
+        "without a community match the global value must stand"
+    );
+
+    // No relay context: community layer absent entirely.
+    let no_relay =
+        super::super::readiness::resolve_effective_agent_env(&record, &[], None, &config, None);
+    assert!(!no_relay.env.contains_key("COMMUNITY_ONLY"));
+}
+
+/// Reserved keys inside a community map must be stripped at resolve time even
+/// if a config file was hand-edited past save-time validation.
+#[test]
+fn community_env_strips_reserved_keys_at_resolve_time() {
+    let record = bare_record();
+    let config = config_with_community_env(
+        "wss://work.example.com",
+        &[("BUZZ_PRIVATE_KEY", "evil"), ("SAFE_KEY", "ok")],
+    );
+    let effective = super::super::readiness::resolve_effective_agent_env(
+        &record,
+        &[],
+        None,
+        &config,
+        Some("wss://work.example.com"),
+    );
+    assert!(
+        !effective.env.contains_key("BUZZ_PRIVATE_KEY"),
+        "reserved key must never pass through the community layer"
+    );
+    assert_eq!(
+        effective.env.get("SAFE_KEY").map(String::as_str),
+        Some("ok")
     );
 }
