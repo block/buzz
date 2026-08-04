@@ -25,6 +25,8 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+      - name: Reject private package hosts in lockfiles
+        run: scripts/check-public-package-locks.sh
       - name: Test adapter
         working-directory: benchmarks/harbor-buzz-orchestra
         run: |
