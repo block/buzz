@@ -129,7 +129,9 @@ test("direct-message rows become prominent only when unread", async ({
   await waitForMockLiveSubscription(page, "alice-tyler");
   await page.getByTestId("channel-general").click();
 
-  await expect(directMessage).toHaveCSS("opacity", "0.75");
+  const label = directMessage.locator("[data-sidebar-row-label]");
+  await expect(directMessage).toHaveCSS("opacity", "1");
+  await expect(label).toHaveCSS("opacity", "0.8");
   await page.evaluate((pubkey) => {
     window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
       channelName: "alice-tyler",
@@ -139,7 +141,47 @@ test("direct-message rows become prominent only when unread", async ({
     });
   }, TEST_IDENTITIES.alice.pubkey);
 
+  await expect(label).toHaveCSS("opacity", "1");
+  await expect(directMessage).toHaveCSS("font-weight", "700");
+});
+
+test("light mode reserves full opacity for unread text and avatars", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  const directMessage = page.getByTestId("channel-alice-tyler");
+  await directMessage.click();
+  await waitForMockLiveSubscription(page, "alice-tyler");
+  await page.getByTestId("channel-general").click();
+
+  const inbox = page
+    .getByTestId("sidebar-primary-menu")
+    .getByRole("button", { name: "Inbox", exact: true });
+  await expect(inbox).toHaveCSS("opacity", "1");
+  await expect(inbox.locator("[data-sidebar=menu-label]")).toHaveCSS(
+    "opacity",
+    "0.8",
+  );
   await expect(directMessage).toHaveCSS("opacity", "1");
+  await expect(directMessage.locator("[data-sidebar-row-label]")).toHaveCSS(
+    "opacity",
+    "0.8",
+  );
+
+  await page.evaluate((pubkey) => {
+    window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+      channelName: "alice-tyler",
+      content: "An unread direct message in light mode",
+      kind: 40002,
+      pubkey,
+    });
+  }, TEST_IDENTITIES.alice.pubkey);
+
+  await expect(directMessage.locator("[data-sidebar-row-label]")).toHaveCSS(
+    "opacity",
+    "1",
+  );
   await expect(directMessage).toHaveCSS("font-weight", "700");
 });
 
@@ -157,13 +199,17 @@ test("dark mode keeps selected labels regular and channel-level unread labels bo
     .getByRole("button", { name: "Inbox", exact: true });
   await expect(inbox).toHaveAttribute("data-active", "true");
   await expect(inbox).toHaveCSS("font-weight", "400");
-  await expect(page.getByTestId("open-agents-view")).toHaveCSS(
-    "opacity",
-    "0.75",
-  );
+  await expect(page.getByTestId("open-agents-view")).toHaveCSS("opacity", "1");
+  await expect(
+    page.getByTestId("open-agents-view").locator("[data-sidebar=menu-label]"),
+  ).toHaveCSS("opacity", "0.8");
 
   await page.getByTestId("channel-general").click();
-  await expect(inbox).toHaveCSS("opacity", "0.75");
+  await expect(inbox).toHaveCSS("opacity", "1");
+  await expect(inbox.locator("[data-sidebar=menu-label]")).toHaveCSS(
+    "opacity",
+    "0.8",
+  );
   await waitForMockLiveSubscription(page, "random");
   await page.evaluate((pubkey) => {
     window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
@@ -175,11 +221,14 @@ test("dark mode keeps selected labels regular and channel-level unread labels bo
   }, TEST_IDENTITIES.alice.pubkey);
 
   const unreadChannel = page.getByTestId("channel-random");
-  await expect(page.getByTestId("channel-engineering")).toHaveCSS(
+  const engineeringLabel = page
+    .getByTestId("channel-engineering")
+    .locator("[data-sidebar-row-label]");
+  await expect(engineeringLabel).toHaveCSS("opacity", "0.8");
+  await expect(unreadChannel.locator("[data-sidebar-row-label]")).toHaveCSS(
     "opacity",
-    "0.75",
+    "1",
   );
-  await expect(unreadChannel).toHaveCSS("opacity", "1");
   await expect(unreadChannel).toHaveCSS("font-weight", "700");
   await waitForAnimations(page);
   await page.screenshot({

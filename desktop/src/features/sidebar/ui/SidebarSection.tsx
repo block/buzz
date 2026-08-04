@@ -298,15 +298,6 @@ export function ChannelMenuButton({
           : "group-hover/menu-item:bg-sidebar-accent group-hover/menu-item:text-sidebar-foreground",
         hasTopLevelUnread &&
           "font-bold text-sidebar-foreground hover:text-sidebar-foreground data-[active=true]:font-bold",
-        !isActive &&
-          !hasTopLevelUnread &&
-          !isMuted &&
-          "dark:opacity-75 dark:hover:opacity-100",
-        !isActive &&
-          isMuted &&
-          !hasTopLevelUnread &&
-          !hasThreadUnread &&
-          "opacity-50 dark:opacity-45",
       )}
       data-channel-id={channel.id}
       data-testid={`channel-${channel.name}`}
@@ -320,7 +311,18 @@ export function ChannelMenuButton({
         dmParticipants={dmParticipants}
         presenceStatus={presenceStatus}
       />
-      <span className="min-w-0 flex-1 truncate" data-sidebar-row-label>
+      <span
+        className={cn(
+          "min-w-0 flex-1 truncate",
+          !isActive && !hasTopLevelUnread && !isMuted && "opacity-80",
+          !isActive &&
+            isMuted &&
+            !hasTopLevelUnread &&
+            !hasThreadUnread &&
+            "opacity-50 dark:opacity-45",
+        )}
+        data-sidebar-row-label
+      >
         {resolvedLabel}
       </span>
       {ephemeralDisplay ? (

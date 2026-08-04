@@ -81,7 +81,11 @@ test.describe("channel muting", () => {
 
     const engRow = page.getByTestId("channel-engineering");
     await expect(engRow).toBeVisible();
-    await expect(engRow).toHaveCSS("opacity", "0.5");
+    await expect(engRow).toHaveCSS("opacity", "1");
+    await expect(engRow.locator("[data-sidebar-row-label]")).toHaveCSS(
+      "opacity",
+      "0.5",
+    );
     await expect(engRow.locator("svg.lucide-bell-off")).toHaveCount(1);
   });
 
@@ -95,10 +99,10 @@ test.describe("channel muting", () => {
     await page.goto("/");
     await page.getByTestId("channel-random").click();
 
-    await expect(page.getByTestId("channel-engineering")).toHaveCSS(
-      "opacity",
-      "0.45",
-    );
+    const mutedLabel = page
+      .getByTestId("channel-engineering")
+      .locator("[data-sidebar-row-label]");
+    await expect(mutedLabel).toHaveCSS("opacity", "0.45");
   });
 
   test("03 — muted channel with a top-level @mention is emphasized", async ({
