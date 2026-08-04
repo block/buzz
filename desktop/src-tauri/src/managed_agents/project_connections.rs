@@ -465,6 +465,33 @@ fn serialize_secrets(env: &BTreeMap<String, String>) -> Result<Vec<u8>, String> 
         .map_err(|error| format!("failed to prepare connection credentials: {error}"))
 }
 
+#[cfg(any(test, feature = "system-keyring"))]
+fn store_verified_secret<Write, Verify, Delete>(
+    mut write: Write,
+    mut verify: Verify,
+    mut delete: Delete,
+) -> Result<(), String>
+where
+    Write: FnMut() -> Result<(), String>,
+    Verify: FnMut() -> Result<bool, String>,
+    Delete: FnMut() -> Result<(), String>,
+{
+    let failure = match write() {
+        Ok(()) => match verify() {
+            Ok(true) => return Ok(()),
+            Ok(false) | Err(_) => "Buzz could not verify the saved credentials.",
+        },
+        Err(_) => "Buzz could not save these credentials in the system keyring.",
+    };
+
+    if delete().is_err() {
+        return Err(format!(
+            "{failure} Buzz also could not remove the unverified credentials."
+        ));
+    }
+    Err(failure.to_string())
+}
+
 fn store_secrets(
     app: &AppHandle,
     scope: &ProjectConnectionScope,
@@ -482,15 +509,11 @@ fn store_secrets(
             .map_err(|_| "Buzz could not prepare these credentials.".to_string())?;
         let key = connection_secret_key(scope, id, credential_generation);
         let store = SecretStore::shared(keyring_service());
-        store.store(&key, &raw).map_err(|_| {
-            "Buzz could not save these credentials in the system keyring.".to_string()
-        })?;
-        if !store
-            .verify_stored_raw(&key, &raw)
-            .map_err(|_| "Buzz could not verify the saved credentials.".to_string())?
-        {
-            return Err("Buzz could not verify the saved credentials.".to_string());
-        }
+        store_verified_secret(
+            || store.store(&key, &raw),
+            || store.verify_stored_raw(&key, &raw),
+            || store.delete(&key),
+        )?;
     }
     #[cfg(not(feature = "system-keyring"))]
     {

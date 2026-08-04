@@ -71,6 +71,101 @@ fn connection_input_rejects_reserved_empty_and_oversized_secrets() {
 }
 
 #[test]
+fn verified_secret_write_keeps_the_saved_generation() {
+    use std::cell::Cell;
+
+    let deleted = Cell::new(false);
+    assert!(store_verified_secret(
+        || Ok(()),
+        || Ok(true),
+        || {
+            deleted.set(true);
+            Ok(())
+        },
+    )
+    .is_ok());
+    assert!(!deleted.get());
+}
+
+#[test]
+fn failed_secret_verification_removes_the_saved_generation() {
+    use std::cell::Cell;
+
+    let deleted = Cell::new(false);
+    let error = store_verified_secret(
+        || Ok(()),
+        || Ok(false),
+        || {
+            deleted.set(true);
+            Ok(())
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error, "Buzz could not verify the saved credentials.");
+    assert!(deleted.get());
+}
+
+#[test]
+fn secret_verification_error_removes_the_saved_generation() {
+    use std::cell::Cell;
+
+    let deleted = Cell::new(false);
+    let error = store_verified_secret(
+        || Ok(()),
+        || Err("backend detail".to_string()),
+        || {
+            deleted.set(true);
+            Ok(())
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error, "Buzz could not verify the saved credentials.");
+    assert!(deleted.get());
+}
+
+#[test]
+fn secret_write_error_removes_a_possible_partial_generation() {
+    use std::cell::Cell;
+
+    let verified = Cell::new(false);
+    let deleted = Cell::new(false);
+    let error = store_verified_secret(
+        || Err("backend detail".to_string()),
+        || {
+            verified.set(true);
+            Ok(true)
+        },
+        || {
+            deleted.set(true);
+            Ok(())
+        },
+    )
+    .unwrap_err();
+    assert_eq!(
+        error,
+        "Buzz could not save these credentials in the system keyring."
+    );
+    assert!(!verified.get());
+    assert!(deleted.get());
+}
+
+#[test]
+fn failed_secret_cleanup_is_reported_without_backend_details() {
+    let error = store_verified_secret(
+        || Ok(()),
+        || Ok(false),
+        || Err("backend detail".to_string()),
+    )
+    .unwrap_err();
+    assert_eq!(
+        error,
+        "Buzz could not verify the saved credentials. \
+         Buzz also could not remove the unverified credentials."
+    );
+    assert!(!error.contains("backend detail"));
+}
+
+#[test]
 fn stale_ready_connection_is_presented_as_check_needed() {
     let mut connection = stored_connection();
     connection.health.last_verified_at = Some("2020-01-01T00:00:00Z".to_string());
