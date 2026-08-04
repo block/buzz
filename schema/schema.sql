@@ -112,6 +112,12 @@ CREATE INDEX idx_channels_community_visibility ON channels (community_id, visibi
 CREATE INDEX idx_channels_created_by ON channels (community_id, created_by);
 CREATE INDEX idx_channels_ttl_expiry ON channels (ttl_deadline)
     WHERE ttl_seconds IS NOT NULL AND archived_at IS NULL AND deleted_at IS NULL;
+-- Tenant-independent channel-id → community lookups (Db::communities_of_channels,
+-- Db::community_of_channel) carry no community_id predicate, so no
+-- community_id-leading index can serve them. Covering + partial: index-only scan.
+-- Not UNIQUE — the same channel id may exist under more than one community.
+CREATE INDEX idx_channels_id_live ON channels (id) INCLUDE (community_id)
+    WHERE deleted_at IS NULL;
 
 -- channels.community_id is immutable: a channel can never be re-tenanted.
 -- (Conformance: "Migration lint forbids channel re-tenanting except through an

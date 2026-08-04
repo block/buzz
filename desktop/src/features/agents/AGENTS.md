@@ -67,11 +67,17 @@ with a TypeScript lookup table or an id comparison in a component.
 7. **Onboarding setup detects readiness; it does not select defaults.** The
    setup page derives visible and ready harnesses from the runtime catalog and
    only offers install or sign-in actions. The following defaults page is the
-   sole onboarding surface that chooses and persists `preferred_runtime`, and
-   its Finish gate consumes the shared renderer's `onValidityChange` signal —
-   a harness selection alone does not complete onboarding when the harness
+   sole onboarding surface that chooses `preferred_runtime`. Its complete draft
+   lives in machine-onboarding session state, so Back performs no write and
+   restores even incomplete edits when the user returns. Skip abandons that
+   draft and advances with zero config writes. Next is the only persistence
+   boundary: it consumes the shared renderer's `onValidityChange` signal,
+   disables editing while awaiting `set_global_agent_config`, advances only on
+   success, and leaves the draft in place with a retryable inline error on
+   failure. A harness selection alone does not enable Next when the harness
    requires provider/model/credential config (e.g. buzz-agent with no
-   provider). Baked build env and runtime-file config satisfy the gate.
+   provider). Baked build env and runtime-file config satisfy the gate. Drafts
+   intentionally do not survive an app restart.
    `onboarding-agent-defaults.spec.ts` is the acceptance gate for anything
    touching this flow or the shared renderer.
 8. **Omit the Model control only after a confirmed successful empty
@@ -168,8 +174,9 @@ with a TypeScript lookup table or an id comparison in a component.
   plus both resolvers, including unknown-reads-as-local and
   blank-`runOn`-is-not-a-provider.
 - `desktop/tests/e2e/onboarding-agent-defaults.spec.ts` — onboarding behavior
-  acceptance coverage for readiness, failure states, defaults, navigation,
-  successful-empty vs failed optional-model discovery, and persistence races.
+  acceptance coverage for readiness, failure states, defaults, session-draft
+  restoration, zero-write Skip, Next save failure/retry, navigation, and
+  successful-empty vs failed optional-model discovery.
 - Rust: `runtime_metadata_env_vars` tests pin spawn-time key application.
 - Rust: persona sharing/retention tests pin relay+owner scoping, durable
   enqueue errors, relay rejection/unavailability, and accepted publication.

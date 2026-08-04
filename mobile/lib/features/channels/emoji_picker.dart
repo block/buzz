@@ -9,6 +9,7 @@ import '../../shared/custom_emoji/custom_emoji_render.dart';
 import '../../shared/emoji/emoji_data.dart';
 import '../../shared/emoji/emoji_data_provider.dart';
 import '../../shared/emoji/emoji_search.dart';
+import '../../shared/emoji/native_emoji_glyph.dart';
 import '../../shared/theme/theme.dart';
 import 'recent_emoji_provider.dart';
 
@@ -30,6 +31,7 @@ const _sheetHeightFactor = 0.62;
 void showEmojiPicker({
   required BuildContext context,
   required void Function(String emoji) onSelect,
+  VoidCallback? onDismiss,
 }) {
   showModalBottomSheet<void>(
     context: context,
@@ -42,7 +44,7 @@ void showEmojiPicker({
         onSelect(emoji);
       },
     ),
-  );
+  ).whenComplete(onDismiss ?? () {});
 }
 
 class EmojiPickerSheet extends HookConsumerWidget {

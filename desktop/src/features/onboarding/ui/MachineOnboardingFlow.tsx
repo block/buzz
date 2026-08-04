@@ -33,6 +33,7 @@ import {
 import { OnboardingFooterProvider } from "./OnboardingFooter";
 import { OnboardingSlideTransition } from "./OnboardingSlideTransition";
 import { SetupStep } from "./SetupStep";
+import type { DefaultConfigDraft } from "./types";
 
 export type MachineOnboardingPage =
   | "identity"
@@ -85,6 +86,8 @@ export function MachineOnboardingFlow({
     IdentityStorage | undefined
   >();
   const [readyRuntimeIds, setReadyRuntimeIds] = React.useState<string[]>([]);
+  const [defaultConfigDraft, setDefaultConfigDraft] =
+    React.useState<DefaultConfigDraft | null>(null);
   const [backupSubview, setBackupSubview] =
     React.useState<BackupSubview>("created");
   const [backupDirection, setBackupDirection] = React.useState<
@@ -381,8 +384,11 @@ export function MachineOnboardingFlow({
               actions={{
                 back: () => setPage("setup"),
                 complete: () => complete(selectedPubkey ?? undefined),
+                discardDraft: () => setDefaultConfigDraft(null),
+                updateDraft: setDefaultConfigDraft,
               }}
               direction="forward"
+              draft={defaultConfigDraft}
               readyRuntimeIds={readyRuntimeIds}
             />
           )}

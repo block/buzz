@@ -2,7 +2,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../../shared/relay/relay.dart';
 import '../../../shared/theme/theme_provider.dart';
-import '../read_state/read_state_time.dart';
+import '../../../shared/read_state/read_state_time.dart';
 import 'thread_follows_storage.dart';
 
 class ThreadFollowsState {

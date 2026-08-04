@@ -1,6 +1,5 @@
 import * as React from "react";
 import { toast } from "sonner";
-
 import {
   type CreateChannelManagedAgentInput,
   useAttachManagedAgentToChannelMutation,
@@ -13,6 +12,11 @@ import {
 import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRuntime";
 import { useAddChannelMembersMutation } from "@/features/channels/hooks";
 import { filterEffectiveExplicitAgentPubkeys } from "@/features/messages/lib/effectiveExplicitAgentPubkeys";
+import {
+  prepareBackgroundMediaUpload,
+  saveQueuedAttachmentsForDraft,
+  type QueuedMediaAttachment,
+} from "@/features/messages/lib/backgroundMediaUploadStore";
 import type { UseChannelLinksResult } from "@/features/messages/lib/useChannelLinks";
 import type { UseEmojiAutocompleteResult } from "@/features/messages/lib/useEmojiAutocomplete";
 import {
@@ -23,57 +27,28 @@ import {
 import type { UseMentionsResult } from "@/features/messages/lib/useMentions";
 import type { UseRichTextEditorResult } from "@/features/messages/lib/useRichTextEditor";
 import type { UseDraftsResult } from "@/features/messages/lib/useDrafts";
+import { invokeTauri } from "@/shared/api/tauri";
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 import type { AcpRuntime, ChannelType, ManagedAgent } from "@/shared/api/types";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
-import { MENTION_REFERENCE_TAG } from "@/shared/lib/resolveMentionNames";
 import { buildCustomEmojiTags } from "@/shared/lib/customEmojiTags";
-
-type PendingNonMemberMentionSend = {
-  capturedChannelId: string | null;
-  /** Thread context captured at submit time — null for main-timeline sends. */
-  capturedThreadContext: {
-    parentEventId: string | null;
-    threadHeadId: string | null;
-  } | null;
-  finalContent: string;
-  mentionPubkeys: string[];
-  nonMemberPubkeys: string[];
-  outgoingTags?: string[][];
-  preparedManagedAgents?: ManagedAgent[];
-  readyAgentPubkeys?: string[];
-  savedContent: string;
-  savedImeta: ImetaMedia[];
-  savedSpoileredAttachmentUrls: Set<string>;
-  sentDraftKey: string | null | undefined;
-  audienceGeneration: number;
-  audienceRevision: number | null;
-  /** Agent mentions explicitly authored in this draft (never inferred). */
-  explicitAgentPubkeys: string[];
-};
-
-type SendMessageWithMentionFlowInput = {
-  capturedChannelId: string | null;
-  /** Thread context captured at submit time — null for main-timeline sends. */
-  capturedThreadContext?: {
-    parentEventId: string | null;
-    threadHeadId: string | null;
-  } | null;
-  pendingImeta: ImetaMedia[];
-  sentDraftKey: string | null | undefined;
-  spoileredAttachmentUrls?: ReadonlySet<string>;
-  trimmed: string;
-  audienceGeneration?: number;
-  audienceRevision?: number | null;
-};
-
+import {
+  getErrorMessage,
+  isManagedAgentRunning,
+  isProviderBackedAgent,
+  MENTION_REFERENCE_TAG,
+  mergeOutgoingTagsWithReferenceMentions,
+  type PendingNonMemberMentionSend,
+  type SendMessageWithMentionFlowInput,
+  uniqueNormalizedPubkeys,
+} from "./useMentionSendFlow.helpers";
 type UseMentionSendFlowOptions = {
   channelId: string | null;
   channelLinks: Pick<UseChannelLinksResult, "clearChannels">;
   channelType: ChannelType | null;
   contentRef: React.MutableRefObject<string>;
   customEmoji: CustomEmoji[];
-  drafts: Pick<UseDraftsResult, "markDraftSent">;
+  drafts: Pick<UseDraftsResult, "loadDraft" | "markDraftSent" | "persistDraft">;
   emojiAutocomplete: Pick<UseEmojiAutocompleteResult, "clearEmojis">;
   mentions: UseMentionsResult;
   onPrepareSendChannel?: (
@@ -98,6 +73,9 @@ type UseMentionSendFlowOptions = {
   setContent: (content: string) => void;
   setIsEmojiPickerOpen: React.Dispatch<React.SetStateAction<boolean>>;
   setPendingImeta: (pendingImeta: ImetaMedia[]) => void;
+  hasUnsavedMedia: () => boolean;
+  clearQueuedAttachments: () => void;
+  restoreQueuedAttachments: (attachments: QueuedMediaAttachment[]) => void;
   setSpoileredAttachmentUrls?: React.Dispatch<
     React.SetStateAction<Set<string>>
   >;
@@ -109,43 +87,10 @@ type UseMentionSendFlowOptions = {
   }) => void;
   resolvePostSendContent?: (effectiveExplicitAgentPubkeys: string[]) => string;
 };
-
-function mergeOutgoingTagsWithReferenceMentions(
-  outgoingTags: string[][] | undefined,
-  pubkeys: Iterable<string>,
-) {
-  const normalizedPubkeys = uniqueNormalizedPubkeys(pubkeys);
-  if (normalizedPubkeys.length === 0) {
-    return outgoingTags;
-  }
-
-  return [
-    ...(outgoingTags ?? []),
-    ...normalizedPubkeys.map((pubkey) => [MENTION_REFERENCE_TAG, pubkey]),
-  ];
-}
-
-function getErrorMessage(error: unknown, fallback: string) {
-  return error instanceof Error && error.message ? error.message : fallback;
-}
-
-function uniqueNormalizedPubkeys(pubkeys: Iterable<string>) {
-  return [...new Set([...pubkeys].map(normalizePubkey))].filter(Boolean);
-}
-
-function isManagedAgentRunning(agent: ManagedAgent) {
-  return agent.status === "running" || agent.status === "deployed";
-}
-
-function isProviderBackedAgent(agent: ManagedAgent) {
-  return agent.backend.type === "provider";
-}
-
 const DM_THREAD_AGENT_MENTION_ERROR =
   "Agents must already be in a DM to be mentioned in its threads. Start a new conversation that includes the agent.";
 const DM_THREAD_MEMBERS_LOADING_ERROR =
   "Checking conversation members. Try again in a moment.";
-
 export function useMentionSendFlow({
   channelId,
   channelLinks,
@@ -161,6 +106,9 @@ export function useMentionSendFlow({
   setContent,
   setIsEmojiPickerOpen,
   setPendingImeta,
+  hasUnsavedMedia,
+  clearQueuedAttachments,
+  restoreQueuedAttachments,
   setSpoileredAttachmentUrls,
   onSuccessfulExplicitAgentAudience,
   resolvePostSendContent,
@@ -187,7 +135,6 @@ export function useMentionSendFlow({
       isMountedRef.current = false;
     };
   }, []);
-
   const addMembersMutation = useAddChannelMembersMutation(channelId);
   const attachAgentMutation = useAttachManagedAgentToChannelMutation(channelId);
   const createPersonaAgentMutation =
@@ -197,18 +144,15 @@ export function useMentionSendFlow({
   const availableRuntimesQuery = useAvailableAcpRuntimes();
   const managedAgentsQuery = useManagedAgentsQuery();
   const startAgentMutation = useStartManagedAgentMutation();
-
   const getManagedAgentsByPubkey = React.useCallback(async () => {
     const agents =
       managedAgentsQuery.data ??
       (await managedAgentsQuery.refetch()).data ??
       [];
-
     return new Map(
       agents.map((agent) => [normalizePubkey(agent.pubkey), agent]),
     );
   }, [managedAgentsQuery.data, managedAgentsQuery.refetch]);
-
   const getAvailableRuntimes = React.useCallback(async (): Promise<
     AcpRuntime[]
   > => {
@@ -216,7 +160,6 @@ export function useMentionSendFlow({
     if (cached.length > 0 || !availableRuntimesQuery.isLoading) {
       return cached;
     }
-
     const refetched = await availableRuntimesQuery.refetch();
     return (refetched.data ?? []).filter(
       (runtime): runtime is AcpRuntime =>
@@ -229,7 +172,6 @@ export function useMentionSendFlow({
     availableRuntimesQuery.isLoading,
     availableRuntimesQuery.refetch,
   ]);
-
   const ensureManagedAgentMentionsReady = React.useCallback(
     async (
       mentionPubkeys: string[],
@@ -398,6 +340,7 @@ export function useMentionSendFlow({
         mentions.cancelMentionAutocomplete();
       } else richText.clearContent();
       setPendingImeta([]);
+      clearQueuedAttachments();
       setSpoileredAttachmentUrls?.(new Set());
       if (!postSendContent) mentions.clearMentions();
       channelLinks.clearChannels();
@@ -415,6 +358,7 @@ export function useMentionSendFlow({
       setContent,
       setIsEmojiPickerOpen,
       setPendingImeta,
+      clearQueuedAttachments,
       setSpoileredAttachmentUrls,
     ],
   );
@@ -441,12 +385,33 @@ export function useMentionSendFlow({
 
       isCompleteSendPendingRef.current = true;
       setIsCompleteSendPending(true);
+      const preparedUpload =
+        draft.queuedAttachments.length > 0
+          ? prepareBackgroundMediaUpload(draft.queuedAttachments)
+          : null;
+      const persistPreflightDraft = () => {
+        if (!draft.recoveryDraftKey) return;
+        drafts.persistDraft(
+          draft.recoveryDraftKey,
+          draft.savedContent,
+          draft.capturedChannelId ?? draft.recoveryDraftKey,
+          draft.savedImeta,
+          [...draft.savedSpoileredAttachmentUrls],
+          draft.savedMentionRefs,
+        );
+        saveQueuedAttachmentsForDraft(
+          draft.recoveryDraftKey,
+          draft.queuedAttachments,
+        );
+      };
+      let uploadStarted = false;
       try {
         const readyAgentPubkeys = new Set(
           (draft.readyAgentPubkeys ?? []).map(normalizePubkey),
         );
         const managedAgentsByPubkey = await getManagedAgentsByPubkey();
         if (!isMountedRef.current) {
+          persistPreflightDraft();
           return;
         }
         for (const agent of draft.preparedManagedAgents ?? []) {
@@ -472,6 +437,7 @@ export function useMentionSendFlow({
             return;
           }
           if (!isMountedRef.current) {
+            persistPreflightDraft();
             return;
           }
         }
@@ -485,6 +451,7 @@ export function useMentionSendFlow({
           [...managedAgentsByPubkey.values()],
         );
         if (!isMountedRef.current) {
+          persistPreflightDraft();
           return;
         }
         if (agentReadiness.errors.length > 0) {
@@ -499,29 +466,110 @@ export function useMentionSendFlow({
           return;
         }
 
+        if (preparedAgentPubkeys.length > 0 && sendChannelId) {
+          try {
+            await invokeTauri("sync_agents_to_active_huddle", {
+              channelId: sendChannelId,
+              agentPubkeys: preparedAgentPubkeys,
+            });
+          } catch (error) {
+            const message = `Could not add mentioned agent to the Huddle: ${getErrorMessage(
+              error,
+              "Huddle enrollment failed.",
+            )}`;
+            setNonMemberPromptError(message);
+            toast.error(message);
+            return;
+          }
+        }
+
         const effectiveExplicitAgentPubkeys =
           filterEffectiveExplicitAgentPubkeys(
             draft.explicitAgentPubkeys,
             mentionPubkeys,
           );
 
-        // Replace the sent body directly with its final post-send state before
-        // the async network send starts. This avoids an intermediate blank frame
-        // for persistent audiences while preserving the ordinary empty state.
-        if (draft.capturedChannelId === channelIdRef.current) {
-          clearComposer(
-            resolvePostSendContent?.(effectiveExplicitAgentPubkeys),
+        const send = onSendRef.current;
+        const persistCanceledDraft = () => {
+          if (!draft.recoveryDraftKey) return;
+          const existing = drafts.loadDraft(draft.recoveryDraftKey);
+          if (
+            existing &&
+            (existing.content !== draft.savedContent ||
+              existing.channelId !==
+                (draft.capturedChannelId ?? draft.recoveryDraftKey) ||
+              JSON.stringify(existing.pendingImeta) !==
+                JSON.stringify(draft.savedImeta) ||
+              JSON.stringify(existing.spoileredAttachmentUrls) !==
+                JSON.stringify([...draft.savedSpoileredAttachmentUrls]))
+          ) {
+            return;
+          }
+          drafts.persistDraft(
+            draft.recoveryDraftKey,
+            draft.savedContent,
+            draft.capturedChannelId ?? draft.recoveryDraftKey,
+            draft.savedImeta,
+            [...draft.savedSpoileredAttachmentUrls],
+            draft.savedMentionRefs,
           );
-        }
-
-        try {
-          await onSendRef.current(
-            draft.finalContent,
+        };
+        const restoreComposerAfterFailure = () => {
+          persistCanceledDraft();
+          const canRestoreCurrentComposer =
+            isMountedRef.current &&
+            (draft.capturedChannelId === channelIdRef.current ||
+              channelIdRef.current === null) &&
+            contentRef.current.trim().length === 0 &&
+            !hasUnsavedMedia();
+          if (!canRestoreCurrentComposer && draft.recoveryDraftKey) {
+            saveQueuedAttachmentsForDraft(
+              draft.recoveryDraftKey,
+              draft.queuedAttachments,
+            );
+          }
+          if (!canRestoreCurrentComposer) {
+            return;
+          }
+          setContent(draft.savedContent);
+          contentRef.current = draft.savedContent;
+          richText.setContent(draft.savedContent);
+          setPendingImeta(draft.savedImeta);
+          restoreQueuedAttachments(draft.queuedAttachments);
+          mentions.restoreDraftMentionRefs(draft.savedMentionRefs);
+          setSpoileredAttachmentUrls?.(
+            new Set(draft.savedSpoileredAttachmentUrls),
+          );
+        };
+        const finishSend = async (
+          uploaded: ImetaMedia[],
+          signal?: AbortSignal,
+        ) => {
+          const { content: finalContent, mediaTags } = buildOutgoingMessage(
+            draft.trimmed,
+            [...draft.savedImeta, ...uploaded],
+            new Set([
+              ...draft.savedSpoileredAttachmentUrls,
+              ...draft.queuedAttachments.flatMap((attachment, index) =>
+                attachment.spoilered && uploaded[index]
+                  ? [uploaded[index].url]
+                  : [],
+              ),
+            ]),
+          );
+          const finalOutgoingTags = mergeOutgoingTags(
+            mediaTags,
+            outgoingTags ?? [],
+          );
+          if (signal?.aborted) return;
+          await send(
+            finalContent,
             mentionPubkeys,
-            outgoingTags,
+            finalOutgoingTags,
             sendChannelId,
             draft.capturedThreadContext,
           );
+          if (signal?.aborted) return;
           if (effectiveExplicitAgentPubkeys.length > 0) {
             // Promote only explicitly authored agents that remained effective
             // for this successful send. "Send without inviting" removes its
@@ -537,25 +585,57 @@ export function useMentionSendFlow({
             drafts.markDraftSent(
               draft.sentDraftKey,
               draft.savedContent,
-              sendChannelId ?? draft.sentDraftKey,
+              draft.capturedChannelId ?? draft.sentDraftKey,
               draft.savedImeta,
               [...draft.savedSpoileredAttachmentUrls],
             );
           }
-        } catch {
-          // Only restore the composer content if the user is still on the
-          // channel that originated the send.
-          if (draft.capturedChannelId === channelIdRef.current) {
-            setContent(draft.savedContent);
-            contentRef.current = draft.savedContent;
-            richText.setContent(draft.savedContent);
-            setPendingImeta(draft.savedImeta);
-            setSpoileredAttachmentUrls?.(
-              new Set(draft.savedSpoileredAttachmentUrls),
-            );
+        };
+        if (preparedUpload) {
+          uploadStarted = preparedUpload.start({
+            onComplete: async (uploaded, signal) => {
+              try {
+                await finishSend(uploaded, signal);
+              } catch {
+                restoreComposerAfterFailure();
+              }
+            },
+            onError: (error) => {
+              restoreComposerAfterFailure();
+              toast.error(
+                `Upload failed: ${getErrorMessage(error, "Unknown error")}`,
+              );
+            },
+            onCancel: () => {
+              restoreComposerAfterFailure();
+            },
+          });
+          if (!uploadStarted) {
+            return;
+          }
+        }
+
+        // Replace the sent body directly with its final post-send state before
+        // the async network send starts. This avoids an intermediate blank frame
+        // for persistent audiences while preserving the ordinary empty state.
+        if (
+          draft.capturedChannelId === channelIdRef.current ||
+          channelIdRef.current === null
+        ) {
+          clearComposer(
+            resolvePostSendContent?.(effectiveExplicitAgentPubkeys),
+          );
+        }
+
+        if (!preparedUpload) {
+          try {
+            await finishSend([]);
+          } catch {
+            restoreComposerAfterFailure();
           }
         }
       } finally {
+        if (!uploadStarted) preparedUpload?.cancel();
         isCompleteSendPendingRef.current = false;
         if (isMountedRef.current) {
           setIsCompleteSendPending(false);
@@ -576,7 +656,10 @@ export function useMentionSendFlow({
       richText.setContent,
       setContent,
       setPendingImeta,
+      restoreQueuedAttachments,
       setSpoileredAttachmentUrls,
+      hasUnsavedMedia,
+      mentions.restoreDraftMentionRefs,
     ],
   );
 
@@ -642,7 +725,9 @@ export function useMentionSendFlow({
       capturedChannelId,
       capturedThreadContext = null,
       pendingImeta,
+      queuedAttachments = [],
       sentDraftKey,
+      recoveryDraftKey,
       spoileredAttachmentUrls = new Set(),
       trimmed,
       audienceGeneration = 0,
@@ -703,15 +788,7 @@ export function useMentionSendFlow({
             createdPersonaAgentPubkeySet.has(pubkey),
         );
         const pubkeys = explicitMentionPubkeys;
-        const { content: finalContent, mediaTags } = buildOutgoingMessage(
-          trimmed,
-          pendingImeta,
-          spoileredAttachmentUrls,
-        );
-        const outgoingTags = mergeOutgoingTags(
-          mediaTags,
-          buildCustomEmojiTags(finalContent, customEmoji),
-        );
+        const outgoingTags = buildCustomEmojiTags(trimmed, customEmoji);
         const nonMemberPubkeys = getNonMemberMentionPubkeys(pubkeys);
         let promptNonMemberPubkeys = nonMemberPubkeys.filter(
           (pubkey) =>
@@ -734,7 +811,7 @@ export function useMentionSendFlow({
         const pendingDraft: PendingNonMemberMentionSend = {
           capturedChannelId: effectiveChannelId,
           capturedThreadContext,
-          finalContent,
+          trimmed,
           mentionPubkeys: pubkeys,
           nonMemberPubkeys: promptNonMemberPubkeys,
           outgoingTags,
@@ -745,8 +822,11 @@ export function useMentionSendFlow({
               : createdPersonaAgentPubkeys,
           savedContent: trimmed,
           savedImeta: [...pendingImeta],
+          queuedAttachments: [...queuedAttachments],
           savedSpoileredAttachmentUrls: new Set(spoileredAttachmentUrls),
           sentDraftKey,
+          recoveryDraftKey,
+          savedMentionRefs: mentions.getDraftMentionRefs(trimmed),
           audienceGeneration,
           audienceRevision,
           explicitAgentPubkeys,
@@ -775,6 +855,7 @@ export function useMentionSendFlow({
       mentions.extractMentionPubkeys,
       mentions.isAgentPubkey,
       mentions.isManagedAgentPubkey,
+      mentions.getDraftMentionRefs,
       onPrepareSendChannel,
     ],
   );

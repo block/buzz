@@ -39,15 +39,6 @@ class _FilterMenuButton extends StatelessWidget {
             alignment: AnchoredPopoverAlignment.start,
             offset: const Offset(0, Grid.half),
             menuPadding: const EdgeInsets.symmetric(vertical: Grid.half),
-            color: context.colors.surface.withValues(alpha: 0.98),
-            elevation: 8,
-            shadowColor: context.colors.shadow.withValues(alpha: 0.18),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(Radii.card),
-              side: BorderSide(
-                color: context.colors.outlineVariant.withValues(alpha: 0.45),
-              ),
-            ),
             surfaceKey: const ValueKey('activity-filter-popover'),
             items: [
               for (final entry in _filterLabels.entries)
@@ -183,13 +174,6 @@ class _InboxOptionsButton extends StatelessWidget {
             context: buttonContext,
             width: 216,
             alignment: AnchoredPopoverAlignment.end,
-            color: context.colors.surface,
-            elevation: 4,
-            shadowColor: context.colors.shadow.withValues(alpha: 0.18),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(Radii.md),
-              side: BorderSide(color: context.colors.outline),
-            ),
             surfaceKey: const ValueKey('activity-options-popover'),
             items: [
               PopupMenuItem(

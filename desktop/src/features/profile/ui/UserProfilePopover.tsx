@@ -593,6 +593,11 @@ export function UserProfilePopover({
         data-testid="user-profile-popover"
         onMouseEnter={handleContentMouseEnter}
         onMouseLeave={handleMouseLeave}
+        // This is a hover card: moving focus into its first button on open
+        // makes the profile header look keyboard-selected before the user has
+        // interacted with it. Keep focus on the trigger; Tab still enters the
+        // card and shows its normal focus treatment when needed.
+        onOpenAutoFocus={(event) => event.preventDefault()}
         side="top"
         sideOffset={8}
       >

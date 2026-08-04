@@ -35,7 +35,7 @@
 //! can gate microphone input while the agent is speaking.
 
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     num::NonZero,
     path::PathBuf,
     sync::{
@@ -44,7 +44,7 @@ use std::{
         Arc, Mutex, MutexGuard, PoisonError,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use super::pocket::{
@@ -61,6 +61,9 @@ use startup::await_worker_startup;
 #[path = "tts_audio.rs"]
 mod audio;
 use audio::*;
+#[path = "tts_activity.rs"]
+mod activity;
+use activity::*;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -77,6 +80,7 @@ const RECV_TIMEOUT: Duration = Duration::from_millis(100);
 /// ~5 ms — so playing audio dies ~15 ms after the flag is set, even while
 /// the worker is blocked inside `synth_chunk`.
 const MONITOR_TICK: Duration = Duration::from_millis(10);
+const SPEAKER_ACTIVITY_TICK: Duration = Duration::from_millis(50);
 const AUDIO_PRIME_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Pocket TTS is a one-step consistency model, not diffusion. Kept for API compat.
@@ -167,10 +171,12 @@ impl TtsPipeline {
         cancel: Arc<AtomicBool>,
         voice: &str,
         output_device: Option<String>,
+        activity_app: Option<tauri::AppHandle>,
     ) -> Result<Self, String> {
         let (text_tx, text_rx) = mpsc::sync_channel::<QueuedText>(TEXT_QUEUE_DEPTH);
         let shutdown = Arc::new(AtomicBool::new(false));
-        // cancel is passed in from HuddleState.tts_cancel — shared with STT for barge-in.
+        // cancel is passed in from HuddleState.tts_cancel — shared with remote
+        // participant interruption and the push-to-talk shortcut.
 
         let shutdown_worker = Arc::clone(&shutdown);
         let cancel_worker = Arc::clone(&cancel);
@@ -203,6 +209,7 @@ impl TtsPipeline {
                         (cancel_worker, worker_voice_cancel),
                     ),
                     output_device,
+                    activity_app,
                     startup_tx,
                 )
             })
@@ -231,6 +238,8 @@ impl TtsPipeline {
             .try_send(QueuedText {
                 generation: self.voice_generation.load(Ordering::Acquire),
                 route_id: 0,
+                speaker_pubkey: None,
+                voice_reference: None,
                 text,
             })
             .map_err(|e| {
@@ -309,6 +318,7 @@ fn tts_worker(
     text_rx: mpsc::Receiver<QueuedText>,
     control_state: WorkerControlState,
     output_device: Option<String>,
+    activity_app: Option<tauri::AppHandle>,
     startup_tx: mpsc::SyncSender<Result<(), String>>,
 ) {
     let (selected_voice, voice_generation, voice_change_ack) = voice_state;
@@ -351,6 +361,7 @@ fn tts_worker(
         ));
         return;
     }
+    let mut style_cache = HashMap::from([(voice_name.clone(), style.clone())]);
 
     // ── 2b. Warmup inference ─────────────────────────────────────────────────
     // The first ONNX inference on any session is significantly slower than
@@ -454,6 +465,7 @@ fn tts_worker(
     // `cancel == false` and no-ops. The lock is uncontended except during an
     // actual barge-in, so the hot path is unaffected.
     let player_ops = Arc::new(Mutex::new(()));
+    let activity_frames = Arc::new(Mutex::new(VecDeque::<TtsSpeakerActivityFrame>::new()));
     let monitor_stop = Arc::new(AtomicBool::new(false));
     let monitor = {
         let player = Arc::clone(&player);
@@ -462,9 +474,12 @@ fn tts_worker(
         let tts_active = Arc::clone(&tts_active);
         let stop = Arc::clone(&monitor_stop);
         let player_ops = Arc::clone(&player_ops);
+        let activity_frames = Arc::clone(&activity_frames);
         thread::Builder::new()
             .name("tts-barge-in-monitor".into())
             .spawn(move || {
+                let mut last_activity_pubkey: Option<String> = None;
+                let mut next_activity_tick = Instant::now();
                 while !stop.load(Ordering::Acquire) {
                     if cancel.load(Ordering::Acquire) || voice_cancel.load(Ordering::Acquire) {
                         let _ops = lock_player_ops(&player_ops);
@@ -479,6 +494,46 @@ fn tts_worker(
                             player.clear();
                             player.play();
                             tts_active.store(false, Ordering::Release);
+                        }
+                    }
+                    if let Some(ref app) = activity_app {
+                        if tts_active.load(Ordering::Acquire) {
+                            let now = Instant::now();
+                            if now >= next_activity_tick {
+                                let frame = activity_frames
+                                    .lock()
+                                    .unwrap_or_else(|error| error.into_inner())
+                                    .pop_front();
+                                if let Some(frame) = frame {
+                                    use tauri::Emitter;
+                                    let _ = app.emit(
+                                        "huddle-tts-speaker-level",
+                                        TtsSpeakerActivityPayload {
+                                            pubkey: Some(frame.pubkey.clone()),
+                                            level: frame.level,
+                                        },
+                                    );
+                                    last_activity_pubkey = Some(frame.pubkey);
+                                }
+                                next_activity_tick = now + SPEAKER_ACTIVITY_TICK;
+                            }
+                        } else {
+                            let had_activity = last_activity_pubkey.take().is_some();
+                            activity_frames
+                                .lock()
+                                .unwrap_or_else(|error| error.into_inner())
+                                .clear();
+                            if had_activity {
+                                use tauri::Emitter;
+                                let _ = app.emit(
+                                    "huddle-tts-speaker-level",
+                                    TtsSpeakerActivityPayload {
+                                        pubkey: None,
+                                        level: 0.0,
+                                    },
+                                );
+                            }
+                            next_activity_tick = Instant::now();
                         }
                     }
                     thread::sleep(MONITOR_TICK);
@@ -507,7 +562,9 @@ fn tts_worker(
     let mut first_append = true;
     let mut last_route_id = 0;
     let mut deferred_text = VecDeque::new();
-    let append_audio = |prepared: PreparedModelAudio, route_id: u64| {
+    let append_audio = |prepared: PreparedModelAudio,
+                        route_id: u64,
+                        speaker_pubkey: Option<&str>| {
         let _ops = lock_player_ops(&player_ops);
         if cancel.load(Ordering::Acquire)
             || voice_cancel.load(Ordering::Acquire)
@@ -524,6 +581,16 @@ fn tts_worker(
                 "buzz-desktop: tts stage=synthesis status=cancelled reason={reason} route_id={route_id}"
             );
             return false;
+        }
+        if let Some(pubkey) = speaker_pubkey {
+            activity_frames
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .extend(build_tts_speaker_activity_frames(
+                    &prepared.buffer,
+                    pubkey,
+                    SAMPLE_RATE as usize,
+                ));
         }
         player.append(SamplesBuffer::new(channels, rate, prepared.buffer));
         eprintln!(
@@ -555,14 +622,19 @@ fn tts_worker(
             continue;
         }
 
-        // Voice changes cancel the old utterance/queue and are observed here,
-        // before receiving subsequent text. A bad bundled asset falls back to
-        // Mary without discarding the already-warmed Pocket engine.
-        let voice_ready =
-            reconcile_selected_voice(&model_dir, &selected_voice, &mut voice_name, &mut style);
-        acknowledge_voice_change(&voice_change_ack, &voice_cancel);
-        if !voice_ready {
-            continue;
+        // A global Settings voice change cancels the old utterance and is
+        // acknowledged before receiving subsequent text. Per-agent voice
+        // changes are carried by each queue item and never drain other agents.
+        if has_pending_voice_change(&voice_change_ack) {
+            let voice_ready =
+                reconcile_selected_voice(&model_dir, &selected_voice, &mut voice_name, &mut style);
+            if voice_ready {
+                style_cache.insert(voice_name.clone(), style.clone());
+            }
+            acknowledge_voice_change(&voice_change_ack, &voice_cancel);
+            if !voice_ready {
+                continue;
+            }
         }
 
         let mut queued_text = Some(match deferred_text.pop_front() {
@@ -614,15 +686,28 @@ fn tts_worker(
             );
             continue;
         }
+        let requested_voice = queued_text.voice_reference.unwrap_or_else(|| {
+            selected_voice
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone()
+        });
         let raw_text = queued_text.text;
+        let speaker_pubkey = queued_text.speaker_pubkey;
         let route_id = queued_text.route_id;
         eprintln!("buzz-desktop: tts stage=synthesis status=started route_id={route_id}");
 
-        // The selected voice can change while this worker is blocked in
-        // recv_timeout. Reconcile again after receipt so the first message
-        // queued after an unpublished pipeline is installed cannot use the
-        // voice captured when construction began.
-        if !reconcile_selected_voice(&model_dir, &selected_voice, &mut voice_name, &mut style) {
+        // The selected per-agent voice travels with the queue item, preserving
+        // message order while allowing one warmed Pocket engine to alternate
+        // between cached reference styles.
+        if !reconcile_queued_voice(
+            &model_dir,
+            &requested_voice,
+            &selected_voice,
+            &mut voice_name,
+            &mut style,
+            &mut style_cache,
+        ) {
             eprintln!(
                 "buzz-desktop: tts stage=synthesis status=failed reason=voice_unavailable route_id={route_id}"
             );
@@ -761,7 +846,7 @@ fn tts_worker(
                             silence_buf_len,
                             player.empty(),
                         ) {
-                            if !append_audio(prepared, route_id) {
+                            if !append_audio(prepared, route_id, speaker_pubkey.as_deref()) {
                                 first_append = true;
                                 synthesis_outcome = "cancelled";
                                 break 'playback_chunks;
@@ -787,7 +872,7 @@ fn tts_worker(
             if let Some(prepared) =
                 playback_audio.finish(&mut first_append, silence_buf_len, player.empty())
             {
-                if !append_audio(prepared, route_id) {
+                if !append_audio(prepared, route_id, speaker_pubkey.as_deref()) {
                     first_append = true;
                     synthesis_outcome = "cancelled";
                     break 'playback_chunks;
