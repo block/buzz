@@ -193,8 +193,8 @@ export function AppShell() {
   // guard here would drop managed-agent coverage during startup.
   useAgentObserverIngestion();
   // Kind 24200 is relay-ephemeral, so reconciliation runs eagerly (not
-  // deferred) and unconditionally repairs the DB subscription on internal
-  // builds — otherwise frames emitted before the listener opens are lost.
+  // deferred): seeds kind 24200 for fresh identities, no-ops for explicit
+  // opt-outs. Frames before the listener opens are permanently lost.
   const observerReconciled = useObserverArchiveReconciliation(
     identityQuery.data?.pubkey,
   );
@@ -333,6 +333,7 @@ export function AppShell() {
     notificationSettings: notificationSettings.settings,
     openSearchHit,
     pubkey: identityQuery.data?.pubkey,
+    silentChannelIds: huddleBackingChannelIds,
   });
   const {
     followedRootIds,
@@ -420,7 +421,6 @@ export function AppShell() {
     unreadThreadFeedItems,
   ]);
 
-  // Badge count consumes the shared NIP-RS read-state from useUnreadChannels.
   const { homeBadgeCount, homeBadgeCountExcludingHighPriority } =
     useHomeFeedNotificationState(
       homeFeedQuery.data,
@@ -439,8 +439,8 @@ export function AppShell() {
       getThreadReadAt,
       getMessageReadAt,
       channels,
+      huddleBackingChannelIds,
     );
-
   const dueReminderBadge = useDueReminderBadgeCount(
     identityQuery.data?.pubkey,
     notificationSettings.settings.homeBadgeEnabled,

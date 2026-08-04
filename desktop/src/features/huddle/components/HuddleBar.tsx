@@ -156,7 +156,6 @@ export function HuddleBar({
     isMuted,
     toggleMute,
     micLevel,
-    pttActive,
     voiceInputMode,
     setVoiceInputMode,
     activeSpeakers,
@@ -485,7 +484,6 @@ export function HuddleBar({
   const hasAvailableMic = micConnected;
   const ttsEnabled = barState.tts_enabled;
   const transcriptionEnabled = barState.transcription_enabled;
-
   // Self-removing detection: remote-peer audio plays through native rodio
   // today (outside the WebView render graph), so the browser's AEC has no
   // far-end reference. The AEC follow-up PR flips this constant in the
@@ -619,36 +617,34 @@ export function HuddleBar({
           </span>
         )}
 
-        {showAddAgent && (
-          <AddAgentDialog
-            currentAgentPubkeys={barState.agent_pubkeys}
-            onClose={() => setShowAddAgent(false)}
-            onAdd={async (pubkey: string): Promise<AgentAddResult> => {
-              setAgentAddError(null);
-              try {
-                const result = await invoke<AgentAddResult>(
-                  "add_agent_to_huddle",
-                  { agentPubkey: pubkey },
-                );
-                // Refresh huddle state so the participant list updates immediately.
-                const s = await invoke<HuddleState>("get_huddle_state");
-                setState(s);
-                return result;
-              } catch (e: unknown) {
-                const msg = e instanceof Error ? e.message : String(e);
-                setAgentAddError(`Failed to add agent: ${msg}`);
-                throw e; // Re-throw so AddAgentDialog shows its inline error.
-              }
-            }}
-          />
-        )}
+        <AddAgentDialog
+          currentAgentPubkeys={barState.agent_pubkeys}
+          onClose={() => setShowAddAgent(false)}
+          onAdd={async (pubkey: string): Promise<AgentAddResult> => {
+            setAgentAddError(null);
+            try {
+              const result = await invoke<AgentAddResult>(
+                "add_agent_to_huddle",
+                { agentPubkey: pubkey },
+              );
+              // Refresh huddle state so the participant list updates immediately.
+              const s = await invoke<HuddleState>("get_huddle_state");
+              setState(s);
+              return result;
+            } catch (e: unknown) {
+              const msg = e instanceof Error ? e.message : String(e);
+              setAgentAddError(`Failed to add agent: ${msg}`);
+              throw e; // Re-throw so AddAgentDialog shows its inline error.
+            }
+          }}
+          open={showAddAgent}
+        />
 
         <div className="flex shrink-0 items-center gap-2">
           <MicControls
             isMuted={isMuted}
             onToggleMute={toggleMute}
             isPttMode={isPttMode}
-            pttActive={pttActive}
             micConnected={hasAvailableMic}
             micLevel={micLevel}
             onSelectVoiceInputMode={setVoiceInputMode}
@@ -701,15 +697,13 @@ export function HuddleBar({
                 pubkey: currentPubkey,
               }}
               onRemoveAgent={async (pubkey) => {
-                if (!barState.ephemeral_channel_id) return;
                 const confirmed = window.confirm(
                   "Remove this agent from the huddle?",
                 );
                 if (!confirmed) return;
                 try {
-                  await invoke("remove_channel_member", {
-                    channelId: barState.ephemeral_channel_id,
-                    pubkey,
+                  await invoke("remove_agent_from_huddle", {
+                    agentPubkey: pubkey,
                   });
                   setState((prev) => {
                     if (!prev) return prev;
