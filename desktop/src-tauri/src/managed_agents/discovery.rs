@@ -13,8 +13,9 @@ mod presets;
 mod runtime_metadata;
 #[macro_use]
 mod windows_install;
+
+pub(crate) use presets::{preset_args_for_command, preset_harness_definitions, preset_harness_ids};
 use presets::{preset_catalog_entry, PRESET_HARNESSES};
-pub(crate) use presets::{preset_harness_definitions, preset_harness_ids};
 pub(crate) use runtime_metadata::KnownAcpRuntime;
 
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
