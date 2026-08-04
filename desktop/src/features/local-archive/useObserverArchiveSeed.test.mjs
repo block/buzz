@@ -10,11 +10,11 @@ import { ArchiveSyncManager } from "./archiveSyncManager.ts";
 
 // ── Fake deps factory ────────────────────────────────────────────────────────
 
-function makeDeps({ mergeShouldFail = false, explicitChoice = null } = {}) {
+function makeDeps({ mergeShouldFail = false, explicitChoice = "unset" } = {}) {
   const calls = { merge: [] };
-  // Simulates a per-pubkey localStorage map.
+  // Simulates a per-pubkey localStorage map. "unset" means no choice stored.
   const choices = new Map();
-  if (explicitChoice !== null) {
+  if (explicitChoice !== "unset") {
     // Pre-populate a choice for any pubkey that asks (single-pubkey tests).
     choices.set("__default__", explicitChoice);
   }
@@ -25,13 +25,10 @@ function makeDeps({ mergeShouldFail = false, explicitChoice = null } = {}) {
       if (mergeShouldFail) throw new Error("merge failed");
       calls.merge.push({ kind });
     },
-    hasExplicitChoice: (pubkey) =>
-      choices.has(pubkey) ||
-      (choices.has("__default__") && explicitChoice !== null),
-    getExplicitChoice: (pubkey) => {
+    readExplicitChoice: (pubkey) => {
       if (choices.has(pubkey)) return choices.get(pubkey);
       if (choices.has("__default__")) return choices.get("__default__");
-      return null;
+      return "unset";
     },
     setExplicitChoice: (pubkey, enabled) => {
       choices.set(pubkey, enabled);
@@ -78,17 +75,36 @@ test("test_reconcile_explicit_optout_skips_merge", async () => {
   );
 });
 
-test("test_reconcile_explicit_optin_still_merges", async () => {
-  // Simulate a user who explicitly opted in (choice stored as true).
+test("test_reconcile_storage_error_treated_as_fail_closed", async () => {
+  // Storage errors return `true` (not "unset"), which means reconcile
+  // treats them as an already-set choice and skips the merge.
+  // This prevents auto-seeding from silently overriding a stored opt-out
+  // that we couldn't read due to the error.
+  const deps = makeDeps();
+  // Override readExplicitChoice to simulate a storage error returning `true`.
+  deps.readExplicitChoice = () => true;
+
+  await reconcileObserverArchive("pk1", deps);
+
+  assert.equal(
+    deps.calls.merge.length,
+    0,
+    "merge must NOT fire when storage error returns fail-closed true",
+  );
+});
+
+test("test_reconcile_explicit_optin_already_seeded_skips_merge", async () => {
+  // Simulate a user who already has an explicit opt-in recorded (already
+  // seeded on a prior run). The new tri-state model skips merge for any
+  // non-"unset" choice — re-merging is idempotent but wasteful.
   const deps = makeDeps({ explicitChoice: true });
   await reconcileObserverArchive("pk1", deps);
 
   assert.equal(
     deps.calls.merge.length,
-    1,
-    "merge must fire when user explicitly opted in",
+    0,
+    "merge must NOT fire when choice is already recorded as opted-in",
   );
-  assert.equal(deps.calls.merge[0].kind, 24200);
 });
 
 test("test_reconcile_no_prior_choice_seeds_and_records_choice", async () => {
@@ -96,14 +112,9 @@ test("test_reconcile_no_prior_choice_seeds_and_records_choice", async () => {
   await reconcileObserverArchive("pk1", deps);
 
   assert.equal(deps.calls.merge.length, 1, "merge must fire on first run");
-  // After reconciliation the choice should now be set (to true).
+  // After reconciliation the choice should now be recorded as true.
   assert.equal(
-    deps.hasExplicitChoice("pk1"),
-    true,
-    "choice must be persisted after first-run seed",
-  );
-  assert.equal(
-    deps.getExplicitChoice("pk1"),
+    deps.readExplicitChoice("pk1"),
     true,
     "stored choice must be true after seed",
   );
@@ -147,8 +158,7 @@ test("test_archive_sync_blocked_until_reconciliation", async () => {
 
   const reconcilerDeps = {
     mergeSaveSubscriptionKinds: () => mergePromise,
-    hasExplicitChoice: () => false,
-    getExplicitChoice: () => null,
+    readExplicitChoice: () => "unset",
     setExplicitChoice: () => {},
   };
 
@@ -347,8 +357,7 @@ test("test_startReconciliation_unmount_before_resolve_suppresses_onReady", async
   });
   const deps = {
     mergeSaveSubscriptionKinds: () => mergePromise,
-    hasExplicitChoice: () => false,
-    getExplicitChoice: () => null,
+    readExplicitChoice: () => "unset",
     setExplicitChoice: () => {},
   };
   const readyCalls = [];
@@ -376,8 +385,7 @@ test("test_startReconciliation_identity_switch_stale_completion_suppressed", asy
   });
   const depsA = {
     mergeSaveSubscriptionKinds: () => mergePromiseA,
-    hasExplicitChoice: () => false,
-    getExplicitChoice: () => null,
+    readExplicitChoice: () => "unset",
     setExplicitChoice: () => {},
   };
   const depsB = makeDeps();

@@ -3,22 +3,19 @@ import * as React from "react";
 import { KIND_AGENT_OBSERVER_FRAME } from "@/shared/constants/kinds";
 import { mergeSaveSubscriptionKinds } from "@/shared/api/tauriArchive";
 import {
-  getExplicitObserverArchiveChoice,
-  hasExplicitObserverArchiveChoice,
+  readExplicitObserverArchiveChoice,
   setExplicitObserverArchiveChoice,
 } from "./observerArchivePreference";
 
 export interface ObserverArchiveSeedDeps {
   mergeSaveSubscriptionKinds: (kind: number) => Promise<void>;
-  hasExplicitChoice: (pubkey: string) => boolean;
-  getExplicitChoice: (pubkey: string) => boolean | null;
+  readExplicitChoice: (pubkey: string) => boolean | "unset";
   setExplicitChoice: (pubkey: string, enabled: boolean) => void;
 }
 
 const defaultDeps: ObserverArchiveSeedDeps = {
   mergeSaveSubscriptionKinds,
-  hasExplicitChoice: hasExplicitObserverArchiveChoice,
-  getExplicitChoice: getExplicitObserverArchiveChoice,
+  readExplicitChoice: readExplicitObserverArchiveChoice,
   setExplicitChoice: setExplicitObserverArchiveChoice,
 };
 
@@ -37,19 +34,13 @@ export async function reconcileObserverArchive(
   pubkey: string,
   deps: ObserverArchiveSeedDeps = defaultDeps,
 ): Promise<void> {
-  // If the user explicitly opted out, honour that choice and skip the merge.
-  if (
-    deps.hasExplicitChoice(pubkey) &&
-    deps.getExplicitChoice(pubkey) === false
-  ) {
-    return;
-  }
+  const choice = deps.readExplicitChoice(pubkey);
+  // Any explicit choice (or a storage error treated as fail-closed) skips the
+  // merge: opted-out users stay opted out; already-seeded users stay seeded.
+  if (choice !== "unset") return;
+  // No prior choice: seed the default-on subscription and record it.
   await deps.mergeSaveSubscriptionKinds(KIND_AGENT_OBSERVER_FRAME);
-  // Record that this identity has been seeded (explicit choice = true) so
-  // future reconciliation calls are also guarded correctly.
-  if (!deps.hasExplicitChoice(pubkey)) {
-    deps.setExplicitChoice(pubkey, true);
-  }
+  deps.setExplicitChoice(pubkey, true);
 }
 
 /**
