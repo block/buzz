@@ -66,6 +66,9 @@ mod activity;
 use activity::*;
 #[path = "tts_pipeline_controls.rs"]
 mod pipeline_controls;
+#[path = "tts_speaker_cancellation.rs"]
+mod speaker_cancellation;
+use speaker_cancellation::*;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -133,6 +136,8 @@ type WorkerControlState = (
     Arc<AtomicBool>,
     WorkerCancelSignals,
     SpeakerGenerations,
+    ActiveSpeaker,
+    SpeakerCancellation,
 );
 
 // ── Public pipeline handle ────────────────────────────────────────────────────
@@ -164,6 +169,10 @@ pub struct TtsPipeline {
     /// Per-agent generations let removal invalidate that agent's queued and
     /// in-flight text without poisoning speech queued after the agent rejoins.
     speaker_generations: SpeakerGenerations,
+    /// Speaker whose audio currently owns the shared player queue.
+    active_speaker: ActiveSpeaker,
+    /// Targeted cancellation used when an agent leaves the huddle.
+    speaker_cancel: SpeakerCancellation,
     /// Completed after the worker drains pre-change text and installs the new style.
     voice_change_ack: VoiceChangeAck,
     /// Worker thread handle — taken on drop to join cleanly.
@@ -199,6 +208,10 @@ impl TtsPipeline {
         let worker_voice_generation = Arc::clone(&voice_generation);
         let speaker_generations = Arc::new(Mutex::new(HashMap::new()));
         let worker_speaker_generations = Arc::clone(&speaker_generations);
+        let active_speaker = Arc::new(Mutex::new(None));
+        let worker_active_speaker = Arc::clone(&active_speaker);
+        let speaker_cancel = Arc::new(Mutex::new(None));
+        let worker_speaker_cancel = Arc::clone(&speaker_cancel);
         let voice_change_ack = Arc::new(Mutex::new(None));
         let worker_voice_change_ack = Arc::clone(&voice_change_ack);
         let model_dir_worker = model_dir.clone();
@@ -220,6 +233,8 @@ impl TtsPipeline {
                         shutdown_worker,
                         (cancel_worker, worker_voice_cancel),
                         worker_speaker_generations,
+                        worker_active_speaker,
+                        worker_speaker_cancel,
                     ),
                     output_device,
                     activity_app,
@@ -238,6 +253,8 @@ impl TtsPipeline {
             voice,
             voice_generation,
             speaker_generations,
+            active_speaker,
+            speaker_cancel,
             voice_change_ack,
             thread: Some(handle),
         })
@@ -267,7 +284,8 @@ fn tts_worker(
     startup_tx: mpsc::SyncSender<Result<(), String>>,
 ) {
     let (selected_voice, voice_generation, voice_change_ack) = voice_state;
-    let (tts_active, shutdown, cancel_signals, speaker_generations) = control_state;
+    let (tts_active, shutdown, cancel_signals, speaker_generations, active_speaker, speaker_cancel) =
+        control_state;
     let (cancel, voice_cancel) = cancel_signals;
     // ── 1. Initialise TTS engine ──────────────────────────────────────────────
     let model_dir_str = model_dir.to_string_lossy().to_string();
@@ -388,103 +406,21 @@ fn tts_worker(
     }
     eprintln!("buzz-desktop: tts stage=startup status=ready");
 
-    // ── 3b. Barge-in monitor thread ───────────────────────────────────────────
-    //
-    // The worker loop only observes `cancel` between sentences — while it is
-    // blocked inside `synth_chunk` (hundreds of ms for a long sentence),
-    // nothing would silence the audio that is already playing. The monitor
-    // closes that gap: every MONITOR_TICK it checks the flag and, while set,
-    // silences the player and releases the mic gate. It does NOT consume the
-    // flag — the worker still owns that (drain queue, reset lead-in), so the
-    // monitor keeps re-clearing until the worker catches up, which also
-    // covers a sentence appended in the race window after the worker's own
-    // post-synthesis cancel check.
-    //
-    // `player_ops` closes the converse race (found in review): the monitor
-    // loads `cancel == true`, is preempted, the worker consumes the cancel
-    // and appends a fresh post-cancel utterance, then the monitor resumes
-    // from its stale branch and deletes audio that was meant to play. All
-    // worker player mutations (appends and cancel/shutdown clears) hold this
-    // lock, and the monitor re-checks `cancel` *while holding it* — so its
-    // clear either runs before fresh audio can be appended, or observes
-    // `cancel == false` and no-ops. The lock is uncontended except during an
-    // actual barge-in, so the hot path is unaffected.
     let player_ops = Arc::new(Mutex::new(()));
     let activity_frames = Arc::new(Mutex::new(VecDeque::<TtsSpeakerActivityFrame>::new()));
     let monitor_stop = Arc::new(AtomicBool::new(false));
-    let monitor = {
-        let player = Arc::clone(&player);
-        let cancel = Arc::clone(&cancel);
-        let voice_cancel = Arc::clone(&voice_cancel);
-        let tts_active = Arc::clone(&tts_active);
-        let stop = Arc::clone(&monitor_stop);
-        let player_ops = Arc::clone(&player_ops);
-        let activity_frames = Arc::clone(&activity_frames);
-        thread::Builder::new()
-            .name("tts-barge-in-monitor".into())
-            .spawn(move || {
-                let mut last_activity_pubkey: Option<String> = None;
-                let mut next_activity_tick = Instant::now();
-                while !stop.load(Ordering::Acquire) {
-                    if cancel.load(Ordering::Acquire) || voice_cancel.load(Ordering::Acquire) {
-                        let _ops = lock_player_ops(&player_ops);
-                        // Re-check under the lock: the worker may have
-                        // consumed this cancel (and appended fresh audio)
-                        // between the load above and the lock acquisition.
-                        if cancel.load(Ordering::Acquire) || voice_cancel.load(Ordering::Acquire) {
-                            // clear() pauses the persistent player; play()
-                            // un-pauses (see handle_cancel_or_shutdown).
-                            // Idempotent — safe to repeat every tick until
-                            // the worker consumes the flag.
-                            player.clear();
-                            player.play();
-                            tts_active.store(false, Ordering::Release);
-                        }
-                    }
-                    if let Some(ref app) = activity_app {
-                        if tts_active.load(Ordering::Acquire) {
-                            let now = Instant::now();
-                            if now >= next_activity_tick {
-                                let frame = activity_frames
-                                    .lock()
-                                    .unwrap_or_else(|error| error.into_inner())
-                                    .pop_front();
-                                if let Some(frame) = frame {
-                                    use tauri::Emitter;
-                                    let _ = app.emit(
-                                        "huddle-tts-speaker-level",
-                                        TtsSpeakerActivityPayload {
-                                            pubkey: Some(frame.pubkey.clone()),
-                                            level: frame.level,
-                                        },
-                                    );
-                                    last_activity_pubkey = Some(frame.pubkey);
-                                }
-                                next_activity_tick = now + SPEAKER_ACTIVITY_TICK;
-                            }
-                        } else {
-                            let had_activity = last_activity_pubkey.take().is_some();
-                            activity_frames
-                                .lock()
-                                .unwrap_or_else(|error| error.into_inner())
-                                .clear();
-                            if had_activity {
-                                use tauri::Emitter;
-                                let _ = app.emit(
-                                    "huddle-tts-speaker-level",
-                                    TtsSpeakerActivityPayload {
-                                        pubkey: None,
-                                        level: 0.0,
-                                    },
-                                );
-                            }
-                            next_activity_tick = Instant::now();
-                        }
-                    }
-                    thread::sleep(MONITOR_TICK);
-                }
-            })
-    };
+    let monitor = spawn_tts_monitor(TtsMonitorState {
+        player: Arc::clone(&player),
+        cancel: Arc::clone(&cancel),
+        voice_cancel: Arc::clone(&voice_cancel),
+        tts_active: Arc::clone(&tts_active),
+        stop: Arc::clone(&monitor_stop),
+        player_ops: Arc::clone(&player_ops),
+        activity_frames: Arc::clone(&activity_frames),
+        active_speaker: Arc::clone(&active_speaker),
+        speaker_cancel: Arc::clone(&speaker_cancel),
+        activity_app,
+    });
     if let Err(ref e) = monitor {
         // Degraded but functional: barge-in still works between sentences
         // via the worker's own checks, just not mid-synthesis.
@@ -548,6 +484,21 @@ fn tts_worker(
             return false;
         }
         if let Some(pubkey) = speaker_pubkey {
+            let mut active = active_speaker
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if player.empty() {
+                active.take();
+            }
+            if active
+                .as_deref()
+                .is_some_and(|current| !current.eq_ignore_ascii_case(pubkey))
+            {
+                return false;
+            }
+            active.get_or_insert_with(|| pubkey.to_ascii_lowercase());
+        }
+        if let Some(pubkey) = speaker_pubkey {
             activity_frames
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
@@ -569,6 +520,17 @@ fn tts_worker(
 
     loop {
         let mut no_current_text = None;
+        if consume_speaker_cancel(
+            &speaker_cancel,
+            &active_speaker,
+            &speaker_generations,
+            &tts_active,
+            (&text_rx, &mut deferred_text, &mut no_current_text),
+            Some((&player, &player_ops)),
+        ) {
+            first_append = true;
+            continue;
+        }
         if handle_cancel_or_shutdown(
             (&cancel, &voice_cancel),
             &shutdown,
@@ -612,6 +574,10 @@ fn tts_worker(
                     // lead-in so the next utterance gets a fresh cushion.
                     if player.empty() && !first_append {
                         tts_active.store(false, Ordering::Release);
+                        active_speaker
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .take();
                         eprintln!(
                             "buzz-desktop: tts stage=player status=drained route_id={last_route_id}"
                         );
@@ -658,6 +624,22 @@ fn tts_worker(
             );
             continue;
         }
+        if !player.empty()
+            && queued_text
+                .speaker_pubkey
+                .as_deref()
+                .is_some_and(|speaker| {
+                    active_speaker
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .as_deref()
+                        .is_some_and(|active| !active.eq_ignore_ascii_case(speaker))
+                })
+        {
+            deferred_text.push_front(queued_text);
+            thread::sleep(RECV_TIMEOUT);
+            continue;
+        }
         let requested_voice = queued_text.voice_reference.unwrap_or_else(|| {
             selected_voice
                 .lock()
@@ -697,6 +679,10 @@ fn tts_worker(
         // stays set across items.)
         if player.empty() && !first_append {
             tts_active.store(false, Ordering::Release);
+            active_speaker
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take();
             eprintln!("buzz-desktop: tts stage=player status=drained route_id={last_route_id}");
             first_append = true;
         }

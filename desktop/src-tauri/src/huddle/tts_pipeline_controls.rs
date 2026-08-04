@@ -32,14 +32,15 @@ impl TtsPipeline {
         }
     }
 
-    /// Invalidate speech already queued for one agent. If audio is currently
-    /// playing, use the existing global cancellation path to silence it; the
-    /// generation boundary keeps a later utterance from inheriting that stop.
+    /// Invalidate speech queued for one agent and cancel the player only when
+    /// that same agent currently owns it.
     pub(crate) fn cancel_speaker(&self, speaker_pubkey: &str) {
-        advance_speaker_generation(&self.speaker_generations, speaker_pubkey);
-        if self.tts_active.load(Ordering::Acquire) {
-            self.cancel.store(true, Ordering::Release);
-        }
+        request_speaker_cancel(
+            &self.speaker_generations,
+            &self.active_speaker,
+            &self.speaker_cancel,
+            speaker_pubkey,
+        );
     }
 
     /// Select a bundled Pocket voice for subsequent speech.

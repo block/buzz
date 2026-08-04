@@ -77,9 +77,11 @@ export function AddAgentDialog({
     setAdding(agent.pubkey);
     setError(null);
     setWarning(null);
+    let startedForAdd = false;
     try {
       if (agent.status !== "running") {
         await invoke("start_managed_agent", { pubkey: agent.pubkey });
+        startedForAdd = true;
       }
       const result = await onAdd(agent.pubkey);
       if (result.parent_error) {
@@ -92,6 +94,16 @@ export function AddAgentDialog({
         onClose();
       }
     } catch (e: unknown) {
+      if (startedForAdd) {
+        try {
+          await invoke("stop_managed_agent", { pubkey: agent.pubkey });
+        } catch (rollbackError: unknown) {
+          console.error(
+            "Failed to stop agent after huddle add failed:",
+            rollbackError,
+          );
+        }
+      }
       const msg = e instanceof Error ? e.message : String(e);
       setError(`Failed to add agent: ${msg}`);
       console.error("Failed to add agent to huddle:", e);

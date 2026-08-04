@@ -20,6 +20,8 @@ pub(super) type VoiceChangeAck = Arc<Mutex<Option<PendingVoiceChange>>>;
 pub(super) type WorkerVoiceState = (Arc<Mutex<String>>, Arc<AtomicU64>, VoiceChangeAck);
 pub(super) type WorkerCancelSignals = (Arc<AtomicBool>, Arc<AtomicBool>);
 pub(super) type SpeakerGenerations = Arc<Mutex<HashMap<String, u64>>>;
+pub(super) type ActiveSpeaker = Arc<Mutex<Option<String>>>;
+pub(super) type SpeakerCancellation = Arc<Mutex<Option<String>>>;
 pub(super) type CancelTextState<'a> = (
     &'a mpsc::Receiver<QueuedText>,
     &'a mut VecDeque<QueuedText>,
@@ -106,6 +108,49 @@ pub(super) fn queued_speaker_is_current(
         .is_none_or(|speaker_pubkey| {
             current_speaker_generation(generations, speaker_pubkey) == queued.speaker_generation
         })
+}
+
+pub(super) fn request_speaker_cancel(
+    generations: &SpeakerGenerations,
+    active_speaker: &ActiveSpeaker,
+    cancellation: &SpeakerCancellation,
+    speaker_pubkey: &str,
+) {
+    advance_speaker_generation(generations, speaker_pubkey);
+    let owns_player = active_speaker
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .as_deref()
+        .is_some_and(|active| active.eq_ignore_ascii_case(speaker_pubkey));
+    if owns_player {
+        cancellation
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .replace(speaker_pubkey.to_ascii_lowercase());
+    }
+}
+
+pub(super) fn retain_current_speaker_text(
+    generations: &SpeakerGenerations,
+    deferred_text: &mut VecDeque<QueuedText>,
+    current_text: &mut Option<QueuedText>,
+    text_rx: &mpsc::Receiver<QueuedText>,
+) {
+    deferred_text.retain(|text| queued_speaker_is_current(generations, text));
+    if let Some(text) = current_text.take() {
+        if queued_speaker_is_current(generations, &text) {
+            deferred_text.push_front(text);
+        } else {
+            log_cancelled_route(text.route_id, "speaker_removed");
+        }
+    }
+    while let Ok(text) = text_rx.try_recv() {
+        if queued_speaker_is_current(generations, &text) {
+            deferred_text.push_back(text);
+        } else {
+            log_cancelled_route(text.route_id, "speaker_removed");
+        }
+    }
 }
 
 pub(super) fn has_pending_voice_change(voice_change_ack: &VoiceChangeAck) -> bool {
@@ -335,5 +380,38 @@ mod speaker_generation_tests {
         let rejoined_alice =
             queued_speech("alice", current_speaker_generation(&generations, "alice"));
         assert!(queued_speaker_is_current(&generations, &rejoined_alice));
+    }
+
+    #[test]
+    fn removing_a_silent_speaker_does_not_cancel_the_active_speaker() {
+        let generations = Arc::new(Mutex::new(HashMap::new()));
+        let active_speaker = Arc::new(Mutex::new(Some("alice".to_string())));
+        let cancellation = Arc::new(Mutex::new(None));
+
+        request_speaker_cancel(&generations, &active_speaker, &cancellation, "bob");
+
+        assert!(cancellation.lock().expect("cancellation").is_none());
+        assert_eq!(
+            active_speaker.lock().expect("active speaker").as_deref(),
+            Some("alice")
+        );
+    }
+
+    #[test]
+    fn targeted_cancellation_preserves_other_speakers_queue_entries() {
+        let generations = Arc::new(Mutex::new(HashMap::new()));
+        let active_speaker = Arc::new(Mutex::new(Some("alice".to_string())));
+        let cancellation = Arc::new(Mutex::new(None));
+        let alice = queued_speech("alice", 0);
+        let bob = queued_speech("bob", 0);
+        let (_text_tx, text_rx) = mpsc::sync_channel(1);
+        let mut deferred = VecDeque::from([alice, bob]);
+        let mut current = None;
+
+        request_speaker_cancel(&generations, &active_speaker, &cancellation, "alice");
+        retain_current_speaker_text(&generations, &mut deferred, &mut current, &text_rx);
+
+        assert_eq!(deferred.len(), 1);
+        assert_eq!(deferred[0].speaker_pubkey.as_deref(), Some("bob"));
     }
 }

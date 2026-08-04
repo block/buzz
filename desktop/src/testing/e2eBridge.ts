@@ -265,6 +265,8 @@ type E2eConfig = {
       parent_added: boolean;
       parent_error: string | null;
     };
+    /** When set, the mocked `add_agent_to_huddle` command throws. */
+    addAgentToHuddleError?: string;
     /** Delay an invocation-time huddle snapshot to exercise hydration ordering. */
     huddleStateReadDelayMs?: number;
     /** Delay companion creation to expose the newly-started huddle handoff state. */
@@ -10422,6 +10424,10 @@ export function maybeInstallE2eTauriMocks() {
         return { matched_active_huddle: true, added };
       }
       case "add_agent_to_huddle": {
+        const error = activeConfig?.mock?.addAgentToHuddleError;
+        if (error) {
+          throw new Error(error);
+        }
         const result = activeConfig?.mock?.addAgentToHuddleResult;
         if (!result) {
           throw new Error("No mock add-agent result configured.");
