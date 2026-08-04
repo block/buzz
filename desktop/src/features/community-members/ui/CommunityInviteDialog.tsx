@@ -26,7 +26,9 @@ export function CommunityInviteDialog({
   const [ttlSecs, setTtlSecs] = React.useState(DEFAULT_INVITE_TTL_SECS);
 
   React.useEffect(() => {
-    if (open) setTtlSecs(DEFAULT_INVITE_TTL_SECS);
+    // Reset after the link section has unmounted so reopening never mints an
+    // invite with the previous dialog session's expiry.
+    if (!open) setTtlSecs(DEFAULT_INVITE_TTL_SECS);
   }, [open]);
 
   return (

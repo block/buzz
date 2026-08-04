@@ -35,6 +35,7 @@ const MAX_USE_OPTIONS: { label: string; value: number | null }[] = [
 export const DEFAULT_INVITE_TTL_SECS = TTL_OPTIONS[1].value;
 
 type CopyStatus = "idle" | "copying" | "copied";
+type GenerationStatus = "idle" | "generating" | "failed";
 
 /**
  * Share-with-link footer for the community invite dialog.
@@ -51,18 +52,30 @@ export function InviteLinkSection({
   ttlSecs: number;
 }) {
   const [copyStatus, setCopyStatus] = React.useState<CopyStatus>("idle");
+  const [generationStatus, setGenerationStatus] =
+    React.useState<GenerationStatus>("generating");
   const [inviteUrl, setInviteUrl] = React.useState("");
-  const [isGenerating, setIsGenerating] = React.useState(true);
   const [maxUses, setMaxUses] = React.useState<number | null>(null);
+  const generationRequestId = React.useRef(0);
   const shouldReduceMotion = useReducedMotion();
   const ttlLabel =
     TTL_OPTIONS.find((option) => option.value === ttlSecs)?.label ?? "3 days";
   const maxUsesLabel =
     MAX_USE_OPTIONS.find((option) => option.value === maxUses)?.label ??
     "No limit";
-  const copyLabel = copyStatus === "copied" ? "Copied" : "Copy link";
-  const isCopying = isGenerating || copyStatus === "copying";
-  const copyButtonWidth = copyStatus === "copied" ? "5.25rem" : "4.5rem";
+  const isGenerating = generationStatus === "generating";
+  const hasGenerationFailed = generationStatus === "failed";
+  const isWorking = isGenerating || copyStatus === "copying";
+  const copyLabel = hasGenerationFailed
+    ? "Retry"
+    : copyStatus === "copied"
+      ? "Copied"
+      : "Copy link";
+  const copyButtonWidth = isWorking
+    ? "6.25rem"
+    : copyStatus === "copied"
+      ? "5.25rem"
+      : "4.5rem";
   const copyButtonTransition = shouldReduceMotion
     ? { duration: 0 }
     : { duration: 0.12, ease: [0.77, 0, 0.175, 1] as const };
@@ -73,30 +86,37 @@ export function InviteLinkSection({
     return () => window.clearTimeout(resetTimer);
   }, [copyStatus]);
 
-  React.useEffect(() => {
-    let isCurrent = true;
-
-    async function generateInviteLink() {
-      setIsGenerating(true);
-      setInviteUrl("");
-      setCopyStatus("idle");
-      try {
-        const invite = await mintInvite({ ttlSecs, maxUses });
-        if (isCurrent) setInviteUrl(invite.url);
-      } catch {
-        if (isCurrent) {
-          toast.error("Couldn’t create an invite link. Try again.");
-        }
-      } finally {
-        if (isCurrent) setIsGenerating(false);
+  const generateInviteLink = React.useCallback(async () => {
+    const requestId = generationRequestId.current + 1;
+    generationRequestId.current = requestId;
+    setGenerationStatus("generating");
+    setInviteUrl("");
+    setCopyStatus("idle");
+    try {
+      const invite = await mintInvite({ ttlSecs, maxUses });
+      if (generationRequestId.current === requestId) {
+        setInviteUrl(invite.url);
+        setGenerationStatus("idle");
+      }
+    } catch {
+      if (generationRequestId.current === requestId) {
+        setGenerationStatus("failed");
+        toast.error("Couldn’t create an invite link.");
       }
     }
+  }, [maxUses, ttlSecs]);
 
+  React.useEffect(() => {
     void generateInviteLink();
     return () => {
-      isCurrent = false;
+      generationRequestId.current += 1;
     };
-  }, [maxUses, ttlSecs]);
+  }, [generateInviteLink]);
+
+  function retryInviteGeneration() {
+    if (!hasGenerationFailed) return;
+    void generateInviteLink();
+  }
 
   async function handleCopy() {
     if (!inviteUrl || isGenerating || copyStatus === "copying") return;
@@ -119,7 +139,11 @@ export function InviteLinkSection({
           className="h-11 pr-28 text-transparent caret-transparent selection:bg-transparent"
           data-testid="invite-link-url"
           disabled={isGenerating}
-          placeholder="Creating invite link…"
+          placeholder={
+            hasGenerationFailed
+              ? "Couldn’t create invite link"
+              : "Creating invite link…"
+          }
           readOnly
           value={inviteUrl}
         />
@@ -142,12 +166,17 @@ export function InviteLinkSection({
             className="h-9 w-full px-3"
             data-copy-status={copyStatus}
             data-testid="copy-invite-link"
-            disabled={isGenerating || !inviteUrl || copyStatus === "copying"}
-            onClick={() => void handleCopy()}
+            disabled={
+              !hasGenerationFailed &&
+              (isGenerating || !inviteUrl || copyStatus === "copying")
+            }
+            onClick={() =>
+              hasGenerationFailed ? retryInviteGeneration() : void handleCopy()
+            }
             size="sm"
             type="button"
           >
-            {isCopying ? (
+            {isWorking ? (
               <Spinner aria-hidden="true" className="h-4 w-4 border-2" />
             ) : copyStatus === "copied" ? (
               <Check aria-hidden="true" className="h-4 w-4" />
