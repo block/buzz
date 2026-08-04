@@ -65,13 +65,21 @@ typedef PairingSocketFactory =
       required void Function(Object? error) onDisconnected,
     });
 
+/// Overrides the post-payload relay credential check in deterministic tests.
+typedef PairingCredentialValidator =
+    Future<void> Function({required String relayUrl, required String? nsec});
+
 class PairingNotifier extends Notifier<PairingState> {
   final PairingSocketFactory _socketFactory;
+  final PairingCredentialValidator? _credentialValidator;
   PairingSocket? _socket;
   Timer? _sessionTimeout;
 
-  PairingNotifier({PairingSocketFactory? socketFactory})
-    : _socketFactory = socketFactory ?? _createPairingSocket;
+  PairingNotifier({
+    PairingSocketFactory? socketFactory,
+    PairingCredentialValidator? credentialValidator,
+  }) : _socketFactory = socketFactory ?? _createPairingSocket,
+       _credentialValidator = credentialValidator;
 
   static PairingSocket _createPairingSocket({
     required String wsUrl,
@@ -163,7 +171,8 @@ class PairingNotifier extends Notifier<PairingState> {
   Uint8List? _conversationKey;
   bool _sasConfirmReceived = false;
   bool _userConfirmedSas = false;
-  Map<String, dynamic>? _pendingPayload; // buffered until user confirms SAS
+  Map<String, dynamic>?
+  _pendingPayload; // gated on verified SAS + user approval
   final Set<String> _processedEventIds = {}; // NIP-AB §Duplicate Event Handling
 
   Future<void> _pairNipAb(String uri) async {
@@ -410,12 +419,11 @@ class PairingNotifier extends Notifier<PairingState> {
   }
 
   void _handlePayload(Map<String, dynamic> msg) {
-    // Only accept payload after the transcript hash was verified.
-    if (!_sasConfirmReceived) return;
-
-    // If the user hasn't confirmed SAS yet, buffer the payload.
-    // It will be processed when confirmSas() is called.
-    if (state.status == PairingStatus.confirmingSas) {
+    // Nostr relays do not guarantee ordering between back-to-back events.
+    // Buffer a validated/decrypted payload even when sas-confirm has not
+    // arrived yet, but never process it until both transcript verification
+    // and explicit user confirmation are complete.
+    if (!_sasConfirmReceived || state.status == PairingStatus.confirmingSas) {
       _pendingPayload = msg;
       return;
     }
@@ -461,7 +469,8 @@ class PairingNotifier extends Notifier<PairingState> {
       _validateRelayUrl(relayUrl);
 
       // Validate credentials against the relay via NIP-42 WS handshake.
-      await _validateCredentials(relayUrl: relayUrl, nsec: nsec);
+      final validator = _credentialValidator ?? _validateCredentials;
+      await validator(relayUrl: relayUrl, nsec: nsec);
 
       // Send complete only after credentials are validated.
       _sendComplete(true);

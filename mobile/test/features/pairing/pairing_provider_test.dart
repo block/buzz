@@ -1,28 +1,23 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:nostr/nostr.dart' as nostr;
+import 'package:buzz/features/pairing/pairing_crypto.dart';
 import 'package:buzz/features/pairing/pairing_provider.dart';
 import 'package:buzz/features/pairing/pairing_socket.dart';
 import 'package:buzz/shared/auth/auth.dart';
+import 'package:buzz/shared/crypto/ecdh.dart';
+import 'package:buzz/shared/crypto/nip44.dart';
 
-/// Tests for [PairingNotifier]'s legacy `buzz://` payload parsing and
-/// SSRF-prevention validation.
+/// Tests for [PairingNotifier]'s NIP-AB flow, legacy `buzz://` parsing,
+/// and SSRF-prevention validation.
 ///
-/// The pairing flow used to validate by calling `GET /api/users/me/profile`
-/// over HTTP. That has been replaced with a NIP-42 WebSocket handshake via
-/// [RelaySocket], which is constructed directly inside the provider with no
-/// dependency-injection hook — so the "happy path" that exercises the
-/// network is no longer mockable in a unit test.
-///
-/// What we still cover here:
-///   - Initial state.
-///   - Parsing every documented payload format (raw base64, `buzz://`
-///     prefix, whitespace).
-///   - Failure modes that return BEFORE any network call: invalid base64,
-///     wrong shape (non-object, missing fields, missing nsec), and SSRF
-///     guards (private IPs, non-http schemes).
-///   - `reset()` returning to idle from an error state.
+/// The credential validator is injected for the NIP-AB end-to-end test so it
+/// exercises signed event validation, NIP-44 decryption, out-of-order event
+/// buffering, explicit SAS approval, credential handoff, and completion
+/// without contacting an external relay.
 void main() {
   group('PairingNotifier', () {
     late ProviderContainer container;
@@ -170,6 +165,122 @@ void main() {
       expect(state.errorMessage, contains('not a JSON object'));
     });
 
+    test(
+      'payload delivered before confirmation is buffered until user approval',
+      () async {
+        final sourceKeys = nostr.Keys('01' * 32);
+        final sessionSecret = Uint8List.fromList(
+          List<int>.generate(32, (index) => index + 1),
+        );
+        _RecordingPairingSocket? createdPairingSocket;
+        String? validatedRelayUrl;
+        String? validatedNsec;
+        final notifier = PairingNotifier(
+          socketFactory:
+              ({
+                required wsUrl,
+                required ephemeralPrivkey,
+                required onMessage,
+                required onDisconnected,
+              }) {
+                createdPairingSocket = _RecordingPairingSocket(
+                  ephemeralPrivkey: ephemeralPrivkey,
+                  onMessage: onMessage,
+                );
+                return createdPairingSocket!;
+              },
+          credentialValidator: ({required relayUrl, required nsec}) async {
+            validatedRelayUrl = relayUrl;
+            validatedNsec = nsec;
+          },
+        );
+        fakeAuth = FakeAuthNotifier();
+        container = ProviderContainer(
+          overrides: [
+            authProvider.overrideWith(() => fakeAuth),
+            pairingProvider.overrideWith(() => notifier),
+          ],
+        );
+        final code =
+            'nostrpair://${sourceKeys.public}'
+            '?secret=${bytesToHex(sessionSecret)}'
+            '&relay=wss%3A%2F%2Fpairing.example.test&v=1';
+
+        await container.read(pairingProvider.notifier).pair(code);
+        expect(
+          container.read(pairingProvider).status,
+          PairingStatus.confirmingSas,
+        );
+        final pairingSocket = createdPairingSocket!;
+
+        final targetPubkey = nostr.Keys(pairingSocket.ephemeralPrivkey).public;
+        final ecdhShared = ecdhSharedSecret(sourceKeys.secret, targetPubkey);
+        final (_, sasInput) = deriveSas(ecdhShared, sessionSecret);
+        final transcriptHash = deriveTranscriptHash(
+          deriveSessionId(sessionSecret),
+          hexToBytes(sourceKeys.public),
+          hexToBytes(targetPubkey),
+          sasInput,
+          sessionSecret,
+        );
+        final conversationKey = getConversationKey(
+          sourceKeys.secret,
+          targetPubkey,
+        );
+        Map<String, dynamic> sourceEvent(Map<String, dynamic> message) =>
+            nostr.Event.from(
+              kind: 24134,
+              content: nip44Encrypt(conversationKey, jsonEncode(message)),
+              tags: [
+                ['p', targetPubkey],
+              ],
+              secretKey: sourceKeys.secret,
+              createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+            ).toMap();
+
+        // Relays do not guarantee ordering between back-to-back events. Deliver
+        // the payload first to reproduce the production race.
+        pairingSocket.emit(
+          sourceEvent({
+            'type': 'payload',
+            'payload_type': 'custom',
+            'payload': jsonEncode({
+              'relayUrl': 'https://relay.example.test',
+              'pubkey': sourceKeys.public,
+              'nsec': sourceKeys.nsec,
+            }),
+          }),
+        );
+        expect(validatedRelayUrl, isNull);
+        expect(fakeAuth.lastCommunity, isNull);
+        expect(
+          container.read(pairingProvider).status,
+          PairingStatus.confirmingSas,
+        );
+        pairingSocket.emit(
+          sourceEvent({
+            'type': 'sas-confirm',
+            'transcript_hash': bytesToHex(transcriptHash),
+          }),
+        );
+        expect(validatedRelayUrl, isNull);
+        expect(fakeAuth.lastCommunity, isNull);
+        expect(
+          container.read(pairingProvider).status,
+          PairingStatus.confirmingSas,
+        );
+
+        container.read(pairingProvider.notifier).confirmSas();
+        await pumpEventQueue(times: 20);
+
+        expect(validatedRelayUrl, 'https://relay.example.test');
+        expect(validatedNsec, sourceKeys.nsec);
+        expect(fakeAuth.lastCommunity?.pubkey, sourceKeys.public);
+        expect(container.read(pairingProvider).status, PairingStatus.success);
+        expect(pairingSocket.publishedEvents, isNotEmpty);
+      },
+    );
+
     test('reset returns to idle from error state', () async {
       container = createContainer();
 
@@ -221,6 +332,49 @@ class FakeAuthNotifier extends AsyncNotifier<AuthState>
     state = AsyncData(
       AuthState(status: AuthStatus.authenticated, community: community),
     );
+  }
+}
+
+class _RecordingPairingSocket extends PairingSocket {
+  final String ephemeralPrivkey;
+  final void Function(List<dynamic> message) messageCallback;
+  final List<Map<String, dynamic>> publishedEvents = [];
+  bool _isConnected = false;
+
+  _RecordingPairingSocket({
+    required this.ephemeralPrivkey,
+    required void Function(List<dynamic> message) onMessage,
+  }) : messageCallback = onMessage,
+       super(
+         wsUrl: 'ws://unused',
+         ephemeralPrivkey: ephemeralPrivkey,
+         onMessage: (_) {},
+         onDisconnected: (_) {},
+       );
+
+  @override
+  bool get isConnected => _isConnected;
+
+  @override
+  Future<void> connect() async {
+    _isConnected = true;
+  }
+
+  @override
+  void subscribe(String subId, int kind, String pubkeyHex) {}
+
+  @override
+  void publishEvent(Map<String, dynamic> event) {
+    publishedEvents.add(event);
+  }
+
+  void emit(Map<String, dynamic> event) {
+    messageCallback(['EVENT', 'pair', event]);
+  }
+
+  @override
+  void dispose() {
+    _isConnected = false;
   }
 }
 
