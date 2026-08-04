@@ -16,6 +16,7 @@ import {
 const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 const AGENTS_CHANNEL_ID = "94a444a4-c0a3-5966-ab05-530c6ddc2301";
 const MOCK_IDENTITY_PUBKEY = "deadbeef".repeat(8);
+const CACHED_PROFILE_LABELS_TAG = "@cached-profile-labels";
 // Relay-only agent owned by the mock viewer (see e2eBridge.ts
 // OWNED_RELAY_AGENT_PUBKEY). Classified as a bot via mockRelayAgents and
 // owned-by-viewer via its mockProfiles owner_pubkey, so the sidebar
@@ -487,8 +488,13 @@ async function expectIntroActionsShareRow(
   }
 }
 
-test.beforeEach(async ({ page }) => {
-  await installMockBridge(page);
+test.beforeEach(async ({ page }, testInfo) => {
+  await installMockBridge(
+    page,
+    testInfo.tags.includes(CACHED_PROFILE_LABELS_TAG)
+      ? { usersBatchDelayMs: 10_000 }
+      : undefined,
+  );
 });
 
 test("sidebar shows all channel types", async ({ page }) => {
@@ -513,6 +519,41 @@ test("sidebar shows all channel types", async ({ page }) => {
   const dmList = page.getByTestId("dm-list");
   await expect(dmList).toContainText("alice-tyler");
   await expect(dmList).toContainText("bob-tyler");
+});
+
+test("shows cached profile labels while relay profiles revalidate", {
+  tag: CACHED_PROFILE_LABELS_TAG,
+}, async ({ page }) => {
+  await page.addInitScript(
+    ({ alicePubkey }) => {
+      window.localStorage.setItem(
+        "buzz-user-labels.v1:ws://localhost:3000",
+        JSON.stringify({
+          version: 1,
+          updatedAt: Date.now(),
+          profiles: {
+            [alicePubkey]: {
+              displayName: "Cached Alice",
+              name: "alice",
+              nip05Handle: null,
+            },
+          },
+        }),
+      );
+    },
+    { alicePubkey: TEST_IDENTITIES.alice.pubkey },
+  );
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+
+  const aliceMessage = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Hey team — checking in." });
+  await expect(aliceMessage.getByTestId("message-author")).toHaveText(
+    "Cached Alice",
+    { timeout: 1_000 },
+  );
 });
 
 test("shows presence in sidebar, DM header, and member list", async ({
