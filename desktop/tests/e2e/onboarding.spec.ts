@@ -216,6 +216,7 @@ async function expectWelcomeComposerBannerLayout(page: Page) {
   const radii = await banner.evaluate((element) => {
     const styles = window.getComputedStyle(element);
     return {
+      backdropFilter: styles.backdropFilter,
       bottomLeft: styles.borderBottomLeftRadius,
       bottomRight: styles.borderBottomRightRadius,
       topLeft: styles.borderTopLeftRadius,
@@ -226,6 +227,7 @@ async function expectWelcomeComposerBannerLayout(page: Page) {
   expect(radii.topLeft).toBe(radii.topRight);
   expect(radii.bottomLeft).toBe("0px");
   expect(radii.bottomRight).toBe("0px");
+  expect(radii.backdropFilter).toBe("none");
   expect(personaMentionBox.width).toBeGreaterThan(0);
 }
 

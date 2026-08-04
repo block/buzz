@@ -334,7 +334,7 @@ export function WelcomeComposerBanner({
                 : 0,
           }}
           className={cn(
-            "relative z-0 mx-5 -mb-3 flex transform-gpu items-center gap-2 rounded-t-2xl border border-b-0 px-4 pb-5 pt-2.5 text-sm leading-5 backdrop-blur-sm transition-colors will-change-[filter,transform]",
+            "relative z-0 mx-5 -mb-3 flex transform-gpu items-center gap-2 rounded-t-2xl border border-b-0 px-4 pb-5 pt-2.5 text-sm leading-5 transition-colors will-change-[filter,transform]",
             state !== "prompt"
               ? "border-emerald-500/30 bg-emerald-500/15 text-foreground"
               : "border-border/60 bg-muted/55 text-muted-foreground",
