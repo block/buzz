@@ -2,11 +2,18 @@ import * as React from "react";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import {
+  useManagedAgentsQuery,
+  useStartManagedAgentMutation,
+} from "@/features/agents/hooks";
+import { startManagedAgentRuntimeAndWait } from "@/features/agents/managedAgentRuntimeReadiness";
+import {
   useOpenDmMutation,
   useUpsertCachedChannel,
 } from "@/features/channels/hooks";
+import { useCommunities } from "@/features/communities/useCommunities";
 import type { Channel } from "@/shared/api/types";
 import { useSendMessageMutation } from "@/features/messages/hooks";
+import { resolveManagedAgentSendAudience } from "@/features/messages/lib/managedAgentSendAudience";
 import { getKeyboardSearchSelection } from "@/features/profile/lib/userCandidateSearch";
 import { SelectedRecipientChip } from "@/features/profile/ui/SelectedRecipientChip";
 import { useIdentityQuery } from "@/shared/api/hooks";
@@ -32,6 +39,9 @@ export function NewMessageScreen() {
   const openDmMutation = useOpenDmMutation();
   const upsertCachedChannel = useUpsertCachedChannel();
   const sendMessageMutation = useSendMessageMutation(null, identityQuery.data);
+  const managedAgentsQuery = useManagedAgentsQuery();
+  const startAgentMutation = useStartManagedAgentMutation();
+  const { activeCommunity } = useCommunities();
   const { goChannel } = useAppNavigation();
 
   const [isRecipientPickerOpen, setIsRecipientPickerOpen] =
@@ -262,6 +272,38 @@ export function NewMessageScreen() {
       }
 
       try {
+        const managedAgents =
+          managedAgentsQuery.data ??
+          (await managedAgentsQuery.refetch()).data ??
+          [];
+        const managedAgentsByPubkey = new Map(
+          managedAgents.map((agent) => [normalizePubkey(agent.pubkey), agent]),
+        );
+        const managedAudience = resolveManagedAgentSendAudience({
+          channelType: "dm",
+          dmParticipantPubkeys: directMessage.participantPubkeys,
+          explicitMentionPubkeys: mentionPubkeys,
+          managedAgentPubkeys: managedAgentsByPubkey.keys(),
+        });
+        for (const pubkey of managedAudience) {
+          const agent = managedAgentsByPubkey.get(pubkey);
+          if (!agent) continue;
+          if (agent.backend.type === "provider") {
+            if (agent.status !== "deployed") {
+              await startAgentMutation.mutateAsync(agent.pubkey);
+            }
+          } else if (agent.status !== "running") {
+            const relayUrl = activeCommunity?.relayUrl;
+            if (!relayUrl) {
+              throw new Error("No active community relay is available.");
+            }
+            await startManagedAgentRuntimeAndWait({
+              agentName: agent.name,
+              pubkey: agent.pubkey,
+              relayUrl,
+            });
+          }
+        }
         await sendMessageMutation.mutateAsync({
           targetChannel: directMessage,
           content,
@@ -288,8 +330,12 @@ export function NewMessageScreen() {
     },
     [
       goChannel,
+      activeCommunity?.relayUrl,
+      managedAgentsQuery.data,
+      managedAgentsQuery.refetch,
       openDirectMessage,
       sendMessageMutation,
+      startAgentMutation,
       submitErrorMessage,
       upsertCachedChannel,
     ],
