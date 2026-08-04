@@ -1114,7 +1114,7 @@ test("system add rows use plain names while remove rows retain agent mention sty
   const addedRow = page
     .getByTestId("system-message-row")
     .filter({ hasText: "portal" })
-    .filter({ hasText: "added by" });
+    .filter({ hasText: "joined the channel" });
   const removedRow = page
     .getByTestId("system-message-row")
     .filter({ hasText: "removed portal from the channel" });
@@ -1251,7 +1251,7 @@ test("system agent profile exposes owned agent actions", async ({ page }) => {
   const joinedRow = page
     .getByTestId("system-message-row")
     .filter({ hasText: "mira" })
-    .filter({ hasText: "added by" });
+    .filter({ hasText: "joined the channel" });
   const agentName = joinedRow.getByText("mira", { exact: true });
   await expect(agentName).toHaveText("mira");
   await expect(agentName).not.toHaveAttribute("data-mention");
