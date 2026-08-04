@@ -160,6 +160,15 @@ test("isAgentIdentityInManagedList: keeps people and only current managed agent 
     ),
     false,
   );
+  // Bot channel members from other devices are not locally managed but should
+  // pass through so shouldHideAgentFromMentions can gate on invocability.
+  assert.equal(
+    isAgentIdentityInManagedList(
+      { isAgent: true, isMember: true, pubkey: PUB_B },
+      managedAgentPubkeys,
+    ),
+    true,
+  );
 });
 
 test("shouldHideAgentFromMentions: never hides non-agents", () => {

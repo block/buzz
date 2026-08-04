@@ -1,0 +1,64 @@
+name: Windows Fork Build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Windows (patched)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      TARGET: x86_64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add Rust target
+        shell: bash
+        run: rustup target add "$TARGET"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.14.1
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.4.0
+
+      - name: Install dependencies
+        shell: bash
+        run: pnpm install --frozen-lockfile
+
+      - name: Create sidecar stubs
+        shell: bash
+        run: |
+          mkdir -p desktop/src-tauri/binaries
+          for bin in buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz; do
+            touch "desktop/src-tauri/binaries/${bin}-${TARGET}.exe"
+          done
+          touch "desktop/src-tauri/binaries/buzz-backend-kubernetes-${TARGET}.exe" || true
+
+      - name: Build Windows NSIS installer
+        shell: bash
+        run: cd desktop && pnpm tauri build --target "$TARGET" --bundles nsis
+        env:
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+
+      - name: Locate installer
+        id: artifact
+        shell: bash
+        run: |
+          EXE=$(find desktop/src-tauri/target/${TARGET}/release/bundle/nsis -name '*.exe' | head -1)
+          echo "exe=$EXE" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: buzz-windows-patched
+          path: ${{ steps.artifact.outputs.exe }}
+          if-no-files-found: error
+          retention-days: 14
