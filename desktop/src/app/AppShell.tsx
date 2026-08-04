@@ -2,8 +2,9 @@ import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Outlet, useLocation } from "@tanstack/react-router";
 import { deriveShellRoute, markAllReadSources } from "@/app/AppShell.helpers";
+import { useTerminalContext } from "@/app/useTerminalContext";
 import { AppShellProvider } from "@/app/AppShellContext";
-import { AppShellOverlays } from "@/app/AppShellOverlays";
+import { AppShellOverlays, TerminalBootstrap } from "@/app/AppShellOverlays";
 import { AppShellChannelSurface } from "@/app/AppShellChannelSurface";
 import { AppHuddleShell } from "@/app/AppHuddleShell";
 import { AppTopChrome } from "@/app/AppTopChrome";
@@ -307,13 +308,13 @@ export function AppShell() {
     selectedView,
     sidebarChannels,
   ]);
-  const activeChannel = React.useMemo(
-    () =>
-      selectedChannelId
-        ? (channels.find((channel) => channel.id === selectedChannelId) ?? null)
-        : null,
-    [channels, selectedChannelId],
-  );
+  const { activeChannel, terminalContext } = useTerminalContext({
+    channelId: selectedChannelId,
+    channels,
+    locationSearch: location.search,
+    pubkey: identityQuery.data?.pubkey,
+    relayUrl: communitiesHook.activeCommunity?.relayUrl,
+  });
   const managedChannel = React.useMemo(() => {
     const targetChannelId = managedChannelId ?? selectedChannelId;
     return targetChannelId
@@ -333,14 +334,12 @@ export function AppShell() {
     openSearchHit,
     pubkey: identityQuery.data?.pubkey,
   });
-
   const {
     followedRootIds,
     isFollowing: isFollowingThread,
     followThread,
     unfollowThread,
   } = useThreadFollows(identityQuery.data?.pubkey);
-
   const {
     markAllChannelsRead: markAllChannelReadMarkers,
     markChannelRead,
@@ -776,6 +775,7 @@ export function AppShell() {
             onShowHuddleInMainApp={showHuddleInMainApp}
             onViewHuddleChannel={viewHuddleChannel}
             onVisibilityChange={handleHuddleVisibilityChange}
+            terminal={<TerminalBootstrap {...terminalContext} />}
           >
             {hasCommunityRail && !isHuddleRoom ? (
               <CommunityRail
