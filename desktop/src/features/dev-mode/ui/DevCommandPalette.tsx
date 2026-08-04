@@ -15,6 +15,7 @@ import {
   useLeaveChannelMutation,
   useUpdateChannelMutation,
 } from "@/features/channels/hooks";
+import { useChannelModerationCapabilities } from "@/features/channels/ui/ChannelManagementModerationActions";
 import {
   AUTHOR_COLOR_PALETTE,
   defaultAuthorColor,
@@ -56,6 +57,8 @@ type PaletteEntry = {
   id: string;
   label: string;
   detail?: string;
+  /** Extra search terms that match this entry without appearing in it. */
+  aliases?: string[];
   /** Swatch color for color-picker entries. */
   swatch?: string;
   run: () => void;
@@ -178,6 +181,16 @@ export function DevCommandPalette({
         member.role !== "bot",
     );
   }, [membersQuery.data, myPubkey]);
+
+  // Archiving needs owner/admin rights (or owning an agent that owns the
+  // channel), same as the standard UI's context menu. Without them the
+  // archive entry is hidden and typing "archive" surfaces "leave" instead.
+  const { canManageChannel: canArchiveChannel } =
+    useChannelModerationCapabilities(
+      membersQuery.data,
+      myPubkey ?? undefined,
+      Boolean(activeChannelId),
+    );
   const managedAgentsQuery = useManagedAgentsQuery({
     enabled: mode === "add-member",
   });
@@ -621,14 +634,19 @@ export function DevCommandPalette({
             detail: isLastHumanMember
               ? "archives — you're the last member"
               : "remove yourself",
+            aliases: canArchiveChannel ? undefined : ["archive"],
             run: () => leaveChannel(),
           },
-          {
-            id: "archive-channel",
-            label: `archive # ${activeChannel.name}`,
-            detail: "hide from the channel list",
-            run: () => archiveChannel(),
-          },
+          ...(canArchiveChannel
+            ? [
+                {
+                  id: "archive-channel",
+                  label: `archive # ${activeChannel.name}`,
+                  detail: "hide from the channel list",
+                  run: () => archiveChannel(),
+                } satisfies PaletteEntry,
+              ]
+            : []),
         ]
       : [];
 
@@ -719,7 +737,9 @@ export function DevCommandPalette({
       }));
 
     const matches = (entry: PaletteEntry) =>
-      `${entry.label} ${entry.detail ?? ""}`.toLowerCase().includes(needle);
+      `${entry.label} ${entry.detail ?? ""} ${entry.aliases?.join(" ") ?? ""}`
+        .toLowerCase()
+        .includes(needle);
     const matchesName = (entry: PaletteEntry) =>
       entry.label.toLowerCase().includes(needle);
     // An action verb typed literally ("archive", "leave", "pin"…) beats
@@ -729,7 +749,10 @@ export function DevCommandPalette({
     // typing "join" doesn't dump every discoverable channel.
     const matchedActions = actions.filter(matches);
     const startsWithNeedle = (entry: PaletteEntry) =>
-      entry.label.toLowerCase().startsWith(needle);
+      entry.label.toLowerCase().startsWith(needle) ||
+      (entry.aliases ?? []).some((alias) =>
+        alias.toLowerCase().startsWith(needle),
+      );
     return [
       ...matchedActions.filter(startsWithNeedle),
       ...channelEntries.filter(matches),
@@ -740,6 +763,7 @@ export function DevCommandPalette({
     activeChannel,
     addUserToChannel,
     archiveChannel,
+    canArchiveChannel,
     channels,
     createNamedChannel,
     discoverableChannels,
