@@ -1,5 +1,6 @@
 pub mod agent_management;
 mod client;
+mod client_adapter;
 mod commands;
 mod error;
 mod links;
@@ -2071,12 +2072,27 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         _ => (None, None),
     };
 
+    let command = match cli.command {
+        Cmd::Channels(sub @ ChannelsCmd::List { .. }) => {
+            let client =
+                client_adapter::build_reusable_client(&relay_url, &keys, auth_tag_json.as_deref())
+                    .await?;
+            return commands::channels::dispatch_reusable(sub, &client, &cli.format).await;
+        }
+        Cmd::Messages(sub @ MessagesCmd::Send { .. }) => {
+            let client =
+                client_adapter::build_reusable_client(&relay_url, &keys, auth_tag_json.as_deref())
+                    .await?;
+            return commands::messages::dispatch_reusable(sub, &client).await;
+        }
+        command => command,
+    };
     let client = BuzzClient::new(relay_url, keys, auth_tag, auth_tag_json)?;
 
-    match cli.command {
+    match command {
         Cmd::Agents(sub) => commands::agents::dispatch(sub, &client).await,
         Cmd::Messages(sub) => commands::messages::dispatch(sub, &client, &cli.format).await,
-        Cmd::Channels(sub) => commands::channels::dispatch(sub, &client, &cli.format).await,
+        Cmd::Channels(sub) => commands::channels::dispatch(sub, &client).await,
         Cmd::Canvas(sub) => commands::channels::dispatch_canvas(sub, &client).await,
         Cmd::Reactions(sub) => commands::reactions::dispatch(sub, &client).await,
         Cmd::Emoji(sub) => commands::emoji::dispatch(sub, &client).await,
