@@ -224,7 +224,10 @@ class _InboxOptionsButton extends StatelessWidget {
         tooltip: 'Activity options',
         color: navigationPrimaryForeground(context),
         padding: const EdgeInsets.symmetric(horizontal: Grid.xxs),
-        constraints: const BoxConstraints.tightFor(width: 36, height: Grid.xl),
+        constraints: const BoxConstraints.tightFor(
+          width: Grid.xl,
+          height: Grid.xl,
+        ),
         icon: const Icon(LucideIcons.ellipsis, size: 20),
         onPressed: () async {
           final selected = await showAnchoredPopover<String>(

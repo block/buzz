@@ -296,7 +296,13 @@ void main() {
 
     await tester.tap(find.descendant(of: surface, matching: find.text('All')));
     await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('activity-options-menu')));
+    final optionsTrigger = find.byKey(const ValueKey('activity-options-menu'));
+    expect(
+      tester.getSize(optionsTrigger),
+      const Size(Grid.xl, Grid.xl),
+      reason: 'Activity options must retain a 48dp touch target.',
+    );
+    await tester.tap(optionsTrigger);
     await tester.pump();
 
     final optionsSurface = find.byKey(
