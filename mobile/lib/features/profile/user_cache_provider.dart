@@ -12,11 +12,13 @@ import 'user_profile.dart';
 /// kind:0 batch query (NIP-01 `authors` filter) every 50ms.
 class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
   final Set<String> _pending = {};
+  final Map<String, int> _localUpdateVersions = {};
   Timer? _batchTimer;
 
   @override
   Map<String, UserProfile> build() {
     ref.watch(relayConfigProvider);
+    _localUpdateVersions.clear();
     ref.onDispose(() {
       _batchTimer?.cancel();
       _batchTimer = null;
@@ -44,6 +46,13 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     _batchTimer ??= Timer(const Duration(milliseconds: 50), _flushPending);
   }
 
+  /// Replace a cached profile after the local user publishes new metadata.
+  void updateProfile(UserProfile profile) {
+    final pubkey = profile.pubkey.toLowerCase();
+    _localUpdateVersions[pubkey] = (_localUpdateVersions[pubkey] ?? 0) + 1;
+    state = {...state, pubkey: profile};
+  }
+
   void _scheduleFetch(String pubkey) {
     if (state.containsKey(pubkey) || _pending.contains(pubkey)) return;
     _pending.add(pubkey);
@@ -56,6 +65,9 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
 
     final pubkeys = _pending.toList();
     _pending.clear();
+    final requestVersions = {
+      for (final pubkey in pubkeys) pubkey: _localUpdateVersions[pubkey] ?? 0,
+    };
 
     try {
       final session = ref.read(relaySessionProvider.notifier);
@@ -67,6 +79,7 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
       for (final event in events) {
         final data = ProfileData.fromEvent(event);
         final pk = data.pubkey.toLowerCase();
+        if ((_localUpdateVersions[pk] ?? 0) != requestVersions[pk]) continue;
         updated[pk] = UserProfile(
           pubkey: pk,
           displayName: data.displayName,
