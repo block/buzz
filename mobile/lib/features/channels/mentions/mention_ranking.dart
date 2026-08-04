@@ -31,6 +31,24 @@ class MentionCandidate {
   }
 }
 
+/// The set of lowercase labels shared by more than one candidate.
+///
+/// Name collisions are the impersonation vector: a vanity-ground key can wear
+/// any display name, and duplicate agent identities legitimately share one.
+/// Callers use this to decide which rows need a key shown alongside the name.
+/// Mirrors the `nameCounts` map desktop builds in `MentionAutocomplete`.
+Set<String> mentionNameCollisions(List<MentionCandidate> candidates) {
+  final counts = <String, int>{};
+  for (final candidate in candidates) {
+    final label = candidate.label.toLowerCase();
+    counts[label] = (counts[label] ?? 0) + 1;
+  }
+  return {
+    for (final entry in counts.entries)
+      if (entry.value > 1) entry.key,
+  };
+}
+
 /// Group rank: channel members, then people, then other agents.
 /// Mirrors desktop's `getMentionCandidateGroupRank` (personas are a
 /// desktop-only concept; their slot between members and people is unused

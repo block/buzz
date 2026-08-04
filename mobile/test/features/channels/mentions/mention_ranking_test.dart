@@ -111,4 +111,54 @@ void main() {
 
     expect(rankedPubkeys([second, first], ''), ['9' * 64, '8' * 64]);
   });
+
+  group('mentionNameCollisions', () {
+    test('is empty when every label is unique', () {
+      final candidates = [
+        candidate(displayName: 'Brain', pubkey: channelBrainPubkey),
+        candidate(displayName: 'Pinky', pubkey: otherBrainPubkey),
+      ];
+
+      expect(mentionNameCollisions(candidates), isEmpty);
+    });
+
+    test('reports a label shared by two candidates', () {
+      final candidates = [
+        candidate(displayName: 'Brain', isMember: true, pubkey: '1' * 64),
+        candidate(displayName: 'Brain', pubkey: '2' * 64),
+        candidate(displayName: 'Pinky', pubkey: '3' * 64),
+      ];
+
+      expect(mentionNameCollisions(candidates), {'brain'});
+    });
+
+    test('matches labels case-insensitively', () {
+      final candidates = [
+        candidate(displayName: 'Brain', pubkey: '1' * 64),
+        candidate(displayName: 'BRAIN', pubkey: '2' * 64),
+      ];
+
+      expect(mentionNameCollisions(candidates), {'brain'});
+    });
+
+    test('falls back to the pubkey label, which does not collide', () {
+      final candidates = [
+        candidate(displayName: null, pubkey: '1' * 64),
+        candidate(displayName: null, pubkey: '2' * 64),
+      ];
+
+      expect(mentionNameCollisions(candidates), isEmpty);
+    });
+
+    test('reports every colliding label, not just the first', () {
+      final candidates = [
+        candidate(displayName: 'Brain', pubkey: '1' * 64),
+        candidate(displayName: 'Brain', pubkey: '2' * 64),
+        candidate(displayName: 'Pinky', pubkey: '3' * 64),
+        candidate(displayName: 'Pinky', pubkey: '4' * 64),
+      ];
+
+      expect(mentionNameCollisions(candidates), {'brain', 'pinky'});
+    });
+  });
 }
