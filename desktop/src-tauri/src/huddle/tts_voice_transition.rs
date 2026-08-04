@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, VecDeque},
+    fmt,
     path::Path,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -28,6 +29,43 @@ pub(super) type CancelTextState<'a> = (
     &'a mut Option<QueuedText>,
 );
 pub(super) type CancelSignals<'a> = (&'a AtomicBool, &'a AtomicBool);
+
+#[derive(Clone)]
+pub(super) struct PlaybackProbe {
+    player: Arc<Mutex<Option<Arc<rodio::Player>>>>,
+    pub(super) player_ops: Arc<Mutex<()>>,
+}
+
+impl PlaybackProbe {
+    pub(super) fn new() -> Self {
+        Self {
+            player: Arc::new(Mutex::new(None)),
+            player_ops: Arc::new(Mutex::new(())),
+        }
+    }
+
+    pub(super) fn install(&self, player: Arc<rodio::Player>) {
+        self.player
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .replace(player);
+    }
+
+    fn player(&self) -> Option<Arc<rodio::Player>> {
+        self.player
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+}
+
+impl fmt::Debug for PlaybackProbe {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PlaybackProbe")
+            .finish_non_exhaustive()
+    }
+}
 
 #[derive(Debug)]
 pub(super) struct QueuedText {
@@ -134,8 +172,32 @@ pub(super) fn request_active_speaker_cancel(
     generations: &SpeakerGenerations,
     active_speaker: &ActiveSpeaker,
     cancellation: &SpeakerCancellation,
+    playback_probe: &PlaybackProbe,
     expected_speaker_pubkey: &str,
 ) -> bool {
+    let Some(player) = playback_probe.player() else {
+        return false;
+    };
+    let _ops = super::lock_player_ops(&playback_probe.player_ops);
+    request_active_speaker_cancel_while_locked(
+        generations,
+        active_speaker,
+        cancellation,
+        !player.empty(),
+        expected_speaker_pubkey,
+    )
+}
+
+fn request_active_speaker_cancel_while_locked(
+    generations: &SpeakerGenerations,
+    active_speaker: &ActiveSpeaker,
+    cancellation: &SpeakerCancellation,
+    playback_live: bool,
+    expected_speaker_pubkey: &str,
+) -> bool {
+    if !playback_live {
+        return false;
+    }
     let active = active_speaker
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -382,6 +444,23 @@ fn log_cancelled_route(route_id: u64, reason: &str) {
 mod speaker_generation_tests {
     use super::*;
 
+    fn playback_probe(playback_live: bool) -> PlaybackProbe {
+        let channels = std::num::NonZero::new(1).expect("non-zero channels");
+        let sample_rate = std::num::NonZero::new(24_000).expect("non-zero sample rate");
+        let (mixer, _mixer_source) = rodio::mixer::mixer(channels, sample_rate);
+        let player = Arc::new(rodio::Player::connect_new(&mixer));
+        if playback_live {
+            player.append(rodio::buffer::SamplesBuffer::new(
+                channels,
+                sample_rate,
+                vec![0.0; 24_000],
+            ));
+        }
+        let probe = PlaybackProbe::new();
+        probe.install(player);
+        probe
+    }
+
     fn queued_speech(speaker_pubkey: &str, speaker_generation: u64) -> QueuedText {
         QueuedText {
             generation: 1,
@@ -452,6 +531,7 @@ mod speaker_generation_tests {
             &generations,
             &active_speaker,
             &cancellation,
+            &playback_probe(true),
             "alice",
         ));
         assert_eq!(current_speaker_generation(&generations, "alice"), 1);
@@ -466,6 +546,7 @@ mod speaker_generation_tests {
             &generations,
             &active_speaker,
             &cancellation,
+            &playback_probe(true),
             "alice",
         ));
 
@@ -485,6 +566,7 @@ mod speaker_generation_tests {
             &generations,
             &active_speaker,
             &cancellation,
+            &playback_probe(true),
             "alice",
         ));
         assert_eq!(current_speaker_generation(&generations, "alice"), 0);
@@ -493,6 +575,30 @@ mod speaker_generation_tests {
         assert_eq!(
             active_speaker.lock().expect("active speaker").as_deref(),
             Some("bob"),
+        );
+    }
+
+    #[test]
+    fn stop_request_after_playback_drains_preserves_queued_speech() {
+        let generations = Arc::new(Mutex::new(HashMap::new()));
+        let active_speaker = Arc::new(Mutex::new(Some("alice".to_string())));
+        let cancellation = Arc::new(Mutex::new(None));
+        let next_utterance = queued_speech("alice", 0);
+
+        assert!(!request_active_speaker_cancel(
+            &generations,
+            &active_speaker,
+            &cancellation,
+            &playback_probe(false),
+            "alice",
+        ));
+
+        assert_eq!(current_speaker_generation(&generations, "alice"), 0);
+        assert!(queued_speaker_is_current(&generations, &next_utterance));
+        assert!(cancellation.lock().expect("cancellation").is_none());
+        assert_eq!(
+            active_speaker.lock().expect("active speaker").as_deref(),
+            Some("alice"),
         );
     }
 }

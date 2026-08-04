@@ -53,6 +53,7 @@ impl TtsPipeline {
             &self.speaker_generations,
             &self.active_speaker,
             &self.speaker_cancel,
+            &self.playback_probe,
             expected_speaker_pubkey,
         )
     }

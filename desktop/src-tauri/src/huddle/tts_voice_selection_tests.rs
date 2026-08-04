@@ -22,6 +22,7 @@ fn inert_pipeline(cancel: Arc<AtomicBool>) -> TtsPipeline {
         speaker_generations: Arc::new(std::sync::Mutex::new(HashMap::new())),
         active_speaker: Arc::new(std::sync::Mutex::new(None)),
         speaker_cancel: Arc::new(std::sync::Mutex::new(None)),
+        playback_probe: PlaybackProbe::new(),
         voice_change_ack: Arc::new(std::sync::Mutex::new(None)),
         thread: Some(thread),
     }

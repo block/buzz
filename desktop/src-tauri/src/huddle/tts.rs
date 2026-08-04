@@ -138,6 +138,7 @@ type WorkerControlState = (
     SpeakerGenerations,
     ActiveSpeaker,
     SpeakerCancellation,
+    PlaybackProbe,
 );
 
 // ── Public pipeline handle ────────────────────────────────────────────────────
@@ -173,6 +174,8 @@ pub struct TtsPipeline {
     active_speaker: ActiveSpeaker,
     /// Targeted cancellation used when an agent leaves the huddle.
     speaker_cancel: SpeakerCancellation,
+    /// Shared player handle used to reject Stop clicks after playback drains.
+    playback_probe: PlaybackProbe,
     /// Completed after the worker drains pre-change text and installs the new style.
     voice_change_ack: VoiceChangeAck,
     /// Worker thread handle — taken on drop to join cleanly.
@@ -212,6 +215,8 @@ impl TtsPipeline {
         let worker_active_speaker = Arc::clone(&active_speaker);
         let speaker_cancel = Arc::new(Mutex::new(None));
         let worker_speaker_cancel = Arc::clone(&speaker_cancel);
+        let playback_probe = PlaybackProbe::new();
+        let worker_playback_probe = playback_probe.clone();
         let voice_change_ack = Arc::new(Mutex::new(None));
         let worker_voice_change_ack = Arc::clone(&voice_change_ack);
         let model_dir_worker = model_dir.clone();
@@ -235,6 +240,7 @@ impl TtsPipeline {
                         worker_speaker_generations,
                         worker_active_speaker,
                         worker_speaker_cancel,
+                        worker_playback_probe,
                     ),
                     output_device,
                     activity_app,
@@ -255,6 +261,7 @@ impl TtsPipeline {
             speaker_generations,
             active_speaker,
             speaker_cancel,
+            playback_probe,
             voice_change_ack,
             thread: Some(handle),
         })
@@ -284,8 +291,15 @@ fn tts_worker(
     startup_tx: mpsc::SyncSender<Result<(), String>>,
 ) {
     let (selected_voice, voice_generation, voice_change_ack) = voice_state;
-    let (tts_active, shutdown, cancel_signals, speaker_generations, active_speaker, speaker_cancel) =
-        control_state;
+    let (
+        tts_active,
+        shutdown,
+        cancel_signals,
+        speaker_generations,
+        active_speaker,
+        speaker_cancel,
+        playback_probe,
+    ) = control_state;
     let (cancel, voice_cancel) = cancel_signals;
     // ── 1. Initialise TTS engine ──────────────────────────────────────────────
     let model_dir_str = model_dir.to_string_lossy().to_string();
@@ -378,6 +392,7 @@ fn tts_worker(
     // Shared (Arc) with the barge-in monitor thread below, which needs to
     // silence it while this thread is blocked inside `synth_chunk`.
     let player = Arc::new(Player::connect_new(sink_handle.mixer()));
+    playback_probe.install(Arc::clone(&player));
 
     // Prime the audio output stream with a short silent buffer.
     // On macOS, CoreAudio initializes the output device lazily on first use.
@@ -406,7 +421,7 @@ fn tts_worker(
     }
     eprintln!("buzz-desktop: tts stage=startup status=ready");
 
-    let player_ops = Arc::new(Mutex::new(()));
+    let player_ops = Arc::clone(&playback_probe.player_ops);
     let activity_frames = Arc::new(Mutex::new(VecDeque::<TtsSpeakerActivityFrame>::new()));
     let monitor_stop = Arc::new(AtomicBool::new(false));
     let monitor = spawn_tts_monitor(TtsMonitorState {
