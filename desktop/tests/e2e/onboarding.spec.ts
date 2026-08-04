@@ -219,8 +219,12 @@ async function expectWelcomeComposerBannerLayout(page: Page) {
       backdropFilter: styles.backdropFilter,
       bottomLeft: styles.borderBottomLeftRadius,
       bottomRight: styles.borderBottomRightRadius,
+      filter: styles.filter,
+      zIndex: styles.zIndex,
       topLeft: styles.borderTopLeftRadius,
       topRight: styles.borderTopRightRadius,
+      transform: styles.transform,
+      willChange: styles.willChange,
     };
   });
 
@@ -228,6 +232,10 @@ async function expectWelcomeComposerBannerLayout(page: Page) {
   expect(radii.bottomLeft).toBe("0px");
   expect(radii.bottomRight).toBe("0px");
   expect(radii.backdropFilter).toBe("none");
+  expect(radii.filter).toBe("none");
+  expect(radii.transform).toBe("none");
+  expect(radii.willChange).toBe("auto");
+  expect(radii.zIndex).toBe("1");
   expect(personaMentionBox.width).toBeGreaterThan(0);
 }
 
@@ -252,6 +260,12 @@ async function expectWelcomePersonaMention(page: Page) {
       .getByTestId("welcome-composer-persona-character")
       .count(),
   ).toBeGreaterThanOrEqual(4);
+  expect(
+    await personaMention
+      .getByTestId("welcome-composer-persona-character")
+      .first()
+      .evaluate((element) => window.getComputedStyle(element).filter),
+  ).toBe("none");
 
   const transition = await personaMention.evaluate((element) => {
     const styles = window.getComputedStyle(element);
