@@ -125,6 +125,26 @@ test.describe("unread pill & divider", () => {
     const pill = page.getByTestId("message-unread-pill");
     await expect(pill).toBeVisible();
     await expect(pill).toContainText("20 new messages");
+    await expect(
+      page.getByTestId("message-timeline-sticky-day-divider"),
+    ).toHaveAttribute("data-day-label", /.+/);
+
+    const { pillTop, stickyDayTop } = await page.evaluate(() => {
+      const pill = document.querySelector<HTMLElement>(
+        '[data-testid="message-unread-pill"]',
+      );
+      const stickyDay = document.querySelector<HTMLElement>(
+        '[data-testid="message-timeline-sticky-day-divider"]',
+      );
+      if (!pill || !stickyDay) {
+        throw new Error("missing top timeline affordance");
+      }
+      return {
+        pillTop: pill.getBoundingClientRect().top,
+        stickyDayTop: stickyDay.getBoundingClientRect().top,
+      };
+    });
+    expect(Math.abs(pillTop - stickyDayTop)).toBeLessThanOrEqual(1);
   });
 
   test("02-unread-divider-visible", async ({ page }) => {
@@ -201,7 +221,7 @@ test.describe("unread pill & divider", () => {
     // Forced channel unread uses channel-name emphasis, not the thread dot.
     await expect(page.getByTestId("channel-general")).toHaveCSS(
       "font-weight",
-      "600",
+      "700",
     );
     await expect(page.getByTestId("channel-unread-dot-general")).toHaveCount(0);
 
