@@ -248,6 +248,64 @@ test("serializes an in-flight publish before sending the latest edit", async () 
   }
 });
 
+test("republishes above a newer remote observed while publish is in flight", async () => {
+  const timer = installFakeTimer();
+  const first = Promise.withResolvers();
+  const published = [];
+  const acknowledgements = [];
+  let signed = 0;
+  globalThis.window.__TAURI_INTERNALS__ = {
+    invoke(command, args) {
+      if (command === "nip44_encrypt_to_self") return Promise.resolve("cipher");
+      if (command === "sign_event") {
+        signed += 1;
+        return Promise.resolve(
+          JSON.stringify(
+            relayEvent({
+              id: `event-${signed}`,
+              content: args.content,
+              created_at: args.createdAt,
+            }),
+          ),
+        );
+      }
+      throw new Error(`unexpected command: ${command}`);
+    },
+  };
+  mock.method(relayClient, "publishEvent", (event) => {
+    published.push(event);
+    return published.length === 1 ? first.promise : Promise.resolve();
+  });
+  try {
+    const manager = new CommunityThemeSyncManager("alice", (event) => {
+      acknowledgements.push(event);
+    });
+    manager.publish(preference);
+    timer.fire();
+    await waitUntil(() => published.length === 1);
+
+    manager.acceptRemote({
+      preference: { ...preference, theme: "dracula" },
+      createdAt: published[0].created_at + 100,
+      eventId: "remote-winner",
+    });
+    first.resolve();
+    await waitUntil(() => timer.pending());
+    assert.equal(acknowledgements.length, 0);
+    assert.deepEqual(manager.getPending(), preference);
+
+    timer.fire();
+    await waitUntil(() => acknowledgements.length === 1);
+    assert.equal(published.length, 2);
+    assert.ok(published[1].created_at > published[0].created_at + 100);
+    assert.deepEqual(manager.getPending(), null);
+  } finally {
+    delete globalThis.window.__TAURI_INTERNALS__;
+    timer.restore();
+    mock.reset();
+  }
+});
+
 test("transient publish failure retries and acknowledges exact event", async () => {
   const timer = installFakeTimer();
   const published = [];

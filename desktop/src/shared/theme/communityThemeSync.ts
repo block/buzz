@@ -69,6 +69,7 @@ export class CommunityThemeSyncManager {
   private debounceTimer: number | null = null;
   private destroyed = false;
   private lastRemoteCreatedAt = 0;
+  private lastRemoteEventId = "";
   private lastPublished: PublishedCommunityTheme | null = null;
   private pending: CommunityThemePreference | null = null;
   private publishInFlight = false;
@@ -95,10 +96,15 @@ export class CommunityThemeSyncManager {
       if (events[0].pubkey !== this.pubkey) return { status: "invalid" };
       const remote = await decryptAndParse(events[0]);
       if (!remote) return { status: "invalid" };
-      this.lastRemoteCreatedAt = Math.max(
-        this.lastRemoteCreatedAt,
-        remote.createdAt,
-      );
+      if (
+        isNewerCommunityThemeCoordinate(remote, {
+          createdAt: this.lastRemoteCreatedAt,
+          eventId: this.lastRemoteEventId,
+        })
+      ) {
+        this.lastRemoteCreatedAt = remote.createdAt;
+        this.lastRemoteEventId = remote.eventId;
+      }
       return { status: "valid", remote };
     } catch {
       return { status: "unavailable" };
@@ -145,10 +151,15 @@ export class CommunityThemeSyncManager {
   }
 
   acceptRemote(remote: RemoteCommunityTheme): void {
-    this.lastRemoteCreatedAt = Math.max(
-      this.lastRemoteCreatedAt,
-      remote.createdAt,
-    );
+    if (
+      isNewerCommunityThemeCoordinate(remote, {
+        createdAt: this.lastRemoteCreatedAt,
+        eventId: this.lastRemoteEventId,
+      })
+    ) {
+      this.lastRemoteCreatedAt = remote.createdAt;
+      this.lastRemoteEventId = remote.eventId;
+    }
     const lastPublished = this.lastPublished;
     if (
       lastPublished &&
@@ -204,12 +215,31 @@ export class CommunityThemeSyncManager {
         "Timed out publishing community theme.",
         "Failed to publish community theme.",
       );
-      this.lastRemoteCreatedAt = event.created_at;
       const published = {
         preference,
         createdAt: event.created_at,
         eventId: event.id,
       };
+      const eventLostToRemote = isNewerCommunityThemeCoordinate(
+        {
+          createdAt: this.lastRemoteCreatedAt,
+          eventId: this.lastRemoteEventId,
+        },
+        published,
+      );
+      if (eventLostToRemote) {
+        this.lastPublished = null;
+        this.publishRetryAttempt = 0;
+        if (
+          this.pending &&
+          sameCommunityThemePreference(this.pending, preference)
+        ) {
+          this.schedulePublish(0);
+        }
+        return;
+      }
+      this.lastRemoteCreatedAt = event.created_at;
+      this.lastRemoteEventId = event.id;
       this.lastPublished = published;
       this.publishRetryAttempt = 0;
       if (
@@ -251,10 +281,15 @@ export class CommunityThemeSyncManager {
         if (event.pubkey !== this.pubkey || this.destroyed) return;
         void decryptAndParse(event).then((remote) => {
           if (!remote || this.destroyed) return;
-          this.lastRemoteCreatedAt = Math.max(
-            this.lastRemoteCreatedAt,
-            remote.createdAt,
-          );
+          if (
+            isNewerCommunityThemeCoordinate(remote, {
+              createdAt: this.lastRemoteCreatedAt,
+              eventId: this.lastRemoteEventId,
+            })
+          ) {
+            this.lastRemoteCreatedAt = remote.createdAt;
+            this.lastRemoteEventId = remote.eventId;
+          }
           onUpdate(remote);
         });
       },
