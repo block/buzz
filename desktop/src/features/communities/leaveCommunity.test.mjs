@@ -99,7 +99,7 @@ test("targets an inactive community relay and always disconnects", async () => {
 });
 
 test("treats an already-absent active membership as successful cleanup", async () => {
-  await leaveCommunity(
+  const result = await leaveCommunity(
     "wss://active.example",
     "wss://active.example",
     dependencies({
@@ -108,11 +108,13 @@ test("treats an already-absent active membership as successful cleanup", async (
       },
     }),
   );
+
+  assert.deepEqual(result, { status: "already-absent" });
 });
 
 test("treats an already-absent inactive membership as successful cleanup and disconnects", async () => {
   let disconnected = false;
-  await leaveCommunity(
+  const result = await leaveCommunity(
     "wss://inactive.example",
     "wss://active.example",
     dependencies({
@@ -126,6 +128,7 @@ test("treats an already-absent inactive membership as successful cleanup and dis
       }),
     }),
   );
+  assert.deepEqual(result, { status: "already-absent" });
   assert.equal(disconnected, true);
 });
 

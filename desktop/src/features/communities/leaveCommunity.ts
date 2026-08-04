@@ -23,7 +23,7 @@ const defaultDependencies: LeaveCommunityDependencies = {
     relayClient.publishEvent(
       event,
       "Timed out while leaving the community. Try again.",
-      "Failed to send the leave request. Check your connection and try again.",
+      "Couldn't send the leave request. Check your connection and try again.",
     ),
   createRelayClient: (relayUrl) => new ReadOnlyRelayClient(relayUrl),
 };
@@ -35,13 +35,19 @@ function membershipIsAlreadyAbsent(error: unknown): boolean {
   );
 }
 
-async function ignoreAlreadyAbsentMembership(
+export type LeaveCommunityResult =
+  | { status: "left" }
+  | { status: "already-absent" };
+
+async function publishLeaveRequest(
   publish: () => Promise<unknown>,
-): Promise<void> {
+): Promise<LeaveCommunityResult> {
   try {
     await publish();
+    return { status: "left" };
   } catch (error) {
     if (!membershipIsAlreadyAbsent(error)) throw error;
+    return { status: "already-absent" };
   }
 }
 
@@ -50,8 +56,10 @@ export async function leaveCommunity(
   relayUrl: string,
   activeRelayUrl: string | undefined,
   dependencies: LeaveCommunityDependencies = defaultDependencies,
-): Promise<void> {
-  if (!(await dependencies.requiresMembership(relayUrl))) return;
+): Promise<LeaveCommunityResult> {
+  if (!(await dependencies.requiresMembership(relayUrl))) {
+    return { status: "left" };
+  }
 
   const event = await dependencies.sign({
     kind: KIND_NIP43_LEAVE_REQUEST,
@@ -60,15 +68,12 @@ export async function leaveCommunity(
   });
 
   if (relayUrl === activeRelayUrl) {
-    await ignoreAlreadyAbsentMembership(() =>
-      dependencies.publishActive(event),
-    );
-    return;
+    return publishLeaveRequest(() => dependencies.publishActive(event));
   }
 
   const client = dependencies.createRelayClient(relayUrl);
   try {
-    await ignoreAlreadyAbsentMembership(() => client.publishEvent(event));
+    return await publishLeaveRequest(() => client.publishEvent(event));
   } catch (error) {
     if (
       error instanceof Error &&

@@ -85,14 +85,14 @@ export function useCommunityNavigationTransitions({
       // Do not touch local state until this relay has explicitly accepted the
       // signed NIP-43 leave request. Rejections and timeouts bubble back to the
       // dialog so the person can retry without losing their community config.
-      await leaveCommunity(
+      const leaveResult = await leaveCommunity(
         target.relayUrl,
         communities.activeCommunity?.relayUrl,
       );
 
       if (id !== communities.activeCommunity?.id) {
         communities.removeCommunity(id);
-        return;
+        return leaveResult;
       }
 
       if (!fallback) {
@@ -103,7 +103,7 @@ export function useCommunityNavigationTransitions({
         }
         await goHome({ replace: true });
         communities.removeCommunity(id);
-        return;
+        return leaveResult;
       }
 
       await runCommunityViewTransition(async () => {
@@ -119,6 +119,7 @@ export function useCommunityNavigationTransitions({
         }
         communities.removeCommunity(id);
       });
+      return leaveResult;
     },
     [communities, goHome, router.history, saveActiveDestination],
   );

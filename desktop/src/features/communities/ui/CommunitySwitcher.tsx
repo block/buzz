@@ -11,7 +11,9 @@ import {
   WifiOff,
 } from "lucide-react";
 import * as React from "react";
+import { toast } from "sonner";
 
+import type { LeaveCommunityResult } from "@/features/communities/leaveCommunity";
 import type { Community } from "@/features/communities/types";
 import {
   DropdownMenu,
@@ -58,7 +60,7 @@ type CommunitySwitcherProps = {
     id: string,
     updates: Partial<Pick<Community, "name" | "relayUrl" | "token">>,
   ) => void;
-  onRemoveCommunity: (id: string) => Promise<void>;
+  onRemoveCommunity: (id: string) => Promise<LeaveCommunityResult | undefined>;
 };
 
 export function CommunityEmojiIcon({
@@ -160,13 +162,19 @@ export function CommunitySwitcher({
     setIsLeaving(true);
     setLeaveError(null);
     try {
-      await onRemoveCommunity(activeCommunity.id);
+      const result = await onRemoveCommunity(activeCommunity.id);
       setDropdownOpen(false);
+      if (result?.status === "already-absent") {
+        toast("Community removed", {
+          description:
+            "You were no longer a member, so Buzz removed the community from this device.",
+        });
+      }
     } catch (error) {
       setLeaveError(
         error instanceof Error
           ? error.message
-          : "Could not leave the community. Try again.",
+          : "Couldn't leave the community. Try again.",
       );
       setDropdownOpen(true);
     } finally {
