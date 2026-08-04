@@ -280,6 +280,7 @@ class ChannelSortManager {
         return;
       }
       final ciphertext = _crypto.encrypt(jsonEncode(_store.toJson()));
+      String? submittedEventId;
       await _signedEventRelay.submit(
         kind: EventKind.readState,
         content: ciphertext,
@@ -288,11 +289,13 @@ class ChannelSortManager {
           ['t', _dTag],
         ],
         createdAt: createdAt,
+        onSigned: (event) => submittedEventId = event.id,
       );
       if (_disposed || _generation != generationAtStart) return;
-      // Publishing clears durable pending state, but only remote adoption may
-      // advance the sync cursor. This matches desktop and prevents local
-      // publications from inflating the next event's timestamp.
+      // Keep local publications strictly ordered for this manager lifetime, as
+      // desktop does, but never persist that volatile publication cursor.
+      _lastRemoteCreatedAt = createdAt;
+      _lastRemoteEventId = submittedEventId ?? '';
       _syncState = ChannelSortSyncState(
         updatedAt: _syncState.updatedAt,
         eventId: _syncState.eventId,
