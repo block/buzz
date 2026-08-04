@@ -1826,59 +1826,80 @@ test("channel date divider keeps the date sticky while the separator rule scroll
 
   const timeline = page.getByTestId("message-timeline");
   await timeline.evaluate((element) => {
-    const firstGroup = element.querySelector<HTMLElement>(
-      '[data-testid="message-timeline-day-group"]',
-    );
-    if (!firstGroup) {
-      throw new Error("missing first day group");
-    }
-    const groupRect = firstGroup.getBoundingClientRect();
-    const stickyTop = Number.parseFloat(
-      getComputedStyle(
-        firstGroup.querySelector<HTMLElement>(
-          '[data-testid="message-timeline-day-divider"]',
-        ) ?? firstGroup,
-      ).top,
-    );
-    element.scrollTop +=
-      groupRect.top - (element.getBoundingClientRect().top + stickyTop - 32);
+    element.scrollTop = element.scrollHeight * 0.2;
     element.dispatchEvent(new Event("scroll", { bubbles: true }));
   });
-  await page.waitForTimeout(50);
+
+  const [headerBox, stickyPillBox] = await Promise.all([
+    page.getByTestId("chat-header").boundingBox(),
+    page
+      .getByTestId("message-timeline-sticky-day-divider-content")
+      .locator("p")
+      .first()
+      .boundingBox(),
+  ]);
+  if (!headerBox || !stickyPillBox) {
+    throw new Error("missing channel header or sticky day divider");
+  }
+  expect(
+    Math.abs(stickyPillBox.y - (headerBox.y + headerBox.height) - 8),
+  ).toBeLessThanOrEqual(1);
+  await expect(
+    page.getByTestId("message-timeline-sticky-day-divider"),
+  ).toHaveCSS("opacity", "1");
+  await expect(
+    page.getByTestId("message-timeline-day-divider").last().locator("p"),
+  ).toHaveCSS("visibility", "visible");
 
   const metrics = await timeline.evaluate((element) => {
-    const firstGroup = element.querySelector<HTMLElement>(
-      '[data-testid="message-timeline-day-group"]',
+    const pinnedDivider = element.parentElement?.querySelector<HTMLElement>(
+      '[data-testid="message-timeline-sticky-day-divider"]',
     );
-    const firstDivider = firstGroup?.querySelector<HTMLElement>(
-      '[data-testid="message-timeline-day-divider"]',
+    const pinnedPill = pinnedDivider?.querySelector<HTMLElement>(
+      '[data-testid="message-timeline-sticky-day-divider-content"] p',
     );
-    const firstDividerPill = firstDivider?.querySelector<HTMLElement>("p");
-    if (!firstGroup || !firstDivider || !firstDividerPill) {
-      throw new Error("missing day group or divider");
+    if (!pinnedDivider || !pinnedPill) {
+      throw new Error("missing sticky day divider");
     }
 
-    const groupRect = firstGroup.getBoundingClientRect();
-    const dividerRect = firstDivider.getBoundingClientRect();
-    const groupBefore = getComputedStyle(firstGroup, "::before");
-    const dividerBefore = getComputedStyle(firstDivider, "::before");
-
     return {
-      dividerBeforeContent: dividerBefore.content,
-      dividerPillBackground: getComputedStyle(firstDividerPill).backgroundColor,
-      dividerPillShadow: getComputedStyle(firstDividerPill).boxShadow,
-      dividerPosition: getComputedStyle(firstDivider).position,
-      dividerTop: dividerRect.top,
-      dividerZIndex: getComputedStyle(firstDivider).zIndex,
-      groupBeforeContent: groupBefore.content,
-      groupBeforePosition: groupBefore.position,
-      groupTop: groupRect.top,
-      ruleTop: groupRect.top + Number.parseFloat(groupBefore.top),
+      dividerPillBackground: getComputedStyle(pinnedPill).backgroundColor,
+      dividerPillShadow: getComputedStyle(pinnedPill).boxShadow,
+      dividerZIndex: getComputedStyle(pinnedDivider).zIndex,
     };
   });
 
-  expect(metrics.dividerPosition).toBe("sticky");
   expect(Number.parseInt(metrics.dividerZIndex, 10)).toBeGreaterThan(10);
+  await expect(
+    page.getByTestId("message-timeline-sticky-day-divider"),
+  ).toHaveCSS("overflow", "visible");
+
+  const dividerAlignment = await timeline.evaluate((element) => {
+    const group = [
+      ...element.querySelectorAll<HTMLElement>(
+        '[data-testid="message-timeline-day-group"]',
+      ),
+    ].find((candidate) => {
+      const pill = candidate.querySelector<HTMLElement>("p");
+      return pill && getComputedStyle(pill).visibility === "visible";
+    });
+    const pill = group?.querySelector<HTMLElement>("p");
+    if (!group || !pill) throw new Error("missing visible day divider");
+
+    const rule = getComputedStyle(group, "::before");
+    const groupBox = group.getBoundingClientRect();
+    const pillBox = pill.getBoundingClientRect();
+    return {
+      chipCenter: pillBox.top + pillBox.height / 2,
+      ruleCenter:
+        groupBox.top +
+        Number.parseFloat(rule.top) +
+        Number.parseFloat(rule.height) / 2,
+    };
+  });
+  expect(
+    Math.abs(dividerAlignment.chipCenter - dividerAlignment.ruleCenter),
+  ).toBeLessThanOrEqual(0.5);
   await expect
     .poll(async () => {
       const headerZIndex = await page
@@ -1931,11 +1952,6 @@ test("channel date divider keeps the date sticky while the separator rule scroll
   expect(metrics.dividerPillBackground).not.toBe("rgba(0, 0, 0, 0)");
   expect(metrics.dividerPillBackground).not.toBe("transparent");
   expect(metrics.dividerPillShadow).toBe("none");
-  expect(metrics.dividerBeforeContent).toBe("none");
-  expect(metrics.groupBeforePosition).toBe("absolute");
-  expect(metrics.groupBeforeContent).not.toBe("none");
-  expect(metrics.groupTop).toBeLessThan(metrics.dividerTop - 8);
-  expect(metrics.ruleTop).toBeLessThan(metrics.dividerTop - 8);
 });
 
 test("shows and clears activity indicators for active channel agents", async ({
