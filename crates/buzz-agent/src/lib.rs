@@ -15,6 +15,17 @@ pub use catalog::{discover_databricks_models, ModelEntry, DATABRICKS_V2_KNOWN_MO
 pub use config::Provider;
 pub use types::AgentError;
 
+/// Maximum number of MCP tools the bundled agent accepts across one session.
+pub const MAX_MCP_TOOLS_PER_SESSION: usize = mcp::MAX_TOOLS_PER_SESSION;
+
+/// Return whether the bundled agent can expose `tool_name` under `server_name`.
+///
+/// The check includes the provider-facing qualified-name budget used by the
+/// bundled agent, not only the MCP server's bare tool name.
+pub fn supports_mcp_server_tool_name(server_name: &str, tool_name: &str) -> bool {
+    mcp::valid_server_tool_name(server_name, tool_name)
+}
+
 /// Environment keys the Windows Git Bash resolver may inspect. `spawn_one()`
 /// forwards every key in this list into its otherwise-cleared MCP child; Doctor
 /// uses the same contract so a ready agent can always start its shell tool.

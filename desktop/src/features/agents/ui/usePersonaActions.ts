@@ -57,6 +57,7 @@ import {
 import {
   resolveCreateIntent,
   type AgentCreateIntent,
+  type AgentLaunchContext,
 } from "./agentCreateIntent";
 import { resolveManagedAgentAvatarUrl } from "./managedAgentAvatar";
 import {
@@ -176,6 +177,7 @@ export function usePersonaActions() {
     input: CreatePersonaInput | UpdatePersonaInput,
     intent?: AgentCreateIntent,
     backendIntent?: BackendIntent | null,
+    launchContext?: AgentLaunchContext,
     targetChannel?: Pick<Channel, "id" | "name"> | null,
     options?: { publishCatalogUpdates?: boolean },
   ): Promise<boolean> {
@@ -242,6 +244,7 @@ export function usePersonaActions() {
           runtime,
           undefined,
           startIntent ?? undefined,
+          launchContext,
         );
 
         try {

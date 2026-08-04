@@ -230,6 +230,53 @@ test("provider intent forces startOnAppLaunch off and omits local commands", asy
   assert.equal(input.systemPrompt, "prompt");
 });
 
+test("launch context persists Project scope and logical connection bindings", async () => {
+  const launchContext = {
+    projectScope: {
+      relayUrl: "wss://relay.example",
+      operatorPubkey: "a".repeat(64),
+      projectAddress: "30621:owner:growth",
+      channelId: "growth-channel",
+    },
+    connectionBindings: {
+      analytics: "connection-ga",
+    },
+  };
+  const input = await buildInstanceInputForDefinition(
+    persona(),
+    gooseRuntime,
+    undefined,
+    undefined,
+    launchContext,
+  );
+
+  assert.deepEqual(input.projectScope, launchContext.projectScope);
+  assert.deepEqual(input.connectionBindings, launchContext.connectionBindings);
+});
+
+test("provider launch carries the same Project contract without local commands", async () => {
+  const launchContext = {
+    projectScope: {
+      relayUrl: "wss://relay.example",
+      operatorPubkey: "a".repeat(64),
+      projectAddress: "30621:owner:growth",
+      channelId: "growth-channel",
+    },
+    connectionBindings: {},
+  };
+  const input = await buildInstanceInputForDefinition(
+    persona(),
+    gooseRuntime,
+    undefined,
+    { type: "provider", id: "blox", config: { region: "us" } },
+    launchContext,
+  );
+
+  assert.deepEqual(input.projectScope, launchContext.projectScope);
+  assert.deepEqual(input.connectionBindings, {});
+  assert.equal("agentCommand" in input, false);
+});
+
 test("row 1: refuses when the configured runtime is not available", () => {
   assert.throws(
     () =>

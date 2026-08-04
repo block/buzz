@@ -624,6 +624,7 @@ mod tests {
                 name_pool: vec![],
                 idle_timeout_seconds: None,
                 max_turn_duration_seconds: None,
+                tool_requirements: Vec::new(),
             },
             profile: AgentSnapshotProfile {
                 display_name: "Test".to_string(),
@@ -674,6 +675,7 @@ mod tests {
                 name_pool: vec![],
                 idle_timeout_seconds: None,
                 max_turn_duration_seconds: None,
+                tool_requirements: Vec::new(),
             },
             profile: AgentSnapshotProfile {
                 display_name: "Test".to_string(),
@@ -720,6 +722,7 @@ mod tests {
                 name_pool: vec![],
                 idle_timeout_seconds: None,
                 max_turn_duration_seconds: None,
+                tool_requirements: Vec::new(),
             },
             profile: AgentSnapshotProfile {
                 display_name: "Test".to_string(),

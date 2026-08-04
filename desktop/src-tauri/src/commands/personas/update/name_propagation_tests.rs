@@ -58,6 +58,9 @@ fn agent(persona_id: &str, name: &str, display_name: Option<&str>) -> ManagedAge
         definition_respond_to_allowlist: vec![],
         definition_parallelism: None,
         relay_mesh: None,
+        project_scope: None,
+        pinned_tool_requirements: Vec::new(),
+        connection_bindings: std::collections::BTreeMap::new(),
     }
 }
 

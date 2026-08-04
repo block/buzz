@@ -1530,6 +1530,9 @@ mod tests {
             definition_respond_to_allowlist: Vec::new(),
             definition_parallelism: None,
             relay_mesh: None,
+            project_scope: None,
+            pinned_tool_requirements: Vec::new(),
+            connection_bindings: std::collections::BTreeMap::new(),
         };
 
         let runtime = known_acp_runtime_exact("buzz-agent");
@@ -1727,15 +1730,10 @@ mod tests {
             ]),
         );
         let result = agent_readiness(&env);
-        assert!(
-            result.is_ready(),
-            "OPENROUTER_MODEL fallback should satisfy model requirement"
-        );
+        assert!(result.is_ready());
     }
 }
 
-// Goose file-config-aware requirement tests live in a sibling file so this
-// module stays under the desktop file-size ratchet.
 #[cfg(test)]
 #[path = "readiness_goose_file_config_tests.rs"]
 mod goose_file_config_tests;

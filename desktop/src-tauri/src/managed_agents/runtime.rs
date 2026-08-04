@@ -35,6 +35,9 @@ pub(crate) use sweep::sweep_untracked_bundle_harnesses;
 
 type RespondToEnv = (Vec<(&'static str, String)>, Vec<&'static str>);
 
+mod configure;
+pub(crate) use configure::{build_respond_to_env, configure_runtime_cli};
+
 mod process;
 #[cfg(test)]
 use process::{
@@ -301,6 +304,7 @@ pub fn build_managed_agent_summary(
         pubkey: record.pubkey.clone(),
         name: record.name.clone(),
         persona_id: record.persona_id.clone(),
+        project_scope: record.project_scope.clone(),
         runtime: record.runtime.clone(),
         team_id: record.team_id.clone(),
         relay_url: record.relay_url.clone(),
@@ -322,6 +326,8 @@ pub fn build_managed_agent_summary(
         persona_orphaned,
         needs_restart,
         env_vars: record.env_vars.clone(),
+        tool_requirements: record.pinned_tool_requirements.clone(),
+        connection_bindings: record.connection_bindings.clone(),
         backend: record.backend.clone(),
         backend_agent_id: record.backend_agent_id.clone(),
         status,
@@ -362,87 +368,6 @@ pub fn find_managed_agent_mut<'a>(
         .iter_mut()
         .find(|record| record.pubkey == pubkey)
         .ok_or_else(|| format!("agent {pubkey} not found"))
-}
-
-/// Pure decision function for the inbound author gate env vars.
-///
-/// Returns the env vars to **set** and the env vars to **remove**. Removal is
-/// belt-and-suspenders: an inherited parent env var must not leak into a
-/// child agent and silently change its security posture.
-///
-/// The `owner_hex` argument is the current workspace owner pubkey. It's used
-/// as a fallback for legacy records (`auth_tag.is_none()`) — without it, the
-/// harness's owner cache stays empty and `owner-only` / `allowlist` modes
-/// drop everything.
-///
-/// Returns `Err(...)` if the record's allowlist fails validation. The harness
-/// validates too, but doing it here means we never spawn a doomed process.
-pub(crate) fn build_respond_to_env(
-    record: &ManagedAgentRecord,
-    owner_hex: Option<&str>,
-) -> Result<RespondToEnv, String> {
-    // Defensive re-validation: an on-disk record could have been hand-edited.
-    let normalized = super::types::validate_respond_to_allowlist(&record.respond_to_allowlist)?;
-    if record.respond_to == super::types::RespondTo::Allowlist && normalized.is_empty() {
-        return Err(
-            "respond-to mode 'allowlist' requires at least one pubkey in the allowlist".to_string(),
-        );
-    }
-
-    let mut set: Vec<(&'static str, String)> = Vec::new();
-    let mut remove: Vec<&'static str> = Vec::new();
-
-    set.push((
-        "BUZZ_ACP_RESPOND_TO",
-        record.respond_to.as_str().to_string(),
-    ));
-
-    if record.respond_to == super::types::RespondTo::Allowlist {
-        set.push(("BUZZ_ACP_RESPOND_TO_ALLOWLIST", normalized.join(",")));
-    } else {
-        remove.push("BUZZ_ACP_RESPOND_TO_ALLOWLIST");
-    }
-
-    // Legacy fallback: agents created before NIP-OA lack `auth_tag`. Without
-    // it the harness can't resolve the owner, and owner-dependent gate modes
-    // would drop every event. Forwarding the workspace owner pubkey via
-    // BUZZ_ACP_AGENT_OWNER keeps those records functional. Modern records
-    // (`auth_tag = Some(...)`) use `BUZZ_AUTH_TAG` as before.
-    if record.auth_tag.is_none() {
-        if let Some(owner) = owner_hex {
-            set.push(("BUZZ_ACP_AGENT_OWNER", owner.to_string()));
-        } else {
-            remove.push("BUZZ_ACP_AGENT_OWNER");
-        }
-    } else {
-        remove.push("BUZZ_ACP_AGENT_OWNER");
-    }
-
-    Ok((set, remove))
-}
-
-pub(crate) fn configure_runtime_cli(
-    command: &mut std::process::Command,
-    runtime: Option<&KnownAcpRuntime>,
-) {
-    let Some(runtime) = runtime else {
-        return;
-    };
-    if runtime.id != "claude" {
-        return;
-    }
-    if let Some(cli_path) = runtime.underlying_cli.and_then(resolve_command) {
-        // On Windows, `.cmd` and `.bat` files are batch shims — they cannot be
-        // passed directly to `CreateProcess` and cause EINVAL when the Claude
-        // adapter tries to spawn them (issue #2397). Skip setting
-        // `CLAUDE_CODE_EXECUTABLE` for shim paths so the adapter falls back to
-        // its own PATH lookup and finds the real binary instead.
-        // Non-Windows: `.cmd`/`.bat` are valid executables and must be assigned.
-        if should_skip_claude_executable(&cli_path, cfg!(windows)) {
-            return;
-        }
-        command.env("CLAUDE_CODE_EXECUTABLE", cli_path);
-    }
 }
 
 /// Spawn an agent process without holding any locks on records or runtimes.
@@ -506,7 +431,16 @@ pub fn spawn_agent_child(
             })?;
     let effective_command = &descriptor.command;
     let agent_args = &descriptor.args;
-
+    if let Some(scope) = record.project_scope.as_ref() {
+        let project_relay = buzz_core_pkg::relay::normalize_relay_url(&scope.relay_url)
+            .map_err(|_| "The agent's Project has an invalid Buzz community.".to_string())?;
+        if project_relay != runtime_key.relay_url {
+            return Err(
+                "This agent cannot use Project Connections while connected to another Buzz community."
+                    .to_string(),
+            );
+        }
+    }
     let log_path = super::managed_agent_runtime_log_path(app, &runtime_key)?;
     append_log_marker(
         &log_path,
@@ -540,6 +474,15 @@ pub fn spawn_agent_child(
             }
         }
     };
+    let legacy_mcp_command = resolved_mcp_command
+        .as_deref()
+        .map(std::path::Path::to_string_lossy);
+    let project_mcp_config_bytes =
+        super::project_connections::materialize_agent_project_connections(
+            app,
+            record,
+            legacy_mcp_command.as_deref(),
+        )?;
     // Resolve agent command to a full path (DMG launches have minimal PATH).
     let resolved_agent_command = resolve_command(effective_command)
         .map(|p| p.display().to_string())
@@ -582,6 +525,13 @@ pub fn spawn_agent_child(
     command.env("BUZZ_ACP_LAZY_POOL", if lazy { "true" } else { "false" });
     command.env("BUZZ_ACP_AGENT_COMMAND", &resolved_agent_command);
     command.env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","));
+    command.env_remove("BUZZ_ACP_MCP_CONFIG");
+    command.env_remove("BUZZ_ACP_MCP_CONFIG_DELETE_AFTER_READ");
+    if let Some(scope) = record.project_scope.as_ref() {
+        command.env("BUZZ_ACP_CHANNELS", &scope.channel_id);
+    } else {
+        command.env_remove("BUZZ_ACP_CHANNELS");
+    }
     match &resolved_mcp_command {
         Some(mcp_cmd) => {
             command.env("BUZZ_ACP_MCP_COMMAND", mcp_cmd);
@@ -881,6 +831,17 @@ pub fn spawn_agent_child(
         .env("BUZZ_MANAGED_AGENT", current_instance_id(app))
         .env("BUZZ_MANAGED_AGENT_START_NONCE", &start_nonce);
 
+    let project_mcp_config_path = project_mcp_config_bytes
+        .as_deref()
+        .map(|bytes| {
+            super::project_connections::write_agent_project_connection_config(app, record, bytes)
+        })
+        .transpose()?;
+    if let Some(path) = project_mcp_config_path.as_ref() {
+        command.env("BUZZ_ACP_MCP_CONFIG", path);
+        command.env("BUZZ_ACP_MCP_CONFIG_DELETE_AFTER_READ", "true");
+    }
+
     // Spawn the harness in its own process group so we can kill the entire
     // tree (harness + MCP servers + agent subprocesses) on shutdown.
     #[cfg(unix)]
@@ -899,6 +860,9 @@ pub fn spawn_agent_child(
     }
 
     let child = command.spawn().map_err(|error| {
+        if let Some(path) = project_mcp_config_path.as_deref() {
+            let _ = super::project_connections::remove_agent_project_connection_config(path);
+        }
         format!(
             "failed to spawn `{}` for agent {}: {error}",
             resolved_acp_command.display(),
@@ -944,12 +908,14 @@ pub fn spawn_agent_child(
         spawned_setup_mode,
         spawned_adapter_availability,
         start_nonce,
+        project_mcp_config_path,
         &record.name,
     ));
     #[cfg(not(windows))]
     Ok(crate::managed_agents::ManagedAgentProcess {
         child,
         log_path,
+        project_mcp_config_path,
         spawn_config_hash,
         setup_mode: spawned_setup_mode,
         adapter_availability: spawned_adapter_availability,

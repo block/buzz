@@ -15,6 +15,7 @@ type ChooserDialogContentProps = React.ComponentPropsWithoutRef<
   headerClassName?: string;
   headerTestId?: string;
   scrollAreaClassName?: string;
+  scrollAreaRef?: React.Ref<HTMLDivElement>;
   scrollAreaTestId?: string;
   title: React.ReactNode;
 };
@@ -35,6 +36,7 @@ export const ChooserDialogContent = React.forwardRef<
       headerClassName,
       headerTestId,
       scrollAreaClassName,
+      scrollAreaRef,
       scrollAreaTestId,
       title,
       "aria-describedby": ariaDescribedBy,
@@ -49,6 +51,7 @@ export const ChooserDialogContent = React.forwardRef<
         className,
       )}
       ref={ref}
+      wrapperClassName="overflow-y-clip"
       {...props}
     >
       <DialogHeader
@@ -64,6 +67,7 @@ export const ChooserDialogContent = React.forwardRef<
           scrollAreaClassName,
         )}
         data-testid={scrollAreaTestId}
+        ref={scrollAreaRef}
       >
         <div className={cn("py-5", contentClassName)}>{children}</div>
       </div>

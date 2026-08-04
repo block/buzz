@@ -6,6 +6,7 @@ import type {
   RespondToMode,
 } from "@/shared/api/types";
 import { KIND_PERSONA } from "@/shared/constants/kinds";
+import { agentToolRequirementsValid } from "../ui/agentToolRequirements";
 
 export type CatalogPersonaShareLevel = "not-shared" | "none";
 
@@ -17,6 +18,7 @@ type CatalogAgentProjection = {
   model: string | null;
   provider: string | null;
   namePool: string[];
+  toolRequirements: AgentPersona["toolRequirements"];
   respondTo: RespondToMode | null;
   parallelism: number | null;
 };
@@ -152,6 +154,30 @@ function parsePersonaContent(event: RelayEvent): CatalogAgentProjection | null {
         (candidate): candidate is string => typeof candidate === "string",
       )
     : [];
+  const toolRequirements = Array.isArray(parsed.tool_requirements)
+    ? parsed.tool_requirements.flatMap((candidate) => {
+        if (
+          !isObject(candidate) ||
+          typeof candidate.id !== "string" ||
+          typeof candidate.label !== "string" ||
+          typeof candidate.capability !== "string" ||
+          typeof candidate.required !== "boolean"
+        ) {
+          return [];
+        }
+        return [
+          {
+            id: candidate.id,
+            label: candidate.label,
+            capability: candidate.capability,
+            required: candidate.required,
+          },
+        ];
+      })
+    : [];
+  if (!agentToolRequirementsValid(toolRequirements)) {
+    return null;
+  }
   const respondTo =
     parsed.respond_to === "allowlist"
       ? "owner-only"
@@ -175,6 +201,7 @@ function parsePersonaContent(event: RelayEvent): CatalogAgentProjection | null {
     model: optionalString(parsed.model),
     provider: optionalString(parsed.provider),
     namePool,
+    toolRequirements,
     respondTo,
     parallelism,
   };
@@ -303,6 +330,7 @@ function publicationToPersona(
     shared: true,
     sourceTeam: null,
     envVars: {},
+    toolRequirements: publication.agent.toolRequirements,
     respondTo: publication.agent.respondTo,
     respondToAllowlist: [],
     parallelism: publication.agent.parallelism,

@@ -53,7 +53,11 @@ export function AgentManagementDialogs() {
           runtimes={management.runtimes}
           runtimeCatalogStatus={management.runtimeCatalogStatus}
           submitLabel="Save changes"
-          title="Edit agent"
+          title={
+            management.editInitialValues?.displayName
+              ? `Edit ${management.editInitialValues.displayName}`
+              : "Edit agent"
+          }
         />
       ) : null}
       <AgentCardDialogs />

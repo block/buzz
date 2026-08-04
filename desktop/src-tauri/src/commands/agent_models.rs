@@ -5,6 +5,7 @@ use serde::Deserialize;
 use tauri::{AppHandle, State};
 
 use super::agent_model_process::run_agent_models_command;
+use crate::managed_agents::project_connections;
 // The map-only lookup is reached solely from the base-URL helpers that exist for
 // their unit tests; discovery itself always goes through the process-env variant.
 #[cfg(test)]
@@ -890,6 +891,12 @@ pub async fn update_managed_agent(
             crate::managed_agents::validate_user_env_keys(&env_vars)?;
             record.env_vars = env_vars;
         }
+        project_connections::apply_agent_project_connection_update(
+            &app,
+            record,
+            input.project_scope,
+            input.connection_bindings,
+        )?;
 
         // Native provider/model fields are authoritative. Keep the typed marker
         // derived for new records while retaining legacy typed records for
@@ -1007,15 +1014,12 @@ pub async fn update_managed_agent(
             ));
         }
     }
-
     Ok(UpdateManagedAgentResponse {
         agent: summary,
         profile_sync_error: None,
     })
 }
-
 // ── Model normalization ───────────────────────────────────────────────────────
-
 /// Normalize raw `buzz-acp models --json` output into a typed DTO for the frontend.
 ///
 /// Merges models from both ACP paths (stable configOptions + unstable SessionModelState),
@@ -1032,10 +1036,8 @@ pub(super) fn normalize_agent_models(
         .as_str()
         .unwrap_or("unknown")
         .to_string();
-
     let mut models: Vec<AgentModelInfo> = Vec::new();
     let mut seen_ids: HashSet<String> = HashSet::new();
-
     // 1. Stable configOptions (preferred). Only entries with category "model"
     //    are model options — the CLI pre-filters, but we're defensive here.
     if let Some(config_options) = raw["stable"]["configOptions"].as_array() {
@@ -1083,9 +1085,7 @@ pub(super) fn normalize_agent_models(
             }
         }
     }
-
     let supports_switching = !models.is_empty();
-
     AgentModelsResponse {
         agent_name,
         agent_version,

@@ -216,6 +216,9 @@ fn managed_agent(name: &str) -> ManagedAgentRecord {
         definition_respond_to: None,
         definition_respond_to_allowlist: vec![],
         definition_parallelism: None,
+        project_scope: None,
+        pinned_tool_requirements: Vec::new(),
+        connection_bindings: std::collections::BTreeMap::new(),
     }
 }
 

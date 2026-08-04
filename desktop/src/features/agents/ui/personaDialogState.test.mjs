@@ -94,10 +94,11 @@ test("duplicatePersonaDialogState copies persona fields into a new draft", () =>
     provider: undefined,
     namePool: [],
     envVars: {},
+    toolRequirements: [],
   });
 });
 
-test("duplicatePersonaDialogState carries envVars and namePool into the duplicate", () => {
+test("duplicatePersonaDialogState carries envVars, names, and tools into the duplicate", () => {
   // Regression: codex R10 P2. Without this, a duplicated persona that
   // relies on an API key in env_vars would silently fail at spawn until
   // the user re-entered every credential.
@@ -112,6 +113,14 @@ test("duplicatePersonaDialogState carries envVars and namePool into the duplicat
     isActive: true,
     namePool: ["alice", "bob"],
     envVars: { ANTHROPIC_API_KEY: "sk-test", GOOSE_PROVIDER: "anthropic" },
+    toolRequirements: [
+      {
+        id: "analytics",
+        label: "Analytics reports",
+        capability: "mcp.tool.run_report",
+        required: true,
+      },
+    ],
     createdAt: "2025-01-01T00:00:00Z",
     updatedAt: "2025-01-02T00:00:00Z",
   });
@@ -121,6 +130,14 @@ test("duplicatePersonaDialogState carries envVars and namePool into the duplicat
     GOOSE_PROVIDER: "anthropic",
   });
   assert.deepEqual(state.initialValues.namePool, ["alice", "bob"]);
+  assert.deepEqual(state.initialValues.toolRequirements, [
+    {
+      id: "analytics",
+      label: "Analytics reports",
+      capability: "mcp.tool.run_report",
+      required: true,
+    },
+  ]);
 });
 
 test("editPersonaDialogState preserves the persona id for updates", () => {
@@ -138,7 +155,7 @@ test("editPersonaDialogState preserves the persona id for updates", () => {
     updatedAt: "2025-01-02T00:00:00Z",
   });
 
-  assert.equal(state.title, "Edit agent");
+  assert.equal(state.title, "Edit Kit");
   assert.equal(state.description, "");
   assert.equal(state.submitLabel, "Save changes");
   assert.deepEqual(state.initialValues, {
@@ -151,6 +168,7 @@ test("editPersonaDialogState preserves the persona id for updates", () => {
     provider: undefined,
     namePool: [],
     envVars: {},
+    toolRequirements: [],
   });
 });
 

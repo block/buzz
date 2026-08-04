@@ -353,6 +353,7 @@ fn apply_inbound_persona(personas: &mut Vec<AgentDefinition>, inbound: AgentDefi
             local.model = inbound.model;
             local.provider = inbound.provider;
             local.name_pool = inbound.name_pool;
+            local.tool_requirements = inbound.tool_requirements;
             local.respond_to = inbound.respond_to;
             local.respond_to_allowlist = inbound.respond_to_allowlist;
             local.parallelism = inbound.parallelism;

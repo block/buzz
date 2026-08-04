@@ -119,6 +119,9 @@ fn agent_record() -> ManagedAgentRecord {
         agent_command_override: None,
         persona_source_version: None,
         provider: None,
+        project_scope: None,
+        pinned_tool_requirements: Vec::new(),
+        connection_bindings: std::collections::BTreeMap::new(),
     }
 }
 
@@ -144,6 +147,7 @@ fn persona_with_model(model: &str) -> AgentDefinition {
         parallelism: None,
         created_at: "".to_string(),
         updated_at: "".to_string(),
+        tool_requirements: Vec::new(),
     }
 }
 

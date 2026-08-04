@@ -1,6 +1,10 @@
 import type { Page } from "@playwright/test";
 import type { ProjectConnection } from "../../src/shared/api/tauriProjectConnections";
-import type { ChannelTemplate, RelayEvent } from "../../src/shared/api/types";
+import type {
+  AgentToolRequirement,
+  ChannelTemplate,
+  RelayEvent,
+} from "../../src/shared/api/types";
 import type { MockManagedAgentSeed } from "../../src/testing/e2eBridge";
 import { FEATURE_OVERRIDES_STORAGE_KEY, PREVIEW_FEATURE_IDS } from "./features";
 
@@ -105,6 +109,7 @@ type MockPersonaSeed = {
   namePool?: string[];
   respondTo?: "owner-only" | "allowlist" | "anyone";
   respondToAllowlist?: string[];
+  toolRequirements?: AgentToolRequirement[];
 };
 
 type MockTeamSeed = {
@@ -157,6 +162,8 @@ type MockBridgeOptions = {
   pocketVoiceImportResult?: "success" | "cancel" | "invalid";
   /** Advertised HEAD for the first mock project without adding that branch. */
   projectHeadBranch?: string;
+  /** Optional discussion channel extension tag for the first mock Project. */
+  projectChannelId?: string;
   /** Relay NIP-11 identity used to sign authoritative repository state. */
   relaySelf?: string | null;
   /** Native-like huddle state seeded from authoritative role-bearing membership. */

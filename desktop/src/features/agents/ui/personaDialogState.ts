@@ -74,6 +74,7 @@ export function duplicatePersonaDialogState(
       // them if they want a blank template.
       namePool: persona.namePool ?? [],
       envVars: persona.envVars ?? {},
+      toolRequirements: persona.toolRequirements ?? [],
       ...behaviorEntry(persona),
     },
   };
@@ -106,7 +107,7 @@ export function editPersonaDialogState(
   persona: AgentPersona,
 ): PersonaDialogState {
   return {
-    title: "Edit agent",
+    title: `Edit ${persona.displayName}`,
     description: "",
     submitLabel: "Save changes",
     initialValues: {
@@ -123,6 +124,7 @@ export function editPersonaDialogState(
       // the dialog must therefore round-trip the existing values.)
       namePool: persona.namePool ?? [],
       envVars: persona.envVars ?? {},
+      toolRequirements: persona.toolRequirements ?? [],
       ...behaviorEntry(persona),
     },
   };

@@ -47,7 +47,6 @@ pub(super) fn reject_legacy_persona_filename(file_name: &str) -> Result<(), Stri
 }
 
 // ── Import preview types ──────────────────────────────────────────────────────
-
 /// Materialized preview returned to the UI before any write is committed.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -579,6 +578,7 @@ pub async fn confirm_agent_snapshot_import(
             source_team_persona_slug: None,
             catalog_source: None,
             env_vars: std::collections::BTreeMap::new(),
+            tool_requirements: snapshot.definition.tool_requirements.clone(),
             respond_to: respond_to_wire.clone(),
             respond_to_allowlist: minted.respond_to_allowlist.clone(),
             parallelism: minted_parallelism,
@@ -621,6 +621,9 @@ pub async fn confirm_agent_snapshot_import(
             provider: snapshot.definition.provider.clone(),
             persona_source_version: None,
             env_vars: std::collections::BTreeMap::new(),
+            project_scope: None,
+            pinned_tool_requirements: snapshot.definition.tool_requirements.clone(),
+            connection_bindings: std::collections::BTreeMap::new(),
             start_on_app_launch: false,
             auto_restart_on_config_change: true,
             runtime_pid: None,
@@ -857,7 +860,6 @@ pub(crate) async fn submit_engram_event(
 }
 
 // ── NIP-49 egress guard: boundary 7 (persona snapshot engram submit) ─────────
-
 #[cfg(test)]
 mod egress_guard_tests {
     use super::submit_engram_event;

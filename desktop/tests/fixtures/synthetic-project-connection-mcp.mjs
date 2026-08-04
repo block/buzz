@@ -32,7 +32,7 @@ for await (const line of lines) {
         result: {
           tools: [
             {
-              name: "analytics.weekly_summary",
+              name: "analytics_weekly",
               description: "Returns a synthetic weekly summary.",
               inputSchema: { type: "object", properties: {} },
             },

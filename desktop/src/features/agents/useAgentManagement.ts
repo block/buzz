@@ -26,7 +26,10 @@ import { useCreatedAgentChannelAttachment } from "./useCreatedAgentChannelAttach
 import { classifyAgentManagementOrigin } from "./agentManagementBuffer";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { resolveManagedAgentAvatarUrl } from "./ui/managedAgentAvatar";
-import type { AgentCreateIntent } from "./ui/agentCreateIntent";
+import type {
+  AgentCreateIntent,
+  AgentLaunchContext,
+} from "./ui/agentCreateIntent";
 import { editPersonaDialogState } from "./ui/personaDialogState";
 import type {
   CreatePersonaInput,
@@ -179,6 +182,7 @@ export function useAgentManagement() {
     input: CreatePersonaInput | UpdatePersonaInput,
     intent: AgentCreateIntent,
     backendIntent: BackendIntent | null,
+    launchContext?: AgentLaunchContext,
   ): Promise<boolean> {
     if (request?.action !== "create" || "id" in input) {
       return false;
@@ -211,6 +215,7 @@ export function useAgentManagement() {
             runtime,
             undefined,
             backendIntent ?? undefined,
+            launchContext,
           ),
         );
         if (created.spawnError) throw new Error(created.spawnError);

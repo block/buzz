@@ -2,11 +2,6 @@ import * as React from "react";
 import { ChevronDown } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
-import type {
-  AcpRuntimeCatalogEntry,
-  CreatePersonaInput,
-  UpdatePersonaInput,
-} from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
 import { Dialog } from "@/shared/ui/dialog";
@@ -91,33 +86,8 @@ import {
   runtimeDropdownAction,
   usePendingHarnessSelection,
 } from "./addCustomHarness";
-
-type AgentDefinitionDialogProps = {
-  open: boolean;
-  title: string;
-  description: string;
-  submitLabel: string;
-  initialValues: CreatePersonaInput | UpdatePersonaInput | null;
-  error: Error | null;
-  isPending: boolean;
-  runtimes: AcpRuntimeCatalogEntry[];
-  runtimeCatalogStatus?: "loading" | "ready" | "error";
-  onOpenChange: (open: boolean) => void;
-  onSubmit: (
-    input: CreatePersonaInput | UpdatePersonaInput,
-    options: AgentDefinitionSubmitOptions,
-  ) => Promise<unknown>;
-  /** Publishes saved changes when the edited agent is shared in the catalog. */
-  publishCatalogUpdatesOnSave?: boolean;
-  /** Rendered below the form fields in create mode only ("Where to run"). */
-  createRunSection?: React.ReactNode;
-  /** Extra create-mode submit gate (e.g. incomplete provider config). */
-  createSubmitBlocked?: boolean;
-};
-
-export type AgentDefinitionSubmitOptions = {
-  publishCatalogUpdates: boolean;
-};
+import { useAgentToolRequirementsDraft } from "./useAgentToolRequirementsDraft";
+import type { AgentDefinitionDialogProps } from "./agentDefinitionDialogTypes";
 
 export function AgentDefinitionDialog({
   open,
@@ -134,6 +104,7 @@ export function AgentDefinitionDialog({
   publishCatalogUpdatesOnSave = false,
   createRunSection,
   createSubmitBlocked = false,
+  createSubmitBlockReason = null,
 }: AgentDefinitionDialogProps) {
   const runtimesLoading = runtimeCatalogStatus === "loading";
   const [displayName, setDisplayName] = React.useState("");
@@ -171,6 +142,12 @@ export function AgentDefinitionDialog({
   const [isAvatarUploadPending, setIsAvatarUploadPending] =
     React.useState(false);
   const [hasUserChanges, setHasUserChanges] = React.useState(false);
+  const toolsDraft = useAgentToolRequirementsDraft({
+    disabled: isPending,
+    initialValues,
+    onUserChange: () => setHasUserChanges(true),
+    open,
+  });
   const [isAddHarnessOpen, setIsAddHarnessOpen] = React.useState(false);
   const {
     globalConfig,
@@ -357,6 +334,7 @@ export function AgentDefinitionDialog({
       provider: providerForSubmit,
       namePool: namePoolInput,
       envVars,
+      toolRequirements: toolsDraft.requirements,
       behavior: behaviorForSubmit(
         behaviorDraft,
         behaviorSeedRef.current,
@@ -491,16 +469,30 @@ export function AgentDefinitionDialog({
   const selectedRuntimeIsAvailable =
     runtime.trim().length === 0 ||
     selectedRuntime?.availability === "available";
+  const extraCreateBlocked =
+    typeof createSubmitBlocked === "function"
+      ? createSubmitBlocked(toolsDraft.requirements)
+      : createSubmitBlocked;
+  const extraCreateBlockReason =
+    typeof createSubmitBlockReason === "function"
+      ? createSubmitBlockReason(toolsDraft.requirements)
+      : createSubmitBlockReason;
+  const submitBlockReason = !toolsDraft.valid
+    ? "Complete each tool name and capability ID."
+    : isCreateMode
+      ? (extraCreateBlockReason ?? null)
+      : null;
   // Gate model/provider validity through missingNormalizedFields — single
   // source of truth with the readiness gate so display and Save can't drift.
   const canSubmit =
     canSubmitPersonaDialog({ displayName, isPending }) &&
     (!isCreateMode || runtime.trim().length > 0) &&
     (!isCreateMode || selectedRuntimeIsAvailable) &&
-    (!isCreateMode || !createSubmitBlocked) &&
+    (!isCreateMode || !extraCreateBlocked) &&
     // Crash-loop guard, create AND edit: an empty allowlist would crash
     // every instance minted from this definition at startup.
     personaBehaviorDraftValid(behaviorDraft) &&
+    toolsDraft.valid &&
     // D1: localModeSatisfied covers both missingNormalizedFields AND
     // missingEnvKeys — credential env keys now block submit, not just display.
     localModeSatisfied &&
@@ -750,7 +742,7 @@ export function AgentDefinitionDialog({
             publishesCatalogUpdates={
               publishCatalogUpdatesOnSave && hasUserChanges
             }
-            submitBlockReason={null}
+            submitBlockReason={submitBlockReason}
             submitLabel={submitLabel}
           />
         }
@@ -963,7 +955,12 @@ export function AgentDefinitionDialog({
               open={isAddHarnessOpen}
             />
 
-            {isCreateMode ? createRunSection : null}
+            {toolsDraft.section}
+            {isCreateMode
+              ? typeof createRunSection === "function"
+                ? createRunSection(toolsDraft.requirements)
+                : createRunSection
+              : null}
 
             <div className="space-y-3">
               <button

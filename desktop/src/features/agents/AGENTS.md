@@ -172,7 +172,15 @@ with a TypeScript lookup table or an id comparison in a component.
   positions (after the people picker for `allowlist`).
 - `lib/agentAccessWarning.test.mjs` — every mode × run-location copy variant
   plus both resolvers, including unknown-reads-as-local and
-  blank-`runOn`-is-not-a-provider.
+   blank-`runOn`-is-not-a-provider.
+12. **Projects own connections; agents own bindings.** An agent stores the
+    Project it works in and maps each portable tool requirement to a
+    Project-owned connection. Changing the Project clears the draft bindings
+    so credentials and connection IDs cannot cross that boundary. An
+    unrelated edit must preserve an assignment that is temporarily unavailable
+    to the client. Running agents restart immediately only when no active turn
+    is known; otherwise the edit is saved and the existing restart policy waits
+    for the current task to finish.
 - `desktop/tests/e2e/onboarding-agent-defaults.spec.ts` — onboarding behavior
   acceptance coverage for readiness, failure states, defaults, session-draft
   restoration, zero-write Skip, Next save failure/retry, navigation, and

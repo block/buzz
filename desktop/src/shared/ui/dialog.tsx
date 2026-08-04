@@ -49,6 +49,8 @@ type DialogContentProps = React.ComponentPropsWithoutRef<
   overlayClassName?: string;
   overlayVariant?: "default" | "transparent";
   showCloseButton?: boolean;
+  /** Extra classes for the viewport wrapper around the dialog panel. */
+  wrapperClassName?: string;
   /**
    * - `default`: standard opaque dialog panel (rounded, shadowed).
    * - `none`: no surface — the caller composes its own.
@@ -72,6 +74,7 @@ const DialogContent = React.forwardRef<
       overlayVariant = "default",
       showCloseButton = true,
       surface = "default",
+      wrapperClassName,
       ...props
     },
     ref,
@@ -96,6 +99,7 @@ const DialogContent = React.forwardRef<
           surface === "textured"
             ? "p-[calc(6rem+1rem)] max-sm:p-[calc(6rem-1.5rem)]"
             : "p-4",
+          wrapperClassName,
         )}
       >
         <DialogPrimitive.Content

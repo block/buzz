@@ -13,6 +13,7 @@ import {
   resolveManagedAgentAvatarUrl,
   type UploadMediaBytes,
 } from "../ui/managedAgentAvatar";
+import type { AgentLaunchContext } from "../ui/agentCreateIntent";
 
 type RuntimesQueryLike = {
   isFetched: boolean;
@@ -112,6 +113,7 @@ export async function buildInstanceInputForDefinition(
   runtime: AcpRuntime,
   upload?: UploadMediaBytes,
   backendIntent?: BackendIntent,
+  launchContext?: AgentLaunchContext,
 ): Promise<CreateManagedAgentInput> {
   const avatarUrl = await resolveManagedAgentAvatarUrl(
     persona.avatarUrl,
@@ -136,6 +138,12 @@ export async function buildInstanceInputForDefinition(
         id: backendIntent.id,
         config: backendIntent.config,
       },
+      ...(launchContext
+        ? {
+            projectScope: launchContext.projectScope,
+            connectionBindings: launchContext.connectionBindings,
+          }
+        : {}),
     };
   }
 
@@ -157,5 +165,11 @@ export async function buildInstanceInputForDefinition(
     spawnAfterCreate: true,
     startOnAppLaunch: true,
     backend: { type: "local" },
+    ...(launchContext
+      ? {
+          projectScope: launchContext.projectScope,
+          connectionBindings: launchContext.connectionBindings,
+        }
+      : {}),
   };
 }

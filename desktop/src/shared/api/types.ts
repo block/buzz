@@ -300,6 +300,15 @@ export type ManagedAgentRuntimeStatus = {
   logPath: string | null;
 };
 
+export type {
+  AgentProjectScope,
+  AgentToolRequirement,
+} from "./agentProjectTypes";
+import type {
+  AgentProjectScope,
+  AgentToolRequirement,
+} from "./agentProjectTypes";
+
 export type ManagedAgentBackend =
   | { type: "local" }
   | { type: "provider"; id: string; config: Record<string, unknown> };
@@ -373,6 +382,12 @@ export type ManagedAgent = {
   autoRestartOnConfigChange: boolean;
   backend: ManagedAgentBackend;
   backendAgentId: string | null;
+  /** Project boundary assigned to this deployed agent. */
+  projectScope: AgentProjectScope | null;
+  /** Requirements pinned when this agent was created or explicitly updated. */
+  toolRequirements: AgentToolRequirement[];
+  /** Template requirement ID to Project connection ID. */
+  connectionBindings: Record<string, string>;
   /** Who the agent should respond to. Maps to `buzz-acp --respond-to`. */
   respondTo: RespondToMode;
   /**
@@ -435,6 +450,8 @@ export type CreateManagedAgentInput = {
   spawnAfterCreate?: boolean;
   startOnAppLaunch?: boolean;
   backend?: ManagedAgentBackend;
+  projectScope?: AgentProjectScope;
+  connectionBindings?: Record<string, string>;
   /** Inbound author gate mode. Omitted = `"owner-only"` (server default). */
   respondTo?: RespondToMode;
   /**
@@ -706,6 +723,10 @@ export type UpdateManagedAgentInput = {
    * (validated & normalized server-side).
    */
   respondToAllowlist?: string[];
+  /** Absent = don't touch. Null removes this agent's Project assignment. */
+  projectScope?: AgentProjectScope | null;
+  /** Absent = don't touch. Present replaces all tool bindings. */
+  connectionBindings?: Record<string, string>;
 };
 export type AgentPersona = {
   id: string;
@@ -733,6 +754,8 @@ export type AgentPersona = {
   catalogSource?: CatalogSourceCoordinate | null;
   /** Agent environment variables, layered after desktop parent and persona values. */
   envVars: Record<string, string>;
+  /** Portable capabilities agents created from this template need. */
+  toolRequirements: AgentToolRequirement[];
   /** NIP-AP behavioral defaults (wire shape). Null/empty = unset. */
   respondTo: RespondToMode | null;
   respondToAllowlist: string[];
@@ -770,6 +793,7 @@ export type CreatePersonaInput = {
   provider?: string;
   namePool?: string[];
   envVars?: Record<string, string>;
+  toolRequirements?: AgentToolRequirement[];
   behavior?: PersonaBehaviorInput;
   /**
    * Set when this persona is a copy of another owner's shared catalog entry,
@@ -788,6 +812,7 @@ export type UpdatePersonaInput = {
   provider?: string;
   namePool?: string[];
   envVars?: Record<string, string>;
+  toolRequirements?: AgentToolRequirement[];
   behavior?: PersonaBehaviorInput;
 };
 
@@ -993,37 +1018,7 @@ export type ChannelMessagesPageResponse = {
   nextCursor: ChannelPageCursor | null;
 };
 
-// ── Global agent configuration ────────────────────────────────────────────────
-
-/**
- * Global agent configuration defaults applied to ALL agents.
- *
- * Lowest user-settable layer — per-agent and persona values win on any key
- * collision. Mirrors the Rust `GlobalAgentConfig` struct.
- *
- * Precedence: baked floor < global < persona < per-agent.
- */
-export type GlobalAgentConfig = {
-  /** Global env vars injected into all agents unconditionally. */
-  env_vars: Record<string, string>;
-  /** Global fallback provider (e.g. "anthropic", "databricks_v2"). Null = no global default. */
-  provider: string | null;
-  /** Global fallback model identifier. Null = no global default. */
-  model: string | null;
-  /** Preferred ACP runtime for agents without a persona-specific runtime. */
-  preferred_runtime: string | null;
-};
-
-/**
- * Result returned by `set_global_agent_config`.
- *
- * Mirrors the Rust `GlobalAgentConfigSaveResult` struct.
- */
-export type GlobalAgentConfigSaveResult = {
-  /** The persisted global config (after strip-on-write). */
-  config: GlobalAgentConfig;
-  /** Number of local agents successfully stopped and restarted. */
-  restarted_count: number;
-  /** Number of agents whose stop succeeded but respawn failed. */
-  failed_restart_count: number;
-};
+export type {
+  GlobalAgentConfig,
+  GlobalAgentConfigSaveResult,
+} from "./globalAgentConfigTypes";

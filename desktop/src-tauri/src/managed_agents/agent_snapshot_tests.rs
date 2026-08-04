@@ -72,6 +72,9 @@ fn minimal_record() -> ManagedAgentRecord {
         definition_respond_to_allowlist: vec!["abc123def".to_string()],
         definition_parallelism: Some(4),
         relay_mesh: None,
+        project_scope: None,
+        pinned_tool_requirements: Vec::new(),
+        connection_bindings: std::collections::BTreeMap::new(),
     }
 }
 

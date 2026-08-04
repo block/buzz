@@ -13,11 +13,9 @@ import {
 } from "@/features/agents/hooks";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import type {
-  ManagedAgent,
   RespondToMode,
   UpdateManagedAgentInput,
 } from "@/shared/api/types";
-import type { EditAgentFocusTarget } from "@/features/agents/openEditAgentEvent";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
@@ -62,7 +60,6 @@ import {
   selectionOnRuntimeChange,
   type RuntimeModelProviderSelection,
 } from "./runtimeModelProviderSelection";
-import { AgentCreationPreview } from "./AgentCreationPreview";
 import type { EnvVarsValue } from "./EnvVarsEditor";
 import { useRequiredCredentialState } from "./useRequiredCredentialState";
 import { CreateAgentRespondToField } from "./RespondToField";
@@ -94,6 +91,9 @@ import {
   runtimeDropdownAction,
   usePendingHarnessSelection,
 } from "./addCustomHarness";
+import { useAgentConnectionBindingsDraft } from "./useAgentConnectionBindingsDraft";
+import type { AgentInstanceEditDialogProps } from "./agentInstanceEditDialogTypes";
+import { AgentInstanceIdentitySection } from "./AgentInstanceIdentitySection";
 
 export function AgentInstanceEditDialog({
   agent,
@@ -102,16 +102,7 @@ export function AgentInstanceEditDialog({
   onEditLinkedPersona,
   onOpenChange,
   onUpdated,
-}: {
-  agent: ManagedAgent;
-  /** Optional field to scroll/focus when the dialog opens from a card deep-link. */
-  initialFocus?: EditAgentFocusTarget;
-  open: boolean;
-  /** Present only when the linked definition is editable (non-built-in, resolved). Caller closes this dialog and enters definition-edit. */
-  onEditLinkedPersona?: () => void;
-  onOpenChange: (open: boolean) => void;
-  onUpdated?: (agent: ManagedAgent) => void;
-}) {
+}: AgentInstanceEditDialogProps) {
   const updateMutation = useUpdateManagedAgentMutation();
   const startMutation = useStartManagedAgentMutation();
   const runtimesQuery = useAcpRuntimesQuery({ enabled: open });
@@ -142,6 +133,11 @@ export function AgentInstanceEditDialog({
   const [isCustomProviderEditing, setIsCustomProviderEditing] =
     React.useState(false);
   const [envVars, setEnvVars] = React.useState<EnvVarsValue>(agent.envVars);
+  const connectionsDraft = useAgentConnectionBindingsDraft({
+    agent,
+    open,
+    updatePending: updateMutation.isPending,
+  });
   const [autoRestartOnConfigChange, setAutoRestartOnConfigChange] =
     React.useState(agent.autoRestartOnConfigChange);
   const personasQuery = usePersonasQuery();
@@ -165,6 +161,7 @@ export function AgentInstanceEditDialog({
     React.useState(false);
   const [isAddHarnessOpen, setIsAddHarnessOpen] = React.useState(false);
   const shouldReduceMotion = useReducedMotion();
+  const dialogScrollAreaRef = React.useRef<HTMLDivElement>(null);
 
   // Runtime selector: defaults to "custom" until the dialog opens and the
   // catalog loads. The open-effect re-derives the correct id from the catalog.
@@ -609,7 +606,8 @@ export function AgentInstanceEditDialog({
       requiredEnvKeyMissing,
     }) &&
     providerValid &&
-    !updateMutation.isPending &&
+    connectionsDraft.valid &&
+    !connectionsDraft.isSaving &&
     !isAvatarUploadPending;
 
   async function handleSubmit() {
@@ -721,6 +719,8 @@ export function AgentInstanceEditDialog({
           respondToAllowlist.join(",") !== agent.respondToAllowlist.join(",")
             ? respondToAllowlist
             : undefined,
+        projectScope: connectionsDraft.projectScopeUpdate,
+        connectionBindings: connectionsDraft.update,
       };
 
       const result = await updateMutation.mutateAsync(input);
@@ -732,6 +732,10 @@ export function AgentInstanceEditDialog({
           autoRestartOnConfigChange,
         );
       }
+      await connectionsDraft.restartAfterSave(
+        result.agent,
+        autoRestartOnConfigChange,
+      );
       showAgentProfileSyncWarning(result.agent.name, result.profileSyncError);
       handleOpenChange(false);
       onUpdated?.(result.agent);
@@ -763,7 +767,6 @@ export function AgentInstanceEditDialog({
     }
   }
 
-  // Model and provider field derived state
   const normalizedConfig = configSurfaceQuery.data?.normalized;
   const modelRequired = isMissingRequiredDropdownField(
     normalizedConfig?.model,
@@ -837,7 +840,6 @@ export function AgentInstanceEditDialog({
     { label: "Custom provider...", value: CUSTOM_PROVIDER_DROPDOWN_VALUE },
   ];
 
-  const previewLabel = name.trim() || "Agent name";
   const previewAvatarUrl = avatarUrl.trim() || null;
   const advancedFieldsTransition = shouldReduceMotion
     ? { duration: 0 }
@@ -851,11 +853,23 @@ export function AgentInstanceEditDialog({
         data-testid="edit-agent-dialog"
         footerClassName="border-t-0 pt-0"
         headerClassName="pb-2"
+        onOpenAutoFocus={(event) => {
+          if (initialFocus) return;
+          event.preventDefault();
+          requestAnimationFrame(() => {
+            dialogScrollAreaRef.current?.scrollTo({ top: 0 });
+            document
+              .getElementById("edit-agent-name")
+              ?.focus({ preventScroll: true });
+          });
+        }}
+        scrollAreaRef={dialogScrollAreaRef}
+        scrollAreaTestId="edit-agent-dialog-scroll-area"
         title={`Edit ${agent.name}`}
         footer={
           <div className="flex w-full items-center justify-end gap-2">
             <Button
-              disabled={updateMutation.isPending || isAvatarUploadPending}
+              disabled={connectionsDraft.isSaving || isAvatarUploadPending}
               onClick={() => handleOpenChange(false)}
               type="button"
               variant="outline"
@@ -868,76 +882,35 @@ export function AgentInstanceEditDialog({
               onClick={() => void handleSubmit()}
               type="button"
             >
-              {updateMutation.isPending ? "Saving..." : "Save changes"}
+              {connectionsDraft.saveLabel}
             </Button>
           </div>
         }
       >
-        <div className="grid gap-5 lg:grid-cols-[220px_minmax(0,1fr)]">
-          {/* Avatar is definition-level identity. hideEditControl suppresses
-              the internal pencil badge; the CTA below is the only edit path. */}
-          <div className="flex flex-col items-center gap-2">
-            <AgentCreationPreview
-              avatarUrl={previewAvatarUrl}
-              hideEditControl
-              label={previewLabel}
-              onClearAvatar={() => setAvatarUrl("")}
-              onUploadPendingChange={setIsAvatarUploadPending}
-              onSelectAvatar={setAvatarUrl}
-            />
-            {onEditLinkedPersona ? (
-              <Button
-                className="w-full"
-                onClick={() => {
-                  handleOpenChange(false);
-                  onEditLinkedPersona();
-                }}
-                size="sm"
-                type="button"
-                variant="outline"
-              >
-                Edit avatar
-              </Button>
-            ) : (
-              <p className="text-center text-xs text-muted-foreground">
-                Avatar is shared identity
-              </p>
-            )}
-          </div>
-          <div className="space-y-5">
-            {/* Agent name */}
-            <div className="space-y-1.5">
-              <label
-                className="text-sm font-medium text-foreground"
-                htmlFor="edit-agent-name"
-              >
-                Agent name
-              </label>
-              <div
-                className={cn(
-                  "flex min-h-11 items-center px-3",
-                  PERSONA_FIELD_SHELL_CLASS,
-                )}
-              >
-                <Input
-                  autoCorrect="off"
-                  className={cn(
-                    "h-8 px-0 py-0 leading-6",
-                    PERSONA_FIELD_CONTROL_CLASS,
-                  )}
-                  disabled={updateMutation.isPending}
-                  id="edit-agent-name"
-                  onChange={(event) => setName(event.target.value)}
-                  placeholder="Agent name"
-                  value={name}
-                />
-              </div>
-            </div>
+        <div className="grid grid-cols-[112px_minmax(0,1fr)] gap-5">
+          <AgentInstanceIdentitySection
+            avatarUrl={previewAvatarUrl}
+            disabled={connectionsDraft.isSaving}
+            name={name}
+            onEditTemplate={
+              onEditLinkedPersona
+                ? () => {
+                    handleOpenChange(false);
+                    onEditLinkedPersona();
+                  }
+                : undefined
+            }
+            onNameChange={setName}
+            onSelectAvatar={setAvatarUrl}
+            onUploadPendingChange={setIsAvatarUploadPending}
+          />
+          <div className="col-start-2 space-y-5">
+            {connectionsDraft.section}
 
             {/* Who can send instructions */}
             <CreateAgentRespondToField
               allowlist={respondToAllowlist}
-              disabled={updateMutation.isPending}
+              disabled={connectionsDraft.isSaving}
               mode={respondTo}
               onAllowlistChange={setRespondToAllowlist}
               onModeChange={setRespondTo}
@@ -955,7 +928,7 @@ export function AgentInstanceEditDialog({
                 Provider
               </label>
               <PersonaDropdownField
-                disabled={updateMutation.isPending}
+                disabled={connectionsDraft.isSaving}
                 id="edit-agent-runtime"
                 onValueChange={handleRuntimeDropdownChange}
                 options={runtimeDropdownOptions}
@@ -998,7 +971,7 @@ export function AgentInstanceEditDialog({
                       "h-8 px-0 py-0 leading-6",
                       PERSONA_FIELD_CONTROL_CLASS,
                     )}
-                    disabled={updateMutation.isPending}
+                    disabled={connectionsDraft.isSaving}
                     id="edit-agent-command"
                     onChange={(event) => setAgentCommand(event.target.value)}
                     placeholder="Full path or shell command"
@@ -1026,7 +999,7 @@ export function AgentInstanceEditDialog({
                   )}
                 </label>
                 <PersonaDropdownField
-                  disabled={updateMutation.isPending}
+                  disabled={connectionsDraft.isSaving}
                   id="edit-agent-llm-provider"
                   onValueChange={handleProviderDropdownChange}
                   options={providerDropdownOptions}
@@ -1047,7 +1020,7 @@ export function AgentInstanceEditDialog({
                         "h-8 px-0 py-0 leading-6",
                         PERSONA_FIELD_CONTROL_CLASS,
                       )}
-                      disabled={updateMutation.isPending}
+                      disabled={connectionsDraft.isSaving}
                       id="edit-agent-custom-provider"
                       onChange={(event) => setProvider(event.target.value)}
                       placeholder="Custom provider ID"
@@ -1060,7 +1033,7 @@ export function AgentInstanceEditDialog({
 
             {llmProviderFieldVisible && topLevelSecretEnvVar ? (
               <PersonaProviderApiKeyField
-                disabled={updateMutation.isPending}
+                disabled={connectionsDraft.isSaving}
                 envVarName={topLevelSecretEnvVar}
                 isInherited={apiKeyIsInherited}
                 inheritedLabel={apiKeyInheritedLabel}
@@ -1092,7 +1065,7 @@ export function AgentInstanceEditDialog({
                 )}
               </label>
               <PersonaDropdownField
-                disabled={updateMutation.isPending || modelDiscoveryLoading}
+                disabled={connectionsDraft.isSaving || modelDiscoveryLoading}
                 id="edit-agent-model"
                 onValueChange={handleModelDropdownChange}
                 options={modelDropdownOptions}
@@ -1113,7 +1086,7 @@ export function AgentInstanceEditDialog({
                       "h-8 px-0 py-0 leading-6",
                       PERSONA_FIELD_CONTROL_CLASS,
                     )}
-                    disabled={updateMutation.isPending}
+                    disabled={connectionsDraft.isSaving}
                     id="edit-agent-custom-model"
                     onChange={(event) => setModel(event.target.value)}
                     placeholder="Custom model ID"
@@ -1178,7 +1151,7 @@ export function AgentInstanceEditDialog({
                       acpCommand={acpCommand}
                       agentArgs={agentArgs}
                       autoRestartOnConfigChange={autoRestartOnConfigChange}
-                      disabled={updateMutation.isPending}
+                      disabled={connectionsDraft.isSaving}
                       envVars={envVars}
                       fileSatisfiedEnvKeys={fileSatisfiedEnvKeys}
                       hiddenEnvKeys={

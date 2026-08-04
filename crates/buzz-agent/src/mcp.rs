@@ -19,7 +19,7 @@ use crate::types::{clamp, AgentError, McpServerStdio, ToolDef, ToolResult, ToolR
 const SEP: &str = "__";
 const MAX_NAME_LEN: usize = 128;
 const MAX_QNAME_LEN: usize = 64;
-const MAX_TOOLS_PER_SESSION: usize = 128;
+pub(crate) const MAX_TOOLS_PER_SESSION: usize = 128;
 const MAX_DESCRIPTION_BYTES: usize = 1024;
 const MAX_SCHEMA_BYTES: usize = 4096;
 const MARKER_FIELD_MAX: usize = 256;
@@ -265,11 +265,11 @@ impl McpRegistry {
                     )));
                 }
                 let bare = t.name.to_string();
-                if !valid_name(&bare) || bare.contains("__") {
+                if !valid_name(&bare) || bare.contains(SEP) {
                     return Err(AgentError::Mcp(format!("invalid tool name: {bare}")));
                 }
                 let qname = format!("{}{SEP}{}", s.name, bare);
-                if qname.len() > MAX_QNAME_LEN {
+                if !valid_server_tool_name(&s.name, &bare) {
                     return Err(AgentError::Mcp(format!(
                         "qualified tool name too long: {} ({} > {MAX_QNAME_LEN})",
                         qname,
@@ -886,6 +886,12 @@ fn killpg(_pgid: u32, name: &str, stage: &str) {
     tracing::info!("relying on Drop to kill MCP {name} ({stage})");
 }
 
+pub(crate) fn valid_server_tool_name(server_name: &str, tool_name: &str) -> bool {
+    valid_name(tool_name)
+        && !tool_name.contains(SEP)
+        && format!("{server_name}{SEP}{tool_name}").len() <= MAX_QNAME_LEN
+}
+
 fn valid_name(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= MAX_NAME_LEN
@@ -1035,6 +1041,15 @@ fn configure_no_window(cmd: &mut Command) {
 #[cfg(test)]
 mod content_tests {
     use super::*;
+
+    #[test]
+    fn project_server_tool_contract_covers_character_and_qualified_name_limits() {
+        let server = format!("project_{}", "c".repeat(32));
+        assert!(valid_server_tool_name(&server, "analytics_weekly"));
+        assert!(!valid_server_tool_name(&server, "analytics.weekly_summary"));
+        assert!(!valid_server_tool_name(&server, "double__separator"));
+        assert!(!valid_server_tool_name(&server, &"x".repeat(23)));
+    }
 
     #[test]
     fn passthrough_includes_buzz_owner_attestation() {

@@ -8,6 +8,7 @@ import { AddAgentToChannelDialog } from "./AddAgentToChannelDialog";
 import { AddTeamToChannelDialog } from "./AddTeamToChannelDialog";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
 import { AgentDialog } from "./AgentDialog";
+import { AgentProjectLaunchDialog } from "./AgentProjectLaunchDialog";
 import { PersonaCatalogDialog } from "./PersonaCatalogDialog";
 import { PersonaDeleteDialog } from "./PersonaDeleteDialog";
 import { PersonaShareDialog } from "./PersonaShareDialog";
@@ -37,6 +38,7 @@ import {
 } from "@/shared/ui/dropdown-menu";
 import { PageHeader } from "@/shared/ui/PageHeader";
 import { getInheritedAgentDefaults } from "./bakedEnvHelpers";
+import type { AgentPersona } from "@/shared/api/types";
 
 export function AgentsView() {
   const { openPersonaProfilePanel, openProfilePanel } = useProfilePanel();
@@ -53,6 +55,8 @@ export function AgentsView() {
   // Exclusivity: create never sets `personaDialogState` (edit/dup/import do),
   // so the create-mode and definition-edit AgentDialog mounts never coexist.
   const [isCreateDialogOpen, setIsCreateDialogOpen] = React.useState(false);
+  const [personaToStart, setPersonaToStart] =
+    React.useState<AgentPersona | null>(null);
 
   function openUnifiedCreate() {
     personas.prepareCreate();
@@ -236,7 +240,8 @@ export function AgentsView() {
                 void agents.handleStart(pubkey);
               }}
               onStartPersona={(persona) => {
-                void agents.handleStartPersona(persona);
+                agents.setActionErrorMessage(null);
+                setPersonaToStart(persona);
               }}
               // Persona props
               personas={personas.libraryPersonas}
@@ -328,6 +333,21 @@ export function AgentsView() {
           }
         />
       ) : null}
+      {personaToStart ? (
+        <AgentProjectLaunchDialog
+          error={agents.actionErrorMessage}
+          isPending={agents.startingPersonaIds.has(personaToStart.id)}
+          key={personaToStart.id}
+          onOpenChange={(open) => {
+            if (!open) setPersonaToStart(null);
+          }}
+          onStart={(launchContext) =>
+            agents.handleStartPersona(personaToStart, launchContext)
+          }
+          open
+          persona={personaToStart}
+        />
+      ) : null}
       {agents.agentToAddToChannel ? (
         <AddAgentToChannelDialog
           agent={agents.agentToAddToChannel}
@@ -389,6 +409,7 @@ export function AgentsView() {
           onSubmit={(input, options) =>
             personas.handleSubmit(
               input,
+              undefined,
               undefined,
               undefined,
               undefined,

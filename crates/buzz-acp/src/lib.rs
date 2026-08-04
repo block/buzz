@@ -14,6 +14,19 @@ mod usage;
 
 pub use usage::TurnUsage;
 
+/// Validate an in-memory structured MCP configuration with the same parser and
+/// limits used by the harness at process startup.
+///
+/// `legacy_mcp_command` must be the effective legacy MCP executable, when one
+/// will be launched alongside the structured servers.
+pub fn validate_structured_mcp_config(
+    content: &[u8],
+    legacy_mcp_command: Option<&str>,
+) -> Result<(), String> {
+    config::validate_mcp_config_document(content, legacy_mcp_command)
+        .map_err(|error| error.to_string())
+}
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;

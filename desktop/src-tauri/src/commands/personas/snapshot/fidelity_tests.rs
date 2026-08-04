@@ -64,6 +64,9 @@ fn make_definition(slug: &str) -> ManagedAgentRecord {
         definition_respond_to_allowlist: vec![],
         definition_parallelism: None,
         relay_mesh: None,
+        project_scope: None,
+        pinned_tool_requirements: Vec::new(),
+        connection_bindings: std::collections::BTreeMap::new(),
     }
 }
 
@@ -88,6 +91,7 @@ fn make_snapshot(
             name_pool: vec![],
             idle_timeout_seconds: None,
             max_turn_duration_seconds: None,
+            tool_requirements: Vec::new(),
         },
         profile: AgentSnapshotProfile {
             display_name: "Test Agent".to_string(),

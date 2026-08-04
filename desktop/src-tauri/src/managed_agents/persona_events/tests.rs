@@ -58,6 +58,9 @@ fn sample_record() -> ManagedAgentRecord {
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
         relay_mesh: None,
+        project_scope: None,
+        pinned_tool_requirements: Vec::new(),
+        connection_bindings: std::collections::BTreeMap::new(),
     }
 }
 
@@ -161,6 +164,7 @@ fn sample_persona() -> AgentDefinition {
         parallelism: None,
         created_at: "2025-01-01T00:00:00Z".to_string(),
         updated_at: "2025-01-01T00:00:00Z".to_string(),
+        tool_requirements: Vec::new(),
     }
 }
 
@@ -325,6 +329,7 @@ fn content_matches_nip_ap_vector() {
         respond_to: None,
         respond_to_allowlist: Vec::new(),
         parallelism: None,
+        tool_requirements: Vec::new(),
     };
     assert_eq!(
         serde_json::to_string(&content).unwrap(),
@@ -388,6 +393,7 @@ fn content_matches_nip_ap_vector() {
         parallelism: None,
         created_at: "2025-01-01T00:00:00Z".to_string(),
         updated_at: "2025-01-01T00:00:00Z".to_string(),
+        tool_requirements: Vec::new(),
     };
     let event = build_persona_event(&record)
         .unwrap()
@@ -419,6 +425,7 @@ fn round_trip_minimal_persona() {
         parallelism: None,
         created_at: "2025-01-01T00:00:00Z".to_string(),
         updated_at: "2025-01-01T00:00:00Z".to_string(),
+        tool_requirements: Vec::new(),
     };
 
     let builder = build_persona_event(&record).unwrap();
@@ -516,6 +523,7 @@ fn quad_absent_definition_hash_stable_across_activation() {
         parallelism: None,
         created_at: "2026-01-01T00:00:00Z".to_string(),
         updated_at: "2026-01-01T00:00:00Z".to_string(),
+        tool_requirements: Vec::new(),
     };
     let live = persona_event_content(&record);
     // The reserved-era projection: identical fields, quad hardcoded off.
@@ -560,6 +568,7 @@ fn persona_from_event_content_for_test(content: PersonaEventContent) -> AgentDef
         parallelism: content.parallelism,
         created_at: "2026-01-01T00:00:00Z".to_string(),
         updated_at: "2026-01-01T00:00:00Z".to_string(),
+        tool_requirements: Vec::new(),
     }
 }
 
@@ -576,6 +585,7 @@ fn persona_content_hash_is_deterministic() {
         respond_to: None,
         respond_to_allowlist: Vec::new(),
         parallelism: None,
+        tool_requirements: Vec::new(),
     };
     let hash1 = persona_content_hash(&content);
     let hash2 = persona_content_hash(&content);
@@ -596,6 +606,7 @@ fn persona_content_hash_changes_on_edit() {
         respond_to: None,
         respond_to_allowlist: Vec::new(),
         parallelism: None,
+        tool_requirements: Vec::new(),
     };
     let mut content2 = content1.clone();
     content2.system_prompt = Some("Goodbye".to_string());

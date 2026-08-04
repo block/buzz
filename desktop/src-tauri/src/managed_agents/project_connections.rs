@@ -31,12 +31,21 @@ const MAX_ARGS: usize = 128;
 const MAX_ARG_BYTES: usize = 4096;
 const MAX_ENV_KEYS: usize = 128;
 const MAX_SECRET_BYTES: usize = 64 * 1024;
+const MAX_SECRET_FILE_BYTES: usize = 512 * 1024;
+const MAX_CONNECTION_STORE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_HEALTH_DETAIL_BYTES: usize = 512;
 const HEALTH_STALE_AFTER_SECONDS: i64 = 24 * 60 * 60;
 
 static PROJECT_CONNECTIONS_LOCK: Mutex<()> = Mutex::new(());
 
 mod transactions;
 use transactions::{commit_delete, commit_update, UpdateTransaction};
+mod store;
+#[cfg(any(test, not(feature = "system-keyring")))]
+use store::read_bounded_file;
+#[cfg(test)]
+use store::validate_stored_connection;
+use store::{load_store_unlocked, save_store_unlocked};
 
 pub(super) fn lock_project_connections() -> MutexGuard<'static, ()> {
     PROJECT_CONNECTIONS_LOCK
@@ -205,23 +214,9 @@ fn next_generation() -> String {
     Uuid::new_v4().simple().to_string()
 }
 
-fn is_lower_hex(value: &str, length: usize) -> bool {
-    value.len() == length
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-}
-
-fn validate_stored_connection(connection: &StoredProjectConnection) -> Result<(), String> {
-    if !is_lower_hex(&connection.id, 32)
-        || !is_lower_hex(&connection.generation, 32)
-        || !is_lower_hex(&connection.credential_generation, 32)
-        || !is_lower_hex(&connection.executable_sha256, 64)
-        || canonical_project_scope(&connection.project_scope)? != connection.project_scope
-    {
-        return Err("Project connection metadata is invalid.".to_string());
-    }
-    Ok(())
+pub(super) fn connection_mcp_server_name(connection_id: &str) -> String {
+    let stable_suffix = connection_id.get(..12).unwrap_or(connection_id);
+    format!("project_{stable_suffix}")
 }
 
 fn valid_stable_id(value: &str, max: usize) -> bool {
@@ -355,13 +350,6 @@ fn workspace_connection_dir(
     Ok(scoped)
 }
 
-fn connection_store_path(
-    app: &AppHandle,
-    scope: &ProjectConnectionScope,
-) -> Result<PathBuf, String> {
-    Ok(workspace_connection_dir(app, scope)?.join("connections.json"))
-}
-
 fn reject_unsafe_owner_file(path: &Path) -> Result<(), String> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -387,53 +375,6 @@ fn reject_unsafe_owner_file(path: &Path) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-fn load_store_unlocked(
-    app: &AppHandle,
-    scope: &ProjectConnectionScope,
-) -> Result<ProjectConnectionStore, String> {
-    let path = connection_store_path(app, scope)?;
-    reject_unsafe_owner_file(&path)?;
-    let bytes = match fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(ProjectConnectionStore::default());
-        }
-        Err(error) => {
-            return Err(format!(
-                "failed to read Project connections from {}: {error}",
-                path.display()
-            ));
-        }
-    };
-    let store: ProjectConnectionStore = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("failed to parse Project connections: {error}"))?;
-    if store.version != CONNECTION_STORE_VERSION {
-        return Err(format!(
-            "unsupported Project connection store version {}",
-            store.version
-        ));
-    }
-    if store.connections.len() > MAX_CONNECTIONS {
-        return Err("Project connection store exceeds its connection limit".to_string());
-    }
-    for connection in &store.connections {
-        validate_stored_connection(connection)?;
-    }
-    Ok(store)
-}
-
-fn save_store_unlocked(
-    app: &AppHandle,
-    scope: &ProjectConnectionScope,
-    store: &ProjectConnectionStore,
-) -> Result<(), String> {
-    let path = connection_store_path(app, scope)?;
-    reject_unsafe_owner_file(&path)?;
-    let bytes = serde_json::to_vec_pretty(store)
-        .map_err(|error| format!("failed to serialize Project connections: {error}"))?;
-    atomic_write_json_restricted(&path, &bytes)
 }
 
 #[cfg(feature = "system-keyring")]
@@ -462,8 +403,12 @@ fn connection_secret_path(
 }
 
 fn serialize_secrets(env: &BTreeMap<String, String>) -> Result<Vec<u8>, String> {
-    serde_json::to_vec(env)
-        .map_err(|error| format!("failed to prepare connection credentials: {error}"))
+    let serialized = serde_json::to_vec(env)
+        .map_err(|error| format!("failed to prepare connection credentials: {error}"))?;
+    if serialized.len() > MAX_SECRET_FILE_BYTES {
+        return Err("The connection secret values exceed Buzz's size limit.".to_string());
+    }
+    Ok(serialized)
 }
 
 fn store_secrets(
@@ -540,13 +485,26 @@ fn load_secrets(
             &connection.credential_generation,
         )?;
         reject_unsafe_owner_file(&path)?;
-        fs::read(path).map_err(|_| {
-            format!(
-                "Sign in again to '{}'. Its saved credentials are missing.",
-                connection.name
-            )
+        read_bounded_file(&path, MAX_SECRET_FILE_BYTES).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                format!(
+                    "Sign in again to '{}'. Its saved credentials are missing.",
+                    connection.name
+                )
+            } else {
+                format!(
+                    "Sign in again to '{}'. Its saved credentials are invalid.",
+                    connection.name
+                )
+            }
         })?
     };
+    if raw.len() > MAX_SECRET_FILE_BYTES {
+        return Err(format!(
+            "Sign in again to '{}'. Its saved credentials are invalid.",
+            connection.name
+        ));
+    }
     let env: BTreeMap<String, String> = serde_json::from_slice(&raw).map_err(|_| {
         format!(
             "Sign in again to '{}'. Its credentials are invalid.",
@@ -561,6 +519,19 @@ fn load_secrets(
             connection.name
         ));
     }
+    validate_connection_input(
+        &connection.name,
+        &connection.provider,
+        &connection.command,
+        &connection.args,
+        &env,
+    )
+    .map_err(|_| {
+        format!(
+            "Sign in again to '{}'. Its saved credentials are invalid.",
+            connection.name
+        )
+    })?;
     Ok(env)
 }
 
@@ -597,10 +568,13 @@ fn validate_connection_input(
     args: &[String],
     env: &BTreeMap<String, String>,
 ) -> Result<(), String> {
-    if name.trim().is_empty() || name.len() > MAX_NAME_BYTES {
+    if name.trim().is_empty() || name.len() > MAX_NAME_BYTES || name.chars().any(char::is_control) {
         return Err("Give this connection a short name.".to_string());
     }
-    if provider.trim().is_empty() || provider.len() > MAX_PROVIDER_BYTES {
+    if provider.trim().is_empty()
+        || provider.len() > MAX_PROVIDER_BYTES
+        || provider.chars().any(char::is_control)
+    {
         return Err("Name the service this connection uses.".to_string());
     }
     if command.trim().is_empty()
@@ -621,8 +595,16 @@ fn validate_connection_input(
         return Err("This connection has too many secret values.".to_string());
     }
     let mut total = 0usize;
+    let mut normalized_env_keys = BTreeSet::new();
     for (key, value) in env {
-        if !super::is_well_formed_env_key(key) || super::is_reserved_env_key(key) {
+        if !super::is_well_formed_env_key(key) {
+            let displayed = super::display_invalid_key(key);
+            return Err(format!(
+                "'{displayed}' cannot be used as a connection secret name."
+            ));
+        }
+        if super::is_reserved_env_key(key) || !normalized_env_keys.insert(key.to_ascii_uppercase())
+        {
             return Err(format!(
                 "'{key}' cannot be used as a connection secret name."
             ));
@@ -643,9 +625,7 @@ fn validate_connection_input(
     Ok(())
 }
 
-fn executable_sha256(path: &Path) -> Result<String, String> {
-    let mut file =
-        fs::File::open(path).map_err(|_| "Buzz could not read this executable.".to_string())?;
+fn executable_sha256_file(file: &mut fs::File) -> Result<String, String> {
     let mut digest = Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
     loop {
@@ -660,14 +640,22 @@ fn executable_sha256(path: &Path) -> Result<String, String> {
     Ok(hex::encode(digest.finalize()))
 }
 
-fn canonical_connection_command(command: &str) -> Result<(String, String), String> {
+fn executable_sha256(path: &Path) -> Result<String, String> {
+    let mut file =
+        fs::File::open(path).map_err(|_| "Buzz could not read this executable.".to_string())?;
+    executable_sha256_file(&mut file)
+}
+
+fn open_canonical_executable(command: &str) -> Result<(String, fs::File), String> {
     let path = Path::new(command.trim());
     if !path.is_absolute() {
         return Err("Enter the executable's absolute path.".to_string());
     }
     let canonical =
         fs::canonicalize(path).map_err(|_| "Buzz could not verify this executable.".to_string())?;
-    let metadata = canonical
+    let file = fs::File::open(&canonical)
+        .map_err(|_| "Buzz could not read this executable.".to_string())?;
+    let metadata = file
         .metadata()
         .map_err(|_| "Buzz could not verify this executable.".to_string())?;
     if !metadata.is_file() {
@@ -684,7 +672,12 @@ fn canonical_connection_command(command: &str) -> Result<(String, String), Strin
         .to_str()
         .map(str::to_string)
         .ok_or_else(|| "The MCP server path is not valid Unicode.".to_string())?;
-    let fingerprint = executable_sha256(Path::new(&canonical))?;
+    Ok((canonical, file))
+}
+
+fn canonical_connection_command(command: &str) -> Result<(String, String), String> {
+    let (canonical, mut file) = open_canonical_executable(command)?;
+    let fingerprint = executable_sha256_file(&mut file)?;
     Ok((canonical, fingerprint))
 }
 
@@ -705,6 +698,13 @@ fn health_for_display(mut connection: StoredProjectConnection) -> StoredProjectC
     }
     connection
 }
+
+mod agent_runtime;
+pub(crate) use agent_runtime::{
+    apply_agent_project_connection_update, materialize_agent_project_connections,
+    prepare_agent_project_assignment, remove_agent_project_connection_config,
+    validate_agent_project_connections, write_agent_project_connection_config,
+};
 
 fn find_connection<'a>(
     store: &'a ProjectConnectionStore,
@@ -898,6 +898,34 @@ pub fn delete_project_connection(
     connection_id: &str,
 ) -> Result<(), String> {
     let project_scope = validate_project_scope_for_app(app, project_scope)?;
+    let state = app.state::<crate::app_state::AppState>();
+    let _managed_agents_guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let records = super::load_managed_agents(app)?;
+    let mut users: Vec<_> = records
+        .iter()
+        .filter(|record| {
+            record
+                .project_scope
+                .as_ref()
+                .is_some_and(|scope| ProjectConnectionScope::from(scope) == project_scope)
+                && record
+                    .connection_bindings
+                    .values()
+                    .any(|bound| bound == connection_id)
+        })
+        .map(|record| record.name.clone())
+        .collect();
+    users.sort_by_key(|name| name.to_ascii_lowercase());
+    users.dedup();
+    if !users.is_empty() {
+        return Err(format!(
+            "This connection is used by {}. Remove the agent bindings before deleting it.",
+            users.join(", ")
+        ));
+    }
     let _guard = lock_project_connections();
     let mut store = load_store_unlocked(app, &project_scope)?;
     let index = store

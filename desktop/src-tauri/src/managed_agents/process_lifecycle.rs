@@ -137,6 +137,7 @@ pub fn finish_spawn(
     setup_mode: bool,
     adapter_availability: Option<super::AcpAvailabilityStatus>,
     start_nonce: String,
+    project_mcp_config_path: Option<std::path::PathBuf>,
     agent_name: &str,
 ) -> super::ManagedAgentProcess {
     let job = create_job_for_child(child.id());
@@ -149,6 +150,7 @@ pub fn finish_spawn(
     super::ManagedAgentProcess {
         child,
         log_path,
+        project_mcp_config_path,
         spawn_config_hash,
         setup_mode,
         adapter_availability,

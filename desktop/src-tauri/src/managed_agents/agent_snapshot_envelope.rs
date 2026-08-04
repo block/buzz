@@ -344,6 +344,7 @@ mod tests {
                 idle_timeout_seconds: None,
                 max_turn_duration_seconds: None,
                 source_is_builtin: false,
+                tool_requirements: Vec::new(),
             },
             profile: AgentSnapshotProfile {
                 display_name: "Locked Test".to_string(),
@@ -419,6 +420,9 @@ mod tests {
             agent_command_override: None,
             persona_source_version: None,
             provider: None,
+            project_scope: None,
+            pinned_tool_requirements: Vec::new(),
+            connection_bindings: std::collections::BTreeMap::new(),
         }
     }
 

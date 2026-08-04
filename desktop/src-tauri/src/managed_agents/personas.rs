@@ -126,6 +126,7 @@ fn built_in_persona_records(now: &str) -> Vec<AgentDefinition> {
             source_team_persona_slug: None,
             catalog_source: None,
             env_vars: std::collections::BTreeMap::new(),
+            tool_requirements: Vec::new(),
             respond_to: None,
             respond_to_allowlist: Vec::new(),
             parallelism: None,

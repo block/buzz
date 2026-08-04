@@ -216,6 +216,9 @@ mod tests {
             definition_respond_to_allowlist: Vec::new(),
             definition_parallelism: None,
             relay_mesh: None,
+            project_scope: None,
+            pinned_tool_requirements: Vec::new(),
+            connection_bindings: std::collections::BTreeMap::new(),
         }
     }
 

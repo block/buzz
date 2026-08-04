@@ -651,7 +651,6 @@ impl AcpClient {
         if let Some(merged) = codex_config_value {
             cmd.env("CODEX_CONFIG", merged);
         }
-
         // Spawn the agent in its own process group so SIGKILL doesn't propagate
         // to the harness's own process group on Unix.
         // tokio::process::Command::process_group is a stable tokio API (no extra imports needed).

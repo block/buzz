@@ -7,8 +7,8 @@ use uuid::Uuid;
 use crate::{
     app_state::AppState,
     managed_agents::{
-        apply_persona_behavior, load_personas, save_personas, try_regenerate_nest, AgentDefinition,
-        CatalogSource, CreatePersonaRequest,
+        apply_persona_behavior, load_personas, save_personas, try_regenerate_nest,
+        validate_tool_requirements, AgentDefinition, CatalogSource, CreatePersonaRequest,
     },
     util::now_iso,
 };
@@ -51,6 +51,7 @@ pub async fn create_persona(
             .filter(|s| !s.is_empty())
             .collect();
         crate::managed_agents::validate_user_env_keys(&input.env_vars)?;
+        validate_tool_requirements(&input.tool_requirements)?;
         let mut persona = AgentDefinition {
             id: Uuid::new_v4().to_string(),
             display_name,
@@ -67,6 +68,7 @@ pub async fn create_persona(
             source_team_persona_slug: None,
             catalog_source,
             env_vars: input.env_vars,
+            tool_requirements: input.tool_requirements,
             respond_to: None,
             respond_to_allowlist: Vec::new(),
             parallelism: None,

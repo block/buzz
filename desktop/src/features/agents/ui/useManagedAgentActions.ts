@@ -35,6 +35,7 @@ import {
   buildInstanceInputForDefinition,
   resolveStartRuntimeForDefinition,
 } from "../lib/instanceInputForDefinition";
+import type { AgentLaunchContext } from "./agentCreateIntent";
 
 export function useManagedAgentActions() {
   const { globalConfig } = useGlobalAgentConfig();
@@ -185,9 +186,12 @@ export function useManagedAgentActions() {
     setStartingPersonaIds(next);
   }
 
-  async function handleStartPersona(persona: AgentPersona) {
+  async function handleStartPersona(
+    persona: AgentPersona,
+    launchContext: AgentLaunchContext,
+  ): Promise<boolean> {
     if (startingPersonaIdsRef.current.has(persona.id)) {
-      return;
+      return false;
     }
     setPersonaStartPending(persona.id, true);
     clearFeedback();
@@ -198,7 +202,13 @@ export function useManagedAgentActions() {
         runtimes,
         globalConfig.preferred_runtime,
       );
-      const input = await buildInstanceInputForDefinition(persona, runtime);
+      const input = await buildInstanceInputForDefinition(
+        persona,
+        runtime,
+        undefined,
+        undefined,
+        launchContext,
+      );
 
       const created = await createAgentMutation.mutateAsync(input);
       setCreatedAgent(created);
@@ -219,10 +229,12 @@ export function useManagedAgentActions() {
 
       void managedAgentsQuery.refetch();
       void relayAgentsQuery.refetch();
+      return !created.spawnError;
     } catch (error) {
       setActionErrorMessage(
         error instanceof Error ? error.message : "Failed to start agent.",
       );
+      return false;
     } finally {
       setPersonaStartPending(persona.id, false);
     }

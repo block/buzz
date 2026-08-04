@@ -181,6 +181,9 @@ fn fixture(
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
         relay_mesh: None,
+        project_scope: None,
+        pinned_tool_requirements: Vec::new(),
+        connection_bindings: std::collections::BTreeMap::new(),
     }
 }
 
@@ -304,6 +307,7 @@ fn persona_with_provider(
         parallelism: None,
         created_at: "2026-06-09T00:00:00Z".to_string(),
         updated_at: "2026-06-09T00:00:00Z".to_string(),
+        tool_requirements: Vec::new(),
     }
 }
 
@@ -1220,8 +1224,6 @@ fn receipt_invalid_when_process_not_running() {
     );
 }
 
-// ── Test helpers ────────────────────────────────────────────────────────────
-
 fn minimal_record(pubkey: &str) -> crate::managed_agents::ManagedAgentRecord {
     serde_json::from_str(&format!(
         r#"{{
@@ -1251,9 +1253,7 @@ fn minimal_record(pubkey: &str) -> crate::managed_agents::ManagedAgentRecord {
 
 fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRuntime {
     use std::process::{Command, Stdio};
-    // Spawn a real child so ManagedAgentProcess's Child field is satisfied.
-    // `true` exits immediately with 0 — just a handle we need for type purposes.
-    //
+    // Spawn a short-lived child to satisfy ManagedAgentProcess's Child field.
     // Absolute `/usr/bin/true` on unix (present on both macOS and Linux):
     // parallel tests holding `lock_path_mutex` swap PATH to a tempdir, and a
     // bare `true` lookup during that window fails with NotFound (observed
@@ -1271,6 +1271,7 @@ fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRun
     let process = crate::managed_agents::ManagedAgentProcess {
         child,
         log_path: std::path::PathBuf::new(),
+        project_mcp_config_path: None,
         spawn_config_hash: 0,
         setup_mode: false,
         adapter_availability: None,
@@ -1280,8 +1281,6 @@ fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRun
     };
     crate::managed_agents::ManagedAgentPairRuntime::starting(process)
 }
-
-// ── restart_eligible tests ──────────────────────────────────────────────
 
 #[test]
 fn restart_eligible_true_when_non_orphan_has_hash_drift() {

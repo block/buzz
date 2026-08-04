@@ -209,6 +209,7 @@ fn persona_with_runtime(id: &str, runtime: Option<&str>) -> crate::managed_agent
         parallelism: None,
         created_at: "2026-06-09T00:00:00Z".to_string(),
         updated_at: "2026-06-09T00:00:00Z".to_string(),
+        tool_requirements: Vec::new(),
     }
 }
 
@@ -283,6 +284,9 @@ fn record_with(
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
         relay_mesh: None,
+        project_scope: None,
+        pinned_tool_requirements: Vec::new(),
+        connection_bindings: std::collections::BTreeMap::new(),
     }
 }
 
@@ -1729,9 +1733,7 @@ fn builtin_catalog_entry_has_empty_definition_env() {
         builtin.definition_env
     );
 }
-
 // ── Discovery publish via the PRODUCTION call path (stale-snapshot regression) ─
-//
 // These drive `discover_acp_runtimes_from` itself and land a save/delete in
 // the window between its directory scan and its registry publish (via the
 // `pre_publish_test_hook` seam). They red if discovery's final line reverts
@@ -1742,14 +1744,12 @@ fn builtin_catalog_entry_has_empty_definition_env() {
 /// RAII guard: installs the pre-publish hook, clears it on drop (even on
 /// panic) so a failing test cannot poison later ones.
 struct PrePublishHookGuard;
-
 impl PrePublishHookGuard {
     fn install(hook: Box<dyn Fn() + Send>) -> Self {
         super::pre_publish_test_hook::set(Some(hook));
         PrePublishHookGuard
     }
 }
-
 impl Drop for PrePublishHookGuard {
     fn drop(&mut self) {
         super::pre_publish_test_hook::set(None);

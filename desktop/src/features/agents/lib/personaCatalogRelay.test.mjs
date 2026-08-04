@@ -22,6 +22,7 @@ function personaEvent({
   avatarUrl = null,
   respondTo = null,
   sharedTag,
+  toolRequirements = [],
 }) {
   return {
     id,
@@ -47,6 +48,7 @@ function personaEvent({
       respond_to: respondTo,
       respond_to_allowlist: respondTo === "allowlist" ? [BOB] : undefined,
       parallelism: 4,
+      tool_requirements: toolRequirements,
     }),
     sig: "sig",
   };
@@ -64,6 +66,55 @@ test("a shared kind 30175 persona from Alice is discoverable by Bob", () => {
   assert.equal(personas[0].shared, true);
   assert.equal(personas[0].catalogSource.ownerPubkey, ALICE);
   assert.equal(personas[0].catalogSource.isOwn, false);
+});
+
+test("catalog personas preserve logical tool requirements without credentials", () => {
+  const [persona] = catalogPersonasFromPublications(
+    catalogPublicationsFromEvents([
+      personaEvent({
+        createdAt: 1,
+        id: "alice-analytics",
+        toolRequirements: [
+          {
+            id: "analytics",
+            label: "Analytics reports",
+            capability: "mcp.tool.run_report",
+            required: true,
+          },
+        ],
+      }),
+    ]),
+    [],
+    BOB,
+  );
+
+  assert.deepEqual(persona.toolRequirements, [
+    {
+      id: "analytics",
+      label: "Analytics reports",
+      capability: "mcp.tool.run_report",
+      required: true,
+    },
+  ]);
+});
+
+test("an invalid tool requirement rejects the shared catalog head", () => {
+  const publications = catalogPublicationsFromEvents([
+    personaEvent({
+      createdAt: 1,
+      id: "unsafe-tools",
+      toolRequirements: [
+        {
+          id: "__proto__",
+          label: "Unsafe",
+          capability: "mcp.tool.run_report",
+          required: true,
+        },
+      ],
+    }),
+  ]);
+
+  assert.deepEqual(publications, []);
 });
 
 test("a newer unshared head hides the older shared head", () => {
@@ -356,7 +407,7 @@ test("test_foreign_entry_with_no_local_copy_stays_unselected", () => {
     BOB,
   );
 
-  assert.equal(personas[0].id, "catalog:" + ALICE + ":reviewer");
+  assert.equal(personas[0].id, `catalog:${ALICE}:reviewer`);
   assert.equal(personas[0].isActive, false);
 });
 
@@ -377,7 +428,7 @@ test("test_catalog_source_match_is_scoped_to_the_publishing_owner", () => {
     ALICE,
   );
 
-  assert.equal(personas[0].id, "catalog:" + BOB + ":reviewer");
+  assert.equal(personas[0].id, `catalog:${BOB}:reviewer`);
   assert.equal(personas[0].isActive, false);
 });
 

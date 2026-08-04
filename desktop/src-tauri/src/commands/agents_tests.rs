@@ -62,6 +62,9 @@ fn bare_agent_record(
         definition_respond_to: None,
         definition_respond_to_allowlist: vec![],
         definition_parallelism: None,
+        project_scope: None,
+        pinned_tool_requirements: Vec::new(),
+        connection_bindings: std::collections::BTreeMap::new(),
     }
 }
 fn persona_record(id: &str, model: Option<&str>, provider: Option<&str>) -> AgentDefinition {
@@ -87,6 +90,7 @@ fn persona_record(id: &str, model: Option<&str>, provider: Option<&str>) -> Agen
         parallelism: None,
         created_at: "".to_string(),
         updated_at: "".to_string(),
+        tool_requirements: Vec::new(),
     }
 }
 

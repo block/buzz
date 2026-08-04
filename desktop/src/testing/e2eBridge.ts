@@ -14,7 +14,12 @@ import { relayClient } from "@/shared/api/relayClient";
 import { activateRateLimit } from "@/shared/api/relayRateLimitGate";
 import { resolveAgentParallelism } from "@/features/agents/lib/agentParallelism";
 import type { ConnectionState } from "@/shared/api/relayClientShared";
-import type { ChannelTemplate, RelayEvent } from "@/shared/api/types";
+import type {
+  AgentProjectScope,
+  AgentToolRequirement,
+  ChannelTemplate,
+  RelayEvent,
+} from "@/shared/api/types";
 import { getMarkdownParseCount } from "@/shared/ui/markdown/nodeCache";
 import { syncAgentTurnsFromEvents } from "@/features/agents/activeAgentTurnsStore";
 import { recordTimeoutFromRejection } from "@/features/moderation/lib/timeoutStore";
@@ -95,6 +100,9 @@ export type MockManagedAgentSeed = {
   respondToAllowlist?: string[];
   /** Per-agent env vars seeded into the mock store. */
   envVars?: Record<string, string>;
+  projectScope?: AgentProjectScope | null;
+  toolRequirements?: AgentToolRequirement[];
+  connectionBindings?: Record<string, string>;
 };
 
 type MockManagedAgentRuntimeSeed = {
@@ -131,6 +139,7 @@ type MockPersonaSeed = {
   namePool?: string[];
   respondTo?: "owner-only" | "allowlist" | "anyone";
   respondToAllowlist?: string[];
+  toolRequirements?: AgentToolRequirement[];
 };
 
 type MockTeamSeed = {
@@ -180,6 +189,8 @@ type E2eConfig = {
     pocketVoiceImportResult?: "success" | "cancel" | "invalid";
     /** Advertised HEAD for the first mock project without adding that branch. */
     projectHeadBranch?: string;
+    /** Optional discussion channel extension tag for the first mock Project. */
+    projectChannelId?: string;
     /** Builderlab account returned by hosted-community onboarding. Null/omitted = signed out. */
     builderlabAuth?: {
       email?: string;
@@ -836,6 +847,9 @@ type RawManagedAgent = {
     | { type: "local" }
     | { type: "provider"; id: string; config: Record<string, unknown> };
   backend_agent_id: string | null;
+  project_scope?: AgentProjectScope | null;
+  tool_requirements?: AgentToolRequirement[];
+  connection_bindings?: Record<string, string>;
   respond_to: "owner-only" | "allowlist" | "anyone";
   respond_to_allowlist: string[];
 };
@@ -893,6 +907,7 @@ type RawPersona = {
   source_team?: string | null;
   catalog_source?: { owner_pubkey: string; persona_id: string } | null;
   env_vars?: Record<string, string>;
+  tool_requirements?: AgentToolRequirement[];
   respond_to?: string | null;
   respond_to_allowlist?: string[];
   parallelism?: number | null;
@@ -1645,6 +1660,13 @@ function cloneManagedAgent(agent: MockManagedAgent): RawManagedAgent {
     auto_restart_on_config_change: agent.auto_restart_on_config_change ?? true,
     backend: agent.backend ?? { type: "local" as const },
     backend_agent_id: agent.backend_agent_id ?? null,
+    project_scope: agent.project_scope
+      ? { ...agent.project_scope }
+      : (agent.project_scope ?? null),
+    tool_requirements: (agent.tool_requirements ?? []).map((requirement) => ({
+      ...requirement,
+    })),
+    connection_bindings: { ...(agent.connection_bindings ?? {}) },
     respond_to: agent.respond_to ?? "owner-only",
     respond_to_allowlist: agent.respond_to_allowlist
       ? [...agent.respond_to_allowlist]
@@ -2198,6 +2220,11 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     auto_restart_on_config_change: seed.autoRestartOnConfigChange ?? true,
     backend: seed.backend ?? { type: "local" },
     backend_agent_id: null,
+    project_scope: seed.projectScope ? { ...seed.projectScope } : null,
+    tool_requirements: (seed.toolRequirements ?? []).map((requirement) => ({
+      ...requirement,
+    })),
+    connection_bindings: { ...(seed.connectionBindings ?? {}) },
     respond_to: seed.respondTo ?? "owner-only",
     respond_to_allowlist: seed.respondToAllowlist ?? [],
     private_key_nsec: `nsec1mock${seed.pubkey.slice(0, 20)}`,
@@ -2328,6 +2355,7 @@ function resetMockPersonas(config?: E2eConfig) {
     is_active: activePersonaIds.has(persona.id),
     shared: false,
     source_team: null,
+    tool_requirements: [],
     created_at: now,
     updated_at: now,
   }));
@@ -2352,6 +2380,9 @@ function resetMockPersonas(config?: E2eConfig) {
       shared: persona.shared ?? false,
       source_team: persona.sourceTeam ?? null,
       env_vars: { ...(persona.envVars ?? {}) },
+      tool_requirements: (persona.toolRequirements ?? []).map(
+        (requirement) => ({ ...requirement }),
+      ),
       created_at: now,
       updated_at: persona.updatedAt ?? now,
     });
@@ -5581,6 +5612,11 @@ function buildMockProjectEvents(): RelayEvent[] {
         ["d", "buzz"],
         ["name", "buzz"],
         ["description", "The complete Buzz community platform."],
+        [
+          "buzz-channel",
+          getConfig()?.mock?.projectChannelId ??
+            "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
+        ],
         ["a", `${KIND_REPO_ANNOUNCEMENT}:${projectOwner}:buzz`],
         ["a", `${KIND_REPO_ANNOUNCEMENT}:${ALICE_PUBKEY}:relay-tools`],
       ],
@@ -7961,7 +7997,12 @@ async function handleGetAgentMemory(
 }
 
 async function handleListPersonas(): Promise<RawPersona[]> {
-  return mockPersonas.map((persona) => ({ ...persona }));
+  return mockPersonas.map((persona) => ({
+    ...persona,
+    tool_requirements: (persona.tool_requirements ?? []).map((requirement) => ({
+      ...requirement,
+    })),
+  }));
 }
 
 type PersonaBehaviorInput = {
@@ -7995,6 +8036,7 @@ async function handleCreatePersona(args: {
     model?: string;
     provider?: string;
     envVars?: Record<string, string>;
+    toolRequirements?: AgentToolRequirement[];
     behavior?: PersonaBehaviorInput;
     catalogSource?: { ownerPubkey: string; personaId: string };
   };
@@ -8023,6 +8065,9 @@ async function handleCreatePersona(args: {
         }
       : null,
     env_vars: { ...(args.input.envVars ?? {}) },
+    tool_requirements: (args.input.toolRequirements ?? []).map(
+      (requirement) => ({ ...requirement }),
+    ),
     created_at: now,
     updated_at: now,
   };
@@ -8041,6 +8086,7 @@ type MockUpdatePersonaInput = {
   model?: string;
   provider?: string;
   envVars?: Record<string, string>;
+  toolRequirements?: AgentToolRequirement[];
   behavior?: PersonaBehaviorInput;
 };
 
@@ -8076,6 +8122,11 @@ async function applyMockPersonaUpdate(
   if (input.envVars !== undefined) {
     // Absent = preserve; present = replace entirely (matches Rust handler).
     persona.env_vars = { ...input.envVars };
+  }
+  if (input.toolRequirements !== undefined) {
+    persona.tool_requirements = input.toolRequirements.map((requirement) => ({
+      ...requirement,
+    }));
   }
   applyMockPersonaBehavior(persona, input.behavior);
   persona.updated_at = new Date().toISOString();
@@ -8180,6 +8231,7 @@ function upsertMockPersonaEvent(persona: RawPersona): void {
       respond_to: persona.respond_to ?? null,
       respond_to_allowlist: persona.respond_to_allowlist ?? [],
       parallelism: persona.parallelism ?? null,
+      tool_requirements: persona.tool_requirements ?? [],
     }),
     sig: "0".repeat(128),
   };
@@ -8430,6 +8482,8 @@ async function handleCreateManagedAgent(
       backend?:
         | { type: "local" }
         | { type: "provider"; id: string; config: Record<string, unknown> };
+      projectScope?: AgentProjectScope;
+      connectionBindings?: Record<string, string>;
       respondTo?: "owner-only" | "allowlist" | "anyone";
       respondToAllowlist?: string[];
     };
@@ -8517,6 +8571,13 @@ async function handleCreateManagedAgent(
     auto_restart_on_config_change: true,
     backend: args.input.backend ?? { type: "local" as const },
     backend_agent_id: null,
+    project_scope: args.input.projectScope
+      ? { ...args.input.projectScope }
+      : null,
+    tool_requirements: (linkedPersona?.tool_requirements ?? []).map(
+      (requirement) => ({ ...requirement }),
+    ),
+    connection_bindings: { ...(args.input.connectionBindings ?? {}) },
     respond_to: mintRespondTo,
     respond_to_allowlist: [...mintRespondToAllowlist],
     private_key_nsec: `nsec1mock${pubkey.slice(0, 20)}`,
@@ -8763,6 +8824,8 @@ async function handleUpdateManagedAgent(args: {
     model?: string | null;
     systemPrompt?: string | null;
     envVars?: Record<string, string>;
+    projectScope?: AgentProjectScope | null;
+    connectionBindings?: Record<string, string>;
     respondTo?: "owner-only" | "allowlist" | "anyone";
     respondToAllowlist?: string[];
   };
@@ -8779,6 +8842,14 @@ async function handleUpdateManagedAgent(args: {
   }
   if (args.input.envVars !== undefined) {
     agent.env_vars = { ...args.input.envVars };
+  }
+  if (args.input.projectScope !== undefined) {
+    agent.project_scope = args.input.projectScope
+      ? { ...args.input.projectScope }
+      : null;
+  }
+  if (args.input.connectionBindings !== undefined) {
+    agent.connection_bindings = { ...args.input.connectionBindings };
   }
   if (args.input.respondTo !== undefined) {
     agent.respond_to = args.input.respondTo;
@@ -11839,6 +11910,7 @@ export function maybeInstallE2eTauriMocks() {
             const content = JSON.parse(nostrEvent.content) as {
               display_name?: string;
               system_prompt?: string;
+              tool_requirements?: AgentToolRequirement[];
             };
             const now = new Date().toISOString();
             const existing = mockPersonas.find((p) => p.id === dTag);
@@ -11851,6 +11923,11 @@ export function maybeInstallE2eTauriMocks() {
                 content.display_name ?? existing.display_name;
               existing.system_prompt =
                 content.system_prompt ?? existing.system_prompt;
+              existing.tool_requirements = (
+                content.tool_requirements ??
+                existing.tool_requirements ??
+                []
+              ).map((requirement) => ({ ...requirement }));
               existing.shared = shared;
               existing.updated_at = now;
             } else {
@@ -11863,6 +11940,9 @@ export function maybeInstallE2eTauriMocks() {
                 is_active: true,
                 shared,
                 env_vars: {},
+                tool_requirements: (content.tool_requirements ?? []).map(
+                  (requirement) => ({ ...requirement }),
+                ),
                 created_at: now,
                 updated_at: now,
               });

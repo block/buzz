@@ -9,7 +9,7 @@ use buzz_core_pkg::kind::{event_is_shared, KIND_PERSONA};
 use nostr::{EventBuilder, Kind, Tag};
 use serde::{Deserialize, Serialize};
 
-use super::{AgentDefinition, ManagedAgentRecord};
+use super::{AgentDefinition, AgentToolRequirement, ManagedAgentRecord};
 use crate::app_state::AppState;
 
 /// The JSON body stored in a persona event's content field.
@@ -39,6 +39,10 @@ pub struct PersonaEventContent {
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub name_pool: Vec<String>,
+    /// Portable logical requirements. Project connection ids and credentials
+    /// are intentionally instance-local and never enter persona events.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_requirements: Vec<AgentToolRequirement>,
     /// Definition-level defaults copied onto instances at creation
     /// (NIP-AP behavioral fields). Absent = defer to client defaults;
     /// `skip_serializing_if` keeps pre-revision hashes stable.
@@ -178,6 +182,7 @@ pub fn persona_from_event(event: &nostr::Event) -> Result<AgentDefinition, Strin
 
     let content: PersonaEventContent = serde_json::from_str(event.content.as_ref())
         .map_err(|e| format!("failed to parse persona event content: {e}"))?;
+    super::validate_tool_requirements(&content.tool_requirements)?;
 
     let created_at = event.created_at.to_human_datetime();
 
@@ -197,6 +202,7 @@ pub fn persona_from_event(event: &nostr::Event) -> Result<AgentDefinition, Strin
         source_team_persona_slug: Some(d_tag),
         catalog_source: None,
         env_vars: BTreeMap::new(),
+        tool_requirements: content.tool_requirements,
         respond_to: content.respond_to,
         respond_to_allowlist: content.respond_to_allowlist,
         parallelism: content.parallelism,
@@ -388,6 +394,7 @@ pub fn persona_event_content(record: &AgentDefinition) -> PersonaEventContent {
         model: record.model.clone(),
         provider: record.provider.clone(),
         name_pool: record.name_pool.clone(),
+        tool_requirements: record.tool_requirements.clone(),
         // NIP-AP behavioral defaults: live since the create-path unification
         // (B5) — carried on AgentDefinition in wire shape and copied verbatim.
         // Quad-absent records serialize identically to the reserved era, so

@@ -7,6 +7,11 @@
  */
 export type AgentCreateIntent = "definition" | "definition_start";
 
+export type AgentLaunchContext = {
+  projectScope: AgentProjectScope;
+  connectionBindings: Record<string, string>;
+};
+
 /**
  * Default intent for callers that don't pass one. Un-migrated callers of
  * `usePersonaActions.handleSubmit` (AgentDefinitionDialog's duplicate path
@@ -18,3 +23,4 @@ export function resolveCreateIntent(
 ): AgentCreateIntent {
   return intent ?? "definition_start";
 }
+import type { AgentProjectScope } from "@/shared/api/types";

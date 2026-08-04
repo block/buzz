@@ -1,6 +1,7 @@
 use nostr::{Keys, ToBech32};
 use tauri::{AppHandle, State};
 
+use crate::managed_agents::project_connections;
 use crate::{
     app_state::AppState,
     managed_agents::{
@@ -808,6 +809,12 @@ pub async fn create_managed_agent(
         let snapshot_model = persona_snapshot.as_ref().and_then(|s| s.model.clone());
         let snapshot_provider = persona_snapshot.as_ref().and_then(|s| s.provider.clone());
         let snapshot_source_version = persona_snapshot.as_ref().map(|s| s.source_version.clone());
+        let (pinned_tool_requirements, project_scope) =
+            project_connections::prepare_agent_project_assignment(
+                &app,
+                linked_persona.as_ref(),
+                input.project_scope.as_ref(),
+            )?;
         let effective_provider = snapshot_provider
             .or_else(|| input.provider.as_deref().and_then(trim_to_optional_string));
         let mut effective_model =
@@ -817,7 +824,6 @@ pub async fn create_managed_agent(
         {
             effective_model = Some(crate::managed_agents::RELAY_MESH_AUTO_MODEL_ID.to_string());
         }
-
         // Mint-time behavioral quad: explicit input wins, then the linked
         // definition's NIP-AP defaults, then client defaults. The ONLY parse
         // point for definition behavioral strings — fails loudly on a bad
@@ -828,7 +834,6 @@ pub async fn create_managed_agent(
             input.parallelism,
             linked_persona.as_ref(),
         )?;
-
         let record = crate::managed_agents::ManagedAgentRecord {
             pubkey: pubkey.clone(),
             name: name.clone(),
@@ -868,6 +873,9 @@ pub async fn create_managed_agent(
             model: effective_model.clone(),
             provider: effective_provider.clone(),
             persona_source_version: snapshot_source_version,
+            project_scope,
+            pinned_tool_requirements,
+            connection_bindings: input.connection_bindings.clone(),
             // Provider agents are managed externally — force false.
             start_on_app_launch: if input.backend != BackendKind::Local {
                 false
@@ -914,11 +922,9 @@ pub async fn create_managed_agent(
                 relay_mesh.clone()
             },
         };
-
+        project_connections::validate_agent_project_connections(&app, &record)?;
         records.push(record);
-
         save_managed_agents(&app, &records)?;
-
         let record = records
             .iter()
             .find(|record| record.pubkey == pubkey)
@@ -1269,7 +1275,6 @@ pub async fn stop_managed_agent(
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
-
 // Async so the blocking body (disk reads/writes, process termination, keyring
 // delete, nest regeneration) runs off the main UI thread via spawn_blocking.
 #[tauri::command]
@@ -1291,7 +1296,6 @@ pub async fn delete_managed_agent(
                 .managed_agent_processes
                 .lock()
                 .map_err(|error| error.to_string())?;
-
             let (sync_changed, exited_pubkeys) = sync_managed_agent_processes(
                 &mut records,
                 &mut runtimes,
@@ -1303,7 +1307,6 @@ pub async fn delete_managed_agent(
             for pubkey in &exited_pubkeys {
                 state.clear_agent_session_caches(pubkey);
             }
-
             // Guard: reject deletion of deployed remote agents unless explicitly forced.
             // This turns "don't orphan remote infra" from a UI convention into a backend
             // invariant — a buggy or compromised IPC caller cannot silently orphan a live
@@ -1320,7 +1323,6 @@ pub async fn delete_managed_agent(
                     );
                 }
             }
-
             if let Some(record) = records.iter_mut().find(|record| record.pubkey == pubkey) {
                 stop_managed_agent_process(&app, record, &mut runtimes)?;
             }
@@ -1349,13 +1351,11 @@ pub async fn delete_managed_agent(
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
-
 // Remote agent shutdown is handled entirely by the frontend:
 // 1. Frontend sends "!shutdown" @mention via WebSocket (signed by user's key)
 // 2. Harness sees it, exits gracefully, sets presence to "offline"
 // 3. Desktop's existing presence polling sees "offline" — UI updates automatically
 // No backend Tauri command needed. Presence IS the status.
-
 #[path = "agents_deploy.rs"]
 mod deploy;
 use deploy::build_deploy_payload;
