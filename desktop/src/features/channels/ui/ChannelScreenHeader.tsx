@@ -85,16 +85,12 @@ export function ChannelScreenHeader({
         terminalPanel.mode === "closed" ? "Open Buzz Term" : "Hide Buzz Term"
       }
       onClick={toggleTerminalPanel}
-      size="icon-xs"
+      size="icon"
       title="Buzz Term (⌘J)"
-      variant={terminalPanel.mode === "closed" ? "ghost" : "secondary"}
+      type="button"
+      variant={terminalPanel.mode === "closed" ? "outline" : "secondary"}
     >
-      <span className="relative">
-        <SquareTerminal className="h-4 w-4" />
-        {terminalPanel.sessionChannelIds.has(activeChannel.id) ? (
-          <span className="absolute -right-1 -top-1 h-1.5 w-1.5 rounded-full bg-primary" />
-        ) : null}
-      </span>
+      <SquareTerminal />
     </Button>
   ) : null;
   const channelActions = activeChannel ? (

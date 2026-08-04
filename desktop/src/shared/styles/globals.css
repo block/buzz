@@ -10,6 +10,7 @@
 @import "./globals/skeleton.css";
 @import "./globals/spoilers.css";
 @import "./globals/components.css";
+@import "./globals/terminal.css";
 @import "./globals/utilities.css";
 @import "./globals/media-controls.css";
 @import "./globals/avatar-framing.css";

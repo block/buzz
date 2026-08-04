@@ -15,6 +15,7 @@ import {
 } from "./terminalState";
 import { buildTerminalBanner } from "./terminalBanner";
 import { paintTerminalBanner } from "./terminalBannerPainter";
+import { buildBannerColorTable, phaseAt } from "./terminalBannerWave";
 import {
   TERMINAL_CELL_METRICS,
   type TerminalFrame,
@@ -44,11 +45,15 @@ type TerminalSubstrateProps = {
   focusReportingEnabled: boolean;
   enabled?: boolean;
   mode?: "docked" | "maximized";
+  visible?: boolean;
   onHide?: () => void;
   onModeChange?: (mode: "docked" | "maximized") => void;
   onToggle?: () => void;
   onFrameConsumed?: (frame: TerminalFrame) => void;
   onViewportSize?: (size: TerminalViewportSize) => void;
+  viewportReportingEnabled?: boolean;
+  showSplash?: boolean;
+  onSplashStarted?: () => void;
   onInput: (text: string) => void;
   /** Whole cells scrolled, keeping the DOM's sign: negative goes back. */
   onScroll: (lines: number) => void;
@@ -69,17 +74,9 @@ function isToggleChord(event: KeyboardEvent): boolean {
 
 const { width: CELL_WIDTH, height: CELL_HEIGHT } = TERMINAL_CELL_METRICS;
 const NOOP = () => {};
-
-function hasVisibleOutput(frame: TerminalFrame): boolean {
-  return frame.rows.some((row) =>
-    row.spans.some((span) =>
-      span.clusters.some((cluster) => cluster.text.trim().length > 0),
-    ),
-  );
-}
+const SPLASH_DURATION_MS = 2_500;
 
 export function TerminalSubstrate({
-  channelName,
   frame,
   sessionFrames,
   sessions,
@@ -87,11 +84,15 @@ export function TerminalSubstrate({
   focusReportingEnabled,
   enabled = true,
   mode = "docked",
+  visible = true,
   onHide = NOOP,
   onModeChange = NOOP,
   onToggle,
   onFrameConsumed,
   onViewportSize,
+  viewportReportingEnabled = true,
+  showSplash = true,
+  onSplashStarted,
   onInput,
   onScroll,
   onTerminalFocusChange,
@@ -110,8 +111,13 @@ export function TerminalSubstrate({
   const paintedPaletteRef = React.useRef(terminalPalette);
   const paintedSessionRef = React.useRef<string | null>(null);
   const reportedFocusRef = React.useRef<boolean | null>(null);
+  const reportedViewportSizeRef = React.useRef<TerminalViewportSize | null>(
+    null,
+  );
+  const dragCleanupRef = React.useRef<(() => void) | null>(null);
+  const resizeReportFrameRef = React.useRef(0);
+  const resizingRef = React.useRef(false);
   const scrollBySessionRef = React.useRef(new Map<string, number>());
-  const revealedRef = React.useRef(false);
   const activeSession = sessions.find((session) => session.active);
   const activeSessionId = activeSession?.id ?? null;
   const frames = React.useMemo(
@@ -122,15 +128,12 @@ export function TerminalSubstrate({
   );
   const [owner, setOwner] = React.useState<"buzz" | "terminal">("buzz");
   const [viewport, setViewport] = React.useState({ columns: 1, rows: 1 });
-  const [welcomeVisible, setWelcomeVisible] = React.useState(true);
+  const [welcomeVisible, setWelcomeVisible] = React.useState(false);
   const [cursorPainted, setCursorPainted] = React.useState(true);
   const [cursorReset, setCursorReset] = React.useState(0);
   const [reducedMotion, setReducedMotion] = React.useState(
     () => window.matchMedia("(prefers-reduced-motion: reduce)").matches,
   );
-  const shortcutLabel = /Mac|iPhone|iPad/.test(navigator.platform)
-    ? "⌘J"
-    : "CTRL+J";
   const [dockHeight, setDockHeight] = React.useState(() => {
     const stored = Number.parseInt(
       window.localStorage.getItem("buzz-terminal-dock-height") ?? "",
@@ -169,6 +172,12 @@ export function TerminalSubstrate({
   const consumeFrame = React.useEffectEvent((nextFrame: TerminalFrame) => {
     onFrameConsumed?.(nextFrame);
   });
+  const beginSplash = React.useEffectEvent(() => {
+    if (!showSplash) return false;
+    onSplashStarted?.();
+    setWelcomeVisible(true);
+    return true;
+  });
   /**
    * Tab chords are handled at the window in capture phase, like the ⌘J
    * handoff, so they win over the focused textarea. Gated on terminal
@@ -194,6 +203,7 @@ export function TerminalSubstrate({
     return true;
   });
   const reportViewportSize = React.useEffectEvent(() => {
+    if (!viewportReportingEnabled) return;
     const canvas = canvasRef.current;
     if (!canvas) return;
     const bounds = canvas.getBoundingClientRect();
@@ -202,13 +212,32 @@ export function TerminalSubstrate({
     const pixelHeight = Math.max(1, Math.round(bounds.height * dpr));
     const columns = Math.max(1, Math.floor(bounds.width / CELL_WIDTH));
     const rows = Math.max(1, Math.floor(bounds.height / CELL_HEIGHT));
+    const size = { columns, rows, pixelWidth, pixelHeight };
+    if (resizingRef.current) return;
     setViewport((current) =>
       current.columns === columns && current.rows === rows
         ? current
         : { columns, rows },
     );
-    onViewportSize?.({ columns, rows, pixelWidth, pixelHeight });
+    const reported = reportedViewportSizeRef.current;
+    if (
+      reported?.columns === columns &&
+      reported.rows === rows &&
+      reported.pixelWidth === pixelWidth &&
+      reported.pixelHeight === pixelHeight
+    )
+      return;
+    reportedViewportSizeRef.current = size;
+    onViewportSize?.(size);
   });
+
+  React.useEffect(
+    () => () => {
+      dragCleanupRef.current?.();
+      window.cancelAnimationFrame(resizeReportFrameRef.current);
+    },
+    [],
+  );
 
   React.useEffect(() => {
     if (!enabled) forceBuzzFallback();
@@ -240,10 +269,14 @@ export function TerminalSubstrate({
     reportViewportSize();
     const ResizeObserverConstructor = window.ResizeObserver;
     if (!ResizeObserverConstructor) return;
-    const observer = new ResizeObserverConstructor(reportViewportSize);
+    const observer = new ResizeObserverConstructor(() => reportViewportSize());
     observer.observe(canvas);
     return () => observer.disconnect();
   }, []);
+
+  React.useLayoutEffect(() => {
+    if (viewportReportingEnabled) reportViewportSize();
+  }, [viewportReportingEnabled]);
 
   React.useEffect(() => {
     if (!focusReportingEnabled) {
@@ -289,7 +322,6 @@ export function TerminalSubstrate({
         setOwner((current) => {
           const next = current === "terminal" ? "buzz" : "terminal";
           if (next === "terminal") {
-            revealedRef.current = true;
             textareaRef.current?.focus({ preventScroll: true });
           }
           return next;
@@ -299,7 +331,6 @@ export function TerminalSubstrate({
     window.addEventListener("keydown", handleKeyDown, true);
     window.addEventListener("keyup", handleKeyUp, true);
     if (onToggle) {
-      revealedRef.current = true;
       setOwner("terminal");
       textareaRef.current?.focus({ preventScroll: true });
     }
@@ -309,15 +340,55 @@ export function TerminalSubstrate({
     };
   }, [enabled, onToggle]);
 
-  // The panel can remain open beside chat indefinitely. Paint the welcome
-  // banner once instead of running a permanent animation loop in the dock.
+  React.useEffect(() => {
+    if (!visible) {
+      setWelcomeVisible(false);
+      return;
+    }
+    if (!viewportReportingEnabled || !banner || !beginSplash()) return;
+  }, [banner, viewportReportingEnabled, visible]);
+
+  React.useEffect(() => {
+    if (!welcomeVisible) return;
+    const timeout = window.setTimeout(
+      () => setWelcomeVisible(false),
+      SPLASH_DURATION_MS,
+    );
+    return () => window.clearTimeout(timeout);
+  }, [welcomeVisible]);
+
+  // The splash is a bounded decoration, never a PTY-readiness gate. Each open
+  // gets one animation epoch; input may dismiss it early and the deadline ends
+  // it unconditionally even when an idle shell emits no new frames.
   React.useEffect(() => {
     const canvas = bannerCanvasRef.current;
-    if (!canvas || !banner || !terminalPalette || !welcomeVisible) return;
+    if (!canvas || !banner || !terminalPalette || !welcomeVisible || !visible)
+      return;
     const dpr = window.devicePixelRatio || 1;
-    if (!paintTerminalBanner(canvas, banner, terminalPalette, dpr))
-      setWelcomeVisible(false);
-  }, [banner, terminalPalette, welcomeVisible]);
+    if (reducedMotion) {
+      if (!paintTerminalBanner(canvas, banner, terminalPalette, dpr))
+        setWelcomeVisible(false);
+      return;
+    }
+
+    const table = buildBannerColorTable(terminalPalette);
+    const start = performance.now();
+    let frame = 0;
+    const tick = (now: number) => {
+      if (
+        !paintTerminalBanner(canvas, banner, terminalPalette, dpr, {
+          phase: phaseAt((now - start) / 1000),
+          table,
+        })
+      ) {
+        setWelcomeVisible(false);
+        return;
+      }
+      frame = window.requestAnimationFrame(tick);
+    };
+    frame = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(frame);
+  }, [banner, reducedMotion, terminalPalette, visible, welcomeVisible]);
 
   React.useEffect(() => {
     for (const delivered of frames) {
@@ -336,17 +407,6 @@ export function TerminalSubstrate({
       }
       grid.apply(delivered.frame);
       consumeFrame(delivered.frame);
-      if (
-        delivered.sessionId === activeSessionId &&
-        revealedRef.current &&
-        hasVisibleOutput(delivered.frame)
-      ) {
-        // Policy: the banner is a splash for the reveal, so spawn-time shell
-        // output must not dismiss it. Only visible output from the active PTY
-        // that arrives after the terminal has been revealed (or the first
-        // keystroke, see sendInput) removes the overlay.
-        setWelcomeVisible(false);
-      }
     }
     gridRef.current = activeSessionId
       ? (gridsRef.current.get(activeSessionId) ?? null)
@@ -407,6 +467,7 @@ export function TerminalSubstrate({
       className="buzz-terminal-substrate"
       data-terminal-mode={mode}
       data-terminal-owner={owner}
+      data-terminal-visible={visible ? "true" : "false"}
       style={{
         ...terminalStyle,
         ...(mode === "docked" ? { height: dockHeight } : undefined),
@@ -453,29 +514,71 @@ export function TerminalSubstrate({
             );
           }}
           onPointerDown={(event) => {
-            event.currentTarget.setPointerCapture(event.pointerId);
+            event.preventDefault();
+            dragCleanupRef.current?.();
+            window.cancelAnimationFrame(resizeReportFrameRef.current);
+            const handle = event.currentTarget;
+            const substrate = handle.closest<HTMLElement>(
+              ".buzz-terminal-substrate",
+            );
+            if (!substrate) return;
+            const pointerId = event.pointerId;
+            handle.setPointerCapture(pointerId);
+            resizingRef.current = true;
+            substrate.dataset.terminalResizing = "true";
             const startY = event.clientY;
             const startHeight = dockHeight;
+            let nextHeight = startHeight;
+            let frame = 0;
+            const applyHeight = () => {
+              frame = 0;
+              substrate.style.height = `${nextHeight}px`;
+            };
+            const cleanup = () => {
+              window.cancelAnimationFrame(frame);
+              frame = 0;
+              handle.removeEventListener("pointermove", move);
+              handle.removeEventListener("pointerup", finish);
+              handle.removeEventListener("pointercancel", finish);
+              if (dragCleanupRef.current === cleanup)
+                dragCleanupRef.current = null;
+            };
             const move = (moveEvent: PointerEvent) => {
-              const next = Math.max(
+              if (moveEvent.pointerId !== pointerId) return;
+              nextHeight = Math.max(
                 180,
                 Math.min(
                   window.innerHeight * 0.7,
                   startHeight + startY - moveEvent.clientY,
                 ),
               );
-              setDockHeight(next);
+              if (!frame) frame = window.requestAnimationFrame(applyHeight);
+            };
+            const finish = (finishEvent: PointerEvent) => {
+              if (finishEvent.pointerId !== pointerId) return;
+              if (frame) {
+                window.cancelAnimationFrame(frame);
+                applyHeight();
+              }
+              cleanup();
+              resizingRef.current = false;
+              delete substrate.dataset.terminalResizing;
+              setDockHeight(nextHeight);
               window.localStorage.setItem(
                 "buzz-terminal-dock-height",
-                String(Math.round(next)),
+                String(Math.round(nextHeight)),
+              );
+              resizeReportFrameRef.current = window.requestAnimationFrame(
+                () => {
+                  resizeReportFrameRef.current = 0;
+                  if (!resizingRef.current) reportViewportSize();
+                },
               );
             };
-            const up = () => {
-              window.removeEventListener("pointermove", move);
-              window.removeEventListener("pointerup", up);
-            };
-            window.addEventListener("pointermove", move);
-            window.addEventListener("pointerup", up, { once: true });
+            dragCleanupRef.current = cleanup;
+            handle.addEventListener("pointermove", move);
+            handle.addEventListener("pointerup", finish);
+            handle.addEventListener("pointercancel", finish);
           }}
           tabIndex={0}
         />
@@ -492,6 +595,7 @@ export function TerminalSubstrate({
               role="presentation"
             >
               <button
+                aria-label={`Terminal ${index + 1}${session.closing ? ", closing" : session.title !== "SHELL" ? `, ${session.title}` : ""}`}
                 aria-selected={session.active}
                 className="buzz-terminal-tab-select"
                 disabled={session.closing}
@@ -499,10 +603,12 @@ export function TerminalSubstrate({
                 role="tab"
                 type="button"
               >
-                <span className="buzz-terminal-designator">
-                  SYS.{String(index + 1).padStart(2, "0")}
+                <span className="buzz-terminal-designator buzz-terminal-tab-title">
+                  {session.title === "SHELL" ? `› ${index + 1}` : session.title}
                 </span>
-                <span>{session.closing ? "CLOSING" : session.title}</span>
+                {session.closing ? (
+                  <span className="buzz-terminal-tab-title">Closing…</span>
+                ) : null}
               </button>
               <button
                 aria-label={`Close ${session.title}`}
@@ -525,9 +631,6 @@ export function TerminalSubstrate({
           </button>
         </div>
         <div className="buzz-terminal-readout">
-          <span>{channelName ? `#${channelName}` : "BUZZ"}</span>
-          <span>LOCAL PTY · PRIVATE</span>
-          <span>{shortcutLabel} HIDE</span>
           <button
             aria-label={
               mode === "maximized" ? "Restore Buzz Term" : "Maximize Buzz Term"

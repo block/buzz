@@ -57,6 +57,7 @@ before(async () => {
     playbackRate: 1,
     reverse() {},
   });
+  dom.window.HTMLElement.prototype.setPointerCapture = () => {};
   ({ act, cleanup, fireEvent, render, waitFor } = await import(
     "@testing-library/react"
   ));
@@ -232,6 +233,46 @@ test("tab actions restore terminal input focus", async () => {
   }
 });
 
+test("drag resize batches visual updates and commits state only on release", async () => {
+  const { view } = fixture({ mode: "docked" });
+  await ready(view);
+  const substrate = view.container.querySelector(".buzz-terminal-substrate");
+  const handle = view.getByLabelText("Resize Buzz Term");
+
+  fireEvent.pointerDown(handle, { clientY: 500, pointerId: 1 });
+  fireEvent.pointerMove(handle, { clientY: 400, pointerId: 2 });
+  fireEvent.pointerUp(handle, { clientY: 400, pointerId: 2 });
+  assert.equal(substrate.dataset.terminalResizing, "true");
+  fireEvent.pointerMove(handle, { clientY: 460, pointerId: 1 });
+  fireEvent.pointerMove(handle, { clientY: 440, pointerId: 1 });
+  assert.equal(substrate.dataset.terminalResizing, "true");
+  assert.equal(window.localStorage.getItem("buzz-terminal-dock-height"), null);
+
+  await waitFor(() => assert.equal(substrate.style.height, "380px"));
+  fireEvent.pointerUp(handle, { clientY: 440, pointerId: 1 });
+  assert.equal(substrate.dataset.terminalResizing, undefined);
+  assert.equal(window.localStorage.getItem("buzz-terminal-dock-height"), "380");
+});
+
+test("unmount cancels a queued drag update", async () => {
+  const { view } = fixture({ mode: "docked" });
+  await ready(view);
+  const handle = view.getByLabelText("Resize Buzz Term");
+  const previousHeight = handle.closest(".buzz-terminal-substrate").style
+    .height;
+
+  fireEvent.pointerDown(handle, { clientY: 500, pointerId: 1 });
+  fireEvent.pointerMove(handle, { clientY: 440, pointerId: 1 });
+  view.unmount();
+  await new Promise((resolve) => window.requestAnimationFrame(resolve));
+
+  assert.equal(window.localStorage.getItem("buzz-terminal-dock-height"), null);
+  assert.equal(
+    handle.closest(".buzz-terminal-substrate").style.height,
+    previousHeight,
+  );
+});
+
 const EMPTY_FRAME = {
   cursor: { column: 0, line: 0, visible: false },
   full: false,
@@ -275,74 +316,83 @@ async function reveal(view) {
   );
 }
 
-test("spawn-time output before the first reveal keeps the welcome overlay", async () => {
-  const subject = fixture({ frame: EMPTY_FRAME });
+test("the first settled reveal runs one bounded splash", async () => {
+  let starts = 0;
+  const subject = fixture({
+    frame: EMPTY_FRAME,
+    onSplashStarted() {
+      starts += 1;
+    },
+    showSplash: true,
+    viewportReportingEnabled: false,
+    visible: true,
+  });
   await ready(subject.view);
-  await expectWelcome(subject.view, true);
+  await expectWelcome(subject.view, false);
 
-  subject.rerender({ frame: VISIBLE_FRAME });
+  subject.rerender({
+    frame: EMPTY_FRAME,
+    onSplashStarted() {
+      starts += 1;
+    },
+    showSplash: true,
+    viewportReportingEnabled: true,
+    visible: true,
+  });
   await expectWelcome(subject.view, true);
-
-  await reveal(subject.view);
-  await expectWelcome(subject.view, true);
+  assert.equal(starts, 1);
+  await act(async () => new Promise((resolve) => setTimeout(resolve, 2_550)));
+  await expectWelcome(subject.view, false);
 });
 
-test("the first keystroke dismisses the welcome overlay", async () => {
-  const subject = fixture({ frame: VISIBLE_FRAME });
+test("later reveals do not replay a consumed splash", async () => {
+  const subject = fixture({
+    frame: EMPTY_FRAME,
+    showSplash: true,
+    viewportReportingEnabled: true,
+    visible: true,
+  });
   await ready(subject.view);
-  await reveal(subject.view);
+  await expectWelcome(subject.view, true);
+
+  subject.rerender({ frame: EMPTY_FRAME, showSplash: false, visible: false });
+  await expectWelcome(subject.view, false);
+  subject.rerender({ frame: EMPTY_FRAME, showSplash: false, visible: true });
+  await expectWelcome(subject.view, false);
+});
+
+test("a consumed splash stays absent after substrate remount", async () => {
+  const first = fixture({
+    frame: EMPTY_FRAME,
+    showSplash: true,
+    visible: true,
+  });
+  await ready(first.view);
+  await expectWelcome(first.view, true);
+  first.view.unmount();
+
+  const second = fixture({
+    frame: EMPTY_FRAME,
+    showSplash: false,
+    visible: true,
+  });
+  await ready(second.view);
+  await expectWelcome(second.view, false);
+});
+
+test("the first keystroke dismisses the welcome overlay early", async () => {
+  const subject = fixture({
+    frame: EMPTY_FRAME,
+    showSplash: true,
+    visible: true,
+  });
+  await ready(subject.view);
   await expectWelcome(subject.view, true);
 
   fireEvent.input(subject.view.getByLabelText("Terminal input"), {
     target: { value: "l" },
   });
   await expectWelcome(subject.view, false);
-});
-
-test("non-empty output after the reveal dismisses the welcome overlay", async () => {
-  const subject = fixture({ frame: EMPTY_FRAME });
-  await ready(subject.view);
-  await reveal(subject.view);
-  await expectWelcome(subject.view, true);
-
-  subject.rerender({ frame: VISIBLE_FRAME });
-  await expectWelcome(subject.view, false);
-});
-
-test("empty active output keeps the welcome overlay", async () => {
-  const subject = fixture({ frame: EMPTY_FRAME });
-  await ready(subject.view);
-  await reveal(subject.view);
-  await expectWelcome(subject.view, true);
-
-  subject.rerender({
-    frame: {
-      ...EMPTY_FRAME,
-      viewport: { ...EMPTY_FRAME.viewport, generation: 2 },
-    },
-  });
-  await expectWelcome(subject.view, true);
-});
-
-test("non-empty output from an inactive PTY keeps the welcome overlay", async () => {
-  const subject = fixture({
-    sessionFrames: [{ frame: EMPTY_FRAME, sessionId: "one" }],
-    sessions: [
-      { active: true, closing: false, id: "one", title: "SHELL" },
-      { active: false, closing: false, id: "two", title: "LOG" },
-    ],
-  });
-  await ready(subject.view);
-  await reveal(subject.view);
-  await expectWelcome(subject.view, true);
-
-  subject.rerender({
-    sessionFrames: [
-      { frame: EMPTY_FRAME, sessionId: "one" },
-      { frame: VISIBLE_FRAME, sessionId: "two" },
-    ],
-  });
-  await expectWelcome(subject.view, true);
 });
 
 test("mounted wheel path accumulates fractional lines per active session", async () => {
