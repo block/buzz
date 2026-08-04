@@ -12,7 +12,7 @@ import {
   KIND_GIT_PULL_REQUEST,
 } from "@/shared/constants/kinds";
 import { normalizePubkey } from "@/shared/lib/pubkey";
-import type { Project, ProjectPullRequest } from "./hooks";
+import type { ProjectPullRequest, Repository as Project } from "./hooks";
 import { nextProjectPullRequestStatusCreatedAt } from "./projectPullRequests.mjs";
 import { useProjectPullRequestWriteInvalidation } from "./pullRequestReviews";
 

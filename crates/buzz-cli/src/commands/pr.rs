@@ -1,4 +1,5 @@
 use crate::client::BuzzClient;
+use crate::commands::with_git_provenance;
 use crate::error::CliError;
 use crate::validate::{
     read_file_or_stdin, read_or_stdin, sdk_err, validate_hex64, validate_repo_id,
@@ -55,7 +56,9 @@ pub async fn cmd_open_pr(
         revision_of: revision_of.map(str::to_string),
     };
 
-    let builder = buzz_sdk::build_git_pull_request(&repo, &content, &meta).map_err(sdk_err)?;
+    let builder = with_git_provenance(
+        buzz_sdk::build_git_pull_request(&repo, &content, &meta).map_err(sdk_err)?,
+    )?;
     let event = client.sign_event(builder)?;
     let resp = client.submit_event(event).await?;
     println!("{resp}");
@@ -97,7 +100,9 @@ pub async fn cmd_update_pr(
         merge_base: merge_base.map(str::to_string),
     };
 
-    let builder = buzz_sdk::build_git_pr_update(&repo, &content, &meta).map_err(sdk_err)?;
+    let builder = with_git_provenance(
+        buzz_sdk::build_git_pr_update(&repo, &content, &meta).map_err(sdk_err)?,
+    )?;
     let event = client.sign_event(builder)?;
     let resp = client.submit_event(event).await?;
     println!("{resp}");
@@ -206,7 +211,8 @@ pub async fn cmd_pr_status(
         applied_as_commits: vec![],
     };
 
-    let builder = buzz_sdk::build_git_status(status, &content, &meta).map_err(sdk_err)?;
+    let builder =
+        with_git_provenance(buzz_sdk::build_git_status(status, &content, &meta).map_err(sdk_err)?)?;
     let event = client.sign_event(builder)?;
     let resp = client.submit_event(event).await?;
     println!("{resp}");

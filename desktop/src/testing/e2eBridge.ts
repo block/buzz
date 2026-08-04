@@ -44,6 +44,7 @@ import {
   KIND_MEMBER_ADDED_NOTIFICATION,
   KIND_MEMBER_REMOVED_NOTIFICATION,
   KIND_PERSONA,
+  KIND_PROJECT_ANNOUNCEMENT,
   KIND_REPO_ANNOUNCEMENT,
   KIND_REPO_STATE,
   KIND_STREAM_MESSAGE_EDIT,
@@ -1147,8 +1148,18 @@ declare global {
       kind: number;
       tags: string[][];
     }>;
+    /** Project-scoped events accepted by the mock relay. */
+    __BUZZ_E2E_ACCEPTED_PROJECT_EVENTS__?: Array<{
+      content: string;
+      kind: number;
+      tags: string[][];
+    }>;
     /** Project event kinds rejected once, in order, to exercise retry flows. */
     __BUZZ_E2E_REJECT_PROJECT_EVENT_KINDS__?: number[];
+    /** Makes the mock relay reject project announcements as an unknown kind. */
+    __BUZZ_E2E_UNSUPPORTED_PROJECT_ANNOUNCEMENTS__?: boolean;
+    /** Project event kinds accepted once but reported as failed to test lost acknowledgements. */
+    __BUZZ_E2E_FAIL_PROJECT_EVENT_ACK_KINDS__?: number[];
     /** Structured merge error returned by the mock native merge command. */
     __BUZZ_E2E_PROJECT_MERGE_ERROR__?: {
       code: string;
@@ -5368,6 +5379,7 @@ const MOCK_PROJECT_SEEDS = [
     name: "buzz",
     description:
       "Relay, desktop, and mobile clients for the Buzz community platform.",
+    cloneUrl: `${DEFAULT_RELAY_HTTP_URL}/git/${MOCK_IDENTITY_PUBKEY}/buzz`,
     owner: MOCK_IDENTITY_PUBKEY,
     contributors: [ALICE_PUBKEY, BOB_PUBKEY, CHARLIE_PUBKEY],
     activityLevel: 4,
@@ -5376,6 +5388,7 @@ const MOCK_PROJECT_SEEDS = [
     dtag: "relay-tools",
     name: "relay-tools",
     description: "Operator tooling and admin CLI for relay deployments.",
+    cloneUrl: "https://github.com/block/relay-tools.git",
     owner: ALICE_PUBKEY,
     contributors: [MOCK_IDENTITY_PUBKEY, BOB_PUBKEY],
     activityLevel: 2,
@@ -5384,6 +5397,7 @@ const MOCK_PROJECT_SEEDS = [
     dtag: "design-system",
     name: "design-system",
     description: "Shared UI tokens, typography ramps, and component library.",
+    cloneUrl: `${DEFAULT_RELAY_HTTP_URL}/git/${BOB_PUBKEY}/design-system`,
     owner: BOB_PUBKEY,
     contributors: [ALICE_PUBKEY],
     activityLevel: 1,
@@ -5402,6 +5416,7 @@ const MOCK_PROJECT_SUBJECTS = [
 ];
 
 const MOCK_PROJECT_KINDS = new Set<number>([
+  KIND_PROJECT_ANNOUNCEMENT,
   KIND_REPO_ANNOUNCEMENT,
   KIND_REPO_STATE,
   KIND_GIT_PATCH,
@@ -5480,7 +5495,8 @@ function buildMockProjectEvents(): RelayEvent[] {
           ["d", seed.dtag],
           ["name", seed.name],
           ["description", seed.description],
-          ["clone", `https://relay.example.com/git/${owner}/${seed.dtag}`],
+          ["buzz-channel", "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"],
+          ["clone", seed.cloneUrl],
           ...seed.contributors.map((pubkey) => ["p", pubkey]),
         ],
         owner,
@@ -5545,10 +5561,7 @@ function buildMockProjectEvents(): RelayEvent[] {
             ? [
                 ["h", "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"],
                 ["branch-name", `feature/mock-${dayOffset}-${index}`],
-                [
-                  "clone",
-                  `https://relay.example.com/git/${owner}/${seed.dtag}`,
-                ],
+                ["clone", seed.cloneUrl],
               ]
             : []),
         ];
@@ -5557,6 +5570,25 @@ function buildMockProjectEvents(): RelayEvent[] {
       }
     }
   }
+
+  const projectOwner =
+    window.__BUZZ_E2E_PROJECT_OWNER_OVERRIDE__ ?? MOCK_PROJECT_SEEDS[0].owner;
+  events.push(
+    createMockEvent(
+      KIND_PROJECT_ANNOUNCEMENT,
+      "",
+      [
+        ["d", "buzz"],
+        ["name", "buzz"],
+        ["description", "The complete Buzz community platform."],
+        ["a", `${KIND_REPO_ANNOUNCEMENT}:${projectOwner}:buzz`],
+        ["a", `${KIND_REPO_ANNOUNCEMENT}:${ALICE_PUBKEY}:relay-tools`],
+      ],
+      projectOwner,
+      now,
+      "project-buzz".padEnd(64, "0"),
+    ),
+  );
 
   return events;
 }
@@ -5574,7 +5606,7 @@ function isMockProjectScopedEvent(event: RelayEvent): boolean {
     (tag) => tag[0] === "a" && (tag[1] ?? "").startsWith("30617:"),
   );
   return (
-    hasRepoAddressTag &&
+    (event.kind === KIND_REPO_ANNOUNCEMENT || hasRepoAddressTag) &&
     (event.kind === 1 || MOCK_PROJECT_KINDS.has(event.kind))
   );
 }
@@ -9902,6 +9934,18 @@ function sendToMockSocket(args: {
         ]);
         return;
       }
+      if (
+        event.kind === KIND_PROJECT_ANNOUNCEMENT &&
+        window.__BUZZ_E2E_UNSUPPORTED_PROJECT_ANNOUNCEMENTS__
+      ) {
+        sendWsText(socket.handler, [
+          "OK",
+          event.id,
+          false,
+          "restricted: unknown event kind",
+        ]);
+        return;
+      }
       const rejectionIndex =
         window.__BUZZ_E2E_REJECT_PROJECT_EVENT_KINDS__?.indexOf(event.kind) ??
         -1;
@@ -9919,6 +9963,30 @@ function sendToMockSocket(args: {
         return;
       }
       getMockProjectEventStore().push(event);
+      const acceptedProjectEvents =
+        window.__BUZZ_E2E_ACCEPTED_PROJECT_EVENTS__ ?? [];
+      acceptedProjectEvents.push({
+        content: event.content,
+        kind: event.kind,
+        tags: event.tags,
+      });
+      window.__BUZZ_E2E_ACCEPTED_PROJECT_EVENTS__ = acceptedProjectEvents;
+      const failedAckIndex =
+        window.__BUZZ_E2E_FAIL_PROJECT_EVENT_ACK_KINDS__?.indexOf(event.kind) ??
+        -1;
+      if (failedAckIndex >= 0) {
+        window.__BUZZ_E2E_FAIL_PROJECT_EVENT_ACK_KINDS__?.splice(
+          failedAckIndex,
+          1,
+        );
+        sendWsText(socket.handler, [
+          "OK",
+          event.id,
+          false,
+          "mock lost project acknowledgement",
+        ]);
+        return;
+      }
       sendWsText(socket.handler, ["OK", event.id, true, ""]);
       return;
     }

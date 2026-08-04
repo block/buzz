@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { waitForAnimations } from "../helpers/animations";
-import { installMockBridge } from "../helpers/bridge";
+import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 
 const SHOTS = "test-results/project-commit-detail";
 const ALIGNMENT_TOLERANCE_PX = 2;
@@ -31,29 +31,100 @@ test("top-level project lists align dates and overflow actions", async ({
     page.getByRole("heading", { level: 1, name: "Projects" }),
   ).toBeVisible();
 
-  async function trailingPositions(row: import("@playwright/test").Locator) {
+  async function trailingPositions(
+    row: import("@playwright/test").Locator,
+    {
+      actionName = /More options for/,
+      dateTestId = "projects-row-date",
+      summaryTestId,
+    }: {
+      actionName?: RegExp;
+      dateTestId?: string;
+      summaryTestId?: string;
+    } = {},
+  ) {
     await waitForAnimations(page);
-    const date = row.getByTestId("projects-row-date");
-    const menu = row.getByRole("button", { name: /More options for/ });
+    const date = row.getByTestId(dateTestId);
+    const menu = row.getByRole("button", { name: actionName });
     await expect(date).toBeVisible();
     await expect(menu).toBeVisible();
     const dateBox = await date.boundingBox();
     const menuBox = await menu.boundingBox();
+    const rowBox = await row.boundingBox();
+    const summaryBox = summaryTestId
+      ? await row.getByTestId(summaryTestId).boundingBox()
+      : null;
     expect(dateBox).not.toBeNull();
     expect(menuBox).not.toBeNull();
-    return { dateX: dateBox?.x ?? 0, menuX: menuBox?.x ?? 0 };
+    expect(rowBox).not.toBeNull();
+    if (summaryTestId) expect(summaryBox).not.toBeNull();
+    return {
+      dateX: dateBox?.x ?? 0,
+      menuX: menuBox?.x ?? 0,
+      rowHeight: rowBox?.height ?? 0,
+      summaryX: summaryBox?.x ?? null,
+    };
   }
 
-  await page.getByRole("button", { name: "Repositories", exact: true }).click();
+  await page.getByTestId("projects-section-projects").click();
+  await page.getByRole("button", { name: "Filter projects" }).click();
+  await expect(
+    page.getByRole("menuitem", { name: "My Projects" }),
+  ).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Local" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  const projectPositions = await trailingPositions(
+    page.locator('[data-testid^="project-row-"]').first(),
+    { summaryTestId: "projects-row-summary" },
+  );
+
+  await page.getByTestId("projects-section-repositories").click();
   await page.getByRole("button", { name: "Filter repositories" }).click();
   await expect(
     page.getByRole("menuitem", { name: "My Repositories" }),
   ).toBeVisible();
-  await expect(page.getByRole("menuitem", { name: "Local" })).toBeVisible();
   await page.keyboard.press("Escape");
-  const repositoryPositions = await trailingPositions(
-    page.locator('[data-testid^="project-row-"]').first(),
-  );
+  await expect(page.getByTestId("repository-row-buzz")).toBeVisible();
+  await expect(page.getByTestId("repository-row-relay-tools")).toBeVisible();
+  const repositoryRow = page.getByTestId("repository-row-buzz");
+  await expect(
+    repositoryRow.getByTestId("repositories-row-summary"),
+  ).toContainText("commits");
+  await expect(
+    repositoryRow.getByTestId("repositories-row-branch"),
+  ).toContainText("main");
+  await expect(repositoryRow.locator("p")).toHaveText("buzz");
+  const repositoryPositions = await trailingPositions(repositoryRow, {
+    actionName: /More options for/,
+    dateTestId: "repositories-row-date",
+    summaryTestId: "repositories-row-summary",
+  });
+  expect(
+    Math.abs(
+      (repositoryPositions.summaryX ?? 0) - (projectPositions.summaryX ?? 0),
+    ),
+  ).toBeLessThanOrEqual(ALIGNMENT_TOLERANCE_PX);
+  expect(
+    Math.abs(repositoryPositions.rowHeight - projectPositions.rowHeight),
+  ).toBeLessThanOrEqual(ALIGNMENT_TOLERANCE_PX);
+  expect(
+    Math.abs(repositoryPositions.dateX - projectPositions.dateX),
+  ).toBeLessThanOrEqual(ALIGNMENT_TOLERANCE_PX);
+  expect(
+    Math.abs(repositoryPositions.menuX - projectPositions.menuX),
+  ).toBeLessThanOrEqual(ALIGNMENT_TOLERANCE_PX);
+  await waitForAnimations(page);
+  await page.screenshot({
+    path: `${SHOTS}/05-project-repositories-list.png`,
+  });
+  await page
+    .getByTestId("repository-row-relay-tools")
+    .getByRole("button", { name: "More options for relay-tools" })
+    .click();
+  await expect(
+    page.getByRole("menuitem", { name: "Clone & open in Terminal" }),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
 
   await page
     .getByRole("button", { name: "Pull Requests", exact: true })
@@ -64,9 +135,7 @@ test("top-level project lists align dates and overflow actions", async ({
   ).toBeVisible();
   await page.keyboard.press("Escape");
   await page.getByTestId("projects-create-menu").hover();
-  await expect(
-    page.getByRole("menuitem", { name: "Repository" }),
-  ).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Project" })).toBeVisible();
   await expect(page.getByRole("menuitem", { name: "Issue" })).toBeVisible();
   await page
     .getByRole("menuitem", { name: "Pull Request", exact: true })
@@ -100,20 +169,20 @@ test("top-level project lists align dates and overflow actions", async ({
   const issuePositions = await trailingPositions(issueRow);
 
   expect(
-    Math.abs(pullRequestPositions.dateX - repositoryPositions.dateX),
+    Math.abs(pullRequestPositions.dateX - projectPositions.dateX),
   ).toBeLessThanOrEqual(ALIGNMENT_TOLERANCE_PX);
   expect(
-    Math.abs(pullRequestPositions.menuX - repositoryPositions.menuX),
+    Math.abs(pullRequestPositions.menuX - projectPositions.menuX),
   ).toBeLessThanOrEqual(ALIGNMENT_TOLERANCE_PX);
   expect(
-    Math.abs(issuePositions.dateX - repositoryPositions.dateX),
+    Math.abs(issuePositions.dateX - projectPositions.dateX),
   ).toBeLessThanOrEqual(ALIGNMENT_TOLERANCE_PX);
   expect(
-    Math.abs(issuePositions.menuX - repositoryPositions.menuX),
+    Math.abs(issuePositions.menuX - projectPositions.menuX),
   ).toBeLessThanOrEqual(ALIGNMENT_TOLERANCE_PX);
 
   await page.setViewportSize({ height: 720, width: 900 });
-  await page.getByRole("button", { name: "Repositories", exact: true }).click();
+  await page.getByTestId("projects-section-projects").click();
   const responsiveRepositoryRow = page
     .locator('[data-testid^="project-row-"]')
     .first();
@@ -136,6 +205,275 @@ test("top-level project lists align dates and overflow actions", async ({
   ).toBe(true);
 });
 
+test("creating a project publishes its initial repository grouping", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-projects-view").click();
+  await page.getByTestId("projects-create-menu").hover();
+  await page.getByRole("menuitem", { name: "Project" }).click();
+  await page.getByTestId("create-project-name").fill("multi-repo-demo");
+  await page
+    .getByTestId("create-project-description")
+    .fill("A grouped project created through the desktop app.");
+  await page
+    .getByTestId("create-project-clone-url")
+    .fill("https://relay.example.com/git/owner/multi-repo-demo.git");
+  await page.getByTestId("create-project-submit").click();
+
+  await expect(page.getByTestId("create-project-dialog")).toBeHidden();
+  await expect(
+    page
+      .locator(
+        '[data-testid="project-card-multi-repo-demo"], [data-testid="project-row-multi-repo-demo"]',
+      )
+      .first(),
+  ).toBeVisible();
+
+  const createdEvents = await page.evaluate(
+    () =>
+      window.__BUZZ_E2E_ACCEPTED_PROJECT_EVENTS__?.filter((event) =>
+        event.tags.some(
+          (tag) => tag[0] === "d" && tag[1] === "multi-repo-demo",
+        ),
+      ) ?? [],
+  );
+  expect(createdEvents.map((event) => event.kind).sort()).toEqual([
+    30617, 30621,
+  ]);
+  const projectEvent = createdEvents.find((event) => event.kind === 30621);
+  expect(projectEvent?.tags).toContainEqual([
+    "a",
+    `30617:${"deadbeef".repeat(8)}:multi-repo-demo`,
+  ]);
+  expect(projectEvent?.content).toBe("");
+
+  await page.getByTestId("projects-create-menu").hover();
+  await page.getByRole("menuitem", { name: "Project" }).click();
+  await page.getByTestId("create-project-name").fill("multi-repo-demo");
+  await page.getByTestId("create-project-submit").click();
+  await expect(page.getByTestId("create-project-dialog")).toBeVisible();
+  await expect(
+    page.getByText('You already have a project named "multi-repo-demo".'),
+  ).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          window.__BUZZ_E2E_ACCEPTED_PROJECT_EVENTS__?.filter((event) =>
+            event.tags.some(
+              (tag) => tag[0] === "d" && tag[1] === "multi-repo-demo",
+            ),
+          ).length ?? 0,
+      ),
+    )
+    .toBe(2);
+});
+
+test("unsupported relays keep the initial repository accessible", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await page.addInitScript(() => {
+    window.__BUZZ_E2E_UNSUPPORTED_PROJECT_ANNOUNCEMENTS__ = true;
+  });
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-projects-view").click();
+  await page.getByTestId("projects-create-menu").hover();
+  await page.getByRole("menuitem", { name: "Project" }).click();
+  await page.getByTestId("create-project-name").fill("legacy-fallback");
+  await page.getByTestId("create-project-submit").click();
+
+  await expect(page.getByTestId("create-project-dialog")).toBeHidden();
+  await expect(page.getByText("Created as a standalone project")).toBeVisible();
+  await waitForAnimations(page);
+  const projectEntry = page
+    .locator(
+      '[data-testid="project-card-legacy-fallback"], [data-testid="project-row-legacy-fallback"]',
+    )
+    .first();
+  await expect(projectEntry).toBeVisible();
+  await projectEntry
+    .getByRole("button", { name: "View legacy-fallback" })
+    .click();
+  await expect(page.getByTestId("project-repository-picker")).toContainText(
+    "legacy-fallback",
+  );
+  await waitForAnimations(page);
+  await page.screenshot({
+    path: `${SHOTS}/06-single-repository-add.png`,
+  });
+
+  const acceptedKinds = await page.evaluate(
+    () =>
+      window.__BUZZ_E2E_ACCEPTED_PROJECT_EVENTS__
+        ?.filter((event) =>
+          event.tags.some(
+            (tag) => tag[0] === "d" && tag[1] === "legacy-fallback",
+          ),
+        )
+        .map((event) => event.kind) ?? [],
+  );
+  expect(acceptedKinds).toEqual([30617]);
+});
+
+test("project creation can retry after its repository publication fails", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await page.addInitScript(() => {
+    window.__BUZZ_E2E_REJECT_PROJECT_EVENT_KINDS__ = [30621];
+  });
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-projects-view").click();
+  await page.getByTestId("projects-create-menu").hover();
+  await page.getByRole("menuitem", { name: "Project" }).click();
+  await page.getByTestId("create-project-name").fill("retry-project");
+  await page.getByTestId("create-project-submit").click();
+
+  await expect(page.getByTestId("create-project-dialog")).toBeVisible();
+  await expect(page.getByText("mock project event rejection")).toBeVisible();
+
+  await page.getByTestId("create-project-submit").click();
+  await expect(page.getByTestId("create-project-dialog")).toBeHidden();
+  await expect(
+    page
+      .locator(
+        '[data-testid="project-card-retry-project"], [data-testid="project-row-retry-project"]',
+      )
+      .first(),
+  ).toBeVisible();
+});
+
+test("project creation is idempotent after a lost publish acknowledgement", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await page.addInitScript(() => {
+    window.__BUZZ_E2E_FAIL_PROJECT_EVENT_ACK_KINDS__ = [30621];
+  });
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-projects-view").click();
+  await page.getByTestId("projects-create-menu").hover();
+  await page.getByRole("menuitem", { name: "Project" }).click();
+  await page.getByTestId("create-project-name").fill("lost-ack-project");
+  await page.getByTestId("create-project-submit").click();
+
+  await expect(page.getByTestId("create-project-dialog")).toBeVisible();
+  await expect(
+    page.getByText("mock lost project acknowledgement"),
+  ).toBeVisible();
+
+  await page.getByTestId("create-project-submit").click();
+  await expect(page.getByTestId("create-project-dialog")).toBeHidden();
+  await expect(
+    page
+      .locator(
+        '[data-testid="project-card-lost-ack-project"], [data-testid="project-row-lost-ack-project"]',
+      )
+      .first(),
+  ).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          window.__BUZZ_E2E_ACCEPTED_PROJECT_EVENTS__?.filter((event) =>
+            event.tags.some(
+              (tag) => tag[0] === "d" && tag[1] === "lost-ack-project",
+            ),
+          ).length ?? 0,
+      ),
+    )
+    .toBe(2);
+});
+
+test("multi-repository projects switch the active repository", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-projects-view").click();
+  await page.getByTestId("projects-section-projects").click();
+  await page
+    .locator(
+      '[data-testid="project-card-buzz"], [data-testid="project-row-buzz"]',
+    )
+    .first()
+    .click();
+
+  const picker = page.getByTestId("project-repository-picker");
+  await expect(picker).toContainText("buzz");
+  await picker.click();
+  await expect(
+    page.getByTestId("project-repository-relay-tools"),
+  ).toBeVisible();
+  await waitForAnimations(page);
+  await page.screenshot({
+    path: `${SHOTS}/04-multi-repository-picker.png`,
+  });
+
+  await page.getByTestId("project-repository-relay-tools").click();
+  await expect(picker).toContainText("relay-tools");
+  await expect(page).toHaveURL(
+    new RegExp(`repositoryId=${TEST_IDENTITIES.alice.pubkey}%3Arelay-tools`),
+  );
+
+  await page.getByTestId("add-project-repository").click();
+  await page.getByTestId("create-project-repository").click();
+  await page.getByTestId("add-project-repository-name").fill("mobile-app");
+  await page.getByTestId("add-project-repository-submit").click();
+  await expect(page.getByTestId("add-project-repository-dialog")).toBeHidden();
+  await expect(picker).toContainText("mobile-app");
+  const addedEvents = await page.evaluate(
+    () =>
+      window.__BUZZ_E2E_ACCEPTED_PROJECT_EVENTS__?.filter(
+        (event) =>
+          event.tags.some((tag) => tag[0] === "d" && tag[1] === "mobile-app") ||
+          event.tags.some(
+            (tag) =>
+              tag[0] === "a" &&
+              tag[1]?.endsWith(":mobile-app") &&
+              event.kind === 30621,
+          ),
+      ) ?? [],
+  );
+  expect(addedEvents.map((event) => event.kind)).toEqual([30621, 30617]);
+  expect(
+    addedEvents.find((event) => event.kind === 30617)?.tags,
+  ).toContainEqual(["buzz-channel", "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"]);
+
+  await page.getByTestId("add-project-repository").click();
+  await page.getByTestId("attach-project-repository").click();
+  await expect(
+    page.getByTestId("attach-project-repository-dialog"),
+  ).toBeVisible();
+  await page.getByTestId("attach-existing-repository-design-system").click();
+  await expect(
+    page.getByTestId("attach-project-repository-dialog"),
+  ).toBeHidden();
+  await expect(picker).toContainText("design-system");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          window.__BUZZ_E2E_ACCEPTED_PROJECT_EVENTS__?.some(
+            (event) =>
+              event.kind === 30621 &&
+              event.tags.some(
+                (tag) => tag[0] === "a" && tag[1]?.endsWith(":design-system"),
+              ),
+          ) ?? false,
+      ),
+    )
+    .toBe(true);
+});
+
 test("commit detail opens from the commits feed with a diff", async ({
   page,
 }) => {
@@ -147,8 +485,8 @@ test("commit detail opens from the commits feed with a diff", async ({
   await page.getByTestId("open-projects-view").click();
 
   // The overview no longer lists repository cards — switch to the
-  // Repositories filter to reveal the project cards/rows.
-  await page.getByRole("button", { name: "Repositories", exact: true }).click();
+  // Projects filter reveals the complete project cards/rows list.
+  await page.getByTestId("projects-section-projects").click();
 
   // Open the first mock project (dtag "buzz" from the e2e bridge fixture).
   const projectEntry = page
@@ -256,8 +594,8 @@ test("pull request and issue feeds share the commit row structure", async ({
   await page.getByTestId("open-projects-view").click();
 
   // The overview no longer lists repository cards — switch to the
-  // Repositories filter to reveal the project cards/rows.
-  await page.getByRole("button", { name: "Repositories", exact: true }).click();
+  // Projects filter reveals the complete project cards/rows list.
+  await page.getByTestId("projects-section-projects").click();
 
   const projectEntry = page
     .locator(

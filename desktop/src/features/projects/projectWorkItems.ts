@@ -20,9 +20,16 @@ import {
   projectPullRequestEventsToPullRequests,
 } from "./projectPullRequests.mjs";
 
-type ProjectReference = {
+type RepositoryReference = {
   repoAddress: string;
 };
+
+type ProjectReference = {
+  repositories: RepositoryReference[];
+};
+
+type ProjectRepository<TProject extends ProjectReference> =
+  TProject["repositories"][number];
 
 /** Optional event groups that can fail without discarding root work items. */
 export type ProjectWorkItemSection =
@@ -33,11 +40,19 @@ export type ProjectWorkItemSection =
 /** Aggregate work items plus any optional event groups that failed to load. */
 export type ProjectsWorkItemsResult<TProject extends ProjectReference> = {
   issues: {
-    items: Array<{ project: TProject; issue: ProjectIssue }>;
+    items: Array<{
+      project: TProject;
+      repository: ProjectRepository<TProject>;
+      issue: ProjectIssue;
+    }>;
     failedSections: ProjectWorkItemSection[];
   };
   pullRequests: {
-    items: Array<{ project: TProject; pullRequest: ProjectPullRequest }>;
+    items: Array<{
+      project: TProject;
+      repository: ProjectRepository<TProject>;
+      pullRequest: ProjectPullRequest;
+    }>;
     failedSections: ProjectWorkItemSection[];
   };
 };
@@ -59,7 +74,11 @@ export async function fetchProjectsWorkItems<TProject extends ProjectReference>(
   projects: TProject[],
 ): Promise<ProjectsWorkItemsResult<TProject>> {
   const repoAddresses = [
-    ...new Set(projects.map((project) => project.repoAddress)),
+    ...new Set(
+      projects.flatMap((project) =>
+        project.repositories.map((repository) => repository.repoAddress),
+      ),
+    ),
   ];
   const [rootResult, updateResult, commentResult, statusResult] =
     await Promise.allSettled([
@@ -109,27 +128,31 @@ export async function fetchProjectsWorkItems<TProject extends ProjectReference>(
 
   const pullRequests = projects
     .flatMap((project) =>
-      projectPullRequestEventsToPullRequests(
-        (rootsByRepo.get(project.repoAddress) ?? []).filter(
-          (event) => event.kind === KIND_GIT_PULL_REQUEST,
-        ),
-        updatesByRepo.get(project.repoAddress) ?? [],
-        commentsByRepo.get(project.repoAddress) ?? [],
-        statusesByRepo.get(project.repoAddress) ?? [],
-      ).map((pullRequest) => ({ project, pullRequest })),
+      project.repositories.flatMap((repository) =>
+        projectPullRequestEventsToPullRequests(
+          (rootsByRepo.get(repository.repoAddress) ?? []).filter(
+            (event) => event.kind === KIND_GIT_PULL_REQUEST,
+          ),
+          updatesByRepo.get(repository.repoAddress) ?? [],
+          commentsByRepo.get(repository.repoAddress) ?? [],
+          statusesByRepo.get(repository.repoAddress) ?? [],
+        ).map((pullRequest) => ({ project, pullRequest, repository })),
+      ),
     )
     .sort(
       (left, right) => right.pullRequest.updatedAt - left.pullRequest.updatedAt,
     );
   const issues = projects
     .flatMap((project) =>
-      projectIssueEventsToIssues(
-        (rootsByRepo.get(project.repoAddress) ?? []).filter(
-          (event) => event.kind === KIND_GIT_ISSUE,
-        ),
-        statusesByRepo.get(project.repoAddress) ?? [],
-        commentsByRepo.get(project.repoAddress) ?? [],
-      ).map((issue) => ({ project, issue })),
+      project.repositories.flatMap((repository) =>
+        projectIssueEventsToIssues(
+          (rootsByRepo.get(repository.repoAddress) ?? []).filter(
+            (event) => event.kind === KIND_GIT_ISSUE,
+          ),
+          statusesByRepo.get(repository.repoAddress) ?? [],
+          commentsByRepo.get(repository.repoAddress) ?? [],
+        ).map((issue) => ({ issue, project, repository })),
+      ),
     )
     .sort((left, right) => right.issue.updatedAt - left.issue.updatedAt);
   const sharedFailedSections: ProjectWorkItemSection[] = [];

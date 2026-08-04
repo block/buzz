@@ -53,6 +53,7 @@ pub struct ProjectConnectionScope {
     ///
     /// Legacy one-repository Projects use their NIP-34 repository coordinate
     /// (`30617:<owner>:<d-tag>`).
+    #[serde(alias = "repoAddress")]
     pub project_address: String,
 }
 

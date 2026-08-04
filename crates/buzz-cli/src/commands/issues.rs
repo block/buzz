@@ -1,4 +1,5 @@
 use crate::client::BuzzClient;
+use crate::commands::with_git_provenance;
 use crate::error::CliError;
 use crate::validate::{read_or_stdin, sdk_err, validate_hex64, validate_repo_id};
 use buzz_sdk::{GitIssueMeta, GitRepoCoord, GitStatusMeta};
@@ -26,7 +27,9 @@ pub async fn cmd_create_issue(
         id: repo_id.to_string(),
     };
 
-    let builder = buzz_sdk::build_git_issue(&repo, subject, &body, &meta).map_err(sdk_err)?;
+    let builder = with_git_provenance(
+        buzz_sdk::build_git_issue(&repo, subject, &body, &meta).map_err(sdk_err)?,
+    )?;
     let event = client.sign_event(builder)?;
     let resp = client.submit_event(event).await?;
     println!("{resp}");
@@ -137,7 +140,8 @@ pub async fn cmd_issue_status(
         applied_as_commits: vec![],
     };
 
-    let builder = buzz_sdk::build_git_status(status, &body, &meta).map_err(sdk_err)?;
+    let builder =
+        with_git_provenance(buzz_sdk::build_git_status(status, &body, &meta).map_err(sdk_err)?)?;
     let event = client.sign_event(builder)?;
     let resp = client.submit_event(event).await?;
     println!("{resp}");
