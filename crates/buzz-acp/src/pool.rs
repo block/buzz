@@ -1915,6 +1915,28 @@ pub async fn run_prompt_task(
         None => prompt_sections.iter().map(String::as_str).collect(),
     };
 
+    // Capture the reply destination for the content-delivery fallback BEFORE
+    // the prompt runs, so it survives any move of `batch` in the outcome arms.
+    // Only channel turns with a triggering event can receive a fallback post;
+    // heartbeats and DMs without a triggering message are skipped (None).
+    let fallback_reply: Option<FallbackReplyTarget> = batch.as_ref().and_then(|b| {
+        b.events.last().map(|last| {
+            let tags = crate::queue::parse_thread_tags(&last.event);
+            // Thread the reply to the triggering event: if the trigger is
+            // itself a reply, anchor to its root; otherwise the trigger IS
+            // the root. Mirrors the CLI `resolve_thread_ref` semantics.
+            let root_hex = tags
+                .root_event_id
+                .clone()
+                .unwrap_or_else(|| last.event.id.to_hex());
+            FallbackReplyTarget {
+                channel_id: b.channel_id,
+                root_event_hex: root_hex,
+                parent_event_hex: last.event.id.to_hex(),
+            }
+        })
+    });
+
     // Turn start, labelled exactly as `log_stop_reason` labels the end, so a
     // log reads as start/stop pairs. Purely observational: an unpaired start is
     // the only durable evidence that a turn was entered and never returned, and
@@ -2079,6 +2101,20 @@ pub async fn run_prompt_task(
                             Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
                         )
                         .await;
+                        // Content-delivery fallback (see the main EndTurn arm):
+                        // this rare branch is also a successful turn end, so an
+                        // undelivered plain-text reply still needs posting.
+                        if let (Some(target), Some(content)) =
+                            (&fallback_reply, agent.acp.take_undelivered_turn_message())
+                        {
+                            let outcome =
+                                post_agent_content_fallback(&ctx.rest_client, target, &content)
+                                    .await;
+                            agent.acp.observe(
+                                "delivery_fallback",
+                                content_fallback_activity_payload(&outcome),
+                            );
+                        }
                         send_prompt_result(
                             &result_tx,
                             &turn_id,
@@ -2141,6 +2177,26 @@ pub async fn run_prompt_task(
                 Some(core_stop),
             )
             .await;
+
+            // Content-delivery fallback: on a normal turn end, if the agent
+            // produced assistant text but never called a publish tool, post
+            // that text as the channel reply. Only fires for `EndTurn` (not
+            // MaxTokens/MaxTurnRequests, which are truncated/aborted turns
+            // whose partial text shouldn't be treated as a deliberate reply)
+            // and only when a `fallback_reply` destination was captured
+            // (channel turns with a triggering event; not heartbeats).
+            if matches!(stop_reason, StopReason::EndTurn) {
+                if let (Some(target), Some(content)) =
+                    (&fallback_reply, agent.acp.take_undelivered_turn_message())
+                {
+                    let outcome =
+                        post_agent_content_fallback(&ctx.rest_client, target, &content).await;
+                    agent.acp.observe(
+                        "delivery_fallback",
+                        content_fallback_activity_payload(&outcome),
+                    );
+                }
+            }
 
             send_prompt_result(
                 &result_tx,
@@ -3868,6 +3924,115 @@ pub(crate) async fn post_failure_notice(
     }
 }
 
+/// Captured reply destination for the content-delivery fallback, taken before
+/// the prompt runs so it survives any move of the triggering `batch`.
+#[derive(Clone)]
+struct FallbackReplyTarget {
+    channel_id: Uuid,
+    /// Thread root the reply anchors to (hex). Equals `parent_event_hex` when
+    /// the trigger was a top-level message.
+    root_event_hex: String,
+    /// Immediate parent being replied to (hex) — the triggering event.
+    parent_event_hex: String,
+}
+
+/// Content-delivery fallback: post an agent's plain-text reply (kind:9) that it
+/// generated but never published itself.
+///
+/// buzz-agent's output is its tool calls; streamed assistant `content` is
+/// observability-only and is normally not posted. Capable models reliably call
+/// `buzz messages send`, but weaker local models (e.g. via Buzz shared compute)
+/// often answer a conversational prompt in plain content and never call the
+/// send tool — silently dropping the reply. When [`AcpClient`] reports such an
+/// undelivered turn message, this posts it as a threaded reply, mirroring
+/// [`post_failure_notice`]'s build/sign/submit path. Best-effort: any error is
+/// logged and returned to the caller so it can surface the degraded delivery in
+/// the owner-visible Activity feed without failing the turn.
+async fn post_agent_content_fallback(
+    rest: &crate::relay::RestClient,
+    target: &FallbackReplyTarget,
+    content: &str,
+) -> Result<(), String> {
+    let thread_ref = match (
+        nostr::EventId::from_hex(&target.root_event_hex),
+        nostr::EventId::from_hex(&target.parent_event_hex),
+    ) {
+        (Ok(root_id), Ok(parent_id)) => Some(buzz_sdk::ThreadRef {
+            root_event_id: root_id,
+            parent_event_id: parent_id,
+        }),
+        _ => None,
+    };
+    let builder = match buzz_sdk::build_message(
+        target.channel_id,
+        content,
+        thread_ref.as_ref(),
+        &[],
+        false,
+        &[],
+    ) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(channel = %target.channel_id, "content fallback: build failed: {e}");
+            return Err(format!("build failed: {e}"));
+        }
+    };
+    let event = match builder.sign_with_keys(&rest.keys) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!(channel = %target.channel_id, "content fallback: sign failed: {e}");
+            return Err(format!("sign failed: {e}"));
+        }
+    };
+    match tokio::time::timeout(Duration::from_secs(5), rest.submit_event(&event)).await {
+        Ok(Ok(_)) => {
+            // WARN (not INFO) and default target (buzz_acp::pool) so it is
+            // always visible under the harness's `buzz_acp=info` filter — this
+            // fallback firing is a signal worth surfacing (a model failed to
+            // call the send tool and we delivered its reply for it).
+            tracing::warn!(
+                channel = %target.channel_id,
+                "content-delivery fallback: posted undelivered agent content as channel reply"
+            );
+            Ok(())
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(channel = %target.channel_id, "content fallback failed: {e}");
+            Err(format!("relay publish failed: {e}"))
+        }
+        Err(_) => {
+            tracing::warn!(channel = %target.channel_id, "content fallback timed out");
+            Err("relay publish timed out".to_string())
+        }
+    }
+}
+
+/// Build a free-form observer status record understood by the Desktop Activity
+/// transcript. The explicit title/text pair keeps fallback delivery visible to
+/// operators instead of leaving the only signal in harness logs.
+fn content_fallback_activity_payload(outcome: &Result<(), String>) -> serde_json::Value {
+    let (title, text) = match outcome {
+        Ok(()) => (
+            "Delivery fallback",
+            "Agent skipped message publishing; Buzz delivered its plain-text response automatically."
+                .to_string(),
+        ),
+        Err(error) => (
+            "Delivery fallback failed",
+            format!(
+                "Agent skipped message publishing; Buzz could not deliver its plain-text response automatically: {error}"
+            ),
+        ),
+    };
+
+    serde_json::json!({
+        "type": "delivery_fallback",
+        "title": title,
+        "text": text,
+        "posted": outcome.is_ok(),
+    })
+}
+
 /// Best-effort: remove a reaction via a signed kind:5 (NIP-09) deletion event.
 ///
 /// Queries kind:7 reactions by our pubkey targeting the event, finds the matching
@@ -3988,6 +4153,32 @@ mod tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
+
+    #[test]
+    fn content_fallback_activity_reports_degraded_but_successful_delivery() {
+        let payload = content_fallback_activity_payload(&Ok(()));
+
+        assert_eq!(payload["type"], "delivery_fallback");
+        assert_eq!(payload["title"], "Delivery fallback");
+        assert_eq!(payload["posted"], true);
+        assert!(payload["text"]
+            .as_str()
+            .unwrap()
+            .contains("Agent skipped message publishing"));
+    }
+
+    #[test]
+    fn content_fallback_activity_reports_failed_delivery() {
+        let payload = content_fallback_activity_payload(&Err("relay unavailable".to_string()));
+
+        assert_eq!(payload["type"], "delivery_fallback");
+        assert_eq!(payload["title"], "Delivery fallback failed");
+        assert_eq!(payload["posted"], false);
+        assert!(payload["text"]
+            .as_str()
+            .unwrap()
+            .contains("relay unavailable"));
+    }
 
     // These pin the initial_message dispatch path (run_prompt_task, ~line 855):
     // a legacy agent WITH a base_prompt must get [Base] prepended to the user
