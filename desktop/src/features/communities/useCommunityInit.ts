@@ -14,6 +14,7 @@ import { clearTrayAgentActivity } from "@/shared/api/trayMenu";
 import { getOverrides } from "@/shared/features";
 import { resetMediaCaches } from "@/shared/lib/mediaUrl";
 import { clearSearchHitEventCache } from "@/app/navigation/searchHitEventCache";
+import { resetNavigationDeepLinkDrain } from "@/shared/deep-link";
 import {
   clearAllDrafts,
   initDraftStore,
@@ -46,12 +47,13 @@ import type { Community } from "./types";
  * destroyed via effect cleanup and do not need entries here.
  * See AGENTS.md "Community Switching" for the full contract.
  */
-function resetCommunityState({
+async function resetCommunityState({
   resetAvatarState,
 }: {
   resetAvatarState: boolean;
-}): void {
+}): Promise<void> {
   relayClient.disconnect();
+  await resetNavigationDeepLinkDrain();
   resetRateLimitGate();
   clearAllDrafts();
   resetAgentObserverStore();
@@ -120,6 +122,12 @@ export function useCommunityInit(
 
     async function init() {
       if (!activeCommunity) {
+        if (hasInitializedRef.current) {
+          await resetCommunityState({ resetAvatarState: true });
+          hasInitializedRef.current = false;
+          prevCommunityIdRef.current = null;
+          appliedRelayUrlRef.current = null;
+        }
         try {
           const defaultRelayUrl = await getDefaultRelayUrl();
           const autoConnectDefaultRelay =
@@ -194,7 +202,7 @@ export function useCommunityInit(
           // store under the outgoing community ID and delete its snapshot.
           prevCommunityIdRef.current = null;
         }
-        resetCommunityState({
+        await resetCommunityState({
           resetAvatarState:
             appliedRelayUrlRef.current !== activeCommunity.relayUrl,
         });

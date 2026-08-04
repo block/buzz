@@ -15,6 +15,8 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:video_player/video_player.dart';
 
 import '../../shared/clipboard_utils.dart';
+import '../../shared/deeplink/deep_link.dart';
+import '../../shared/deeplink/pending_deep_link_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/syntax_highlight.dart';
 import '../../shared/theme/theme.dart';
@@ -23,7 +25,9 @@ import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/custom_emoji/custom_emoji_render.dart';
 import '../../shared/emoji/emoji_data_provider.dart';
 import '../../shared/emoji/emoji_only.dart';
+import 'channels_provider.dart';
 import 'media_viewer_page.dart';
+import 'message_content/link_normalizer.dart';
 import 'message_media.dart';
 
 part 'message_content/media_carousel.dart';
@@ -152,6 +156,26 @@ class MessageContent extends HookConsumerWidget {
     final resolvedAgentMentionPubkeys = {
       ...agentMentionPubkeys.map((pubkey) => pubkey.toLowerCase()),
     };
+    final resolvedChannelNames = channelNames.isNotEmpty
+        ? channelNames
+        : <String, String>{
+            for (final channel
+                in ref.watch(channelsProvider).asData?.value ?? const [])
+              channel.name.toLowerCase(): channel.id,
+          };
+    final resolvedChannelTap =
+        onChannelTap ??
+        (String channelId) {
+          ref
+              .read(pendingDeepLinkProvider.notifier)
+              .open(Uri(scheme: 'buzz', host: 'channel', path: channelId));
+        };
+    final channelPresentationKey = [
+      for (final entry
+          in (resolvedChannelNames.entries.toList()
+            ..sort((a, b) => a.key.compareTo(b.key))))
+        '${entry.key}\u0000${entry.value}',
+    ].join('\u0001');
     final imetaByUrl = parseImetaTags(tags);
     final trailingGallery = maxLines == null
         ? _extractTrailingImageGallery(content, imetaByUrl)
@@ -189,45 +213,17 @@ class MessageContent extends HookConsumerWidget {
         ? kEmojiOnlyCustomEmojiSize
         : kCustomEmojiInlineSize;
 
-    final finalContent = useMemoized(() {
-      // Convert autolinks and bare URLs to standard markdown links,
-      // but skip content inside backticks (inline code / fenced blocks).
-      final buffer = StringBuffer();
-      final parts = markdownContent.split('`');
-      for (var i = 0; i < parts.length; i++) {
-        if (i.isOdd) {
-          // Inside backticks — preserve as-is.
-          buffer.write('`${parts[i]}`');
-        } else {
-          // 1. Angle-bracket autolinks: <https://...>
-          var segment = parts[i].replaceAllMapped(
-            RegExp(r'<(https?://[^>]+)>'),
-            (m) => '[${m[1]}](${m[1]})',
-          );
-          // 2. Bare URLs not already inside markdown link/image syntax.
-          //    Negative lookbehind avoids matching URLs preceded by ]( or =
-          //    which are already part of markdown links or imeta tags.
-          segment = segment.replaceAllMapped(
-            RegExp(r'(?<![(\]=])https?://[^\s)>\]]+'),
-            (m) {
-              final url = m[0]!;
-              // Skip if this URL is already a markdown link label that equals
-              // the URL (produced by step 1 or authored as [url](url)).
-              final start = m.start;
-              if (start >= 1 && segment[start - 1] == '[') return url;
-              return '[$url]($url)';
-            },
-          );
-          buffer.write(segment);
-        }
-      }
-      final processed = buffer.toString();
+    final linkNormalizedContent = useMemoized(
+      () => normalizeBareLinks(markdownContent),
+      [markdownContent],
+    );
 
+    final finalContent = useMemoized(() {
       // Replace spaces with non-breaking spaces inside known mention names
       // so the gpt_markdown combined regex can match multi-word names
       // even when caseSensitive is not preserved.
       // Skip content inside backticks to avoid altering inline code.
-      final mentionParts = processed.split('`');
+      final mentionParts = linkNormalizedContent.split('`');
       final mentionBuf = StringBuffer();
       for (var i = 0; i < mentionParts.length; i++) {
         if (i.isOdd) {
@@ -246,27 +242,35 @@ class MessageContent extends HookConsumerWidget {
           mentionBuf.write(segment);
         }
       }
-      final mentionProcessed = mentionBuf.toString();
+      var result = mentionBuf.toString();
 
       // Ensure channel links at the very start of content don't get
       // swallowed by markdown processing.
-      var result = mentionProcessed;
       if (RegExp(r'^#[A-Za-z0-9_]').hasMatch(result)) {
         result = '\u200B$result';
       }
       return result;
-    }, [markdownContent, resolvedMentionNames]);
+    }, [linkNormalizedContent, resolvedMentionNames]);
 
     final markdown = KeyedSubtree(
-      key: ValueKey('$finalContent\u0000$mentionPresentationKey'),
+      key: ValueKey(
+        '$finalContent\u0000$mentionPresentationKey\u0000$channelPresentationKey',
+      ),
       child: GptMarkdown(
         finalContent,
         style: style,
         followLinkColor: false,
         codeBuilder: (context, name, code, closed) =>
             _MessageCodeBlock(name: name, code: code),
-        linkBuilder: (context, linkText, url, linkStyle) =>
-            _buildLink(context, ref, linkText, url, linkStyle, style),
+        linkBuilder: (context, linkText, url, linkStyle) => _buildLink(
+          context,
+          ref,
+          linkText,
+          url,
+          linkStyle,
+          style,
+          resolvedChannelTap,
+        ),
         imageBuilder: (context, imageUrl) =>
             _buildMedia(context, imageUrl, imetaByUrl[imageUrl]),
         maxLines: maxLines,
@@ -278,8 +282,8 @@ class MessageContent extends HookConsumerWidget {
           ),
           CustomEmojiMd(customEmoji, size: inlineCustomEmojiSize),
           _ChannelLinkMd(
-            channelNames: channelNames,
-            onChannelTap: onChannelTap,
+            channelNames: resolvedChannelNames,
+            onChannelTap: resolvedChannelTap,
           ),
           ...MarkdownComponent.inlineComponents,
         ],
@@ -331,6 +335,7 @@ class MessageContent extends HookConsumerWidget {
     String url,
     TextStyle linkStyle,
     TextStyle? fallbackStyle,
+    void Function(String channelId) resolvedChannelTap,
   ) {
     String text = '';
     linkText.visitChildren((span) {
@@ -345,9 +350,22 @@ class MessageContent extends HookConsumerWidget {
     return GestureDetector(
       onTap: () async {
         final uri = Uri.tryParse(url);
-        if (uri == null || (uri.scheme != 'http' && uri.scheme != 'https')) {
+        if (uri == null) return;
+
+        // Rendered channel URLs must use the same callback as `#channel`
+        // references so detail-page callers can suppress self-navigation.
+        // Message and join links still need the top-level authenticated
+        // dispatcher.
+        if (uri.scheme == 'buzz') {
+          final deepLink = parseBuzzDeepLink(uri);
+          if (deepLink case ChannelDeepLink(:final channelId)) {
+            resolvedChannelTap(channelId);
+          } else if (deepLink != null) {
+            ref.read(pendingDeepLinkProvider.notifier).open(uri);
+          }
           return;
         }
+        if (uri.scheme != 'http' && uri.scheme != 'https') return;
 
         final auth = ref.read(mediaGetAuthServiceProvider);
         if (!auth.isRelayMediaUrl(url)) {

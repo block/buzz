@@ -425,3 +425,63 @@ test("message deep links survive reload", async ({ page }) => {
     "Engineering shipped the desktop build.",
   );
 });
+
+// Cold-start OS links are queued natively until AppShell mounts its router listener.
+
+test("cold-start channel deep link drains after the router mounts", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    pendingNavigationDeepLinks: [
+      {
+        id: "navigation-channel-1",
+        kind: "channel",
+        channelId: ENGINEERING_CHANNEL_ID,
+      },
+    ],
+  });
+
+  await page.goto("/");
+
+  await expect(page.getByTestId("chat-title")).toHaveText("engineering");
+  await expect(page).toHaveURL(
+    new RegExp(`#/channels/${ENGINEERING_CHANNEL_ID}$`),
+  );
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).filter(
+          (entry) =>
+            entry.command === "acknowledge_pending_navigation_deep_link",
+        ),
+      ),
+    )
+    .toEqual([
+      {
+        command: "acknowledge_pending_navigation_deep_link",
+        payload: { id: "navigation-channel-1" },
+      },
+    ]);
+});
+
+test("cold-start message deep link preserves its thread target", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    pendingNavigationDeepLinks: [
+      {
+        id: "navigation-message-1",
+        kind: "message",
+        channelId: WATERCOLOR_CHANNEL_ID,
+        messageId: "mock-forum-release-reply",
+        threadRootId: "mock-forum-release-thread",
+      },
+    ],
+  });
+
+  await page.goto("/");
+
+  await expect(page.getByTestId("chat-title")).toHaveText("watercooler");
+  await expect(page).toHaveURL(/messageId=mock-forum-release-reply/);
+  await expect(page).toHaveURL(/threadRootId=mock-forum-release-thread/);
+});

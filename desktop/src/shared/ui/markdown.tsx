@@ -14,6 +14,7 @@ import { toast } from "sonner";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { requestOpenSnapshotImport } from "@/features/agents/openSnapshotImportFromUrlEvent";
+import { parseChannelLink } from "@/features/messages/lib/channelLink";
 import {
   parseMessageLink,
   resolveMessageLinkRenderTarget,
@@ -60,6 +61,11 @@ import {
   SyntaxHighlightedCode,
 } from "./markdown/CodeBlock";
 import { FileCard } from "./markdown/FileCard";
+import {
+  ChannelDeepLinkAnchor,
+  MarkdownChannelDeepLink,
+  MarkdownChannelReference,
+} from "./markdown/ChannelDeepLink";
 import { InlineEmojiPopover } from "./markdown/InlineEmojiPopover";
 import { MarkdownInput } from "./markdown/MarkdownInput";
 import {
@@ -1426,10 +1432,16 @@ function createMarkdownComponents(
       );
     }
 
-    // Intercept `buzz://message?channel=…&id=…` links so a click navigates
-    // in-app instead of opening the URL in the OS browser. http(s) links
-    // continue to use the existing target="_blank" behavior.
+    // Intercept `buzz://channel/<uuid>` and `buzz://message?...` links so
+    // clicks navigate in-app instead of opening the URL in the OS browser.
     if (href) {
+      if (parseChannelLink(href).ok) {
+        return (
+          <ChannelDeepLinkAnchor {...props} href={href}>
+            {children}
+          </ChannelDeepLinkAnchor>
+        );
+      }
       const messageLinkTarget = resolveMessageLinkRenderTarget({
         href,
         label,
@@ -1727,46 +1739,16 @@ function createMarkdownComponents(
       }
       return <InlineEmojiPopover alt={alt} resolvedSrc={resolvedSrc} />;
     },
-    "channel-link": function MarkdownChannelLink({
-      children,
-    }: {
-      children?: React.ReactNode;
-    }) {
-      const { channels, onOpenChannel } = useMarkdownRuntime();
-      const text = String(children ?? "");
-      const channelName = text.startsWith("#") ? text.slice(1) : text;
-      const channel = channels.find(
-        (c) =>
-          c.channelType !== "dm" &&
-          c.name.toLowerCase() === channelName.toLowerCase(),
-      );
-
-      if (channel && interactive) {
-        return (
-          <button
-            type="button"
-            data-channel-link=""
-            aria-label={`Open channel ${channelName}`}
-            className={cn(
-              "cursor-pointer",
-              MENTION_CHIP_BASE_CLASSES,
-              MENTION_CHIP_HOVER_CLASSES,
-            )}
-            onClick={() => {
-              onOpenChannel(channel.id);
-            }}
-          >
-            {children}
-          </button>
-        );
-      }
-
-      return (
-        <span data-channel-link="" className={MENTION_CHIP_BASE_CLASSES}>
-          {children}
-        </span>
-      );
-    },
+    "channel-deep-link": ({ children }: { children?: React.ReactNode }) => (
+      <MarkdownChannelDeepLink interactive={interactive}>
+        {children}
+      </MarkdownChannelDeepLink>
+    ),
+    "channel-link": ({ children }: { children?: React.ReactNode }) => (
+      <MarkdownChannelReference interactive={interactive}>
+        {children}
+      </MarkdownChannelReference>
+    ),
     "message-link": function MarkdownMessageLink({
       children,
     }: {

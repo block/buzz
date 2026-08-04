@@ -15,6 +15,8 @@ export interface DeepLinkDeps {
   onAddCommunityAvailable: (listener: () => void) => () => void;
 }
 
+export type ChannelDeepLinkPayload = { channelId: string };
+
 /**
  * Payload emitted by the Rust deep-link handler for `buzz://message?…`.
  * Field names match the JSON shape produced in `desktop/src-tauri/src/lib.rs`.
@@ -22,6 +24,14 @@ export interface DeepLinkDeps {
 export type MessageDeepLinkPayload = {
   channelId: string;
   messageId: string;
+  threadRootId: string | null;
+};
+
+type PendingNavigationDeepLink = {
+  id: string;
+  kind: "channel" | "message";
+  channelId: string;
+  messageId: string | null;
   threadRootId: string | null;
 };
 
@@ -152,17 +162,105 @@ export async function listenForDeepLinks(
   };
 }
 
+let navigationDrainTail: Promise<void> = Promise.resolve();
+let navigationDrainGeneration = 0;
+
+export async function resetNavigationDeepLinkDrain(): Promise<void> {
+  navigationDrainGeneration += 1;
+  try {
+    await invoke("clear_pending_navigation_deep_links");
+  } catch (error: unknown) {
+    // A community switch must not strand the app behind its loading gate if
+    // the best-effort native queue cleanup is unavailable. The generation
+    // bump above still prevents in-flight JavaScript drains from acknowledging.
+    console.warn("Failed to clear pending navigation deep links", error);
+  }
+}
+
+function serializeNavigationDrain(task: () => Promise<void>): Promise<void> {
+  const drain = navigationDrainTail.then(task, task);
+  // Keep the shared tail fulfilled so one route failure cannot poison future
+  // listener mounts. The caller still receives `drain` and reports the error.
+  navigationDrainTail = drain.catch(() => {});
+  return drain;
+}
+
+async function drainPendingNavigationDeepLinks(
+  onOpenChannel: (
+    payload: ChannelDeepLinkPayload,
+  ) => boolean | Promise<boolean>,
+  onOpenMessage: (
+    payload: MessageDeepLinkPayload,
+  ) => boolean | Promise<boolean>,
+) {
+  const generation = navigationDrainGeneration;
+  while (generation === navigationDrainGeneration) {
+    const pending = await invoke<PendingNavigationDeepLink | null>(
+      "take_pending_navigation_deep_link",
+    );
+    if (!pending || generation !== navigationDrainGeneration) return;
+    const accepted = await (pending.kind === "channel"
+      ? onOpenChannel({ channelId: pending.channelId })
+      : pending.messageId
+        ? onOpenMessage({
+            channelId: pending.channelId,
+            messageId: pending.messageId,
+            threadRootId: pending.threadRootId,
+          })
+        : false);
+    if (!accepted || generation !== navigationDrainGeneration) return;
+    const acknowledged = await invoke<boolean>(
+      "acknowledge_pending_navigation_deep_link",
+      { id: pending.id },
+    );
+    if (!acknowledged) return;
+  }
+}
+
 /**
- * Register a listener for `deep-link-message` events. Must be called from
- * inside the router tree (e.g. AppShell) because the navigation callback
- * uses TanStack Router state.
+ * Register listeners for queued channel/message navigation emitted by Rust.
+ * A consumer must explicitly accept each item before it is acknowledged, so
+ * effect teardown leaves an in-flight queue head available for the next mount.
  */
-export function listenForMessageDeepLinks(
-  onOpen: (payload: MessageDeepLinkPayload) => void,
+export async function listenForNavigationDeepLinks(
+  onOpenChannel: (
+    payload: ChannelDeepLinkPayload,
+  ) => boolean | Promise<boolean>,
+  onOpenMessage: (
+    payload: MessageDeepLinkPayload,
+  ) => boolean | Promise<boolean>,
 ): Promise<UnlistenFn> {
-  return listen<MessageDeepLinkPayload>("deep-link-message", (event) => {
-    onOpen(event.payload);
-  });
+  let drainRunning = false;
+  let drainRequested = false;
+  const drain = () => {
+    drainRequested = true;
+    if (drainRunning) return;
+    drainRunning = true;
+    void (async () => {
+      try {
+        while (drainRequested) {
+          drainRequested = false;
+          await serializeNavigationDrain(() =>
+            drainPendingNavigationDeepLinks(onOpenChannel, onOpenMessage),
+          );
+        }
+      } catch (error: unknown) {
+        console.warn("Failed to drain pending navigation deep links", error);
+      } finally {
+        drainRunning = false;
+        if (drainRequested) drain();
+      }
+    })();
+  };
+
+  const unlistens = await Promise.all([
+    listen<ChannelDeepLinkPayload>("deep-link-channel", drain),
+    listen<MessageDeepLinkPayload>("deep-link-message", drain),
+  ]);
+  drain();
+  return () => {
+    for (const unlisten of unlistens) unlisten();
+  };
 }
 
 export function listenForNostrBindDeepLinks(

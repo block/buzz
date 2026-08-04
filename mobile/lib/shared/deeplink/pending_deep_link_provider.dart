@@ -23,7 +23,7 @@ class PendingDeepLinkNotifier extends Notifier<BuzzDeepLink?> {
   @override
   BuzzDeepLink? build() {
     final stream = debugUriStreamOverride ?? AppLinks().uriLinkStream;
-    _subscription = stream.listen(handleUri);
+    _subscription = stream.listen(open);
     ref.onDispose(() {
       _subscription?.cancel();
       _subscription = null;
@@ -32,8 +32,7 @@ class PendingDeepLinkNotifier extends Notifier<BuzzDeepLink?> {
   }
 
   /// Parse and park an incoming URI. Unsupported links are ignored loudly.
-  @visibleForTesting
-  void handleUri(Uri uri) {
+  void open(Uri uri) {
     final link = parseBuzzDeepLink(uri);
     if (link == null) {
       debugPrint('deep-link: ignoring unsupported link: $uri');

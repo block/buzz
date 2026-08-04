@@ -50,6 +50,26 @@ class InviteDeepLink extends BuzzDeepLink {
       'InviteDeepLink(relay: $relayUrl, code: $code, policyReceipt: $policyReceipt)';
 }
 
+/// A parsed channel-only deep link.
+///
+/// Canonical form: `buzz://channel/<channel-uuid>`.
+class ChannelDeepLink extends BuzzDeepLink {
+  /// Channel UUID from the sole path segment.
+  final String channelId;
+
+  const ChannelDeepLink({required this.channelId});
+
+  @override
+  bool operator ==(Object other) =>
+      other is ChannelDeepLink && other.channelId == channelId;
+
+  @override
+  int get hashCode => channelId.hashCode;
+
+  @override
+  String toString() => 'ChannelDeepLink(channel: $channelId)';
+}
+
 /// A parsed `buzz://message` deep link.
 class MessageDeepLink extends BuzzDeepLink {
   /// Channel UUID from the `channel` query param.
@@ -113,6 +133,27 @@ String buildMessageLink({
     host: 'message',
     queryParameters: params,
   ).toString();
+}
+
+/// Parse a canonical `buzz://channel/<channel-uuid>` URI.
+///
+/// The channel ID must be the URI's sole non-empty path segment. Query
+/// parameters and fragments are rejected so malformed or ambiguous links never
+/// become navigation targets.
+ChannelDeepLink? parseChannelDeepLink(Uri uri) {
+  if (uri.scheme != 'buzz' || uri.host != 'channel') return null;
+  if (uri.hasQuery || uri.hasFragment || uri.userInfo.isNotEmpty) return null;
+  if (uri.pathSegments.length != 1 || uri.pathSegments.single.isEmpty) {
+    return null;
+  }
+  final channelId = uri.pathSegments.single;
+  if (!RegExp(
+    r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
+    caseSensitive: false,
+  ).hasMatch(channelId)) {
+    return null;
+  }
+  return ChannelDeepLink(channelId: channelId.toLowerCase());
 }
 
 /// Parse a `buzz://message?…` URI into a [MessageDeepLink].
@@ -218,4 +259,6 @@ InviteDeepLink? parseInviteDeepLink(Uri uri) {
 
 /// Parse any supported Buzz deep link.
 BuzzDeepLink? parseBuzzDeepLink(Uri uri) =>
-    parseInviteDeepLink(uri) ?? parseMessageDeepLink(uri);
+    parseInviteDeepLink(uri) ??
+    parseChannelDeepLink(uri) ??
+    parseMessageDeepLink(uri);

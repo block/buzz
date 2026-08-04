@@ -46,9 +46,44 @@ void main() {
     final destination = tester.widget<_CapturedDestination>(
       find.byType(_CapturedDestination),
     );
+    final messageLink = destination.link as MessageDeepLink;
     expect(destination.channel.id, 'channel-1');
-    expect(destination.link.messageId, 'message-2');
-    expect(destination.link.threadRootId, 'message-1');
+    expect(messageLink.messageId, 'message-2');
+    expect(messageLink.threadRootId, 'message-1');
+  });
+
+  testWidgets('dispatches a channel-only link to the channel root', (
+    tester,
+  ) async {
+    const link = ChannelDeepLink(channelId: 'channel-1');
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          pendingDeepLinkProvider.overrideWith(
+            () => _FakePendingDeepLinkNotifier(link),
+          ),
+          channelsProvider.overrideWith(
+            () => _FakeChannelsNotifier(Future.value([_channel])),
+          ),
+        ],
+        child: MaterialApp(
+          home: DeepLinkDispatcher(
+            destinationBuilder: (channel, link) =>
+                _CapturedDestination(channel: channel, link: link),
+            child: const Scaffold(body: SizedBox()),
+          ),
+        ),
+      ),
+    );
+
+    await tester.pumpAndSettle();
+
+    final destination = tester.widget<_CapturedDestination>(
+      find.byType(_CapturedDestination),
+    );
+    expect(destination.channel.id, 'channel-1');
+    expect(destination.link, same(link));
   });
 
   testWidgets('retains invite and surfaces prepare failure', (tester) async {
@@ -259,7 +294,7 @@ class _CapturedDestination extends StatelessWidget {
   const _CapturedDestination({required this.channel, required this.link});
 
   final Channel channel;
-  final MessageDeepLink link;
+  final BuzzDeepLink link;
 
   @override
   Widget build(BuildContext context) => const SizedBox();

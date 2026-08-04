@@ -416,6 +416,14 @@ type MockBridgeOptions = {
     code?: string | null;
     name?: string | null;
   }>;
+  /** Pending channel/message links that arrived before AppShell mounted. */
+  pendingNavigationDeepLinks?: Array<{
+    id: string;
+    kind: "channel" | "message";
+    channelId: string;
+    messageId?: string | null;
+    threadRootId?: string | null;
+  }>;
   /**
    * Global agent config returned by `get_global_agent_config`. Defaults to
    * an empty config (no provider, model, or env vars) if not specified.

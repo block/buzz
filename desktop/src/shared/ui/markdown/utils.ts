@@ -1,6 +1,7 @@
 import * as React from "react";
 import { defaultUrlTransform } from "react-markdown";
 
+import { isChannelLink } from "@/features/messages/lib/channelLink";
 import { isMessageLink } from "@/features/messages/lib/messageLink";
 
 export function useStableArray<T>(arr: T[]): T[] {
@@ -172,7 +173,7 @@ export function isInsideHiddenSpoiler(element: Element): boolean {
  * click end-to-end. Everything else delegates to `defaultUrlTransform`.
  */
 export function messageLinkUrlTransform(value: string, key: string): string {
-  if (key === "href" && isMessageLink(value)) {
+  if (key === "href" && (isMessageLink(value) || isChannelLink(value))) {
     return value;
   }
   return defaultUrlTransform(value);

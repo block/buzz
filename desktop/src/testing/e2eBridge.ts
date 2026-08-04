@@ -424,6 +424,13 @@ type E2eConfig = {
       code?: string | null;
       name?: string | null;
     }>;
+    pendingNavigationDeepLinks?: Array<{
+      id: string;
+      kind: "channel" | "message";
+      channelId: string;
+      messageId?: string | null;
+      threadRootId?: string | null;
+    }>;
     // When true, `get_identity` returns `lost: true` until `persist_current_identity`
     // or `import_identity` is called. Drives the identity-lost recovery UX in tests.
     identityLost?: boolean;
@@ -4249,6 +4256,24 @@ function resetMockPendingCommunityDeepLinks(config: E2eConfig | null) {
     ...pending,
     code: pending.code ?? null,
     name: pending.name ?? null,
+  }));
+}
+
+let mockPendingNavigationDeepLinks: Array<{
+  id: string;
+  kind: "channel" | "message";
+  channelId: string;
+  messageId: string | null;
+  threadRootId: string | null;
+}> = [];
+
+function resetMockPendingNavigationDeepLinks(config: E2eConfig | null) {
+  mockPendingNavigationDeepLinks = (
+    config?.mock?.pendingNavigationDeepLinks ?? []
+  ).map((pending) => ({
+    ...pending,
+    messageId: pending.messageId ?? null,
+    threadRootId: pending.threadRootId ?? null,
   }));
 }
 
@@ -9821,6 +9846,7 @@ export function maybeInstallE2eTauriMocks() {
   resetMockPersonaCatalogEvents(config);
   resetMockSaveSubscriptions(config);
   resetMockPendingCommunityDeepLinks(config);
+  resetMockPendingNavigationDeepLinks(config);
   initializeMockHuddle(config.mock?.huddle, config);
   mockWebsocketSendMutexWedged = false;
   if (config.mock?.windowLabel) {
@@ -11520,6 +11546,17 @@ export function maybeInstallE2eTauriMocks() {
           return false;
         }
         mockPendingCommunityDeepLinks.splice(index, 1);
+        return true;
+      }
+      case "clear_pending_navigation_deep_links":
+        mockPendingNavigationDeepLinks.length = 0;
+        return;
+      case "take_pending_navigation_deep_link":
+        return mockPendingNavigationDeepLinks[0] ?? null;
+      case "acknowledge_pending_navigation_deep_link": {
+        const { id } = payload as { id: string };
+        if (mockPendingNavigationDeepLinks[0]?.id !== id) return false;
+        mockPendingNavigationDeepLinks.shift();
         return true;
       }
       case "get_relay_http_url":
