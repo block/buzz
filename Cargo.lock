@@ -1083,7 +1083,7 @@ name = "buzz-migrate"
 version = "0.1.0"
 dependencies = [
  "axum",
- "base64",
+ "base64 0.22.1",
  "buzz-core",
  "buzz-sdk",
  "buzz-ws-client",

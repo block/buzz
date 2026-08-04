@@ -933,6 +933,135 @@ async fn no_usage_turn_emits_no_usage_notification() {
     h.shutdown().await;
 }
 
+/// Usage must be reported after EVERY provider round, not only once the turn
+/// returns.
+///
+/// A turn is many provider round-trips over many minutes. While the only report
+/// was the one `session/prompt` sends after the turn returns, a turn whose
+/// process was killed mid-flight reported nothing at all: its counters lived in
+/// the prompt task's stack frame, the provider had already billed them, and no
+/// consumer ever saw them. That is not a corner case for a long-horizon
+/// benchmark — every phase of a `continue_until_timeout` run is terminated
+/// mid-turn by design, which under-reported one measured run's cost several-fold.
+///
+/// Two rounds with distinct usage. The assertion that matters is the FIRST
+/// notification: it must carry round 1's counts alone, proving it was sent
+/// before round 2 had returned, so a kill between the rounds would still have
+/// left round 1 on the wire.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn usage_is_reported_after_each_round_not_only_at_turn_end() {
+    let url = spawn_fake_llm(vec![
+        openai_tool_call_with_usage("call_round1", "fake__noop", json!({}), 15, 6),
+        openai_text_with_usage("done", 20, 8),
+    ])
+    .await;
+    let mut h = Harness::spawn(&url).await;
+    let sid = init_session(&mut h).await;
+
+    let p_id = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
+        )
+        .await;
+
+    let (frames_before, response) = recv_until_with_drain(&mut h, |v| v["id"] == p_id).await;
+    assert_eq!(
+        response["result"]["stopReason"], "end_turn",
+        "turn must complete with end_turn"
+    );
+
+    let usage: Vec<&Value> = frames_before
+        .iter()
+        .filter(|v| is_usage_update(v))
+        .collect();
+    assert!(
+        usage.len() >= 2,
+        "expected a usage_update per round (2 rounds), got {}; frames: {frames_before:#?}",
+        usage.len()
+    );
+
+    // Round 1 alone — emitted while round 2 was still outstanding.
+    assert_eq!(
+        usage[0]["params"]["update"]["accumulatedInputTokens"],
+        json!(15u64),
+        "first notification must carry round 1's input tokens only"
+    );
+    assert_eq!(
+        usage[0]["params"]["update"]["accumulatedOutputTokens"],
+        json!(6u64),
+        "first notification must carry round 1's output tokens only"
+    );
+
+    // The last one is the turn total and is what a high-water-mark consumer keeps.
+    let last = usage[usage.len() - 1];
+    assert_eq!(
+        last["params"]["update"]["accumulatedInputTokens"],
+        json!(35u64),
+        "final notification must carry the turn total 15+20=35"
+    );
+    assert_eq!(
+        last["params"]["update"]["accumulatedOutputTokens"],
+        json!(14u64),
+        "final notification must carry the turn total 6+8=14"
+    );
+
+    h.shutdown().await;
+}
+
+/// A mid-turn report must be SESSION-cumulative, not turn-local.
+///
+/// The baseline handed to the run loop is a snapshot taken when the turn began;
+/// if it were dropped, a consumer taking the high-water mark per session would
+/// see turn 2's first round (a small number) arrive after turn 1's total and
+/// discard it, silently losing turn 2 for any turn that never completed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mid_turn_usage_includes_earlier_turns() {
+    let url = spawn_fake_llm(vec![
+        openai_text_with_usage("turn one", 10, 5),
+        openai_tool_call_with_usage("call_t2", "fake__noop", json!({}), 20, 8),
+        openai_text_with_usage("turn two done", 30, 9),
+    ])
+    .await;
+    let mut h = Harness::spawn(&url).await;
+    let sid = init_session(&mut h).await;
+
+    let p1 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"turn 1"}]}),
+        )
+        .await;
+    let (_, _) = recv_until_with_drain(&mut h, |v| v["id"] == p1).await;
+
+    let p2 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"turn 2"}]}),
+        )
+        .await;
+    let (frames_before, _) = recv_until_with_drain(&mut h, |v| v["id"] == p2).await;
+
+    let first = frames_before
+        .iter()
+        .find(|v| is_usage_update(v))
+        .unwrap_or_else(|| {
+            panic!("expected a usage_update during turn 2; frames: {frames_before:#?}")
+        });
+    assert_eq!(
+        first["params"]["update"]["accumulatedInputTokens"],
+        json!(30u64),
+        "turn 2 round 1 must report 10 (turn 1) + 20 (this round), not 20"
+    );
+    assert_eq!(
+        first["params"]["update"]["accumulatedOutputTokens"],
+        json!(13u64),
+        "turn 2 round 1 must report 5 (turn 1) + 8 (this round), not 8"
+    );
+
+    h.shutdown().await;
+}
+
 /// When a turn is cancelled AFTER the provider has already returned a response
 /// (so token counts are observed), buzz-agent must still emit the usage
 /// notification before the cancelled `session/prompt` response.

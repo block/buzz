@@ -1023,7 +1023,7 @@ jobs:
           git log -1 --format=%s | grep -qx smoke
           echo "Host bash resolved and functional; git commit round-trip passed"
       - name: Check (Tauri crate)
-        run: cargo check --manifest-path desktop/src-tauri/Cargo.toml --target $env:TARGET
+        run: cargo check --manifest-path desktop/src-tauri/Cargo.toml --workspace --all-targets --target $env:TARGET
         env:
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
       - name: Test (Tauri crate)

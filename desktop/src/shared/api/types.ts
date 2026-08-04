@@ -517,6 +517,9 @@ export type AcpRuntimeCatalogEntry = {
   providerEnvVar: string | null;
   /** Environment variable used to apply thinking effort, when supported. */
   thinkingEnvVar: string | null;
+  maxTokensEnvVar: string | null;
+  contextLimitEnvVar: string | null;
+  maxRoundsEnvVar: string | null;
   installHint: string;
   installInstructionsUrl: string;
   canAutoInstall: boolean;
@@ -529,12 +532,7 @@ export type AcpRuntimeCatalogEntry = {
   authStatus: AuthStatus;
   /** Hint for completing authentication; null when not applicable or already logged in. */
   loginHint: string | null;
-  /**
-   * Whether this entry is compiled into the app ("builtin"), a bundled preset
-   * ("preset" — PATH-probed, not editable/deletable), or loaded from a user
-   * JSON file in `custom_harnesses/` ("custom"). Controls editability in the
-   * UI — only "custom" entries can be edited or deleted.
-   */
+  /** "builtin" (compiled in), "preset" (PATH-probed, not editable), or "custom" (user JSON). Controls UI editability. */
   source: "builtin" | "preset" | "custom";
   /**
    * Definition-level environment variables for `source: custom` entries.
@@ -602,7 +600,6 @@ export type AgentModelInfo = {
 };
 
 // ── Config bridge types ──────────────────────────────────────────────────────
-
 export type ConfigOrigin =
   | "buzzExplicit"
   | "acpNativeRead"
@@ -612,7 +609,8 @@ export type ConfigOrigin =
   | "personaDefault"
   | "globalDefault"
   | "runtimeOverride"
-  | "harnessConstraint";
+  | "harnessConstraint"
+  | "harnessDefault";
 
 export type ConfigWriteMechanism =
   | { type: "respawnWithEnvVar"; envKey: string }
