@@ -24,28 +24,21 @@ import '../profile/profile_provider.dart';
 import '../profile/user_cache_provider.dart';
 import '../profile/user_profile.dart';
 import 'recent_searches_provider.dart';
+import 'search_motion_field.dart';
 import 'search_provider.dart';
 
 enum _SearchFilter { all, messages, channels, people }
 
 const _searchFieldMinHeight = 36.0;
 const _searchIdleFieldHeight = 45.0;
-const _searchIdleIconSize = 26.0;
-const _searchCompactIconSize = 18.0;
 const _searchIdleTextSize = 15.0;
 const _searchFieldVerticalPadding = Grid.xxs;
-const _searchFieldHint = 'Search messages, channels, and people';
 const _searchFieldMoveDuration = Duration(milliseconds: 160);
 const _searchTitleReturnDuration = Duration(milliseconds: 80);
 const _searchCancelEnterDuration = Duration(milliseconds: 80);
 const _searchCancelExitDuration = Duration(milliseconds: 60);
 const _searchIdleFieldTopInset = Grid.half;
 const _searchHeaderFiltersHeight = Grid.xl;
-const _searchIdleIconInset = Grid.xxs;
-const _searchIdleTextInset =
-    _searchIdleIconInset + _searchIdleIconSize + Grid.xxs;
-const _searchCompactTextInset =
-    _searchIdleIconInset + _searchCompactIconSize + Grid.xxs;
 const _searchActiveFieldTopOffset = 42.0;
 const _searchActiveFieldRightInset = 72.0;
 
@@ -258,7 +251,7 @@ class SearchPage extends HookConsumerWidget {
               // native input connection before the keyboard is shown.
               child: SizedBox(
                 key: const Key('search-field-container'),
-                child: _SearchMotionField(
+                child: SearchMotionField(
                   controller: textController,
                   focusNode: focusNode,
                   iconColor: searchPrimaryColor,
@@ -267,6 +260,7 @@ class SearchPage extends HookConsumerWidget {
                   surfaceColor: searchSurfaceColor,
                   isSearchEditing: isSearchEditing.value,
                   reduceMotion: reduceMotion,
+                  motionDuration: _searchFieldMoveDuration,
                   onTap: activateSearch,
                   onChanged: (value) =>
                       ref.read(searchProvider.notifier).search(value),
@@ -351,109 +345,6 @@ class SearchPage extends HookConsumerWidget {
       ),
     );
   }
-}
-
-class _SearchMotionField extends StatelessWidget {
-  final TextEditingController controller;
-  final FocusNode focusNode;
-  final Color iconColor;
-  final Color inputColor;
-  final Color placeholderColor;
-  final Color surfaceColor;
-  final bool isSearchEditing;
-  final bool reduceMotion;
-  final VoidCallback onTap;
-  final ValueChanged<String> onChanged;
-  final ValueChanged<String> onSubmitted;
-
-  const _SearchMotionField({
-    required this.controller,
-    required this.focusNode,
-    required this.iconColor,
-    required this.inputColor,
-    required this.placeholderColor,
-    required this.surfaceColor,
-    required this.isSearchEditing,
-    required this.reduceMotion,
-    required this.onTap,
-    required this.onChanged,
-    required this.onSubmitted,
-  });
-
-  @override
-  Widget build(BuildContext context) => DecoratedBox(
-    decoration: BoxDecoration(
-      color: surfaceColor,
-      borderRadius: BorderRadius.circular(Radii.lg),
-    ),
-    child: Stack(
-      children: [
-        Positioned.fill(
-          child: Align(
-            alignment: Alignment.centerLeft,
-            child: SizedBox(
-              width: double.infinity,
-              child: TextField(
-                key: const Key('search-field'),
-                controller: controller,
-                focusNode: focusNode,
-                decoration: InputDecoration(
-                  hintText: isSearchEditing ? null : _searchFieldHint,
-                  hintStyle: searchInputTextStyle.copyWith(
-                    color: placeholderColor,
-                    fontSize: _searchIdleTextSize,
-                    height: 20 / _searchIdleTextSize,
-                  ),
-                  border: InputBorder.none,
-                  enabledBorder: InputBorder.none,
-                  focusedBorder: InputBorder.none,
-                  isDense: true,
-                  contentPadding: EdgeInsets.only(
-                    left: isSearchEditing
-                        ? _searchCompactTextInset
-                        : _searchIdleTextInset,
-                    right: Grid.xxs,
-                    top: isSearchEditing ? _searchFieldVerticalPadding : 0,
-                    bottom: isSearchEditing ? _searchFieldVerticalPadding : 0,
-                  ),
-                ),
-                style: searchInputTextStyle.copyWith(color: inputColor),
-                textAlignVertical: TextAlignVertical.center,
-                textAlign: TextAlign.start,
-                textInputAction: TextInputAction.search,
-                onTap: onTap,
-                onChanged: onChanged,
-                onSubmitted: onSubmitted,
-              ),
-            ),
-          ),
-        ),
-        IgnorePointer(
-          child: Align(
-            alignment: Alignment.centerLeft,
-            child: Padding(
-              padding: const EdgeInsets.only(left: _searchIdleIconInset),
-              child: AnimatedScale(
-                duration: reduceMotion
-                    ? Duration.zero
-                    : _searchFieldMoveDuration,
-                curve: Curves.easeInOutCubic,
-                scale: isSearchEditing
-                    ? _searchCompactIconSize / _searchIdleIconSize
-                    : 1,
-                child: Icon(
-                  LucideIcons.search,
-                  key: const Key('search-moving-icon'),
-                  size: _searchIdleIconSize,
-                  color: iconColor,
-                ),
-              ),
-            ),
-          ),
-        ),
-      ],
-    ),
-  );
 }
 
 class _SearchBody extends ConsumerWidget {
