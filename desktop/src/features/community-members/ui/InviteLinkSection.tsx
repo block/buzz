@@ -57,6 +57,12 @@ export function InviteLinkSection({
   const [inviteUrl, setInviteUrl] = React.useState("");
   const [maxUses, setMaxUses] = React.useState<number | null>(null);
   const generationRequestId = React.useRef(0);
+  // React StrictMode replays effects in development. Keep one in-flight mint
+  // per setting set so the replay observes the original request instead of
+  // creating a second durable invite.
+  const inviteRequests = React.useRef(
+    new Map<string, ReturnType<typeof mintInvite>>(),
+  );
   const shouldReduceMotion = useReducedMotion();
   const ttlLabel =
     TTL_OPTIONS.find((option) => option.value === ttlSecs)?.label ?? "3 days";
@@ -65,6 +71,7 @@ export function InviteLinkSection({
     "No limit";
   const isGenerating = generationStatus === "generating";
   const hasGenerationFailed = generationStatus === "failed";
+  const inviteSettingsKey = `${ttlSecs}:${maxUses ?? "no-limit"}`;
   const isWorking = isGenerating || copyStatus === "copying";
   const copyLabel = hasGenerationFailed
     ? "Retry"
@@ -92,19 +99,31 @@ export function InviteLinkSection({
     setGenerationStatus("generating");
     setInviteUrl("");
     setCopyStatus("idle");
+    const existingRequest = inviteRequests.current.get(inviteSettingsKey);
+    const inviteRequest = existingRequest ?? mintInvite({ ttlSecs, maxUses });
+    if (!existingRequest) {
+      inviteRequests.current.set(inviteSettingsKey, inviteRequest);
+    }
+
     try {
-      const invite = await mintInvite({ ttlSecs, maxUses });
+      const invite = await inviteRequest;
+      if (inviteRequests.current.get(inviteSettingsKey) === inviteRequest) {
+        inviteRequests.current.delete(inviteSettingsKey);
+      }
       if (generationRequestId.current === requestId) {
         setInviteUrl(invite.url);
         setGenerationStatus("idle");
       }
     } catch {
+      if (inviteRequests.current.get(inviteSettingsKey) === inviteRequest) {
+        inviteRequests.current.delete(inviteSettingsKey);
+      }
       if (generationRequestId.current === requestId) {
         setGenerationStatus("failed");
         toast.error("Couldn’t create an invite link.");
       }
     }
-  }, [maxUses, ttlSecs]);
+  }, [inviteSettingsKey, maxUses, ttlSecs]);
 
   React.useEffect(() => {
     void generateInviteLink();
