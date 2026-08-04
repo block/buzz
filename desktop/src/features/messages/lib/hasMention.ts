@@ -1,9 +1,4 @@
-/**
- * Escape special regex characters in a string.
- */
-function escapeRegExp(str: string): string {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
+import { CJK_BOUNDARY_RANGES, escapeRegExp } from "@/shared/lib/mentionPattern";
 
 function maskRange(
   chars: string[],
@@ -133,17 +128,20 @@ function maskMarkdownCode(text: string): string {
  *
  * Matches `@Name` preceded by start-of-string, whitespace, an opening
  * parenthesis (for team expansions), markdown
- * bold/italic markers (`*`, `**`, `***`, `_`, `__`, `___`), or spoiler
- * delimiters (`||`). This handles the case where a mention is pasted from the
- * chat area and TipTap's Bold extension wraps it in bold marks (font-weight >=
- * 500 -> bold), plus messages whose visible mention text is spoilered.
+ * bold/italic markers (`*`, `**`, `***`, `_`, `__`, `___`), spoiler
+ * delimiters (`||`), or a directly adjacent CJK/Hangul character. This handles
+ * the case where a mention is pasted from the chat area and TipTap's Bold
+ * extension wraps it in bold marks (font-weight >= 500 -> bold), messages whose
+ * visible mention text is spoilered, and mentions butted directly against
+ * Korean/Japanese/Chinese text with no separating space (e.g. `@Fizz이렇게`),
+ * which otherwise silently drop the p-tag and notification.
  *
  * Exported separately so it can be unit-tested without importing React.
  */
 export function getMentionOffset(text: string, name: string): number | null {
   const escaped = escapeRegExp(name);
   const pattern = new RegExp(
-    `(^|\\s|\\(|[*_]{1,3}|\\|\\|)(@${escaped})(?=\\|\\||[\\s,;.!?:)\\]}*_]|$)`,
+    `(^|\\s|\\(|[*_]{1,3}|\\|\\||[${CJK_BOUNDARY_RANGES}])(@${escaped})(?=\\|\\||[\\s,;.!?:)\\]}*_${CJK_BOUNDARY_RANGES}]|$)`,
     "i",
   );
   const match = pattern.exec(maskMarkdownCode(text));
