@@ -58,7 +58,10 @@ pub(super) fn build_launch_block(
     }
     policy_env.insert("BUZZ_ACP_RELAY_OBSERVER".into(), "true".into());
     policy_env.insert("BUZZ_ACP_LAZY_POOL".into(), "true".into());
-    policy_env.insert("BUZZ_ACP_AGENTS".into(), record.parallelism.to_string());
+    policy_env.insert(
+        "BUZZ_ACP_AGENTS".into(),
+        crate::managed_agents::acp_agents_value(&descriptor.command, record.parallelism),
+    );
 
     if let Some(value) = effective_prompt {
         policy_env.insert("BUZZ_ACP_SYSTEM_PROMPT".into(), value.to_string());
@@ -176,7 +179,15 @@ pub(super) fn deploy_payload_json(
         "turn_timeout_seconds": record.turn_timeout_seconds,
         "idle_timeout_seconds": record.idle_timeout_seconds,
         "max_turn_duration_seconds": record.max_turn_duration_seconds,
-        "parallelism": record.parallelism,
+        // Legacy top-level field: providers use launch.policy_env["BUZZ_ACP_AGENTS"]
+        // as the executable contract, but this field is projected as effective
+        // parallelism for display/bookkeeping consistency.
+        "parallelism": crate::managed_agents::effective_parallelism(
+            // The provider executes record.agent_command — use that pinned
+            // command as the policy identity so the cap follows the payload.
+            &record.agent_command,
+            record.parallelism,
+        ),
         "respond_to": record.respond_to,
         "respond_to_allowlist": &record.respond_to_allowlist,
         "env_vars": merged_env,
@@ -256,5 +267,75 @@ mod tests {
         assert_eq!(launch["policy_env"]["BUZZ_ACP_MAX_TURN_DURATION"], "23");
         assert_eq!(launch["policy_env"]["BUZZ_ACP_AGENTS"], "4");
         assert_eq!(launch["owner_pubkey"], "owner-hex");
+    }
+
+    /// OpenClaw descriptor: `launch.policy_env["BUZZ_ACP_AGENTS"]` must be "5"
+    /// even when the record's requested parallelism is 10. This is the direct
+    /// `launch.policy_env` seam test — the executable contract for remote providers.
+    #[test]
+    fn launch_block_openclaw_over_cap_policy_env_is_capped() {
+        let mut record = record();
+        record.agent_command = "openclaw".into();
+        record.parallelism = 10; // above the OpenClaw spawn-time cap
+        let descriptor = EffectiveHarnessDescriptor {
+            command: "openclaw".into(),
+            args: vec![],
+            env: BTreeMap::new(),
+        };
+
+        let launch = build_launch_block(&record, &descriptor, &[], None, None, "owner-hex");
+
+        assert_eq!(
+            launch["policy_env"]["BUZZ_ACP_AGENTS"],
+            crate::managed_agents::parallelism::OPENCLAW_MAX_PARALLELISM.to_string(),
+            "launch.policy_env[BUZZ_ACP_AGENTS] must be capped at {} for OpenClaw, not 10",
+            crate::managed_agents::parallelism::OPENCLAW_MAX_PARALLELISM
+        );
+    }
+
+    /// Uncapped harness (goose): `launch.policy_env["BUZZ_ACP_AGENTS"]` passes
+    /// the requested value through unchanged.
+    #[test]
+    fn launch_block_goose_policy_env_is_not_capped() {
+        let mut record = record();
+        record.parallelism = 8;
+        let descriptor = EffectiveHarnessDescriptor {
+            command: "goose".into(),
+            args: vec![],
+            env: BTreeMap::new(),
+        };
+
+        let launch = build_launch_block(&record, &descriptor, &[], None, None, "owner-hex");
+
+        assert_eq!(
+            launch["policy_env"]["BUZZ_ACP_AGENTS"], "8",
+            "goose: policy_env[BUZZ_ACP_AGENTS] must pass through requested value 8"
+        );
+    }
+
+    /// deploy_payload_json: legacy top-level `parallelism` is the effective value.
+    #[test]
+    fn deploy_payload_json_openclaw_parallelism_is_effective() {
+        let mut record = record();
+        record.agent_command = "openclaw".into();
+        record.parallelism = 10;
+        let launch = serde_json::json!({});
+
+        let payload = deploy_payload_json(
+            &record,
+            "wss://relay.example".to_string(),
+            None,
+            None,
+            None,
+            BTreeMap::new(),
+            launch,
+        );
+
+        assert_eq!(
+            payload["parallelism"],
+            crate::managed_agents::parallelism::OPENCLAW_MAX_PARALLELISM,
+            "legacy top-level parallelism must be effective (capped at {}) for OpenClaw",
+            crate::managed_agents::parallelism::OPENCLAW_MAX_PARALLELISM
+        );
     }
 }

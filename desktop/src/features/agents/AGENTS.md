@@ -19,6 +19,18 @@ never maintains a rival copy of this table. Setup guidance follows the same
 rule: `requires_external_cli` is derived from `KnownAcpRuntime` and projected
 to the UI rather than inferred from a runtime ID in a component.
 
+**Second metadata source: command-keyed execution policy.**
+`harness_max_parallelism` (`managed_agents/parallelism.rs`) maps the harness's
+static command string to a spawn-time cap (`OPENCLAW_MAX_PARALLELISM = 5` for
+OpenClaw). This cap is not a `KnownAcpRuntime` field because it applies to
+preset harnesses (like OpenClaw) that are not in the builtin catalog. It is
+projected onto `AcpRuntimeCatalogEntry.max_parallelism` by all four
+catalog-producing constructors (builtin discovery, preset catalog, custom
+discovery, custom-save response) using the **static definition command**, not
+the resolved `entry.command` (which may be `null` for unavailable entries).
+The frontend reads `maxParallelism` from the catalog entry and never keeps a
+separate constant.
+
 If you need a new capability fact (a new env key, a native option, a "supports
 X" flag): add it to `KnownAcpRuntime` first, expose it on
 `AcpRuntimeCatalogEntry`, then project it through the core. Do not shortcut
