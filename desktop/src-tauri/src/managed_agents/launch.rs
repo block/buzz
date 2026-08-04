@@ -82,7 +82,7 @@ pub(crate) fn resolve_launch_spec(
     if let Some(value) = resolve_session_title(record.display_name.as_deref(), &record.name) {
         policy_env.insert(SESSION_TITLE_ENV_VAR.into(), value);
     }
-    if let Some(value) = super::spawn_hash::effective_team_instructions(record, teams) {
+    if let Some(value) = super::spawn_snapshot::effective_team_instructions(record, teams) {
         policy_env.insert("BUZZ_ACP_TEAM_INSTRUCTIONS".into(), value);
     }
 

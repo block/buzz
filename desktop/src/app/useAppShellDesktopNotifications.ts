@@ -25,6 +25,7 @@ import type { Channel, RelayEvent } from "@/shared/api/types";
 
 export function useAppShellDesktopNotifications({
   channels,
+  enabled,
   goChannel,
   goHome,
   notificationSettings,
@@ -32,6 +33,7 @@ export function useAppShellDesktopNotifications({
   pubkey,
 }: {
   channels: Channel[];
+  enabled: boolean;
   goChannel: (channelId: string) => Promise<unknown>;
   goHome: () => Promise<unknown>;
   notificationSettings: NotificationSettings;
@@ -42,6 +44,7 @@ export function useAppShellDesktopNotifications({
 }) {
   const handleChannelNotification = React.useEffectEvent(
     (_channelId: string, event: RelayEvent) => {
+      if (!enabled) return;
       if (!shouldBounceForChannelNotification(event.tags)) return;
       if (!notificationSettings.desktopEnabled) return;
       void requestDockBounce();
@@ -50,6 +53,7 @@ export function useAppShellDesktopNotifications({
 
   const handleDmNotification = React.useEffectEvent(
     (event: RelayEvent, channel: Channel) => {
+      if (!enabled) return;
       if (
         !notificationSettings.desktopEnabled ||
         !notificationSettings.slotAlertsEnabled.dm
@@ -84,6 +88,7 @@ export function useAppShellDesktopNotifications({
 
   const handleThreadReplyDesktopNotification = React.useEffectEvent(
     (channelId: string, event: RelayEvent) => {
+      if (!enabled) return;
       if (
         !notificationSettings.desktopEnabled ||
         !notificationSettings.slotAlertsEnabled.thread_reply
@@ -151,6 +156,7 @@ export function useAppShellDesktopNotifications({
   );
 
   React.useEffect(() => {
+    if (!enabled) return;
     let isCancelled = false;
     let cleanup = () => {};
 
@@ -173,7 +179,7 @@ export function useAppShellDesktopNotifications({
       isCancelled = true;
       cleanup();
     };
-  }, []);
+  }, [enabled]);
 
   return {
     handleChannelNotification,

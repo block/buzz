@@ -25,26 +25,29 @@ import '../profile/user_cache_provider.dart';
 import '../profile/user_profile.dart';
 import '../forum/forum_posts_view.dart';
 import 'channel.dart';
+import 'channel_actions_sheet.dart';
 import 'channel_link_navigation.dart';
 import 'agent_activity/working_bots_provider.dart';
 import 'channel_management_provider.dart';
+import 'channel_sections/channel_sections_provider.dart';
 import 'channel_messages_provider.dart';
 import 'channel_typing_provider.dart';
 import 'channel_typing_indicator.dart';
 import 'channels_provider.dart';
+import 'unread_badge/observed_unread_event.dart';
 import 'compose_bar.dart';
 import 'composer_dock_size_reporter.dart';
 import 'date_formatters.dart';
 import 'day_divider.dart';
 import 'dm_channel_labels.dart';
 import 'ephemeral_channel_display.dart';
-import 'manage_channel_sheet.dart';
 import 'members_sheet.dart';
 import 'message_actions.dart';
 import 'message_content.dart';
-import 'read_state/deferred_read_state_update.dart';
-import 'read_state/read_state_provider.dart';
-import 'read_state/read_state_time.dart';
+import '../../shared/read_state/deferred_read_state_update.dart';
+import '../../shared/read_state/read_state_format.dart';
+import '../../shared/read_state/read_state_provider.dart';
+import '../../shared/read_state/read_state_time.dart';
 import 'reaction_row.dart';
 import 'send_message_provider.dart';
 import '../profile/user_profile_sheet.dart';
@@ -128,11 +131,58 @@ class ChannelDetailPage extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final composerDockHeight = useState(0.0);
+    final sendMessage = ref.read(sendMessageProvider);
     final detailsAsync = ref.watch(channelDetailsProvider(channel.id));
     final channelsAsync = ref.watch(channelsProvider);
     final messagesState = ref.watch(channelMessagesProvider(channel.id));
     final sessionStatus = ref.watch(relaySessionProvider).status;
     final readState = ref.watch(readStateProvider);
+    final channelsNotifier = ref.read(channelsProvider.notifier);
+    final initialOrdinaryUnreadMessageIdsRef = useRef<Set<String>>(const {});
+    final initialOldestOrdinaryUnreadMessageIdRef = useRef<String?>(null);
+    final initialForcedUnreadMessageIdsRef = useRef<Set<String>>(const {});
+    final didCaptureInitialReadAt = useRef(false);
+    if (readState.isReady && !didCaptureInitialReadAt.value) {
+      final channelReadAt = readState.effectiveTimestamp(channel.id);
+      final ordinaryUnreadEvents = [
+        for (final event
+            in channelsNotifier
+                    .observedUnreadEventsByChannel[channel.id]
+                    ?.values ??
+                const <ObservedUnreadEvent>[])
+          if (event.rootId == null &&
+              event.createdAt >
+                  (observedUnreadEventReadAt(
+                        event,
+                        channelReadAt,
+                        (rootId) => readState.effectiveTimestamp(
+                          threadContextKey(rootId),
+                        ),
+                        (messageId) => readState.effectiveTimestamp(
+                          msgContextKey(messageId),
+                        ),
+                      ) ??
+                      0))
+            event,
+      ]..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      initialOrdinaryUnreadMessageIdsRef.value = {
+        for (final event in ordinaryUnreadEvents) event.id,
+      };
+      initialOldestOrdinaryUnreadMessageIdRef.value =
+          ordinaryUnreadEvents.firstOrNull?.id;
+      initialForcedUnreadMessageIdsRef.value = {
+        for (final entry in readState.forcedUnreadContexts.entries)
+          if (entry.value == channel.id && entry.key.startsWith('msg:'))
+            entry.key.substring('msg:'.length),
+      };
+      didCaptureInitialReadAt.value = true;
+    }
+    final initialOrdinaryUnreadMessageIds =
+        initialOrdinaryUnreadMessageIdsRef.value;
+    final initialOldestOrdinaryUnreadMessageId =
+        initialOldestOrdinaryUnreadMessageIdRef.value;
+    final initialForcedUnreadMessageIds =
+        initialForcedUnreadMessageIdsRef.value;
     final currentPubkey = ref
         .watch(profileProvider)
         .whenData((value) => value?.pubkey)
@@ -206,14 +256,28 @@ class ChannelDetailPage extends HookConsumerWidget {
       return null;
     }, [channel.id]);
 
-    useEffect(() {
-      final messageId = initialMessageId;
-      if (messageId == null || channel.isForum) return null;
-      final eventIds = {messageId, ?initialThreadRootId};
-      final notifier = ref.read(channelMessagesProvider(channel.id).notifier);
-      unawaited(_loadDeepLinkEvents(ref, channel.id, eventIds));
-      return () => notifier.releaseDeepLinkEvents(eventIds);
-    }, [channel.id, initialMessageId, initialThreadRootId]);
+    useEffect(
+      () {
+        if (channel.isForum) return null;
+        final eventIds = {
+          ?initialMessageId,
+          ?initialThreadRootId,
+          ?initialOldestOrdinaryUnreadMessageId,
+          ...initialForcedUnreadMessageIds,
+        };
+        if (eventIds.isEmpty) return null;
+        final notifier = ref.read(channelMessagesProvider(channel.id).notifier);
+        unawaited(_loadDeepLinkEvents(ref, channel.id, eventIds));
+        return () => notifier.releaseDeepLinkEvents(eventIds);
+      },
+      [
+        channel.id,
+        initialMessageId,
+        initialThreadRootId,
+        initialOldestOrdinaryUnreadMessageId,
+        initialForcedUnreadMessageIds,
+      ],
+    );
 
     useEffect(() {
       if (!readState.isReady || readTimestamp == null) {
@@ -277,27 +341,25 @@ class ChannelDetailPage extends HookConsumerWidget {
             channel: resolvedChannel,
             currentPubkey: currentPubkey,
           ),
-          if (!resolvedChannel.isDm)
-            IconButton(
-              color: context.colors.primary,
-              onPressed: () async {
-                final shouldClose = await showModalBottomSheet<bool>(
-                  context: context,
-                  isScrollControlled: true,
-                  showDragHandle: true,
-                  constraints: BoxConstraints(
-                    maxWidth: 640,
-                    maxHeight: MediaQuery.sizeOf(context).height * 0.9,
-                  ),
-                  builder: (_) => ManageChannelSheet(channel: resolvedChannel),
-                );
-                if (shouldClose == true && context.mounted) {
-                  Navigator.of(context).pop();
-                }
-              },
-              tooltip: 'Manage channel',
-              icon: const Icon(LucideIcons.ellipsisVertical, size: 22),
-            ),
+          IconButton(
+            color: context.colors.primary,
+            onPressed: () async {
+              final shouldClose = await showChannelActionsSheet(
+                context: context,
+                channel: resolvedChannel,
+                isUnread: false,
+                sectionId: ref
+                    .read(channelSectionsProvider)
+                    .store
+                    .assignments[resolvedChannel.id],
+              );
+              if (shouldClose == true && context.mounted) {
+                Navigator.of(context).pop();
+              }
+            },
+            tooltip: 'Channel actions',
+            icon: const Icon(LucideIcons.ellipsisVertical, size: 22),
+          ),
         ],
       ),
       body: Stack(
@@ -379,6 +441,19 @@ class ChannelDetailPage extends HookConsumerWidget {
                               allMessages: messages,
                               initialMessageId: initialMessageId,
                               initialThreadRootId: initialThreadRootId,
+                              initialOrdinaryUnreadMessageIds:
+                                  initialOrdinaryUnreadMessageIds,
+                              initialOldestOrdinaryUnreadMessageId:
+                                  initialOldestOrdinaryUnreadMessageId,
+                              initialForcedUnreadMessageIds:
+                                  initialForcedUnreadMessageIds,
+                              hasInitialUnread:
+                                  readState.isReady &&
+                                  (readState.isForcedUnread(channel.id) ||
+                                      initialForcedUnreadMessageIds
+                                          .isNotEmpty ||
+                                      initialOldestOrdinaryUnreadMessageId !=
+                                          null),
                               channelId: channel.id,
                               currentPubkey: currentPubkey,
                               isMember: resolvedChannel.isMember,
@@ -443,14 +518,12 @@ class ChannelDetailPage extends HookConsumerWidget {
                             content,
                             mentionPubkeys, {
                             mediaTags = const <List<String>>[],
-                          }) => ref
-                              .read(sendMessageProvider)
-                              .call(
-                                channelId: channel.id,
-                                content: content,
-                                mentionPubkeys: mentionPubkeys,
-                                mediaTags: mediaTags,
-                              ),
+                          }) => sendMessage.call(
+                            channelId: channel.id,
+                            content: content,
+                            mentionPubkeys: mentionPubkeys,
+                            mediaTags: mediaTags,
+                          ),
                     ),
                   ],
                 ),

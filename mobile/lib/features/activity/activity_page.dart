@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -21,8 +22,8 @@ import '../channels/channel_detail_page.dart';
 import '../channels/channels_provider.dart';
 import '../channels/dm_channel_labels.dart';
 import '../channels/message_content.dart';
-import '../channels/read_state/read_state_format.dart';
-import '../channels/read_state/read_state_provider.dart';
+import '../../shared/read_state/read_state_format.dart';
+import '../../shared/read_state/read_state_provider.dart';
 import '../profile/user_cache_provider.dart';
 import '../profile/user_profile.dart';
 import 'activity_provider.dart';
@@ -288,6 +289,7 @@ class ActivityPage extends HookConsumerWidget {
               children: [
                 if (index == newBoundaryIndex) const _NewBoundaryDivider(),
                 _InboxRow(
+                  key: ValueKey(item.id),
                   item: item,
                   channel: channel,
                   currentPubkey: myPk,
