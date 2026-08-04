@@ -98,7 +98,38 @@ test("targets an inactive community relay and always disconnects", async () => {
   ]);
 });
 
-test("preserves relay rejection and disconnects without falling through", async () => {
+test("treats an already-absent active membership as successful cleanup", async () => {
+  await leaveCommunity(
+    "wss://active.example",
+    "wss://active.example",
+    dependencies({
+      publishActive: async () => {
+        throw new Error("invalid: you are not a relay member");
+      },
+    }),
+  );
+});
+
+test("treats an already-absent inactive membership as successful cleanup and disconnects", async () => {
+  let disconnected = false;
+  await leaveCommunity(
+    "wss://inactive.example",
+    "wss://active.example",
+    dependencies({
+      createRelayClient: () => ({
+        publishEvent: async () => {
+          throw new Error("invalid: you are not a relay member");
+        },
+        disconnect: () => {
+          disconnected = true;
+        },
+      }),
+    }),
+  );
+  assert.equal(disconnected, true);
+});
+
+test("preserves other relay rejections and disconnects without falling through", async () => {
   const rejection = new Error("invalid: relay owner cannot leave");
   let disconnected = false;
 

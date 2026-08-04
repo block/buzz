@@ -28,6 +28,23 @@ const defaultDependencies: LeaveCommunityDependencies = {
   createRelayClient: (relayUrl) => new ReadOnlyRelayClient(relayUrl),
 };
 
+function membershipIsAlreadyAbsent(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    error.message.toLowerCase().includes("not a relay member")
+  );
+}
+
+async function ignoreAlreadyAbsentMembership(
+  publish: () => Promise<unknown>,
+): Promise<void> {
+  try {
+    await publish();
+  } catch (error) {
+    if (!membershipIsAlreadyAbsent(error)) throw error;
+  }
+}
+
 /** Revoke relay membership and resolve only after the relay accepts the request. */
 export async function leaveCommunity(
   relayUrl: string,
@@ -43,13 +60,15 @@ export async function leaveCommunity(
   });
 
   if (relayUrl === activeRelayUrl) {
-    await dependencies.publishActive(event);
+    await ignoreAlreadyAbsentMembership(() =>
+      dependencies.publishActive(event),
+    );
     return;
   }
 
   const client = dependencies.createRelayClient(relayUrl);
   try {
-    await client.publishEvent(event);
+    await ignoreAlreadyAbsentMembership(() => client.publishEvent(event));
   } catch (error) {
     if (
       error instanceof Error &&
