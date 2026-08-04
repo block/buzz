@@ -63,6 +63,12 @@ export const EMPTY_GLOBAL_CONFIG: GlobalAgentConfig = {
   model: null,
   preferred_runtime: null,
 };
+/** Baked env keys routed to structured controls, not the generic env editor. */
+const BAKED_STRUCTURED_KEYS = new Set([
+  "BUZZ_AGENT_PROVIDER",
+  "BUZZ_AGENT_MODEL",
+  BUZZ_AGENT_THINKING_EFFORT,
+]);
 const PROGRESSIVE_FIELDS_TRANSITION = {
   duration: 0.22,
   ease: [0.23, 1, 0.32, 1],

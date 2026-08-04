@@ -3,10 +3,9 @@ use tauri::State;
 use crate::{
     app_state::AppState,
     managed_agents::{
-        readiness::guardian_runtime_protection,
-        command_availability, is_npm_global_install, AcpRuntimeCatalogEntry,
-        DiscoverManagedAgentPrereqsRequest, InstallRuntimeResult, ManagedAgentPrereqsInfo,
-        RelayAgentInfo, DEFAULT_ACP_COMMAND,
+        command_availability, is_npm_global_install, readiness::guardian_runtime_protection,
+        AcpRuntimeCatalogEntry, DiscoverManagedAgentPrereqsRequest, InstallRuntimeResult,
+        ManagedAgentPrereqsInfo, RelayAgentInfo, DEFAULT_ACP_COMMAND,
     },
     nostr_convert,
     relay::query_relay,

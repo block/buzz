@@ -156,18 +156,8 @@ export function AgentDefinitionDialog({
   const [behaviorDraft, setBehaviorDraft] = React.useState(
     emptyPersonaBehaviorDraft,
   );
-  // The seed the draft is diffed against at submit: an untouched quad
-  // submits no behavior group, keeping unrelated edits hash-quiet.
   const behaviorSeedRef = React.useRef(emptyPersonaBehaviorDraft);
-  // Tracks when the runtime was auto-seeded by the default-runtime effect in
-  // edit mode (i.e. the user never explicitly chose a runtime). Used to omit
-  // the seeded runtime from the submit payload for builtin definitions whose
-  // canonical runtime is null — the sync would revert it anyway.
   const isRuntimeAutoSeededRef = React.useRef(false);
-  // Guards the seeding effect so it fires at most once per dialog-open.
-  // Without this, clearing runtime back to "" via "No preference" would re-
-  // trigger the effect (the `runtime` dep would pass the length guard) and
-  // snap the dropdown back to the default — an edit-mode regression.
   const hasSeededForOpenRef = React.useRef(false);
   const [showAdvancedFields, setShowAdvancedFields] = React.useState(false);
   const [isAvatarUploadPending, setIsAvatarUploadPending] =
@@ -249,10 +239,6 @@ export function AgentDefinitionDialog({
     setRuntime(defaultRuntime.id);
     hasSeededForOpenRef.current = true;
     if ("id" in initialValues) {
-      // Edit mode: record that this runtime was auto-seeded so the submit path
-      // can omit it from the payload for builtin definitions (canonical runtime
-      // null; sync would revert the value anyway). Explicit user changes via
-      // the dropdown clear this flag.
       isRuntimeAutoSeededRef.current = true;
     }
   }, [defaultRuntime, initialValues, open, runtime, runtimesLoading]);
@@ -316,16 +302,12 @@ export function AgentDefinitionDialog({
       setIsAvatarUploadPending(false);
       setHasUserChanges(false);
       setIsAddHarnessOpen(false);
-      // isRuntimeAutoSeededRef and hasSeededForOpenRef are NOT reset here — the
-      // [initialValues, open] effect resets both when the dialog re-opens.
     }
 
     onOpenChange(next);
   }
 
   async function handleSubmit() {
-    // D1: the same localModeSatisfied gate as canSubmit prevents form-submit
-    // (Enter) from bypassing a missing credential.
     if (!initialValues || !localModeSatisfied || !canSubmit) return;
 
     const {
@@ -397,11 +379,6 @@ export function AgentDefinitionDialog({
     (runtime.trim().length > 0 && runtimeCanChooseLlmProvider) ||
     blankRuntimeModelProviderEditable;
   const trimmedProvider = provider.trim();
-  // Required credential env keys for this runtime + provider combination.
-  // Used to show required markers on the LLM provider label and amber
-  // locked rows in the env vars editor.
-  // File-layer config for the selected runtime (e.g. goose config.yaml).
-  // Used to silence requirements already satisfied there.
   const { data: runtimeFileConfig } = useRuntimeFileConfigQuery(runtime, {
     enabled: open,
   });
@@ -451,13 +428,8 @@ export function AgentDefinitionDialog({
       runtimeFileConfig,
     ],
   );
-  // requiredEnvKeys: the gate already handles baked-, global-, and file-
-  // satisfied keys so no further filtering is needed.
   const { requiredEnvKeys } = localModeGate;
   const localModeSatisfied = localModeGate.satisfied;
-  // Effective provider: agent value → global fallback → file fallback.
-  // Mirrors the chain inside computeLocalModeGate so model-option scoping and
-  // model requiredness are consistent with the readiness gate.
   const fileProvider = runtimeFileConfig?.provider?.trim() ?? "";
   const effectiveProvider =
     trimmedProvider || inheritedProviderDefault.value || fileProvider;
