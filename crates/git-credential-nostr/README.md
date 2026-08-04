@@ -30,13 +30,18 @@ That's it. Use git normally — `git clone`, `git push`, `git fetch`.
 
 ## CI / CD
 
-Set `$NOSTR_PRIVATE_KEY` instead of a key file. The env var takes precedence
-over `nostr.keyfile` and avoids touching the filesystem:
+Set `$NOSTR_PRIVATE_KEY` or `$BUZZ_PRIVATE_KEY` instead of a key file. The
+env vars take precedence over `nostr.keyfile` and avoid touching the
+filesystem:
 
 ```bash
 export NOSTR_PRIVATE_KEY=nsec1...
 git clone https://relay.example.com/git/owner/repo.git
 ```
+
+`$BUZZ_PRIVATE_KEY` uses the same name as the rest of the Buzz ecosystem
+(`buzz-cli`, the ACP/MCP shim, and `buzz-admin`). `$NOSTR_PRIVATE_KEY` is
+still accepted for backward compatibility and wins when both are set.
 
 ## How It Works
 
@@ -61,7 +66,7 @@ git ──stdin──▶ git-credential-nostr ──stdout──▶ git
 
 | Error | Cause | Fix |
 |-------|-------|-----|
-| `no nostr key configured` | Neither `$NOSTR_PRIVATE_KEY` nor `nostr.keyfile` is set | Follow the Setup steps above |
+| `no nostr key configured` | None of `$NOSTR_PRIVATE_KEY`, `$BUZZ_PRIVATE_KEY`, or `nostr.keyfile` is set | Follow the Setup steps above |
 | `insecure permissions` | Key file is readable by group/others | `chmod 600 ~/.nostr/key` |
 | `method hint` | Server's `WWW-Authenticate` header is missing `method="..."` | Upgrade the Buzz server |
 | `useHttpPath` | `credential.useHttpPath` is not set | `git config --global credential.useHttpPath true` |

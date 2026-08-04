@@ -47,14 +47,32 @@ fn check_keyfile_permissions(path: &str) -> Result<(), String> {
 /// Max keyfile size — nsec1 is 63 bytes; hex keys are 64 bytes. 256 is generous.
 const MAX_KEYFILE_BYTES: u64 = 256;
 
+fn non_empty_env(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|v| !v.is_empty())
+}
+
 fn load_key() -> Result<String, String> {
-    if let Ok(val) = std::env::var("NOSTR_PRIVATE_KEY") {
-        if !val.is_empty() {
-            return Ok(val);
+    let nostr = non_empty_env("NOSTR_PRIVATE_KEY");
+    let buzz = non_empty_env("BUZZ_PRIVATE_KEY");
+
+    // If both identity env vars are set to different values, the older
+    // $NOSTR_PRIVATE_KEY wins for backward compatibility. Warn the caller so
+    // the silent wrong-identity trap described in the issue is at least audible.
+    if let (Some(n), Some(b)) = (&nostr, &buzz) {
+        if n != b {
+            eprintln!("warning: $BUZZ_PRIVATE_KEY is set but will not be used because $NOSTR_PRIVATE_KEY is also set to a different value");
         }
     }
+
+    if let Some(n) = nostr {
+        return Ok(n);
+    }
+    if let Some(b) = buzz {
+        return Ok(b);
+    }
+
     let path = git_config("nostr.keyfile").ok_or_else(|| {
-        "no nostr key configured. Set $NOSTR_PRIVATE_KEY or git config nostr.keyfile".to_string()
+        "no nostr key configured. Set $NOSTR_PRIVATE_KEY, $BUZZ_PRIVATE_KEY, or git config nostr.keyfile".to_string()
     })?;
     check_keyfile_permissions(&path)?;
     let meta = std::fs::metadata(&path).map_err(|e| format!("cannot stat keyfile {path}: {e}"))?;
