@@ -7,8 +7,8 @@ the root `docker-compose.yml`, which remains local development infrastructure.
 
 ```bash
 cd deploy/compose
-cp .env.example .env
-$EDITOR .env       # replace every CHANGE_ME value
+./run.sh init buzz.example.com <64-character-owner-pubkey-hex>
+$EDITOR .env       # review the image tag and optional ports
 ./run.sh start
 ```
 
@@ -19,9 +19,17 @@ cd deploy/compose
 BUZZ_COMPOSE_TLS=true ./run.sh start
 ```
 
-The bootstrap script should eventually replace manual `.env` editing for normal
-users. It is responsible for generating stable secrets and, optionally, an owner
-keypair.
+`init` refuses to overwrite an existing `.env`. It uses the public key from an
+existing Nostr identity and generates the relay, hook, database, Redis, and
+MinIO secrets once. The resulting file is mode 600. Back it up securely before
+starting the stack; running `init` again is not a secret-rotation workflow.
+
+To configure the file manually instead:
+
+```bash
+install -m 600 .env.example .env
+$EDITOR .env       # replace every CHANGE_ME value
+```
 
 ## Production notes
 
@@ -52,8 +60,7 @@ Before sharing an install link publicly, verify a fresh install with:
 
 ```bash
 cd deploy/compose
-cp .env.example .env
-$EDITOR .env
+./run.sh init buzz.example.com <64-character-owner-pubkey-hex>
 ./run.sh config
 ./run.sh start
 curl -fsS "http://127.0.0.1:$(grep -E '^BUZZ_HTTP_PORT=' .env | cut -d= -f2-)/_liveness"
