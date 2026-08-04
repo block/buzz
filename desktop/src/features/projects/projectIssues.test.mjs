@@ -126,6 +126,31 @@ test("preserves root and comment tags for rich content rendering", () => {
   assert.deepEqual(issue.comments[0].tags, [comment.tags[1]]);
 });
 
+test("parses public and private-safe issue provenance", () => {
+  const channelId = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
+  const publicIssue = eventToProjectIssue(
+    issueEvent({
+      tags: [
+        ["a", REPO_ADDRESS],
+        ["h", channelId],
+      ],
+    }),
+  );
+  const privateIssue = eventToProjectIssue(
+    issueEvent({
+      tags: [
+        ["a", REPO_ADDRESS],
+        ["buzz-origin-agent", "Builder"],
+      ],
+    }),
+  );
+
+  assert.equal(publicIssue.channelId, channelId);
+  assert.equal(publicIssue.originAgentName, null);
+  assert.equal(privateIssue.channelId, null);
+  assert.equal(privateIssue.originAgentName, "Builder");
+});
+
 test("builds repository-scoped issue creation tags", () => {
   assert.deepEqual(
     buildGitIssueTags({

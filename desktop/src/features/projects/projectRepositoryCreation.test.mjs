@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   buildAddedRepositoryEventTemplates,
   buildAttachedRepositoryProjectEventTemplate,
+  buildRepositoryChannelBindingTemplate,
 } from "./projectRepositoryCreation.ts";
 
 const OWNER = "a".repeat(64);
@@ -32,6 +33,7 @@ const project = {
 
 test("buildAddedRepositoryEventTemplates preserves NIP-MP project metadata and membership", () => {
   const templates = buildAddedRepositoryEventTemplates({
+    accessChannelId: "11111111-1111-4111-8111-111111111111",
     project,
     ownerPubkey: OWNER,
     name: "Mobile App",
@@ -43,6 +45,7 @@ test("buildAddedRepositoryEventTemplates preserves NIP-MP project metadata and m
   assert.deepEqual(templates.repository.tags, [
     ["d", "mobile-app"],
     ["name", "Mobile App"],
+    ["buzz-channel", "11111111-1111-4111-8111-111111111111"],
     ["description", "Flutter client"],
     ["clone", "https://relay.example/git/mobile-app.git"],
   ]);
@@ -57,6 +60,37 @@ test("buildAddedRepositoryEventTemplates preserves NIP-MP project metadata and m
     ["a", `30617:${OTHER_OWNER}:relay`, "wss://relay.example"],
   ]);
   assert.equal(templates.project.content, "");
+});
+
+test("buildRepositoryChannelBindingTemplate preserves repository metadata", () => {
+  const repository = {
+    id: `${OWNER}:desktop`,
+    dtag: "desktop",
+    name: "Desktop",
+    description: "Desktop app",
+    owner: OWNER,
+    createdAt: 1,
+    repoAddress: `30617:${OWNER}:desktop`,
+    eventContent: "Desktop app",
+    eventTags: [
+      ["d", "desktop"],
+      ["name", "Desktop"],
+      ["x-custom", "preserve-me"],
+    ],
+  };
+  const template = buildRepositoryChannelBindingTemplate({
+    channelId: "11111111-1111-4111-8111-111111111111",
+    ownerPubkey: OWNER,
+    repository,
+  });
+
+  assert.equal(template.content, "Desktop app");
+  assert.deepEqual(template.tags, [
+    ["d", "desktop"],
+    ["name", "Desktop"],
+    ["x-custom", "preserve-me"],
+    ["buzz-channel", "11111111-1111-4111-8111-111111111111"],
+  ]);
 });
 
 test("buildAttachedRepositoryProjectEventTemplate links an existing repository", () => {
@@ -76,6 +110,7 @@ test("buildAddedRepositoryEventTemplates rejects updates by another owner", () =
   assert.throws(
     () =>
       buildAddedRepositoryEventTemplates({
+        accessChannelId: "11111111-1111-4111-8111-111111111111",
         project,
         ownerPubkey: OTHER_OWNER,
         name: "Mobile",

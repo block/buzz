@@ -17,6 +17,7 @@ import { signRelayEvent } from "@/shared/api/tauri";
 import { getIdentity } from "@/shared/api/tauriIdentity";
 
 export type CreateProjectInput = {
+  accessChannelId: string;
   name: string;
   description?: string;
   cloneUrl?: string;

@@ -78,6 +78,7 @@ import {
   writeStoredViewMode,
 } from "@/features/projects/lib/projectsViewHelpers";
 import { useOpenProjectTerminal } from "@/features/projects/ui/useOpenProjectTerminal";
+import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 import { useCommunities } from "@/features/communities/useCommunities";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { topChromeInset } from "@/shared/layout/chromeLayout";
@@ -573,7 +574,7 @@ export function ProjectsView() {
   );
 
   if (projectsQuery.isLoading) {
-    return null;
+    return <ViewLoadingFallback kind="projects" />;
   }
 
   if (projectsQuery.isError) {

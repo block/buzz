@@ -49,6 +49,15 @@ test("preserves an optional source channel from the pull request", () => {
   assert.equal(eventToProjectPullRequest(pullRequestEvent()).channelId, null);
 });
 
+test("preserves a private-safe agent origin without a channel ID", () => {
+  const event = pullRequestEvent();
+  event.tags.push(["buzz-origin-agent", "Builder"]);
+
+  const pullRequest = eventToProjectPullRequest(event);
+  assert.equal(pullRequest.channelId, null);
+  assert.equal(pullRequest.originAgentName, "Builder");
+});
+
 function updateEvent({ pubkey, createdAt, commit, cloneUrl }) {
   return {
     id: `update-${pubkey.slice(0, 8)}-${createdAt}`,

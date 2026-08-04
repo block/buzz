@@ -110,6 +110,8 @@ export function eventToProjectIssue(
     author: issue.pubkey,
     createdAt: issue.created_at,
     repoAddress: getTag(issue, "a") ?? null,
+    channelId: getTag(issue, "h") ?? null,
+    originAgentName: getTag(issue, "buzz-origin-agent") ?? null,
     labels: getAllTags(issue, "t"),
     recipients: getAllTags(issue, "p"),
     status: statusFromEvent(issue, latestStatus),

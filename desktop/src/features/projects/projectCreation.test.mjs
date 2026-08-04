@@ -7,9 +7,11 @@ import {
 } from "./projectCreation.ts";
 
 const OWNER = "a".repeat(64);
+const CHANNEL = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 
 test("buildInitialProjectEventTemplates emits a NIP-MP project", () => {
   const templates = buildInitialProjectEventTemplates({
+    accessChannelId: CHANNEL,
     cloneUrl: "https://relay.example/git/owner/sprout.git",
     description: "A multi-repository workspace",
     name: "Sprout",
@@ -23,6 +25,7 @@ test("buildInitialProjectEventTemplates emits a NIP-MP project", () => {
   assert.deepEqual(templates.project.tags, [
     ["d", "sprout"],
     ["name", "Sprout"],
+    ["buzz-channel", CHANNEL],
     ["description", "A multi-repository workspace"],
     ["a", `30617:${OWNER}:sprout`],
   ]);
@@ -30,6 +33,7 @@ test("buildInitialProjectEventTemplates emits a NIP-MP project", () => {
   assert.deepEqual(templates.repository.tags, [
     ["d", "sprout"],
     ["name", "Sprout"],
+    ["buzz-channel", CHANNEL],
     ["description", "A multi-repository workspace"],
     ["clone", "https://relay.example/git/owner/sprout.git"],
     ["web", "https://example.com/sprout"],
@@ -40,6 +44,7 @@ test("buildInitialProjectEventTemplates rejects names without an identifier", ()
   assert.throws(
     () =>
       buildInitialProjectEventTemplates({
+        accessChannelId: CHANNEL,
         name: "!!!",
         ownerPubkey: OWNER,
       }),
@@ -50,6 +55,7 @@ test("buildInitialProjectEventTemplates rejects names without an identifier", ()
 test("buildInitialProjectEventTemplates enforces the description tag byte limit", () => {
   assert.doesNotThrow(() =>
     buildInitialProjectEventTemplates({
+      accessChannelId: CHANNEL,
       description: "🙂".repeat(512),
       name: "Sprout",
       ownerPubkey: OWNER,
@@ -58,6 +64,7 @@ test("buildInitialProjectEventTemplates enforces the description tag byte limit"
   assert.throws(
     () =>
       buildInitialProjectEventTemplates({
+        accessChannelId: CHANNEL,
         description: "🙂".repeat(513),
         name: "Sprout",
         ownerPubkey: OWNER,

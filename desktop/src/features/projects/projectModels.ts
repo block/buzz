@@ -19,6 +19,9 @@ export type Repository = {
   defaultBranch: string;
   repoAddress: string;
   maintainers?: string[];
+  channelId?: string | null;
+  eventContent?: string;
+  eventTags?: string[][];
 };
 
 export type Project = {
@@ -86,6 +89,12 @@ function isValidPubkey(value: string): boolean {
   return /^[a-fA-F0-9]{64}$/.test(value);
 }
 
+export function isValidProjectChannelId(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    value,
+  );
+}
+
 function deduplicateAddressableEvents(events: RelayEvent[]): RelayEvent[] {
   const latest = new Map<string, RelayEvent>();
   for (const event of events) {
@@ -139,6 +148,7 @@ export function eventToRepository(
 
   const owner = event.pubkey.toLowerCase();
   const setupUsers = getAllTags(event, "auth");
+  const channel = getTag(event, "buzz-channel");
   return {
     id: `${owner}:${dtag}`,
     dtag,
@@ -157,6 +167,9 @@ export function eventToRepository(
     status: getTag(event, "status") ?? "active",
     defaultBranch: getTag(event, "default-branch") ?? "main",
     repoAddress: `${KIND_REPO_ANNOUNCEMENT}:${owner}:${dtag}`,
+    channelId: channel && isValidProjectChannelId(channel) ? channel : null,
+    eventContent: event.content,
+    eventTags: event.tags.map((tag) => [...tag]),
     maintainers: getAllTagValues(event, "maintainers")
       .map((maintainer) => maintainer.toLowerCase())
       .filter(isValidPubkey),
@@ -222,12 +235,7 @@ function eventToExplicitProject(
     owner,
     createdAt: event.created_at,
     projectChannelId:
-      channel &&
-      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-        channel,
-      )
-        ? channel
-        : null,
+      channel && isValidProjectChannelId(channel) ? channel : null,
     status: visibility === "listed" ? "active" : "unlisted",
     projectAddress,
     primaryRepositoryAddress,

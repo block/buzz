@@ -48,6 +48,7 @@ import { ProfilePanelProvider } from "@/shared/context/ProfilePanelContext";
 import { useHistorySearchState } from "@/shared/hooks/useHistorySearchState";
 import { useThreadPanelWidth } from "@/shared/hooks/useThreadPanelWidth";
 import { Button } from "@/shared/ui/button";
+import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 import { useCommunities } from "@/features/communities/useCommunities";
 import { useProjectCommitDiffQuery } from "@/features/projects/useProjectCommitDiff";
 import { useGitIdentityQuery } from "@/features/projects/useGitIdentity";
@@ -691,7 +692,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
   );
 
   if (projectQuery.isLoading) {
-    return null;
+    return <ViewLoadingFallback kind="projects" />;
   }
   if (projectQuery.isError) {
     return (

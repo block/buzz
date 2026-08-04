@@ -1,4 +1,5 @@
-import type { Project } from "@/features/projects/hooks";
+import type { Project, Repository } from "@/features/projects/hooks";
+import { isValidProjectChannelId } from "@/features/projects/projectModels";
 import {
   KIND_PROJECT_ANNOUNCEMENT,
   KIND_REPO_ANNOUNCEMENT,
@@ -83,7 +84,42 @@ export function buildAttachedRepositoryProjectEventTemplate({
   });
 }
 
+export function buildRepositoryChannelBindingTemplate({
+  channelId,
+  ownerPubkey,
+  repository,
+}: {
+  channelId: string;
+  ownerPubkey: string;
+  repository: Repository;
+}): ProjectEventTemplate {
+  const normalizedChannelId = channelId.trim();
+  if (ownerPubkey.trim().toLowerCase() !== repository.owner.toLowerCase()) {
+    throw new Error("Only the repository owner can repair its access.");
+  }
+  if (!isValidProjectChannelId(normalizedChannelId)) {
+    throw new Error("Repository access channel is invalid.");
+  }
+  if (!repository.eventTags) {
+    throw new Error(
+      "Repository metadata is unavailable. Refresh and try again.",
+    );
+  }
+
+  return {
+    kind: KIND_REPO_ANNOUNCEMENT,
+    content: repository.eventContent ?? repository.description,
+    tags: [
+      ...repository.eventTags
+        .filter((tag) => tag[0] !== "buzz-channel")
+        .map((tag) => [...tag]),
+      ["buzz-channel", normalizedChannelId],
+    ],
+  };
+}
+
 export function buildAddedRepositoryEventTemplates({
+  accessChannelId,
   cloneUrl,
   description,
   name,
@@ -91,6 +127,7 @@ export function buildAddedRepositoryEventTemplates({
   project,
   webUrl,
 }: {
+  accessChannelId?: string;
   cloneUrl?: string;
   description?: string;
   name: string;
@@ -122,6 +159,16 @@ export function buildAddedRepositoryEventTemplates({
     ["d", repositoryDtag],
     ["name", normalizedName],
   ];
+  const normalizedAccessChannelId = accessChannelId?.trim();
+  if (!normalizedAccessChannelId) {
+    throw new Error(
+      "This project has no repository access channel to inherit.",
+    );
+  }
+  if (!isValidProjectChannelId(normalizedAccessChannelId)) {
+    throw new Error("Repository access channel is invalid.");
+  }
+  repositoryTags.push(["buzz-channel", normalizedAccessChannelId]);
   if (normalizedDescription) {
     repositoryTags.push(["description", normalizedDescription]);
   }

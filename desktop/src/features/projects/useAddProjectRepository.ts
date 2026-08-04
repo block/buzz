@@ -18,6 +18,7 @@ import { KIND_PROJECT_ANNOUNCEMENT } from "@/shared/constants/kinds";
 import { getCachedRelayOrigin } from "@/shared/lib/mediaUrl";
 
 export type AddProjectRepositoryInput = {
+  accessChannelId?: string;
   cloneUrl?: string;
   description?: string;
   name: string;

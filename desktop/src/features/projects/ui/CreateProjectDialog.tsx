@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import { useChannelsQuery } from "@/features/channels/hooks";
 import type { CreateProjectInput } from "@/features/projects/useCreateProject";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
@@ -33,8 +34,20 @@ export function CreateProjectDialog({
   const [description, setDescription] = React.useState("");
   const [cloneUrl, setCloneUrl] = React.useState("");
   const [webUrl, setWebUrl] = React.useState("");
+  const [accessChannelId, setAccessChannelId] = React.useState("");
   const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
   const nameInputRef = React.useRef<HTMLInputElement>(null);
+  const channelsQuery = useChannelsQuery({ enabled: open });
+  const accessChannels = React.useMemo(
+    () =>
+      (channelsQuery.data ?? []).filter(
+        (channel) =>
+          channel.isMember &&
+          !channel.archivedAt &&
+          channel.channelType !== "dm",
+      ),
+    [channelsQuery.data],
+  );
 
   React.useEffect(() => {
     if (!open) return;
@@ -43,6 +56,7 @@ export function CreateProjectDialog({
     setDescription("");
     setCloneUrl("");
     setWebUrl("");
+    setAccessChannelId(accessChannels[0]?.id ?? "");
     setErrorMessage(null);
 
     // Small delay to let the dialog animation start before focusing.
@@ -50,18 +64,19 @@ export function CreateProjectDialog({
       nameInputRef.current?.focus();
     }, 50);
     return () => globalThis.clearTimeout(timerId);
-  }, [open]);
+  }, [accessChannels, open]);
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
     const trimmedName = name.trim();
-    if (!trimmedName) return;
+    if (!trimmedName || !accessChannelId) return;
 
     setErrorMessage(null);
 
     try {
       await onCreate({
+        accessChannelId,
         name: trimmedName,
         description: description.trim() || undefined,
         cloneUrl: cloneUrl.trim() || undefined,
@@ -93,7 +108,9 @@ export function CreateProjectDialog({
           <div className="flex w-full items-center justify-end gap-3">
             <Button
               data-testid="create-project-submit"
-              disabled={isCreating || name.trim().length === 0}
+              disabled={
+                isCreating || name.trim().length === 0 || !accessChannelId
+              }
               form="create-project-form"
               type="submit"
             >
@@ -146,6 +163,47 @@ export function CreateProjectDialog({
                 value={name}
               />
             </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <label
+              className="text-sm font-medium text-foreground"
+              htmlFor="create-project-access-channel"
+            >
+              Repository access channel
+            </label>
+            <div
+              className={cn(
+                "flex min-h-11 items-center px-3",
+                CREATE_FIELD_SHELL_CLASS,
+              )}
+            >
+              <select
+                className={cn(
+                  "h-8 w-full px-0 py-0",
+                  CREATE_FIELD_CONTROL_CLASS,
+                )}
+                data-testid="create-project-access-channel"
+                disabled={isCreating}
+                id="create-project-access-channel"
+                onChange={(event) => {
+                  setAccessChannelId(event.target.value);
+                  setErrorMessage(null);
+                }}
+                required
+                value={accessChannelId}
+              >
+                <option value="">Select a channel</option>
+                {accessChannels.map((channel) => (
+                  <option key={channel.id} value={channel.id}>
+                    {channel.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Members of this channel can access project repositories.
+            </p>
           </div>
 
           <div className="space-y-1.5">

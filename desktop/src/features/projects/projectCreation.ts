@@ -2,6 +2,7 @@ import {
   KIND_PROJECT_ANNOUNCEMENT,
   KIND_REPO_ANNOUNCEMENT,
 } from "@/shared/constants/kinds";
+import { isValidProjectChannelId } from "./projectModels";
 
 export type ProjectEventTemplate = {
   kind: number;
@@ -31,12 +32,14 @@ function projectDtagFromName(name: string): string {
 }
 
 export function buildInitialProjectEventTemplates({
+  accessChannelId,
   cloneUrl,
   description,
   name,
   ownerPubkey,
   webUrl,
 }: {
+  accessChannelId: string;
   cloneUrl?: string;
   description?: string;
   name: string;
@@ -71,6 +74,12 @@ export function buildInitialProjectEventTemplates({
     ["d", dtag],
     ["name", normalizedName],
   ];
+  const normalizedAccessChannelId = accessChannelId.trim();
+  if (!isValidProjectChannelId(normalizedAccessChannelId)) {
+    throw new Error("Repository access channel is invalid.");
+  }
+  repositoryTags.push(["buzz-channel", normalizedAccessChannelId]);
+  projectTags.push(["buzz-channel", normalizedAccessChannelId]);
   if (normalizedDescription) {
     repositoryTags.push(["description", normalizedDescription]);
     projectTags.push(["description", normalizedDescription]);

@@ -444,6 +444,9 @@ test("multi-repository projects switch the active repository", async ({
       ) ?? [],
   );
   expect(addedEvents.map((event) => event.kind)).toEqual([30621, 30617]);
+  expect(
+    addedEvents.find((event) => event.kind === 30617)?.tags,
+  ).toContainEqual(["buzz-channel", "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"]);
 
   await page.getByTestId("add-project-repository").click();
   await page.getByTestId("attach-project-repository").click();

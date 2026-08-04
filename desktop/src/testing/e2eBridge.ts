@@ -5167,6 +5167,7 @@ function buildMockProjectEvents(): RelayEvent[] {
           ["d", seed.dtag],
           ["name", seed.name],
           ["description", seed.description],
+          ["buzz-channel", "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"],
           ["clone", seed.cloneUrl],
           ...seed.contributors.map((pubkey) => ["p", pubkey]),
         ],

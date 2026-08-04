@@ -23,6 +23,7 @@ import {
   ProjectFeedRowMonoCell,
 } from "./ProjectFeedRow";
 import { ProjectIssueCommentTimeline } from "./ProjectIssueCommentTimeline";
+import { ProjectOriginReference } from "./ProjectOriginReference";
 import { OverviewRailSection } from "./ProjectOverviewPanel";
 import { ProfileIdentityButton } from "./ProjectProfileIdentity";
 import { ProjectRichContent } from "./ProjectRichContent";
@@ -194,9 +195,13 @@ export function ProjectIssueDetail({
       <div className="min-w-0 divide-y divide-border/50">
         <header className="space-y-3 p-4">
           <div className="min-w-0">
-            <p className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+            <p className="flex flex-wrap items-center gap-1.5 text-xs font-medium text-muted-foreground">
               <CircleDot className="h-3.5 w-3.5" />
               Issue from {authorLabel}
+              <ProjectOriginReference
+                agentName={issue.originAgentName}
+                channelId={issue.channelId}
+              />
             </p>
             <h3 className="mt-1 line-clamp-2 text-base font-semibold text-foreground">
               {issue.title}{" "}

@@ -2,6 +2,7 @@ import * as React from "react";
 
 import type { Project } from "@/features/projects/hooks";
 import type { AddProjectRepositoryInput } from "@/features/projects/useAddProjectRepository";
+import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
@@ -14,12 +15,16 @@ const FIELD_CONTROL_CLASS =
   "h-8 border-0 bg-transparent px-0 py-0 text-muted-foreground/55 shadow-none outline-none ring-0 placeholder:text-muted-foreground/55 focus:bg-transparent focus:text-foreground focus-visible:ring-0";
 
 export function AddProjectRepositoryDialog({
+  accessChannelId,
+  channels,
   isCreating,
   onAdd,
   onOpenChange,
   open,
   project,
 }: {
+  accessChannelId?: string;
+  channels: Channel[];
   isCreating: boolean;
   onAdd: (input: AddProjectRepositoryInput) => Promise<void>;
   onOpenChange: (open: boolean) => void;
@@ -28,6 +33,7 @@ export function AddProjectRepositoryDialog({
 }) {
   const [name, setName] = React.useState("");
   const [cloneUrl, setCloneUrl] = React.useState("");
+  const [selectedChannelId, setSelectedChannelId] = React.useState("");
   const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
   const nameInputRef = React.useRef<HTMLInputElement>(null);
 
@@ -35,20 +41,22 @@ export function AddProjectRepositoryDialog({
     if (!open) return;
     setName("");
     setCloneUrl("");
+    setSelectedChannelId(accessChannelId ?? "");
     setErrorMessage(null);
     const timerId = globalThis.setTimeout(
       () => nameInputRef.current?.focus(),
       50,
     );
     return () => globalThis.clearTimeout(timerId);
-  }, [open]);
+  }, [accessChannelId, open]);
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!name.trim()) return;
+    if (!name.trim() || !selectedChannelId) return;
     setErrorMessage(null);
     try {
       await onAdd({
+        accessChannelId: selectedChannelId,
         cloneUrl: cloneUrl.trim() || undefined,
         name: name.trim(),
         project,
@@ -77,7 +85,7 @@ export function AddProjectRepositoryDialog({
         footer={
           <Button
             data-testid="add-project-repository-submit"
-            disabled={isCreating || !name.trim()}
+            disabled={isCreating || !name.trim() || !selectedChannelId}
             form="add-project-repository-form"
             type="submit"
           >
@@ -119,6 +127,38 @@ export function AddProjectRepositoryDialog({
                 value={name}
               />
             </div>
+          </div>
+          <div className="space-y-1.5">
+            <label
+              className="text-sm font-medium text-foreground"
+              htmlFor="add-project-repository-channel"
+            >
+              Access channel
+            </label>
+            <div className={FIELD_SHELL_CLASS}>
+              <select
+                className={cn(FIELD_CONTROL_CLASS, "w-full")}
+                data-testid="add-project-repository-channel"
+                disabled={isCreating}
+                id="add-project-repository-channel"
+                onChange={(event) => {
+                  setSelectedChannelId(event.target.value);
+                  setErrorMessage(null);
+                }}
+                required
+                value={selectedChannelId}
+              >
+                <option value="">Select a channel</option>
+                {channels.map((channel) => (
+                  <option key={channel.id} value={channel.id}>
+                    {channel.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Members of this channel can access the repository.
+            </p>
           </div>
           <div className="space-y-1.5">
             <label

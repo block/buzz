@@ -24,6 +24,8 @@ export type ProjectIssue = {
   author: string;
   createdAt: number;
   repoAddress: string | null;
+  channelId: string | null;
+  originAgentName: string | null;
   labels: string[];
   recipients: string[];
   status: ProjectIssueStatus;

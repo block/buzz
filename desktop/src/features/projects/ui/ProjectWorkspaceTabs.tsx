@@ -230,6 +230,15 @@ export function WorkspaceTabs({
     pullRequests.find(
       (pullRequest) => pullRequest.id === selectedPullRequestId,
     ) ?? null;
+  const selectedCommitPullRequest = React.useMemo(
+    () =>
+      pullRequests.find(
+        (pullRequest) =>
+          pullRequest.commit === selectedCommitHash ||
+          pullRequest.initialCommit === selectedCommitHash,
+      ),
+    [pullRequests, selectedCommitHash],
+  );
   const isPullRequestSelected = Boolean(selectedPullRequest);
   const [selectedTab, setSelectedTab] = React.useState("overview");
   const [pullRequestCommentTarget, setPullRequestCommentTarget] =
@@ -432,6 +441,8 @@ export function WorkspaceTabs({
             diff={commitDiff}
             diffError={commitDiffError}
             diffLoading={commitDiffLoading}
+            originAgentName={selectedCommitPullRequest?.originAgentName}
+            originChannelId={selectedCommitPullRequest?.channelId}
             profiles={profiles}
           />
         ) : (

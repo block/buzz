@@ -77,6 +77,9 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     "BUZZ_ACP_RESPOND_TO",
     "BUZZ_ACP_RESPOND_TO_ALLOWLIST",
     "BUZZ_ACP_AGENT_OWNER",
+    // Stable agent identity used for git attribution and private-conversation
+    // provenance must come from the managed-agent record, not user overrides.
+    "BUZZ_ACP_DISPLAY_NAME",
     // Remote lifetime/presence policy: user env must not disable the
     // desktop/provider-owned bounds while the saved record still promises them.
     "BUZZ_ACP_EXIT_AFTER_INACTIVITY",

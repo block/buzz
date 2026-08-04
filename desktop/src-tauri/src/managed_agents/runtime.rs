@@ -22,7 +22,7 @@ pub(crate) use path::should_use_inherited;
 
 mod metadata;
 pub(crate) use metadata::{
-    resolve_session_title, runtime_metadata_env_vars, SESSION_TITLE_ENV_VAR,
+    resolve_session_title, runtime_metadata_env_vars, DISPLAY_NAME_ENV_VAR, SESSION_TITLE_ENV_VAR,
 };
 
 mod stop;
@@ -773,9 +773,13 @@ pub fn spawn_agent_child(
     // is display metadata only. `spawn_config_hash` hashes the same resolve, so
     // a rename raises the restart badge instead of leaving the process stale.
     if let Some(title) = resolve_session_title(record.display_name.as_deref(), &record.name) {
-        command.env(SESSION_TITLE_ENV_VAR, title);
+        command
+            .env(SESSION_TITLE_ENV_VAR, &title)
+            .env(DISPLAY_NAME_ENV_VAR, title);
     } else {
-        command.env_remove(SESSION_TITLE_ENV_VAR);
+        command
+            .env_remove(SESSION_TITLE_ENV_VAR)
+            .env_remove(DISPLAY_NAME_ENV_VAR);
     }
     build_buzz_agent_provider_defaults(&mut command);
     if let Some(meta) = runtime_meta {

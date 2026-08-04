@@ -143,23 +143,6 @@ function readHiddenProjectCards(): string[] {
   }
 }
 
-function isDeletedByA(
-  event: RelayEvent,
-  deletionEvents: RelayEvent[],
-): boolean {
-  const dtag = event.tags.find((tag) => tag[0] === "d")?.[1];
-  if (!dtag) return false;
-  const address = `${event.kind}:${event.pubkey.toLowerCase()}:${dtag}`;
-  // NIP-09: a deletion is only valid when signed by the author of the
-  // referenced event — otherwise anyone could hide someone else's project.
-  return deletionEvents.some(
-    (deletion) =>
-      deletion.created_at >= event.created_at &&
-      deletion.pubkey.toLowerCase() === event.pubkey.toLowerCase() &&
-      deletion.tags.some((tag) => tag[0] === "a" && tag[1] === address),
-  );
-}
-
 /**
  * Converts a kind:30617 repo announcement into a `Project`.
  *
@@ -180,32 +163,17 @@ export function eventToProject(
 }
 
 export async function fetchProjects(): Promise<Project[]> {
-  const [projectEvents, repositoryEvents, deletionEvents] = await Promise.all([
+  const [projectEvents, repositoryEvents] = await Promise.all([
     fetchProjectEventsExhaustively([KIND_PROJECT_ANNOUNCEMENT]),
     fetchProjectEventsExhaustively([KIND_REPO_ANNOUNCEMENT]),
-    fetchProjectEventsExhaustively([KIND_DELETION]),
   ]);
-  const liveProjectEvents = projectEvents.filter(
-    (event) => !isDeletedByA(event, deletionEvents),
-  );
-  const liveRepositoryEvents = repositoryEvents.filter(
-    (event) => !isDeletedByA(event, deletionEvents),
-  );
 
   return buildProjectReadModels({
-    projectEvents: liveProjectEvents,
-    repositoryEvents: liveRepositoryEvents,
+    projectEvents,
+    repositoryEvents,
     relayOrigin: getCachedRelayOrigin(),
     hiddenAddresses: new Set(readHiddenProjectCards()),
   }).sort((a, b) => b.createdAt - a.createdAt);
-}
-
-async function fetchProject(projectId: string): Promise<Project | null> {
-  return (
-    (await fetchProjects()).find((project) =>
-      projectMatchesRouteId(project, projectId),
-    ) ?? null
-  );
 }
 
 function eventToRepoState(event: RelayEvent): RepoState {
@@ -662,8 +630,11 @@ export function useProjectsQuery() {
 
 export function useProjectQuery(projectId: string) {
   return useQuery({
-    queryKey: ["project", projectId],
-    queryFn: () => fetchProject(projectId),
+    queryKey: projectsQueryKey,
+    queryFn: fetchProjects,
+    select: (projects) =>
+      projects.find((project) => projectMatchesRouteId(project, projectId)) ??
+      null,
     staleTime: 60_000,
   });
 }
