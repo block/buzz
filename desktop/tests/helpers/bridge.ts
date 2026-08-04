@@ -70,11 +70,14 @@ type MockRelayAgentSeed = {
 type MockHuddleSeed = {
   parentChannelId: string;
   ephemeralChannelId: string;
+  huddleThreadEventId?: string | null;
+  phase?: "creating" | "connected" | "active";
   members: Array<{
     pubkey: string;
     role: "owner" | "admin" | "member" | "guest" | "bot";
   }>;
   transcriptionEnabled?: boolean;
+  ttsEnabled?: boolean;
   isCreator?: boolean;
 };
 
@@ -143,6 +146,8 @@ type MockInstallRuntimeResult = {
 };
 
 type MockBridgeOptions = {
+  /** Tauri window label exposed to the app. Defaults to the main window. */
+  windowLabel?: string;
   ttsSettings?: {
     version: number;
     agentTextToSpeech: boolean;
@@ -224,6 +229,10 @@ type MockBridgeOptions = {
   };
   /** Delay an invocation-time huddle snapshot to exercise hydration ordering. */
   huddleStateReadDelayMs?: number;
+  /** Delay companion creation to expose the newly-started huddle handoff state. */
+  openHuddleWindowDelayMs?: number;
+  /** Delay the native start result after membership arrives in the channel list. */
+  startHuddleReturnDelayMs?: number;
   /** Per agent+relay runtime rows for pair-scoped lifecycle commands. */
   managedAgentRuntimes?: Array<{
     pubkey: string;
@@ -309,10 +318,15 @@ type MockBridgeOptions = {
   observerArchiveDefaultEnabled?: boolean;
   /**
    * Delay (ms) applied to `observer_archive_default_enabled` so specs can
-   * assert the pending-reconciliation state (toggle disabled, no
-   * `list_save_subscriptions` call yet) before the policy resolves.
+   * exercise short-lived loading UI. Prefer the explicit defer/release seam
+   * when asserting behavior while the policy check is pending.
    */
   observerArchiveDefaultEnabledDelayMs?: number;
+  /**
+   * Hold `observer_archive_default_enabled` until the test calls
+   * `__BUZZ_E2E_RELEASE_OBSERVER_ARCHIVE_POLICY__`.
+   */
+  deferObserverArchiveDefaultEnabled?: boolean;
   /**
    * When set, `observer_archive_default_enabled` throws with this message —
    * drives the fail-closed path when the policy check itself fails.

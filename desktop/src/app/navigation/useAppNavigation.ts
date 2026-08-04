@@ -171,6 +171,8 @@ export function useAppNavigation() {
         autoSend?: string;
         messageId?: string;
         replace?: boolean;
+        /** Open this thread panel directly without waiting for a timeline row. */
+        thread?: string;
         threadRootId?: string | null;
       },
     ) =>
@@ -190,6 +192,7 @@ export function useAppNavigation() {
             ...(options?.agentSession
               ? { agentSession: options.agentSession }
               : {}),
+            ...(options?.thread ? { thread: options.thread } : {}),
             ...(options?.autoSend ? { autoSend: options.autoSend } : {}),
           },
         },

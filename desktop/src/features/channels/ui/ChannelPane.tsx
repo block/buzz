@@ -48,16 +48,14 @@ import {
   WELCOME_PERSONA_ROTATION_MS,
   type WelcomeComposerBannerState,
 } from "@/features/channels/ui/WelcomeComposerBanner";
-import {
-  isWelcomeSetupSystemMessage,
-  mentionsKnownAgent,
-} from "@/features/channels/ui/ChannelPane.helpers";
+import { mentionsKnownAgent } from "@/features/channels/ui/ChannelPane.helpers";
+import { HuddleStartingView, HuddleTranscriptIntro } from "@/features/huddle";
 import { useChannelIntro } from "@/features/channels/ui/useChannelIntro";
 import type { ChannelPaneProps } from "@/features/channels/ui/ChannelPane.types";
 import * as agentSessionSelection from "@/features/channels/ui/agentSessionSelection";
 import { usePrepareDmSendChannel } from "@/features/channels/ui/usePrepareDmSendChannel";
+import { useChannelPaneMessages } from "@/features/channels/ui/useChannelPaneMessages";
 import { Button } from "@/shared/ui/button";
-import { buildMainTimelineEntries } from "@/features/messages/lib/threadPanel";
 import { useRenderScopedReactionHydration } from "@/features/messages/lib/useRenderScopedReactionHydration";
 import type { TimelineMessage } from "@/features/messages/types";
 import { isWelcomeExperienceChannel as isWelcomeExperience } from "@/features/onboarding/welcome";
@@ -65,6 +63,12 @@ import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
+
+const HUDDLE_TRANSCRIPT_ROOT_STYLE = {
+  "--buzz-channel-content-top-padding": "0rem",
+  "--channel-top-chrome-height": "0.25rem",
+} as React.CSSProperties;
+
 export const ChannelPane = React.memo(function ChannelPane({
   activeChannel,
   agentPubkeys,
@@ -83,6 +87,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   hasOlderMessages,
   historyExhausted,
   isFetchingOlder,
+  isHuddleTranscript = false,
   followThreadById,
   isFollowingThread,
   isFollowingThreadById,
@@ -191,13 +196,8 @@ export const ChannelPane = React.memo(function ChannelPane({
       channelPaneMountedRef.current = false;
     };
   }, []);
-  // Clear the ?autoSend search param once the auto-submit fires so
-  // back-navigation cannot re-trigger the send.
-  // When `onAutoSendComplete` is provided it does a surgical single-key clear
-  // that preserves `?thread` and all other panel search state (required for
-  // the thread-draft send path so the thread panel does not unmount before the
-  // deferred setTimeout(0) submit fires). The goChannel fallback is kept for
-  // callers that do not supply the prop (e.g. isolated tests / older wrappers).
+  // Clear only the auto-send key so thread state survives deferred submission;
+  // older wrappers fall back to goChannel to prevent back-navigation replay.
   const handleAutoSubmitComplete = React.useCallback(() => {
     if (onAutoSendComplete) {
       onAutoSendComplete();
@@ -409,8 +409,6 @@ export const ChannelPane = React.memo(function ChannelPane({
     activeChannel?.id ?? null,
   );
   const hasComposerBotActivity = composerWorkingBotPubkeys.length > 0;
-  // Background card mints surface in the same rail ("Minting card…" chip),
-  // so they must also reserve the activity row.
   const hasCardMintActivity = useCardMintJobs().length > 0;
   const hasComposerBottomActivity =
     hasComposerBotActivity || hasTypingActivity || hasCardMintActivity;
@@ -444,7 +442,7 @@ export const ChannelPane = React.memo(function ChannelPane({
         messageTimelineRef.current?.scrollToBottomOnNextUpdate(),
     });
   }, [onAddAgent]);
-  const channelIntro = useChannelIntro({
+  const standardChannelIntro = useChannelIntro({
     activeChannel,
     onAddAgent,
     onBrowseChannels,
@@ -452,23 +450,14 @@ export const ChannelPane = React.memo(function ChannelPane({
     onOpenMembers,
     onWelcomeAddAgent: onAddAgent ? handleWelcomeAddAgent : undefined,
   });
-  const visibleMessages = React.useMemo(() => {
-    if (!isWelcomeExperience(activeChannel)) {
-      return messages;
-    }
-
-    return messages.filter((message) => !isWelcomeSetupSystemMessage(message));
-  }, [activeChannel, messages]);
-  const mainTimelineEntries = React.useMemo(
-    () =>
-      buildMainTimelineEntries(
-        visibleMessages,
-        new Set(),
-        threadSummaries,
-        profiles,
-      ),
-    [profiles, threadSummaries, visibleMessages],
-  );
+  const channelIntro = isHuddleTranscript ? null : standardChannelIntro;
+  const { mainTimelineEntries, visibleMessages } = useChannelPaneMessages({
+    activeChannel,
+    isHuddleTranscript,
+    messages,
+    profiles,
+    threadSummaries,
+  });
   useRenderScopedReactionHydration({
     activeChannel,
     mainTimelineEntries,
@@ -585,9 +574,14 @@ export const ChannelPane = React.memo(function ChannelPane({
     isSinglePanelView,
     useSplitAuxiliaryPane,
   });
+  const timelineReplyHandler =
+    activeChannel?.archivedAt || isHuddleTranscript ? undefined : onOpenThread;
   return (
-    <div className="relative flex min-h-0 min-w-0 flex-1 flex-row overflow-hidden">
-      {!isSinglePanelView ? (
+    <div
+      className="relative flex min-h-0 min-w-0 flex-1 flex-row overflow-hidden"
+      style={isHuddleTranscript ? HUDDLE_TRANSCRIPT_ROOT_STYLE : undefined}
+    >
+      {!isSinglePanelView && !isHuddleTranscript ? (
         <div
           aria-hidden="true"
           className={cn(
@@ -621,7 +615,7 @@ export const ChannelPane = React.memo(function ChannelPane({
               : undefined
           }
         >
-          {header}
+          {isHuddleTranscript ? null : header}
           {channelFind.isOpen ? (
             <div className={cn("absolute inset-x-0 z-40", channelChrome.top)}>
               <ChannelFindBar
@@ -647,6 +641,12 @@ export const ChannelPane = React.memo(function ChannelPane({
             hasComposerOverlay={hasMainComposerOverlay}
             hasOlderMessages={hasOlderMessages}
             historyExhausted={historyExhausted}
+            hideDayDividers={isHuddleTranscript}
+            alwaysShowMessageIdentity={isHuddleTranscript}
+            hideAgentAccessBadges={isHuddleTranscript}
+            pinnedIntro={
+              isHuddleTranscript ? <HuddleTranscriptIntro /> : undefined
+            }
             huddleMemberPubkeys={huddleMemberPubkeys}
             huddleMemberPubkeysPending={huddleMemberPubkeysPending}
             isFetchingOlder={isFetchingOlder}
@@ -668,7 +668,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                   : "No messages yet"
                 : "No channel selected"
             }
-            isLoading={isTimelineLoading}
+            isLoading={isHuddleTranscript ? false : isTimelineLoading}
             entranceMessageId={entranceMessageId}
             onEntranceMessageComplete={onEntranceMessageComplete}
             mainEntries={mainTimelineEntries}
@@ -680,8 +680,8 @@ export const ChannelPane = React.memo(function ChannelPane({
             onEdit={onEdit}
             onMarkUnread={onMarkUnread}
             onMarkRead={onMarkRead}
-            onReply={activeChannel?.archivedAt ? undefined : onOpenThread}
-            onOpenThread={onOpenThread}
+            onReply={timelineReplyHandler}
+            onOpenThread={isHuddleTranscript ? undefined : onOpenThread}
             channelName={activeChannel?.name}
             channelType={activeChannel?.channelType ?? null}
             isSendingVideoReviewComment={isSending}
@@ -854,6 +854,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                 firstUnreadReplyId={threadFirstUnreadReplyId}
                 huddleMemberPubkeys={huddleMemberPubkeys}
                 huddleMemberPubkeysPending={huddleMemberPubkeysPending}
+                isHuddleTranscript={isHuddleTranscript}
                 isFollowingThread={isFollowingThread}
                 isMessageUnreadById={isMessageUnreadById}
                 isSending={isSending}
@@ -913,6 +914,9 @@ export const ChannelPane = React.memo(function ChannelPane({
           })()
         ) : shouldShowThreadSkeleton ? (
           (() => {
+            if (isHuddleTranscript) {
+              return wrapThreadPanel(<HuddleStartingView />);
+            }
             const panel = (
               <MessageThreadPanelSkeleton
                 {...threadLayoutProps}

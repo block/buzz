@@ -94,6 +94,7 @@ export default defineConfig({
         "**/live-broadcast-reply-timeline.spec.ts",
         "**/markdown-parse-cache.spec.ts",
         "**/overscroll-boundary.spec.ts",
+        "**/terminal-wheel.spec.ts",
         "**/cold-switch-longtask.perf.ts",
         "**/timeline-no-shift.spec.ts",
         "**/human-edit-agent-content.spec.ts",
