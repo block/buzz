@@ -4,13 +4,17 @@ import '../../shared/relay/relay.dart';
 import '../channels/channel_management_provider.dart';
 import '../profile/user_cache_provider.dart';
 import '../profile/user_profile.dart';
+import 'channel.dart';
 import 'channel_messages_provider.dart';
+import 'channels_provider.dart';
+import 'message_mention_pubkeys.dart';
 
 /// Sends messages by signing an event with the user's nsec and publishing it
 /// over the relay's NIP-42-authenticated WebSocket session.
 class SendMessage {
   final SignedEventRelay _signedEventRelay;
   final Future<List<ChannelMember>> Function(String channelId) _fetchMembers;
+  final Future<Channel?> Function(String channelId) _fetchChannel;
   final Map<String, UserProfile> Function() _readUserCache;
   final void Function(String channelId, NostrEvent event) _addLocalMessage;
   final void Function(String channelId, String eventId) _completeLocalMessage;
@@ -20,6 +24,7 @@ class SendMessage {
     required SignedEventRelay signedEventRelay,
     required Future<List<ChannelMember>> Function(String channelId)
     fetchMembers,
+    required Future<Channel?> Function(String channelId) fetchChannel,
     required Map<String, UserProfile> Function() readUserCache,
     required void Function(String channelId, NostrEvent event) addLocalMessage,
     required void Function(String channelId, String eventId)
@@ -27,6 +32,7 @@ class SendMessage {
     required void Function(String channelId, String eventId) removeLocalMessage,
   }) : _signedEventRelay = signedEventRelay,
        _fetchMembers = fetchMembers,
+       _fetchChannel = fetchChannel,
        _readUserCache = readUserCache,
        _addLocalMessage = addLocalMessage,
        _completeLocalMessage = completeLocalMessage,
@@ -53,14 +59,28 @@ class SendMessage {
         mentionPubkeys ?? await _resolveMentions(content, channelId);
     final authorPubkey = _signedEventRelay.pubkey;
 
-    // Normalize mentions: lowercase, deduplicate, exclude self (matching
-    // the desktop's normalizeMentionPubkeys).
-    final selfLower = authorPubkey?.toLowerCase();
-    final seenMentions = <String>{?selfLower};
-    final normalizedMentions = <String>[
-      for (final pk in resolvedMentions)
-        if (seenMentions.add(pk.toLowerCase())) pk,
-    ];
+    // DMs must p-tag every other participant even without @mentions — agent
+    // harnesses and human notification subscriptions both rely on those tags.
+    // Mirrors desktop `messageMentionPubkeys`.
+    final channel = await _fetchChannel(channelId);
+    final isDm = channel?.isDm ?? false;
+    var memberPubkeys = const <String>[];
+    if (isDm) {
+      try {
+        memberPubkeys = [
+          for (final member in await _fetchMembers(channelId)) member.pubkey,
+        ];
+      } catch (_) {
+        // Non-fatal — participantPubkeys alone still cover typical 1:1 DMs.
+      }
+    }
+    final normalizedMentions = messageMentionPubkeys(
+      isDm: isDm,
+      senderPubkey: authorPubkey,
+      explicitMentions: resolvedMentions,
+      memberPubkeys: memberPubkeys,
+      participantPubkeys: channel?.participantPubkeys ?? const [],
+    );
 
     final tags = <List<String>>[
       ['h', channelId],
@@ -169,6 +189,13 @@ final sendMessageProvider = Provider<SendMessage>((ref) {
     ),
     fetchMembers: (channelId) =>
         ref.read(channelMembersProvider(channelId).future),
+    fetchChannel: (channelId) async {
+      final channels = await ref.read(channelsProvider.future);
+      for (final channel in channels) {
+        if (channel.id == channelId) return channel;
+      }
+      return null;
+    },
     readUserCache: () => ref.read(userCacheProvider),
     addLocalMessage: (channelId, event) => ref
         .read(channelMessagesProvider(channelId).notifier)
