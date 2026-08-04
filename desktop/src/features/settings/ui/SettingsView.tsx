@@ -125,6 +125,7 @@ export function SettingsView({
   onSetNotifyWhileViewing,
   onSetAllSlotAlertsEnabled,
   onSetSoundForSlot,
+  onSetSenderSound,
   section,
 }: SettingsViewProps) {
   const { isMobile, open: sidebarOpen, setOpen: setSidebarOpen } = useSidebar();
@@ -347,6 +348,7 @@ export function SettingsView({
                 onSetNotifyWhileViewing,
                 onSetAllSlotAlertsEnabled,
                 onSetSoundForSlot,
+                onSetSenderSound,
               })}
             </div>
           </section>

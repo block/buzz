@@ -24,6 +24,10 @@ const rules = [
 // message text), so they are exempted from the readable-text px rule. Matching
 // the literal keeps these exceptions stable when unrelated edits move lines.
 const overrides = new Set([
+  // Top chrome sits beside the native traffic lights, which ignore the app's
+  // Cmd +/- rem zoom, so its row is fixed-px on purpose (see AppTopChrome).
+  "src/app/AppTopChrome.tsx:text-[12px]",
+  "src/app/AppTopChrome.tsx:text-[10px]",
   "src/features/settings/ui/ProfileSettingsCard.tsx:text-[6rem]",
   "src/features/onboarding/ui/AvatarStep.tsx:text-[6rem]",
   "src/features/agents/ui/AgentCreationPreview.tsx:text-[4rem]",

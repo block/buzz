@@ -916,3 +916,27 @@
     animation: none;
   }
 }
+
+/* Dev mode: per-character wave on channel names while an agent is working.
+   inline-block is load-bearing — transforms are ignored on inline spans. */
+.dev-wavy-char {
+  display: inline-block;
+  animation: dev-wavy-char 1200ms ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dev-wavy-char {
+    animation: none;
+  }
+}
+
+@keyframes dev-wavy-char {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+
+  50% {
+    transform: translateY(-0.14em);
+  }
+}

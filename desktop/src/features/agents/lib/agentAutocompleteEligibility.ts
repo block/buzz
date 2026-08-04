@@ -9,6 +9,24 @@ export function getSharedChannelIds(channels: readonly Channel[] | undefined) {
   );
 }
 
+/**
+ * True only when the agent's kind:10100 announcement explicitly allowlists the
+ * current identity. Unlike `relayAgentIsSharedWithUser` this ignores the
+ * "respond to anyone + shares a channel" rule, so stale announcements left
+ * behind by abandoned identities (which allowlist a pubkey the user no longer
+ * holds) don't qualify.
+ */
+export function relayAgentAllowlistsUser(
+  agent: Pick<RelayAgent, "respondTo" | "respondToAllowlist">,
+  currentPubkey?: string | null,
+) {
+  if (!currentPubkey || agent.respondTo !== "allowlist") return false;
+  const normalizedCurrentPubkey = normalizePubkey(currentPubkey);
+  return agent.respondToAllowlist.some(
+    (pubkey) => normalizePubkey(pubkey) === normalizedCurrentPubkey,
+  );
+}
+
 export function relayAgentIsSharedWithUser(
   agent: Pick<RelayAgent, "channelIds" | "respondTo" | "respondToAllowlist">,
   sharedChannelIds: ReadonlySet<string>,

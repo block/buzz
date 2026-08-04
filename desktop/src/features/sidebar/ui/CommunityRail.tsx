@@ -39,6 +39,8 @@ import { cn } from "@/shared/lib/cn";
 import { getInitials } from "@/shared/lib/initials";
 import { writeTextToClipboard } from "@/shared/lib/clipboard";
 
+type CommunityRailVariant = "standard" | "developer";
+
 type CommunityRailProps = {
   communities: Community[];
   activeCommunityId: string | null;
@@ -50,6 +52,8 @@ type CommunityRailProps = {
   ) => void;
   onRemoveCommunity: (id: string) => void;
   onReorderCommunities: (orderedIds: string[]) => void;
+  /** Developer mode swaps the round Discord-style tiles for flat squares. */
+  variant?: CommunityRailVariant;
 };
 
 const MAX_BADGE = 99;
@@ -96,6 +100,7 @@ function CommunityButton({
   dragListeners,
   dragAttributes,
   isDragging,
+  variant = "standard",
 }: {
   community: Community;
   isActive: boolean;
@@ -106,6 +111,7 @@ function CommunityButton({
   dragListeners?: React.HTMLAttributes<HTMLElement>;
   dragAttributes?: React.HTMLAttributes<HTMLElement>;
   isDragging?: boolean;
+  variant?: CommunityRailVariant;
 }) {
   const { mentionCount, showBadge, showDot, pending, badgeLabel } =
     communityRailIndicators(unread);
@@ -136,10 +142,20 @@ function CommunityButton({
             >
               <span
                 className={cn(
-                  "flex h-9 w-9 items-center justify-center overflow-hidden rounded-2xl text-xs font-semibold transition-all",
-                  isActive
-                    ? "rounded-xl bg-primary text-primary-foreground"
-                    : "bg-sidebar-accent/60 text-sidebar-foreground/80 hover:rounded-xl hover:bg-primary/80 hover:text-primary-foreground",
+                  "flex h-9 w-9 items-center justify-center overflow-hidden text-xs font-semibold",
+                  variant === "developer"
+                    ? cn(
+                        "rounded-none border font-mono",
+                        isActive
+                          ? "border-primary bg-primary/15 text-foreground"
+                          : "border-border/60 text-muted-foreground hover:border-primary/60 hover:text-foreground",
+                      )
+                    : cn(
+                        "rounded-2xl transition-all",
+                        isActive
+                          ? "rounded-xl bg-primary text-primary-foreground"
+                          : "bg-sidebar-accent/60 text-sidebar-foreground/80 hover:rounded-xl hover:bg-primary/80 hover:text-primary-foreground",
+                      ),
                   pending && !isActive && "opacity-60",
                 )}
               >
@@ -157,14 +173,24 @@ function CommunityButton({
               </span>
               {showBadge ? (
                 <span
-                  className="absolute -bottom-0.5 -right-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-2xs font-semibold text-primary-foreground ring-2 ring-sidebar"
+                  className={cn(
+                    "absolute -bottom-0.5 -right-0.5 flex h-4 min-w-4 items-center justify-center bg-primary px-1 text-2xs font-semibold text-primary-foreground ring-2",
+                    variant === "developer"
+                      ? "rounded-none font-mono ring-background"
+                      : "rounded-full ring-sidebar",
+                  )}
                   data-testid={`community-rail-mentions-${community.id}`}
                 >
                   {badgeLabel}
                 </span>
               ) : showDot ? (
                 <span
-                  className="absolute -bottom-0.5 -right-0.5 h-2 w-2 shrink-0 rounded-full bg-primary ring-2 ring-sidebar"
+                  className={cn(
+                    "absolute -bottom-0.5 -right-0.5 h-2 w-2 shrink-0 bg-primary ring-2",
+                    variant === "developer"
+                      ? "rounded-none ring-background"
+                      : "rounded-full ring-sidebar",
+                  )}
                   data-testid={`community-rail-unread-dot-${community.id}`}
                 >
                   <span className="sr-only">unread</span>
@@ -185,13 +211,18 @@ function CommunityButton({
 function CommunityDragOverlay({
   community,
   iconUrl,
+  variant = "standard",
 }: {
   community: Community;
   iconUrl: string | null;
+  variant?: CommunityRailVariant;
 }) {
   return (
     <div
-      className="flex h-9 w-9 cursor-grabbing items-center justify-center overflow-hidden rounded-xl bg-primary text-xs font-semibold text-primary-foreground opacity-90 shadow-lg ring-1 ring-sidebar-border"
+      className={cn(
+        "flex h-9 w-9 cursor-grabbing items-center justify-center overflow-hidden bg-primary text-xs font-semibold text-primary-foreground opacity-90 shadow-lg ring-1 ring-sidebar-border",
+        variant === "developer" ? "rounded-none font-mono" : "rounded-xl",
+      )}
       data-buzz-flat
     >
       {iconUrl ? (
@@ -218,6 +249,7 @@ function SortableCommunityButton({
   onSwitchCommunity,
   onMarkAllRead,
   onSetEditingCommunity,
+  variant = "standard",
 }: {
   community: Community;
   activeCommunityId: string | null;
@@ -228,6 +260,7 @@ function SortableCommunityButton({
   onSwitchCommunity: (id: string) => void;
   onMarkAllRead: (community: Community) => void;
   onSetEditingCommunity: (community: Community) => void;
+  variant?: CommunityRailVariant;
 }) {
   const {
     attributes,
@@ -286,6 +319,7 @@ function SortableCommunityButton({
             state: "unknown",
           }
         }
+        variant={variant}
       />
     </div>
   );
@@ -307,6 +341,7 @@ export function CommunityRail({
   onUpdateCommunity,
   onRemoveCommunity,
   onReorderCommunities,
+  variant = "standard",
 }: CommunityRailProps) {
   const { unreadByCommunity, markCommunityRead } = useCommunityUnread(
     communities,
@@ -370,7 +405,12 @@ export function CommunityRail({
   return (
     <nav
       aria-label="Communities"
-      className="relative z-0 flex w-14 shrink-0 flex-col items-center gap-2 overflow-y-auto bg-sidebar px-2.5 pb-5 pt-[calc(var(--buzz-top-chrome-height,40px)+7px)]"
+      className={cn(
+        "relative z-0 flex w-14 shrink-0 flex-col items-center gap-2 overflow-y-auto px-2.5 pb-5 pt-[calc(var(--buzz-top-chrome-height,40px)+7px)]",
+        variant === "developer"
+          ? "border-r border-border/60 bg-background font-mono"
+          : "bg-sidebar",
+      )}
       data-testid="community-rail"
     >
       <DndContext
@@ -396,6 +436,7 @@ export function CommunityRail({
               onMarkAllRead={handleMarkAllRead}
               onSetEditingCommunity={setEditingCommunity}
               onSwitchCommunity={onSwitchCommunity}
+              variant={variant}
             />
           ))}
         </SortableContext>
@@ -404,6 +445,7 @@ export function CommunityRail({
             <CommunityDragOverlay
               community={draggingCommunity}
               iconUrl={iconsByCommunity[draggingCommunity.id] ?? null}
+              variant={variant}
             />
           ) : null}
         </DragOverlay>
@@ -412,7 +454,12 @@ export function CommunityRail({
         <TooltipTrigger asChild>
           <button
             aria-label="Add community"
-            className="flex h-9 w-9 items-center justify-center rounded-2xl bg-sidebar-accent/60 text-sidebar-foreground/70 outline-hidden transition-all hover:rounded-xl hover:bg-primary/80 hover:text-primary-foreground focus:outline-none focus-visible:outline-none"
+            className={cn(
+              "flex h-9 w-9 items-center justify-center outline-hidden focus:outline-none focus-visible:outline-none",
+              variant === "developer"
+                ? "rounded-none border border-dashed border-border/60 text-muted-foreground hover:border-primary/60 hover:text-foreground"
+                : "rounded-2xl bg-sidebar-accent/60 text-sidebar-foreground/70 transition-all hover:rounded-xl hover:bg-primary/80 hover:text-primary-foreground",
+            )}
             data-testid="community-rail-add"
             onClick={onAddCommunity}
             type="button"

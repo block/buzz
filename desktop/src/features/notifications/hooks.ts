@@ -11,10 +11,14 @@ import {
 } from "./lib/desktop";
 import {
   COMING_SOON_SLOTS,
+  DEFAULT_SENDER_SOUNDS,
   DEFAULT_SLOT_ALERTS_ENABLED,
   DEFAULT_SLOT_SOUNDS,
+  SENDER_KINDS,
   SOUND_NAMES,
   SOUND_SLOTS,
+  type SenderKind,
+  type SenderSounds,
   type SlotSounds,
   type SoundName,
   type SoundSlot,
@@ -43,6 +47,7 @@ export type NotificationSettings = {
   homeBadgeEnabled: boolean;
   notifyWhileViewing: boolean;
   sounds: SlotSounds;
+  senderSounds: SenderSounds;
   slotAlertsEnabled: Record<SoundSlot, boolean>;
   /**
    * Per-row state captured when the master switch bulk-disables, so turning
@@ -57,6 +62,7 @@ const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
   homeBadgeEnabled: true,
   notifyWhileViewing: false,
   sounds: { ...DEFAULT_SLOT_SOUNDS },
+  senderSounds: { ...DEFAULT_SENDER_SOUNDS },
   slotAlertsEnabled: { ...DEFAULT_SLOT_ALERTS_ENABLED },
   slotAlertsSnapshot: null,
 };
@@ -71,6 +77,19 @@ function sanitizeSoundsMap(value: unknown): SlotSounds {
     const picked = candidate[slot];
     if (typeof picked === "string" && SOUND_NAME_SET.has(picked as SoundName)) {
       result[slot] = picked as SoundName;
+    }
+  }
+  return result;
+}
+
+function sanitizeSenderSounds(value: unknown): SenderSounds {
+  const result = { ...DEFAULT_SENDER_SOUNDS };
+  if (!value || typeof value !== "object") return result;
+  const candidate = value as Partial<Record<SenderKind, unknown>>;
+  for (const kind of SENDER_KINDS) {
+    const picked = candidate[kind];
+    if (typeof picked === "string" && SOUND_NAME_SET.has(picked as SoundName)) {
+      result[kind] = picked as SoundName;
     }
   }
   return result;
@@ -113,6 +132,7 @@ function sanitizeNotificationSettings(value: unknown): NotificationSettings {
         ? candidate.notifyWhileViewing
         : DEFAULT_NOTIFICATION_SETTINGS.notifyWhileViewing,
     sounds: sanitizeSoundsMap(candidate.sounds),
+    senderSounds: sanitizeSenderSounds(candidate.senderSounds),
     slotAlertsEnabled: sanitizeSlotAlertsEnabled(candidate.slotAlertsEnabled),
     slotAlertsSnapshot:
       candidate.slotAlertsSnapshot != null &&
@@ -333,6 +353,16 @@ export function useNotificationSettings(pubkey?: string) {
     [],
   );
 
+  const setSenderSound = React.useCallback(
+    (kind: SenderKind, name: SoundName) => {
+      setSettings((current) => ({
+        ...current,
+        senderSounds: { ...current.senderSounds, [kind]: name },
+      }));
+    },
+    [],
+  );
+
   return {
     errorMessage,
     isUpdatingDesktopEnabled,
@@ -341,6 +371,7 @@ export function useNotificationSettings(pubkey?: string) {
     setHomeBadgeEnabled,
     setAllSlotAlertsEnabled,
     setNotifyWhileViewing,
+    setSenderSound,
     setSlotAlertsEnabled,
     setSoundForSlot,
     settings,

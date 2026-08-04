@@ -167,9 +167,9 @@ fn model_discovery_error(pubkey: &str, error: &str) -> String {
 
 #[path = "agent_models_discovery_config.rs"]
 mod discovery_config;
-use discovery_config::{
-    agent_model_discovery_config, draft_agent_model_discovery_env, AgentModelDiscoveryConfig,
-};
+use discovery_config::draft_agent_model_discovery_env;
+// Re-exported for `agent_completion` (channel naming) to launch discovery.
+pub(super) use discovery_config::{agent_model_discovery_config, AgentModelDiscoveryConfig};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

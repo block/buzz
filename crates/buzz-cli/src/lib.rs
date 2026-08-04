@@ -547,17 +547,17 @@ pub enum ChannelsCmd {
     },
     /// Create a new channel
     #[command(
-        after_help = "Examples:\n  buzz channels create --name general --type stream --visibility open\n  buzz channels create --name design --type forum --visibility open --description \"Design discussions\"\n  buzz channels create --name standup --type stream --visibility open --ttl 3600  # ephemeral, archived after 1h idle\n  buzz channels create --name project-x --template \"Buzz Team\"  # type/visibility/canvas/roster from the template; explicit flags override"
+        after_help = "Examples:\n  buzz channels create --name general --type stream --visibility open\n  buzz channels create --name design --type forum --visibility open --description \"Design discussions\"\n  buzz channels create --name standup --type stream --visibility open --ttl 3600  # ephemeral, archived after 1h idle\n  buzz channels create --name implementation --parent general --description \"Implement the feature\"\n  buzz channels create --name project-x --template \"Buzz Team\"  # type/visibility/canvas/roster from the template; explicit flags override"
     )]
     Create {
         /// Channel name
         #[arg(long)]
         name: String,
         /// Channel type. Required unless --template supplies one.
-        #[arg(long = "type", value_enum, required_unless_present = "template")]
+        #[arg(long = "type", value_enum, required_unless_present_any = ["template", "parent"])]
         channel_type: Option<ChannelType>,
         /// Channel visibility. Required unless --template supplies one.
-        #[arg(long, value_enum, required_unless_present = "template")]
+        #[arg(long, value_enum, required_unless_present_any = ["template", "parent"])]
         visibility: Option<ChannelVisibility>,
         /// Channel description
         #[arg(long)]
@@ -571,6 +571,9 @@ pub enum ChannelsCmd {
         /// its agent roster against the relay to add as members.
         #[arg(long)]
         template: Option<String>,
+        /// Parent channel UUID or exact name. Creates a one-level sub-channel.
+        #[arg(long, conflicts_with = "template", value_name = "CHANNEL")]
+        parent: Option<String>,
         /// Override the channel-templates.json path (default: the desktop
         /// app's prod app-data dir). Mainly for the dev store or testing.
         #[arg(long, value_name = "PATH")]

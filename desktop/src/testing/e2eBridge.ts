@@ -331,6 +331,9 @@ type E2eConfig = {
     profileUpdateErrors?: string[];
     searchProfiles?: MockSearchProfileSeed[];
     updateAvailable?: boolean;
+    /** Delay (ms) before mock `archive_channel` resolves, to test that the
+     *  UI updates optimistically without waiting on the relay. */
+    archiveChannelDelayMs?: number;
     updateChannelDelayMs?: number;
     updateDownloadDelayMs?: number;
     restartDelayMs?: number;
@@ -1104,6 +1107,13 @@ declare global {
       /** 64-hex id required for the event to be a valid reaction target. */
       id?: string;
     }) => RelayEvent;
+    /** Bulk-add `count` synthetic members to a mock channel so specs can
+     *  exercise large-roster UI (member counts, capped browsers) without
+     *  seeding hundreds of identities. Returns the new member total. */
+    __BUZZ_E2E_ADD_MOCK_MEMBERS__?: (input: {
+      channelName: string;
+      count: number;
+    }) => number;
     /** Prepend `count` synthetic older messages to a channel's mock store so
      *  an older-history fetch has something to paginate. Mirrors how the real
      *  relay backfills history. Returns the created events. */
@@ -6635,6 +6645,11 @@ async function handleArchiveChannel(
   args: { channelId: string },
   config: E2eConfig | undefined,
 ) {
+  const delayMs = config?.mock?.archiveChannelDelayMs ?? 0;
+  if (delayMs > 0) {
+    await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+  }
+
   const identity = getIdentity(config);
   if (!identity) {
     const channel = getMockChannel(args.channelId);
@@ -9881,6 +9896,28 @@ export function maybeInstallE2eTauriMocks() {
       pending,
       id,
     );
+  };
+  window.__BUZZ_E2E_ADD_MOCK_MEMBERS__ = ({ channelName, count }) => {
+    const channel = mockChannels.find(
+      (candidate) => candidate.name === channelName,
+    );
+    if (!channel) {
+      throw new Error(`Mock channel ${channelName} not found.`);
+    }
+
+    const base = channel.members.length;
+    for (let index = 0; index < count; index += 1) {
+      const serial = (base + index).toString(16).padStart(12, "0");
+      channel.members.push({
+        pubkey: `e2ec${serial}`.padEnd(64, "0"),
+        role: "member",
+        is_agent: false,
+        joined_at: new Date().toISOString(),
+        display_name: `crowd-${base + index}`,
+      });
+    }
+    syncMockChannel(channel);
+    return channel.members.length;
   };
   window.__BUZZ_E2E_PREPEND_MOCK_HISTORY__ = prependMockHistory;
   window.__BUZZ_E2E_EMIT_MOCK_TYPING__ = ({

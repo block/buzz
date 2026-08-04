@@ -61,6 +61,7 @@ fn record(
         persona_source_version: None,
         env_vars: BTreeMap::new(),
         start_on_app_launch: false,
+        stopped_by_app_shutdown: false,
         runtime_pid: None,
         backend: BackendKind::Local,
         backend_agent_id: None,

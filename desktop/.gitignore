@@ -28,3 +28,4 @@ test-results
 *.njsproj
 *.sln
 *.sw?
+src-tauri/tauri.devmode.conf.json

@@ -15,6 +15,7 @@ import { useLiveHomeFeedActions } from "@/app/useLiveHomeFeedActions";
 import { useChannelBrowserDialog } from "@/app/useChannelBrowserDialog";
 import { useMarkAsReadShortcuts } from "@/app/useMarkAsReadShortcuts";
 import { useSettingsShortcuts } from "@/app/useSettingsShortcuts";
+import { useGlobalActionShortcuts } from "@/app/useGlobalActionShortcuts";
 import { useAppShellDesktopNotifications } from "@/app/useAppShellDesktopNotifications";
 import { useAppShellLifecycleEffects } from "@/app/useAppShellLifecycleEffects";
 import { useChannelActivityProjection } from "@/app/useChannelActivityProjection";
@@ -81,6 +82,7 @@ import {
 } from "@/features/communities/communityNavigationStorage";
 import { useAddCommunityDialogState } from "@/features/communities/addCommunityPrefill";
 import { useApplyTemplate } from "@/features/channel-templates/useApplyTemplate";
+import { useDisplayStyle } from "@/features/dev-mode/lib/displayStylePreference";
 import { relayClient } from "@/shared/api/relayClient";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { useRelayAutoHeal } from "@/shared/api/useRelayAutoHeal";
@@ -89,7 +91,6 @@ import { useWebviewScrollBoundaryLock } from "@/shared/hooks/useWebviewScrollBou
 import { joinChannel } from "@/shared/api/tauri";
 import type { Channel, ChannelVisibility, SearchHit } from "@/shared/api/types";
 import { ChannelNavigationProvider } from "@/shared/context/ChannelNavigationContext";
-import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
 import { useMessageDeepLinks } from "@/shared/useMessageDeepLinks";
 import { SidebarProvider } from "@/shared/ui/sidebar";
 import { RelayConnectionOverlay } from "@/app/RelayConnectionOverlay";
@@ -98,10 +99,17 @@ import { AppShellTrayMenu } from "@/app/useAppShellTrayMenu";
 import { AppProfilePanelProvider } from "@/app/AppProfilePanelProvider";
 import { LazySettingsScreen } from "@/app/LazySettingsScreen";
 const EMPTY_CHANNELS: Channel[] = [];
+
+const LazyDevModeShell = React.lazy(async () => {
+  const module = await import("@/features/dev-mode/ui/DevModeShell");
+  return { default: module.DevModeShell };
+});
+
 export function AppShell() {
   useWebviewZoomShortcuts();
   useTauriWindowDrag();
   useWebviewScrollBoundaryLock();
+  const displayStyle = useDisplayStyle();
   const communitiesHook = useCommunities();
   const {
     handleHuddleCompanionOpen,
@@ -170,6 +178,7 @@ export function AppShell() {
     ? locationSearchSection
     : DEFAULT_SETTINGS_SECTION;
   const startupReady = useDeferredStartup();
+
   const identityQuery = useIdentityQuery();
   const { mutedChannelIds, muteChannel, unmuteChannel } = useChannelMutes(
     identityQuery.data?.pubkey,
@@ -321,6 +330,7 @@ export function AppShell() {
       ? (channels.find((channel) => channel.id === targetChannelId) ?? null)
       : null;
   }, [channels, managedChannelId, selectedChannelId]);
+
   const {
     handleChannelNotification,
     handleDmNotification,
@@ -533,6 +543,7 @@ export function AppShell() {
     },
     [applyAgents, applyCanvas, createChannelMutation, goChannel],
   );
+
   const handleCreateForum = React.useCallback(
     async ({
       description,
@@ -600,6 +611,7 @@ export function AppShell() {
     },
     [goHome, hideDmMutation, selectedChannelId],
   );
+
   const handleOpenSettings = React.useCallback(
     (section: SettingsSection = DEFAULT_SETTINGS_SECTION) => {
       setIsChannelManagementOpen(false);
@@ -607,10 +619,12 @@ export function AppShell() {
     },
     [goSettings],
   );
+
   const handleCloseSettings = React.useCallback(
     () => closeSettings(),
     [closeSettings],
   );
+
   // Section switches rewrite the settings entry rather than stacking one
   // history entry per section, so back always exits settings in one step.
   const handleSettingsSectionChange = React.useCallback(
@@ -634,74 +648,23 @@ export function AppShell() {
   });
   // Dispatch `buzz://message` deep links only from the main window; the companion is dedicated to its active Huddle route.
   useMessageDeepLinks(!isHuddleRoom);
+  const handleOpenNewDm = React.useCallback(
+    () => void goNewMessage(),
+    [goNewMessage],
+  );
   const handleOpenCreateChannel = React.useCallback(
     () => setIsCreateChannelOpen(true),
     [],
   );
-  React.useLayoutEffect(() => {
-    if (settingsOpen || isHuddleRoom) {
-      return;
-    }
-
-    function handleKeyDown(event: KeyboardEvent) {
-      if (!hasPrimaryShortcutModifier(event) || event.altKey || event.repeat) {
-        return;
-      }
-
-      // A focused surface may claim the shortcut first — e.g. the composer
-      // consumes ⌘K to open the link editor when text is selected. Its
-      // element-level handler runs before this window-level bubble listener
-      // and calls `preventDefault()`; respect that instead of also opening
-      // the global dialog.
-      if (event.defaultPrevented) {
-        return;
-      }
-
-      const key = event.key.toLowerCase();
-      if (key === "k" && !event.shiftKey) {
-        event.preventDefault();
-        handleOpenSearch();
-        return;
-      }
-
-      if (key === "k" && event.shiftKey) {
-        event.preventDefault();
-        void goNewMessage();
-        return;
-      }
-
-      if (key === "n" && event.shiftKey) {
-        event.preventDefault();
-        handleOpenCreateChannel();
-        return;
-      }
-
-      if (key === "o" && event.shiftKey) {
-        event.preventDefault();
-        handleOpenBrowseChannels();
-        return;
-      }
-
-      if (key === "a" && event.shiftKey) {
-        event.preventDefault();
-        void goHome();
-        return;
-      }
-    }
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [
-    handleOpenBrowseChannels,
-    handleOpenCreateChannel,
-    handleOpenSearch,
-    goNewMessage,
-    goHome,
-    isHuddleRoom,
-    settingsOpen,
-  ]);
+  const handleGoHomeShortcut = React.useCallback(() => void goHome(), [goHome]);
+  useGlobalActionShortcuts({
+    disabled: settingsOpen || isHuddleRoom,
+    onOpenSearch: handleOpenSearch,
+    onOpenNewDm: handleOpenNewDm,
+    onOpenCreateChannel: handleOpenCreateChannel,
+    onOpenBrowseChannels: handleOpenBrowseChannels,
+    onGoHome: handleGoHomeShortcut,
+  });
   useSettingsShortcuts({
     onClose: handleCloseSettings,
     onOpenSettings: handleOpenSettings,
@@ -785,6 +748,11 @@ export function AppShell() {
                 onSwitchCommunity={handleSwitchCommunity}
                 onUpdateCommunity={communitiesHook.updateCommunity}
                 communities={communitiesHook.communities}
+                variant={
+                  !settingsOpen && displayStyle === "developer"
+                    ? "developer"
+                    : "standard"
+                }
               />
             ) : null}
             <SidebarProvider
@@ -792,7 +760,9 @@ export function AppShell() {
               data-testid="app-sidebar-layer"
             >
               <AppProfilePanelProvider>
-                {!settingsOpen && !isHuddleRoom ? (
+                {!settingsOpen &&
+                !isHuddleRoom &&
+                displayStyle !== "developer" ? (
                   <AppTopChrome
                     canGoBack={canGoBack}
                     canGoForward={canGoForward}
@@ -833,7 +803,18 @@ export function AppShell() {
                           notificationSettings.setAllSlotAlertsEnabled
                         }
                         onSetSoundForSlot={notificationSettings.setSoundForSlot}
+                        onSetSenderSound={notificationSettings.setSenderSound}
                         section={settingsSection}
+                      />
+                    </React.Suspense>
+                  </div>
+                ) : displayStyle === "developer" ? (
+                  <div className="flex min-h-0 flex-1 overflow-hidden">
+                    <React.Suspense fallback={null}>
+                      <LazyDevModeShell
+                        hasCommunityRail={hasCommunityRail}
+                        topLevelUnreadChannelIds={topLevelUnreadChannelIds}
+                        unreadChannelIds={unreadChannelIds}
                       />
                     </React.Suspense>
                   </div>
@@ -867,7 +848,7 @@ export function AppShell() {
                         onAddCommunityOpenChange={
                           addCommunityDialog.onOpenChange
                         }
-                        onNewMessage={goNewMessage}
+                        onNewMessage={handleOpenNewDm}
                         onBackgroundClick={requestFocusedThreadClose}
                         onCreateChannelOpenChange={setIsCreateChannelOpen}
                         onOpenAddCommunity={addCommunityDialog.openDialog}

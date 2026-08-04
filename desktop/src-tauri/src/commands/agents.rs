@@ -1,22 +1,19 @@
 use nostr::{Keys, ToBech32};
 use tauri::{AppHandle, State};
 
-use crate::{
-    app_state::AppState,
-    managed_agents::{
-        build_managed_agent_summary, current_instance_id, discover_provider_candidates,
-        ensure_persona_is_active, find_managed_agent_mut, load_managed_agents, load_personas,
-        load_teams, managed_agent_avatar_url, normalize_agent_args, provider_deploy,
-        resolve_provider_binary, save_managed_agents, start_managed_agent_process,
-        stop_managed_agent_process, stop_managed_agent_workspace_pair,
-        sync_managed_agent_processes, try_regenerate_nest, validate_provider_config, BackendKind,
-        CreateManagedAgentRequest, CreateManagedAgentResponse, ManagedAgentRecord,
-        ManagedAgentSummary, RelayMeshConfig, DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM,
-        DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
-    },
-    relay::{relay_ws_url_with_override, sync_managed_agent_profile},
-    util::now_iso,
+use crate::app_state::AppState;
+use crate::managed_agents::{
+    build_managed_agent_summary, current_instance_id, discover_provider_candidates,
+    ensure_persona_is_active, find_managed_agent_mut, load_managed_agents, load_personas,
+    load_teams, managed_agent_avatar_url, normalize_agent_args, provider_deploy,
+    resolve_provider_binary, save_managed_agents, start_managed_agent_process,
+    stop_managed_agent_process, stop_managed_agent_workspace_pair, sync_managed_agent_processes,
+    try_regenerate_nest, validate_provider_config, BackendKind, CreateManagedAgentRequest,
+    CreateManagedAgentResponse, ManagedAgentRecord, ManagedAgentSummary, RelayMeshConfig,
+    DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
 };
+use crate::relay::{relay_ws_url_with_override, sync_managed_agent_profile};
+use crate::util::now_iso;
 
 /// Read the workspace owner pubkey without holding the lock. Used to populate `BUZZ_ACP_AGENT_OWNER`
 /// as a fallback for legacy agent records that have no NIP-OA `auth_tag`.
@@ -874,6 +871,7 @@ pub async fn create_managed_agent(
             } else {
                 input.start_on_app_launch
             },
+            stopped_by_app_shutdown: false,
             auto_restart_on_config_change: true,
             runtime_pid: None,
             backend: input.backend.clone(),

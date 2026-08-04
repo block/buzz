@@ -55,7 +55,74 @@ pub async fn fetch_link_preview_title(href: String) -> Result<Option<String>, St
     Ok(extract_google_title(&body))
 }
 
-fn is_supported_google_link(url: &Url) -> bool {
+/// Fetch the page title of any https URL — og:title / twitter:title falling
+/// back to `<title>`. Best-effort: auth walls, non-HTML responses, and
+/// timeouts all yield `Ok(None)` so callers can render the bare link.
+#[tauri::command]
+pub async fn fetch_page_title(href: String) -> Result<Option<String>, String> {
+    let url = Url::parse(href.trim()).map_err(|error| format!("invalid URL: {error}"))?;
+    if url.scheme() != "https" {
+        return Ok(None);
+    }
+
+    let client = reqwest::Client::builder()
+        .redirect(Policy::limited(3))
+        .pool_idle_timeout(Duration::from_secs(10))
+        .pool_max_idle_per_host(1)
+        .build()
+        .map_err(|error| format!("page title client failed: {error}"))?;
+
+    let request = client
+        .get(url.as_str())
+        .header(
+            ACCEPT,
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        )
+        .header(USER_AGENT, "Buzz Desktop link preview");
+
+    let response = match tokio::time::timeout(TITLE_FETCH_TIMEOUT, request.send()).await {
+        Ok(Ok(response)) => response,
+        Ok(Err(_)) | Err(_) => return Ok(None),
+    };
+
+    if !response.status().is_success() {
+        return Ok(None);
+    }
+
+    let is_html = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_ascii_lowercase().contains("text/html"))
+        .unwrap_or(true);
+    if !is_html {
+        return Ok(None);
+    }
+
+    let body = read_limited_text(response).await?;
+    Ok(extract_page_title(&body))
+}
+
+fn extract_page_title(html: &str) -> Option<String> {
+    let raw = extract_meta_title(html).or_else(|| extract_title_tag(html))?;
+    let title = decode_html_entities(&raw)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if title.is_empty() || is_auth_wall_title(&title) {
+        return None;
+    }
+    Some(title)
+}
+
+/// Auth walls (Slack, Google, Okta, ...) title their login pages "Sign in
+/// ..." — worse than useless as a link label, so render the bare URL instead.
+fn is_auth_wall_title(title: &str) -> bool {
+    let lower = title.to_ascii_lowercase();
+    lower.starts_with("sign in") || lower.starts_with("log in") || lower.starts_with("login")
+}
+
+pub(crate) fn is_supported_google_link(url: &Url) -> bool {
     if url.scheme() != "https" {
         return false;
     }
@@ -251,8 +318,51 @@ fn decode_html_entities(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_google_title, is_supported_google_link};
+    use super::{extract_google_title, extract_page_title, is_supported_google_link};
     use url::Url;
+
+    #[test]
+    fn page_title_prefers_open_graph_then_title_tag() {
+        let html = r#"
+          <html>
+            <head>
+              <meta property="og:title" content="Slack thread &amp; replies">
+              <title>Fallback title</title>
+            </head>
+          </html>
+        "#;
+        assert_eq!(
+            extract_page_title(html).as_deref(),
+            Some("Slack thread & replies")
+        );
+        assert_eq!(
+            extract_page_title("<title>Plain\n  Page   Title</title>").as_deref(),
+            Some("Plain Page Title")
+        );
+    }
+
+    #[test]
+    fn page_title_none_when_absent_or_blank() {
+        assert_eq!(
+            extract_page_title("<html><body>no title</body></html>"),
+            None
+        );
+        assert_eq!(extract_page_title("<title>   </title>"), None);
+    }
+
+    #[test]
+    fn page_title_rejects_auth_wall_titles() {
+        assert_eq!(extract_page_title("<title>Sign in to Block</title>"), None);
+        assert_eq!(
+            extract_page_title("<title>Log in | Workspace</title>"),
+            None
+        );
+        assert_eq!(extract_page_title("<title>LOGIN</title>"), None);
+        assert_eq!(
+            extract_page_title("<title>Design signals</title>").as_deref(),
+            Some("Design signals")
+        );
+    }
 
     #[test]
     fn title_prefers_open_graph_title() {

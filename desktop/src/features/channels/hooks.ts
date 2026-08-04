@@ -37,6 +37,10 @@ import {
   readChannelSnapshot,
   writeChannelSnapshot,
 } from "@/features/channels/channelSnapshot";
+import {
+  applySubChannelRenames,
+  planSubChannelRenames,
+} from "@/features/dev-mode/lib/subChannels";
 
 export const channelsQueryKey = ["channels"] as const;
 const channelDetailQueryKey = (channelId: string) =>
@@ -185,6 +189,62 @@ function setChannelArchivedState(
   queryClient.setQueryData<ChannelDetail | undefined>(
     channelDetailQueryKey(channelId),
     (current) => (current ? { ...current, archivedAt } : current),
+  );
+}
+
+/**
+ * Patch one channel in the list + detail caches. Used for optimistic
+ * membership updates so join/leave/add/archive feel instant; the settle-time
+ * invalidate reconciles with the relay's answer.
+ */
+function patchChannelState(
+  queryClient: ReturnType<typeof useQueryClient>,
+  channelId: string,
+  patch: (channel: Channel) => Channel,
+) {
+  queryClient.setQueryData<Channel[]>(channelsQueryKey, (current = []) =>
+    sortChannels(
+      current.map((channel) =>
+        channel.id === channelId ? patch(channel) : channel,
+      ),
+    ),
+  );
+
+  queryClient.setQueryData<ChannelDetail | undefined>(
+    channelDetailQueryKey(channelId),
+    (current) => (current ? { ...current, ...patch(current) } : current),
+  );
+}
+
+/**
+ * Snapshot the caches an optimistic channel patch touches, for onError
+ * rollback. Restoring the full list is simpler and safer than un-applying
+ * the patch.
+ */
+function snapshotChannelState(
+  queryClient: ReturnType<typeof useQueryClient>,
+  channelId: string,
+) {
+  return {
+    channels: queryClient.getQueryData<Channel[]>(channelsQueryKey),
+    detail: queryClient.getQueryData<ChannelDetail | undefined>(
+      channelDetailQueryKey(channelId),
+    ),
+  };
+}
+
+function restoreChannelState(
+  queryClient: ReturnType<typeof useQueryClient>,
+  channelId: string,
+  snapshot: ReturnType<typeof snapshotChannelState> | undefined,
+) {
+  if (!snapshot) return;
+  if (snapshot.channels) {
+    queryClient.setQueryData<Channel[]>(channelsQueryKey, snapshot.channels);
+  }
+  queryClient.setQueryData<ChannelDetail | undefined>(
+    channelDetailQueryKey(channelId),
+    snapshot.detail,
   );
 }
 
@@ -342,12 +402,41 @@ export function useUpdateChannelMutation(channelId: string | null) {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: (input: Omit<UpdateChannelInput, "channelId">) => {
+    mutationFn: async (input: Omit<UpdateChannelInput, "channelId">) => {
       if (!channelId) {
         throw new Error("No channel selected.");
       }
 
-      return updateChannel({ ...input, channelId });
+      const previousName = queryClient
+        .getQueryData<Channel[]>(channelsQueryKey)
+        ?.find((channel) => channel.id === channelId)?.name;
+      const updated = await updateChannel({ ...input, channelId });
+
+      // A `parent--sub` channel is linked to its parent purely by name, so
+      // renaming a parent must rename every sub or the family falls apart.
+      // Best-effort, bounded concurrency — a parent can have hundreds.
+      if (previousName && previousName !== updated.name) {
+        const plan = planSubChannelRenames(
+          queryClient.getQueryData<Channel[]>(channelsQueryKey) ?? [],
+          previousName,
+          updated.name,
+        );
+        if (plan.length > 0) {
+          const { failed } = await applySubChannelRenames(
+            plan,
+            async (subChannelId, newName) => {
+              await updateChannel({ channelId: subChannelId, name: newName });
+            },
+          );
+          if (failed.length > 0) {
+            console.warn(
+              `channel rename: ${failed.length} of ${plan.length} sub-channel(s) failed to follow "${previousName}" → "${updated.name}"`,
+            );
+          }
+        }
+      }
+
+      return updated;
     },
     onMutate: () => ({ channelId }),
     onSuccess: (updatedChannel) => {
@@ -428,12 +517,15 @@ export function useArchiveChannelMutation(channelId: string | null) {
 
       await archiveChannel(channelId);
     },
-    onSuccess: () => {
-      if (!channelId) {
-        return;
-      }
-
+    onMutate: () => {
+      if (!channelId) return undefined;
+      const snapshot = snapshotChannelState(queryClient, channelId);
       setChannelArchivedState(queryClient, channelId, new Date().toISOString());
+      return snapshot;
+    },
+    onError: (_error, _variables, snapshot) => {
+      if (!channelId) return;
+      restoreChannelState(queryClient, channelId, snapshot);
     },
     onSettled: async () => {
       await invalidateChannelState(queryClient, channelId);
@@ -518,6 +610,22 @@ export function useAddChannelMembersMutation(channelId: string | null) {
 
       return addChannelMembers({ ...rest, channelId: effectiveChannelId });
     },
+    onMutate: (variables) => {
+      const effectiveChannelId = variables?.channelId ?? channelId;
+      if (!effectiveChannelId) return undefined;
+      const snapshot = snapshotChannelState(queryClient, effectiveChannelId);
+      const added = variables.pubkeys.length;
+      patchChannelState(queryClient, effectiveChannelId, (channel) => ({
+        ...channel,
+        memberCount: channel.memberCount + added,
+      }));
+      return snapshot;
+    },
+    onError: (_error, variables, snapshot) => {
+      const effectiveChannelId = variables?.channelId ?? channelId;
+      if (!effectiveChannelId) return;
+      restoreChannelState(queryClient, effectiveChannelId, snapshot);
+    },
     onSuccess: (result, variables) => {
       const effectiveChannelId = variables.channelId ?? channelId;
       if (
@@ -567,15 +675,38 @@ export function useJoinChannelMutation(channelId: string | null) {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async () => {
-      if (!channelId) {
+    // Accepts a per-call channel override so one hook instance can join
+    // arbitrary channels (e.g. palette search results).
+    // biome-ignore lint/suspicious/noConfusingVoidType: `| void` (not `| undefined`) is what lets existing no-arg `mutate()` callers compile.
+    mutationFn: async (variables: { channelId?: string } | void) => {
+      const effectiveChannelId = variables?.channelId ?? channelId;
+      if (!effectiveChannelId) {
         throw new Error("No channel selected.");
       }
 
-      await joinChannel(channelId);
+      await joinChannel(effectiveChannelId);
     },
-    onSettled: async () => {
-      await invalidateChannelState(queryClient, channelId);
+    onMutate: (variables) => {
+      const effectiveChannelId = variables?.channelId ?? channelId;
+      if (!effectiveChannelId) return undefined;
+      const snapshot = snapshotChannelState(queryClient, effectiveChannelId);
+      patchChannelState(queryClient, effectiveChannelId, (channel) => ({
+        ...channel,
+        isMember: true,
+        memberCount: channel.memberCount + 1,
+      }));
+      return snapshot;
+    },
+    onError: (_error, variables, snapshot) => {
+      const effectiveChannelId = variables?.channelId ?? channelId;
+      if (!effectiveChannelId) return;
+      restoreChannelState(queryClient, effectiveChannelId, snapshot);
+    },
+    onSettled: async (_data, _error, variables) => {
+      await invalidateChannelState(
+        queryClient,
+        variables?.channelId ?? channelId,
+      );
     },
   });
 }
@@ -590,6 +721,20 @@ export function useLeaveChannelMutation(channelId: string | null) {
       }
 
       await leaveChannel(channelId);
+    },
+    onMutate: () => {
+      if (!channelId) return undefined;
+      const snapshot = snapshotChannelState(queryClient, channelId);
+      patchChannelState(queryClient, channelId, (channel) => ({
+        ...channel,
+        isMember: false,
+        memberCount: Math.max(0, channel.memberCount - 1),
+      }));
+      return snapshot;
+    },
+    onError: (_error, _variables, snapshot) => {
+      if (!channelId) return;
+      restoreChannelState(queryClient, channelId, snapshot);
     },
     onSettled: async () => {
       await invalidateChannelState(queryClient, channelId);

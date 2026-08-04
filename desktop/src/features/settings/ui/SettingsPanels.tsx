@@ -19,6 +19,7 @@ import {
   Smile,
   Sun,
   SunMoon,
+  Terminal,
   Ticket,
   UserRound,
   Volume2,
@@ -28,7 +29,11 @@ import type {
   DesktopNotificationPermissionState,
   NotificationSettings,
 } from "@/features/notifications/hooks";
-import type { SoundName, SoundSlot } from "@/features/notifications/lib/sound";
+import type {
+  SenderKind,
+  SoundName,
+  SoundSlot,
+} from "@/features/notifications/lib/sound";
 import { CommunityMembersSettingsCard } from "@/features/community-members/ui/CommunityMembersSettingsCard";
 import { CustomEmojiSettingsCard } from "@/features/custom-emoji/ui/CustomEmojiSettingsCard";
 import { LocalArchiveSettingsCard } from "@/features/local-archive/ui/LocalArchiveSettingsCard";
@@ -37,6 +42,10 @@ import {
   useThreadViewMode,
   type ThreadViewMode,
 } from "@/features/channels/lib/threadViewModePreference";
+import {
+  setDisplayStyle,
+  useDisplayStyle,
+} from "@/features/dev-mode/lib/displayStylePreference";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import {
@@ -153,6 +162,7 @@ export type SettingsPanelProps = {
   onSetNotifyWhileViewing: (enabled: boolean) => void;
   onSetAllSlotAlertsEnabled: (enabled: boolean) => void;
   onSetSoundForSlot: (slot: SoundSlot, name: SoundName) => void;
+  onSetSenderSound: (kind: SenderKind, name: SoundName) => void;
 };
 
 export const settingsSections: SettingsSectionDescriptor[] = [
@@ -428,6 +438,7 @@ function ThemeSettingsCard() {
     followSystem,
     setFollowSystem,
   } = useTheme();
+  const displayStyle = useDisplayStyle();
 
   // Buzz themes pin a neutral accent (GitHub black in light, white in dark),
   // so the accent picker is hidden while a Buzz theme is active. `themeName` is
@@ -528,6 +539,41 @@ function ThemeSettingsCard() {
         title="Appearance"
         description="Choose a theme for Buzz."
       />
+
+      {/* Display style: Standard / Developer */}
+      <div className="mb-4 flex gap-2">
+        {(
+          [
+            {
+              style: "standard" as const,
+              label: "Standard",
+              Icon: MessagesSquare,
+            },
+            {
+              style: "developer" as const,
+              label: "Developer",
+              Icon: Terminal,
+            },
+          ] as const
+        ).map(({ style, label, Icon }) => (
+          <button
+            aria-pressed={displayStyle === style}
+            className={cn(
+              "flex items-center gap-2 rounded-lg border px-4 py-2 text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
+              displayStyle === style
+                ? "border-primary bg-primary/10 text-foreground"
+                : "border-border/70 text-muted-foreground hover:border-border hover:text-foreground",
+            )}
+            data-testid={`display-style-${style}`}
+            key={style}
+            onClick={() => setDisplayStyle(style)}
+            type="button"
+          >
+            <Icon className="h-4 w-4" />
+            {label}
+          </button>
+        ))}
+      </div>
 
       {/* Mode selector: System / Light / Dark */}
       <div className="mb-4 flex gap-2">
@@ -814,6 +860,7 @@ export function renderSettingsSection(
           onSetNotifyWhileViewing={props.onSetNotifyWhileViewing}
           onSetAllSlotAlertsEnabled={props.onSetAllSlotAlertsEnabled}
           onSetSoundForSlot={props.onSetSoundForSlot}
+          onSetSenderSound={props.onSetSenderSound}
         />
       );
     case "voice":

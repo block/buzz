@@ -294,6 +294,9 @@ type MockBridgeOptions = {
   profileUpdateErrors?: string[];
   searchProfiles?: MockSearchProfileSeed[];
   updateAvailable?: boolean;
+  /** Delay (ms) before mock `archive_channel` resolves, to test that the
+   *  UI updates optimistically without waiting on the relay. */
+  archiveChannelDelayMs?: number;
   updateChannelDelayMs?: number;
   updateDownloadDelayMs?: number;
   updateVersion?: string;

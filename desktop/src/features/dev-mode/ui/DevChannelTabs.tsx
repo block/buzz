@@ -1,0 +1,104 @@
+import * as React from "react";
+
+import { useWorkingChannels } from "@/features/agents/agentWorkingSignal";
+import { parseSubChannelName } from "@/features/dev-mode/lib/subChannels";
+import { DevWavyText } from "@/features/dev-mode/ui/DevWavyText";
+import type { Channel } from "@/shared/api/types";
+import { cn } from "@/shared/lib/cn";
+
+/**
+ * Tab strip across the top of an open channel: `main` plus one tab per
+ * sub-channel the user can see (surfaced to users as "tabs"). Parents can
+ * carry hundreds, so the strip scrolls horizontally instead of wrapping;
+ * the active tab scrolls itself into view. ⇧⌘[/⇧⌘] cycle through tabs;
+ * ⌘1–⌘9 jump straight to one.
+ */
+export function DevChannelTabs({
+  main,
+  subs,
+  activeId,
+  unreadChannelIds,
+  onSelect,
+  onNewSubChannel,
+}: {
+  main: Channel;
+  subs: Channel[];
+  activeId: string;
+  unreadChannelIds: ReadonlySet<string>;
+  onSelect: (channelId: string) => void;
+  onNewSubChannel: () => void;
+}) {
+  const scrollActiveIntoView = React.useCallback(
+    (node: HTMLButtonElement | null) => {
+      node?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    },
+    [],
+  );
+
+  const workingChannels = useWorkingChannels();
+  const workingChannelIds = React.useMemo(
+    () => new Set(workingChannels.map((summary) => summary.channelId)),
+    [workingChannels],
+  );
+
+  const tab = (channel: Channel, label: string) => {
+    const isActive = channel.id === activeId;
+    // An active tab keeps its dot while an unread thread remains inside it —
+    // viewing the tab clears top-level posts, not collapsed thread replies.
+    const isUnread = unreadChannelIds.has(channel.id);
+    const isWorking = workingChannelIds.has(channel.id);
+    return (
+      <button
+        key={channel.id}
+        ref={isActive ? scrollActiveIntoView : undefined}
+        className={cn(
+          "flex shrink-0 cursor-pointer items-baseline gap-1.5 border-b-2 px-2.5 py-1 text-xs",
+          isActive
+            ? "border-primary text-foreground"
+            : "border-transparent text-muted-foreground hover:text-foreground",
+        )}
+        data-testid="dev-mode-channel-tab"
+        data-active={isActive || undefined}
+        onClick={() => onSelect(channel.id)}
+        type="button"
+      >
+        <span className={cn("whitespace-nowrap", isUnread && "font-semibold")}>
+          {isWorking ? <DevWavyText text={label} /> : label}
+        </span>
+        {isUnread ? (
+          <span
+            aria-label="unread"
+            className="text-3xs leading-none text-primary"
+            role="img"
+          >
+            ●
+          </span>
+        ) : null}
+      </button>
+    );
+  };
+
+  return (
+    <div
+      className="flex shrink-0 items-center border-b border-border/60 font-mono"
+      data-testid="dev-mode-channel-tabs"
+    >
+      <div className="scrollbar-none flex min-w-0 flex-1 overflow-x-auto">
+        {tab(main, "main")}
+        {subs.map((sub) =>
+          tab(sub, parseSubChannelName(sub.name)?.subSlug ?? sub.name),
+        )}
+      </div>
+      <button
+        aria-label={`New tab in # ${main.name}`}
+        className="shrink-0 cursor-pointer px-2.5 py-1 text-xs text-muted-foreground/60 hover:text-foreground"
+        data-testid="dev-mode-new-tab"
+        onClick={onNewSubChannel}
+        title="⌘⇧T"
+        type="button"
+      >
+        + tab
+      </button>
+    </div>
+  );
+}

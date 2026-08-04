@@ -17,23 +17,23 @@ use crate::managed_agents::known_acp_runtime;
 /// one pure step so the linked-agent regression test can bind the exact values
 /// the command consumes.
 #[derive(Debug, PartialEq, Eq)]
-pub(super) struct AgentModelDiscoveryConfig {
+pub(in crate::commands) struct AgentModelDiscoveryConfig {
     /// Effective harness command (descriptor-resolved), for `resolve_command`.
-    pub(super) command: String,
+    pub(in crate::commands) command: String,
     /// Effective harness args (descriptor-resolved).
-    pub(super) args: Vec<String>,
+    pub(in crate::commands) args: Vec<String>,
     /// Model from the authoritative resolver spawn uses — linked instances
     /// read their definition, never stale `record.model` bytes.
-    pub(super) model: Option<String>,
+    pub(in crate::commands) model: Option<String>,
     /// Provider from the same authoritative resolver — never stale
     /// `record.provider` bytes for linked instances.
-    pub(super) provider: Option<String>,
+    pub(in crate::commands) provider: Option<String>,
     /// The runtime's provider env var (e.g. `GOOSE_PROVIDER`), so discovery
     /// can recover the provider from the env when the resolver yields none.
     /// `None` for runtimes that do not take a provider, or an unknown command.
-    pub(super) provider_env_var: Option<&'static str>,
+    pub(in crate::commands) provider_env_var: Option<&'static str>,
     /// The descriptor's fully layered env (definition/persona/global/agent).
-    pub(super) env: BTreeMap<String, String>,
+    pub(in crate::commands) env: BTreeMap<String, String>,
 }
 
 /// Resolve the model-discovery config for a saved agent — the descriptor-backed
@@ -55,7 +55,7 @@ pub(super) struct AgentModelDiscoveryConfig {
 /// Returns `Err("DANGLING_HARNESS_ID:<id>")` from the descriptor resolver when
 /// the harness id no longer exists; the caller routes it through
 /// `model_discovery_error`.
-pub(super) fn agent_model_discovery_config(
+pub(in crate::commands) fn agent_model_discovery_config(
     record: &crate::managed_agents::ManagedAgentRecord,
     personas: &[crate::managed_agents::AgentDefinition],
     global: &crate::managed_agents::GlobalAgentConfig,

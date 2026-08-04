@@ -201,6 +201,35 @@ pub struct AuthAgentArgs {
     pub agent_args: Vec<String>,
 }
 
+/// CLI args for `buzz-acp complete` — one-shot prompt completion via the
+/// configured agent. Spawns the agent, opens a session, sends a single
+/// prompt, and prints the accumulated agent reply text. No relay connection.
+#[derive(Debug, Parser)]
+#[command(
+    name = "buzz-acp complete",
+    about = "One-shot prompt completion via the configured agent"
+)]
+pub struct CompleteArgs {
+    #[command(flatten)]
+    pub agent: AuthAgentArgs,
+
+    /// Prompt text to send to the agent.
+    #[arg(long)]
+    pub prompt: String,
+
+    /// Optional system prompt for the session.
+    #[arg(long)]
+    pub system_prompt: Option<String>,
+
+    /// Optional model id to select via `session/set_model` (best-effort).
+    #[arg(long)]
+    pub model: Option<String>,
+
+    /// Output structured JSON (`{"text": ...}`) instead of raw text.
+    #[arg(long)]
+    pub json: bool,
+}
+
 /// CLI args for `buzz-acp auth-methods` — query adapter-advertised login methods.
 #[derive(Debug, Parser)]
 #[command(

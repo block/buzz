@@ -1,6 +1,10 @@
 import type { DesktopNotificationPermissionState } from "@/features/notifications/hooks";
 import type { NotificationSettings } from "@/features/notifications/hooks";
-import type { SoundName, SoundSlot } from "@/features/notifications/lib/sound";
+import type {
+  SenderKind,
+  SoundName,
+  SoundSlot,
+} from "@/features/notifications/lib/sound";
 import type { SettingsSection } from "@/features/settings/ui/SettingsPanels";
 import { SettingsView } from "@/features/settings/ui/SettingsView";
 
@@ -19,6 +23,7 @@ type SettingsScreenProps = {
   onSetNotifyWhileViewing: (enabled: boolean) => void;
   onSetAllSlotAlertsEnabled: (enabled: boolean) => void;
   onSetSoundForSlot: (slot: SoundSlot, name: SoundName) => void;
+  onSetSenderSound: (kind: SenderKind, name: SoundName) => void;
   section: SettingsSection;
 };
 
@@ -37,6 +42,7 @@ export function SettingsScreen({
   onSetNotifyWhileViewing,
   onSetAllSlotAlertsEnabled,
   onSetSoundForSlot,
+  onSetSenderSound,
   section,
 }: SettingsScreenProps) {
   return (
@@ -55,6 +61,7 @@ export function SettingsScreen({
       onSetNotifyWhileViewing={onSetNotifyWhileViewing}
       onSetAllSlotAlertsEnabled={onSetAllSlotAlertsEnabled}
       onSetSoundForSlot={onSetSoundForSlot}
+      onSetSenderSound={onSetSenderSound}
       section={section}
     />
   );

@@ -45,6 +45,14 @@ export default {
           '"Segoe UI"',
           "sans-serif",
         ],
+        mono: [
+          '"JetBrains Mono Variable"',
+          '"JetBrains Mono"',
+          "ui-monospace",
+          "SFMono-Regular",
+          "Menlo",
+          "monospace",
+        ],
       },
       colors: {
         background: "hsl(var(--background))",
