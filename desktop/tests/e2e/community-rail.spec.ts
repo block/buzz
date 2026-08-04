@@ -986,8 +986,24 @@ test.describe("community rail", () => {
         }),
       );
     }, `community-rail-button-${COMMUNITY_B.id}`);
+
+    // KeyboardSensor attaches its document keydown listener on the next timer
+    // tick. Wait for dnd-kit to expose the active drag before sending ArrowUp.
+    await expect(buttonB).toHaveAttribute("aria-pressed", "true");
+
     // ArrowUp moves the active item one slot up.
     await page.keyboard.press("ArrowUp");
+
+    // Let dnd-kit publish the new collision target before dropping. Otherwise
+    // the drop can still observe B's original position and become a no-op.
+    await expect
+      .poll(async () => {
+        const boxA = await buttonA.boundingBox();
+        const boxB = await buttonB.boundingBox();
+        return boxA !== null && boxB !== null && boxB.y < boxA.y;
+      })
+      .toBe(true);
+
     // Space drops the item — same synthetic dispatch for consistency.
     await page.evaluate((testId) => {
       const el = document.querySelector(`[data-testid="${testId}"]`);
