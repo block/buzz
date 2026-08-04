@@ -191,7 +191,7 @@ export function RepositoryGridCard(props: RepositoryItemProps) {
   } = props;
   return (
     <Card
-      className="group relative flex min-h-40 flex-col overflow-hidden border-border/60 bg-card shadow-none transition-colors duration-150 hover:bg-muted/20"
+      className="group relative flex min-h-40 flex-col overflow-hidden border-border/60 bg-transparent shadow-none transition-colors duration-150 hover:bg-muted/20"
       data-testid={`repository-card-${repository.dtag}`}
     >
       <RepositoryOpenButton
