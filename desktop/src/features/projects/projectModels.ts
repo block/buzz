@@ -46,6 +46,8 @@ export type Project = {
 type BuildProjectReadModelsInput = {
   projectEvents: RelayEvent[];
   repositoryEvents: RelayEvent[];
+  /** NIP-09 kind:5 deletion events relevant to projects and repositories. */
+  deletionEvents?: RelayEvent[];
   relayOrigin?: string | null;
   hiddenAddresses?: ReadonlySet<string>;
 };
@@ -89,6 +91,18 @@ function isValidPubkey(value: string): boolean {
   return /^[a-fA-F0-9]{64}$/.test(value);
 }
 
+/**
+ * Validates a pubkey as a lowercase-only 64-hex string, per NIP-MP rule
+ * `member-coordinate-malformed`: owner hex MUST be lowercase so that `#a`
+ * filter matching (which is byte-exact) can resolve the coordinate.
+ */
+function isValidProjectMemberOwner(value: string): boolean {
+  return /^[0-9a-f]{64}$/.test(value);
+}
+
+/** NIP-MP rule `member-cap`: a project may carry at most 64 member `a` tags. */
+export const MAX_PROJECT_MEMBERS = 64;
+
 export function isValidProjectChannelId(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
     value,
@@ -127,8 +141,8 @@ function parseRepositoryAddress(
 
   const owner = value.slice(firstSeparator + 1, secondSeparator);
   const dtag = value.slice(secondSeparator + 1);
-  return isValidPubkey(owner) && isValidDTag(dtag)
-    ? { owner: owner.toLowerCase(), dtag }
+  return isValidProjectMemberOwner(owner) && isValidDTag(dtag)
+    ? { owner, dtag }
     : null;
 }
 
@@ -176,12 +190,15 @@ export function eventToRepository(
   };
 }
 
-function eventToExplicitProject(
+export function eventToExplicitProject(
   event: RelayEvent,
   repositoriesByAddress: ReadonlyMap<string, Repository>,
   visibleRepositoriesByAddress: ReadonlyMap<string, Repository>,
 ): Project | null {
-  const dtag = getTag(event, "d");
+  // NIP-MP rule `d-cardinality`: exactly one `d` tag is required.
+  // Multiple `d` tags make the addressing coordinate reader-dependent; reject.
+  const dTags = event.tags.filter((tag) => tag[0] === "d");
+  const dtag = dTags.length === 1 ? dTags[0][1] : undefined;
   if (
     event.kind !== KIND_PROJECT_ANNOUNCEMENT ||
     !dtag ||
@@ -192,6 +209,10 @@ function eventToExplicitProject(
   }
 
   const membershipTags = event.tags.filter((tag) => tag[0] === "a");
+  // NIP-MP rule `member-cap`: reject events exceeding the 64-member limit.
+  if (membershipTags.length > MAX_PROJECT_MEMBERS) {
+    return null;
+  }
   const repositoryAddresses: string[] = [];
   const repositoryRelayHints: Record<string, string> = {};
   const seen = new Set<string>();
@@ -223,6 +244,37 @@ function eventToExplicitProject(
 
   const owner = event.pubkey.toLowerCase();
   const projectAddress = `${KIND_PROJECT_ANNOUNCEMENT}:${owner}:${dtag}`;
+
+  // NIP-MP rule `metadata-cardinality`: at most one each of `name`,
+  // `description`, `buzz-channel`, `buzz-visibility`. Duplicates make the
+  // effective value reader-dependent; reject.
+  const SINGLETON_METADATA = [
+    "name",
+    "description",
+    "buzz-channel",
+    "buzz-visibility",
+  ] as const;
+  for (const tagName of SINGLETON_METADATA) {
+    if (event.tags.filter((tag) => tag[0] === tagName).length > 1) {
+      return null;
+    }
+  }
+
+  // NIP-MP rule `metadata-length`: enforce per-field byte limits.
+  const MAX_METADATA_BYTES: Record<string, number> = {
+    name: 256,
+    description: 2_048,
+    "buzz-channel": 256,
+    "buzz-visibility": 256,
+  };
+  const encoder = new TextEncoder();
+  for (const [tagName, maxBytes] of Object.entries(MAX_METADATA_BYTES)) {
+    const value = getTag(event, tagName);
+    if (value !== undefined && encoder.encode(value).byteLength > maxBytes) {
+      return null;
+    }
+  }
+
   const rawVisibility = getTag(event, "buzz-visibility");
   const visibility =
     rawVisibility === "unlisted" ? ("unlisted" as const) : ("listed" as const);
@@ -274,18 +326,61 @@ function repositoryToLegacyProject(repository: Repository): Project {
   };
 }
 
+/**
+ * Builds the set of addressable coordinates that have been authoritatively
+ * deleted per NIP-09 semantics: the deletion signer must equal the coordinate
+ * owner, and the deletion's `created_at` must be ≥ the live head's timestamp.
+ * Returns a `Map<coordinate, deletedAt>` for threshold comparison.
+ */
+function buildDeletionThresholds(
+  deletionEvents: RelayEvent[],
+): Map<string, number> {
+  const thresholds = new Map<string, number>();
+  for (const event of deletionEvents) {
+    const signer = event.pubkey.toLowerCase();
+    for (const tag of event.tags) {
+      if (tag[0] !== "a" || !tag[1]) continue;
+      const coordinate = tag[1];
+      // The signer must be the owner of the coordinate.
+      const firstColon = coordinate.indexOf(":");
+      const secondColon = coordinate.indexOf(":", firstColon + 1);
+      if (firstColon < 0 || secondColon < 0) continue;
+      const owner = coordinate.slice(firstColon + 1, secondColon).toLowerCase();
+      if (owner !== signer) continue;
+      // Keep the latest (most permissive) deletion threshold.
+      const existing = thresholds.get(coordinate);
+      if (existing === undefined || event.created_at > existing) {
+        thresholds.set(coordinate, event.created_at);
+      }
+    }
+  }
+  return thresholds;
+}
+
 export function buildProjectReadModels({
   projectEvents,
   repositoryEvents,
+  deletionEvents = [],
   relayOrigin,
   hiddenAddresses = new Set(),
 }: BuildProjectReadModelsInput): Project[] {
-  const repositories = deduplicateAddressableEvents(repositoryEvents).flatMap(
-    (event) => {
+  const deletionThresholds = buildDeletionThresholds(deletionEvents);
+
+  /** Returns true when the event's addressable coordinate has been deleted. */
+  function isDeleted(event: RelayEvent): boolean {
+    const dtag = event.tags.find((tag) => tag[0] === "d")?.[1];
+    if (!dtag) return false;
+    const coordinate = `${event.kind}:${event.pubkey.toLowerCase()}:${dtag}`;
+    const threshold = deletionThresholds.get(coordinate);
+    return threshold !== undefined && event.created_at <= threshold;
+  }
+
+  const repositories = deduplicateAddressableEvents(repositoryEvents)
+    .filter((event) => !isDeleted(event))
+    .flatMap((event) => {
       const repository = eventToRepository(event, relayOrigin);
       return repository ? [repository] : [];
-    },
-  );
+    });
   const repositoriesByAddress = new Map(
     repositories.map((repository) => [repository.repoAddress, repository]),
   );
@@ -299,8 +394,9 @@ export function buildProjectReadModels({
     ]),
   );
 
-  const explicitProjects = deduplicateAddressableEvents(projectEvents).flatMap(
-    (event) => {
+  const explicitProjects = deduplicateAddressableEvents(projectEvents)
+    .filter((event) => !isDeleted(event))
+    .flatMap((event) => {
       const project = eventToExplicitProject(
         event,
         repositoriesByAddress,
@@ -311,8 +407,7 @@ export function buildProjectReadModels({
         !hiddenAddresses.has(project.projectAddress)
         ? [project]
         : [];
-    },
-  );
+    });
   const claimedRepositories = new Set(
     explicitProjects.flatMap((project) =>
       project.repositoryAddresses.filter((address) => {

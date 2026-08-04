@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   addRepositoryToProject,
   buildProjectReadModels,
+  eventToExplicitProject,
   eventToRepository,
   selectProjectRepository,
 } from "./projectModels.ts";
@@ -318,4 +319,252 @@ test("buildProjectReadModels conforms to the shared NIP-MP fold fixtures", () =>
       fixtureCase.name,
     );
   }
+});
+
+// ── NIP-MP ingest-fixture conformance (TypeScript parser) ──────────────────
+//
+// The shared NIP-MP.fixtures.json is the ingest oracle used by the relay
+// validator and the Rust CLI builder. The TypeScript read model must agree
+// on every accept/reject case so that relay and desktop never diverge about
+// which signed project heads are valid.
+
+test("buildProjectReadModels conforms to the shared NIP-MP ingest fixtures", () => {
+  const fixtures = JSON.parse(
+    readFileSync(
+      new URL("../../../../docs/nips/NIP-MP.fixtures.json", import.meta.url),
+      "utf8",
+    ),
+  );
+
+  const SIGNER = "a".repeat(64);
+
+  for (const fixtureCase of fixtures.cases) {
+    const event = {
+      id: "e".repeat(64),
+      kind: fixtureCase.template.kind,
+      pubkey: SIGNER,
+      created_at: 1_000,
+      content: fixtureCase.template.content,
+      tags: fixtureCase.template.tags,
+    };
+
+    // Use eventToExplicitProject directly — buildProjectReadModels only returns
+    // listed projects, so an unlisted-but-valid envelope (e.g. valid_unlisted)
+    // would be filtered out before we could observe it. The ingest oracle only
+    // cares whether the envelope parses successfully, not whether it reaches
+    // the rendered collection; eventToExplicitProject is the correct gate.
+    const parsed = eventToExplicitProject(event, new Map(), new Map());
+    const accepted = parsed !== null;
+
+    if (fixtureCase.expect === "accept") {
+      assert.equal(
+        accepted,
+        true,
+        `${fixtureCase.name}: expected accept, got reject`,
+      );
+    } else {
+      assert.equal(
+        accepted,
+        false,
+        `${fixtureCase.name}: expected reject, got accept`,
+      );
+    }
+  }
+});
+
+// ── NIP-09 tombstone deletion ───────────────────────────────────────────────
+
+test("buildProjectReadModels applies kind:5 tombstones to project events", () => {
+  const owner = "a".repeat(64);
+  const projectAddress = `30621:${owner}:platform`;
+  const projectEvent = {
+    id: "p".repeat(64),
+    kind: 30621,
+    pubkey: owner,
+    created_at: 100,
+    content: "",
+    tags: [
+      ["d", "platform"],
+      ["name", "Platform"],
+    ],
+  };
+  const deletionEvent = {
+    id: "d".repeat(64),
+    kind: 5,
+    pubkey: owner,
+    created_at: 200,
+    content: "",
+    tags: [["a", projectAddress]],
+  };
+
+  const withDeletion = buildProjectReadModels({
+    projectEvents: [projectEvent],
+    repositoryEvents: [],
+    deletionEvents: [deletionEvent],
+  });
+  assert.equal(
+    withDeletion.filter((p) => !p.legacy).length,
+    0,
+    "deleted project should not appear",
+  );
+
+  const withoutDeletion = buildProjectReadModels({
+    projectEvents: [projectEvent],
+    repositoryEvents: [],
+  });
+  assert.equal(
+    withoutDeletion.filter((p) => !p.legacy).length,
+    1,
+    "project without deletion should appear",
+  );
+});
+
+test("buildProjectReadModels applies kind:5 tombstones to repository events", () => {
+  const owner = "b".repeat(64);
+  const repoAddress = `30617:${owner}:relay`;
+  const repoEvent = {
+    id: "r".repeat(64),
+    kind: 30617,
+    pubkey: owner,
+    created_at: 100,
+    content: "",
+    tags: [
+      ["d", "relay"],
+      ["name", "relay"],
+    ],
+  };
+  const deletionEvent = {
+    id: "d".repeat(64),
+    kind: 5,
+    pubkey: owner,
+    created_at: 200,
+    content: "",
+    tags: [["a", repoAddress]],
+  };
+
+  const withDeletion = buildProjectReadModels({
+    projectEvents: [],
+    repositoryEvents: [repoEvent],
+    deletionEvents: [deletionEvent],
+  });
+  assert.equal(withDeletion.length, 0, "deleted repository should not appear");
+});
+
+test("buildProjectReadModels ignores a tombstone that predates the live head", () => {
+  const owner = "a".repeat(64);
+  const projectAddress = `30621:${owner}:platform`;
+  const projectEvent = {
+    id: "p".repeat(64),
+    kind: 30621,
+    pubkey: owner,
+    created_at: 200,
+    content: "",
+    tags: [["d", "platform"]],
+  };
+  // Deletion is at t=100, but the live head is at t=200 — should not apply.
+  const staleDeletion = {
+    id: "d".repeat(64),
+    kind: 5,
+    pubkey: owner,
+    created_at: 100,
+    content: "",
+    tags: [["a", projectAddress]],
+  };
+
+  const projects = buildProjectReadModels({
+    projectEvents: [projectEvent],
+    repositoryEvents: [],
+    deletionEvents: [staleDeletion],
+  });
+  assert.equal(
+    projects.filter((p) => !p.legacy).length,
+    1,
+    "head newer than tombstone must survive",
+  );
+});
+
+test("buildProjectReadModels rejects a tombstone signed by a different pubkey", () => {
+  const owner = "a".repeat(64);
+  const impostor = "b".repeat(64);
+  const projectAddress = `30621:${owner}:platform`;
+  const projectEvent = {
+    id: "p".repeat(64),
+    kind: 30621,
+    pubkey: owner,
+    created_at: 100,
+    content: "",
+    tags: [["d", "platform"]],
+  };
+  const foreignDeletion = {
+    id: "d".repeat(64),
+    kind: 5,
+    pubkey: impostor,
+    created_at: 200,
+    content: "",
+    tags: [["a", projectAddress]],
+  };
+
+  const projects = buildProjectReadModels({
+    projectEvents: [projectEvent],
+    repositoryEvents: [],
+    deletionEvents: [foreignDeletion],
+  });
+  assert.equal(
+    projects.filter((p) => !p.legacy).length,
+    1,
+    "a stranger's tombstone must not delete someone else's project",
+  );
+});
+
+// ── Route contract ──────────────────────────────────────────────────────────
+
+test("projectMatchesRouteId resolves a 30617 coordinate to the containing project", () => {
+  const projectOwner = "a".repeat(64);
+  const repoOwner = "c".repeat(64);
+  const repoAddress = `30617:${repoOwner}:relay`;
+  const projects = buildProjectReadModels({
+    projectEvents: [
+      {
+        id: "project-event",
+        kind: 30621,
+        pubkey: projectOwner,
+        created_at: 200,
+        content: "",
+        tags: [
+          ["d", "platform"],
+          ["a", repoAddress],
+        ],
+      },
+    ],
+    repositoryEvents: [
+      {
+        id: "repo-event",
+        kind: 30617,
+        pubkey: repoOwner,
+        created_at: 100,
+        content: "",
+        tags: [
+          ["d", "relay"],
+          ["name", "relay"],
+          ["maintainers", projectOwner],
+        ],
+      },
+    ],
+  });
+  const explicitProject = projects.find((p) => !p.legacy);
+  assert.ok(explicitProject, "explicit project must be present");
+
+  // Entity link navigates with the 30617 coordinate (repo dtag ≠ project dtag).
+  assert.equal(
+    projectMatchesRouteId(explicitProject, repoAddress),
+    true,
+    "30617 route must resolve to the containing project",
+  );
+  // Legacy project (implicit card for an unclaimed repo) must NOT match the
+  // explicit project's 30621 coordinate.
+  assert.equal(
+    projectMatchesRouteId(explicitProject, `30617:${projectOwner}:platform`),
+    false,
+    "unrelated 30617 address must not match",
+  );
 });

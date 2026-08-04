@@ -6,10 +6,11 @@ import {
   type Repository,
 } from "@/features/projects/hooks";
 import { addRepositoryToProject } from "@/features/projects/projectModels";
-import { buildAttachedRepositoryProjectEventTemplate } from "@/features/projects/projectRepositoryCreation";
+import { buildAttachedRepositoryPatchTemplate } from "@/features/projects/projectRepositoryCreation";
 import { relayClient } from "@/shared/api/relayClient";
 import { signRelayEvent } from "@/shared/api/tauri";
 import { getIdentity } from "@/shared/api/tauriIdentity";
+import { KIND_PROJECT_ANNOUNCEMENT } from "@/shared/constants/kinds";
 
 export type AttachProjectRepositoryInput = {
   project: Project;
@@ -21,14 +22,44 @@ async function attachProjectRepository({
   repository,
 }: AttachProjectRepositoryInput) {
   const identity = await getIdentity();
-  const template = buildAttachedRepositoryProjectEventTemplate({
+
+  // Fetch the live signed project head immediately before mutating.
+  const liveHeads = await relayClient.fetchEvents({
+    kinds: [KIND_PROJECT_ANNOUNCEMENT],
+    authors: [identity.pubkey],
+    "#d": [project.dtag],
+    limit: 1,
+  });
+  const liveHead = liveHeads[0];
+  if (!liveHead) {
+    throw new Error(
+      "Could not find this project on the relay. Refresh and try again.",
+    );
+  }
+
+  // Dominated-write guard.
+  if (liveHead.created_at > project.createdAt) {
+    throw new Error(
+      "This project was updated by another session while you were working. Refresh and try again.",
+    );
+  }
+
+  const liveAddresses = liveHead.tags
+    .filter((tag) => tag[0] === "a" && tag[1])
+    .map((tag) => tag[1] as string);
+
+  const template = buildAttachedRepositoryPatchTemplate({
+    liveHead,
     ownerPubkey: identity.pubkey,
-    project,
-    repositoryAddress: repository.repoAddress,
+    existingAddresses: liveAddresses,
+    newRepositoryAddress: repository.repoAddress,
   });
   const projectEvent = await signRelayEvent({
     ...template,
-    createdAt: Math.max(Math.floor(Date.now() / 1_000), project.createdAt + 1),
+    createdAt: Math.max(
+      Math.floor(Date.now() / 1_000),
+      liveHead.created_at + 1,
+    ),
   });
   await relayClient.publishEvent(
     projectEvent,
@@ -52,7 +83,6 @@ export function useAttachProjectRepositoryMutation() {
   return useMutation({
     mutationFn: attachProjectRepository,
     onSuccess: ({ previousProjectId, project }) => {
-      queryClient.setQueryData(["project", project.id], project);
       if (previousProjectId !== project.id) {
         queryClient.removeQueries({
           exact: true,

@@ -51,6 +51,13 @@ export async function enumerateProjectEvents(
     });
     for (const event of boundary) eventsById.set(event.id, event);
     if (boundary.length >= pageSize) {
+      // Invariant violation: the relay has more events sharing this exact
+      // second than the page limit. Enumeration is statically uncompletable
+      // at the current page size. Rather than present a silently truncated
+      // collection, we hard-error. If this surfaces in production, the fix is
+      // either a larger pageSize constant or a relay-side deduplication pass.
+      // TODO: add a telemetry event here so pathological relay states are
+      // diagnosable before they reach users.
       throw new Error(
         "The relay cannot exhaustively enumerate projects because too many events share one timestamp.",
       );

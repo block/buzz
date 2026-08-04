@@ -139,6 +139,24 @@ export async function fetchProjectsWorkItems<TProject extends ProjectReference>(
         ).map((pullRequest) => ({ project, pullRequest, repository })),
       ),
     )
+    // Deduplicate by (repoAddress, pull-request id): a repository in N projects
+    // must produce exactly one aggregate row per pull request (NIP-MP §Multiple
+    // membership). First occurrence wins; that project's navigation context is
+    // kept for the row.
+    .filter(
+      (() => {
+        const seen = new Set<string>();
+        return (item: {
+          repository: RepositoryReference;
+          pullRequest: ProjectPullRequest;
+        }) => {
+          const key = `${item.repository.repoAddress}:${item.pullRequest.id}`;
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        };
+      })(),
+    )
     .sort(
       (left, right) => right.pullRequest.updatedAt - left.pullRequest.updatedAt,
     );
@@ -153,6 +171,21 @@ export async function fetchProjectsWorkItems<TProject extends ProjectReference>(
           commentsByRepo.get(repository.repoAddress) ?? [],
         ).map((issue) => ({ issue, project, repository })),
       ),
+    )
+    // Deduplicate by (repoAddress, issue id).
+    .filter(
+      (() => {
+        const seen = new Set<string>();
+        return (item: {
+          repository: RepositoryReference;
+          issue: ProjectIssue;
+        }) => {
+          const key = `${item.repository.repoAddress}:${item.issue.id}`;
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        };
+      })(),
     )
     .sort((left, right) => right.issue.updatedAt - left.issue.updatedAt);
   const sharedFailedSections: ProjectWorkItemSection[] = [];

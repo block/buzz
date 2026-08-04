@@ -163,14 +163,23 @@ export function eventToProject(
 }
 
 export async function fetchProjects(): Promise<Project[]> {
-  const [projectEvents, repositoryEvents] = await Promise.all([
+  const [projectEvents, repositoryEvents, deletionEvents] = await Promise.all([
     fetchProjectEventsExhaustively([KIND_PROJECT_ANNOUNCEMENT]),
     fetchProjectEventsExhaustively([KIND_REPO_ANNOUNCEMENT]),
+    // NIP-09 tombstones: fetch all kind:5 events that name a project or
+    // repository coordinate. The relay's soft-delete already filters these on
+    // the main Buzz relay, but a client that relies exclusively on server-side
+    // deletion resurrects deleted heads on any relay that retains them alongside
+    // their tombstones. Fetching deletions is the conformant NIP-MP client fold.
+    relayClient
+      .fetchEvents({ kinds: [KIND_DELETION], limit: 2_000 })
+      .catch((): RelayEvent[] => []),
   ]);
 
   return buildProjectReadModels({
     projectEvents,
     repositoryEvents,
+    deletionEvents,
     relayOrigin: getCachedRelayOrigin(),
     hiddenAddresses: new Set(readHiddenProjectCards()),
   }).sort((a, b) => b.createdAt - a.createdAt);
@@ -602,7 +611,7 @@ async function fetchProjectActivitySummaries(
 async function deleteProject(project: Project): Promise<void> {
   const identity = await getIdentity();
   if (identity.pubkey.toLowerCase() !== project.owner.toLowerCase()) {
-    throw new Error("Only branch owners can delete branches.");
+    throw new Error("Only the project owner can delete this project.");
   }
 
   const event = await signRelayEvent({
@@ -931,11 +940,7 @@ export function useDeleteProjectMutation() {
       queryClient.setQueryData<Project[]>(projectsQueryKey, (current = []) =>
         current.filter((item) => item.id !== project.id),
       );
-      queryClient.setQueryData(["project", project.id], null);
       void queryClient.invalidateQueries({ queryKey: projectsQueryKey });
-      void queryClient.invalidateQueries({
-        queryKey: ["project", project.id],
-      });
     },
   });
 }

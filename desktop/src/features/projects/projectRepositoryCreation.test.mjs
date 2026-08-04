@@ -5,6 +5,8 @@ import {
   buildAddedRepositoryEventTemplates,
   buildAttachedRepositoryProjectEventTemplate,
   buildRepositoryChannelBindingTemplate,
+  buildProjectPatchTemplate,
+  buildAddedRepositoryEventTemplatesFromHead,
 } from "./projectRepositoryCreation.ts";
 
 const OWNER = "a".repeat(64);
@@ -116,5 +118,166 @@ test("buildAddedRepositoryEventTemplates rejects updates by another owner", () =
         name: "Mobile",
       }),
     /Only the project owner/,
+  );
+});
+
+// ── buildProjectPatchTemplate: unknown-tag preservation ────────────────────
+
+test("buildProjectPatchTemplate preserves unknown tags from the live head", () => {
+  const OWNER = "a".repeat(64);
+  const existingAddress = `30617:${OWNER}:desktop`;
+  const liveHead = {
+    id: "e".repeat(64),
+    kind: 30621,
+    pubkey: OWNER,
+    created_at: 100,
+    content: "ignored-by-nip-mp",
+    tags: [
+      ["d", "platform"],
+      ["name", "Platform"],
+      ["description", "Multi-repo project"],
+      ["buzz-channel", "11111111-1111-4111-8111-111111111111"],
+      ["future-metadata", "preserve-me"],
+      ["alt", "extension tag that must survive round-trip"],
+      ["a", existingAddress],
+    ],
+  };
+  const newAddress = `30617:${OWNER}:mobile`;
+  const template = buildProjectPatchTemplate({
+    liveHead,
+    ownerPubkey: OWNER,
+    repositoryAddresses: [existingAddress, newAddress],
+  });
+
+  // Content must be preserved verbatim (NIP-MP §content).
+  assert.equal(template.content, "ignored-by-nip-mp");
+
+  // Non-`a` tags — including unknown ones — must survive in order.
+  const nonMemberTags = template.tags.filter((t) => t[0] !== "a");
+  assert.deepEqual(nonMemberTags, [
+    ["d", "platform"],
+    ["name", "Platform"],
+    ["description", "Multi-repo project"],
+    ["buzz-channel", "11111111-1111-4111-8111-111111111111"],
+    ["future-metadata", "preserve-me"],
+    ["alt", "extension tag that must survive round-trip"],
+  ]);
+
+  // New address must be added; sorted order maintained.
+  const memberTags = template.tags.filter((t) => t[0] === "a").map((t) => t[1]);
+  assert.deepEqual(memberTags.sort(), [existingAddress, newAddress].sort());
+});
+
+test("buildProjectPatchTemplate preserves relay hints on existing members", () => {
+  const OWNER = "a".repeat(64);
+  const OTHER = "b".repeat(64);
+  const existingWithHint = `30617:${OTHER}:relay`;
+  const liveHead = {
+    id: "e".repeat(64),
+    kind: 30621,
+    pubkey: OWNER,
+    created_at: 100,
+    content: "",
+    tags: [
+      ["d", "platform"],
+      ["a", existingWithHint, "wss://relay.example"],
+    ],
+  };
+  const newAddress = `30617:${OWNER}:mobile`;
+  const template = buildProjectPatchTemplate({
+    liveHead,
+    ownerPubkey: OWNER,
+    repositoryAddresses: [existingWithHint, newAddress],
+  });
+
+  const existingTag = template.tags.find(
+    (t) => t[0] === "a" && t[1] === existingWithHint,
+  );
+  assert.ok(existingTag, "existing member tag must be present");
+  assert.equal(
+    existingTag[2],
+    "wss://relay.example",
+    "relay hint must be preserved",
+  );
+});
+
+test("buildProjectPatchTemplate rejects a non-owner caller", () => {
+  const OWNER = "a".repeat(64);
+  const OTHER = "b".repeat(64);
+  const liveHead = {
+    id: "e".repeat(64),
+    kind: 30621,
+    pubkey: OWNER,
+    created_at: 100,
+    content: "",
+    tags: [["d", "platform"]],
+  };
+  assert.throws(
+    () =>
+      buildProjectPatchTemplate({
+        liveHead,
+        ownerPubkey: OTHER,
+        repositoryAddresses: [],
+      }),
+    /Only the project owner/,
+  );
+});
+
+test("buildProjectPatchTemplate rejects a repository address list exceeding 64 members", () => {
+  const OWNER = "a".repeat(64);
+  const liveHead = {
+    id: "e".repeat(64),
+    kind: 30621,
+    pubkey: OWNER,
+    created_at: 100,
+    content: "",
+    tags: [["d", "wide"]],
+  };
+  const tooMany = Array.from(
+    { length: 65 },
+    (_, i) => `30617:${"a".repeat(64)}:repo-${String(i).padStart(2, "0")}`,
+  );
+  assert.throws(
+    () =>
+      buildProjectPatchTemplate({
+        liveHead,
+        ownerPubkey: OWNER,
+        repositoryAddresses: tooMany,
+      }),
+    /64/,
+  );
+});
+
+// ── buildAddedRepositoryEventTemplatesFromHead: racing writer ───────────────
+
+test("buildAddedRepositoryEventTemplatesFromHead detects a concurrent add via the live head", () => {
+  const OWNER = "a".repeat(64);
+  const existingAddress = `30617:${OWNER}:desktop`;
+  const newDtag = "mobile";
+  const newAddress = `30617:${OWNER}:${newDtag}`;
+
+  // Live head already contains the address (another session snuck it in).
+  const liveHeadWithRace = {
+    id: "e".repeat(64),
+    kind: 30621,
+    pubkey: OWNER,
+    created_at: 150,
+    content: "",
+    tags: [
+      ["d", "platform"],
+      ["a", existingAddress],
+      ["a", newAddress], // concurrent add
+    ],
+  };
+  assert.throws(
+    () =>
+      buildAddedRepositoryEventTemplatesFromHead({
+        accessChannelId: "11111111-1111-4111-8111-111111111111",
+        existingRepositoryAddresses: [existingAddress],
+        liveHead: liveHeadWithRace,
+        name: "Mobile",
+        ownerPubkey: OWNER,
+      }),
+    /already contains.*mobile.*another session/,
   );
 });

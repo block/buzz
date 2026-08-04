@@ -62,9 +62,7 @@ export function useBindProjectRepositoryChannelMutation() {
           ),
         })),
       );
-      void queryClient.invalidateQueries({
-        queryKey: ["project", repository.id],
-      });
+      void queryClient.invalidateQueries({ queryKey: projectsQueryKey });
     },
   });
 }

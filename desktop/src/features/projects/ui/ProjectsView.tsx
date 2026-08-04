@@ -543,7 +543,12 @@ export function ProjectsView() {
       const repository = selectProjectRepository(project, null);
       if (!repository) return Promise.resolve();
       return openTerminal(repository, {
-        hasLocalCheckout: hasLocalCheckout(project, localRepoNames),
+        // Check the selected repository only — not all members — so the
+        // terminal affordance reflects the repository the button will open.
+        hasLocalCheckout: hasLocalRepositoryCheckout(
+          repository,
+          localRepoNames,
+        ),
       });
     },
     [localRepoNames, openTerminal],
