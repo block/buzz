@@ -161,8 +161,10 @@ class ChannelQuickActionsLauncher extends HookConsumerWidget {
                 child: _MorphingQuickActionsButton(
                   open: effectiveOpen,
                   openEdgeOffset: rightInset - Grid.gutter,
-                  onToggle: () =>
-                      quickActionsOpen.value = !quickActionsOpen.value,
+                  onToggle: () {
+                    unawaited(HapticFeedback.lightImpact());
+                    quickActionsOpen.value = !quickActionsOpen.value;
+                  },
                   onSelected: (action) => unawaited(selectQuickAction(action)),
                 ),
               ),
