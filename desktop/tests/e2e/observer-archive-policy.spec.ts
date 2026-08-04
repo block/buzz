@@ -226,7 +226,7 @@ test.describe("observer archive policy — reconciliation gate", () => {
   }) => {
     await installMockBridge(page, {
       observerArchiveDefaultEnabled: true,
-      observerArchiveDefaultEnabledDelayMs: 500,
+      deferObserverArchiveDefaultEnabled: true,
       saveSubscriptions: [
         {
           scope_type: "owner_p",
@@ -237,6 +237,14 @@ test.describe("observer archive policy — reconciliation gate", () => {
     });
 
     await page.goto("/", { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(
+      () =>
+        (
+          window as Window & {
+            __BUZZ_E2E_OBSERVER_ARCHIVE_POLICY_PENDING__?: number;
+          }
+        ).__BUZZ_E2E_OBSERVER_ARCHIVE_POLICY_PENDING__ === 1,
+    );
     await expect(page.getByTestId("channel-general")).toBeVisible({
       timeout: 10_000,
     });
@@ -271,6 +279,16 @@ test.describe("observer archive policy — reconciliation gate", () => {
       "deadbeef".repeat(8),
     );
     expect(hasSubscriptionWhilePending).toBe(false);
+
+    const released = await page.evaluate(
+      () =>
+        (
+          window as Window & {
+            __BUZZ_E2E_RELEASE_OBSERVER_ARCHIVE_POLICY__?: () => number;
+          }
+        ).__BUZZ_E2E_RELEASE_OBSERVER_ARCHIVE_POLICY__?.() ?? 0,
+    );
+    expect(released).toBe(1);
 
     // After the policy resolves, both the IPC call and the live filter
     // appear.

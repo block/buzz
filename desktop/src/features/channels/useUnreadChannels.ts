@@ -9,9 +9,8 @@ import {
   countUnreadBadgeObservedEvents,
   countUnreadHighPriorityObservedEvents,
   countUnreadObservedEvents,
-  countUnreadTopLevelObservedEvents,
+  hasUnreadTopLevelObservedEvent,
   makeObservedUnreadEvent,
-  mapsEqual,
   observedUnreadEventReadAt,
   recordObservedUnreadEvent,
   type ObservedUnreadEvent,
@@ -26,6 +25,7 @@ import { makeRootIdStore } from "@/features/channels/unreadRootIdStore";
 import {
   forcedUnreadStore,
   type ForcedUnreadMap,
+  useForcedUnreadActions,
 } from "@/features/channels/forcedUnreadStore";
 import {
   getThreadReference,
@@ -38,6 +38,7 @@ import {
 } from "@/features/notifications/lib/shouldNotify";
 import type { RelayClient } from "@/shared/api/relayClientSession";
 import type { Channel, RelayEvent } from "@/shared/api/types";
+import { useStableMap, useStableSet } from "@/shared/hooks/useStableReference";
 import { normalizeRelayUrl } from "@/features/profile/lib/selfProfileStorage";
 import {
   activityScopeKey,
@@ -78,14 +79,6 @@ const authoredStore = makeRootIdStore("buzz-thread-authored.v1");
 // authored, or followed still gets the thread-unread badge.
 const mentionedStore = makeRootIdStore("buzz-thread-mentioned.v1");
 const mutedStore = makeRootIdStore("buzz-thread-muted.v1");
-
-function setsEqual(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
-  if (a.size !== b.size) return false;
-  for (const item of a) {
-    if (!b.has(item)) return false;
-  }
-  return true;
-}
 
 export function useUnreadChannels(
   channels: Channel[],
@@ -264,9 +257,18 @@ export function useUnreadChannels(
     (
       channelId: string,
       readAt: string | null | undefined,
-      { topLevelOnly = false }: { topLevelOnly?: boolean } = {},
+      {
+        preserveForcedUnread = false,
+        topLevelOnly = false,
+      }: {
+        preserveForcedUnread?: boolean;
+        topLevelOnly?: boolean;
+      } = {},
     ) => {
-      if (Object.hasOwn(forcedUnreadRef.current, channelId)) {
+      if (
+        !preserveForcedUnread &&
+        Object.hasOwn(forcedUnreadRef.current, channelId)
+      ) {
         delete forcedUnreadRef.current[channelId];
         if (pubkey) {
           forcedUnreadStore.write(pubkey, forcedUnreadRef.current);
@@ -296,22 +298,13 @@ export function useUnreadChannels(
     [markContextRead, pubkey],
   );
 
-  // Manually mark a channel unread (e.g., right-click → "mark unread"). Persists
-  // the current NIP-RS read marker as baseline to localStorage so the rail
-  // observer can detect when a cross-device read has since covered the force.
-  // NIP-RS markers are monotonic, so we do not publish a lower timestamp.
-  const markChannelUnread = React.useCallback(
-    (channelId: string) => {
-      if (!Object.hasOwn(forcedUnreadRef.current, channelId)) {
-        forcedUnreadRef.current[channelId] = getOwnTimestamp(channelId);
-        if (pubkey) {
-          forcedUnreadStore.write(pubkey, forcedUnreadRef.current);
-        }
-        bumpLatestVersion();
-      }
-    },
-    [getOwnTimestamp, pubkey],
-  );
+  const { clearChannelUnreadSource, markChannelUnread } =
+    useForcedUnreadActions(
+      forcedUnreadRef,
+      getOwnTimestamp,
+      pubkey,
+      bumpLatestVersion,
+    );
 
   // Record the thread root of an EXTERNAL message that @-mentioned the user.
   // Keyed on the thread root so the badge gate trips for a mention recipient
@@ -427,6 +420,22 @@ export function useUnreadChannels(
         bumpMembershipVersion();
       }
       bumpLatestVersion();
+    },
+    [normalizedPubkey],
+  );
+
+  const recordThreadInteraction = React.useCallback(
+    (rootId: string) => {
+      const normalizedRootId = rootId.trim();
+      if (!normalizedRootId) return;
+      const target = participatedRootIdsRef.current;
+      const sizeBefore = target.size;
+      target.add(normalizedRootId);
+      if (target.size === sizeBefore) return;
+      if (normalizedPubkey !== null) {
+        participationStore.write(normalizedPubkey, target);
+      }
+      bumpMembershipVersion();
     },
     [normalizedPubkey],
   );
@@ -800,16 +809,10 @@ export function useUnreadChannels(
       for (const channel of channels) {
         if (channel.id === activeChannelId) continue;
 
-        if (Object.hasOwn(forcedUnreadRef.current, channel.id)) {
-          // Forced-unread is dot tier only — not high-priority.
-          unread.add(channel.id);
-          topLevelUnread.add(channel.id);
-          counts.set(channel.id, 1);
-          unreadChannelNotificationCount += 1;
-          continue;
-        }
-
-        if (latestByChannelRef.current.get(channel.id) === undefined) continue;
+        const isForcedUnread = Object.hasOwn(
+          forcedUnreadRef.current,
+          channel.id,
+        );
 
         const observedEvents = observedUnreadEventsByChannelRef.current.get(
           channel.id,
@@ -823,21 +826,22 @@ export function useUnreadChannels(
             (messageId) => getOwnTimestamp(`msg:${messageId}`),
           );
 
-        const unreadCount = countUnreadObservedEvents(
-          observedEvents,
-          readAtForObservedEvent,
-        );
-        if (unreadCount === 0) continue;
+        const unreadCount =
+          latestByChannelRef.current.get(channel.id) === undefined
+            ? 0
+            : countUnreadObservedEvents(observedEvents, readAtForObservedEvent);
+        if (unreadCount === 0) {
+          if (!isForcedUnread) continue;
+          unread.add(channel.id);
+          topLevelUnread.add(channel.id);
+          counts.set(channel.id, 1);
+          unreadChannelNotificationCount += 1;
+          continue;
+        }
 
         unread.add(channel.id);
-        // Channels whose unread includes a channel-level post — surfaces
-        // that clear by opening the channel (vs thread replies, which clear
-        // through thread read markers) distinguish the two via this set.
         if (
-          countUnreadTopLevelObservedEvents(
-            observedEvents,
-            readAtForObservedEvent,
-          ) > 0
+          hasUnreadTopLevelObservedEvent(observedEvents, readAtForObservedEvent)
         ) {
           topLevelUnread.add(channel.id);
         }
@@ -883,46 +887,14 @@ export function useUnreadChannels(
       readStateVersion,
     ]);
 
-  // Stabilize Set references: only replace when contents actually change,
-  // so downstream memos don't re-run on every render when sets are equal.
-  const prevUnreadRef = React.useRef<ReadonlySet<string>>(new Set());
-  const prevTopLevelUnreadRef = React.useRef<ReadonlySet<string>>(new Set());
-  const prevHighPriorityRef = React.useRef<ReadonlySet<string>>(new Set());
-  const prevUnreadCountsRef = React.useRef<ReadonlyMap<string, number>>(
-    new Map(),
-  );
-
-  const unreadChannelIds = setsEqual(
-    rawUnread.unreadChannelIds,
-    prevUnreadRef.current,
-  )
-    ? prevUnreadRef.current
-    : rawUnread.unreadChannelIds;
-  prevUnreadRef.current = unreadChannelIds;
-
-  const topLevelUnreadChannelIds = setsEqual(
+  const unreadChannelIds = useStableSet(rawUnread.unreadChannelIds);
+  const topLevelUnreadChannelIds = useStableSet(
     rawUnread.topLevelUnreadChannelIds,
-    prevTopLevelUnreadRef.current,
-  )
-    ? prevTopLevelUnreadRef.current
-    : rawUnread.topLevelUnreadChannelIds;
-  prevTopLevelUnreadRef.current = topLevelUnreadChannelIds;
-
-  const highPriorityUnreadChannelIds = setsEqual(
+  );
+  const highPriorityUnreadChannelIds = useStableSet(
     rawUnread.highPriorityUnreadChannelIds,
-    prevHighPriorityRef.current,
-  )
-    ? prevHighPriorityRef.current
-    : rawUnread.highPriorityUnreadChannelIds;
-  prevHighPriorityRef.current = highPriorityUnreadChannelIds;
-
-  const unreadChannelCounts = mapsEqual(
-    rawUnread.unreadChannelCounts,
-    prevUnreadCountsRef.current,
-  )
-    ? prevUnreadCountsRef.current
-    : rawUnread.unreadChannelCounts;
-  prevUnreadCountsRef.current = unreadChannelCounts;
+  );
+  const unreadChannelCounts = useStableMap(rawUnread.unreadChannelCounts);
   const unreadChannelNotificationCount =
     rawUnread.unreadChannelNotificationCount;
 
@@ -977,6 +949,7 @@ export function useUnreadChannels(
     markAllChannelsRead,
     markChannelRead,
     markChannelUnread,
+    clearChannelUnreadSource,
     // Exposed so other surfaces (e.g. Home) can project per-item read state
     // off the same NIP-RS read marker without instantiating a second
     // ReadStateManager. readStateVersion is the invalidation signal callers
@@ -988,6 +961,7 @@ export function useUnreadChannels(
     participatedRootIds,
     authoredRootIds,
     mentionedRootIds,
+    recordThreadInteraction,
     threadActivityItems: projectActivityForScope(
       threadActivityScopeRef.current,
       currentActivityScope,

@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     path::Path,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -30,6 +30,8 @@ pub(super) type CancelSignals<'a> = (&'a AtomicBool, &'a AtomicBool);
 pub(super) struct QueuedText {
     pub(super) generation: u64,
     pub(super) route_id: u64,
+    pub(super) speaker_pubkey: Option<String>,
+    pub(super) voice_reference: Option<String>,
     pub(super) text: String,
 }
 
@@ -40,15 +42,30 @@ pub(crate) struct TtsTextSender {
 }
 
 impl TtsTextSender {
-    pub(crate) fn send(&self, route_id: u64, text: String) -> Result<(), String> {
+    pub(crate) fn send(
+        &self,
+        route_id: u64,
+        speaker_pubkey: String,
+        voice_reference: String,
+        text: String,
+    ) -> Result<(), String> {
         self.text_tx
             .send(QueuedText {
                 generation: self.generation,
                 route_id,
+                speaker_pubkey: Some(speaker_pubkey),
+                voice_reference: Some(voice_reference),
                 text,
             })
             .map_err(|error| error.to_string())
     }
+}
+
+pub(super) fn has_pending_voice_change(voice_change_ack: &VoiceChangeAck) -> bool {
+    voice_change_ack
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .is_some()
 }
 
 pub(super) fn begin_voice_change(
@@ -147,6 +164,43 @@ pub(super) fn reconcile_selected_voice(
                     false
                 }
             }
+        }
+    }
+}
+
+pub(super) fn reconcile_queued_voice(
+    model_dir: &Path,
+    requested_voice: &str,
+    selected_voice: &Mutex<String>,
+    voice_name: &mut String,
+    style: &mut VoiceStyle,
+    style_cache: &mut HashMap<String, VoiceStyle>,
+) -> bool {
+    if requested_voice == voice_name.as_str() {
+        return true;
+    }
+    if let Some(cached) = style_cache.get(requested_voice) {
+        *style = cached.clone();
+        *voice_name = requested_voice.to_owned();
+        return true;
+    }
+
+    match load_voice_style(&voice_path(model_dir, requested_voice)) {
+        Ok(requested_style) => {
+            style_cache.insert(requested_voice.to_owned(), requested_style.clone());
+            *style = requested_style;
+            *voice_name = requested_voice.to_owned();
+            true
+        }
+        Err(_) => {
+            eprintln!(
+                "buzz-desktop: tts stage=agent_voice_switch status=fallback reason=voice_style"
+            );
+            let ready = reconcile_selected_voice(model_dir, selected_voice, voice_name, style);
+            if ready {
+                style_cache.insert(voice_name.clone(), style.clone());
+            }
+            ready
         }
     }
 }

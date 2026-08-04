@@ -22,8 +22,7 @@ pub(crate) use path::should_use_inherited;
 
 mod metadata;
 pub(crate) use metadata::{
-    resolve_effective_prompt_model_provider, resolve_session_title, runtime_metadata_env_vars,
-    SESSION_TITLE_ENV_VAR,
+    resolve_session_title, runtime_metadata_env_vars, SESSION_TITLE_ENV_VAR,
 };
 
 mod stop;

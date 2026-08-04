@@ -3,9 +3,9 @@ import 'dart:async';
 import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
-import '../../../shared/relay/relay.dart';
-import '../../../shared/theme/theme_provider.dart';
-import '../../../shared/community/community_provider.dart';
+import '../relay/relay.dart';
+import '../theme/theme_provider.dart';
+import '../community/community_provider.dart';
 import 'read_state_manager.dart';
 
 class ReadStateState {

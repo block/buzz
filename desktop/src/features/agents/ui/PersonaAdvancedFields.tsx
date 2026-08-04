@@ -1,15 +1,33 @@
+import * as React from "react";
 import { Input } from "@/shared/ui/input";
 import { cn } from "@/shared/lib/cn";
 import { EnvVarsEditor, type EnvVarsValue } from "./EnvVarsEditor";
 import { CreateAgentRespondToField } from "./RespondToField";
 import type { PersonaBehaviorDraft } from "./personaBehaviorDraft";
-import { isBuzzAgentRuntime } from "./buzzAgentConfig";
-import { BuzzAgentModelTuningFields } from "./buzzAgentModelTuningFields";
 import {
+  isBuzzAgentRuntime,
+  BUZZ_AGENT_THINKING_EFFORT,
+} from "./buzzAgentConfig";
+import {
+  AGENT_PARALLELISM_HELP,
+  AGENT_PARALLELISM_PLACEHOLDER,
+} from "../lib/agentParallelism";
+import {
+  BuzzAgentModelTuningFields,
+  NumericTuningFields,
+} from "./buzzAgentModelTuningFields";
+import {
+  CARD_MINT_KEY_ANNOTATIONS,
   PERSONA_FIELD_CONTROL_CLASS,
   PERSONA_FIELD_SHELL_CLASS,
   PERSONA_LABEL_OPTIONAL_CLASS,
 } from "./agentConfigOptions";
+import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
+import {
+  deriveNumericDescriptors,
+  structuredEnvKeys,
+  type RuntimeCatalogStatus,
+} from "../lib/agentConfigCore";
 
 export function PersonaAdvancedFields({
   behaviorDraft,
@@ -26,6 +44,8 @@ export function PersonaAdvancedFields({
   requiredEnvKeys = [],
   fileSatisfiedEnvKeys = [],
   hiddenEnvKeys = [],
+  catalogStatus = "ready" as RuntimeCatalogStatus,
+  selectedRuntime,
 }: {
   behaviorDraft: PersonaBehaviorDraft;
   disabled: boolean;
@@ -35,7 +55,7 @@ export function PersonaAdvancedFields({
   inheritedEnvVars?: EnvVarsValue;
   /** Active LLM model — forwarded to BuzzAgentModelTuningFields for effort filtering. */
   model?: string;
-  /** Runtime id for the buzz-agent tuning knobs visibility gate. */
+  /** Runtime id for the buzz-agent effort-tuning knob visibility gate. */
   modelTuningRuntimeId?: string;
   namePoolText: string;
   onBehaviorDraftChange: (value: PersonaBehaviorDraft) => void;
@@ -46,7 +66,42 @@ export function PersonaAdvancedFields({
   requiredEnvKeys?: readonly string[];
   fileSatisfiedEnvKeys?: readonly string[];
   hiddenEnvKeys?: readonly string[];
+  /**
+   * Lifecycle status of the runtime catalog query. Controls the numeric-tuning
+   * gate and hidden-key behaviour:
+   * - `loading` or `error`: no structured controls; keys not hidden — saved
+   *   values stay visible as generic rows.
+   * - `ready`: descriptors derived from `selectedRuntime` (empty when the
+   *   runtime has no numeric env-var fields).
+   */
+  catalogStatus?: RuntimeCatalogStatus;
+  /**
+   * The catalog entry for the selected runtime. Drives descriptor-based
+   * numeric tuning fields. When undefined after the catalog has settled,
+   * no numeric controls render.
+   */
+  selectedRuntime?: AcpRuntimeCatalogEntry;
 }) {
+  // Numeric tuning descriptors — gate on catalog status so that loading/error
+  // never collapses to "no controls": keys stay visible as generic rows.
+  const numericDescriptors = React.useMemo(
+    () =>
+      catalogStatus === "ready"
+        ? deriveNumericDescriptors(selectedRuntime)
+        : [],
+    [catalogStatus, selectedRuntime],
+  );
+
+  const effectiveHiddenKeys = React.useMemo(
+    () => [
+      ...hiddenEnvKeys,
+      ...(isBuzzAgentRuntime(modelTuningRuntimeId)
+        ? [BUZZ_AGENT_THINKING_EFFORT]
+        : []),
+      ...structuredEnvKeys(numericDescriptors),
+    ],
+    [hiddenEnvKeys, modelTuningRuntimeId, numericDescriptors],
+  );
   return (
     <div className="space-y-5 pt-2">
       <CreateAgentRespondToField
@@ -82,7 +137,7 @@ export function PersonaAdvancedFields({
           >
             <Input
               className={cn(
-                "h-8 px-0 py-0 leading-6",
+                "h-8 px-0 py-0 leading-6 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none",
                 PERSONA_FIELD_CONTROL_CLASS,
               )}
               disabled={disabled}
@@ -96,13 +151,13 @@ export function PersonaAdvancedFields({
                   parallelism: event.target.value,
                 })
               }
-              placeholder="1"
+              placeholder={AGENT_PARALLELISM_PLACEHOLDER}
               type="number"
               value={behaviorDraft.parallelism}
             />
           </div>
           <p className="text-xs text-muted-foreground">
-            How many conversations each running instance handles at once (1–32).
+            {AGENT_PARALLELISM_HELP}
           </p>
         </div>
       </div>
@@ -141,13 +196,33 @@ export function PersonaAdvancedFields({
       <EnvVarsEditor
         disabled={disabled}
         fileSatisfiedKeys={fileSatisfiedEnvKeys}
-        hiddenKeys={hiddenEnvKeys}
+        hiddenKeys={effectiveHiddenKeys}
+        keyAnnotations={CARD_MINT_KEY_ANNOTATIONS}
         onChange={onEnvVarsChange}
         requiredKeys={requiredEnvKeys}
         value={envVars}
       />
 
-      {/* Tier-1 buzz-agent model-tuning knobs — only shown for buzz-agent. */}
+      {/* Descriptor-driven numeric tuning knobs — shown when catalog has settled
+          and the runtime exposes numeric env-var fields. */}
+      {numericDescriptors.length > 0 ? (
+        <NumericTuningFields
+          descriptors={numericDescriptors}
+          envVars={envVars}
+          inheritedEnvVars={inheritedEnvVars}
+          onEnvVarChange={(key, value) => {
+            const next = { ...envVars };
+            if (value === "") {
+              delete next[key];
+            } else {
+              next[key] = value;
+            }
+            onEnvVarsChange(next);
+          }}
+        />
+      ) : null}
+
+      {/* Effort-tuning knob — only shown for buzz-agent. */}
       {isBuzzAgentRuntime(modelTuningRuntimeId) ? (
         <BuzzAgentModelTuningFields
           envVars={envVars}

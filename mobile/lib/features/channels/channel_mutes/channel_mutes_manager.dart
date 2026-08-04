@@ -8,7 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../shared/crypto/nip44.dart';
 import '../../../shared/relay/relay.dart';
-import '../read_state/read_state_time.dart';
+import '../../../shared/read_state/read_state_time.dart';
 import 'channel_mutes_storage.dart';
 
 class ChannelMutesCrypto {

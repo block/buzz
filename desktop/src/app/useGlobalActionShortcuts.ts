@@ -6,17 +6,18 @@ import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
 /**
  * Window-level primary-modifier shortcuts: ⌘K search, ⇧⌘K new DM, ⇧⌘N create
  * channel, ⇧⌘O browse channels, ⇧⌘A home, ⇧⌘D display style. Disabled while
- * settings is open (settings has its own shortcut scope).
+ * settings is open (settings has its own shortcut scope) and in the Huddle
+ * companion window.
  */
 export function useGlobalActionShortcuts({
-  settingsOpen,
+  disabled,
   onOpenSearch,
   onOpenNewDm,
   onOpenCreateChannel,
   onOpenBrowseChannels,
   onGoHome,
 }: {
-  settingsOpen: boolean;
+  disabled: boolean;
   onOpenSearch: () => void;
   onOpenNewDm: () => void;
   onOpenCreateChannel: () => void;
@@ -24,7 +25,7 @@ export function useGlobalActionShortcuts({
   onGoHome: () => void;
 }) {
   React.useLayoutEffect(() => {
-    if (settingsOpen) {
+    if (disabled) {
       return;
     }
 
@@ -85,7 +86,7 @@ export function useGlobalActionShortcuts({
       window.removeEventListener("keydown", handleKeyDown);
     };
   }, [
-    settingsOpen,
+    disabled,
     onOpenSearch,
     onOpenNewDm,
     onOpenCreateChannel,

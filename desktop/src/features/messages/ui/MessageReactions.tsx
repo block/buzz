@@ -126,7 +126,10 @@ function ReactionPopoverContent({ reaction }: { reaction: TimelineReaction }) {
       <div className="max-w-[14rem] text-balance text-sm font-semibold leading-snug text-popover-foreground">
         {userText} <span className="text-muted-foreground">reacted with</span>
       </div>
-      <div className="mt-0.5 text-sm font-semibold leading-snug text-muted-foreground">
+      <div
+        className="mt-0.5 break-all text-sm font-semibold leading-snug text-muted-foreground"
+        data-testid="reaction-popover-name"
+      >
         {displayName}
       </div>
     </div>
@@ -504,7 +507,7 @@ function ReactionPill({
         align="start"
         side="top"
         sideOffset={6}
-        className="w-auto min-w-56 max-w-72 rounded-xl p-3"
+        className="w-72 rounded-xl p-3"
         onMouseEnter={handleMouseEnter}
         onMouseLeave={scheduleClose}
         onOpenAutoFocus={(e) => e.preventDefault()}
