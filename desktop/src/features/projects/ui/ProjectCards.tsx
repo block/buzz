@@ -3,6 +3,7 @@ import {
   FolderGit2,
   GitCommit,
   GitPullRequest,
+  Plus,
   TerminalSquare,
   Trash2,
 } from "lucide-react";
@@ -263,7 +264,11 @@ function StatusPill({ status }: { status: string }) {
   );
 }
 
-export function EmptyState() {
+export function EmptyState({
+  onCreateProject,
+}: {
+  onCreateProject?: () => void;
+}) {
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-3 px-4 py-16 text-center">
       <FolderGit2 className="h-10 w-10 text-muted-foreground/40" />
@@ -273,6 +278,12 @@ export function EmptyState() {
           Projects published to this relay will appear here.
         </p>
       </div>
+      {onCreateProject ? (
+        <Button className="mt-2 gap-2" onClick={onCreateProject} size="sm">
+          <Plus className="h-4 w-4" />
+          Create project
+        </Button>
+      ) : null}
     </div>
   );
 }
