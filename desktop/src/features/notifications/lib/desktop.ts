@@ -181,7 +181,9 @@ export async function listenForDesktopNotificationActions(
   let nativeUnlisten: (() => void) | null = null;
 
   if (isTauri()) {
-    if (!isLinuxPlatform() && !isMacPlatform()) {
+    const usesMacActivationQueue = isMacPlatform();
+
+    if (!isLinuxPlatform() && !usesMacActivationQueue) {
       try {
         pluginListener = await onAction((notification) => {
           const target = parseNotificationTarget(
@@ -201,7 +203,7 @@ export async function listenForDesktopNotificationActions(
     // Linux forwards the target as the event payload. macOS queues targets in
     // Rust first so cold-start clicks survive until this listener is mounted.
     const dispatchNativeActivations = async (payload?: unknown) => {
-      if (isMacPlatform()) {
+      if (usesMacActivationQueue) {
         const targets = await invoke<unknown[]>(
           TAKE_PENDING_MACOS_NOTIFICATION_ACTIVATIONS,
         );
@@ -236,7 +238,7 @@ export async function listenForDesktopNotificationActions(
       nativeUnlisten = null;
     }
 
-    if (nativeUnlisten && isMacPlatform()) {
+    if (nativeUnlisten && usesMacActivationQueue) {
       try {
         await dispatchNativeActivations();
       } catch (error) {
