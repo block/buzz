@@ -90,6 +90,97 @@ async fn publish_presence(
     Ok(())
 }
 
+/// Build the kind:10100 agent-profile content JSON.
+///
+/// Field names are the cross-client contract: desktop reads them in
+/// `agents_from_events` and mobile in `AgentDirectoryEntry.fromEvent`, and the
+/// relay's ingest side effect requires `channel_add_policy`. Collections are
+/// normalized (lowercased pubkeys) and sorted so republishes are
+/// deterministic.
+fn agent_profile_content(
+    respond_to: &RespondTo,
+    allowlist: &HashSet<String>,
+    channel_ids: &HashSet<Uuid>,
+) -> String {
+    let mut allow: Vec<String> = allowlist.iter().map(|pk| pk.to_ascii_lowercase()).collect();
+    allow.sort();
+    let mut channels: Vec<String> = channel_ids.iter().map(Uuid::to_string).collect();
+    channels.sort();
+    serde_json::json!({
+        "respond_to": respond_to.to_string(),
+        "respond_to_allowlist": allow,
+        "channel_ids": channels,
+        "channel_add_policy": "anyone",
+    })
+    .to_string()
+}
+
+/// Publish/refresh the agent's kind:10100 directory profile (replaceable).
+///
+/// Self-attested discovery metadata for client UX — mention pickers,
+/// "managed by" labels, and respond_to-aware eligibility. Without it,
+/// clients cannot see that `respond_to=anyone` and hide the agent from
+/// non-owners' mention autocomplete. Enforcement stays in `author_allowed`;
+/// clients must treat this as advisory.
+async fn publish_agent_profile(
+    publisher: &relay::RelayEventPublisher,
+    keys: &nostr::Keys,
+    respond_to: &RespondTo,
+    allowlist: &HashSet<String>,
+    channel_ids: &HashSet<Uuid>,
+) -> Result<(), relay::RelayError> {
+    use buzz_core::kind::KIND_AGENT_PROFILE;
+    use nostr::{EventBuilder, Kind};
+
+    let content = agent_profile_content(respond_to, allowlist, channel_ids);
+    let event = EventBuilder::new(Kind::Custom(KIND_AGENT_PROFILE as u16), content)
+        .tags([])
+        .sign_with_keys(keys)
+        .map_err(|e| relay::RelayError::Http(format!("agent profile sign error: {e}")))?;
+    publisher.publish_event(event).await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod agent_profile_content_tests {
+    use super::*;
+
+    #[test]
+    fn content_matches_cross_client_contract() {
+        let mut allowlist = HashSet::new();
+        allowlist.insert("B".repeat(64));
+        allowlist.insert("a".repeat(64));
+        let mut channels = HashSet::new();
+        let ch = Uuid::parse_str("af804d33-a3c1-4415-858e-3747c296a613").unwrap();
+        channels.insert(ch);
+
+        let content = agent_profile_content(&RespondTo::Allowlist, &allowlist, &channels);
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        assert_eq!(parsed["respond_to"], "allowlist");
+        assert_eq!(
+            parsed["respond_to_allowlist"],
+            serde_json::json!(["a".repeat(64), "b".repeat(64)]),
+        );
+        assert_eq!(parsed["channel_ids"], serde_json::json!([ch.to_string()]));
+        assert_eq!(parsed["channel_add_policy"], "anyone");
+    }
+
+    #[test]
+    fn respond_to_strings_match_client_comparisons() {
+        for (mode, expected) in [
+            (RespondTo::Anyone, "anyone"),
+            (RespondTo::OwnerOnly, "owner-only"),
+            (RespondTo::Allowlist, "allowlist"),
+            (RespondTo::Nobody, "nobody"),
+        ] {
+            let content = agent_profile_content(&mode, &HashSet::new(), &HashSet::new());
+            let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+            assert_eq!(parsed["respond_to"], expected);
+        }
+    }
+}
+
 fn emit_runtime_lifecycle(
     observer: Option<&observer::ObserverHandle>,
     start_nonce: &str,
@@ -1997,6 +2088,29 @@ async fn tokio_main() -> Result<()> {
         }
     }
 
+    // Advertise the agent in the relay directory (kind:10100) so other
+    // clients can see its respond_to policy and offer it in mention
+    // autocomplete. Published after channel subscriptions so channel_ids
+    // reflects the live set. Best-effort: a miss self-heals on the next
+    // restart or membership change.
+    if let Err(e) = publish_agent_profile(
+        &presence_publisher,
+        &presence_keys,
+        &config.respond_to,
+        &config.respond_to_allowlist,
+        &subscribed_channel_ids,
+    )
+    .await
+    {
+        tracing::warn!("failed to publish agent profile (kind:10100): {e}");
+    } else {
+        tracing::info!(
+            channels = subscribed_channel_ids.len(),
+            respond_to = %config.respond_to,
+            "agent profile (kind:10100) published"
+        );
+    }
+
     if config.lazy_pool {
         emit_runtime_lifecycle(
             observer.as_ref(),
@@ -2507,6 +2621,20 @@ async fn tokio_main() -> Result<()> {
                                             tracing::warn!("failed to subscribe to new channel {ch}: {e}");
                                         } else {
                                             subscribed_channel_ids.insert(ch);
+                                            // Keep the directory profile's channel_ids
+                                            // fresh so the new channel's members can
+                                            // mention this agent without an agent restart.
+                                            if let Err(e) = publish_agent_profile(
+                                                &presence_publisher,
+                                                &presence_keys,
+                                                &config.respond_to,
+                                                &config.respond_to_allowlist,
+                                                &subscribed_channel_ids,
+                                            )
+                                            .await
+                                            {
+                                                tracing::warn!("failed to refresh agent profile (kind:10100): {e}");
+                                            }
                                         }
                                     } else {
                                         tracing::debug!(channel_id = %ch, "membership notification: no matching rules — skipping");
@@ -2516,6 +2644,19 @@ async fn tokio_main() -> Result<()> {
                                     tracing::info!(channel_id = %ch, "membership notification: unsubscribing from channel");
                                     if let Err(e) = relay.unsubscribe_channel(ch).await {
                                         tracing::warn!("failed to unsubscribe from channel {ch}: {e}");
+                                    }
+                                    // Drop the channel from the directory profile so
+                                    // clients stop offering this agent there.
+                                    if let Err(e) = publish_agent_profile(
+                                        &presence_publisher,
+                                        &presence_keys,
+                                        &config.respond_to,
+                                        &config.respond_to_allowlist,
+                                        &subscribed_channel_ids,
+                                    )
+                                    .await
+                                    {
+                                        tracing::warn!("failed to refresh agent profile (kind:10100): {e}");
                                     }
                                     // Drain queued events and invalidate sessions for the
                                     // removed channel. Events already in-flight will
