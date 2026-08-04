@@ -86,7 +86,7 @@ test.describe("channel muting", () => {
       "opacity",
       "0.5",
     );
-    await expect(engRow.locator("svg")).toHaveCSS("opacity", "0.5");
+    await expect(engRow.locator("svg.lucide-hash")).toHaveCSS("opacity", "0.5");
     await expect(engRow.locator("svg.lucide-bell-off")).toHaveCount(1);
   });
 
@@ -146,7 +146,7 @@ test.describe("channel muting", () => {
 
     await expect(page.getByTestId("channel-engineering")).toHaveCSS(
       "font-weight",
-      "600",
+      "700",
     );
     await expect(
       page.getByTestId("channel-unread-dot-engineering"),

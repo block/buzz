@@ -253,7 +253,7 @@ export function AppSidebar({
   const scrollRef = React.useRef<HTMLDivElement>(null);
   useSidebarScrollLock(scrollRef);
   // biome-ignore format: keep compact to stay within file size limit
-  const { scrollToNextAbove, scrollToNextBelow, unreadAboveCount, unreadBelowCount } = useSidebarActivityOverflow({ activeWorkingByChannelId, channels, previewActivityChannelIds, scrollRef, unreadChannelIds });
+  const { scrollToNextAbove, scrollToNextBelow, unreadAboveCount, unreadBelowCount, unreadAboveLabel, unreadBelowLabel } = useSidebarActivityOverflow({ activeWorkingByChannelId, channels, previewActivityChannelIds, scrollRef, unreadChannelIds });
 
   React.useEffect(() => {
     const scrollElement = scrollRef.current;
@@ -588,6 +588,7 @@ export function AppSidebar({
           {unreadAboveCount > 0 ? (
             <MoreUnreadButton
               count={unreadAboveCount}
+              label={unreadAboveLabel}
               onClick={scrollToNextAbove}
               position="top"
               testId="sidebar-more-unread-above"
@@ -859,6 +860,7 @@ export function AppSidebar({
             <MoreUnreadButton
               bottomClassName="bottom-full"
               count={unreadBelowCount}
+              label={unreadBelowLabel}
               onClick={scrollToNextBelow}
               position="bottom"
               testId="sidebar-more-unread-below"

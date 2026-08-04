@@ -543,7 +543,7 @@ test.describe("channel activity hover preview", () => {
 
     await expect(page.getByTestId("channel-general")).toHaveCSS(
       "font-weight",
-      "600",
+      "700",
     );
     for (const [index, itemId] of inboxItemIds.entries()) {
       const inboxRow = page.getByTestId(`home-inbox-item-${itemId}`);
@@ -552,13 +552,13 @@ test.describe("channel activity hover preview", () => {
       if (index === 0) {
         await expect(page.getByTestId("channel-general")).toHaveCSS(
           "font-weight",
-          "600",
+          "700",
         );
       }
     }
     await expect(page.getByTestId("channel-general")).not.toHaveCSS(
       "font-weight",
-      "600",
+      "700",
     );
     for (const itemId of inboxItemIds) {
       const inboxRow = page.getByTestId(`home-inbox-item-${itemId}`);
@@ -568,7 +568,7 @@ test.describe("channel activity hover preview", () => {
 
     await expect(page.getByTestId("channel-general")).toHaveCSS(
       "font-weight",
-      "600",
+      "700",
     );
     await expect(page.getByTestId("channel-unread-dot-general")).toBeVisible();
     await page.getByTestId("channel-general").click();
@@ -594,7 +594,7 @@ test.describe("channel activity hover preview", () => {
     await expect(page.getByTestId("channel-unread-dot-general")).toBeVisible();
     await expect(page.getByTestId("channel-general")).toHaveCSS(
       "font-weight",
-      "600",
+      "700",
     );
 
     await page.mouse.move(900, 680);
@@ -632,7 +632,7 @@ test.describe("channel activity hover preview", () => {
     await expect(page.getByTestId("chat-title")).toHaveText("random");
     await expect(page.getByTestId("channel-general")).not.toHaveCSS(
       "font-weight",
-      "600",
+      "700",
     );
   });
 
@@ -694,7 +694,7 @@ test.describe("channel activity hover preview", () => {
     await page.getByTestId("channel-random").click();
     await expect(page.getByTestId("channel-general")).toHaveCSS(
       "font-weight",
-      "600",
+      "700",
     );
   });
 
@@ -728,7 +728,7 @@ test.describe("channel activity hover preview", () => {
     }
     await expect(page.getByTestId("channel-general")).toHaveCSS(
       "font-weight",
-      "600",
+      "700",
     );
     await expect.poll(() => getForcedUnreadSources(page)).toEqual(["inbox"]);
 
@@ -740,7 +740,7 @@ test.describe("channel activity hover preview", () => {
       if (index === 0) {
         await expect(page.getByTestId("channel-general")).toHaveCSS(
           "font-weight",
-          "600",
+          "700",
         );
         await expect
           .poll(() => getForcedUnreadSources(page))

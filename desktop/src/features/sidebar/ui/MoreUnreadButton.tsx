@@ -4,12 +4,14 @@ import { UnreadPill, unreadCountLabel } from "@/shared/ui/UnreadPill";
 export function MoreUnreadButton({
   bottomClassName = "bottom-0",
   count,
+  label,
   onClick,
   position,
   testId,
 }: {
   bottomClassName?: string;
   count: number;
+  label?: string;
   onClick: () => void;
   position: "top" | "bottom";
   testId: string;
@@ -24,7 +26,7 @@ export function MoreUnreadButton({
       <UnreadPill
         direction={position === "top" ? "up" : "down"}
         emphasis="primary"
-        label={unreadCountLabel(count)}
+        label={label ?? unreadCountLabel(count)}
         onClick={onClick}
         testId={testId}
       />

@@ -2283,7 +2283,7 @@ test("sidebar shows unread indicator for newly active channels", async ({
 
   await expect(page.getByTestId("channel-random")).toHaveCSS(
     "font-weight",
-    "600",
+    "700",
   );
   await expect(page.getByTestId("channel-unread-random")).toHaveCount(0);
 
@@ -2316,7 +2316,7 @@ test("sidebar shows unread indicator for new forum posts", async ({ page }) => {
 
   await expect(page.getByTestId("channel-watercooler")).toHaveCSS(
     "font-weight",
-    "600",
+    "700",
   );
   await expect(page.getByTestId("channel-unread-watercooler")).toHaveCount(0);
 

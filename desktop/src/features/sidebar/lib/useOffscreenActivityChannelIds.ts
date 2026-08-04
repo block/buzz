@@ -2,7 +2,12 @@ import * as React from "react";
 
 import type { Channel } from "@/shared/api/types";
 
-export function useOffscreenActivityChannelIds({
+type OffscreenActivityChannelIds = {
+  messageChannelIds: ReadonlySet<string>;
+  channelIds: ReadonlySet<string>;
+};
+
+export function getOffscreenActivityChannelIds({
   activeWorkingByChannelId,
   channels,
   previewActivityChannelIds,
@@ -12,26 +17,52 @@ export function useOffscreenActivityChannelIds({
   channels: readonly Channel[];
   previewActivityChannelIds: ReadonlySet<string>;
   unreadChannelIds: ReadonlySet<string>;
-}) {
-  return React.useMemo(() => {
-    const channelIds = new Set([
-      ...previewActivityChannelIds,
-      ...activeWorkingByChannelId.keys(),
-    ]);
+}): OffscreenActivityChannelIds {
+  const messageChannelIds = new Set(previewActivityChannelIds);
 
-    // Direct messages use their own unread indicator rather than the channel
-    // preview dot, but should remain discoverable when their row is offscreen.
-    for (const channel of channels) {
-      if (channel.channelType === "dm" && unreadChannelIds.has(channel.id)) {
-        channelIds.add(channel.id);
-      }
+  // Direct messages use their own unread indicator rather than the channel
+  // preview dot, but should remain discoverable when their row is offscreen.
+  for (const channel of channels) {
+    if (channel.channelType === "dm" && unreadChannelIds.has(channel.id)) {
+      messageChannelIds.add(channel.id);
     }
+  }
 
-    return channelIds;
-  }, [
+  return {
+    messageChannelIds,
+    channelIds: new Set([
+      ...messageChannelIds,
+      ...activeWorkingByChannelId.keys(),
+    ]),
+  };
+}
+
+export function useOffscreenActivityChannelIds(args: {
+  activeWorkingByChannelId: ReadonlyMap<string, unknown>;
+  channels: readonly Channel[];
+  previewActivityChannelIds: ReadonlySet<string>;
+  unreadChannelIds: ReadonlySet<string>;
+}) {
+  const {
     activeWorkingByChannelId,
     channels,
     previewActivityChannelIds,
     unreadChannelIds,
-  ]);
+  } = args;
+
+  return React.useMemo(
+    () =>
+      getOffscreenActivityChannelIds({
+        activeWorkingByChannelId,
+        channels,
+        previewActivityChannelIds,
+        unreadChannelIds,
+      }),
+    [
+      activeWorkingByChannelId,
+      channels,
+      previewActivityChannelIds,
+      unreadChannelIds,
+    ],
+  );
 }
