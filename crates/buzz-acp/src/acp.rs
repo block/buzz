@@ -95,8 +95,15 @@ pub enum AcpError {
     #[error("Agent did not stop within {0:?} after cancellation")]
     CancelDrainTimeout(std::time::Duration),
 
-    #[error("Request timeout — agent did not respond within {0:?}")]
-    Timeout(std::time::Duration),
+    #[error("Request timeout — agent did not respond to {method} within {elapsed:?}")]
+    Timeout {
+        /// The JSON-RPC method that went unanswered. Without it a caller
+        /// cannot tell a slow `session/new` from a slow `session/prompt`,
+        /// and sessions are created lazily inside the prompt task — so the
+        /// two are indistinguishable from the outside (see #4098).
+        method: &'static str,
+        elapsed: std::time::Duration,
+    },
 
     #[error("Write timeout — agent stopped reading stdin (blocked for {0:?})")]
     WriteTimeout(std::time::Duration),
@@ -1075,7 +1082,7 @@ impl AcpClient {
     /// if they don't, the agent is likely stuck and we must not block forever.
     async fn send_request(
         &mut self,
-        method: &str,
+        method: &'static str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, AcpError> {
         let id = self.next_id;
@@ -1096,12 +1103,20 @@ impl AcpClient {
         let timeout = Self::REQUEST_TIMEOUT;
         match tokio::time::timeout(timeout, self.write_ndjson(&msg)).await {
             Ok(result) => result?,
-            Err(_) => return Err(AcpError::Timeout(timeout)),
+            Err(_) => {
+                return Err(AcpError::Timeout {
+                    method,
+                    elapsed: timeout,
+                })
+            }
         }
 
         match tokio::time::timeout(timeout, self.read_until_response(id)).await {
             Ok(result) => result,
-            Err(_) => Err(AcpError::Timeout(timeout)),
+            Err(_) => Err(AcpError::Timeout {
+                method,
+                elapsed: timeout,
+            }),
         }
     }
 
