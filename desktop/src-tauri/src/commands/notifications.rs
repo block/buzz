@@ -1,4 +1,4 @@
-//! Native (Linux) desktop-notification helper.
+//! Native desktop-notification helpers.
 //!
 //! `tauri-plugin-notification` posts a notification by calling `notify_rust`'s
 //! `show()` and then immediately dropping the returned `NotificationHandle`.
@@ -15,9 +15,9 @@
 
 /// Show a desktop notification natively.
 ///
-/// On Linux this uses the connection-preserving path described above. On other
-/// platforms the bundled notification plugin already works correctly, so the
-/// frontend never calls this and we simply report that it is unused.
+/// Linux uses the connection-preserving D-Bus path described above. macOS uses
+/// one application-lifetime `UNUserNotificationCenterDelegate`; it does not
+/// allocate a listener or waiter for each notification.
 #[tauri::command]
 pub fn show_native_notification(
     app: tauri::AppHandle,
@@ -31,10 +31,16 @@ pub fn show_native_notification(
         Ok(())
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app;
+        crate::macos_notifications::show(title, body, target)
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = (&app, &title, &body, &target);
-        Err("show_native_notification is only supported on Linux".to_string())
+        Err("show_native_notification is only supported on Linux and macOS".to_string())
     }
 }
 

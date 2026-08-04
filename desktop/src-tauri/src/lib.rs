@@ -13,6 +13,8 @@ mod identity_storage;
 mod initial_window;
 mod key_backup;
 mod linux_media;
+#[cfg(target_os = "macos")]
+mod macos_notifications;
 mod managed_agents;
 mod media_proxy;
 #[cfg(feature = "mesh-llm")]
@@ -309,7 +311,10 @@ pub fn run() {
         .setup(move |app| {
             let app_handle = app.handle().clone();
             #[cfg(target_os = "macos")]
-            tray_menu::init(&app_handle)?;
+            {
+                tray_menu::init(&app_handle)?;
+                macos_notifications::init(&app_handle)?;
+            }
 
             // ── Phase 2: boot-time sentinel wipe ──────────────────────────────
             // Must run before migrations and identity resolution so the wipe
