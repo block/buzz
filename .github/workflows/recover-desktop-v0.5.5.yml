@@ -1,0 +1,124 @@
+name: Recover Desktop v0.5.5 tag
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type "recover desktop-v0.5.5 from PR 4800"
+        required: true
+        type: string
+
+concurrency:
+  group: recover-desktop-v0.5.5-tag
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: read
+  statuses: read
+
+jobs:
+  recover:
+    if: >-
+      github.repository == 'block/buzz' &&
+      github.ref == 'refs/heads/main' &&
+      github.actor == 'wesbillman' &&
+      inputs.confirmation == 'recover desktop-v0.5.5 from PR 4800'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      VERSION: 0.5.5
+      TAG: desktop-v0.5.5
+      PR_NUMBER: '4800'
+      BASE_SHA: 4a2305170eef565bf1836e2859247e67c030f8af
+      CANDIDATE_SHA: 2d03d37b05b68186b2caad9da79080032be3ac72
+      MERGE_SHA: a0ed13de14ee64dd90c32335790f7d3b4e94330d
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Revalidate the merged release candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git fetch origin "$BASE_SHA" "$CANDIDATE_SHA" "$MERGE_SHA" refs/heads/main:refs/remotes/origin/main --no-tags
+
+          pr="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
+          jq -e \
+            --arg base "$BASE_SHA" \
+            --arg candidate "$CANDIDATE_SHA" \
+            --arg merge "$MERGE_SHA" \
+            '(.state == "closed") and (.merged == true) and
+             (.base.ref == "main") and (.base.sha == $base) and
+             (.head.repo.full_name == "block/buzz") and
+             (.head.ref == "version-bump/0.5.5") and
+             (.head.sha == $candidate) and (.merge_commit_sha == $merge)' \
+            <<<"$pr" >/dev/null
+
+          [[ "$(git show -s --format=%P "$CANDIDATE_SHA")" == "$BASE_SHA" ]]
+          [[ "$(git show -s --format=%P "$MERGE_SHA")" == "$BASE_SHA" ]]
+          [[ "$(git show -s --format=%T "$MERGE_SHA")" == "$(git show -s --format=%T "$CANDIDATE_SHA")" ]]
+          git merge-base --is-ancestor "$MERGE_SHA" origin/main
+
+          git checkout --detach "$CANDIDATE_SHA"
+          scripts/desktop_release.py validate \
+            --candidate "$CANDIDATE_SHA" \
+            --version "$VERSION" \
+            --repo "$GITHUB_REPOSITORY"
+
+          required_checks=(
+            "Desktop E2E Integration"
+            "Desktop"
+            "Rust Lint"
+            "Security"
+            "Unit Tests"
+            "Windows Rust (x86_64-pc-windows-msvc)"
+            "Mobile"
+            "Web"
+            "Backend Integration (relay e2e)"
+            "Desktop E2E Relay"
+            "Relay E2E"
+            "Desktop Build (macOS)"
+            "DCO Check"
+            "Desktop Release Candidate"
+          )
+          checks="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/commits/$CANDIDATE_SHA/check-runs?per_page=100")"
+          for required in "${required_checks[@]}"; do
+            jq -e --arg name "$required" -f scripts/required-check-succeeded.jq <<<"$checks" >/dev/null || {
+              echo "required check is missing or unsuccessful: $required" >&2
+              exit 1
+            }
+          done
+          status="$(gh api "repos/$GITHUB_REPOSITORY/commits/$CANDIDATE_SHA/status")"
+          jq -e '(.total_count == 0) or (.state == "success")' <<<"$status" >/dev/null
+
+      - name: Create release tagger token
+        id: release-tagger
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.BUZZ_RELEASE_TAGGER_CLIENT_ID }}
+          private-key: ${{ secrets.BUZZ_RELEASE_TAGGER_PRIVATE_KEY }}
+          permission-contents: write
+
+      - name: Create immutable release tag
+        env:
+          GH_TOKEN: ${{ steps.release-tagger.outputs.token }}
+        run: |
+          set -euo pipefail
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --silent 2>/dev/null; then
+            existing_sha="$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha)"
+            [[ "$existing_sha" == "$MERGE_SHA" ]] || {
+              echo "tag $TAG already exists at $existing_sha, expected $MERGE_SHA" >&2
+              exit 1
+            }
+            echo "Tag already exists at the expected commit"
+            exit 0
+          fi
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f ref="refs/tags/$TAG" \
+            -f sha="$MERGE_SHA" \
+            --silent
