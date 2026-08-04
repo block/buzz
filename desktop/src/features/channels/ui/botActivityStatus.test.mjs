@@ -185,3 +185,22 @@ describe("formatStatusSegments", () => {
     );
   });
 });
+
+describe("buildStableActivityStatus previews", () => {
+  it("prefers a human description over the raw command preview", () => {
+    const status = buildStableActivityStatus(
+      [
+        tool({
+          status: "executing",
+          args: {
+            command: "sed -n '420,432p' file.ts",
+            description: "Read the store cache",
+          },
+          descriptor: { preview: "sed -n '420,432p' file.ts" },
+        }),
+      ],
+      CHANNEL,
+    );
+    assert.equal(status.activity, "Bash: Read the store cache");
+  });
+});
