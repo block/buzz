@@ -107,25 +107,41 @@ class ChannelSortSyncState {
   final int updatedAt;
   final String eventId;
   final bool hasPendingLocalChanges;
+  final int pendingUpdatedAt;
 
   const ChannelSortSyncState({
     this.updatedAt = 0,
     this.eventId = '',
     this.hasPendingLocalChanges = false,
+    this.pendingUpdatedAt = 0,
   });
 
   Map<String, dynamic> toJson() => {
     'updatedAt': updatedAt,
     'eventId': eventId,
     'hasPendingLocalChanges': hasPendingLocalChanges,
+    'pendingUpdatedAt': pendingUpdatedAt,
   };
 
-  factory ChannelSortSyncState.fromJson(Map<String, dynamic> json) =>
-      ChannelSortSyncState(
-        updatedAt: json['updatedAt'] is int ? json['updatedAt'] as int : 0,
-        eventId: json['eventId'] is String ? json['eventId'] as String : '',
-        hasPendingLocalChanges: json['hasPendingLocalChanges'] == true,
-      );
+  factory ChannelSortSyncState.fromJson(Map<String, dynamic> json) {
+    final updatedAt = json['updatedAt'] is int ? json['updatedAt'] as int : 0;
+    final hasPendingLocalChanges = json['hasPendingLocalChanges'] == true;
+    final storedPendingUpdatedAt = json['pendingUpdatedAt'];
+    // Older builds used updatedAt for both the remote cursor and local edit
+    // stamp. Preserve the pending guard while resetting that ambiguous cursor.
+    final isLegacyPending =
+        hasPendingLocalChanges && storedPendingUpdatedAt is! int;
+    return ChannelSortSyncState(
+      updatedAt: isLegacyPending ? 0 : updatedAt,
+      eventId: isLegacyPending
+          ? ''
+          : (json['eventId'] is String ? json['eventId'] as String : ''),
+      hasPendingLocalChanges: hasPendingLocalChanges,
+      pendingUpdatedAt: storedPendingUpdatedAt is int
+          ? storedPendingUpdatedAt
+          : (hasPendingLocalChanges ? updatedAt : 0),
+    );
+  }
 }
 
 class ChannelSortStorage {

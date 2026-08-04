@@ -160,6 +160,66 @@ void main() {
     subject.dispose();
   });
 
+  test('same-second remote does not erase a pending local edit', () async {
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    ChannelSortStorage(prefs).writeSyncState(
+      keys.public,
+      'wss://relay.example',
+      ChannelSortSyncState(updatedAt: now - 1, eventId: 'remote'),
+    );
+    final relay = _FakeRelaySession();
+    final signed = _RecordingSignedEventRelay();
+    final subject = manager(relay, signed);
+    await subject.initialize();
+
+    subject.setSortModeFor('channels', ChannelSortMode.recent);
+    relay.emit(event({'dms': 'recent'}, now, id: 'a'));
+    expect(subject.store.groups, {'channels': ChannelSortMode.recent});
+    await signed.submitted.future.timeout(const Duration(seconds: 1));
+    subject.dispose();
+  });
+
+  test('publishing does not advance the persisted remote cursor', () async {
+    final storage = ChannelSortStorage(prefs);
+    storage.writeSyncState(
+      keys.public,
+      'wss://relay.example',
+      const ChannelSortSyncState(updatedAt: 100, eventId: 'remote'),
+    );
+    final signed = _RecordingSignedEventRelay();
+    final subject = manager(_FakeRelaySession(), signed);
+    await subject.initialize();
+
+    subject.setSortModeFor('channels', ChannelSortMode.recent);
+    await signed.submitted.future.timeout(const Duration(seconds: 1));
+    await Future<void>.delayed(Duration.zero);
+
+    final syncState = storage.readSyncState(keys.public, 'wss://relay.example');
+    expect(syncState.updatedAt, 100);
+    expect(syncState.eventId, 'remote');
+    expect(syncState.hasPendingLocalChanges, isFalse);
+    expect(syncState.pendingUpdatedAt, 0);
+    subject.dispose();
+  });
+
+  test('legacy pending state resets its ambiguous remote cursor', () {
+    final storage = ChannelSortStorage(prefs);
+    // Simulate the pre-migration JSON, which had no pendingUpdatedAt field.
+    prefs.setString(
+      '${channelSortKey(keys.public, 'wss://relay.example')}:sync',
+      jsonEncode({
+        'updatedAt': 4102444800,
+        'eventId': 'local-publication',
+        'hasPendingLocalChanges': true,
+      }),
+    );
+
+    final syncState = storage.readSyncState(keys.public, 'wss://relay.example');
+    expect(syncState.updatedAt, 0);
+    expect(syncState.eventId, isEmpty);
+    expect(syncState.pendingUpdatedAt, 4102444800);
+  });
+
   test('lower event ID wins when remote timestamps tie', () async {
     final relay = _FakeRelaySession()
       ..historyEvents = [
@@ -176,23 +236,20 @@ void main() {
     subject.dispose();
   });
 
-  test(
-    'keeps a lower-ID same-second relay replacement after publishing',
-    () async {
-      final relay = _FakeRelaySession();
-      final signed = _RecordingSignedEventRelay();
-      final subject = manager(relay, signed);
-      await subject.initialize();
+  test('adopts a newer relay replacement after publishing', () async {
+    final relay = _FakeRelaySession();
+    final signed = _RecordingSignedEventRelay();
+    final subject = manager(relay, signed);
+    await subject.initialize();
 
-      subject.setSortModeFor('channels', ChannelSortMode.recent);
-      final submitted = await signed.submitted.future.timeout(
-        const Duration(seconds: 1),
-      );
-      relay.emit(event({'dms': 'recent'}, submitted.createdAt!, id: 'a'));
-      expect(subject.store.groups, {'dms': ChannelSortMode.recent});
-      subject.dispose();
-    },
-  );
+    subject.setSortModeFor('channels', ChannelSortMode.recent);
+    final submitted = await signed.submitted.future.timeout(
+      const Duration(seconds: 1),
+    );
+    relay.emit(event({'dms': 'recent'}, submitted.createdAt! + 1, id: 'a'));
+    expect(subject.store.groups, {'dms': ChannelSortMode.recent});
+    subject.dispose();
+  });
 
   test(
     'future-dated remote event is ignored and cannot wedge publishing',

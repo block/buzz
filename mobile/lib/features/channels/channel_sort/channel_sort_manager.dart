@@ -143,10 +143,16 @@ class ChannelSortManager {
     _store = liveSectionIds == null
         ? updated
         : stripOrphanedSectionModes(updated, liveSectionIds);
+    final now = currentUnixSeconds();
+    final pendingUpdatedAt = min(
+      max(now, _syncState.pendingUpdatedAt + 1),
+      now + _maxClockDriftSeconds,
+    );
     _syncState = ChannelSortSyncState(
-      updatedAt: max(currentUnixSeconds(), _syncState.updatedAt + 1),
+      updatedAt: _syncState.updatedAt,
       eventId: _syncState.eventId,
       hasPendingLocalChanges: true,
+      pendingUpdatedAt: pendingUpdatedAt,
     );
     _generation++;
     _persist();
@@ -212,7 +218,7 @@ class ChannelSortManager {
   void _applyRemote(NostrEvent event) {
     if (event.createdAt > currentUnixSeconds() + _maxClockDriftSeconds) return;
     if (_syncState.hasPendingLocalChanges &&
-        event.createdAt < _syncState.updatedAt) {
+        event.createdAt <= _syncState.pendingUpdatedAt) {
       return;
     }
     final isNewer =
@@ -265,9 +271,15 @@ class ChannelSortManager {
     try {
       final now = currentUnixSeconds();
       final createdAt = max(now, _lastRemoteCreatedAt + 1);
-      if (createdAt > now + _maxClockDriftSeconds) return;
+      if (createdAt > now + _maxClockDriftSeconds) {
+        debugPrint(
+          '[ChannelSortManager] publish delayed: relay cursor '
+          'is ${createdAt - now}s ahead of local time',
+        );
+        _schedulePublish();
+        return;
+      }
       final ciphertext = _crypto.encrypt(jsonEncode(_store.toJson()));
-      String? submittedEventId;
       await _signedEventRelay.submit(
         kind: EventKind.readState,
         content: ciphertext,
@@ -276,14 +288,14 @@ class ChannelSortManager {
           ['t', _dTag],
         ],
         createdAt: createdAt,
-        onSigned: (event) => submittedEventId = event.id,
       );
       if (_disposed || _generation != generationAtStart) return;
-      _lastRemoteCreatedAt = createdAt;
-      _lastRemoteEventId = submittedEventId ?? '';
+      // Publishing clears durable pending state, but only remote adoption may
+      // advance the sync cursor. This matches desktop and prevents local
+      // publications from inflating the next event's timestamp.
       _syncState = ChannelSortSyncState(
-        updatedAt: createdAt,
-        eventId: _lastRemoteEventId,
+        updatedAt: _syncState.updatedAt,
+        eventId: _syncState.eventId,
       );
       _persist();
     } catch (error) {
