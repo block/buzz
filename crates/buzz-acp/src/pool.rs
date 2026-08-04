@@ -557,6 +557,12 @@ pub struct PromptContext {
     /// `[Agent Memory — core]` section. On by default; disabled via
     /// `--no-memory` / `BUZZ_ACP_NO_MEMORY`.
     pub memory_enabled: bool,
+    /// Whether the agent should default to replying in the current thread.
+    ///
+    /// Mirrors the `thread_replies` behavioral config from persona packs.
+    /// When false, `format_prompt` skips forced `--reply-to` anchors for new
+    /// top-level channel mentions. Existing threads and DMs are unaffected.
+    pub thread_replies: bool,
     /// Harness identity string for NIP-AM `harness` field. Derived from the
     /// configured `agent_command` at startup (e.g. `"goose"`, `"buzz-agent"`).
     pub harness_name: String,
@@ -1875,6 +1881,7 @@ pub async fn run_prompt_task(
                 system_prompt: ctx.system_prompt.as_deref(),
                 team_instructions: ctx.team_instructions.as_deref(),
                 agent_canvas: agent_canvas.as_deref(),
+                thread_replies: ctx.thread_replies,
             },
         )
     } else {
@@ -6455,6 +6462,7 @@ mod tests {
             agent_keys: agent_keys.clone(),
             agent_owner_pubkey: owner_pubkey,
             memory_enabled: false,
+            thread_replies: true,
             harness_name: "goose".to_string(),
             relay_url: "ws://127.0.0.1:3000".to_string(),
         }

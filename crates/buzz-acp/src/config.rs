@@ -474,6 +474,15 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_RELAY_OBSERVER", default_value_t = false)]
     pub relay_observer: bool,
 
+    /// Whether the agent should default to replying in the current thread.
+    ///
+    /// Mirrors the `thread_replies` behavioral config from persona packs.
+    /// When false, the harness does NOT append `--reply-to` instructions for
+    /// new top-level channel mentions, letting the agent post flat at channel root.
+    /// Existing thread and DM reply anchors are unaffected.
+    #[arg(long, env = "BUZZ_ACP_THREAD_REPLIES", default_value_t = true)]
+    pub thread_replies: bool,
+
     /// Exit after this many seconds with no dispatched events and no turn in flight.
     /// 0 disables inactivity self-termination.
     #[arg(long, env = "BUZZ_ACP_EXIT_AFTER_INACTIVITY", default_value_t = 0)]
@@ -544,6 +553,11 @@ pub struct Config {
     pub respond_to_allowlist: HashSet<String>,
     /// Allowed `respond_to` modes. Empty = all modes allowed.
     pub allowed_respond_to: Vec<String>,
+    /// Whether the agent should default to replying in the current thread.
+    ///
+    /// Mirrors the `thread_replies` behavioral config from persona packs.
+    /// Defaults to `true` per `PERSONA_PACK_SPEC.md`.
+    pub thread_replies: bool,
     /// Per-persona env vars to inject at agent spawn time (e.g., GOOSE_PROVIDER, GOOSE_MODEL, BUZZ_AGENT_MODEL).
     /// Populated from persona pack resolution. Empty when no pack is configured.
     pub persona_env_vars: Vec<(String, String)>,
@@ -1102,6 +1116,7 @@ impl Config {
             respond_to: args.respond_to,
             respond_to_allowlist,
             allowed_respond_to,
+            thread_replies: args.thread_replies,
             persona_env_vars,
             has_generated_codex_config,
             relay_observer: args.relay_observer,
@@ -1473,6 +1488,7 @@ mod tests {
             respond_to: RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: Vec::new(),
+            thread_replies: true,
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,

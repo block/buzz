@@ -1610,6 +1610,7 @@ async fn tokio_main() -> Result<()> {
             .as_deref()
             .and_then(|hex| nostr::PublicKey::from_hex(hex).ok()),
         memory_enabled: config.memory_enabled,
+        thread_replies: config.thread_replies,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
     });
@@ -5129,6 +5130,7 @@ mod build_mcp_servers_tests {
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: std::collections::HashSet::new(),
             allowed_respond_to: vec![],
+            thread_replies: true,
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
@@ -5351,6 +5353,7 @@ mod error_outcome_emission_tests {
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: vec![],
+            thread_replies: true,
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
