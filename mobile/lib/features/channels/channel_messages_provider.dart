@@ -237,25 +237,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       event.kind,
     );
     final thread = isTimelineRow ? event.threadReference : null;
-    if (thread?.parentId != null) {
-      final rootId = thread?.rootId;
-      if (rootId != null) {
-        ref.invalidate(
-          threadRepliesProvider(
-            ThreadRepliesArgs(channelId: channelId, rootId: rootId),
-          ),
-        );
-      }
-      final parentId = thread?.parentId;
-      if (parentId != null && parentId != rootId) {
-        ref.invalidate(
-          threadRepliesProvider(
-            ThreadRepliesArgs(channelId: channelId, rootId: parentId),
-          ),
-        );
-      }
-      if (!_isBroadcastReply(event)) return false;
-    }
+    if (thread?.parentId != null && !_isBroadcastReply(event)) return false;
     // Thread summaries are neither a timeline row nor an aux event, but they are
     // how the root's "N replies" row learns a reply landed — a reply itself
     // never reaches the main timeline. Dropping them here meant the count only

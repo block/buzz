@@ -366,15 +366,6 @@ void main() {
         queryResults: [
           [_event(id: 'history', createdAt: 10), _bounds()],
           <NostrEvent>[],
-          [
-            _event(
-              id: 'reply',
-              createdAt: 20,
-              extraTags: const [
-                ['e', 'root', '', 'reply'],
-              ],
-            ),
-          ],
         ],
       );
       final container = _buildContainer(relaySession);
@@ -384,7 +375,12 @@ void main() {
       await relaySession.subscribed;
       await _pumpEventQueue();
       const args = ThreadRepliesArgs(channelId: _channelId, rootId: 'root');
-      container.read(threadRepliesWithLocalProvider(args));
+      final threadSubscription = container.listen(
+        threadRepliesWithLocalProvider(args),
+        (_, _) {},
+        fireImmediately: true,
+      );
+      addTearDown(threadSubscription.close);
       await _pumpEventQueue();
       final notifier = container.read(
         channelMessagesProvider(_channelId).notifier,
@@ -426,6 +422,7 @@ void main() {
       );
       expect(container.read(threadLocalRepliesProvider(args)), isEmpty);
       expect(container.read(pendingLocalMessagesProvider(_channelId)), isEmpty);
+      expect(relaySession.queryFilters, hasLength(2));
 
       final rejected = _event(
         id: 'rejected',
@@ -447,13 +444,12 @@ void main() {
   );
 
   test(
-    'thread live echo keeps ownership until the authoritative refetch succeeds',
+    'thread live echo retires ownership without an invalidating refetch',
     () async {
       final relaySession = _RecordingRelaySessionNotifier(
         queryResults: [
           [_event(id: 'history', createdAt: 10), _bounds()],
           <NostrEvent>[],
-          Exception('thread refetch failed'),
         ],
       );
       final container = _buildContainer(relaySession);
@@ -463,7 +459,12 @@ void main() {
       await relaySession.subscribed;
       await _pumpEventQueue();
       const args = ThreadRepliesArgs(channelId: _channelId, rootId: 'root');
-      container.read(threadRepliesWithLocalProvider(args));
+      final threadSubscription = container.listen(
+        threadRepliesWithLocalProvider(args),
+        (_, _) {},
+        fireImmediately: true,
+      );
+      addTearDown(threadSubscription.close);
       await _pumpEventQueue();
       final notifier = container.read(
         channelMessagesProvider(_channelId).notifier,
@@ -480,15 +481,8 @@ void main() {
       relaySession.emit(reply);
       await _pumpEventQueue();
 
-      expect(container.read(pendingLocalMessagesProvider(_channelId)).keys, [
-        'reply',
-      ]);
-      expect(
-        container
-            .read(threadLocalRepliesProvider(args))
-            .map((event) => event.id),
-        ['reply'],
-      );
+      expect(container.read(pendingLocalMessagesProvider(_channelId)), isEmpty);
+      expect(container.read(threadLocalRepliesProvider(args)), isEmpty);
       expect(
         container
             .read(threadRepliesWithLocalProvider(args))
@@ -496,6 +490,7 @@ void main() {
             ?.map((event) => event.id),
         ['reply'],
       );
+      expect(relaySession.queryFilters, hasLength(2));
     },
   );
 
