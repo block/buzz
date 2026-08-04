@@ -27,8 +27,8 @@ import '../profile/user_profile_sheet.dart';
 import 'message_actions.dart';
 import 'message_content.dart';
 import 'reaction_row.dart';
-import 'read_state/read_state_format.dart';
-import 'read_state/read_state_provider.dart';
+import '../../shared/read_state/read_state_format.dart';
+import '../../shared/read_state/read_state_provider.dart';
 import 'send_message_provider.dart';
 import 'small_avatar.dart';
 import 'timeline_message.dart';
@@ -60,6 +60,7 @@ class ThreadDetailPage extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final composerDockHeight = useState(0.0);
+    final sendMessage = ref.read(sendMessageProvider);
     // Relay thread queries are keyed by the outermost root, even when this
     // page displays a nested branch. Query that root, then select this head's
     // direct children from the returned subtree below.
@@ -533,16 +534,14 @@ class ThreadDetailPage extends HookConsumerWidget {
                             content,
                             mentionPubkeys, {
                             mediaTags = const <List<String>>[],
-                          }) => ref
-                              .read(sendMessageProvider)
-                              .call(
-                                channelId: channelId,
-                                content: content,
-                                mentionPubkeys: mentionPubkeys,
-                                parentEventId: threadHead.id,
-                                rootEventId: effectiveRootId,
-                                mediaTags: mediaTags,
-                              ),
+                          }) => sendMessage.call(
+                            channelId: channelId,
+                            content: content,
+                            mentionPubkeys: mentionPubkeys,
+                            parentEventId: threadHead.id,
+                            rootEventId: effectiveRootId,
+                            mediaTags: mediaTags,
+                          ),
                     ),
                   ],
                 ),

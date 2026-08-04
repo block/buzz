@@ -219,3 +219,40 @@ void _sendTypingIndicator(
     // Fire-and-forget — typing indicator failure is non-fatal.
   }
 }
+
+/// Reports a send that was cancelled because the active community changed.
+///
+/// The send path is fire-and-forget, so a `StateError` escaping it would be
+/// silent. The composer's own error line cannot carry this message either: the
+/// identity change that causes the failure also resets that state on the next
+/// frame, so [messenger] must be resolved before the send's first `await`.
+void _reportSendCancelledByCommunitySwitch(ScaffoldMessengerState? messenger) {
+  messenger?.showSnackBar(
+    const SnackBar(content: Text('Message not sent: the community changed')),
+  );
+}
+
+/// Adds mentioned non-members to the channel before a send.
+///
+/// Agents are added silently with the `bot` role; humans are only passed here
+/// after they have been explicitly invited from the mention prompt.
+Future<void> _addMentionedNonMembers(
+  ChannelActions channelActions, {
+  required String channelId,
+  required List<String> agentPubkeys,
+  required List<String> humanPubkeys,
+}) async {
+  if (agentPubkeys.isNotEmpty) {
+    await channelActions.addMembers(
+      channelId: channelId,
+      pubkeys: agentPubkeys,
+      role: 'bot',
+    );
+  }
+  if (humanPubkeys.isNotEmpty) {
+    await channelActions.addMembers(
+      channelId: channelId,
+      pubkeys: humanPubkeys,
+    );
+  }
+}

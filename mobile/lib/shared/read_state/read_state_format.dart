@@ -2,7 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
-import '../../../shared/relay/nostr_models.dart';
+import '../relay/nostr_models.dart';
 
 const readStateDTagPrefix = 'read-state:';
 const readStateFetchLimit = 500;
