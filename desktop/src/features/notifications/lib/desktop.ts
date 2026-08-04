@@ -200,36 +200,51 @@ export async function listenForDesktopNotificationActions(
 
     // Linux forwards the target as the event payload. macOS queues targets in
     // Rust first so cold-start clicks survive until this listener is mounted.
-    try {
-      const dispatchNativeActivations = async (payload?: unknown) => {
-        if (isMacPlatform()) {
-          const targets = await invoke<unknown[]>(
-            TAKE_PENDING_MACOS_NOTIFICATION_ACTIVATIONS,
-          );
-          for (const pendingTarget of targets) {
-            const target = parseNotificationTarget(pendingTarget);
-            if (target) {
-              dispatchDesktopNotificationTarget(target);
-            }
+    const dispatchNativeActivations = async (payload?: unknown) => {
+      if (isMacPlatform()) {
+        const targets = await invoke<unknown[]>(
+          TAKE_PENDING_MACOS_NOTIFICATION_ACTIVATIONS,
+        );
+        for (const pendingTarget of targets) {
+          const target = parseNotificationTarget(pendingTarget);
+          if (target) {
+            dispatchDesktopNotificationTarget(target);
           }
-          return;
         }
+        return;
+      }
 
-        const target = parseNotificationTarget(payload);
-        if (target) {
-          dispatchDesktopNotificationTarget(target);
-        }
-      };
+      const target = parseNotificationTarget(payload);
+      if (target) {
+        dispatchDesktopNotificationTarget(target);
+      }
+    };
 
+    try {
       nativeUnlisten = await listen<unknown>(
         NATIVE_NOTIFICATION_ACTIVATED_EVENT,
         (event) => {
-          void dispatchNativeActivations(event.payload);
+          void dispatchNativeActivations(event.payload).catch((error) => {
+            console.error(
+              "Failed to dispatch native notification activation",
+              error,
+            );
+          });
         },
       );
-      await dispatchNativeActivations();
     } catch {
       nativeUnlisten = null;
+    }
+
+    if (nativeUnlisten && isMacPlatform()) {
+      try {
+        await dispatchNativeActivations();
+      } catch (error) {
+        console.error(
+          "Failed to drain pending macOS notification activations",
+          error,
+        );
+      }
     }
   }
 
