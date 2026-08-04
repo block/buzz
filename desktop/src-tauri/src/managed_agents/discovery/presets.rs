@@ -187,6 +187,7 @@ pub(crate) fn preset_harness_definitions(
                 label: preset.label.to_string(),
                 command: preset.command.to_string(),
                 args: preset.args.iter().map(|arg| arg.to_string()).collect(),
+                mcp_command: None,
                 env: Default::default(),
                 install_instructions_url: preset.install_instructions_url.to_string(),
                 install_hint: preset.install_hint.to_string(),

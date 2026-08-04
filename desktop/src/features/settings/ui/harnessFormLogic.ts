@@ -73,6 +73,7 @@ export interface CustomFormValues {
   id: string;
   label: string;
   command: string;
+  mcpCommand: string;
   /** Each element is one argument; no space-splitting round-trip. */
   args: string[];
   /** KEY=VALUE pairs for env injection at spawn time. */
@@ -86,6 +87,7 @@ export interface EditableCatalogEntry {
   id: string;
   label: string;
   command: string | null;
+  mcpCommand: string | null;
   defaultArgs: string[] | undefined;
   definitionEnv?: Record<string, string>;
   installInstructionsUrl: string;
@@ -97,6 +99,7 @@ export interface HarnessDefinitionPayload {
   id: string;
   label: string;
   command: string;
+  mcpCommand?: string;
   args: string[];
   env: Record<string, string>;
   installInstructionsUrl: string;
@@ -118,6 +121,7 @@ export function formValuesFromCatalogEntry(
     id: entry.id,
     label: entry.label,
     command: entry.command ?? "",
+    mcpCommand: entry.mcpCommand ?? "",
     args: entry.defaultArgs ?? [],
     env: envPairsFromRecord(entry.definitionEnv),
     installInstructionsUrl: entry.installInstructionsUrl,
@@ -133,6 +137,7 @@ export function definitionFromFormValues(
     id: form.id.trim(),
     label: form.label.trim(),
     command: form.command.trim(),
+    mcpCommand: form.mcpCommand.trim() || undefined,
     args: filterArgs(form.args),
     env: buildEnvRecord(form.env),
     installInstructionsUrl: form.installInstructionsUrl.trim(),

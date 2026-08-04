@@ -31,6 +31,7 @@ function makeArgs(overrides = {}) {
       id: overrides.id ?? "test-harness",
       label: overrides.label ?? "Test Harness",
       command: overrides.command ?? "test-bin",
+      mcpCommand: overrides.mcpCommand,
       args: overrides.args ?? [],
       env: overrides.env ?? {},
       installInstructionsUrl: overrides.installInstructionsUrl ?? "",
@@ -70,6 +71,17 @@ describe("handleSaveCustomHarness", () => {
     assert.deepStrictEqual(
       mockCustomHarnesses.get("env-rt")?.definition_env,
       env,
+    );
+  });
+
+  it("preserves the optional MCP sidecar command", () => {
+    const entry = handleSaveCustomHarness(
+      makeArgs({ id: "mcp-rt", mcpCommand: "read-only-mcp" }),
+    );
+    assert.equal(entry.mcp_command, "read-only-mcp");
+    assert.equal(
+      mockCustomHarnesses.get("mcp-rt")?.mcp_command,
+      "read-only-mcp",
     );
   });
 

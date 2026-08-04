@@ -1561,9 +1561,7 @@ pub fn discover_acp_runtimes_from(
                 command,
                 binary_path,
                 default_args,
-                // Custom harnesses are plain ACP — no MCP sidecar, no env-var
-                // model switching, no thinking knobs.
-                mcp_command: None,
+                mcp_command: def.mcp_command.clone(),
                 model_env_var: None,
                 provider_env_var: None,
                 thinking_env_var: None,

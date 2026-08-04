@@ -28,6 +28,7 @@ export const EMPTY_CUSTOM_FORM: CustomFormValues = {
   id: "",
   label: "",
   command: "",
+  mcpCommand: "",
   args: [],
   env: [],
   installInstructionsUrl: "",
@@ -36,15 +37,25 @@ export const EMPTY_CUSTOM_FORM: CustomFormValues = {
 
 // ── Inline command validation ─────────────────────────────────────────────────
 
-function CommandAvailabilityBadge({ command }: { command: string }) {
+function CommandAvailabilityBadge({
+  command,
+  kind = "acp",
+}: {
+  command: string;
+  kind?: "acp" | "mcp";
+}) {
   const trimmed = command.trim();
-  const prereqs = useManagedAgentPrereqsQuery(trimmed, "", {
-    enabled: trimmed.length > 0,
-  });
+  const prereqs = useManagedAgentPrereqsQuery(
+    kind === "acp" ? trimmed : "",
+    kind === "mcp" ? trimmed : "",
+    {
+      enabled: trimmed.length > 0,
+    },
+  );
 
   if (!trimmed || prereqs.isLoading) return null;
 
-  const available = prereqs.data?.acp.available;
+  const available = prereqs.data?.[kind].available;
   if (available === undefined) return null;
 
   return (
@@ -244,7 +255,12 @@ export function CustomHarnessForm({
   function field(
     key: keyof Pick<
       CustomFormValues,
-      "id" | "label" | "command" | "installInstructionsUrl" | "installHint"
+      | "id"
+      | "label"
+      | "command"
+      | "mcpCommand"
+      | "installInstructionsUrl"
+      | "installHint"
     >,
   ) {
     return (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -381,6 +397,31 @@ export function CustomHarnessForm({
           </FieldShell>
           <p className="text-xs text-muted-foreground">
             Any command that speaks ACP over stdio works.
+          </p>
+        </div>
+
+        <div className="space-y-1.5">
+          <div className="flex items-center gap-2">
+            <label
+              className="text-sm font-medium text-foreground"
+              htmlFor="ch-mcp-command"
+            >
+              MCP command
+              <span className={PERSONA_LABEL_OPTIONAL_CLASS}>(optional)</span>
+            </label>
+            <CommandAvailabilityBadge command={form.mcpCommand} kind="mcp" />
+          </div>
+          <FieldShell>
+            <Input
+              className={cn(FIELD_INPUT_CLASS, "font-mono")}
+              id="ch-mcp-command"
+              onChange={field("mcpCommand")}
+              placeholder="my-mcp-server"
+              value={form.mcpCommand}
+            />
+          </FieldShell>
+          <p className="text-xs text-muted-foreground">
+            Starts this MCP sidecar only for agents using this harness.
           </p>
         </div>
 

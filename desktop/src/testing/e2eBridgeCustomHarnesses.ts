@@ -61,6 +61,7 @@ export function handleSaveCustomHarness(args: {
     id?: string;
     label?: string;
     command?: string;
+    mcpCommand?: string;
     args?: string[];
     env?: Record<string, string>;
     installInstructionsUrl?: string;
@@ -88,7 +89,7 @@ export function handleSaveCustomHarness(args: {
     command: def.command ?? null,
     binary_path: null,
     default_args: def.args ?? [],
-    mcp_command: null,
+    mcp_command: def.mcpCommand ?? null,
     install_hint: def.installHint ?? "",
     install_instructions_url: def.installInstructionsUrl ?? "",
     can_auto_install: false,
