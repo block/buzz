@@ -12,6 +12,7 @@ import {
   DEFAULT_INVITE_TTL_SECS,
   InviteLinkSection,
 } from "./InviteLinkSection";
+import { Separator } from "@/shared/ui/separator";
 
 export function CommunityInviteDialog({
   isOwner,
@@ -49,10 +50,17 @@ export function CommunityInviteDialog({
           />
         </section>
 
+        <div
+          className="relative flex items-center py-2"
+          data-testid="invite-options-divider"
+        >
+          <Separator className="bg-input/40" />
+          <span className="absolute left-1/2 -translate-x-1/2 bg-background px-3 text-sm text-muted-foreground">
+            Or, copy a link
+          </span>
+        </div>
+
         <section className="space-y-3">
-          <p className="text-2xs font-medium text-secondary-foreground/75">
-            Link settings
-          </p>
           <InviteLinkSection onTtlSecsChange={setTtlSecs} ttlSecs={ttlSecs} />
         </section>
       </DialogContent>

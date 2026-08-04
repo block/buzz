@@ -27,7 +27,7 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-test("copies a freshly minted invite link without showing a URL or QR code", async ({
+test("copies a freshly minted invite link from the link field", async ({
   page,
 }) => {
   await page.goto("/");
@@ -38,7 +38,9 @@ test("copies a freshly minted invite link without showing a URL or QR code", asy
   await expect(page.getByTestId("member-pubkey-input")).toBeVisible();
   await expect(page.getByTestId("member-role")).toHaveCount(0);
   await expect(page.getByTestId("confirm-add-member")).toHaveCount(0);
-  await expect(page.getByTestId("invite-link-url")).toHaveCount(0);
+  await expect(page.getByTestId("invite-link-url")).toHaveValue(
+    "buzz://join?relay=wss%3A%2F%2Frelay.example.com&code=qr-download-test",
+  );
   await expect(page.getByTestId("invite-link-qr-code")).toHaveCount(0);
   await expect(page.getByTestId("invite-link-max-uses-trigger")).toHaveText(
     "No limit",
@@ -80,9 +82,12 @@ test("sets a selected invite-use limit", async ({ page }) => {
   ).toBeVisible();
   await page.getByTestId("invite-link-max-uses-10").click();
   await expect(maxUsesTrigger).toHaveText("10 uses");
+  await expect
+    .poll(() => invitePayloads.at(-1))
+    .toEqual({
+      max_uses: 10,
+      ttl_secs: 3 * 24 * 60 * 60,
+    });
   await page.getByTestId("copy-invite-link").click();
   await expect(page.getByTestId("copy-invite-link")).toContainText("Copied");
-  expect(invitePayloads).toEqual([
-    { max_uses: 10, ttl_secs: 3 * 24 * 60 * 60 },
-  ]);
 });
