@@ -2,28 +2,54 @@ import * as React from "react";
 
 import { KIND_AGENT_OBSERVER_FRAME } from "@/shared/constants/kinds";
 import { mergeSaveSubscriptionKinds } from "@/shared/api/tauriArchive";
+import {
+  getExplicitObserverArchiveChoice,
+  hasExplicitObserverArchiveChoice,
+  setExplicitObserverArchiveChoice,
+} from "./observerArchivePreference";
 
 export interface ObserverArchiveSeedDeps {
   mergeSaveSubscriptionKinds: (kind: number) => Promise<void>;
+  hasExplicitChoice: (pubkey: string) => boolean;
+  getExplicitChoice: (pubkey: string) => boolean | null;
+  setExplicitChoice: (pubkey: string, enabled: boolean) => void;
 }
 
 const defaultDeps: ObserverArchiveSeedDeps = {
   mergeSaveSubscriptionKinds,
+  hasExplicitChoice: hasExplicitObserverArchiveChoice,
+  getExplicitChoice: getExplicitObserverArchiveChoice,
+  setExplicitChoice: setExplicitObserverArchiveChoice,
 };
 
 /**
  * Reconcile observer-feed archive state for the current identity.
  *
- * Archive defaults to enabled for all builds. This unconditionally ensures
- * kind 24200 exists in the DB subscription via an atomic DB-side merge.
+ * Archive defaults to enabled for all builds. Merges kind 24200 into the
+ * DB subscription via an atomic DB-side merge — UNLESS the user has
+ * previously made an explicit opt-out choice for this identity, in which
+ * case we skip the merge to preserve their preference across restarts.
  *
  * Rejects on failure — callers must not open archive listeners against
  * unreconciled state.
  */
 export async function reconcileObserverArchive(
+  pubkey: string,
   deps: ObserverArchiveSeedDeps = defaultDeps,
 ): Promise<void> {
+  // If the user explicitly opted out, honour that choice and skip the merge.
+  if (
+    deps.hasExplicitChoice(pubkey) &&
+    deps.getExplicitChoice(pubkey) === false
+  ) {
+    return;
+  }
   await deps.mergeSaveSubscriptionKinds(KIND_AGENT_OBSERVER_FRAME);
+  // Record that this identity has been seeded (explicit choice = true) so
+  // future reconciliation calls are also guarded correctly.
+  if (!deps.hasExplicitChoice(pubkey)) {
+    deps.setExplicitChoice(pubkey, true);
+  }
 }
 
 /**
@@ -62,7 +88,7 @@ export function startReconciliation(
 ): () => void {
   let cancelled = false;
 
-  reconcileObserverArchive(deps)
+  reconcileObserverArchive(pubkey, deps)
     .then(() => {
       if (!cancelled) onReady(pubkey);
     })
