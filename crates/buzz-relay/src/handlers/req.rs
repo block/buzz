@@ -334,7 +334,12 @@ pub async fn handle_req(
         // (B) projection strategy and the missing-lookup ImplBug
         // guard-rail. Skipped silently if `trace_state` is `None` (only
         // happens on malformed pubkey, a separate failure path).
-        if let Some(state_snap) = trace_state.as_ref() {
+        // `tracer.enabled()` short-circuits the whole block on the production
+        // `NoopTracer`: the `communities_of_channels` lookup below is a
+        // `channels` read whose only consumer is `record_read_message_rows`,
+        // and this emit runs once PER FILTER. Gating on `trace_state` alone was
+        // not enough — that is `Some` for every well-formed request.
+        if let Some(state_snap) = trace_state.as_ref().filter(|_| state.tracer.enabled()) {
             let row_channels: Vec<Option<uuid::Uuid>> =
                 events.iter().map(|e| e.channel_id).collect();
             let distinct: Vec<uuid::Uuid> = {
@@ -659,7 +664,9 @@ async fn handle_search_req(
                 // level isn't bound to a single channel filter, the
                 // per-row `channel_id` carries the channel identity
                 // honestly.
-                if let Some(state_snap) = trace_state {
+                // Same `enabled()` gate as the non-search lane: skip the
+                // trace-only `channels` lookup when nothing observes the emit.
+                if let Some(state_snap) = trace_state.filter(|_| state.tracer.enabled()) {
                     let row_channels: Vec<Option<uuid::Uuid>> =
                         events.iter().map(|e| e.channel_id).collect();
                     let distinct: Vec<uuid::Uuid> = {

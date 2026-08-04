@@ -57,6 +57,7 @@ before(async () => {
     playbackRate: 1,
     reverse() {},
   });
+  dom.window.HTMLElement.prototype.setPointerCapture = () => {};
   ({ act, cleanup, fireEvent, render, waitFor } = await import(
     "@testing-library/react"
   ));
@@ -232,6 +233,89 @@ test("tab actions restore terminal input focus", async () => {
   }
 });
 
+test("drag resize batches visual updates and commits state only on release", async () => {
+  const { view } = fixture({ mode: "docked" });
+  await ready(view);
+  const substrate = view.container.querySelector(".buzz-terminal-substrate");
+  const handle = view.getByLabelText("Resize Buzz Term");
+
+  fireEvent.pointerDown(handle, { clientY: 500, pointerId: 1 });
+  fireEvent.pointerMove(handle, { clientY: 400, pointerId: 2 });
+  fireEvent.pointerUp(handle, { clientY: 400, pointerId: 2 });
+  assert.equal(substrate.dataset.terminalResizing, "true");
+  fireEvent.pointerMove(handle, { clientY: 460, pointerId: 1 });
+  fireEvent.pointerMove(handle, { clientY: 440, pointerId: 1 });
+  assert.equal(substrate.dataset.terminalResizing, "true");
+  assert.equal(window.localStorage.getItem("buzz-terminal-dock-height"), null);
+
+  await waitFor(() => assert.equal(substrate.style.height, "380px"));
+  fireEvent.pointerUp(handle, { clientY: 440, pointerId: 1 });
+  assert.equal(substrate.dataset.terminalResizing, undefined);
+  assert.equal(window.localStorage.getItem("buzz-terminal-dock-height"), "380");
+});
+
+test("drag resize repaints the canvas without reporting PTY geometry until release", async () => {
+  let canvasHeight = 280;
+  const viewportSizes = [];
+  dom.window.HTMLCanvasElement.prototype.getBoundingClientRect = () => ({
+    bottom: canvasHeight,
+    height: canvasHeight,
+    left: 0,
+    right: 940.8,
+    top: 0,
+    width: 940.8,
+    x: 0,
+    y: 0,
+    toJSON() {},
+  });
+  const { view } = fixture({
+    mode: "docked",
+    onViewportSize(size) {
+      viewportSizes.push(size);
+    },
+  });
+  await ready(view);
+  const canvas = view.container.querySelector(
+    ".buzz-terminal-viewport > canvas:not(.buzz-terminal-welcome)",
+  );
+  const handle = view.getByLabelText("Resize Buzz Term");
+  await waitFor(() => assert.equal(canvas.height, 280));
+  const reportsBeforeDrag = viewportSizes.length;
+
+  fireEvent.pointerDown(handle, { clientY: 500, pointerId: 1 });
+  canvasHeight = 340;
+  fireEvent.pointerMove(handle, { clientY: 440, pointerId: 1 });
+
+  await waitFor(() => assert.equal(canvas.height, 340));
+  assert.equal(
+    viewportSizes.length,
+    reportsBeforeDrag,
+    "visual repaint must not resize the PTY during drag",
+  );
+
+  fireEvent.pointerUp(handle, { clientY: 440, pointerId: 1 });
+  await waitFor(() => assert.equal(viewportSizes.at(-1).pixelHeight, 340));
+});
+
+test("unmount cancels a queued drag update", async () => {
+  const { view } = fixture({ mode: "docked" });
+  await ready(view);
+  const handle = view.getByLabelText("Resize Buzz Term");
+  const previousHeight = handle.closest(".buzz-terminal-substrate").style
+    .height;
+
+  fireEvent.pointerDown(handle, { clientY: 500, pointerId: 1 });
+  fireEvent.pointerMove(handle, { clientY: 440, pointerId: 1 });
+  view.unmount();
+  await new Promise((resolve) => window.requestAnimationFrame(resolve));
+
+  assert.equal(window.localStorage.getItem("buzz-terminal-dock-height"), null);
+  assert.equal(
+    handle.closest(".buzz-terminal-substrate").style.height,
+    previousHeight,
+  );
+});
+
 const EMPTY_FRAME = {
   cursor: { column: 0, line: 0, visible: false },
   full: false,
@@ -275,74 +359,83 @@ async function reveal(view) {
   );
 }
 
-test("spawn-time output before the first reveal keeps the welcome overlay", async () => {
-  const subject = fixture({ frame: EMPTY_FRAME });
+test("the first settled reveal runs one bounded splash", async () => {
+  let starts = 0;
+  const subject = fixture({
+    frame: EMPTY_FRAME,
+    onSplashStarted() {
+      starts += 1;
+    },
+    showSplash: true,
+    viewportReportingEnabled: false,
+    visible: true,
+  });
   await ready(subject.view);
-  await expectWelcome(subject.view, true);
+  await expectWelcome(subject.view, false);
 
-  subject.rerender({ frame: VISIBLE_FRAME });
+  subject.rerender({
+    frame: EMPTY_FRAME,
+    onSplashStarted() {
+      starts += 1;
+    },
+    showSplash: true,
+    viewportReportingEnabled: true,
+    visible: true,
+  });
   await expectWelcome(subject.view, true);
-
-  await reveal(subject.view);
-  await expectWelcome(subject.view, true);
+  assert.equal(starts, 1);
+  await act(async () => new Promise((resolve) => setTimeout(resolve, 2_550)));
+  await expectWelcome(subject.view, false);
 });
 
-test("the first keystroke dismisses the welcome overlay", async () => {
-  const subject = fixture({ frame: VISIBLE_FRAME });
+test("later reveals do not replay a consumed splash", async () => {
+  const subject = fixture({
+    frame: EMPTY_FRAME,
+    showSplash: true,
+    viewportReportingEnabled: true,
+    visible: true,
+  });
   await ready(subject.view);
-  await reveal(subject.view);
+  await expectWelcome(subject.view, true);
+
+  subject.rerender({ frame: EMPTY_FRAME, showSplash: false, visible: false });
+  await expectWelcome(subject.view, false);
+  subject.rerender({ frame: EMPTY_FRAME, showSplash: false, visible: true });
+  await expectWelcome(subject.view, false);
+});
+
+test("a consumed splash stays absent after substrate remount", async () => {
+  const first = fixture({
+    frame: EMPTY_FRAME,
+    showSplash: true,
+    visible: true,
+  });
+  await ready(first.view);
+  await expectWelcome(first.view, true);
+  first.view.unmount();
+
+  const second = fixture({
+    frame: EMPTY_FRAME,
+    showSplash: false,
+    visible: true,
+  });
+  await ready(second.view);
+  await expectWelcome(second.view, false);
+});
+
+test("the first keystroke dismisses the welcome overlay early", async () => {
+  const subject = fixture({
+    frame: EMPTY_FRAME,
+    showSplash: true,
+    visible: true,
+  });
+  await ready(subject.view);
   await expectWelcome(subject.view, true);
 
   fireEvent.input(subject.view.getByLabelText("Terminal input"), {
     target: { value: "l" },
   });
   await expectWelcome(subject.view, false);
-});
-
-test("non-empty output after the reveal dismisses the welcome overlay", async () => {
-  const subject = fixture({ frame: EMPTY_FRAME });
-  await ready(subject.view);
-  await reveal(subject.view);
-  await expectWelcome(subject.view, true);
-
-  subject.rerender({ frame: VISIBLE_FRAME });
-  await expectWelcome(subject.view, false);
-});
-
-test("empty active output keeps the welcome overlay", async () => {
-  const subject = fixture({ frame: EMPTY_FRAME });
-  await ready(subject.view);
-  await reveal(subject.view);
-  await expectWelcome(subject.view, true);
-
-  subject.rerender({
-    frame: {
-      ...EMPTY_FRAME,
-      viewport: { ...EMPTY_FRAME.viewport, generation: 2 },
-    },
-  });
-  await expectWelcome(subject.view, true);
-});
-
-test("non-empty output from an inactive PTY keeps the welcome overlay", async () => {
-  const subject = fixture({
-    sessionFrames: [{ frame: EMPTY_FRAME, sessionId: "one" }],
-    sessions: [
-      { active: true, closing: false, id: "one", title: "SHELL" },
-      { active: false, closing: false, id: "two", title: "LOG" },
-    ],
-  });
-  await ready(subject.view);
-  await reveal(subject.view);
-  await expectWelcome(subject.view, true);
-
-  subject.rerender({
-    sessionFrames: [
-      { frame: EMPTY_FRAME, sessionId: "one" },
-      { frame: VISIBLE_FRAME, sessionId: "two" },
-    ],
-  });
-  await expectWelcome(subject.view, true);
 });
 
 test("mounted wheel path accumulates fractional lines per active session", async () => {
@@ -764,213 +857,3 @@ test("the handoff chord still toggles with the tab layer installed", async () =>
 // Splash animation lifecycle.
 //
 // This substrate is mounted unconditionally on every route and merely
-// CSS-concealed in Buzz mode, so "is the splash animating?" is a question about
-// `owner`, not about mounting. A loop gated only on `welcomeVisible` ran at
-// 120 rAF/s behind the whole app forever for anyone who never opened the
-// terminal; that is the defect these arms exist to keep dead.
-//
-// The rAF clock is driven by hand rather than by jsdom's visual loop: a real
-// clock can only show "frames happened", while a manual one can advance AFTER a
-// transition and prove no successor callback was scheduled. Distinguishing a
-// cancelled frame from a frame that was never scheduled needs that.
-function splashClock() {
-  const real = {
-    request: dom.window.requestAnimationFrame,
-    cancel: dom.window.cancelAnimationFrame,
-  };
-  const pending = new Map();
-  let nextHandle = 1;
-  let scheduled = 0;
-  let cancelled = 0;
-  dom.window.requestAnimationFrame = (callback) => {
-    const handle = nextHandle++;
-    pending.set(handle, callback);
-    scheduled += 1;
-    return handle;
-  };
-  dom.window.cancelAnimationFrame = (handle) => {
-    if (pending.delete(handle)) cancelled += 1;
-  };
-  return {
-    get scheduled() {
-      return scheduled;
-    },
-    get cancelled() {
-      return cancelled;
-    },
-    get outstanding() {
-      return pending.size;
-    },
-    /** Run every queued callback once, as one frame would. */
-    advance(now = 16) {
-      const due = [...pending.entries()];
-      pending.clear();
-      act(() => {
-        for (const [, callback] of due) callback(now);
-      });
-      return due.length;
-    },
-    restore() {
-      dom.window.requestAnimationFrame = real.request;
-      dom.window.cancelAnimationFrame = real.cancel;
-    },
-  };
-}
-
-/** Draws issued to the banner/splash canvas only. */
-function bannerDraws(view) {
-  const banner = view.container.querySelector(".buzz-terminal-welcome");
-  if (!banner) return [];
-  return paintLog.filter((entry) => entry.canvas === banner);
-}
-
-test("the splash animation runs only while the terminal is revealed", async () => {
-  const clock = splashClock();
-  try {
-    // ARM 1 — concealed entry. `enabled` defaults true, so this is the
-    // production-shaped state that used to animate behind the channel view.
-    const subject = fixture();
-    await ready(subject.view);
-    const substrate = subject.view.container.querySelector(
-      ".buzz-terminal-substrate",
-    );
-    assert.equal(substrate.dataset.terminalOwner, "buzz");
-    await expectWelcome(subject.view, true);
-    assert.equal(
-      clock.scheduled,
-      0,
-      "ARM 1: no splash frame is scheduled while Buzz owns the screen",
-    );
-    clock.advance();
-    assert.equal(
-      bannerDraws(subject.view).length,
-      0,
-      "ARM 1: and no hidden banner paint happens either",
-    );
-
-    // ARM 2 — revealed. The positive control: the loop must actually run, or
-    // arms 1/3 are satisfied by a loop that is simply broken everywhere.
-    await reveal(subject.view);
-    assert.ok(
-      clock.scheduled > 0,
-      "ARM 2: revealing the terminal starts the splash loop",
-    );
-    const afterReveal = clock.scheduled;
-    assert.equal(clock.advance(), 1, "ARM 2: exactly one frame was pending");
-    assert.ok(
-      bannerDraws(subject.view).length > 0,
-      "ARM 2: the revealed splash actually paints",
-    );
-    assert.ok(
-      clock.scheduled > afterReveal,
-      "ARM 2: the loop reschedules itself while revealed",
-    );
-
-    // ARM 3 — terminal -> buzz. The regression users hit: leaving the terminal
-    // must CANCEL the outstanding frame, not merely stop new ones. Advancing
-    // the clock afterwards is what separates those two.
-    const beforeConceal = clock.scheduled;
-    const cancelledBefore = clock.cancelled;
-    toggleChord();
-    await waitFor(() => assert.equal(substrate.dataset.terminalOwner, "buzz"));
-    assert.ok(
-      clock.cancelled > cancelledBefore,
-      "ARM 3: concealing cancels the frame that was already scheduled",
-    );
-    assert.equal(
-      clock.outstanding,
-      0,
-      "ARM 3: nothing is left queued after cleanup",
-    );
-    const drawsBefore = bannerDraws(subject.view).length;
-    clock.advance();
-    clock.advance();
-    assert.equal(
-      clock.scheduled,
-      beforeConceal,
-      "ARM 3: no successor callback is scheduled after concealing",
-    );
-    assert.equal(
-      bannerDraws(subject.view).length,
-      drawsBefore,
-      "ARM 3: and no further hidden banner paint occurs",
-    );
-
-    // ARM 4 — buzz -> terminal again. Proves cleanup did not poison the
-    // positive path: a fix that permanently kills the loop passes 1 and 3.
-    await reveal(subject.view);
-    assert.ok(
-      clock.scheduled > beforeConceal,
-      "ARM 4: re-revealing restarts the splash loop",
-    );
-    clock.advance();
-    assert.ok(
-      bannerDraws(subject.view).length > drawsBefore,
-      "ARM 4: and it paints again",
-    );
-  } finally {
-    clock.restore();
-  }
-});
-
-// The gate above reads `owner` alone, which is only sound because
-// `owner === "terminal"` implies `enabled`: the sole `commitOwner("terminal")`
-// call site sits behind an `!enabled` early return, and dropping `enabled`
-// forces ownership back to Buzz. That implication is true by construction
-// today and nothing else in this file pins it, so a refactor adding a second
-// reveal path outside the `enabled` guard would silently widen the gate. This
-// arm is that implication, held as a regression test in both directions.
-test("a disabled terminal cannot reveal, so owner-gating cannot widen", async () => {
-  const clock = splashClock();
-  try {
-    const subject = fixture({ enabled: false });
-    await ready(subject.view);
-    const substrate = subject.view.container.querySelector(
-      ".buzz-terminal-substrate",
-    );
-
-    toggleChord();
-    await waitFor(() => assert.ok(substrate.dataset.terminalOwner));
-    assert.equal(
-      substrate.dataset.terminalOwner,
-      "buzz",
-      "the toggle chord must not reveal a terminal that has no session",
-    );
-    assert.equal(
-      clock.scheduled,
-      0,
-      "and no splash frame is scheduled while disabled",
-    );
-    clock.advance();
-    assert.equal(
-      bannerDraws(subject.view).length,
-      0,
-      "nor any hidden banner paint",
-    );
-
-    // The other direction: losing `enabled` while revealed must concede
-    // ownership and cancel the loop, which is what makes the `enabled` term
-    // redundant in the animation gate rather than merely absent from it.
-    subject.rerender({ enabled: true });
-    await reveal(subject.view);
-    assert.ok(clock.scheduled > 0, "the enabled terminal does reveal and run");
-    const afterReveal = clock.scheduled;
-
-    subject.rerender({ enabled: false });
-    await waitFor(() => assert.equal(substrate.dataset.terminalOwner, "buzz"));
-    assert.equal(
-      clock.outstanding,
-      0,
-      "losing the session cancels the outstanding splash frame",
-    );
-    clock.advance();
-    clock.advance();
-    assert.equal(
-      clock.scheduled,
-      afterReveal,
-      "and schedules no successor once disabled",
-    );
-  } finally {
-    clock.restore();
-  }
-});
