@@ -5,6 +5,7 @@ import {
   pickAndUploadMedia,
   uploadMediaBytes,
 } from "@/shared/api/tauri";
+import type { QueuedMediaAttachment } from "./backgroundMediaUploadStore";
 
 /**
  * First 4 hex chars of the sha256 — used as a short display name.
@@ -30,6 +31,7 @@ export type UploadingAttachmentPreview = {
    * (e.g. video transcoding before the HTTP upload starts). */
   progress?: number | null;
   slotIndex?: number;
+  spoilered?: boolean;
   type?: string;
 };
 
@@ -133,7 +135,22 @@ async function captureVideoPosterFrame(
   }
 }
 
-export function useMediaUpload() {
+type UseMediaUploadOptions = {
+  /** Keep newly selected files local until the message is submitted. */
+  deferUploadsUntilSend?: boolean;
+};
+
+export function useMediaUpload({
+  deferUploadsUntilSend = false,
+}: UseMediaUploadOptions = {}) {
+  const e2eConfig = (
+    window as Window & {
+      __BUZZ_E2E__?: { mock?: { deferredComposerUploads?: boolean } };
+    }
+  ).__BUZZ_E2E__;
+  const queueUntilSend =
+    deferUploadsUntilSend &&
+    (!e2eConfig || e2eConfig.mock?.deferredComposerUploads === true);
   const [uploadState, setUploadState] = React.useState<UploadState>({
     status: "idle",
   });
@@ -144,6 +161,11 @@ export function useMediaUpload() {
   >([]);
   const uploadingPreviewsRef = React.useRef(uploadingPreviews);
   uploadingPreviewsRef.current = uploadingPreviews;
+  const [queuedAttachments, setQueuedAttachmentsState] = React.useState<
+    QueuedMediaAttachment[]
+  >([]);
+  const queuedAttachmentsRef = React.useRef(queuedAttachments);
+  queuedAttachmentsRef.current = queuedAttachments;
   React.useEffect(() => {
     let unlisten: (() => void) | null = null;
     let cancelled = false;
@@ -248,6 +270,99 @@ export function useMediaUpload() {
    *  before React flushes the state update. */
   const nextSlotRef = React.useRef(0);
   const nextUploadingPreviewIdRef = React.useRef(0);
+  const nextQueuedAttachmentIdRef = React.useRef(0);
+
+  const updateQueuedVideoPoster = React.useCallback(
+    (id: number, posterUrl: string) => {
+      setQueuedAttachmentsState((current) =>
+        current.map((attachment) =>
+          attachment.id === id
+            ? { ...attachment, previewUrl: posterUrl }
+            : attachment,
+        ),
+      );
+    },
+    [],
+  );
+
+  const queueFiles = React.useCallback(
+    (files: File[]) => {
+      if (files.length === 0) return;
+
+      const attachments = files.map((file) => {
+        const id = nextQueuedAttachmentIdRef.current;
+        nextQueuedAttachmentIdRef.current += 1;
+        const previewUrl = file.type.startsWith("image/")
+          ? URL.createObjectURL(file)
+          : undefined;
+        if (file.type.startsWith("video/")) {
+          void captureVideoPosterFrame(file).then((poster) => {
+            if (poster) updateQueuedVideoPoster(id, poster.posterUrl);
+          });
+        }
+        return { file, id, previewUrl, spoilered: false };
+      });
+
+      setQueuedAttachmentsState((current) => [...current, ...attachments]);
+    },
+    [updateQueuedVideoPoster],
+  );
+
+  const removeQueuedAttachment = React.useCallback((id: number) => {
+    setQueuedAttachmentsState((current) => {
+      const removed = current.find((attachment) => attachment.id === id);
+      if (removed?.previewUrl?.startsWith("blob:")) {
+        URL.revokeObjectURL(removed.previewUrl);
+      }
+      return current.filter((attachment) => attachment.id !== id);
+    });
+  }, []);
+
+  const clearQueuedAttachments = React.useCallback(() => {
+    setQueuedAttachmentsState((current) => {
+      for (const attachment of current) {
+        if (attachment.previewUrl?.startsWith("blob:")) {
+          URL.revokeObjectURL(attachment.previewUrl);
+        }
+      }
+      return [];
+    });
+  }, []);
+
+  const restoreQueuedAttachments = React.useCallback(
+    (attachments: QueuedMediaAttachment[]) => {
+      clearQueuedAttachments();
+      queueFiles(attachments.map((attachment) => attachment.file));
+      setQueuedAttachmentsState((current) =>
+        current.map((attachment, index) => ({
+          ...attachment,
+          spoilered: attachments[index]?.spoilered ?? false,
+        })),
+      );
+    },
+    [clearQueuedAttachments, queueFiles],
+  );
+
+  const toggleQueuedAttachmentSpoiler = React.useCallback((id: number) => {
+    setQueuedAttachmentsState((current) =>
+      current.map((attachment) =>
+        attachment.id === id
+          ? { ...attachment, spoilered: !attachment.spoilered }
+          : attachment,
+      ),
+    );
+  }, []);
+
+  React.useEffect(
+    () => () => {
+      for (const attachment of queuedAttachmentsRef.current) {
+        if (attachment.previewUrl?.startsWith("blob:")) {
+          URL.revokeObjectURL(attachment.previewUrl);
+        }
+      }
+    },
+    [],
+  );
 
   const isUploadCanceled = React.useCallback(
     (previewId?: number) =>
@@ -367,6 +482,19 @@ export function useMediaUpload() {
   );
 
   const handlePaperclip = React.useCallback(async () => {
+    if (queueUntilSend) {
+      const input = document.createElement("input");
+      input.type = "file";
+      input.multiple = true;
+      input.addEventListener(
+        "change",
+        () => queueFiles(Array.from(input.files ?? [])),
+        { once: true },
+      );
+      input.click();
+      return;
+    }
+
     // Hold a single pending tick while the native picker is open + uploads
     // run in Rust. We don't know the file count until the dialog returns,
     // and uploads are already complete by then, so we just append each
@@ -374,7 +502,7 @@ export function useMediaUpload() {
     const previewId = reserveUploadingPreview();
     setUploadingCount((c) => c + 1);
     try {
-      const descriptors = await pickAndUploadMedia();
+      const descriptors = await pickAndUploadMedia(uploadProgressId(previewId));
       if (isUploadCanceled(previewId)) return;
       finishUpload(previewId);
       for (const descriptor of descriptors) {
@@ -385,7 +513,14 @@ export function useMediaUpload() {
       if (isUploadCanceled(previewId)) return;
       onUploadError(err, previewId);
     }
-  }, [finishUpload, isUploadCanceled, onUploadError, reserveUploadingPreview]);
+  }, [
+    queueUntilSend,
+    finishUpload,
+    isUploadCanceled,
+    onUploadError,
+    queueFiles,
+    reserveUploadingPreview,
+  ]);
 
   const handleDrop = React.useCallback(
     async (event: React.DragEvent<HTMLElement>) => {
@@ -398,6 +533,11 @@ export function useMediaUpload() {
       // Accept any file. The Tauri layer and the relay enforce the deny-list
       // (active-content + executables) and size caps; everything else uploads.
       const validFiles = files;
+
+      if (queueUntilSend) {
+        queueFiles(validFiles);
+        return;
+      }
 
       setUploadingCount((c) => c + validFiles.length);
       const baseIndex = reserveSlots(validFiles.length);
@@ -425,9 +565,11 @@ export function useMediaUpload() {
     },
     [
       reserveSlots,
+      queueUntilSend,
       fillSlot,
       isUploadCanceled,
       onUploadError,
+      queueFiles,
       reserveUploadingPreview,
     ],
   );
@@ -497,6 +639,11 @@ export function useMediaUpload() {
 
       event.preventDefault();
 
+      if (queueUntilSend) {
+        queueFiles(mediaFiles);
+        return;
+      }
+
       setUploadingCount((c) => c + mediaFiles.length);
       const baseIndex = reserveSlots(mediaFiles.length);
 
@@ -522,9 +669,11 @@ export function useMediaUpload() {
     },
     [
       reserveSlots,
+      queueUntilSend,
       fillSlot,
       isUploadCanceled,
       onUploadError,
+      queueFiles,
       reserveUploadingPreview,
     ],
   );
@@ -532,6 +681,10 @@ export function useMediaUpload() {
   /** Upload a File directly — used by Tiptap's editorProps.handlePaste. */
   const uploadFile = React.useCallback(
     async (file: File) => {
+      if (queueUntilSend) {
+        queueFiles([file]);
+        return;
+      }
       const previewId = reserveUploadingPreview(file);
       setUploadingCount((c) => c + 1);
       try {
@@ -547,7 +700,14 @@ export function useMediaUpload() {
         onUploadError(err, previewId);
       }
     },
-    [isUploadCanceled, onUploaded, onUploadError, reserveUploadingPreview],
+    [
+      queueUntilSend,
+      isUploadCanceled,
+      onUploaded,
+      onUploadError,
+      queueFiles,
+      reserveUploadingPreview,
+    ],
   );
 
   /**
@@ -642,10 +802,22 @@ export function useMediaUpload() {
   );
 
   const isUploading = uploadingCount > 0;
+  const queuedPreviews = React.useMemo<UploadingAttachmentPreview[]>(
+    () =>
+      queuedAttachments.map((attachment) => ({
+        filename: attachment.file.name,
+        id: attachment.id,
+        posterUrl: attachment.previewUrl,
+        spoilered: attachment.spoilered,
+        type: attachment.file.type,
+      })),
+    [queuedAttachments],
+  );
 
   return React.useMemo(
     () => ({
       cancelUpload,
+      clearQueuedAttachments,
       handleDragEnter,
       handleDragLeave,
       handleDragOver,
@@ -657,10 +829,16 @@ export function useMediaUpload() {
       originalUrlByUrl,
       pendingImeta,
       pendingImetaRef,
+      queuedAttachments,
+      queuedAttachmentsRef,
+      queuedPreviews,
       removeAttachment,
+      removeQueuedAttachment,
+      restoreQueuedAttachments,
       revertAttachment,
       setPendingImeta,
       setUploadState,
+      toggleQueuedAttachmentSpoiler,
       uploadEditedAttachment,
       uploadFile,
       uploadingCount,
@@ -669,6 +847,7 @@ export function useMediaUpload() {
     }),
     [
       cancelUpload,
+      clearQueuedAttachments,
       handleDragEnter,
       handleDragLeave,
       handleDragOver,
@@ -679,9 +858,14 @@ export function useMediaUpload() {
       isUploading,
       originalUrlByUrl,
       pendingImeta,
+      queuedAttachments,
+      queuedPreviews,
       removeAttachment,
+      removeQueuedAttachment,
+      restoreQueuedAttachments,
       revertAttachment,
       setPendingImeta,
+      toggleQueuedAttachmentSpoiler,
       uploadEditedAttachment,
       uploadFile,
       uploadingCount,

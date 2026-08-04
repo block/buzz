@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/channels/send_message_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
@@ -65,6 +66,30 @@ void main() {
     await expectLater(result, throwsException);
     expect(completedIds, isEmpty);
     expect(removedIds, [localMessages.single.id]);
+  });
+
+  test('cancels delivery after the active community changes', () async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    container
+        .read(relayConfigProvider.notifier)
+        .update(baseUrl: 'https://first.example');
+    final send = container.read(sendMessageProvider);
+
+    container
+        .read(relayConfigProvider.notifier)
+        .update(baseUrl: 'https://second.example');
+
+    await expectLater(
+      send(channelId: _channelId, content: 'old community draft'),
+      throwsA(
+        isA<StateError>().having(
+          (error) => error.message,
+          'message',
+          contains('active community changed'),
+        ),
+      ),
+    );
   });
 }
 

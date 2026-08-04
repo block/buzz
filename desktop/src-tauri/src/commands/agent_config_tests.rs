@@ -57,6 +57,7 @@ fn goose_runtime() -> &'static KnownAcpRuntime {
         thinking_env_var: Some("GOOSE_THINKING_EFFORT"),
         max_tokens_env_var: Some("GOOSE_MAX_TOKENS"),
         context_limit_env_var: Some("GOOSE_CONTEXT_LIMIT"),
+        max_rounds_env_var: None,
         required_normalized_fields: &["model", "provider"],
         login_hint: None,
         auth_probe_args: None,

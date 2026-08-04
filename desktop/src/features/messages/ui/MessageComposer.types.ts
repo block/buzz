@@ -51,6 +51,7 @@ export type MessageComposerProps = {
   } | null;
   isSending?: boolean;
   mediaController?: MediaUploadController;
+  onDeferredEditPendingChange?: (isPending: boolean) => void;
   onCancelEdit?: () => void;
   onCancelReply?: () => void;
   /**
@@ -66,6 +67,8 @@ export type MessageComposerProps = {
     content: string,
     mediaTags?: string[][],
     mentionPubkeys?: string[],
+    /** Target captured when the edit was submitted; avoids a later ref swap. */
+    eventId?: string,
   ) => Promise<void>;
   /** Captures send context synchronously before awaits can change navigation. */
   onCaptureSendContext?: () => {
@@ -92,6 +95,8 @@ export type MessageComposerProps = {
     id: string;
   } | null;
   showTopBorder?: boolean;
+  /** Render the app-wide upload queue above this composer dock. */
+  showBackgroundUploadProgress?: boolean;
   toolbarExtraActions?: ReactNode;
   typingParentEventId?: string | null;
   typingRootEventId?: string | null;

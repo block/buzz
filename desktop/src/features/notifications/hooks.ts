@@ -352,6 +352,7 @@ export function useHomeFeedNotificationState(
   pubkey: string | undefined,
   settings: NotificationSettings,
   setDesktopEnabled: (enabled: boolean) => Promise<boolean>,
+  desktopNotificationsEnabled: boolean,
   isHomeActive: boolean,
   // NIP-RS read marker lookup, shared with the sidebar via AppShell. When
   // provided, channel-backed feed items are treated as read iff their
@@ -383,6 +384,7 @@ export function useHomeFeedNotificationState(
     pubkey,
     settings,
     setDesktopEnabled,
+    desktopNotificationsEnabled,
     profiles,
     mutedChannelIds,
     channels,

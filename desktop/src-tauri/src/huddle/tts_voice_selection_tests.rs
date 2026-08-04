@@ -167,6 +167,8 @@ fn an_in_hand_post_change_message_survives_cancellation() {
         .send(QueuedText {
             generation: voice_generation.load(Ordering::Acquire),
             route_id: 1,
+            speaker_pubkey: None,
+            voice_reference: None,
             text: "new message".to_string(),
         })
         .expect("new message");
@@ -178,11 +180,15 @@ fn an_in_hand_post_change_message_survives_cancellation() {
         QueuedText {
             generation: 1,
             route_id: 2,
+            speaker_pubkey: None,
+            voice_reference: None,
             text: "old message".to_string(),
         },
         QueuedText {
             generation: voice_generation.load(Ordering::Acquire),
             route_id: 3,
+            speaker_pubkey: None,
+            voice_reference: None,
             text: "later new message".to_string(),
         },
     ]);
@@ -239,6 +245,8 @@ fn superseding_voice_change_removes_earlier_deferred_messages() {
     deferred_text.push_back(QueuedText {
         generation: voice_generation.load(Ordering::Acquire),
         route_id: 4,
+        speaker_pubkey: None,
+        voice_reference: None,
         text: "message for Eve".to_string(),
     });
     assert!(handle_cancel_or_shutdown(
@@ -285,6 +293,8 @@ fn barge_in_clears_deferred_voice_change_messages() {
     let mut deferred_text = VecDeque::from([QueuedText {
         generation: 2,
         route_id: 5,
+        speaker_pubkey: None,
+        voice_reference: None,
         text: "deferred message".to_string(),
     }]);
     let mut current_text = None;
@@ -326,6 +336,8 @@ fn barge_in_during_a_voice_change_clears_post_change_messages() {
     deferred_text.push_back(QueuedText {
         generation: voice_generation.load(Ordering::Acquire),
         route_id: 6,
+        speaker_pubkey: None,
+        voice_reference: None,
         text: "post-change message".to_string(),
     });
     barge_in.store(true, Ordering::Release);
@@ -377,9 +389,15 @@ fn a_sender_captured_before_voice_change_is_stale_even_if_it_sends_after_drain()
         None,
     ));
     old_sender
-        .send(7, "late old message".to_string())
+        .send(
+            7,
+            "agent".to_string(),
+            "reference_sample".to_string(),
+            "late old message".to_string(),
+        )
         .expect("late send");
     let late = text_rx.recv().expect("late queued text");
 
     assert!(late.generation < voice_generation.load(Ordering::Acquire));
+    assert_eq!(late.voice_reference.as_deref(), Some("reference_sample"));
 }
