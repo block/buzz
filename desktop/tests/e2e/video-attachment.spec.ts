@@ -565,6 +565,13 @@ test("video upload previews use poster frames and inline videos open review mode
     el.currentTime = 10.7;
     el.dispatchEvent(new Event("timeupdate"));
   });
+  await expect
+    .poll(() =>
+      page
+        .getByTestId("video-review-progress-fill")
+        .evaluate((el) => (el as HTMLElement).style.width),
+    )
+    .toBe("85.6%");
   await reviewDialog.getByTestId("video-review-reaction-1").click();
   const fractionalTimecode = reviewDialog
     .getByRole("button", { name: "Jump to 00:10.7" })
@@ -624,12 +631,15 @@ test("video upload previews use poster frames and inline videos open review mode
   // must not remount the review dialog or wipe an in-progress comment draft.
   await commentBox.click();
   await commentBox.fill("Second pass note");
+  await waitForMockLiveSubscription(page, "general");
   await emitMockMessage(page, "general", "Unrelated chatter mid-review");
-  await expect(
-    page
-      .getByTestId("message-row")
-      .filter({ hasText: "Unrelated chatter mid-review" }),
-  ).toHaveCount(1);
+  // The virtualized timeline can omit rows behind the modal, so wait for the
+  // live event's render turn instead of asserting that its offscreen row is
+  // mounted.
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+  );
   await expect(commentBox).toHaveText("Second pass note");
   await expect(commentBox).toBeFocused();
   await expect(page.getByTestId("video-review-composer-timecode")).toHaveText(
@@ -746,6 +756,11 @@ test("video upload previews use poster frames and inline videos open review mode
     .click({ position: { x: 4, y: 4 } });
   await expect(page.getByTestId("video-review-dialog")).toHaveCount(0);
 
+  const timelineScroller = page.getByTestId("message-timeline");
+  await timelineScroller.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+    element.dispatchEvent(new Event("scroll", { bubbles: true }));
+  });
   const videoSummaryRow = page.locator(
     `[data-thread-head-id="${videoMessageId}"]`,
   );
