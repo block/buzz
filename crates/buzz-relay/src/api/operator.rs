@@ -24,6 +24,23 @@ use crate::state::AppState;
 
 use super::{api_error, bridge, internal_error};
 
+/// HTTP 409 envelope for `limit_reached:` rejections.
+///
+/// Carries the effective per-owner limit as a structured
+/// `max_communities_per_owner` field next to the stable `error` message, so
+/// clients render the deployment's real number without parsing the message and
+/// intermediaries that match the message keep resolving it to a
+/// `limit_reached` code (#4160).
+fn limit_reached_conflict(msg: &str) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({
+            "error": msg,
+            "max_communities_per_owner": buzz_db::relay_members::max_communities_per_owner(),
+        })),
+    )
+}
+
 /// Query parameters for `GET /operator/communities`.
 #[derive(Debug, Deserialize)]
 pub struct ListCommunitiesQuery {
@@ -178,9 +195,8 @@ pub async fn provision_community(
         Err(msg) if msg.starts_with("actor not authorized") => {
             Err(api_error(StatusCode::FORBIDDEN, &msg))
         }
-        Err(msg) if msg == "community already exists" || msg.starts_with("limit_reached:") => {
-            Err(api_error(StatusCode::CONFLICT, &msg))
-        }
+        Err(msg) if msg.starts_with("limit_reached:") => Err(limit_reached_conflict(&msg)),
+        Err(msg) if msg == "community already exists" => Err(api_error(StatusCode::CONFLICT, &msg)),
         Err(msg)
             if msg.starts_with("failed to create community:")
                 || msg.starts_with("community provisioned but owner bootstrap failed:") =>
@@ -425,10 +441,9 @@ pub async fn transfer_community(
             ));
         }
         buzz_db::relay_members::TransferResult::LimitReached => {
-            return Err(api_error(
-                StatusCode::CONFLICT,
-                &limit_reached_error("transferee already owns the maximum number of communities"),
-            ));
+            return Err(limit_reached_conflict(&limit_reached_error(
+                "transferee already owns the maximum number of communities",
+            )));
         }
     };
 
@@ -1158,13 +1173,15 @@ mod tests {
         );
     }
 
-    /// Both `limit_reached:` rejections (create and transfer) must embed the
-    /// effective limit after the routing prefix so clients can surface the
-    /// deployment's real number (#4160). The prefix stays intact for the
-    /// `starts_with`-based 409 routing.
+    /// Both `limit_reached:` rejections (create and transfer) must report the
+    /// effective limit as a structured `max_communities_per_owner` field so
+    /// clients can surface the deployment's real number without parsing the
+    /// message (#4160). The message itself stays a stable contract — prefix
+    /// intact for the `starts_with`-based 409 routing, and free of the
+    /// deployment-specific number that intermediaries would have to tolerate.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn limit_reached_rejections_embed_effective_limit() {
+    async fn limit_reached_rejections_report_effective_limit() {
         let operator = Keys::generate();
         let full_owner = Keys::generate();
         let other_owner = Keys::generate();
@@ -1172,7 +1189,6 @@ mod tests {
             return;
         };
         let effective_limit = buzz_db::relay_members::max_communities_per_owner();
-        let embedded_limit = format!("({effective_limit})");
 
         for _ in 0..effective_limit {
             let host = format!("community-{}.example", Uuid::new_v4().simple());
@@ -1184,25 +1200,28 @@ mod tests {
             );
         }
 
-        // Create rejection embeds the number.
+        // Create rejection reports the number.
         let host = format!("community-{}.example", Uuid::new_v4().simple());
         let create_response =
             provision_community(state.clone(), &operator, &host, &full_owner).await;
         assert_eq!(create_response.status(), StatusCode::CONFLICT);
-        let create_error = read_json(create_response).await["error"]
+        let create_body = read_json(create_response).await;
+        let create_error = create_body["error"]
             .as_str()
             .expect("create rejection error string")
             .to_string();
-        assert!(
-            create_error.starts_with("limit_reached:"),
-            "error: {create_error}"
+        assert_eq!(
+            create_error,
+            "limit_reached: owner already owns the maximum number of communities"
         );
-        assert!(
-            create_error.contains(&embedded_limit),
-            "error: {create_error}"
+        assert_eq!(
+            create_body
+                .get("max_communities_per_owner")
+                .and_then(Value::as_i64),
+            Some(effective_limit)
         );
 
-        // Transfer rejection embeds the number too: hand a fresh community to
+        // Transfer rejection reports the number too: hand a fresh community to
         // the already-full owner.
         let transferable_host = format!("community-{}.example", Uuid::new_v4().simple());
         assert_eq!(
@@ -1232,17 +1251,20 @@ mod tests {
         )
         .await;
         assert_eq!(transfer_response.status(), StatusCode::CONFLICT);
-        let transfer_error = read_json(transfer_response).await["error"]
+        let transfer_body_json = read_json(transfer_response).await;
+        let transfer_error = transfer_body_json["error"]
             .as_str()
             .expect("transfer rejection error string")
             .to_string();
-        assert!(
-            transfer_error.starts_with("limit_reached:"),
-            "error: {transfer_error}"
+        assert_eq!(
+            transfer_error,
+            "limit_reached: transferee already owns the maximum number of communities"
         );
-        assert!(
-            transfer_error.contains(&embedded_limit),
-            "error: {transfer_error}"
+        assert_eq!(
+            transfer_body_json
+                .get("max_communities_per_owner")
+                .and_then(Value::as_i64),
+            Some(effective_limit)
         );
     }
 

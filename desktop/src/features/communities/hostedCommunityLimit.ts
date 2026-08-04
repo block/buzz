@@ -8,6 +8,16 @@
  * value rather than hardcode its own copy — otherwise gates and copy drift in
  * both directions the moment a deployment overrides the default.
  *
+ * The desktop does not call the relay's operator API directly: every hosted
+ * community request goes through Builderlab (`app.builderlab.xyz`, see
+ * `desktop/src-tauri/src/builderlab.rs`), which reshapes the relay payload —
+ * the desktop sees `id`/`slug`/`normalized_host` where the relay emits
+ * `community_id`/`host`. Builderlab must therefore forward
+ * `max_communities_per_owner` for a non-default limit to reach these surfaces;
+ * until it does, every resolution falls back and the UI behaves exactly as it
+ * did before. That fallback is the reason this stays a soft dependency rather
+ * than a breaking one.
+ *
  * This module stays free of `@tauri-apps` imports (and any other value
  * imports) so `node:test` can load it directly.
  */
@@ -35,14 +45,35 @@ type LimitBearingResponse = {
  *
  * A positive-integer `max_communities_per_owner` wins; anything else (absent
  * response, absent field, non-number, non-integer, or non-positive value)
- * falls back to {@link DEFAULT_HOSTED_COMMUNITY_LIMIT} — the same fallback
- * rules the relay applies to its own env override.
+ * falls back to `fallback` — the same fallback rules the relay applies to its
+ * own env override.
+ *
+ * Pass the limit already in hand as `fallback` when resolving a response that
+ * may omit the field (e.g. a mutation reply) so a known-good value from an
+ * earlier response is never clobbered by
+ * {@link DEFAULT_HOSTED_COMMUNITY_LIMIT}.
  */
 export function resolveHostedCommunityLimit(
   response: LimitBearingResponse | null | undefined,
+  fallback: number = DEFAULT_HOSTED_COMMUNITY_LIMIT,
 ): number {
   const limit = response?.max_communities_per_owner;
   return typeof limit === "number" && Number.isInteger(limit) && limit > 0
     ? limit
-    : DEFAULT_HOSTED_COMMUNITY_LIMIT;
+    : fallback;
+}
+
+/**
+ * User-facing copy for a `limit_reached` rejection.
+ *
+ * Names a number only when the caller resolved one from a server response.
+ * There is deliberately no default: a limit this deployment may not use is
+ * worse than copy that omits the number.
+ */
+export function hostedCommunityLimitReachedMessage(
+  communityLimit?: number,
+): string {
+  return communityLimit
+    ? `You've reached the limit of ${communityLimit} hosted communities.`
+    : "You've reached your limit of hosted communities.";
 }

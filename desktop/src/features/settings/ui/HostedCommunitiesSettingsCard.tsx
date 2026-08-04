@@ -19,10 +19,10 @@ import {
   HOSTED_COMMUNITY_SUFFIX as HOST_SUFFIX,
   hostedCommunityErrorMessage as errorMessage,
   hostedCommunityRelayUrl as relayUrl,
+  loadHostedCommunityAccount,
   resolveHostedCommunityLimit,
   type BuilderlabAuth,
   type HostedCommunityAvailabilityResponse as AvailabilityResponse,
-  type HostedCommunitiesResponse as CommunitiesResponse,
   type HostedCommunity,
   type HostedCommunityMutationResponse as CommunityMutationResponse,
   type HostedIdentityResponse as IdentityResponse,
@@ -83,38 +83,10 @@ export function HostedCommunitiesSettingsCard() {
 
   const loadAccount = React.useCallback(async () => {
     setError(null);
-    const [identityResponse, communitiesResponse] = await Promise.all([
-      invoke<IdentityResponse>("get_builderlab_nostr_identity"),
-      invoke<CommunitiesResponse>("list_builderlab_communities"),
-    ]);
-    if (
-      identityResponse.error &&
-      identityResponse.error.code !== "unauthorized" &&
-      // `missing_mapping` (setup_needed) just means this account hasn't linked a
-      // Buzz identity yet — that's the connect-card empty state, not an error to
-      // surface at the top of the page.
-      !identityResponse.error.setup_needed
-    ) {
-      throw new Error(
-        errorMessage(
-          identityResponse.error,
-          identityResponse.correlation_id,
-          "Could not load the connected Buzz identity.",
-        ),
-      );
-    }
-    if (communitiesResponse.error && !communitiesResponse.error.setup_needed) {
-      throw new Error(
-        errorMessage(
-          communitiesResponse.error,
-          communitiesResponse.correlation_id,
-          "Could not load communities.",
-        ),
-      );
-    }
-    setIdentity(identityResponse.identity ?? null);
-    setCommunities(communitiesResponse.communities ?? []);
-    setCommunityLimit(resolveHostedCommunityLimit(communitiesResponse));
+    const account = await loadHostedCommunityAccount();
+    setIdentity(account.identity);
+    setCommunities(account.communities);
+    setCommunityLimit(account.communityLimit);
   }, []);
 
   React.useEffect(() => {
@@ -309,12 +281,17 @@ export function HostedCommunitiesSettingsCard() {
         { communityId: community.id, transfereeNpub: npub },
       );
       if (response.error) {
+        // A rejection carries the relay's effective limit; adopt it so the copy
+        // and the gate reflect the server rather than whatever was current at
+        // load time.
+        const limit = resolveHostedCommunityLimit(response, communityLimit);
+        setCommunityLimit(limit);
         throw new Error(
           errorMessage(
             response.error,
             response.correlation_id,
             "Could not transfer ownership.",
-            communityLimit,
+            limit,
           ),
         );
       }
@@ -389,12 +366,14 @@ export function HostedCommunitiesSettingsCard() {
         { name: normalizedName },
       );
       if (response.error || !response.community) {
+        const limit = resolveHostedCommunityLimit(response, communityLimit);
+        setCommunityLimit(limit);
         throw new Error(
           errorMessage(
             response.error,
             response.correlation_id,
             "Could not create the community.",
-            communityLimit,
+            limit,
           ),
         );
       }

@@ -13,6 +13,7 @@ import test from "node:test";
 
 import {
   DEFAULT_HOSTED_COMMUNITY_LIMIT,
+  hostedCommunityLimitReachedMessage,
   resolveHostedCommunityLimit,
 } from "./hostedCommunityLimit.ts";
 
@@ -114,4 +115,76 @@ test("owner_of_five_is_gated_at_stock_default", () => {
   const limit = resolveHostedCommunityLimit({});
   const ownedCommunities = 5;
   assert.equal(ownedCommunities >= limit, true);
+});
+
+// ---------------------------------------------------------------------------
+// Caller-supplied fallback. Mutation replies (create/transfer) may omit the
+// field, so resolving one must never drag an already-known limit back down to
+// the stock default.
+// ---------------------------------------------------------------------------
+
+test("resolve_uses_caller_fallback_when_field_is_absent", () => {
+  assert.equal(resolveHostedCommunityLimit({}, 7), 7);
+  assert.equal(resolveHostedCommunityLimit(undefined, 7), 7);
+  assert.equal(resolveHostedCommunityLimit({ error: { code: "taken" } }, 3), 3);
+});
+
+test("resolve_uses_caller_fallback_on_invalid_values", () => {
+  assert.equal(
+    resolveHostedCommunityLimit({ max_communities_per_owner: 0 }, 7),
+    7,
+  );
+  assert.equal(
+    resolveHostedCommunityLimit({ max_communities_per_owner: "7" }, 7),
+    7,
+  );
+});
+
+test("resolve_prefers_server_value_over_caller_fallback", () => {
+  assert.equal(
+    resolveHostedCommunityLimit({ max_communities_per_owner: 9 }, 7),
+    9,
+  );
+  assert.equal(
+    resolveHostedCommunityLimit({ max_communities_per_owner: 2 }, 7),
+    2,
+  );
+});
+
+test("mutation_reply_without_the_field_keeps_the_loaded_limit", () => {
+  // A relay reporting 7 at load time, then a create rejection that carries no
+  // limit: the copy and gate must stay on 7, not silently revert to 5.
+  const loadedLimit = resolveHostedCommunityLimit({
+    max_communities_per_owner: 7,
+  });
+  const rejection = { error: { code: "limit_reached" } };
+  assert.equal(resolveHostedCommunityLimit(rejection, loadedLimit), 7);
+});
+
+// ---------------------------------------------------------------------------
+// The `limit_reached` copy must never invent a number: without a
+// server-resolved limit it omits the count instead of asserting 5.
+// ---------------------------------------------------------------------------
+
+test("limit_reached_copy_names_the_resolved_limit", () => {
+  assert.equal(
+    hostedCommunityLimitReachedMessage(7),
+    "You've reached the limit of 7 hosted communities.",
+  );
+  assert.equal(
+    hostedCommunityLimitReachedMessage(3),
+    "You've reached the limit of 3 hosted communities.",
+  );
+});
+
+test("limit_reached_copy_omits_the_number_when_unresolved", () => {
+  for (const unresolved of [undefined, 0]) {
+    const message = hostedCommunityLimitReachedMessage(unresolved);
+    assert.equal(message, "You've reached your limit of hosted communities.");
+    assert.equal(
+      /\d/.test(message),
+      false,
+      `copy must not fabricate a limit: ${message}`,
+    );
+  }
 });

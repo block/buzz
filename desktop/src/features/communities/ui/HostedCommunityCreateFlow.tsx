@@ -17,6 +17,7 @@ import {
   type HostedCommunity,
   type HostedNostrIdentity,
   loadHostedCommunityAccount,
+  resolveHostedCommunityLimit,
   startBuilderlabLogin,
   VALID_HOSTED_COMMUNITY_NAME,
 } from "@/features/communities/hostedCommunityApi";
@@ -241,12 +242,17 @@ export function HostedCommunityCreateFlow({
       }
       const response = await createHostedCommunity(normalizedName);
       if (response.error || !response.community) {
+        // A rejection carries the relay's effective limit; adopt it so the copy
+        // and the gate reflect the server rather than whatever was current at
+        // load time.
+        const limit = resolveHostedCommunityLimit(response, communityLimit);
+        setCommunityLimit(limit);
         throw new Error(
           hostedCommunityErrorMessage(
             response.error,
             response.correlation_id,
             "Could not create the community.",
-            communityLimit,
+            limit,
           ),
         );
       }

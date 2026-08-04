@@ -73,17 +73,17 @@ pub struct ProvisionCommunityResponse {
     pub max_communities_per_owner: i64,
 }
 
-/// Builds a `limit_reached:` rejection message with the effective per-owner
-/// limit embedded, e.g. `limit_reached: <detail> (5)`.
+/// Builds a `limit_reached:` rejection message, e.g.
+/// `limit_reached: <detail>`.
 ///
 /// The `limit_reached:` prefix is load-bearing: the operator API routes it to
-/// HTTP 409 via `starts_with` (see `crate::api::operator`), so the number is
-/// appended after the detail rather than spliced into the prefix.
+/// HTTP 409 via `starts_with` (see `crate::api::operator`), and intermediaries
+/// map the message onto a `limit_reached` error code for clients. The message
+/// is therefore a stable contract — the effective limit rides alongside it as
+/// the structured `max_communities_per_owner` field on the 409 body instead of
+/// being spliced into this string.
 pub(crate) fn limit_reached_error(detail: &str) -> String {
-    format!(
-        "limit_reached: {detail} ({})",
-        buzz_db::relay_members::max_communities_per_owner()
-    )
+    format!("limit_reached: {detail}")
 }
 
 pub(crate) fn validate_pubkey_hex(value: &str) -> Option<String> {
@@ -394,22 +394,23 @@ mod tests {
         );
     }
 
-    /// The rejection message keeps the `limit_reached:` routing prefix intact
-    /// and embeds the effective (env-aware) limit for user-facing copy.
+    /// The rejection message is a stable wire contract: the `limit_reached:`
+    /// routing prefix plus the detail, and nothing deployment-specific. The
+    /// effective limit travels as a structured field on the 409 body (see
+    /// `crate::api::operator`), so intermediaries that map this message onto a
+    /// `limit_reached` error code keep matching whatever the deployment's
+    /// configured limit is (#4160).
     #[test]
-    fn limit_reached_error_keeps_prefix_and_embeds_effective_limit() {
+    fn limit_reached_error_is_a_stable_message_without_the_limit() {
         let message = limit_reached_error("owner already owns the maximum number of communities");
+        assert_eq!(
+            message,
+            "limit_reached: owner already owns the maximum number of communities"
+        );
         assert!(message.starts_with("limit_reached:"), "message: {message}");
         assert!(
-            message.contains("owner already owns the maximum number of communities"),
-            "message: {message}"
-        );
-        assert!(
-            message.contains(&format!(
-                "({})",
-                buzz_db::relay_members::max_communities_per_owner()
-            )),
-            "message: {message}"
+            !message.contains(&buzz_db::relay_members::max_communities_per_owner().to_string()),
+            "message must not embed the effective limit: {message}"
         );
     }
 
