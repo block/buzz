@@ -9,6 +9,7 @@ mod pool;
 mod pool_lifecycle;
 mod queue;
 mod relay;
+mod session_identity;
 mod setup_mode;
 mod usage;
 
@@ -1558,6 +1559,8 @@ async fn tokio_main() -> Result<()> {
             .and_then(|hex| nostr::PublicKey::from_hex(hex).ok()),
         memory_enabled: config.memory_enabled,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
+        session_identity_log_path: std::env::var_os("BUZZ_ACP_SESSION_IDENTITY_LOG")
+            .map(std::path::PathBuf::from),
         relay_url: config.relay_url.clone(),
     });
 

@@ -115,6 +115,30 @@ fn unknown_command_returns_none() {
     assert!(known_acp_runtime("custom-agent").is_none());
 }
 
+#[test]
+fn session_identity_receipt_is_pair_scoped_beside_the_runtime_log() {
+    let log_path = std::path::Path::new(
+        "/app-data/agents/logs/agentpubkey__relayhash.log",
+    );
+
+    assert_eq!(
+        super::session_identity_log_path(log_path),
+        std::path::PathBuf::from(
+            "/app-data/agents/logs/agentpubkey__relayhash.session-identities.jsonl",
+        )
+    );
+
+    let mut command = std::process::Command::new("buzz-acp");
+    super::configure_session_identity_receipt(&mut command, log_path);
+    assert!(command.get_envs().any(|(key, value)| {
+        key == "BUZZ_ACP_SESSION_IDENTITY_LOG"
+            && value
+                == Some(std::ffi::OsStr::new(
+                    "/app-data/agents/logs/agentpubkey__relayhash.session-identities.jsonl",
+                ))
+    }));
+}
+
 // ── build_respond_to_env tests ───────────────────────────────────────
 
 use super::build_respond_to_env;

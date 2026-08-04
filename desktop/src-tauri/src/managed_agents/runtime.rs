@@ -14,6 +14,22 @@ use crate::{
     util::now_iso,
 };
 
+const SESSION_IDENTITY_LOG_ENV: &str = "BUZZ_ACP_SESSION_IDENTITY_LOG";
+
+fn session_identity_log_path(runtime_log_path: &std::path::Path) -> std::path::PathBuf {
+    runtime_log_path.with_extension("session-identities.jsonl")
+}
+
+fn configure_session_identity_receipt(
+    command: &mut std::process::Command,
+    runtime_log_path: &std::path::Path,
+) {
+    command.env(
+        SESSION_IDENTITY_LOG_ENV,
+        session_identity_log_path(runtime_log_path),
+    );
+}
+
 mod path;
 pub(in crate::managed_agents) use path::build_augmented_path;
 pub(crate) use path::compose_path_entries;
@@ -860,6 +876,7 @@ pub fn spawn_agent_child(
     for (key, value) in &descriptor.env {
         command.env(key, value);
     }
+    configure_session_identity_receipt(&mut command, &log_path);
     configure_runtime_cli(&mut command, runtime_meta);
 
     // Buzz shared compute is stored as a native provider; derive the OpenAI-compatible
