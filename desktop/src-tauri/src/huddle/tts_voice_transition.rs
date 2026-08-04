@@ -34,6 +34,17 @@ pub(super) type CancelSignals<'a> = (&'a AtomicBool, &'a AtomicBool);
 pub(super) struct PlaybackProbe {
     player: Arc<Mutex<Option<Arc<rodio::Player>>>>,
     pub(super) player_ops: Arc<Mutex<()>>,
+    synthesis_in_flight: Arc<AtomicBool>,
+}
+
+pub(super) struct SynthesisFlightGuard {
+    playback_probe: PlaybackProbe,
+}
+
+impl Drop for SynthesisFlightGuard {
+    fn drop(&mut self) {
+        self.playback_probe.set_synthesis_in_flight(false);
+    }
 }
 
 impl PlaybackProbe {
@@ -41,6 +52,7 @@ impl PlaybackProbe {
         Self {
             player: Arc::new(Mutex::new(None)),
             player_ops: Arc::new(Mutex::new(())),
+            synthesis_in_flight: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -49,6 +61,18 @@ impl PlaybackProbe {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .replace(player);
+    }
+
+    pub(super) fn set_synthesis_in_flight(&self, in_flight: bool) {
+        let _ops = super::lock_player_ops(&self.player_ops);
+        self.synthesis_in_flight.store(in_flight, Ordering::Release);
+    }
+
+    pub(super) fn begin_synthesis(&self) -> SynthesisFlightGuard {
+        self.set_synthesis_in_flight(true);
+        SynthesisFlightGuard {
+            playback_probe: self.clone(),
+        }
     }
 
     fn player(&self) -> Option<Arc<rodio::Player>> {
@@ -179,11 +203,13 @@ pub(super) fn request_active_speaker_cancel(
         return false;
     };
     let _ops = super::lock_player_ops(&playback_probe.player_ops);
+    let playback_live =
+        !player.empty() || playback_probe.synthesis_in_flight.load(Ordering::Acquire);
     request_active_speaker_cancel_while_locked(
         generations,
         active_speaker,
         cancellation,
-        !player.empty(),
+        playback_live,
         expected_speaker_pubkey,
     )
 }
@@ -211,11 +237,17 @@ fn request_active_speaker_cancel_while_locked(
     // Keep ownership locked until the generation and cancellation request are
     // committed. The drain path takes the same lock, so the request is bound
     // to the utterance the Stop action actually observed.
-    advance_speaker_generation(generations, speaker_pubkey);
-    cancellation
+    let mut cancellation = cancellation
         .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .replace(speaker_pubkey.to_ascii_lowercase());
+        .unwrap_or_else(|error| error.into_inner());
+    if cancellation
+        .as_deref()
+        .is_some_and(|pending| pending.eq_ignore_ascii_case(speaker_pubkey))
+    {
+        return false;
+    }
+    advance_speaker_generation(generations, speaker_pubkey);
+    cancellation.replace(speaker_pubkey.to_ascii_lowercase());
     true
 }
 
@@ -575,6 +607,67 @@ mod speaker_generation_tests {
         assert_eq!(
             active_speaker.lock().expect("active speaker").as_deref(),
             Some("bob"),
+        );
+    }
+
+    #[test]
+    fn stop_request_during_empty_synthesis_gap_cancels_in_flight_speech() {
+        let generations = Arc::new(Mutex::new(HashMap::new()));
+        let active_speaker = Arc::new(Mutex::new(Some("alice".to_string())));
+        let cancellation = Arc::new(Mutex::new(None));
+        let next_chunk = queued_speech("alice", 0);
+        let probe = playback_probe(false);
+        let _synthesis_flight = probe.begin_synthesis();
+
+        assert!(request_active_speaker_cancel(
+            &generations,
+            &active_speaker,
+            &cancellation,
+            &probe,
+            "alice",
+        ));
+
+        assert_eq!(current_speaker_generation(&generations, "alice"), 1);
+        assert!(!queued_speaker_is_current(&generations, &next_chunk));
+        assert_eq!(
+            cancellation.lock().expect("cancellation").as_deref(),
+            Some("alice"),
+        );
+    }
+
+    #[test]
+    fn repeated_stop_for_same_in_flight_utterance_is_idempotent() {
+        let generations = Arc::new(Mutex::new(HashMap::new()));
+        let active_speaker = Arc::new(Mutex::new(Some("alice".to_string())));
+        let cancellation = Arc::new(Mutex::new(None));
+        let probe = playback_probe(false);
+        let _synthesis_flight = probe.begin_synthesis();
+
+        assert!(request_active_speaker_cancel(
+            &generations,
+            &active_speaker,
+            &cancellation,
+            &probe,
+            "alice",
+        ));
+        let speech_queued_after_first_stop = queued_speech("alice", 1);
+
+        assert!(!request_active_speaker_cancel(
+            &generations,
+            &active_speaker,
+            &cancellation,
+            &probe,
+            "alice",
+        ));
+
+        assert_eq!(current_speaker_generation(&generations, "alice"), 1);
+        assert!(queued_speaker_is_current(
+            &generations,
+            &speech_queued_after_first_stop,
+        ));
+        assert_eq!(
+            cancellation.lock().expect("cancellation").as_deref(),
+            Some("alice"),
         );
     }
 

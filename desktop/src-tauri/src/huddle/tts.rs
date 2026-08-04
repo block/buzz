@@ -657,6 +657,28 @@ fn tts_worker(
         let route_id = queued_text.route_id;
         eprintln!("buzz-desktop: tts stage=synthesis status=started route_id={route_id}");
 
+        // If playback already drained while we were waiting for this item,
+        // release stale ownership before doing any potentially slow voice or
+        // synthesis work. Serialize the drain decision with Stop and append so
+        // those paths observe one coherent utterance boundary.
+        {
+            let _ops = lock_player_ops(&player_ops);
+            if player.empty() && !first_append {
+                tts_active.store(false, Ordering::Release);
+                active_speaker
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .take();
+                eprintln!("buzz-desktop: tts stage=player status=drained route_id={last_route_id}");
+                first_append = true;
+            }
+        }
+
+        // From this point until the item finishes, an empty player can mean a
+        // voice-preparation or synthesis gap rather than a drained utterance.
+        // Stop must remain able to invalidate the in-flight speaker generation.
+        let _synthesis_flight = playback_probe.begin_synthesis();
+
         // The selected per-agent voice travels with the queue item, preserving
         // message order while allowing one warmed Pocket engine to alternate
         // between cached reference styles.
@@ -672,24 +694,6 @@ fn tts_worker(
                 "buzz-desktop: tts stage=synthesis status=failed reason=voice_unavailable route_id={route_id}"
             );
             continue;
-        }
-
-        // If playback already drained while we were waiting for this item,
-        // the agent is silent — release the mic gate BEFORE preprocessing/
-        // synthesis. Without this, an item arriving inside the recv timeout
-        // window would run the whole synthesis pass with `tts_active` stuck
-        // true and nothing playing, making STT discard human speech as
-        // "echo" during a silent window. (Pipelining is unaffected: when
-        // audio is still draining, `player.empty()` is false and the flag
-        // stays set across items.)
-        if player.empty() && !first_append {
-            tts_active.store(false, Ordering::Release);
-            active_speaker
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .take();
-            eprintln!("buzz-desktop: tts stage=player status=drained route_id={last_route_id}");
-            first_append = true;
         }
 
         // Preprocess text.
