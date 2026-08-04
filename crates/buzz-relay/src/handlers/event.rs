@@ -1396,6 +1396,7 @@ mod tests {
                 },
             )),
             subscriptions: Arc::new(Mutex::new(HashMap::new())),
+            pending_subscriptions: Arc::new(Mutex::new(HashMap::new())),
             send_tx,
             ctrl_tx,
             cancel: CancellationToken::new(),

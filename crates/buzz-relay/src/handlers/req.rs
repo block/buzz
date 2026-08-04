@@ -18,10 +18,32 @@ use nostr::Filter;
 
 use buzz_auth::Scope;
 
-use crate::connection::{AuthState, ConnectionState};
+use crate::connection::{AuthState, ConnectionState, PendingSubscription};
 use crate::protocol::RelayMessage;
 use crate::state::AppState;
 
+/// Topic refcount operations used by subscription lifecycle commits.
+///
+/// Keeping this boundary explicit lets race tests pause inside retain/release
+/// rather than only before the commit begins.
+#[async_trait::async_trait]
+pub(crate) trait SubscriptionTopics: Send + Sync {
+    async fn retain_topic(&self, tenant: &TenantContext, topic: EventTopic);
+    async fn release_topic(&self, tenant: &TenantContext, topic: EventTopic);
+}
+
+#[async_trait::async_trait]
+impl SubscriptionTopics for buzz_pubsub::PubSubManager {
+    async fn retain_topic(&self, tenant: &TenantContext, topic: EventTopic) {
+        self.retain_topic(tenant, topic).await;
+    }
+
+    async fn release_topic(&self, tenant: &TenantContext, topic: EventTopic) {
+        self.release_topic(tenant, topic).await;
+    }
+}
+
+const MAX_HISTORICAL_LIMIT: i64 = 2_000;
 const MAX_SUBSCRIPTIONS: usize = 1024;
 
 /// Maximum `query_events` calls in flight per multi-filter REQ / bridge query.
@@ -40,11 +62,12 @@ pub(crate) const FILTER_QUERY_CONCURRENCY: usize = 4;
 const _: () = assert!(FILTER_QUERY_CONCURRENCY >= 2 && FILTER_QUERY_CONCURRENCY <= 8);
 
 /// Handle a REQ message: register the subscription, deliver historical events, then send EOSE.
-pub async fn handle_req(
+pub(crate) async fn handle_req(
     sub_id: String,
     filters: Vec<Filter>,
     conn: Arc<ConnectionState>,
     state: Arc<AppState>,
+    pending: Arc<PendingSubscription>,
 ) {
     let (conn_id, pubkey_bytes, token_channel_ids) = {
         let auth = conn.auth_state.read().await;
@@ -231,28 +254,19 @@ pub async fn handle_req(
         return;
     }
 
-    {
-        let mut subs = conn.subscriptions.lock().await;
-        subs.insert(sub_id.clone(), filters.clone());
-    }
-
-    let replaced = state.sub_registry.register_scoped(
-        conn.tenant.community(),
-        conn_id,
-        sub_id.clone(),
-        filters.clone(),
+    if !register_subscription_if_current(
+        &sub_id,
+        &filters,
         channel_id,
-    );
-    if let Some(replaced) = replaced {
-        state
-            .pubsub
-            .release_topic(&conn.tenant, topic_for_subscription(replaced.channel_id))
-            .await;
+        &conn,
+        &state.sub_registry,
+        state.pubsub.as_ref(),
+        &pending,
+    )
+    .await
+    {
+        return;
     }
-    state
-        .pubsub
-        .retain_topic(&conn.tenant, topic_for_subscription(channel_id))
-        .await;
 
     debug!(conn_id = %conn_id, sub_id = %sub_id, "Subscription registered");
 
@@ -421,6 +435,58 @@ pub async fn handle_req(
 /// pages to the request.
 const SEARCH_PAGE_SIZE: u32 = 100;
 
+/// Atomically commit a REQ into the per-connection map, fan-out registry, and
+/// Redis topic refcount only while it still owns the pending lease. CLOSE uses
+/// the same pending-subscription lock, so it either invalidates this lease
+/// first or observes and removes the completed registration afterward.
+async fn register_subscription_if_current(
+    sub_id: &str,
+    filters: &[Filter],
+    channel_id: Option<uuid::Uuid>,
+    conn: &ConnectionState,
+    registry: &crate::subscription::SubscriptionRegistry,
+    pubsub: &dyn SubscriptionTopics,
+    pending: &Arc<PendingSubscription>,
+) -> bool {
+    let pending_subscriptions = conn.pending_subscriptions.lock().await;
+    let still_current = pending_subscriptions
+        .get(sub_id)
+        .is_some_and(|current| Arc::ptr_eq(current, pending));
+    if conn.cancel.is_cancelled() || pending.is_cancelled() || !still_current {
+        return false;
+    }
+
+    conn.subscriptions
+        .lock()
+        .await
+        .insert(sub_id.to_owned(), filters.to_vec());
+
+    let replaced = registry.register_scoped(
+        conn.tenant.community(),
+        conn.conn_id,
+        sub_id.to_owned(),
+        filters.to_vec(),
+        channel_id,
+    );
+    if let Some(replaced) = replaced {
+        pubsub
+            .release_topic(&conn.tenant, topic_for_subscription(replaced.channel_id))
+            .await;
+    }
+    pubsub
+        .retain_topic(&conn.tenant, topic_for_subscription(channel_id))
+        .await;
+
+    // Only a successful replacement commit supersedes historical delivery from
+    // the previous same-ID REQ. Validation/search failures leave it untouched.
+    pending.commit();
+
+    drop(pending_subscriptions);
+    true
+}
+
+/// Handle a NIP-50 search REQ: query Postgres FTS, fetch full events, deliver results, EOSE.
+/// Search subscriptions are one-shot — no persistent subscription is registered.
 /// Maximum FTS pages to fetch per filter (prevents unbounded loops).
 ///
 /// Derived from the advertised page ceiling rather than fixed: the scan
@@ -1292,7 +1358,277 @@ fn topic_for_subscription(channel_id: Option<uuid::Uuid>) -> EventTopic {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::{Alphabet, Filter, SingleLetterTag};
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+
+    use axum::extract::ws::Message as WsMessage;
+    use buzz_core::{CommunityId, StoredEvent};
+    use buzz_pubsub::{EventTopic, PubSubManager};
+    use chrono::Utc;
+    use nostr::{Alphabet, EventBuilder, Filter, Keys, Kind, SingleLetterTag};
+    use tokio::sync::{mpsc, Barrier, Mutex, Notify, RwLock};
+    use tokio::task::JoinSet;
+    use tokio_util::sync::CancellationToken;
+
+    fn test_connection(tenant: TenantContext) -> Arc<ConnectionState> {
+        let (send_tx, _send_rx) = mpsc::channel::<WsMessage>(8);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel::<WsMessage>(8);
+        Arc::new(ConnectionState {
+            conn_id: uuid::Uuid::new_v4(),
+            tenant,
+            remote_addr: "127.0.0.1:1234".parse().expect("socket address"),
+            auth_state: RwLock::new(AuthState::Failed),
+            subscriptions: Arc::new(Mutex::new(HashMap::new())),
+            pending_subscriptions: Arc::new(Mutex::new(HashMap::new())),
+            send_tx,
+            ctrl_tx,
+            cancel: CancellationToken::new(),
+            backpressure_count: Arc::new(AtomicU8::new(0)),
+            grace_limit: 3,
+        })
+    }
+
+    async fn test_pubsub() -> Arc<PubSubManager> {
+        let config = deadpool_redis::Config::from_url("redis://127.0.0.1:6379");
+        let pool = config
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("Redis test pool");
+        Arc::new(
+            PubSubManager::new("redis://127.0.0.1:6379", pool)
+                .await
+                .expect("pubsub manager"),
+        )
+    }
+
+    fn matching_event(channel_id: uuid::Uuid) -> StoredEvent {
+        let event = EventBuilder::new(Kind::TextNote, "race test")
+            .tags([])
+            .sign_with_keys(&Keys::generate())
+            .expect("sign event");
+        StoredEvent::with_received_at(event, Utc::now(), Some(channel_id), true)
+    }
+
+    fn subscription_gauge_value(snapshotter: &metrics_util::debugging::Snapshotter) -> f64 {
+        snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .find(|(key, ..)| key.key().name() == "buzz_subscriptions_active")
+            .map(|(_, _, _, value)| {
+                let metrics_util::debugging::DebugValue::Gauge(value) = value else {
+                    panic!("buzz_subscriptions_active must be a gauge");
+                };
+                value.into_inner()
+            })
+            .unwrap_or(0.0)
+    }
+
+    struct RetainBarrierTopics {
+        inner: Arc<PubSubManager>,
+        entered: Arc<Barrier>,
+        resume: Arc<Notify>,
+        pause_next_retain: AtomicBool,
+    }
+
+    impl RetainBarrierTopics {
+        fn new(inner: Arc<PubSubManager>) -> Self {
+            Self {
+                inner,
+                entered: Arc::new(Barrier::new(2)),
+                resume: Arc::new(Notify::new()),
+                pause_next_retain: AtomicBool::new(true),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SubscriptionTopics for RetainBarrierTopics {
+        async fn retain_topic(&self, tenant: &TenantContext, topic: EventTopic) {
+            if self.pause_next_retain.swap(false, Ordering::SeqCst) {
+                self.entered.wait().await;
+                self.resume.notified().await;
+            }
+            self.inner.retain_topic(tenant, topic).await;
+        }
+
+        async fn release_topic(&self, tenant: &TenantContext, topic: EventTopic) {
+            self.inner.release_topic(tenant, topic).await;
+        }
+    }
+
+    #[test]
+    fn close_during_topic_retain_serializes_after_registration_commit() {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        metrics::with_local_recorder(&recorder, || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime");
+            let local = tokio::task::LocalSet::new();
+            local.block_on(&runtime, async {
+                metrics::gauge!("buzz_subscriptions_active").increment(0.0);
+
+                let community = CommunityId::from_uuid(uuid::Uuid::new_v4());
+                let conn = test_connection(TenantContext::resolved(community, "race.test"));
+                let registry = Arc::new(crate::subscription::SubscriptionRegistry::new());
+                let inner_pubsub = test_pubsub().await;
+                let pubsub = Arc::new(RetainBarrierTopics::new(Arc::clone(&inner_pubsub)));
+                let channel_id = uuid::Uuid::new_v4();
+                let sub_id = "close-race".to_owned();
+                let filters = vec![Filter::new().kind(Kind::TextNote)];
+                let pending = conn.begin_pending_subscription(&sub_id).await;
+
+                let req_task = tokio::task::spawn_local({
+                    let conn = Arc::clone(&conn);
+                    let registry = Arc::clone(&registry);
+                    let pubsub = Arc::clone(&pubsub);
+                    let pending = Arc::clone(&pending);
+                    let sub_id = sub_id.clone();
+                    let filters = filters.clone();
+                    async move {
+                        register_subscription_if_current(
+                            &sub_id,
+                            &filters,
+                            Some(channel_id),
+                            &conn,
+                            &registry,
+                            pubsub.as_ref(),
+                            &pending,
+                        )
+                        .await
+                    }
+                });
+
+                pubsub.entered.wait().await;
+                assert_eq!(registry.total_subscriptions(), 1);
+                assert_eq!(
+                    inner_pubsub
+                        .topic_refcount(&conn.tenant, EventTopic::Channel(channel_id))
+                        .await,
+                    0
+                );
+
+                let close_finished = Arc::new(AtomicBool::new(false));
+                let close_task = tokio::task::spawn_local({
+                    let close_finished = Arc::clone(&close_finished);
+                    let conn = Arc::clone(&conn);
+                    let registry = Arc::clone(&registry);
+                    let pubsub = Arc::clone(&pubsub);
+                    let sub_id = sub_id.clone();
+                    async move {
+                        crate::handlers::close::remove_subscription(
+                            &sub_id,
+                            &conn,
+                            &registry,
+                            pubsub.as_ref(),
+                        )
+                        .await;
+                        close_finished.store(true, Ordering::SeqCst);
+                    }
+                });
+                tokio::task::yield_now().await;
+                assert!(!close_finished.load(Ordering::SeqCst));
+
+                pubsub.resume.notify_one();
+                assert!(req_task.await.expect("REQ task"));
+                close_task.await.expect("CLOSE task");
+
+                assert!(conn.subscriptions.lock().await.is_empty());
+                assert!(conn.pending_subscriptions.lock().await.is_empty());
+                assert_eq!(registry.total_subscriptions(), 0);
+                assert!(registry
+                    .fan_out_scoped(community, &matching_event(channel_id))
+                    .is_empty());
+                assert_eq!(
+                    inner_pubsub
+                        .topic_refcount(&conn.tenant, EventTopic::Channel(channel_id))
+                        .await,
+                    0
+                );
+            });
+        });
+        assert_eq!(subscription_gauge_value(&snapshotter), 0.0);
+    }
+
+    #[test]
+    fn disconnect_during_pre_registration_await_drains_req_before_cleanup() {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        metrics::with_local_recorder(&recorder, || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime");
+            runtime.block_on(async {
+                metrics::gauge!("buzz_subscriptions_active").increment(0.0);
+
+                let community = CommunityId::from_uuid(uuid::Uuid::new_v4());
+                let conn = test_connection(TenantContext::resolved(community, "race.test"));
+                let registry = Arc::new(crate::subscription::SubscriptionRegistry::new());
+                let pubsub = test_pubsub().await;
+                let channel_id = uuid::Uuid::new_v4();
+                let sub_id = "disconnect-race".to_owned();
+                let filters = vec![Filter::new().kind(Kind::TextNote)];
+                let pending = conn.begin_pending_subscription(&sub_id).await;
+                let gate = Arc::new(Notify::new());
+                let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+                let mut req_tasks = JoinSet::new();
+
+                req_tasks.spawn({
+                    let conn = Arc::clone(&conn);
+                    let registry = Arc::clone(&registry);
+                    let pubsub = Arc::clone(&pubsub);
+                    let pending = Arc::clone(&pending);
+                    let gate = Arc::clone(&gate);
+                    let sub_id = sub_id.clone();
+                    let filters = filters.clone();
+                    async move {
+                        started_tx.send(()).expect("signal pre-registration await");
+                        gate.notified().await;
+                        let _ = register_subscription_if_current(
+                            &sub_id,
+                            &filters,
+                            Some(channel_id),
+                            &conn,
+                            &registry,
+                            pubsub.as_ref(),
+                            &pending,
+                        )
+                        .await;
+                    }
+                });
+
+                started_rx
+                    .await
+                    .expect("REQ reached pre-registration await");
+                crate::connection::shutdown_pending_requests(&conn, &mut req_tasks).await;
+                for removed in registry.remove_connection(conn.conn_id) {
+                    pubsub
+                        .release_topic(&conn.tenant, topic_for_subscription(removed.channel_id))
+                        .await;
+                }
+                gate.notify_one();
+                tokio::task::yield_now().await;
+
+                assert!(conn.cancel.is_cancelled());
+                assert!(req_tasks.is_empty());
+                assert!(conn.subscriptions.lock().await.is_empty());
+                assert!(conn.pending_subscriptions.lock().await.is_empty());
+                assert_eq!(registry.total_subscriptions(), 0);
+                assert!(registry
+                    .fan_out_scoped(community, &matching_event(channel_id))
+                    .is_empty());
+                assert_eq!(
+                    pubsub
+                        .topic_refcount(&conn.tenant, EventTopic::Channel(channel_id))
+                        .await,
+                    0
+                );
+            });
+        });
+        assert_eq!(subscription_gauge_value(&snapshotter), 0.0);
+    }
 
     #[test]
     fn global_queries_push_access_scope_before_limit() {
