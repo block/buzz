@@ -1,10 +1,12 @@
 import { Pin } from "lucide-react";
 import * as React from "react";
 
+import { useWorkingChannels } from "@/features/agents/agentWorkingSignal";
 import {
   type ChannelGroup,
   toggleChannelPinned,
 } from "@/features/dev-mode/lib/pinnedChannels";
+import { DevWavyText } from "@/features/dev-mode/ui/DevWavyText";
 import type { NavigatorWidthControls } from "@/features/dev-mode/lib/useNavigatorWidth";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
@@ -26,12 +28,14 @@ function ChannelRow({
   isHighlighted,
   isPinned,
   isUnread,
+  isWorking,
   onOpen,
 }: {
   channel: Channel;
   isHighlighted: boolean;
   isPinned: boolean;
   isUnread: boolean;
+  isWorking: boolean;
   onOpen: (channelId: string) => void;
 }) {
   const scrollHighlightedIntoView = React.useCallback(
@@ -91,7 +95,7 @@ function ChannelRow({
             isUnread ? "font-semibold" : "font-medium",
           )}
         >
-          # {channel.name}
+          # {isWorking ? <DevWavyText text={channel.name} /> : channel.name}
         </span>
         {isUnread ? (
           <span
@@ -140,6 +144,12 @@ export function DevChannelNavigator({
   const isEmpty = groups.every((group) => group.channels.length === 0);
   const { width, dragging, dividerProps } = widthControls;
 
+  const workingChannels = useWorkingChannels();
+  const workingChannelIds = React.useMemo(
+    () => new Set(workingChannels.map((summary) => summary.channelId)),
+    [workingChannels],
+  );
+
   return (
     <div className="flex shrink-0" style={{ width }}>
       <div
@@ -171,6 +181,7 @@ export function DevChannelNavigator({
                   isHighlighted={channel.id === highlightedId}
                   isPinned={group.pinned}
                   isUnread={unreadChannelIds.has(channel.id)}
+                  isWorking={workingChannelIds.has(channel.id)}
                   onOpen={onOpen}
                 />
               ))}

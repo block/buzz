@@ -1,6 +1,8 @@
 import * as React from "react";
 
+import { useWorkingChannels } from "@/features/agents/agentWorkingSignal";
 import { parseSubChannelName } from "@/features/dev-mode/lib/subChannels";
+import { DevWavyText } from "@/features/dev-mode/ui/DevWavyText";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 
@@ -33,11 +35,18 @@ export function DevChannelTabs({
     [],
   );
 
+  const workingChannels = useWorkingChannels();
+  const workingChannelIds = React.useMemo(
+    () => new Set(workingChannels.map((summary) => summary.channelId)),
+    [workingChannels],
+  );
+
   const tab = (channel: Channel, label: string) => {
     const isActive = channel.id === activeId;
     // An active tab keeps its dot while an unread thread remains inside it —
     // viewing the tab clears top-level posts, not collapsed thread replies.
     const isUnread = unreadChannelIds.has(channel.id);
+    const isWorking = workingChannelIds.has(channel.id);
     return (
       <button
         key={channel.id}
@@ -54,7 +63,7 @@ export function DevChannelTabs({
         type="button"
       >
         <span className={cn("whitespace-nowrap", isUnread && "font-semibold")}>
-          {label}
+          {isWorking ? <DevWavyText text={label} /> : label}
         </span>
         {isUnread ? (
           <span
