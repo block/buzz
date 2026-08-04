@@ -6,7 +6,6 @@ import {
   useAgentMemoryQuery,
   useIsManagedAgent,
 } from "@/features/agent-memory/hooks";
-import { useActiveAgentTurns } from "@/features/agents/activeAgentTurnsStore";
 import {
   type AttachManagedAgentToChannelResult,
   useAcpRuntimesQuery,
@@ -58,7 +57,7 @@ import {
   useUsersBatchQuery,
 } from "@/features/profile/hooks";
 import { ownsAuthorAgent } from "@/features/profile/lib/identity";
-import { resolveProfileActivityAgent } from "@/features/profile/lib/profileActivityAgent";
+import { useProfileActivityAgent } from "@/features/profile/ui/useProfileActivityAgent";
 import {
   AgentInfoFocusedView,
   AgentInstructionsFocusedView,
@@ -309,28 +308,14 @@ export function UserProfilePanel({
   // manage it locally (older agents may not advertise an owner pubkey). Every
   // real boundary is server-side, so this only controls what UI we paint.
   const viewerIsOwner = isCurrentUserOwner || isOwner === true;
-  const observableTurns = useActiveAgentTurns(isBot ? effectivePubkey : null);
-  const viewerCanObserve = viewerIsOwner || observableTurns.length > 0;
-
-  const activityAgent = React.useMemo(
-    () =>
-      resolveProfileActivityAgent({
-        effectivePubkey,
-        isBot,
-        managedAgent,
-        profile: profile ?? null,
-        relayAgent,
-        viewerCanObserve,
-      }),
-    [
-      effectivePubkey,
-      isBot,
-      managedAgent,
-      profile,
-      relayAgent,
-      viewerCanObserve,
-    ],
-  );
+  const { activityAgent, viewerCanObserve } = useProfileActivityAgent({
+    effectivePubkey,
+    isBot,
+    managedAgent,
+    profile: profile ?? null,
+    relayAgent,
+    viewerIsOwner,
+  });
   // Observer ingestion is app-global. Owners see all turns, while a requester
   // can open a shared agent only while requester-addressed activity proves an
   // observable turn is live.
