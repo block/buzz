@@ -7,7 +7,10 @@ import {
   parseEntityLink,
   type ParsedEntityLink,
 } from "@/shared/lib/entityLink";
-import type { SupportedLinkPreview } from "@/shared/lib/linkPreview";
+import {
+  parseSupportedLinkPreview,
+  type SupportedLinkPreview,
+} from "@/shared/lib/linkPreview";
 
 /**
  * Navigate to the project detail view for a `buzz://pr|issue|repo` link.
@@ -49,10 +52,23 @@ export function useEntityCardOpenHandlers(
 }
 
 /**
- * Render an inline anchor for a `buzz://pr|issue|repo` entity link that
- * navigates in-app instead of handing the custom scheme to the OS (which
- * has no handler for it yet). Returns null when the href is not a valid
- * entity link so the caller can fall through to its default anchor.
+ * Resolve an anchor href to a canonical `buzz://` entity link, accepting
+ * both the deep-link scheme directly and HTTPS relay clone URLs (which the
+ * preview parser normalizes onto `buzz://repo`).
+ */
+function resolveEntityHref(href: string): string | null {
+  if (isEntityLink(href)) return href;
+  if (!/^https?:\/\//i.test(href)) return null;
+
+  const preview = parseSupportedLinkPreview(href);
+  return preview && isEntityLink(preview.href) ? preview.href : null;
+}
+
+/**
+ * Render an inline anchor for a Buzz entity link (`buzz://pr|issue|repo` or
+ * an HTTPS relay clone URL) that navigates in-app instead of handing the
+ * URL to the OS. Returns null when the href is not a valid entity link so
+ * the caller can fall through to its default anchor.
  */
 export function renderEntityLinkAnchor({
   anchorProps,
@@ -65,9 +81,12 @@ export function renderEntityLinkAnchor({
   href: string | undefined;
   onOpenEntityLink: (link: ParsedEntityLink) => void;
 }): React.ReactElement | null {
-  if (!href || !isEntityLink(href)) return null;
+  if (!href) return null;
 
-  const parsed = parseEntityLink(href);
+  const canonicalHref = resolveEntityHref(href);
+  if (!canonicalHref) return null;
+
+  const parsed = parseEntityLink(canonicalHref);
   if (!parsed.ok) return null;
 
   return (

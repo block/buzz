@@ -63,7 +63,7 @@ test("parseSupportedLinkPreview parses Buzz relay git clone URLs", () => {
     ),
     {
       kind: "buzz-repository",
-      href: "https://buzz.block.builderlab.xyz/repos/buzz-world-galaxy",
+      href: `buzz://repo?owner=${BUZZ_OWNER}&d=buzz-world-galaxy`,
       provider: "Buzz",
       title: "buzz-world-galaxy",
       typeLabel: "repo",
@@ -71,14 +71,14 @@ test("parseSupportedLinkPreview parses Buzz relay git clone URLs", () => {
   );
 });
 
-test("parseSupportedLinkPreview strips .git suffix and keeps relay port", () => {
+test("parseSupportedLinkPreview strips .git suffix from clone URLs", () => {
   assert.deepEqual(
     parseSupportedLinkPreview(
       `http://localhost:3000/git/${BUZZ_OWNER}/buzz-world.git`,
     ),
     {
       kind: "buzz-repository",
-      href: "http://localhost:3000/repos/buzz-world",
+      href: `buzz://repo?owner=${BUZZ_OWNER}&d=buzz-world`,
       provider: "Buzz",
       title: "buzz-world",
       typeLabel: "repo",
@@ -234,7 +234,7 @@ test("extractSupportedLinkPreviews picks up bare Buzz clone URLs in prose", () =
     [
       {
         kind: "buzz-repository",
-        href: "https://buzz.block.builderlab.xyz/repos/buzz-world-galaxy",
+        href: `buzz://repo?owner=${BUZZ_OWNER}&d=buzz-world-galaxy`,
         provider: "Buzz",
         title: "buzz-world-galaxy",
         typeLabel: "repo",
@@ -260,7 +260,19 @@ test("extractSupportedLinkPreviews dedupes clone URL variants of one repo", () =
         `https://relay.example/git/${BUZZ_OWNER}/buzz-world-galaxy.git`,
       ].join(" "),
     ).map((preview) => preview.href),
-    ["https://relay.example/repos/buzz-world-galaxy"],
+    [`buzz://repo?owner=${BUZZ_OWNER}&d=buzz-world-galaxy`],
+  );
+});
+
+test("clone URLs and buzz://repo links for the same repo dedupe to one card", () => {
+  assert.deepEqual(
+    extractSupportedLinkPreviews(
+      [
+        `https://relay.example/git/${BUZZ_OWNER}/buzz-world-galaxy`,
+        `buzz://repo?owner=${BUZZ_OWNER}&d=buzz-world-galaxy`,
+      ].join(" "),
+    ).map((preview) => preview.href),
+    [`buzz://repo?owner=${BUZZ_OWNER}&d=buzz-world-galaxy`],
   );
 });
 

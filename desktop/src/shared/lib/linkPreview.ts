@@ -332,26 +332,28 @@ function parseBuzzEntityPreview(href: string): SupportedLinkPreview | null {
 }
 
 const BUZZ_GIT_PATH_RE =
-  /^\/git\/[a-f0-9]{64}\/([a-zA-Z0-9._-]+?)(?:\.git)?\/?$/;
+  /^\/git\/([a-f0-9]{64})\/([a-zA-Z0-9._-]+?)(?:\.git)?\/?$/;
 
 /**
  * Recognize a Buzz relay git URL (`{relay-origin}/git/<owner-pubkey>/<repo>`,
- * the clone URL shape agents paste when announcing work). The card links to
- * the relay-served web repo page (`/repos/<d-tag>`) instead of the raw git
- * transport endpoint, which is not a browsable page.
+ * the clone URL shape agents paste when announcing work). The preview href
+ * is normalized to the canonical `buzz://repo` deep link: the raw git
+ * transport endpoint is not a browsable page, and the buzz:// href gives the
+ * card the same in-app click navigation as explicit entity links (and
+ * dedupes the two spellings of the same repository).
  */
 function parseBuzzGitLink(parsed: URL): SupportedLinkPreview | null {
   const match = BUZZ_GIT_PATH_RE.exec(parsed.pathname);
   if (!match) return null;
 
-  const repo = match[1];
+  const [, owner, repo] = match;
   if (repo.startsWith(".") || repo.includes("..") || repo.length > 64) {
     return null;
   }
 
   return {
     kind: "buzz-repository",
-    href: `${parsed.origin}/repos/${repo}`,
+    href: buildRepoLink({ owner, dtag: repo }),
     provider: "Buzz",
     title: repo,
     typeLabel: "repo",

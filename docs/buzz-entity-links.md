@@ -100,9 +100,11 @@ Agents naturally paste HTTPS clone URLs
 (`{relay-origin}/git/<pubkey>/<repo>`) when announcing work, so those are
 recognized **first** — implemented on this branch. Detection keys on the
 path shape (`/git/` + 64-hex pubkey segment) rather than a host allow-list,
-since relay hosts differ per community; the card links to the relay-served
-web repo page (`/repos/<d-tag>`) because the raw transport URL is not
-browsable.
+since relay hosts differ per community. The preview href is normalized to
+the canonical `buzz://repo?owner=…&d=…` deep link (the raw transport URL is
+not a browsable page), so clone-URL cards and inline clone-URL anchors get
+the same in-app click navigation as explicit entity links, and both
+spellings of the same repository dedupe to one card.
 
 PRs, issues, and projects have no HTTPS page to link to (the web client has
 no such routes), which is why they use the `buzz://` scheme above: it is
@@ -229,7 +231,8 @@ No persona changes needed — the base prompt applies to all managed agents.
 
 0. **HTTPS clone-URL repo cards** *(done, this branch)* — recognize relay
    `/git/<pubkey>/<repo>` URLs in `linkPreview.ts`, `Buzz` provider card
-   with the `BuzzMark` logo, href rewritten to the web repo page.
+   with the `BuzzMark` logo, href normalized to the `buzz://repo` deep link
+   for in-app navigation.
 1. **Link core + cards** *(done, this branch)* — `entityLink.ts`, detection
    in `linkPreview.ts`, `Buzz` card variant in
    `link-preview-attachment.tsx`, in-timeline click navigation, relay title
