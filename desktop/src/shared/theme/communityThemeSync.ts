@@ -74,6 +74,7 @@ export class CommunityThemeSyncManager {
   private pending: CommunityThemePreference | null = null;
   private publishInFlight = false;
   private publishRetryAttempt = 0;
+  private readonly remoteProcessing = new Set<Promise<unknown>>();
   private readonly onPublished: (published: PublishedCommunityTheme) => void;
 
   constructor(
@@ -94,7 +95,9 @@ export class CommunityThemeSyncManager {
       });
       if (events.length === 0) return { status: "absent" };
       if (events[0].pubkey !== this.pubkey) return { status: "invalid" };
-      const remote = await decryptAndParse(events[0]);
+      const processing = decryptAndParse(events[0]);
+      this.trackRemoteProcessing(processing);
+      const remote = await processing;
       if (!remote) return { status: "invalid" };
       if (
         isNewerCommunityThemeCoordinate(remote, {
@@ -215,6 +218,8 @@ export class CommunityThemeSyncManager {
         "Timed out publishing community theme.",
         "Failed to publish community theme.",
       );
+      await this.waitForDeliveredRemotes();
+      if (this.destroyed) return;
       const published = {
         preference,
         createdAt: event.created_at,
@@ -267,6 +272,18 @@ export class CommunityThemeSyncManager {
     }
   }
 
+  private trackRemoteProcessing(task: Promise<unknown>): void {
+    this.remoteProcessing.add(task);
+    void task.then(
+      () => this.remoteProcessing.delete(task),
+      () => this.remoteProcessing.delete(task),
+    );
+  }
+
+  private async waitForDeliveredRemotes(): Promise<void> {
+    await Promise.allSettled([...this.remoteProcessing]);
+  }
+
   async subscribe(
     onUpdate: (remote: RemoteCommunityTheme) => void,
   ): Promise<() => Promise<void>> {
@@ -279,7 +296,7 @@ export class CommunityThemeSyncManager {
       },
       (event: RelayEvent) => {
         if (event.pubkey !== this.pubkey || this.destroyed) return;
-        void decryptAndParse(event).then((remote) => {
+        const processing = decryptAndParse(event).then((remote) => {
           if (!remote || this.destroyed) return;
           if (
             isNewerCommunityThemeCoordinate(remote, {
@@ -292,6 +309,7 @@ export class CommunityThemeSyncManager {
           }
           onUpdate(remote);
         });
+        this.trackRemoteProcessing(processing);
       },
     );
   }
