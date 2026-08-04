@@ -4,22 +4,24 @@ import test from "node:test";
 import { getOffscreenActivityChannelIds } from "./useOffscreenActivityChannelIds.ts";
 import { getSidebarActivityOverflowLabel } from "./useSidebarActivityOverflow.ts";
 
-function makeChannel(id, channelType = "stream") {
-  return { channelType, id };
-}
-
-test("keeps working channels separate from message activity", () => {
+test("keeps every unread channel navigable while adding working activity", () => {
   const activity = getOffscreenActivityChannelIds({
     activeWorkingByChannelId: new Map([["working", {}]]),
-    channels: [makeChannel("dm", "dm")],
     previewActivityChannelIds: new Set(["preview"]),
-    unreadChannelIds: new Set(["dm"]),
+    unreadChannelIds: new Set(["dm", "forum", "stream"]),
   });
 
-  assert.deepEqual([...activity.messageChannelIds].sort(), ["dm", "preview"]);
+  assert.deepEqual([...activity.messageChannelIds].sort(), [
+    "dm",
+    "forum",
+    "preview",
+    "stream",
+  ]);
   assert.deepEqual([...activity.channelIds].sort(), [
     "dm",
+    "forum",
     "preview",
+    "stream",
     "working",
   ]);
 });

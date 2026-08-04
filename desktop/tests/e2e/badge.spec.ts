@@ -245,7 +245,7 @@ test("dark mode keeps selected labels regular and channel-level unread labels bo
   });
 });
 
-test("offscreen preview activity shows the primary sidebar arrow", async ({
+test("offscreen top-level unread shows the primary sidebar arrow", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1280, height: 360 });
@@ -258,7 +258,16 @@ test("offscreen preview activity shows the primary sidebar arrow", async ({
     .getByTestId("app-sidebar")
     .locator('[data-sidebar="content"]');
   await sidebarScroller.evaluate((element) => {
-    element.scrollTop = element.scrollHeight;
+    const random = element.querySelector<HTMLElement>(
+      '[data-testid="channel-random"]',
+    );
+    if (!random) throw new Error("Could not find #random in the sidebar");
+
+    // Keep #random just above the viewport so it is the next unread row.
+    element.scrollTop +=
+      random.getBoundingClientRect().bottom -
+      element.getBoundingClientRect().top +
+      1;
   });
   await expect(page.getByTestId("channel-random")).not.toBeInViewport();
 
@@ -273,35 +282,15 @@ test("offscreen preview activity shows the primary sidebar arrow", async ({
     },
     { pubkey: TEST_IDENTITIES.alice.pubkey },
   );
-  await expect(page.getByTestId("sidebar-more-unread-above")).toHaveCount(0);
-
-  const rootEventId = await page.evaluate((pubkey) => {
-    return window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
-      channelName: "random",
-      content: "A conversation I started",
-      kind: 40002,
-      pubkey,
-    })?.id;
-  }, DEFAULT_MOCK_PUBKEY);
-  await page.evaluate(
-    ({ parentEventId, pubkey }) => {
-      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
-        channelName: "random",
-        content: "A reply that appears in the channel preview",
-        kind: 40002,
-        parentEventId,
-        pubkey,
-      });
-    },
-    { parentEventId: rootEventId, pubkey: TEST_IDENTITIES.alice.pubkey },
-  );
 
   const activityArrow = page.getByTestId("sidebar-more-unread-above");
   await expect(activityArrow).toBeVisible();
   await expect(activityArrow).toHaveClass(/bg-primary/);
+  await activityArrow.click();
+  await expect(page.getByTestId("channel-random")).toBeInViewport();
   await waitForAnimations(page);
   await page.screenshot({
-    path: `${SHOTS}/sidebar-preview-activity-arrow.png`,
+    path: `${SHOTS}/sidebar-top-level-unread-arrow.png`,
     clip: { x: 0, y: 0, width: 320, height: 360 },
   });
 });
