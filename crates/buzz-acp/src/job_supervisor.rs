@@ -1959,6 +1959,9 @@ fn process_group_alive(pgid: nix::unistd::Pid) -> Result<bool, ControlError> {
         .map_err(|error| control("runner_cancel_failed", error.to_string()))
 }
 
+// The unix arm returns explicitly so the windows arm below can never become the
+// accidental fallthrough value on a future platform edit.
+#[allow(clippy::needless_return)]
 fn recorded_tree_is_empty(identity: &RunnerIdentity) -> Result<bool, ControlError> {
     #[cfg(unix)]
     {

@@ -421,6 +421,8 @@ async fn serve_relay_websocket(
                             }
                         }
                     }
+                    // The suggested collapse needs `.await` in a match guard, which is illegal.
+                    #[allow(clippy::collapsible_match)]
                     Message::Ping(payload) => {
                         if websocket.send(Message::Pong(payload)).await.is_err() {
                             break;

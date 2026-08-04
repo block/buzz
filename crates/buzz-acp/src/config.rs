@@ -851,17 +851,33 @@ fn validate_managed_bundled_executable(
     Ok(canonical_configured)
 }
 
+/// Borrowed operator-supplied inputs for one managed runtime configuration.
+struct ManagedRuntimeInputs<'a> {
+    agent_command: &'a str,
+    mcp_command: &'a str,
+    harness_executable: &'a Path,
+    runtime_lock_path: Option<&'a Path>,
+    state_dir: Option<&'a Path>,
+    runtime_id: Option<&'a str>,
+    receipt_path: Option<&'a Path>,
+    lh_command: Option<&'a Path>,
+    workspace_roots: Option<&'a OsString>,
+}
+
 fn managed_runtime_config(
-    agent_command: &str,
-    mcp_command: &str,
-    harness_executable: &Path,
-    runtime_lock_path: Option<&Path>,
-    state_dir: Option<&Path>,
-    runtime_id: Option<&str>,
-    receipt_path: Option<&Path>,
-    lh_command: Option<&Path>,
-    workspace_roots: Option<&OsString>,
+    inputs: ManagedRuntimeInputs<'_>,
 ) -> Result<ManagedRuntimeConfig, ConfigError> {
+    let ManagedRuntimeInputs {
+        agent_command,
+        mcp_command,
+        harness_executable,
+        runtime_lock_path,
+        state_dir,
+        runtime_id,
+        receipt_path,
+        lh_command,
+        workspace_roots,
+    } = inputs;
     validate_managed_bundled_executable(agent_command, "buzz-agent", harness_executable)?;
     validate_managed_bundled_executable(mcp_command, "buzz-dev-mcp", harness_executable)?;
     let runtime_lock_path = runtime_lock_path.ok_or_else(|| {
@@ -1459,17 +1475,17 @@ impl Config {
                     "unsupported_managed_adapter: cannot verify bundled executable identity".into(),
                 )
             })?;
-            Some(managed_runtime_config(
-                &agent_command,
-                &args.mcp_command,
-                &harness_executable,
-                args.runtime_lock_path.as_deref(),
-                args.runtime_state_dir.as_deref(),
-                args.runtime_id.as_deref(),
-                args.runtime_receipt_path.as_deref(),
-                args.lh_command.as_deref(),
-                args.job_workspace_roots.as_ref(),
-            )?)
+            Some(managed_runtime_config(ManagedRuntimeInputs {
+                agent_command: &agent_command,
+                mcp_command: &args.mcp_command,
+                harness_executable: &harness_executable,
+                runtime_lock_path: args.runtime_lock_path.as_deref(),
+                state_dir: args.runtime_state_dir.as_deref(),
+                runtime_id: args.runtime_id.as_deref(),
+                receipt_path: args.runtime_receipt_path.as_deref(),
+                lh_command: args.lh_command.as_deref(),
+                workspace_roots: args.job_workspace_roots.as_ref(),
+            })?)
         } else {
             None
         };
@@ -3547,6 +3563,21 @@ channels = "ALL"
         fn mcp_command(&self) -> &str {
             self.mcp_executable.to_str().expect("UTF-8 fixture path")
         }
+
+        /// Canonical managed inputs with no job driver and no approved roots.
+        fn inputs(&self) -> ManagedRuntimeInputs<'_> {
+            ManagedRuntimeInputs {
+                agent_command: self.agent_command(),
+                mcp_command: self.mcp_command(),
+                harness_executable: &self.harness_executable,
+                runtime_lock_path: Some(&self.lock),
+                state_dir: Some(&self.state),
+                runtime_id: Some("agent_pair"),
+                receipt_path: Some(&self.receipt),
+                lh_command: None,
+                workspace_roots: None,
+            }
+        }
     }
 
     impl Drop for ManagedConfigFixture {
@@ -3662,18 +3693,8 @@ channels = "ALL"
     fn managed_runtime_rejects_missing_mcp() {
         let fixture = ManagedConfigFixture::new();
         std::fs::remove_file(&fixture.mcp_executable).expect("remove bundled MCP");
-        let error = managed_runtime_config(
-            fixture.agent_command(),
-            fixture.mcp_command(),
-            &fixture.harness_executable,
-            Some(&fixture.lock),
-            Some(&fixture.state),
-            Some("agent_pair"),
-            Some(&fixture.receipt),
-            None,
-            None,
-        )
-        .expect_err("managed mode without the bundled MCP must fail closed");
+        let error = managed_runtime_config(fixture.inputs())
+            .expect_err("managed mode without the bundled MCP must fail closed");
         assert!(error.to_string().contains("unsupported_managed_adapter"));
     }
 
@@ -3719,17 +3740,11 @@ channels = "ALL"
     fn managed_runtime_accepts_canonical_bundled_pair_and_canonicalizes_operator_paths() {
         let fixture = ManagedConfigFixture::new();
         let roots = fixture.roots();
-        let config = managed_runtime_config(
-            fixture.agent_command(),
-            fixture.mcp_command(),
-            &fixture.harness_executable,
-            Some(&fixture.lock),
-            Some(&fixture.state),
-            Some("agent_pair"),
-            Some(&fixture.receipt),
-            Some(&fixture.executable),
-            Some(&roots),
-        )
+        let config = managed_runtime_config(ManagedRuntimeInputs {
+            lh_command: Some(&fixture.executable),
+            workspace_roots: Some(&roots),
+            ..fixture.inputs()
+        })
         .expect("valid managed config");
 
         assert_eq!(
@@ -3746,48 +3761,26 @@ channels = "ALL"
     fn managed_runtime_allows_unavailable_lh_and_roots_but_rejects_relative_lh() {
         let fixture = ManagedConfigFixture::new();
         let empty_roots = OsString::new();
-        let unavailable = managed_runtime_config(
-            fixture.agent_command(),
-            fixture.mcp_command(),
-            &fixture.harness_executable,
-            Some(&fixture.lock),
-            Some(&fixture.state),
-            Some("agent_pair"),
-            Some(&fixture.receipt),
-            Some(Path::new("")),
-            Some(&empty_roots),
-        )
+        let unavailable = managed_runtime_config(ManagedRuntimeInputs {
+            lh_command: Some(Path::new("")),
+            workspace_roots: Some(&empty_roots),
+            ..fixture.inputs()
+        })
         .expect("unavailable job configuration must not block conversation");
         assert_eq!(unavailable.lh_executable, None);
         assert!(unavailable.workspace_roots.is_empty());
 
-        let missing = managed_runtime_config(
-            fixture.agent_command(),
-            fixture.mcp_command(),
-            &fixture.harness_executable,
-            Some(&fixture.lock),
-            Some(&fixture.state),
-            Some("agent_pair"),
-            Some(&fixture.receipt),
-            None,
-            None,
-        )
-        .expect("missing job configuration must not block conversation");
+        let missing = managed_runtime_config(fixture.inputs())
+            .expect("missing job configuration must not block conversation");
         assert_eq!(missing.lh_executable, None);
         assert!(missing.workspace_roots.is_empty());
 
         let roots = fixture.roots();
-        let relative = managed_runtime_config(
-            fixture.agent_command(),
-            fixture.mcp_command(),
-            &fixture.harness_executable,
-            Some(&fixture.lock),
-            Some(&fixture.state),
-            Some("agent_pair"),
-            Some(&fixture.receipt),
-            Some(Path::new("lh")),
-            Some(&roots),
-        )
+        let relative = managed_runtime_config(ManagedRuntimeInputs {
+            lh_command: Some(Path::new("lh")),
+            workspace_roots: Some(&roots),
+            ..fixture.inputs()
+        })
         .expect_err("relative LH must fail");
         assert!(relative.to_string().contains("driver_unavailable"));
     }
@@ -3801,31 +3794,20 @@ channels = "ALL"
         let roots = fixture.roots();
         std::fs::set_permissions(&fixture.executable, std::fs::Permissions::from_mode(0o600))
             .expect("remove executable bit");
-        let error = managed_runtime_config(
-            fixture.agent_command(),
-            fixture.mcp_command(),
-            &fixture.harness_executable,
-            Some(&fixture.lock),
-            Some(&fixture.state),
-            Some("agent_pair"),
-            Some(&fixture.receipt),
-            Some(&fixture.executable),
-            Some(&roots),
-        )
+        let error = managed_runtime_config(ManagedRuntimeInputs {
+            lh_command: Some(&fixture.executable),
+            workspace_roots: Some(&roots),
+            ..fixture.inputs()
+        })
         .expect_err("non-executable LH must fail");
         assert!(error.to_string().contains("driver_unavailable"));
 
-        let custom = managed_runtime_config(
-            "custom-agent",
-            fixture.mcp_command(),
-            &fixture.harness_executable,
-            Some(&fixture.lock),
-            Some(&fixture.state),
-            Some("agent_pair"),
-            Some(&fixture.receipt),
-            Some(&fixture.executable),
-            Some(&roots),
-        )
+        let custom = managed_runtime_config(ManagedRuntimeInputs {
+            agent_command: "custom-agent",
+            lh_command: Some(&fixture.executable),
+            workspace_roots: Some(&roots),
+            ..fixture.inputs()
+        })
         .expect_err("custom managed adapter must fail closed");
         assert!(custom.to_string().contains("unsupported_managed_adapter"));
     }

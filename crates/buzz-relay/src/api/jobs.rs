@@ -13,7 +13,8 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::handlers::agent_jobs::{
-    list_agent_jobs, lookup_agent_job, AgentJobAdmissionError, AgentJobLookup, AgentJobProjection,
+    list_agent_jobs, lookup_agent_job, AgentJobAdmissionError, AgentJobListFilter, AgentJobLookup,
+    AgentJobProjection,
 };
 use crate::state::AppState;
 
@@ -228,10 +229,12 @@ pub(crate) async fn list_jobs(
         tenant.community(),
         pubkey.as_bytes(),
         &accessible_channels,
-        target,
-        query.channel,
-        query.state.as_deref(),
-        query.limit,
+        AgentJobListFilter {
+            target_pubkey: target,
+            channel_id: query.channel,
+            state: query.state.as_deref(),
+            limit: query.limit,
+        },
     )
     .await
     .map_err(projection_error)?;

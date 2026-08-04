@@ -191,7 +191,7 @@ pub async fn write_bounded_frame<W: AsyncWrite + Unpin>(
 }
 
 enum Handshake {
-    Authenticated(ControlRequest, AuthorizedCapability),
+    Authenticated(Box<ControlRequest>, AuthorizedCapability),
     Unauthorized,
 }
 
@@ -204,7 +204,7 @@ async fn read_handshake(
         return Ok(Handshake::Unauthorized);
     };
     Ok(match authenticate(&request, config) {
-        Some(capability) => Handshake::Authenticated(request, capability),
+        Some(capability) => Handshake::Authenticated(Box::new(request), capability),
         None => Handshake::Unauthorized,
     })
 }
@@ -224,7 +224,7 @@ async fn serve_connection(
             // Authentication is the boundary: privileged operations may outlive
             // the handshake without starving new clients of pre-auth capacity.
             drop(pre_auth_permit);
-            dispatch_authenticated(request, capability, &config, handler.as_ref()).await
+            dispatch_authenticated(*request, capability, &config, handler.as_ref()).await
         }
         Handshake::Unauthorized => {
             let _pre_auth_permit = pre_auth_permit;

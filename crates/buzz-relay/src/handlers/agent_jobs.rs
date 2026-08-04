@@ -20,7 +20,7 @@ use buzz_core::{CommunityId, StoredEvent};
 /// Result of atomically admitting one public job event.
 pub(crate) enum AgentJobPersistOutcome {
     /// The signed event and its projection transition committed.
-    Inserted(StoredEvent),
+    Inserted(Box<StoredEvent>),
     /// This exact signed event ID was already committed.
     Replay,
 }
@@ -607,9 +607,9 @@ pub(crate) async fn persist_agent_job_event(
     insert_chain_entry(&mut tx, community_id, event, &parsed).await?;
     tx.commit().await.map_err(internal)?;
 
-    Ok(AgentJobPersistOutcome::Inserted(
+    Ok(AgentJobPersistOutcome::Inserted(Box::new(
         StoredEvent::with_received_at(event.clone(), received_at, Some(parsed.channel_id), true),
-    ))
+    )))
 }
 
 fn parse_hex(bytes: Vec<u8>, field: &'static str) -> Result<String, AgentJobAdmissionError> {
@@ -752,6 +752,14 @@ pub(crate) async fn lookup_agent_job(
     Ok(Some(AgentJobLookup { status, chain }))
 }
 
+/// Optional participant-supplied narrowing for an indexed job list.
+pub(crate) struct AgentJobListFilter<'a> {
+    pub target_pubkey: Option<&'a [u8]>,
+    pub channel_id: Option<Uuid>,
+    pub state: Option<&'a str>,
+    pub limit: u16,
+}
+
 /// Indexed canonical list for an authorized participant, constrained to
 /// currently accessible channels and optional target/channel/state filters.
 pub(crate) async fn list_agent_jobs(
@@ -759,11 +767,14 @@ pub(crate) async fn list_agent_jobs(
     community_id: CommunityId,
     participant: &[u8],
     accessible_channels: &[Uuid],
-    target_pubkey: Option<&[u8]>,
-    channel_id: Option<Uuid>,
-    state: Option<&str>,
-    limit: u16,
+    filter: AgentJobListFilter<'_>,
 ) -> Result<Vec<AgentJobProjection>, AgentJobAdmissionError> {
+    let AgentJobListFilter {
+        target_pubkey,
+        channel_id,
+        state,
+        limit,
+    } = filter;
     let limit = i64::from(limit.clamp(1, 500));
     let mut tx = db.begin_transaction().await.map_err(internal)?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
@@ -1085,10 +1096,12 @@ mod tests {
             community,
             requester.public_key().as_bytes(),
             &[channel],
-            None,
-            Some(channel),
-            Some("accepted"),
-            10,
+            AgentJobListFilter {
+                target_pubkey: None,
+                channel_id: Some(channel),
+                state: Some("accepted"),
+                limit: 10,
+            },
         )
         .await
         .expect("list");

@@ -277,6 +277,9 @@ pub fn runner_receipt_health(
 pub fn argv_sha256(argv: &[String]) -> Result<String, ArtifactError> {
     Ok(hex::encode(Sha256::digest(serde_json::to_vec(argv)?)))
 }
+// Each platform arm ends in an explicit `return` so that adding an arm can never
+// silently change which one is the function tail after `cfg` stripping.
+#[allow(clippy::needless_return)]
 pub fn process_start_marker(pid: u32) -> Result<String, ArtifactError> {
     #[cfg(target_os = "linux")]
     {

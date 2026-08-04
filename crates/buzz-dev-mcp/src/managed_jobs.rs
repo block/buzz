@@ -4,7 +4,7 @@ use buzz_runtime::{
         MAX_ARGV_ELEMENTS, MAX_ARG_BYTES, MAX_CWD_BYTES, MAX_JOB_ARGV_JSON_BYTES,
         MAX_LOG_TAIL_LINES, MAX_SUMMARY_BYTES,
     },
-    JobId, JobStartRequest, JobState, RuntimeClient,
+    ClientError, JobId, JobStartRequest, JobState, RuntimeClient,
 };
 use rmcp::ErrorData;
 use schemars::JsonSchema;
@@ -74,8 +74,23 @@ fn serialize<T: serde::Serialize>(value: &T) -> Result<String, ErrorData> {
         .map_err(|_| ErrorData::internal_error("cannot encode runtime response", None))
 }
 
-fn runtime_error() -> ErrorData {
-    ErrorData::internal_error("managed runtime request failed", None)
+fn runtime_error(error: ClientError) -> ErrorData {
+    match error {
+        ClientError::Remote { code, message } => {
+            ErrorData::invalid_params(message, Some(serde_json::json!({"code": code})))
+        }
+        ClientError::InvalidRequest(message) => ErrorData::invalid_params(
+            message,
+            Some(serde_json::json!({"code": "invalid_job_request"})),
+        ),
+        other => {
+            tracing::warn!(error = %other, "managed runtime job request failed");
+            ErrorData::internal_error(
+                "managed runtime request failed",
+                Some(serde_json::json!({"code": "job_runtime_unavailable"})),
+            )
+        }
+    }
 }
 
 fn validate_start(params: &JobsStartParams) -> Result<Uuid, ErrorData> {
@@ -169,11 +184,14 @@ pub(crate) async fn jobs_start(
             summary: params.summary,
         })
         .await
-        .map_err(|_| runtime_error())?;
+        .map_err(runtime_error)?;
     if !matches!(status.state, JobState::Accepted | JobState::Running) {
         return Err(ErrorData::internal_error(
             "managed runtime did not accept the job",
-            None,
+            Some(serde_json::json!({
+                "code": "job_not_accepted",
+                "state": status.state,
+            })),
         ));
     }
     serialize(&serde_json::json!({
@@ -189,7 +207,7 @@ pub(crate) async fn jobs_status(
     let status = client
         .jobs_status(parse_job_id(&params.job_id)?)
         .await
-        .map_err(|_| runtime_error())?;
+        .map_err(runtime_error)?;
     serialize(&status)
 }
 
@@ -201,7 +219,7 @@ pub(crate) async fn jobs_logs(
     let logs = client
         .jobs_logs(parse_job_id(&params.job_id)?, lines)
         .await
-        .map_err(|_| runtime_error())?;
+        .map_err(runtime_error)?;
     serialize(&logs)
 }
 
@@ -285,5 +303,41 @@ mod tests {
         let mut params = valid_params();
         params.summary.clear();
         assert!(validate_start(&params).is_err());
+    }
+
+    #[test]
+    fn rejected_cwd_reports_the_runtime_reason_not_an_opaque_failure() {
+        let error = runtime_error(ClientError::Remote {
+            code: "workspace_not_allowed".into(),
+            message: "cwd is outside operator-approved workspace roots".into(),
+        });
+        assert_eq!(
+            error.message,
+            "cwd is outside operator-approved workspace roots"
+        );
+        assert_eq!(
+            error.data.as_ref().and_then(|data| data.get("code")),
+            Some(&serde_json::json!("workspace_not_allowed"))
+        );
+    }
+
+    #[test]
+    fn invalid_job_request_reports_the_validation_reason() {
+        let error = runtime_error(ClientError::InvalidRequest("argv is empty".into()));
+        assert_eq!(error.message, "argv is empty");
+        assert_eq!(
+            error.data.as_ref().and_then(|data| data.get("code")),
+            Some(&serde_json::json!("invalid_job_request"))
+        );
+    }
+
+    #[test]
+    fn transport_failure_stays_opaque_but_typed() {
+        let error = runtime_error(ClientError::Timeout);
+        assert_eq!(error.message, "managed runtime request failed");
+        assert_eq!(
+            error.data.as_ref().and_then(|data| data.get("code")),
+            Some(&serde_json::json!("job_runtime_unavailable"))
+        );
     }
 }
