@@ -23,6 +23,8 @@ const _presenceDotRatio = 8 / 14;
 class ProfileAvatar extends ConsumerWidget {
   final VoidCallback? onTap;
   final bool showPresence;
+
+  /// The avatar diameter in logical pixels; defaults to the 32px desktop match.
   final double size;
 
   const ProfileAvatar({

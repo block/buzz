@@ -1,12 +1,7 @@
-import 'package:flutter/material.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
-
-import '../../shared/theme/theme.dart';
+part of '../search_page.dart';
 
 const _searchIdleIconSize = 26.0;
 const _searchCompactIconSize = 18.0;
-const _searchIdleTextSize = 15.0;
-const _searchFieldVerticalPadding = Grid.xxs;
 const _searchFieldHint = 'Search messages, channels, and people';
 const _searchIdleIconInset = Grid.xxs;
 const _searchIdleTextInset =
@@ -14,7 +9,7 @@ const _searchIdleTextInset =
 const _searchCompactTextInset =
     _searchIdleIconInset + _searchCompactIconSize + Grid.xxs;
 
-class SearchMotionField extends StatelessWidget {
+class _SearchMotionField extends StatelessWidget {
   final TextEditingController controller;
   final FocusNode focusNode;
   final Color iconColor;
@@ -28,7 +23,7 @@ class SearchMotionField extends StatelessWidget {
   final ValueChanged<String> onChanged;
   final ValueChanged<String> onSubmitted;
 
-  const SearchMotionField({
+  const _SearchMotionField({
     required this.controller,
     required this.focusNode,
     required this.iconColor,
@@ -41,7 +36,6 @@ class SearchMotionField extends StatelessWidget {
     required this.onTap,
     required this.onChanged,
     required this.onSubmitted,
-    super.key,
   });
 
   @override

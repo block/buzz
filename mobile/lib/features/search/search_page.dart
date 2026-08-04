@@ -24,8 +24,9 @@ import '../profile/profile_provider.dart';
 import '../profile/user_cache_provider.dart';
 import '../profile/user_profile.dart';
 import 'recent_searches_provider.dart';
-import 'search_motion_field.dart';
 import 'search_provider.dart';
+
+part 'search_page/motion_field.dart';
 
 enum _SearchFilter { all, messages, channels, people }
 
@@ -250,7 +251,7 @@ class SearchPage extends HookConsumerWidget {
               // native input connection before the keyboard is shown.
               child: SizedBox(
                 key: const Key('search-field-container'),
-                child: SearchMotionField(
+                child: _SearchMotionField(
                   controller: textController,
                   focusNode: focusNode,
                   iconColor: searchPrimaryColor,
