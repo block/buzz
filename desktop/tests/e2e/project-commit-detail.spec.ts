@@ -865,16 +865,19 @@ test("navigating via a 30617 entity-link route opens the correct non-primary rep
     },
   );
   await installMockBridge(page);
-  await page.goto("/", { waitUntil: "domcontentloaded" });
 
-  // Enable the feature before navigating to the project route directly.
-  await page.getByTestId("open-projects-view").click();
-
-  // Navigate via the entity-link route: projectId is the 30617 coordinate
-  // (what #4695 entity links emit) and pullRequestId targets the relay-tools PR.
-  const encodedProjectId = encodeURIComponent(RELAY_TOOLS_ADDRESS);
+  // Navigate via the entity-link route using the hash router URL format.
+  // Python's http.server (the e2e web server) serves only index.html at `/`;
+  // a direct page.goto to `/projects/...` returns 404 because there is no
+  // SPA fallback. The app uses createHashHistory(), so the correct URL is
+  // `/#/projects/<id>?...` — the server always sees just `/` and the hash
+  // fragment is resolved entirely client-side by TanStack Router. Colons are
+  // valid in hash-fragment path segments and must NOT be percent-encoded:
+  // TanStack Router's param extractor receives the raw decoded segment, and
+  // %3A would be passed through literally (as the string "30617%3A…") rather
+  // than decoded to "30617:…", causing the project lookup to fail.
   await page.goto(
-    `/projects/${encodedProjectId}?pullRequestId=${KNOWN_PR_ID}`,
+    `/#/projects/${RELAY_TOOLS_ADDRESS}?pullRequestId=${KNOWN_PR_ID}`,
     { waitUntil: "domcontentloaded" },
   );
 
@@ -884,7 +887,9 @@ test("navigating via a 30617 entity-link route opens the correct non-primary rep
   await expect(picker).not.toContainText("buzz");
 
   // The PR detail panel must render from the relay-tools repository — not blank.
+  // Use `first()` to avoid Playwright strict-mode violations: the text appears
+  // in both the breadcrumb and the PR title heading once the detail panel opens.
   await expect(
-    page.getByText("Entity-link test PR from relay-tools"),
+    page.getByText("Entity-link test PR from relay-tools").first(),
   ).toBeVisible({ timeout: 10_000 });
 });
