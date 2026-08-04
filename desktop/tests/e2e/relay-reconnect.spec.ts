@@ -372,6 +372,66 @@ test("resume event short-circuits accumulated reconnect backoff", async ({
   expect(Date.now() - resumedAt).toBeLessThan(2_000);
 });
 
+test("resume events during repeated AUTH rejection cannot defeat the terminal cap", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  // Three consecutive rejections must latch terminal even when resume
+  // events interleave with the handshakes: resume attempts bypass backoff
+  // but must preserve the AUTH rejection streak (review finding on
+  // PR #4737 — preconnect()'s streak reset previously made the cap
+  // unreachable under focus/online bursts).
+  //
+  // Queue MORE rejections than the cap: superseded connection attempts
+  // (resume racing the backoff timer) consume queue entries on handshakes
+  // whose frames the client drops as stale, exactly like a real relay that
+  // rejects every attempt. A queue of exactly 3 can be silently eaten and
+  // a default-success AUTH would then reset the streak.
+  await queueAuthResponses(
+    page,
+    Array.from({ length: 12 }, () => ({
+      success: false,
+      message: "auth-required: verification failed",
+    })),
+  );
+  await disconnectMockWebsockets(page);
+
+  // Fire resume events while the rejection sequence plays out. Repeated
+  // dispatch (post-rate-limit spacing is irrelevant here: each poll tick
+  // dispatches both events) guarantees at least one lands between
+  // handshakes.
+  await expect
+    .poll(
+      async () => {
+        await page.evaluate(() => {
+          window.dispatchEvent(new Event("online"));
+          window.dispatchEvent(new Event("focus"));
+        });
+        return page.evaluate(() =>
+          window.__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?.(),
+        );
+      },
+      { intervals: [500], timeout: 20_000 },
+    )
+    .toBe("disconnected");
+
+  // Terminal is user-owned: further resume events must not revive the
+  // session.
+  await page.evaluate(() => {
+    window.dispatchEvent(new Event("online"));
+    window.dispatchEvent(new Event("focus"));
+  });
+  await page.waitForTimeout(1_000);
+  expect(
+    await page.evaluate(() =>
+      window.__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?.(),
+    ),
+  ).toBe("disconnected");
+});
+
 test("sub-2s degraded flap invalidates relay queries on recovery", async ({
   page,
 }) => {

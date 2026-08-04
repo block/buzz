@@ -12,11 +12,15 @@
  *    and the relay's fail-closed allowlist DB lookup errors, both of which
  *    can clear on retry.
  *
- * Only `restricted:` rejections (banned / not a relay member) are known
- * permanent. Everything else retries with normal backoff, but latches
- * terminal after `MAX_CONSECUTIVE_AUTH_REJECTIONS` consecutive rejections so
- * a genuinely broken identity (e.g. persistently wrong system clock) still
- * surfaces the terminal error card instead of flapping forever.
+ * Only `restricted:` and `blocked:` rejections (not a relay member / banned)
+ * are known permanent. Everything else retries with normal backoff, but
+ * latches terminal after `MAX_CONSECUTIVE_AUTH_REJECTIONS` consecutive
+ * rejections so a genuinely broken identity (e.g. persistently wrong system
+ * clock) still surfaces the terminal error card instead of flapping forever.
+ *
+ * The rejection streak is preserved across environment-driven resume
+ * attempts (focus/online/visibility); only explicit user re-engagement —
+ * the reconnect card or a community switch — may reset it.
  */
 export type AuthOkDecision = "authenticated" | "retry" | "terminal";
 
@@ -42,7 +46,12 @@ export class AuthOkTracker {
 
     this.consecutiveRejections++;
 
-    if (normalized.startsWith("restricted:")) return "terminal";
+    if (
+      normalized.startsWith("restricted:") ||
+      normalized.startsWith("blocked:")
+    ) {
+      return "terminal";
+    }
     if (this.consecutiveRejections >= MAX_CONSECUTIVE_AUTH_REJECTIONS) {
       return "terminal";
     }

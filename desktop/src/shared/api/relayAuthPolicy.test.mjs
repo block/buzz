@@ -35,6 +35,18 @@ test("restricted rejections latch terminal immediately", () => {
   }
 });
 
+test("the relay's actual ban string latches terminal immediately", () => {
+  // Exact string emitted by crates/buzz-relay/src/handlers/auth.rs at the
+  // ban seam. A known-permanent ban must never enter the retry loop.
+  assert.equal(
+    new AuthOkTracker().record(
+      false,
+      "blocked: you are banned from this community",
+    ),
+    "terminal",
+  );
+});
+
 test("verification failures retry with backoff (clock skew, DB fail-closed)", () => {
   const tracker = new AuthOkTracker();
   assert.equal(

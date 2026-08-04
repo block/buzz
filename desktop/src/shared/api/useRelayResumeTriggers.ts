@@ -5,16 +5,21 @@ import { shouldTriggerResumeReconnect } from "@/shared/api/relayResumeTriggerPol
 
 /**
  * Event-driven reconnect triggers: network `online`, window `focus`, and
- * visibility→visible each attempt an immediate `preconnect()` when the relay
- * session is degraded (reconnecting/stalled), rate-limited by
+ * visibility→visible each attempt an immediate `resumeReconnect()` when the
+ * relay session is degraded (reconnecting/stalled), rate-limited by
  * `RESUME_TRIGGER_MIN_INTERVAL_MS`.
  *
  * Rationale (CMD+R gap audit G1): without these, recovery rides solely on
  * the backoff timer, which WKWebView throttles while the window is occluded
  * or the system was asleep. The moment a user focuses the window to hit
- * CMD+R *is* a focus event — this fires the reconnect first. Deliberately
- * does not trigger on `disconnected` (terminal latch): that path requires
- * explicit user re-engagement via the reconnect card.
+ * CMD+R *is* a focus event — this fires the reconnect first.
+ *
+ * Uses `resumeReconnect()`, NOT `preconnect()`: resume events bypass the
+ * pending backoff timer but must preserve the terminal latch and the AUTH
+ * rejection streak. Otherwise a focus/online event arriving during repeated
+ * AUTH rejection would reset the consecutive-rejection cap and the session
+ * could retry indefinitely instead of surfacing `disconnected`. The
+ * terminal state stays user-owned via the reconnect card.
  */
 export function useRelayResumeTriggers(): void {
   React.useEffect(() => {
@@ -32,9 +37,10 @@ export function useRelayResumeTriggers(): void {
         return;
       }
       lastAttemptAt = now;
-      // preconnect() clears any pending backoff timer and connects now.
-      // Failures re-arm the normal backoff loop; nothing to handle here.
-      void relayClient.preconnect().catch(() => {});
+      // resumeReconnect() clears any pending backoff timer and connects now,
+      // preserving terminal/AUTH-streak state. Failures re-arm the normal
+      // backoff loop; nothing to handle here.
+      void relayClient.resumeReconnect().catch(() => {});
     };
 
     const onVisibilityChange = () => {
