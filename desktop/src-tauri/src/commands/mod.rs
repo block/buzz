@@ -33,6 +33,7 @@ mod media_transcode;
 #[cfg(feature = "mesh-llm")]
 pub(crate) mod mesh_llm;
 mod messages;
+mod nostr_bind_result;
 mod notifications;
 mod observer_archive;
 mod os_idle;
@@ -88,6 +89,7 @@ pub use media_download::*;
 #[cfg(feature = "mesh-llm")]
 pub use mesh_llm::*;
 pub use messages::*;
+pub use nostr_bind_result::*;
 pub use notifications::*;
 pub use observer_archive::*;
 pub use os_idle::*;

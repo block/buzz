@@ -611,6 +611,7 @@ pub fn run() {
             terminal_runtime::terminal_focus,
             take_pending_community_deep_link,
             acknowledge_pending_community_deep_link,
+            fetch_nostr_bind_result,
             start_builderlab_login,
             cancel_builderlab_login,
             get_builderlab_auth,

@@ -204,7 +204,11 @@ struct NostrBindDeepLinkPayload {
     expires_at: String,
     return_mode: String,
     callback_url: Option<String>,
+    result_protocol: Option<String>,
+    result_url: Option<String>,
 }
+
+const RUN402_ADOPTION_RESULT_PROTOCOL: &str = "run402_adoption_result_v1";
 
 fn non_empty_param(url: &Url, name: &str) -> Result<String, String> {
     url.query_pairs()
@@ -243,6 +247,18 @@ fn validate_nostr_bind_callback_url(callback_url: &str, origin: &str) -> Result<
     Ok(())
 }
 
+fn is_structurally_safe_result_url(result_url: &str) -> bool {
+    let Ok(result_url) = Url::parse(result_url) else {
+        return false;
+    };
+    result_url.scheme() == "https"
+        && result_url.host_str().is_some()
+        && result_url.username().is_empty()
+        && result_url.password().is_none()
+        && result_url.query().is_none()
+        && result_url.fragment().is_none()
+}
+
 fn parse_nostr_bind_deep_link(url: &Url) -> Result<NostrBindDeepLinkPayload, String> {
     let challenge_id = non_empty_param(url, "challenge_id")?;
     let nonce = non_empty_param(url, "nonce")?;
@@ -255,6 +271,8 @@ fn parse_nostr_bind_deep_link(url: &Url) -> Result<NostrBindDeepLinkPayload, Str
     let expires_at = non_empty_param(url, "expires_at")?;
     let return_mode = non_empty_param(url, "return")?;
     let callback_url = optional_non_empty_param(url, "callback_url");
+    let requested_result_protocol = optional_non_empty_param(url, "result_protocol");
+    let requested_result_url = optional_non_empty_param(url, "result_url");
 
     nostr_bind::validate_challenge_id(&challenge_id)?;
     nostr_bind::validate_nonce(&nonce)?;
@@ -276,6 +294,24 @@ fn parse_nostr_bind_deep_link(url: &Url) -> Result<NostrBindDeepLinkPayload, Str
         validate_nostr_bind_callback_url(callback_url, &origin)?;
     }
 
+    // Result acknowledgement is an optional extension. Unknown or malformed
+    // extensions preserve the legacy manual flow instead of rejecting an
+    // otherwise valid identity approval.
+    let (result_protocol, result_url) = match (
+        requested_result_protocol.as_deref(),
+        requested_result_url.as_deref(),
+    ) {
+        (Some(RUN402_ADOPTION_RESULT_PROTOCOL), Some(result_url))
+            if is_structurally_safe_result_url(result_url) =>
+        {
+            (
+                Some(RUN402_ADOPTION_RESULT_PROTOCOL.to_owned()),
+                Some(result_url.to_owned()),
+            )
+        }
+        _ => (None, None),
+    };
+
     Ok(NostrBindDeepLinkPayload {
         challenge_id,
         nonce,
@@ -288,6 +324,8 @@ fn parse_nostr_bind_deep_link(url: &Url) -> Result<NostrBindDeepLinkPayload, Str
         expires_at,
         return_mode,
         callback_url,
+        result_protocol,
+        result_url,
     })
 }
 
@@ -299,7 +337,7 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
     let url = match Url::parse(url_str) {
         Ok(u) => u,
         Err(e) => {
-            eprintln!("buzz-desktop: invalid deep link URL {url_str:?}: {e}");
+            eprintln!("buzz-desktop: invalid deep link URL: {e}");
             return;
         }
     };
@@ -372,7 +410,9 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
                 let _ = app.emit("deep-link-nostr-bind", payload);
             }
             Err(error) => {
-                eprintln!("buzz-desktop: rejecting nostr-bind deep link: {error}: {url_str}");
+                // Do not print the deep link: it contains the signed-attempt
+                // challenge material and may contain an issuer result URL.
+                eprintln!("buzz-desktop: rejecting nostr-bind deep link: {error}");
             }
         },
         Some(action) => {
@@ -606,6 +646,39 @@ mod tests {
             payload.callback_url.as_deref(),
             Some("https://example.com/buzz")
         );
+        assert_eq!(payload.result_protocol, None);
+        assert_eq!(payload.result_url, None);
+    }
+
+    #[test]
+    fn parse_nostr_bind_deep_link_accepts_optional_run402_result_acknowledgement() {
+        let url = Url::parse("buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=123456&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2999-01-01T00%3A00%3A00Z&return=browser_fragment_v1&callback_url=https%3A%2F%2Fexample.com%2Fbuzz&result_protocol=run402_adoption_result_v1&result_url=https%3A%2F%2Fapi.run402.com%2Fbuzz-human-adoption-results%2Fv1").unwrap();
+        let payload = parse_nostr_bind_deep_link(&url).unwrap();
+
+        assert_eq!(
+            payload.result_protocol.as_deref(),
+            Some("run402_adoption_result_v1")
+        );
+        assert_eq!(
+            payload.result_url.as_deref(),
+            Some("https://api.run402.com/buzz-human-adoption-results/v1")
+        );
+    }
+
+    #[test]
+    fn parse_nostr_bind_deep_link_ignores_unknown_or_unsafe_result_extensions() {
+        for suffix in [
+            "&result_protocol=future_result_v2&result_url=https%3A%2F%2Fapi.run402.com%2Fresult",
+            "&result_protocol=run402_adoption_result_v1&result_url=http%3A%2F%2Fapi.run402.com%2Fresult",
+            "&result_protocol=run402_adoption_result_v1&result_url=https%3A%2F%2Fuser%3Apass%40api.run402.com%2Fresult",
+            "&result_protocol=run402_adoption_result_v1&result_url=https%3A%2F%2Fapi.run402.com%2Fresult%3Ftoken%3Dsecret",
+            "&result_protocol=run402_adoption_result_v1&result_url=https%3A%2F%2Fapi.run402.com%2Fresult%23fragment",
+        ] {
+            let base = "buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=123456&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2999-01-01T00%3A00%3A00Z&return=browser_fragment_v1&callback_url=https%3A%2F%2Fexample.com%2Fbuzz";
+            let payload = parse_nostr_bind_deep_link(&Url::parse(&format!("{base}{suffix}")).unwrap()).unwrap();
+            assert_eq!(payload.result_protocol, None);
+            assert_eq!(payload.result_url, None);
+        }
     }
 
     #[test]
