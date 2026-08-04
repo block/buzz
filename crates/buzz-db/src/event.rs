@@ -601,8 +601,8 @@ pub(crate) fn row_to_stored_event(row: sqlx::postgres::PgRow) -> Result<Option<S
     // Avoid the Value → String → parse round-trip: deserialize directly from the Value.
     let event: nostr::Event = match serde_json::from_value(event_json) {
         Ok(e) => e,
-        Err(_e) => {
-            tracing::warn!("failed to reconstruct event from DB row");
+        Err(e) => {
+            tracing::warn!("failed to reconstruct event from DB row: {e}");
             return Ok(None);
         }
     };
