@@ -252,14 +252,15 @@ impl ActionSink for RelayActionSink {
 
             // 3. Build kind:9 Nostr event
             //    - Signed by relay keypair (event.pubkey = relay pubkey)
-            //    - `p` tag attributes the message to the workflow owner
+            //    - `actor` attributes the message to the workflow owner without
+            //      turning every workflow post into an Inbox mention
             //    - `h` tag scopes to the channel (NIP-29, canonical UUID)
             //    - `buzz:workflow` tag prevents recursive workflow triggering
             //    - one `p` tag per `@Name` that resolves to a channel member,
             //      so mentioned agents are woken (wake is `p`-tag gated)
             let mut tags = vec![
-                Tag::parse(["p", &author_pubkey_hex])
-                    .map_err(|e| ActionSinkError::EventBuild(format!("p tag: {e}")))?,
+                Tag::parse(["actor", &author_pubkey_hex])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("actor tag: {e}")))?,
                 Tag::parse(["h", &channel_id_canonical])
                     .map_err(|e| ActionSinkError::EventBuild(format!("h tag: {e}")))?,
                 Tag::parse(["buzz:workflow", "true"])
@@ -267,9 +268,10 @@ impl ActionSink for RelayActionSink {
             ];
 
             // Resolve `@Name` mentions to channel-member pubkeys and append a
-            // `p` tag for each (skipping the author, already tagged above). A
-            // resolution failure must not drop the message, so log and proceed
-            // with the base tags.
+            // `p` tag for each. The workflow owner is included only when the
+            // text explicitly mentions them; `actor` attribution alone must
+            // never route a channel post into their Inbox. A resolution failure
+            // must not drop the message, so log and proceed with the base tags.
             let members = state
                 .db
                 .get_members(tenant.community(), channel_uuid)
@@ -289,9 +291,6 @@ impl ActionSink for RelayActionSink {
                 })
                 .collect();
             for mentioned in resolve_mention_pubkeys(&text, &named_members) {
-                if mentioned == author_pubkey_hex {
-                    continue;
-                }
                 tags.push(
                     Tag::parse(["p", &mentioned])
                         .map_err(|e| ActionSinkError::EventBuild(format!("mention p tag: {e}")))?,
@@ -611,7 +610,7 @@ mod integration_tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn workflow_send_message_p_tags_mentioned_member() {
+    async fn workflow_send_message_only_p_tags_explicitly_mentioned_member() {
         let state = test_state().await;
 
         let author = nostr::Keys::generate();
@@ -700,12 +699,25 @@ mod integration_tests {
             .collect();
 
         assert!(
-            p_tag_targets.contains(&author_hex.as_str()),
-            "author should still be attributed via p tag; got {p_tag_targets:?}"
+            !p_tag_targets.contains(&author_hex.as_str()),
+            "workflow owner must not be implicitly mentioned; got {p_tag_targets:?}"
         );
         assert!(
             p_tag_targets.contains(&agent_hex.as_str()),
             "mentioned member {agent_hex} must be p-tagged so it wakes; got {p_tag_targets:?}"
+        );
+
+        let actor_tag_targets: Vec<&str> = stored
+            .event
+            .tags
+            .iter()
+            .filter(|t| t.as_slice().first().map(|s| s.as_str()) == Some("actor"))
+            .filter_map(|t| t.as_slice().get(1).map(|s| s.as_str()))
+            .collect();
+        assert_eq!(
+            actor_tag_targets,
+            vec![author_hex.as_str()],
+            "workflow owner should be attributed exactly once via actor tag"
         );
     }
 }
