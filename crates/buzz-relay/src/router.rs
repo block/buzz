@@ -8,7 +8,7 @@ use axum::{
     extract::{ConnectInfo, FromRequest, State, WebSocketUpgrade},
     http::{header, HeaderMap, HeaderValue, Request, StatusCode},
     middleware,
-    response::{IntoResponse, Json},
+    response::{IntoResponse, Json, Response},
     routing::{get, post, put},
     Router,
 };
@@ -26,6 +26,11 @@ use crate::metrics::track_metrics;
 use crate::nip11::{nip11_document, relay_info_handler};
 use crate::readiness::{self, ReadinessEvaluation, ReadinessReason};
 use crate::state::AppState;
+
+/// Upgrade-response header used to correlate client diagnostics with the
+/// relay's per-connection logs. The value is an opaque, random UUID and carries
+/// no tenant or identity information.
+pub const RELAY_CONNECTION_ID_HEADER: &str = "x-buzz-connection-id";
 
 /// Build the axum [`Router`] with all relay routes, middleware, and CORS configuration.
 ///
@@ -367,9 +372,11 @@ async fn nip11_or_ws_handler(
             if state.shutting_down.load(Ordering::Relaxed) {
                 return (StatusCode::SERVICE_UNAVAILABLE, "relay restarting").into_response();
             }
-            limit_relay_websocket(ws, max_frame_bytes)
-                .on_upgrade(move |socket| handle_connection(socket, state, addr, tenant))
-                .into_response()
+            let conn_id = uuid::Uuid::new_v4();
+            let response = limit_relay_websocket(ws, max_frame_bytes)
+                .on_upgrade(move |socket| handle_connection(socket, state, addr, tenant, conn_id))
+                .into_response();
+            with_relay_connection_id(response, conn_id)
         }
         Err(_) => {
             // Browser requesting HTML and Git web GUI is enabled → serve SPA.
@@ -387,6 +394,14 @@ async fn nip11_or_ws_handler(
             Json(nip11_document(&state, raw_host).await).into_response()
         }
     }
+}
+
+fn with_relay_connection_id(mut response: Response, conn_id: uuid::Uuid) -> Response {
+    response.headers_mut().insert(
+        RELAY_CONNECTION_ID_HEADER,
+        HeaderValue::from_str(&conn_id.to_string()).expect("UUID is a valid header value"),
+    );
+    response
 }
 
 fn limit_relay_websocket<F>(
@@ -630,6 +645,22 @@ mod tests {
             readiness::RedisOutcome::Success,
             readiness::DeletionCatalogOutcome::Success,
         )
+    }
+
+    #[test]
+    fn websocket_upgrade_exposes_opaque_connection_id() {
+        let conn_id = uuid::Uuid::new_v4();
+        let expected = conn_id.to_string();
+        let response =
+            with_relay_connection_id(StatusCode::SWITCHING_PROTOCOLS.into_response(), conn_id);
+
+        assert_eq!(
+            response
+                .headers()
+                .get(RELAY_CONNECTION_ID_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some(expected.as_str())
+        );
     }
 
     #[test]

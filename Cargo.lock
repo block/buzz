@@ -1214,6 +1214,7 @@ dependencies = [
  "chrono",
  "deadpool-redis",
  "futures-util",
+ "metrics",
  "nostr 0.44.7",
  "redis",
  "serde",

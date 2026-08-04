@@ -305,7 +305,17 @@ pub async fn fan_out_pubsub_event(state: &Arc<AppState>, channel_event: buzz_pub
 
     let matches = state.sub_registry.fan_out_scoped(community_id, &stored);
     let matches = filter_fanout_by_access(state, community_id, &stored, matches, None).await;
+    let match_count = matches.len();
+    let event_id_hex = stored.event.id.to_hex();
     metrics::counter!("buzz_multinode_fanout_total").increment(1);
+    metrics::histogram!("buzz_multinode_fanout_recipients").record(match_count as f64);
+    debug!(
+        event_id = %event_id_hex,
+        community_id = %community_id,
+        channel_id = ?channel_id,
+        match_count,
+        "Redis event matched local WebSocket subscriptions"
+    );
     if matches.is_empty() {
         return;
     }
@@ -328,9 +338,17 @@ pub async fn fan_out_pubsub_event(state: &Arc<AppState>, channel_event: buzz_pub
             .map(|(conn_id, sub_id)| (*conn_id, sub_id.as_str())),
         &frames,
     );
+    debug!(
+        event_id = %event_id_hex,
+        community_id = %community_id,
+        channel_id = ?channel_id,
+        match_count,
+        drop_count,
+        "Redis event fan-out completed"
+    );
     if drop_count > 0 {
         tracing::warn!(
-            event_id = %stored.event.id.to_hex(),
+            event_id = %event_id_hex,
             drop_count,
             "multi-node fan-out: {drop_count} connection(s) dropped"
         );
@@ -414,16 +432,41 @@ async fn dispatch_persistent_event_inner(
         Some(channel_id) => EventTopic::Channel(channel_id),
         None => EventTopic::Global,
     };
+    let topic_scope = if stored_event.channel_id.is_some() {
+        "channel"
+    } else {
+        "global"
+    };
     state.mark_local_event(tenant.community(), &stored_event.event.id);
-    if let Err(e) = state
+    match state
         .pubsub
         .publish_event(tenant, topic, &stored_event.event)
         .await
     {
-        state
-            .local_event_ids
-            .invalidate(&(tenant.community(), stored_event.event.id.to_bytes()));
-        warn!(event_id = %event_id_hex, "Redis publish failed: {e}");
+        Ok(subscriber_count) => {
+            metrics::histogram!("buzz_pubsub_event_publish_subscribers", "topic" => topic_scope)
+                .record(subscriber_count as f64);
+            if subscriber_count == 0 {
+                metrics::counter!(
+                    "buzz_pubsub_event_publish_zero_subscribers_total",
+                    "topic" => topic_scope
+                )
+                .increment(1);
+            }
+            debug!(
+                event_id = %event_id_hex,
+                community_id = %tenant.community(),
+                channel_id = ?stored_event.channel_id,
+                subscriber_count,
+                "event published to Redis"
+            );
+        }
+        Err(e) => {
+            state
+                .local_event_ids
+                .invalidate(&(tenant.community(), stored_event.event.id.to_bytes()));
+            warn!(event_id = %event_id_hex, "Redis publish failed: {e}");
+        }
     }
 
     let matches = state
