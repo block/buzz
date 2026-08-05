@@ -199,7 +199,9 @@ test.describe("Documents outline and Obsidian syntax", () => {
     await expect(page.getByTestId("documents-round-trip-banner")).toBeVisible();
     await expect(page.getByTestId("documents-source-editor")).toBeVisible();
 
-    await page.getByTestId("documents-round-trip-switch").click();
+    // The header toggle is the single control for switching modes; the notice
+    // itself is informational only.
+    await page.getByTestId("documents-toggle-view-mode").click();
     await expect(editorSurface(page).locator(".callout-warning")).toHaveCount(
       1,
     );

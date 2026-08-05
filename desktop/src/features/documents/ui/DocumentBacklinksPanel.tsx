@@ -1,4 +1,5 @@
-import { Link2, Link2Off } from "lucide-react";
+import * as React from "react";
+import { ChevronDown, ChevronRight, Link2, Link2Off } from "lucide-react";
 
 import type { Backlinks, Mention } from "@/features/documents/lib/backlinks";
 import { groupMentionsBySource } from "@/features/documents/lib/backlinks";
@@ -57,15 +58,24 @@ function Section({
   title: string;
 }) {
   const groups = groupMentionsBySource(mentions);
+  const [collapsed, setCollapsed] = React.useState(false);
+  const Chevron = collapsed ? ChevronRight : ChevronDown;
 
   return (
     <section data-testid={testId}>
-      <h3 className="flex items-center gap-1.5 px-3 py-2 text-2xs font-medium uppercase tracking-wide text-muted-foreground">
+      <button
+        aria-expanded={!collapsed}
+        className="flex w-full items-center gap-1.5 px-3 py-2 text-2xs font-medium uppercase tracking-wide text-muted-foreground hover:text-foreground"
+        data-testid={`${testId}-toggle`}
+        onClick={() => setCollapsed((current) => !current)}
+        type="button"
+      >
+        <Chevron className="h-3 w-3 shrink-0" />
         {icon}
         {title}
         <span className="ml-auto tabular-nums">{mentions.length}</span>
-      </h3>
-      {groups.length === 0 ? (
+      </button>
+      {collapsed ? null : groups.length === 0 ? (
         <p className="px-3 pb-2 text-2xs text-muted-foreground">{emptyLabel}</p>
       ) : (
         <ul>

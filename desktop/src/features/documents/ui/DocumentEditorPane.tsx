@@ -14,39 +14,22 @@ import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 
 /**
- * Warns that live preview would reformat this file.
+ * Notes that this file will be reformatted if edited in live preview.
  *
- * This is the visible half of the round-trip guard: the note opens in source
- * mode, and switching to live preview is an explicit choice rather than a
- * silent default.
+ * Deliberately one short line with no action button: the mode toggle sits
+ * immediately below in the header, and having both said "live preview" read as
+ * two competing controls for the same thing.
  */
-function RoundTripBanner({ onSwitchToLive }: { onSwitchToLive: () => void }) {
+function RoundTripNotice() {
   return (
-    <div
-      className="flex items-start gap-2 border-b border-border/60 bg-amber-500/10 px-4 py-2 text-sm"
+    <p
+      className="flex items-center gap-1.5 border-b border-border/60 bg-amber-500/10 px-4 py-1.5 text-2xs text-amber-700 dark:text-amber-500"
       data-testid="documents-round-trip-banner"
     >
-      <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-500" />
-      <div className="min-w-0 flex-1">
-        <p>
-          Live preview would reformat this file, so it opened in source mode.
-        </p>
-        <p className="mt-0.5 text-muted-foreground">
-          Tables, callouts, footnotes and raw HTML are not yet represented in
-          the editor.
-        </p>
-      </div>
-      <Button
-        className="shrink-0"
-        data-testid="documents-round-trip-switch"
-        onClick={onSwitchToLive}
-        size="sm"
-        type="button"
-        variant="ghost"
-      >
-        Use live preview anyway
-      </Button>
-    </div>
+      <TriangleAlert className="h-3.5 w-3.5 shrink-0" />
+      Live preview would reformat this file — it uses markdown the editor does
+      not yet support.
+    </p>
   );
 }
 
@@ -252,9 +235,7 @@ export function DocumentEditorPane({
       {hasExternalChange ? (
         <ExternalChangeBanner onKeepMine={onKeepMine} onReload={onReload} />
       ) : null}
-      {tab.roundTrip === "lossy" && isSource ? (
-        <RoundTripBanner onSwitchToLive={() => onSetViewMode("live")} />
-      ) : null}
+      {tab.roundTrip === "lossy" ? <RoundTripNotice /> : null}
 
       <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border/60 px-4 py-1.5">
         <span className="truncate text-sm text-muted-foreground">

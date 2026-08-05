@@ -25,6 +25,7 @@ import {
   writeVaultFile,
 } from "@/shared/api/vault";
 import { useVaultInvalidation } from "@/features/documents/hooks";
+import { useAlwaysLivePreview } from "@/features/documents/useDocumentsPreferences";
 import {
   activeTab as selectActiveTab,
   closeTab as closeTabIn,
@@ -58,8 +59,14 @@ const TREE_REFRESH_DEBOUNCE_MS = 500;
 /** A tab whose file changed on disk while it had unsaved edits. */
 export type ExternalChange = { path: string };
 
-function buildTab(path: string, raw: string): DocumentTab {
+function buildTab(
+  path: string,
+  raw: string,
+  alwaysLivePreview: boolean,
+): DocumentTab {
   const { body, frontmatter } = splitFrontmatter(raw);
+  // The file is still classified either way; the preference only decides which
+  // mode we start in, so the warning can still be shown.
   const roundTrip = classifyRoundTrip(body, reserializeMarkdown);
   return {
     content: body,
@@ -69,11 +76,16 @@ function buildTab(path: string, raw: string): DocumentTab {
     name: tabLabel(path),
     path,
     roundTrip,
-    viewMode: initialViewModeFor(roundTrip),
+    viewMode: alwaysLivePreview ? "live" : initialViewModeFor(roundTrip),
   };
 }
 
 export function useDocumentSession(vaultRoot: string | null) {
+  const alwaysLivePreview = useAlwaysLivePreview();
+  // Read through a ref so callbacks do not need to re-create when it changes.
+  const alwaysLivePreviewRef = React.useRef(alwaysLivePreview);
+  alwaysLivePreviewRef.current = alwaysLivePreview;
+
   const [state, setState] = React.useState(emptyTabsState);
   const [externalChanges, setExternalChanges] = React.useState<
     ReadonlyMap<string, ExternalChange>
@@ -150,7 +162,12 @@ export function useDocumentSession(vaultRoot: string | null) {
       for (const path of paths) {
         try {
           const raw = await readVaultFile(path);
-          setState((current) => openTabIn(current, buildTab(path, raw)));
+          setState((current) =>
+            openTabIn(
+              current,
+              buildTab(path, raw, alwaysLivePreviewRef.current),
+            ),
+          );
         } catch {
           // A note deleted since last session simply does not come back.
         }
@@ -173,7 +190,9 @@ export function useDocumentSession(vaultRoot: string | null) {
     }
     try {
       const raw = await readVaultFile(path);
-      setState((current) => openTabIn(current, buildTab(path, raw)));
+      setState((current) =>
+        openTabIn(current, buildTab(path, raw, alwaysLivePreviewRef.current)),
+      );
     } catch (error: unknown) {
       toast.error(
         error instanceof Error ? error.message : "Could not open that note.",
@@ -214,7 +233,7 @@ export function useDocumentSession(vaultRoot: string | null) {
   const reloadFile = React.useCallback(async (path: string) => {
     try {
       const raw = await readVaultFile(path);
-      const rebuilt = buildTab(path, raw);
+      const rebuilt = buildTab(path, raw, alwaysLivePreviewRef.current);
       setState((current) =>
         reloadTabFromDisk(current, path, {
           content: rebuilt.content,

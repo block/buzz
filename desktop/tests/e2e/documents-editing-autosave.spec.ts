@@ -110,8 +110,9 @@ test.describe("Documents round-trip guard", () => {
   test("a note containing a table opens in source mode with a warning", async ({
     page,
   }) => {
-    // A GFM table serializes down to its concatenated cell text, so live-editing
-    // one would destroy it. The guard must catch that before any autosave.
+    // Raw HTML is escaped by the serializer (`<div>` becomes `&lt;div&gt;`), so
+    // live-editing would corrupt it. Tables used to be the fixture here, but
+    // they round-trip now that the table extensions are installed.
     await page.addInitScript(() => {
       window.localStorage.removeItem("buzz.documents.vaultPath.v1");
     });
@@ -129,15 +130,15 @@ test.describe("Documents round-trip guard", () => {
       const seed = window.__BUZZ_E2E_SEED_MOCK_VAULT_FILE__;
       if (!seed) throw new Error("mock vault seed helper is unavailable");
       seed(
-        "/mock/vault/Table note.md",
-        "# Table note\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n",
+        "/mock/vault/Raw note.md",
+        '# Raw note\n\n<div align="center">centered</div>\n',
       );
     });
 
     await page.getByTestId("open-documents-view").click();
     await page.getByTestId("documents-choose-vault").click();
     await expect(page.getByTestId("documents-tree")).toBeVisible();
-    await page.getByTestId("documents-file-Table note.md").click();
+    await page.getByTestId("documents-file-Raw note.md").click();
 
     await expect(page.getByTestId("documents-round-trip-banner")).toBeVisible();
     await expect(page.getByTestId("documents-source-editor")).toBeVisible();
@@ -282,5 +283,51 @@ test.describe("Documents tree mutations", () => {
     // The buffer must not linger for a file that no longer exists.
     await expect(page.getByTestId("documents-tab-Welcome")).toHaveCount(0);
     await expect(page.getByTestId("documents-file-Welcome.md")).toHaveCount(0);
+  });
+});
+
+test.describe("Documents always-live-preview setting", () => {
+  test("a lossy note opens in live preview when the setting is on", async ({
+    page,
+  }) => {
+    // The guard still classifies the file — the setting only changes which
+    // mode it starts in, so the notice remains visible as a warning.
+    await page.addInitScript(() => {
+      window.localStorage.removeItem("buzz.documents.vaultPath.v1");
+      window.localStorage.setItem("buzz.documents.alwaysLivePreview.v1", "1");
+    });
+    await installMockBridge(page);
+    await page.goto("/");
+    await page.waitForFunction(
+      () => typeof window.__BUZZ_E2E_SEED_MOCK_VAULT_FILE__ === "function",
+    );
+    await page.evaluate(() => {
+      const seed = window.__BUZZ_E2E_SEED_MOCK_VAULT_FILE__;
+      if (!seed) throw new Error("mock vault seed helper is unavailable");
+      seed(
+        "/mock/vault/Raw note.md",
+        '# Raw note\n\n<div align="center">centered</div>\n',
+      );
+    });
+
+    await page.getByTestId("open-documents-view").click();
+    await page.getByTestId("documents-choose-vault").click();
+    await expect(page.getByTestId("documents-tree")).toBeVisible();
+    await page.getByTestId("documents-file-Raw note.md").click();
+
+    await expect(page.getByTestId("documents-live-editor")).toBeVisible();
+    await expect(page.getByTestId("documents-source-editor")).toHaveCount(0);
+    // Still warned, just not forced.
+    await expect(page.getByTestId("documents-round-trip-banner")).toBeVisible();
+  });
+
+  test("only one live-preview control is offered", async ({ page }) => {
+    // Regression: the notice used to carry its own "use live preview anyway"
+    // button alongside the header toggle, reading as two competing controls.
+    await openWelcomeNote(page);
+    await expect(page.getByTestId("documents-toggle-view-mode")).toHaveCount(1);
+    await expect(page.getByTestId("documents-round-trip-switch")).toHaveCount(
+      0,
+    );
   });
 });

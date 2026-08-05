@@ -57,6 +57,11 @@ const MUST_BE_STABLE = [
   ["blockquote", "> quoted text"],
   ["link", "See [the docs](https://example.com)."],
   ["thematic break", "before\n\n---\n\nafter"],
+  ["gfm table", "| a | b |\n| --- | --- |\n| 1 | 2 |"],
+  [
+    "gfm table with hand-aligned delimiters",
+    "| Version | Supported |\n| ------- | --------- |\n| main | Active |",
+  ],
   ["multiple paragraphs", "one\n\ntwo\n\nthree"],
   ["strikethrough", "~~gone~~"],
   ["wikilink", "A [[Note Title]] reference."],
@@ -74,12 +79,11 @@ const MUST_BE_STABLE = [
  * must be *detected* so the file opens in source mode, never silently
  * rewritten.
  *
- * The table case is the sharpest one — a GFM table serializes down to its
- * concatenated cell text (`| a | b |…` becomes `ab12`), so autosaving a note
- * containing one would destroy it outright.
+ * Tables used to head this list — without the table extensions a GFM table
+ * serialized down to its concatenated cell text (`| a | b |…` became `ab12`).
+ * They now round-trip, and moved to MUST_BE_STABLE.
  */
 const MUST_BE_DETECTED_LOSSY = [
-  ["table", "| a | b |\n| --- | --- |\n| 1 | 2 |"],
   ["callout", "> [!info] Title\n> body"],
   ["footnote", "Text[^1]\n\n[^1]: note"],
   ["raw html", "<div>raw</div>"],

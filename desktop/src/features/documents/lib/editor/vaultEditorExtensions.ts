@@ -14,6 +14,10 @@
  */
 import type { Extensions } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
+import { Table } from "@tiptap/extension-table";
+import { TableCell } from "@tiptap/extension-table-cell";
+import { TableHeader } from "@tiptap/extension-table-header";
+import { TableRow } from "@tiptap/extension-table-row";
 import { Markdown } from "tiptap-markdown";
 
 import { ObsidianSyntaxExtension } from "@/features/documents/lib/editor/obsidianSyntaxExtension";
@@ -42,6 +46,13 @@ export function vaultEditorExtensions(): Extensions {
         openOnClick: false,
       },
     }),
+    // Without these, a GFM table has no schema node: markdown-it still parses
+    // one, the nodes are dropped, and the table serializes back as its bare
+    // concatenated cell text. `tiptap-markdown` ships serialization for them.
+    Table.configure({ resizable: false }),
+    TableRow,
+    TableHeader,
+    TableCell,
     Markdown.configure({
       // Preserve the source as closely as the serializer allows.
       breaks: false,

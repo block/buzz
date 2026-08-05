@@ -1,8 +1,13 @@
 import { FolderOpen, TriangleAlert } from "lucide-react";
 
 import { useVaultLifecycle } from "@/features/documents/useVaultLifecycle";
+import {
+  setAlwaysLivePreview,
+  useAlwaysLivePreview,
+} from "@/features/documents/useDocumentsPreferences";
 import { Button } from "@/shared/ui/button";
 import { Card } from "@/shared/ui/card";
+import { Switch } from "@/shared/ui/switch";
 
 /**
  * Settings → Documents. Gated on the `documents` preview feature.
@@ -13,6 +18,7 @@ import { Card } from "@/shared/ui/card";
 export function DocumentsSettingsCard() {
   const { activation, chooseVault, forgetVault, vaultPath } =
     useVaultLifecycle();
+  const alwaysLivePreview = useAlwaysLivePreview();
 
   return (
     <section className="space-y-4" data-testid="settings-documents">
@@ -77,6 +83,27 @@ export function DocumentsSettingsCard() {
             <span>{activation.message}</span>
           </p>
         ) : null}
+      </Card>
+
+      <Card className="p-4">
+        <div className="flex items-start justify-between gap-4">
+          <label className="min-w-0" htmlFor="documents-always-live-preview">
+            <p className="text-sm font-medium">Always open in live preview</p>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Some markdown cannot be represented in the editor — tables,
+              callouts, footnotes and raw HTML. Those notes normally open in
+              source mode so editing them cannot rewrite the file. Turn this on
+              to open everything in live preview instead; saving such a note
+              will reformat it.
+            </p>
+          </label>
+          <Switch
+            checked={alwaysLivePreview}
+            data-testid="documents-always-live-preview"
+            id="documents-always-live-preview"
+            onCheckedChange={setAlwaysLivePreview}
+          />
+        </div>
       </Card>
     </section>
   );
