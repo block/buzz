@@ -395,6 +395,10 @@ pub(crate) fn configure_runtime_cli(
     }
 }
 
+fn connection_relay_url(configured_relay_url: &str) -> String {
+    configured_relay_url.trim().to_string()
+}
+
 /// Spawn an agent process without holding any locks on records or runtimes.
 /// Returns the child process and log path on success. The caller is responsible
 /// for updating `ManagedAgentRecord` fields and inserting into the runtimes map.
@@ -496,9 +500,10 @@ pub fn spawn_agent_child(
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| effective_command.clone());
 
-    // The caller supplies the explicit canonical pair relay. This is the only
-    // relay this child may connect to, regardless of the record/workspace default.
-    let effective_relay_url = runtime_key.relay_url.clone();
+    // The canonical relay is only the pair identity. Preserve the configured
+    // authority for the network connection because relay communities are
+    // host-derived (`localhost` and `127.0.0.1` can be distinct tenants).
+    let effective_relay_url = connection_relay_url(relay_url);
 
     // Augment PATH for DMG launches so child processes can find:
     //   - bundled CLI via ~/.local/bin symlink
@@ -852,7 +857,11 @@ pub fn spawn_agent_child(
         super::spawn_snapshot::SpawnConfigInputs {
             record,
             descriptor: &descriptor,
-            relay_url: &effective_relay_url,
+            // Snapshot the canonical key relay, not the connection URL: the
+            // restart-drift check recomputes the prospective snapshot with
+            // `key.relay_url`, and the two must agree even when the configured
+            // spelling differs from the canonical one.
+            relay_url: &runtime_key.relay_url,
             team_instructions: team_instructions.as_deref(),
             system_prompt: effective_prompt.as_deref(),
             model: effective_model.as_deref(),
@@ -964,7 +973,7 @@ pub fn start_managed_agent_process(
     // Scalar PIDs are migration-only and never establish pair liveness.
     record.runtime_pid = None;
 
-    let mut process = spawn_agent_child(app, record, &key.relay_url, false, owner_hex)?;
+    let mut process = spawn_agent_child(app, record, &relay_url, false, owner_hex)?;
     let now = now_iso();
     let receipt = super::ManagedAgentRuntimeReceipt {
         key: key.clone(),
