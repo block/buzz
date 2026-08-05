@@ -118,6 +118,169 @@ test("does not invent a cause or fix when evidence is incomplete", () => {
   assert.match(explanation.nextAction, /missing outcome evidence/i);
 });
 
+test("explains the latest raw ACP turn instead of the whole channel history", () => {
+  const priorTurn = [
+    {
+      ...base,
+      seq: 1,
+      timestamp: "2026-08-05T12:00:00Z",
+      kind: "turn_completed",
+      payload: {},
+    },
+  ];
+  const failedTurn = [
+    {
+      ...base,
+      turnId: "turn-2",
+      seq: 2,
+      timestamp: "2026-08-05T12:01:00Z",
+      kind: "turn_started",
+      payload: {},
+    },
+    {
+      ...base,
+      turnId: "turn-2",
+      seq: 3,
+      timestamp: "2026-08-05T12:01:01Z",
+      kind: "acp_write",
+      payload: {
+        method: "session/prompt",
+        params: {
+          prompt: [
+            {
+              type: "text",
+              text: "[Buzz event: @mention]\nContent: Use /usr/bin/touch /Library/buzz-causal-test.txt once.\nEvent ID: abc123",
+            },
+          ],
+        },
+      },
+    },
+    {
+      ...base,
+      turnId: "turn-2",
+      seq: 4,
+      timestamp: "2026-08-05T12:01:02Z",
+      kind: "acp_write",
+      payload: {
+        id: 9,
+        result: {
+          outcome: { outcome: "selected", optionId: "allow_once" },
+        },
+      },
+    },
+    {
+      ...base,
+      turnId: "turn-2",
+      seq: 5,
+      timestamp: "2026-08-05T12:01:03Z",
+      kind: "acp_read",
+      payload: {
+        method: "session/update",
+        params: {
+          update: {
+            sessionUpdate: "tool_call_update",
+            status: "failed",
+            content: [
+              {
+                type: "content",
+                content: {
+                  type: "text",
+                  text: "touch: /Library/buzz-causal-test.txt: Permission denied",
+                },
+              },
+            ],
+          },
+        },
+      },
+    },
+    {
+      ...base,
+      turnId: "turn-2",
+      seq: 6,
+      timestamp: "2026-08-05T12:01:04Z",
+      kind: "turn_completed",
+      payload: {},
+    },
+  ];
+
+  const explanation = explainSession([...priorTurn, ...failedTurn], []);
+
+  assert.equal(
+    explanation.task,
+    "Use /usr/bin/touch /Library/buzz-causal-test.txt once.",
+  );
+  assert.equal(explanation.outcome, "failed");
+  assert.match(explanation.why, /Permission denied/);
+  assert.equal(
+    explanation.evidence.some(
+      (event) => event.title === "Tool request allowed",
+    ),
+    true,
+  );
+  assert.equal(
+    explanation.evidence.some((event) => event.title === "Tool failed"),
+    true,
+  );
+  assert.equal(
+    explanation.unknowns.some((gap) => gap.sourceLayer === "os_sandbox"),
+    false,
+  );
+});
+
+test("does not call a completed turn successful without a successful tool result", () => {
+  const explanation = explainSession(
+    [
+      {
+        ...base,
+        seq: 1,
+        timestamp: "2026-08-05T12:00:00Z",
+        kind: "turn_completed",
+        payload: {},
+      },
+    ],
+    [],
+  );
+
+  assert.equal(explanation.outcome, "unknown");
+});
+
+test("marks a completed turn successful when its tool result succeeded", () => {
+  const explanation = explainSession(
+    [
+      {
+        ...base,
+        seq: 1,
+        timestamp: "2026-08-05T12:00:00Z",
+        kind: "acp_read",
+        payload: {
+          method: "session/update",
+          params: {
+            update: {
+              sessionUpdate: "tool_call_update",
+              status: "completed",
+              content: [{ type: "text", text: "exit code 0" }],
+            },
+          },
+        },
+      },
+      {
+        ...base,
+        seq: 2,
+        timestamp: "2026-08-05T12:00:01Z",
+        kind: "turn_completed",
+        payload: {},
+      },
+    ],
+    [],
+  );
+
+  assert.equal(explanation.outcome, "succeeded");
+  assert.equal(
+    explanation.evidence.some((event) => event.title === "Tool completed"),
+    true,
+  );
+});
+
 test("models the real host-write incident and validates one controlled replay", () => {
   const failedRun = [
     {

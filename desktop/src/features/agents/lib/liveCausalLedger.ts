@@ -1,5 +1,11 @@
 import type { ObserverEvent } from "../ui/agentSessionTypes";
 import {
+  extractPromptText,
+  extractToolResult,
+  parsePromptText,
+} from "../ui/agentSessionTranscriptHelpers";
+import { asRecord, asString } from "../ui/agentSessionUtils";
+import {
   CAUSAL_EXPERIMENT_SCHEMA,
   CausalLedger,
   type CausalExperiment,
@@ -46,6 +52,61 @@ function eventId(event: ObserverEvent): string {
   return `observer:${event.sessionId ?? "unknown"}:${event.seq}:${event.timestamp}`;
 }
 
+function taskFromEvents(events: readonly ObserverEvent[]): {
+  description: string;
+  sourceMessageId: string | null;
+} {
+  const captured = events.find((event) => event.kind === "task_captured");
+  if (captured) {
+    const capturedPayload = payload(captured);
+    return {
+      description:
+        text(capturedPayload.description) ??
+        "Task unavailable from observer evidence",
+      sourceMessageId: text(capturedPayload.sourceMessageId),
+    };
+  }
+
+  const promptEvent = events.find((event) => {
+    const eventPayload = payload(event);
+    return (
+      event.kind === "acp_write" &&
+      asString(eventPayload.method) === "session/prompt"
+    );
+  });
+  if (!promptEvent) {
+    return {
+      description: "Task unavailable from observer evidence",
+      sourceMessageId: null,
+    };
+  }
+  const prompt = extractPromptText(payload(promptEvent));
+  const parsed = parsePromptText(prompt);
+  return {
+    description:
+      parsed.userText ||
+      prompt.trim() ||
+      "Task unavailable from observer evidence",
+    sourceMessageId: parsed.userEventId,
+  };
+}
+
+function hasOsSandboxEvidence(events: readonly ObserverEvent[]): boolean {
+  return events.some((event) => {
+    if (event.kind !== "acp_read") return false;
+    const eventPayload = payload(event);
+    if (asString(eventPayload.method) !== "session/update") return false;
+    const update = asRecord(asRecord(eventPayload.params).update);
+    return (
+      asString(update.sessionUpdate) === "tool_call_update" &&
+      asString(update.status) === "failed" &&
+      /permission denied|operation not permitted/i.test(
+        extractToolResult(update),
+      )
+    );
+  });
+}
+
 export class LiveCausalLedger {
   readonly #persistence: CausalLedgerPersistence;
   readonly #owner: string;
@@ -73,7 +134,8 @@ export class LiveCausalLedger {
     this.#writes = this.#writes.then(async () => {
       await this.#ready;
       if (!event.sessionId) return;
-      const key = `${agentPubkey.toLowerCase()}:${event.sessionId}`;
+      const runId = event.turnId ?? `terminal-${event.seq}`;
+      const key = `${agentPubkey.toLowerCase()}:${event.sessionId}:${runId}`;
       const session = this.#sessions.get(key) ?? [];
       session.push(event);
       this.#sessions.set(key, session);
@@ -88,7 +150,7 @@ export class LiveCausalLedger {
         ? await CausalLedger.fromJournal(latestJournal)
         : new CausalLedger();
 
-      const experimentId = `live:${agentPubkey.toLowerCase()}:${event.sessionId}`;
+      const experimentId = `live:${agentPubkey.toLowerCase()}:${event.sessionId}:${runId}`;
       if (
         this.#ledger
           .entries()
@@ -118,12 +180,9 @@ export class LiveCausalLedger {
     turnId: string | null,
     events: ObserverEvent[],
   ): CausalExperiment {
-    const taskEvent = events.find((event) => event.kind === "task_captured");
-    const taskPayload = taskEvent ? payload(taskEvent) : {};
-    const taskDescription =
-      text(taskPayload.description) ??
-      "Task unavailable from observer evidence";
-    const sourceMessageId = text(taskPayload.sourceMessageId);
+    const task = taskFromEvents(events);
+    const taskDescription = task.description;
+    const sourceMessageId = task.sourceMessageId;
     const proposalId = proposalIdFromReplayTask(taskDescription);
     const markedProposal = proposalId
       ? this.#ledger
@@ -188,7 +247,7 @@ export class LiveCausalLedger {
           ? "observed"
           : "missing",
         host_workspace: layers.has("host_workspace") ? "observed" : "missing",
-        os_sandbox: "missing",
+        os_sandbox: hasOsSandboxEvidence(events) ? "observed" : "missing",
       },
       relations: { supports: [], contradicts: [], invalidates: [] },
     };

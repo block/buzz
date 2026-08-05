@@ -57,6 +57,71 @@ test("automatically closes a live session into an owner-local candidate", async 
   assert.ok(storage.getItem(ledger.storageKey));
 });
 
+test("captures the task and OS failure from raw ACP evidence", async () => {
+  const ledger = new LiveCausalLedger(
+    "owner",
+    browserLedgerPersistence("owner", memoryStorage()),
+  );
+  await ledger.ingest(
+    "agent",
+    observer(1, "acp_write", {
+      method: "session/prompt",
+      params: {
+        prompt: [
+          {
+            type: "text",
+            text: `[Buzz event: @mention]\nEvent ID: ${"a".repeat(64)}\nContent: Touch the protected file once.`,
+          },
+        ],
+      },
+    }),
+  );
+  await ledger.ingest(
+    "agent",
+    observer(2, "acp_read", {
+      method: "session/update",
+      params: {
+        update: {
+          sessionUpdate: "tool_call_update",
+          status: "failed",
+          content: [
+            {
+              type: "text",
+              text: "touch: /Library/file: Permission denied",
+            },
+          ],
+        },
+      },
+    }),
+  );
+  await ledger.ingest("agent", observer(3, "turn_completed"));
+
+  const [entry] = await ledger.entries();
+  assert.equal(
+    entry.experiment.task.description,
+    "Touch the protected file once.",
+  );
+  assert.equal(entry.experiment.task.sourceMessageId, "a".repeat(64));
+  assert.equal(entry.experiment.coverage.os_sandbox, "observed");
+});
+
+test("records each turn in a reused session as its own candidate", async () => {
+  const ledger = new LiveCausalLedger(
+    "owner",
+    browserLedgerPersistence("owner", memoryStorage()),
+  );
+  await ledger.ingest("agent", observer(1, "turn_completed"));
+  await ledger.ingest("agent", {
+    ...observer(2, "turn_completed"),
+    turnId: "turn-2",
+  });
+
+  const entries = await ledger.entries();
+  assert.equal(entries.length, 2);
+  assert.equal(entries[0].experiment.execution.turnId, "turn-1");
+  assert.equal(entries[1].experiment.execution.turnId, "turn-2");
+});
+
 test("restores the candidate after restart and does not duplicate terminal replay", async () => {
   const storage = memoryStorage();
   const first = new LiveCausalLedger(
