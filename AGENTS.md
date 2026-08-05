@@ -592,6 +592,7 @@ usage.
 
 ## See Also
 
+- [docs/CODEBASE_CONTEXT.md](docs/CODEBASE_CONTEXT.md) — quick codebase orientation, execution paths, invariants, risks, and known documentation drift
 - [CONTRIBUTING.md](CONTRIBUTING.md) — setup, code style, PR process, how to add event kinds / CLI subcommands / HTTP endpoints
 - [TESTING.md](TESTING.md) — multi-agent E2E test guide
 - [ARCHITECTURE.md](ARCHITECTURE.md) — system design and component relationships
