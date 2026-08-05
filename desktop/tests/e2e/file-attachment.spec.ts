@@ -545,3 +545,64 @@ test("a queued attachment can be removed without a mouse", async ({ page }) => {
     "large-video.mp4",
   );
 });
+
+test("an uploaded attachment's remove button is named and keyboard-operable", async ({
+  page,
+}) => {
+  // Companion to the queued case: these badges are now in the tab order, so
+  // every icon-only remove button needs an accessible name a screen reader can
+  // read. Images and non-media files render through different branches, so
+  // both are checked here.
+  await installMockBridge(page, {
+    deferredComposerUploads: true,
+    uploadDescriptors: [
+      {
+        url: `https://mock.relay/media/${"b".repeat(64)}.png`,
+        sha256: "b".repeat(64),
+        size: 2048,
+        type: "image/png",
+        uploaded: Math.floor(Date.now() / 1000),
+        dim: "320x200",
+        filename: "photo.png",
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+
+  const composer = page.getByTestId("message-composer");
+  const remove = composer.getByRole("button", { name: "Remove attachment" });
+
+  // Image attachment (MediaAttachmentItem).
+  await choosePhoto(page);
+  await expect(composer.getByTestId("composer-media-attachment")).toBeVisible();
+  await expect(remove).toHaveCount(1);
+  await remove.focus();
+  await expect(remove).toBeFocused();
+  await expect(remove).toHaveCSS("opacity", "1");
+  await page.keyboard.press("Enter");
+  await expect(composer.getByTestId("composer-media-attachment")).toHaveCount(
+    0,
+  );
+});
+
+test("a non-media attachment's remove button is named and keyboard-operable", async ({
+  page,
+}) => {
+  // The file-card branch renders its own remove badge, so it needs the same
+  // accessible name as the image and queued ones.
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await chooseQuarterlyReport(page);
+
+  const composer = page.getByTestId("message-composer");
+  await expect(composer).toContainText("quarterly-report.pdf");
+
+  const remove = composer.getByRole("button", { name: "Remove attachment" });
+  await expect(remove).toHaveCount(1);
+  await remove.focus();
+  await expect(remove).toBeFocused();
+  await expect(remove).toHaveCSS("opacity", "1");
+  await page.keyboard.press("Enter");
+  await expect(composer).not.toContainText("quarterly-report.pdf");
+});
