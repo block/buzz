@@ -240,25 +240,42 @@ function beginNewDraftEpoch(state) {
     uploadingCount: state.uploadingCount,
   };
   if (next.active.size === 0) return next;
-  for (const id of next.active) next.canceled.add(id);
-  next.previews = state.previews.filter(
-    (preview) => !next.active.has(preview.id),
-  );
-  next.uploadingCount = Math.max(0, state.uploadingCount - next.active.size);
-  next.active = new Set();
+  // Mirrors the real callback: snapshot, clear the live set, then schedule the
+  // updaters. `applyUpdates` below runs them afterwards, the way React does.
+  const retiredIds = new Set(next.active);
+  const retiredCount = retiredIds.size;
+  next.active.clear();
+  for (const id of retiredIds) next.canceled.add(id);
+  next.pendingUpdates = [
+    (s) => {
+      s.previews = s.previews.filter((preview) => !retiredIds.has(preview.id));
+    },
+    (s) => {
+      s.uploadingCount = Math.max(0, s.uploadingCount - retiredCount);
+    },
+  ];
   return next;
+}
+
+/** Run the scheduled state updaters, as React does after the event handler. */
+function applyUpdates(state) {
+  for (const update of state.pendingUpdates ?? []) update(state);
+  state.pendingUpdates = [];
+  return state;
 }
 
 test("a draft boundary retires in-flight uploads so the new draft can send", () => {
   // Draft A has one upload in flight; switching to draft B must leave B with
   // no previews and nothing counted as uploading.
-  const after = beginNewDraftEpoch({
-    epoch: 0,
-    active: new Set([1]),
-    canceled: new Set(),
-    previews: [{ id: 1, slotIndex: 0, uploadEpoch: 0 }],
-    uploadingCount: 1,
-  });
+  const after = applyUpdates(
+    beginNewDraftEpoch({
+      epoch: 0,
+      active: new Set([1]),
+      canceled: new Set(),
+      previews: [{ id: 1, slotIndex: 0, uploadEpoch: 0 }],
+      uploadingCount: 1,
+    }),
+  );
   assert.equal(after.epoch, 1);
   assert.deepEqual(after.previews, []);
   assert.equal(after.uploadingCount, 0);
@@ -268,25 +285,29 @@ test("a draft boundary retires in-flight uploads so the new draft can send", () 
 });
 
 test("retiring several concurrent uploads clears the count exactly once each", () => {
-  const after = beginNewDraftEpoch({
-    epoch: 4,
-    active: new Set([7, 8, 9]),
-    canceled: new Set(),
-    previews: [{ id: 7 }, { id: 8 }, { id: 9 }],
-    uploadingCount: 3,
-  });
+  const after = applyUpdates(
+    beginNewDraftEpoch({
+      epoch: 4,
+      active: new Set([7, 8, 9]),
+      canceled: new Set(),
+      previews: [{ id: 7 }, { id: 8 }, { id: 9 }],
+      uploadingCount: 3,
+    }),
+  );
   assert.equal(after.uploadingCount, 0);
   assert.deepEqual(after.previews, []);
 });
 
 test("a draft boundary with no uploads in flight still advances the epoch", () => {
-  const after = beginNewDraftEpoch({
-    epoch: 2,
-    active: new Set(),
-    canceled: new Set(),
-    previews: [],
-    uploadingCount: 0,
-  });
+  const after = applyUpdates(
+    beginNewDraftEpoch({
+      epoch: 2,
+      active: new Set(),
+      canceled: new Set(),
+      previews: [],
+      uploadingCount: 0,
+    }),
+  );
   assert.equal(after.epoch, 3);
   assert.equal(after.uploadingCount, 0);
 });
@@ -294,12 +315,48 @@ test("a draft boundary with no uploads in flight still advances the epoch", () =
 test("the retired count never drives uploadingCount negative", () => {
   // Defensive: a preview already settled by finishUpload must not be
   // double-decremented into a negative count that would wedge the gate.
-  const after = beginNewDraftEpoch({
+  const after = applyUpdates(
+    beginNewDraftEpoch({
+      epoch: 0,
+      active: new Set([1, 2]),
+      canceled: new Set(),
+      previews: [{ id: 1 }, { id: 2 }],
+      uploadingCount: 1,
+    }),
+  );
+  assert.equal(after.uploadingCount, 0);
+});
+
+test("retirement holds even though the live active set is cleared first", () => {
+  // Regression: the updaters must not read the live `active` set, which is
+  // emptied before React runs them. Closing over it filtered against an empty
+  // set and subtracted 0, leaving the stale preview and a stuck send gate.
+  const state = beginNewDraftEpoch({
     epoch: 0,
-    active: new Set([1, 2]),
+    active: new Set([1]),
     canceled: new Set(),
-    previews: [{ id: 1 }, { id: 2 }],
+    previews: [{ id: 1 }],
     uploadingCount: 1,
   });
-  assert.equal(after.uploadingCount, 0);
+  assert.equal(state.active.size, 0, "live set is cleared before updates run");
+  // Updates land only now — after the clear — exactly as React schedules them.
+  applyUpdates(state);
+  assert.deepEqual(state.previews, []);
+  assert.equal(state.uploadingCount, 0);
+});
+
+test("replayed updaters stay idempotent", () => {
+  // React may invoke an updater more than once (StrictMode double-render).
+  const state = beginNewDraftEpoch({
+    epoch: 0,
+    active: new Set([1]),
+    canceled: new Set(),
+    previews: [{ id: 1 }],
+    uploadingCount: 1,
+  });
+  const updates = state.pendingUpdates;
+  for (const update of updates) update(state);
+  for (const update of updates) update(state);
+  assert.deepEqual(state.previews, []);
+  assert.equal(state.uploadingCount, 0);
 });

@@ -463,16 +463,23 @@ export function useMediaUpload({
    */
   const beginNewDraftEpoch = React.useCallback(() => {
     uploadEpochRef.current += 1;
-    const retiredIds = activeUploadingPreviewIdsRef.current;
-    if (retiredIds.size === 0) return;
+    const activeIds = activeUploadingPreviewIdsRef.current;
+    if (activeIds.size === 0) return;
+    // Snapshot before clearing the live set: the state updaters below run
+    // lazily (and may be replayed), so they must not close over a set that
+    // this callback empties before React invokes them — that would filter
+    // against an empty set and subtract 0, leaving the stale preview and a
+    // stuck send gate in the new draft.
+    const retiredIds = new Set(activeIds);
+    const retiredCount = retiredIds.size;
+    activeIds.clear();
     for (const id of retiredIds) {
       canceledUploadingPreviewIdsRef.current.add(id);
     }
     setUploadingPreviews((prev) =>
       prev.filter((preview) => !retiredIds.has(preview.id)),
     );
-    setUploadingCount((count) => Math.max(0, count - retiredIds.size));
-    retiredIds.clear();
+    setUploadingCount((count) => Math.max(0, count - retiredCount));
   }, []);
 
   const cancelUpload = React.useCallback(
