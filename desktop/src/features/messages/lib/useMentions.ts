@@ -16,7 +16,6 @@ import {
   coalesceAutocompleteCandidatesByKey,
   getMentionableAgentPubkeys,
   getSharedChannelIds,
-  isAgentIdentityInManagedList,
   shouldHideAgentFromMentions,
 } from "@/features/agents/lib/agentAutocompleteEligibility";
 import {
@@ -246,9 +245,16 @@ export function useMentions(
       if (isArchivedDiscovery(pubkey)) {
         return;
       }
-      if (!isAgentIdentityInManagedList(candidate, managedAgentPubkeys)) {
-        return;
-      }
+      // Agent visibility in the mention picker is governed solely by
+      // `shouldHideAgentFromMentions` (the "Option B" member/directory policy
+      // below). We deliberately do NOT pre-filter with
+      // `isAgentIdentityInManagedList` here: that gate keeps only *locally*
+      // managed agents, which drops channel-member agents managed by another
+      // Desktop instance before the member/directory policy can show them —
+      // the root cause of #4187 (cross-desktop managed agents missing from the
+      // `@mention` autocomplete). `isAgentIdentityInManagedList` still belongs
+      // in the "add member" search (MembersSidebar), where you may only add
+      // agents you manage; it does not belong on the mention path.
       if (
         shouldHideAgentFromMentions({
           isAgent: candidate.isAgent === true,
@@ -420,7 +426,6 @@ export function useMentions(
     managedAgentNamesByPubkey,
     managedAgentPersonaIds,
     managedAgentPersonaIdsByPubkey,
-    managedAgentPubkeys,
     managedAgentsQuery.data,
     memberPubkeys,
     members,
