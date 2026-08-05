@@ -11,6 +11,7 @@ import {
 } from "@/features/channels/hooks";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import type { MentionSuggestion } from "@/features/messages/ui/MentionAutocomplete";
+import { mergeKnownAgentPubkeys } from "@/features/agents/knownAgentPubkeys";
 import {
   coalesceAgentAutocompleteCandidates,
   coalesceAutocompleteCandidatesByKey,
@@ -221,6 +222,24 @@ export function useMentions(
     return lookup;
   }, [managedAgentsQuery.data, personasQuery.data]);
   const knownAgentPubkeys = mentionableAgentPubkeys;
+  // Managed agents ∪ relay directory. `isAgentIdentityInManagedList` gates the
+  // autocomplete on THIS set, and passing only the managed agents makes every
+  // remotely-hosted agent unmentionable: the relay flags an attested identity
+  // `is_agent` (users.agent_owner_pubkey, write-once), the candidate therefore
+  // arrives with isAgent=true, and the gate drops it before
+  // `shouldHideAgentFromMentions` — so `relayAgentIsSharedWithUser`, the
+  // allowlist and channel membership are never consulted for it. That made the
+  // whole relay-agent branch of the eligibility module unreachable, including
+  // the relay-agent candidate loop below.
+  //
+  // The union is the set this app already treats as "known agents" everywhere
+  // else (`useKnownAgentPubkeys`, same `mergeKnownAgentPubkeys` helper); using
+  // it here restores the intended layering: identity/ownership decides who is
+  // KNOWN, and the eligibility rules decide who is INVOCABLE.
+  const knownOrManagedAgentPubkeys = React.useMemo(
+    () => mergeKnownAgentPubkeys(managedAgentsQuery.data, relayAgentsQuery.data),
+    [managedAgentsQuery.data, relayAgentsQuery.data],
+  );
   const activePersonas = React.useMemo(
     () => (personasQuery.data ?? []).filter((persona) => persona.isActive),
     [personasQuery.data],
@@ -246,7 +265,7 @@ export function useMentions(
       if (isArchivedDiscovery(pubkey)) {
         return;
       }
-      if (!isAgentIdentityInManagedList(candidate, managedAgentPubkeys)) {
+      if (!isAgentIdentityInManagedList(candidate, knownOrManagedAgentPubkeys)) {
         return;
       }
       if (
