@@ -179,7 +179,14 @@ test.describe("Documents external-change reconciliation", () => {
     await page.keyboard.type(" mine");
     await expect(page.getByTestId("documents-tab-dirty-Welcome")).toBeVisible();
 
+    // The file must genuinely change on disk. Emitting the event alone proves
+    // nothing: a watcher event whose bytes match what we already have is not a
+    // conflict, and is deliberately ignored.
     await page.evaluate(() => {
+      window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.("write_vault_file", {
+        content: "# Welcome\n\nChanged by another app.\n",
+        path: "/mock/vault/Welcome.md",
+      });
       window.__BUZZ_E2E_EMIT_TAURI_EVENT__?.("vault-file-modified", [
         { modified_ms: 999_999, path: "/mock/vault/Welcome.md" },
       ]);
@@ -227,6 +234,69 @@ test.describe("Documents external-change reconciliation", () => {
       page.getByTestId("documents-external-change-banner"),
     ).toHaveCount(0);
     await expect(editor).toContainText("echoed");
+  });
+
+  test("a save whose watcher event arrives before its own response is not a conflict", async ({
+    page,
+  }) => {
+    await openWelcomeNote(page);
+
+    const editor = editorSurface(page);
+    await editor.click();
+    await page.keyboard.press("End");
+    await page.keyboard.type(" first");
+
+    // Let the debounced autosave land.
+    await expect(page.getByTestId("documents-tab-dirty-Welcome")).toHaveCount(
+      0,
+      { timeout: 5_000 },
+    );
+
+    // Keep typing, so the tab is dirty again — the state the user is in while
+    // working through a note.
+    await page.keyboard.type(" second");
+    await expect(page.getByTestId("documents-tab-dirty-Welcome")).toBeVisible();
+
+    // The watcher event for the save above, carrying an mtime the app never
+    // recorded. In the real app this happens because `write_vault_file`
+    // replaces the file with a rename and the watcher fires on it before the
+    // command's response crosses back — so mtime-based suppression cannot see
+    // it. The bytes on disk are still ours, so this is not a conflict.
+    await page.evaluate(() => {
+      window.__BUZZ_E2E_EMIT_TAURI_EVENT__?.("vault-file-modified", [
+        { modified_ms: 987_654, path: "/mock/vault/Welcome.md" },
+      ]);
+    });
+
+    await expect(
+      page.getByTestId("documents-external-change-banner"),
+    ).toHaveCount(0);
+    await expect(editor).toContainText("second");
+  });
+
+  test("a rewrite with identical content is not a conflict", async ({
+    page,
+  }) => {
+    await openWelcomeNote(page);
+
+    const editor = editorSurface(page);
+    await editor.click();
+    await page.keyboard.press("End");
+    await page.keyboard.type(" mine");
+    await expect(page.getByTestId("documents-tab-dirty-Welcome")).toBeVisible();
+
+    // Sync clients and formatters rewrite files byte-for-byte all the time.
+    // Nothing changed, so there is nothing to reconcile.
+    await page.evaluate(() => {
+      window.__BUZZ_E2E_EMIT_TAURI_EVENT__?.("vault-file-modified", [
+        { modified_ms: 555_555, path: "/mock/vault/Welcome.md" },
+      ]);
+    });
+
+    await expect(
+      page.getByTestId("documents-external-change-banner"),
+    ).toHaveCount(0);
+    await expect(editor).toContainText("mine");
   });
 });
 
