@@ -4,6 +4,8 @@ import { Eye, FileCode2, TriangleAlert } from "lucide-react";
 
 import type { DocumentTab } from "@/features/documents/lib/documentTabs";
 import { useVaultEditor } from "@/features/documents/lib/editor/useVaultEditor";
+import type { WikilinkClickHandler } from "@/features/documents/lib/editor/wikilinkExtension";
+import type { NoteIndex } from "@/features/documents/lib/noteIndex";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 
@@ -120,12 +122,16 @@ function DocumentSourceEditor({
 }
 
 function DocumentLiveEditor({
+  noteIndex,
   onChange,
   onSave,
+  onWikilinkClick,
   tab,
 }: {
+  noteIndex: NoteIndex | null;
   onChange: (markdown: string) => void;
   onSave: () => void;
+  onWikilinkClick: WikilinkClickHandler;
   tab: DocumentTab;
 }) {
   /**
@@ -148,8 +154,11 @@ function DocumentLiveEditor({
   );
 
   const { editor, loadDocument } = useVaultEditor({
+    currentPath: tab.path,
+    noteIndex,
     onChange: handleChange,
     onSave,
+    onWikilinkClick,
   });
 
   React.useEffect(() => {
@@ -170,19 +179,23 @@ function DocumentLiveEditor({
 
 export function DocumentEditorPane({
   hasExternalChange,
+  noteIndex,
   onChange,
   onKeepMine,
   onReload,
   onSave,
   onSetViewMode,
+  onWikilinkClick,
   tab,
 }: {
   hasExternalChange: boolean;
+  noteIndex: NoteIndex | null;
   onChange: (markdown: string) => void;
   onKeepMine: () => void;
   onReload: () => void;
   onSave: () => void;
   onSetViewMode: (mode: "live" | "source") => void;
+  onWikilinkClick: WikilinkClickHandler;
   tab: DocumentTab;
 }) {
   const isSource = tab.viewMode === "source";
@@ -229,8 +242,10 @@ export function DocumentEditorPane({
         // files — undo must never resurrect a different note's text.
         <DocumentLiveEditor
           key={tab.path}
+          noteIndex={noteIndex}
           onChange={onChange}
           onSave={onSave}
+          onWikilinkClick={onWikilinkClick}
           tab={tab}
         />
       )}

@@ -5,14 +5,18 @@
  * probe measured a different schema than the editor uses, the guard would bless
  * files the editor then reformats.
  *
- * Kept deliberately close to CommonMark + GFM for now. Obsidian syntax
- * (wikilinks, callouts, highlights, tags) arrives in later phases; until an
- * extension can both render *and* serialize a construct, the round-trip guard
- * correctly routes those files to source mode rather than silently eating them.
+ * Kept deliberately close to CommonMark. Wikilinks are decoration-only — they
+ * stay plain text in the document and so serialize back byte-identically.
+ * Constructs that would need a real node (callouts, tables, footnotes) are
+ * absent on purpose: until an extension can both render *and* serialize one,
+ * the round-trip guard correctly routes those files to source mode rather than
+ * silently eating them.
  */
 import type { Extensions } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
 import { Markdown } from "tiptap-markdown";
+
+import { WikilinkExtension } from "@/features/documents/lib/editor/wikilinkExtension";
 
 export function vaultEditorExtensions(): Extensions {
   return [
@@ -44,5 +48,8 @@ export function vaultEditorExtensions(): Extensions {
       linkify: false,
       transformPastedText: false,
     }),
+    // Decoration-only: wikilinks stay plain text in the document, so they
+    // serialize back byte-identically and the round-trip guard still passes.
+    WikilinkExtension,
   ];
 }

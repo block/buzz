@@ -1,0 +1,30 @@
+/**
+ * Documents editor decorations.
+ *
+ * Only ProseMirror `Decoration` classes need real CSS — a decoration takes a
+ * class name string, not a component, so these cannot be Tailwind utilities on
+ * an element. Everything React renders in Documents uses Tailwind directly.
+ *
+ * Colours come from the existing theme tokens rather than fixed hexes, so the
+ * editor stays legible in both light and dark mode.
+ */
+
+.documents-editor .wikilink {
+  color: var(--color-primary);
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.documents-editor .wikilink:hover {
+  text-decoration: underline;
+}
+
+/**
+ * A link whose target does not exist yet. Muted rather than red: an unresolved
+ * wikilink is a normal part of writing, not an error.
+ */
+.documents-editor .wikilink-broken {
+  color: var(--color-muted-foreground);
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}

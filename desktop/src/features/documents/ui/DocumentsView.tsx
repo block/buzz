@@ -1,7 +1,10 @@
 import * as React from "react";
 import { FolderOpen } from "lucide-react";
 
-import { useVaultTreeQuery } from "@/features/documents/hooks";
+import {
+  useVaultContentsQuery,
+  useVaultTreeQuery,
+} from "@/features/documents/hooks";
 import { useDocumentSession } from "@/features/documents/useDocumentSession";
 import {
   ancestorFolderPaths,
@@ -12,6 +15,10 @@ import { useVaultLifecycle } from "@/features/documents/useVaultLifecycle";
 import { DocumentEditorPane } from "@/features/documents/ui/DocumentEditorPane";
 import { DocumentTabBar } from "@/features/documents/ui/DocumentTabBar";
 import { DocumentTreePane } from "@/features/documents/ui/DocumentTreePane";
+import { DocumentBacklinksPanel } from "@/features/documents/ui/DocumentBacklinksPanel";
+import { getBacklinks } from "@/features/documents/lib/backlinks";
+import { buildNoteIndex } from "@/features/documents/lib/noteIndex";
+import { collectFilePaths } from "@/features/documents/lib/treeModel";
 import { DocumentDeleteDialog } from "@/features/documents/ui/DocumentTreeContextMenu";
 import {
   DocumentNamePromptDialog,
@@ -32,7 +39,7 @@ export function DocumentsView() {
   const vaultRoot = isReady ? activation.path : null;
 
   const treeQuery = useVaultTreeQuery(vaultRoot);
-  const { tree } = useResizableDocumentsPanes();
+  const { rail, tree } = useResizableDocumentsPanes();
 
   const [expandedPaths, setExpandedPaths] = React.useState<ReadonlySet<string>>(
     () => new Set(),
@@ -53,6 +60,35 @@ export function DocumentsView() {
   const rows = React.useMemo(
     () => flattenVisibleRows(treeQuery.data ?? [], expandedPaths),
     [expandedPaths, treeQuery.data],
+  );
+
+  // The corpus every wikilink and backlink is resolved against.
+  const contentsQuery = useVaultContentsQuery(vaultRoot, treeQuery.data);
+
+  const noteIndex = React.useMemo(() => {
+    if (!vaultRoot || !treeQuery.data) return null;
+    return buildNoteIndex(vaultRoot, collectFilePaths(treeQuery.data));
+  }, [treeQuery.data, vaultRoot]);
+
+  const backlinks = React.useMemo(() => {
+    if (!activePath || !contentsQuery.data) {
+      return { linked: [], unlinked: [] };
+    }
+    return getBacklinks({
+      contents: contentsQuery.data,
+      index: noteIndex,
+      targetPath: activePath,
+    });
+  }, [activePath, contentsQuery.data, noteIndex]);
+
+  const handleWikilinkClick = React.useCallback(
+    ({ exists, path }: { exists: boolean; path: string | null }) => {
+      // Broken links have nowhere to go yet; creating on click would litter the
+      // vault with empty notes from stray clicks.
+      if (!exists || !path) return;
+      void session.openFile(path);
+    },
+    [session.openFile],
   );
 
   const handleToggleFolder = React.useCallback((path: string) => {
@@ -238,6 +274,8 @@ export function DocumentsView() {
               hasExternalChange={session.externalChanges.has(
                 session.activeTab.path,
               )}
+              noteIndex={noteIndex}
+              onWikilinkClick={handleWikilinkClick}
               onChange={(markdown) => {
                 if (session.activeTab) {
                   session.updateTabContent(session.activeTab.path, markdown);
@@ -271,6 +309,31 @@ export function DocumentsView() {
             </p>
           )}
         </div>
+
+        {session.activeTab ? (
+          <>
+            <button
+              aria-label="Resize the backlinks rail"
+              className={cn(
+                "w-1 shrink-0 cursor-col-resize bg-transparent",
+                "hover:bg-border focus-visible:bg-border",
+              )}
+              data-testid="documents-rail-resize-handle"
+              onDoubleClick={rail.handleWidthReset}
+              onPointerDown={rail.handleResizeStart}
+              type="button"
+            />
+            <div
+              className="flex min-h-0 shrink-0 flex-col border-l border-border/60"
+              style={{ width: `${rail.widthPx}px` }}
+            >
+              <DocumentBacklinksPanel
+                backlinks={backlinks}
+                onOpen={(path) => void session.openFile(path)}
+              />
+            </div>
+          </>
+        ) : null}
       </div>
 
       <DocumentNamePromptDialog

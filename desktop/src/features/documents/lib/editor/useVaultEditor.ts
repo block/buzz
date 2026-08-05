@@ -13,13 +13,24 @@ import * as React from "react";
 import { useEditor } from "@tiptap/react";
 
 import { vaultEditorExtensions } from "@/features/documents/lib/editor/vaultEditorExtensions";
+import {
+  wikilinkKey,
+  type WikilinkClickHandler,
+  type WikilinkStorage,
+} from "@/features/documents/lib/editor/wikilinkExtension";
 import { toDiskMarkdown } from "@/features/documents/lib/markdownEscapes";
+import type { NoteIndex } from "@/features/documents/lib/noteIndex";
 
 export type UseVaultEditorOptions = {
+  /** Path of the note being edited, for same-folder wikilink resolution. */
+  currentPath: string;
+  /** Vault-wide index; `null` while the corpus is still loading. */
+  noteIndex: NoteIndex | null;
   /** Called only for genuine user edits, with the disk-ready markdown. */
   onChange: (markdown: string) => void;
   /** Ctrl/Cmd+S. */
   onSave: () => void;
+  onWikilinkClick: WikilinkClickHandler;
 };
 
 function readMarkdown(editor: {
@@ -38,7 +49,13 @@ function readMarkdown(editor: {
   return toDiskMarkdown(raw);
 }
 
-export function useVaultEditor({ onChange, onSave }: UseVaultEditorOptions) {
+export function useVaultEditor({
+  currentPath,
+  noteIndex,
+  onChange,
+  onSave,
+  onWikilinkClick,
+}: UseVaultEditorOptions) {
   const onChangeRef = React.useRef(onChange);
   onChangeRef.current = onChange;
   const onSaveRef = React.useRef(onSave);
@@ -82,6 +99,23 @@ export function useVaultEditor({ onChange, onSave }: UseVaultEditorOptions) {
       }
     },
   });
+
+  // Keep wikilink decorations in sync with the index. Mutating
+  // `editor.storage.<name>` directly is required: the extension instance's
+  // `.storage` getter returns a fresh spread-copy per access, so writes through
+  // it are silently lost (see the note in useRichTextEditor.ts).
+  React.useEffect(() => {
+    if (!editor) return;
+    const storage = (editor.storage as unknown as Record<string, unknown>)
+      .documentsWikilink as WikilinkStorage | undefined;
+    if (!storage) return;
+
+    storage.currentPath = currentPath;
+    storage.noteIndex = noteIndex;
+    storage.onWikilinkClick = onWikilinkClick;
+    // Force a re-decoration; the document itself has not changed.
+    editor.view.dispatch(editor.state.tr.setMeta(wikilinkKey, true));
+  }, [currentPath, editor, noteIndex, onWikilinkClick]);
 
   /** Loads a document without marking it dirty. */
   const loadDocument = React.useCallback(
