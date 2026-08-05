@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -6,6 +9,7 @@ import '../../shared/clipboard_utils.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
+import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/sheet_divider.dart';
 import 'channel.dart';
 import 'channel_management_provider.dart';
@@ -25,7 +29,7 @@ Future<bool?> showChannelActionsSheet({
   required bool isUnread,
   VoidCallback? onMarkRead,
   String? sectionId,
-}) => showModalBottomSheet<bool>(
+}) => showBuzzModalBottomSheet<bool>(
   context: context,
   isScrollControlled: true,
   showDragHandle: true,
@@ -103,215 +107,223 @@ class ChannelActionsSheet extends ConsumerWidget {
 
     return SafeArea(
       top: false,
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.fromLTRB(
-          Grid.gutter,
-          0,
-          Grid.gutter,
-          Grid.xs,
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (!channel.isDm) ...[
-              _ChannelQuickActionsRow(
-                isStarred: isStarred,
-                isUnread: isUnread,
-                onToggleStar: () {
-                  close();
-                  final notifier = ref.read(channelStarsProvider.notifier);
-                  isStarred
-                      ? notifier.unstarChannel(channel.id)
-                      : notifier.starChannel(channel.id);
-                },
-                onToggleRead: () {
-                  close();
-                  final timestamp = dateTimeToUnixSeconds(
-                    channel.lastMessageAt,
-                  );
-                  if (isUnread) {
-                    onMarkRead?.call();
-                    if (timestamp != null) {
+      child: IconTheme.merge(
+        data: const IconThemeData(size: 22),
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(
+            Grid.gutter,
+            0,
+            Grid.gutter,
+            Grid.xs,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (!channel.isDm) ...[
+                _ChannelQuickActionsRow(
+                  isStarred: isStarred,
+                  isUnread: isUnread,
+                  onToggleStar: () {
+                    close();
+                    final notifier = ref.read(channelStarsProvider.notifier);
+                    isStarred
+                        ? notifier.unstarChannel(channel.id)
+                        : notifier.starChannel(channel.id);
+                  },
+                  onToggleRead: () {
+                    close();
+                    final timestamp = dateTimeToUnixSeconds(
+                      channel.lastMessageAt,
+                    );
+                    if (isUnread) {
+                      onMarkRead?.call();
+                      if (timestamp != null) {
+                        ref
+                            .read(readStateProvider.notifier)
+                            .markContextRead(
+                              channel.id,
+                              timestamp,
+                              clearForcedMessages: true,
+                            );
+                        ref
+                            .read(channelsProvider.notifier)
+                            .clearObservedUnreadCoveredByRead(
+                              channel.id,
+                              timestamp,
+                            );
+                      }
+                    } else {
                       ref
                           .read(readStateProvider.notifier)
-                          .markContextRead(
-                            channel.id,
-                            timestamp,
-                            clearForcedMessages: true,
-                          );
-                      ref
-                          .read(channelsProvider.notifier)
-                          .clearObservedUnreadCoveredByRead(
-                            channel.id,
-                            timestamp,
-                          );
+                          .markContextUnread(channel.id, channelId: channel.id);
                     }
-                  } else {
-                    ref
-                        .read(readStateProvider.notifier)
-                        .markContextUnread(channel.id, channelId: channel.id);
-                  }
-                },
-              ),
-              const SizedBox(height: Grid.xs),
-            ],
-            if (!channel.isDm)
-              ListTile(
-                leading: const Icon(LucideIcons.folderInput),
-                title: const Text('Move to section…'),
-                onTap: () async {
-                  final pageContext = Navigator.of(
-                    context,
-                    rootNavigator: true,
-                  ).context;
-                  close();
-                  await _showMoveSectionSheet(
-                    pageContext,
-                    ref,
-                    channel: channel,
-                    sectionId: sectionId,
-                  );
-                },
-              ),
-            ListTile(
-              leading: Icon(isMuted ? LucideIcons.bell : LucideIcons.bellOff),
-              title: Text(isMuted ? 'Unmute channel' : 'Mute channel'),
-              onTap: () {
-                close();
-                final notifier = ref.read(channelMutesProvider.notifier);
-                isMuted
-                    ? notifier.unmuteChannel(channel.id)
-                    : notifier.muteChannel(channel.id);
-              },
-            ),
-            if (!channel.isDm)
-              ListTile(
-                leading: const Icon(LucideIcons.settings),
-                title: const Text('Manage channel'),
-                onTap: () async {
-                  final shouldClose = await showModalBottomSheet<bool>(
-                    context: context,
-                    isScrollControlled: true,
-                    showDragHandle: true,
-                    constraints: BoxConstraints(
-                      maxWidth: 640,
-                      maxHeight: MediaQuery.sizeOf(context).height * 0.9,
-                    ),
-                    builder: (_) => ManageChannelSheet(channel: channel),
-                  );
-                  if (shouldClose == true && context.mounted) {
-                    Navigator.of(context).pop(true);
-                  }
-                },
-              ),
-            ListTile(
-              leading: const Icon(LucideIcons.copy),
-              title: const Text('Copy channel name'),
-              onTap: () {
-                close();
-                copyToClipboard(
-                  context,
-                  channel.name,
-                  message: 'Channel name copied to clipboard',
-                );
-              },
-            ),
-            ListTile(
-              leading: const Icon(LucideIcons.hash),
-              title: const Text('Copy channel ID'),
-              onTap: () {
-                close();
-                copyToClipboard(
-                  context,
-                  channel.id,
-                  message: 'Channel ID copied to clipboard',
-                );
-              },
-            ),
-            if (!channel.isDm) ...[
-              const SheetDivider(),
-              if (channel.isMember && !channel.isArchived)
-                _ActionTile(
-                  icon: LucideIcons.logOut,
-                  label: 'Leave channel',
-                  destructive: true,
-                  onTap: () => _confirmAndRun(
-                    context,
-                    ref,
-                    title: 'Leave #${channel.name}?',
-                    body: 'You’ll stop receiving messages from this channel.',
-                    confirmLabel: 'Leave',
-                    action: () => ref
-                        .read(channelActionsProvider)
-                        .leaveChannel(channel.id),
-                  ),
+                  },
                 ),
-              if (lifecycleCapabilitiesLoading)
-                const ListTile(
-                  enabled: false,
-                  leading: BuzzLoadingIndicator(
-                    size: 20,
-                    semanticLabel: 'Loading channel actions',
-                  ),
-                  title: Text('Loading channel actions…'),
-                )
-              else if (lifecycleCapabilitiesUnavailable)
-                const ListTile(
-                  enabled: false,
-                  leading: Icon(LucideIcons.triangleAlert),
-                  title: Text('Channel actions unavailable'),
-                )
-              else ...[
-                if (canArchive)
-                  _ActionTile(
-                    icon: LucideIcons.archive,
-                    label: 'Archive channel',
-                    onTap: () => _confirmAndRun(
+                const SizedBox(height: Grid.xs),
+              ],
+              if (!channel.isDm)
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(LucideIcons.folderInput),
+                  title: const Text('Move to section…'),
+                  onTap: () async {
+                    final pageContext = Navigator.of(
                       context,
+                      rootNavigator: true,
+                    ).context;
+                    close();
+                    await _showMoveSectionSheet(
+                      pageContext,
                       ref,
-                      title: 'Archive #${channel.name}?',
-                      body: 'The channel will become read-only.',
-                      confirmLabel: 'Archive',
-                      action: () => ref
-                          .read(channelActionsProvider)
-                          .archiveChannel(channel.id),
-                    ),
-                  ),
-                if (canUnarchive)
+                      channel: channel,
+                      sectionId: sectionId,
+                    );
+                  },
+                ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(isMuted ? LucideIcons.bell : LucideIcons.bellOff),
+                title: Text(isMuted ? 'Unmute channel' : 'Mute channel'),
+                onTap: () {
+                  close();
+                  final notifier = ref.read(channelMutesProvider.notifier);
+                  isMuted
+                      ? notifier.unmuteChannel(channel.id)
+                      : notifier.muteChannel(channel.id);
+                },
+              ),
+              if (!channel.isDm)
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(LucideIcons.settings),
+                  title: const Text('Manage channel'),
+                  onTap: () async {
+                    final shouldClose = await showBuzzModalBottomSheet<bool>(
+                      context: context,
+                      isScrollControlled: true,
+                      showDragHandle: true,
+                      constraints: BoxConstraints(
+                        maxWidth: 640,
+                        maxHeight: MediaQuery.sizeOf(context).height * 0.9,
+                      ),
+                      builder: (_) => ManageChannelSheet(channel: channel),
+                    );
+                    if (shouldClose == true && context.mounted) {
+                      Navigator.of(context).pop(true);
+                    }
+                  },
+                ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(LucideIcons.copy),
+                title: const Text('Copy channel name'),
+                onTap: () {
+                  close();
+                  copyToClipboard(
+                    context,
+                    channel.name,
+                    message: 'Channel name copied to clipboard',
+                  );
+                },
+              ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(LucideIcons.hash),
+                title: const Text('Copy channel ID'),
+                onTap: () {
+                  close();
+                  copyToClipboard(
+                    context,
+                    channel.id,
+                    message: 'Channel ID copied to clipboard',
+                  );
+                },
+              ),
+              if (!channel.isDm) ...[
+                const SheetDivider(),
+                if (channel.isMember && !channel.isArchived)
                   _ActionTile(
-                    icon: LucideIcons.archiveRestore,
-                    label: 'Unarchive channel',
-                    onTap: () => _confirmAndRun(
-                      context,
-                      ref,
-                      title: 'Unarchive #${channel.name}?',
-                      body: 'The channel will become active again.',
-                      confirmLabel: 'Unarchive',
-                      action: () => ref
-                          .read(channelActionsProvider)
-                          .unarchiveChannel(channel.id),
-                    ),
-                  ),
-                if (canDelete)
-                  _ActionTile(
-                    icon: LucideIcons.trash2,
-                    label: 'Delete channel',
+                    icon: LucideIcons.logOut,
+                    label: 'Leave channel',
                     destructive: true,
                     onTap: () => _confirmAndRun(
                       context,
                       ref,
-                      title: 'Delete #${channel.name}?',
-                      body:
-                          'This permanently deletes the channel and cannot be undone.',
-                      confirmLabel: 'Delete',
+                      title: 'Leave #${channel.name}?',
+                      body: 'You’ll stop receiving messages from this channel.',
+                      confirmLabel: 'Leave',
                       action: () => ref
                           .read(channelActionsProvider)
-                          .deleteChannel(channel.id),
+                          .leaveChannel(channel.id),
                     ),
                   ),
+                if (lifecycleCapabilitiesLoading)
+                  const ListTile(
+                    enabled: false,
+                    leading: BuzzLoadingIndicator(
+                      size: 20,
+                      semanticLabel: 'Loading channel actions',
+                    ),
+                    title: Text('Loading channel actions…'),
+                  )
+                else if (lifecycleCapabilitiesUnavailable)
+                  const ListTile(
+                    enabled: false,
+                    leading: Icon(LucideIcons.triangleAlert),
+                    title: Text('Channel actions unavailable'),
+                  )
+                else ...[
+                  if (canArchive)
+                    _ActionTile(
+                      icon: LucideIcons.archive,
+                      label: 'Archive channel',
+                      onTap: () => _confirmAndRun(
+                        context,
+                        ref,
+                        title: 'Archive #${channel.name}?',
+                        body: 'The channel will become read-only.',
+                        confirmLabel: 'Archive',
+                        action: () => ref
+                            .read(channelActionsProvider)
+                            .archiveChannel(channel.id),
+                      ),
+                    ),
+                  if (canUnarchive)
+                    _ActionTile(
+                      icon: LucideIcons.archiveRestore,
+                      label: 'Unarchive channel',
+                      onTap: () => _confirmAndRun(
+                        context,
+                        ref,
+                        title: 'Unarchive #${channel.name}?',
+                        body: 'The channel will become active again.',
+                        confirmLabel: 'Unarchive',
+                        action: () => ref
+                            .read(channelActionsProvider)
+                            .unarchiveChannel(channel.id),
+                      ),
+                    ),
+                  if (canDelete)
+                    _ActionTile(
+                      icon: LucideIcons.trash2,
+                      label: 'Delete channel',
+                      destructive: true,
+                      onTap: () => _confirmAndRun(
+                        context,
+                        ref,
+                        title: 'Delete #${channel.name}?',
+                        body:
+                            'This permanently deletes the channel and cannot be undone.',
+                        confirmLabel: 'Delete',
+                        action: () => ref
+                            .read(channelActionsProvider)
+                            .deleteChannel(channel.id),
+                      ),
+                    ),
+                ],
               ],
             ],
-          ],
+          ),
         ),
       ),
     );
@@ -333,17 +345,21 @@ class _ChannelQuickActionsRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Row(
-    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
     children: [
-      _ChannelQuickAction(
-        icon: isStarred ? LucideIcons.starOff : LucideIcons.star,
-        label: isStarred ? 'Unstar' : 'Star',
-        onTap: onToggleStar,
+      Expanded(
+        child: _ChannelQuickAction(
+          icon: isStarred ? LucideIcons.starOff : LucideIcons.star,
+          label: isStarred ? 'Unstar' : 'Star',
+          onTap: onToggleStar,
+        ),
       ),
-      _ChannelQuickAction(
-        icon: isUnread ? LucideIcons.checkCheck : LucideIcons.circleDot,
-        label: isUnread ? 'Mark Read' : 'Mark Unread',
-        onTap: onToggleRead,
+      const SizedBox(width: Grid.twelve),
+      Expanded(
+        child: _ChannelQuickAction(
+          icon: isUnread ? LucideIcons.checkCheck : LucideIcons.circleDot,
+          label: isUnread ? 'Mark Read' : 'Mark Unread',
+          onTap: onToggleRead,
+        ),
       ),
     ],
   );
@@ -362,28 +378,35 @@ class _ChannelQuickAction extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => GestureDetector(
-    onTap: onTap,
+    onTap: () {
+      unawaited(HapticFeedback.lightImpact());
+      onTap();
+    },
     behavior: HitTestBehavior.opaque,
     child: Column(
       mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Container(
-          width: 76,
-          height: 56,
-          alignment: Alignment.center,
+          height: 68 + (Grid.xxs * 2),
           decoration: BoxDecoration(
             color: context.colors.surfaceContainerHighest,
             borderRadius: BorderRadius.circular(Radii.dialog),
           ),
-          child: Icon(icon, size: 24, color: context.colors.onSurface),
-        ),
-        const SizedBox(height: Grid.xxs),
-        Text(
-          label,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: context.textTheme.labelMedium?.copyWith(
-            color: context.colors.onSurface,
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(icon, size: 22, color: context.colors.onSurface),
+              const SizedBox(height: Grid.xxs),
+              Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: context.textTheme.labelMedium?.copyWith(
+                  color: context.colors.onSurface,
+                ),
+              ),
+            ],
           ),
         ),
       ],
@@ -406,12 +429,16 @@ class _ActionTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => ListTile(
+    contentPadding: EdgeInsets.zero,
     leading: Icon(icon, color: destructive ? context.colors.error : null),
     title: Text(
       label,
       style: destructive ? TextStyle(color: context.colors.error) : null,
     ),
-    onTap: onTap,
+    onTap: () {
+      unawaited(HapticFeedback.lightImpact());
+      onTap();
+    },
   );
 }
 
@@ -424,7 +451,7 @@ Future<void> _confirmAndRun(
   required Future<void> Function() action,
 }) async {
   final pageContext = Navigator.of(sheetContext, rootNavigator: true).context;
-  final confirmed = await showDialog<bool>(
+  final confirmed = await showBuzzDialog<bool>(
     context: pageContext,
     builder: (dialogContext) => AlertDialog(
       title: Text(title),
@@ -465,69 +492,72 @@ Future<void> _showMoveSectionSheet(
 }) async {
   final sections = [...ref.read(channelSectionsProvider).store.sections]
     ..sort((a, b) => a.order.compareTo(b.order));
-  await showModalBottomSheet<void>(
+  await showBuzzModalBottomSheet<void>(
     context: context,
     showDragHandle: true,
     builder: (sheetContext) => SafeArea(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.fromLTRB(
-          Grid.gutter,
-          0,
-          Grid.gutter,
-          Grid.xs,
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            for (final section in sections)
+      child: IconTheme.merge(
+        data: const IconThemeData(size: 22),
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(
+            Grid.gutter,
+            0,
+            Grid.gutter,
+            Grid.xs,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (final section in sections)
+                ListTile(
+                  leading: const Icon(LucideIcons.folder),
+                  title: Text(section.name),
+                  trailing: sectionId == section.id
+                      ? Icon(
+                          LucideIcons.check,
+                          color: sheetContext.colors.primary,
+                        )
+                      : null,
+                  onTap: () {
+                    Navigator.of(sheetContext).pop();
+                    ref
+                        .read(channelSectionsProvider.notifier)
+                        .assignChannel(channel.id, section.id);
+                  },
+                ),
               ListTile(
-                leading: const Icon(LucideIcons.folder),
-                title: Text(section.name),
-                trailing: sectionId == section.id
-                    ? Icon(
-                        LucideIcons.check,
-                        color: sheetContext.colors.primary,
-                      )
-                    : null,
-                onTap: () {
+                leading: const Icon(LucideIcons.folderPlus),
+                title: const Text('New section…'),
+                onTap: () async {
                   Navigator.of(sheetContext).pop();
-                  ref
-                      .read(channelSectionsProvider.notifier)
-                      .assignChannel(channel.id, section.id);
+                  final name = await _showSectionNameDialog(context);
+                  if (name == null || name.isEmpty) return;
+                  final notifier = ref.read(channelSectionsProvider.notifier);
+                  notifier.createSection(name);
+                  final created = ref
+                      .read(channelSectionsProvider)
+                      .store
+                      .sections
+                      .where((section) => section.name == name.trim())
+                      .lastOrNull;
+                  if (created != null) {
+                    notifier.assignChannel(channel.id, created.id);
+                  }
                 },
               ),
-            ListTile(
-              leading: const Icon(LucideIcons.folderPlus),
-              title: const Text('New section…'),
-              onTap: () async {
-                Navigator.of(sheetContext).pop();
-                final name = await _showSectionNameDialog(context);
-                if (name == null || name.isEmpty) return;
-                final notifier = ref.read(channelSectionsProvider.notifier);
-                notifier.createSection(name);
-                final created = ref
-                    .read(channelSectionsProvider)
-                    .store
-                    .sections
-                    .where((section) => section.name == name.trim())
-                    .lastOrNull;
-                if (created != null) {
-                  notifier.assignChannel(channel.id, created.id);
-                }
-              },
-            ),
-            if (sectionId != null)
-              ListTile(
-                leading: const Icon(LucideIcons.folderMinus),
-                title: const Text('Remove from section'),
-                onTap: () {
-                  Navigator.of(sheetContext).pop();
-                  ref
-                      .read(channelSectionsProvider.notifier)
-                      .unassignChannel(channel.id);
-                },
-              ),
-          ],
+              if (sectionId != null)
+                ListTile(
+                  leading: const Icon(LucideIcons.folderMinus),
+                  title: const Text('Remove from section'),
+                  onTap: () {
+                    Navigator.of(sheetContext).pop();
+                    ref
+                        .read(channelSectionsProvider.notifier)
+                        .unassignChannel(channel.id);
+                  },
+                ),
+            ],
+          ),
         ),
       ),
     ),
@@ -536,7 +566,7 @@ Future<void> _showMoveSectionSheet(
 
 Future<String?> _showSectionNameDialog(BuildContext context) async {
   final controller = TextEditingController();
-  final result = await showDialog<String>(
+  final result = await showBuzzDialog<String>(
     context: context,
     builder: (dialogContext) => AlertDialog(
       title: const Text('New Section'),

@@ -54,7 +54,7 @@ class _AppearanceSection extends ConsumerWidget {
 }
 
 void _showAppearanceModeSheet(BuildContext context) {
-  showModalBottomSheet<void>(
+  showBuzzModalBottomSheet<void>(
     context: context,
     showDragHandle: true,
     builder: (_) => const _AppearanceModeSheet(),

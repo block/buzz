@@ -422,7 +422,7 @@ Future<void> _confirmRemoveCommunity(
   Community community, {
   required bool closeSheetAfterRemoval,
 }) async {
-  final confirmed = await showDialog<bool>(
+  final confirmed = await showBuzzDialog<bool>(
     context: context,
     builder: (dialogContext) => AlertDialog.adaptive(
       title: const Text('Remove community?'),
