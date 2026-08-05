@@ -142,6 +142,17 @@ fn materializing_runtime_keeps_snapshot_stable() {
 }
 
 #[test]
+fn hermes_spawn_snapshot_includes_bundled_buzz_mcp() {
+    let mut rec = record();
+    rec.runtime = Some("hermes".into());
+
+    assert_eq!(
+        snapshot(&rec, &[], &[], "wss://ws.example", &Default::default())["mcp_command"],
+        "buzz-dev-mcp"
+    );
+}
+
+#[test]
 fn record_env_var_edit_changes_snapshot() {
     let rec = record();
     let mut edited = record();

@@ -15,7 +15,7 @@ mod runtime_metadata;
 mod windows_install;
 pub(crate) use presets::{
     canonical_harness_command, command_for_runtime_id, preset_harness_definitions,
-    preset_harness_ids,
+    preset_harness_ids, preset_mcp_command,
 };
 use presets::{preset_catalog_entry, PRESET_HARNESSES};
 pub(crate) use runtime_metadata::KnownAcpRuntime;

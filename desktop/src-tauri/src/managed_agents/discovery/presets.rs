@@ -13,6 +13,7 @@ pub(super) struct PresetHarness {
     label: &'static str,
     command: &'static str,
     args: &'static [&'static str],
+    mcp_command: Option<&'static str>,
     install_instructions_url: &'static str,
     install_hint: &'static str,
     /// Vendor CLI the ACP command wraps, when the preset is an adapter.
@@ -63,7 +64,7 @@ pub(super) fn preset_catalog_entry(
             def.command,
             def.args.iter().map(|arg| arg.to_string()).collect(),
         ),
-        mcp_command: None,
+        mcp_command: def.mcp_command.map(str::to_string),
         model_env_var: None,
         provider_env_var: None,
         thinking_env_var: None,
@@ -91,6 +92,7 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         label: "Devin",
         command: "devin",
         args: &["acp"],
+        mcp_command: None,
         install_instructions_url: "https://docs.devin.ai/cli",
         install_hint: "Buzz talks to Devin through the official Devin CLI's ACP mode (devin acp).",
         underlying_cli: None,
@@ -100,6 +102,7 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         label: "Cursor",
         command: "cursor-agent",
         args: &["acp"],
+        mcp_command: None,
         install_instructions_url: "https://cursor.com/downloads",
         install_hint: "Buzz talks to Cursor through the cursor-agent CLI's ACP mode.",
         underlying_cli: None,
@@ -109,6 +112,7 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         label: "Oh My Pi",
         command: "omp",
         args: &["acp"],
+        mcp_command: None,
         install_instructions_url: "https://omp.sh/",
         install_hint: "Buzz talks to Oh My Pi through its CLI's ACP mode (omp acp).",
         underlying_cli: None,
@@ -118,6 +122,7 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         label: "Grok Build",
         command: "grok",
         args: &["agent", "--always-approve", "stdio"],
+        mcp_command: None,
         install_instructions_url: "https://build.x.ai/docs",
         install_hint: "Buzz talks to Grok Build through its CLI's agent stdio mode.",
         underlying_cli: None,
@@ -127,6 +132,7 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         label: "OpenCode",
         command: "opencode",
         args: &["acp"],
+        mcp_command: None,
         install_instructions_url: "https://opencode.ai/docs",
         install_hint: "Buzz talks to OpenCode through its CLI's ACP mode (opencode acp).",
         underlying_cli: None,
@@ -136,6 +142,7 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         label: "Kimi Code",
         command: "kimi",
         args: &["acp"],
+        mcp_command: None,
         install_instructions_url: "https://kimi.ai/download",
         install_hint: "Buzz talks to Kimi Code through its CLI's ACP mode (kimi acp).",
         underlying_cli: None,
@@ -145,6 +152,7 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         label: "Amp",
         command: "amp-acp",
         args: &[],
+        mcp_command: None,
         install_instructions_url: "https://github.com/tao12345666333/amp-acp",
         install_hint: "Buzz talks to the Amp CLI through the amp-acp adapter. Follow the setup guide to install the adapter so the amp-acp command is on your PATH.",
         underlying_cli: Some("amp"),
@@ -154,6 +162,7 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         label: "Hermes Agent",
         command: "hermes-acp",
         args: &[],
+        mcp_command: Some("buzz-dev-mcp"),
         install_instructions_url: "https://hermes-agent.nousresearch.com",
         install_hint: "Buzz talks to Hermes Agent through its hermes-acp command.",
         underlying_cli: None,
@@ -163,6 +172,7 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         label: "OpenClaw",
         command: "openclaw",
         args: &["acp"],
+        mcp_command: None,
         install_instructions_url: "https://docs.openclaw.ai/start/getting-started",
         install_hint: "Buzz talks to OpenClaw through its ACP mode (openclaw acp), which relies on the OpenClaw Gateway daemon. Follow the setup guide to install both.\n\n\
             ⚠️  Execution-locus note: `openclaw acp` runs tools inside the \
@@ -211,6 +221,18 @@ pub(super) fn preset_command_for_id(id: &str) -> Option<&'static str> {
         .iter()
         .find(|p| p.id == id)
         .map(|p| p.command)
+}
+
+/// Return the bundled MCP command declared by a static preset.
+pub(crate) fn preset_mcp_command(command: &str) -> Option<&'static str> {
+    let normalized = super::normalize_command_identity(command);
+    PRESET_HARNESSES
+        .iter()
+        .find(|preset| {
+            preset.id == normalized
+                || super::normalize_command_identity(preset.command) == normalized
+        })
+        .and_then(|preset| preset.mcp_command)
 }
 
 /// Return the primary harness command for a given runtime id, or `None`.
@@ -286,6 +308,7 @@ mod tests {
         label: "Amp Test",
         command: "amp-acp",
         args: &[],
+        mcp_command: None,
         install_instructions_url: "https://example.com/install",
         install_hint: "Install the amp-acp npm adapter.",
         underlying_cli: Some("amp"),
@@ -341,6 +364,19 @@ mod tests {
         assert_eq!(entry.default_args, vec!["acp"]);
         assert_eq!(entry.install_instructions_url, "https://docs.devin.ai/cli");
         assert_eq!(entry.source, HarnessSource::Preset);
+    }
+
+    #[test]
+    fn hermes_preset_exposes_bundled_buzz_mcp_in_runtime_catalog() {
+        let preset = PRESET_HARNESSES
+            .iter()
+            .find(|preset| preset.id == "hermes")
+            .expect("Hermes preset should be present");
+
+        let entry =
+            preset_catalog_entry(preset, |_| Some(PathBuf::from("/usr/local/bin/hermes-acp")));
+
+        assert_eq!(entry.mcp_command.as_deref(), Some("buzz-dev-mcp"));
     }
 
     #[test]
