@@ -213,6 +213,7 @@ export function AgentsView() {
               actionErrorMessage={agents.actionErrorMessage}
               actionNoticeMessage={agents.actionNoticeMessage}
               agents={agents.managedAgents}
+              remoteAgents={agents.relayAgentsQuery.data ?? []}
               agentsError={
                 agents.managedAgentsQuery.error instanceof Error
                   ? agents.managedAgentsQuery.error

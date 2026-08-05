@@ -9,7 +9,11 @@ import { resolveAgentCardModelLabel } from "@/features/agents/lib/agentCardModel
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import { useUserProfileQuery } from "@/features/profile/hooks";
-import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
+import type {
+  AgentPersona,
+  ManagedAgent,
+  RelayAgent,
+} from "@/shared/api/types";
 import type { ProfilePanelOpenOptions } from "@/shared/context/ProfilePanelContext";
 import { useFeedbackToasts } from "@/shared/hooks/useToastEffect";
 import { Badge } from "@/shared/ui/badge";
@@ -25,6 +29,7 @@ type UnifiedAgentsSectionProps = {
   actionErrorMessage: string | null;
   actionNoticeMessage: string | null;
   agents: ManagedAgent[];
+  remoteAgents: RelayAgent[];
   agentsError: Error | null;
   isActionPending: boolean;
   isAgentsLoading: boolean;
@@ -70,6 +75,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     actionNoticeMessage,
     defaultModel,
     agents,
+    remoteAgents,
     agentsError,
     isActionPending,
     isAgentsLoading,
@@ -208,6 +214,28 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
         </div>
       ) : null}
 
+      {remoteAgents.length > 0 ? (
+        <section className="space-y-3" data-testid="remote-agents-section">
+          <div>
+            <h2 className="font-semibold text-foreground text-lg">
+              Remote / DGX agents
+            </h2>
+            <p className="text-secondary-foreground text-sm">
+              Agents running on your relay or another machine.
+            </p>
+          </div>
+          <div className={IDENTITY_CARD_GRID_CLASS}>
+            {remoteAgents.map((agent) => (
+              <RemoteAgentCard
+                agent={agent}
+                key={agent.pubkey}
+                onOpenProfile={onOpenAgentProfile}
+              />
+            ))}
+          </div>
+        </section>
+      ) : null}
+
       {agentsError ? (
         <p
           className={`${AGENT_CARD_COLUMN_CLASS} rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive`}
@@ -223,6 +251,33 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
         </p>
       ) : null}
     </section>
+  );
+}
+
+function RemoteAgentCard({
+  agent,
+  onOpenProfile,
+}: {
+  agent: RelayAgent;
+  onOpenProfile: (pubkey: string) => void;
+}) {
+  const profileQuery = useUserProfileQuery(agent.pubkey);
+  const statusLabel = agent.status === "online" ? "Online" : agent.status;
+
+  return (
+    <AgentIdentityCard
+      ariaLabel={`${agent.name} remote agent profile`}
+      avatarUrl={profileQuery.data?.avatarUrl}
+      dataTestId={`remote-agent-${agent.pubkey}`}
+      label={agent.name}
+      modelLabel={agent.agentType || "DGX agent"}
+      onClick={() => onOpenProfile(agent.pubkey)}
+      statusBadge={
+        <span className="text-secondary-foreground/75 text-xs">
+          {statusLabel}
+        </span>
+      }
+    />
   );
 }
 

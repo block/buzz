@@ -262,6 +262,31 @@ impl RespondToArg {
 
 #[derive(Subcommand)]
 pub enum AgentsCmd {
+    /// Publish a relay-visible profile for a remote agent (kind 10100)
+    #[command(name = "publish-profile")]
+    PublishProfile {
+        /// Agent display name
+        #[arg(long)]
+        name: String,
+        /// Agent implementation type
+        #[arg(long, default_value = "agent")]
+        agent_type: String,
+        /// Channel names, comma-separated
+        #[arg(long, value_delimiter = ',')]
+        channels: Vec<String>,
+        /// Channel UUIDs, comma-separated and aligned with --channels
+        #[arg(long, value_delimiter = ',')]
+        channel_ids: Vec<String>,
+        /// Public capability labels, comma-separated
+        #[arg(long, value_delimiter = ',')]
+        capabilities: Vec<String>,
+        /// Current status: online, away, or offline
+        #[arg(long, default_value = "online")]
+        status: String,
+        /// Public response policy
+        #[arg(long, value_enum)]
+        respond_to: Option<RespondToArg>,
+    },
     /// Open a prefilled create-agent form in the owner's Buzz Desktop
     DraftCreate {
         /// Current channel UUID; the new agent is added here after save
@@ -2169,6 +2194,7 @@ mod tests {
                 "archived",
                 "draft-create",
                 "draft-update",
+                "publish-profile",
                 "unarchive"
             ]
         );
