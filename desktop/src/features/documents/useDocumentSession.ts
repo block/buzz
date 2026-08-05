@@ -25,6 +25,10 @@ import {
   writeVaultFile,
 } from "@/shared/api/vault";
 import { useVaultInvalidation } from "@/features/documents/hooks";
+import {
+  clearDocumentCache,
+  forgetCachedDocument,
+} from "@/features/documents/lib/editor/documentJsonCache";
 import { useAlwaysLivePreview } from "@/features/documents/useDocumentsPreferences";
 import {
   activeTab as selectActiveTab,
@@ -95,8 +99,18 @@ export function useDocumentSession(vaultRoot: string | null) {
   // Pending autosave timers, keyed by path. Keyed by path and not index so
   // reordering or closing a tab can never cross-save into the wrong file.
   const timersRef = React.useRef(new Map<string, number>());
-  // mtimes this app wrote, so the watcher can ignore its own echo.
+  // mtimes this app wrote, so the watcher can ignore its own echo cheaply.
   const writtenMtimesRef = React.useRef(new Map<string, number>());
+  // The exact bytes we last read from, or wrote to, each file.
+  //
+  // This is what actually makes echo suppression correct, and it is a *ref* on
+  // purpose. `write_vault_file` replaces the file with a rename, the watcher
+  // fires on that rename immediately, and the resulting event routinely reaches
+  // the webview *before* the write command's own response does — so neither the
+  // mtime above nor the `diskContent` on the tab has been recorded yet when the
+  // event is handled. A ref updated synchronously, at the moment of the read or
+  // write, is not subject to that ordering or to React's batching.
+  const knownContentRef = React.useRef(new Map<string, string>());
   // Mirrors `state` for use inside callbacks that must not re-subscribe.
   const stateRef = React.useRef(state);
   stateRef.current = state;
@@ -117,11 +131,21 @@ export function useDocumentSession(vaultRoot: string | null) {
       if (!tab?.isDirty) return;
 
       const bytes = joinFrontmatter(tab.frontmatter, tab.content);
+      // Record what we are about to write *before* awaiting it: the watcher
+      // fires partway through the write, and its event can arrive first.
+      const previouslyKnown = knownContentRef.current.get(path);
+      knownContentRef.current.set(path, bytes);
       try {
         const { modifiedMs } = await writeVaultFile(path, bytes);
         writtenMtimesRef.current.set(path, modifiedMs);
         setState((current) => markTabSaved(current, path, bytes));
       } catch (error: unknown) {
+        // The write never landed, so the file still holds what it held before.
+        if (previouslyKnown === undefined) {
+          knownContentRef.current.delete(path);
+        } else {
+          knownContentRef.current.set(path, previouslyKnown);
+        }
         toast.error(
           error instanceof Error ? error.message : "Could not save that note.",
         );
@@ -162,6 +186,7 @@ export function useDocumentSession(vaultRoot: string | null) {
       for (const path of paths) {
         try {
           const raw = await readVaultFile(path);
+          knownContentRef.current.set(path, raw);
           setState((current) =>
             openTabIn(
               current,
@@ -190,6 +215,7 @@ export function useDocumentSession(vaultRoot: string | null) {
     }
     try {
       const raw = await readVaultFile(path);
+      knownContentRef.current.set(path, raw);
       setState((current) =>
         openTabIn(current, buildTab(path, raw, alwaysLivePreviewRef.current)),
       );
@@ -205,6 +231,10 @@ export function useDocumentSession(vaultRoot: string | null) {
     async (path: string) => {
       await saveTab(path);
       clearTimer(path);
+      // Nothing watches a closed file, so stop carrying its bytes around.
+      knownContentRef.current.delete(path);
+      writtenMtimesRef.current.delete(path);
+      forgetCachedDocument(path);
       setState((current) => closeTabIn(current, path));
       setExternalChanges((current) => {
         if (!current.has(path)) return current;
@@ -229,30 +259,90 @@ export function useDocumentSession(vaultRoot: string | null) {
     [],
   );
 
+  /** Replaces a tab's buffer with bytes already read from disk. */
+  const applyDiskContent = React.useCallback((path: string, raw: string) => {
+    knownContentRef.current.set(path, raw);
+    const rebuilt = buildTab(path, raw, alwaysLivePreviewRef.current);
+    setState((current) =>
+      reloadTabFromDisk(current, path, {
+        content: rebuilt.content,
+        diskContent: rebuilt.diskContent,
+        frontmatter: rebuilt.frontmatter,
+        roundTrip: rebuilt.roundTrip,
+      }),
+    );
+    setExternalChanges((current) => {
+      if (!current.has(path)) return current;
+      const next = new Map(current);
+      next.delete(path);
+      return next;
+    });
+  }, []);
+
   /** Re-reads a file from disk, discarding the local buffer. */
-  const reloadFile = React.useCallback(async (path: string) => {
-    try {
-      const raw = await readVaultFile(path);
-      const rebuilt = buildTab(path, raw, alwaysLivePreviewRef.current);
-      setState((current) =>
-        reloadTabFromDisk(current, path, {
-          content: rebuilt.content,
-          diskContent: rebuilt.diskContent,
-          frontmatter: rebuilt.frontmatter,
-          roundTrip: rebuilt.roundTrip,
-        }),
-      );
+  const reloadFile = React.useCallback(
+    async (path: string) => {
+      try {
+        applyDiskContent(path, await readVaultFile(path));
+      } catch (error: unknown) {
+        toast.error(
+          error instanceof Error
+            ? error.message
+            : "Could not reload that note.",
+        );
+      }
+    },
+    [applyDiskContent],
+  );
+
+  /**
+   * Decides what a watcher event actually means for an open tab.
+   *
+   * The mtime carried by the event is only a fast path. The authoritative test
+   * is whether the bytes on disk are bytes we already know about — either our
+   * own save echoing back, or an external tool rewriting the file with
+   * identical content, which sync clients and formatters do constantly. Neither
+   * is a change, and raising the banner for one is how a plain "type into a
+   * note" session ended up accusing the user of a conflict.
+   */
+  const reconcileExternalChange = React.useCallback(
+    async (path: string) => {
+      // Sampled either side of the read, because an autosave can land while it
+      // is in flight: the read would then return the bytes from *before* that
+      // write, which match `knownBefore` but not the value it left behind.
+      const knownBefore = knownContentRef.current.get(path);
+      let raw: string;
+      try {
+        raw = await readVaultFile(path);
+      } catch {
+        // Deleted or unreadable — the tree refresh handles that case.
+        return;
+      }
+
+      if (raw === knownBefore || raw === knownContentRef.current.get(path)) {
+        return;
+      }
+      knownContentRef.current.set(path, raw);
+
+      // Re-read the tab: it may have been closed, or gone dirty, while the read
+      // above was in flight.
+      const tab = findTab(stateRef.current, path);
+      if (!tab) return;
+      if (!tab.isDirty) {
+        applyDiskContent(path, raw);
+        return;
+      }
+
+      // Never clobber unsaved work — cancel the pending save and ask.
+      clearTimer(path);
       setExternalChanges((current) => {
         const next = new Map(current);
-        next.delete(path);
+        next.set(path, { path });
         return next;
       });
-    } catch (error: unknown) {
-      toast.error(
-        error instanceof Error ? error.message : "Could not reload that note.",
-      );
-    }
-  }, []);
+    },
+    [applyDiskContent, clearTimer],
+  );
 
   /** Dismisses the external-change banner, keeping the local buffer. */
   const keepLocalVersion = React.useCallback((path: string) => {
@@ -290,6 +380,14 @@ export function useDocumentSession(vaultRoot: string | null) {
     [],
   );
 
+  // Drop parsed documents when leaving a vault. Cache keys are absolute paths,
+  // so entries from another vault could never be *served* by mistake — this is
+  // purely about not holding a closed vault's documents until they age out.
+  React.useEffect(() => {
+    if (!vaultRoot) return;
+    return clearDocumentCache;
+  }, [vaultRoot]);
+
   // --- Filesystem watcher -------------------------------------------------
 
   React.useEffect(() => {
@@ -314,24 +412,15 @@ export function useDocumentSession(vaultRoot: string | null) {
       disposers.push(
         await onVaultFileModified((entries) => {
           for (const entry of entries) {
-            const tab = findTab(stateRef.current, entry.path);
-            if (!tab) continue;
+            if (!findTab(stateRef.current, entry.path)) continue;
 
-            // Our own write echoing back through the watcher.
+            // Fast path: our own write, echoing back with the mtime it
+            // reported. Only usable once the write's response has landed, which
+            // is why `reconcileExternalChange` re-checks against the bytes.
             const written = writtenMtimesRef.current.get(entry.path);
             if (written !== undefined && written === entry.modifiedMs) continue;
 
-            if (tab.isDirty) {
-              // Never clobber unsaved work — cancel the pending save and ask.
-              clearTimer(entry.path);
-              setExternalChanges((current) => {
-                const next = new Map(current);
-                next.set(entry.path, { path: entry.path });
-                return next;
-              });
-            } else {
-              void reloadFile(entry.path);
-            }
+            void reconcileExternalChange(entry.path);
           }
         }),
       );
@@ -353,7 +442,7 @@ export function useDocumentSession(vaultRoot: string | null) {
       for (const dispose of disposers) dispose();
       void stopVaultWatch();
     };
-  }, [clearTimer, invalidateTree, reloadFile, vaultRoot]);
+  }, [invalidateTree, reconcileExternalChange, vaultRoot]);
 
   // Read through a ref so the unmount effect below can stay `[]`-scoped and
   // still call the current implementation.
