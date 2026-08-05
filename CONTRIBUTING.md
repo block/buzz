@@ -70,6 +70,13 @@ We review as capacity allows — focused PRs that follow this guide move fastest
 
 ---
 
+## Local Windows relay troubleshooting
+
+If the desktop or CLI cannot reach a local compose relay on Windows (hangs on
+`localhost`, or WebSocket **404** “no community is configured for this host”),
+see [docs/local-windows-relay-host.md](docs/local-windows-relay-host.md): prefer
+`127.0.0.1` and keep `communities.host` aligned with the client Host header.
+
 ## Setting Up the Development Environment
 
 ### Prerequisites

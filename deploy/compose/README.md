@@ -59,3 +59,19 @@ $EDITOR .env
 curl -fsS "http://127.0.0.1:$(grep -E '^BUZZ_HTTP_PORT=' .env | cut -d= -f2-)/_liveness"
 ./run.sh status
 ```
+
+## Local Windows clients (IPv4 + tenant host)
+
+On Windows, prefer **`127.0.0.1`** over **`localhost`** for desktop/CLI relay
+URLs: `localhost` may resolve to IPv6 (`::1`) and hang while IPv4 works.
+
+The relay also keys the tenant off the WebSocket **Host** header
+(`communities.host`). If clients use `ws://127.0.0.1:3000` but the community
+row still says `localhost:3000`, upgrades return **404** (“no community is
+configured for this host”). Align them:
+
+```sql
+UPDATE communities SET host = '127.0.0.1:3000' WHERE lower(host) = 'localhost:3000';
+```
+
+Full write-up: [docs/local-windows-relay-host.md](../../docs/local-windows-relay-host.md).
