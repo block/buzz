@@ -1,4 +1,7 @@
-use std::sync::atomic::Ordering;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, OnceLock,
+};
 
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -14,6 +17,67 @@ use super::{
 use crate::app_state::AppState;
 
 const STATUS_EVENT: &str = "managed-agent-runtime-status";
+
+type RuntimeListResult = Result<Vec<ManagedAgentRuntimeStatus>, String>;
+
+#[derive(Clone)]
+struct RuntimeListFlight {
+    id: u64,
+    result: tokio::sync::watch::Receiver<Option<RuntimeListResult>>,
+}
+
+#[derive(Default)]
+struct RuntimeListSingleFlight {
+    next_id: AtomicU64,
+    current: tokio::sync::Mutex<Option<RuntimeListFlight>>,
+}
+
+impl RuntimeListSingleFlight {
+    async fn run<F, Fut>(self: &Arc<Self>, compute: F) -> RuntimeListResult
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = RuntimeListResult> + Send + 'static,
+    {
+        let mut receiver = {
+            let mut current = self.current.lock().await;
+            if let Some(flight) = current.as_ref() {
+                flight.result.clone()
+            } else {
+                let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+                let (sender, receiver) = tokio::sync::watch::channel(None);
+                *current = Some(RuntimeListFlight {
+                    id,
+                    result: receiver.clone(),
+                });
+                let coordinator = Arc::clone(self);
+                tauri::async_runtime::spawn(async move {
+                    let result = compute().await;
+                    let _ = sender.send(Some(result));
+                    let mut current = coordinator.current.lock().await;
+                    if current.as_ref().is_some_and(|flight| flight.id == id) {
+                        *current = None;
+                    }
+                });
+                receiver
+            }
+        };
+
+        loop {
+            if let Some(result) = receiver.borrow().clone() {
+                return result;
+            }
+            receiver
+                .changed()
+                .await
+                .map_err(|_| "managed runtime status worker stopped unexpectedly".to_string())?;
+        }
+    }
+}
+
+fn runtime_list_single_flight() -> &'static Arc<RuntimeListSingleFlight> {
+    static SINGLE_FLIGHT: OnceLock<Arc<RuntimeListSingleFlight>> = OnceLock::new();
+    SINGLE_FLIGHT.get_or_init(|| Arc::new(RuntimeListSingleFlight::default()))
+}
 
 fn status_for(
     app: &AppHandle,
@@ -144,9 +208,47 @@ pub async fn list_managed_agent_runtimes(
     // Runtime status is polled frequently by the desktop. The implementation
     // reads agent configuration, inspects child processes, and may update the
     // managed-agent store, so keep that blocking work off Tauri's IPC thread.
-    tauri::async_runtime::spawn_blocking(move || list_managed_agent_runtimes_blocking(app))
+    runtime_list_single_flight()
+        .run(move || async move {
+            tauri::async_runtime::spawn_blocking(move || list_managed_agent_runtimes_blocking(app))
+                .await
+                .map_err(|error| format!("managed runtime status worker failed: {error}"))?
+        })
         .await
-        .map_err(|error| format!("managed runtime status worker failed: {error}"))?
+}
+
+#[derive(Clone)]
+struct RuntimeStatusSnapshot {
+    key: ManagedAgentRuntimeKey,
+    record: super::ManagedAgentRecord,
+    lifecycle: ManagedAgentRuntimeLifecycle,
+    pid: Option<u32>,
+    error: Option<String>,
+    start_nonce: Option<String>,
+    emit_after_reap: bool,
+}
+
+fn status_for_snapshot(
+    app: &AppHandle,
+    snapshot: &RuntimeStatusSnapshot,
+    inputs: StatusInputs<'_>,
+) -> ManagedAgentRuntimeStatus {
+    let command = record_agent_command(&snapshot.record, inputs.personas);
+    let metadata = super::known_acp_runtime(&command);
+    let effective =
+        resolve_effective_agent_env(&snapshot.record, inputs.personas, metadata, inputs.global);
+    ManagedAgentRuntimeStatus {
+        pubkey: snapshot.key.pubkey.clone(),
+        relay_url: snapshot.key.relay_url.clone(),
+        requested_relay_url: None,
+        local_setup: matches!(agent_readiness(&effective), AgentReadiness::Ready),
+        lifecycle: snapshot.lifecycle.clone(),
+        pid: snapshot.pid,
+        error: snapshot.error.clone(),
+        log_path: managed_agent_runtime_log_path(app, &snapshot.key)
+            .ok()
+            .map(|path| path.display().to_string()),
+    }
 }
 
 fn list_managed_agent_runtimes_blocking(
@@ -179,7 +281,7 @@ fn list_managed_agent_runtimes_blocking(
         })
         .collect();
     let records_changed = !exited_keys.is_empty();
-    let mut statuses = Vec::new();
+    let mut snapshots = Vec::new();
     for key in exited_keys {
         runtimes.remove(&key);
         super::remove_agent_runtime_receipt(&app, &key);
@@ -190,42 +292,98 @@ fn list_managed_agent_runtimes_blocking(
         {
             record.updated_at = crate::util::now_iso();
             record.last_stopped_at = Some(record.updated_at.clone());
-            let status = status_for_with(
-                &app,
-                record,
-                &key,
-                None,
-                None,
-                StatusInputs {
-                    personas: &personas,
-                    global: &global,
-                },
-            );
-            emit_status(&app, &status);
-            statuses.push(status);
+            snapshots.push(RuntimeStatusSnapshot {
+                key,
+                record: record.clone(),
+                lifecycle: ManagedAgentRuntimeLifecycle::Stopped,
+                pid: None,
+                error: None,
+                start_nonce: None,
+                emit_after_reap: true,
+            });
         }
     }
-    statuses.extend(runtimes.iter().filter_map(|(key, runtime)| {
+    snapshots.extend(runtimes.iter().filter_map(|(key, runtime)| {
         let record = records
             .iter()
             .find(|record| record.pubkey.eq_ignore_ascii_case(&key.pubkey))?;
-        Some(status_for_with(
-            &app,
-            record,
-            key,
-            Some(runtime),
-            None,
-            StatusInputs {
-                personas: &personas,
-                global: &global,
-            },
-        ))
+        Some(RuntimeStatusSnapshot {
+            key: key.clone(),
+            record: record.clone(),
+            lifecycle: runtime.lifecycle.clone(),
+            pid: Some(runtime.child.id()),
+            error: runtime.error.clone(),
+            start_nonce: Some(runtime.start_nonce.clone()),
+            emit_after_reap: false,
+        })
     }));
     drop(runtimes);
     // Records are only mutated above when a runtime exited — skip the store
     // rewrite on the common nothing-changed poll.
     if records_changed {
         save_managed_agents(&app, &records)?;
+    }
+    drop(_store);
+    drop(_transition);
+
+    // CLI readiness probes may spawn external processes. They run only after
+    // all runtime-management locks have been released.
+    let statuses: Vec<_> = snapshots
+        .iter()
+        .map(|snapshot| {
+            status_for_snapshot(
+                &app,
+                snapshot,
+                StatusInputs {
+                    personas: &personas,
+                    global: &global,
+                },
+            )
+        })
+        .collect();
+
+    // Validate that no agent or harness generation changed while the probes
+    // ran. Delayed results are never applied to a newer generation.
+    let _transition = state
+        .managed_agent_runtime_transition
+        .lock()
+        .map_err(|e| e.to_string())?;
+    let _store = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|e| e.to_string())?;
+    let current_records = load_managed_agents(&app)?;
+    let mut current_runtimes = state
+        .managed_agent_processes
+        .lock()
+        .map_err(|e| e.to_string())?;
+    for snapshot in &snapshots {
+        let unchanged_record = current_records.iter().any(|record| {
+            record.pubkey.eq_ignore_ascii_case(&snapshot.key.pubkey)
+                && record.updated_at == snapshot.record.updated_at
+        });
+        let unchanged_runtime = match snapshot.start_nonce.as_deref() {
+            Some(start_nonce) => current_runtimes
+                .get_mut(&snapshot.key)
+                .is_some_and(|runtime| {
+                    runtime.start_nonce == start_nonce
+                        && runtime.child.id() == snapshot.pid.unwrap_or_default()
+                        && runtime.child.try_wait().ok().flatten().is_none()
+                }),
+            None => !current_runtimes.contains_key(&snapshot.key),
+        };
+        if !unchanged_record || !unchanged_runtime {
+            return Err("managed runtime changed while status probes were in flight".into());
+        }
+    }
+    drop(current_runtimes);
+    drop(_store);
+    drop(_transition);
+
+    for (snapshot, status) in snapshots.iter().zip(&statuses) {
+        if snapshot.emit_after_reap {
+            emit_status(&app, status);
+        }
     }
     Ok(statuses)
 }
@@ -582,6 +740,83 @@ pub async fn reconcile_managed_agent_runtimes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn runtime_list_single_flight_shares_hundreds_of_callers() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let coordinator = Arc::new(RuntimeListSingleFlight::default());
+        let barrier = Arc::new(tokio::sync::Barrier::new(201));
+        let computations = Arc::new(AtomicUsize::new(0));
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let mut callers = Vec::new();
+
+        for _ in 0..200 {
+            let coordinator = Arc::clone(&coordinator);
+            let barrier = Arc::clone(&barrier);
+            let computations = Arc::clone(&computations);
+            let active = Arc::clone(&active);
+            let max_active = Arc::clone(&max_active);
+            callers.push(tokio::spawn(async move {
+                barrier.wait().await;
+                coordinator
+                    .run(move || async move {
+                        computations.fetch_add(1, Ordering::SeqCst);
+                        let now_active = active.fetch_add(1, Ordering::SeqCst) + 1;
+                        max_active.fetch_max(now_active, Ordering::SeqCst);
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        Ok(Vec::new())
+                    })
+                    .await
+            }));
+        }
+        barrier.wait().await;
+        for caller in callers {
+            assert!(caller.await.expect("caller task").is_ok());
+        }
+        assert_eq!(computations.load(Ordering::SeqCst), 1);
+        assert_eq!(max_active.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn runtime_list_computation_survives_first_caller_cancellation() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let coordinator = Arc::new(RuntimeListSingleFlight::default());
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let finished = Arc::new(AtomicBool::new(false));
+        let first = {
+            let coordinator = Arc::clone(&coordinator);
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            let finished = Arc::clone(&finished);
+            tokio::spawn(async move {
+                coordinator
+                    .run(move || async move {
+                        started.notify_one();
+                        release.notified().await;
+                        finished.store(true, Ordering::SeqCst);
+                        Ok(Vec::new())
+                    })
+                    .await
+            })
+        };
+        started.notified().await;
+        first.abort();
+
+        let second = coordinator.run(|| async { panic!("a second computation must not start") });
+        tokio::pin!(second);
+        tokio::select! {
+            result = &mut second => panic!("shared computation finished too early: {result:?}"),
+            () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+        }
+        release.notify_one();
+        assert!(second.await.is_ok());
+        assert!(finished.load(Ordering::SeqCst));
+    }
 
     fn payload(
         relay_url: &str,

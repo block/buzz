@@ -574,9 +574,8 @@ pub fn resolve_command(command: &str) -> Option<PathBuf> {
 pub fn clear_resolve_cache() {
     let mut guard = resolve_cache().lock().unwrap_or_else(|e| e.into_inner());
     guard.clear();
-    // Also invalidate the adapter-availability cache so a freshly-installed
-    // adapter is reflected the next time the summary builder checks the badge.
     clear_adapter_availability_cache();
+    super::readiness::cli_probe::clear_login_probe_cache();
 }
 
 // ── Adapter availability cache (Phase-2 badge fallback) ─────────────────────
@@ -1095,6 +1094,7 @@ fn probe_auth_status(binary_path: &Path, probe_args: &[&str]) -> AuthStatus {
         cli_probe::ProbeOutcome::ConfigInvalid { stderr_excerpt } => AuthStatus::ConfigInvalid {
             diagnostic: stderr_excerpt,
         },
+        cli_probe::ProbeOutcome::TimedOut => AuthStatus::Unknown,
     }
 }
 

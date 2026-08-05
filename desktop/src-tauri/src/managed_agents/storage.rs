@@ -378,7 +378,9 @@ pub fn save_managed_agents(app: &AppHandle, records: &[ManagedAgentRecord]) -> R
     // keyring is unreachable, the key stays inline.
     persist_agent_keys(&mut sorted);
 
-    write_agent_store(app, definitions, sorted)
+    write_agent_store(app, definitions, sorted)?;
+    crate::managed_agents::readiness::cli_probe::clear_login_probe_cache();
+    Ok(())
 }
 
 /// Save the key-less agent *definitions*, preserving the keyed instances —
@@ -391,7 +393,9 @@ pub(crate) fn save_agent_definitions(
     instances.retain(|record| !record.pubkey.is_empty());
     let mut definitions = definitions.to_vec();
     definitions.retain(|record| record.pubkey.is_empty());
-    write_agent_store(app, definitions, instances)
+    write_agent_store(app, definitions, instances)?;
+    crate::managed_agents::readiness::cli_probe::clear_login_probe_cache();
+    Ok(())
 }
 
 /// Serialize definitions + instances into the single unified store file.
