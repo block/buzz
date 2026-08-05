@@ -8,6 +8,7 @@ repository.workspace = true
 description = "Postgres event store and data access layer for Buzz"
 
 [dependencies]
+buzz-auth = { workspace = true }
 buzz-core = { workspace = true }
 sqlx        = { workspace = true }
 tokio       = { workspace = true }

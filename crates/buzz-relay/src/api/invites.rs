@@ -548,6 +548,16 @@ pub async fn claim_invite(
                 )
                 .await)
             }
+            buzz_db::relay_invite::ClaimOutcome::IdentityBindingRequired => {
+                Err(record_atomic_identity_rejection(
+                    &state,
+                    tenant.community(),
+                    pubkey,
+                    identity_proof,
+                    buzz_db::identity_binding::BindIdentityResult::BindingRequired,
+                )
+                .await)
+            }
         };
     }
 
@@ -611,6 +621,16 @@ pub async fn claim_invite(
                 pubkey,
                 identity_proof,
                 buzz_db::identity_binding::BindIdentityResult::Revoked,
+            )
+            .await);
+        }
+        buzz_db::relay_members::MembershipClaimOutcome::IdentityBindingRequired => {
+            return Err(record_atomic_identity_rejection(
+                &state,
+                tenant.community(),
+                pubkey,
+                identity_proof,
+                buzz_db::identity_binding::BindIdentityResult::BindingRequired,
             )
             .await);
         }

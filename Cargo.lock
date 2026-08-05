@@ -1003,6 +1003,7 @@ dependencies = [
 name = "buzz-db"
 version = "0.1.0"
 dependencies = [
+ "buzz-auth",
  "buzz-core",
  "chrono",
  "hex",

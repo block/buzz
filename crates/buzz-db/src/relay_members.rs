@@ -158,11 +158,11 @@ pub async fn claim_relay_membership(
         .await?
     {
         MembershipClaimOutcome::Joined { inserted, .. } => Ok(inserted),
-        MembershipClaimOutcome::IdentityConflict(_) | MembershipClaimOutcome::IdentityRevoked => {
-            Err(crate::DbError::InvalidData(
-                "unexpected corporate identity result without staged identity".to_string(),
-            ))
-        }
+        MembershipClaimOutcome::IdentityConflict(_)
+        | MembershipClaimOutcome::IdentityRevoked
+        | MembershipClaimOutcome::IdentityBindingRequired => Err(crate::DbError::InvalidData(
+            "unexpected corporate identity result without staged identity".to_string(),
+        )),
     }
 }
 
@@ -180,6 +180,9 @@ pub enum MembershipClaimOutcome {
     IdentityConflict(IdentityBindingConflict),
     /// The staged identity is revoked.
     IdentityRevoked,
+    /// The staged identity has no active binding and lacks sealed enrollment
+    /// evidence.
+    IdentityBindingRequired,
 }
 
 /// Claims relay membership and an optional corporate identity in one transaction.
@@ -205,6 +208,10 @@ pub async fn claim_relay_membership_with_identity(
             BindIdentityResult::Revoked => {
                 tx.rollback().await?;
                 return Ok(MembershipClaimOutcome::IdentityRevoked);
+            }
+            BindIdentityResult::BindingRequired => {
+                tx.rollback().await?;
+                return Ok(MembershipClaimOutcome::IdentityBindingRequired);
             }
         }
     } else {

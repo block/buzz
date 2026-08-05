@@ -67,7 +67,7 @@ pub struct ChannelRecord {
 }
 
 /// A channel membership row as returned from the database.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemberRecord {
     /// The channel this membership belongs to.
     pub channel_id: Uuid,
@@ -400,7 +400,7 @@ pub async fn add_member(
 }
 
 /// Outcome of atomically adding a channel member and binding corporate identity.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChannelAdmissionOutcome {
     /// Membership and any staged identity binding committed together.
     Joined {
@@ -413,6 +413,9 @@ pub enum ChannelAdmissionOutcome {
     IdentityConflict(IdentityBindingConflict),
     /// The staged identity principal or key is revoked.
     IdentityRevoked,
+    /// The staged identity has no active binding and lacks sealed enrollment
+    /// evidence.
+    IdentityBindingRequired,
 }
 
 /// Add a channel member and optional corporate identity binding in one transaction.
@@ -458,6 +461,10 @@ pub async fn add_member_with_identity(
             Ok(BindIdentityResult::Revoked) => {
                 tx.rollback().await?;
                 return Ok(ChannelAdmissionOutcome::IdentityRevoked);
+            }
+            Ok(BindIdentityResult::BindingRequired) => {
+                tx.rollback().await?;
+                return Ok(ChannelAdmissionOutcome::IdentityBindingRequired);
             }
             Err(error) => {
                 tx.rollback().await?;
@@ -1806,14 +1813,20 @@ mod tests {
         )
         .await
         .expect("create private huddle");
-        crate::identity_binding::bind_or_validate_identity(
+        crate::identity_binding::resolve_identity_binding(
             &pool,
-            community,
-            "https://idp.example",
-            "conflicting-principal",
-            &bound_key,
-            Some("bound@example.com"),
-            crate::identity_binding::SOURCE_JWT_NPUB,
+            &crate::identity_binding::ResolveBindingInput {
+                authorization_domain: community,
+                issuer: "https://idp.example",
+                subject: "conflicting-principal",
+                pubkey: &bound_key,
+                display_name: Some("bound@example.com"),
+                enrollment_mode: crate::identity_binding::EnrollmentMode::AttestedKey,
+                key_attested: true,
+                policy_version: "channel-test-policy-v1",
+                evidence_valid_from: 0,
+                evidence_valid_until: i64::MAX as u64,
+            },
         )
         .await
         .expect("seed conflicting binding");
@@ -1843,7 +1856,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn atomic_huddle_admission_identity_storage_failure_rolls_back_membership() {
+    async fn atomic_huddle_admission_raw_identity_cannot_enroll_and_rolls_back_membership() {
         let pool = setup_pool().await;
         let community_id = make_test_community(&pool).await;
         let community = CommunityId::from_uuid(community_id);
@@ -1852,7 +1865,7 @@ mod tests {
         let channel = create_test_channel(
             &pool,
             community_id,
-            "atomic-identity-storage-failure",
+            "atomic-identity-binding-required",
             ChannelType::Stream,
             ChannelVisibility::Private,
             None,
@@ -1861,28 +1874,9 @@ mod tests {
         )
         .await
         .expect("create private huddle");
-        let suffix = community_id.simple();
-        let function_name = format!("buzz_test_fail_identity_{suffix}");
-        let trigger_name = format!("buzz_test_fail_identity_insert_{suffix}");
-        // Identifiers and the literal UUID below are derived only from a generated UUID.
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "CREATE FUNCTION {function_name}() RETURNS trigger LANGUAGE plpgsql AS $$ \
-             BEGIN RAISE EXCEPTION 'injected identity storage failure'; END $$"
-        )))
-        .execute(&pool)
-        .await
-        .expect("create failure function");
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "CREATE TRIGGER {trigger_name} BEFORE INSERT ON identity_bindings \
-             FOR EACH ROW WHEN (NEW.community_id = '{community_id}'::uuid) \
-             EXECUTE FUNCTION {function_name}()"
-        )))
-        .execute(&pool)
-        .await
-        .expect("create failure trigger");
-        let identity = identity_for(&joiner, "storage-failure");
+        let identity = identity_for(&joiner, "binding-required");
 
-        let result = add_member_with_identity(
+        let outcome = add_member_with_identity(
             &pool,
             community,
             channel.id,
@@ -1891,22 +1885,10 @@ mod tests {
             Some(&owner),
             Some(&identity),
         )
-        .await;
-
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "DROP TRIGGER {trigger_name} ON identity_bindings"
-        )))
-        .execute(&pool)
         .await
-        .expect("drop failure trigger");
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "DROP FUNCTION {function_name}()"
-        )))
-        .execute(&pool)
-        .await
-        .expect("drop failure function");
+        .expect("typed binding-required outcome");
 
-        assert!(matches!(result, Err(DbError::Sqlx(_))), "{result:?}");
+        assert_eq!(outcome, ChannelAdmissionOutcome::IdentityBindingRequired);
         assert_eq!(
             active_membership_count(&pool, community, channel.id, &joiner).await,
             0
@@ -1943,6 +1925,23 @@ mod tests {
         .await
         .expect("create private huddle");
         let identity = identity_for(&joiner, "successful-principal");
+        crate::identity_binding::resolve_identity_binding(
+            &pool,
+            &crate::identity_binding::ResolveBindingInput {
+                authorization_domain: community,
+                issuer: identity.issuer,
+                subject: identity.uid,
+                pubkey: identity.pubkey,
+                display_name: identity.display_name,
+                enrollment_mode: crate::identity_binding::EnrollmentMode::AttestedKey,
+                key_attested: true,
+                policy_version: "channel-test-policy-v1",
+                evidence_valid_from: 0,
+                evidence_valid_until: i64::MAX as u64,
+            },
+        )
+        .await
+        .expect("seed verified binding");
 
         let first = add_member_with_identity(
             &pool,
@@ -1958,7 +1957,7 @@ mod tests {
         assert!(matches!(
             first,
             ChannelAdmissionOutcome::Joined {
-                identity_binding: Some(BindIdentityResult::Created),
+                identity_binding: Some(BindIdentityResult::Matched),
                 ..
             }
         ));
@@ -1987,7 +1986,8 @@ mod tests {
         );
         let binding_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM identity_bindings \
-             WHERE community_id = $1 AND pubkey = $2 AND revoked_at IS NULL",
+             WHERE community_id = $1 AND pubkey = $2 \
+               AND binding_state = 'active' AND revoked_at IS NULL",
         )
         .bind(community.as_uuid())
         .bind(&joiner)

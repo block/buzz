@@ -29,6 +29,8 @@ pub mod feed;
 pub mod git_repo;
 /// Corporate identity binding persistence.
 pub mod identity_binding;
+/// Linearizable corporate identity lifecycle persistence.
+pub mod identity_lifecycle;
 /// Embedded database migrations.
 pub mod migration;
 /// Community moderation: reports, bans/timeouts, audit actions.
@@ -641,6 +643,14 @@ pub struct TokenSummary {
 }
 
 impl Db {
+    /// Build the single PostgreSQL authority adapter for application-root
+    /// authorization runtime composition.
+    pub fn federated_authority_adapter(
+        &self,
+    ) -> identity_binding::PostgresFederatedAuthorityAdapter {
+        identity_binding::PostgresFederatedAuthorityAdapter::new(self.pool.clone())
+    }
+
     /// Creates a new `Db` by connecting a Postgres pool with the given config.
     ///
     /// When `config.read_database_url` is set, a second pool with the same
@@ -2595,14 +2605,16 @@ impl Db {
     pub async fn revoke_identity_principal(
         &self,
         community_id: CommunityId,
+        operation_id: identity_lifecycle::LifecycleOperationId,
         issuer: &str,
         uid: &str,
-        revoked_by: Option<&[u8]>,
+        revoked_by: &[u8],
         reason: &str,
     ) -> Result<bool> {
         identity_binding::revoke_identity_principal(
             &self.pool,
             community_id,
+            operation_id,
             issuer,
             uid,
             revoked_by,
@@ -2615,12 +2627,20 @@ impl Db {
     pub async fn revoke_identity_key(
         &self,
         community_id: CommunityId,
+        operation_id: identity_lifecycle::LifecycleOperationId,
         pubkey: &[u8],
-        revoked_by: Option<&[u8]>,
+        revoked_by: &[u8],
         reason: &str,
     ) -> Result<bool> {
-        identity_binding::revoke_identity_key(&self.pool, community_id, pubkey, revoked_by, reason)
-            .await
+        identity_binding::revoke_identity_key(
+            &self.pool,
+            community_id,
+            operation_id,
+            pubkey,
+            revoked_by,
+            reason,
+        )
+        .await
     }
 
     /// Atomically rotate a corporate principal to a replacement key.
@@ -2628,24 +2648,22 @@ impl Db {
     pub async fn rotate_identity_binding(
         &self,
         community_id: CommunityId,
+        operation_id: identity_lifecycle::LifecycleOperationId,
         issuer: &str,
         uid: &str,
         old_pubkey: &[u8],
-        new_pubkey: &[u8],
-        display_name: Option<&str>,
-        source: &str,
-        rotated_by: Option<&[u8]>,
+        replacement: identity_lifecycle::VerifiedReplacementKey<'_>,
+        rotated_by: &[u8],
         reason: &str,
     ) -> Result<()> {
         identity_binding::rotate_identity_binding(
             &self.pool,
             community_id,
+            operation_id,
             issuer,
             uid,
             old_pubkey,
-            new_pubkey,
-            display_name,
-            source,
+            replacement,
             rotated_by,
             reason,
         )

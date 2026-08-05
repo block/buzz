@@ -695,6 +695,9 @@ async fn handle_active_audio_connection(
             Ok(buzz_db::channel::ChannelAdmissionOutcome::IdentityRevoked) => {
                 Some(buzz_db::identity_binding::BindIdentityResult::Revoked)
             }
+            Ok(buzz_db::channel::ChannelAdmissionOutcome::IdentityBindingRequired) => {
+                Some(buzz_db::identity_binding::BindIdentityResult::BindingRequired)
+            }
             Err(e) => {
                 warn!(channel_id = %channel_id, pubkey = %pubkey_hex, "audio membership auto-add failed: {e}");
                 let _ = ws_send
