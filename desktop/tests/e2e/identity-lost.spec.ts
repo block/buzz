@@ -84,10 +84,10 @@ test("lost boot offers phone recovery with a single-use QR", async ({
   await expect(page.getByTestId("identity-recovery-pairing")).toBeVisible();
   await expect(page.getByTestId("identity-recovery-qr")).toBeVisible();
   await expect(
-    page.getByText("This code expires shortly and works once."),
+    page.getByText("Scan this code with a signed-in Buzz phone."),
   ).toBeVisible();
   await expect(
-    page.getByText(/grant this desktop permanent access/i),
+    page.getByText("On your phone, open Settings → Send identity to desktop."),
   ).toBeVisible();
   await page.waitForTimeout(1_000); // Let the onboarding entrance motion settle.
   await page.screenshot({
@@ -167,8 +167,19 @@ test("phone recovery uses the desktop pairing card semantics", async ({
   });
 
   await expect(
-    card.getByText("Verify this code matches your mobile device"),
+    card.getByText("Does this code match your phone?"),
   ).toBeVisible();
+  await expect(
+    page.getByText("Confirm the code before sharing your identity."),
+  ).toBeVisible();
+  await expect(
+    card.getByText(
+      "This gives this desktop permanent access to your Buzz identity. Only continue if you trust it.",
+    ),
+  ).toBeVisible();
+  await expect(
+    card.getByText(/On your phone, open Settings/),
+  ).not.toBeVisible();
   await expect(card.getByTestId("identity-recovery-sas")).toHaveText("123 456");
   await expect(card.getByTestId("confirm-identity-recovery-sas")).toHaveText(
     "Codes match",

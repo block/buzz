@@ -38,8 +38,10 @@ function recoveryErrorMessage(message: string): string {
 
 export function IdentityRecoveryPairing({
   onRecovered,
+  onStepChange,
 }: {
   onRecovered: () => Promise<void>;
+  onStepChange?: (step: Step) => void;
 }) {
   const [step, setStep] = React.useState<Step>("loading");
   const [qrUri, setQrUri] = React.useState<string | null>(null);
@@ -48,6 +50,10 @@ export function IdentityRecoveryPairing({
   const [copied, setCopied] = React.useState(false);
   const active = React.useRef(true);
   const copyTimer = React.useRef<number | null>(null);
+
+  React.useEffect(() => {
+    onStepChange?.(step);
+  }, [onStepChange, step]);
 
   const start = React.useCallback(async () => {
     active.current = true;
@@ -171,7 +177,7 @@ export function IdentityRecoveryPairing({
           <div className="flex max-w-60 flex-col items-center gap-3 py-2 text-center text-foreground">
             <ShieldCheck className="h-10 w-10 text-primary" />
             <p className="text-sm font-medium">
-              Verify this code matches your mobile device
+              Does this code match your phone?
             </p>
             <div className="rounded-xl border-2 border-primary/30 bg-primary/5 px-5 py-3">
               <p
@@ -182,8 +188,8 @@ export function IdentityRecoveryPairing({
               </p>
             </div>
             <p className="text-xs text-muted-foreground">
-              Your phone is about to transfer your Buzz identity to this
-              desktop. Only confirm if you initiated this pairing.
+              This gives this desktop permanent access to your Buzz identity.
+              Only continue if you trust it.
             </p>
             <div className="flex w-full gap-2">
               <Button
@@ -234,7 +240,7 @@ export function IdentityRecoveryPairing({
       </div>
       {step === "qr" && qrUri ? (
         <Button
-          className="w-full"
+          className="w-full border-foreground/20 bg-white text-foreground shadow-none hover:bg-black/5"
           data-testid="copy-identity-recovery-code"
           onClick={() => void copyPairingCode()}
           size="sm"
@@ -254,15 +260,12 @@ export function IdentityRecoveryPairing({
           {error}
         </p>
       ) : null}
-      <p className="max-w-[266px] text-sm leading-5 text-foreground/75">
-        On your phone, open Settings → Send identity to desktop. This code
-        expires shortly and works once.
-      </p>
-      <p className="max-w-[266px] text-xs leading-4 text-foreground/65">
-        Your phone will grant this desktop permanent access to your full Buzz
-        identity. Only approve a desktop you trust and verify the six-digit code
-        on both screens.
-      </p>
+      {step === "qr" || step === "loading" ? (
+        <p className="max-w-[266px] text-sm leading-5 text-foreground/75">
+          On your phone, open Settings → Send identity to desktop. This code
+          expires shortly and works once.
+        </p>
+      ) : null}
     </div>
   );
 }

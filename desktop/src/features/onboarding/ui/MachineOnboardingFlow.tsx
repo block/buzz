@@ -92,6 +92,7 @@ export function MachineOnboardingFlow({
   const [keyImportDialog, setKeyImportDialog] = React.useState<
     "backup" | "phone" | null
   >(null);
+  const [phoneRecoveryStep, setPhoneRecoveryStep] = React.useState("loading");
   const [selectedPubkey, setSelectedPubkey] = React.useState<string | null>(
     null,
   );
@@ -384,7 +385,7 @@ export function MachineOnboardingFlow({
                   data-testid="backup-recovery-dialog"
                   surface="textured"
                 >
-                  <div className="mx-auto w-full max-w-[35rem] py-10 text-center max-sm:py-6">
+                  <div className="mx-auto w-full max-w-[35rem] pb-6 pt-10 text-center max-sm:pb-4 max-sm:pt-6">
                     <DialogTitle className="text-balance px-8 text-3xl font-normal text-foreground">
                       Restore from a backup file
                     </DialogTitle>
@@ -415,18 +416,22 @@ export function MachineOnboardingFlow({
                   data-testid="phone-recovery-dialog"
                   surface="textured"
                 >
-                  <div className="mx-auto flex w-full max-w-[35rem] flex-col items-center py-8 text-center max-sm:py-4">
+                  <div className="mx-auto flex w-full max-w-[35rem] flex-col items-center pb-6 pt-8 text-center max-sm:pb-4 max-sm:pt-4">
                     <DialogTitle className="text-balance px-8 text-3xl font-normal text-foreground">
                       {identityLost
                         ? "Recover from your phone"
                         : "Use your Buzz identity"}
                     </DialogTitle>
                     <DialogDescription className="mt-4 text-sm leading-6 text-foreground/80">
-                      Scan this code with a signed-in Buzz phone.
+                      {phoneRecoveryStep === "loading" ||
+                      phoneRecoveryStep === "qr"
+                        ? "Scan this code with a signed-in Buzz phone."
+                        : "Confirm the code before sharing your identity."}
                     </DialogDescription>
                     <div className="mt-5">
                       <IdentityRecoveryPairing
                         onRecovered={loadRecoveredIdentity}
+                        onStepChange={setPhoneRecoveryStep}
                       />
                     </div>
                   </div>
