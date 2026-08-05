@@ -73,6 +73,52 @@ test.describe("community rail", () => {
       "opacity",
       "1",
     );
+    await expect(buttonB.locator(":scope > span").first()).toHaveCSS(
+      "opacity",
+      "1",
+    );
+    const [activeStyle, inactiveStyle] = await Promise.all(
+      [buttonA, buttonB].map((button) =>
+        button
+          .locator(":scope > span")
+          .first()
+          .evaluate((element) => {
+            const style = getComputedStyle(element);
+            return {
+              backgroundColor: style.backgroundColor,
+              borderRadius: style.borderRadius,
+              color: style.color,
+              outlineStyle: style.outlineStyle,
+              outlineWidth: style.outlineWidth,
+            };
+          }),
+      ),
+    );
+    expect(activeStyle.backgroundColor).toBe(inactiveStyle.backgroundColor);
+    expect(activeStyle.borderRadius).toBe(inactiveStyle.borderRadius);
+    expect(activeStyle.borderRadius).toBe("12px");
+    expect(activeStyle.color).toBe(inactiveStyle.color);
+    expect(activeStyle.outlineStyle).toBe("solid");
+    expect(activeStyle.outlineWidth).toBe("2px");
+    expect(inactiveStyle.outlineStyle).toBe("solid");
+    expect(inactiveStyle.outlineWidth).toBe("2px");
+
+    const inactiveIcon = buttonB.locator(":scope > span").first();
+    await buttonB.hover();
+    await expect(inactiveIcon).toHaveCSS("outline-width", "2px");
+    const hoverStyle = await inactiveIcon.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return {
+        backgroundColor: style.backgroundColor,
+        borderRadius: style.borderRadius,
+        color: style.color,
+        outlineStyle: style.outlineStyle,
+      };
+    });
+    expect(hoverStyle.backgroundColor).toBe(inactiveStyle.backgroundColor);
+    expect(hoverStyle.borderRadius).toBe(inactiveStyle.borderRadius);
+    expect(hoverStyle.color).toBe(inactiveStyle.color);
+    expect(hoverStyle.outlineStyle).toBe("solid");
 
     // The add-community affordance lives at the bottom of the rail.
     await expect(page.getByTestId("community-rail-add")).toBeVisible();
