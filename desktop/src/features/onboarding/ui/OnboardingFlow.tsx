@@ -7,6 +7,7 @@ import {
 } from "@/features/profile/hooks";
 import { relayClient } from "@/shared/api/relayClient";
 import { getMyRelayMembershipLookup } from "@/shared/api/relayMembers";
+import { savePendingProfile } from "@/features/profile/pendingProfileSave";
 import {
   isRelayMembershipDeniedError,
   isRelayUnreachableError,
@@ -211,6 +212,41 @@ export function OnboardingFlow({
     setCurrentPage("key-import");
   }, []);
 
+  /**
+   * Route to the membership-denied screen, parking whatever the user typed so
+   * it can be written once they belong to a relay.
+   *
+   * A kind:0 write requires membership, but first-run setup runs before the
+   * user has joined anything — so this path is reachable with a perfectly
+   * valid name and avatar in hand. Discarding them (and the old dead end) is
+   * what made this a funnel-killer (block/buzz#3544).
+   */
+  const enterMembershipDenied = React.useCallback(
+    async (nextPage: OnboardingPage | "complete") => {
+      let pubkey = "";
+      try {
+        const identity = await getIdentity();
+        pubkey = identity.pubkey;
+      } catch {
+        pubkey = "";
+      }
+      setDeniedPubkey(pubkey);
+      if (pubkey) {
+        savePendingProfile({
+          pubkey,
+          displayName: profileDraft.displayName.trim(),
+          avatarUrl: profileDraft.avatarUrl.trim(),
+        });
+      }
+      setDeniedFromPage((prev) =>
+        currentPage === "membership-denied" ? prev : currentPage,
+      );
+      setMembershipRetryPage(nextPage);
+      setCurrentPage("membership-denied");
+    },
+    [currentPage, profileDraft],
+  );
+
   const saveProfileAndContinue = React.useCallback(
     async (nextPage: OnboardingPage | "complete") => {
       if (isProfileAdvancePending) {
@@ -231,17 +267,7 @@ export function OnboardingFlow({
         setMembershipError(null);
 
         if (membershipStatus === "denied") {
-          try {
-            const identity = await getIdentity();
-            setDeniedPubkey(identity.pubkey);
-          } catch {
-            setDeniedPubkey("");
-          }
-          setDeniedFromPage((prev) =>
-            currentPage === "membership-denied" ? prev : currentPage,
-          );
-          setMembershipRetryPage(nextPage);
-          setCurrentPage("membership-denied");
+          await enterMembershipDenied(nextPage);
           return;
         }
 
@@ -268,17 +294,7 @@ export function OnboardingFlow({
             await profileUpdateMutation.mutateAsync(updatePayload);
           } catch (error) {
             if (isRelayMembershipDeniedError(error)) {
-              try {
-                const identity = await getIdentity();
-                setDeniedPubkey(identity.pubkey);
-              } catch {
-                setDeniedPubkey("");
-              }
-              setDeniedFromPage((prev) =>
-                currentPage === "membership-denied" ? prev : currentPage,
-              );
-              setMembershipRetryPage(nextPage);
-              setCurrentPage("membership-denied");
+              await enterMembershipDenied(nextPage);
               return;
             }
 
@@ -297,7 +313,7 @@ export function OnboardingFlow({
       }
     },
     [
-      currentPage,
+      enterMembershipDenied,
       isProfileAdvancePending,
       profileDraft,
       profileUpdateMutation,
@@ -424,6 +440,7 @@ export function OnboardingFlow({
             setCurrentPage(deniedFromPage);
           }}
           onChangeCommunity={() => setIsCommunityChangeOpen(true)}
+          onContinueWithoutProfile={skipForNow}
           onImportKey={importExistingKey}
           onRetry={() => {
             void saveProfileAndContinue(membershipRetryPage);
