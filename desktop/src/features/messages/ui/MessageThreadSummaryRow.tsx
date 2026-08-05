@@ -9,17 +9,16 @@ import type { ThreadDepthGuideAction } from "@/features/messages/ui/MessageRow";
 import { formatThreadSummaryLastReplyTime } from "@/features/messages/lib/dateFormatters";
 import {
   getThreadReplyAvatarCenterRem,
+  getThreadReplyBodyOffsetRem,
   getThreadReplyIndentRem,
   threadReplyLength,
-  THREAD_REPLY_BODY_OFFSET_REM,
   THREAD_REPLY_LINE_WIDTH_REM,
   THREAD_REPLY_ROW_MARGIN_INLINE_REM,
 } from "@/features/messages/lib/threadTreeLayout";
 import { cn } from "@/shared/lib/cn";
+import { useAvatarScale } from "@/shared/lib/useAvatarScale";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
-const THREAD_SUMMARY_CONTENT_OFFSET_REM =
-  THREAD_REPLY_BODY_OFFSET_REM - THREAD_REPLY_ROW_MARGIN_INLINE_REM;
 const THREAD_SUMMARY_SURFACE_AVATAR_INSET_REM = 0.25;
 
 function ParticipantAvatar({
@@ -46,7 +45,7 @@ function ParticipantAvatar({
     >
       <UserAvatar
         avatarUrl={participant.avatarUrl}
-        className="h-6 w-6 text-2xs"
+        className="shrink-0 text-2xs"
         displayName={participant.author}
         size="sm"
       />
@@ -84,13 +83,15 @@ export function MessageThreadSummaryRow({
   summaryIndentOffsetRem?: number;
   unreadCount?: number;
 }) {
-  const indentRem = getThreadReplyIndentRem(depth);
+  const avatarScale = useAvatarScale();
+  const summaryContentOffsetRem =
+    getThreadReplyBodyOffsetRem(avatarScale) -
+    THREAD_REPLY_ROW_MARGIN_INLINE_REM;
+  const indentRem = getThreadReplyIndentRem(depth, avatarScale);
   const hoverLeftRem =
     indentRem + THREAD_REPLY_ROW_MARGIN_INLINE_REM + summaryIndentOffsetRem;
   const hoverLeft = threadReplyLength(hoverLeftRem);
-  const contentPaddingStart = threadReplyLength(
-    THREAD_SUMMARY_CONTENT_OFFSET_REM,
-  );
+  const contentPaddingStart = threadReplyLength(summaryContentOffsetRem);
   const surfaceInsetStart = `calc(${contentPaddingStart} - ${threadReplyLength(
     THREAD_SUMMARY_SURFACE_AVATAR_INSET_REM,
   )})`;
@@ -103,7 +104,7 @@ export function MessageThreadSummaryRow({
     : Array.from({ length: Math.max(0, depth - 1) }, (_, index) => index + 1);
   const depthGuideItems = guideDepths.map((guideDepth) => ({
     depth: guideDepth,
-    offset: getThreadReplyAvatarCenterRem(guideDepth),
+    offset: getThreadReplyAvatarCenterRem(guideDepth, avatarScale),
   }));
   const collapseDepthGuideActionsByDepth = new Map(
     collapseDepthGuideActions?.map((action) => [action.depth, action]) ?? [],

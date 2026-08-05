@@ -393,6 +393,7 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
                 header={
                   <div className="flex min-w-0 items-center gap-2">
                     <UserAvatar
+                      appearanceScale={false}
                       avatarUrl={currentProfile?.avatarUrl ?? null}
                       className="!h-7 !w-7 shrink-0"
                       displayName={currentDisplayName}

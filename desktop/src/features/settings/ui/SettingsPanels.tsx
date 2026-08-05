@@ -29,6 +29,7 @@ import type {
   NotificationSettings,
 } from "@/features/notifications/hooks";
 import type { SoundName, SoundSlot } from "@/features/notifications/lib/sound";
+import { AppearanceScaleSettings } from "@/features/settings/ui/AppearanceScaleSettings";
 import { CommunityMembersSettingsCard } from "@/features/community-members/ui/CommunityMembersSettingsCard";
 import { CustomEmojiSettingsCard } from "@/features/custom-emoji/ui/CustomEmojiSettingsCard";
 import { LocalArchiveSettingsCard } from "@/features/local-archive/ui/LocalArchiveSettingsCard";
@@ -526,8 +527,10 @@ function ThemeSettingsCard() {
     >
       <SettingsSectionHeader
         title="Appearance"
-        description="Choose a theme for Buzz."
+        description="Choose a theme, interface scale, chat text size, and avatar size for Buzz."
       />
+
+      <AppearanceScaleSettings />
 
       {/* Mode selector: System / Light / Dark */}
       <div className="mb-4 flex gap-2">

@@ -181,10 +181,11 @@ export function BotActivityComposerAction({
           <span className="flex h-4.5 items-center overflow-visible -space-x-1">
             {workingAgents.slice(0, 2).map((agent) => (
               <UserAvatar
+                appearanceScale={false}
                 avatarUrl={agentAvatarUrl(agent)}
                 className={cn(
                   "border border-background",
-                  isInline ? "!h-4.5 !w-4.5 text-3xs" : "shrink-0",
+                  isInline ? "h-4.5 w-4.5 text-3xs" : "h-5 w-5 shrink-0",
                 )}
                 displayName={agent.name}
                 fallbackDelayMs={isInline ? 0 : undefined}
@@ -252,8 +253,9 @@ export function BotActivityComposerAction({
                 type="button"
               >
                 <UserAvatar
+                  appearanceScale={false}
                   avatarUrl={agentAvatarUrl(agent)}
-                  className="shrink-0"
+                  className="h-6 w-6 shrink-0"
                   displayName={agent.name}
                   size="sm"
                 />

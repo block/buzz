@@ -684,6 +684,7 @@ export function TopbarSearch({
       >
         {result.kind === "message" ? (
           <UserAvatar
+            appearanceScale={false}
             avatarUrl={
               resultProfiles?.[result.hit.pubkey.toLowerCase()]?.avatarUrl ??
               null
@@ -699,6 +700,7 @@ export function TopbarSearch({
           />
         ) : result.kind === "user" ? (
           <UserAvatar
+            appearanceScale={false}
             avatarUrl={result.user.avatarUrl}
             className="h-7 w-7"
             displayName={userDisplayName ?? result.user.pubkey}

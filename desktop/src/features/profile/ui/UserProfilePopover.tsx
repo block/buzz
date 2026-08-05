@@ -32,6 +32,7 @@ import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
 import { usePresenceQuery } from "@/features/presence/hooks";
 import { useUserStatusQuery } from "@/features/user-status/hooks";
 import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
+import { HOVER_PROFILE_STATUS_RATIOS } from "@/features/profile/lib/avatarStatusGeometry";
 import { ProfileAvatarWithStatus } from "@/features/profile/ui/ProfileAvatarWithStatus";
 import {
   createOptimisticMessage,
@@ -44,6 +45,7 @@ import { sendChannelMessage } from "@/shared/api/tauri";
 import type { Channel, RelayEvent } from "@/shared/api/types";
 import { KIND_STREAM_MESSAGE } from "@/shared/constants/kinds";
 import { cn } from "@/shared/lib/cn";
+import { useAvatarScale } from "@/shared/lib/useAvatarScale";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 
 import { Popover, PopoverAnchor, PopoverContent } from "@/shared/ui/popover";
@@ -144,7 +146,7 @@ function HoverPubkeyName({
   pubkey: string;
 }) {
   return (
-    <span className="group/name inline-grid h-5 min-w-0 flex-1 overflow-hidden text-sm font-semibold leading-5">
+    <span className="group/name inline-grid h-6 min-w-0 flex-1 overflow-hidden text-base font-semibold leading-6">
       <span
         className={`${TEXT_SWAP_BASE_CLASS} ${TEXT_SWAP_VISIBLE_CLASS} ${TEXT_SWAP_HOVER_HIDDEN_CLASS}`}
       >
@@ -170,6 +172,9 @@ function StatusLine({ children }: { children: React.ReactNode }) {
   );
 }
 
+/** Base hover-card avatar size at Avatar size = 100% (matches prior layout). */
+const HOVER_PROFILE_AVATAR_BASE_PX = 64;
+
 export function UserProfilePopover({
   children,
   pubkey,
@@ -188,6 +193,9 @@ export function UserProfilePopover({
   const hoverTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
+  // Appearance → Avatar size also scales hover profile cards.
+  const avatarScale = useAvatarScale();
+  const hoverAvatarPx = Math.round(HOVER_PROFILE_AVATAR_BASE_PX * avatarScale);
   const queryClient = useQueryClient();
   const { goChannel } = useAppNavigation();
   const openDmMutation = useOpenDmMutation();
@@ -520,12 +528,13 @@ export function UserProfilePopover({
   const profileHeaderContent = (
     <>
       <ProfileAvatarWithStatus
-        avatarClassName="text-xs"
+        avatarClassName="text-sm"
         avatarUrl={profile?.avatarUrl ?? null}
-        className="h-10 w-10"
-        iconClassName="h-5 w-5"
+        className="shrink-0"
+        iconClassName="shrink-0"
         label={displayName}
-        size={40}
+        ratios={HOVER_PROFILE_STATUS_RATIOS}
+        size={hoverAvatarPx}
         status={presenceStatus ?? "offline"}
         statusTestId="user-profile-popover-presence-badge"
         testId="user-profile-popover-avatar"
@@ -537,14 +546,14 @@ export function UserProfilePopover({
           {isBotProfile && botIdenticonValue ? (
             <BotIdenticon
               value={botIdenticonValue}
-              size={20}
+              size={Math.max(20, Math.round(24 * avatarScale))}
               className="shrink-0 rounded"
             />
           ) : null}
         </div>
         {isBotProfile && ownerLabel ? (
           <p
-            className="mt-0.5 truncate text-xs leading-4 text-muted-foreground"
+            className="mt-0.5 truncate text-sm leading-5 text-muted-foreground"
             data-testid={`user-profile-popover-owner-${pubkey}`}
           >
             managed by {ownerLabel}
@@ -552,7 +561,7 @@ export function UserProfilePopover({
         ) : null}
         {profileSubheader ? (
           <p
-            className="mt-0.5 truncate text-xs leading-4 text-muted-foreground"
+            className="mt-0.5 truncate text-sm leading-5 text-muted-foreground"
             data-testid="user-profile-description"
           >
             {profileSubheader}
@@ -595,7 +604,7 @@ export function UserProfilePopover({
       </PopoverAnchor>
       <PopoverContent
         align="start"
-        className="w-80"
+        className="w-96"
         data-testid="user-profile-popover"
         onMouseEnter={handleContentMouseEnter}
         onMouseLeave={handleMouseLeave}

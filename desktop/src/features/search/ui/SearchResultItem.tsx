@@ -243,7 +243,9 @@ export function MessageResultBody({
         <Badge variant="secondary">{describeSearchHit(hit)}</Badge>
         <span className="flex items-center gap-1 text-xs text-muted-foreground">
           <UserAvatar
+            appearanceScale={false}
             avatarUrl={avatarUrl}
+            className="h-5 w-5"
             displayName={authorLabel}
             size="xs"
           />

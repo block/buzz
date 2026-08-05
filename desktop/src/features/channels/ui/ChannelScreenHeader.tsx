@@ -8,11 +8,7 @@ import { getChannelDescription } from "@/features/channels/lib/channelDescriptio
 import { getDmParticipantPreview } from "@/features/channels/lib/dmParticipantDisplay";
 import { ChannelHeaderStatusBadge } from "@/features/channels/ui/ChannelHeaderStatusBadge";
 import { ChannelMembersBar } from "@/features/channels/ui/ChannelMembersBar";
-import {
-  DEFAULT_HOVER_PROFILE_STATUS_GEOMETRY,
-  ProfileAvatarWithStatus,
-  scaleProfileAvatarStatusGeometry,
-} from "@/features/profile/ui/ProfileAvatarWithStatus";
+import { ProfileAvatarWithStatus } from "@/features/profile/ui/ProfileAvatarWithStatus";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { Button } from "@/shared/ui/button";
 import type { Channel, PresenceStatus } from "@/shared/api/types";
@@ -23,10 +19,6 @@ import {
 } from "@/features/terminal/terminalPanelStore";
 
 const DM_HEADER_AVATAR_SIZE = 32;
-const DM_HEADER_AVATAR_STATUS_GEOMETRY = scaleProfileAvatarStatusGeometry(
-  DEFAULT_HOVER_PROFILE_STATUS_GEOMETRY,
-  DM_HEADER_AVATAR_SIZE,
-);
 
 type ChannelScreenHeaderProps = {
   activeChannel: Channel | null;
@@ -150,7 +142,6 @@ export function ChannelScreenHeader({
                 avatarClassName="text-xs"
                 avatarUrl={activeDmAvatarUrl}
                 className="mr-1.5 h-8 w-8"
-                geometry={DM_HEADER_AVATAR_STATUS_GEOMETRY}
                 iconClassName="h-4 w-4"
                 label={activeChannelTitle}
                 size={DM_HEADER_AVATAR_SIZE}
@@ -164,7 +155,6 @@ export function ChannelScreenHeader({
               avatarClassName="text-xs"
               avatarUrl={activeDmAvatarUrl}
               className="mr-1.5 h-8 w-8"
-              geometry={DM_HEADER_AVATAR_STATUS_GEOMETRY}
               iconClassName="h-4 w-4"
               label={activeChannelTitle}
               size={DM_HEADER_AVATAR_SIZE}
@@ -221,6 +211,7 @@ function DmHeaderParticipantStack({
             }}
           >
             <UserAvatar
+              appearanceScale={false}
               avatarUrl={participant.avatarUrl}
               className="h-8 w-8 text-xs"
               displayName={participant.displayName}

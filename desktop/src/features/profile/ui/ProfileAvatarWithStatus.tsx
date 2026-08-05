@@ -1,5 +1,10 @@
 import { getPresenceLabel } from "@/features/presence/lib/presence";
 import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
+import {
+  type AvatarStatusGeometryRatios,
+  HOVER_PROFILE_STATUS_RATIOS,
+  resolveAvatarStatusGeometry,
+} from "@/features/profile/lib/avatarStatusGeometry";
 import type { PresenceStatus } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import {
@@ -19,6 +24,15 @@ type ProfileAvatarWithStatusProps = {
   avatarClassName?: string;
   avatarUrl: string | null;
   className?: string;
+  /**
+   * Fractional status geometry relative to `size`. Prefer this over the
+   * legacy absolute `geometry` object.
+   */
+  ratios?: AvatarStatusGeometryRatios;
+  /**
+   * @deprecated Prefer {@link ratios}. Absolute pixel geometry for a fixed
+   * base size (historically 40).
+   */
   geometry?: ProfileAvatarStatusGeometry;
   iconClassName?: string;
   label: string;
@@ -35,6 +49,7 @@ export const DEFAULT_HOVER_PROFILE_STATUS_GEOMETRY = {
   centerY: 34,
 } satisfies ProfileAvatarStatusGeometry;
 
+/** @deprecated Prefer {@link resolveAvatarStatusGeometry} with ratios. */
 export function scaleProfileAvatarStatusGeometry(
   geometry: ProfileAvatarStatusGeometry,
   size: number,
@@ -49,11 +64,31 @@ export function scaleProfileAvatarStatusGeometry(
   };
 }
 
+function geometryFromLegacy(
+  geometry: ProfileAvatarStatusGeometry,
+  size: number,
+): ReturnType<typeof resolveAvatarStatusGeometry> {
+  return {
+    cutout: {
+      cx: geometry.centerX,
+      cy: geometry.centerY,
+      r: geometry.cutoutSize / 2,
+    },
+    badgeBox: {
+      bottom: size - geometry.centerY - geometry.dotSize / 2,
+      height: geometry.dotSize,
+      right: size - geometry.centerX - geometry.dotSize / 2,
+      width: geometry.dotSize,
+    },
+  };
+}
+
 export function ProfileAvatarWithStatus({
   avatarClassName,
   avatarUrl,
   className,
-  geometry = DEFAULT_HOVER_PROFILE_STATUS_GEOMETRY,
+  ratios = HOVER_PROFILE_STATUS_RATIOS,
+  geometry,
   iconClassName,
   label,
   size,
@@ -62,21 +97,11 @@ export function ProfileAvatarWithStatus({
   testId,
 }: ProfileAvatarWithStatusProps) {
   const statusLabel = status ? getPresenceLabel(status) : null;
-  const cutout = status
-    ? {
-        cx: geometry.centerX,
-        cy: geometry.centerY,
-        r: geometry.cutoutSize / 2,
-      }
-    : undefined;
-  const badgeBox = status
-    ? {
-        bottom: size - geometry.centerY - geometry.dotSize / 2,
-        height: geometry.dotSize,
-        right: size - geometry.centerX - geometry.dotSize / 2,
-        width: geometry.dotSize,
-      }
-    : undefined;
+  const resolved = geometry
+    ? geometryFromLegacy(geometry, size)
+    : resolveAvatarStatusGeometry(size, ratios);
+  const cutout = status ? resolved.cutout : undefined;
+  const badgeBox = status ? resolved.badgeBox : undefined;
 
   return (
     <MaskedAvatarBadgeFrame
