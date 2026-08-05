@@ -97,7 +97,11 @@ void main() {
       greaterThanOrEqualTo(31),
     );
 
-    await tester.tap(find.byKey(const ValueKey('settings-presence-target')));
+    final presenceTarget = find.byKey(
+      const ValueKey('settings-presence-target'),
+    );
+    final targetRect = tester.getRect(presenceTarget);
+    await tester.tapAt(Offset(targetRect.center.dx, targetRect.bottom - 1));
     await tester.pump();
 
     final scale = tester.widget<ScaleTransition>(

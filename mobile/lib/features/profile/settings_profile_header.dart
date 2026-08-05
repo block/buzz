@@ -109,81 +109,82 @@ class _PresencePill extends StatelessWidget {
         child: SizedBox(
           key: const ValueKey('settings-presence-target'),
           height: Grid.xl,
-          child: Center(
-            child: Material(
-              key: const ValueKey('settings-presence-pill'),
-              color: backgroundColor,
+          child: Material(
+            color: Colors.transparent,
+            child: InkWell(
+              key: const ValueKey('settings-presence-menu'),
               borderRadius: BorderRadius.circular(Radii.full),
-              child: InkWell(
-                key: const ValueKey('settings-presence-menu'),
-                borderRadius: BorderRadius.circular(Radii.full),
-                onTap: () async {
-                  final selected = await showAnchoredPopover<String>(
-                    context: buttonContext,
-                    width: 176,
-                    alignment: AnchoredPopoverAlignment.center,
-                    offset: const Offset(0, Grid.half),
-                    menuPadding: const EdgeInsets.symmetric(
-                      vertical: Grid.half,
-                    ),
-                    surfaceKey: const ValueKey('settings-presence-popover'),
-                    items: [
-                      for (final option in const ['online', 'away', 'offline'])
-                        PopupMenuItem<String>(
-                          key: ValueKey('settings-presence-$option'),
-                          value: option,
-                          height: Grid.xl,
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: Grid.twelve,
-                          ),
-                          child: Row(
-                            children: [
-                              Container(
-                                width: 10,
-                                height: 10,
-                                decoration: BoxDecoration(
-                                  color: _presenceColor(context, option),
-                                  shape: BoxShape.circle,
-                                ),
-                              ),
-                              const SizedBox(width: Grid.xxs),
-                              Expanded(
-                                child: Text(
-                                  _presenceLabel(option),
-                                  style: filterChipTextStyle.copyWith(
-                                    color: context.colors.onSurface,
-                                    fontWeight: option == effectivePresence
-                                        ? FontWeight.w500
-                                        : FontWeight.w400,
-                                  ),
-                                ),
-                              ),
-                              if (option == effectivePresence)
-                                Icon(
-                                  LucideIcons.check,
-                                  size: 16,
-                                  color: context.colors.primary,
-                                ),
-                            ],
-                          ),
+              onTap: () async {
+                final selected = await showAnchoredPopover<String>(
+                  context: buttonContext,
+                  width: 176,
+                  alignment: AnchoredPopoverAlignment.center,
+                  offset: const Offset(0, Grid.half),
+                  menuPadding: const EdgeInsets.symmetric(vertical: Grid.half),
+                  surfaceKey: const ValueKey('settings-presence-popover'),
+                  items: [
+                    for (final option in const ['online', 'away', 'offline'])
+                      PopupMenuItem<String>(
+                        key: ValueKey('settings-presence-$option'),
+                        value: option,
+                        height: Grid.xl,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: Grid.twelve,
                         ),
-                    ],
-                  );
-                  if (buttonContext.mounted && selected != null) {
-                    onSelected(selected);
-                  }
-                },
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: Grid.xs,
-                    vertical: Grid.xxs,
-                  ),
-                  child: Text(
-                    label,
-                    key: const ValueKey('settings-presence-label'),
-                    style: filterChipTextStyle.copyWith(
-                      color: foregroundColor,
-                      fontWeight: FontWeight.w500,
+                        child: Row(
+                          children: [
+                            Container(
+                              width: 10,
+                              height: 10,
+                              decoration: BoxDecoration(
+                                color: _presenceColor(context, option),
+                                shape: BoxShape.circle,
+                              ),
+                            ),
+                            const SizedBox(width: Grid.xxs),
+                            Expanded(
+                              child: Text(
+                                _presenceLabel(option),
+                                style: filterChipTextStyle.copyWith(
+                                  color: context.colors.onSurface,
+                                  fontWeight: option == effectivePresence
+                                      ? FontWeight.w500
+                                      : FontWeight.w400,
+                                ),
+                              ),
+                            ),
+                            if (option == effectivePresence)
+                              Icon(
+                                LucideIcons.check,
+                                size: 16,
+                                color: context.colors.primary,
+                              ),
+                          ],
+                        ),
+                      ),
+                  ],
+                );
+                if (buttonContext.mounted && selected != null) {
+                  onSelected(selected);
+                }
+              },
+              child: Center(
+                child: Material(
+                  key: const ValueKey('settings-presence-pill'),
+                  color: backgroundColor,
+                  borderRadius: BorderRadius.circular(Radii.full),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: Grid.xs,
+                      vertical: Grid.xxs,
+                    ),
+                    child: Text(
+                      label,
+                      key: const ValueKey('settings-presence-label'),
+                      style: filterChipTextStyle.copyWith(
+                        color: foregroundColor,
+                        fontWeight: FontWeight.w500,
+                      ),
                     ),
                   ),
                 ),
