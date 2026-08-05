@@ -64,6 +64,23 @@ export function isAgentIdentityInManagedList(
   );
 }
 
+/**
+ * Keep agent identities that this client can actually address.
+ *
+ * Channel members must reach the policy-aware gate below even when their
+ * process is managed on another machine. Non-members stay limited to agents
+ * managed by this client.
+ */
+export function isAgentMentionReachable(
+  candidate: { isAgent?: boolean; isMember?: boolean; pubkey: string },
+  managedAgentPubkeys: ReadonlySet<string>,
+) {
+  if (candidate.isAgent !== true) return true;
+
+  const normalized = normalizePubkey(candidate.pubkey);
+  return candidate.isMember === true || managedAgentPubkeys.has(normalized);
+}
+
 export function shouldHideAgentFromMentions({
   isAgent,
   isMember,

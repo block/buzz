@@ -6,6 +6,7 @@ import {
   getMentionableAgentPubkeys,
   getSharedChannelIds,
   isAgentIdentityInManagedList,
+  isAgentMentionReachable,
   relayAgentIsSharedWithUser,
   shouldHideAgentFromMentions,
 } from "./agentAutocompleteEligibility.ts";
@@ -156,6 +157,39 @@ test("isAgentIdentityInManagedList: keeps people and only current managed agent 
   assert.equal(
     isAgentIdentityInManagedList(
       { isAgent: true, pubkey: PUB_B },
+      managedAgentPubkeys,
+    ),
+    false,
+  );
+});
+
+test("isAgentMentionReachable: keeps remote channel agents without restoring stale non-members", () => {
+  const managedAgentPubkeys = new Set([PUB_A]);
+
+  assert.equal(
+    isAgentMentionReachable(
+      { isAgent: false, isMember: false, pubkey: PUB_D },
+      managedAgentPubkeys,
+    ),
+    true,
+  );
+  assert.equal(
+    isAgentMentionReachable(
+      { isAgent: true, isMember: false, pubkey: PUB_A },
+      managedAgentPubkeys,
+    ),
+    true,
+  );
+  assert.equal(
+    isAgentMentionReachable(
+      { isAgent: true, isMember: true, pubkey: PUB_B },
+      managedAgentPubkeys,
+    ),
+    true,
+  );
+  assert.equal(
+    isAgentMentionReachable(
+      { isAgent: true, isMember: false, pubkey: PUB_C },
       managedAgentPubkeys,
     ),
     false,
