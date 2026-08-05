@@ -12,6 +12,7 @@
 //!                              (use a large value, e.g. 999, to simulate hang)
 //!   FAKE_MCP_RESULT_SIZE=N   — `tools/call` returns an N-byte text result
 //!                              (default: the literal "ok"); grows history
+//!   FAKE_MCP_IMAGE_RESULT=1  — `tools/call` returns text plus a PNG image block
 //!   FAKE_MCP_PID_FILE=path   — write the child PID to `path` on startup
 //!                              (for tests that want to verify the child died)
 //!   FAKE_MCP_SPAWN_GRANDCHILD=1
@@ -300,10 +301,18 @@ fn main() {
                 } else {
                     "ok".to_owned()
                 };
+                let content = if env_flag("FAKE_MCP_IMAGE_RESULT") {
+                    json!([
+                        { "type": "text", "text": result_text },
+                        { "type": "image", "data": "aW1n", "mimeType": "image/png" },
+                    ])
+                } else {
+                    json!([{ "type": "text", "text": result_text }])
+                };
                 write_response(
                     id,
                     json!({
-                        "content": [{ "type": "text", "text": result_text }],
+                        "content": content,
                         "isError": false,
                     }),
                 );

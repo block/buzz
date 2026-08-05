@@ -400,6 +400,10 @@ pub enum AgentError {
     /// leaves `Llm::complete` it has already been decorated with the model
     /// name.
     LlmContextExceeded(String),
+    /// The provider explicitly rejected image content for the selected model.
+    /// Kept distinct so the agent loop can remove the unsupported image from
+    /// replayed history and give the model a recoverable tool error.
+    UnsupportedImageInput(String),
     Mcp(String),
     Cancelled,
 }
@@ -412,6 +416,7 @@ impl std::fmt::Display for AgentError {
             Self::LlmAuth(s) => write!(f, "llm auth: {s}"),
             Self::LlmModelNotFound(s) => write!(f, "llm model not found: {s}"),
             Self::LlmContextExceeded(s) => write!(f, "llm context exceeded: {s}"),
+            Self::UnsupportedImageInput(s) => write!(f, "llm image input unsupported: {s}"),
             Self::Mcp(s) => write!(f, "mcp: {s}"),
             Self::Cancelled => write!(f, "cancelled"),
         }
