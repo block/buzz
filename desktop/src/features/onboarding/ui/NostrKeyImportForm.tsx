@@ -29,7 +29,6 @@ type NostrKeyImportFormProps = {
   errorMessage?: string | null;
   onBack: () => void;
   onImport: (nsec: string, password?: string) => Promise<void>;
-  onPhoneRecovery?: () => void;
   onStageChange?: (stage: NostrKeyImportStage) => void;
   showBack?: boolean;
   /** "spotlight" is the first-launch treatment: glowy centered input, no drop zone, pill buttons. */
@@ -49,7 +48,6 @@ export function NostrKeyImportForm({
   errorMessage: externalErrorMessage = null,
   onBack,
   onImport,
-  onPhoneRecovery,
   onStageChange,
   showBack = true,
   variant = "default",
@@ -295,6 +293,7 @@ export function NostrKeyImportForm({
         className="sr-only"
         data-testid="nostr-import-file-input"
         disabled={isInteractionDisabled}
+        id="nostr-import-file-input"
         onChange={(event) => {
           void handleFiles(event.currentTarget.files);
           event.currentTarget.value = "";
@@ -304,36 +303,7 @@ export function NostrKeyImportForm({
         type="file"
       />
 
-      {!isPasswordStage && variant === "spotlight" ? (
-        <p className="mt-2 text-center text-sm leading-6 text-foreground/80">
-          You can also use a{" "}
-          <button
-            className="rounded-sm font-medium underline decoration-foreground/40 underline-offset-4 transition-colors hover:decoration-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-            data-testid="nostr-import-file-button"
-            disabled={isInteractionDisabled}
-            onClick={openFilePicker}
-            type="button"
-          >
-            backup file
-          </button>
-          {onPhoneRecovery ? (
-            <>
-              {" "}
-              or{" "}
-              <button
-                className="rounded-sm font-medium underline decoration-foreground/40 underline-offset-4 transition-colors hover:decoration-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                data-testid="nostr-import-phone-link"
-                disabled={isInteractionDisabled}
-                onClick={onPhoneRecovery}
-                type="button"
-              >
-                recover from your phone
-              </button>
-            </>
-          ) : null}
-          .
-        </p>
-      ) : !isPasswordStage ? (
+      {!isPasswordStage && variant !== "spotlight" ? (
         <button
           className={cn(
             "relative flex h-[120px] flex-col items-center justify-center gap-3 overflow-hidden rounded-xl border border-transparent bg-muted text-foreground transition-[background-color,border-color,box-shadow,color] duration-[250ms] ease-out hover:bg-muted/80 disabled:opacity-60",

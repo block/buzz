@@ -309,13 +309,36 @@ export function MachineOnboardingFlow({
                         : "Use your Buzz identity"
                       : "Enter your private key"}
                 </h1>
-                <p className="mt-5 max-w-[440px] text-sm leading-6 text-foreground/80">
-                  {keyImportStage === "backup-password"
-                    ? "Enter your backup password to restore your identity."
-                    : keyImportMethod === "phone"
-                      ? "Scan this code with a signed-in Buzz phone."
-                      : "Paste your private key to sign in to Buzz."}
-                </p>
+                <div className="mt-5 max-w-[440px] text-sm leading-6 text-foreground/80">
+                  {keyImportStage === "backup-password" ? (
+                    "Enter your backup password to restore your identity."
+                  ) : keyImportMethod === "phone" ? (
+                    "Scan this code with a signed-in Buzz phone."
+                  ) : (
+                    <p>
+                      Paste your private key to sign in to Buzz. You can also
+                      use a{" "}
+                      <label
+                        className={`${isPending ? "pointer-events-none opacity-60" : "cursor-pointer"} rounded-sm font-medium underline decoration-foreground/40 underline-offset-4 transition-colors hover:decoration-foreground focus-within:outline-none focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2`}
+                        data-testid="nostr-import-file-button"
+                        htmlFor="nostr-import-file-input"
+                      >
+                        backup file
+                      </label>
+                      , or{" "}
+                      <button
+                        className="rounded-sm font-medium underline decoration-foreground/40 underline-offset-4 transition-colors hover:decoration-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-60"
+                        data-testid="nostr-import-phone-link"
+                        disabled={isPending}
+                        onClick={() => setKeyImportMethod("phone")}
+                        type="button"
+                      >
+                        recover from your phone
+                      </button>
+                      .
+                    </p>
+                  )}
+                </div>
               </motion.div>
               <div
                 className={
@@ -369,7 +392,6 @@ export function MachineOnboardingFlow({
                         setPage("identity");
                       }}
                       onImport={importExistingIdentity}
-                      onPhoneRecovery={() => setKeyImportMethod("phone")}
                       onStageChange={setKeyImportStage}
                       showBack={!identityLost}
                       variant="spotlight"
