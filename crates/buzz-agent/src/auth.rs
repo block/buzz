@@ -560,9 +560,9 @@ async fn browser_pkce_flow(
                 }
                 match result {
                     Ok(_) => Html(
-                        "<h2>Buzz: signed in</h2><p>You can close this window.</p>".to_string(),
+                        "<h2>Zorro: signed in</h2><p>You can close this window.</p>".to_string(),
                     ),
-                    Err(e) => Html(format!("<h2>Buzz auth failed</h2><pre>{e}</pre>")),
+                    Err(e) => Html(format!("<h2>Zorro auth failed</h2><pre>{e}</pre>")),
                 }
             }
         }),

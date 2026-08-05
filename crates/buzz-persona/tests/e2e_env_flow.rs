@@ -255,7 +255,7 @@ You are a goose bot.
         root.join("agents/buzz-bot.persona.md"),
         r#"---
 name: "buzz-bot"
-display_name: "Buzz Bot"
+display_name: "Zorro Bot"
 description: "A buzz-agent runtime bot"
 runtime: "buzz-agent"
 model: "openai:gpt-4o"

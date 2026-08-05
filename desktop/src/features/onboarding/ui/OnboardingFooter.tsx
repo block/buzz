@@ -17,7 +17,7 @@ const OnboardingFooterTargetContext = React.createContext<HTMLElement | null>(
  * containing block that would otherwise trap `position: fixed`, which is why
  * the CTAs can't simply live inside the step and use `fixed` themselves. The
  * slot stays inside the `.buzz-onboarding-neutral-theme` subtree so
- * `--buzz-welcome-chartreuse` and the theme color tokens still resolve for the
+ * onboarding palette variables and theme color tokens still resolve for the
  * docked buttons.
  */
 export function OnboardingFooterProvider({
@@ -32,7 +32,7 @@ export function OnboardingFooterProvider({
       {children}
       {/* Scrim: on pages taller than the viewport, content scrolls under the
           docked CTA. This bottom-anchored fade to the shell's bottom color
-          (invisible on short pages and on the flat chartreuse landing) gives
+          (invisible on short pages and blended into the landing gradient) gives
           the CTA a floor to sit on instead of colliding with form fields. */}
       <div
         aria-hidden

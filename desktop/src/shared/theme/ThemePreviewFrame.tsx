@@ -12,11 +12,11 @@ export const BUZZ_GRADIENT_STOPS: Record<
   string,
   { top: string; bottom: string }
 > = {
-  buzz: {
+  zorro: {
     top: "var(--buzz-gradient-light-top)",
     bottom: "var(--buzz-gradient-light-bottom)",
   },
-  "buzz-dark": {
+  "zorro-dark": {
     top: "var(--buzz-gradient-dark-top)",
     bottom: "var(--buzz-gradient-dark-bottom)",
   },

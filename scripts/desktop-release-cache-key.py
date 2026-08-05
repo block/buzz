@@ -28,7 +28,7 @@ def normalized(path: pathlib.Path, data: bytes) -> bytes:
             raise ValueError(f"could not normalize package version in {path}")
     elif path == DESKTOP_LOCK:
         text, count = re.subn(
-            r'(?ms)(^name = "buzz-desktop"\nversion = )"[^"]+"',
+            r'(?ms)(^name = "zorro-desktop"\nversion = )"[^"]+"',
             r'\1"<desktop-version>"',
             text,
             count=1,

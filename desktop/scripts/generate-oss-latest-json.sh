@@ -38,7 +38,7 @@ done
 
 jq -n \
   --arg version "$VERSION" \
-  --arg notes "Buzz v$VERSION" \
+  --arg notes "Zorro v$VERSION" \
   --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   "${platform_args[@]}" \
   "{ version: \$version, notes: \$notes, pub_date: \$pub_date, platforms: ($platforms_obj) }"

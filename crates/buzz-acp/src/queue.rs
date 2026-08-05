@@ -310,25 +310,21 @@ impl EventQueue {
                     .keys()
                     .find(|id| !self.in_flight_channels.contains(id))
                     .copied();
-                match cancelled_id {
-                    Some(id) => {
-                        // Move cancelled events into the regular events slot.
-                        // No new events to merge — re-dispatch the original batch.
-                        let cancelled = self.cancelled_batches.remove(&id).unwrap_or_default();
-                        let cancel_reason = self.cancel_reasons.remove(&id);
-                        self.in_flight_channels.insert(id);
-                        self.in_flight_deadlines
-                            .insert(id, now + self.in_flight_deadline);
-                        self.in_flight_batch_sizes.insert(id, cancelled.len());
-                        return Some(FlushBatch {
-                            channel_id: id,
-                            events: cancelled,
-                            cancelled_events: vec![],
-                            cancel_reason,
-                        });
-                    }
-                    None => return None,
-                }
+                let id = cancelled_id?;
+                // Move cancelled events into the regular events slot.
+                // No new events to merge — re-dispatch the original batch.
+                let cancelled = self.cancelled_batches.remove(&id).unwrap_or_default();
+                let cancel_reason = self.cancel_reasons.remove(&id);
+                self.in_flight_channels.insert(id);
+                self.in_flight_deadlines
+                    .insert(id, now + self.in_flight_deadline);
+                self.in_flight_batch_sizes.insert(id, cancelled.len());
+                return Some(FlushBatch {
+                    channel_id: id,
+                    events: cancelled,
+                    cancelled_events: vec![],
+                    cancel_reason,
+                });
             }
         };
 
@@ -944,10 +940,9 @@ pub fn extract_slash_command(content: &str, known_names: &[&str]) -> Option<Stri
                         .unwrap_or(after_at.len());
                     (len > 0).then_some(len)
                 });
-            match name_len {
-                Some(len) => rest = after_at[len..].trim_start(),
-                None => return None, // bare '@' — not a mention
-            }
+            // A bare '@' is not a mention.
+            let len = name_len?;
+            rest = after_at[len..].trim_start();
         } else {
             break;
         }
@@ -1532,7 +1527,7 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
             )
         } else {
             format!(
-                "[Buzz event: {}]\n{}",
+                "[Zorro event: {}]\n{}",
                 be.prompt_tag,
                 format_event_block(batch.channel_id, args.channel_info, be, args.profile_lookup)
             )
@@ -1545,7 +1540,7 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
                 batch.events.len()
             )
         } else {
-            format!("[Buzz events — {} events]", batch.events.len())
+            format!("[Zorro events — {} events]", batch.events.len())
         };
         let mut s = header;
         for (i, be) in batch.events.iter().enumerate() {
@@ -1887,7 +1882,7 @@ mod tests {
         // Should contain [Context] section before the event.
         assert!(prompt.contains("[Context]"));
         assert!(prompt.contains("Scope: channel"));
-        assert!(prompt.contains("[Buzz event: @mention]\n"));
+        assert!(prompt.contains("[Zorro event: @mention]\n"));
         assert!(prompt.contains(&format!("Channel: {}", ch)));
         assert!(prompt.contains(&format!("From: {}", npub)));
         assert!(prompt.contains("Content: Hello @agent"));
@@ -2207,7 +2202,7 @@ mod tests {
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
 
         assert!(prompt.contains("[Context]"));
-        assert!(prompt.contains("[Buzz events — 3 events]"));
+        assert!(prompt.contains("[Zorro events — 3 events]"));
         assert!(prompt.contains("--- Event 1 (tag-a) ---"));
         assert!(prompt.contains("--- Event 2 (tag-b) ---"));
         assert!(prompt.contains("--- Event 3 (tag-c) ---"));

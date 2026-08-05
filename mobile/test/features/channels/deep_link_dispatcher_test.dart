@@ -119,7 +119,7 @@ void main() {
 
     expect(storage.loadCalls, 1);
     expect(pending.consumeCalls, 1);
-    expect(find.text('Join this Buzz community?'), findsOneWidget);
+    expect(find.text('Join this Zorro community?'), findsOneWidget);
   });
 
   testWidgets(
@@ -154,7 +154,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Join this Buzz community?'), findsOneWidget);
+      expect(find.text('Join this Zorro community?'), findsOneWidget);
       expect(inviteContainer.read(pendingDeepLinkProvider), isNull);
 
       final messageContainer = ProviderContainer(

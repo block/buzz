@@ -1117,7 +1117,7 @@ mod tests {
         // against the durable cache, not an unpersisted candidate.
         //
         // This is a real-keychain integration test. Run locally with:
-        //   cargo test -p buzz-desktop -- --ignored mutate_blob_does_not_advance
+        //   cargo test -p zorro-desktop -- --ignored mutate_blob_does_not_advance
         //
         // On a machine with a reachable keychain the `store()` call succeeds
         // (result.is_ok()) and the write-failure branch is skipped — the test
@@ -1187,7 +1187,7 @@ mod tests {
 
     // Integration tests that exercise the real OS keychain. Skipped in CI
     // (unsigned builds lack keychain entitlements); run locally with:
-    //   cargo test -p buzz-desktop -- --ignored blob_
+    //   cargo test -p zorro-desktop -- --ignored blob_
     //
     // Each test uses a unique service name to avoid cross-test pollution.
 

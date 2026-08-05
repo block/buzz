@@ -16,6 +16,16 @@ void main() {
       );
     });
 
+    test('parses zorro scheme', () {
+      final link = parseMessageDeepLink(
+        Uri.parse('zorro://message?channel=d14cd131&id=abc123'),
+      );
+      expect(
+        link,
+        const MessageDeepLink(channelId: 'd14cd131', messageId: 'abc123'),
+      );
+    });
+
     test('parses optional thread param', () {
       final link = parseMessageDeepLink(
         Uri.parse('buzz://message?channel=d14cd131&id=abc123&thread=root99'),
@@ -94,6 +104,21 @@ void _inviteTests() {
       final link = parseInviteDeepLink(
         Uri.parse(
           'buzz://join?relay=wss%3A%2F%2Frelay.example.com&code=abc123',
+        ),
+      );
+      expect(
+        link,
+        const InviteDeepLink(
+          relayUrl: 'wss://relay.example.com',
+          code: 'abc123',
+        ),
+      );
+    });
+
+    test('parses zorro join handoff link', () {
+      final link = parseInviteDeepLink(
+        Uri.parse(
+          'zorro://join?relay=wss%3A%2F%2Frelay.example.com&code=abc123',
         ),
       );
       expect(

@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Postgres full-text search for Buzz, scoped by community"
+description = "Postgres full-text search for Zorro, scoped by community"
 
 [dependencies]
 buzz-core   = { workspace = true }

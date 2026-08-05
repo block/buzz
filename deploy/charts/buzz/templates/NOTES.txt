@@ -1,5 +1,5 @@
 ══════════════════════════════════════════════════════════════════════════════
-  Buzz {{ .Chart.AppVersion }} — release "{{ .Release.Name }}" (namespace {{ .Release.Namespace }})
+  Zorro {{ .Chart.AppVersion }} — release "{{ .Release.Name }}" (namespace {{ .Release.Namespace }})
 ══════════════════════════════════════════════════════════════════════════════
 
 ▶ Relay URL

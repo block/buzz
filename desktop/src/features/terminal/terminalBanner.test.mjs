@@ -56,7 +56,7 @@ const EXPECTED_BUZZ_TERM = [
   "██████    ▀█████    ██████    ██████            ███      ▀███▀    ██        ██ ██ ██",
 ];
 
-test("builds the amended four-layer Buzz Term composite", () => {
+test("builds the amended four-layer Zorro Term composite", () => {
   const banner = buildTerminalBanner(183, 69, 17 / 8.4);
   assert.ok(banner);
   const seen = layers(banner);

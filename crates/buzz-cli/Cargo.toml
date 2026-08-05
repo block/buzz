@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Agent-first CLI for Buzz relay"
+description = "Agent-first CLI for Zorro relay"
 
 [lib]
 name = "buzz_cli"

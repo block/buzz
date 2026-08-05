@@ -247,7 +247,7 @@ test("preset_aux_contains_correct_kinds", () => {
   assert.ok(PRESET_AUX.includes(7), "must include kind 7 (reaction)");
   assert.ok(
     PRESET_AUX.includes(9005),
-    "must include kind 9005 (Buzz-native deletion)",
+    "must include kind 9005 (Zorro-native deletion)",
   );
   assert.ok(
     PRESET_AUX.includes(40003),

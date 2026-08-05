@@ -91,7 +91,7 @@ pub(crate) fn open_output_sink_by_name(
             }
         }
         eprintln!(
-            "buzz-desktop: preferred output device {name:?} not found, falling back to default"
+            "zorro-desktop: preferred output device {name:?} not found, falling back to default"
         );
     }
 

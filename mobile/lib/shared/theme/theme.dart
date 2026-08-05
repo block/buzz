@@ -2,7 +2,7 @@ export 'accent_colors.dart';
 export 'adaptive_theme.dart';
 export 'app_colors.dart';
 export 'app_theme.dart';
-export 'buzz_theme.dart';
+export 'zorro_theme.dart';
 export 'color_scheme.dart';
 export 'grid.dart';
 export 'message_typography.dart';

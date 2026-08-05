@@ -142,7 +142,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--gui",
         action="store_true",
-        help="Open the Buzz desktop app as the benchmark user to watch the run live",
+        help="Open the Zorro desktop app as the benchmark user to watch the run live",
     )
     parser.add_argument(
         "--fresh",
@@ -507,7 +507,7 @@ def launch_gui(state: dict[str, str]) -> subprocess.Popen:
     real_cli.chmod(0o755)
 
     print(
-        f"Opening Buzz GUI as the benchmark user ({state['user_pubkey'][:16]}…).\n"
+        f"Opening Zorro GUI as the benchmark user ({state['user_pubkey'][:16]}…).\n"
         "Watch, don't type — a message from you mid-trial would taint the run."
     )
     # Distinct bundle identifier: the desktop app persists workspaces (incl.
@@ -517,7 +517,7 @@ def launch_gui(state: dict[str, str]) -> subprocess.Popen:
     # workspace silently shadows the benchmark relay. An identifier of our own
     # keeps that state isolated both ways.
     tauri_config = json.dumps(
-        {"identifier": GUI_BUNDLE_IDENTIFIER, "productName": "Buzz Benchmark"}
+        {"identifier": GUI_BUNDLE_IDENTIFIER, "productName": "Zorro Benchmark"}
     )
     return subprocess.Popen(
         ["pnpm", "exec", "tauri", "dev", "--config", tauri_config],

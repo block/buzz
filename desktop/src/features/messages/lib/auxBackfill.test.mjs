@@ -50,7 +50,7 @@ test("excludes auxiliary kinds (reactions, edits, deletions)", () => {
     event(hex("2"), 7), // reaction — excluded
     event(hex("3"), 40003), // edit — excluded
     event(hex("4"), 5), // NIP-09 deletion — excluded
-    event(hex("5"), 9005), // Buzz-native deletion — excluded
+    event(hex("5"), 9005), // Zorro-native deletion — excluded
   ];
   assert.deepEqual(collectMessageIdsForAuxBackfill(events), [hex("1")]);
 });

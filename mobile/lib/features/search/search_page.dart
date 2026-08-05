@@ -64,14 +64,14 @@ class SearchPage extends HookConsumerWidget {
       () => focusNode.hasFocus,
     );
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
-    final isBuzzTheme = context.appColors.topSectionGradient != null;
+    final isZorroTheme = context.appColors.topSectionGradient != null;
     final buzzSearchColor = context.theme.brightness == Brightness.dark
         ? Colors.white
         : Colors.black;
-    final searchSurfaceColor = isBuzzTheme
+    final searchSurfaceColor = isZorroTheme
         ? buzzSearchColor.withValues(alpha: 0.04)
         : context.colors.surfaceContainerHighest;
-    final searchMutedColor = isBuzzTheme
+    final searchMutedColor = isZorroTheme
         ? buzzSearchColor.withValues(alpha: 0.4)
         : context.colors.onSurfaceVariant;
     final headerTitleStyle = context.textTheme.titleMedium?.copyWith(

@@ -60,7 +60,7 @@ function runtimeInstallGuideLabel(runtime: AcpRuntimeCatalogEntry) {
 
 function RuntimeLogo({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
   // Single logo pipeline: RuntimeIcon owns every runtime asset — the
-  // theme-adaptive RUNTIME_MARKS, the BuzzMark, the bundled bitmap maps
+  // theme-adaptive RUNTIME_MARKS, the ZorroHat, the bundled bitmap maps
   // (RUNTIME_LOGOS / PRESET_LOGOS), and the terminal-glyph fallback. It never
   // renders remote or user-supplied avatar URLs (security line), so the row
   // and the catalog cannot drift apart.

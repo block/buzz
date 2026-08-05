@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Core types, event verification, and filter matching for Buzz"
+description = "Core types, event verification, and filter matching for Zorro"
 
 [features]
 test-utils = []

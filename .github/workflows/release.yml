@@ -198,23 +198,23 @@ jobs:
           EXTRACT_DIR="${RUNNER_TEMP}/signed-app-extract"
           rm -rf "$EXTRACT_DIR" && mkdir -p "$EXTRACT_DIR"
           ditto -x -k "$SIGNED_APP_ZIP" "$EXTRACT_DIR"
-          rm -rf "${APP_DIR}/Buzz.app"
-          cp -R "${EXTRACT_DIR}/Buzz.app" "${APP_DIR}/Buzz.app"
+          rm -rf "${APP_DIR}/Zorro.app"
+          cp -R "${EXTRACT_DIR}/Zorro.app" "${APP_DIR}/Zorro.app"
 
           # Rebuild the updater archive from the signed .app and re-sign it with the Tauri updater key.
-          rm -f "${APP_DIR}/Buzz.app.tar.gz" "${APP_DIR}/Buzz.app.tar.gz.sig"
-          (cd "$APP_DIR" && tar -czf Buzz.app.tar.gz Buzz.app)
-          TARBALL_ABS="$(pwd)/${APP_DIR}/Buzz.app.tar.gz"
+          rm -f "${APP_DIR}/Zorro.app.tar.gz" "${APP_DIR}/Zorro.app.tar.gz.sig"
+          (cd "$APP_DIR" && tar -czf Zorro.app.tar.gz Zorro.app)
+          TARBALL_ABS="$(pwd)/${APP_DIR}/Zorro.app.tar.gz"
           (cd desktop && pnpm tauri signer sign "$TARBALL_ABS")
 
       - name: Verify code signature
         run: |
           codesign --verify --deep --strict --verbose=2 \
-            desktop/src-tauri/target/release/bundle/macos/Buzz.app
+            desktop/src-tauri/target/release/bundle/macos/Zorro.app
           spctl --assess --type execute --verbose=4 \
-            desktop/src-tauri/target/release/bundle/macos/Buzz.app
+            desktop/src-tauri/target/release/bundle/macos/Zorro.app
           desktop/scripts/verify-macos-entitlements.sh \
-            desktop/src-tauri/target/release/bundle/macos/Buzz.app
+            desktop/src-tauri/target/release/bundle/macos/Zorro.app
 
       - name: Locate build artifacts
         id: artifacts
@@ -371,18 +371,18 @@ jobs:
           EXTRACT_DIR="${RUNNER_TEMP}/signed-app-extract-x64"
           rm -rf "$EXTRACT_DIR" && mkdir -p "$EXTRACT_DIR"
           ditto -x -k "$SIGNED_APP_ZIP" "$EXTRACT_DIR"
-          rm -rf "${APP_DIR}/Buzz.app"
-          cp -R "${EXTRACT_DIR}/Buzz.app" "${APP_DIR}/Buzz.app"
+          rm -rf "${APP_DIR}/Zorro.app"
+          cp -R "${EXTRACT_DIR}/Zorro.app" "${APP_DIR}/Zorro.app"
 
           # Rebuild the updater archive from the signed .app and re-sign with the Tauri updater key.
-          rm -f "${APP_DIR}/Buzz.app.tar.gz" "${APP_DIR}/Buzz.app.tar.gz.sig"
-          (cd "$APP_DIR" && tar -czf Buzz.app.tar.gz Buzz.app)
-          TARBALL_ABS="$(pwd)/${APP_DIR}/Buzz.app.tar.gz"
+          rm -f "${APP_DIR}/Zorro.app.tar.gz" "${APP_DIR}/Zorro.app.tar.gz.sig"
+          (cd "$APP_DIR" && tar -czf Zorro.app.tar.gz Zorro.app)
+          TARBALL_ABS="$(pwd)/${APP_DIR}/Zorro.app.tar.gz"
           (cd desktop && pnpm tauri signer sign "$TARBALL_ABS")
 
       - name: Verify code signature
         run: |
-          APP_DIR="desktop/src-tauri/target/${TARGET}/release/bundle/macos/Buzz.app"
+          APP_DIR="desktop/src-tauri/target/${TARGET}/release/bundle/macos/Zorro.app"
           codesign --verify --deep --strict --verbose=2 "$APP_DIR"
           spctl --assess --type execute --verbose=4 "$APP_DIR"
           desktop/scripts/verify-macos-entitlements.sh "$APP_DIR"
@@ -931,7 +931,7 @@ jobs:
             gh release create "desktop-v${VERSION}" \
               --draft \
               --target "${{ needs.setup.outputs.source_sha }}" \
-              --title "Buzz Desktop v${VERSION}" \
+              --title "Zorro Desktop v${VERSION}" \
               --notes-file "$NOTES_FILE" \
               "${PRERELEASE_FLAGS[@]}"
           fi

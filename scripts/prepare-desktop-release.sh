@@ -38,7 +38,7 @@ agent_email="${RELEASE_AUTOMATION_EMAIL:-${AGENT_EMAIL:-release-automation@users
 msg="$(mktemp)"
 trap 'rm -f "$msg"' EXIT
 cat >"$msg" <<EOF
-chore(release): release Buzz Desktop version $version
+chore(release): release Zorro Desktop version $version
 
 Co-authored-by: $agent_name <$agent_email>
 EOF
@@ -76,8 +76,8 @@ This PR must be **squash merged** only after the Desktop Release Candidate check
 The checked-in changelog accounts for every non-merge commit in the release range. Publication remains bound to the immutable candidate tag.
 EOF
 if existing="$(gh pr list --head "$branch" --state open --json number --jq '.[0].number')" && [[ -n "$existing" ]]; then
-  gh pr edit "$existing" --title "chore(release): release Buzz Desktop version $version" --body-file "$body"
+  gh pr edit "$existing" --title "chore(release): release Zorro Desktop version $version" --body-file "$body"
 else
   gh pr create --base main --head "$branch" \
-    --title "chore(release): release Buzz Desktop version $version" --body-file "$body"
+    --title "chore(release): release Zorro Desktop version $version" --body-file "$body"
 fi

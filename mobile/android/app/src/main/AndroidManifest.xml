@@ -44,6 +44,7 @@
                 <category android:name="android.intent.category.DEFAULT"/>
                 <category android:name="android.intent.category.BROWSABLE"/>
                 <data android:scheme="buzz"/>
+                <data android:scheme="zorro"/>
             </intent-filter>
             <!-- Disable Flutter's built-in deeplink handler; app_links owns
                  incoming URLs so they can be routed with app state in Dart. -->

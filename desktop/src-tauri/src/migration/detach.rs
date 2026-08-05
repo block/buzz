@@ -30,8 +30,10 @@ pub fn detach_directory_backed_teams(app: &tauri::AppHandle) {
     };
     match detach_directory_backed_teams_in_dir(&base_dir) {
         Ok(0) => {}
-        Ok(n) => eprintln!("buzz-desktop: detach-dir-teams: detached {n} directory-backed team(s)"),
-        Err(e) => eprintln!("buzz-desktop: detach-dir-teams: {e}"),
+        Ok(n) => {
+            eprintln!("zorro-desktop: detach-dir-teams: detached {n} directory-backed team(s)")
+        }
+        Err(e) => eprintln!("zorro-desktop: detach-dir-teams: {e}"),
     }
 }
 
@@ -135,7 +137,7 @@ pub(super) fn detach_directory_backed_teams_in_dir(base_dir: &Path) -> Result<us
                         }
                     }
                     Err(e) => eprintln!(
-                        "buzz-desktop: detach-dir-teams: team {}: \
+                        "zorro-desktop: detach-dir-teams: team {}: \
                          failed to read instructions.md (preserving existing value): {e}",
                         team.id
                     ),

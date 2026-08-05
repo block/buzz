@@ -178,7 +178,7 @@ test.describe("config bridge screenshots", () => {
     const panel = await openAgentProfileFromChannel(page, "Goose Agent");
 
     // The folded config panel: provenance sentences inline under each value.
-    await expect(panel.getByText("Set in Buzz").first()).toBeVisible();
+    await expect(panel.getByText("Set in Zorro").first()).toBeVisible();
     await settleAnimations(panel);
 
     await panel.screenshot({ path: `${SHOTS}/01-folded-config-panel.png` });
@@ -211,7 +211,7 @@ test.describe("config bridge screenshots", () => {
     const panel = await openAgentProfileFromChannel(page, "Multi-Origin Agent");
 
     // Multiple distinct provenance origins visible at once.
-    await expect(panel.getByText("Set in Buzz").first()).toBeVisible();
+    await expect(panel.getByText("Set in Zorro").first()).toBeVisible();
     await expect(panel.getByText("Inherited from template")).toBeVisible();
     await expect(
       panel.getByText("From environment variable (GOOSE_MODE)"),
@@ -264,14 +264,14 @@ test.describe("config bridge screenshots", () => {
       managedAgents: [
         {
           pubkey: BUZZ_AGENT_PUBKEY,
-          name: "Buzz Agent",
+          name: "Zorro Agent",
           status: "running" as const,
           channelNames: ["agents"],
         },
       ],
     });
 
-    const panel = await openAgentProfileFromChannel(page, "Buzz Agent");
+    const panel = await openAgentProfileFromChannel(page, "Zorro Agent");
 
     await expect(
       panel.getByText("No custom servers configured", { exact: true }),

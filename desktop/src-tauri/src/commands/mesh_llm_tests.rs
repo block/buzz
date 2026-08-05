@@ -380,7 +380,7 @@ async fn cold_client_preflight_requires_explicit_target() {
 /// frontend selected earlier.
 ///
 /// Hardware-gated (`#[ignore]`): loads a real model. Run with:
-///   cargo test -p buzz-desktop --features mesh-llm \
+///   cargo test -p zorro-desktop --features mesh-llm \
 ///     ensure_serve_runtime_serves_other_model -- --ignored --nocapture
 #[test]
 #[ignore = "loads a real model; run manually with --ignored"]

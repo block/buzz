@@ -64,7 +64,7 @@ if [[ -z "${SLACK_TOKEN:-}" ]]; then
 fi
 
 if ! command -v buzz &>/dev/null; then
-  echo "ERROR: 'buzz' not found in PATH. Install the Buzz CLI and retry." >&2
+  echo "ERROR: 'buzz' not found in PATH. Install the Zorro CLI and retry." >&2
   exit 1
 fi
 
@@ -162,5 +162,5 @@ for emoji_name in "$@"; do
     continue
   }
 
-  echo "${emoji_name} → registered as :${buzz_shortcode}: in Buzz"
+  echo "${emoji_name} → registered as :${buzz_shortcode}: in Zorro"
 done

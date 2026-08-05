@@ -308,7 +308,7 @@ fn tts_worker(
         Ok(e) => e,
         Err(e) => {
             let error = format!("TTS engine initialization failed: {e}");
-            eprintln!("buzz-desktop: tts stage=startup status=failed reason=engine_load");
+            eprintln!("zorro-desktop: tts stage=startup status=failed reason=engine_load");
             let _ = startup_tx.send(Err(error));
             return;
         }
@@ -325,7 +325,7 @@ fn tts_worker(
         Ok(s) => s,
         Err(e) => {
             let error = format!("TTS voice style initialization failed: {e}");
-            eprintln!("buzz-desktop: tts stage=startup status=failed reason=fallback_voice_style");
+            eprintln!("zorro-desktop: tts stage=startup status=failed reason=fallback_voice_style");
             let _ = startup_tx.send(Err(error));
             return;
         }
@@ -347,9 +347,9 @@ fn tts_worker(
     // and discard the output so the first real utterance runs at warm-session speed.
     {
         match engine.synth_chunk("warmup", "en", &style, SYNTH_STEPS) {
-            Ok(_) => eprintln!("buzz-desktop: tts stage=warmup status=ready"),
+            Ok(_) => eprintln!("zorro-desktop: tts stage=warmup status=ready"),
             Err(_) => eprintln!(
-                "buzz-desktop: tts stage=warmup status=failed reason=inference first_utterance_may_be_slow=true"
+                "zorro-desktop: tts stage=warmup status=failed reason=inference first_utterance_may_be_slow=true"
             ),
         }
     }
@@ -363,7 +363,7 @@ fn tts_worker(
         Ok(h) => h,
         Err(e) => {
             let error = format!("TTS audio output initialization failed: {e}");
-            eprintln!("buzz-desktop: tts stage=startup status=failed reason=output_open");
+            eprintln!("zorro-desktop: tts stage=startup status=failed reason=output_open");
             let _ = startup_tx.send(Err(error));
             return;
         }
@@ -407,7 +407,7 @@ fn tts_worker(
         let deadline = std::time::Instant::now() + AUDIO_PRIME_TIMEOUT;
         while !player.empty() {
             if std::time::Instant::now() >= deadline {
-                eprintln!("buzz-desktop: tts stage=startup status=failed reason=output_prime");
+                eprintln!("zorro-desktop: tts stage=startup status=failed reason=output_prime");
                 let _ = startup_tx.send(Err(
                     "TTS audio output did not become ready before timeout".to_string(),
                 ));
@@ -419,7 +419,7 @@ fn tts_worker(
     if startup_tx.send(Ok(())).is_err() {
         return;
     }
-    eprintln!("buzz-desktop: tts stage=startup status=ready");
+    eprintln!("zorro-desktop: tts stage=startup status=ready");
 
     let player_ops = Arc::clone(&playback_probe.player_ops);
     let activity_frames = Arc::new(Mutex::new(VecDeque::<TtsSpeakerActivityFrame>::new()));
@@ -439,7 +439,7 @@ fn tts_worker(
     if let Err(ref e) = monitor {
         // Degraded but functional: barge-in still works between sentences
         // via the worker's own checks, just not mid-synthesis.
-        eprintln!("buzz-desktop: TTS barge-in monitor failed to spawn: {e}");
+        eprintln!("zorro-desktop: TTS barge-in monitor failed to spawn: {e}");
     }
 
     // ── 4. Main loop ──────────────────────────────────────────────────────────
@@ -475,7 +475,7 @@ fn tts_worker(
                 "voice_switch"
             };
             eprintln!(
-                "buzz-desktop: tts stage=synthesis status=cancelled reason={reason} route_id={route_id}"
+                "zorro-desktop: tts stage=synthesis status=cancelled reason={reason} route_id={route_id}"
             );
             return false;
         }
@@ -484,7 +484,7 @@ fn tts_worker(
         });
         if !speaker_is_current {
             eprintln!(
-                "buzz-desktop: tts stage=synthesis status=cancelled reason=speaker_removed route_id={route_id}"
+                "zorro-desktop: tts stage=synthesis status=cancelled reason=speaker_removed route_id={route_id}"
             );
             return false;
         }
@@ -515,7 +515,7 @@ fn tts_worker(
         }
         player.append(SamplesBuffer::new(channels, rate, prepared.buffer));
         eprintln!(
-            "buzz-desktop: tts stage=player status=append_accepted route_id={route_id} chunk_index={} sample_count={}",
+            "zorro-desktop: tts stage=player status=append_accepted route_id={route_id} chunk_index={} sample_count={}",
             prepared.chunk_index, prepared.sample_count
         );
         // Set this only after append so STT remains open during synthesis.
@@ -584,7 +584,7 @@ fn tts_worker(
                             .unwrap_or_else(|error| error.into_inner())
                             .take();
                         eprintln!(
-                            "buzz-desktop: tts stage=player status=drained route_id={last_route_id}"
+                            "zorro-desktop: tts stage=player status=drained route_id={last_route_id}"
                         );
                         first_append = true;
                     }
@@ -617,14 +617,14 @@ fn tts_worker(
         };
         if !queued_speaker_is_current(&speaker_generations, &queued_text) {
             eprintln!(
-                "buzz-desktop: tts stage=queue status=dropped reason=speaker_removed route_id={}",
+                "zorro-desktop: tts stage=queue status=dropped reason=speaker_removed route_id={}",
                 queued_text.route_id
             );
             continue;
         }
         if queued_text.generation < voice_generation.load(Ordering::Acquire) {
             eprintln!(
-                "buzz-desktop: tts stage=queue status=dropped reason=voice_switch route_id={}",
+                "zorro-desktop: tts stage=queue status=dropped reason=voice_switch route_id={}",
                 queued_text.route_id
             );
             continue;
@@ -655,7 +655,7 @@ fn tts_worker(
         let speaker_pubkey = queued_text.speaker_pubkey;
         let speaker_generation = queued_text.speaker_generation;
         let route_id = queued_text.route_id;
-        eprintln!("buzz-desktop: tts stage=synthesis status=started route_id={route_id}");
+        eprintln!("zorro-desktop: tts stage=synthesis status=started route_id={route_id}");
 
         // If playback already drained while we were waiting for this item,
         // release stale ownership before doing any potentially slow voice or
@@ -669,7 +669,9 @@ fn tts_worker(
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
                     .take();
-                eprintln!("buzz-desktop: tts stage=player status=drained route_id={last_route_id}");
+                eprintln!(
+                    "zorro-desktop: tts stage=player status=drained route_id={last_route_id}"
+                );
                 first_append = true;
             }
         }
@@ -691,7 +693,7 @@ fn tts_worker(
             &mut style_cache,
         ) {
             eprintln!(
-                "buzz-desktop: tts stage=synthesis status=failed reason=voice_unavailable route_id={route_id}"
+                "zorro-desktop: tts stage=synthesis status=failed reason=voice_unavailable route_id={route_id}"
             );
             continue;
         }
@@ -700,7 +702,7 @@ fn tts_worker(
         let text = preprocess_for_tts(&raw_text);
         if text.is_empty() {
             eprintln!(
-                "buzz-desktop: tts stage=synthesis status=empty reason=preprocess route_id={route_id}"
+                "zorro-desktop: tts stage=synthesis status=empty reason=preprocess route_id={route_id}"
             );
             continue;
         }
@@ -718,7 +720,7 @@ fn tts_worker(
         let chunks = group_sentences_into_chunks(&sentences, MAX_CHUNK_CHARS);
         if chunks.is_empty() {
             eprintln!(
-                "buzz-desktop: tts stage=synthesis status=empty reason=no_chunks route_id={route_id}"
+                "zorro-desktop: tts stage=synthesis status=empty reason=no_chunks route_id={route_id}"
             );
             continue;
         }
@@ -751,7 +753,7 @@ fn tts_worker(
                 Ok(model_chunks) => model_chunks,
                 Err(_) => {
                     eprintln!(
-                        "buzz-desktop: tts stage=synthesis status=failed reason=chunking route_id={route_id}"
+                        "zorro-desktop: tts stage=synthesis status=failed reason=chunking route_id={route_id}"
                     );
                     synthesis_outcome = "failed";
                     break 'playback_chunks;
@@ -759,7 +761,7 @@ fn tts_worker(
             };
             if model_chunks.is_empty() {
                 eprintln!(
-                    "buzz-desktop: tts stage=synthesis status=empty reason=no_chunks route_id={route_id}"
+                    "zorro-desktop: tts stage=synthesis status=empty reason=no_chunks route_id={route_id}"
                 );
                 continue;
             }
@@ -795,7 +797,7 @@ fn tts_worker(
                         "voice_switch"
                     };
                     eprintln!(
-                        "buzz-desktop: tts stage=synthesis status=cancelled reason={reason} route_id={route_id}"
+                        "zorro-desktop: tts stage=synthesis status=cancelled reason={reason} route_id={route_id}"
                     );
                     // The monitor already stopped any queued playback. Discard
                     // synthesis that completed after cancellation so stale audio
@@ -830,12 +832,12 @@ fn tts_worker(
                     }
                     Ok(_) => {
                         eprintln!(
-                            "buzz-desktop: tts stage=synthesis status=empty route_id={route_id} chunk_index={chunk_index}"
+                            "zorro-desktop: tts stage=synthesis status=empty route_id={route_id} chunk_index={chunk_index}"
                         );
                     }
                     Err(_) => {
                         eprintln!(
-                            "buzz-desktop: tts stage=synthesis status=failed reason=inference route_id={route_id} chunk_index={chunk_index}"
+                            "zorro-desktop: tts stage=synthesis status=failed reason=inference route_id={route_id} chunk_index={chunk_index}"
                         );
                         synthesis_outcome = "failed";
                         break;
@@ -863,7 +865,7 @@ fn tts_worker(
             }
         }
         if synthesis_outcome == "completed" && appended_audio {
-            eprintln!("buzz-desktop: tts stage=synthesis status=completed route_id={route_id}");
+            eprintln!("zorro-desktop: tts stage=synthesis status=completed route_id={route_id}");
         }
 
         if shutdown.load(Ordering::Acquire) {
@@ -904,7 +906,7 @@ fn handle_cancel_or_shutdown(
     let (text_rx, deferred_text, current_text) = text_state;
     if shutdown.load(Ordering::Acquire) {
         eprintln!(
-            "buzz-desktop: tts stage=cancellation reason=shutdown route_id={}",
+            "zorro-desktop: tts stage=cancellation reason=shutdown route_id={}",
             active_route_id.unwrap_or(0)
         );
         if let Some((p, ops)) = player {
@@ -925,7 +927,7 @@ fn handle_cancel_or_shutdown(
         let barge_in = cancel.swap(false, Ordering::AcqRel);
         voice_cancel.store(false, Ordering::Release);
         eprintln!(
-            "buzz-desktop: tts stage=cancellation reason={} route_id={}",
+            "zorro-desktop: tts stage=cancellation reason={} route_id={}",
             if barge_in { "barge_in" } else { "voice_switch" },
             active_route_id.unwrap_or(0)
         );

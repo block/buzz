@@ -100,7 +100,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--provisioner-config",
         type=Path,
         required=True,
-        help="JSON config for the Buzz relay/Postgres provisioner",
+        help="JSON config for the Zorro relay/Postgres provisioner",
     )
     parser.add_argument(
         "--buzz-bin-dir",
@@ -251,7 +251,7 @@ def write_metadata_template(args: argparse.Namespace, job_dir: Path) -> Path:
         )
     metadata = {
         "agent_url": "https://github.com/block/buzz",
-        "agent_display_name": f"Buzz Orchestra ({manifest.get('condition', 'team')})",
+        "agent_display_name": f"Zorro Orchestra ({manifest.get('condition', 'team')})",
         "agent_org_display_name": "Block",
         "models": models,
     }

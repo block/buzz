@@ -219,7 +219,7 @@ test("tab actions restore terminal input focus", async () => {
   const actions = [
     ["select", view.getByRole("tab")],
     ["close", view.getByLabelText("Close SHELL")],
-    ["new", view.getByLabelText("New Buzz Term tab")],
+    ["new", view.getByLabelText("New Zorro Term tab")],
   ];
   for (const [label, target] of actions) {
     target.focus();
@@ -237,7 +237,7 @@ test("drag resize batches visual updates and commits state only on release", asy
   const { view } = fixture({ mode: "docked" });
   await ready(view);
   const substrate = view.container.querySelector(".buzz-terminal-substrate");
-  const handle = view.getByLabelText("Resize Buzz Term");
+  const handle = view.getByLabelText("Resize Zorro Term");
 
   fireEvent.pointerDown(handle, { clientY: 500, pointerId: 1 });
   fireEvent.pointerMove(handle, { clientY: 400, pointerId: 2 });
@@ -278,7 +278,7 @@ test("drag resize repaints the canvas without reporting PTY geometry until relea
   const canvas = view.container.querySelector(
     ".buzz-terminal-viewport > canvas:not(.buzz-terminal-welcome)",
   );
-  const handle = view.getByLabelText("Resize Buzz Term");
+  const handle = view.getByLabelText("Resize Zorro Term");
   await waitFor(() => assert.equal(canvas.height, 280));
   const reportsBeforeDrag = viewportSizes.length;
 
@@ -300,7 +300,7 @@ test("drag resize repaints the canvas without reporting PTY geometry until relea
 test("unmount cancels a queued drag update", async () => {
   const { view } = fixture({ mode: "docked" });
   await ready(view);
-  const handle = view.getByLabelText("Resize Buzz Term");
+  const handle = view.getByLabelText("Resize Zorro Term");
   const previousHeight = handle.closest(".buzz-terminal-substrate").style
     .height;
 
@@ -448,7 +448,7 @@ test("mounted wheel path accumulates fractional lines per active session", async
   assert.deepEqual(calls.scroll, [1]);
 });
 
-test("canvas failure atomically restores Buzz ownership", async () => {
+test("canvas failure atomically restores Zorro ownership", async () => {
   const { props, view } = fixture();
   await ready(view);
   const substrate = view.container.querySelector(".buzz-terminal-substrate");
@@ -497,7 +497,7 @@ test("cursor blink runs only while the terminal owns input and resets on input",
   try {
     const subject = fixture({ frame: VISIBLE_FRAME });
     await ready(subject.view);
-    assert.equal(callbacks.size, 0, "Buzz ownership must pause blinking");
+    assert.equal(callbacks.size, 0, "Zorro ownership must pause blinking");
 
     toggleChord();
     await waitFor(() => assert.equal(callbacks.size, 1));
@@ -791,7 +791,7 @@ test("tab chords drive new, close, and select while the terminal owns input", as
   assert.deepEqual(subject.calls.input, []);
 });
 
-test("tab chords stay inert while Buzz owns input", async () => {
+test("tab chords stay inert while Zorro owns input", async () => {
   const subject = tabFixture();
   await ready(subject.view);
   // Deliberately not revealed: owner is "buzz".
@@ -805,7 +805,7 @@ test("tab chords stay inert while Buzz owns input", async () => {
   assert.equal(
     spawn.defaultPrevented,
     false,
-    "Buzz-mode ⌘T belongs to the rest of the app",
+    "Zorro-mode ⌘T belongs to the rest of the app",
   );
 });
 

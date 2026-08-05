@@ -159,8 +159,8 @@ jobs:
             type=semver,pattern={{major}}.{{minor}},match=^relay-v(.*)$,value=${{ inputs.version }}
             type=semver,pattern={{major}},match=^relay-v(.*)$,value=${{ inputs.version }}
           labels: |
-            org.opencontainers.image.title=Buzz
-            org.opencontainers.image.description=WebSocket relay server for the Buzz communications platform
+            org.opencontainers.image.title=Zorro
+            org.opencontainers.image.description=WebSocket relay server for the Zorro communications platform
             org.opencontainers.image.licenses=Apache-2.0
 
       - name: Build and push release image by digest
@@ -389,8 +389,8 @@ jobs:
         with:
           images: ghcr.io/block/buzz-push-gateway
           labels: |
-            org.opencontainers.image.title=Buzz Push Gateway
-            org.opencontainers.image.description=Capability-gated APNs last hop for Buzz
+            org.opencontainers.image.title=Zorro Push Gateway
+            org.opencontainers.image.description=Capability-gated APNs last hop for Zorro
             org.opencontainers.image.licenses=Apache-2.0
       - name: Build and push by digest
         id: build

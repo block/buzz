@@ -32,7 +32,7 @@ use nostr::{EventBuilder, Keys, Kind, Tag};
 use tracing::warn;
 
 #[derive(Parser)]
-#[command(name = "buzz-admin", about = "Buzz instance administration")]
+#[command(name = "buzz-admin", about = "Zorro instance administration")]
 struct Cli {
     #[command(subcommand)]
     command: Command,

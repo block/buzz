@@ -116,7 +116,8 @@ export function shouldResolveTitle(preview: SupportedLinkPreview): boolean {
 }
 
 function resolveTitle(preview: SupportedLinkPreview): Promise<string | null> {
-  return preview.href.startsWith("buzz://")
+  return preview.href.startsWith("buzz://") ||
+    preview.href.startsWith("zorro://")
     ? fetchBuzzEntityTitle(preview.href)
     : fetchLinkPreviewTitle(preview.href);
 }

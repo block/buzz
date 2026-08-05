@@ -30,7 +30,7 @@ pub async fn fetch_link_preview_title(href: String) -> Result<Option<String>, St
             ACCEPT,
             "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         )
-        .header(USER_AGENT, "Buzz Desktop link preview");
+        .header(USER_AGENT, "Zorro Desktop link preview");
 
     let response = tokio::time::timeout(TITLE_FETCH_TIMEOUT, request.send())
         .await

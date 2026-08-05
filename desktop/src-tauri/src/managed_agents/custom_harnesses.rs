@@ -920,7 +920,7 @@ mod tests {
         };
         let err = validate_harness_definition_pub(&def).unwrap_err();
         assert!(
-            err.contains("reserved by Buzz"),
+            err.contains("reserved by Zorro"),
             "ownership marker key must be rejected: {err}"
         );
     }
@@ -941,7 +941,7 @@ mod tests {
         };
         let err = validate_harness_definition_pub(&def).unwrap_err();
         assert!(
-            err.contains("reserved by Buzz"),
+            err.contains("reserved by Zorro"),
             "reserved key must be blocked case-insensitively: {err}"
         );
     }

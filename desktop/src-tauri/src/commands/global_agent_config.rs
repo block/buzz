@@ -164,7 +164,7 @@ fn collect_restart_candidates(
         Ok(r) => r,
         Err(e) => {
             eprintln!(
-                "buzz-desktop: set_global_agent_config: failed to load agents for restart scan: {e}"
+                "zorro-desktop: set_global_agent_config: failed to load agents for restart scan: {e}"
             );
             return (Vec::new(), Vec::new());
         }
@@ -173,7 +173,7 @@ fn collect_restart_candidates(
         Ok(p) => p,
         Err(e) => {
             eprintln!(
-                "buzz-desktop: set_global_agent_config: failed to load personas for restart scan: {e}"
+                "zorro-desktop: set_global_agent_config: failed to load personas for restart scan: {e}"
             );
             return (Vec::new(), Vec::new());
         }
@@ -334,12 +334,12 @@ async fn restart_local_agent_on_config_change(
     let runtime_keys = match stop_result {
         Ok(Ok(runtime_keys)) => runtime_keys,
         Ok(Err(e)) => {
-            eprintln!("buzz-desktop: set_global_agent_config: skipping restart of {pubkey}: {e}");
+            eprintln!("zorro-desktop: set_global_agent_config: skipping restart of {pubkey}: {e}");
             return RestartOutcome::Skipped;
         }
         Err(e) => {
             eprintln!(
-                "buzz-desktop: set_global_agent_config: spawn_blocking failed for stop of {pubkey}: {e}"
+                "zorro-desktop: set_global_agent_config: spawn_blocking failed for stop of {pubkey}: {e}"
             );
             return RestartOutcome::Skipped;
         }
@@ -353,17 +353,17 @@ async fn restart_local_agent_on_config_change(
     {
         Ok(_) => {
             eprintln!(
-                "buzz-desktop: set_global_agent_config: restarted agent {pubkey} with updated config"
+                "zorro-desktop: set_global_agent_config: restarted agent {pubkey} with updated config"
             );
             RestartOutcome::Restarted
         }
         Err(e) => {
             eprintln!(
-                "buzz-desktop: set_global_agent_config: failed to start {pubkey} after restart: {e}"
+                "zorro-desktop: set_global_agent_config: failed to start {pubkey} after restart: {e}"
             );
             if let Err(save_err) = persist_last_error(app, pubkey, &e) {
                 eprintln!(
-                    "buzz-desktop: set_global_agent_config: failed to persist last_error for {pubkey}: {save_err}"
+                    "zorro-desktop: set_global_agent_config: failed to persist last_error for {pubkey}: {save_err}"
                 );
             }
             RestartOutcome::FailedAfterStop

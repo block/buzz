@@ -373,7 +373,7 @@ pub async fn import_identity(
         let pubkey_hex = pubkey.to_hex();
         let display_name = truncated_display_name(&pubkey)?;
 
-        eprintln!("buzz-desktop: imported identity pubkey {}", pubkey_hex);
+        eprintln!("zorro-desktop: imported identity pubkey {}", pubkey_hex);
 
         Ok(IdentityInfo {
             pubkey: pubkey_hex,
@@ -442,7 +442,7 @@ fn commit_imported_identity(
     // per the ordering contract above.
     if let Err(e) = crate::key_backup::cleanup_stale_backup(&previous_pubkey, &pubkey, data_dir) {
         eprintln!(
-            "buzz-desktop: import committed, but stale key backup cleanup failed: {e}; \
+            "zorro-desktop: import committed, but stale key backup cleanup failed: {e}; \
              the leftover identity.ncryptsec encrypts the PREVIOUS key and will be \
              replaced by the next backup creation"
         );
@@ -544,7 +544,7 @@ pub async fn sign_out(app: tauri::AppHandle) -> Result<(), String> {
 
     // Stop all managed agents before restart so they don't race the wipe.
     if let Err(e) = crate::shutdown::shutdown_managed_agents(&app) {
-        eprintln!("buzz-desktop sign-out: agent shutdown: {e}");
+        eprintln!("zorro-desktop sign-out: agent shutdown: {e}");
     }
 
     // Write the reset sentinel — destruction happens on next boot.

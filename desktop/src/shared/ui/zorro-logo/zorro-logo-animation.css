@@ -1,0 +1,94 @@
+.zorro-logo {
+  display: grid;
+  place-items: center;
+  inline-size: fit-content;
+}
+
+.zorro-logo--screen {
+  min-block-size: 100vh;
+  inline-size: 100%;
+  overflow: hidden;
+}
+
+.zorro-logo--background {
+  background-color: #ff931f;
+  background-image:
+    radial-gradient(circle, rgb(122 1 3 / 0.14) 1.2px, transparent 1.3px),
+    linear-gradient(145deg, #ffb950 0%, #ff931f 48%, #ec3f13 100%);
+  background-position: 0 0;
+  background-size:
+    37px 37px,
+    auto;
+}
+
+.zorro-logo__mark {
+  display: block;
+  inline-size: min(466px, calc(100vw - 32px));
+  block-size: auto;
+  overflow: visible;
+}
+
+.zorro-logo--compact {
+  inline-size: 1.5rem;
+}
+
+.zorro-logo--compact .zorro-logo__mark {
+  inline-size: 100%;
+  block-size: auto;
+  max-inline-size: 100%;
+}
+
+.zorro-logo__ink {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.zorro-logo--loop .zorro-logo__ink {
+  animation: zorro-logo-strike var(--zorro-logo-cycle, 1.1s)
+    cubic-bezier(0.16, 1, 0.3, 1) infinite;
+}
+
+.zorro-logo--reverse .zorro-logo__ink {
+  animation-direction: reverse;
+}
+
+@keyframes zorro-logo-strike {
+  0% {
+    opacity: 0;
+    transform: translateX(-8%) skewX(-8deg);
+  }
+  42%,
+  76% {
+    opacity: 1;
+    transform: translateX(0) skewX(0deg);
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(5%) skewX(4deg);
+  }
+}
+
+@keyframes zorro-logo-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.zorro-logo--pulse .zorro-logo__mark {
+  animation: zorro-logo-pulse 1.8s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .zorro-logo animate {
+    display: none;
+  }
+
+  .zorro-logo--pulse .zorro-logo__mark {
+    animation: none;
+    opacity: 0.8;
+  }
+}

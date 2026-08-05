@@ -35,7 +35,7 @@ test("extractConfigNudge parses env_key requirement", () => {
     "**Fizz** needs configuration before it can respond:",
     "- set `ANTHROPIC_API_KEY` in Edit Agent → Environment variables",
     "",
-    "Open Edit Agent in the Buzz app to set these.",
+    "Open Edit Agent in the Zorro app to set these.",
     "",
     "```buzz:config-nudge",
     JSON.stringify(payload),
@@ -56,7 +56,7 @@ test("extractConfigNudge parses normalized_field requirement", () => {
 
 test("extractConfigNudge parses git_bash requirement", () => {
   const payload = {
-    agent_name: "Buzz Agent",
+    agent_name: "Zorro Agent",
     agent_pubkey: ATLAS_PUBKEY,
     requirements: [{ surface: "git_bash" }],
   };
@@ -374,7 +374,7 @@ test("authGuard_signerIsHuman_tagAttributedToAgent_returnsNull", () => {
 
 test("nudgePresent_extractNonNull_and_stripRemovesSentinel", () => {
   const prose =
-    "**Fizz** needs configuration before it can respond:\n- set `ANTHROPIC_API_KEY` in Edit Agent → Environment variables\n\nOpen Edit Agent in the Buzz app to set these.";
+    "**Fizz** needs configuration before it can respond:\n- set `ANTHROPIC_API_KEY` in Edit Agent → Environment variables\n\nOpen Edit Agent in the Zorro app to set these.";
   const payload = {
     agent_name: "Fizz",
     agent_pubkey: FIZZ_PUBKEY,

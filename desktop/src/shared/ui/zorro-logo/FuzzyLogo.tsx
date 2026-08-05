@@ -1,7 +1,7 @@
 import { cn } from "@/shared/lib/cn";
-import BuzzLogoAnimation, {
-  type BuzzLogoAnimationProps,
-} from "./BuzzLogoAnimation";
+import ZorroLogoAnimation, {
+  type ZorroLogoAnimationProps,
+} from "./ZorroLogoAnimation";
 
 export type FuzzyLogoProps = {
   /** When false, skips the looping feTurbulence texture filter and uses a CSS pulse instead. */
@@ -14,18 +14,18 @@ export type FuzzyLogoProps = {
   /** Set false when a parent drives its own opacity animation over the mark. */
   pulse?: boolean;
   reverse?: boolean;
-  variant?: BuzzLogoAnimationProps["variant"];
+  variant?: ZorroLogoAnimationProps["variant"];
 };
 
 /**
- * The fuzzy Buzz mark. v8 ships a built-in animated texture (looping fractal-noise
+ * The fuzzy Zorro mark. v8 ships a built-in animated texture (looping fractal-noise
  * turbulence + grain) applied via an SVG filter. Set `fuzz={false}` to render the
  * crisp geometry with a lightweight CSS pulse — recommended for long-lived mounts.
  */
 export function FuzzyLogo({
   fuzz = true,
   className,
-  ariaLabel = "Buzz logo",
+  ariaLabel = "Zorro logo",
   loop = false,
   loopRestSeconds = 0,
   pulse = true,
@@ -37,10 +37,10 @@ export function FuzzyLogo({
   const hasRestWindow = loop && loopRestSeconds > 0;
 
   return (
-    <BuzzLogoAnimation
+    <ZorroLogoAnimation
       ariaLabel={ariaLabel}
       className={cn(
-        pulse && !fuzz && !hasRestWindow && "buzz-logo--pulse",
+        pulse && !fuzz && !hasRestWindow && "zorro-logo--pulse",
         className,
       )}
       fullScreen={false}

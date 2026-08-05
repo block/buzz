@@ -5,6 +5,7 @@
  */
 
 const MESSAGE_LINK_SCHEME = "buzz:";
+const SUPPORTED_MESSAGE_LINK_SCHEMES = new Set(["buzz:", "zorro:"]);
 const MESSAGE_LINK_HOST = "message";
 
 export type MessageLinkInput = {
@@ -67,7 +68,7 @@ export function parseMessageLink(url: string): MessageLinkParseResult {
     return { ok: false, reason: "invalid-url" };
   }
 
-  if (parsed.protocol !== MESSAGE_LINK_SCHEME) {
+  if (!SUPPORTED_MESSAGE_LINK_SCHEMES.has(parsed.protocol)) {
     return { ok: false, reason: "wrong-scheme" };
   }
   // `new URL("buzz://message?…")` puts "message" in `hostname`.
@@ -100,7 +101,10 @@ export function parseMessageLink(url: string): MessageLinkParseResult {
  */
 export function isMessageLink(href: string | undefined | null): boolean {
   if (!href) return false;
-  return href.startsWith("buzz://message?") || href === "buzz://message";
+  return ["buzz", "zorro"].some(
+    (scheme) =>
+      href.startsWith(`${scheme}://message?`) || href === `${scheme}://message`,
+  );
 }
 
 type MessageLinkRenderInput = {

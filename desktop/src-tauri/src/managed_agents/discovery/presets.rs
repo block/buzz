@@ -92,7 +92,7 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         command: "devin",
         args: &["acp"],
         install_instructions_url: "https://docs.devin.ai/cli",
-        install_hint: "Buzz talks to Devin through the official Devin CLI's ACP mode (devin acp).",
+        install_hint: "Zorro talks to Devin through the official Devin CLI's ACP mode (devin acp).",
         underlying_cli: None,
     },
     PresetHarness {
@@ -101,7 +101,7 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         command: "cursor-agent",
         args: &["acp"],
         install_instructions_url: "https://cursor.com/downloads",
-        install_hint: "Buzz talks to Cursor through the cursor-agent CLI's ACP mode.",
+        install_hint: "Zorro talks to Cursor through the cursor-agent CLI's ACP mode.",
         underlying_cli: None,
     },
     PresetHarness {
@@ -110,7 +110,7 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         command: "omp",
         args: &["acp"],
         install_instructions_url: "https://omp.sh/",
-        install_hint: "Buzz talks to Oh My Pi through its CLI's ACP mode (omp acp).",
+        install_hint: "Zorro talks to Oh My Pi through its CLI's ACP mode (omp acp).",
         underlying_cli: None,
     },
     PresetHarness {
@@ -119,7 +119,7 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         command: "grok",
         args: &["agent", "--always-approve", "stdio"],
         install_instructions_url: "https://build.x.ai/docs",
-        install_hint: "Buzz talks to Grok Build through its CLI's agent stdio mode.",
+        install_hint: "Zorro talks to Grok Build through its CLI's agent stdio mode.",
         underlying_cli: None,
     },
     PresetHarness {
@@ -128,7 +128,7 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         command: "opencode",
         args: &["acp"],
         install_instructions_url: "https://opencode.ai/docs",
-        install_hint: "Buzz talks to OpenCode through its CLI's ACP mode (opencode acp).",
+        install_hint: "Zorro talks to OpenCode through its CLI's ACP mode (opencode acp).",
         underlying_cli: None,
     },
     PresetHarness {
@@ -137,7 +137,7 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         command: "kimi",
         args: &["acp"],
         install_instructions_url: "https://kimi.ai/download",
-        install_hint: "Buzz talks to Kimi Code through its CLI's ACP mode (kimi acp).",
+        install_hint: "Zorro talks to Kimi Code through its CLI's ACP mode (kimi acp).",
         underlying_cli: None,
     },
     PresetHarness {
@@ -146,7 +146,7 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         command: "amp-acp",
         args: &[],
         install_instructions_url: "https://github.com/tao12345666333/amp-acp",
-        install_hint: "Buzz talks to the Amp CLI through the amp-acp adapter. Follow the setup guide to install the adapter so the amp-acp command is on your PATH.",
+        install_hint: "Zorro talks to the Amp CLI through the amp-acp adapter. Follow the setup guide to install the adapter so the amp-acp command is on your PATH.",
         underlying_cli: Some("amp"),
     },
     PresetHarness {
@@ -155,7 +155,7 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         command: "hermes-acp",
         args: &[],
         install_instructions_url: "https://hermes-agent.nousresearch.com",
-        install_hint: "Buzz talks to Hermes Agent through its hermes-acp command.",
+        install_hint: "Zorro talks to Hermes Agent through its hermes-acp command.",
         underlying_cli: None,
     },
     PresetHarness {
@@ -164,7 +164,7 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         command: "openclaw",
         args: &["acp"],
         install_instructions_url: "https://docs.openclaw.ai/start/getting-started",
-        install_hint: "Buzz talks to OpenClaw through its ACP mode (openclaw acp), which relies on the OpenClaw Gateway daemon. Follow the setup guide to install both.\n\n\
+        install_hint: "Zorro talks to OpenClaw through its ACP mode (openclaw acp), which relies on the OpenClaw Gateway daemon. Follow the setup guide to install both.\n\n\
             ⚠️  Execution-locus note: `openclaw acp` runs tools inside the \
             OpenClaw Gateway daemon, not in the Desktop process. \
             Desktop-injected BUZZ_* env vars are visible to the `openclaw` \

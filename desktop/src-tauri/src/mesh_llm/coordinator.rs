@@ -341,7 +341,7 @@ async fn reconcile_roster(
     }
     drop(guard);
     eprintln!(
-        "buzz-mesh: membership roster changed; restarting Buzz to rebuild MeshLLM with the fresh community allowlist"
+        "buzz-mesh: membership roster changed; restarting Zorro to rebuild MeshLLM with the fresh community allowlist"
     );
     app.request_restart();
     Ok(())

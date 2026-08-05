@@ -70,6 +70,16 @@ test("parseInviteInput_buzz_join_with_wss_relay_returns_relay_and_code", () => {
   });
 });
 
+test("parseInviteInput_zorro_join_with_wss_relay_returns_relay_and_code", () => {
+  const result = parseInviteInput(
+    "zorro://join?relay=wss://relay.example.com&code=abc123",
+  );
+  assert.deepEqual(result, {
+    relayWsUrl: "wss://relay.example.com",
+    code: "abc123",
+  });
+});
+
 test("parseInviteInput_buzz_join_with_ws_relay_returns_relay_and_code", () => {
   const result = parseInviteInput(
     "buzz://join?relay=ws://localhost:3000&code=testcode",

@@ -124,8 +124,8 @@ FROM debian:${DEBIAN_VERSION}-slim AS runtime-base
 # OCI annotations: required for GHCR to auto-link the image to this repo and
 # inherit its visibility. org.opencontainers.image.source is the load-bearing
 # one — without it GHCR keeps the image private even when the repo is public.
-LABEL org.opencontainers.image.title="Buzz" \
-      org.opencontainers.image.description="WebSocket relay server for the Buzz communications platform" \
+LABEL org.opencontainers.image.title="Zorro" \
+      org.opencontainers.image.description="WebSocket relay server for the Zorro communications platform" \
       org.opencontainers.image.source="https://github.com/block/buzz" \
       org.opencontainers.image.url="https://github.com/block/buzz" \
       org.opencontainers.image.documentation="https://github.com/block/buzz#readme" \

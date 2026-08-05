@@ -13,7 +13,7 @@ const live = [
   { id: "mesh/model", label: "mesh/model" },
 ];
 
-test("Buzz shared compute maps persisted auto to Default and hides custom input", () => {
+test("Zorro shared compute maps persisted auto to Default and hides custom input", () => {
   const state = relayMeshModelPickerState({
     discoveredOptions: live,
     fallbackOptions: fallback,
@@ -27,7 +27,7 @@ test("Buzz shared compute maps persisted auto to Default and hides custom input"
   assert.equal(state.showCustomInput, false);
 });
 
-test("Buzz shared compute fallback is Default auto while normal providers remain unchanged", () => {
+test("Zorro shared compute fallback is Default auto while normal providers remain unchanged", () => {
   const mesh = relayMeshModelPickerState({
     discoveredOptions: null,
     fallbackOptions: fallback,
@@ -50,7 +50,7 @@ test("Buzz shared compute fallback is Default auto while normal providers remain
   assert.equal(openai.showCustomInput, true);
 });
 
-test("Buzz shared compute keeps Default auto when discovery is empty", () => {
+test("Zorro shared compute keeps Default auto when discovery is empty", () => {
   const state = relayMeshModelPickerState({
     discoveredOptions: [],
     fallbackOptions: fallback,
@@ -66,7 +66,7 @@ test("Buzz shared compute keeps Default auto when discovery is empty", () => {
   assert.equal(state.showCustomInput, false);
 });
 
-test("Buzz shared compute dropdown contains Default plus live models and no custom escape hatch", () => {
+test("Zorro shared compute dropdown contains Default plus live models and no custom escape hatch", () => {
   const options = modelDropdownOptions({
     options: live,
     loading: false,

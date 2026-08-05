@@ -37,7 +37,7 @@ PY
   rm -f msg
   git add .
   cat >msg <<'EOF'
-chore(release): release Buzz Desktop version 1.0.1
+chore(release): release Zorro Desktop version 1.0.1
 
 Co-authored-by: Test Automation <test@example.com>
 EOF

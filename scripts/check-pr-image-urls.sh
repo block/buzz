@@ -31,7 +31,7 @@ fi
 
 if [[ -s "$tmp_matches" ]]; then
   matches=$(sort -u "$tmp_matches")
-  echo "error: PR markdown contains Buzz/relay media URLs that may not render on GitHub:" >&2
+  echo "error: PR markdown contains Zorro/relay media URLs that may not render on GitHub:" >&2
   printf '%s\n' "$matches" >&2
   echo >&2
   echo "Upload screenshots with scripts/post-screenshots.sh, then use its GitHub-safe image URLs in the PR body/comment." >&2

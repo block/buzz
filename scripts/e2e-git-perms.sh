@@ -347,7 +347,7 @@ RELAY_PID=$!
 
 # Wait for relay to be ready (poll, not sleep)
 for i in $(seq 1 "$RELAY_STARTUP_TIMEOUT"); do
-    if curl -sf --max-time 2 "${RELAY_HTTP}/" -H "Accept: application/nostr+json" | grep -q "Buzz"; then
+    if curl -sf --max-time 2 "${RELAY_HTTP}/" -H "Accept: application/nostr+json" | grep -q "Zorro"; then
         break
     fi
     if [[ $i -eq "$RELAY_STARTUP_TIMEOUT" ]]; then
@@ -448,7 +448,7 @@ cat > "$BOT1_DIR/index.html" << 'HTML'
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Buzz E2E Test Page</title>
+    <title>Zorro E2E Test Page</title>
     <style>
         body { font-family: system-ui; max-width: 800px; margin: 0 auto; padding: 2rem; }
         h1 { color: #2d5016; }
@@ -456,8 +456,8 @@ cat > "$BOT1_DIR/index.html" << 'HTML'
     </style>
 </head>
 <body>
-    <h1>🐝 Buzz Collaborative Page</h1>
-    <p>This page was created by two bots collaborating via Buzz's git server.</p>
+    <h1>🐝 Zorro Collaborative Page</h1>
+    <p>This page was created by two bots collaborating via Zorro's git server.</p>
     <div class="contributor">
         <strong>Bot 1</strong> — Created the initial page structure
     </div>
@@ -491,7 +491,7 @@ sed -i.bak '/<\/body>/i\
         <strong>Bot 2</strong> — Added this section (pushing as bot role → promoted to member)\
     </div>\
     <footer>\
-        <p><em>Built with Buzz sovereign git hosting</em></p>\
+        <p><em>Built with Zorro sovereign git hosting</em></p>\
     </footer>' "$BOT2_DIR/index.html"
 rm -f "$BOT2_DIR/index.html.bak"
 

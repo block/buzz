@@ -208,9 +208,9 @@ jobs:
           EXTRACT_DIR="${RUNNER_TEMP}/signed-app-extract"
           rm -rf "$EXTRACT_DIR" && mkdir -p "$EXTRACT_DIR"
           ditto -x -k "$SIGNED_APP_ZIP" "$EXTRACT_DIR"
-          codesign --verify --deep --strict --verbose=2 "$EXTRACT_DIR/Buzz.app"
-          spctl --assess --type execute --verbose=4 "$EXTRACT_DIR/Buzz.app"
-          desktop/scripts/verify-macos-entitlements.sh "$EXTRACT_DIR/Buzz.app"
+          codesign --verify --deep --strict --verbose=2 "$EXTRACT_DIR/Zorro.app"
+          spctl --assess --type execute --verbose=4 "$EXTRACT_DIR/Zorro.app"
+          desktop/scripts/verify-macos-entitlements.sh "$EXTRACT_DIR/Zorro.app"
 
       - name: Stage signed DMG
         id: artifact

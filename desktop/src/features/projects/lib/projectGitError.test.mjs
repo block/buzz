@@ -14,7 +14,7 @@ test("explains unsupported authenticated GitHub clones without exposing git outp
     {
       title: "Repository access required",
       description:
-        "This repository requires GitHub authentication. Buzz currently clones public GitHub repositories without credentials.",
+        "This repository requires GitHub authentication. Zorro currently clones public GitHub repositories without credentials.",
     },
   );
 });

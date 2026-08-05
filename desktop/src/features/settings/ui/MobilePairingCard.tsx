@@ -113,7 +113,7 @@ function PairingStatusDialog({
                     </p>
                   </div>
                   <p className="text-center text-xs text-muted-foreground">
-                    You are about to transfer your Buzz identity to another
+                    You are about to transfer your Zorro identity to another
                     device. Only confirm if you initiated this pairing.
                   </p>
                 </div>
@@ -333,9 +333,9 @@ export function MobilePairingCard({
         title="Mobile"
         description={
           <>
-            Connect the Buzz mobile app to this relay by scanning a QR code. The
-            connection is secured with end-to-end encryption and a verification
-            code.
+            Connect the Zorro mobile app to this relay by scanning a QR code.
+            The connection is secured with end-to-end encryption and a
+            verification code.
           </>
         }
       />

@@ -29,7 +29,7 @@ Original recordings: Voice Cloning Toolkit (VCTK) corpus,
 https://datashare.ed.ac.uk/handle/10283/3443 (CC-BY-4.0).
 Enhancement (denoise/dereverb): ai-coustics, https://ai-coustics.com/
 
-Buzz ships the ONNX/model artifacts and voice WAVs unmodified, renamed only
+Zorro ships the ONNX/model artifacts and voice WAVs unmodified, renamed only
 by placement in the local model directory.
 
 Provided \"AS IS\", without warranty of any kind, express or implied. See the

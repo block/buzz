@@ -15,6 +15,44 @@ const NCRYPTSEC =
 
 test.use({ viewport: { width: 1280, height: 800 } });
 
+test("floating landing hats disappear with a slash on hover", async ({
+  page,
+}) => {
+  await installMockBridge(page, undefined, {
+    skipCommunitySeed: true,
+    skipOnboardingSeed: true,
+  });
+  await page.goto("/");
+
+  const floatingHat = page.getByTestId("landing-floating-hat-0");
+  await expect(floatingHat).toBeVisible();
+  await floatingHat.hover({ force: true });
+
+  const animationNames = await floatingHat.evaluate((element) =>
+    Array.from(element.querySelectorAll<HTMLElement>("[class*='__']")).map(
+      (part) => getComputedStyle(part).animationName,
+    ),
+  );
+  expect(animationNames).toEqual([
+    "zorro-hat-slice-top",
+    "zorro-hat-slice-bottom",
+    "zorro-hat-slash",
+  ]);
+
+  await page.waitForTimeout(650);
+  await expect(
+    floatingHat.locator(".zorro-slashable-hat__piece").first(),
+  ).toHaveCSS("opacity", "0");
+  await expect(
+    floatingHat.locator(".zorro-slashable-hat__piece").last(),
+  ).toHaveCSS("opacity", "0");
+
+  await page.mouse.move(640, 760);
+  await expect(
+    floatingHat.locator(".zorro-slashable-hat__piece").first(),
+  ).toHaveCSS("opacity", "1");
+});
+
 test("machine onboarding: landing, backup, setup docked CTAs", async ({
   page,
 }) => {
@@ -84,7 +122,7 @@ test("machine onboarding: landing, backup, setup docked CTAs", async ({
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOT_DIR}/02b-backup-revealed.png` });
 
-  // Backup options leave the yellow flow for the dark security view without
+  // Backup options leave the light setup flow for the dark security view without
   // adding a progress step or a generic Next action.
   await page.getByTestId("backup-options-link").click();
   await expect(

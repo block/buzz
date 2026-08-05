@@ -115,7 +115,7 @@ class BuzzContainerRuntime:
         orchestrator = next(c for c in trial.credentials if c.role == "orchestrator")
         workers = [c for c in trial.credentials if c.agent_id != orchestrator.agent_id]
         if not workers:
-            raise RuntimeLaunchError("Buzz orchestration requires at least one worker")
+            raise RuntimeLaunchError("Zorro orchestration requires at least one worker")
         trial_dir = self.logs_dir / "buzz"
         trial_dir.mkdir(parents=True, exist_ok=True)
 
@@ -634,7 +634,7 @@ class BuzzContainerRuntime:
             "## Your team",
             "",
             f"You are `{credential.agent_id}` (pubkey `{credential.nostr_pubkey}`).",
-            f"The team coordinates in Buzz channel `{trial.channel_id}`.",
+            f"The team coordinates in Zorro channel `{trial.channel_id}`.",
             (
                 f"Tasks come from the user `{trial.user.agent_id}` "
                 f"(pubkey `{trial.user.nostr_pubkey}`); address your final report "

@@ -128,7 +128,7 @@ pub(crate) fn replace_with_symlink(src: &std::path::Path, dst: &std::path::Path)
         // Wrong or broken symlink — remove and replace, no backup.
         if let Err(e) = std::fs::remove_file(dst) {
             eprintln!(
-                "buzz-desktop: symlink-util: failed to remove stale symlink {}: {e}",
+                "zorro-desktop: symlink-util: failed to remove stale symlink {}: {e}",
                 dst.display()
             );
             // Fall through — create_symlink will surface EEXIST.
@@ -138,20 +138,20 @@ pub(crate) fn replace_with_symlink(src: &std::path::Path, dst: &std::path::Path)
         let label = if dst.is_dir() { "dir" } else { "file" };
         let Some(bak) = backup_path(dst) else {
             eprintln!(
-                "buzz-desktop: symlink-util: all backup paths occupied for {}; skipping",
+                "zorro-desktop: symlink-util: all backup paths occupied for {}; skipping",
                 dst.display()
             );
             return 0;
         };
         match std::fs::rename(dst, &bak) {
             Ok(()) => eprintln!(
-                "buzz-desktop: symlink-util: backed up real {label} {} → {}",
+                "zorro-desktop: symlink-util: backed up real {label} {} → {}",
                 dst.display(),
                 bak.display()
             ),
             Err(e) => {
                 eprintln!(
-                    "buzz-desktop: symlink-util: failed to back up {label} {}: {e}",
+                    "zorro-desktop: symlink-util: failed to back up {label} {}: {e}",
                     dst.display()
                 );
                 return 0;
@@ -160,13 +160,13 @@ pub(crate) fn replace_with_symlink(src: &std::path::Path, dst: &std::path::Path)
         // Backup succeeded — attempt symlink creation.
         if let Err(e) = create_symlink(src, dst) {
             eprintln!(
-                "buzz-desktop: symlink-util: failed to symlink {} → {}: {e}; attempting rollback",
+                "zorro-desktop: symlink-util: failed to symlink {} → {}: {e}; attempting rollback",
                 dst.display(),
                 src.display()
             );
             if let Err(rb_err) = std::fs::rename(&bak, dst) {
                 eprintln!(
-                    "buzz-desktop: symlink-util: ROLLBACK FAILED ({rb_err}) — \
+                    "zorro-desktop: symlink-util: ROLLBACK FAILED ({rb_err}) — \
                      {dst_disp} is still at {bak_disp}; \
                      restore it manually: `mv {bak_disp} {dst_disp}`",
                     dst_disp = dst.display(),
@@ -183,7 +183,7 @@ pub(crate) fn replace_with_symlink(src: &std::path::Path, dst: &std::path::Path)
         Ok(()) => 1,
         Err(e) => {
             eprintln!(
-                "buzz-desktop: symlink-util: failed to symlink {} → {}: {e}",
+                "zorro-desktop: symlink-util: failed to symlink {} → {}: {e}",
                 dst.display(),
                 src.display()
             );

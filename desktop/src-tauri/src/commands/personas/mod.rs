@@ -200,7 +200,7 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
                         .lock()
                         .map_err(|error| error.to_string())?;
                     if let Err(e) = stop_managed_agent_process(&app, rec, &mut runtimes) {
-                        eprintln!("buzz-desktop: delete_persona: failed to stop agent {pk}: {e}");
+                        eprintln!("zorro-desktop: delete_persona: failed to stop agent {pk}: {e}");
                     }
                     // runtimes drops here (per-agent, process lock not held across stops).
                 }

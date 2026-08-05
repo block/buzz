@@ -412,7 +412,7 @@ fn owner_roster_rejects_spoofed_owner_id_and_cross_member_binding() {
     let events = vec![spoofed_owner, cross_member_binding, membership];
     assert!(
         super::owner_ids_from_events(&events).is_empty(),
-        "a Buzz member must not be able to advertise an unproven MeshLLM owner identity"
+        "a Zorro member must not be able to advertise an unproven MeshLLM owner identity"
     );
     assert!(
         super::availability_from_events(events)

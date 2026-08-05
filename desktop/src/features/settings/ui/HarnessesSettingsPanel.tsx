@@ -114,7 +114,7 @@ export function HarnessesSettingsPanel() {
       <SectionHeader
         className="items-center"
         title="Agent runtimes"
-        description="Choose which agent tools Buzz can use on this device."
+        description="Choose which agent tools Zorro can use on this device."
         action={
           <Button
             disabled={isRefreshing}

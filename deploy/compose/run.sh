@@ -100,7 +100,7 @@ case "${1:-help}" in
 Usage: ./run.sh <command>
 
 Commands:
-  start         Start Buzz with docker compose up -d --wait
+  start         Start Zorro with docker compose up -d --wait
   stop          Stop containers without deleting volumes
   restart       Recreate the relay after env/image changes
   pull          Pull configured images

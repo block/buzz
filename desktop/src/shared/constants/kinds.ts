@@ -90,7 +90,7 @@ export const HOME_MENTION_EVENT_KINDS = [...CHANNEL_MESSAGE_EVENT_KINDS];
 export const CHANNEL_EVENT_KINDS = [
   KIND_DELETION, // 5 — NIP-09 event deletions
   KIND_REACTION, // 7 — NIP-25 reactions
-  KIND_NIP29_DELETE_EVENT, // 9005 — NIP-29 / Buzz-native deletions
+  KIND_NIP29_DELETE_EVENT, // 9005 — NIP-29 / Zorro-native deletions
   ...CHANNEL_MESSAGE_EVENT_KINDS,
   40001, // legacy: pre-migration stream messages
   KIND_STREAM_MESSAGE_EDIT, // 40003 — message edits
@@ -114,7 +114,7 @@ export const CHANNEL_EVENT_KINDS = [
 export const CHANNEL_AUX_EVENT_KINDS = [
   KIND_DELETION, // 5 — NIP-09 event deletions
   KIND_REACTION, // 7 — NIP-25 reactions
-  KIND_NIP29_DELETE_EVENT, // 9005 — NIP-29 / Buzz-native deletions
+  KIND_NIP29_DELETE_EVENT, // 9005 — NIP-29 / Zorro-native deletions
   KIND_STREAM_MESSAGE_EDIT, // 40003 — message edits
 ] as const;
 

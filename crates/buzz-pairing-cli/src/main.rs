@@ -319,7 +319,7 @@ async fn cmd_target(relay_override: Option<String>, show_secret: bool) -> Result
     };
     println!("Received {kind_label} payload!");
     if show_secret {
-        println!("{kind_label}: {}", &*payload);
+        println!("{kind_label}: {}", *payload);
     } else {
         println!("(use --show-secret to display the received secret)");
     }

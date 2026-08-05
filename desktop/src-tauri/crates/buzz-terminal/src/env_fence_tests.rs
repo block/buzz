@@ -129,7 +129,7 @@ fn fence_still_delivers_the_terminal_contract() {
     seed_secrets();
     let out = fenced_child_environment();
 
-    for (key, value) in [("TERM", "xterm-256color"), ("TERM_PROGRAM", "Buzz")] {
+    for (key, value) in [("TERM", "xterm-256color"), ("TERM_PROGRAM", "Zorro")] {
         assert!(
             out.lines().any(|line| line == format!("{key}={value}")),
             "{key} missing from child environment:\n{out}"
@@ -195,7 +195,7 @@ fn child_path_is_free_of_buzz_toolchain() {
         .expect("child has a PATH");
     assert!(
         !path_line.contains("buzz-terminal-path-canary"),
-        "Buzz's toolchain leaked into the child PATH: {path_line}"
+        "Zorro's toolchain leaked into the child PATH: {path_line}"
     );
 
     // The reachability arm: run `command -v` for the canary inside the fence.
@@ -205,7 +205,7 @@ fn child_path_is_free_of_buzz_toolchain() {
     );
     assert!(
         resolved.contains("CANARY_UNREACHABLE"),
-        "a Buzz-only executable was reachable from the child shell: {resolved}"
+        "a Zorro-only executable was reachable from the child shell: {resolved}"
     );
 }
 

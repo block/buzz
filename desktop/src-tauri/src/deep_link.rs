@@ -6,6 +6,14 @@ use url::Url;
 
 use crate::nostr_bind;
 
+pub(crate) fn is_supported_deep_link_url(value: &str) -> bool {
+    value.starts_with("buzz://") || value.starts_with("zorro://")
+}
+
+fn is_supported_deep_link_scheme(scheme: &str) -> bool {
+    matches!(scheme, "buzz" | "zorro")
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PendingCommunityDeepLink {
@@ -94,13 +102,13 @@ fn activate_main_window(app: &tauri::AppHandle) {
     };
 
     if let Err(error) = window.unminimize() {
-        eprintln!("buzz-desktop: failed to unminimize main window for deep link: {error}");
+        eprintln!("zorro-desktop: failed to unminimize main window for deep link: {error}");
     }
     if let Err(error) = window.show() {
-        eprintln!("buzz-desktop: failed to show main window for deep link: {error}");
+        eprintln!("zorro-desktop: failed to show main window for deep link: {error}");
     }
     if let Err(error) = window.set_focus() {
-        eprintln!("buzz-desktop: failed to focus main window for deep link: {error}");
+        eprintln!("zorro-desktop: failed to focus main window for deep link: {error}");
     }
 }
 
@@ -299,20 +307,20 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
     let url = match Url::parse(url_str) {
         Ok(u) => u,
         Err(e) => {
-            eprintln!("buzz-desktop: invalid deep link URL {url_str:?}: {e}");
+            eprintln!("zorro-desktop: invalid deep link URL {url_str:?}: {e}");
             return;
         }
     };
 
-    if url.scheme() != "buzz" {
-        eprintln!("buzz-desktop: ignoring unsupported deep link scheme: {url_str}");
+    if !is_supported_deep_link_scheme(url.scheme()) {
+        eprintln!("zorro-desktop: ignoring unsupported deep link scheme: {url_str}");
         return;
     }
 
     match url.host_str() {
         Some("connect") => {
             let Some(relay_url) = parse_websocket_relay_param(&url) else {
-                eprintln!("buzz-desktop: connect deep link missing/invalid relay: {url_str}");
+                eprintln!("zorro-desktop: connect deep link missing/invalid relay: {url_str}");
                 return;
             };
             activate_main_window(app);
@@ -324,7 +332,7 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
             // the relay's /invite/<code> landing page. The frontend claims the
             // invite against the relay's HTTP API, then adds the workspace.
             let Some(payload) = parse_join_deep_link(&url) else {
-                eprintln!("buzz-desktop: join deep link missing/invalid relay or code: {url_str}");
+                eprintln!("zorro-desktop: join deep link missing/invalid relay or code: {url_str}");
                 return;
             };
             activate_main_window(app);
@@ -336,7 +344,9 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
         }
         Some("add-community") => {
             let Some(payload) = parse_add_community_deep_link(&url) else {
-                eprintln!("buzz-desktop: add-community deep link missing/invalid relay: {url_str}");
+                eprintln!(
+                    "zorro-desktop: add-community deep link missing/invalid relay: {url_str}"
+                );
                 return;
             };
             activate_main_window(app);
@@ -360,7 +370,7 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
             // structure on this side (serde JSON) and let the TS code own
             // any further normalisation.
             let Some(payload) = parse_message_deep_link(&url) else {
-                eprintln!("buzz-desktop: message deep link missing channel or id: {url_str}");
+                eprintln!("zorro-desktop: message deep link missing channel or id: {url_str}");
                 return;
             };
             activate_main_window(app);
@@ -372,14 +382,14 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
                 let _ = app.emit("deep-link-nostr-bind", payload);
             }
             Err(error) => {
-                eprintln!("buzz-desktop: rejecting nostr-bind deep link: {error}: {url_str}");
+                eprintln!("zorro-desktop: rejecting nostr-bind deep link: {error}: {url_str}");
             }
         },
         Some(action) => {
-            eprintln!("buzz-desktop: unknown deep link action: {action}");
+            eprintln!("zorro-desktop: unknown deep link action: {action}");
         }
         None => {
-            eprintln!("buzz-desktop: deep link missing action: {url_str}");
+            eprintln!("zorro-desktop: deep link missing action: {url_str}");
         }
     }
 }
@@ -389,9 +399,19 @@ mod tests {
     use url::Url;
 
     use super::{
-        parse_add_community_deep_link, parse_join_deep_link, parse_message_deep_link,
-        parse_nostr_bind_deep_link, PendingCommunityDeepLink, PendingCommunityDeepLinks,
+        is_supported_deep_link_scheme, is_supported_deep_link_url, parse_add_community_deep_link,
+        parse_join_deep_link, parse_message_deep_link, parse_nostr_bind_deep_link,
+        PendingCommunityDeepLink, PendingCommunityDeepLinks,
     };
+
+    #[test]
+    fn supports_zorro_and_legacy_buzz_schemes() {
+        assert!(is_supported_deep_link_scheme("zorro"));
+        assert!(is_supported_deep_link_scheme("buzz"));
+        assert!(is_supported_deep_link_url("zorro://message?channel=a&id=b"));
+        assert!(is_supported_deep_link_url("buzz://message?channel=a&id=b"));
+        assert!(!is_supported_deep_link_url("https://example.com"));
+    }
 
     fn pending(id: &str, relay_url: &str, code: Option<&str>) -> PendingCommunityDeepLink {
         PendingCommunityDeepLink {

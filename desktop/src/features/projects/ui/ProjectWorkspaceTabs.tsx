@@ -530,7 +530,7 @@ export function WorkspaceTabs({
           sourceControls={sourceControls}
           unavailableMessage={
             externalHost
-              ? `Not mirrored on Buzz. Repository files are hosted on ${externalHost}.`
+              ? `Not mirrored on Zorro. Repository files are hosted on ${externalHost}.`
               : undefined
           }
         />

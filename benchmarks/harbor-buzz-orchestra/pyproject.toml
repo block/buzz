@@ -1,7 +1,7 @@
 [project]
 name = "harbor-buzz-orchestra"
 version = "0.1.0"
-description = "Harbor custom agent for Buzz-coordinated multi-agent benchmarks"
+description = "Harbor custom agent for Zorro-coordinated multi-agent benchmarks"
 requires-python = ">=3.12"
 dependencies = [
     "harbor>=0.16.1,<0.18",

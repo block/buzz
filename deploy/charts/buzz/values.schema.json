@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Buzz Helm chart values",
+  "title": "Zorro Helm chart values",
   "description": "Schema for values.yaml. Catches misconfiguration at `helm install` time before _validate.tpl runtime fails. Both layers are intentional: schema rejects malformed inputs; templates reject inconsistent combinations.",
   "type": "object",
   "additionalProperties": true,

@@ -17,7 +17,7 @@ function entry(overrides) {
     providerEnvVar: null,
     thinkingEnvVar: null,
     installHint:
-      "Buzz talks to the Amp CLI through the amp-acp adapter. Follow the setup guide to install the adapter so the amp-acp command is on your PATH.",
+      "Zorro talks to the Amp CLI through the amp-acp adapter. Follow the setup guide to install the adapter so the amp-acp command is on your PATH.",
     installInstructionsUrl: "https://example.com",
     canAutoInstall: false,
     requiresExternalCli: false,
@@ -44,7 +44,7 @@ test("not-installed warning includes the install hint", () => {
   const warning = runtimeAvailabilityWarning(entry({}));
   assert.equal(
     warning,
-    "Amp is not installed. Buzz talks to the Amp CLI through the amp-acp adapter. Follow the setup guide to install the adapter so the amp-acp command is on your PATH.",
+    "Amp is not installed. Zorro talks to the Amp CLI through the amp-acp adapter. Follow the setup guide to install the adapter so the amp-acp command is on your PATH.",
   );
 });
 

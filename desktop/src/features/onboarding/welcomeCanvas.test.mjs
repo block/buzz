@@ -10,7 +10,7 @@ test("welcome canvas covers purpose, agent use, a first challenge, and help", ()
   assert.match(WELCOME_CANVAS_CONTENT, /private channel is your home base/i);
   assert.match(WELCOME_CANVAS_CONTENT, /Mention an agent/i);
   assert.match(WELCOME_CANVAS_CONTENT, /quick challenge/i);
-  assert.match(WELCOME_CANVAS_CONTENT, /Buzz user guide/i);
+  assert.match(WELCOME_CANVAS_CONTENT, /Zorro user guide/i);
 });
 
 test("ensureWelcomeCanvas seeds a fresh channel with no canvas", async () => {

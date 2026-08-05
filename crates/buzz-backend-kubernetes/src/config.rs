@@ -347,7 +347,7 @@ mod tests {
     fn rejects_invalid_namespace_names() {
         for bad in [
             "",
-            "Buzz-Agents",
+            "Zorro-Agents",
             "-leading",
             "trailing-",
             "has_underscore",

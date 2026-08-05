@@ -48,7 +48,7 @@ import {
 } from "@/shared/ui/dropdown-menu";
 import {
   ACCENT_COLORS,
-  isBuzzTheme,
+  isZorroTheme,
   NEUTRAL_ACCENT,
   useTheme,
 } from "@/shared/theme/ThemeProvider";
@@ -242,6 +242,8 @@ export const settingsSections: SettingsSectionDescriptor[] = [
 ];
 
 function formatThemeLabel(name: string): string {
+  if (name === "zorro") return "Zorro Light";
+  if (name === "zorro-dark") return "Zorro Dark";
   return name
     .split("-")
     .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
@@ -255,6 +257,7 @@ function formatThemeLabel(name: string): string {
  * "material-theme-lighter", and "gruvbox-light-soft".
  */
 function pairedThemeLabel(lightName: string): string {
+  if (lightName === "zorro") return "Zorro";
   const modeTokens = new Set([
     "light",
     "latte",
@@ -432,7 +435,7 @@ function ThemeSettingsCard() {
   // Buzz themes pin a neutral accent (GitHub black in light, white in dark),
   // so the accent picker is hidden while a Buzz theme is active. `themeName` is
   // the effective theme, so this also covers System mode resolving to Buzz.
-  const accentPickerHidden = isBuzzTheme(themeName);
+  const accentPickerHidden = isZorroTheme(themeName);
   const shouldReduceMotion = useReducedMotion();
 
   const previewVarsByTheme = useThemePreviewVars();
@@ -526,7 +529,7 @@ function ThemeSettingsCard() {
     >
       <SettingsSectionHeader
         title="Appearance"
-        description="Choose a theme for Buzz."
+        description="Choose a theme for Zorro."
       />
 
       {/* Mode selector: System / Light / Dark */}
@@ -569,7 +572,7 @@ function ThemeSettingsCard() {
           }}
         />
         {/* Bottom fade — hidden while the accent picker is visible so its
-            near-white gradient (Buzz light) can't mask the swatches below it
+            near-white gradient (Zorro light) can't mask the swatches below it
             (the "white bar"). Kept only when the picker is hidden. */}
         {accentPickerHidden ? (
           <div
@@ -622,7 +625,7 @@ function ThemeSettingsCard() {
         </div>
       </div>
 
-      {/* Accent color picker — hidden for Buzz themes (pinned neutral accent).
+      {/* Accent color picker — hidden for Zorro themes (pinned neutral accent).
           Reveal/hide with the translate-up + opacity fade defined by
           ACCENT_PICKER_TRANSITION above. Reduced motion skips the transition
           and just renders/unrenders. */}

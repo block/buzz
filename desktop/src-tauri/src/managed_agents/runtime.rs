@@ -524,7 +524,7 @@ pub fn spawn_agent_child(
             Some(path) => Some(path),
             None => {
                 eprintln!(
-                    "buzz-desktop: mcp_command {effective_mcp_command:?} not found, skipping"
+                    "zorro-desktop: mcp_command {effective_mcp_command:?} not found, skipping"
                 );
                 None
             }
@@ -670,7 +670,7 @@ pub fn spawn_agent_child(
                     Ok(json) => Some(json),
                     Err(e) => {
                         eprintln!(
-                            "buzz-desktop: failed to serialize setup payload for {}: {e}",
+                            "zorro-desktop: failed to serialize setup payload for {}: {e}",
                             record.name
                         );
                         None
@@ -698,7 +698,7 @@ pub fn spawn_agent_child(
         if let Some(json) = setup_payload_json {
             command.env("BUZZ_ACP_SETUP_PAYLOAD", json);
             eprintln!(
-                "buzz-desktop: agent {} not ready — spawning in setup-listener mode",
+                "zorro-desktop: agent {} not ready — spawning in setup-listener mode",
                 record.name
             );
         }
@@ -834,7 +834,7 @@ pub fn spawn_agent_child(
         command.env("GIT_CONFIG_VALUE_1", "true");
     } else {
         eprintln!(
-            "buzz-desktop: git-credential-nostr not found — agent {} will not have automatic Buzz git auth",
+            "zorro-desktop: git-credential-nostr not found — agent {} will not have automatic Zorro git auth",
             record.name,
         );
     }

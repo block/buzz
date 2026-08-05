@@ -1,7 +1,7 @@
 //! Tokio worker stack-size smoke — reproduces and verifies the fix for the
 //! mesh-llm model-download stack overflow (SIGABRT via stack guard).
 //!
-//! Crash report (2026-07-08, buzz-desktop 0.3.46): enabling Share compute
+//! Crash report (2026-07-08, Zorro Desktop 0.3.46): enabling Share compute
 //! aborted the app on a `tokio-rt-worker` thread inside
 //! `mesh_llm_host_runtime::models::resolve::download_model_ref_with_progress_details`
 //! — Rust's stack-overflow signal handler fired on tokio's default 2 MiB

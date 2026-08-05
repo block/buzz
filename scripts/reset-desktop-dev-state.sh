@@ -66,4 +66,4 @@ remove_path "$HOME/.sprout-dev"
 mkdir -p "$HOME/.buzz-dev"
 : > "$HOME/.buzz-dev/.dev-nest-migrated"
 
-log "Development desktop state removed; production Buzz state was not touched"
+log "Development desktop state removed; production Zorro state was not touched"

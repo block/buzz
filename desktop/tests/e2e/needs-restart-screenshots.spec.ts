@@ -370,7 +370,7 @@ test.describe("restart-diff screenshots", () => {
     const banner = panel.getByTestId("needs-restart-banner");
     await expect(banner).toBeVisible({ timeout: 10_000 });
     await expect(
-      banner.getByText("Buzz can restart it automatically"),
+      banner.getByText("Zorro can restart it automatically"),
     ).toBeVisible();
 
     await waitForAnimations(page);

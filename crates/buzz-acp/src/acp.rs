@@ -2461,7 +2461,7 @@ mod tests {
 
     #[test]
     fn session_prompt_request_format() {
-        let prompt_text = "[Buzz @mention]\nChannel: test\nFrom: npub1...\nMessage: hello";
+        let prompt_text = "[Zorro @mention]\nChannel: test\nFrom: npub1...\nMessage: hello";
         let msg = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 2u64,
@@ -2487,7 +2487,7 @@ mod tests {
             "sess_abc123",
             &[
                 "/goal ship it",
-                "[Buzz event: @mention]\nContent: @Eva /goal ship it",
+                "[Zorro event: @mention]\nContent: @Eva /goal ship it",
             ],
         );
         let prompt = params["prompt"].as_array().unwrap();

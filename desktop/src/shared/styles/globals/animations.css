@@ -642,7 +642,7 @@
 
 /* ── Setup / cold-boot loading screen ───────────────────────────────────
    Theme-adaptive grainient background for the "setting up your community"
-   gate. Restored from pre-#1570; the animated Buzz mark is the hero (see
+   gate. Restored from pre-#1570; the animated Zorro mark is the hero (see
    AppLoadingGate in app/App.tsx). */
 
 @property --buzz-grainient-x-0 {
@@ -717,6 +717,21 @@
   color: hsl(var(--foreground));
   isolation: isolate;
   position: relative;
+}
+
+/* Keep the cold-boot gate on Zorro's current palette instead of inheriting
+   stale chart colors from an older cached version of the theme. */
+:root[data-buzz-sidebar] .buzz-setup-loading-shell {
+  --buzz-grainient-color-0: rgb(
+    255 185 80 /
+    var(--buzz-grainient-alpha-strong)
+  );
+  --buzz-grainient-color-1: rgb(
+    255 126 51 /
+    var(--buzz-grainient-alpha-strong)
+  );
+  --buzz-grainient-color-2: rgb(236 63 19 / var(--buzz-grainient-alpha-medium));
+  --buzz-grainient-color-3: rgb(165 1 4 / var(--buzz-grainient-alpha-strong));
 }
 
 .dark .buzz-setup-loading-shell {
@@ -837,7 +852,7 @@
    most of the cycle (the website staggers many bees, so it could afford long
    rests; one bee cannot).
 
-   The animated elements are HTML-level <svg> wings (see FlappingBee.tsx), not
+   The animated elements are HTML-level <svg> wings (see SlashingZee.tsx), not
    SVG children: WebKit paints SVG children on the main thread, so their
    animations freeze while boot work hogs the thread — exactly when the loading
    gate is visible. HTML-level transforms run on the compositor and keep
@@ -913,6 +928,32 @@
 
 @media (prefers-reduced-motion: reduce) {
   .bee-sprite .bee-wing {
+    animation: none;
+  }
+}
+
+/* Buzz's startup mark moves as one compositor layer, preserving the old
+   first-paint behavior without carrying the bee's wing geometry forward. */
+.zorro-loader-mark {
+  animation: zorro-loader-strike 1.1s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+  transform-origin: center;
+  will-change: transform, opacity;
+}
+
+@keyframes zorro-loader-strike {
+  0%,
+  100% {
+    opacity: 0.7;
+    transform: scale(0.92) skewX(-2deg);
+  }
+  45% {
+    opacity: 1;
+    transform: scale(1) skewX(0deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .zorro-loader-mark {
     animation: none;
   }
 }

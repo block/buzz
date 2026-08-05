@@ -104,16 +104,28 @@ test("parseMessageLink accepts legacy buzz://message links", () => {
   });
 });
 
-test("isMessageLink matches buzz://message and legacy buzz://message", () => {
+test("parseMessageLink accepts zorro://message links", () => {
+  const r = parseMessageLink(
+    `zorro://message?channel=${CHANNEL}&id=${MESSAGE}`,
+  );
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.ok && r.value, {
+    channelId: CHANNEL,
+    messageId: MESSAGE,
+    threadRootId: null,
+  });
+});
+
+test("isMessageLink matches both supported message schemes", () => {
   assert.equal(
-    isMessageLink(`buzz://message?channel=${CHANNEL}&id=${MESSAGE}`),
+    isMessageLink(`zorro://message?channel=${CHANNEL}&id=${MESSAGE}`),
     true,
   );
   assert.equal(
     isMessageLink(`buzz://message?channel=${CHANNEL}&id=${MESSAGE}`),
     true,
   );
-  assert.equal(isMessageLink("buzz://connect?relay=wss://x"), false);
+  assert.equal(isMessageLink("zorro://connect?relay=wss://x"), false);
   assert.equal(isMessageLink("buzz://connect?relay=wss://x"), false);
   assert.equal(isMessageLink("https://example.com"), false);
   assert.equal(isMessageLink(undefined), false);

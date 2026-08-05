@@ -52,10 +52,10 @@ pub fn strip_baked_team_instructions(app: &tauri::AppHandle) {
     match strip_baked_team_instructions_in_dir(&base_dir) {
         Ok(0) => {}
         Ok(stripped) => eprintln!(
-            "buzz-desktop: team-suffix-strip: removed the baked team-instructions suffix from \
+            "zorro-desktop: team-suffix-strip: removed the baked team-instructions suffix from \
              {stripped} record(s)"
         ),
-        Err(e) => eprintln!("buzz-desktop: team-suffix-strip: {e}"),
+        Err(e) => eprintln!("zorro-desktop: team-suffix-strip: {e}"),
     }
 }
 

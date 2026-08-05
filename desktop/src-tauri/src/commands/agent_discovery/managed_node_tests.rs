@@ -4,7 +4,7 @@ use super::*;
 fn test_npm_eacces_hint_guidance_mentions_buzz_private_dir() {
     let hint = npm_eacces_hint("EACCES: permission denied", "npm install -g foo").unwrap();
     assert!(
-        hint.contains("Buzz's private Node tools directory"),
+        hint.contains("Zorro's private Node tools directory"),
         "hint: {hint}"
     );
 }
@@ -14,9 +14,9 @@ fn test_rewrite_npm_install_uses_private_prefix() {
     assert_eq!(
         rewrite_npm_global_install(
             "npm install -g @agentclientprotocol/codex-acp",
-            "'/tmp/Buzz Node'"
+            "'/tmp/Zorro Node'"
         ),
-        "npm install --global --prefix '/tmp/Buzz Node' @agentclientprotocol/codex-acp"
+        "npm install --global --prefix '/tmp/Zorro Node' @agentclientprotocol/codex-acp"
     );
 }
 
@@ -47,8 +47,8 @@ fn test_rewrite_ignores_non_global_command() {
 #[test]
 fn test_shell_quote_escapes_single_quotes() {
     assert_eq!(
-        shell_quote(std::path::Path::new("/tmp/Buzz's Node")),
-        "'/tmp/Buzz'\\''s Node'"
+        shell_quote(std::path::Path::new("/tmp/Zorro's Node")),
+        "'/tmp/Zorro'\\''s Node'"
     );
 }
 

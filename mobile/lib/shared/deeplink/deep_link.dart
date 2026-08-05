@@ -9,6 +9,8 @@ library;
 
 import '../relay/relay_validation.dart';
 
+const _supportedAppLinkSchemes = {'buzz', 'zorro'};
+
 /// A parsed deep link supported by the app.
 sealed class BuzzDeepLink {
   const BuzzDeepLink();
@@ -121,7 +123,9 @@ String buildMessageLink({
 /// `buzz://connect` which is desktop-only), or links missing a non-empty
 /// `channel` or `id` param.
 MessageDeepLink? parseMessageDeepLink(Uri uri) {
-  if (uri.scheme != 'buzz' || uri.host != 'message') return null;
+  if (!_supportedAppLinkSchemes.contains(uri.scheme) || uri.host != 'message') {
+    return null;
+  }
 
   final channel = uri.queryParameters['channel'];
   final id = uri.queryParameters['id'];
@@ -151,7 +155,7 @@ MessageDeepLink? parseMessageDeepLink(Uri uri) {
 InviteDeepLink? parseInviteDeepLink(Uri uri) {
   if (uri.hasFragment || uri.userInfo.isNotEmpty) return null;
 
-  if (uri.scheme == 'buzz') {
+  if (_supportedAppLinkSchemes.contains(uri.scheme)) {
     if (uri.host != 'join') return null;
     final relay = uri.queryParameters['relay'];
     final code = uri.queryParameters['code'];

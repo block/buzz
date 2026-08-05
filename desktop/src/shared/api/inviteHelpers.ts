@@ -33,7 +33,7 @@ export function parseInviteInput(input: string): ParsedInvite | null {
 
     // buzz://join?relay=...&code=...
     // Non-special schemes put the authority in `host`, not `pathname`.
-    if (url.protocol === "buzz:") {
+    if (url.protocol === "buzz:" || url.protocol === "zorro:") {
       if (url.host !== "join") return null;
       const relay = url.searchParams.get("relay");
       const code = url.searchParams.get("code");

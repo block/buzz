@@ -99,7 +99,7 @@ mod tests {
             dir.path(),
             &serde_json::json!([
                 { "name": "Fizz", "persona_id": "persona-1", "runtime": "claude" },
-                { "name": "Buzz", "persona_id": "persona-1" }
+                { "name": "Zorro", "persona_id": "persona-1" }
             ]),
         );
         let agents_path = dir.path().join("agents/managed-agents.json");

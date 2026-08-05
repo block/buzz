@@ -70,7 +70,7 @@ test("applyLegacyCommunityStorage seeds missing communities and active community
   assert.equal(storage.getItem("buzz-active-community-id"), "legacy-community");
 });
 
-test("applyLegacyCommunityStorage preserves existing non-local Buzz communities", () => {
+test("applyLegacyCommunityStorage preserves existing non-local Zorro communities", () => {
   const storage = createMemoryStorage({
     "buzz-communities": currentCommunities,
     "buzz-active-community-id": "current-community",

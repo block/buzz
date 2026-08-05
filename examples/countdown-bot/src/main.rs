@@ -28,7 +28,7 @@ const SUBSCRIPTION_ID: &str = "countdown-bot";
 const BOT_NAME: &str = "countdown-bot";
 const BOT_DISPLAY_NAME: &str = "Countdown Bot";
 const BOT_ABOUT: &str =
-    "A tiny non-AI Buzz reference bot that replies to !countdown and countdown-style !fib.";
+    "A tiny non-AI Zorro reference bot that replies to !countdown and countdown-style !fib.";
 const BOT_ICON_DATA_URL: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'%3E%3Crect width='128' height='128' rx='28' fill='%23131622'/%3E%3Ccircle cx='64' cy='64' r='42' fill='none' stroke='%237dd3fc' stroke-width='10'/%3E%3Cpath d='M64 32v32l22 14' fill='none' stroke='%23facc15' stroke-width='10' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M42 96h44' stroke='%23a78bfa' stroke-width='8' stroke-linecap='round'/%3E%3C/svg%3E";
 
 #[tokio::main]

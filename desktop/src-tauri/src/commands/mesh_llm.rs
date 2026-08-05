@@ -67,7 +67,7 @@ fn load_mesh_sharing_config(app: &AppHandle) -> Result<Option<MeshSharingConfig>
 }
 
 const RELAY_MESH_RUNTIME_NO_TARGET: &str =
-    "Buzz shared compute requires a live serving member; start serving the selected model on a member, then try again";
+    "Zorro shared compute requires a live serving member; start serving the selected model on a member, then try again";
 
 /// Whether the Share-compute "stop sharing" path (`mesh_stop_node`) should tear
 /// down the runtime currently occupying the single slot.
@@ -125,7 +125,7 @@ fn restarting_share_status(config: &MeshSharingConfig) -> mesh_llm::MeshNodeStat
         mode: Some(mesh_llm::MeshNodeMode::Serve),
         health: mesh_llm::MeshHealth {
             status: mesh_llm::MeshHealthStatus::Degraded,
-            reason: Some("Buzz is restarting to switch this machine to sharing".to_string()),
+            reason: Some("Zorro is restarting to switch this machine to sharing".to_string()),
         },
         api_base_url: None,
         console_url: None,
@@ -499,7 +499,7 @@ pub async fn mesh_start_node(
             drop(runtime);
             app.request_restart();
             return Err(format!(
-                "mesh node started but status probe failed: {error:#}; Buzz is restarting to guarantee cleanup"
+                "mesh node started but status probe failed: {error:#}; Zorro is restarting to guarantee cleanup"
             ));
         }
     };
@@ -575,14 +575,14 @@ fn mesh_readiness_failure_message(
 ) -> String {
     match failure {
         MeshReadinessFailure::CatalogNeverSynced => format!(
-            "Buzz shared compute connected to the serving member but could not sync \
+            "Zorro shared compute connected to the serving member but could not sync \
              the model list for \"{model_id}\" — this is a network path problem \
              between this machine and the host (the compute node is reachable for \
              pings but the model-sync stream did not establish). Try again, or have \
              the host and this machine on a more direct network. (last: {last_detail})"
         ),
         MeshReadinessFailure::RoutingNeverCompleted => format!(
-            "Buzz shared compute found \"{model_id}\" on a serving member but inference \
+            "Zorro shared compute found \"{model_id}\" on a serving member but inference \
              requests did not complete — the host is discoverable but not currently \
              reachable for requests. Try again shortly. (last: {last_detail})"
         ),
@@ -844,13 +844,13 @@ pub(crate) async fn ensure_relay_mesh_for_record(
             mesh_llm::MeshRuntimeRecovery::Evicted | mesh_llm::MeshRuntimeRecovery::Absent => {}
             mesh_llm::MeshRuntimeRecovery::Debouncing => {
                 return Err(
-                    "Buzz shared compute ingress is temporarily unresponsive; recovery is already scheduled. Try again shortly."
+                    "Zorro shared compute ingress is temporarily unresponsive; recovery is already scheduled. Try again shortly."
                         .to_string(),
                 );
             }
             mesh_llm::MeshRuntimeRecovery::ReleasePending => {
                 return Err(
-                    "Buzz shared compute is still shutting down its previous local ingress. Try again shortly."
+                    "Zorro shared compute is still shutting down its previous local ingress. Try again shortly."
                         .to_string(),
                 );
             }
@@ -860,7 +860,7 @@ pub(crate) async fn ensure_relay_mesh_for_record(
             mesh_llm::MeshRuntimeRecovery::RestartRequired => {
                 app.request_restart();
                 return Err(
-                    "Buzz shared compute startup lost its local ingress before shutdown control became available. Buzz is restarting to recover it."
+                    "Zorro shared compute startup lost its local ingress before shutdown control became available. Zorro is restarting to recover it."
                         .to_string(),
                 );
             }
@@ -882,13 +882,13 @@ pub(crate) async fn ensure_relay_mesh_for_record(
         Ok(Some(target)) => target,
         Ok(None) => {
             return Err(
-                "Buzz shared compute cannot start because no live member is serving this model. Start serving it on a member, then try again."
+                "Zorro shared compute cannot start because no live member is serving this model. Start serving it on a member, then try again."
                     .to_string(),
             );
         }
         Err(error) => {
             return Err(format!(
-                "could not refresh Buzz shared compute serving members: {error}"
+                "could not refresh Zorro shared compute serving members: {error}"
             ));
         }
     };

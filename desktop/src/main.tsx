@@ -78,7 +78,7 @@ function renderApp() {
     <React.StrictMode>
       <CommunitiesProvider>
         <CommunityOnboardingProvider enabled={huddleWindowChannelId() === null}>
-          <ThemeProvider defaultTheme="buzz">
+          <ThemeProvider defaultTheme="zorro">
             <TooltipProvider delayDuration={300}>
               <EmojiBurstProvider>
                 <PoofBurstProvider>

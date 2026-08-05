@@ -46,7 +46,7 @@ use app_state::{build_app_state, resolve_persisted_identity, AppState};
 use builderlab::*;
 use commands::*;
 use deep_link::{
-    acknowledge_pending_community_deep_link, handle_deep_link_url,
+    acknowledge_pending_community_deep_link, handle_deep_link_url, is_supported_deep_link_url,
     take_pending_community_deep_link, PendingCommunityDeepLinks,
 };
 use huddle::audio_output::{
@@ -118,7 +118,7 @@ pub fn run() {
             }
             // Forward any deep link URLs from the duplicate launch.
             for arg in &argv {
-                if arg.starts_with("buzz://") {
+                if is_supported_deep_link_url(arg) {
                     handle_deep_link_url(app, arg);
                 }
             }
@@ -172,7 +172,7 @@ pub fn run() {
                             .is_err()
                             {
                                 eprintln!(
-                                    "buzz-desktop: initial render did not commit before reveal timeout"
+                                    "zorro-desktop: initial render did not commit before reveal timeout"
                                 );
                             }
 
@@ -353,7 +353,7 @@ pub fn run() {
             // memberships, DMs, and relay identity.
             let state = app_handle.state::<AppState>();
             if let Err(e) = resolve_persisted_identity(&app_handle, &state) {
-                eprintln!("buzz-desktop: fatal: identity resolution failed: {e}");
+                eprintln!("zorro-desktop: fatal: identity resolution failed: {e}");
                 std::process::exit(1);
             }
 
@@ -377,7 +377,7 @@ pub fn run() {
             // snapshot. Synchronous and best-effort — a failure here must not
             // block launch, but a missing persona is logged loudly inside.
             if let Err(e) = backfill_persona_snapshots(&app_handle) {
-                eprintln!("buzz-desktop: persona-snapshot backfill failed: {e}");
+                eprintln!("zorro-desktop: persona-snapshot backfill failed: {e}");
             }
 
             // Warm the loaded-harness registry BEFORE restore so cold-launch
@@ -447,7 +447,7 @@ pub fn run() {
             // nest directory. Non-fatal: agents fall back to $HOME if nest
             // creation fails.
             if let Err(error) = ensure_nest() {
-                eprintln!("buzz-desktop: failed to create nest: {error}");
+                eprintln!("zorro-desktop: failed to create nest: {error}");
             }
 
             // Resolve the REPOS symlink from the persisted repos_dir BEFORE
@@ -494,7 +494,7 @@ pub fn run() {
             if let Ok(exe) = std::env::current_exe() {
                 if let Some(parent) = exe.parent() {
                     if let Err(error) = managed_agents::ensure_cli_symlink(parent, is_dev_nest) {
-                        eprintln!("buzz-desktop: failed to create CLI symlink: {error}");
+                        eprintln!("zorro-desktop: failed to create CLI symlink: {error}");
                     }
                 }
             }
@@ -591,7 +591,7 @@ pub fn run() {
                         )
                         .await
                         {
-                            eprintln!("buzz-desktop: event-flush: {e}");
+                            eprintln!("zorro-desktop: event-flush: {e}");
                         }
                         tokio::time::sleep(Duration::from_secs(30)).await;
                     }
@@ -924,7 +924,7 @@ pub fn run() {
             api.prevent_close();
             if let Some(window) = app_handle.get_webview_window("main") {
                 if let Err(error) = window.hide() {
-                    eprintln!("buzz-desktop: failed to hide main window: {error}");
+                    eprintln!("zorro-desktop: failed to hide main window: {error}");
                 }
             }
         }
@@ -947,7 +947,7 @@ pub fn run() {
                     });
             if is_active_huddle_window {
                 if let Err(error) = app_handle.emit("huddle-companion-returned", ()) {
-                    eprintln!("buzz-desktop: failed to restore huddle drawer: {error}");
+                    eprintln!("zorro-desktop: failed to restore huddle drawer: {error}");
                 }
             }
         }

@@ -142,7 +142,7 @@ pub fn finish_spawn(
     let job = create_job_for_child(child.id());
     if job.is_none() {
         eprintln!(
-            "buzz-desktop: failed to assign agent {agent_name} to a Job Object; \
+            "zorro-desktop: failed to assign agent {agent_name} to a Job Object; \
              teardown will fall back to killing only the harness process"
         );
     }

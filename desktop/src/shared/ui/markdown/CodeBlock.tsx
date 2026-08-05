@@ -139,8 +139,8 @@ export function SyntaxHighlightedCode({
   language: string;
 } & React.ComponentProps<"code">) {
   const { themeName } = useTheme();
-  // Buzz aliases ("buzz" / "buzz-dark") are not bundled Shiki themes — resolve
-  // to the real bundle (github-light / github-dark) before touching Shiki, or
+  // Zorro aliases are not bundled Shiki themes — resolve them to the real
+  // syntax bundle (github-light / github-dark) before touching Shiki, or
   // it throws and code blocks fall back to plain text.
   const shikiTheme = resolveShikiThemeName(themeName);
   const [loadedKey, setLoadedKey] = React.useState(0);

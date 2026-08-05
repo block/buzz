@@ -6,7 +6,7 @@ import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 const DEFAULT_MOCK_PUBKEY = "deadbeef".repeat(8);
 const BUZZ_REPO_ADDRESS = `30617:${DEFAULT_MOCK_PUBKEY}:buzz`;
 
-test("Buzz Git pull request renders and stays actionable in Inbox", async ({
+test("Zorro Git pull request renders and stays actionable in Inbox", async ({
   page,
 }) => {
   await page.addInitScript(() => {

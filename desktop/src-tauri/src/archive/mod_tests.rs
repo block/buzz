@@ -809,7 +809,7 @@ fn test_turn_metric_decrypt_fail_drops_fail_closed() {
 //
 // Run (Linux/macOS only):
 //
-//   RELAY_URL=ws://localhost:3000 cargo test -p buzz-desktop \
+//   RELAY_URL=ws://localhost:3000 cargo test -p zorro-desktop \
 //       archive::tests::real_relay -- --ignored --nocapture
 //
 // The relay must be running with a Postgres backend (same docker compose

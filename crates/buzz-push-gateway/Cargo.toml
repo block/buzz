@@ -1,6 +1,6 @@
 [package]
 name = "buzz-push-gateway"
-description = "Blind, capability-gated NIP-PL gateway for the Buzz mobile app"
+description = "Blind, capability-gated NIP-PL gateway for the Zorro mobile app"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

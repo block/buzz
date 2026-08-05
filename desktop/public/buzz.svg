@@ -1,10 +1,9 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Buzz">
-  <rect width="512" height="512" rx="96" fill="#0b0b0b"/>
-  <path d="M256 75 334 120v90l-78 45-78-45v-90z" fill="#ffd84d"/>
-  <path d="M178 210 256 255v90l-78 45-78-45v-90z" fill="#ffbd24"/>
-  <path d="M334 210 412 255v90l-78 45-78-45v-90z" fill="#ffb000"/>
-  <path d="M256 300 334 345v90l-78 45-78-45v-90z" fill="#ff8a00"/>
-  <path d="M256 105 306 134l-50 29-50-29z" fill="#ffe680" opacity=".75"/>
-  <path d="M178 240 228 269l-50 29-50-29z" fill="#ffe680" opacity=".55"/>
-  <path d="M334 240 384 269l-50 29-50-29z" fill="#ffe680" opacity=".55"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Zorro">
+  <rect width="512" height="512" rx="110" fill="#EC3F13"/>
+  <path d="M39 346c31-38 132-59 217-59s186 21 217 59c18 22 7 46-25 59-49 20-120 31-192 31S113 425 64 405c-32-13-43-37-25-59Z" fill="#151112"/>
+  <path d="M60 344c42-27 119-42 196-42s154 15 196 42c20 13 19 27-2 39-42 24-119 38-194 38S104 407 62 383c-21-12-22-26-2-39Z" fill="#2a2325"/>
+  <path d="M174 216c0-20 37-33 82-33s82 13 82 33l14 132H160l14-132Z" fill="#211b1d"/>
+  <path d="M174 216c0-20 37-33 82-33s82 13 82 33c0 20-37 33-82 33s-82-13-82-33Z" fill="#3a3033"/>
+  <path d="M220 220h72v22l-42 34h42v24h-72v-23l42-34h-42v-23Z" fill="#f6cacc"/>
+  <path d="M73 374c50 20 116 30 183 30s133-10 183-30c-30 30-106 48-183 48S103 404 73 374Z" fill="#0d0a0b" opacity=".55"/>
 </svg>

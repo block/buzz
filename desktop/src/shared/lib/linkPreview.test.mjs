@@ -56,7 +56,7 @@ test("parseSupportedLinkPreview ignores unsupported GitHub URLs", () => {
 const BUZZ_OWNER =
   "71d67180ba17e749ee825fc8819c9c6ee7003617e1c126504f9b658070ab9224";
 
-test("parseSupportedLinkPreview parses Buzz relay git clone URLs", () => {
+test("parseSupportedLinkPreview parses Zorro relay git clone URLs", () => {
   // Must pass the active relay origin for host validation.
   assert.deepEqual(
     parseSupportedLinkPreview(
@@ -66,7 +66,7 @@ test("parseSupportedLinkPreview parses Buzz relay git clone URLs", () => {
     {
       kind: "buzz-repository",
       href: `buzz://repo?owner=${BUZZ_OWNER}&d=buzz-world-galaxy`,
-      provider: "Buzz",
+      provider: "Zorro",
       title: "buzz-world-galaxy",
       typeLabel: "repo",
     },
@@ -89,14 +89,14 @@ test("parseSupportedLinkPreview strips .git suffix from clone URLs", () => {
     {
       kind: "buzz-repository",
       href: `buzz://repo?owner=${BUZZ_OWNER}&d=buzz-world`,
-      provider: "Buzz",
+      provider: "Zorro",
       title: "buzz-world",
       typeLabel: "repo",
     },
   );
 });
 
-test("parseSupportedLinkPreview rejects malformed Buzz git URLs", () => {
+test("parseSupportedLinkPreview rejects malformed Zorro git URLs", () => {
   for (const href of [
     // Owner segment must be a 64-char lowercase hex pubkey.
     "https://relay.example/git/not-a-pubkey/repo",
@@ -155,7 +155,7 @@ test("parseSupportedLinkPreview parses buzz:// PR and issue deep links", () => {
     {
       kind: "buzz-pull-request",
       href: `buzz://pr?id=${BUZZ_EVENT_ID}&owner=${BUZZ_OWNER}&d=buzz-world`,
-      provider: "Buzz",
+      provider: "Zorro",
       title: "buzz-world #c3b589fa",
       typeLabel: "PR",
     },
@@ -171,7 +171,7 @@ test("parseSupportedLinkPreview parses buzz:// PR and issue deep links", () => {
     {
       kind: "buzz-repository",
       href: `buzz://repo?owner=${BUZZ_OWNER}&d=buzz-world`,
-      provider: "Buzz",
+      provider: "Zorro",
       title: "buzz-world",
       typeLabel: "repo",
     },
@@ -268,7 +268,7 @@ test("extractSupportedLinkPreviews returns unique supported links in order", () 
   );
 });
 
-test("extractSupportedLinkPreviews picks up bare Buzz clone URLs in prose", () => {
+test("extractSupportedLinkPreviews picks up bare Zorro clone URLs in prose", () => {
   assert.deepEqual(
     extractSupportedLinkPreviews(
       `master pushed; clone: https://buzz.block.builderlab.xyz/git/${BUZZ_OWNER}/buzz-world-galaxy and review please.`,
@@ -278,7 +278,7 @@ test("extractSupportedLinkPreviews picks up bare Buzz clone URLs in prose", () =
       {
         kind: "buzz-repository",
         href: `buzz://repo?owner=${BUZZ_OWNER}&d=buzz-world-galaxy`,
-        provider: "Buzz",
+        provider: "Zorro",
         title: "buzz-world-galaxy",
         typeLabel: "repo",
       },
@@ -293,13 +293,13 @@ test("extractSupportedLinkPreviews picks up bare Buzz clone URLs in prose", () =
   );
 });
 
-test("extractSupportedLinkPreviews uses markdown labels for Buzz repo links", () => {
+test("extractSupportedLinkPreviews uses markdown labels for Zorro repo links", () => {
   assert.deepEqual(
     extractSupportedLinkPreviews(
-      `[Buzz World](https://relay.example/git/${BUZZ_OWNER}/buzz-world-galaxy)`,
+      `[Zorro World](https://relay.example/git/${BUZZ_OWNER}/buzz-world-galaxy)`,
       "https://relay.example",
     ).map((preview) => preview.title),
-    ["Buzz World"],
+    ["Zorro World"],
   );
 });
 
@@ -490,7 +490,7 @@ function makePrPreview(title) {
     kind: "buzz-pull-request",
     href: `buzz://pr?id=${EVENT_HEX}&owner=${OWNER_HEX}&d=buzz-world`,
     title,
-    provider: "Buzz",
+    provider: "Zorro",
     typeLabel: "pr",
   };
 }

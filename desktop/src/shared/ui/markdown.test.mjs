@@ -916,7 +916,7 @@ function nudgeBody(agentPubkey) {
     "**Fizz** needs configuration before it can respond:",
     "- set `ANTHROPIC_API_KEY` in Edit Agent → Environment variables",
     "",
-    "Open Edit Agent in the Buzz app to set these.",
+    "Open Edit Agent in the Zorro app to set these.",
     "",
     "```buzz:config-nudge",
     JSON.stringify({

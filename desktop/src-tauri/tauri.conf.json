@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Buzz",
+  "productName": "Zorro",
   "version": "0.5.5",
   "identifier": "xyz.block.buzz.app",
   "build": {
@@ -45,7 +45,7 @@
     },
     "deep-link": {
       "desktop": {
-        "schemes": ["buzz"]
+        "schemes": ["buzz", "zorro"]
       }
     }
   },

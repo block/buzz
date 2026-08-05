@@ -18,10 +18,10 @@ const MANAGED_AGENTS = [
 ];
 
 const SYSTEM_PROMPT_WITH_CORE =
-  "[Base]\nYou are a helpful AI assistant running in Buzz.\n\n" +
+  "[Base]\nYou are a helpful AI assistant running in Zorro.\n\n" +
   "[System]\nYou are Observer Agent. You coordinate multi-agent workflows.\n\n" +
   "[Agent Memory — core]\n" +
-  "I am Duncan — full-stack executor on the Buzz team.\n\n" +
+  "I am Duncan — full-stack executor on the Zorro team.\n\n" +
   "## Lessons Learned\n\n" +
   "### Tag teammates on handoff — ALWAYS (CRITICAL)\n" +
   "After completing a task, @mention the next person in the workflow.\n\n" +

@@ -10,6 +10,7 @@ import {
 } from "@/shared/api/tauriIdentity";
 import type { IdentityStorage } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
+import { ZorroHat } from "@/shared/ui/zorro-logo/ZorroHat";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { BackupStep } from "./BackupStep";
 import { DefaultConfigStep } from "./DefaultConfigStep";
@@ -20,7 +21,7 @@ import {
   useEncryptedBackupSession,
 } from "./EncryptedBackupCreator";
 import { IdentityKeyHelpDialog } from "./IdentityKeyHelpDialog";
-import { LandingBees } from "./LandingBees";
+import { LandingZees } from "./LandingZees";
 import {
   NostrKeyImportForm,
   type NostrKeyImportStage,
@@ -178,7 +179,7 @@ export function MachineOnboardingFlow({
       data-testid="machine-onboarding-gate"
     >
       <StartupWindowDragRegion />
-      {page === "identity" ? <LandingBees /> : null}
+      {page === "identity" ? <LandingZees /> : null}
       {isSecuritySubview ? (
         <div className="fixed inset-x-0 top-8 z-20 flex justify-center px-6">
           <Button
@@ -214,11 +215,14 @@ export function MachineOnboardingFlow({
               effect="mask-reveal-up"
               transitionKey="machine-identity"
             >
-              <img
-                alt="Buzz"
-                className="w-full max-w-[600px]"
-                src="/landing/buzz-wordmark.png"
-              />
+              <ZorroHat className="mb-3 h-auto w-44 sm:w-52" />
+              <div
+                aria-label="Zorro"
+                className="font-black text-6xl tracking-[0.18em] text-foreground sm:text-7xl"
+                role="img"
+              >
+                ZORRO
+              </div>
               <p className="mt-2 max-w-[560px] text-center text-2xl font-normal leading-none text-foreground">
                 Your people, your agents, your projects —<br />
                 all in one place.
@@ -285,7 +289,7 @@ export function MachineOnboardingFlow({
                     ? "Enter your backup password to unlock your key and restore your identity."
                     : identityLost
                       ? "Your identity is no longer in the system keyring. Re-import your nsec to restore it."
-                      : "If you already have a Buzz account, enter your private key below to get started."}
+                      : "If you already have a Zorro account, enter your private key below to get started."}
                 </p>
               </motion.div>
               <div className="buzz-onboarding-key-import-position w-full">

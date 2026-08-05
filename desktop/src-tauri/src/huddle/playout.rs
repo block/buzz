@@ -118,7 +118,7 @@ impl PeerSlot {
                 recovering_playout: false,
             }),
             Err(e) => {
-                eprintln!("buzz-desktop: jitter buffer init peer {peer_idx}: {e}");
+                eprintln!("zorro-desktop: jitter buffer init peer {peer_idx}: {e}");
                 None
             }
         }
@@ -230,7 +230,7 @@ pub(crate) async fn run_playout_recv_loop(
                             slot.update_playout_recovery();
                             if slot.player.len() >= PLAYOUT_QUEUE_EMERGENCY_HIGH_WATER {
                                 eprintln!(
-                                    "buzz-desktop: playout queue emergency high-water for peer \
+                                    "zorro-desktop: playout queue emergency high-water for peer \
                                      {peer_idx} (depth={}) — dropping oldest frame",
                                     slot.player.len(),
                                 );
@@ -240,7 +240,7 @@ pub(crate) async fn run_playout_recv_loop(
                         }
                         Err(e) => {
                             eprintln!(
-                                "buzz-desktop: jitter get_audio peer {peer_idx}: {e}"
+                                "zorro-desktop: jitter get_audio peer {peer_idx}: {e}"
                             );
                         }
                     }
@@ -289,7 +289,7 @@ pub(crate) async fn run_playout_recv_loop(
                             // the slice is too short, which `if data.len() <= ...`
                             // already guards. Defensive log + drop.
                             eprintln!(
-                                "buzz-desktop: dropping malformed audio frame from peer {peer_idx} ({} bytes)",
+                                "zorro-desktop: dropping malformed audio frame from peer {peer_idx} ({} bytes)",
                                 data.len(),
                             );
                             continue;
@@ -338,7 +338,7 @@ pub(crate) async fn run_playout_recv_loop(
                                 .insert_packet(header.seq, header.ts_48k, opus_bytes)
                         {
                             eprintln!(
-                                "buzz-desktop: jitter insert peer {peer_idx}: {err}"
+                                "zorro-desktop: jitter insert peer {peer_idx}: {err}"
                             );
                         } else {
                             // Heartbeat for the playout tick's idle-peer

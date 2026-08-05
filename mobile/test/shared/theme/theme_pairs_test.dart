@@ -151,8 +151,8 @@ void main() {
 
       expect(resolved.forcedMode, ThemeMode.dark);
       expect(resolved.dark.brightness, Brightness.dark);
-      expect(resolved.darkTheme?.name, buzzDarkThemeName);
-      expect(resolved.dark, generateColorScheme(findTheme(buzzDarkThemeName)!));
+      expect(resolved.darkTheme?.name, 'kanagawa-wave');
+      expect(resolved.dark, generateColorScheme(findTheme('kanagawa-wave')!));
     });
 
     test('light mode falls back to the default pair when pick is unpaired', () {
@@ -160,8 +160,8 @@ void main() {
 
       expect(resolved.forcedMode, ThemeMode.light);
       expect(resolved.light.brightness, Brightness.light);
-      expect(resolved.lightTheme?.name, buzzThemeName);
-      expect(resolved.light, generateColorScheme(findTheme(buzzThemeName)!));
+      expect(resolved.lightTheme?.name, 'kanagawa-lotus');
+      expect(resolved.light, generateColorScheme(findTheme('kanagawa-lotus')!));
     });
 
     test('an unknown scheme name falls back to the default theme', () {
@@ -178,11 +178,11 @@ void main() {
     test('system mode replaces an unpaired selection with a paired theme', () {
       expect(
         schemeForAppearanceMode('snazzy-light', ThemeMode.system),
-        themeGroups().paired.first.name,
+        defaultSchemeName,
       );
       expect(
         schemeForAppearanceMode('nord', ThemeMode.system),
-        themeGroups().paired.first.name,
+        defaultSchemeName,
       );
     });
 

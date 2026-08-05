@@ -2,7 +2,7 @@ import { ExternalLink } from "lucide-react";
 
 import type { SupportedLinkPreview } from "@/shared/lib/linkPreview";
 import { cn } from "@/shared/lib/cn";
-import { BuzzMark } from "@/shared/ui/buzz-logo/BuzzMark";
+import { ZorroHat } from "@/shared/ui/zorro-logo/ZorroHat";
 import {
   Attachment,
   AttachmentActions,
@@ -95,7 +95,7 @@ function LinkPreviewLogo({ preview }: { preview: SupportedLinkPreview }) {
     case "buzz-issue":
     case "buzz-pull-request":
     case "buzz-repository":
-      return <BuzzMark className="h-4 w-4" />;
+      return <ZorroHat className="h-4 w-4" />;
     case "github-issue":
     case "github-pull-request":
     case "github-repository":

@@ -14,7 +14,7 @@ import {
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { useRelayOrigin } from "@/shared/lib/useRelayOrigin";
-import { BuzzMark } from "@/shared/ui/buzz-logo/BuzzMark";
+import { ZorroHat } from "@/shared/ui/zorro-logo/ZorroHat";
 import { Card } from "@/shared/ui/card";
 import { DropdownMenuItem } from "@/shared/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
@@ -51,7 +51,7 @@ function RepositoryHostIcon({ repository }: { repository: Repository }) {
   const host = projectRepoHostForRepository(repository, useRelayOrigin());
   const label =
     host.kind === "buzz"
-      ? "Buzz-hosted repository"
+      ? "Zorro-hosted repository"
       : host.kind === "external"
         ? `Git data hosted on ${host.host}`
         : "Repository host";
@@ -66,7 +66,7 @@ function RepositoryHostIcon({ repository }: { repository: Repository }) {
           role="img"
         >
           {host.kind === "buzz" ? (
-            <BuzzMark className="h-4.5 w-5" />
+            <ZorroHat className="h-4.5 w-5" />
           ) : host.kind === "external" && host.host === "github.com" ? (
             <GitHubMark className="h-4.5 w-4.5" />
           ) : host.kind === "external" ? (

@@ -1,7 +1,7 @@
 apiVersion: v2
 name: buzz
 description: |
-  Buzz — a Nostr-based messaging platform for human–agent collaboration.
+  Zorro — a Nostr-based messaging platform for human–agent collaboration.
 
   A single relay binary serving WebSocket + REST + web UI, backed by
   PostgreSQL and Redis. Configurable for single-node evaluation

@@ -39,10 +39,10 @@ pub fn backfill_standalone_agents(app: &tauri::AppHandle) {
         Ok(0) => {}
         Ok(backfilled) => {
             eprintln!(
-                "buzz-desktop: standalone-backfill: {backfilled} agents linked to manufactured definitions"
+                "zorro-desktop: standalone-backfill: {backfilled} agents linked to manufactured definitions"
             );
         }
-        Err(e) => eprintln!("buzz-desktop: standalone-backfill: {e}"),
+        Err(e) => eprintln!("zorro-desktop: standalone-backfill: {e}"),
     }
 }
 
@@ -87,7 +87,7 @@ fn backfill_standalone_agents_in_dir(base_dir: &Path) -> Result<usize, String> {
         // the colliding definition, then relaunch.
         if existing_slugs.contains(&record.pubkey) {
             eprintln!(
-                "buzz-desktop: standalone-backfill: slug collision for agent {} — skipped; \
+                "zorro-desktop: standalone-backfill: slug collision for agent {} — skipped; \
                  delete or re-slug the colliding definition to let the next launch backfill it",
                 record.pubkey
             );
@@ -109,7 +109,7 @@ fn backfill_standalone_agents_in_dir(base_dir: &Path) -> Result<usize, String> {
         view_source.definition_parallelism = Some(record.parallelism);
         let Some(persona_view) = view_source.to_definition_view() else {
             eprintln!(
-                "buzz-desktop: standalone-backfill: agent {} produced no persona view — skipped",
+                "zorro-desktop: standalone-backfill: agent {} produced no persona view — skipped",
                 record.pubkey
             );
             continue;

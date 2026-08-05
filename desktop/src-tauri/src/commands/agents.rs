@@ -55,7 +55,7 @@ pub(super) fn retain_managed_agent_pending(
         retain_agent_record(&conn, &scope.owner_keys, record).map(|_| ())
     })();
     if let Err(e) = result {
-        eprintln!("buzz-desktop: agent-retain: {e}");
+        eprintln!("zorro-desktop: agent-retain: {e}");
     }
 }
 
@@ -111,7 +111,7 @@ pub(super) fn tombstone_managed_agent_pending(
         )
     })();
     if let Err(e) = result {
-        eprintln!("buzz-desktop: agent-tombstone: {e}");
+        eprintln!("zorro-desktop: agent-tombstone: {e}");
     }
 }
 
@@ -197,7 +197,7 @@ pub(super) fn archive_managed_agent_pending(app: &AppHandle, state: &AppState, a
         )
     })();
     if let Err(e) = result {
-        eprintln!("buzz-desktop: agent-archive: {e}");
+        eprintln!("zorro-desktop: agent-archive: {e}");
     }
 }
 
@@ -211,10 +211,10 @@ fn normalize_relay_mesh(
 
     let model_ref = config.model_ref.trim();
     if model_ref.is_empty() {
-        return Err("Buzz shared compute model is required".to_string());
+        return Err("Zorro shared compute model is required".to_string());
     }
     if backend != &BackendKind::Local {
-        return Err("Buzz shared compute agents must use the local backend".to_string());
+        return Err("Zorro shared compute agents must use the local backend".to_string());
     }
 
     Ok(Some(RelayMeshConfig {
@@ -1203,7 +1203,7 @@ pub async fn start_managed_agent(
                     .await
             {
                 eprintln!(
-                    "buzz-desktop: profile reconciliation failed for agent {reconcile_pubkey}: {e}"
+                    "zorro-desktop: profile reconciliation failed for agent {reconcile_pubkey}: {e}"
                 );
             }
         });

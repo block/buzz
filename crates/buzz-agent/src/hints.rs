@@ -30,10 +30,8 @@ fn find_git_root(start: &Path) -> Option<PathBuf> {
         if current.join(".git").exists() {
             return Some(current);
         }
-        match current.parent() {
-            Some(parent) => current = parent.to_path_buf(),
-            None => return None,
-        }
+        let parent = current.parent()?;
+        current = parent.to_path_buf();
     }
 }
 
@@ -452,7 +450,7 @@ mod tests {
         std::fs::create_dir_all(&skill_dir).unwrap();
         std::fs::write(
             skill_dir.join("SKILL.md"),
-            "---\nname: buzz-cli\ndescription: CLI reference for Buzz managed agents\n---\nUse `buzz` to manage agents.\n",
+            "---\nname: buzz-cli\ndescription: CLI reference for Zorro managed agents\n---\nUse `buzz` to manage agents.\n",
         )
         .unwrap();
 
@@ -472,7 +470,7 @@ mod tests {
             "missing Available Skills"
         );
         assert!(
-            result.contains("buzz-cli: CLI reference for Buzz managed agents"),
+            result.contains("buzz-cli: CLI reference for Zorro managed agents"),
             "missing skill bullet"
         );
         // Body must NOT be inlined — lazy loading only.

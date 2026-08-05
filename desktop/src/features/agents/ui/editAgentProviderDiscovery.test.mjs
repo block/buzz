@@ -1164,7 +1164,7 @@ test("editAgent_bugA_inheritedShortName_resolvesViaIdFallback", () => {
   const runtimes = [
     {
       id: "buzz-agent",
-      command: "/Applications/Buzz.app/Contents/MacOS/buzz-agent", // resolved path
+      command: "/Applications/Zorro.app/Contents/MacOS/buzz-agent", // resolved path
       availability: "available",
       defaultArgs: [],
     },
@@ -1219,7 +1219,7 @@ test("editAgent_bugA_inheritedShortName_discoveryGatePasses", () => {
   const runtimes = [
     {
       id: "buzz-agent",
-      command: "/Applications/Buzz.app/Contents/MacOS/buzz-agent",
+      command: "/Applications/Zorro.app/Contents/MacOS/buzz-agent",
       availability: "available",
       defaultArgs: [],
     },
@@ -1256,7 +1256,7 @@ test("editAgent_bugA_inheritedShortName_discoveryGatePasses", () => {
   );
   assert.equal(
     discoveryAgentCommand,
-    "/Applications/Buzz.app/Contents/MacOS/buzz-agent",
+    "/Applications/Zorro.app/Contents/MacOS/buzz-agent",
     "discoveryAgentCommand must be the resolved path from the catalog entry",
   );
   assert.equal(
@@ -1274,7 +1274,7 @@ test("editAgent_bugA_unknownCommandStillFallsBackToCustom", () => {
   const runtimes = [
     {
       id: "buzz-agent",
-      command: "/Applications/Buzz.app/Contents/MacOS/buzz-agent",
+      command: "/Applications/Zorro.app/Contents/MacOS/buzz-agent",
       availability: "available",
       defaultArgs: [],
     },

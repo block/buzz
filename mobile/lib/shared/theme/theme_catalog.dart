@@ -25,15 +25,18 @@ class ThemeColors {
   bool get isDark => bg.computeLuminance() < 0.5;
 
   /// Human-readable display name: 'catppuccin-mocha' → 'Catppuccin Mocha'.
-  String get displayName => name
-      .split('-')
-      .map((w) => w.isNotEmpty ? '${w[0].toUpperCase()}${w.substring(1)}' : w)
-      .join(' ');
+  String get displayName {
+    if (name == 'zorro') return 'Zorro Light';
+    return name
+        .split('-')
+        .map((w) => w.isNotEmpty ? '${w[0].toUpperCase()}${w.substring(1)}' : w)
+        .join(' ');
+  }
 }
 
 /// Known light theme names — used to show sun/moon icons before loading.
 const lightThemeNames = <String>{
-  'buzz',
+  'zorro',
   'catppuccin-latte',
   'everforest-light',
   'github-light',
@@ -80,24 +83,22 @@ const themeCatalog = <ThemeColors>[
     added: Color(0xFF70BF56),
     deleted: Color(0xFFF26D78),
   ),
-  // Buzz and Buzz Dark are first-party: they borrow the GitHub Light / GitHub
-  // Dark palettes wholesale and are distinguished only by the branded gradient
-  // painted across the app's top section (see buzz_theme.dart).
+  // Zorro's light and dark pair use the product red-orange palette.
   ThemeColors(
-    name: 'buzz',
-    bg: Color(0xFFFFFFFF),
-    fg: Color(0xFF24292E),
-    comment: Color(0xFF6A737D),
-    added: Color(0xFF28A745),
-    deleted: Color(0xFFD73A49),
+    name: 'zorro',
+    bg: Color(0xFFFFF8ED),
+    fg: Color(0xFF7A0103),
+    comment: Color(0xFFA50104),
+    added: Color(0xFFFF931F),
+    deleted: Color(0xFFB81702),
   ),
   ThemeColors(
-    name: 'buzz-dark',
-    bg: Color(0xFF24292E),
-    fg: Color(0xFFE1E4E8),
-    comment: Color(0xFF6A737D),
-    added: Color(0xFF34D058),
-    deleted: Color(0xFFEA4A5A),
+    name: 'zorro-dark',
+    bg: Color(0xFFB81702),
+    fg: Color(0xFFF5F3ED),
+    comment: Color(0xFFFFB950),
+    added: Color(0xFFFFAD33),
+    deleted: Color(0xFFFF7E33),
   ),
   ThemeColors(
     name: 'catppuccin-frappe',

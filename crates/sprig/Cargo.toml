@@ -7,7 +7,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "All-in-one Buzz ACP harness, agent, and developer MCP"
+description = "All-in-one Zorro ACP harness, agent, and developer MCP"
 
 [[bin]]
 name = "sprig"

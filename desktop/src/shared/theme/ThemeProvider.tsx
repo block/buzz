@@ -24,6 +24,7 @@ import {
 
 export const THEME_STORAGE_KEY = "buzz-theme";
 const CACHE_KEY = "buzz-theme-cache";
+const THEME_CACHE_VERSION = 6;
 export const ACCENT_STORAGE_KEY = "buzz-accent-color";
 export const NEUTRAL_ACCENT = "neutral";
 const FOLLOW_SYSTEM_KEY = "buzz-follow-system";
@@ -81,6 +82,11 @@ function readStoredTheme(fallback: SyntaxThemeName): SyntaxThemeName {
   // Migrate legacy values
   if (stored === "light") return "catppuccin-latte";
   if (stored === "dark" || stored === "system") return "houston";
+  if (stored === "buzz" || stored === "buzz-dark") {
+    const migrated = stored === "buzz" ? "zorro" : "zorro-dark";
+    window.localStorage.setItem(THEME_STORAGE_KEY, migrated);
+    return migrated;
+  }
 
   return isValidThemeName(stored) ? stored : fallback;
 }
@@ -220,8 +226,8 @@ function applyAccentColor(value: string) {
  * appearance panel hides the accent picker. The user's chosen accent is left
  * untouched in storage so it returns when they switch back to another theme.
  */
-export function isBuzzTheme(themeName: string): boolean {
-  return themeName === "buzz" || themeName === "buzz-dark";
+export function isZorroTheme(themeName: string): boolean {
+  return themeName === "zorro" || themeName === "zorro-dark";
 }
 
 /**
@@ -232,7 +238,7 @@ function resolveEffectiveAccent(
   themeName: string,
   accentColor: string,
 ): string {
-  return isBuzzTheme(themeName) ? NEUTRAL_ACCENT : accentColor;
+  return isZorroTheme(themeName) ? NEUTRAL_ACCENT : accentColor;
 }
 
 /**
@@ -245,7 +251,7 @@ function resolveEffectiveAccent(
  */
 function applyBuzzSidebar(themeName: string) {
   const root = document.documentElement;
-  if (isBuzzTheme(themeName)) {
+  if (isZorroTheme(themeName)) {
     root.setAttribute("data-buzz-sidebar", "");
     // Keep the concrete Buzz variant on the root as well as the generic
     // marker. The gradient stylesheet matches this attribute directly, which
@@ -323,7 +329,7 @@ let buzzVibrancyEnabled = false;
  */
 function maybeEnableBuzzTranslucent(themeName: string, requestToken: number) {
   if (requestToken !== buzzVibrancyRequest) return;
-  if (!isBuzzTheme(themeName) || !isMacPlatform()) return;
+  if (!isZorroTheme(themeName) || !isMacPlatform()) return;
   if (!buzzVibrancyReady) return;
   if (!document.documentElement.hasAttribute("data-buzz-sidebar")) return;
   setBuzzTranslucent(true);
@@ -348,14 +354,14 @@ function maybeEnableBuzzTranslucent(themeName: string, requestToken: number) {
  * continuation can't re-enable translucency after a newer theme superseded it.
  */
 async function applyBuzzVibrancy(themeName: string) {
-  const buzz = isBuzzTheme(themeName);
+  const zorro = isZorroTheme(themeName);
   const requestToken = ++buzzVibrancyRequest;
 
-  // Buzz Light and Buzz Dark use the same native material. Rebuilding the
+  // Zorro Light and Zorro Dark use the same native material. Rebuilding the
   // NSVisualEffectView on every mode change briefly clears the layer behind
   // the webview and makes the new CSS theme appear late. Keep the installed
   // layer and let applyTheme swap only the color tokens.
-  if (buzz && buzzVibrancyEnabled && buzzVibrancyReady) {
+  if (zorro && buzzVibrancyEnabled && buzzVibrancyReady) {
     maybeEnableBuzzTranslucent(themeName, requestToken);
     return;
   }
@@ -373,18 +379,18 @@ async function applyBuzzVibrancy(themeName: string) {
 
   try {
     await invokeTauri<void>("set_window_vibrancy", {
-      enabled: buzz,
+      enabled: zorro,
       material: BUZZ_VIBRANCY_MATERIAL,
     });
     // A newer theme change superseded this request while the IPC was in flight;
     // that later call owns the current translucency state, so don't clobber it.
     if (requestToken !== buzzVibrancyRequest) return;
-    buzzVibrancyEnabled = buzz;
+    buzzVibrancyEnabled = zorro;
     // Native layer is installed. Record readiness and try to enable translucency
     // — but only if `applyBuzzSidebar` has already installed the Buzz gradient
     // vars. If that effect hasn't landed yet (the IPC won the race), it will
     // call maybeEnableBuzzTranslucent itself once the marker is applied.
-    if (buzz && isMacPlatform()) {
+    if (zorro && isMacPlatform()) {
       buzzVibrancyReady = true;
       maybeEnableBuzzTranslucent(themeName, requestToken);
     }
@@ -402,7 +408,11 @@ function applyCachedVars(): string | null {
   try {
     const cached = window.localStorage.getItem(CACHE_KEY);
     if (!cached) return null;
-    const { themeName, vars, isDark } = JSON.parse(cached);
+    const { version, themeName, vars, isDark } = JSON.parse(cached);
+    if (version !== THEME_CACHE_VERSION) {
+      window.localStorage.removeItem(CACHE_KEY);
+      return null;
+    }
     const root = document.documentElement;
     for (const [key, value] of Object.entries(vars)) {
       root.style.setProperty(key, value as string);
@@ -474,7 +484,12 @@ async function applyTheme(name: SyntaxThemeName): Promise<{
   try {
     window.localStorage.setItem(
       CACHE_KEY,
-      JSON.stringify({ themeName: name, vars, isDark }),
+      JSON.stringify({
+        version: THEME_CACHE_VERSION,
+        themeName: name,
+        vars,
+        isDark,
+      }),
     );
   } catch {
     // Storage full — non-critical
@@ -485,7 +500,7 @@ async function applyTheme(name: SyntaxThemeName): Promise<{
 
 export function ThemeProvider({
   children,
-  defaultTheme = "buzz",
+  defaultTheme = "zorro",
 }: ThemeProviderProps) {
   // Apply cached vars synchronously before first render
   const [selectedTheme, setSelectedTheme] = useState<string>(() => {
@@ -506,8 +521,8 @@ export function ThemeProvider({
   const [followSystem, setFollowSystemState] = useState<boolean>(() => {
     const stored = window.localStorage.getItem(FOLLOW_SYSTEM_KEY);
     if (stored !== null) return stored === "true";
-    // Fresh profiles (no saved theme) default to System mode so the Buzz
-    // default tracks the OS light/dark scheme. Profiles that picked a theme
+    // Fresh profiles (no saved theme) default to System mode so Zorro
+    // tracks the OS with its light/dark pair. Profiles that picked a theme
     // before this toggle existed keep their fixed theme until they opt in.
     return window.localStorage.getItem(THEME_STORAGE_KEY) === null;
   });

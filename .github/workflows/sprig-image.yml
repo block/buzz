@@ -108,8 +108,8 @@ jobs:
             type=semver,pattern={{version}},match=^sprig-v(.*)$
             type=semver,pattern={{major}}.{{minor}},match=^sprig-v(.*)$
           labels: |
-            org.opencontainers.image.title=Buzz Sprig
-            org.opencontainers.image.description=Agent runtime image for Buzz remote agents (buzz-acp multicall + git + curl)
+            org.opencontainers.image.title=Zorro Sprig
+            org.opencontainers.image.description=Agent runtime image for Zorro remote agents (buzz-acp multicall + git + curl)
             org.opencontainers.image.licenses=Apache-2.0
 
       - name: Build and push by digest

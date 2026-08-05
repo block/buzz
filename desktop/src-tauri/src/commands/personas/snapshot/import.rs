@@ -794,7 +794,7 @@ fn retain_agent_pending(app: &AppHandle, state: &AppState, record: &ManagedAgent
         )
     })();
     if let Err(e) = result {
-        eprintln!("buzz-desktop: snapshot-import retain-agent: {e}");
+        eprintln!("zorro-desktop: snapshot-import retain-agent: {e}");
     }
 }
 

@@ -363,14 +363,14 @@ pub(crate) fn mint_media_get_auth(state: &AppState, base_url: &str) -> Option<St
     let keys = match state.signing_keys() {
         Ok(k) => k,
         Err(e) => {
-            eprintln!("buzz-desktop: media get auth unavailable (unsigned request): {e}");
+            eprintln!("zorro-desktop: media get auth unavailable (unsigned request): {e}");
             return None;
         }
     };
     match sign_blossom_get_auth_header(&keys, base_url, MEDIA_GET_AUTH_EXPIRY_SECS) {
         Ok(header) => Some(header),
         Err(e) => {
-            eprintln!("buzz-desktop: media get auth signing failed (unsigned request): {e}");
+            eprintln!("zorro-desktop: media get auth signing failed (unsigned request): {e}");
             None
         }
     }
@@ -609,7 +609,7 @@ async fn process_picked_path(
     if let Some(poster) = poster_bytes {
         match do_upload(poster, "image/jpeg", state, None, None).await {
             Ok(poster_desc) => descriptor.image = Some(poster_desc.url),
-            Err(e) => eprintln!("buzz-desktop: poster upload failed (non-fatal): {e}"),
+            Err(e) => eprintln!("zorro-desktop: poster upload failed (non-fatal): {e}"),
         }
     }
 
@@ -789,7 +789,7 @@ pub(super) async fn upload_media_bytes_inner(
     if let Some(poster) = poster_bytes {
         match do_upload(poster, "image/jpeg", &state, None, cancellation).await {
             Ok(poster_desc) => descriptor.image = Some(poster_desc.url),
-            Err(e) => eprintln!("buzz-desktop: poster upload failed (non-fatal): {e}"),
+            Err(e) => eprintln!("zorro-desktop: poster upload failed (non-fatal): {e}"),
         }
     }
 

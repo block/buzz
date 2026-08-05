@@ -299,7 +299,7 @@ pub(crate) fn validate_clone_url(clone_url: &str) -> Result<(), String> {
         })
         .unwrap_or(false);
     if !is_buzz_repo_path {
-        return Err("clone URL must point at a Buzz git repository".into());
+        return Err("clone URL must point at a Zorro git repository".into());
     }
     Ok(())
 }
@@ -341,7 +341,7 @@ pub(crate) fn validate_local_clone_url(clone_url: &str) -> Result<(), String> {
     if validate_clone_url(clone_url).is_ok() || validate_github_clone_url(clone_url).is_ok() {
         return Ok(());
     }
-    Err("clone URL must point at a Buzz repository or public GitHub repository".into())
+    Err("clone URL must point at a Zorro repository or public GitHub repository".into())
 }
 
 pub(crate) fn validate_local_clone_url_for_workspace(
@@ -401,10 +401,10 @@ mod tests {
     #[test]
     fn credential_helper_config_value_uses_forward_slashes() {
         let path =
-            std::path::PathBuf::from(r"C:\Users\x\AppData\Local\Buzz\git-credential-nostr.exe");
+            std::path::PathBuf::from(r"C:\Users\x\AppData\Local\Zorro\git-credential-nostr.exe");
         assert_eq!(
             credential_helper_config_value(&path),
-            "C:/Users/x/AppData/Local/Buzz/git-credential-nostr.exe",
+            "C:/Users/x/AppData/Local/Zorro/git-credential-nostr.exe",
         );
     }
 
@@ -413,7 +413,7 @@ mod tests {
         assert_eq!(
             git_subcommand(&[
                 "-c",
-                "user.name=Buzz User",
+                "user.name=Zorro User",
                 "-c",
                 "user.email=user@example.com",
                 "merge",
@@ -432,7 +432,7 @@ mod tests {
         assert!(git_needs_credentials(&["fetch", "origin"]));
         assert!(git_needs_credentials(&[
             "-c",
-            "user.name=Buzz User",
+            "user.name=Zorro User",
             "merge",
             "HEAD"
         ]));

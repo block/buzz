@@ -45,11 +45,11 @@ pub(crate) fn reconcile_agents_to_events(
         Ok(0) => {}
         Ok(reconciled) => {
             eprintln!(
-                "buzz-desktop: agent-event-reconcile: {reconciled} agents reconciled to retention"
+                "zorro-desktop: agent-event-reconcile: {reconciled} agents reconciled to retention"
             );
         }
         Err(e) => {
-            eprintln!("buzz-desktop: agent-event-reconcile: {e}");
+            eprintln!("zorro-desktop: agent-event-reconcile: {e}");
         }
     }
 }

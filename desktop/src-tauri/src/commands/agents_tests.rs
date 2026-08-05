@@ -229,7 +229,7 @@ fn normalize_relay_mesh_rejects_empty_model_ref() {
 
     assert_eq!(
         normalize_relay_mesh(Some(&config), &BackendKind::Local).unwrap_err(),
-        "Buzz shared compute model is required"
+        "Zorro shared compute model is required"
     );
 }
 
@@ -245,7 +245,7 @@ fn normalize_relay_mesh_rejects_non_local_backend() {
 
     assert_eq!(
         normalize_relay_mesh(Some(&config), &backend).unwrap_err(),
-        "Buzz shared compute agents must use the local backend"
+        "Zorro shared compute agents must use the local backend"
     );
 }
 

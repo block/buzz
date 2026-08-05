@@ -1,17 +1,22 @@
 use super::*;
 
-/// Binary names for the Buzz desktop/Tauri process. Used by dead-instance
+/// Binary names for the Zorro desktop/Tauri process. Used by dead-instance
 /// detection to confirm the owning desktop is still alive.
 const DESKTOP_BINARY_NAMES: &[&str] = &[
+    "Zorro",
+    "zorro-desktop",
+    "zorro_desktop",
+    // Linux limits /proc/<pid>/comm to 15 visible bytes, truncating the
+    // AppImage shim's real executable name, `zorro-desktop.bin`.
+    "zorro-desktop.b",
+    // Legacy Buzz names keep orphan detection working during upgrades.
     "Buzz",
     "buzz-desktop",
     "buzz_desktop",
-    // Linux limits /proc/<pid>/comm to 15 visible bytes, truncating the
-    // AppImage shim's real executable name, `buzz-desktop.bin`.
     "buzz-desktop.bi",
 ];
 
-/// Check if a process name matches a known Buzz desktop binary.
+/// Check if a process name matches a known Zorro or legacy Buzz desktop binary.
 pub(super) fn is_desktop_binary(name: &str) -> bool {
     DESKTOP_BINARY_NAMES.contains(&name)
 }
@@ -106,7 +111,7 @@ fn extract_buzz_marker_value(_pid: u32) -> Option<String> {
 }
 
 /// Check if a Buzz desktop process is still alive for the given instance ID.
-/// Scans all user-owned processes named "Buzz" or "buzz-desktop" and checks
+/// Scans all user-owned Zorro and legacy Buzz desktop processes and checks
 /// whether any has the identifier in its command-line args (KERN_PROCARGS2 buffer
 /// includes both argv and environ — the `--config` JSON from `tauri dev` contains
 /// the identifier string).
@@ -290,7 +295,7 @@ pub(crate) fn reap_dead_instance_agents(our_instance_id: &str, skip_pids: &[u32]
             continue;
         }
         eprintln!(
-            "buzz-desktop: reaping {} orphaned agent(s) from dead instance '{instance_id}'",
+            "zorro-desktop: reaping {} orphaned agent(s) from dead instance '{instance_id}'",
             agent_pids.len()
         );
         resolve_pgids_and_kill(agent_pids);
@@ -348,7 +353,7 @@ pub(crate) fn reap_dead_instance_agents(our_instance_id: &str, skip_pids: &[u32]
             continue;
         }
         eprintln!(
-            "buzz-desktop: reaping {} orphaned agent(s) from dead instance '{instance_id}'",
+            "zorro-desktop: reaping {} orphaned agent(s) from dead instance '{instance_id}'",
             agent_pids.len()
         );
         resolve_pgids_and_kill(agent_pids);

@@ -71,6 +71,17 @@ test("parseEntityLink lowercase-normalizes hex identifiers", () => {
   });
 });
 
+test("parseEntityLink accepts zorro:// entity links", () => {
+  assert.deepEqual(
+    parseEntityLink(`zorro://issue?id=${EVENT_ID}&owner=${OWNER}&d=buzz-world`),
+    {
+      ok: true,
+      value: { type: "issue", id: EVENT_ID, owner: OWNER, dtag: "buzz-world" },
+    },
+  );
+  assert.equal(isEntityLink(`zorro://repo?owner=${OWNER}`), true);
+});
+
 test("parseEntityLink rejects malformed links", () => {
   const cases = [
     ["not a url at all", "invalid-url"],

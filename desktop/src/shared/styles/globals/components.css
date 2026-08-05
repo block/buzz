@@ -262,14 +262,13 @@
   }
 
   .buzz-onboarding-neutral-theme.buzz-startup-shell {
-    /* Dot grid over the chartreuse→light-blue gradient (dots layer first so
-       they sit on top). The welcome page overrides this with dots over a flat
-       chartreuse fill below. */
+    /* Dot grid over the Zorro amber-to-red onboarding gradient. */
     background-image:
-      radial-gradient(circle, rgb(0 0 0 / 0.08) 1px, transparent 1px),
+      radial-gradient(circle, rgb(122 1 3 / 0.12) 1px, transparent 1px),
       linear-gradient(
         to bottom,
-        var(--buzz-welcome-chartreuse),
+        var(--buzz-onboarding-gradient-top),
+        var(--buzz-onboarding-landing-background) 48%,
         var(--buzz-onboarding-shell-bottom)
       );
     background-size:
@@ -278,53 +277,198 @@
   }
 
   .buzz-onboarding-neutral-theme.buzz-startup-shell.buzz-onboarding-welcome {
-    background-color: var(--buzz-welcome-chartreuse);
-    /* Landing is a flat chartreuse field, so the docked-footer scrim must match
-       it (not the gradient's light-blue bottom) to stay invisible. */
-    --buzz-onboarding-shell-bottom: var(--buzz-welcome-chartreuse);
-    /* Subtle dot grid: 2px dots spaced on a 24px lattice. */
-    background-image: radial-gradient(
-      circle,
-      rgb(0 0 0 / 0.08) 1px,
-      transparent 1px
-    );
-    background-size: 24px 24px;
+    background-color: var(--buzz-onboarding-landing-background);
+    /* An orange diagonal sweep distinguishes the landing composition while
+       staying connected to the amber/red setup pages. */
+    background-image:
+      radial-gradient(circle, rgb(122 1 3 / 0.14) 1px, transparent 1px),
+      linear-gradient(
+        145deg,
+        var(--buzz-onboarding-gradient-top) 0%,
+        var(--buzz-onboarding-landing-background) 48%,
+        var(--buzz-onboarding-landing-bottom) 100%
+      );
+    background-size:
+      24px 24px,
+      auto;
   }
 
   .buzz-onboarding-neutral-theme {
-    /* Landing "chartreuse" — the welcome background; reused for the CTA label. */
-    --buzz-welcome-chartreuse: #d7d72e;
+    --buzz-onboarding-gradient-top: #ffb950;
+    --buzz-onboarding-landing-background: #ff931f;
+    --buzz-onboarding-landing-bottom: #ec3f13;
+    /* Legacy variable name retained for setup-state accents. */
+    --buzz-welcome-chartreuse: #fa5e1f;
     /* Bottom stop of the onboarding shell gradient; also the docked-footer
        scrim color so content scrolling under the CTA fades into the page. */
-    --buzz-onboarding-shell-bottom: #d7e7f6;
-    /* Label color for the primary onboarding CTA (light blue on the dark pill). */
-    --buzz-onboarding-cta-label: #d7e6f0;
-    /* Olive ink for the backup step's private key and its "never share" caption,
-       reading against the fuzzy-white key frame. */
-    --buzz-onboarding-backup-ink: #717106;
-    --background: 0 0% 100%;
-    --foreground: 0 0% 9%;
-    --primary: 0 0% 9%;
-    --primary-foreground: 0 0% 98%;
-    --secondary: 0 0% 96.1%;
-    --secondary-foreground: 0 0% 9%;
-    --muted: 0 0% 96.1%;
-    --muted-foreground: 0 0% 45.1%;
-    --accent: 0 0% 96.1%;
-    --accent-foreground: 0 0% 9%;
-    --border: 0 0% 89.8%;
-    --input: 0 0% 89.8%;
-    --ring: 0 0% 9%;
+    --buzz-onboarding-shell-bottom: #ff7e33;
+    --buzz-onboarding-button: #a50104;
+    --buzz-onboarding-button-hover: #b81702;
+    --buzz-onboarding-cta-label: #fff8ed;
+    --buzz-onboarding-secondary-bg: rgb(255 173 51 / 0.35);
+    --buzz-onboarding-secondary-bg-hover: rgb(255 173 51 / 0.56);
+    --buzz-onboarding-secondary-border: rgb(236 63 19 / 0.46);
+    --buzz-onboarding-secondary-ink: #7a0103;
+    /* Deep warm ink for the backup step's private key and caption. */
+    --buzz-onboarding-backup-ink: #7a0103;
+    --background: 36.7 100% 96.5%;
+    --foreground: 359 98.4% 24.1%;
+    --primary: 358.9 98.8% 32.5%;
+    --primary-foreground: 36.7 100% 96.5%;
+    --secondary: 36 100% 65.7%;
+    --secondary-foreground: 359 98.4% 24.1%;
+    --muted: 35.9 100% 60%;
+    --muted-foreground: 359 98.4% 24.1%;
+    --accent: 17.3 95.6% 55.1%;
+    --accent-foreground: 359 98.4% 24.1%;
+    --border: 12.2 85.1% 50%;
+    --input: 12.2 85.1% 50%;
+    --ring: 359.1 98.6% 28%;
     --buzz-onboarding-emoji-picker-background: 245, 245, 245;
     --buzz-onboarding-emoji-picker-color: 23, 23, 23;
     --buzz-onboarding-emoji-picker-input: 255, 255, 255;
     --buzz-onboarding-avatar-dialog-bg: 255 255 255;
-    --buzz-onboarding-avatar-accent-bg: 240 240 205;
-    --buzz-onboarding-avatar-accent-fg: 113 113 6;
-    --buzz-onboarding-avatar-action-bg: 23 23 23;
-    --buzz-onboarding-avatar-action-fg: 240 240 205;
-    --buzz-onboarding-avatar-control-fg: 113 113 6;
+    --buzz-onboarding-avatar-accent-bg: 255 185 80;
+    --buzz-onboarding-avatar-accent-fg: 122 1 3;
+    --buzz-onboarding-avatar-action-bg: 165 1 4;
+    --buzz-onboarding-avatar-action-fg: 255 248 237;
+    --buzz-onboarding-avatar-control-fg: 122 1 3;
     --buzz-onboarding-avatar-dialog-shadow: 0 0 0;
+  }
+
+  .zorro-slashable-hat {
+    aspect-ratio: 1;
+    cursor: crosshair;
+    display: inline-block;
+    position: relative;
+  }
+
+  .zorro-zee-hitbox {
+    cursor: crosshair;
+  }
+
+  .zorro-zee-hitbox .zorro-slashable-hat {
+    pointer-events: none;
+  }
+
+  .zorro-slashable-hat__piece {
+    inset: 0;
+    pointer-events: none;
+    position: absolute;
+    will-change: opacity, transform;
+  }
+
+  .zorro-slashable-hat__piece--top {
+    clip-path: polygon(0 0, 100% 0, 100% 43%, 0 68%);
+  }
+
+  .zorro-slashable-hat__piece--bottom {
+    clip-path: polygon(0 68%, 100% 43%, 100% 100%, 0 100%);
+  }
+
+  .zorro-slashable-hat__slash {
+    background: linear-gradient(
+      90deg,
+      transparent,
+      #ffb950 12%,
+      #fff 50%,
+      #ffb950 88%,
+      transparent
+    );
+    box-shadow: 0 0 10px rgb(142 1 3 / 0.72);
+    height: max(2px, 0.025em);
+    left: -10%;
+    opacity: 0;
+    pointer-events: none;
+    position: absolute;
+    top: 56%;
+    transform: rotate(-14deg) scaleX(0);
+    transform-origin: left center;
+    width: 120%;
+    z-index: 1;
+  }
+
+  .zorro-slashable-hat:hover .zorro-slashable-hat__piece--top,
+  .zorro-zee-hitbox:hover .zorro-slashable-hat__piece--top {
+    animation: zorro-hat-slice-top 560ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+
+  .zorro-slashable-hat:hover .zorro-slashable-hat__piece--bottom,
+  .zorro-zee-hitbox:hover .zorro-slashable-hat__piece--bottom {
+    animation: zorro-hat-slice-bottom 560ms cubic-bezier(0.16, 1, 0.3, 1)
+      forwards;
+  }
+
+  .zorro-slashable-hat:hover .zorro-slashable-hat__slash,
+  .zorro-zee-hitbox:hover .zorro-slashable-hat__slash {
+    animation: zorro-hat-slash 430ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+  }
+
+  @keyframes zorro-hat-slice-top {
+    0%,
+    36% {
+      opacity: 1;
+      transform: translate3d(0, 0, 0) rotate(0);
+    }
+
+    100% {
+      opacity: 0;
+      transform: translate3d(8%, -11%, 0) rotate(4deg);
+    }
+  }
+
+  @keyframes zorro-hat-slice-bottom {
+    0%,
+    36% {
+      opacity: 1;
+      transform: translate3d(0, 0, 0) rotate(0);
+    }
+
+    100% {
+      opacity: 0;
+      transform: translate3d(-8%, 11%, 0) rotate(-4deg);
+    }
+  }
+
+  @keyframes zorro-hat-slash {
+    0% {
+      opacity: 0;
+      transform: rotate(-14deg) scaleX(0);
+    }
+
+    18%,
+    68% {
+      opacity: 1;
+    }
+
+    55% {
+      transform: rotate(-14deg) scaleX(1);
+    }
+
+    100% {
+      opacity: 0;
+      transform: rotate(-14deg) scaleX(1) translateX(8%);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .zorro-slashable-hat:hover .zorro-slashable-hat__piece,
+    .zorro-zee-hitbox:hover .zorro-slashable-hat__piece {
+      animation: none;
+      opacity: 0;
+    }
+
+    .zorro-slashable-hat:hover .zorro-slashable-hat__slash,
+    .zorro-zee-hitbox:hover .zorro-slashable-hat__slash {
+      animation: none;
+      display: none;
+    }
+  }
+
+  @media (max-width: 899px), (max-height: 639px) {
+    .zorro-zee-hitbox {
+      display: none;
+    }
   }
 
   /*
@@ -337,6 +481,12 @@
     color-scheme: dark;
     --buzz-onboarding-shell-bottom: #082b49;
     --buzz-onboarding-cta-label: #f5f5f5;
+    --buzz-onboarding-button: #292929;
+    --buzz-onboarding-button-hover: #363636;
+    --buzz-onboarding-secondary-bg: rgb(255 255 255 / 0.08);
+    --buzz-onboarding-secondary-bg-hover: rgb(255 255 255 / 0.14);
+    --buzz-onboarding-secondary-border: rgb(255 255 255 / 0.16);
+    --buzz-onboarding-secondary-ink: #f5f5f5;
     --background: 222 45% 4%;
     --foreground: 0 0% 96%;
     --card: 220 14% 11%;

@@ -1022,7 +1022,7 @@ test("repository rows identify their git host", async ({ page }) => {
     .getByTestId("repository-host-icon");
   await expect(buzzHostIcon).toHaveAttribute(
     "aria-label",
-    "Buzz-hosted repository",
+    "Zorro-hosted repository",
   );
   await expect(
     page
@@ -1032,7 +1032,7 @@ test("repository rows identify their git host", async ({ page }) => {
 
   await buzzHostIcon.hover();
   await expect(
-    page.getByRole("tooltip", { name: "Buzz-hosted repository" }),
+    page.getByRole("tooltip", { name: "Zorro-hosted repository" }),
   ).toBeVisible();
 });
 
@@ -1130,10 +1130,10 @@ test("project without a checkout offers fetch feedback and dropdown cloning", as
   await openBuzzProject(page);
 
   await expect(
-    page.getByRole("button", { name: "Buzz", exact: true }),
+    page.getByRole("button", { name: "Zorro", exact: true }),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Buzz", exact: true }),
+    page.getByRole("button", { name: "Zorro", exact: true }),
   ).toHaveClass(/\bborder-input\/40\b/);
   await expect(page.getByRole("button", { name: /main/ })).toHaveClass(
     /\bborder-input\/40\b/,
@@ -1144,7 +1144,7 @@ test("project without a checkout offers fetch feedback and dropdown cloning", as
   await page.getByRole("button", { name: "Fetch", exact: true }).click();
   await expect(page.getByText("Remote state refreshed.")).toBeVisible();
 
-  await page.getByRole("button", { name: "Buzz", exact: true }).click();
+  await page.getByRole("button", { name: "Zorro", exact: true }).click();
   const cloneItem = page.getByRole("menuitem", {
     name: "Local missing Clone",
   });
@@ -1226,7 +1226,7 @@ test("repository tags can be browsed as immutable remote snapshots", async ({
 
   await expect(page.getByRole("button", { name: /v1\.0\.0/ })).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Buzz", exact: true }),
+    page.getByRole("button", { name: "Zorro", exact: true }),
   ).toBeVisible();
   await expect
     .poll(() =>

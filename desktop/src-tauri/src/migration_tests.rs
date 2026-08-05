@@ -715,7 +715,7 @@ fn reconcile_mcp_commands_handles_mixed_agents() {
             {"name": "Stale Goose", "agent_command": "goose", "mcp_command": "buzz-mcp-server"},
             {"name": "Clean Goose", "agent_command": "goose", "mcp_command": ""},
             {"name": "Custom Agent", "agent_command": "goose", "mcp_command": "my-custom-mcp"},
-            {"name": "Stale Buzz", "agent_command": "buzz-agent", "mcp_command": "buzz-mcp-server"}
+            {"name": "Stale Zorro", "agent_command": "buzz-agent", "mcp_command": "buzz-mcp-server"}
         ]),
     );
     reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json"));

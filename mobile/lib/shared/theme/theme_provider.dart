@@ -4,7 +4,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'accent_colors.dart';
 import 'adaptive_theme.dart';
-import 'buzz_theme.dart';
 import 'color_scheme.dart';
 import 'theme_catalog.dart';
 import 'theme_pairs.dart';
@@ -13,10 +12,9 @@ const _themeModeKey = 'buzz_theme_mode';
 const _accentKey = 'buzz_accent_color';
 const _schemeKey = 'buzz_color_scheme';
 
-/// Buzz ships as the default: the first-party pair, so a fresh install gets the
-/// branded top-section gradient without picking a theme first.
-const defaultSchemeName = buzzThemeName;
-const defaultSchemeDisplayName = 'Buzz';
+/// Fresh installs use Zorro and follow the system brightness.
+const defaultSchemeName = 'zorro';
+const defaultSchemeDisplayName = 'Zorro';
 
 /// Pre-loaded SharedPreferences instance, overridden in main().
 final savedPrefsProvider = Provider<SharedPreferences>(
@@ -78,7 +76,15 @@ class SchemeNotifier extends Notifier<String?> {
   @override
   String? build() {
     final prefs = ref.read(savedPrefsProvider);
-    final stored = prefs.getString(_schemeKey);
+    final legacyStored = prefs.getString(_schemeKey);
+    final stored = switch (legacyStored) {
+      'buzz' => 'zorro',
+      'buzz-dark' => 'zorro-dark',
+      _ => legacyStored,
+    };
+    if (stored != legacyStored && stored != null) {
+      prefs.setString(_schemeKey, stored);
+    }
     final compatible = schemeForAppearanceMode(
       stored,
       ref.watch(themeProvider),
@@ -121,7 +127,7 @@ String? schemeForAppearanceMode(String? schemeName, ThemeMode mode) {
   final selected = findTheme(schemeName ?? defaultSchemeName);
   if (selected != null && isPairedTheme(selected.name)) return schemeName;
 
-  return themeGroups().paired.firstOrNull?.name ?? schemeName;
+  return isPairedTheme(defaultSchemeName) ? defaultSchemeName : schemeName;
 }
 
 /// Resolves the selected scheme and appearance [mode] into light and dark

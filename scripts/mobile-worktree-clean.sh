@@ -58,7 +58,7 @@ if command -v adb &>/dev/null; then
 fi
 
 if [[ "$removed" == "0" ]]; then
-    echo "no worktree-suffixed Buzz installs found (production apps untouched)"
+    echo "no worktree-suffixed Zorro installs found (production apps untouched)"
 elif [[ "$dry_run" == "1" ]]; then
     echo "dry run: $removed worktree install(s) would be removed (production apps untouched)"
 else

@@ -98,7 +98,7 @@ pub fn enable_media_capture<R: tauri::Runtime>(webview: &tauri::Webview<R>) {
     });
 
     if let Err(error) = result {
-        eprintln!("buzz-desktop: could not enable WebKitGTK media capture: {error}");
+        eprintln!("zorro-desktop: could not enable WebKitGTK media capture: {error}");
     }
 }
 

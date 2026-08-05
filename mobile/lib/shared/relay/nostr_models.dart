@@ -53,7 +53,7 @@ abstract final class EventKind {
   static const channelEventKinds = [
     deletion, // 5
     reaction, // 7
-    nip29DeleteEvent, // 9005 — Buzz-native deletion
+    nip29DeleteEvent, // 9005 — Zorro-native deletion
     ...channelMessageEventKinds,
     40001, // legacy pre-migration stream messages
     streamMessageEdit, // 40003

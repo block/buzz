@@ -36,7 +36,7 @@ pub fn spawn_event_sync(
         })
         .await
         {
-            eprintln!("buzz-desktop: event-sync: spawn_blocking failed: {e}");
+            eprintln!("zorro-desktop: event-sync: spawn_blocking failed: {e}");
         }
     });
 }
@@ -72,11 +72,11 @@ pub fn migrate_personas_to_events(app: &tauri::AppHandle, keys: &nostr::Keys, db
         Ok(0) => {}
         Ok(migrated) => {
             eprintln!(
-                "buzz-desktop: persona-event-migration: {migrated} personas migrated to retention"
+                "zorro-desktop: persona-event-migration: {migrated} personas migrated to retention"
             );
         }
         Err(e) => {
-            eprintln!("buzz-desktop: persona-event-migration: {e}");
+            eprintln!("zorro-desktop: persona-event-migration: {e}");
         }
     }
 }
@@ -229,10 +229,12 @@ pub fn migrate_teams_to_events(app: &tauri::AppHandle, keys: &nostr::Keys, db_pa
     match migrate_teams_in_dir_at(&base_dir, keys, db_path) {
         Ok(0) => {}
         Ok(migrated) => {
-            eprintln!("buzz-desktop: team-event-migration: {migrated} teams migrated to retention");
+            eprintln!(
+                "zorro-desktop: team-event-migration: {migrated} teams migrated to retention"
+            );
         }
         Err(e) => {
-            eprintln!("buzz-desktop: team-event-migration: {e}");
+            eprintln!("zorro-desktop: team-event-migration: {e}");
         }
     }
 }

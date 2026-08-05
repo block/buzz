@@ -23,7 +23,7 @@ function makeTool(overrides = {}) {
   };
 }
 
-test("buildCompactToolSummary formats Buzz send_message preview", () => {
+test("buildCompactToolSummary formats Zorro send_message preview", () => {
   const summary = buildCompactToolSummary(
     makeTool({
       toolName: "send_message",
@@ -232,7 +232,7 @@ test("buildCompactToolSummary exposes shellContent for shell-sourced buzz CLI re
   });
 });
 
-test("buildCompactToolSummary derives structured actions for native Buzz MCP tools", () => {
+test("buildCompactToolSummary derives structured actions for native Zorro MCP tools", () => {
   const summary = buildCompactToolSummary(
     makeTool({
       toolName: "get_channel",

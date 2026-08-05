@@ -42,7 +42,7 @@ pub(in crate::commands) fn retain_persona_pending(
     persona: &AgentDefinition,
 ) {
     if let Err(e) = prepare_persona_publication(app, state, persona, None) {
-        eprintln!("buzz-desktop: persona-retain: {e}");
+        eprintln!("zorro-desktop: persona-retain: {e}");
     }
 }
 
@@ -114,7 +114,7 @@ fn project_scoped_persona_sharing(
         )
     });
     if let Err(error) = projected {
-        eprintln!("buzz-desktop: persona-share-projection unavailable, reporting every agent as unshared: {error}");
+        eprintln!("zorro-desktop: persona-share-projection unavailable, reporting every agent as unshared: {error}");
         for persona in personas {
             persona.shared = false;
         }
@@ -239,7 +239,7 @@ pub(in crate::commands) fn tombstone_persona_pending(
         )
     })();
     if let Err(e) = result {
-        eprintln!("buzz-desktop: persona-tombstone: {e}");
+        eprintln!("zorro-desktop: persona-tombstone: {e}");
     }
 }
 

@@ -68,7 +68,7 @@ impl PocketVoiceLibrary {
             .map_err(|error| format!("imported voice registry is invalid: {error}"))?;
         if registry.version > REGISTRY_VERSION {
             return Err(format!(
-                "imported voice registry version {} is newer than this Buzz build supports",
+                "imported voice registry version {} is newer than this Zorro build supports",
                 registry.version
             ));
         }

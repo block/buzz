@@ -15,7 +15,7 @@ function decodePayload(callbackUrl) {
 }
 
 test("buildNostrBindCallbackUrl returns a UTF-8 base64url payload in the fragment", () => {
-  const response = JSON.stringify({ content: "Buzz ⚡", sig: "+/=" });
+  const response = JSON.stringify({ content: "Zorro ⚡", sig: "+/=" });
   const result = buildNostrBindCallbackUrl(
     "https://example.com/buzz?source=bind",
     response,

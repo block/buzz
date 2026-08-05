@@ -9,7 +9,7 @@ class AppColors extends ThemeExtension<AppColors> {
   /// Gradient for the app's top section, non-null only under the Buzz themes.
   /// Carried on the theme rather than read from a provider so any surface can
   /// opt in via `context.appColors.topSectionGradient` — see
-  /// `buzzTopSectionGradient`.
+  /// `zorroTopSectionGradient`.
   final Gradient? topSectionGradient;
 
   const AppColors({

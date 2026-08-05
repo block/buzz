@@ -47,7 +47,7 @@ done <<< "$refs"
   fail "candidate sequence changed; expected rc.$candidate_number but next is rc.$next"
 
 tag="mobile-v${version}-rc.${candidate_number}"
-message="Buzz Mobile $version release candidate $candidate_number"
+message="Zorro Mobile $version release candidate $candidate_number"
 tag_object_sha="$(
   gh api --method POST "repos/$repo/git/tags" \
     -f tag="$tag" \

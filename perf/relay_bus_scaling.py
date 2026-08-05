@@ -458,7 +458,7 @@ def assert_scaling(args: argparse.Namespace, rows: list[Measurement]) -> None:
 
 
 def print_rows(args: argparse.Namespace, rows: list[Measurement]) -> None:
-    print("Buzz relay Redis bus scaling harness")
+    print("Zorro relay Redis bus scaling harness")
     print("====================================")
     print(
         "scenario: "

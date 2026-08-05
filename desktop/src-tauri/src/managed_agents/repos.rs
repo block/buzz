@@ -254,7 +254,7 @@ pub fn resolve_repos_at_boot(nest_root: &Path) -> bool {
     let persisted = read_persisted_repos_dir(nest_root);
     let symlink_result = ensure_repos_symlink(nest_root, persisted.as_deref());
     if let Err(error) = &symlink_result {
-        eprintln!("buzz-desktop: repos dir setup failed at boot: {error}");
+        eprintln!("zorro-desktop: repos dir setup failed at boot: {error}");
     }
     let restore = should_restore_agents(persisted.is_some(), &symlink_result);
     // Log the resolved outcome on success so a healthy boot is observable (the
@@ -262,16 +262,16 @@ pub fn resolve_repos_at_boot(nest_root: &Path) -> bool {
     if symlink_result.is_ok() {
         match persisted.as_deref() {
             Some(dir) => eprintln!(
-                "buzz-desktop: repos dir resolved at boot — REPOS symlinked to configured `{dir}`"
+                "zorro-desktop: repos dir resolved at boot — REPOS symlinked to configured `{dir}`"
             ),
             None => eprintln!(
-                "buzz-desktop: repos dir resolved at boot — no configured override, REPOS is the default real dir"
+                "zorro-desktop: repos dir resolved at boot — no configured override, REPOS is the default real dir"
             ),
         }
     }
     if !restore {
         eprintln!(
-            "buzz-desktop: skipping agent restore — configured repos_dir `{}` could not be resolved at boot; will retry on next launch",
+            "zorro-desktop: skipping agent restore — configured repos_dir `{}` could not be resolved at boot; will retry on next launch",
             persisted.as_deref().unwrap_or_default()
         );
     }

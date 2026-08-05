@@ -54,7 +54,7 @@ async function openChannel(page: Page) {
 
 async function expectBuzzSidebarPalette(page: Page, mode: "light" | "dark") {
   const mutedColor =
-    mode === "light" ? "rgba(0, 0, 0, 0.4)" : "rgba(255, 255, 255, 0.4)";
+    mode === "light" ? "rgba(0, 0, 0, 0.4)" : "rgba(255, 185, 80, 0.7)";
   const searchSurface =
     mode === "light" ? "rgba(0, 0, 0, 0.04)" : "rgba(255, 255, 255, 0.04)";
   const hoverSurface =
@@ -62,7 +62,7 @@ async function expectBuzzSidebarPalette(page: Page, mode: "light" | "dark") {
   const activeSurface =
     mode === "light" ? "rgba(0, 0, 0, 0.07)" : "color(srgb 1 1 1 / 0.16)";
   const chromeColor =
-    mode === "light" ? "rgba(0, 0, 0, 0.5)" : "rgba(255, 255, 255, 0.5)";
+    mode === "light" ? "rgba(0, 0, 0, 0.5)" : "rgba(255, 185, 80, 0.85)";
   const search = page.getByTestId("open-search");
   const pinnedHeader = page.getByTestId("sidebar-pinned-header");
   const sidebarScroller = page.locator(".buzz-sidebar-scrollbar");
@@ -268,7 +268,7 @@ async function expectBuzzGradientPaint(
     };
   });
 
-  expect(paint.theme).toBe(mode === "light" ? "buzz" : "buzz-dark");
+  expect(paint.theme).toBe(mode === "light" ? "zorro" : "zorro-dark");
   expect(paint.isDark).toBe(mode === "dark");
   expect(paint.surfaceImage).toBe("none");
   expect(paint.lightImage).not.toBe("");
@@ -284,7 +284,7 @@ async function expectBuzzGradientPaint(
 
 async function expectBuzzSettingsPalette(page: Page, mode: "light" | "dark") {
   const mutedColor =
-    mode === "light" ? "rgba(0, 0, 0, 0.4)" : "rgba(255, 255, 255, 0.4)";
+    mode === "light" ? "rgba(0, 0, 0, 0.4)" : "rgba(255, 185, 80, 0.7)";
   const sidebar = page.getByTestId("settings-sidebar");
   const sectionLabel = sidebar
     .locator('[data-sidebar="group-label"]')
@@ -306,10 +306,10 @@ async function expectBuzzSettingsPalette(page: Page, mode: "light" | "dark") {
 
 async function expectAppliedBuzzTheme(
   page: Page,
-  themeName: "buzz" | "buzz-dark",
-  storedTheme: "buzz" | "buzz-dark" = themeName,
+  themeName: "zorro" | "zorro-dark",
+  storedTheme: "zorro" | "zorro-dark" = themeName,
 ) {
-  const isDark = themeName === "buzz-dark";
+  const isDark = themeName === "zorro-dark";
   await expect
     .poll(() =>
       page.evaluate((storageKey) => {
@@ -354,8 +354,8 @@ async function emitNativeThemeChange(page: Page, theme: "light" | "dark") {
   }, theme);
 }
 
-test("buzz light sidebar gradient", async ({ page }) => {
-  await seedTheme(page, "buzz");
+test("Zorro Light sidebar gradient", async ({ page }) => {
+  await seedTheme(page, "zorro");
   await installMockBridge(page);
   await openChannel(page);
   await expectBuzzGradientPaint(page, "light");
@@ -369,8 +369,8 @@ test("buzz light sidebar gradient", async ({ page }) => {
     .screenshot({ path: `${SHOTS}/01-buzz-light-sidebar.png` });
 });
 
-test("buzz dark sidebar gradient", async ({ page }) => {
-  await seedTheme(page, "buzz-dark");
+test("Zorro Dark sidebar gradient", async ({ page }) => {
+  await seedTheme(page, "zorro-dark");
   await installMockBridge(page);
   await openChannel(page);
   await expectBuzzGradientPaint(page, "dark");
@@ -380,7 +380,7 @@ test("buzz dark sidebar gradient", async ({ page }) => {
   await expectIconlessSectionTitleAligned(page, "dm-list");
   await expect(page.locator("[data-buzz-content-surface]")).toHaveCSS(
     "background-color",
-    "rgb(26, 26, 26)",
+    "rgb(184, 23, 2)",
   );
   await waitForAnimations(page);
   await page
@@ -391,7 +391,7 @@ test("buzz dark sidebar gradient", async ({ page }) => {
 test("custom section icon and name align with channel columns", async ({
   page,
 }) => {
-  await seedTheme(page, "buzz");
+  await seedTheme(page, "zorro");
   await seedIconChannelSection(page);
   await installMockBridge(page);
   await openChannel(page);
@@ -445,29 +445,31 @@ async function openAppearance(page: Page, mode: "system" | "light" | "dark") {
   return panel;
 }
 
-test("appearance picker — system tab (Buzz follows OS)", async ({ page }) => {
-  await seedTheme(page, "buzz");
+test("appearance picker — system tab (Zorro follows OS)", async ({ page }) => {
+  await seedTheme(page, "zorro");
   await installMockBridge(page);
   const panel = await openAppearance(page, "system");
   await panel.screenshot({ path: `${SHOTS}/03-picker-system.png` });
 });
 
-test("appearance picker — light tab (Buzz)", async ({ page }) => {
-  await seedTheme(page, "buzz");
+test("appearance picker — light tab (Zorro Light)", async ({ page }) => {
+  await seedTheme(page, "zorro");
   await installMockBridge(page);
   const panel = await openAppearance(page, "light");
   await panel.screenshot({ path: `${SHOTS}/04-picker-light.png` });
 });
 
-test("appearance picker — dark tab (Buzz Dark)", async ({ page }) => {
-  await seedTheme(page, "buzz-dark");
+test("appearance picker — dark tab (Zorro Dark)", async ({ page }) => {
+  await seedTheme(page, "zorro-dark");
   await installMockBridge(page);
   const panel = await openAppearance(page, "dark");
   await panel.screenshot({ path: `${SHOTS}/05-picker-dark.png` });
 });
 
-test("settings nav uses Buzz active pill + hover (light)", async ({ page }) => {
-  await seedTheme(page, "buzz");
+test("settings nav uses Zorro active pill + hover (light)", async ({
+  page,
+}) => {
+  await seedTheme(page, "zorro");
   await installMockBridge(page);
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-settings").click();
@@ -497,8 +499,8 @@ test("settings nav uses Buzz active pill + hover (light)", async ({ page }) => {
   await sidebar.screenshot({ path: `${SHOTS}/06-settings-nav-light.png` });
 });
 
-test("settings nav uses Buzz active pill + hover (dark)", async ({ page }) => {
-  await seedTheme(page, "buzz-dark");
+test("settings nav uses Zorro active pill + hover (dark)", async ({ page }) => {
+  await seedTheme(page, "zorro-dark");
   await installMockBridge(page);
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-settings").click();
@@ -509,7 +511,7 @@ test("settings nav uses Buzz active pill + hover (dark)", async ({ page }) => {
   await expectBuzzSettingsPalette(page, "dark");
   await expect(page.getByTestId("settings-content-surface")).toHaveCSS(
     "background-color",
-    "rgb(26, 26, 26)",
+    "rgb(184, 23, 2)",
   );
   await waitForAnimations(page);
   await sidebar.screenshot({ path: `${SHOTS}/07-settings-nav-dark.png` });
@@ -521,7 +523,7 @@ test("settings nav uses Buzz active pill + hover (dark)", async ({ page }) => {
 test("settings content uses the same inset surface as the main app", async ({
   page,
 }) => {
-  await seedTheme(page, "buzz");
+  await seedTheme(page, "zorro");
   await installMockBridge(page);
   await page.goto("/", { waitUntil: "domcontentloaded" });
   const searchBox = await page.getByTestId("open-search").boundingBox();
@@ -566,8 +568,8 @@ test("settings content uses the same inset surface as the main app", async ({
   });
 });
 
-test("appearance hides accent picker under Buzz", async ({ page }) => {
-  await seedTheme(page, "buzz");
+test("appearance hides accent picker under Zorro", async ({ page }) => {
+  await seedTheme(page, "zorro");
   await installMockBridge(page);
   const panel = await openAppearance(page, "light");
   // The accent picker is hidden while a Buzz theme is active. Its neutral
@@ -576,7 +578,7 @@ test("appearance hides accent picker under Buzz", async ({ page }) => {
   await panel.screenshot({ path: `${SHOTS}/10-appearance-no-accent.png` });
 });
 
-test("accent picker reveals/hides when toggling Buzz", async ({ page }) => {
+test("accent picker reveals/hides when toggling Zorro", async ({ page }) => {
   // Start on a non-Buzz theme so the accent picker is present, then select the
   // Buzz tile — the picker should animate out and unmount. Reselecting a
   // non-Buzz tile brings it back. Asserts the presence toggle (the motion
@@ -595,34 +597,34 @@ test("accent picker reveals/hides when toggling Buzz", async ({ page }) => {
   await expect(page.getByTestId("accent-color-neutral")).toBeVisible();
 });
 
-test("Buzz light and dark modes apply live without a reload", async ({
+test("Zorro light and dark modes apply live without a reload", async ({
   page,
 }) => {
-  await seedTheme(page, "buzz");
+  await seedTheme(page, "zorro");
   await installMockBridge(page);
   await openAppearance(page, "light");
-  await expectAppliedBuzzTheme(page, "buzz");
+  await expectAppliedBuzzTheme(page, "zorro");
   const lightGradient = await expectBuzzGradientPaint(page, "light");
 
   await page.getByTestId("appearance-mode-dark").click();
-  await expectAppliedBuzzTheme(page, "buzz-dark");
+  await expectAppliedBuzzTheme(page, "zorro-dark");
   const darkGradient = await expectBuzzGradientPaint(page, "dark");
   expect(darkGradient).not.toBe(lightGradient);
 
   await page.getByTestId("appearance-mode-light").click();
-  await expectAppliedBuzzTheme(page, "buzz");
+  await expectAppliedBuzzTheme(page, "zorro");
   await expectBuzzGradientPaint(page, "light");
 
   // Exercise the overlap that previously let a slower, stale theme load win.
   await page.getByTestId("appearance-mode-dark").click();
   await page.getByTestId("appearance-mode-light").click();
-  await expectAppliedBuzzTheme(page, "buzz");
+  await expectAppliedBuzzTheme(page, "zorro");
 });
 
-test("Buzz follows native system theme changes without a reload", async ({
+test("Zorro follows native system theme changes without a reload", async ({
   page,
 }) => {
-  await seedTheme(page, "buzz");
+  await seedTheme(page, "zorro");
   await page.addInitScript(() => {
     (window as typeof window & { isTauri?: boolean }).isTauri = true;
   });
@@ -630,10 +632,10 @@ test("Buzz follows native system theme changes without a reload", async ({
   await openAppearance(page, "system");
 
   await emitNativeThemeChange(page, "dark");
-  await expectAppliedBuzzTheme(page, "buzz-dark", "buzz");
+  await expectAppliedBuzzTheme(page, "zorro-dark", "zorro");
   await expectBuzzGradientPaint(page, "dark");
 
   await emitNativeThemeChange(page, "light");
-  await expectAppliedBuzzTheme(page, "buzz", "buzz");
+  await expectAppliedBuzzTheme(page, "zorro", "zorro");
   await expectBuzzGradientPaint(page, "light");
 });

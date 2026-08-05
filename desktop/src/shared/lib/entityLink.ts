@@ -13,7 +13,7 @@
  * must stay compatible (see the golden-format tests on both sides).
  */
 
-const ENTITY_LINK_SCHEME = "buzz:";
+const SUPPORTED_ENTITY_LINK_SCHEMES = new Set(["buzz:", "zorro:"]);
 
 export type ParsedEntityLink =
   | { type: "pr"; id: string; owner: string; dtag: string }
@@ -81,10 +81,11 @@ export function buildIssueLink(input: {
  */
 export function isEntityLink(href: string | undefined | null): boolean {
   if (!href) return false;
-  return (
-    href.startsWith("buzz://pr?") ||
-    href.startsWith("buzz://issue?") ||
-    href.startsWith("buzz://repo?")
+  return ["buzz", "zorro"].some(
+    (scheme) =>
+      href.startsWith(`${scheme}://pr?`) ||
+      href.startsWith(`${scheme}://issue?`) ||
+      href.startsWith(`${scheme}://repo?`),
   );
 }
 
@@ -111,7 +112,7 @@ export function parseEntityLink(url: string): EntityLinkParseResult {
     return { ok: false, reason: "invalid-url" };
   }
 
-  if (parsed.protocol !== ENTITY_LINK_SCHEME) {
+  if (!SUPPORTED_ENTITY_LINK_SCHEMES.has(parsed.protocol)) {
     return { ok: false, reason: "wrong-scheme" };
   }
 

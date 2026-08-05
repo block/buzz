@@ -149,7 +149,7 @@ test.describe("observer feed screenshots", () => {
             prompt: [
               {
                 type: "text",
-                text: "[Buzz event: Kind 9]\nContent: @Observer Agent help me debug this",
+                text: "[Zorro event: Kind 9]\nContent: @Observer Agent help me debug this",
               },
               {
                 type: "text",
@@ -207,7 +207,7 @@ test.describe("observer feed screenshots", () => {
           method: "session/new",
           params: {
             systemPrompt:
-              "[Base]\nYou are a helpful AI assistant running in Buzz.\n\n[System]\nYou are Observer Agent. You coordinate multi-agent workflows in the #agents channel.",
+              "[Base]\nYou are a helpful AI assistant running in Zorro.\n\n[System]\nYou are Observer Agent. You coordinate multi-agent workflows in the #agents channel.",
           },
         },
       },
@@ -362,7 +362,7 @@ test.describe("observer feed screenshots", () => {
             prompt: [
               {
                 type: "text",
-                text: "[Buzz event: Kind 9]\nContent: @Observer Agent help me debug this",
+                text: "[Zorro event: Kind 9]\nContent: @Observer Agent help me debug this",
               },
               {
                 type: "text",
@@ -418,7 +418,7 @@ test.describe("observer feed screenshots", () => {
           method: "session/new",
           params: {
             systemPrompt:
-              "[Base]\nYou are a helpful AI assistant running in Buzz.\n\n[System]\nYou are Observer Agent. You coordinate multi-agent workflows in the #agents channel.\n\n[Team Instructions]\nAlways tag on handoff.\n\n[Agent Memory — core]\nI am Observer Agent.\n## Lessons Learned\nAlways tag on handoff.\n\n[Channel Canvas]\nCanvas revision (event ID): a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2\nLast modified: 2026-07-11T10:00:00Z\nFetch current content with: buzz canvas get --channel 94a444a4-c0a3-5966-ab05-530c6ddc2301",
+              "[Base]\nYou are a helpful AI assistant running in Zorro.\n\n[System]\nYou are Observer Agent. You coordinate multi-agent workflows in the #agents channel.\n\n[Team Instructions]\nAlways tag on handoff.\n\n[Agent Memory — core]\nI am Observer Agent.\n## Lessons Learned\nAlways tag on handoff.\n\n[Channel Canvas]\nCanvas revision (event ID): a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2\nLast modified: 2026-07-11T10:00:00Z\nFetch current content with: buzz canvas get --channel 94a444a4-c0a3-5966-ab05-530c6ddc2301",
           },
         },
       },
@@ -698,7 +698,7 @@ test.describe("observer feed screenshots", () => {
           method: "session/new",
           params: {
             systemPrompt:
-              "[Base]\nYou are a helpful AI assistant running in Buzz.\n\n[System]\nYou are Observer Agent. You coordinate multi-agent workflows in the #agents channel.\n\n[Team Instructions]\nAlways tag on handoff.\n\n[Agent Memory — core]\nI am Observer Agent.\n## Lessons Learned\nAlways tag on handoff.\n\n[Channel Canvas]\nCanvas revision (event ID): a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2\nLast modified: 2026-07-11T10:00:00Z\nFetch current content with: buzz canvas get --channel 94a444a4-c0a3-5966-ab05-530c6ddc2301",
+              "[Base]\nYou are a helpful AI assistant running in Zorro.\n\n[System]\nYou are Observer Agent. You coordinate multi-agent workflows in the #agents channel.\n\n[Team Instructions]\nAlways tag on handoff.\n\n[Agent Memory — core]\nI am Observer Agent.\n## Lessons Learned\nAlways tag on handoff.\n\n[Channel Canvas]\nCanvas revision (event ID): a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2\nLast modified: 2026-07-11T10:00:00Z\nFetch current content with: buzz canvas get --channel 94a444a4-c0a3-5966-ab05-530c6ddc2301",
           },
         },
       },
@@ -728,7 +728,7 @@ test.describe("observer feed screenshots", () => {
             prompt: [
               {
                 type: "text",
-                text: "[Buzz event: Kind 9]\nContent: @Observer Agent help me debug this",
+                text: "[Zorro event: Kind 9]\nContent: @Observer Agent help me debug this",
               },
               {
                 type: "text",
@@ -792,7 +792,7 @@ test.describe("observer feed screenshots", () => {
     const sectionTitles = await sectionArticles.allInnerTexts();
     // Only per-turn context sections (Buzz event + Thread context) — no system-prompt sections.
     expect(sectionTitles.length).toBe(2);
-    expect(sectionTitles[0]).toContain("Buzz event");
+    expect(sectionTitles[0]).toContain("Zorro event");
     expect(sectionTitles[1]).toContain("Thread context");
     // Collect all article heading text and assert none of the five
     // system-prompt section labels appear — including exact "System" which

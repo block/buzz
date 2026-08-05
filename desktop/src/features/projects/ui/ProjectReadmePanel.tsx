@@ -164,19 +164,19 @@ export function ReadmePanel({
     const unavailableContent = {
       authentication: {
         description:
-          "Buzz could not authenticate with this repository. Check your access and try again.",
+          "Zorro could not authenticate with this repository. Check your access and try again.",
         icon: LockKeyhole,
         title: "Repository access failed",
       },
       missing: {
         description:
-          "The project announcement exists, but its git repository was not found on the Buzz relay.",
+          "The project announcement exists, but its git repository was not found on the Zorro relay.",
         icon: CircleAlert,
         title: "Repository not initialized",
       },
       network: {
         description:
-          "The Buzz git service could not be reached. Check your connection and try again.",
+          "The Zorro git service could not be reached. Check your connection and try again.",
         icon: CloudOff,
         title: "Couldn’t reach repository",
       },
@@ -188,7 +188,7 @@ export function ReadmePanel({
       },
       unknown: {
         description:
-          "Buzz could not load this repository. Try again or contact the project owner.",
+          "Zorro could not load this repository. Try again or contact the project owner.",
         icon: CircleAlert,
         title: "Repository unavailable",
       },
@@ -222,7 +222,7 @@ export function ReadmePanel({
           </h3>
           <p className="mt-1 max-w-lg text-sm text-muted-foreground">
             {externalHost
-              ? "Clone this repository locally to explore its files, commits, and contributors in Buzz."
+              ? "Clone this repository locally to explore its files, commits, and contributors in Zorro."
               : unavailable.description}
           </p>
           {externalUrl ? (

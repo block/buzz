@@ -1140,7 +1140,7 @@ test("custom personas share with people and keep export separate", async ({
   ).toBeVisible();
   await expect(exportDialog.getByText("portable snapshot")).toHaveCount(0);
   await expect(
-    exportDialog.getByRole("button", { name: "Send in Buzz" }),
+    exportDialog.getByRole("button", { name: "Send in Zorro" }),
   ).toHaveCount(0);
   await expect(exportDialog.getByLabel("Memories")).toHaveCount(0);
   await expect(

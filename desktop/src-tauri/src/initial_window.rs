@@ -5,11 +5,11 @@ pub(crate) const INITIAL_RENDER_READY_EVENT: &str = "initial-render-ready";
 
 pub(crate) fn reveal_initial_window<R: tauri::Runtime>(window: &tauri::Window<R>) {
     if let Err(error) = window.show() {
-        eprintln!("buzz-desktop: failed to reveal main window: {error}");
+        eprintln!("zorro-desktop: failed to reveal main window: {error}");
         return;
     }
     if let Err(error) = window.set_focus() {
-        eprintln!("buzz-desktop: failed to focus main window: {error}");
+        eprintln!("zorro-desktop: failed to focus main window: {error}");
     }
 }
 
@@ -19,7 +19,7 @@ pub(crate) fn set_initial_window_backing<R: tauri::Runtime>(window: &tauri::Wind
     // native backing only across the first visible frames so the previous app
     // cannot show through before WebKit has submitted its first surface.
     if let Err(error) = window.set_background_color(Some(tauri::window::Color(17, 21, 24, 255))) {
-        eprintln!("buzz-desktop: failed to set initial window backing: {error}");
+        eprintln!("zorro-desktop: failed to set initial window backing: {error}");
     }
 }
 
@@ -27,7 +27,7 @@ pub(crate) fn set_initial_window_backing<R: tauri::Runtime>(window: &tauri::Wind
 pub(crate) async fn clear_initial_window_backing<R: tauri::Runtime>(window: &tauri::Window<R>) {
     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     if let Err(error) = window.set_background_color(None) {
-        eprintln!("buzz-desktop: failed to clear initial window backing: {error}");
+        eprintln!("zorro-desktop: failed to clear initial window backing: {error}");
     }
 }
 
@@ -63,5 +63,5 @@ pub(crate) async fn wait_for_stable_initial_window_geometry<R: tauri::Runtime>(
         tokio::time::sleep(std::time::Duration::from_millis(16)).await;
     }
 
-    eprintln!("buzz-desktop: initial window geometry did not settle before reveal timeout");
+    eprintln!("zorro-desktop: initial window geometry did not settle before reveal timeout");
 }

@@ -21,8 +21,8 @@ RUN cargo build --release --locked -p buzz-push-gateway --bin buzz-push-gateway 
     && strip target/release/buzz-push-gateway
 
 FROM debian:${DEBIAN_VERSION}-slim AS runtime
-LABEL org.opencontainers.image.title="Buzz Push Gateway" \
-      org.opencontainers.image.description="Capability-gated APNs last hop for Buzz" \
+LABEL org.opencontainers.image.title="Zorro Push Gateway" \
+      org.opencontainers.image.description="Capability-gated APNs last hop for Zorro" \
       org.opencontainers.image.source="https://github.com/block/buzz" \
       org.opencontainers.image.licenses="Apache-2.0"
 RUN apt-get update \

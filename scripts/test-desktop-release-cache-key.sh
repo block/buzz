@@ -26,7 +26,7 @@ manifest.write_text(
 
 lock = Path("desktop/src-tauri/Cargo.lock")
 text = lock.read_text()
-start = text.index('name = "buzz-desktop"')
+start = text.index('name = "zorro-desktop"')
 version = text.index(f'version = "{current_version}"', start)
 lock.write_text(
     text[:version]

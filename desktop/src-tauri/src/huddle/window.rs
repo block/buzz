@@ -13,7 +13,7 @@ pub(super) fn close_huddle_window(app: &tauri::AppHandle, ephemeral_channel_id: 
     let label = format!("huddle-{ephemeral_channel_id}");
     if let Some(window) = app.get_webview_window(&label) {
         if let Err(error) = window.close() {
-            eprintln!("buzz-desktop: failed to close huddle companion: {error}");
+            eprintln!("zorro-desktop: failed to close huddle companion: {error}");
         }
     }
 }

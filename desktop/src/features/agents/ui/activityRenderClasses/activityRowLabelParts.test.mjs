@@ -23,9 +23,9 @@ test("splitActivityRowCountedObject splits a leading count", () => {
     count: 3,
     rest: " files",
   });
-  assert.deepEqual(splitActivityRowCountedObject("12 Buzz relay ops"), {
+  assert.deepEqual(splitActivityRowCountedObject("12 Zorro relay ops"), {
     count: 12,
-    rest: " Buzz relay ops",
+    rest: " Zorro relay ops",
   });
 });
 

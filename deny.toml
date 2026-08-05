@@ -80,7 +80,7 @@ expression = "MIT OR Apache-2.0"
 license-files = []
 
 [[licenses.clarify]]
-crate = "buzz-desktop"
+crate = "zorro-desktop"
 expression = "Apache-2.0"
 license-files = []
 

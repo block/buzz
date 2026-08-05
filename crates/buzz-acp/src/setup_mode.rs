@@ -274,10 +274,10 @@ impl SetupPayload {
                 "Fix the config file(s) and restart the agent.".to_string()
             } else if any_external {
                 // Mixed: some Buzz-managed fields, some external config.
-                "Open Edit Agent in the Buzz app for the Buzz-managed fields; fix the external CLI config files manually and restart the agent.".to_string()
+                "Open Edit Agent in the Zorro app for the Zorro-managed fields; fix the external CLI config files manually and restart the agent.".to_string()
             } else {
                 // All Buzz-managed — original footer unchanged.
-                "Open Edit Agent in the Buzz app to set these.".to_string()
+                "Open Edit Agent in the Zorro app to set these.".to_string()
             };
 
             format!(
@@ -690,7 +690,7 @@ mod tests {
     #[test]
     fn setup_payload_deserializes_git_bash_requirement() {
         let payload: SetupPayload = serde_json::from_str(
-            r#"{"agent_name":"Buzz Agent","agent_pubkey":"test","requirements":[{"surface":"git_bash"}]}"#,
+            r#"{"agent_name":"Zorro Agent","agent_pubkey":"test","requirements":[{"surface":"git_bash"}]}"#,
         )
         .unwrap();
         assert!(matches!(
@@ -783,7 +783,7 @@ mod tests {
     #[test]
     fn nudge_body_git_bash_copy_points_to_agent_runtimes() {
         let payload = SetupPayload {
-            agent_name: "Buzz Agent".to_string(),
+            agent_name: "Zorro Agent".to_string(),
             agent_pubkey: "test".to_string(),
             requirements: vec![RequirementPayload::GitBash],
         };
@@ -884,7 +884,7 @@ mod tests {
         };
         let body = payload.nudge_body();
         assert!(
-            body.contains("Open Edit Agent in the Buzz app to set these."),
+            body.contains("Open Edit Agent in the Zorro app to set these."),
             "all-managed nudge must use the original Edit Agent footer; got: {body:?}"
         );
     }

@@ -47,12 +47,12 @@
     --sidebar-accent-foreground: 234 16.02% 35.49%;
     --sidebar-border: 225 13.56% 76.86%;
     --sidebar-ring: 225 13.56% 76.86%;
-    /* Exact Buzz palette tokens; components consume these semantically. */
-    --buzz-gradient-light-top: #e6e6b6;
-    --buzz-gradient-light-bottom: #c4d0da;
-    --buzz-gradient-dark-top: #4a4616;
-    --buzz-gradient-dark-bottom: #0a1423;
-    --buzz-content-dark: 0 0% 10.1960784314%;
+    /* Zorro red-orange palette; legacy variable names remain compatible. */
+    --buzz-gradient-light-top: #ffb950;
+    --buzz-gradient-light-bottom: #ff7e33;
+    --buzz-gradient-dark-top: #7a0103;
+    --buzz-gradient-dark-bottom: #7a0103;
+    --buzz-content-dark: 6.9 97.8% 36.5%;
     /* Hosted-community onboarding intentionally keeps this light palette in
        both app themes; semantic tokens keep component code color-agnostic. */
     --buzz-hosted-community-surface-fg: 23 23 23;
@@ -181,12 +181,11 @@
 }
 
 /*
- * Buzz theme - sidebar gradient.
+ * Zorro theme - sidebar gradient.
  *
- * Buzz reuses the GitHub Light palette for every base color; its one
- * distinguishing feature is this gradient painted across the sidebar/nav
- * canvas, replacing GitHub Light's flat grey. ThemeProvider toggles the
- * `data-buzz-sidebar` attribute on <html> when the Buzz theme is active.
+ * The first-party Zorro palette uses this gradient across the sidebar/nav
+ * canvas. ThemeProvider toggles the legacy `data-buzz-sidebar` attribute on
+ * <html> when the Zorro theme is active.
  *
  * These rules are intentionally UNLAYERED: the `bg-sidebar` background-color
  * lives in Tailwind's `utilities` layer, and unlayered declarations win over
@@ -224,7 +223,7 @@
 }
 
 /*
- * Dark variant (Buzz Dark). Reuses the GitHub Dark base palette; only the
+ * Dark variant (Zorro Dark). Reuses the GitHub Dark base palette; only the
  * Buzz color tokens change, so every downstream rule (gradient fill, hover,
  * search box, muted labels, active pill) adapts automatically. The `.dark`
  * class is set on the document root whenever a dark theme is active.
@@ -232,9 +231,9 @@
 :root[data-buzz-sidebar].dark {
   --buzz-gradient-top: var(--buzz-gradient-dark-top);
   --buzz-gradient-bottom: var(--buzz-gradient-dark-bottom);
-  --buzz-muted-foreground: rgb(255 255 255 / 40%);
+  --buzz-muted-foreground: rgb(255 185 80 / 70%);
   --buzz-search-surface: rgb(255 255 255 / 4%);
-  --buzz-chrome-foreground: rgb(255 255 255 / 50%);
+  --buzz-chrome-foreground: rgb(255 185 80 / 85%);
   --buzz-hover-surface: rgb(255 255 255 / 4%);
   --buzz-active-fill: 0 0% 100%;
   --buzz-active-surface: color-mix(
@@ -267,7 +266,7 @@
   color: hsl(var(--primary-foreground));
 }
 
-/* Keep the subtle content-card lift in Buzz Light only. */
+/* Keep the subtle content-card lift in Zorro Light only. */
 :root[data-buzz-sidebar]:not(.dark)
   [data-buzz-content-surface]:not([data-buzz-content-unframed]) {
   box-shadow:
@@ -281,7 +280,7 @@
 }
 
 /*
- * Buzz Dark uses a warmer neutral for the inset main/settings content canvas.
+ * Zorro Dark uses a warmer neutral for the inset main/settings content canvas.
  * Override `--background` locally as well as the surface fill so descendant
  * headers and panes using `bg-background` remain visually continuous.
  */
@@ -405,7 +404,7 @@
  * `text-sidebar-active-foreground` tokens are also consumed by non-sidebar
  * controls (avatar edit buttons in ProfileSettingsCard / AgentCreationPreview,
  * the selected persona row in PersonaCatalogDialog). A root-level override
- * turned those white (white-on-white under Buzz Dark); scoping keeps them on
+ * turned those white (white-on-white under Zorro Dark); scoping keeps them on
  * the normal accent-driven active colors.
  */
 :root[data-buzz-sidebar] [data-testid="app-sidebar"],
