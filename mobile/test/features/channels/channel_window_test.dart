@@ -181,6 +181,73 @@ void main() {
       expect(channelWindowThreadSummaries(merged)['mine']?.replyCount, 2);
     });
 
+    test(
+      'a live summary removes covered fallback replies from the overlay',
+      () {
+        var store = replaceNewestChannelWindow(
+          const ChannelWindowStore.empty(),
+          _page(rows: [_row('root', createdAt: 10)]),
+        );
+        store = mergeLiveChannelWindowEvent(
+          store,
+          _reply('reply', rootId: 'root', createdAt: 20),
+          isTimelineRow: true,
+        );
+        expect(store.liveOverlay.map((event) => event.id), ['reply']);
+
+        store = mergeLiveChannelWindowEvent(
+          store,
+          _summary('root', replyCount: 1, participants: ['p1'], createdAt: 20),
+          isTimelineRow: false,
+        );
+
+        expect(store.liveOverlay, isEmpty);
+        expect(channelWindowThreadSummaries(store)['root']?.replyCount, 1);
+      },
+    );
+
+    test('a live summary keeps broadcast replies in the overlay', () {
+      var store = replaceNewestChannelWindow(
+        const ChannelWindowStore.empty(),
+        _page(rows: [_row('root', createdAt: 10)]),
+      );
+      store = mergeLiveChannelWindowEvent(
+        store,
+        _reply('broadcast', rootId: 'root', createdAt: 20, broadcast: true),
+        isTimelineRow: true,
+      );
+
+      store = mergeLiveChannelWindowEvent(
+        store,
+        _summary('root', replyCount: 1, participants: ['p1'], createdAt: 20),
+        isTimelineRow: false,
+      );
+
+      expect(store.liveOverlay.map((event) => event.id), ['broadcast']);
+    });
+
+    test('a covered reply is not retained when its summary arrives first', () {
+      var store = replaceNewestChannelWindow(
+        const ChannelWindowStore.empty(),
+        _page(rows: [_row('root', createdAt: 10)]),
+      );
+      store = mergeLiveChannelWindowEvent(
+        store,
+        _summary('root', replyCount: 1, participants: ['p1'], createdAt: 20),
+        isTimelineRow: false,
+      );
+
+      final merged = mergeLiveChannelWindowEvent(
+        store,
+        _reply('reply', rootId: 'root', createdAt: 20),
+        isTimelineRow: true,
+      );
+
+      expect(identical(merged, store), isTrue);
+      expect(merged.liveOverlay, isEmpty);
+      expect(channelWindowThreadSummaries(merged)['root']?.replyCount, 1);
+    });
+
     test('a later live summary replaces an earlier one', () {
       var store = replaceNewestChannelWindow(
         const ChannelWindowStore.empty(),
@@ -460,6 +527,22 @@ NostrEvent _row(String id, {int createdAt = 10}) => _event(
   kind: EventKind.streamMessageV2,
   tags: const [
     ['h', _channelId],
+  ],
+);
+
+NostrEvent _reply(
+  String id, {
+  required String rootId,
+  required int createdAt,
+  bool broadcast = false,
+}) => _event(
+  id: id,
+  createdAt: createdAt,
+  kind: EventKind.streamMessageV2,
+  tags: [
+    ['h', _channelId],
+    ['e', rootId, '', 'reply'],
+    if (broadcast) ['broadcast', '1'],
   ],
 );
 
