@@ -31,6 +31,7 @@ import {
 
 export function EditAgentAdvancedFields({
   acpCommand,
+  workingDirectory,
   agentArgs,
   autoRestartOnConfigChange,
   disabled,
@@ -50,6 +51,7 @@ export function EditAgentAdvancedFields({
   selectedRuntime,
   systemPrompt,
   onAcpCommandChange,
+  onWorkingDirectoryChange,
   onAgentArgsChange,
   onEnvVarsChange,
   onInheritHarnessChange,
@@ -58,6 +60,7 @@ export function EditAgentAdvancedFields({
   onSystemPromptChange,
 }: {
   acpCommand: string;
+  workingDirectory: string;
   agentArgs: string;
   autoRestartOnConfigChange: boolean;
   disabled: boolean;
@@ -101,6 +104,7 @@ export function EditAgentAdvancedFields({
   selectedRuntime?: AcpRuntimeCatalogEntry;
   systemPrompt: string;
   onAcpCommandChange: (value: string) => void;
+  onWorkingDirectoryChange: (value: string) => void;
   onAgentArgsChange: (value: string) => void;
   onEnvVarsChange: (value: EnvVarsValue) => void;
   onInheritHarnessChange: (value: boolean) => void;
@@ -192,6 +196,42 @@ export function EditAgentAdvancedFields({
           {autoRestartOnConfigChange
             ? "Restarts this agent automatically when its configuration changes, once it is idle and connected."
             : "Configuration changes only show the restart badge; restart manually to apply them."}
+        </p>
+      </div>
+
+      {/* Machine-local working directory */}
+      <div className="space-y-1.5">
+        <label
+          className="text-sm font-medium text-foreground"
+          htmlFor="edit-agent-working-directory"
+        >
+          Working directory
+          <span className={PERSONA_LABEL_OPTIONAL_CLASS}>Optional</span>
+        </label>
+        <div
+          className={cn(
+            "flex min-h-11 items-center px-3",
+            PERSONA_FIELD_SHELL_CLASS,
+          )}
+        >
+          <Input
+            autoCapitalize="none"
+            autoCorrect="off"
+            className={cn(
+              "h-8 px-0 py-0 leading-6",
+              PERSONA_FIELD_CONTROL_CLASS,
+            )}
+            disabled={disabled}
+            id="edit-agent-working-directory"
+            onChange={(event) => onWorkingDirectoryChange(event.target.value)}
+            placeholder="Absolute path; blank uses the Buzz default"
+            spellCheck={false}
+            value={workingDirectory}
+          />
+        </div>
+        <p className="text-xs text-muted-foreground">
+          Starts this agent in an existing local directory. This is a workspace
+          guardrail, not a sandbox or credential boundary.
         </p>
       </div>
 

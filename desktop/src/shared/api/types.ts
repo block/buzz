@@ -318,6 +318,7 @@ export type ManagedAgent = {
   runtime: string | null;
   teamId?: string | null;
   relayUrl: string;
+  workingDirectory: string | null;
   acpCommand: string;
   /** Resolved/effective harness command (persona-wins, override-honored). */
   agentCommand: string;
@@ -385,15 +386,12 @@ export type ManagedAgent = {
    */
   respondToAllowlist: string[];
 };
-
 /** Inbound author gate mode. Mirrors buzz-acp's --respond-to CLI flag. */
 export type RespondToMode = "owner-only" | "allowlist" | "anyone";
-
 export type BackendProviderCandidate = {
   id: string;
   binaryPath: string;
 };
-
 export type BackendProviderProbeResult = {
   ok: boolean;
   name?: string;
@@ -412,6 +410,7 @@ export type CreateManagedAgentInput = {
   /** Team this instance was deployed from; controls runtime team instructions. */
   teamId?: string;
   relayUrl?: string;
+  workingDirectory?: string;
   acpCommand?: string;
   agentCommand?: string;
   /**
@@ -688,6 +687,7 @@ export type UpdateManagedAgentInput = {
   parallelism?: number;
   turnTimeoutSeconds?: number;
   relayUrl?: string;
+  workingDirectory?: string | null;
   acpCommand?: string;
   agentCommand?: string;
   /**

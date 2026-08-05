@@ -187,6 +187,7 @@ fn team_export_with_instance_and_memory_level_uses_supplied_entries() {
         auth_tag: None,
         relay_url: String::new(),
         avatar_url: None,
+        working_directory: None,
         acp_command: crate::managed_agents::DEFAULT_ACP_COMMAND.to_string(),
         agent_command: String::new(),
         agent_command_override: None,

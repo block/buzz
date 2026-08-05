@@ -373,6 +373,7 @@ mod tests {
             auth_tag: None,
             relay_url: "ws://localhost:3000".to_string(),
             avatar_url: None,
+            working_directory: None,
             acp_command: "buzz-acp".to_string(),
             agent_command: "goose".to_string(),
             agent_args: vec![],

@@ -119,7 +119,9 @@ test("relay rate-limited: prefix check is case-sensitive (Rust always emits lowe
 // arrives as definitionEnv (camelCase), source "custom" is preserved, and the
 // env round-trips end-to-end so a save-then-edit cycle cannot erase env.
 
-const { fromRawAcpRuntimeCatalogEntry } = await import("./tauri.ts");
+const { fromRawAcpRuntimeCatalogEntry, fromRawManagedAgent } = await import(
+  "./tauri.ts"
+);
 
 test("fromRawAcpRuntimeCatalogEntry maps definition_env to definitionEnv", () => {
   const raw = {
@@ -254,6 +256,53 @@ test("fromRawAcpRuntimeCatalogEntry omits maxParallelism when max_parallelism is
     entry.maxParallelism,
     undefined,
     "uncapped harness must have maxParallelism: undefined",
+  );
+});
+
+test("fromRawManagedAgent preserves the machine-local working directory", () => {
+  const raw = {
+    pubkey: "a".repeat(64),
+    name: "Workspace Agent",
+    persona_id: null,
+    relay_url: "wss://relay.example",
+    working_directory: "/tmp/agent-workspace",
+    acp_command: "buzz-acp",
+    agent_command: "buzz-agent",
+    agent_args: [],
+    mcp_command: "",
+    turn_timeout_seconds: 0,
+    idle_timeout_seconds: null,
+    max_turn_duration_seconds: null,
+    parallelism: 1,
+    system_prompt: null,
+    model: null,
+    provider: null,
+    persona_out_of_date: false,
+    persona_orphaned: false,
+    needs_restart: false,
+    status: "stopped",
+    pid: null,
+    created_at: "2026-08-05T00:00:00Z",
+    updated_at: "2026-08-05T00:00:00Z",
+    last_started_at: null,
+    last_stopped_at: null,
+    last_exit_code: null,
+    last_error: null,
+    last_error_code: null,
+    log_path: "/tmp/agent.log",
+    start_on_app_launch: false,
+    backend: { type: "local" },
+    backend_agent_id: null,
+  };
+
+  assert.equal(
+    fromRawManagedAgent(raw).workingDirectory,
+    "/tmp/agent-workspace",
+  );
+  assert.equal(
+    fromRawManagedAgent({ ...raw, working_directory: undefined })
+      .workingDirectory,
+    null,
   );
 });
 

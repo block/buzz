@@ -113,6 +113,42 @@ test.describe("edit agent dialog", () => {
     );
   });
 
+  test("persists a machine-local working directory from Advanced", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      managedAgents: [
+        {
+          pubkey: AGENT_PUBKEY,
+          name: AGENT_NAME,
+          status: "stopped",
+          channelNames: ["agents"],
+        },
+      ],
+    });
+
+    await openEditDialog(page);
+    await page.getByRole("button", { name: "Advanced", exact: true }).click();
+
+    const workdir = page.locator("#edit-agent-working-directory");
+    await expect(workdir).toBeVisible();
+    await expect(
+      page.getByText(
+        "This is a workspace guardrail, not a sandbox or credential boundary.",
+        { exact: false },
+      ),
+    ).toBeVisible();
+    await workdir.fill("/tmp/buzz-agent-workspace");
+    await page.getByTestId("edit-agent-dialog-submit").click();
+    await expect(page.getByTestId("edit-agent-dialog")).not.toBeVisible();
+
+    await page.getByTestId("user-profile-edit-agent").click();
+    await page.getByRole("button", { name: "Advanced", exact: true }).click();
+    await expect(page.locator("#edit-agent-working-directory")).toHaveValue(
+      "/tmp/buzz-agent-workspace",
+    );
+  });
+
   test("changes the model via custom entry and persists it", async ({
     page,
   }) => {

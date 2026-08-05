@@ -237,6 +237,7 @@ fn record_with(
         auth_tag: None,
         relay_url: String::new(),
         avatar_url: None,
+        working_directory: None,
         acp_command: String::new(),
         agent_command: String::new(),
         agent_command_override: override_cmd.map(str::to_string),
@@ -285,7 +286,6 @@ fn record_with(
         relay_mesh: None,
     }
 }
-
 #[test]
 fn record_agent_command_own_runtime_wins_over_persona() {
     // A record with its own materialized runtime never consults the

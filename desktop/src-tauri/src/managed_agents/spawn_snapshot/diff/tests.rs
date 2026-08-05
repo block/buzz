@@ -8,6 +8,7 @@ const RELAY_WITH_TOKEN: &str = "wss://relay.example/ws?token=SENTINEL";
 /// coverage guard below sees the full serialized key set.
 fn base() -> SpawnConfigSnapshot {
     SpawnConfigSnapshot {
+        working_directory: Some("/tmp/agent-workspace".into()),
         acp_command: "buzz-acp".into(),
         command: "goose".into(),
         args: vec!["--mode".into(), "acp".into()],
@@ -48,6 +49,7 @@ type Mutation = (&'static str, fn(&mut SpawnConfigSnapshot));
 
 fn mutations() -> Vec<Mutation> {
     vec![
+        ("working_directory", |s| s.working_directory = None),
         ("acp_command", |s| s.acp_command = "other-acp".into()),
         ("command", |s| s.command = "claude".into()),
         ("args", |s| s.args = vec!["--other".into()]),

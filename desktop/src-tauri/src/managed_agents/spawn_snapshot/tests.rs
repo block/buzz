@@ -24,6 +24,7 @@ fn record() -> ManagedAgentRecord {
         auth_tag: None,
         relay_url: "ws://localhost:3000".into(),
         avatar_url: None,
+        working_directory: None,
         acp_command: "buzz-acp".into(),
         agent_command: "goose".into(),
         agent_command_override: None,
@@ -104,6 +105,18 @@ fn snapshot_is_deterministic() {
     assert_eq!(
         snapshot(&rec, &[], &[], "wss://ws.example", &Default::default()),
         snapshot(&rec, &[], &[], "wss://ws.example", &Default::default())
+    );
+}
+
+#[test]
+fn working_directory_change_requires_restart() {
+    let first = record();
+    let mut second = first.clone();
+    second.working_directory = Some("/tmp/agent-workspace".to_string());
+
+    assert_ne!(
+        snapshot(&first, &[], &[], "wss://ws.example", &Default::default()),
+        snapshot(&second, &[], &[], "wss://ws.example", &Default::default())
     );
 }
 

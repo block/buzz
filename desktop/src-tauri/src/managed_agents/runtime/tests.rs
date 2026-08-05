@@ -135,6 +135,7 @@ fn fixture(
         auth_tag,
         relay_url: "ws://localhost:3000".into(),
         avatar_url: None,
+        working_directory: None,
         acp_command: "buzz-acp".into(),
         agent_command: "goose".into(),
         agent_command_override: None,
@@ -183,7 +184,6 @@ fn fixture(
         relay_mesh: None,
     }
 }
-
 #[test]
 fn build_env_owner_only_sets_mode_and_removes_others() {
     let rec = fixture(RespondTo::OwnerOnly, vec![], Some("tag".into()));

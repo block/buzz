@@ -117,11 +117,13 @@ export function AgentInstanceEditDialog({
   const runtimesQuery = useAcpRuntimesQuery({ enabled: open });
   const configSurfaceQuery = useAgentConfigSurface(open ? agent.pubkey : null);
   const runtimes = runtimesQuery.data ?? [];
-
   const [name, setName] = React.useState(agent.name);
   const [aiDefaultsOpen, setAiDefaultsOpen] = React.useState(false);
   const aiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);
   const [acpCommand, setAcpCommand] = React.useState(agent.acpCommand);
+  const [workingDirectory, setWorkingDirectory] = React.useState(
+    agent.workingDirectory ?? "",
+  );
   const [agentCommand, setAgentCommand] = React.useState(agent.agentCommand);
   const [originalAgentCommand, setOriginalAgentCommand] = React.useState(
     agent.agentCommand,
@@ -165,20 +167,18 @@ export function AgentInstanceEditDialog({
     React.useState(false);
   const [isAddHarnessOpen, setIsAddHarnessOpen] = React.useState(false);
   const shouldReduceMotion = useReducedMotion();
-
   // Runtime selector: defaults to "custom" until the dialog opens and the
   // catalog loads. The open-effect re-derives the correct id from the catalog.
   const [selectedRuntimeId, setSelectedRuntimeId] = React.useState("custom");
-
   // Tracks whether the user has made an in-dialog runtime selection.
   const runtimeTouched = React.useRef(false);
-
   // Reset form state only when the dialog opens or when switching to a different agent.
   // biome-ignore lint/correctness/useExhaustiveDependencies: intentional — including agent fields would re-fire on every 5s poll and wipe edits
   React.useEffect(() => {
     if (open) {
       setName(agent.name);
       setAcpCommand(agent.acpCommand);
+      setWorkingDirectory(agent.workingDirectory ?? "");
       setAgentCommand(agent.agentCommand);
       setOriginalAgentCommand(agent.agentCommand);
       setInheritHarness(
@@ -207,7 +207,6 @@ export function AgentInstanceEditDialog({
       updateMutation.reset();
     }
   }, [open, agent.pubkey]);
-
   // Re-derive the runtime id when the catalog loads.
   React.useEffect(() => {
     if (!open || runtimeTouched.current || runtimes.length === 0) {
@@ -220,20 +219,16 @@ export function AgentInstanceEditDialog({
       setSelectedRuntimeId(matched.id);
     }
   }, [open, runtimes, agent.agentCommand]);
-
   // Build the sorted runtime catalog for the dropdown.
   const sortedRuntimes = React.useMemo(
     () => sortPersonaRuntimes(runtimes),
     [runtimes],
   );
-
   const selectedRuntime = React.useMemo(
     () => runtimes.find((r) => r.id === selectedRuntimeId),
     [runtimes, selectedRuntimeId],
   );
-
   const runtimeDropdownValue = selectedRuntimeId || NO_RUNTIME_DROPDOWN_VALUE;
-
   const runtimeDropdownOptions: PersonaDropdownOption[] = React.useMemo(() => {
     const options: PersonaDropdownOption[] = [
       ...sortedRuntimes.map((candidate) => ({
@@ -255,7 +250,6 @@ export function AgentInstanceEditDialog({
     options.push(ADD_CUSTOM_HARNESS_OPTION);
     return options;
   }, [sortedRuntimes, selectedRuntimeId]);
-
   // Resolve the dialog-opening command as the catalog loads. Edit-state runtime
   // ids mutate during selection changes and cannot identify the original state.
   const originalRuntimeSupportsProvider = React.useMemo(() => {
@@ -660,6 +654,10 @@ export function AgentInstanceEditDialog({
         acpCommand:
           acpCommand.trim() !== agent.acpCommand
             ? acpCommand.trim()
+            : undefined,
+        workingDirectory:
+          (workingDirectory.trim() || null) !== agent.workingDirectory
+            ? workingDirectory.trim() || null
             : undefined,
         agentCommand: agentCommandUpdate,
         // A non-inheriting selection is a deliberate pin — signal it so the
@@ -1176,6 +1174,7 @@ export function AgentInstanceEditDialog({
                   >
                     <EditAgentAdvancedFields
                       acpCommand={acpCommand}
+                      workingDirectory={workingDirectory}
                       agentArgs={agentArgs}
                       autoRestartOnConfigChange={autoRestartOnConfigChange}
                       disabled={updateMutation.isPending}
@@ -1201,6 +1200,7 @@ export function AgentInstanceEditDialog({
                       selectedRuntime={prospectiveRuntime}
                       systemPrompt={systemPrompt}
                       onAcpCommandChange={setAcpCommand}
+                      onWorkingDirectoryChange={setWorkingDirectory}
                       onAgentArgsChange={setAgentArgs}
                       onAutoRestartChange={setAutoRestartOnConfigChange}
                       onEnvVarsChange={setEnvVars}

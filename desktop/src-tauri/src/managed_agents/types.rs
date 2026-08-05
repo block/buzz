@@ -106,6 +106,7 @@ impl AgentDefinition {
             auth_tag: None,
             relay_url: String::new(),
             avatar_url: self.avatar_url,
+            working_directory: None,
             acp_command: DEFAULT_ACP_COMMAND.to_string(),
             agent_command: String::new(),
             agent_command_override: None,
@@ -156,7 +157,6 @@ impl AgentDefinition {
         }
     }
 }
-
 impl ManagedAgentRecord {
     /// Present a key-less definition record back in the legacy
     /// [`AgentDefinition`] shape — the compatibility view the persona command
@@ -192,7 +192,6 @@ impl ManagedAgentRecord {
         })
     }
 }
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RelayAgentInfo {
     pub pubkey: String,
@@ -243,6 +242,9 @@ pub struct ManagedAgentRecord {
     /// `#[serde(default)]` so pre-existing records deserialize as `None`.
     #[serde(default)]
     pub avatar_url: Option<String>,
+    /// Local ACP harness CWD; excluded from portable snapshots and relay events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_directory: Option<String>,
     pub acp_command: String,
     pub agent_command: String,
     /// Explicit per-instance harness pin. `None` (the default) means inherit
@@ -439,7 +441,6 @@ pub struct ManagedAgentRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_mesh: Option<RelayMeshConfig>,
 }
-
 /// Typed relay-mesh configuration carried on a [`ManagedAgentRecord`].
 ///
 /// Feature-independent on purpose: the field is always present in the record
@@ -457,7 +458,6 @@ pub struct RelayMeshConfig {
     #[serde(alias = "modelRef")]
     pub model_ref: String,
 }
-
 #[derive(Debug)]
 pub struct ManagedAgentProcess {
     pub child: Child,
@@ -489,7 +489,6 @@ pub struct ManagedAgentProcess {
     #[cfg(windows)]
     pub job: Option<crate::managed_agents::JobHandle>,
 }
-
 #[derive(Debug, Clone, Serialize)]
 pub struct ManagedAgentSummary {
     pub pubkey: String,
@@ -501,6 +500,7 @@ pub struct ManagedAgentSummary {
     pub runtime: Option<String>,
     pub team_id: Option<String>,
     pub relay_url: String,
+    pub working_directory: Option<String>,
     pub acp_command: String,
     pub agent_command: String,
     /// Mirrors `ManagedAgentRecord.agent_command_override`: `Some` when the user

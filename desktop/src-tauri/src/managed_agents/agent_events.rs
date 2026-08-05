@@ -165,6 +165,7 @@ mod tests {
             auth_tag: Some("authtagsecret".to_string()),
             relay_url: "wss://relay.example".to_string(),
             avatar_url: Some("https://example.com/a.png".to_string()),
+            working_directory: Some("/SENTINEL_LOCAL_WORKSPACE".to_string()),
             acp_command: "buzz-acp".to_string(),
             agent_command: "goose".to_string(),
             agent_command_override: None,
@@ -289,6 +290,8 @@ mod tests {
         assert!(!json.contains("backend_agent_id"));
         assert!(!json.contains("provider_binary_path"));
         assert!(!json.contains("relay_url"));
+        assert!(!json.contains("working_directory"));
+        assert!(!json.contains("SENTINEL_LOCAL_WORKSPACE"));
 
         // Identity fields — must appear.
         assert!(json.contains("\"name\""));

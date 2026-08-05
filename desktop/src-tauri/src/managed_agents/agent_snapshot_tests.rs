@@ -20,6 +20,7 @@ fn minimal_record() -> ManagedAgentRecord {
         auth_tag: Some("auth-tag-secret".to_string()),       // MUST NOT appear in snapshot
         relay_url: "wss://relay.example.com".to_string(),    // MUST NOT appear in snapshot
         avatar_url: Some("https://example.com/avatar.png".to_string()),
+        working_directory: Some("/SENTINEL_LOCAL_WORKSPACE".to_string()),
         acp_command: "/usr/local/bin/acp".to_string(), // MUST NOT appear in snapshot
         agent_command: "goose".to_string(),            // MUST NOT appear in snapshot
         agent_command_override: Some("goose-override".to_string()), // MUST NOT appear
@@ -384,7 +385,14 @@ fn snapshot_omits_removed_mcp_toolsets_config() {
 fn secret_exclusion_machine_commands_absent() {
     let record = minimal_record();
     let json = snapshot_json_string(&record);
-    // acp_command / agent_command / agent_command_override / agent_args / mcp_command
+    // working_directory / acp_command / agent_command / agent_command_override /
+    // agent_args / mcp_command
+    assert!(
+        !json.contains("workingDirectory")
+            && !json.contains("working_directory")
+            && !json.contains("SENTINEL_LOCAL_WORKSPACE"),
+        "machine-local working directory must not appear"
+    );
     assert!(
         !json.contains("/usr/local/bin/acp"),
         "acp_command path must not appear"

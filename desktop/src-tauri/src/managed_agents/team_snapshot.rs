@@ -260,6 +260,7 @@ mod tests {
             auth_tag: Some("auth-tag-secret".to_string()),       // MUST NOT appear
             relay_url: "wss://relay.example.com".to_string(),    // MUST NOT appear
             avatar_url: Some(format!("https://example.com/{name}.png")),
+            working_directory: Some("/SENTINEL_LOCAL_WORKSPACE".to_string()),
             acp_command: "/usr/local/bin/acp".to_string(), // MUST NOT appear
             agent_command: "goose".to_string(),            // MUST NOT appear
             agent_command_override: None,
@@ -483,6 +484,12 @@ mod tests {
         assert!(
             !json.contains("SENTINEL_PERSONA_ID"),
             "persona_id must not appear"
+        );
+        assert!(
+            !json.contains("SENTINEL_LOCAL_WORKSPACE")
+                && !json.contains("working_directory")
+                && !json.contains("workingDirectory"),
+            "machine-local working directory must not appear"
         );
     }
 
