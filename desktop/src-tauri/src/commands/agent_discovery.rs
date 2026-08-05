@@ -1040,23 +1040,72 @@ pub async fn discover_managed_agent_prereqs(
 
 #[tauri::command]
 pub async fn list_relay_agents(state: State<'_, AppState>) -> Result<Vec<RelayAgentInfo>, String> {
-    // Query kind:10100 agent profile events from the relay.
-    let events = query_relay(
+    // Query kind:30177 managed-agent events — the kind agent identity/config
+    // is actually published under. kind:10100 is defined in buzz-core but
+    // nothing in the codebase publishes it; see managed_agents/agent_events.rs.
+    let agent_events = query_relay(&state, &[serde_json::json!({ "kinds": [30177] })]).await?;
+
+    let mut agents: Vec<RelayAgentInfo> = agent_events
+        .iter()
+        .filter_map(|ev| nostr_convert::relay_agent_seed_from_managed_agent_event(ev).ok())
+        .collect();
+
+    if agents.is_empty() {
+        return Ok(agents);
+    }
+
+    // kind:30177 doesn't carry channel membership — resolve it via kind:39002
+    // `#p`, the same pattern buzz-acp's own RelayClient::discover_channels
+    // uses for an agent's own memberships (crates/buzz-acp/src/relay.rs).
+    let agent_pubkeys: std::collections::HashSet<String> =
+        agents.iter().map(|a| a.pubkey.clone()).collect();
+    let member_events = query_relay(
         &state,
         &[serde_json::json!({
-            "kinds": [10100],
+            "kinds": [39002],
+            "#p": agent_pubkeys.iter().collect::<Vec<_>>(),
         })],
     )
     .await?;
+    let channel_ids_by_agent =
+        nostr_convert::agent_channel_ids_from_member_events(&member_events, &agent_pubkeys);
 
-    // The convert helper returns `{"agents": [...]}`. Extract and re-deserialize
-    // into the strongly-typed `Vec<RelayAgentInfo>` the frontend expects.
-    let value = nostr_convert::agents_from_events(&events);
-    let agents = value
-        .get("agents")
+    let all_channel_ids: Vec<String> = channel_ids_by_agent
+        .values()
+        .flatten()
         .cloned()
-        .unwrap_or_else(|| serde_json::json!([]));
-    serde_json::from_value(agents).map_err(|e| format!("agent parse failed: {e}"))
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+
+    // Channel names are display-only (eligibility only needs channel_ids) —
+    // best-effort, same #d + limit pattern as get_channels (commands/channels.rs).
+    let name_by_id = if all_channel_ids.is_empty() {
+        std::collections::HashMap::new()
+    } else {
+        let meta_events = query_relay(
+            &state,
+            &[serde_json::json!({
+                "kinds": [39000],
+                "#d": all_channel_ids,
+                "limit": all_channel_ids.len(),
+            })],
+        )
+        .await?;
+        nostr_convert::channel_names_by_id(&meta_events)
+    };
+
+    for agent in &mut agents {
+        if let Some(ids) = channel_ids_by_agent.get(&agent.pubkey) {
+            agent.channels = ids
+                .iter()
+                .filter_map(|id| name_by_id.get(id).cloned())
+                .collect();
+            agent.channel_ids = ids.clone();
+        }
+    }
+
+    Ok(agents)
 }
 
 #[cfg(test)]
