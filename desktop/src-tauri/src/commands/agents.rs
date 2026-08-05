@@ -454,8 +454,8 @@ pub(super) async fn start_local_agent_with_preflight(
 /// again. Providers are expected to handle this as an update-in-place or no-op —
 /// the protocol does not include an explicit `undeploy` operation (deferred to v2).
 ///
-/// Returns Ok(()) on success, Err(message) on failure. Either way the record is
-/// updated and saved before returning.
+/// Returns the optional enrollment command on success, or Err(message) on
+/// failure. Either way the record is updated and saved before returning.
 async fn deploy_to_provider(
     app: &AppHandle,
     state: &AppState,
@@ -496,13 +496,13 @@ async fn deploy_to_provider(
         .find(|r| r.pubkey == pubkey)
         .ok_or_else(|| format!("agent {pubkey} not found"))?;
 
-    match deploy_result {
+    let enrollment_command = match deploy_result {
         Ok(result) => {
-            let enrollment_command = result.enrollment_command;
             rec.backend_agent_id = Some(result.agent_id);
             rec.last_started_at = Some(now_iso());
             rec.updated_at = now_iso();
             rec.last_error = None;
+            result.enrollment_command
         }
         Err(ref e) => {
             rec.last_error = Some(e.clone());
