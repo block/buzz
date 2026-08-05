@@ -30,9 +30,6 @@ test("machine onboarding: landing, backup, setup docked CTAs", async ({
   await page.screenshot({ path: `${SHOT_DIR}/01-landing.png` });
 
   await page.getByRole("button", { name: "Use an existing key" }).click();
-  await page
-    .getByRole("button", { name: "Use a private key or backup instead" })
-    .click();
   await expect(
     page.getByRole("heading", { name: "Enter your private key" }),
   ).toBeVisible();
@@ -146,9 +143,6 @@ test("machine key import remains usable in a short viewport", async ({
   });
   await page.goto("/");
   await page.getByRole("button", { name: "Use an existing key" }).click();
-  await page
-    .getByRole("button", { name: "Use a private key or backup instead" })
-    .click();
 
   const heading = page.getByRole("heading", { name: "Enter your private key" });
   const input = page.getByLabel("Private key", { exact: true });

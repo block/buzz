@@ -52,7 +52,7 @@ test("normal first launch uses the already-persisted identity", async ({
 
 test("lost boot opens onboarding gate directly on the key-import page", async ({
   page,
-}) => {
+}, testInfo) => {
   await installMockBridge(
     page,
     { identityLost: true },
@@ -62,8 +62,12 @@ test("lost boot opens onboarding gate directly on the key-import page", async ({
 
   await expect(page.getByTestId("machine-onboarding-gate")).toBeVisible();
   await expect(
-    page.getByRole("heading", { name: "Recover from your phone" }),
+    page.getByRole("heading", { name: "Enter your private key" }),
   ).toBeVisible();
+  await page.waitForTimeout(1_000);
+  await page.screenshot({
+    path: testInfo.outputPath("desktop-private-key-recovery.png"),
+  });
 });
 
 test("lost boot offers phone recovery with a single-use QR", async ({
@@ -76,6 +80,7 @@ test("lost boot offers phone recovery with a single-use QR", async ({
   );
   await page.goto("/");
 
+  await page.getByTestId("nostr-import-phone-link").click();
   await expect(page.getByTestId("identity-recovery-pairing")).toBeVisible();
   await expect(page.getByTestId("identity-recovery-qr")).toBeVisible();
   await expect(
@@ -135,6 +140,7 @@ test("phone recovery uses the desktop pairing card semantics", async ({
   );
   await page.goto("/");
 
+  await page.getByTestId("nostr-import-phone-link").click();
   const card = page.getByTestId("identity-recovery-pairing");
   const qrContainer = card.getByTestId("identity-recovery-qr-container");
   const qrCode = card.getByTestId("identity-recovery-qr");
@@ -183,6 +189,7 @@ test("canceling recovery uses the standard pairing cancellation state", async ({
     { skipOnboardingSeed: true },
   );
   await page.goto("/");
+  await page.getByTestId("nostr-import-phone-link").click();
   await expect(page.getByTestId("identity-recovery-qr")).toBeVisible();
 
   await page.evaluate(async () => {
@@ -218,6 +225,7 @@ test("phone recovery continues to harness setup without creating or restarting",
     { skipOnboardingSeed: true },
   );
   await page.goto("/");
+  await page.getByTestId("nostr-import-phone-link").click();
   await expect(page.getByTestId("identity-recovery-qr")).toBeVisible();
 
   await page.evaluate(async () => {
@@ -244,6 +252,7 @@ test("recovery turns relay failures into actionable copy", async ({ page }) => {
     { skipOnboardingSeed: true },
   );
   await page.goto("/");
+  await page.getByTestId("nostr-import-phone-link").click();
   await expect(page.getByTestId("identity-recovery-qr")).toBeVisible();
 
   await page.evaluate(async () => {
@@ -271,6 +280,7 @@ test("desktop refreshes recovery codes before the relay expires them", async ({
     { skipOnboardingSeed: true },
   );
   await page.goto("/");
+  await page.getByTestId("nostr-import-phone-link").click();
   await expect(page.getByTestId("identity-recovery-qr")).toBeVisible();
 
   const recoveryStarts = () =>
@@ -296,12 +306,8 @@ test("importing a key from lost mode shows the relaunch-required screen", async 
     { skipOnboardingSeed: true },
   );
   await page.goto("/");
-  await page
-    .getByRole("button", { name: "Use a private key or backup instead" })
-    .click();
-
   await expect(
-    page.getByRole("heading", { name: "Re-import your key" }),
+    page.getByRole("heading", { name: "Enter your private key" }),
   ).toBeVisible();
 
   const importedNsec = nsecEncode(hexToBytes(TEST_IDENTITIES.alice.privateKey));
@@ -321,12 +327,8 @@ test("start-new-identity from lost mode persists the ephemeral key after confirm
     { skipOnboardingSeed: true },
   );
   await page.goto("/");
-  await page
-    .getByRole("button", { name: "Use a private key or backup instead" })
-    .click();
-
   await expect(
-    page.getByRole("heading", { name: "Re-import your key" }),
+    page.getByRole("heading", { name: "Enter your private key" }),
   ).toBeVisible();
 
   page.on("dialog", (dialog) => dialog.accept());
@@ -358,12 +360,8 @@ test("cancelling start-new-identity in lost mode stays on the import screen", as
     { skipOnboardingSeed: true },
   );
   await page.goto("/");
-  await page
-    .getByRole("button", { name: "Use a private key or backup instead" })
-    .click();
-
   await expect(
-    page.getByRole("heading", { name: "Re-import your key" }),
+    page.getByRole("heading", { name: "Enter your private key" }),
   ).toBeVisible();
 
   page.on("dialog", (dialog) => dialog.dismiss());
@@ -371,7 +369,7 @@ test("cancelling start-new-identity in lost mode stays on the import screen", as
 
   // Still on the import screen — no navigation, no persist
   await expect(
-    page.getByRole("heading", { name: "Re-import your key" }),
+    page.getByRole("heading", { name: "Enter your private key" }),
   ).toBeVisible();
   await expect(page.getByTestId("relaunch-required")).toHaveCount(0);
 });
@@ -389,7 +387,7 @@ test("locked boot shows the keyring-locked screen without the onboarding gate or
   await expect(page.getByTestId("keyring-locked")).toBeVisible();
   await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
   await expect(
-    page.getByRole("heading", { name: "Re-import your key" }),
+    page.getByRole("heading", { name: "Enter your private key" }),
   ).toHaveCount(0);
 });
 

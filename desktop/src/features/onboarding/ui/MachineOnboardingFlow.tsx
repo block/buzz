@@ -83,7 +83,7 @@ export function MachineOnboardingFlow({
   const [keyImportStage, setKeyImportStage] =
     React.useState<NostrKeyImportStage>("key-entry");
   const [keyImportMethod, setKeyImportMethod] = React.useState<"phone" | "key">(
-    "phone",
+    "key",
   );
   const [selectedPubkey, setSelectedPubkey] = React.useState<string | null>(
     null,
@@ -269,7 +269,7 @@ export function MachineOnboardingFlow({
                   className={`${ONBOARDING_SECONDARY_CTA_CLASS} px-5`}
                   disabled={isPending}
                   onClick={() => {
-                    setKeyImportMethod("phone");
+                    setKeyImportMethod("key");
                     setKeyImportStage("key-entry");
                     setPage("key-import");
                   }}
@@ -307,18 +307,14 @@ export function MachineOnboardingFlow({
                       ? identityLost
                         ? "Recover from your phone"
                         : "Use your Buzz identity"
-                      : identityLost
-                        ? "Re-import your key"
-                        : "Enter your private key"}
+                      : "Enter your private key"}
                 </h1>
                 <p className="mt-5 max-w-[440px] text-sm leading-6 text-foreground/80">
                   {keyImportStage === "backup-password"
-                    ? "Enter your backup password to unlock your key and restore your identity."
+                    ? "Enter your backup password to restore your identity."
                     : keyImportMethod === "phone"
-                      ? "Scan with a signed-in Buzz phone to securely bring this identity to your desktop."
-                      : identityLost
-                        ? "Re-import your nsec or encrypted backup to restore this identity."
-                        : "Enter your nsec or choose an encrypted backup file."}
+                      ? "Scan this code with a signed-in Buzz phone."
+                      : "Paste your private key to sign in to Buzz."}
                 </p>
               </motion.div>
               <div
@@ -364,13 +360,18 @@ export function MachineOnboardingFlow({
                 ) : (
                   <div className="flex flex-col items-center">
                     <NostrKeyImportForm
-                      backLabel="Back to phone recovery"
+                      backLabel="Back"
                       onBack={() => {
                         setKeyImportStage("key-entry");
-                        setKeyImportMethod("phone");
+                        if (identityLost) {
+                          return;
+                        }
+                        setPage("identity");
                       }}
                       onImport={importExistingIdentity}
+                      onPhoneRecovery={() => setKeyImportMethod("phone")}
                       onStageChange={setKeyImportStage}
+                      showBack={!identityLost}
                       variant="spotlight"
                     />
                     {identityLost && keyImportStage === "key-entry" ? (

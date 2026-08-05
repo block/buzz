@@ -19,9 +19,6 @@ test("key import masks the key with a reveal toggle", async ({ page }) => {
   await page.goto("/");
 
   await page.getByRole("button", { name: "Use an existing key" }).click();
-  await page
-    .getByRole("button", { name: "Use a private key or backup instead" })
-    .click();
   const input = page.getByTestId("nostr-import-nsec-input");
   await expect(input).toBeVisible();
   await waitForAnimations(page);

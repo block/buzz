@@ -29,7 +29,9 @@ type NostrKeyImportFormProps = {
   errorMessage?: string | null;
   onBack: () => void;
   onImport: (nsec: string, password?: string) => Promise<void>;
+  onPhoneRecovery?: () => void;
   onStageChange?: (stage: NostrKeyImportStage) => void;
+  showBack?: boolean;
   /** "spotlight" is the first-launch treatment: glowy centered input, no drop zone, pill buttons. */
   variant?: "default" | "spotlight";
 };
@@ -47,7 +49,9 @@ export function NostrKeyImportForm({
   errorMessage: externalErrorMessage = null,
   onBack,
   onImport,
+  onPhoneRecovery,
   onStageChange,
+  showBack = true,
   variant = "default",
 }: NostrKeyImportFormProps) {
   const [nsecInput, setNsecInput] = React.useState("");
@@ -301,21 +305,34 @@ export function NostrKeyImportForm({
       />
 
       {!isPasswordStage && variant === "spotlight" ? (
-        // First-launch/wiped-identity treatment: no drop zone, but the file
-        // path must still exist — a backup saved through the OS dialog is
-        // exactly what a wiped user returns with.
-        <div className="mt-2 text-center">
-          <Button
-            className={ONBOARDING_SECONDARY_CTA_CLASS}
+        <p className="mt-2 text-center text-sm leading-6 text-foreground/80">
+          You can also use a{" "}
+          <button
+            className="rounded-sm font-medium underline decoration-foreground/40 underline-offset-4 transition-colors hover:decoration-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
             data-testid="nostr-import-file-button"
             disabled={isInteractionDisabled}
             onClick={openFilePicker}
             type="button"
-            variant="ghost"
           >
-            Choose a backup file
-          </Button>
-        </div>
+            backup file
+          </button>
+          {onPhoneRecovery ? (
+            <>
+              {" "}
+              or{" "}
+              <button
+                className="rounded-sm font-medium underline decoration-foreground/40 underline-offset-4 transition-colors hover:decoration-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                data-testid="nostr-import-phone-link"
+                disabled={isInteractionDisabled}
+                onClick={onPhoneRecovery}
+                type="button"
+              >
+                recover from your phone
+              </button>
+            </>
+          ) : null}
+          .
+        </p>
       ) : !isPasswordStage ? (
         <button
           className={cn(
@@ -515,19 +532,21 @@ export function NostrKeyImportForm({
           )}
         </Button>
 
-        <Button
-          className={
-            variant === "spotlight"
-              ? ONBOARDING_SECONDARY_CTA_CLASS
-              : "h-10 w-full text-muted-foreground hover:text-accent-foreground"
-          }
-          disabled={isImporting}
-          onClick={handleBack}
-          type="button"
-          variant="ghost"
-        >
-          {isPasswordStage ? "Back" : backLabel}
-        </Button>
+        {showBack || isPasswordStage ? (
+          <Button
+            className={
+              variant === "spotlight"
+                ? ONBOARDING_SECONDARY_CTA_CLASS
+                : "h-10 w-full text-muted-foreground hover:text-accent-foreground"
+            }
+            disabled={isImporting}
+            onClick={handleBack}
+            type="button"
+            variant="ghost"
+          >
+            {isPasswordStage ? "Back" : backLabel}
+          </Button>
+        ) : null}
       </OnboardingFooter>
     </form>
   );
