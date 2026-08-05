@@ -35,6 +35,22 @@ pub(crate) const DEFAULT_MAX_TURN_DURATION_SECS: u64 = 7200;
 /// deadline (`max_turn_duration + IN_FLIGHT_DEADLINE_BUFFER_SECS`).
 pub(crate) const MAX_TURN_DURATION_CEILING_SECS: u64 = 604_800;
 
+/// Event kinds that open agent turns unless an operator supplies an override.
+///
+/// `mentions` and `all` differ only in whether a `p` tag is required; both
+/// modes subscribe to and match this same bounded set by default.
+pub(crate) fn default_subscription_kinds() -> Vec<u32> {
+    use buzz_core::kind::{
+        KIND_STREAM_MESSAGE, KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
+    };
+
+    vec![
+        KIND_STREAM_MESSAGE,
+        KIND_WORKFLOW_APPROVAL_REQUESTED,
+        KIND_STREAM_REMINDER,
+    ]
+}
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("failed to parse nostr keys: {0}")]
@@ -1276,10 +1292,6 @@ pub fn resolve_channel_filters(
     discovered_channels: &[Uuid],
     rules: &[SubscriptionRule],
 ) -> HashMap<Uuid, ChannelFilter> {
-    use buzz_core::kind::{
-        KIND_STREAM_MESSAGE, KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
-    };
-
     let target_channels: Vec<Uuid> = if let Some(ref overrides) = config.channels_override {
         overrides
             .iter()
@@ -1294,13 +1306,10 @@ pub fn resolve_channel_filters(
 
     match config.subscribe_mode {
         SubscribeMode::Mentions => {
-            let kinds = config.kinds_override.clone().unwrap_or_else(|| {
-                vec![
-                    KIND_STREAM_MESSAGE,
-                    KIND_WORKFLOW_APPROVAL_REQUESTED,
-                    KIND_STREAM_REMINDER,
-                ]
-            });
+            let kinds = config
+                .kinds_override
+                .clone()
+                .unwrap_or_else(default_subscription_kinds);
             let require_mention = !config.no_mention_filter;
             for ch in &target_channels {
                 result.insert(
@@ -1313,13 +1322,10 @@ pub fn resolve_channel_filters(
             }
         }
         SubscribeMode::All => {
-            let kinds = config.kinds_override.clone().unwrap_or_else(|| {
-                vec![
-                    KIND_STREAM_MESSAGE,
-                    KIND_WORKFLOW_APPROVAL_REQUESTED,
-                    KIND_STREAM_REMINDER,
-                ]
-            });
+            let kinds = config
+                .kinds_override
+                .clone()
+                .unwrap_or_else(default_subscription_kinds);
             for ch in &target_channels {
                 result.insert(
                     *ch,
@@ -1385,10 +1391,6 @@ pub fn resolve_dynamic_channel_filter(
     channel_id: Uuid,
     rules: &[crate::filter::SubscriptionRule],
 ) -> Option<ChannelFilter> {
-    use buzz_core::kind::{
-        KIND_STREAM_MESSAGE, KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
-    };
-
     // In Mentions/All mode, if the operator explicitly constrained channels
     // with --channels, only allow dynamic subscription to channels in that
     // allowlist. Config mode ignores --channels (per CLI contract) and uses
@@ -1406,23 +1408,21 @@ pub fn resolve_dynamic_channel_filter(
 
     match config.subscribe_mode {
         SubscribeMode::Mentions => Some(ChannelFilter {
-            kinds: Some(config.kinds_override.clone().unwrap_or_else(|| {
-                vec![
-                    KIND_STREAM_MESSAGE,
-                    KIND_WORKFLOW_APPROVAL_REQUESTED,
-                    KIND_STREAM_REMINDER,
-                ]
-            })),
+            kinds: Some(
+                config
+                    .kinds_override
+                    .clone()
+                    .unwrap_or_else(default_subscription_kinds),
+            ),
             require_mention: !config.no_mention_filter,
         }),
         SubscribeMode::All => Some(ChannelFilter {
-            kinds: Some(config.kinds_override.clone().unwrap_or_else(|| {
-                vec![
-                    KIND_STREAM_MESSAGE,
-                    KIND_WORKFLOW_APPROVAL_REQUESTED,
-                    KIND_STREAM_REMINDER,
-                ]
-            })),
+            kinds: Some(
+                config
+                    .kinds_override
+                    .clone()
+                    .unwrap_or_else(default_subscription_kinds),
+            ),
             require_mention: false,
         }),
         SubscribeMode::Config => {
@@ -1826,14 +1826,12 @@ mod tests {
         let config = test_config(SubscribeMode::All);
         let channels = vec![Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
         let result = resolve_channel_filters(&config, &channels, &[]);
+        let expected = default_subscription_kinds();
 
         assert_eq!(result.len(), 3);
         for ch in &channels {
             let f = result.get(ch).unwrap();
-            let kinds = f.kinds.as_ref().expect("All mode must have explicit kinds");
-            assert!(kinds.contains(&buzz_core::kind::KIND_STREAM_MESSAGE), "must include kind:9");
-            assert!(kinds.contains(&buzz_core::kind::KIND_WORKFLOW_APPROVAL_REQUESTED), "must include kind:46010");
-            assert!(kinds.contains(&buzz_core::kind::KIND_STREAM_REMINDER), "must include kind:40007");
+            assert_eq!(f.kinds.as_deref(), Some(expected.as_slice()));
             assert!(!f.require_mention, "All mode must not require mention");
         }
     }
@@ -1859,10 +1857,7 @@ mod tests {
         let result = resolve_dynamic_channel_filter(&config, ch, &[]);
 
         let f = result.expect("All mode must return a filter");
-        let kinds = f.kinds.as_ref().expect("All mode must have explicit kinds");
-        assert!(kinds.contains(&buzz_core::kind::KIND_STREAM_MESSAGE), "must include kind:9");
-        assert!(kinds.contains(&buzz_core::kind::KIND_WORKFLOW_APPROVAL_REQUESTED), "must include kind:46010");
-        assert!(kinds.contains(&buzz_core::kind::KIND_STREAM_REMINDER), "must include kind:40007");
+        assert_eq!(f.kinds, Some(default_subscription_kinds()));
         assert!(!f.require_mention, "All mode must not require mention");
     }
 
