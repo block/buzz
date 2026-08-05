@@ -39,7 +39,7 @@ test.beforeEach(async ({ page }) => {
 async function chooseQuarterlyReport(page: Page) {
   const [chooser] = await Promise.all([
     page.waitForEvent("filechooser"),
-    page.getByRole("button", { name: "Attach image" }).click(),
+    page.getByRole("button", { name: "Attach file" }).click(),
   ]);
   await chooser.setFiles({
     buffer: Buffer.from("quarterly report"),
@@ -51,7 +51,7 @@ async function chooseQuarterlyReport(page: Page) {
 async function chooseLargeVideo(page: Page) {
   const [chooser] = await Promise.all([
     page.waitForEvent("filechooser"),
-    page.getByRole("button", { name: "Attach image" }).click(),
+    page.getByRole("button", { name: "Attach file" }).click(),
   ]);
   await chooser.setFiles({
     buffer: Buffer.alloc(16 * 1024 * 1024, 1),
@@ -63,7 +63,7 @@ async function chooseLargeVideo(page: Page) {
 async function choosePhoto(page: Page) {
   const [chooser] = await Promise.all([
     page.waitForEvent("filechooser"),
-    page.getByRole("button", { name: "Attach image" }).click(),
+    page.getByRole("button", { name: "Attach file" }).click(),
   ]);
   await chooser.setFiles({
     buffer: Buffer.from("photo"),
@@ -542,7 +542,7 @@ test("forum posts emit a FileCard for generic attachments, not a broken image", 
   await page.getByRole("button", { name: "Start a new post..." }).click();
 
   // Paperclip → mocked pick_and_upload_media returns the PDF descriptor.
-  await page.getByRole("button", { name: "Attach image" }).click();
+  await page.getByRole("button", { name: "Attach file" }).click();
 
   // Submit the (attachment-only) forum post.
   await page.getByTestId("send-message").click();
