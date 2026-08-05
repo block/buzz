@@ -22,7 +22,8 @@ pub(crate) use path::should_use_inherited;
 
 mod metadata;
 pub(crate) use metadata::{
-    resolve_session_title, runtime_metadata_env_vars, SESSION_TITLE_ENV_VAR,
+    apply_agent_display_env, resolve_session_title, runtime_metadata_env_vars,
+    DISPLAY_NAME_ENV_VAR, SESSION_TITLE_ENV_VAR,
 };
 
 mod stop;
@@ -225,49 +226,50 @@ pub fn build_managed_agent_summary(
         }
     };
 
-    // Restart badge: the running process stamped its effective spawn config
-    // at launch; recompute from current disk state and flag drift. Only the
-    // tracked live pair for THIS workspace can drift — stopped agents spawn
-    // fresh, adopted (runtime_pid-only) processes have no stamped hash to
-    // compare, and pairs running for other communities are judged in their
-    // own community (hashing them against this workspace's relay would flag
-    // a spurious restart on every community switch).
+    // Restart badge: the running process stamped the effective spawn config
+    // it was launched with; recompute a prospective one from current disk
+    // state and report every differing field. Only the tracked live pair for
+    // THIS workspace can drift — stopped agents spawn fresh, adopted
+    // (runtime_pid-only) processes have no stamp to compare, and pairs running
+    // for other communities are judged in their own community (comparing them
+    // against this workspace's relay would flag a spurious restart on every
+    // community switch).
     //
-    // Additionally, for runtimes with an adapter version gate (codex only),
-    // check whether the cached adapter availability has drifted from the value
-    // stamped at spawn.  This catches out-of-band adapter changes (manual
-    // npm install/downgrade) that Phase-1 auto-restart doesn't cover.  The
-    // cache is read-only here — no subprocess is spawned.
+    // Adapter-availability drift (codex only) contributes its own synthetic
+    // entry, so an out-of-band adapter change (manual npm install/downgrade)
+    // that Phase-1 auto-restart doesn't cover still shows the user what moved.
+    // The cache is read-only here — no subprocess is spawned.
     //
-    // Global config drives both the restart-drift hash and descriptor env
-    // layering below — the caller loads it once and passes it in, so
+    // Global config drives both the prospective snapshot and the descriptor
+    // env layering below — the caller loads it once and passes it in, so
     // list-style callers pay one disk read per call rather than one per record.
 
-    let needs_restart = pair_key
-        .as_ref()
-        .and_then(|key| runtimes.get(key).map(|runtime| (key, runtime)))
-        .is_some_and(|(key, runtime)| {
-            let teams_for_hash = crate::managed_agents::load_teams(app).unwrap_or_default();
-            let hash_drift = runtime.spawn_config_hash
-                != crate::managed_agents::spawn_hash::spawn_config_hash(
-                    record,
-                    personas,
-                    &teams_for_hash,
-                    &key.relay_url,
-                    global_config,
-                );
-            let availability_drift = super::availability_drift(
-                runtime.adapter_availability.as_ref(),
-                super::adapter_availability_cached(),
-            );
-            // An orphan can never be restarted successfully —
-            // `spawn_agent_child` refuses it before any process side effect —
-            // so `needs_restart` must never fire for one regardless of hash or
-            // availability drift. Surfacing "Restart required" here would offer
-            // an action guaranteed to fail; the UI shows `persona_orphaned`
-            // instead (see `ManagedAgentSummary::persona_orphaned`).
-            restart_eligible(persona_orphaned, hash_drift, availability_drift)
-        });
+    // The prospective side is computed only for a tracked pair: it costs a
+    // teams-store read, and an unstamped agent has nothing to compare against.
+    let tracked_spawn = pair_key.as_ref().zip(pair_runtime).map(|(key, runtime)| {
+        let teams = crate::managed_agents::load_teams(app).unwrap_or_default();
+        let current = crate::managed_agents::spawn_snapshot::prospective_spawn_config_snapshot(
+            record,
+            personas,
+            &teams,
+            &key.relay_url,
+            global_config,
+        );
+        (runtime, current)
+    });
+    let restart_diff = crate::managed_agents::spawn_snapshot::eligible_restart_diff(
+        persona_orphaned,
+        tracked_spawn.as_ref().map(|(runtime, current)| {
+            crate::managed_agents::spawn_snapshot::TrackedSpawnState {
+                stamped: &runtime.spawn_config,
+                current,
+                stamped_availability: runtime.adapter_availability.as_ref(),
+                current_availability: super::adapter_availability_cached(),
+            }
+        }),
+    );
+    // One vector is the whole truth: badge on ⟺ there is a diff to show.
+    let needs_restart = !restart_diff.is_empty();
 
     // Resolve the effective harness via the single typed descriptor — same resolver
     // as spawn, so the UI reflects the persona's current harness (or explicit pin).
@@ -320,6 +322,7 @@ pub fn build_managed_agent_summary(
         persona_out_of_date,
         persona_orphaned,
         needs_restart,
+        restart_diff,
         env_vars: record.env_vars.clone(),
         backend: record.backend.clone(),
         backend_agent_id: record.backend_agent_id.clone(),
@@ -338,19 +341,6 @@ pub fn build_managed_agent_summary(
         respond_to: record.respond_to,
         respond_to_allowlist: record.respond_to_allowlist.clone(),
     })
-}
-
-/// Pure predicate: should the "Restart required" badge fire?
-///
-/// An orphaned linked instance (its persona/definition no longer exists)
-/// can never be restarted successfully — `spawn_agent_child` refuses to
-/// spawn it before any process side effect. Surfacing "Restart required"
-/// for one would offer an action guaranteed to fail, so this always
-/// returns `false` for an orphan regardless of drift. Extracted for unit
-/// testing without `AppHandle`/global state, following the
-/// `availability_drift` pattern in `discovery.rs`.
-fn restart_eligible(persona_orphaned: bool, hash_drift: bool, availability_drift: bool) -> bool {
-    !persona_orphaned && (hash_drift || availability_drift)
 }
 
 pub fn find_managed_agent_mut<'a>(
@@ -473,7 +463,7 @@ pub fn spawn_agent_child(
     let global = crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
 
     // Resolve model/provider/prompt ONCE, here, at the shared spawn boundary —
-    // the single source both the env writes below and `spawn_config_hash`
+    // the single source both the env writes below and the spawn-config snapshot
     // read from. Previously prompt was read from the record's own (possibly
     // stale, Phase-A-snapshot) bytes while model/provider were resolved live
     // from `personas`; a definition edit landing between a caller's snapshot
@@ -490,8 +480,9 @@ pub fn spawn_agent_child(
 
     // Single typed resolver: validates runtime id (dangling harness → Err), resolves
     // command, args (instance wins over definition default), and the full env layer stack.
-    // This is the sole path for harness-definition lookup — spawn, hash, summary, and
-    // model probes all consume this descriptor rather than assembling values inline.
+    // This is the sole path for harness-definition lookup — spawn, snapshot,
+    // summary, and model probes all consume this descriptor rather than
+    // assembling values inline.
     // Like the orphan refusal above, this runs before any side effect so a refused
     // spawn leaves no trace.
     let descriptor =
@@ -735,7 +726,7 @@ pub fn spawn_agent_child(
             }
         }
     }
-    let team_instructions = super::spawn_hash::effective_team_instructions(record, &teams);
+    let team_instructions = super::spawn_snapshot::effective_team_instructions(record, &teams);
     if let Some(instructions) = &team_instructions {
         command.env("BUZZ_ACP_TEAM_INSTRUCTIONS", instructions);
     } else {
@@ -743,8 +734,8 @@ pub fn spawn_agent_child(
     }
 
     // Prompt, model, and provider all come from the single `effective_cfg`
-    // resolved at the top of this function — the SAME resolve `spawn_config_hash`
-    // performs below, so env write and restart badge cannot disagree. Linked
+    // resolved at the top of this function — the SAME resolve the spawn-config
+    // snapshot reads, so env write and restart badge cannot disagree. Linked
     // instances never consult the record's own model/provider/prompt bytes;
     // definition-less instances fall back to their own fields, then global.
     //
@@ -770,13 +761,13 @@ pub fn spawn_agent_child(
     }
     // Session title for the harness to pass out-of-band on `session/new`. The
     // adapter names the session after it; it never reaches the prompt, so this
-    // is display metadata only. `spawn_config_hash` hashes the same resolve, so
-    // a rename raises the restart badge instead of leaving the process stale.
-    if let Some(title) = resolve_session_title(record.display_name.as_deref(), &record.name) {
-        command.env(SESSION_TITLE_ENV_VAR, title);
-    } else {
-        command.env_remove(SESSION_TITLE_ENV_VAR);
-    }
+    // is display metadata only. The spawn-config snapshot records the same
+    // resolve, so a rename raises the restart badge instead of leaving the
+    // process stale.
+    apply_agent_display_env(
+        &mut command,
+        resolve_session_title(record.display_name.as_deref(), &record.name),
+    );
     build_buzz_agent_provider_defaults(&mut command);
     if let Some(meta) = runtime_meta {
         for (key, value) in runtime_metadata_env_vars(
@@ -881,6 +872,22 @@ pub fn spawn_agent_child(
         .env("BUZZ_MANAGED_AGENT", current_instance_id(app))
         .env("BUZZ_MANAGED_AGENT_START_NONCE", &start_nonce);
 
+    // Stamp the effective spawn config from the values that populated the
+    // `Command` above, BEFORE spawning. Re-resolving after `spawn()` would let
+    // a persona/harness/global edit landing in between stamp the NEW config
+    // onto a child running the OLD one, silently suppressing the badge.
+    let spawn_config = super::spawn_snapshot::SpawnConfigSnapshot::from_inputs(
+        super::spawn_snapshot::SpawnConfigInputs {
+            record,
+            descriptor: &descriptor,
+            relay_url: &effective_relay_url,
+            team_instructions: team_instructions.as_deref(),
+            system_prompt: effective_prompt.as_deref(),
+            model: effective_model.as_deref(),
+            provider: effective_provider.as_deref(),
+        },
+    );
+
     // Spawn the harness in its own process group so we can kill the entire
     // tree (harness + MCP servers + agent subprocesses) on shutdown.
     #[cfg(unix)]
@@ -906,18 +913,6 @@ pub fn spawn_agent_child(
         )
     })?;
 
-    // Stamp the effective spawn config so the summary builder can flag
-    // needs_restart when disk state drifts from what this process runs.
-    // `effective_relay_url` is already resolved, and resolution is idempotent,
-    // so it serves as the workspace-relay input here.
-    let spawn_config_hash = super::spawn_hash::spawn_config_hash(
-        record,
-        &personas,
-        &teams,
-        &effective_relay_url,
-        &global,
-    );
-
     // Stamp the adapter availability for runtimes with a version gate (codex
     // only). The summary builder compares this against the current cached value
     // to detect out-of-band adapter changes after spawn (Phase-2 badge fallback).
@@ -940,7 +935,7 @@ pub fn spawn_agent_child(
     return Ok(super::process_lifecycle::finish_spawn(
         child,
         log_path,
-        spawn_config_hash,
+        spawn_config,
         spawned_setup_mode,
         spawned_adapter_availability,
         start_nonce,
@@ -950,7 +945,7 @@ pub fn spawn_agent_child(
     Ok(crate::managed_agents::ManagedAgentProcess {
         child,
         log_path,
-        spawn_config_hash,
+        spawn_config,
         setup_mode: spawned_setup_mode,
         adapter_availability: spawned_adapter_availability,
         start_nonce,

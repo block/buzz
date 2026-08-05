@@ -77,6 +77,9 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     "BUZZ_ACP_RESPOND_TO",
     "BUZZ_ACP_RESPOND_TO_ALLOWLIST",
     "BUZZ_ACP_AGENT_OWNER",
+    // Stable agent identity used for git attribution and private-conversation
+    // provenance must come from the managed-agent record, not user overrides.
+    "BUZZ_ACP_DISPLAY_NAME",
     // Remote lifetime/presence policy: user env must not disable the
     // desktop/provider-owned bounds while the saved record still promises them.
     "BUZZ_ACP_EXIT_AFTER_INACTIVITY",
@@ -222,6 +225,28 @@ pub fn validate_user_env_keys(env_vars: &BTreeMap<String, String>) -> Result<(),
         ));
     }
     Ok(())
+}
+
+/// Returns `true` when `key` is safe to show verbatim — not a credential.
+///
+/// Default-deny: every key NOT in this explicit allowlist is masked. Callers
+/// that display env values (baked-env UI, spawn-diff tooltip) share this
+/// single authority — no second list.
+///
+/// Allowlist (case-insensitive):
+/// - `BUZZ_AGENT_PROVIDER`, `BUZZ_AGENT_MODEL` — agent runtime selection
+/// - `BUZZ_AGENT_THINKING_EFFORT` — non-secret enum (none/minimal/low/medium/high/xhigh/max)
+/// - `DATABRICKS_HOST`, `DATABRICKS_MODEL` — Block non-secret defaults
+pub(crate) fn is_safe_to_reveal(key: &str) -> bool {
+    const SAFE_KEYS: &[&str] = &[
+        "BUZZ_AGENT_PROVIDER",
+        "BUZZ_AGENT_MODEL",
+        "BUZZ_AGENT_THINKING_EFFORT",
+        "DATABRICKS_HOST",
+        "DATABRICKS_MODEL",
+    ];
+    let upper = key.to_ascii_uppercase();
+    SAFE_KEYS.iter().any(|safe| upper == *safe)
 }
 
 /// Per-value byte cap for env values. 32 KiB is generous for credentials,

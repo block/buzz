@@ -308,23 +308,6 @@ type MockBridgeOptions = {
   websocketConnectErrors?: string[];
   stallWebsocketSends?: boolean;
   userSearchDelayMs?: number;
-  /**
-   * Value returned by the `observer_archive_default_enabled` mock command.
-   * `true` = internal-policy build (toggle locked ON); `false`/omitted = OSS
-   * build (toggle functional). Drives LocalArchiveSettingsCard policy state.
-   */
-  observerArchiveDefaultEnabled?: boolean;
-  /**
-   * Delay (ms) applied to `observer_archive_default_enabled` so specs can
-   * assert the pending-reconciliation state (toggle disabled, no
-   * `list_save_subscriptions` call yet) before the policy resolves.
-   */
-  observerArchiveDefaultEnabledDelayMs?: number;
-  /**
-   * When set, `observer_archive_default_enabled` throws with this message —
-   * drives the fail-closed path when the policy check itself fails.
-   */
-  observerArchiveDefaultEnabledError?: string;
   // NIP-IA gate inputs — drive the archive-button gate matrix in
   // tests/e2e/identity-archive.spec.ts.
   /**
@@ -355,6 +338,8 @@ type MockBridgeOptions = {
    * explicit `[]` is honoured (models a picker cancel / no files selected).
    */
   uploadDelayMs?: number;
+  /** Exercise the production composer path that queues files until send. */
+  deferredComposerUploads?: boolean;
   /** Delay (ms) applied to `encode_agent_snapshot_for_send` so E2E tests can
    *  observe the "preparing" phase before the upload begins. 0/undefined = instant. */
   encodeDelayMs?: number;

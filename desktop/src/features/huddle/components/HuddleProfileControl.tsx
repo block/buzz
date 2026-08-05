@@ -43,7 +43,6 @@ export function HuddleProfileControl({
     micConnected,
     micGain,
     micLevel,
-    pttActive,
     selectedDeviceId,
     setMicGain,
     setSelectedDeviceId,
@@ -156,7 +155,6 @@ export function HuddleProfileControl({
           onSelectDevice={setSelectedDeviceId}
           onSelectVoiceInputMode={setVoiceInputMode}
           onToggleMute={toggleMute}
-          pttActive={pttActive}
           selectedDeviceId={selectedDeviceId}
         />
         <Button

@@ -40,7 +40,9 @@ pub(super) fn build_launch_block(
     effective_model: Option<&str>,
     owner_pubkey: &str,
 ) -> serde_json::Value {
-    use crate::managed_agents::{known_acp_runtime, resolve_session_title, SESSION_TITLE_ENV_VAR};
+    use crate::managed_agents::{
+        known_acp_runtime, resolve_session_title, DISPLAY_NAME_ENV_VAR, SESSION_TITLE_ENV_VAR,
+    };
 
     let runtime = known_acp_runtime(&descriptor.command);
     let mut policy_env = BTreeMap::new();
@@ -73,10 +75,11 @@ pub(super) fn build_launch_block(
         policy_env.insert("BUZZ_ACP_MAX_TURN_DURATION".into(), value.to_string());
     }
     if let Some(value) = resolve_session_title(record.display_name.as_deref(), &record.name) {
-        policy_env.insert(SESSION_TITLE_ENV_VAR.into(), value);
+        policy_env.insert(SESSION_TITLE_ENV_VAR.into(), value.clone());
+        policy_env.insert(DISPLAY_NAME_ENV_VAR.into(), value);
     }
     if let Some(value) =
-        crate::managed_agents::spawn_hash::effective_team_instructions(record, teams)
+        crate::managed_agents::spawn_snapshot::effective_team_instructions(record, teams)
     {
         policy_env.insert("BUZZ_ACP_TEAM_INSTRUCTIONS".into(), value);
     }
@@ -250,6 +253,7 @@ mod tests {
             "Coordinate"
         );
         assert_eq!(launch["policy_env"]["BUZZ_ACP_SESSION_TITLE"], "Agent Name");
+        assert_eq!(launch["policy_env"]["BUZZ_ACP_DISPLAY_NAME"], "Agent Name");
         assert_eq!(launch["policy_env"]["BUZZ_ACP_SYSTEM_PROMPT"], "prompt");
         assert_eq!(launch["policy_env"]["BUZZ_ACP_MODEL"], "model");
         assert_eq!(launch["policy_env"]["BUZZ_ACP_IDLE_TIMEOUT"], "17");

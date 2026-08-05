@@ -156,6 +156,13 @@ fn defaults_to_english_without_override_or_locale() {
 }
 
 #[test]
+fn native_system_locale_precedes_environment_fallback() {
+    let locale = first_usable_locale([Some("ko-KR".to_string()), Some("en_US.UTF-8".to_string())]);
+
+    assert_eq!(locale.as_deref(), Some("ko-KR"));
+}
+
+#[test]
 fn supported_european_locale_selects_parakeet_v3() {
     for locale in ["de-DE", "uk_UA", "fr", "es-ES", "pl_PL.UTF-8"] {
         let model = select_stt_model(None, Some(locale));

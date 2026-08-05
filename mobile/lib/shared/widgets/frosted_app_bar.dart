@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../theme/theme.dart';
+import 'directional_transition_scope.dart';
 
 /// Minimum height of the frosted app bar content area below the safe area.
 const _kBarContentMinHeight = Grid.xxs + 32 + Grid.xxs; // 48
@@ -144,6 +145,7 @@ class FrostedAppBar extends StatelessWidget {
         child: BackdropFilter(
           filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
           child: Container(
+            key: const ValueKey('frosted-app-bar-background'),
             padding: EdgeInsets.only(top: topPadding),
             decoration: BoxDecoration(
               // A gradient and a color cannot both paint, so the gradient
@@ -159,48 +161,58 @@ class FrostedAppBar extends StatelessWidget {
                 ),
               ),
             ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                SizedBox(
-                  height: barContentHeight,
-                  child: Padding(
-                    padding: EdgeInsets.symmetric(horizontal: horizontalInset),
-                    child: IconTheme.merge(
-                      data: IconThemeData(color: iconColor),
-                      child: Row(
-                        children: [
-                          ?effectiveLeading,
-                          if (title != null)
-                            Expanded(
-                              child: Padding(
-                                padding: EdgeInsets.only(
-                                  left: effectiveLeading != null
-                                      ? 0
-                                      : Grid.gutter - Grid.quarter,
-                                  right: actions.isEmpty
-                                      ? Grid.gutter - Grid.quarter
-                                      : 0,
+            child: DirectionalTransitionMotion(
+              transformKey: const ValueKey(
+                'frosted-app-bar-content-transition-transform',
+              ),
+              opacityKey: const ValueKey(
+                'frosted-app-bar-content-transition-opacity',
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SizedBox(
+                    height: barContentHeight,
+                    child: Padding(
+                      padding: EdgeInsets.symmetric(
+                        horizontal: horizontalInset,
+                      ),
+                      child: IconTheme.merge(
+                        data: IconThemeData(color: iconColor),
+                        child: Row(
+                          children: [
+                            ?effectiveLeading,
+                            if (title != null)
+                              Expanded(
+                                child: Padding(
+                                  padding: EdgeInsets.only(
+                                    left: effectiveLeading != null
+                                        ? 0
+                                        : Grid.gutter - Grid.quarter,
+                                    right: actions.isEmpty
+                                        ? Grid.gutter - Grid.quarter
+                                        : 0,
+                                  ),
+                                  child: DefaultTextStyle.merge(
+                                    style: effectiveTitleStyle,
+                                    overflow: TextOverflow.ellipsis,
+                                    maxLines: 1,
+                                    child: title!,
+                                  ),
                                 ),
-                                child: DefaultTextStyle.merge(
-                                  style: effectiveTitleStyle,
-                                  overflow: TextOverflow.ellipsis,
-                                  maxLines: 1,
-                                  child: title!,
-                                ),
-                              ),
-                            )
-                          else
-                            const Spacer(),
-                          ...actions,
-                        ],
+                              )
+                            else
+                              const Spacer(),
+                            ...actions,
+                          ],
+                        ),
                       ),
                     ),
                   ),
-                ),
-                if (bottom != null)
-                  SizedBox(height: bottomHeight, child: bottom),
-              ],
+                  if (bottom != null)
+                    SizedBox(height: bottomHeight, child: bottom),
+                ],
+              ),
             ),
           ),
         ),

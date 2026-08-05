@@ -44,10 +44,10 @@ import 'ephemeral_channel_display.dart';
 import 'members_sheet.dart';
 import 'message_actions.dart';
 import 'message_content.dart';
-import 'read_state/deferred_read_state_update.dart';
-import 'read_state/read_state_format.dart';
-import 'read_state/read_state_provider.dart';
-import 'read_state/read_state_time.dart';
+import '../../shared/read_state/deferred_read_state_update.dart';
+import '../../shared/read_state/read_state_format.dart';
+import '../../shared/read_state/read_state_provider.dart';
+import '../../shared/read_state/read_state_time.dart';
 import 'reaction_row.dart';
 import 'send_message_provider.dart';
 import '../profile/user_profile_sheet.dart';
@@ -131,6 +131,7 @@ class ChannelDetailPage extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final composerDockHeight = useState(0.0);
+    final sendMessage = ref.read(sendMessageProvider);
     final detailsAsync = ref.watch(channelDetailsProvider(channel.id));
     final channelsAsync = ref.watch(channelsProvider);
     final messagesState = ref.watch(channelMessagesProvider(channel.id));
@@ -517,14 +518,12 @@ class ChannelDetailPage extends HookConsumerWidget {
                             content,
                             mentionPubkeys, {
                             mediaTags = const <List<String>>[],
-                          }) => ref
-                              .read(sendMessageProvider)
-                              .call(
-                                channelId: channel.id,
-                                content: content,
-                                mentionPubkeys: mentionPubkeys,
-                                mediaTags: mediaTags,
-                              ),
+                          }) => sendMessage.call(
+                            channelId: channel.id,
+                            content: content,
+                            mentionPubkeys: mentionPubkeys,
+                            mediaTags: mediaTags,
+                          ),
                     ),
                   ],
                 ),

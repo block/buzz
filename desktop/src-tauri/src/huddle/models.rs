@@ -305,21 +305,23 @@ pub fn select_stt_model(override_id: Option<&str>, locale: Option<&str>) -> &'st
     default_stt_model()
 }
 
-/// Best-effort system locale from the environment (dependency-free).
+/// Return the first non-empty, non-neutral locale from ordered sources.
 ///
-/// Reads the standard POSIX locale variables in precedence order. Returns
-/// `None` when unset or set to the neutral `C`/`POSIX` locale, in which case
-/// selection falls back to the English default.
+/// The native system locale comes first so packaged GUI apps do not depend on
+/// shell-only POSIX variables. Environment locales remain a fallback for
+/// minimal Linux environments where the native API cannot resolve a locale.
+fn first_usable_locale(candidates: impl IntoIterator<Item = Option<String>>) -> Option<String> {
+    candidates.into_iter().flatten().find_map(|value| {
+        let value = value.trim();
+        (!value.is_empty() && value != "C" && value != "POSIX").then(|| value.to_string())
+    })
+}
+
+/// Best-effort locale from the native OS API, then standard POSIX variables.
 fn detect_locale() -> Option<String> {
-    for key in ["LC_ALL", "LC_MESSAGES", "LANG", "LANGUAGE"] {
-        if let Ok(value) = std::env::var(key) {
-            let value = value.trim();
-            if !value.is_empty() && value != "C" && value != "POSIX" {
-                return Some(value.to_string());
-            }
-        }
-    }
-    None
+    let environment_locales =
+        ["LC_ALL", "LC_MESSAGES", "LANG", "LANGUAGE"].map(|key| std::env::var(key).ok());
+    first_usable_locale(std::iter::once(sys_locale::get_locale()).chain(environment_locales))
 }
 
 /// Resolve the STT model to use for this process: `BUZZ_STT_MODEL` override,

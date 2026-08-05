@@ -370,6 +370,16 @@ impl Tracer for CountingTracer {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.inner.record(step);
     }
+
+    /// Delegate, never inherit the `true` default. This wrapper is
+    /// transparent: whether emits are observed is a property of the
+    /// tracer underneath it. Returning `true` over a `NoopTracer` would
+    /// reintroduce the overhead the gate exists to remove; returning
+    /// `false` over a real tracer would suppress the emits whose absence
+    /// the `EmitGuard` reports as a coverage breach.
+    fn enabled(&self) -> bool {
+        self.inner.enabled()
+    }
 }
 
 impl EmitGuard {
@@ -453,6 +463,52 @@ mod tests {
         fn record(&self, step: TraceStep) {
             self.steps.lock().expect("vec tracer mutex").push(step);
         }
+    }
+
+    /// Discarding tracer that reports `enabled() == false`, standing in
+    /// for the production `NoopTracer`.
+    #[derive(Debug, Default)]
+    struct DisabledTracer;
+
+    impl Tracer for DisabledTracer {
+        fn record(&self, _step: TraceStep) {}
+        fn enabled(&self) -> bool {
+            false
+        }
+    }
+
+    /// `CountingTracer` must forward `enabled()` to the tracer it wraps
+    /// rather than inherit the trait's `true` default. Both directions
+    /// matter, and getting either wrong is silent:
+    ///
+    /// - over a disabled tracer, answering `true` would keep the hot-path
+    ///   read-seam `channels` lookup running in production — the overhead
+    ///   the gate exists to remove;
+    /// - over a live tracer, answering `false` would make gated emitters
+    ///   skip emits during conformance runs, so the `EmitGuard` would
+    ///   report `ImplBug` for seams that are in fact correct (or, worse,
+    ///   mask a real breach behind an expected one).
+    #[test]
+    fn counting_tracer_delegates_enabled_to_inner() {
+        let (_guard, counting) = EmitGuard::arm(
+            Arc::new(DisabledTracer),
+            dummy_state(),
+            "delegates_disabled",
+        );
+        assert!(
+            !counting.enabled(),
+            "CountingTracer must report disabled when wrapping a discarding tracer"
+        );
+
+        let (_guard, counting) = EmitGuard::arm(
+            Arc::new(VecTracer::default()),
+            dummy_state(),
+            "delegates_live",
+        );
+        assert!(
+            counting.enabled(),
+            "CountingTracer must report enabled when wrapping an observing tracer"
+        );
     }
 
     fn dummy_state() -> AbstractState {
