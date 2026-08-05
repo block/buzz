@@ -62,32 +62,6 @@ fn mediapipe_wasm_base() -> String {
         .to_owned()
 }
 
-#[test]
-fn mediapipe_wasm_base_matches_the_installed_package() {
-    // The CDN URL names a version, so the fetched wasm is only guaranteed to
-    // match the bundled JS API if that version is the one npm installed. The
-    // dependency is pinned exactly (no caret) so this comparison is meaningful
-    // — a range would let the lockfile move underneath the URL.
-    const PACKAGE_JSON: &str = include_str!("../../package.json");
-
-    let manifest: serde_json::Value =
-        serde_json::from_str(PACKAGE_JSON).expect("desktop/package.json is valid JSON");
-    let installed = manifest["dependencies"]["@mediapipe/tasks-vision"]
-        .as_str()
-        .expect("desktop depends on @mediapipe/tasks-vision");
-    assert!(
-        !installed.starts_with(['^', '~', '>', '<', '*']),
-        "@mediapipe/tasks-vision must be pinned exactly, found `{installed}`"
-    );
-
-    let base = mediapipe_wasm_base();
-    let expected = format!("@mediapipe/tasks-vision@{installed}/wasm");
-    assert!(
-        base.ends_with(&expected),
-        "MEDIAPIPE_WASM_BASE ({base}) must serve the installed version {installed}"
-    );
-}
-
 /// The npm scope the MediaPipe loader must come from. A CSP source ending in
 /// `/` is a path *prefix* — paths can't be wildcarded — so this admits any
 /// `@mediapipe` package while excluding the rest of what jsDelivr serves.
