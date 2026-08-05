@@ -421,10 +421,18 @@ const OBSERVER_BATCH_KIND: &str = "batch";
 #[derive(Default)]
 struct ObserverPublishQueue {
     coalescer: ObserverChunkCoalescer,
-    /// `(serialized_len, event)`, oldest first. Length is captured at enqueue
-    /// (post-fit) so byte accounting never re-serializes on eviction.
-    events: VecDeque<(usize, observer::ObserverEvent)>,
+    /// `(serialized_len, source_events, event)`, oldest first. Length is
+    /// captured at enqueue (post-fit) so byte accounting never re-serializes
+    /// on eviction; `source_events` is how many GENERATED observer events the
+    /// entry represents (a merged chunk carries every chunk it absorbed), so
+    /// eviction accounting stays in source units after flush.
+    events: VecDeque<(usize, u64, observer::ObserverEvent)>,
     pending_bytes: usize,
+    /// SOURCE observer events lost to byte-budget eviction. Counted in
+    /// generated-event units, not retained entries: a coalesced entry that
+    /// merged N chunks accounts for N when evicted. A PUBLISHED merged entry
+    /// delivers all N sources' text in one event, so the invariant is
+    /// `ingested == dropped_events + Σ source_events over published events`.
     dropped_events: u64,
 }
 
@@ -433,21 +441,22 @@ impl ObserverPublishQueue {
         // ObserverChunkCoalescer::ingest returns immediately-publishable events
         // (force-flushed pending chunks + non-chunk passthrough, or a pending
         // set displaced by the 60KB pre-flush); they join the queue in the
-        // order the coalescer emitted them.
-        for ready in self.coalescer.ingest(event) {
-            self.enqueue(ready);
+        // order the coalescer emitted them, each carrying the count of source
+        // events it represents.
+        for (source_events, ready) in self.coalescer.ingest(event) {
+            self.enqueue(source_events, ready);
         }
         self.enforce_byte_budget();
     }
 
-    fn enqueue(&mut self, mut event: observer::ObserverEvent) {
+    fn enqueue(&mut self, source_events: u64, mut event: observer::ObserverEvent) {
         // Pre-trim at enqueue so (a) byte accounting reflects what will ship
         // and (b) one oversized leaf cannot force every frame it touches into
         // whole-envelope elision downstream.
         fit_observer_event_to_budget(&mut event);
         let bytes = serialized_len(&event);
         self.pending_bytes += bytes;
-        self.events.push_back((bytes, event));
+        self.events.push_back((bytes, source_events, event));
     }
 
     /// Total bytes retained across BOTH stores — the event FIFO and the
@@ -459,23 +468,23 @@ impl ObserverPublishQueue {
     }
 
     /// Enforce [`OBSERVER_PENDING_QUEUE_MAX_BYTES`] over the total, dropping
-    /// OLDEST items first with accounting. Global age order across the two
-    /// stores is structural: every enqueue path flushes the coalescer first,
-    /// so every pending coalescer entry is strictly newer than every queued
-    /// event — eviction is queue front, then coalescer front. The `> 1`
-    /// guard never drops the sole remaining item (any single fitted event or
-    /// pre-flush-capped chunk entry is far under the budget).
+    /// OLDEST items first with accounting in SOURCE-event units. Global age
+    /// order across the two stores is structural: every enqueue path flushes
+    /// the coalescer first, so every pending coalescer entry is strictly newer
+    /// than every queued event — eviction is queue front, then coalescer
+    /// front. The `> 1` guard never drops the sole remaining item (any single
+    /// fitted event or pre-flush-capped chunk entry is far under the budget).
     fn enforce_byte_budget(&mut self) {
         let mut dropped = 0u64;
         while self.total_pending_bytes() > OBSERVER_PENDING_QUEUE_MAX_BYTES
             && self.events.len() + self.coalescer.pending.len() > 1
         {
-            if let Some((bytes, _)) = self.events.pop_front() {
+            if let Some((bytes, source_events, _)) = self.events.pop_front() {
                 self.pending_bytes -= bytes;
+                dropped += source_events;
             } else {
-                self.coalescer.drop_oldest().expect("guard ensures an item");
+                dropped += self.coalescer.drop_oldest().expect("guard ensures an item");
             }
-            dropped += 1;
         }
         if dropped > 0 {
             self.dropped_events += dropped;
@@ -522,16 +531,16 @@ impl ObserverPublishQueue {
     /// Pending coalesced chunks are flushed into the queue first, so a
     /// publish slot never leaves merged chunk text stranded behind the tick.
     fn next_frame(&mut self) -> Option<observer::ObserverEvent> {
-        for ready in self.coalescer.flush() {
-            self.enqueue(ready);
+        for (source_events, ready) in self.coalescer.flush() {
+            self.enqueue(source_events, ready);
         }
-        let channel = self.events.front()?.1.channel_id.clone();
+        let channel = self.events.front()?.2.channel_id.clone();
 
         let mut picked: Vec<observer::ObserverEvent> = Vec::new();
-        let mut kept: VecDeque<(usize, observer::ObserverEvent)> =
+        let mut kept: VecDeque<(usize, u64, observer::ObserverEvent)> =
             VecDeque::with_capacity(self.events.len());
         let mut gathering = true;
-        while let Some((bytes, event)) = self.events.pop_front() {
+        while let Some((bytes, source_events, event)) = self.events.pop_front() {
             if gathering && event.channel_id == channel {
                 picked.push(event);
                 if picked.len() > 1
@@ -540,7 +549,7 @@ impl ObserverPublishQueue {
                     // Frame full: the overflow event stays queued and leads
                     // its channel's next slot.
                     let event = picked.pop().expect("len > 1");
-                    kept.push_back((bytes, event));
+                    kept.push_back((bytes, source_events, event));
                     gathering = false;
                 } else {
                     self.pending_bytes -= bytes;
@@ -551,7 +560,7 @@ impl ObserverPublishQueue {
                     // end of its contiguous front run): stop gathering.
                     gathering = false;
                 }
-                kept.push_back((bytes, event));
+                kept.push_back((bytes, source_events, event));
             }
         }
         self.events = kept;
@@ -702,6 +711,10 @@ struct PendingObserverChunk {
     text: String,
     /// Bytes this entry contributes to `pending_bytes`.
     bytes: usize,
+    /// GENERATED observer events merged into this entry (1 at creation, +1
+    /// per absorbed chunk). Evicting the entry loses this many source events,
+    /// so drop accounting must charge this count, not 1.
+    source_events: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -722,10 +735,13 @@ struct ObserverChunkKey {
 const OBSERVER_CHUNK_MAX_TEXT_BYTES: usize = 60_000;
 
 impl ObserverChunkCoalescer {
-    fn ingest(&mut self, event: observer::ObserverEvent) -> Vec<observer::ObserverEvent> {
+    /// Returns immediately-publishable events, each paired with the number of
+    /// SOURCE observer events it represents (merged chunks carry the count of
+    /// every chunk they absorbed; passthrough events are always 1).
+    fn ingest(&mut self, event: observer::ObserverEvent) -> Vec<(u64, observer::ObserverEvent)> {
         let Some((key, text)) = observer_chunk_key_and_text(&event) else {
             let mut events = self.flush();
-            events.push(event);
+            events.push((1, event));
             return events;
         };
 
@@ -739,6 +755,7 @@ impl ObserverChunkCoalescer {
             }
             pending.text.push_str(&text);
             pending.bytes += text.len();
+            pending.source_events += 1;
             self.pending_bytes += text.len();
             pending.event.seq = event.seq;
             pending.event.timestamp = event.timestamp;
@@ -766,27 +783,29 @@ impl ObserverChunkCoalescer {
             event,
             text,
             bytes,
+            source_events: 1,
         });
     }
 
     /// Evict the OLDEST pending entry for byte-budget enforcement. Returns
-    /// `None` when there is nothing to drop.
-    fn drop_oldest(&mut self) -> Option<()> {
+    /// the number of SOURCE events the entry represented (its merged chunk
+    /// count), or `None` when there is nothing to drop.
+    fn drop_oldest(&mut self) -> Option<u64> {
         if self.pending.is_empty() {
             return None;
         }
         let removed = self.pending.remove(0);
         self.pending_bytes -= removed.bytes;
-        Some(())
+        Some(removed.source_events)
     }
 
-    fn flush(&mut self) -> Vec<observer::ObserverEvent> {
+    fn flush(&mut self) -> Vec<(u64, observer::ObserverEvent)> {
         self.pending_bytes = 0;
         self.pending
             .drain(..)
             .map(|mut pending| {
                 set_observer_chunk_text(&mut pending.event.payload, pending.text);
-                pending.event
+                (pending.source_events, pending.event)
             })
             .collect()
     }
@@ -5544,6 +5563,74 @@ mod observer_publish_queue_tests {
         assert_eq!(*last_frame_seqs.last().expect("seqs"), total);
     }
 
+    /// Max's merged-chunk accounting regression: one coalescer entry can
+    /// represent MANY generated observer events (same-messageId chunks merge
+    /// in place), so evicting it must charge every merged source event to
+    /// `dropped_events`, not 1 per retained entry. Pre-fix, evicting an entry
+    /// that merged 50 chunks recorded `dropped_events == 1` and 49 generated
+    /// events vanished from the accounting.
+    #[test]
+    fn evicting_a_merged_chunk_entry_accounts_every_source_event() {
+        fn chunk(seq: u64, message_id: &str, text: &str) -> observer::ObserverEvent {
+            let mut e = event(seq, "acp_read", Some("chan-a"));
+            e.payload = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "session-1",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "messageId": message_id,
+                        "content": { "type": "text", "text": text },
+                    },
+                },
+            });
+            e
+        }
+
+        let mut queue = ObserverPublishQueue::default();
+        // 50 × 1KB chunks under ONE messageId merge into a single pending
+        // coalescer entry — the oldest item anywhere in the queue.
+        let merged_text = "m".repeat(1_000);
+        let merged_sources = 50u64;
+        for seq in 1..=merged_sources {
+            queue.ingest(chunk(seq, "message-merged", &merged_text));
+        }
+        // Flood with distinct-key 50KB chunks until the byte budget evicts
+        // the oldest entries — the merged entry goes first.
+        let flood_text = "f".repeat(50_000);
+        let flood = 100u64;
+        for seq in 1..=flood {
+            queue.ingest(chunk(
+                merged_sources + seq,
+                &format!("message-{seq}"),
+                &flood_text,
+            ));
+        }
+
+        assert!(
+            queue.total_pending_bytes() <= OBSERVER_PENDING_QUEUE_MAX_BYTES,
+            "eviction must restore the byte budget"
+        );
+        let frames = drain_frames(&mut queue);
+        assert!(
+            !frames
+                .iter()
+                .flat_map(frame_seqs)
+                .any(|seq| seq <= merged_sources),
+            "the merged entry (globally oldest) must have been evicted"
+        );
+        // Every survivor is an unmerged distinct-key chunk (1 source each),
+        // so source-event accounting must close exactly: the merged entry's
+        // eviction charges all 50 sources.
+        let survived: u64 = frames.iter().map(|f| frame_seqs(f).len() as u64).sum();
+        assert_eq!(
+            survived + queue.dropped_events,
+            merged_sources + flood,
+            "accounting: published sources + dropped sources == ingested"
+        );
+    }
+
     /// Under the byte budget the queue is lossless: every ingested event
     /// publishes exactly once.
     #[test]
@@ -5871,9 +5958,14 @@ mod observer_chunk_coalescer_tests {
 
         let events = coalescer.ingest(non_chunk_event(3));
         assert_eq!(events.len(), 2);
-        assert_eq!(events[0].seq, 2);
-        assert_eq!(chunk_text(&events[0]), "hello world");
-        assert_eq!(events[1].kind, "turn_started");
+        assert_eq!(events[0].1.seq, 2);
+        assert_eq!(chunk_text(&events[0].1), "hello world");
+        assert_eq!(
+            events[0].0, 2,
+            "a merged entry reports every source chunk it absorbed"
+        );
+        assert_eq!(events[1].1.kind, "turn_started");
+        assert_eq!(events[1].0, 1);
     }
 
     #[test]
@@ -5894,8 +5986,8 @@ mod observer_chunk_coalescer_tests {
 
         let events = coalescer.flush();
         assert_eq!(events.len(), 2);
-        assert_eq!(chunk_text(&events[0]), "answer");
-        assert_eq!(chunk_text(&events[1]), "thinking");
+        assert_eq!(chunk_text(&events[0].1), "answer");
+        assert_eq!(chunk_text(&events[1].1), "thinking");
     }
 }
 
