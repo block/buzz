@@ -232,6 +232,11 @@ pub(crate) fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
         eprintln!("buzz-desktop: failed to show main window from tray: {error}");
         return;
     }
+    // Any deliberate show counts as the initial reveal: from here on,
+    // activating the app with nothing visible may re-present the window
+    // (see `app_activation`).
+    #[cfg(target_os = "macos")]
+    crate::initial_window::mark_initial_reveal_done();
     if let Err(error) = window.set_focus() {
         eprintln!("buzz-desktop: failed to focus main window from tray: {error}");
     }

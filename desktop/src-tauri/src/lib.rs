@@ -1,4 +1,6 @@
 #![recursion_limit = "256"] // Deep Tauri command futures exceed the default layout query depth.
+#[cfg(target_os = "macos")]
+mod app_activation;
 mod app_menu;
 mod app_state;
 mod archive;
@@ -310,6 +312,8 @@ pub fn run() {
             let app_handle = app.handle().clone();
             #[cfg(target_os = "macos")]
             tray_menu::init(&app_handle)?;
+            #[cfg(target_os = "macos")]
+            app_activation::init(&app_handle);
 
             // ── Phase 2: boot-time sentinel wipe ──────────────────────────────
             // Must run before migrations and identity resolution so the wipe
@@ -926,6 +930,20 @@ pub fn run() {
             if let Some(window) = app_handle.get_webview_window("main") {
                 if let Err(error) = window.hide() {
                     eprintln!("buzz-desktop: failed to hide main window: {error}");
+                }
+            }
+            // With nothing left visible, hiding the app yields activation to
+            // the next app — the same handoff as closing the last window of
+            // a standard macOS app. Without it Buzz stays frontmost with
+            // zero windows: menu bar only, dead Cmd+Tab target. Skipped
+            // while another window (e.g. a huddle) is still up.
+            let any_visible = app_handle
+                .webview_windows()
+                .values()
+                .any(|window| window.is_visible().unwrap_or(false));
+            if !any_visible {
+                if let Err(error) = app_handle.hide() {
+                    eprintln!("buzz-desktop: failed to yield activation after close: {error}");
                 }
             }
         }

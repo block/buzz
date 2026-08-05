@@ -24,18 +24,30 @@
 //! Everything else still mirrors `Menu::default()` deliberately; the Window
 //! submenu's duplicate close item is not restored because File is the
 //! chord's canonical home.
+//!
+//! The app submenu additionally carries the standard Settings… (Cmd+,) and
+//! Check for Updates… items in their HIG positions; both forward to the
+//! webview, where the settings and updater surfaces live.
 
 #[cfg(target_os = "macos")]
 use tauri::menu::{
     AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu, HELP_SUBMENU_ID, WINDOW_SUBMENU_ID,
 };
 #[cfg(target_os = "macos")]
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tauri::{Builder, Runtime};
 
 /// Menu id for File > Close Window.
 #[cfg(target_os = "macos")]
 const CLOSE_WINDOW_ID: &str = "close-window";
+
+/// Menu id for the app submenu's Settings… (Cmd+,) item.
+#[cfg(target_os = "macos")]
+const SETTINGS_ID: &str = "settings";
+
+/// Menu id for the app submenu's Check for Updates… item.
+#[cfg(target_os = "macos")]
+const CHECK_FOR_UPDATES_ID: &str = "check-for-updates";
 
 /// Handle to the File > Close Window item, managed so
 /// `set_close_window_menu_enabled` can toggle it after the menu is built.
@@ -47,12 +59,29 @@ struct CloseWindowMenuItem<R: Runtime>(MenuItem<R>);
 /// the Cmd+W accelerator does not exist.
 pub fn install<R: Runtime>(builder: Builder<R>) -> Builder<R> {
     #[cfg(target_os = "macos")]
-    let builder = builder.menu(build).on_menu_event(|app, event| {
-        if event.id().as_ref() == CLOSE_WINDOW_ID {
-            close_focused_window(app);
-        }
-    });
+    let builder = builder
+        .menu(build)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            CLOSE_WINDOW_ID => close_focused_window(app),
+            SETTINGS_ID => forward_menu_action(app, "menu-open-settings"),
+            CHECK_FOR_UPDATES_ID => forward_menu_action(app, "menu-check-for-updates"),
+            _ => {}
+        });
     builder
+}
+
+/// Shows the main window and forwards a menu action to its webview.
+///
+/// Settings-flavored items stay clickable while the window is hidden to the
+/// tray (the menu bar is reachable whenever the app is active), so the
+/// window is re-presented first — acting invisibly would look like the item
+/// did nothing.
+#[cfg(target_os = "macos")]
+fn forward_menu_action<R: Runtime>(app: &AppHandle<R>, event: &str) {
+    crate::tray_menu::show_main_window(app);
+    if let Err(error) = app.emit_to("main", event, ()) {
+        eprintln!("buzz-desktop: failed to forward menu action {event}: {error}");
+    }
 }
 
 /// Closes the focused window, falling back to the main window.
@@ -109,7 +138,8 @@ pub fn set_close_window_menu_enabled<R: Runtime>(
 }
 
 /// Mirrors `Menu::default()` with File > Close Window as a toggleable custom
-/// item and the Window submenu's duplicate close item omitted.
+/// item, the Window submenu's duplicate close item omitted, and Settings… /
+/// Check for Updates… added to the app submenu.
 ///
 /// The Window and Help submenus keep Tauri's well-known ids: `init_app_menu`
 /// looks them up by id to call `set_as_windows_menu_for_nsapp` and
@@ -145,6 +175,19 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
                 true,
                 &[
                     &PredefinedMenuItem::about(app, None, Some(about_metadata))?,
+                    &PredefinedMenuItem::separator(app)?,
+                    // Standard app-submenu items macOS users expect between
+                    // About and Services; both forward to the webview (the
+                    // settings UI lives there).
+                    &MenuItem::with_id(
+                        app,
+                        CHECK_FOR_UPDATES_ID,
+                        "Check for Updates…",
+                        true,
+                        None::<&str>,
+                    )?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &MenuItem::with_id(app, SETTINGS_ID, "Settings…", true, Some("CmdOrCtrl+,"))?,
                     &PredefinedMenuItem::separator(app)?,
                     &PredefinedMenuItem::services(app, None)?,
                     &PredefinedMenuItem::separator(app)?,

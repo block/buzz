@@ -3,11 +3,27 @@
 #[cfg(target_os = "macos")]
 pub(crate) const INITIAL_RENDER_READY_EVENT: &str = "initial-render-ready";
 
+/// Whether the main window has been deliberately shown this launch — the
+/// first-frame reveal below or an explicit show (tray, Dock reopen). Until
+/// then `app_activation` must ignore activations: the window starts hidden
+/// while saved geometry restores, and the app is already "active" during
+/// launch, so reacting early would preempt the geometry-settled reveal.
+#[cfg(target_os = "macos")]
+pub(crate) static INITIAL_REVEAL_DONE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(target_os = "macos")]
+pub(crate) fn mark_initial_reveal_done() {
+    INITIAL_REVEAL_DONE.store(true, std::sync::atomic::Ordering::Release);
+}
+
 pub(crate) fn reveal_initial_window<R: tauri::Runtime>(window: &tauri::Window<R>) {
     if let Err(error) = window.show() {
         eprintln!("buzz-desktop: failed to reveal main window: {error}");
         return;
     }
+    #[cfg(target_os = "macos")]
+    mark_initial_reveal_done();
     if let Err(error) = window.set_focus() {
         eprintln!("buzz-desktop: failed to focus main window: {error}");
     }
