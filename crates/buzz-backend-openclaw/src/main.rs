@@ -5,12 +5,40 @@
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
-use serde_json::{json, Map, Value};
+use serde::Serialize;
+use serde_json::{json, Value};
 use std::io::Read;
 use uuid::Uuid;
 
 const CODE_PREFIX: &str = "buzz-enroll-v1";
 const CODE_TTL_SECONDS: u64 = 10 * 60;
+
+#[derive(Serialize)]
+struct EnrollmentPayload {
+    version: u8,
+    #[serde(rename = "relayUrl")]
+    relay_url: String,
+    #[serde(rename = "privateKey")]
+    private_key: String,
+    #[serde(rename = "authTag", skip_serializing_if = "Option::is_none")]
+    auth_tag: Option<String>,
+    rooms: Vec<Value>,
+    #[serde(rename = "accountId")]
+    account_id: String,
+    #[serde(rename = "agentId")]
+    agent_id: String,
+    #[serde(rename = "defaultTo")]
+    default_to: String,
+}
+
+#[derive(Serialize)]
+struct UnsignedCode {
+    version: u8,
+    #[serde(rename = "expiresAt")]
+    expires_at: u64,
+    nonce: String,
+    payload: EnrollmentPayload,
+}
 
 fn info() -> Value {
     json!({
@@ -65,33 +93,32 @@ fn enrollment_code(agent: &Value, rooms: &str) -> Result<(String, String), Strin
     let now = Timestamp::now().as_secs();
     let expires_at = (now + CODE_TTL_SECONDS) * 1000;
     let nonce = Uuid::new_v4().simple().to_string();
-    let mut payload = Map::new();
-    payload.insert("version".into(), json!(1));
-    payload.insert("relayUrl".into(), json!(relay_url));
-    payload.insert("privateKey".into(), json!(private_key));
-    if let Some(auth_tag) = agent.get("auth_tag").and_then(Value::as_str) {
-        if !auth_tag.is_empty() {
-            payload.insert("authTag".into(), json!(auth_tag));
-        }
-    }
-    payload.insert("rooms".into(), Value::Array(room_ids));
-    payload.insert("accountId".into(), json!(agent_id));
-    payload.insert("agentId".into(), json!(agent_id));
-    payload.insert(
-        "defaultTo".into(),
-        json!(rooms
-            .split(',')
-            .map(str::trim)
-            .find(|room| !room.is_empty())
-            .unwrap_or_default()),
-    );
-
-    let unsigned = json!({
-        "version": 1,
-        "expiresAt": expires_at,
-        "nonce": nonce,
-        "payload": Value::Object(payload),
-    });
+    let auth_tag = agent
+        .get("auth_tag")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(String::from);
+    let default_to = rooms
+        .split(',')
+        .map(str::trim)
+        .find(|room| !room.is_empty())
+        .unwrap_or_default()
+        .to_string();
+    let unsigned = UnsignedCode {
+        version: 1,
+        expires_at,
+        nonce,
+        payload: EnrollmentPayload {
+            version: 1,
+            relay_url: relay_url.to_string(),
+            private_key: private_key.to_string(),
+            auth_tag,
+            rooms: room_ids,
+            account_id: agent_id.clone(),
+            agent_id: agent_id.clone(),
+            default_to,
+        },
+    };
     let transcript = serde_json::to_string(&unsigned)
         .map_err(|_| "could not encode enrollment code".to_string())?;
     let event = EventBuilder::new(Kind::Custom(27235), transcript)
@@ -102,7 +129,8 @@ fn enrollment_code(agent: &Value, rooms: &str) -> Result<(String, String), Strin
         .custom_created_at(Timestamp::from(now))
         .sign_with_keys(&keys)
         .map_err(|_| "could not sign enrollment code".to_string())?;
-    let mut signed = unsigned;
+    let mut signed = serde_json::to_value(unsigned)
+        .map_err(|_| "could not encode enrollment code".to_string())?;
     signed["signature"] = serde_json::to_value(event)
         .map_err(|_| "could not encode enrollment signature".to_string())?;
     let encoded = URL_SAFE_NO_PAD.encode(
