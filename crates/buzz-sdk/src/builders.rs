@@ -1116,10 +1116,11 @@ pub fn build_git_issue(
 /// emits the explicit unassignment marker. Assignment is routing metadata;
 /// agent execution remains a separate kind:43001–43006 job lifecycle.
 ///
-/// Before updating an existing assignment, callers must query its current
-/// `(kind, author, d)` head and apply `custom_created_at(max(now, head + 1))`
-/// to the returned builder. This prevents a same-second update from losing the
-/// NIP-33 event-ID tie-break. Dominated concurrent writes must be surfaced as
+/// Before updating an existing assignment, callers must query the current
+/// `(kind, d)` heads for both authorized writers and apply
+/// `custom_created_at(max(now, latest_head + 1))` to the returned builder.
+/// This prevents a same-second or cross-author update from losing the global
+/// event-ID tie-break. Dominated concurrent writes must be surfaced as
 /// conflicts rather than success.
 pub fn build_git_issue_assignment(
     repo: &GitRepoCoord,

@@ -930,10 +930,10 @@ struct IssueAssignmentEnvelope {
 
 /// Validate the signed public contract for Buzz issue routing (kind:32001).
 ///
-/// The kind records one repository owner's routing decision. It deliberately
-/// does not represent acceptance, work in progress, or completion; those are
-/// separate job-protocol events. Exact tag cardinality prevents ambiguous
-/// readers from resolving the same signed event differently.
+/// The kind records an issue author's or repository owner's routing decision.
+/// It deliberately does not represent acceptance, work in progress, or
+/// completion; those are separate job-protocol events. Exact tag cardinality
+/// prevents ambiguous readers from resolving the same signed event differently.
 fn validate_issue_assignment_envelope(event: &Event) -> Result<IssueAssignmentEnvelope, String> {
     if !event.content.is_empty() {
         return Err("issue assignment content must be empty".to_string());
@@ -1079,8 +1079,12 @@ fn validate_issue_assignment_target(
     Ok(())
 }
 
-fn issue_assignment_actor_is_authorized(event: &Event, envelope: &IssueAssignmentEnvelope) -> bool {
-    event.pubkey.to_hex() == envelope.repo_owner
+fn issue_assignment_actor_is_authorized(
+    event: &Event,
+    root: &Event,
+    envelope: &IssueAssignmentEnvelope,
+) -> bool {
+    event.pubkey == root.pubkey || event.pubkey.to_hex() == envelope.repo_owner
 }
 
 async fn validate_issue_assignment(
@@ -1103,9 +1107,10 @@ async fn validate_issue_assignment(
         })?;
     validate_issue_assignment_target(&root.event, &envelope)
         .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
-    if !issue_assignment_actor_is_authorized(event, &envelope) {
+    if !issue_assignment_actor_is_authorized(event, &root.event, &envelope) {
         return Err(IngestError::AuthFailed(
-            "restricted: only the repository owner can assign or unassign issues".to_string(),
+            "restricted: only the issue author or repository owner can assign or unassign issues"
+                .to_string(),
         ));
     }
     Ok(())
@@ -3813,9 +3818,10 @@ mod tests {
     }
 
     #[test]
-    fn issue_assignment_authority_is_repo_owner_only_and_root_bound() {
+    fn issue_assignment_authority_is_issue_author_or_repo_owner_and_root_bound() {
         let owner = nostr::Keys::generate();
         let reporter = nostr::Keys::generate();
+        let attacker = nostr::Keys::generate();
         let owner_hex = owner.public_key().to_hex();
         let assignee = nostr::Keys::generate().public_key().to_hex();
         let repo = format!("30617:{owner_hex}:demo");
@@ -3841,6 +3847,7 @@ mod tests {
         assert!(validate_issue_assignment_target(&root, &envelope).is_ok());
         assert!(issue_assignment_actor_is_authorized(
             &owner_assignment,
+            &root,
             &envelope
         ));
 
@@ -3857,8 +3864,27 @@ mod tests {
         );
         let envelope = validate_issue_assignment_envelope(&reporter_assignment).unwrap();
         assert!(validate_issue_assignment_target(&root, &envelope).is_ok());
-        assert!(!issue_assignment_actor_is_authorized(
+        assert!(issue_assignment_actor_is_authorized(
             &reporter_assignment,
+            &root,
+            &envelope
+        ));
+
+        let attacker_assignment = make_event_with_keys(
+            &attacker,
+            KIND_GIT_ISSUE_ASSIGNEE,
+            "",
+            &[
+                &["d", &issue],
+                &["e", &issue, "", "root"],
+                &["p", &assignee, "", "assignee"],
+                &["a", &repo],
+            ],
+        );
+        let envelope = validate_issue_assignment_envelope(&attacker_assignment).unwrap();
+        assert!(!issue_assignment_actor_is_authorized(
+            &attacker_assignment,
+            &root,
             &envelope
         ));
 

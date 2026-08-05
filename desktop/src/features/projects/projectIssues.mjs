@@ -1,3 +1,5 @@
+import { verifyEvent } from "nostr-tools/pure";
+
 export const PROJECT_ISSUE_STATUS = {
   TRIAGE: "Triage",
   BACKLOG: "Backlog",
@@ -37,11 +39,25 @@ function isCanonicalRepoAddress(repoAddress) {
   return Boolean(match && !repoId.startsWith(".") && !repoId.includes(".."));
 }
 
+function canonicalIssueRepoAddress(issue) {
+  const aTags = issue.tags.filter((tag) => tag[0] === "a");
+  if (aTags.length !== 1) return null;
+  const repoAddress = aTags[0][1];
+  return isCanonicalRepoAddress(repoAddress) ? repoAddress : null;
+}
+
+function hasValidSignature(event) {
+  try {
+    return verifyEvent(event);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Pubkeys allowed to change a root event's lifecycle (status, updates):
  * the root author and the owner of the repo the root event targets.
- * Anyone else's status/update events are ignored (NIP-34 scopes these
- * to the root author or a maintainer).
+ * Anyone else's status/update events are ignored.
  */
 export function allowedActorsForRoot(rootEvent) {
   const allowed = new Set([rootEvent.pubkey.toLowerCase()]);
@@ -112,14 +128,14 @@ function parseIssueAssignmentEvent(event) {
   return null;
 }
 
-function isCanonicalIssueAssignmentEvent(issue, event, repoOwner) {
+function isCanonicalIssueAssignmentEvent(issue, event, allowedActors) {
   const dTags = event.tags.filter((tag) => tag[0] === "d");
   const eTags = event.tags.filter((tag) => tag[0] === "e");
   const aTags = event.tags.filter((tag) => tag[0] === "a");
   return (
     event.kind === 32001 &&
     event.content === "" &&
-    event.pubkey === repoOwner &&
+    allowedActors.has(event.pubkey.toLowerCase()) &&
     !event.tags.some((tag) => tag[0] === "h") &&
     dTags.length === 1 &&
     dTags[0].length === 2 &&
@@ -139,11 +155,19 @@ function isCanonicalIssueAssignmentEvent(issue, event, repoOwner) {
 }
 
 function latestAssigneeForIssue(issue, assigneeEvents) {
-  const repoOwner = repoOwnerFromAddress(getTag(issue, "a"));
-  if (!repoOwner) return undefined;
+  const repoAddress = canonicalIssueRepoAddress(issue);
+  const repoOwner = repoOwnerFromAddress(repoAddress);
+  if (issue.kind !== 1621 || !repoOwner || !hasValidSignature(issue)) {
+    return undefined;
+  }
+  const allowedActors = allowedActorsForRoot(issue);
 
   return assigneeEvents
-    .filter((event) => isCanonicalIssueAssignmentEvent(issue, event, repoOwner))
+    .filter(
+      (event) =>
+        hasValidSignature(event) &&
+        isCanonicalIssueAssignmentEvent(issue, event, allowedActors),
+    )
     .sort(
       (left, right) =>
         right.created_at - left.created_at || left.id.localeCompare(right.id),
@@ -153,9 +177,9 @@ function latestAssigneeForIssue(issue, assigneeEvents) {
 /**
  * Assignment is routing metadata, not acceptance or execution. Reassignment
  * does not cancel work already in flight; job lifecycle remains represented
- * separately by kinds 43001–43006. Only the repository owner can set this
- * shared routing state; issue authorship alone does not grant that authority.
- * See VISION_PROJECTS.md.
+ * separately by kinds 43001–43006. The issue author and repository owner can
+ * both update this shared routing state; the latest valid update wins. See
+ * VISION_PROJECTS.md.
  */
 function assigneeFromEvent(assigneeEvent) {
   if (!assigneeEvent) return undefined;

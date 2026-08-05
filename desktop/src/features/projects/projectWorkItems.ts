@@ -2,7 +2,6 @@ import { relayClient } from "@/shared/api/relayClient";
 import type { RelayEvent } from "@/shared/api/types";
 import {
   KIND_GIT_ISSUE,
-  KIND_GIT_ISSUE_ASSIGNEE,
   KIND_GIT_PR_UPDATE,
   KIND_GIT_PULL_REQUEST,
   KIND_GIT_STATUS_CLOSED,
@@ -20,6 +19,7 @@ import {
   type ProjectPullRequest,
   projectPullRequestEventsToPullRequests,
 } from "./projectPullRequests.mjs";
+import { fetchIssueAssignmentEvents } from "./projectIssueAssignmentQueries";
 
 type RepositoryReference = {
   repoAddress: string;
@@ -87,18 +87,12 @@ export async function fetchProjectsWorkItems<TProject extends ProjectReference>(
       ),
     ),
   ];
-  const [
-    rootResult,
-    updateResult,
-    commentResult,
-    statusResult,
-    assigneeResult,
-  ] = await Promise.allSettled([
-    fetchEvents({
-      kinds: [KIND_GIT_ISSUE, KIND_GIT_PULL_REQUEST],
-      "#a": repoAddresses,
-      limit: 2_000,
-    }),
+  const rootPromise = fetchEvents({
+    kinds: [KIND_GIT_ISSUE, KIND_GIT_PULL_REQUEST],
+    "#a": repoAddresses,
+    limit: 2_000,
+  });
+  const optionalResultsPromise = Promise.allSettled([
     fetchEvents({
       kinds: [KIND_GIT_PR_UPDATE],
       "#a": repoAddresses,
@@ -119,20 +113,24 @@ export async function fetchProjectsWorkItems<TProject extends ProjectReference>(
       "#a": repoAddresses,
       limit: 2_000,
     }),
-    fetchEvents({
-      kinds: [KIND_GIT_ISSUE_ASSIGNEE],
-      "#a": repoAddresses,
-      // kind:32001 replaces by issue ID. Keep this at the root-query bound so
-      // every issue in the aggregate result can retain its current assignee.
-      limit: 2_000,
-    }),
   ]);
-
-  if (rootResult.status === "rejected") {
-    throw rootResult.reason instanceof Error
-      ? rootResult.reason
+  let rootEvents: RelayEvent[];
+  try {
+    rootEvents = await rootPromise;
+  } catch (error) {
+    await optionalResultsPromise;
+    throw error instanceof Error
+      ? error
       : new Error("Could not load project issues and pull requests.");
   }
+  const issueRoots = rootEvents.filter(
+    (event) => event.kind === KIND_GIT_ISSUE,
+  );
+  const assigneeResultPromise = Promise.allSettled([
+    fetchIssueAssignmentEvents(issueRoots, repoAddresses, fetchEvents),
+  ]).then(([result]) => result);
+  const [[updateResult, commentResult, statusResult], assigneeResult] =
+    await Promise.all([optionalResultsPromise, assigneeResultPromise]);
 
   const updateEvents =
     updateResult.status === "fulfilled" ? updateResult.value : [];
@@ -142,7 +140,7 @@ export async function fetchProjectsWorkItems<TProject extends ProjectReference>(
     statusResult.status === "fulfilled" ? statusResult.value : [];
   const assigneeEvents =
     assigneeResult.status === "fulfilled" ? assigneeResult.value : [];
-  const rootsByRepo = groupByRepoAddress(rootResult.value);
+  const rootsByRepo = groupByRepoAddress(rootEvents);
   const updatesByRepo = groupByRepoAddress(updateEvents);
   const commentsByRepo = groupByRepoAddress(commentEvents);
   const statusesByRepo = groupByRepoAddress(statusEvents);

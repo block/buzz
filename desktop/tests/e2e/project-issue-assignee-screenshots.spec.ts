@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { finalizeEvent } from "nostr-tools/pure";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
@@ -6,44 +7,46 @@ import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 const SHOTS = "test-results/project-issue-assignee";
 const OWNER = "deadbeef".repeat(8);
 const REPO_ADDRESS = `30617:${OWNER}:buzz`;
-const ISSUE_ID = "1".repeat(64);
 
 test("project issues show signed assignee state", async ({ page }) => {
+  const secretKey = Uint8Array.from(
+    TEST_IDENTITIES.alice.privateKey
+      .match(/../g)
+      ?.map((byte) => Number.parseInt(byte, 16)) ?? [],
+  );
+  const now = Math.floor(Date.now() / 1000);
+  const issue = finalizeEvent(
+    {
+      kind: 1621,
+      created_at: now - 1,
+      content: "Route this issue without implying execution.",
+      tags: [
+        ["a", REPO_ADDRESS],
+        ["subject", "Add signed issue routing"],
+      ],
+    },
+    secretKey,
+  );
+  const assignment = finalizeEvent(
+    {
+      kind: 32001,
+      created_at: now,
+      content: "",
+      tags: [
+        ["d", issue.id],
+        ["e", issue.id, "", "root"],
+        ["p", TEST_IDENTITIES.alice.pubkey, "", "assignee"],
+        ["a", REPO_ADDRESS],
+      ],
+    },
+    secretKey,
+  );
   await page.addInitScript(
-    ({ assignee, issueId, owner, repoAddress }) => {
-      const now = Math.floor(Date.now() / 1000);
-      window.__BUZZ_E2E_EXTRA_PROJECT_EVENTS__ = [
-        {
-          id: issueId,
-          kind: 1621,
-          pubkey: assignee,
-          created_at: now - 1,
-          content: "Route this issue without implying execution.",
-          tags: [
-            ["a", repoAddress],
-            ["subject", "Add signed issue routing"],
-          ],
-        },
-        {
-          id: "2".repeat(64),
-          kind: 32001,
-          pubkey: owner,
-          created_at: now,
-          content: "",
-          tags: [
-            ["d", issueId],
-            ["e", issueId, "", "root"],
-            ["p", assignee, "", "assignee"],
-            ["a", repoAddress],
-          ],
-        },
-      ];
+    ({ events }) => {
+      window.__BUZZ_E2E_EXTRA_PROJECT_EVENTS__ = events;
     },
     {
-      assignee: TEST_IDENTITIES.alice.pubkey,
-      issueId: ISSUE_ID,
-      owner: OWNER,
-      repoAddress: REPO_ADDRESS,
+      events: [issue, assignment],
     },
   );
   await installMockBridge(page);

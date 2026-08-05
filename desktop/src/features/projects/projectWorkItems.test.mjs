@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { finalizeEvent, getPublicKey } from "nostr-tools/pure";
 
 import { fetchProjectsWorkItems } from "./projectWorkItems.ts";
 
@@ -11,7 +12,9 @@ import { fetchProjectsWorkItems } from "./projectWorkItems.ts";
 // production function with a stubbed fetchEvents to verify the dedup contract
 // end-to-end, not just the filter algorithm in isolation.
 
-const REPO_OWNER = "a".repeat(64);
+const OWNER_SECRET = new Uint8Array(32).fill(1);
+const AUTHOR_SECRET = new Uint8Array(32).fill(2);
+const REPO_OWNER = getPublicKey(OWNER_SECRET);
 const REPO_DTAG = "relay";
 const REPO_ADDRESS = `30617:${REPO_OWNER}:${REPO_DTAG}`;
 
@@ -138,29 +141,36 @@ test("fetchProjectsWorkItems returns a single row for a PR present in both proje
   assert.ok(callCount >= 1, "fetchEvents must have been called");
 });
 
-const AUTHOR = "b".repeat(64);
 const ASSIGNEE = "c".repeat(64);
-const ASSIGNED_ISSUE_ID = "e".repeat(64);
 
-const assignedIssue = {
-  ...makeIssue(ASSIGNED_ISSUE_ID),
-  pubkey: AUTHOR,
-  content: "Investigate the failure",
-};
+const assignedIssue = finalizeEvent(
+  {
+    kind: 1621,
+    created_at: 100,
+    content: "Investigate the failure",
+    tags: [
+      ["a", REPO_ADDRESS],
+      ["subject", "Fix the thing"],
+    ],
+  },
+  AUTHOR_SECRET,
+);
+const ASSIGNED_ISSUE_ID = assignedIssue.id;
 
-const assignmentEvent = {
-  id: "f".repeat(64),
-  kind: 32001,
-  pubkey: REPO_OWNER,
-  created_at: 200,
-  content: "",
-  tags: [
-    ["d", ASSIGNED_ISSUE_ID],
-    ["e", ASSIGNED_ISSUE_ID, "", "root"],
-    ["p", ASSIGNEE, "", "assignee"],
-    ["a", REPO_ADDRESS],
-  ],
-};
+const assignmentEvent = finalizeEvent(
+  {
+    kind: 32001,
+    created_at: 200,
+    content: "",
+    tags: [
+      ["d", ASSIGNED_ISSUE_ID],
+      ["e", ASSIGNED_ISSUE_ID, "", "root"],
+      ["p", ASSIGNEE, "", "assignee"],
+      ["a", REPO_ADDRESS],
+    ],
+  },
+  OWNER_SECRET,
+);
 
 test("aggregate work-item queries fetch and project issue assignments", async () => {
   const filters = [];
@@ -182,9 +192,34 @@ test("aggregate work-item queries fetch and project issue assignments", async ()
       (filter) =>
         filter.kinds.length === 1 &&
         filter.kinds[0] === 32001 &&
-        filter["#a"]?.[0] === REPO_ADDRESS,
+        filter["#a"]?.[0] === REPO_ADDRESS &&
+        filter["#d"]?.[0] === ASSIGNED_ISSUE_ID &&
+        filter.limit === 2,
     ),
-    "aggregate query must request repo-scoped assignment events",
+    "aggregate query must request both authorized writer heads by issue id",
+  );
+});
+
+test("assignment queries stay complete across the relay page clamp", async () => {
+  const roots = Array.from({ length: 501 }, (_, index) =>
+    makeIssue(index.toString(16).padStart(64, "0")),
+  );
+  const assignmentFilters = [];
+  const fetchEvents = async (filter) => {
+    if (filter.kinds.includes(1621)) return roots;
+    if (filter.kinds.includes(32001)) assignmentFilters.push(filter);
+    return [];
+  };
+
+  await fetchProjectsWorkItems([projectA], fetchEvents);
+
+  assert.equal(assignmentFilters.length, 2);
+  assert.deepEqual(
+    assignmentFilters.map((filter) => [filter["#d"].length, filter.limit]),
+    [
+      [500, 1_000],
+      [1, 2],
+    ],
   );
 });
 

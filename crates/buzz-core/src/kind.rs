@@ -631,13 +631,13 @@ pub const KIND_GIT_STATUS_DRAFT: u32 = 1633;
 /// announcement, never a project. See `docs/nips/NIP-MP.md`.
 pub const KIND_PROJECT: u32 = 30621;
 
-/// Buzz extension (not part of NIP-34): repository-owner-authored issue
-/// routing state. Parameterized-replaceable by issue ID (`d` tag), so bounded
-/// repo-wide reads retain one current state per issue instead of losing older
-/// assignments under high reassignment volume. The event also `e`-tags the
-/// issue root, `a`-tags its kind:30617 repository, and either carries one
-/// marked assignee `p` tag or `["assignee", "none"]`. Assignment is not
-/// acceptance or execution; those remain kind:43001–43006 job events.
+/// Buzz extension (not part of NIP-34): issue-author- or repository-owner-
+/// authored routing state. Parameterized-replaceable by issue ID (`d` tag),
+/// with readers resolving the two possible author-scoped heads globally. The
+/// event also `e`-tags the issue root, `a`-tags its kind:30617 repository, and
+/// either carries one marked assignee `p` tag or `["assignee", "none"]`.
+/// Assignment is not acceptance or execution; those remain kind:43001–43006
+/// job events.
 pub const KIND_GIT_ISSUE_ASSIGNEE: u32 = 32001;
 
 const _: () = assert!(KIND_GIT_ISSUE_ASSIGNEE <= u16::MAX as u32);

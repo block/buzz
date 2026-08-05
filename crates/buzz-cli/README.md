@@ -90,7 +90,7 @@ buzz repos protect list --id my-repo
 buzz repos protect set --id my-repo --ref refs/heads/main --push admin --no-force-push --no-delete
 buzz repos protect remove --id my-repo --ref refs/heads/main
 
-# Issue routing (the configured signing identity must own the repository)
+# Issue routing (the signing identity must be the issue author or repo owner)
 buzz issues assign --issue <event-id> --repo-owner <hex> --repo-id my-repo --assignee <human-or-agent-pubkey>
 buzz issues assign --issue <event-id> --repo-owner <hex> --repo-id my-repo --unassign
 buzz issues assignments --repo-owner <hex> --repo-id my-repo --assignee <human-or-agent-pubkey>
@@ -103,11 +103,13 @@ buzz channels list | jq '.[].name'
 constraint omitted from the command is removed. `protect list` reports malformed
 stored rules in `validation_error` so an owner can remove and repair them.
 
-`issues assign` reads the current assignment head before signing so rapid
-reassignments advance monotonically. A concurrent dominated write exits with
-the standard write-conflict code (5) instead of reporting false success. If a
-network retry receives `duplicate`, the CLI verifies that the submitted event
-is the current head before treating the retry as idempotent success.
+`issues assign` reads both authorized author-scoped heads before signing so
+rapid and cross-author reassignments advance monotonically. A concurrent
+dominated write exits with the standard write-conflict code (5) instead of
+reporting false success. If a network retry receives `duplicate`, the CLI
+verifies that the submitted event is the globally current head before treating
+the retry as idempotent success. `issues assignments` resolves those heads
+before applying `--assignee` or `--limit`, so stale routing state is not listed.
 
 ## Commands
 

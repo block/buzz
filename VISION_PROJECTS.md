@@ -211,30 +211,33 @@ The envelope is canonical: empty content; exactly one `d`, one root-marked
 `p` or the unassignment marker. Malformed or ambiguous events are ignored by
 readers and rejected by Buzz relays.
 
-Unassignment replaces the marked `p` tag with `["assignee", "none"]`. The
-repository owner signs assignment state; issue authorship alone does not grant
-routing authority. Kind:32001 is parameterized-replaceable by the issue ID in
-`d`, so bounded repo queries retain one current state per issue even after heavy
-reassignment. Readers resolve duplicate relay copies by `created_at`, then the
-lowest event ID when timestamps tie.
+Readers verify both the issue-root and assignment signatures, require exactly
+one matching repository relation on the root, and ignore any state that fails
+those checks.
 
-Writers must query their current `(kind, pubkey, d)` head before updating and
-sign with `created_at = max(now, prior_created_at + 1)`. Deterministic event-ID
-tie-breaking gives convergence, but without this monotonic guard a second
-assignment made in the same wall-clock second can lose to the first. A
-concurrent dominated write must be surfaced as a conflict rather than success.
+Unassignment replaces the marked `p` tag with `["assignee", "none"]`. The issue
+author and repository owner can both sign assignment state; all other writers
+are rejected. Kind:32001 is parameterized-replaceable by the issue ID in `d`.
+Because NIP-33 replacement coordinates include the author pubkey, relays retain
+at most two authorized heads per issue. Readers resolve those heads globally by
+`created_at`, then the lowest event ID when timestamps tie.
 
-Clients must preserve author-self `p` tags when the repository owner assigns
+Writers must query both authorized `(kind, pubkey, d)` heads before updating and
+sign with `created_at = max(now, latest_created_at + 1)`. Deterministic event-ID
+tie-breaking gives convergence, but without this global monotonic guard a
+same-second or cross-author update can lose to the current state. A concurrent
+dominated write must be surfaced as a conflict rather than success.
+
+Clients must preserve author-self `p` tags when either authorized writer assigns
 the issue to themselves; rust-nostr builders require `allow_self_tagging` for
 that case.
 
 Assignment means “this identity is the current routing target.” It does not
 mean the target accepted the work, began it, or completed it. Those transitions
 belong to the separate kind:43001–43006 job protocol, so reassignment never
-silently cancels an in-flight job. Owner-only authorship is part of this
-version's contract. Admitting maintainer signers later requires an explicit
-delegation and cross-author conflict-resolution protocol because NIP-33
-replacement coordinates include the author pubkey.
+silently cancels an in-flight job. Repository maintainers are not authorized by
+this version: admitting delegated signers later requires a protocol for
+authenticating delegation and handling its revocation.
 
 The replaceable assignment event is a current-state projection, not a task
 history. Durable acceptance, progress, completion, cancellation, and evidence

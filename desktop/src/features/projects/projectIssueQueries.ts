@@ -1,7 +1,6 @@
 import { relayClient } from "@/shared/api/relayClient";
 import {
   KIND_GIT_ISSUE,
-  KIND_GIT_ISSUE_ASSIGNEE,
   KIND_GIT_STATUS_CLOSED,
   KIND_GIT_STATUS_DRAFT,
   KIND_GIT_STATUS_MERGED,
@@ -10,6 +9,7 @@ import {
 } from "@/shared/constants/kinds";
 import type { ProjectIssue } from "./projectIssues.mjs";
 import { projectIssueEventsToIssues } from "./projectIssues.mjs";
+import { fetchIssueAssignmentEvents } from "./projectIssueAssignmentQueries";
 
 type ProjectReference = {
   repoAddress: string;
@@ -18,36 +18,38 @@ type ProjectReference = {
 export async function fetchProjectIssues(
   project: ProjectReference,
 ): Promise<ProjectIssue[]> {
-  const [issueEvents, statusEvents, commentEvents, assigneeEvents] =
-    await Promise.all([
-      relayClient.fetchEvents({
-        kinds: [KIND_GIT_ISSUE],
-        "#a": [project.repoAddress],
-        limit: 200,
-      }),
-      relayClient.fetchEvents({
-        kinds: [
-          KIND_GIT_STATUS_OPEN,
-          KIND_GIT_STATUS_MERGED,
-          KIND_GIT_STATUS_CLOSED,
-          KIND_GIT_STATUS_DRAFT,
-        ],
-        "#a": [project.repoAddress],
-        limit: 500,
-      }),
-      relayClient.fetchEvents({
-        kinds: [KIND_TEXT_NOTE],
-        "#a": [project.repoAddress],
-        limit: 500,
-      }),
-      relayClient.fetchEvents({
-        kinds: [KIND_GIT_ISSUE_ASSIGNEE],
-        "#a": [project.repoAddress],
-        // kind:32001 replaces by issue ID, so this returns at most one state
-        // per issue and remains above the 200-root issue query bound.
-        limit: 500,
-      }),
-    ]);
+  const issueEventsPromise = relayClient.fetchEvents({
+    kinds: [KIND_GIT_ISSUE],
+    "#a": [project.repoAddress],
+    limit: 200,
+  });
+  const optionalEventsPromise = Promise.all([
+    relayClient.fetchEvents({
+      kinds: [
+        KIND_GIT_STATUS_OPEN,
+        KIND_GIT_STATUS_MERGED,
+        KIND_GIT_STATUS_CLOSED,
+        KIND_GIT_STATUS_DRAFT,
+      ],
+      "#a": [project.repoAddress],
+      limit: 500,
+    }),
+    relayClient.fetchEvents({
+      kinds: [KIND_TEXT_NOTE],
+      "#a": [project.repoAddress],
+      limit: 500,
+    }),
+  ]);
+  const issueEvents = await issueEventsPromise;
+  const assigneeEventsPromise = fetchIssueAssignmentEvents(
+    issueEvents,
+    [project.repoAddress],
+    relayClient.fetchEvents.bind(relayClient),
+  );
+  const [[statusEvents, commentEvents], assigneeEvents] = await Promise.all([
+    optionalEventsPromise,
+    assigneeEventsPromise,
+  ]);
 
   return projectIssueEventsToIssues(
     issueEvents,
