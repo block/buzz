@@ -126,6 +126,8 @@ export async function fetchProjectsWorkItems<TProject extends ProjectReference>(
   const issueRoots = rootEvents.filter(
     (event) => event.kind === KIND_GIT_ISSUE,
   );
+  // Preserve the same settled-section shape as the optional event groups so
+  // assignment relay failures can be reported without discarding issue roots.
   const assigneeResultPromise = Promise.allSettled([
     fetchIssueAssignmentEvents(issueRoots, repoAddresses, fetchEvents),
   ]).then(([result]) => result);

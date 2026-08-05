@@ -250,23 +250,23 @@ test("explicit unassignment wins without treating malformed events as unassignme
 });
 
 test("same-second cross-author assignments use the lowest event id as a deterministic tie-break", () => {
-  const lowerId = assigneeEvent({
+  const ownerAssignment = assigneeEvent({
     pubkey: OWNER,
     assignee: AUTHOR,
     createdAt: 300,
   });
-  const higherId = assigneeEvent({
+  const authorAssignment = assigneeEvent({
     pubkey: AUTHOR,
     assignee: OWNER,
     createdAt: 300,
   });
-  const expected = [lowerId, higherId].sort((left, right) =>
+  const expected = [ownerAssignment, authorAssignment].sort((left, right) =>
     left.id.localeCompare(right.id),
   )[0];
 
   for (const events of [
-    [lowerId, higherId],
-    [higherId, lowerId],
+    [ownerAssignment, authorAssignment],
+    [authorAssignment, ownerAssignment],
   ]) {
     const issue = eventToProjectIssue(signedIssueEvent(), [], [], events);
     assert.equal(issue.assignee, expected.pubkey === OWNER ? AUTHOR : OWNER);

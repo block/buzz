@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { finalizeEvent, getPublicKey } from "nostr-tools/pure";
 
+import { fetchIssueAssignmentEvents } from "./projectIssueAssignmentQueries.ts";
 import { fetchProjectsWorkItems } from "./projectWorkItems.ts";
 
 // ── Work-item deduplication ─────────────────────────────────────────────────
@@ -29,6 +30,21 @@ const projectA = {
 const projectB = {
   repositories: [{ repoAddress: REPO_ADDRESS }],
 };
+
+test("assignment queries require a repository coordinate", async () => {
+  let queryCount = 0;
+  const events = await fetchIssueAssignmentEvents(
+    [{ id: "a".repeat(64) }],
+    [],
+    async () => {
+      queryCount += 1;
+      return [];
+    },
+  );
+
+  assert.deepEqual(events, []);
+  assert.equal(queryCount, 0);
+});
 
 // Minimal valid NIP-34 issue event for the shared repo.
 function makeIssue(id, updatedAt = 100) {
@@ -193,6 +209,7 @@ test("aggregate work-item queries fetch and project issue assignments", async ()
         filter.kinds.length === 1 &&
         filter.kinds[0] === 32001 &&
         filter["#a"]?.[0] === REPO_ADDRESS &&
+        filter["#d"]?.length === 1 &&
         filter["#d"]?.[0] === ASSIGNED_ISSUE_ID &&
         filter.limit === 2,
     ),

@@ -10,6 +10,7 @@ use nostr::{Event, Timestamp};
 
 const MAX_ASSIGNMENT_LIST_HEADS: u32 = 10_000;
 const ISSUE_ROOT_IDS_PER_QUERY: usize = 500;
+const MAX_ASSIGNMENT_CLOCK_SKEW_SECS: u64 = 900;
 
 fn parse_events(json: &str) -> Result<Vec<Event>, CliError> {
     serde_json::from_str(json)
@@ -27,8 +28,15 @@ fn parse_event_values(values: Vec<serde_json::Value>) -> Result<Vec<Event>, CliE
         .collect()
 }
 
-fn monotonic_assignment_created_at(now: u64, prior_head: Option<u64>) -> u64 {
-    prior_head.map_or(now, |prior| now.max(prior.saturating_add(1)))
+fn monotonic_assignment_created_at(now: u64, prior_head: Option<u64>) -> Result<u64, CliError> {
+    let created_at = prior_head.map_or(now, |prior| now.max(prior.saturating_add(1)));
+    if created_at > now.saturating_add(MAX_ASSIGNMENT_CLOCK_SKEW_SECS) {
+        return Err(CliError::Conflict(
+            "current assignment timestamp is too far in the future; retry after clocks converge"
+                .into(),
+        ));
+    }
+    Ok(created_at)
 }
 
 fn current_assignment_filter(
@@ -178,7 +186,7 @@ fn assignment_assignee(event: &Event) -> Option<&str> {
     })
 }
 
-fn assignment_precedes(left: &Event, right: &Event) -> bool {
+fn assignment_wins_over(left: &Event, right: &Event) -> bool {
     left.created_at.as_secs() > right.created_at.as_secs()
         || (left.created_at == right.created_at && left.id < right.id)
 }
@@ -202,7 +210,7 @@ fn latest_assignment_head(
             .created_at
             .as_secs()
             .cmp(&left.created_at.as_secs())
-            .then_with(|| left.id.to_hex().cmp(&right.id.to_hex()))
+            .then_with(|| left.id.cmp(&right.id))
     });
     events.into_iter().next()
 }
@@ -238,7 +246,7 @@ fn resolve_current_assignments(
         }
 
         match current_by_issue.get(&issue_id) {
-            Some(current) if !assignment_precedes(&event, current) => {}
+            Some(current) if !assignment_wins_over(&event, current) => {}
             _ => {
                 current_by_issue.insert(issue_id, event);
             }
@@ -491,7 +499,7 @@ pub async fn cmd_assign_issue(
     let created_at = monotonic_assignment_created_at(
         Timestamp::now().as_secs(),
         prior.map(|event| event.created_at.as_secs()),
-    );
+    )?;
     let builder = build_git_issue_assignment(&repo, &issue, assignee)
         .map_err(sdk_err)?
         .custom_created_at(Timestamp::from(created_at));
@@ -701,11 +709,19 @@ mod tests {
     }
 
     #[test]
-    fn assignment_writes_advance_past_same_second_and_future_heads() {
-        assert_eq!(monotonic_assignment_created_at(100, None), 100);
-        assert_eq!(monotonic_assignment_created_at(100, Some(50)), 100);
-        assert_eq!(monotonic_assignment_created_at(100, Some(100)), 101);
-        assert_eq!(monotonic_assignment_created_at(100, Some(200)), 201);
+    fn assignment_writes_advance_without_propagating_poisoned_future_heads() {
+        assert_eq!(monotonic_assignment_created_at(100, None).unwrap(), 100);
+        assert_eq!(monotonic_assignment_created_at(100, Some(50)).unwrap(), 100);
+        assert_eq!(
+            monotonic_assignment_created_at(100, Some(100)).unwrap(),
+            101
+        );
+        assert_eq!(
+            monotonic_assignment_created_at(100, Some(999)).unwrap(),
+            1_000
+        );
+        assert!(monotonic_assignment_created_at(100, Some(1_000)).is_err());
+        assert!(monotonic_assignment_created_at(100, Some(u64::MAX)).is_err());
     }
 
     #[test]

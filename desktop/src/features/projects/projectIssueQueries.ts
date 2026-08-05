@@ -11,19 +11,19 @@ import type { ProjectIssue } from "./projectIssues.mjs";
 import { projectIssueEventsToIssues } from "./projectIssues.mjs";
 import { fetchIssueAssignmentEvents } from "./projectIssueAssignmentQueries";
 
-type ProjectReference = {
+type SingleRepoProjectReference = {
   repoAddress: string;
 };
 
 export async function fetchProjectIssues(
-  project: ProjectReference,
+  project: SingleRepoProjectReference,
 ): Promise<ProjectIssue[]> {
   const issueEventsPromise = relayClient.fetchEvents({
     kinds: [KIND_GIT_ISSUE],
     "#a": [project.repoAddress],
     limit: 200,
   });
-  const optionalEventsPromise = Promise.all([
+  const supplementaryEventsPromise = Promise.all([
     relayClient.fetchEvents({
       kinds: [
         KIND_GIT_STATUS_OPEN,
@@ -47,7 +47,7 @@ export async function fetchProjectIssues(
     relayClient.fetchEvents.bind(relayClient),
   );
   const [[statusEvents, commentEvents], assigneeEvents] = await Promise.all([
-    optionalEventsPromise,
+    supplementaryEventsPromise,
     assigneeEventsPromise,
   ]);
 

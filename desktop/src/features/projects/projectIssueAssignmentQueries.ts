@@ -25,6 +25,8 @@ export async function fetchIssueAssignmentEvents(
   repoAddresses: string[],
   fetchEvents: FetchEvents,
 ): Promise<RelayEvent[]> {
+  if (repoAddresses.length === 0) return [];
+
   const issueIds = [
     ...new Set(
       issueEvents

@@ -143,7 +143,6 @@ function isCanonicalIssueAssignmentEvent(issue, event, allowedActors) {
     eTags.length === 1 &&
     eTags[0].length === 4 &&
     eTags[0][1] === issue.id &&
-    /^[a-f0-9]{64}$/.test(eTags[0][1] ?? "") &&
     eTags[0][2] === "" &&
     eTags[0][3] === "root" &&
     aTags.length === 1 &&
@@ -165,8 +164,8 @@ function latestAssigneeForIssue(issue, assigneeEvents) {
   return assigneeEvents
     .filter(
       (event) =>
-        hasValidSignature(event) &&
-        isCanonicalIssueAssignmentEvent(issue, event, allowedActors),
+        isCanonicalIssueAssignmentEvent(issue, event, allowedActors) &&
+        hasValidSignature(event),
     )
     .sort(
       (left, right) =>
