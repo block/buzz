@@ -936,6 +936,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-backend-openclaw"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
 name = "buzz-cli"
 version = "0.1.0"
 dependencies = [
