@@ -65,6 +65,12 @@ pub enum IngestAuth {
     Nip42 {
         /// The authenticated Nostr public key.
         pubkey: nostr::PublicKey,
+        /// Verified delegated owner, when present.
+        owner_pubkey: Option<nostr::PublicKey>,
+        /// Sealed NIP-42 proof, when retained by a later route installer.
+        verified_proof: Option<Arc<buzz_auth::VerifiedNostrProof>>,
+        /// Current direct federated evidence, when retained by a later route.
+        verified_assertion: Option<Arc<buzz_auth::VerifiedFederatedAssertion>>,
         /// Permission scopes granted to this connection.
         scopes: Vec<Scope>,
         /// Token-level channel restriction, if the WebSocket auth used an API token.
@@ -76,6 +82,12 @@ pub enum IngestAuth {
     Http {
         /// The authenticated Nostr public key.
         pubkey: nostr::PublicKey,
+        /// Verified delegated owner, when present.
+        owner_pubkey: Option<nostr::PublicKey>,
+        /// Sealed NIP-98 proof retained from this request.
+        verified_proof: Option<Arc<buzz_auth::VerifiedNostrProof>>,
+        /// Current direct federated evidence retained from this request.
+        verified_assertion: Option<Arc<buzz_auth::VerifiedFederatedAssertion>>,
         /// Permission scopes granted to this request.
         scopes: Vec<Scope>,
         /// How the HTTP request was authenticated.
@@ -88,6 +100,34 @@ impl IngestAuth {
     pub fn pubkey(&self) -> &nostr::PublicKey {
         match self {
             Self::Nip42 { pubkey, .. } | Self::Http { pubkey, .. } => pubkey,
+        }
+    }
+
+    /// Verified delegated owner, when present.
+    pub fn owner_pubkey(&self) -> Option<nostr::PublicKey> {
+        match self {
+            Self::Nip42 { owner_pubkey, .. } | Self::Http { owner_pubkey, .. } => *owner_pubkey,
+        }
+    }
+
+    /// Sealed transport proof retained for protected authorization.
+    pub fn verified_proof(&self) -> Option<&Arc<buzz_auth::VerifiedNostrProof>> {
+        match self {
+            Self::Nip42 { verified_proof, .. } | Self::Http { verified_proof, .. } => {
+                verified_proof.as_ref()
+            }
+        }
+    }
+
+    /// Current direct federated evidence retained for protected authorization.
+    pub fn verified_assertion(&self) -> Option<&Arc<buzz_auth::VerifiedFederatedAssertion>> {
+        match self {
+            Self::Nip42 {
+                verified_assertion, ..
+            }
+            | Self::Http {
+                verified_assertion, ..
+            } => verified_assertion.as_ref(),
         }
     }
 
@@ -2996,6 +3036,9 @@ mod tests {
         .expect("sign feedback");
         let auth = IngestAuth::Http {
             pubkey: keys.public_key(),
+            owner_pubkey: None,
+            verified_proof: None,
+            verified_assertion: None,
             scopes: vec![Scope::MessagesWrite],
             auth_method: HttpAuthMethod::Nip98,
         };
@@ -3398,6 +3441,9 @@ mod tests {
         let envelope_signer = nostr::Keys::generate();
         let auth = IngestAuth::Nip42 {
             pubkey: principal.public_key(),
+            owner_pubkey: None,
+            verified_proof: None,
+            verified_assertion: None,
             scopes: vec![],
             channel_ids: None,
             conn_id: Uuid::new_v4(),
@@ -3416,6 +3462,9 @@ mod tests {
         let keys = nostr::Keys::generate();
         let http_auth = IngestAuth::Http {
             pubkey: keys.public_key(),
+            owner_pubkey: None,
+            verified_proof: None,
+            verified_assertion: None,
             scopes: vec![],
             auth_method: HttpAuthMethod::Nip98,
         };
@@ -3431,6 +3480,9 @@ mod tests {
         let keys = nostr::Keys::generate();
         let ws_auth = IngestAuth::Nip42 {
             pubkey: keys.public_key(),
+            owner_pubkey: None,
+            verified_proof: None,
+            verified_assertion: None,
             scopes: vec![],
             channel_ids: None,
             conn_id: uuid::Uuid::new_v4(),

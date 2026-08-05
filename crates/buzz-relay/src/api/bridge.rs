@@ -59,6 +59,7 @@ async fn enforce_http_admission(
 ///
 /// Returns the authenticated public key and an event ID for replay detection.
 /// For X-Pubkey dev mode, the event ID is a zero hash (no replay concern).
+#[cfg(test)]
 pub(crate) fn verify_bridge_auth(
     headers: &HeaderMap,
     method: &str,
@@ -127,6 +128,99 @@ pub(crate) fn verify_bridge_auth_with_options(
     Err(api_error(StatusCode::UNAUTHORIZED, "missing Nostr auth"))
 }
 
+/// Verify tenant bridge authentication and retain sealed proof evidence.
+///
+/// The development-only `X-Pubkey` path returns no proof and is therefore
+/// rejected later if this exact domain is configured for enforcement.
+type ProtectedBridgeAuth = (
+    nostr::PublicKey,
+    [u8; 32],
+    Option<buzz_auth::VerifiedNostrProof>,
+);
+
+pub(crate) fn verify_protected_bridge_auth(
+    headers: &HeaderMap,
+    method: &str,
+    url: &str,
+    body: Option<&[u8]>,
+    require_auth_token: bool,
+    require_payload: bool,
+    authorization_domain: buzz_core::CommunityId,
+) -> Result<ProtectedBridgeAuth, (StatusCode, Json<Value>)> {
+    let (pubkey, event_id) = verify_bridge_auth_with_options(
+        headers,
+        method,
+        url,
+        body,
+        require_auth_token,
+        require_payload,
+    )?;
+    let Some(encoded) = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Nostr "))
+    else {
+        return Ok((pubkey, event_id, None));
+    };
+    use base64::Engine as _;
+    let event_json = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "invalid Nostr auth"))?;
+    let proof = buzz_auth::VerifiedEvidenceAdapter::new()
+        .verify_nip98(
+            authorization_domain,
+            buzz_auth::AuthTransport::HttpBridge,
+            &event_json,
+            url,
+            method,
+            body,
+            None,
+        )
+        .map_err(|error| {
+            api_error(
+                StatusCode::UNAUTHORIZED,
+                &format!("NIP-98 evidence: {error}"),
+            )
+        })?;
+    if proof.actor_pubkey() != pubkey {
+        return Err(api_error(
+            StatusCode::UNAUTHORIZED,
+            "NIP-98 evidence actor mismatch",
+        ));
+    }
+    Ok((pubkey, event_id, Some(proof)))
+}
+
+pub(crate) fn retain_bridge_proof(
+    proof: Option<buzz_auth::VerifiedNostrProof>,
+    auth_tag: Option<&str>,
+) -> Result<Option<Arc<buzz_auth::VerifiedNostrProof>>, (StatusCode, Json<Value>)> {
+    let Some(proof) = proof else {
+        return Ok(None);
+    };
+    let actor = proof.actor_pubkey();
+    let proof = match crate::corporate_identity::verify_unconditional_nip_oa_owner(actor, auth_tag)
+    {
+        Some(owner) => buzz_auth::VerifiedEvidenceAdapter::new()
+            .attach_transport_delegation(
+                proof,
+                buzz_auth::VerifiedDelegationOutput::from_workspace_verifier(
+                    owner, actor, None, true,
+                ),
+            )
+            .map_err(|_| {
+                api_error(
+                    StatusCode::UNAUTHORIZED,
+                    "NIP-98 delegation evidence mismatch",
+                )
+            })?,
+        None => proof,
+    };
+    Ok(Some(Arc::new(proof)))
+}
+
 /// Corporate identity enrollment must always start from cryptographic proof of
 /// the Nostr key. The development-only `X-Pubkey` fallback is caller-controlled
 /// and therefore cannot safely participate in a durable identity binding.
@@ -188,28 +282,78 @@ async fn verify_bridge_corporate_identity(
     headers: &HeaderMap,
     pubkey: nostr::PublicKey,
     auth_tag: Option<&str>,
-) -> Result<crate::corporate_identity::CorporateIdentityProof, (StatusCode, Json<Value>)> {
-    let identity_jwt = crate::corporate_identity::identity_jwt_from_headers(
+) -> Result<Option<crate::corporate_identity::CorporateIdentityProof>, (StatusCode, Json<Value>)> {
+    let identity_assertion = crate::corporate_identity::identity_assertion_from_headers(
+        state,
+        tenant.community(),
         headers,
-        &state.config.corporate_identity,
-    );
-    crate::corporate_identity::verify_corporate_identity(
+    )
+    .map_err(crate::corporate_identity::CorporateIdentityError::into_api_error)?;
+    match crate::corporate_identity::verify_corporate_identity(
         state,
         tenant.community(),
         pubkey,
-        identity_jwt.as_deref(),
+        identity_assertion.as_ref(),
         auth_tag,
     )
     .await
-    .map_err(|e| e.into_api_error())
+    {
+        Ok(proof) => Ok(Some(proof)),
+        Err(error)
+            if crate::authorization_runtime::transport::legacy_identity_lane(
+                state,
+                tenant.community(),
+            ) == crate::authorization_runtime::transport::LegacyIdentityLane::ObserveOnly =>
+        {
+            tracing::warn!(error = ?error, "observational bridge identity verification unavailable");
+            Ok(None)
+        }
+        Err(error) => Err(error.into_api_error()),
+    }
+}
+
+fn seal_bridge_assertion(
+    state: &AppState,
+    tenant: &TenantContext,
+    proof: Option<&crate::corporate_identity::CorporateIdentityProof>,
+) -> Result<Option<Arc<buzz_auth::VerifiedFederatedAssertion>>, (StatusCode, Json<Value>)> {
+    let Some(proof) = proof else {
+        return Ok(None);
+    };
+    match crate::corporate_identity::current_verified_assertion_for_proof(
+        state,
+        proof,
+        tenant.community(),
+        buzz_auth::AuthTransport::HttpBridge,
+    ) {
+        Ok(assertion) => Ok(assertion.map(Arc::new)),
+        Err(error)
+            if crate::authorization_runtime::transport::legacy_identity_lane(
+                state,
+                tenant.community(),
+            ) == crate::authorization_runtime::transport::LegacyIdentityLane::ObserveOnly =>
+        {
+            tracing::warn!(error = %error, "observational bridge assertion sealing unavailable");
+            Ok(None)
+        }
+        Err(error) => Err(error.into_api_error()),
+    }
 }
 
 async fn finalize_bridge_corporate_identity(
     state: &AppState,
     tenant: &TenantContext,
     pubkey: nostr::PublicKey,
-    proof: crate::corporate_identity::CorporateIdentityProof,
+    proof: Option<crate::corporate_identity::CorporateIdentityProof>,
 ) -> Result<(), (StatusCode, Json<Value>)> {
+    if crate::authorization_runtime::transport::legacy_identity_lane(state, tenant.community())
+        != crate::authorization_runtime::transport::LegacyIdentityLane::Legacy
+    {
+        return Ok(());
+    }
+    let Some(proof) = proof else {
+        return Ok(());
+    };
     crate::corporate_identity::finalize_corporate_identity(state, tenant.community(), pubkey, proof)
         .await
         .map(|_| ())
@@ -449,6 +593,7 @@ async fn handle_channel_window_filter(
     filter: &nostr::Filter,
     accessible_channels: &[uuid::Uuid],
     events: &mut Vec<Value>,
+    release_channels: &mut std::collections::BTreeSet<uuid::Uuid>,
 ) -> Result<(), (StatusCode, Json<Value>)> {
     use buzz_core::kind::{KIND_THREAD_SUMMARY, KIND_WINDOW_BOUNDS};
 
@@ -461,6 +606,7 @@ async fn handle_channel_window_filter(
     if !accessible_channels.contains(&ch_id) {
         return Ok(());
     }
+    release_channels.insert(ch_id);
 
     // Composite request cursor: `until` + `before_id`, both or neither. The
     // window path has no timestamp-only fallback — that ambiguity is the
@@ -678,7 +824,7 @@ pub async fn submit_event(
         })?;
 
     let url = nip98_expected_url(&state.config.relay_url, &tenant, "/events");
-    let (pubkey, event_id_bytes) = verify_bridge_auth(
+    let (pubkey, event_id_bytes, verified_proof) = verify_protected_bridge_auth(
         &headers,
         "POST",
         &url,
@@ -687,20 +833,27 @@ pub async fn submit_event(
             state.config.require_auth_token,
             state.config.corporate_identity.require,
         ),
+        false,
+        tenant.community(),
     )?;
-    let pubkey_hex = pubkey.to_hex();
-
     // Everything after auth — admission, replay, membership, parse, ingest —
     // runs inside the helper.  The thin wrapper here owns the single terminal
     // attribution line so it fires for every outcome, including admission/
     // replay/membership failures that previously returned before any log fired.
-    let outcome =
-        submit_event_authed(&state, &tenant, &headers, &body, pubkey, event_id_bytes).await;
+    let outcome = submit_event_authed(
+        &state,
+        &tenant,
+        &headers,
+        &body,
+        pubkey,
+        event_id_bytes,
+        verified_proof,
+    )
+    .await;
 
     match &outcome {
         SubmitOutcome::Ok { accepted, .. } => {
             tracing::info!(
-                pubkey = %pubkey_hex,
                 route = "/events",
                 status = 200u16,
                 accepted,
@@ -714,7 +867,6 @@ pub async fn submit_event(
             ..
         } => {
             tracing::warn!(
-                pubkey = %pubkey_hex,
                 route = "/events",
                 status = 400u16,
                 accepted = false,
@@ -726,7 +878,6 @@ pub async fn submit_event(
         }
         SubmitOutcome::Rejected { kind, reason, .. } => {
             tracing::warn!(
-                pubkey = %pubkey_hex,
                 route = "/events",
                 status = 400u16,
                 accepted = false,
@@ -737,7 +888,6 @@ pub async fn submit_event(
         }
         SubmitOutcome::Err { status, .. } => {
             tracing::warn!(
-                pubkey = %pubkey_hex,
                 route = "/events",
                 status = status.as_u16(),
                 accepted = false,
@@ -802,6 +952,7 @@ async fn submit_event_authed(
     body: &[u8],
     pubkey: nostr::PublicKey,
     event_id_bytes: [u8; 32],
+    verified_proof: Option<buzz_auth::VerifiedNostrProof>,
 ) -> SubmitOutcome {
     // Admission and replay checks fire before body parse — a 429 or replay
     // reject on a malformed body must still be attributed.
@@ -877,6 +1028,59 @@ async fn submit_event_authed(
             };
         }
     };
+    let verified_proof = match retain_bridge_proof(verified_proof, auth_tag) {
+        Ok(proof) => proof,
+        Err(response) => {
+            return SubmitOutcome::Err {
+                status: response.0,
+                response,
+            }
+        }
+    };
+    let verified_assertion = match seal_bridge_assertion(state, tenant, identity_proof.as_ref()) {
+        Ok(assertion) => assertion,
+        Err(response) => {
+            return SubmitOutcome::Err {
+                status: response.0,
+                response,
+            }
+        }
+    };
+    let protected_result = match verified_proof.as_ref() {
+        Some(proof) => {
+            crate::authorization_runtime::transport::authorize_if_configured(
+                state,
+                Arc::clone(proof),
+                verified_assertion.clone(),
+                crate::protected_surface::event_ingest_capability(buzz_core::kind::event_kind_u32(
+                    &event,
+                )),
+                uuid::Uuid::new_v4(),
+                "http_events",
+            )
+            .await
+        }
+        None => crate::authorization_runtime::transport::authorize_unwired_if_configured(
+            state,
+            tenant.community(),
+        ),
+    };
+    let protected = match protected_result {
+        Ok(authority) => authority,
+        Err(error) => {
+            tracing::warn!(error = %error, "http event protected authorization denied");
+            return SubmitOutcome::Err {
+                status: StatusCode::FORBIDDEN,
+                response: api_error(StatusCode::FORBIDDEN, "protected authorization denied"),
+            };
+        }
+    };
+    if protected.revalidate().is_err() {
+        return SubmitOutcome::Err {
+            status: StatusCode::FORBIDDEN,
+            response: api_error(StatusCode::FORBIDDEN, "protected authorization expired"),
+        };
+    }
     if let Err(e) = finalize_bridge_corporate_identity(state, tenant, pubkey, identity_proof).await
     {
         return SubmitOutcome::Err {
@@ -884,13 +1088,25 @@ async fn submit_event_authed(
             response: e,
         };
     }
-    if let Some(owner) = nip_oa_owner {
+    if let Some(owner) = nip_oa_owner.filter(|_| {
+        crate::authorization_runtime::transport::legacy_identity_lane(state, tenant.community())
+            == crate::authorization_runtime::transport::LegacyIdentityLane::Legacy
+    }) {
+        if protected.revalidate().is_err() {
+            return SubmitOutcome::Err {
+                status: StatusCode::FORBIDDEN,
+                response: api_error(StatusCode::FORBIDDEN, "protected authorization expired"),
+            };
+        }
         super::relay_members::materialize_nip_oa_owner(state, tenant, &pubkey, &owner).await;
     }
 
     let kind_u32 = buzz_core::kind::event_kind_u32(&event);
     let auth = IngestAuth::Http {
         pubkey,
+        owner_pubkey: nip_oa_owner,
+        verified_proof,
+        verified_assertion,
         scopes: buzz_auth::Scope::all_known(), // Pure Nostr: full scopes, channel access via membership
         auth_method: crate::handlers::ingest::HttpAuthMethod::Nip98,
     };
@@ -966,7 +1182,7 @@ pub async fn query_events(
         })?;
 
     let url = nip98_expected_url(&state.config.relay_url, &tenant, "/query");
-    let (pubkey, event_id_bytes) = verify_bridge_auth(
+    let (pubkey, event_id_bytes, verified_proof) = verify_protected_bridge_auth(
         &headers,
         "POST",
         &url,
@@ -975,31 +1191,32 @@ pub async fn query_events(
             state.config.require_auth_token,
             state.config.corporate_identity.require,
         ),
+        false,
+        tenant.community(),
     )?;
-    let pubkey_hex = pubkey.to_hex();
-
     // Admission, replay, membership, and filter execution all run inside the
     // helper.  The single terminal attribution line fires here from the Result
     // so every outcome — including admission/replay/membership failures that
     // previously returned before any log — is attributed.
-    let result =
-        query_events_authed(&state, &tenant, &headers, &body, pubkey, event_id_bytes).await;
+    let result = query_events_authed(
+        &state,
+        &tenant,
+        &headers,
+        &body,
+        pubkey,
+        event_id_bytes,
+        verified_proof,
+    )
+    .await;
     match &result {
-        Ok(Json(Value::Array(events))) => {
-            tracing::info!(
-                pubkey = %pubkey_hex,
-                route = "/query",
-                status = 200u16,
-                result_count = events.len(),
-                "HTTP bridge request"
-            );
+        Ok(Json(Value::Array(_))) => {
+            tracing::info!(route = "/query", status = 200u16, "HTTP bridge request");
         }
         Ok(_) => {
-            tracing::info!(pubkey = %pubkey_hex, route = "/query", status = 200u16, "HTTP bridge request");
+            tracing::info!(route = "/query", status = 200u16, "HTTP bridge request");
         }
         Err((status, _)) => {
             tracing::warn!(
-                pubkey = %pubkey_hex,
                 route = "/query",
                 status = status.as_u16(),
                 "HTTP bridge request"
@@ -1019,6 +1236,7 @@ async fn query_events_authed(
     body: &[u8],
     pubkey: nostr::PublicKey,
     event_id_bytes: [u8; 32],
+    verified_proof: Option<buzz_auth::VerifiedNostrProof>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     enforce_http_admission(state, tenant, &pubkey).await?;
     check_nip98_replay(state, tenant, event_id_bytes).await?;
@@ -1071,320 +1289,424 @@ async fn query_events_authed(
         .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)
         .await
         .map_err(|e| internal_error(&format!("channel access lookup: {e}")))?;
+    let verified_proof = retain_bridge_proof(verified_proof, auth_tag)?;
+    let verified_assertion = seal_bridge_assertion(state, tenant, identity_proof.as_ref())?;
+    let protected_result = match verified_proof {
+        Some(proof) => {
+            crate::authorization_runtime::transport::authorize_if_configured(
+                state,
+                proof,
+                verified_assertion,
+                buzz_auth::AuthorizationCapability::CommunityRead,
+                uuid::Uuid::new_v4(),
+                "http_query",
+            )
+            .await
+        }
+        None => crate::authorization_runtime::transport::authorize_unwired_if_configured(
+            state,
+            tenant.community(),
+        ),
+    };
+    let protected = protected_result
+        .map_err(|_| api_error(StatusCode::FORBIDDEN, "protected authorization denied"))?;
+    protected
+        .revalidate()
+        .map_err(|_| api_error(StatusCode::FORBIDDEN, "protected authorization expired"))?;
     finalize_bridge_corporate_identity(state, tenant, pubkey, identity_proof).await?;
 
-    if filters.iter().any(|f| f.search.is_some()) {
-        if has_mixed_search_filters(&filters) {
-            return Err(api_error(
-                StatusCode::BAD_REQUEST,
-                "mixed search and non-search filters not supported",
+    // Keep the complete post-authorization computation inside one release
+    // boundary. Every success and every backend-derived failure must pass the
+    // same final authority check before its response shape becomes observable.
+    let fetched = async {
+        if filters.iter().any(|f| f.search.is_some()) {
+            if has_mixed_search_filters(&filters) {
+                return Err(api_error(
+                    StatusCode::BAD_REQUEST,
+                    "mixed search and non-search filters not supported",
+                ));
+            }
+            protected
+                .revalidate()
+                .map_err(|_| api_error(StatusCode::FORBIDDEN, "protected authorization expired"))?;
+            let result = handle_bridge_search(
+                state,
+                &raw_filters,
+                &filters,
+                &accessible_channels,
+                tenant,
+                &authed_pubkey_hex,
+                &pubkey_bytes,
+            )
+            .await?;
+            protected
+                .revalidate()
+                .map_err(|_| api_error(StatusCode::FORBIDDEN, "protected authorization expired"))?;
+            return Ok(result);
+        }
+
+        if let Some(presence_events) = synthesize_presence(state, tenant, &filters).await {
+            protected
+                .revalidate()
+                .map_err(|_| api_error(StatusCode::FORBIDDEN, "protected authorization expired"))?;
+            return Ok((
+                Json(Value::Array(presence_events)),
+                std::collections::BTreeSet::new(),
             ));
         }
-        return handle_bridge_search(
-            state,
-            &raw_filters,
-            &filters,
-            &accessible_channels,
-            tenant,
-            &authed_pubkey_hex,
-            &pubkey_bytes,
-        )
-        .await;
-    }
 
-    if let Some(presence_events) = synthesize_presence(state, tenant, &filters).await {
-        return Ok(Json(Value::Array(presence_events)));
-    }
+        let mut events: Vec<Value> = Vec::new();
+        let mut release_channels = std::collections::BTreeSet::new();
+        let mut handled: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
-    let mut events: Vec<Value> = Vec::new();
-    let mut handled: std::collections::HashSet<usize> = std::collections::HashSet::new();
-
-    // Channel-window filters (`top_level: true`) — the GUI read-model surface.
-    // Dispatched first: a window filter is never a feed/thread/catchall query.
-    for (idx, (raw, filter)) in raw_filters.iter().zip(filters.iter()).enumerate() {
-        if !extension_flag(raw, "top_level") {
-            continue;
-        }
-        handle_channel_window_filter(
-            state,
-            tenant,
-            raw,
-            filter,
-            &accessible_channels,
-            &mut events,
-        )
-        .await?;
-        handled.insert(idx);
-    }
-
-    for (idx, (raw, filter)) in raw_filters.iter().zip(filters.iter()).enumerate() {
-        if handled.contains(&idx) {
-            continue;
-        }
-        let feed_types = match extract_feed_types(raw) {
-            Some(t) => t,
-            None => continue,
-        };
-
-        let limit = filter
-            .limit
-            .map(|l| (l as i64).min(BRIDGE_FEED_MAX_LIMIT))
-            .unwrap_or(20);
-        let since = filter
-            .since
-            .and_then(|s| chrono::DateTime::from_timestamp(s.as_secs() as i64, 0));
-
-        let mut seen_types = std::collections::HashSet::new();
-        let mut seen = std::collections::HashSet::new();
-        let mut feed_count = 0i64;
-        for feed_type in &feed_types {
-            let canonical = if feed_type == "agent_activity" {
-                "activity"
-            } else {
-                feed_type.as_str()
-            };
-            if !seen_types.insert(canonical) {
+        // Channel-window filters (`top_level: true`) — the GUI read-model surface.
+        // Dispatched first: a window filter is never a feed/thread/catchall query.
+        for (idx, (raw, filter)) in raw_filters.iter().zip(filters.iter()).enumerate() {
+            if !extension_flag(raw, "top_level") {
                 continue;
             }
-            if feed_count >= limit {
-                break;
+            handle_channel_window_filter(
+                state,
+                tenant,
+                raw,
+                filter,
+                &accessible_channels,
+                &mut events,
+                &mut release_channels,
+            )
+            .await?;
+            handled.insert(idx);
+        }
+
+        for (idx, (raw, filter)) in raw_filters.iter().zip(filters.iter()).enumerate() {
+            if handled.contains(&idx) {
+                continue;
             }
-            let remaining = limit - feed_count;
-            let type_events = match canonical {
-                "mentions" => state
-                    .db
-                    .query_feed_mentions_routed(
-                        "bridge_feed",
-                        tenant.community(),
-                        &pubkey_bytes,
-                        &accessible_channels,
-                        since,
-                        remaining,
-                    )
-                    .await
-                    .map_err(|e| internal_error(&format!("feed mentions error: {e}")))?,
-                "needs_action" => state
-                    .db
-                    .query_feed_needs_action_routed(
-                        "bridge_feed",
-                        tenant.community(),
-                        &pubkey_bytes,
-                        &accessible_channels,
-                        since,
-                        remaining,
-                    )
-                    .await
-                    .map_err(|e| internal_error(&format!("feed needs_action error: {e}")))?,
-                "activity" => state
-                    .db
-                    .query_feed_activity_routed(
-                        "bridge_feed",
-                        tenant.community(),
-                        &accessible_channels,
-                        since,
-                        remaining,
-                    )
-                    .await
-                    .map_err(|e| internal_error(&format!("feed activity error: {e}")))?,
-                _ => continue,
+            let feed_types = match extract_feed_types(raw) {
+                Some(t) => t,
+                None => continue,
             };
-            for se in type_events {
-                if !seen.insert(se.event.id) {
+
+            let limit = filter
+                .limit
+                .map(|l| (l as i64).min(BRIDGE_FEED_MAX_LIMIT))
+                .unwrap_or(20);
+            let since = filter
+                .since
+                .and_then(|s| chrono::DateTime::from_timestamp(s.as_secs() as i64, 0));
+
+            let mut seen_types = std::collections::HashSet::new();
+            let mut seen = std::collections::HashSet::new();
+            let mut feed_count = 0i64;
+            for feed_type in &feed_types {
+                let canonical = if feed_type == "agent_activity" {
+                    "activity"
+                } else {
+                    feed_type.as_str()
+                };
+                if !seen_types.insert(canonical) {
                     continue;
                 }
+                if feed_count >= limit {
+                    break;
+                }
+                let remaining = limit - feed_count;
+                let type_events = match canonical {
+                    "mentions" => state
+                        .db
+                        .query_feed_mentions_routed(
+                            "bridge_feed",
+                            tenant.community(),
+                            &pubkey_bytes,
+                            &accessible_channels,
+                            since,
+                            remaining,
+                        )
+                        .await
+                        .map_err(|e| internal_error(&format!("feed mentions error: {e}")))?,
+                    "needs_action" => state
+                        .db
+                        .query_feed_needs_action_routed(
+                            "bridge_feed",
+                            tenant.community(),
+                            &pubkey_bytes,
+                            &accessible_channels,
+                            since,
+                            remaining,
+                        )
+                        .await
+                        .map_err(|e| internal_error(&format!("feed needs_action error: {e}")))?,
+                    "activity" => state
+                        .db
+                        .query_feed_activity_routed(
+                            "bridge_feed",
+                            tenant.community(),
+                            &accessible_channels,
+                            since,
+                            remaining,
+                        )
+                        .await
+                        .map_err(|e| internal_error(&format!("feed activity error: {e}")))?,
+                    _ => continue,
+                };
+                for se in type_events {
+                    if !seen.insert(se.event.id) {
+                        continue;
+                    }
+                    if !event_in_accessible_channel(&se, &accessible_channels) {
+                        continue;
+                    }
+                    // Defense-in-depth: never deliver a result-gated event (e.g. kind:44200
+                    // or kind:30622) to a non-owner via the feed path, even though feed SQL
+                    // kind allowlists already exclude these kinds.
+                    if !buzz_core::filter::reader_authorized_for_event(
+                        &se.event,
+                        &authed_pubkey_hex,
+                    ) {
+                        continue;
+                    }
+                    if append_bridge_stored_event(&mut events, &mut release_channels, &se) {
+                        feed_count += 1;
+                    }
+                }
+            }
+            handled.insert(idx);
+        }
+
+        let e_tag_key = nostr::SingleLetterTag::lowercase(nostr::Alphabet::E);
+        for (idx, (raw, filter)) in raw_filters.iter().zip(filters.iter()).enumerate() {
+            if handled.contains(&idx) {
+                continue;
+            }
+            let depth = match extract_depth_limit(raw) {
+                Some(d) => d,
+                None => continue,
+            };
+            let e_values = match filter.generic_tags.get(&e_tag_key) {
+                Some(vs) if vs.len() == 1 => vs,
+                _ => continue,
+            };
+            let root_hex = match e_values.iter().next() {
+                Some(h) => h,
+                None => continue,
+            };
+            let root_bytes = match hex::decode(root_hex) {
+                Ok(b) if b.len() == 32 => b,
+                _ => continue,
+            };
+
+            if let Some(ch_id) = extract_channel_from_filter(filter) {
+                if !accessible_channels.contains(&ch_id) {
+                    handled.insert(idx);
+                    continue;
+                }
+            }
+
+            let limit = filter
+                .limit
+                .unwrap_or(100)
+                .min(BRIDGE_THREAD_MAX_LIMIT as usize) as u32;
+            let thread_cursor = extract_thread_cursor(raw);
+            let thread_replies = state
+                .db
+                .get_thread_replies(
+                    tenant.community(),
+                    &root_bytes,
+                    Some(depth),
+                    limit,
+                    thread_cursor.as_deref(),
+                )
+                .await
+                .map_err(|e| internal_error(&format!("thread query error: {e}")))?;
+
+            for reply in thread_replies {
+                let se = reply.stored_event;
                 if !event_in_accessible_channel(&se, &accessible_channels) {
                     continue;
                 }
                 // Defense-in-depth: never deliver a result-gated event (e.g. kind:44200
-                // or kind:30622) to a non-owner via the feed path, even though feed SQL
-                // kind allowlists already exclude these kinds.
+                // or kind:30622) to a non-owner via the thread path, even though
+                // requires_h_channel_scope already excludes these kinds from thread metadata.
                 if !buzz_core::filter::reader_authorized_for_event(&se.event, &authed_pubkey_hex) {
                     continue;
                 }
-                if let Ok(v) = serde_json::to_value(&se.event) {
-                    events.push(v);
-                    feed_count += 1;
+                append_bridge_stored_event(&mut events, &mut release_channels, &se);
+            }
+            handled.insert(idx);
+        }
+
+        // Phase 1 — pure construction + validation, in filter order. Access-scope
+        // skips and the `before_id` BAD_REQUEST are decided here, before any DB
+        // work is issued (validation errors are deterministic client mistakes, so
+        // surfacing them ahead of transient DB errors is strictly more predictable).
+        let mut catchall_queries: Vec<(usize, buzz_db::EventQuery)> = Vec::new();
+        for (idx, (raw, filter)) in raw_filters.iter().zip(filters.iter()).enumerate() {
+            if handled.contains(&idx) {
+                continue;
+            }
+
+            if let Some(ch_id) = extract_channel_from_filter(filter) {
+                if !accessible_channels.contains(&ch_id) {
+                    continue;
                 }
             }
-        }
-        handled.insert(idx);
-    }
 
-    let e_tag_key = nostr::SingleLetterTag::lowercase(nostr::Alphabet::E);
-    for (idx, (raw, filter)) in raw_filters.iter().zip(filters.iter()).enumerate() {
-        if handled.contains(&idx) {
-            continue;
-        }
-        let depth = match extract_depth_limit(raw) {
-            Some(d) => d,
-            None => continue,
-        };
-        let e_values = match filter.generic_tags.get(&e_tag_key) {
-            Some(vs) if vs.len() == 1 => vs,
-            _ => continue,
-        };
-        let root_hex = match e_values.iter().next() {
-            Some(h) => h,
-            None => continue,
-        };
-        let root_bytes = match hex::decode(root_hex) {
-            Ok(b) if b.len() == 32 => b,
-            _ => continue,
-        };
-
-        if let Some(ch_id) = extract_channel_from_filter(filter) {
-            if !accessible_channels.contains(&ch_id) {
-                handled.insert(idx);
-                continue;
-            }
-        }
-
-        let limit = filter
-            .limit
-            .unwrap_or(100)
-            .min(BRIDGE_THREAD_MAX_LIMIT as usize) as u32;
-        let thread_cursor = extract_thread_cursor(raw);
-        let thread_replies = state
-            .db
-            .get_thread_replies(
+            let mut query = crate::handlers::req::build_event_query_from_filter(
+                filter,
+                &pubkey_bytes,
+                state,
                 tenant.community(),
-                &root_bytes,
-                Some(depth),
-                limit,
-                thread_cursor.as_deref(),
             )
-            .await
-            .map_err(|e| internal_error(&format!("thread query error: {e}")))?;
-
-        for reply in thread_replies {
-            let se = reply.stored_event;
-            if !event_in_accessible_channel(&se, &accessible_channels) {
-                continue;
+            .await;
+            crate::handlers::req::apply_access_scope_to_query(
+                &mut query,
+                extract_channel_from_filter(filter),
+                &accessible_channels,
+            );
+            // Shared-gated visibility pushdown: must mirror WS REQ so that a page of
+            // newer private events does not starve older shared ones off the page.
+            if crate::handlers::req::filter_can_match_shared_gated_kinds(filter) {
+                query.shared_gated_reader = Some(pubkey_bytes.clone());
             }
-            // Defense-in-depth: never deliver a result-gated event (e.g. kind:44200
-            // or kind:30622) to a non-owner via the thread path, even though
-            // requires_h_channel_scope already excludes these kinds from thread metadata.
-            if !buzz_core::filter::reader_authorized_for_event(&se.event, &authed_pubkey_hex) {
-                continue;
-            }
-            if let Ok(v) = serde_json::to_value(&se.event) {
-                events.push(v);
-            }
-        }
-        handled.insert(idx);
-    }
 
-    // Phase 1 — pure construction + validation, in filter order. Access-scope
-    // skips and the `before_id` BAD_REQUEST are decided here, before any DB
-    // work is issued (validation errors are deterministic client mistakes, so
-    // surfacing them ahead of transient DB errors is strictly more predictable).
-    let mut catchall_queries: Vec<(usize, buzz_db::EventQuery)> = Vec::new();
-    for (idx, (raw, filter)) in raw_filters.iter().zip(filters.iter()).enumerate() {
-        if handled.contains(&idx) {
-            continue;
-        }
-
-        if let Some(ch_id) = extract_channel_from_filter(filter) {
-            if !accessible_channels.contains(&ch_id) {
-                continue;
-            }
-        }
-
-        let mut query = crate::handlers::req::build_event_query_from_filter(
-            filter,
-            &pubkey_bytes,
-            state,
-            tenant.community(),
-        )
-        .await;
-        crate::handlers::req::apply_access_scope_to_query(
-            &mut query,
-            extract_channel_from_filter(filter),
-            &accessible_channels,
-        );
-        // Shared-gated visibility pushdown: must mirror WS REQ so that a page of
-        // newer private events does not starve older shared ones off the page.
-        if crate::handlers::req::filter_can_match_shared_gated_kinds(filter) {
-            query.shared_gated_reader = Some(pubkey_bytes.clone());
-        }
-
-        match extract_before_id(raw) {
-            BeforeId::Malformed => {
-                return Err(api_error(
-                    StatusCode::BAD_REQUEST,
-                    "before_id must be a 64-char hex event id",
-                ));
-            }
-            BeforeId::Valid(bid) => {
-                if query.until.is_none() {
+            match extract_before_id(raw) {
+                BeforeId::Malformed => {
                     return Err(api_error(
                         StatusCode::BAD_REQUEST,
-                        "before_id requires until to be set",
+                        "before_id must be a 64-char hex event id",
                     ));
                 }
-                query.before_id = Some(bid);
+                BeforeId::Valid(bid) => {
+                    if query.until.is_none() {
+                        return Err(api_error(
+                            StatusCode::BAD_REQUEST,
+                            "before_id requires until to be set",
+                        ));
+                    }
+                    query.before_id = Some(bid);
+                }
+                BeforeId::Absent => {}
             }
-            BeforeId::Absent => {}
+
+            // Honor `page` on non-search general queries so offset paging works for
+            // the empty-query people directory (kind:0 listing). The FTS path
+            // (`handle_bridge_search`) has its own `page`/`per_page`; a filter with
+            // no `search` field lands here instead, where paging would otherwise be
+            // dropped and the directory would terminate at its first page. Deterministic
+            // ordering in `query_events` (`created_at DESC, id ASC`) makes offset paging
+            // stable. `page` defaults to 1 → offset 0, so unrelated general queries are
+            // unaffected.
+            if let Some(offset) = extract_page_offset(raw, query.limit) {
+                query.offset = Some(offset);
+            }
+
+            catchall_queries.push((idx, query));
         }
 
-        // Honor `page` on non-search general queries so offset paging works for
-        // the empty-query people directory (kind:0 listing). The FTS path
-        // (`handle_bridge_search`) has its own `page`/`per_page`; a filter with
-        // no `search` field lands here instead, where paging would otherwise be
-        // dropped and the directory would terminate at its first page. Deterministic
-        // ordering in `query_events` (`created_at DESC, id ASC`) makes offset paging
-        // stable. `page` defaults to 1 → offset 0, so unrelated general queries are
-        // unaffected.
-        if let Some(offset) = extract_page_offset(raw, query.limit) {
-            query.offset = Some(offset);
-        }
+        // Phase 2 — DB reads, bounded-concurrent, order-preserving (`buffered`).
+        // Phase 3 consumes results in original filter order, so response ordering
+        // and error semantics match the previous serial loop.
+        use futures_util::stream::{self, StreamExt};
+        let db = state.db.clone();
+        let mut catchall_results =
+            stream::iter(catchall_queries.into_iter().map(|(idx, query)| {
+                let db = db.clone();
+                async move { (idx, db.query_events_routed("bridge_query", &query).await) }
+            }))
+            .buffered(crate::handlers::req::FILTER_QUERY_CONCURRENCY);
 
-        catchall_queries.push((idx, query));
-    }
-
-    // Phase 2 — DB reads, bounded-concurrent, order-preserving (`buffered`).
-    // Phase 3 consumes results in original filter order, so response ordering
-    // and error semantics match the previous serial loop.
-    use futures_util::stream::{self, StreamExt};
-    let db = state.db.clone();
-    let mut catchall_results = stream::iter(catchall_queries.into_iter().map(|(idx, query)| {
-        let db = db.clone();
-        async move { (idx, db.query_events_routed("bridge_query", &query).await) }
-    }))
-    .buffered(crate::handlers::req::FILTER_QUERY_CONCURRENCY);
-
-    // Phase 3 — post-processing, strictly in filter order.
-    while let Some((idx, filter_events)) = catchall_results.next().await {
-        let filter = &filters[idx];
-        match filter_events {
-            Ok(stored_events) => {
-                for se in stored_events {
-                    if !event_in_accessible_channel(&se, &accessible_channels) {
-                        continue;
-                    }
-                    if !buzz_core::filter::filters_match(std::slice::from_ref(filter), &se) {
-                        continue;
-                    }
-                    // Result-level read auth: never hand a viewer-private snapshot
-                    // (kind:30622) to anyone but its owner, even via kindless `ids`.
-                    // Also enforces author-only kinds (30300/30350) and the persona
-                    // shared-gate (kind:30175 without ["shared","true"]). Single call
-                    // covers all three gated event classes.
-                    if !crate::handlers::req::event_visible_to_reader(&se.event, &pubkey_bytes) {
-                        continue;
-                    }
-                    if let Ok(v) = serde_json::to_value(&se.event) {
-                        events.push(v);
+        // Phase 3 — post-processing, strictly in filter order.
+        while let Some((idx, filter_events)) = catchall_results.next().await {
+            let filter = &filters[idx];
+            match filter_events {
+                Ok(stored_events) => {
+                    for se in stored_events {
+                        if !event_in_accessible_channel(&se, &accessible_channels) {
+                            continue;
+                        }
+                        if !buzz_core::filter::filters_match(std::slice::from_ref(filter), &se) {
+                            continue;
+                        }
+                        // Result-level read auth: never hand a viewer-private snapshot
+                        // (kind:30622) to anyone but its owner, even via kindless `ids`.
+                        // Also enforces author-only kinds (30300/30350) and the persona
+                        // shared-gate (kind:30175 without ["shared","true"]). Single call
+                        // covers all three gated event classes.
+                        if !crate::handlers::req::event_visible_to_reader(&se.event, &pubkey_bytes)
+                        {
+                            continue;
+                        }
+                        append_bridge_stored_event(&mut events, &mut release_channels, &se);
                     }
                 }
-            }
-            Err(e) => {
-                return Err(internal_error(&format!("query error: {e}")));
+                Err(e) => {
+                    return Err(internal_error(&format!("query error: {e}")));
+                }
             }
         }
-    }
 
-    Ok(Json(Value::Array(events)))
+        protected
+            .revalidate()
+            .map_err(|_| api_error(StatusCode::FORBIDDEN, "protected authorization expired"))?;
+        Ok((Json(Value::Array(events)), release_channels))
+    }
+    .await;
+    let fetched = match fetched {
+        Ok((response, release_channels)) => {
+            revalidate_bridge_response_channels(
+                state,
+                tenant.community(),
+                &pubkey_bytes,
+                &release_channels,
+            )
+            .await?;
+            Ok(response)
+        }
+        Err(error) => Err(error),
+    };
+    release_protected_bridge_fetch(fetched, |fetched| protected.release_fetched(fetched))?
+}
+
+/// Revalidate the authoritative stored channel ids retained alongside the
+/// response without caches after all asynchronous fetch work. This is the HTTP
+/// bridge's post-fetch/pre-emission channel fence. Event tags are intentionally
+/// not consulted: a stored channel-scoped row remains fenced even if its signed
+/// event omits or malforms an `h` tag.
+async fn revalidate_bridge_response_channels(
+    state: &AppState,
+    community_id: buzz_core::tenant::CommunityId,
+    actor: &[u8],
+    channels: &std::collections::BTreeSet<uuid::Uuid>,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    for &channel_id in channels {
+        let allowed = state
+            .db
+            .channel_read_authorized(community_id, channel_id, actor)
+            .await
+            .map_err(|error| internal_error(&format!("channel release fence: {error}")))?;
+        if !allowed {
+            return Err(api_error(
+                StatusCode::FORBIDDEN,
+                "restricted: channel access changed before response release",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn append_bridge_stored_event(
+    events: &mut Vec<Value>,
+    release_channels: &mut std::collections::BTreeSet<uuid::Uuid>,
+    stored: &buzz_core::StoredEvent,
+) -> bool {
+    let Ok(value) = serde_json::to_value(&stored.event) else {
+        return false;
+    };
+    if let Some(channel_id) = stored.channel_id {
+        release_channels.insert(channel_id);
+    }
+    events.push(value);
+    true
 }
 
 /// Count events via HTTP bridge (NIP-98 auth). Returns `{"count": N}`.
@@ -1414,7 +1736,7 @@ pub async fn count_events(
         })?;
 
     let url = nip98_expected_url(&state.config.relay_url, &tenant, "/count");
-    let (pubkey, event_id_bytes) = verify_bridge_auth(
+    let (pubkey, event_id_bytes, verified_proof) = verify_protected_bridge_auth(
         &headers,
         "POST",
         &url,
@@ -1423,29 +1745,29 @@ pub async fn count_events(
             state.config.require_auth_token,
             state.config.corporate_identity.require,
         ),
+        false,
+        tenant.community(),
     )?;
-    let pubkey_hex = pubkey.to_hex();
-
     // Admission, replay, membership, and count execution all run inside the
     // helper.  The single terminal attribution line fires here from the Result
     // so every outcome — including admission/replay/membership failures that
     // previously returned before any log — is attributed.
-    let result =
-        count_events_authed(&state, &tenant, &headers, &body, pubkey, event_id_bytes).await;
+    let result = count_events_authed(
+        &state,
+        &tenant,
+        &headers,
+        &body,
+        pubkey,
+        event_id_bytes,
+        verified_proof,
+    )
+    .await;
     match &result {
-        Ok(Json(value)) => {
-            let count = value.get("count").and_then(Value::as_u64);
-            tracing::info!(
-                pubkey = %pubkey_hex,
-                route = "/count",
-                status = 200u16,
-                result_count = count,
-                "HTTP bridge request"
-            );
+        Ok(Json(_)) => {
+            tracing::info!(route = "/count", status = 200u16, "HTTP bridge request");
         }
         Err((status, _)) => {
             tracing::warn!(
-                pubkey = %pubkey_hex,
                 route = "/count",
                 status = status.as_u16(),
                 "HTTP bridge request"
@@ -1465,6 +1787,7 @@ async fn count_events_authed(
     body: &[u8],
     pubkey: nostr::PublicKey,
     event_id_bytes: [u8; 32],
+    verified_proof: Option<buzz_auth::VerifiedNostrProof>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     enforce_http_admission(state, tenant, &pubkey).await?;
     check_nip98_replay(state, tenant, event_id_bytes).await?;
@@ -1509,9 +1832,36 @@ async fn count_events_authed(
         .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)
         .await
         .map_err(|e| internal_error(&format!("channel access lookup: {e}")))?;
+    let verified_proof = retain_bridge_proof(verified_proof, auth_tag)?;
+    let verified_assertion = seal_bridge_assertion(state, tenant, identity_proof.as_ref())?;
+    let protected_result = match verified_proof {
+        Some(proof) => {
+            crate::authorization_runtime::transport::authorize_if_configured(
+                state,
+                proof,
+                verified_assertion,
+                buzz_auth::AuthorizationCapability::CommunityRead,
+                uuid::Uuid::new_v4(),
+                "http_count",
+            )
+            .await
+        }
+        None => crate::authorization_runtime::transport::authorize_unwired_if_configured(
+            state,
+            tenant.community(),
+        ),
+    };
+    let protected = Arc::new(
+        protected_result
+            .map_err(|_| api_error(StatusCode::FORBIDDEN, "protected authorization denied"))?,
+    );
+    protected
+        .revalidate()
+        .map_err(|_| api_error(StatusCode::FORBIDDEN, "protected authorization expired"))?;
     finalize_bridge_corporate_identity(state, tenant, pubkey, identity_proof).await?;
 
     let mut total: u64 = 0;
+    let mut release_channels = std::collections::BTreeSet::new();
     for filter in &filters {
         let needs_author_only_filtering =
             crate::handlers::req::filter_can_match_author_only_kinds(filter);
@@ -1535,6 +1885,7 @@ async fn count_events_authed(
             if !accessible_channels.contains(&ch_id) {
                 continue; // Skip filters targeting inaccessible channels.
             }
+            release_channels.insert(ch_id);
             // Channel is accessible — count with pushability check.
             let mut query = crate::handlers::req::build_event_query_from_filter(
                 filter,
@@ -1559,7 +1910,10 @@ async fn count_events_authed(
                 && !needs_result_gated_filtering
                 && !needs_shared_gate_filtering
             {
-                match state.db.count_events_routed("bridge_count", &query).await {
+                let fetched = state.db.count_events_routed("bridge_count", &query).await;
+                match release_protected_bridge_fetch(fetched, |fetched| {
+                    protected.release_fetched(fetched)
+                })? {
                     Ok(n) => total += n as u64,
                     Err(e) => {
                         return Err(internal_error(&format!("count error: {e}")));
@@ -1569,11 +1923,13 @@ async fn count_events_authed(
                 // Fallback: query + post-filter for non-pushable constraints.
                 let mut q = query;
                 crate::handlers::req::apply_count_fallback_limit(&mut q);
-                match state
+                let fetched = state
                     .db
                     .query_events_routed_bounded("bridge_count_fallback", &q)
-                    .await
-                {
+                    .await;
+                match release_protected_bridge_fetch(fetched, |fetched| {
+                    protected.release_fetched(fetched)
+                })? {
                     Ok(stored_events) => {
                         if crate::handlers::req::count_fallback_exceeded(stored_events.len()) {
                             metrics::counter!("buzz_count_fallback_rejections_total").increment(1);
@@ -1604,6 +1960,7 @@ async fn count_events_authed(
         } else {
             // No channel filter — use SQL-level channel_ids pushdown to count
             // only events in accessible channels (+ global events).
+            release_channels.extend(accessible_channels.iter().copied());
             let mut query = crate::handlers::req::build_event_query_from_filter(
                 filter,
                 &pubkey_bytes,
@@ -1630,7 +1987,10 @@ async fn count_events_authed(
                 && !needs_shared_gate_filtering
             {
                 query.limit = None;
-                match state.db.count_events_routed("bridge_count", &query).await {
+                let fetched = state.db.count_events_routed("bridge_count", &query).await;
+                match release_protected_bridge_fetch(fetched, |fetched| {
+                    protected.release_fetched(fetched)
+                })? {
                     Ok(n) => total += n as u64,
                     Err(e) => {
                         return Err(internal_error(&format!("count error: {e}")));
@@ -1639,11 +1999,13 @@ async fn count_events_authed(
             } else {
                 // Fallback: query a bounded candidate set + post-filter.
                 crate::handlers::req::apply_count_fallback_limit(&mut query);
-                match state
+                let fetched = state
                     .db
                     .query_events_routed_bounded("bridge_count_fallback", &query)
-                    .await
-                {
+                    .await;
+                match release_protected_bridge_fetch(fetched, |fetched| {
+                    protected.release_fetched(fetched)
+                })? {
                     Ok(stored_events) => {
                         if crate::handlers::req::count_fallback_exceeded(stored_events.len()) {
                             metrics::counter!("buzz_count_fallback_rejections_total").increment(1);
@@ -1674,6 +2036,20 @@ async fn count_events_authed(
         }
     }
 
+    if !crate::connection::release_channel_set_read_authority(
+        state.db.clone(),
+        tenant.community(),
+        release_channels.into_iter().collect(),
+        pubkey_bytes,
+        Some(protected),
+    )
+    .await
+    {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "restricted: channel access changed before response release",
+        ));
+    }
     Ok(Json(serde_json::json!({ "count": total })))
 }
 
@@ -1723,7 +2099,7 @@ async fn handle_bridge_search(
     tenant: &buzz_core::tenant::TenantContext,
     reader_pubkey_hex: &str,
     pubkey_bytes: &[u8],
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+) -> Result<(Json<Value>, std::collections::BTreeSet<uuid::Uuid>), (StatusCode, Json<Value>)> {
     // Bridge always includes global (channel-less) events — same as WS with
     // full scopes. `None` means no accessible channels and no global access →
     // empty result set (the caller short-circuits exactly as the WS door EOSEs).
@@ -1732,10 +2108,16 @@ async fn handle_bridge_search(
         true, // include_global
     ) {
         Some(scope) => scope,
-        None => return Ok(Json(Value::Array(Vec::new()))),
+        None => {
+            return Ok((
+                Json(Value::Array(Vec::new())),
+                std::collections::BTreeSet::new(),
+            ));
+        }
     };
 
     let mut events: Vec<Value> = Vec::new();
+    let mut release_channels = std::collections::BTreeSet::new();
     let mut seen_ids: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
 
     for (raw, filter) in raw_filters.iter().zip(filters) {
@@ -1848,13 +2230,11 @@ async fn handle_bridge_search(
             if !seen_ids.insert(*id_array) {
                 continue;
             }
-            if let Ok(v) = serde_json::to_value(&stored.event) {
-                events.push(v);
-            }
+            append_bridge_stored_event(&mut events, &mut release_channels, stored);
         }
     }
 
-    Ok(Json(Value::Array(events)))
+    Ok((Json(Value::Array(events)), release_channels))
 }
 
 /// Query parameters for the webhook trigger endpoint.
@@ -1893,6 +2273,19 @@ pub async fn workflow_webhook(
         .await
         .map_err(|_| not_found("workflow not found"))?;
     let community_id = tenant.community();
+
+    // A webhook secret authenticates the trigger but carries no protected
+    // authority into the workflow run or its delayed actions. Enforce must
+    // therefore stop before even the run row exists until a transaction-owning
+    // workflow executor can validate authority at every durable commit.
+    let mode = state
+        .protected_transport()
+        .and_then(|runtime| runtime.mode_for_domain(community_id));
+    crate::protected_surface::require_effect_permit(
+        mode,
+        crate::protected_surface::EffectSurfaceId::WorkflowBackgroundExecution,
+    )
+    .map_err(|_| not_found("workflow not found"))?;
 
     let workflow = state
         .db
@@ -2078,11 +2471,42 @@ async fn synthesize_presence(
     all_pubkeys.dedup();
 
     // Look up Redis.
-    let presence_map = state
+    let stored_presence = state
         .pubsub
         .get_presence_bulk(tenant, &all_pubkeys)
         .await
         .unwrap_or_default();
+
+    let verifier = crate::authorization_runtime::ephemeral::AuthorityTokenVerifier::new(
+        state.db.clone(),
+        state.relay_keypair.secret_key().as_secret_bytes(),
+    );
+    let mut presence_map = std::collections::HashMap::new();
+    for (pubkey_hex, stored_status) in stored_presence {
+        match crate::authorization_runtime::ephemeral::decode_presence(&stored_status) {
+            Ok(Some(protected)) => {
+                let Ok(pubkey) = nostr::PublicKey::from_hex(&pubkey_hex) else {
+                    continue;
+                };
+                if verifier
+                    .verify_actor_context(
+                        tenant.community(),
+                        protected.context_id,
+                        pubkey.to_bytes(),
+                        &protected.authority,
+                    )
+                    .await
+                    .is_ok()
+                {
+                    presence_map.insert(pubkey_hex, protected.status);
+                }
+            }
+            Ok(None) if !state.is_protected_enforcing(tenant.community()) => {
+                presence_map.insert(pubkey_hex, stored_status);
+            }
+            Ok(None) | Err(_) => {}
+        }
+    }
 
     if presence_map.is_empty() {
         return Some(Vec::new());
@@ -2139,7 +2563,7 @@ async fn authorize_moderation_read(
     headers: &HeaderMap,
     path: &str,
     raw_query: Option<&str>,
-) -> Result<TenantContext, (StatusCode, Json<Value>)> {
+) -> Result<ModerationReadAuthorization, (StatusCode, Json<Value>)> {
     let raw_host = headers
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
@@ -2158,7 +2582,7 @@ async fn authorize_moderation_read(
         _ => path.to_string(),
     };
     let url = nip98_expected_url(&state.config.relay_url, &tenant, &path_with_query);
-    let (pubkey, event_id_bytes) = verify_bridge_auth(
+    let (pubkey, event_id_bytes, verified_proof) = verify_protected_bridge_auth(
         headers,
         "GET",
         &url,
@@ -2167,6 +2591,8 @@ async fn authorize_moderation_read(
             state.config.require_auth_token,
             state.config.corporate_identity.require,
         ),
+        false,
+        tenant.community(),
     )?;
     check_nip98_replay(state, &tenant, event_id_bytes).await?;
     let pubkey_bytes = pubkey.to_bytes().to_vec();
@@ -2190,13 +2616,90 @@ async fn authorize_moderation_read(
             "restricted: moderator access required",
         )
     })?;
+    let verified_proof = retain_bridge_proof(verified_proof, auth_tag)?;
+    let verified_assertion = seal_bridge_assertion(state, &tenant, identity_proof.as_ref())?;
+    let protected_result = match verified_proof {
+        Some(proof) => {
+            crate::authorization_runtime::transport::authorize_if_configured(
+                state,
+                proof,
+                verified_assertion,
+                buzz_auth::AuthorizationCapability::Moderate,
+                uuid::Uuid::new_v4(),
+                "http_moderation_read",
+            )
+            .await
+        }
+        None => crate::authorization_runtime::transport::authorize_unwired_if_configured(
+            state,
+            tenant.community(),
+        ),
+    };
+    let protected = protected_result
+        .map_err(|_| api_error(StatusCode::FORBIDDEN, "protected authorization denied"))?;
+    protected
+        .revalidate()
+        .map_err(|_| api_error(StatusCode::FORBIDDEN, "protected authorization expired"))?;
     finalize_bridge_corporate_identity(state, &tenant, pubkey, identity_proof).await?;
 
-    Ok(tenant)
+    Ok(ModerationReadAuthorization {
+        tenant,
+        protected,
+        actor_pubkey: pubkey_bytes,
+    })
+}
+
+/// Retains exact protected authority through the moderation fetch boundary.
+struct ModerationReadAuthorization {
+    tenant: TenantContext,
+    protected: crate::authorization_runtime::transport::ProtectedAuthorization,
+    actor_pubkey: Vec<u8>,
+}
+
+/// Revalidate both provider-neutral protected authority and the local
+/// moderation role after the fetch transaction releases its locks and before
+/// the response is returned to the transport.
+async fn release_moderation_read(
+    state: &Arc<AppState>,
+    authorization: &ModerationReadAuthorization,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    authorization
+        .protected
+        .revalidate()
+        .map_err(|_| api_error(StatusCode::FORBIDDEN, "protected authorization expired"))?;
+    crate::handlers::moderation_authz::authorize_moderation_action(
+        &authorization.tenant,
+        state,
+        &authorization.actor_pubkey,
+        None,
+        crate::handlers::moderation_authz::ModerationTarget::None,
+        crate::handlers::moderation_authz::ModerationAction::ViewQueue,
+    )
+    .await
+    .map(|_| ())
+    .map_err(|_| {
+        api_error(
+            StatusCode::FORBIDDEN,
+            "restricted: moderator access changed before response release",
+        )
+    })
 }
 
 /// Cap on rows returned by a single moderation read.
 const MODERATION_READ_LIMIT: i64 = 500;
+
+/// Releases a bridge fetch result only after the retained authority check.
+///
+/// Keeping the complete `Result` inside the release boundary ensures that
+/// authority loss takes precedence over both successful rows and backend
+/// failures; neither response shape is observable after the lease is stale.
+fn release_protected_bridge_fetch<T, E, R>(
+    fetched: Result<T, E>,
+    release: impl FnOnce(Result<T, E>) -> Result<Result<T, E>, R>,
+) -> Result<Result<T, E>, (StatusCode, Json<Value>)> {
+    release(fetched)
+        .map_err(|_| api_error(StatusCode::FORBIDDEN, "protected authorization expired"))
+}
 
 /// Optional `?status=` and `?limit=` query for moderation reads.
 #[derive(serde::Deserialize, Default)]
@@ -2219,23 +2722,51 @@ pub async fn moderation_reports(
     RawQuery(raw_query): RawQuery,
     Query(q): Query<ModerationReadQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let tenant = authorize_moderation_read(
+    let authorization = authorize_moderation_read(
         &state,
         &headers,
         "/moderation/reports",
         raw_query.as_deref(),
     )
     .await?;
-    let rows = state
+    let mut transaction = state
         .db
-        .list_moderation_reports(
-            tenant.community(),
-            q.status.as_deref(),
-            clamp_limit(q.limit),
-        )
+        .begin_transaction()
         .await
-        .map_err(|e| internal_error(&format!("list reports: {e}")))?;
-    Ok(Json(Value::Array(rows.iter().map(report_json).collect())))
+        .map_err(|error| internal_error(&format!("begin moderation read: {error}")))?;
+    crate::handlers::moderation_authz::authorize_moderation_action_tx(
+        &mut transaction,
+        &authorization.tenant,
+        &authorization.actor_pubkey,
+        None,
+        crate::handlers::moderation_authz::ModerationTarget::None,
+        crate::handlers::moderation_authz::ModerationAction::ViewQueue,
+    )
+    .await
+    .map_err(|_| {
+        api_error(
+            StatusCode::FORBIDDEN,
+            "restricted: moderator access required",
+        )
+    })?;
+    let fetched = buzz_db::moderation::list_reports_tx(
+        &mut transaction,
+        authorization.tenant.community(),
+        q.status.as_deref(),
+        clamp_limit(q.limit),
+    )
+    .await;
+    let rows = release_protected_bridge_fetch(fetched, |fetched| {
+        authorization.protected.release_fetched(fetched)
+    })?
+    .map_err(|e| internal_error(&format!("list reports: {e}")))?;
+    let response = Json(Value::Array(rows.iter().map(report_json).collect()));
+    transaction
+        .commit()
+        .await
+        .map_err(|error| internal_error(&format!("finish moderation read: {error}")))?;
+    release_moderation_read(&state, &authorization).await?;
+    Ok(response)
 }
 
 /// `GET /moderation/audit` — the moderation audit log (NIP-98 + mod-authz).
@@ -2245,15 +2776,46 @@ pub async fn moderation_audit(
     RawQuery(raw_query): RawQuery,
     Query(q): Query<ModerationReadQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let tenant =
+    let authorization =
         authorize_moderation_read(&state, &headers, "/moderation/audit", raw_query.as_deref())
             .await?;
-    let rows = state
+    let mut transaction = state
         .db
-        .list_moderation_actions(tenant.community(), clamp_limit(q.limit))
+        .begin_transaction()
         .await
-        .map_err(|e| internal_error(&format!("list actions: {e}")))?;
-    Ok(Json(Value::Array(rows.iter().map(action_json).collect())))
+        .map_err(|error| internal_error(&format!("begin moderation read: {error}")))?;
+    crate::handlers::moderation_authz::authorize_moderation_action_tx(
+        &mut transaction,
+        &authorization.tenant,
+        &authorization.actor_pubkey,
+        None,
+        crate::handlers::moderation_authz::ModerationTarget::None,
+        crate::handlers::moderation_authz::ModerationAction::ViewQueue,
+    )
+    .await
+    .map_err(|_| {
+        api_error(
+            StatusCode::FORBIDDEN,
+            "restricted: moderator access required",
+        )
+    })?;
+    let fetched = buzz_db::moderation::list_actions_tx(
+        &mut transaction,
+        authorization.tenant.community(),
+        clamp_limit(q.limit),
+    )
+    .await;
+    let rows = release_protected_bridge_fetch(fetched, |fetched| {
+        authorization.protected.release_fetched(fetched)
+    })?
+    .map_err(|e| internal_error(&format!("list actions: {e}")))?;
+    let response = Json(Value::Array(rows.iter().map(action_json).collect()));
+    transaction
+        .commit()
+        .await
+        .map_err(|error| internal_error(&format!("finish moderation read: {error}")))?;
+    release_moderation_read(&state, &authorization).await?;
+    Ok(response)
 }
 
 /// `GET /moderation/restricted` — currently banned/timed-out members.
@@ -2261,14 +2823,42 @@ pub async fn moderation_restricted(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let tenant =
+    let authorization =
         authorize_moderation_read(&state, &headers, "/moderation/restricted", None).await?;
-    let rows = state
+    let mut transaction = state
         .db
-        .list_community_restrictions(tenant.community())
+        .begin_transaction()
         .await
-        .map_err(|e| internal_error(&format!("list restrictions: {e}")))?;
-    Ok(Json(Value::Array(rows.iter().map(ban_json).collect())))
+        .map_err(|error| internal_error(&format!("begin moderation read: {error}")))?;
+    crate::handlers::moderation_authz::authorize_moderation_action_tx(
+        &mut transaction,
+        &authorization.tenant,
+        &authorization.actor_pubkey,
+        None,
+        crate::handlers::moderation_authz::ModerationTarget::None,
+        crate::handlers::moderation_authz::ModerationAction::ViewQueue,
+    )
+    .await
+    .map_err(|_| {
+        api_error(
+            StatusCode::FORBIDDEN,
+            "restricted: moderator access required",
+        )
+    })?;
+    let fetched =
+        buzz_db::moderation::list_restricted_tx(&mut transaction, authorization.tenant.community())
+            .await;
+    let rows = release_protected_bridge_fetch(fetched, |fetched| {
+        authorization.protected.release_fetched(fetched)
+    })?
+    .map_err(|e| internal_error(&format!("list restrictions: {e}")))?;
+    let response = Json(Value::Array(rows.iter().map(ban_json).collect()));
+    transaction
+        .commit()
+        .await
+        .map_err(|error| internal_error(&format!("finish moderation read: {error}")))?;
+    release_moderation_read(&state, &authorization).await?;
+    Ok(response)
 }
 
 fn report_json(r: &buzz_db::moderation::ReportRecord) -> Value {
@@ -2349,6 +2939,61 @@ mod tests {
             .expect("sign auth event")
             .id
             .to_bytes()
+    }
+
+    #[test]
+    fn bridge_release_retains_stored_channel_without_trusting_event_tags() {
+        let event = EventBuilder::new(Kind::TextNote, "channel-scoped")
+            .sign_with_keys(&Keys::generate())
+            .expect("sign event without h tag");
+        let channel_id = uuid::Uuid::new_v4();
+        let stored = buzz_core::StoredEvent::new(event, Some(channel_id));
+        let mut events = Vec::new();
+        let mut release_channels = std::collections::BTreeSet::new();
+
+        assert!(append_bridge_stored_event(
+            &mut events,
+            &mut release_channels,
+            &stored,
+        ));
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            release_channels.into_iter().collect::<Vec<_>>(),
+            [channel_id]
+        );
+    }
+
+    #[test]
+    fn observational_http_modes_use_read_only_identity_lane() {
+        use crate::authorization_runtime::{
+            finalization::AuthorizationMode,
+            transport::{legacy_identity_lane_for_mode, LegacyIdentityLane},
+        };
+
+        for mode in [AuthorizationMode::Shadow, AuthorizationMode::VerifyOnly] {
+            assert_eq!(
+                legacy_identity_lane_for_mode(Some(mode)),
+                LegacyIdentityLane::ObserveOnly
+            );
+        }
+        assert_eq!(
+            legacy_identity_lane_for_mode(Some(AuthorizationMode::Enforce)),
+            LegacyIdentityLane::ProtectedEnforce
+        );
+    }
+
+    #[test]
+    fn protected_bridge_fetch_release_fences_success_and_backend_error_outcomes() {
+        let released = release_protected_bridge_fetch::<u8, &str, ()>(Ok(7), Ok)
+            .expect("current authority releases fetched rows")
+            .expect("successful fetch remains successful");
+        assert_eq!(released, 7);
+
+        for fetched in [Ok(7), Err("database unavailable")] {
+            let (status, _) = release_protected_bridge_fetch::<u8, &str, ()>(fetched, |_| Err(()))
+                .expect_err("authority loss must hide every fetched outcome");
+            assert_eq!(status, StatusCode::FORBIDDEN);
+        }
     }
 
     #[test]
@@ -3153,13 +3798,6 @@ mod tests {
         assert_eq!(extract_page_offset(&raw, None), None);
     }
 
-    /// Offsets are sized from the *clamped* limit the DB will honor, not from
-    /// what the client asked for. `filter_to_query_params` clamps an absent or
-    /// over-ceiling `limit` to `DEFAULT_MAX_PAGE_LIMIT` (guarded in
-    /// `handlers::req::tests::req_filter_limit_clamps_to_advertised_nip11_max_limit`)
-    /// and that clamped value is what arrives here — so page N starts exactly
-    /// N-1 full pages in. Sizing from an unclamped limit would step past rows
-    /// the previous page never returned.
     #[test]
     fn extract_page_offset_sizes_pages_from_clamped_limit() {
         let clamped = buzz_db::DEFAULT_MAX_PAGE_LIMIT;
@@ -3488,7 +4126,10 @@ mod tests {
         require_corporate_identity: bool,
     ) -> Option<Arc<crate::state::AppState>> {
         let mut config = crate::config::Config::from_env().ok()?;
-        config.database_url = TEST_DB_URL.to_string();
+        let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| TEST_DB_URL.to_owned());
+        config.database_url = database_url.clone();
         // Use the real local Redis so enforce_http_admission can pass.
         config.redis_url =
             std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
@@ -3502,7 +4143,7 @@ mod tests {
             config.corporate_identity.audience = "buzz-relay".to_string();
         }
 
-        let pool = sqlx::PgPool::connect(TEST_DB_URL).await.ok()?;
+        let pool = sqlx::PgPool::connect(&database_url).await.ok()?;
         let db = buzz_db::Db::from_pool(pool.clone());
         let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
@@ -3871,8 +4512,8 @@ mod tests {
             "expected exactly 1 attribution line for invalid-JSON arm, got {n};\nlog:\n{log}"
         );
         assert!(
-            log.contains(&pubkey_hex[..16]),
-            "attribution line must carry the pubkey;\nlog:\n{log}"
+            !log.contains(&pubkey_hex[..16]),
+            "runtime log exposed pubkey;\nlog:\n{log}"
         );
     }
 
@@ -3931,8 +4572,8 @@ mod tests {
             "expected exactly 1 attribution line for IngestError::Rejected arm, got {n};\nlog:\n{log}"
         );
         assert!(
-            log.contains(&pubkey_hex[..16]),
-            "attribution line must carry the pubkey;\nlog:\n{log}"
+            !log.contains(&pubkey_hex[..16]),
+            "runtime log exposed pubkey;\nlog:\n{log}"
         );
     }
 }

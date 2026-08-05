@@ -158,6 +158,7 @@ pub struct PublishLimits {
 struct PublishOptions {
     limits: PublishLimits,
     compaction_threshold: usize,
+    publish_pointer: bool,
 }
 
 struct CompactedPack {
@@ -254,6 +255,15 @@ impl ParentState {
     pub fn from_loaded(etag: ETag, digest: String, parent: Manifest) -> Self {
         Self {
             if_match: Some(etag),
+            parent_digest: Some(digest),
+            parent,
+        }
+    }
+
+    /// Build parent state from a PostgreSQL-selected publication.
+    pub fn from_published(digest: String, parent: Manifest) -> Self {
+        Self {
+            if_match: None,
             parent_digest: Some(digest),
             parent,
         }
@@ -1013,6 +1023,36 @@ pub async fn cas_publish(
         PublishOptions {
             limits,
             compaction_threshold: PACK_COMPACTION_THRESHOLD,
+            publish_pointer: true,
+        },
+    )
+    .await
+}
+
+/// Stage immutable packs and a validated manifest without publishing a pointer.
+///
+/// The caller must make the returned manifest digest visible through a
+/// PostgreSQL publication CAS in the same protected operation transaction.
+pub async fn prepare_publish(
+    store: &GitStore,
+    ctx: &TenantContext,
+    repo_path: &Path,
+    owner: &str,
+    repo: &str,
+    parent_state: &ParentState,
+    limits: PublishLimits,
+) -> Result<CasSuccess, CasError> {
+    cas_publish_inner(
+        store,
+        ctx,
+        repo_path,
+        owner,
+        repo,
+        parent_state,
+        PublishOptions {
+            limits,
+            compaction_threshold: PACK_COMPACTION_THRESHOLD,
+            publish_pointer: false,
         },
     )
     .await
@@ -1207,6 +1247,22 @@ async fn cas_publish_inner(
         }
     };
     let manifest_digest = digest_from_manifest_key(&manifest_key)?;
+
+    if !options.publish_pointer {
+        if let Some(observation) = &compaction_observation {
+            record_compaction(
+                "staged",
+                observation.started_at,
+                observation.packs_before,
+                Some(observation.packs_after),
+                Some(observation.compacted_bytes),
+            );
+        }
+        return Ok(CasSuccess {
+            manifest: m_after,
+            manifest_key,
+        });
+    }
 
     // Step 7: CAS the pointer.
     let precond = match &parent_state.if_match {
@@ -1763,6 +1819,7 @@ mod tests {
         let test_options = PublishOptions {
             limits,
             compaction_threshold: 2,
+            publish_pointer: true,
         };
         let success = cas_publish_inner(
             &store,

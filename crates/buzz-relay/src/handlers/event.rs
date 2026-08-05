@@ -631,13 +631,14 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
     )
     .increment(1);
 
-    let (conn_id, pubkey_bytes, auth_pubkey, scopes, channel_ids) = {
+    let (conn_id, pubkey_bytes, auth_pubkey, owner_pubkey, scopes, channel_ids) = {
         let auth = conn.auth_state.read().await;
         match &*auth {
             AuthState::Authenticated(ctx) => (
                 conn.conn_id,
                 ctx.pubkey.to_bytes().to_vec(),
                 ctx.pubkey,
+                ctx.agent_owner_pubkey,
                 ctx.scopes.clone(),
                 ctx.channel_ids.clone(),
             ),
@@ -720,6 +721,9 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
 
     let ingest_auth = IngestAuth::Nip42 {
         pubkey: auth_pubkey,
+        owner_pubkey,
+        verified_proof: None,
+        verified_assertion: None,
         scopes,
         channel_ids,
         conn_id,

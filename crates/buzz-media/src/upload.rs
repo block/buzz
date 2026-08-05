@@ -12,10 +12,54 @@ use crate::storage::{BlobMeta, MediaStorage};
 use crate::thumbnail::generate_image_metadata_sync;
 use crate::types::BlobDescriptor;
 use crate::upload_record::{record_upload_event, UploadAttribution, UploadEventFacts};
+
+/// Read-only authorization checkpoint invoked immediately before durable media effects.
+pub trait UploadCommitGuard: Send + Sync {
+    /// Deny if the upload no longer has current authority.
+    fn revalidate(&self) -> Result<(), MediaError>;
+}
 use crate::validation::{
     looks_like_mp4_iso_bmff, mime_to_ext, validate_content, validate_file_content,
     validate_video_file,
 };
+
+/// Visibility contract selected by the relay before any upload side effect.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UploadPublicationMode {
+    /// Preserve the existing sidecar and upload-record publication contract.
+    Legacy,
+    /// Stage only immutable objects; PostgreSQL decides protected visibility.
+    ProtectedStaging,
+}
+
+/// Validated immutable objects and metadata awaiting an authoritative publish.
+#[derive(Debug, Clone)]
+pub struct PreparedUpload {
+    pub descriptor: BlobDescriptor,
+    pub metadata: BlobMeta,
+    pub object_key: String,
+    pub thumbnail_key: Option<String>,
+}
+
+/// Inputs for one buffered upload request.
+pub struct BufferedUploadRequest<'a> {
+    /// Object storage used for immutable staging.
+    pub storage: &'a MediaStorage,
+    /// Media validation and size limits.
+    pub config: &'a MediaConfig,
+    /// Server-resolved tenant context.
+    pub ctx: &'a TenantContext,
+    /// Authenticated Blossom upload event.
+    pub auth_event: &'a nostr::Event,
+    /// Bounded upload bytes.
+    pub body: Bytes,
+    /// Optional upload-event attribution for the legacy path.
+    pub attribution: Option<UploadAttribution>,
+    /// Authority checkpoint used immediately before durable effects.
+    pub commit_guard: &'a dyn UploadCommitGuard,
+    /// Visibility contract selected by the relay.
+    pub publication_mode: UploadPublicationMode,
+}
 
 /// Shared buffered-upload pipeline for the image and generic-file paths.
 ///
@@ -49,17 +93,19 @@ struct BufferedUploadInput<'a> {
     auth_event: &'a nostr::Event,
     body: Bytes,
     attribution: Option<UploadAttribution>,
+    commit_guard: &'a dyn UploadCommitGuard,
+    publication_mode: UploadPublicationMode,
 }
 
 async fn process_buffered_upload<V, M, Fut>(
     input: BufferedUploadInput<'_>,
     validate: V,
     prepare_metadata: M,
-) -> Result<BlobDescriptor, MediaError>
+) -> Result<PreparedUpload, MediaError>
 where
     V: FnOnce(&Bytes, &MediaConfig) -> Result<(String, String), MediaError> + Send + 'static,
     M: FnOnce(MetadataInput) -> Fut,
-    Fut: std::future::Future<Output = Result<BlobMeta, MediaError>>,
+    Fut: std::future::Future<Output = Result<(BlobMeta, Option<String>), MediaError>>,
 {
     let BufferedUploadInput {
         storage,
@@ -68,6 +114,8 @@ where
         auth_event,
         body,
         attribution,
+        commit_guard,
+        publication_mode,
     } = input;
 
     // CPU-bound: validate content, compute hash, verify auth.
@@ -95,13 +143,14 @@ where
     // sidecar exists but the blob is missing, fall through to re-upload.
     let sidecar_exists = storage.head(&meta_key).await?;
     let blob_exists = storage.head(&key).await?;
-    if sidecar_exists && blob_exists {
+    if publication_mode == UploadPublicationMode::Legacy && sidecar_exists && blob_exists {
         let meta = storage.get_sidecar(ctx, &sha256).await?;
         // A re-upload of known bytes is still a distinct upload *event*: no
         // blob PUT happens, so without this record the uploader would be
         // invisible to the moderation pipeline (and takedown re-uploads
         // would go unscanned).
         if let Some(attribution) = &attribution {
+            commit_guard.revalidate()?;
             record_upload_event(
                 storage,
                 ctx,
@@ -117,15 +166,20 @@ where
             )
             .await?;
         }
-        return Ok(build_descriptor(
-            config,
-            &sha256,
-            &ext,
-            &mime,
-            body.len() as u64,
-            Some(&meta),
-            meta.uploaded_at,
-        ));
+        return Ok(PreparedUpload {
+            descriptor: build_descriptor(
+                config,
+                &sha256,
+                &ext,
+                &mime,
+                body.len() as u64,
+                Some(&meta),
+                meta.uploaded_at,
+            ),
+            metadata: meta,
+            object_key: key,
+            thumbnail_key: sidecar_exists.then(|| format!("{sha256}.thumb.jpg")),
+        });
     }
 
     // Compute uploaded_at once — single source of truth for sidecar and response.
@@ -138,9 +192,12 @@ where
     // content-addressed and bounded by the upload size limit, so the storage
     // cost is negligible. A V2 background GC job can sweep blobs with no
     // matching sidecar after a grace period.
-    storage.put(&key, &body, &mime).await?;
+    commit_guard.revalidate()?;
+    if !blob_exists {
+        storage.put(&key, &body, &mime).await?;
+    }
 
-    let meta = match prepare_metadata(MetadataInput {
+    let (meta, thumbnail_key) = match prepare_metadata(MetadataInput {
         sha256: sha256.clone(),
         ext: ext.clone(),
         mime: mime.clone(),
@@ -159,33 +216,42 @@ where
     // The moderation record precedes the sidecar publish gate. If this write
     // fails, the blob and any thumbnail remain orphaned but the media cannot be
     // served. Conversely, record existence still implies those objects exist.
-    if let Some(attribution) = &attribution {
-        record_upload_event(
-            storage,
-            ctx,
-            &auth_event.pubkey,
-            attribution,
-            UploadEventFacts {
-                sha256: &sha256,
-                ext: &ext,
-                mime: &mime,
-                size: body.len() as u64,
-                uploaded_at,
-            },
-        )
-        .await?;
+    if publication_mode == UploadPublicationMode::Legacy {
+        if let Some(attribution) = &attribution {
+            commit_guard.revalidate()?;
+            record_upload_event(
+                storage,
+                ctx,
+                &auth_event.pubkey,
+                attribution,
+                UploadEventFacts {
+                    sha256: &sha256,
+                    ext: &ext,
+                    mime: &mime,
+                    size: body.len() as u64,
+                    uploaded_at,
+                },
+            )
+            .await?;
+        }
+        commit_guard.revalidate()?;
+        storage.put_sidecar(ctx, &sha256, &meta).await?;
     }
-    storage.put_sidecar(ctx, &sha256, &meta).await?;
 
-    Ok(build_descriptor(
-        config,
-        &sha256,
-        &ext,
-        &mime,
-        body.len() as u64,
-        Some(&meta),
-        uploaded_at,
-    ))
+    Ok(PreparedUpload {
+        descriptor: build_descriptor(
+            config,
+            &sha256,
+            &ext,
+            &mime,
+            body.len() as u64,
+            Some(&meta),
+            uploaded_at,
+        ),
+        metadata: meta,
+        object_key: key,
+        thumbnail_key,
+    })
 }
 
 /// Inputs handed to a buffered-upload metadata builder, after the shared
@@ -205,13 +271,18 @@ struct MetadataInput {
 /// This is the image path — body is already fully buffered in RAM. Do NOT use
 /// this for video uploads; use [`process_video_upload`] instead.
 pub async fn process_upload(
-    storage: &MediaStorage,
-    config: &MediaConfig,
-    ctx: &TenantContext,
-    auth_event: &nostr::Event,
-    body: Bytes,
-    attribution: Option<UploadAttribution>,
-) -> Result<BlobDescriptor, MediaError> {
+    request: BufferedUploadRequest<'_>,
+) -> Result<PreparedUpload, MediaError> {
+    let BufferedUploadRequest {
+        storage,
+        config,
+        ctx,
+        auth_event,
+        body,
+        attribution,
+        commit_guard,
+        publication_mode,
+    } = request;
     process_buffered_upload(
         BufferedUploadInput {
             storage,
@@ -220,13 +291,17 @@ pub async fn process_upload(
             auth_event,
             body,
             attribution,
+            commit_guard,
+            publication_mode,
         },
         |bytes, cfg| {
             let mime = validate_content(bytes, cfg)?;
             let ext = mime_to_ext(&mime).to_string();
             Ok((mime, ext))
         },
-        |input| async move { prepare_image_metadata(storage, config, input).await },
+        |input| async move {
+            prepare_image_metadata(storage, config, input, commit_guard, publication_mode).await
+        },
     )
     .await
 }
@@ -243,13 +318,18 @@ pub async fn process_upload(
 /// The resulting blob is served with `Content-Disposition: attachment`, so the
 /// client always downloads it rather than rendering it inline.
 pub async fn process_file_upload(
-    storage: &MediaStorage,
-    config: &MediaConfig,
-    ctx: &TenantContext,
-    auth_event: &nostr::Event,
-    body: Bytes,
-    attribution: Option<UploadAttribution>,
-) -> Result<BlobDescriptor, MediaError> {
+    request: BufferedUploadRequest<'_>,
+) -> Result<PreparedUpload, MediaError> {
+    let BufferedUploadRequest {
+        storage,
+        config,
+        ctx,
+        auth_event,
+        body,
+        attribution,
+        commit_guard,
+        publication_mode,
+    } = request;
     process_buffered_upload(
         BufferedUploadInput {
             storage,
@@ -258,6 +338,8 @@ pub async fn process_file_upload(
             auth_event,
             body,
             attribution,
+            commit_guard,
+            publication_mode,
         },
         |bytes, cfg| validate_file_content(bytes, cfg),
         |input| async move {
@@ -272,7 +354,7 @@ pub async fn process_file_upload(
                 uploaded_at: input.uploaded_at,
                 duration_secs: None,
             };
-            Ok(meta)
+            Ok((meta, None))
         },
     )
     .await
@@ -289,6 +371,9 @@ pub async fn process_file_upload(
 /// 5. Writes a sidecar with `duration_secs` (no thumbnail — desktop handles that).
 ///
 /// Returns a [`BlobDescriptor`] with the `duration` field populated.
+// The guard remains an explicit trust-boundary argument so callers cannot
+// accidentally choose an unguarded upload variant before the durable write.
+#[allow(clippy::too_many_arguments)]
 pub async fn process_video_upload(
     storage: &MediaStorage,
     config: &MediaConfig,
@@ -297,7 +382,9 @@ pub async fn process_video_upload(
     body_stream: impl futures_core::Stream<Item = Result<Bytes, axum::Error>> + Send + 'static,
     content_length: Option<u64>,
     attribution: Option<UploadAttribution>,
-) -> Result<BlobDescriptor, MediaError> {
+    commit_guard: &dyn UploadCommitGuard,
+    publication_mode: UploadPublicationMode,
+) -> Result<PreparedUpload, MediaError> {
     // --- 1. Stream body to temp file, compute SHA-256 incrementally ---
     let tmp = tempfile::NamedTempFile::new().map_err(|e| MediaError::Io(e.to_string()))?;
     let tmp_path = tmp.path().to_path_buf();
@@ -429,11 +516,12 @@ pub async fn process_video_upload(
     // --- 5. Idempotency check ---
     let sidecar_exists = storage.head(&meta_key).await?;
     let blob_exists = storage.head(&key).await?;
-    if sidecar_exists && blob_exists {
+    if publication_mode == UploadPublicationMode::Legacy && sidecar_exists && blob_exists {
         let meta = storage.get_sidecar(ctx, &sha256_hex).await?;
         // Re-upload of known bytes: still a distinct upload event — see the
         // buffered path's short-circuit for the rationale.
         if let Some(attribution) = &attribution {
+            commit_guard.revalidate()?;
             record_upload_event(
                 storage,
                 ctx,
@@ -449,21 +537,29 @@ pub async fn process_video_upload(
             )
             .await?;
         }
-        return Ok(build_descriptor(
-            config,
-            &sha256_hex,
-            ext,
-            &mime,
-            file_size,
-            Some(&meta),
-            meta.uploaded_at,
-        ));
+        return Ok(PreparedUpload {
+            descriptor: build_descriptor(
+                config,
+                &sha256_hex,
+                ext,
+                &mime,
+                file_size,
+                Some(&meta),
+                meta.uploaded_at,
+            ),
+            metadata: meta,
+            object_key: key,
+            thumbnail_key: None,
+        });
     }
 
     let uploaded_at = chrono::Utc::now().timestamp();
 
     // --- 6. Stream blob from temp file to S3 ---
-    storage.put_file(&key, &tmp_path, &mime).await?;
+    commit_guard.revalidate()?;
+    if !blob_exists {
+        storage.put_file(&key, &tmp_path, &mime).await?;
+    }
     drop(tmp); // Free temp file disk space immediately after S3 upload.
 
     // --- 7. Build metadata (no thumbnail for video — desktop handles that) ---
@@ -479,33 +575,42 @@ pub async fn process_video_upload(
     };
 
     // Record before publishing the sidecar serve gate. See the buffered path.
-    if let Some(attribution) = &attribution {
-        record_upload_event(
-            storage,
-            ctx,
-            &auth_event.pubkey,
-            attribution,
-            UploadEventFacts {
-                sha256: &sha256_hex,
-                ext,
-                mime: &mime,
-                size: file_size,
-                uploaded_at,
-            },
-        )
-        .await?;
+    if publication_mode == UploadPublicationMode::Legacy {
+        if let Some(attribution) = &attribution {
+            commit_guard.revalidate()?;
+            record_upload_event(
+                storage,
+                ctx,
+                &auth_event.pubkey,
+                attribution,
+                UploadEventFacts {
+                    sha256: &sha256_hex,
+                    ext,
+                    mime: &mime,
+                    size: file_size,
+                    uploaded_at,
+                },
+            )
+            .await?;
+        }
+        commit_guard.revalidate()?;
+        storage.put_sidecar(ctx, &sha256_hex, &meta).await?;
     }
-    storage.put_sidecar(ctx, &sha256_hex, &meta).await?;
 
-    Ok(build_descriptor(
-        config,
-        &sha256_hex,
-        ext,
-        &mime,
-        file_size,
-        Some(&meta),
-        uploaded_at,
-    ))
+    Ok(PreparedUpload {
+        descriptor: build_descriptor(
+            config,
+            &sha256_hex,
+            ext,
+            &mime,
+            file_size,
+            Some(&meta),
+            uploaded_at,
+        ),
+        metadata: meta,
+        object_key: key,
+        thumbnail_key: None,
+    })
 }
 
 /// Generate thumbnail and metadata without publishing the sidecar serve gate.
@@ -514,7 +619,9 @@ async fn prepare_image_metadata(
     storage: &MediaStorage,
     config: &MediaConfig,
     input: MetadataInput,
-) -> Result<BlobMeta, MediaError> {
+    commit_guard: &dyn UploadCommitGuard,
+    publication_mode: UploadPublicationMode,
+) -> Result<(BlobMeta, Option<String>), MediaError> {
     let body_ref = input.body.clone();
     let mime_ref = input.mime.clone();
     let ext_ref = input.ext.clone();
@@ -528,12 +635,22 @@ async fn prepare_image_metadata(
 
     meta.uploaded_at = input.uploaded_at;
 
-    if let Some(ref tb) = thumb_bytes {
-        let thumb_key = format!("{}.thumb.jpg", input.sha256);
+    let thumbnail_key = if let Some(ref tb) = thumb_bytes {
+        let thumb_key = match publication_mode {
+            UploadPublicationMode::Legacy => format!("{}.thumb.jpg", input.sha256),
+            UploadPublicationMode::ProtectedStaging => {
+                let digest = hex::encode(Sha256::digest(tb));
+                format!("_objects/thumbnails/{digest}.jpg")
+            }
+        };
+        commit_guard.revalidate()?;
         storage.put(&thumb_key, tb, "image/jpeg").await?;
-    }
+        Some(thumb_key)
+    } else {
+        None
+    };
 
-    Ok(meta)
+    Ok((meta, thumbnail_key))
 }
 
 fn build_descriptor(

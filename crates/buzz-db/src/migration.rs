@@ -566,7 +566,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 30);
+        assert_eq!(migrations.len(), 39);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -2557,6 +2557,49 @@ mod tests {
         run_migrations(&pool)
             .await
             .expect("retry additive projection after rollback");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn audio_visibility_0039_applies_from_empty_database_without_later_objects() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+
+        MIGRATOR
+            .run_to(39, &pool)
+            .await
+            .expect("apply migrations through audio visibility");
+
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(39));
+        let admission_columns: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM information_schema.columns \
+             WHERE table_schema='public' AND table_name='audio_session_admissions' \
+               AND column_name IN ('claimant_id', 'attachment_generation', \
+                                   'claim_expires_at', 'visibility_observed_at')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("inspect audio admission columns");
+        assert_eq!(admission_columns, 4);
+
+        let admission_constraints: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pg_constraint \
+             WHERE conrelid='audio_session_admissions'::regclass \
+               AND conname IN ('audio_session_admissions_state', \
+                               'audio_session_admissions_claim', \
+                               'audio_session_admissions_visibility')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("inspect audio admission constraints");
+        assert_eq!(admission_constraints, 3);
+
+        let later_authority_table: Option<String> =
+            sqlx::query_scalar("SELECT to_regclass('authorization_authority_epochs')::text")
+                .fetch_one(&pool)
+                .await
+                .expect("inspect later authority table");
+        assert_eq!(later_authority_table, None);
     }
 
     #[tokio::test]

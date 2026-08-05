@@ -15,7 +15,7 @@
 //! through the integration thread.
 
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Row as _};
+use sqlx::{PgPool, Postgres, Row as _, Transaction};
 use uuid::Uuid;
 
 use crate::error::Result;
@@ -208,6 +208,49 @@ pub async fn insert_report(
     Ok(row.try_get("id")?)
 }
 
+/// Insert a report inside a caller-owned transaction.
+///
+/// Protected Enforce callers use this variant so the report row and the
+/// authorization receipt share one commit boundary.
+pub async fn insert_report_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    report: NewReport<'_>,
+) -> Result<Uuid> {
+    let (target_kind, target_event_id, target_pubkey, target_blob_sha256) = match &report.target {
+        ReportTarget::Event(id) => ("event", Some(id.as_slice()), None, None),
+        ReportTarget::Pubkey(pubkey) => ("pubkey", None, Some(pubkey.as_slice()), None),
+        ReportTarget::Blob(sha256) => ("blob", None, None, Some(sha256.as_slice())),
+    };
+
+    let row = sqlx::query(
+        r#"
+        INSERT INTO moderation_reports (
+            community_id, report_event_id, reporter_pubkey, target_kind,
+            target_event_id, target_pubkey, target_blob_sha256, channel_id,
+            report_type, note
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        ON CONFLICT (community_id, report_event_id) DO UPDATE SET
+            report_event_id = EXCLUDED.report_event_id
+        RETURNING id
+        "#,
+    )
+    .bind(community.as_uuid())
+    .bind(report.report_event_id)
+    .bind(report.reporter_pubkey)
+    .bind(target_kind)
+    .bind(target_event_id)
+    .bind(target_pubkey)
+    .bind(target_blob_sha256)
+    .bind(report.channel_id)
+    .bind(report.report_type)
+    .bind(report.note)
+    .fetch_one(&mut **transaction)
+    .await?;
+
+    Ok(row.try_get("id")?)
+}
+
 /// List reports for the moderation queue, newest first.
 /// `status = None` lists all; `Some("open")` etc. filters.
 pub async fn list_reports(
@@ -233,6 +276,32 @@ pub async fn list_reports(
     .fetch_all(pool)
     .await?;
 
+    rows.into_iter().map(row_to_report).collect()
+}
+
+/// List reports inside a caller-owned authorization transaction.
+pub async fn list_reports_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    status: Option<&str>,
+    limit: i64,
+) -> Result<Vec<ReportRecord>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT id, report_event_id, reporter_pubkey, target_kind, target_event_id,
+               target_pubkey, target_blob_sha256, channel_id, report_type, note,
+               status, resolved_by, resolved_at, action_id, created_at
+        FROM moderation_reports
+        WHERE community_id = $1 AND ($2::text IS NULL OR status = $2)
+        ORDER BY created_at DESC
+        LIMIT $3
+        "#,
+    )
+    .bind(community.as_uuid())
+    .bind(status)
+    .bind(limit)
+    .fetch_all(&mut **transaction)
+    .await?;
     rows.into_iter().map(row_to_report).collect()
 }
 
@@ -282,6 +351,31 @@ pub async fn get_report_by_event(
     row.map(row_to_report).transpose()
 }
 
+/// Lock and fetch a report by signed event id inside a caller-owned
+/// transaction.
+pub async fn get_report_by_event_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    report_event_id: &[u8],
+) -> Result<Option<ReportRecord>> {
+    let row = sqlx::query(
+        r#"
+        SELECT id, report_event_id, reporter_pubkey, target_kind, target_event_id,
+               target_pubkey, target_blob_sha256, channel_id, report_type, note,
+               status, resolved_by, resolved_at, action_id, created_at
+        FROM moderation_reports
+        WHERE community_id = $1 AND report_event_id = $2
+        FOR UPDATE
+        "#,
+    )
+    .bind(community.as_uuid())
+    .bind(report_event_id)
+    .fetch_optional(&mut **transaction)
+    .await?;
+
+    row.map(row_to_report).transpose()
+}
+
 /// Mark a report resolved/dismissed/escalated, linking the audit action.
 /// Returns `false` if the report was not found or already closed.
 pub async fn resolve_report(
@@ -305,6 +399,33 @@ pub async fn resolve_report(
     .bind(resolved_by)
     .bind(action_id)
     .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected() > 0)
+}
+
+/// Resolve a report inside a caller-owned transaction.
+pub async fn resolve_report_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    report_id: Uuid,
+    status: &str,
+    resolved_by: &[u8],
+    action_id: Option<Uuid>,
+) -> Result<bool> {
+    let result = sqlx::query(
+        r#"
+        UPDATE moderation_reports
+        SET status = $3, resolved_by = $4, resolved_at = now(), action_id = $5
+        WHERE community_id = $1 AND id = $2 AND status = 'open'
+        "#,
+    )
+    .bind(community.as_uuid())
+    .bind(report_id)
+    .bind(status)
+    .bind(resolved_by)
+    .bind(action_id)
+    .execute(&mut **transaction)
     .await?;
 
     Ok(result.rows_affected() > 0)
@@ -343,6 +464,38 @@ pub async fn ban_member(
     Ok(())
 }
 
+/// Upsert a ban inside a caller-owned transaction.
+pub async fn ban_member_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    pubkey: &[u8],
+    actor: &[u8],
+    reason: Option<&str>,
+    expires_at: Option<DateTime<Utc>>,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO community_bans (
+            community_id, pubkey, banned, ban_expires_at, ban_reason, actor_pubkey
+        ) VALUES ($1, $2, true, $3, $4, $5)
+        ON CONFLICT (community_id, pubkey) DO UPDATE SET
+            banned = true,
+            ban_expires_at = EXCLUDED.ban_expires_at,
+            ban_reason = EXCLUDED.ban_reason,
+            actor_pubkey = EXCLUDED.actor_pubkey,
+            updated_at = now()
+        "#,
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .bind(expires_at)
+    .bind(reason)
+    .bind(actor)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
 /// Lift a ban. Returns `false` if the member was not banned.
 pub async fn unban_member(
     pool: &PgPool,
@@ -364,6 +517,29 @@ pub async fn unban_member(
     .execute(pool)
     .await?;
 
+    Ok(result.rows_affected() > 0)
+}
+
+/// Lift a ban inside a caller-owned transaction.
+pub async fn unban_member_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    pubkey: &[u8],
+    actor: &[u8],
+) -> Result<bool> {
+    let result = sqlx::query(
+        r#"
+        UPDATE community_bans
+        SET banned = false, ban_expires_at = NULL, ban_reason = NULL,
+            actor_pubkey = $3, updated_at = now()
+        WHERE community_id = $1 AND pubkey = $2 AND banned = true
+        "#,
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .bind(actor)
+    .execute(&mut **transaction)
+    .await?;
     Ok(result.rows_affected() > 0)
 }
 
@@ -399,6 +575,37 @@ pub async fn timeout_member(
     Ok(())
 }
 
+/// Upsert a timeout inside a caller-owned transaction.
+pub async fn timeout_member_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    pubkey: &[u8],
+    actor: &[u8],
+    muted_until: DateTime<Utc>,
+    reason: Option<&str>,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO community_bans (
+            community_id, pubkey, muted_until, mute_reason, actor_pubkey
+        ) VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (community_id, pubkey) DO UPDATE SET
+            muted_until = EXCLUDED.muted_until,
+            mute_reason = EXCLUDED.mute_reason,
+            actor_pubkey = EXCLUDED.actor_pubkey,
+            updated_at = now()
+        "#,
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .bind(muted_until)
+    .bind(reason)
+    .bind(actor)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
 /// Clear a timeout early. Returns `false` if the member was not timed out.
 pub async fn untimeout_member(
     pool: &PgPool,
@@ -420,6 +627,29 @@ pub async fn untimeout_member(
     .execute(pool)
     .await?;
 
+    Ok(result.rows_affected() > 0)
+}
+
+/// Clear a timeout inside a caller-owned transaction.
+pub async fn untimeout_member_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    pubkey: &[u8],
+    actor: &[u8],
+) -> Result<bool> {
+    let result = sqlx::query(
+        r#"
+        UPDATE community_bans
+        SET muted_until = NULL, mute_reason = NULL,
+            actor_pubkey = $3, updated_at = now()
+        WHERE community_id = $1 AND pubkey = $2 AND muted_until > now()
+        "#,
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .bind(actor)
+    .execute(&mut **transaction)
+    .await?;
     Ok(result.rows_affected() > 0)
 }
 
@@ -457,6 +687,36 @@ pub async fn restriction_state(
     .fetch_optional(pool)
     .await?;
 
+    match row {
+        Some(row) => Ok(RestrictionState {
+            banned: row.try_get("banned")?,
+            muted_until: row.try_get("muted_until")?,
+        }),
+        None => Ok(RestrictionState::default()),
+    }
+}
+
+/// Fetch and share-lock the current restriction state inside a caller-owned
+/// authorization transaction.
+pub async fn restriction_state_tx(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    community: CommunityId,
+    pubkey: &[u8],
+) -> Result<RestrictionState> {
+    let row = sqlx::query(
+        r#"
+        SELECT
+            (banned AND (ban_expires_at IS NULL OR ban_expires_at > now())) AS banned,
+            CASE WHEN muted_until > now() THEN muted_until ELSE NULL END AS muted_until
+        FROM community_bans
+        WHERE community_id = $1 AND pubkey = $2
+        FOR SHARE
+        "#,
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .fetch_optional(&mut **transaction)
+    .await?;
     match row {
         Some(row) => Ok(RestrictionState {
             banned: row.try_get("banned")?,
@@ -514,6 +774,32 @@ pub async fn list_restricted(pool: &PgPool, community: CommunityId) -> Result<Ve
     rows.into_iter().map(row_to_ban).collect()
 }
 
+/// List active restrictions inside a caller-owned authorization transaction.
+pub async fn list_restricted_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+) -> Result<Vec<BanRecord>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT pubkey,
+               (banned AND (ban_expires_at IS NULL OR ban_expires_at > now())) AS banned,
+               ban_expires_at, ban_reason, muted_until,
+               mute_reason, actor_pubkey, updated_at
+        FROM community_bans
+        WHERE community_id = $1
+          AND (
+              (banned AND (ban_expires_at IS NULL OR ban_expires_at > now()))
+              OR muted_until > now()
+          )
+        ORDER BY updated_at DESC
+        "#,
+    )
+    .bind(community.as_uuid())
+    .fetch_all(&mut **transaction)
+    .await?;
+    rows.into_iter().map(row_to_ban).collect()
+}
+
 /// Insert a moderation audit row, returning its id.
 pub async fn insert_action(
     pool: &PgPool,
@@ -545,6 +831,36 @@ pub async fn insert_action(
     Ok(row.try_get("id")?)
 }
 
+/// Insert a moderation audit row inside a caller-owned transaction.
+pub async fn insert_action_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    action: NewAction<'_>,
+) -> Result<Uuid> {
+    let row = sqlx::query(
+        r#"
+        INSERT INTO moderation_actions (
+            community_id, actor_pubkey, action, target_pubkey, target_event_id,
+            channel_id, reason_code, public_reason, private_reason, matched_principal
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        RETURNING id
+        "#,
+    )
+    .bind(community.as_uuid())
+    .bind(action.actor_pubkey)
+    .bind(action.action)
+    .bind(action.target_pubkey)
+    .bind(action.target_event_id)
+    .bind(action.channel_id)
+    .bind(action.reason_code)
+    .bind(action.public_reason)
+    .bind(action.private_reason)
+    .bind(action.matched_principal)
+    .fetch_one(&mut **transaction)
+    .await?;
+    Ok(row.try_get("id")?)
+}
+
 /// List audit rows, newest first (`buzz moderation audit`).
 pub async fn list_actions(
     pool: &PgPool,
@@ -566,6 +882,29 @@ pub async fn list_actions(
     .fetch_all(pool)
     .await?;
 
+    rows.into_iter().map(row_to_action).collect()
+}
+
+/// List audit rows inside a caller-owned authorization transaction.
+pub async fn list_actions_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    limit: i64,
+) -> Result<Vec<ActionRecord>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT id, actor_pubkey, action, target_pubkey, target_event_id, channel_id,
+               reason_code, public_reason, private_reason, matched_principal, created_at
+        FROM moderation_actions
+        WHERE community_id = $1
+        ORDER BY created_at DESC
+        LIMIT $2
+        "#,
+    )
+    .bind(community.as_uuid())
+    .bind(limit)
+    .fetch_all(&mut **transaction)
+    .await?;
     rows.into_iter().map(row_to_action).collect()
 }
 

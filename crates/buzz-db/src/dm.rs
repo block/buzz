@@ -5,7 +5,7 @@
 
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 use crate::channel::ChannelRecord;
@@ -387,6 +387,164 @@ pub async fn open_dm(
     Ok((channel, true))
 }
 
+/// Open or retrieve a DM inside a caller-owned authorization transaction.
+/// The participant-set advisory lock serializes first creation, and every
+/// channel/member change commits with the caller's operation receipt.
+pub async fn open_dm_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    pubkeys: &[&[u8]],
+    created_by: &[u8],
+) -> Result<(ChannelRecord, bool)> {
+    let mut all: Vec<&[u8]> = pubkeys.to_vec();
+    if !all.contains(&created_by) {
+        all.push(created_by);
+    }
+    all.sort_unstable();
+    all.dedup();
+    if !(2..=9).contains(&all.len()) || all.iter().any(|pubkey| pubkey.len() != 32) {
+        return Err(DbError::InvalidData(
+            "DM requires 2-9 valid participant pubkeys".to_string(),
+        ));
+    }
+    let hash = compute_participant_hash(&all);
+    let lock_key = i64::from_be_bytes(hash[..8].try_into().expect("eight-byte digest prefix"));
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(lock_key)
+        .execute(&mut **tx)
+        .await?;
+
+    let existing = sqlx::query(
+        r#"
+        SELECT id, name, channel_type::text AS channel_type, visibility::text AS visibility,
+               description, canvas, created_by, created_at, updated_at, archived_at,
+               deleted_at, nip29_group_id, topic_required, max_members, topic,
+               topic_set_by, topic_set_at, purpose, purpose_set_by, purpose_set_at
+        FROM channels
+        WHERE community_id = $1 AND participant_hash = $2
+          AND channel_type = 'dm' AND deleted_at IS NULL
+        LIMIT 1 FOR SHARE
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(hash.as_slice())
+    .fetch_optional(&mut **tx)
+    .await?;
+    if let Some(row) = existing {
+        let channel = row_to_channel_record(row)?;
+        sqlx::query(
+            "UPDATE channel_members SET hidden_at = NULL \
+             WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3 \
+               AND removed_at IS NULL",
+        )
+        .bind(community_id.as_uuid())
+        .bind(channel.id)
+        .bind(created_by)
+        .execute(&mut **tx)
+        .await?;
+        return Ok((channel, false));
+    }
+
+    let id = Uuid::new_v4();
+    let name = if all.len() == 2 {
+        "DM".to_string()
+    } else {
+        format!("Group DM ({})", all.len())
+    };
+    sqlx::query(
+        "INSERT INTO channels \
+         (id, community_id, name, channel_type, visibility, created_by, participant_hash) \
+         VALUES ($1, $2, $3, 'dm', 'private', $4, $5)",
+    )
+    .bind(id)
+    .bind(community_id.as_uuid())
+    .bind(name)
+    .bind(created_by)
+    .bind(hash.as_slice())
+    .execute(&mut **tx)
+    .await?;
+    for pubkey in &all {
+        sqlx::query(
+            "INSERT INTO channel_members \
+             (community_id, channel_id, pubkey, role, invited_by) \
+             VALUES ($1, $2, $3, 'member', $4) \
+             ON CONFLICT (community_id, channel_id, pubkey) DO UPDATE SET \
+               removed_at = NULL, removed_by = NULL, role = EXCLUDED.role",
+        )
+        .bind(community_id.as_uuid())
+        .bind(id)
+        .bind(*pubkey)
+        .bind(created_by)
+        .execute(&mut **tx)
+        .await?;
+    }
+    let row = sqlx::query(
+        r#"
+        SELECT id, name, channel_type::text AS channel_type, visibility::text AS visibility,
+               description, canvas, created_by, created_at, updated_at, archived_at,
+               deleted_at, nip29_group_id, topic_required, max_members, topic,
+               topic_set_by, topic_set_at, purpose, purpose_set_by, purpose_set_at
+        FROM channels WHERE community_id = $1 AND id = $2
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(id)
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok((row_to_channel_record(row)?, true))
+}
+
+/// Read and lock a source DM's active participant set, require the actor to be
+/// an active member, then open the expanded immutable participant set inside
+/// the same transaction.
+pub async fn expand_dm_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    source_channel_id: Uuid,
+    additions: &[Vec<u8>],
+    actor: &[u8],
+) -> Result<(ChannelRecord, bool, Vec<Vec<u8>>)> {
+    let channel_type = sqlx::query_scalar::<_, String>(
+        "SELECT channel_type::text FROM channels \
+         WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL FOR SHARE",
+    )
+    .bind(community_id.as_uuid())
+    .bind(source_channel_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| DbError::NotFound(format!("DM {source_channel_id}")))?;
+    if channel_type != "dm" {
+        return Err(DbError::AccessDenied("channel is not a DM".into()));
+    }
+    let mut participants = sqlx::query_scalar::<_, Vec<u8>>(
+        "SELECT pubkey FROM channel_members \
+         WHERE community_id = $1 AND channel_id = $2 AND removed_at IS NULL FOR SHARE",
+    )
+    .bind(community_id.as_uuid())
+    .bind(source_channel_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    if !participants.iter().any(|pubkey| pubkey == actor) {
+        return Err(DbError::AccessDenied("actor is not a DM member".into()));
+    }
+    for pubkey in additions {
+        if pubkey.len() != 32 {
+            return Err(DbError::InvalidData("invalid DM participant pubkey".into()));
+        }
+        if !participants.contains(pubkey) {
+            participants.push(pubkey.clone());
+        }
+    }
+    if participants.len() > 9 {
+        return Err(DbError::InvalidData(
+            "DM supports at most 9 participants".into(),
+        ));
+    }
+    let refs = participants.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    let (channel, created) = open_dm_tx(tx, community_id, &refs, actor).await?;
+    Ok((channel, created, participants))
+}
+
 // -- Hide / unhide ------------------------------------------------------------
 
 /// Hide a DM for a specific user by setting `hidden_at = NOW()`.
@@ -419,6 +577,36 @@ pub async fn hide_dm(
         )));
     }
 
+    Ok(())
+}
+
+/// Hide a DM inside a caller-owned authorization transaction. The joined
+/// channel predicate makes the active membership and DM type part of the
+/// authoritative update rather than an adjacent preflight.
+pub async fn hide_dm_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    pubkey: &[u8],
+) -> Result<()> {
+    let result = sqlx::query(
+        "UPDATE channel_members AS cm SET hidden_at = NOW() \
+         FROM channels AS c \
+         WHERE cm.community_id = $1 AND cm.channel_id = $2 AND cm.pubkey = $3 \
+           AND cm.removed_at IS NULL \
+           AND c.community_id = cm.community_id AND c.id = cm.channel_id \
+           AND c.channel_type = 'dm' AND c.deleted_at IS NULL",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .bind(pubkey)
+    .execute(&mut **tx)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(DbError::AccessDenied(
+            "actor is not an active DM member".into(),
+        ));
+    }
     Ok(())
 }
 

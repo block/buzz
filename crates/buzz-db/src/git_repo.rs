@@ -16,10 +16,11 @@
 //! idempotent re-announce (same owner) from a collision (different owner), and
 //! backs the per-pubkey quota via `COUNT`.
 
-use sqlx::{PgPool, Row as _};
+use nostr::Event;
+use sqlx::{PgPool, Postgres, Row as _, Transaction};
 
 use crate::error::Result;
-use crate::CommunityId;
+use crate::{CommunityId, DbError, StoredEvent};
 
 /// Outcome of a name-reservation attempt.
 ///
@@ -155,6 +156,25 @@ pub async fn count_repos_for_owner(
     row.try_get("n").map_err(crate::error::DbError::from)
 }
 
+/// Return the immutable publication origin for an existing reservation.
+pub async fn repo_publication_origin(
+    pool: &PgPool,
+    community: CommunityId,
+    repo_id: &str,
+    owner_pubkey: &str,
+) -> Result<Option<String>> {
+    sqlx::query_scalar(
+        "SELECT publication_origin FROM git_repo_names \
+         WHERE community_id = $1 AND repo_id = $2 AND owner_pubkey = $3",
+    )
+    .bind(community.as_uuid())
+    .bind(repo_id)
+    .bind(owner_pubkey)
+    .fetch_optional(pool)
+    .await
+    .map_err(Into::into)
+}
+
 /// Release a reservation held by `owner_pubkey` (rollback path).
 ///
 /// Used only when seeding the manifest pointer fails *after* a fresh
@@ -179,9 +199,127 @@ pub async fn release_repo_name(
     Ok(result.rows_affected())
 }
 
+/// Atomically replace a protected repository announcement and reserve its
+/// tenant-local name inside the caller-owned authorization transaction.
+///
+/// The owner-scoped advisory lock makes the quota exact across concurrent new
+/// names, while the coordinate lock preserves NIP-33 timestamp/id ordering.
+/// Re-announcing an existing same-owner name is idempotent and does not consume
+/// quota. A different owner can never claim an already-reserved name.
+pub async fn replace_protected_announcement_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    event: &Event,
+    repo_id: &str,
+    max_repos_per_owner: i64,
+) -> Result<(StoredEvent, bool)> {
+    if max_repos_per_owner <= 0 {
+        return Err(DbError::InvalidData(
+            "repository quota must be positive".into(),
+        ));
+    }
+    let owner = hex::encode(event.pubkey.to_bytes());
+    let coordinate_lock = format!(
+        "git-announcement:{}:{}:{}",
+        community.as_uuid(),
+        owner,
+        repo_id
+    );
+    let name_lock = format!("git-name:{}:{}", community.as_uuid(), repo_id);
+    let quota_lock = format!("git-owner-quota:{}:{}", community.as_uuid(), owner);
+    for lock in [&name_lock, &coordinate_lock, &quota_lock] {
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(lock)
+            .execute(&mut **transaction)
+            .await?;
+    }
+
+    let created_at_seconds = event.created_at.as_secs() as i64;
+    let created_at = chrono::DateTime::from_timestamp(created_at_seconds, 0)
+        .ok_or(DbError::InvalidTimestamp(created_at_seconds))?;
+    let event_id = event.id.as_bytes().as_slice();
+    let existing: Option<(chrono::DateTime<chrono::Utc>, Vec<u8>)> = sqlx::query_as(
+        "SELECT created_at, id FROM events \
+         WHERE community_id = $1 AND kind = 30617 AND pubkey = $2 \
+           AND d_tag = $3 AND deleted_at IS NULL \
+         ORDER BY created_at DESC, id ASC LIMIT 1 FOR UPDATE",
+    )
+    .bind(community.as_uuid())
+    .bind(event.pubkey.to_bytes().as_slice())
+    .bind(repo_id)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    if existing.as_ref().is_some_and(|(accepted_at, accepted_id)| {
+        created_at < *accepted_at
+            || (created_at == *accepted_at && event_id >= accepted_id.as_slice())
+    }) {
+        return Ok((
+            StoredEvent::with_received_at(event.clone(), chrono::Utc::now(), None, false),
+            false,
+        ));
+    }
+
+    let holder: Option<String> = sqlx::query_scalar(
+        "SELECT owner_pubkey FROM git_repo_names \
+         WHERE community_id = $1 AND repo_id = $2 FOR UPDATE",
+    )
+    .bind(community.as_uuid())
+    .bind(repo_id)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    match holder.as_deref() {
+        Some(holder) if holder != owner => {
+            return Err(DbError::InvalidData(
+                "repository name is already reserved".into(),
+            ));
+        }
+        Some(_) => {}
+        None => {
+            let count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM git_repo_names \
+                 WHERE community_id = $1 AND owner_pubkey = $2",
+            )
+            .bind(community.as_uuid())
+            .bind(&owner)
+            .fetch_one(&mut **transaction)
+            .await?;
+            if count >= max_repos_per_owner {
+                return Err(DbError::InvalidData("repository quota exceeded".into()));
+            }
+            sqlx::query(
+                "INSERT INTO git_repo_names \
+                 (community_id, repo_id, owner_pubkey, publication_origin) \
+                 VALUES ($1, $2, $3, 'protected_unpublished')",
+            )
+            .bind(community.as_uuid())
+            .bind(repo_id)
+            .bind(&owner)
+            .execute(&mut **transaction)
+            .await?;
+        }
+    }
+
+    if existing.is_some() {
+        sqlx::query(
+            "UPDATE events SET deleted_at = clock_timestamp() \
+             WHERE community_id = $1 AND kind = 30617 AND pubkey = $2 \
+               AND d_tag = $3 AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(event.pubkey.to_bytes().as_slice())
+        .bind(repo_id)
+        .execute(&mut **transaction)
+        .await?;
+    }
+
+    crate::event::insert_event_with_thread_metadata_tx(transaction, community, event, None, None)
+        .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use uuid::Uuid;
 
     const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
@@ -209,6 +347,110 @@ mod tests {
 
     fn pk() -> String {
         format!("{:064x}", Uuid::new_v4().as_u128())
+    }
+
+    fn announcement(keys: &Keys, repo: &str, created_at: u64) -> Event {
+        EventBuilder::new(Kind::Custom(30_617), "")
+            .tags([Tag::parse(["d", repo]).expect("d tag")])
+            .custom_created_at(Timestamp::from(created_at))
+            .sign_with_keys(keys)
+            .expect("signed announcement")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn protected_announcement_replaces_and_reserves_in_one_transaction() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let owner = Keys::generate();
+        let repo = format!("repo-{}", Uuid::new_v4().simple());
+        let first = announcement(&owner, &repo, 1_800_000_000);
+        let second = announcement(&owner, &repo, 1_800_000_001);
+
+        let mut first_tx = pool.begin().await.expect("first transaction");
+        let (_, inserted) =
+            replace_protected_announcement_tx(&mut first_tx, community, &first, &repo, 10)
+                .await
+                .expect("first announcement");
+        assert!(inserted);
+        first_tx.commit().await.expect("commit first");
+
+        let mut second_tx = pool.begin().await.expect("second transaction");
+        let (_, inserted) =
+            replace_protected_announcement_tx(&mut second_tx, community, &second, &repo, 10)
+                .await
+                .expect("replacement announcement");
+        assert!(inserted);
+        second_tx.commit().await.expect("commit replacement");
+
+        assert_eq!(
+            repo_name_owner(&pool, community, &repo)
+                .await
+                .expect("registered owner"),
+            Some(owner.public_key().to_hex())
+        );
+        let live: Vec<Vec<u8>> = sqlx::query_scalar(
+            "SELECT id FROM events WHERE community_id = $1 AND kind = 30617 \
+             AND pubkey = $2 AND d_tag = $3 AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(owner.public_key().to_bytes().as_slice())
+        .bind(&repo)
+        .fetch_all(&pool)
+        .await
+        .expect("live announcements");
+        assert_eq!(live, vec![second.id.as_bytes().to_vec()]);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn protected_announcement_quota_is_exact_under_concurrency() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let owner = Keys::generate();
+        let first_repo = format!("repo-a-{}", Uuid::new_v4().simple());
+        let second_repo = format!("repo-b-{}", Uuid::new_v4().simple());
+        let first = announcement(&owner, &first_repo, 1_800_000_000);
+        let second = announcement(&owner, &second_repo, 1_800_000_000);
+
+        let first_attempt = async {
+            let mut transaction = pool.begin().await.expect("first transaction");
+            let result = replace_protected_announcement_tx(
+                &mut transaction,
+                community,
+                &first,
+                &first_repo,
+                1,
+            )
+            .await;
+            if result.is_ok() {
+                transaction.commit().await.expect("first commit");
+            }
+            result
+        };
+        let second_attempt = async {
+            let mut transaction = pool.begin().await.expect("second transaction");
+            let result = replace_protected_announcement_tx(
+                &mut transaction,
+                community,
+                &second,
+                &second_repo,
+                1,
+            )
+            .await;
+            if result.is_ok() {
+                transaction.commit().await.expect("second commit");
+            }
+            result
+        };
+        let (first_result, second_result) = tokio::join!(first_attempt, second_attempt);
+        assert_ne!(first_result.is_ok(), second_result.is_ok());
+        assert_eq!(
+            count_repos_for_owner(&pool, community, &owner.public_key().to_hex())
+                .await
+                .expect("quota count"),
+            1
+        );
     }
 
     /// A fresh name is `Reserved`; re-announcing it as the *same* owner is

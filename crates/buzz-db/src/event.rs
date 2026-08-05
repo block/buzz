@@ -329,6 +329,34 @@ pub async fn query_events(pool: &PgPool, q: &EventQuery) -> Result<Vec<StoredEve
     query_events_on(&mut conn, q).await
 }
 
+/// Query events on a caller-owned transaction so authorization-relevant event
+/// state can be read and retained through the protected commit boundary.
+pub async fn query_events_tx(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    q: &EventQuery,
+) -> Result<Vec<StoredEvent>> {
+    query_events_on(transaction, q).await
+}
+
+/// Share-lock a live event through the caller's commit boundary. Callers that
+/// first resolve an authorization-bearing event must use this before trusting
+/// its contents so replacement or deletion cannot race the protected effect.
+pub async fn lock_live_event_tx(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    community_id: CommunityId,
+    event_id: &[u8],
+) -> Result<bool> {
+    Ok(sqlx::query(
+        "SELECT 1 FROM events \
+         WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL FOR SHARE",
+    )
+    .bind(community_id.as_uuid())
+    .bind(event_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .is_some())
+}
+
 /// [`query_events`] on a specific session — the replica-routing path runs
 /// follow-up (aux) queries on the exact reader connection whose heartbeat
 /// observation proved coverage for the page they annotate.
@@ -980,6 +1008,30 @@ pub async fn get_event_by_id(
     }
 }
 
+/// Fetch and share-lock one non-deleted event inside a caller-owned
+/// transaction. The lock keeps deletion or replacement from changing the edit
+/// target after ownership is validated and before the edit commits.
+pub async fn get_event_by_id_tx(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    community_id: CommunityId,
+    id_bytes: &[u8],
+) -> Result<Option<StoredEvent>> {
+    let row = sqlx::query(
+        "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id \
+         FROM events WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL \
+         ORDER BY created_at DESC LIMIT 1 FOR SHARE",
+    )
+    .bind(community_id.as_uuid())
+    .bind(id_bytes)
+    .fetch_optional(&mut **transaction)
+    .await?;
+
+    match row {
+        Some(r) => row_to_stored_event(r),
+        None => Ok(None),
+    }
+}
+
 /// Fetches the latest global (non-channel, `channel_id IS NULL`) replaceable event
 /// for a (kind, pubkey) pair.
 ///
@@ -1111,7 +1163,11 @@ pub struct ThreadMetadataParams<'a> {
     pub broadcast: bool,
 }
 
-async fn insert_event_with_thread_metadata_tx(
+/// Insert an event and optional thread metadata in a caller-owned transaction.
+///
+/// Protected callers use this to commit the event, thread counters, and
+/// authorization receipt at one PostgreSQL boundary.
+pub async fn insert_event_with_thread_metadata_tx(
     tx: &mut Transaction<'_, Postgres>,
     community_id: CommunityId,
     event: &Event,
@@ -1280,6 +1336,585 @@ async fn insert_event_with_thread_metadata_tx(
     ))
 }
 
+/// Replace one NIP-16 addressable event inside a caller-owned transaction.
+pub async fn replace_addressable_event_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    event: &Event,
+    channel_id: Option<Uuid>,
+) -> Result<(StoredEvent, bool)> {
+    let kind = event_kind_i32(event);
+    let pubkey = event.pubkey.to_bytes();
+    let created_at_secs = event.created_at.as_secs() as i64;
+    let created_at = DateTime::from_timestamp(created_at_secs, 0)
+        .ok_or(DbError::InvalidTimestamp(created_at_secs))?;
+    let lock_key = crate::event_replacement_lock_key(
+        community_id,
+        kind,
+        pubkey.as_slice(),
+        channel_id.as_ref().map(|id| id.as_bytes().as_slice()),
+    );
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(lock_key)
+        .execute(&mut **tx)
+        .await?;
+    let received_at = Utc::now();
+    if sqlx::query_scalar::<_, i32>("SELECT 1 FROM events WHERE community_id = $1 AND id = $2")
+        .bind(community_id.as_uuid())
+        .bind(event.id.as_bytes().as_slice())
+        .fetch_optional(&mut **tx)
+        .await?
+        .is_some()
+    {
+        return Ok((
+            StoredEvent::with_received_at(event.clone(), received_at, channel_id, false),
+            false,
+        ));
+    }
+    let existing: Option<(DateTime<Utc>, Vec<u8>)> = sqlx::query_as(
+        "SELECT created_at, id FROM events WHERE community_id = $1 AND kind = $2 \
+         AND pubkey = $3 AND channel_id IS NOT DISTINCT FROM $4 AND deleted_at IS NULL \
+         ORDER BY created_at DESC, id ASC LIMIT 1",
+    )
+    .bind(community_id.as_uuid())
+    .bind(kind)
+    .bind(pubkey.as_slice())
+    .bind(channel_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if existing.as_ref().is_some_and(|(accepted_at, accepted_id)| {
+        created_at < *accepted_at
+            || (created_at == *accepted_at
+                && event.id.as_bytes().as_slice() >= accepted_id.as_slice())
+    }) {
+        return Ok((
+            StoredEvent::with_received_at(event.clone(), received_at, channel_id, false),
+            false,
+        ));
+    }
+    sqlx::query(
+        "UPDATE events SET deleted_at = NOW() WHERE community_id = $1 AND kind = $2 \
+         AND pubkey = $3 AND channel_id IS NOT DISTINCT FROM $4 AND deleted_at IS NULL",
+    )
+    .bind(community_id.as_uuid())
+    .bind(kind)
+    .bind(pubkey.as_slice())
+    .bind(channel_id)
+    .execute(&mut **tx)
+    .await?;
+    let result =
+        insert_event_with_thread_metadata_tx(tx, community_id, event, channel_id, None).await?;
+    if !result.1 && existing.is_some() {
+        return Err(DbError::InvalidData(
+            "replacement insert conflicted after retiring the prior event".into(),
+        ));
+    }
+    Ok(result)
+}
+
+/// Replace one NIP-33 parameterized event inside a caller-owned transaction.
+pub async fn replace_parameterized_event_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    event: &Event,
+    d_tag: &str,
+    channel_id: Option<Uuid>,
+) -> Result<(StoredEvent, bool)> {
+    let kind = event_kind_i32(event);
+    let pubkey = event.pubkey.to_bytes();
+    let created_at_secs = event.created_at.as_secs() as i64;
+    let created_at = DateTime::from_timestamp(created_at_secs, 0)
+        .ok_or(DbError::InvalidTimestamp(created_at_secs))?;
+    let lock_key = crate::event_replacement_lock_key(
+        community_id,
+        kind,
+        pubkey.as_slice(),
+        Some(d_tag.as_bytes()),
+    );
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(lock_key)
+        .execute(&mut **tx)
+        .await?;
+    let received_at = Utc::now();
+    if sqlx::query_scalar::<_, i32>("SELECT 1 FROM events WHERE community_id = $1 AND id = $2")
+        .bind(community_id.as_uuid())
+        .bind(event.id.as_bytes().as_slice())
+        .fetch_optional(&mut **tx)
+        .await?
+        .is_some()
+    {
+        return Ok((
+            StoredEvent::with_received_at(event.clone(), received_at, channel_id, false),
+            false,
+        ));
+    }
+    let d_tag_count = event
+        .tags
+        .iter()
+        .filter(|tag| tag.as_slice().first().is_some_and(|part| part == "d"))
+        .count();
+    let has_exact_d_tag = event.tags.iter().any(|tag| {
+        let parts = tag.as_slice();
+        parts.len() >= 2 && parts[0] == "d" && parts[1] == d_tag
+    });
+    let read_state_t_tag_count = event
+        .tags
+        .iter()
+        .filter(|tag| {
+            let parts = tag.as_slice();
+            parts.len() == 2 && parts[0] == "t" && parts[1] == "read-state"
+        })
+        .count();
+    let is_nip_rs = kind == buzz_core::kind::KIND_READ_STATE as i32
+        && d_tag_count == 1
+        && has_exact_d_tag
+        && d_tag.strip_prefix("read-state:").is_some_and(|slot| {
+            slot.len() == 32
+                && slot
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        })
+        && read_state_t_tag_count == 1;
+    let is_buzz_mesh_status = kind == buzz_core::kind::KIND_BOOKMARK_SET as i32
+        && d_tag.starts_with("buzz-mesh-member-status:")
+        && event.tags.iter().any(|tag| {
+            let parts = tag.as_slice();
+            parts.len() == 2 && parts[0] == "k" && parts[1] == "buzz-mesh-status"
+        });
+    let hard_delete_superseded = is_nip_rs || is_buzz_mesh_status;
+    let existing: Option<(DateTime<Utc>, Vec<u8>)> = sqlx::query_as(
+        "SELECT created_at, id FROM events WHERE community_id = $1 AND kind = $2 \
+         AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL \
+         ORDER BY created_at DESC, id ASC LIMIT 1",
+    )
+    .bind(community_id.as_uuid())
+    .bind(kind)
+    .bind(pubkey.as_slice())
+    .bind(d_tag)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let watermark: Option<(DateTime<Utc>, Vec<u8>)> = if is_nip_rs {
+        sqlx::query_as(
+            "SELECT created_at, event_id FROM parameterized_event_watermarks \
+             WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4",
+        )
+        .bind(community_id.as_uuid())
+        .bind(kind)
+        .bind(pubkey.as_slice())
+        .bind(d_tag)
+        .fetch_optional(&mut **tx)
+        .await?
+    } else {
+        None
+    };
+    let incoming_id = event.id.as_bytes().as_slice();
+    if existing
+        .iter()
+        .chain(watermark.iter())
+        .any(|(accepted_at, accepted_id)| {
+            created_at < *accepted_at
+                || (created_at == *accepted_at && incoming_id >= accepted_id.as_slice())
+        })
+    {
+        return Ok((
+            StoredEvent::with_received_at(event.clone(), received_at, channel_id, false),
+            false,
+        ));
+    }
+    if existing.is_some() {
+        if is_nip_rs {
+            sqlx::query("SELECT set_config('buzz.nip_rs_hard_delete', 'on', true)")
+                .execute(&mut **tx)
+                .await?;
+        }
+        let statement = if hard_delete_superseded {
+            "DELETE FROM events WHERE community_id = $1 AND kind = $2 \
+             AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL"
+        } else {
+            "UPDATE events SET deleted_at = NOW() WHERE community_id = $1 AND kind = $2 \
+             AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL"
+        };
+        sqlx::query(statement)
+            .bind(community_id.as_uuid())
+            .bind(kind)
+            .bind(pubkey.as_slice())
+            .bind(d_tag)
+            .execute(&mut **tx)
+            .await?;
+        if hard_delete_superseded {
+            if let Some((_, existing_id)) = &existing {
+                sqlx::query("DELETE FROM event_mentions WHERE community_id = $1 AND event_id = $2")
+                    .bind(community_id.as_uuid())
+                    .bind(existing_id)
+                    .execute(&mut **tx)
+                    .await?;
+            }
+        }
+    }
+    let sig = event.sig.serialize();
+    let tags = serde_json::to_value(&event.tags)?;
+    let inserted = sqlx::query(
+        "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, \
+         received_at, channel_id, d_tag, not_before) VALUES \
+         ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) ON CONFLICT DO NOTHING",
+    )
+    .bind(community_id.as_uuid())
+    .bind(incoming_id)
+    .bind(pubkey.as_slice())
+    .bind(created_at)
+    .bind(kind)
+    .bind(tags)
+    .bind(&event.content)
+    .bind(sig.as_slice())
+    .bind(received_at)
+    .bind(channel_id)
+    .bind(d_tag)
+    .bind(extract_not_before(event))
+    .execute(&mut **tx)
+    .await?
+    .rows_affected()
+        > 0;
+    if !inserted {
+        return Err(DbError::InvalidData(
+            "parameterized replacement insert conflicted after retiring the prior event".into(),
+        ));
+    }
+    if is_nip_rs {
+        sqlx::query(
+            "INSERT INTO parameterized_event_watermarks \
+             (community_id, kind, pubkey, d_tag, created_at, event_id) \
+             VALUES ($1, $2, $3, $4, $5, $6) \
+             ON CONFLICT (community_id, kind, pubkey, d_tag) DO UPDATE SET \
+             created_at = EXCLUDED.created_at, event_id = EXCLUDED.event_id",
+        )
+        .bind(community_id.as_uuid())
+        .bind(kind)
+        .bind(pubkey.as_slice())
+        .bind(d_tag)
+        .bind(created_at)
+        .bind(incoming_id)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok((
+        StoredEvent::with_received_at(event.clone(), received_at, channel_id, true),
+        true,
+    ))
+}
+
+/// Apply the durable projection of a validated NIP-09 deletion inside the same
+/// authorization transaction that stores the deletion event.
+pub async fn apply_standard_deletion_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    event: &Event,
+    actor: &[u8],
+    relay_pubkey: &[u8],
+) -> Result<()> {
+    let targets = event
+        .tags
+        .iter()
+        .filter_map(|tag| {
+            let parts = tag.as_slice();
+            (parts.len() >= 2 && parts[0] == "e")
+                .then(|| hex::decode(&parts[1]).ok())
+                .flatten()
+                .filter(|value| value.len() == 32)
+        })
+        .collect::<Vec<_>>();
+    if targets.is_empty() {
+        if let Some(coordinate) = event.tags.iter().find_map(|tag| {
+            let parts = tag.as_slice();
+            (parts.len() >= 2 && parts[0] == "a").then_some(parts[1].as_str())
+        }) {
+            let parts = coordinate.splitn(3, ':').collect::<Vec<_>>();
+            if parts.len() == 3 {
+                let kind = parts[0].parse::<u32>().ok();
+                let pubkey = hex::decode(parts[1]).ok();
+                if let (Some(kind), Some(pubkey)) = (kind, pubkey) {
+                    if pubkey.len() != 32 {
+                        return Err(DbError::InvalidData(
+                            "invalid addressable event pubkey".into(),
+                        ));
+                    }
+                    if is_parameterized_replaceable(kind)
+                        && kind != buzz_core::kind::KIND_WORKFLOW_DEF
+                        && kind != buzz_core::kind::KIND_PUSH_LEASE
+                    {
+                        let owns_target = pubkey == actor
+                            || sqlx::query_scalar::<_, bool>(
+                                "SELECT EXISTS(SELECT 1 FROM users WHERE community_id = $1 \
+                                 AND pubkey = $2 AND agent_owner_pubkey = $3)",
+                            )
+                            .bind(community_id.as_uuid())
+                            .bind(&pubkey)
+                            .bind(actor)
+                            .fetch_one(&mut **tx)
+                            .await?;
+                        if !owns_target {
+                            return Err(DbError::AccessDenied(
+                                "actor does not own the addressable event".into(),
+                            ));
+                        }
+                        sqlx::query(
+                            "UPDATE events SET deleted_at = NOW() WHERE community_id = $1 \
+                             AND kind = $2 AND pubkey = $3 AND d_tag = $4 \
+                             AND deleted_at IS NULL",
+                        )
+                        .bind(community_id.as_uuid())
+                        .bind(kind as i32)
+                        .bind(pubkey)
+                        .bind(parts[2])
+                        .execute(&mut **tx)
+                        .await?;
+                    }
+                }
+            }
+        }
+        return Ok(());
+    }
+    for target in targets {
+        let row = sqlx::query(
+            "SELECT e.kind, e.pubkey, e.tags, tm.parent_event_id, tm.root_event_id FROM events e \
+             LEFT JOIN thread_metadata tm ON tm.community_id = e.community_id \
+               AND tm.event_id = e.id AND tm.event_created_at = e.created_at \
+             WHERE e.community_id = $1 AND e.id = $2 AND e.deleted_at IS NULL \
+             ORDER BY e.created_at DESC LIMIT 1 FOR UPDATE OF e",
+        )
+        .bind(community_id.as_uuid())
+        .bind(&target)
+        .fetch_optional(&mut **tx)
+        .await?;
+        let Some(row) = row else { continue };
+        let kind: i32 = row.try_get("kind")?;
+        if kind == buzz_core::kind::KIND_PUSH_LEASE as i32 {
+            continue;
+        }
+        let stored_pubkey: Vec<u8> = row.try_get("pubkey")?;
+        let tags: serde_json::Value = row.try_get("tags")?;
+        let effective_author = if stored_pubkey == relay_pubkey {
+            tags.as_array()
+                .and_then(|tags| {
+                    tags.iter().find_map(|tag| {
+                        let tag = tag.as_array()?;
+                        (tag.first()?.as_str()? == "p")
+                            .then(|| tag.get(1)?.as_str())
+                            .flatten()
+                    })
+                })
+                .and_then(|value| hex::decode(value).ok())
+                .filter(|value| value.len() == 32)
+                .unwrap_or(stored_pubkey)
+        } else {
+            stored_pubkey
+        };
+        let owns_target = effective_author == actor
+            || sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM users WHERE community_id = $1 \
+                 AND pubkey = $2 AND agent_owner_pubkey = $3)",
+            )
+            .bind(community_id.as_uuid())
+            .bind(&effective_author)
+            .bind(actor)
+            .fetch_one(&mut **tx)
+            .await?;
+        if !owns_target {
+            return Err(DbError::AccessDenied(
+                "actor does not own the target event".into(),
+            ));
+        }
+        let parent: Option<Vec<u8>> = row.try_get("parent_event_id")?;
+        let root: Option<Vec<u8>> = row.try_get("root_event_id")?;
+        sqlx::query(
+            "UPDATE events SET deleted_at = NOW() WHERE community_id = $1 \
+             AND id = $2 AND deleted_at IS NULL",
+        )
+        .bind(community_id.as_uuid())
+        .bind(&target)
+        .execute(&mut **tx)
+        .await?;
+        if let Some(parent) = parent {
+            sqlx::query(
+                "UPDATE thread_metadata SET reply_count = GREATEST(reply_count - 1, 0) \
+                 WHERE community_id = $1 AND event_id = $2",
+            )
+            .bind(community_id.as_uuid())
+            .bind(parent)
+            .execute(&mut **tx)
+            .await?;
+        }
+        if let Some(root) = root {
+            sqlx::query(
+                "UPDATE thread_metadata SET descendant_count = GREATEST(descendant_count - 1, 0) \
+                 WHERE community_id = $1 AND event_id = $2",
+            )
+            .bind(community_id.as_uuid())
+            .bind(root)
+            .execute(&mut **tx)
+            .await?;
+        }
+        if kind == buzz_core::kind::KIND_REACTION as i32 {
+            sqlx::query(
+                "UPDATE reactions SET removed_at = NOW() WHERE community_id = $1 \
+                 AND reaction_event_id = $2 AND removed_at IS NULL",
+            )
+            .bind(community_id.as_uuid())
+            .bind(&target)
+            .execute(&mut **tx)
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+/// Apply a NIP-29 channel-admin deletion inside the caller-owned sealed
+/// authorization transaction. The target, its channel, and the actor's live
+/// role/agent relationship are revalidated from locked rows before deletion.
+pub async fn apply_nip29_delete_event_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    deletion: &Event,
+    actor: &[u8],
+    relay_pubkey: &[u8],
+    channel_id: Uuid,
+) -> Result<bool> {
+    let target = deletion
+        .tags
+        .iter()
+        .find_map(|tag| {
+            let parts = tag.as_slice();
+            (parts.len() >= 2 && parts[0] == "e")
+                .then(|| hex::decode(&parts[1]).ok())
+                .flatten()
+                .filter(|value| value.len() == 32)
+        })
+        .ok_or_else(|| DbError::InvalidData("missing deletion target".into()))?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!(
+            "buzz_channel_membership:{}:{}",
+            community_id.as_uuid(),
+            channel_id
+        ))
+        .execute(&mut **tx)
+        .await?;
+    let row = sqlx::query(
+        "SELECT e.pubkey, e.tags, e.channel_id, tm.parent_event_id, tm.root_event_id \
+         FROM events e LEFT JOIN thread_metadata tm \
+           ON tm.community_id = e.community_id AND tm.event_id = e.id \
+          AND tm.event_created_at = e.created_at \
+         WHERE e.community_id = $1 AND e.id = $2 AND e.deleted_at IS NULL \
+         ORDER BY e.created_at DESC LIMIT 1 FOR UPDATE OF e",
+    )
+    .bind(community_id.as_uuid())
+    .bind(&target)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| DbError::NotFound("target event not found".into()))?;
+    let target_channel: Option<Uuid> = row.try_get("channel_id")?;
+    if target_channel != Some(channel_id) {
+        return Err(DbError::AccessDenied(
+            "target event belongs to a different channel".into(),
+        ));
+    }
+    let channel_visibility: String = sqlx::query_scalar(
+        "SELECT visibility::text FROM channels WHERE community_id = $1 AND id = $2 \
+         AND deleted_at IS NULL FOR UPDATE",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or(DbError::ChannelNotFound(channel_id))?;
+    let stored_pubkey: Vec<u8> = row.try_get("pubkey")?;
+    let tags: serde_json::Value = row.try_get("tags")?;
+    let effective_author = if stored_pubkey == relay_pubkey {
+        tags.as_array()
+            .and_then(|tags| {
+                tags.iter().find_map(|tag| {
+                    let tag = tag.as_array()?;
+                    (tag.first()?.as_str()? == "p")
+                        .then(|| tag.get(1)?.as_str())
+                        .flatten()
+                })
+            })
+            .and_then(|value| hex::decode(value).ok())
+            .filter(|value| value.len() == 32)
+            .unwrap_or(stored_pubkey)
+    } else {
+        stored_pubkey
+    };
+    let is_author = effective_author == actor;
+    let active_member = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM channel_members WHERE community_id = $1 \
+         AND channel_id = $2 AND pubkey = $3 AND removed_at IS NULL)",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .bind(actor)
+    .fetch_one(&mut **tx)
+    .await?;
+    let author_path_allowed = is_author && (channel_visibility == "open" || active_member);
+    let elevated = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM channel_members WHERE community_id = $1 \
+         AND channel_id = $2 AND pubkey = $3 AND removed_at IS NULL \
+         AND role IN ('owner', 'admin'))",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .bind(actor)
+    .fetch_one(&mut **tx)
+    .await?;
+    let owns_author = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM users WHERE community_id = $1 AND pubkey = $2 \
+         AND agent_owner_pubkey = $3)",
+    )
+    .bind(community_id.as_uuid())
+    .bind(&effective_author)
+    .bind(actor)
+    .fetch_one(&mut **tx)
+    .await?;
+    if !author_path_allowed && !elevated && !owns_author {
+        return Err(DbError::AccessDenied(
+            "actor may not delete the target event".into(),
+        ));
+    }
+    let parent: Option<Vec<u8>> = row.try_get("parent_event_id")?;
+    let root: Option<Vec<u8>> = row.try_get("root_event_id")?;
+    let changed = sqlx::query(
+        "UPDATE events SET deleted_at = NOW() WHERE community_id = $1 \
+         AND id = $2 AND deleted_at IS NULL",
+    )
+    .bind(community_id.as_uuid())
+    .bind(&target)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected()
+        > 0;
+    if changed {
+        if let Some(parent) = parent {
+            sqlx::query(
+                "UPDATE thread_metadata SET reply_count = GREATEST(reply_count - 1, 0) \
+                 WHERE community_id = $1 AND event_id = $2",
+            )
+            .bind(community_id.as_uuid())
+            .bind(parent)
+            .execute(&mut **tx)
+            .await?;
+        }
+        if let Some(root) = root {
+            sqlx::query(
+                "UPDATE thread_metadata SET descendant_count = GREATEST(descendant_count - 1, 0) \
+                 WHERE community_id = $1 AND event_id = $2",
+            )
+            .bind(community_id.as_uuid())
+            .bind(root)
+            .execute(&mut **tx)
+            .await?;
+        }
+    }
+    Ok(changed)
+}
+
 /// Atomically insert an event and its optional thread metadata.
 ///
 /// `insert_event` and `insert_thread_metadata` calls could leave reply counters
@@ -1320,6 +1955,33 @@ pub async fn insert_reaction_event_with_thread_metadata(
 ) -> Result<ReactionEventInsertOutcome> {
     let mut tx = pool.begin().await?;
 
+    let result = insert_reaction_event_with_thread_metadata_tx(
+        &mut tx,
+        community_id,
+        reaction_event,
+        channel_id,
+        thread_meta,
+        target_event_id,
+        actor_pubkey,
+        emoji,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+/// Insert a reaction and its event inside a caller-owned authorization transaction.
+#[allow(clippy::too_many_arguments)]
+pub async fn insert_reaction_event_with_thread_metadata_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    reaction_event: &Event,
+    channel_id: Option<Uuid>,
+    thread_meta: Option<ThreadMetadataParams<'_>>,
+    target_event_id: &[u8],
+    actor_pubkey: &[u8],
+    emoji: &str,
+) -> Result<ReactionEventInsertOutcome> {
     let target_row = sqlx::query(
         "SELECT created_at FROM events \
          WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL \
@@ -1327,18 +1989,17 @@ pub async fn insert_reaction_event_with_thread_metadata(
     )
     .bind(community_id.as_uuid())
     .bind(target_event_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await?;
 
     let Some(target_row) = target_row else {
-        tx.rollback().await?;
         return Ok(ReactionEventInsertOutcome::TargetMissing);
     };
     let target_created_at: DateTime<Utc> = target_row.get("created_at");
 
     // Preserve add_reaction's exact new / re-activate / active-duplicate semantics.
     let reaction_inserted = crate::reaction::add_reaction_tx(
-        &mut tx,
+        tx,
         community_id,
         target_event_id,
         target_created_at,
@@ -1349,20 +2010,17 @@ pub async fn insert_reaction_event_with_thread_metadata(
     .await?;
 
     if !reaction_inserted {
-        tx.rollback().await?;
         return Ok(ReactionEventInsertOutcome::Duplicate);
     }
 
     let (stored_event, was_inserted) = insert_event_with_thread_metadata_tx(
-        &mut tx,
+        tx,
         community_id,
         reaction_event,
         channel_id,
         thread_meta,
     )
     .await?;
-
-    tx.commit().await?;
 
     Ok(ReactionEventInsertOutcome::Inserted {
         stored_event: Box::new(stored_event),
@@ -1405,6 +2063,16 @@ pub async fn query_due_reminders(
     now_secs: i64,
     batch_limit: i64,
 ) -> Result<Vec<DueReminder>> {
+    query_due_reminders_excluding(pool, now_secs, batch_limit, &[]).await
+}
+
+/// Query due reminders while leaving protected Enforce domains unclaimed.
+pub async fn query_due_reminders_excluding(
+    pool: &PgPool,
+    now_secs: i64,
+    batch_limit: i64,
+    excluded_communities: &[Uuid],
+) -> Result<Vec<DueReminder>> {
     let kind_i32 = KIND_EVENT_REMINDER as i32;
     let rows = sqlx::query(
         r#"
@@ -1413,6 +2081,7 @@ pub async fn query_due_reminders(
         FROM events AS e
         JOIN communities AS c ON c.id = e.community_id
         WHERE e.kind = $1
+          AND NOT (e.community_id = ANY($4::uuid[]))
           AND e.not_before IS NOT NULL
           AND e.not_before <= $2
           AND e.deleted_at IS NULL
@@ -1425,6 +2094,7 @@ pub async fn query_due_reminders(
     .bind(kind_i32)
     .bind(now_secs)
     .bind(batch_limit)
+    .bind(excluded_communities)
     .fetch_all(pool)
     .await?;
 
@@ -2370,6 +3040,13 @@ mod tests {
         assert!(due.iter().any(|row| {
             row.id == event_b.id.as_bytes() && row.community_id == community_b && row.host == host_b
         }));
+
+        let excluded =
+            query_due_reminders_excluding(&pool, Utc::now().timestamp(), 100, &[community_a_uuid])
+                .await
+                .expect("query with protected exclusion");
+        assert!(!excluded.iter().any(|row| row.community_id == community_a));
+        assert!(excluded.iter().any(|row| row.community_id == community_b));
     }
 
     /// Two pods race to claim the same due reminder: exactly one wins. The

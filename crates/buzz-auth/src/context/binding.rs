@@ -601,6 +601,44 @@ impl VersionedBindingRef {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_evidence_adapter(
+        authorization_domain: CommunityId,
+        binding_id: Uuid,
+        principal: FederatedPrincipal,
+        bound_pubkey: PublicKey,
+        binding_version: BindingVersion,
+        expires_at: Option<BindingExpiry>,
+        source: BindingSource,
+        resolution_reason: AuthorizationReason,
+    ) -> Result<Self, AuthContextError> {
+        if binding_id.is_nil() {
+            return Err(AuthContextError::InvalidBindingId);
+        }
+        let valid_reason = matches!(
+            (source, resolution_reason),
+            (_, AuthorizationReason::ExistingBinding)
+                | (
+                    BindingSource::AttestedKey,
+                    AuthorizationReason::EnrolledAttestedKey
+                )
+                | (BindingSource::Tofu, AuthorizationReason::EnrolledTofu)
+        );
+        if !valid_reason {
+            return Err(AuthContextError::InvalidAuthorizationReason);
+        }
+        Ok(Self {
+            authorization_domain,
+            binding_id,
+            principal,
+            bound_pubkey,
+            binding_version,
+            expires_at,
+            source,
+            resolution_reason,
+        })
+    }
+
     /// Build a reference to a binding authoritatively resolved as already active.
     #[cfg(test)]
     pub(crate) fn new_existing_active_for_test(

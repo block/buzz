@@ -5,13 +5,19 @@
 //! the Nostr authority that signed the request. Raw assertions and mutable
 //! display claims never enter this type.
 
-use std::fmt;
+use std::{fmt, sync::Arc};
 
 use buzz_core::{tenant::TenantContext, CommunityId};
 use nostr::PublicKey;
 use uuid::Uuid;
 
-use crate::Scope;
+use crate::{
+    lease::{
+        AuthorizationLease, AuthorizationLeaseValidator, AuthorizationOperationGuard,
+        LeaseUseRequirement, LeaseValidationError,
+    },
+    Scope,
+};
 
 pub(crate) mod authority;
 mod binding;
@@ -32,8 +38,10 @@ pub use binding::{
 pub use evidence::{
     AdmissionExpiry, AssertionExpiry, AssertionNotBefore, AssertionTransport, AuthMethod,
     AuthTransport, AuthorizedCommunityAccess, DelegationCapability, DelegationExpiry,
-    FederatedPrincipal, NostrAuthority, VerifiedFederatedAssertion, VerifiedKeyAttestation,
-    VerifiedNostrProof, VerifiedOwnerAdmission, VerifiedTransportDelegation,
+    FederatedPrincipal, NostrAuthority, ProviderEvidenceValidationError,
+    VerifiedFederatedAssertion, VerifiedKeyAttestation, VerifiedNostrProof,
+    VerifiedOperationBinding, VerifiedOperationBindingKind, VerifiedOwnerAdmission,
+    VerifiedProviderEvidence, VerifiedTransportDelegation,
 };
 pub use reason::{AuthContextError, AuthorizationReason};
 
@@ -133,6 +141,7 @@ pub struct AuthContextV1 {
     nostr: NostrAuthority,
     federated_policy: ResolvedFederatedPolicy,
     federated: FederatedAuthorization,
+    authorization_lease: Option<AuthorizationLease>,
     scopes: Vec<Scope>,
     channel_ids: Option<Vec<Uuid>>,
 }
@@ -142,7 +151,7 @@ pub struct AuthContextV1 {
 pub struct AuthContextInput {
     tenant: TenantContext,
     correlation_id: Uuid,
-    nostr_proof: VerifiedNostrProof,
+    nostr_proof: Arc<VerifiedNostrProof>,
     community_access: AuthorizedCommunityAccess,
 }
 
@@ -177,24 +186,23 @@ impl AuthContextInput {
     pub fn new(
         tenant: TenantContext,
         correlation_id: Uuid,
-        nostr_proof: VerifiedNostrProof,
+        nostr_proof: impl Into<Arc<VerifiedNostrProof>>,
         community_access: AuthorizedCommunityAccess,
     ) -> Self {
         Self {
             tenant,
             correlation_id,
-            nostr_proof,
+            nostr_proof: nostr_proof.into(),
             community_access,
         }
     }
-
     #[allow(dead_code)]
     pub(crate) const fn authorization_domain(&self) -> CommunityId {
         self.tenant.community()
     }
 
     #[allow(dead_code)]
-    pub(crate) const fn nostr_proof_authorization_domain(&self) -> CommunityId {
+    pub(crate) fn nostr_proof_authorization_domain(&self) -> CommunityId {
         self.nostr_proof.authorization_domain()
     }
 
@@ -204,31 +212,45 @@ impl AuthContextInput {
     }
 
     #[allow(dead_code)]
-    pub(crate) const fn correlation_id(&self) -> Uuid {
-        self.correlation_id
-    }
-
-    #[allow(dead_code)]
-    pub(crate) const fn transport(&self) -> AuthTransport {
+    pub(crate) fn transport(&self) -> AuthTransport {
         self.nostr_proof.authorized_transport()
     }
 
     #[allow(dead_code)]
-    pub(crate) const fn proof_method(&self) -> AuthMethod {
+    pub(crate) fn proof_method(&self) -> AuthMethod {
         self.nostr_proof.proof_method()
     }
 
     #[allow(dead_code)]
-    pub(crate) const fn actor_pubkey(&self) -> PublicKey {
+    pub(crate) fn actor_pubkey(&self) -> PublicKey {
         self.nostr_proof.actor_pubkey()
     }
 
     #[allow(dead_code)]
-    pub(crate) const fn verified_owner_pubkey(&self) -> Option<PublicKey> {
-        match self.nostr_proof.verified_delegation() {
-            Some(delegation) => Some(delegation.owner_pubkey()),
-            None => None,
-        }
+    pub(crate) fn verified_owner_pubkey(&self) -> Option<PublicKey> {
+        self.nostr_proof
+            .verified_delegation()
+            .map(VerifiedTransportDelegation::owner_pubkey)
+    }
+
+    /// Server-resolved tenant carried by the finalization input.
+    pub const fn tenant(&self) -> &TenantContext {
+        &self.tenant
+    }
+
+    /// Correlation identifier for this authorization decision.
+    pub const fn correlation_id(&self) -> Uuid {
+        self.correlation_id
+    }
+
+    /// Cryptographically verified Nostr proof.
+    pub fn nostr_proof(&self) -> &VerifiedNostrProof {
+        &self.nostr_proof
+    }
+
+    /// Current community admission and permissions.
+    pub const fn community_access(&self) -> &AuthorizedCommunityAccess {
+        &self.community_access
     }
 }
 
@@ -242,6 +264,7 @@ impl fmt::Debug for AuthContextV1 {
             .field("nostr", &self.nostr)
             .field("federated_policy", &self.federated_policy)
             .field("federated", &self.federated)
+            .field("authorization_lease", &"[redacted]")
             .field("scopes", &"[redacted]")
             .field("channel_ids", &"[redacted]")
             .finish()
@@ -305,7 +328,13 @@ impl AuthContext {
                 }
             }
         };
-        Self::finalize_v1(input, federated_policy, authorization, now_unix_seconds)
+        Self::finalize_v1_inner(
+            input,
+            federated_policy,
+            authorization,
+            None,
+            now_unix_seconds,
+        )
     }
 
     /// Validate all authorization evidence and finalize an immutable V1 context.
@@ -318,32 +347,83 @@ impl AuthContext {
     ///
     /// `now_unix_seconds` must come from the server clock for the authorization
     /// decision being finalized.
+    #[allow(dead_code)]
     pub(crate) fn finalize_v1(
         input: AuthContextInput,
         federated_policy: ResolvedFederatedPolicy,
         authorization: FederatedAuthorization,
         now_unix_seconds: u64,
     ) -> Result<Self, AuthContextError> {
-        let authorization_domain = input.tenant.community();
-        let transport = input.nostr_proof.authorized_transport();
-        if input.nostr_proof.authorization_domain() != authorization_domain {
-            return Err(AuthContextError::NostrProofDomainMismatch);
-        }
-        validate_federated_policy_stamp(&input, &federated_policy, now_unix_seconds)?;
-        if input.community_access.authorization_domain() != authorization_domain {
-            return Err(AuthContextError::CommunityAccessDomainMismatch);
-        }
-        if !transport_accepts_proof(transport, input.nostr_proof.proof_method()) {
-            return Err(AuthContextError::TransportProofMismatch);
-        }
-        validate_federated_authorization(
-            authorization_domain,
-            transport,
-            &input.nostr_proof,
-            &federated_policy,
-            &authorization,
+        Self::finalize_v1_inner(
+            input,
+            federated_policy,
+            authorization,
+            None,
             now_unix_seconds,
-        )?;
+        )
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn finalize_v1_with_lease(
+        input: AuthContextInput,
+        federated_policy: ResolvedFederatedPolicy,
+        authorization: FederatedAuthorization,
+        authorization_lease: AuthorizationLease,
+        now_unix_seconds: u64,
+    ) -> Result<Self, AuthContextError> {
+        if !matches!(
+            federated_policy.requirement(),
+            FederatedIdentityRequirement::Required(_)
+        ) || matches!(authorization, FederatedAuthorization::NotRequired)
+        {
+            return Err(AuthContextError::FinalizedLeaseMismatch);
+        }
+        let active_binding = authorization
+            .active_binding()
+            .ok_or(AuthContextError::FinalizedLeaseMismatch)?;
+        if authorization_lease.authorization_domain() != input.tenant.community()
+            || authorization_lease.transport() != input.nostr_proof.authorized_transport()
+            || authorization_lease.actor_pubkey() != input.nostr_proof.actor_pubkey()
+            || authorization_lease.binding_id() != active_binding.binding_id()
+            || authorization_lease.binding_version() != active_binding.binding_version()
+            || authorization_lease.correlation_id() != input.correlation_id
+        {
+            return Err(AuthContextError::FinalizedLeaseMismatch);
+        }
+        Self::finalize_v1_inner(
+            input,
+            federated_policy,
+            authorization,
+            Some(authorization_lease),
+            now_unix_seconds,
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn finalize_v1_evidence_for_test(
+        input: AuthContextInput,
+        federated_policy: ResolvedFederatedPolicy,
+        authorization: FederatedAuthorization,
+        now_unix_seconds: u64,
+    ) -> Result<Self, AuthContextError> {
+        Self::finalize_v1_inner(
+            input,
+            federated_policy,
+            authorization,
+            None,
+            now_unix_seconds,
+        )
+    }
+
+    fn finalize_v1_inner(
+        input: AuthContextInput,
+        federated_policy: ResolvedFederatedPolicy,
+        authorization: FederatedAuthorization,
+        authorization_lease: Option<AuthorizationLease>,
+        now_unix_seconds: u64,
+    ) -> Result<Self, AuthContextError> {
+        validate_context_evidence(&input, &federated_policy, &authorization, now_unix_seconds)?;
+        let transport = input.nostr_proof.authorized_transport();
         let nostr = NostrAuthority::new(input.nostr_proof);
         let (scopes, channel_ids) = input.community_access.into_permissions();
         Ok(Self::V1(AuthContextV1 {
@@ -353,6 +433,7 @@ impl AuthContext {
             nostr,
             federated_policy,
             federated: authorization,
+            authorization_lease,
             scopes,
             channel_ids,
         }))
@@ -394,17 +475,17 @@ impl AuthContext {
     }
 
     /// Authenticated Nostr actor.
-    pub const fn pubkey(&self) -> PublicKey {
+    pub fn pubkey(&self) -> PublicKey {
         self.nostr().actor_pubkey()
     }
 
     /// Proof method used to authenticate the Nostr actor.
-    pub const fn auth_method(&self) -> AuthMethod {
+    pub fn auth_method(&self) -> AuthMethod {
         self.nostr().proof_method()
     }
 
     /// Cryptographically verified owner for a delegated Nostr actor.
-    pub const fn agent_owner_pubkey(&self) -> Option<PublicKey> {
+    pub fn agent_owner_pubkey(&self) -> Option<PublicKey> {
         self.nostr().verified_owner_pubkey()
     }
 
@@ -420,6 +501,43 @@ impl AuthContext {
         match self {
             Self::V1(context) => &context.federated_policy,
         }
+    }
+
+    /// Bounded federated access lease, when this is an enforcing context.
+    pub const fn authorization_lease(&self) -> Option<&AuthorizationLease> {
+        match self {
+            Self::V1(context) => context.authorization_lease.as_ref(),
+        }
+    }
+
+    /// Validate this context's access lease for one protected operation.
+    ///
+    /// Nostr-only contexts have no federated lease and therefore fail closed
+    /// when presented to a federated-protected operation.
+    pub fn authorize_lease_use(
+        &self,
+        validator: &AuthorizationLeaseValidator,
+        requirement: &LeaseUseRequirement,
+    ) -> Result<(), LeaseValidationError> {
+        let lease = self
+            .authorization_lease()
+            .ok_or(LeaseValidationError::MissingLease)?;
+        validator.authorize(lease, requirement)
+    }
+
+    /// Validate and retain a per-capability guard for an in-flight operation.
+    ///
+    /// Callers must revalidate the returned guard immediately before a
+    /// protected commit or stream emission.
+    pub fn operation_guard<'a>(
+        &'a self,
+        validator: &AuthorizationLeaseValidator,
+        requirement: LeaseUseRequirement,
+    ) -> Result<AuthorizationOperationGuard<'a>, LeaseValidationError> {
+        let lease = self
+            .authorization_lease()
+            .ok_or(LeaseValidationError::MissingLease)?;
+        validator.operation_guard(lease, requirement)
     }
 
     /// Stable reason for the successful authorization decision.
@@ -474,6 +592,47 @@ fn validate_federated_policy_stamp(
     Ok(())
 }
 
+pub(crate) fn validate_context_evidence(
+    input: &AuthContextInput,
+    federated_policy: &ResolvedFederatedPolicy,
+    authorization: &FederatedAuthorization,
+    now_unix_seconds: u64,
+) -> Result<(), AuthContextError> {
+    validate_federated_policy_stamp(input, federated_policy, now_unix_seconds)?;
+    let authorization_domain = input.tenant.community();
+    let transport = input.nostr_proof.authorized_transport();
+    if input.nostr_proof.authorization_domain() != authorization_domain {
+        return Err(AuthContextError::NostrProofDomainMismatch);
+    }
+    if federated_policy.authorization_domain() != authorization_domain {
+        return Err(AuthContextError::PolicyDomainMismatch);
+    }
+    if input.community_access.authorization_domain() != authorization_domain {
+        return Err(AuthContextError::CommunityAccessDomainMismatch);
+    }
+    if !transport_accepts_proof(transport, input.nostr_proof.proof_method()) {
+        return Err(AuthContextError::TransportProofMismatch);
+    }
+    validate_federated_authorization(
+        authorization_domain,
+        transport,
+        &input.nostr_proof,
+        federated_policy,
+        authorization,
+        now_unix_seconds,
+    )
+}
+
+impl FederatedAuthorization {
+    #[allow(dead_code)]
+    pub(crate) const fn active_binding(&self) -> Option<&VersionedBindingRef> {
+        match self {
+            Self::NotRequired => None,
+            Self::Direct { binding, .. } => Some(binding),
+            Self::Delegated { owner, .. } => Some(owner),
+        }
+    }
+}
 pub(super) const fn transport_accepts_proof(
     transport: AuthTransport,
     proof_method: AuthMethod,
@@ -486,7 +645,7 @@ pub(super) const fn transport_accepts_proof(
         AuthTransport::MediaUpload => {
             matches!(proof_method, AuthMethod::Nip98 | AuthMethod::Blossom)
         }
-        AuthTransport::MediaDownload => matches!(proof_method, AuthMethod::Nip98),
+        AuthTransport::MediaDownload => matches!(proof_method, AuthMethod::Blossom),
     }
 }
 

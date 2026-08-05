@@ -23,6 +23,45 @@ use crate::protocol::{ClientMessage, RelayMessage};
 use crate::state::{run_registered_community_connection, AppState};
 use buzz_pubsub::EventTopic;
 
+/// Fail-closed release check evaluated at the response boundary.
+pub(crate) trait OutboundReleaseFence: Send + Sync {
+    /// Return true only while the retained authority is still current.
+    fn release(&self) -> bool;
+}
+
+impl OutboundReleaseFence for crate::authorization_runtime::transport::ProtectedAuthorization {
+    fn release(&self) -> bool {
+        self.release_fetched(()).is_ok()
+    }
+}
+
+/// Revalidate aggregate channel and protected authority immediately before an
+/// HTTP response is released.
+pub(crate) async fn release_channel_set_read_authority(
+    db: buzz_db::Db,
+    community_id: buzz_core::tenant::CommunityId,
+    channel_ids: Vec<Uuid>,
+    actor: Vec<u8>,
+    protected: Option<Arc<crate::authorization_runtime::transport::ProtectedAuthorization>>,
+) -> bool {
+    if protected
+        .as_ref()
+        .is_some_and(|authority| authority.revalidate().is_err())
+    {
+        return false;
+    }
+    if !db
+        .channel_set_read_authorized(community_id, &channel_ids, &actor)
+        .await
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    protected
+        .as_ref()
+        .is_none_or(|authority| authority.revalidate().is_ok())
+}
+
 /// Maximum time a new socket may hold a connection slot without completing NIP-42 auth.
 const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
 

@@ -223,12 +223,13 @@ async fn feedback_attachment(
         return Err(ApiError::not_found());
     }
 
-    let response = crate::api::media::serve_blob_for_tenant(&state, &tenant, &sha256, &headers)
-        .await
-        .map_err(|error| match error {
-            buzz_media::MediaError::NotFound => ApiError::not_found(),
-            _ => ApiError::internal(),
-        })?;
+    let response =
+        crate::api::media::serve_blob_for_tenant(&state, &tenant, &sha256, &headers, None)
+            .await
+            .map_err(|error| match error {
+                buzz_media::MediaError::NotFound => ApiError::not_found(),
+                _ => ApiError::internal(),
+            })?;
     tracing::info!(
         feedback_id = %feedback.id,
         community_id = %feedback.community_id,

@@ -5,7 +5,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use sqlx::{PgPool, Row as _};
+use sqlx::{PgPool, Postgres, Row as _, Transaction};
 use uuid::Uuid;
 
 use crate::{error::Result, CommunityId};
@@ -80,6 +80,38 @@ pub async fn insert(
     .bind(feedback.tags)
     .bind(feedback.event_created_at)
     .fetch_one(pool)
+    .await?;
+
+    Ok(row.try_get("id")?)
+}
+
+/// Insert product feedback inside a caller-owned authorization transaction.
+/// The durable feedback row and the authorization receipt therefore commit or
+/// roll back together.
+pub async fn insert_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    feedback: NewProductFeedback<'_>,
+) -> Result<Uuid> {
+    let row = sqlx::query(
+        r#"
+        INSERT INTO product_feedback (
+            community_id, event_id, submitter_pubkey, category, body, tags,
+            event_created_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (event_id) DO UPDATE SET
+            event_id = EXCLUDED.event_id
+        RETURNING id
+        "#,
+    )
+    .bind(community.as_uuid())
+    .bind(feedback.event_id)
+    .bind(feedback.submitter_pubkey)
+    .bind(feedback.category)
+    .bind(feedback.body)
+    .bind(feedback.tags)
+    .bind(feedback.event_created_at)
+    .fetch_one(&mut **transaction)
     .await?;
 
     Ok(row.try_get("id")?)

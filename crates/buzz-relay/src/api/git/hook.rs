@@ -25,6 +25,7 @@ use tracing::{error, info};
 /// - `BUZZ_REPO_ID` — repo identifier (d-tag)
 /// - `BUZZ_COMMUNITY_ID` — server-resolved community UUID for the git HTTP request
 /// - `BUZZ_PUSHER_PUBKEY` — authenticated pusher's hex pubkey
+/// - `BUZZ_POLICY_FENCE_PATH` — relay-owned path for the exact allowed-policy receipt
 ///
 /// Git sets automatically (quarantine):
 /// - `GIT_OBJECT_DIRECTORY` — quarantine object store
@@ -47,6 +48,7 @@ ZERO="0000000000000000000000000000000000000000"
 : "${BUZZ_PUSHER_PUBKEY:?error: BUZZ_PUSHER_PUBKEY not set}"
 : "${BUZZ_HOOK_URL:?error: BUZZ_HOOK_URL not set}"
 : "${BUZZ_HOOK_SECRET:?error: BUZZ_HOOK_SECRET not set}"
+: "${BUZZ_POLICY_FENCE_PATH:?error: BUZZ_POLICY_FENCE_PATH not set}"
 
 WORK_DIR=$(mktemp -d) || { echo "error: cannot create temp dir" >&2; exit 1; }
 REFS_FILE="$WORK_DIR/refs"
@@ -140,6 +142,13 @@ if [ "$HTTP_CODE" != "200" ]; then
     cat "$RESP_FILE" >&2 2>/dev/null
     exit 1
 fi
+
+# Preserve the exact hook decision for transaction-owned commit-time locking.
+# Failure to hand the receipt back rejects the push before any publication.
+cp -- "$RESP_FILE" "$BUZZ_POLICY_FENCE_PATH" || {
+    echo "error: push authorization receipt could not be retained" >&2
+    exit 1
+}
 
 exit 0
 "#;

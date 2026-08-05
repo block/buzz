@@ -336,10 +336,8 @@ fn capability_coverage_is_exhaustive(capability: AuthorizationCapability) {
 fn proof_method_for_transport(transport: AuthTransport) -> AuthMethod {
     match transport {
         AuthTransport::RelayWebSocket => AuthMethod::Nip42,
-        AuthTransport::HttpBridge | AuthTransport::Git | AuthTransport::MediaDownload => {
-            AuthMethod::Nip98
-        }
-        AuthTransport::MediaUpload => AuthMethod::Blossom,
+        AuthTransport::HttpBridge | AuthTransport::Git => AuthMethod::Nip98,
+        AuthTransport::MediaUpload | AuthTransport::MediaDownload => AuthMethod::Blossom,
         AuthTransport::Audio => AuthMethod::Nip42,
     }
 }

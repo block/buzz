@@ -374,10 +374,15 @@ async fn nip11_or_ws_handler(
                 .into_response();
         }
     };
-    let corporate_identity_jwt = crate::corporate_identity::identity_jwt_from_headers(
+    let corporate_identity_jwt = match crate::corporate_identity::identity_jwt_from_headers(
         &headers,
         &state.config.corporate_identity,
-    );
+    ) {
+        Ok(jwt) => jwt,
+        Err(_) => {
+            return (StatusCode::UNAUTHORIZED, "invalid identity assertion").into_response();
+        }
+    };
 
     let max_frame_bytes = state.config.max_frame_bytes;
     match WebSocketUpgrade::from_request(req, &state).await {

@@ -264,10 +264,12 @@ async fn authenticate(
     )?;
     bridge::check_nip98_replay(state, &tenant, event_id_bytes).await?;
 
-    let identity_jwt = crate::corporate_identity::identity_jwt_from_headers(
+    let identity_assertion = crate::corporate_identity::identity_assertion_from_headers(
+        state,
+        tenant.community(),
         headers,
-        &state.config.corporate_identity,
-    );
+    )
+    .map_err(crate::corporate_identity::CorporateIdentityError::into_api_error)?;
     let auth_tag = headers
         .get("x-auth-tag")
         .and_then(|value| value.to_str().ok());
@@ -275,7 +277,7 @@ async fn authenticate(
         state,
         tenant.community(),
         pubkey,
-        identity_jwt.as_deref(),
+        identity_assertion.as_ref(),
         auth_tag,
     )
     .await

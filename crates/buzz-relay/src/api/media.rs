@@ -18,10 +18,29 @@ use axum::{
 };
 use base64::Engine;
 use buzz_audit::{AuditAction, NewAuditEntry};
+use buzz_auth::{AuthTransport, AuthorizationCapability, VerifiedEvidenceAdapter};
 use buzz_core::tenant::TenantContext;
-use buzz_media::{BlobDescriptor, MediaError, UploadAttribution, UploadNetworkInfo};
+use buzz_media::{
+    BlobDescriptor, MediaError, PreparedUpload, UploadAttribution, UploadNetworkInfo,
+    UploadPublicationMode,
+};
+use futures_util::StreamExt;
+use sha2::{Digest, Sha256};
 
+use crate::authorization_runtime::executor::{
+    begin_authorized_operation, AuthorizedOperationStart, ProtectedOperationId,
+};
+use crate::authorization_runtime::transport::{authorize_if_configured, ProtectedAuthorization};
 use crate::state::AppState;
+
+fn stable_media_correlation(proof: &buzz_auth::VerifiedNostrProof) -> uuid::Uuid {
+    let fingerprint = proof.operation_binding().fingerprint();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&fingerprint[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    uuid::Uuid::from_bytes(bytes)
+}
 
 /// Axum extractor that validates Blossom auth, the BUD-11 hash binding, and
 /// relay membership (NIP-43, when enabled) from headers BEFORE the request
@@ -37,6 +56,7 @@ pub(crate) struct AuthenticatedUpload {
     /// door in `bridge.rs`. Server-resolved, never client-supplied.
     tenant: TenantContext,
     route_mode: UploadRouteMode,
+    protected_authority: Arc<ProtectedAuthorization>,
     _upload_permit: UploadPermit,
 }
 
@@ -61,6 +81,40 @@ fn upload_route_mode(path: &str) -> Result<UploadRouteMode, MediaError> {
 
 struct MediaReadAuth {
     tenant: TenantContext,
+    protected_authority: Option<Arc<ProtectedAuthorization>>,
+}
+
+fn protected_media_denied(error: impl std::fmt::Display) -> MediaError {
+    tracing::warn!(error = %error, "media: protected authorization denied");
+    MediaError::Unauthorized
+}
+
+fn release_media_fetched<T>(
+    authority: &Option<Arc<ProtectedAuthorization>>,
+    value: T,
+) -> Result<T, MediaError> {
+    release_media_outcome(
+        authority
+            .as_deref()
+            .map(|authority| authority as &dyn crate::connection::OutboundReleaseFence),
+        value,
+    )
+}
+
+fn release_media_outcome<T>(
+    authority: Option<&dyn crate::connection::OutboundReleaseFence>,
+    value: T,
+) -> Result<T, MediaError> {
+    if authority.is_some_and(|authority| !authority.release()) {
+        return Err(MediaError::Unauthorized);
+    }
+    Ok(value)
+}
+
+impl buzz_media::UploadCommitGuard for ProtectedAuthorization {
+    fn revalidate(&self) -> Result<(), MediaError> {
+        ProtectedAuthorization::revalidate(self).map_err(protected_media_denied)
+    }
 }
 
 async fn verify_media_corporate_identity(
@@ -68,52 +122,98 @@ async fn verify_media_corporate_identity(
     tenant: &TenantContext,
     headers: &HeaderMap,
     pubkey: nostr::PublicKey,
-) -> Result<crate::corporate_identity::CorporateIdentityProof, MediaError> {
+) -> Result<Option<crate::corporate_identity::CorporateIdentityProof>, MediaError> {
     let auth_tag = headers.get("x-auth-tag").and_then(|v| v.to_str().ok());
-    let identity_jwt = crate::corporate_identity::identity_jwt_from_headers(
+    let identity_assertion = crate::corporate_identity::identity_assertion_from_headers(
+        state,
+        tenant.community(),
         headers,
-        &state.config.corporate_identity,
-    );
-    crate::corporate_identity::verify_corporate_identity(
+    )
+    .map_err(protected_media_denied)?;
+    match crate::corporate_identity::verify_corporate_identity(
         state,
         tenant.community(),
         pubkey,
-        identity_jwt.as_deref(),
+        identity_assertion.as_ref(),
         auth_tag,
     )
     .await
-    .map_err(|e| {
-        tracing::warn!(pubkey = %pubkey.to_hex(), error = %e, "media: corporate identity denied");
-        if e.status_code() == StatusCode::UNAUTHORIZED {
-            MediaError::Unauthorized
-        } else {
-            MediaError::RelayMembershipRequired
+    {
+        Ok(proof) => Ok(Some(proof)),
+        Err(error)
+            if crate::authorization_runtime::transport::legacy_identity_lane(
+                state,
+                tenant.community(),
+            ) == crate::authorization_runtime::transport::LegacyIdentityLane::ObserveOnly =>
+        {
+            tracing::warn!(error = ?error, "observational media identity verification unavailable");
+            Ok(None)
         }
-    })
+        Err(error) => {
+            tracing::warn!(error = ?error, "media: corporate identity denied");
+            if error.status_code() == StatusCode::UNAUTHORIZED {
+                Err(MediaError::Unauthorized)
+            } else {
+                Err(MediaError::RelayMembershipRequired)
+            }
+        }
+    }
+}
+
+fn seal_media_assertion(
+    state: &AppState,
+    tenant: &TenantContext,
+    proof: Option<&crate::corporate_identity::CorporateIdentityProof>,
+    transport: AuthTransport,
+) -> Result<Option<Arc<buzz_auth::VerifiedFederatedAssertion>>, MediaError> {
+    let Some(proof) = proof else {
+        return Ok(None);
+    };
+    match crate::corporate_identity::current_verified_assertion_for_proof(
+        state,
+        proof,
+        tenant.community(),
+        transport,
+    ) {
+        Ok(assertion) => Ok(assertion.map(Arc::new)),
+        Err(error)
+            if crate::authorization_runtime::transport::legacy_identity_lane(
+                state,
+                tenant.community(),
+            ) == crate::authorization_runtime::transport::LegacyIdentityLane::ObserveOnly =>
+        {
+            tracing::warn!(error = %error, "observational media assertion sealing unavailable");
+            Ok(None)
+        }
+        Err(error) => Err(protected_media_denied(error)),
+    }
 }
 
 async fn finalize_media_corporate_identity(
     state: &AppState,
     tenant: &TenantContext,
     pubkey: nostr::PublicKey,
-    proof: crate::corporate_identity::CorporateIdentityProof,
+    proof: Option<crate::corporate_identity::CorporateIdentityProof>,
 ) -> Result<(), MediaError> {
-    crate::corporate_identity::finalize_corporate_identity(
-        state,
-        tenant.community(),
-        pubkey,
-        proof,
-    )
-    .await
-    .map(|_| ())
-    .map_err(|e| {
-        tracing::warn!(pubkey = %pubkey.to_hex(), error = %e, "media: corporate identity finalization denied");
-        if e.status_code() == StatusCode::UNAUTHORIZED {
-            MediaError::Unauthorized
-        } else {
-            MediaError::RelayMembershipRequired
-        }
-    })
+    if crate::authorization_runtime::transport::legacy_identity_lane(state, tenant.community())
+        != crate::authorization_runtime::transport::LegacyIdentityLane::Legacy
+    {
+        return Ok(());
+    }
+    let Some(proof) = proof else {
+        return Ok(());
+    };
+    crate::corporate_identity::finalize_corporate_identity(state, tenant.community(), pubkey, proof)
+        .await
+        .map(|_| ())
+        .map_err(|e| {
+            tracing::warn!(error = ?e, "media: corporate identity finalization denied");
+            if e.status_code() == StatusCode::UNAUTHORIZED {
+                MediaError::Unauthorized
+            } else {
+                MediaError::RelayMembershipRequired
+            }
+        })
 }
 
 const MEDIA_UPLOAD_RATE_WINDOW: Duration = Duration::from_secs(60);
@@ -189,6 +289,24 @@ fn acquire_upload_permit(
     })
 }
 
+fn acquire_protected_upload_permit(
+    state: &AppState,
+    community_id: buzz_core::CommunityId,
+    pubkey: &nostr::PublicKey,
+    require_authority: impl FnOnce() -> Result<(), MediaError>,
+) -> Result<UploadPermit, MediaError> {
+    require_authority()?;
+    if upload_rate_limited(state, community_id, pubkey) {
+        metrics::counter!("buzz_media_upload_rejections_total", "reason" => "rate_limit")
+            .increment(1);
+        return Err(MediaError::UploadRateLimitExceeded);
+    }
+    acquire_upload_permit(state, community_id, pubkey).inspect_err(|_| {
+        metrics::counter!("buzz_media_upload_rejections_total", "reason" => "concurrency")
+            .increment(1);
+    })
+}
+
 impl FromRequestParts<Arc<AppState>> for AuthenticatedUpload {
     type Rejection = MediaError;
 
@@ -244,14 +362,18 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedUpload {
             return Err(MediaError::HashMismatch);
         }
 
-        // 4. Validate X-SHA-256 matches at least one x tag in the auth event
-        let has_matching_x = auth_event
-            .tags
-            .iter()
-            .any(|tag| tag.kind().to_string() == "x" && (tag.content() == Some(claimed_hash)));
-        if !has_matching_x {
-            return Err(MediaError::HashMismatch);
-        }
+        // 4. Full exact-operation verification in the sealed-evidence adapter.
+        // This rechecks signature, upload verb, hash, server, and age together;
+        // a different valid kind:24242 event cannot be substituted afterward.
+        let verified_blossom = VerifiedEvidenceAdapter::new()
+            .verify_blossom_upload(
+                tenant.community(),
+                &auth_event,
+                claimed_hash,
+                Some(tenant.host()),
+                3600,
+            )
+            .map_err(protected_media_denied)?;
 
         // 5. Relay membership gate (NIP-43). Blossom auth proves the signer
         // authorized this exact upload hash for this server; NIP-43 answers
@@ -272,15 +394,47 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedUpload {
         )
         .await
         .map_err(|_| MediaError::RelayMembershipRequired)?;
-        if upload_rate_limited(state, tenant.community(), &auth_event.pubkey) {
-            metrics::counter!("buzz_media_upload_rejections_total", "reason" => "rate_limit")
-                .increment(1);
-            return Err(MediaError::UploadRateLimitExceeded);
-        }
-        let upload_permit = acquire_upload_permit(state, tenant.community(), &auth_event.pubkey)
-            .inspect_err(|_| {
-                metrics::counter!("buzz_media_upload_rejections_total", "reason" => "concurrency")
-                    .increment(1);
+        let verified_blossom = match crate::corporate_identity::verify_unconditional_nip_oa_owner(
+            auth_event.pubkey,
+            auth_tag,
+        ) {
+            Some(owner) => VerifiedEvidenceAdapter::new()
+                .attach_transport_delegation(
+                    verified_blossom,
+                    buzz_auth::VerifiedDelegationOutput::from_workspace_verifier(
+                        owner,
+                        auth_event.pubkey,
+                        None,
+                        true,
+                    ),
+                )
+                .map_err(protected_media_denied)?,
+            None => verified_blossom,
+        };
+        let correlation_id = stable_media_correlation(&verified_blossom);
+        let verified_assertion = seal_media_assertion(
+            state,
+            &tenant,
+            identity_proof.as_ref(),
+            AuthTransport::MediaUpload,
+        )?;
+        let protected_authority = Arc::new(
+            authorize_if_configured(
+                state,
+                Arc::new(verified_blossom),
+                verified_assertion,
+                AuthorizationCapability::MediaWrite,
+                correlation_id,
+                "media.upload",
+            )
+            .await
+            .map_err(protected_media_denied)?,
+        );
+        let upload_permit =
+            acquire_protected_upload_permit(state, tenant.community(), &auth_event.pubkey, || {
+                protected_authority
+                    .revalidate()
+                    .map_err(protected_media_denied)
             })?;
         finalize_media_corporate_identity(state, &tenant, auth_event.pubkey, identity_proof)
             .await?;
@@ -289,6 +443,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedUpload {
             auth_event,
             tenant,
             route_mode,
+            protected_authority,
             _upload_permit: upload_permit,
         })
     }
@@ -366,6 +521,52 @@ pub async fn upload_blob(
     body: axum::body::Body,
 ) -> Result<Json<BlobDescriptor>, MediaError> {
     let attribution = upload_attribution(&state, &auth, &headers).await;
+    let visibility = state
+        .db
+        .protected_object_authority(
+            auth.tenant.community(),
+            buzz_db::protected_visibility::ProtectedObjectSurface::Media,
+        )
+        .await
+        .map_err(|_| MediaError::Internal)?;
+    let mut postgresql_visibility = visibility.state
+        == buzz_db::protected_visibility::ProtectedObjectAuthorityState::PostgreSql;
+    if auth.protected_authority.is_enforcing() && !postgresql_visibility {
+        crate::api::media_migration::require_reconciled_authority(&state, &auth.tenant)
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, "protected media authority migration unavailable");
+                MediaError::Unauthorized
+            })?;
+        postgresql_visibility = true;
+    }
+    let publication_mode = if postgresql_visibility {
+        UploadPublicationMode::ProtectedStaging
+    } else {
+        UploadPublicationMode::Legacy
+    };
+    let legacy_visibility = if publication_mode == UploadPublicationMode::ProtectedStaging {
+        None
+    } else {
+        let guard = state
+            .db
+            .begin_legacy_visibility_write(
+                auth.tenant.community(),
+                buzz_db::protected_visibility::ProtectedObjectSurface::Media,
+            )
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, "legacy media publication is fenced");
+                MediaError::Unauthorized
+            })?;
+        crate::api::media_migration::require_legacy_sentinel_absent(&state, &auth.tenant)
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, "legacy media publication is permanently fenced");
+                MediaError::Unauthorized
+            })?;
+        Some(guard)
+    };
 
     if auth.route_mode == UploadRouteMode::LegacyMedia {
         metrics::counter!("buzz_media_legacy_upload_route_total").increment(1);
@@ -374,12 +575,14 @@ pub async fn upload_blob(
     // Probe actual bytes without trusting Content-Type. Keep the chunks used
     // for the bounded probe and replay them into the selected pipeline so the
     // stored/hash-verified body remains byte-identical.
-    use futures_util::StreamExt;
     const SNIFF_BYTES: usize = 4096;
     let mut source = body.into_data_stream();
     let mut replay_chunks = Vec::new();
     let mut sniff = Vec::with_capacity(SNIFF_BYTES);
     while sniff.len() < SNIFF_BYTES {
+        auth.protected_authority
+            .revalidate()
+            .map_err(protected_media_denied)?;
         match source.next().await {
             Some(Ok(chunk)) => {
                 let needed = SNIFF_BYTES - sniff.len();
@@ -390,14 +593,28 @@ pub async fn upload_blob(
             None => break,
         }
     }
-    let replay = futures_util::stream::iter(replay_chunks.into_iter().map(Ok)).chain(source);
+    let stream_authority = Arc::clone(&auth.protected_authority);
+    let guarded_source = source.map(move |item| {
+        stream_authority.revalidate().map_err(|error| {
+            axum::Error::new(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                error.to_string(),
+            ))
+        })?;
+        item
+    });
+    let replay =
+        futures_util::stream::iter(replay_chunks.into_iter().map(Ok)).chain(guarded_source);
 
-    let mut descriptor = if should_stream_as_video(&sniff) {
+    let prepared = if should_stream_as_video(&sniff) {
         // Video path: stream body directly to disk — never fully buffered in RAM.
         let content_length = headers
             .get("content-length")
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.parse::<u64>().ok());
+        auth.protected_authority
+            .revalidate()
+            .map_err(protected_media_denied)?;
         buzz_media::process_video_upload(
             &state.media_storage,
             &state.config.media,
@@ -406,6 +623,8 @@ pub async fn upload_blob(
             replay,
             content_length,
             attribution,
+            auth.protected_authority.as_ref(),
+            publication_mode,
         )
         .await?
     } else {
@@ -429,14 +648,19 @@ pub async fn upload_blob(
         );
 
         if is_image {
-            buzz_media::process_upload(
-                &state.media_storage,
-                &state.config.media,
-                &auth.tenant,
-                &auth.auth_event,
-                bytes,
+            auth.protected_authority
+                .revalidate()
+                .map_err(protected_media_denied)?;
+            buzz_media::process_upload(buzz_media::upload::BufferedUploadRequest {
+                storage: &state.media_storage,
+                config: &state.config.media,
+                ctx: &auth.tenant,
+                auth_event: &auth.auth_event,
+                body: bytes,
                 attribution,
-            )
+                commit_guard: auth.protected_authority.as_ref(),
+                publication_mode,
+            })
             .await?
         } else if auth.route_mode == UploadRouteMode::LegacyMedia {
             let mime = infer::get(&bytes)
@@ -444,23 +668,38 @@ pub async fn upload_blob(
                 .unwrap_or_else(|| "application/octet-stream".to_string());
             return Err(MediaError::DisallowedContentType(mime));
         } else {
-            buzz_media::process_file_upload(
-                &state.media_storage,
-                &state.config.media,
-                &auth.tenant,
-                &auth.auth_event,
-                bytes,
+            auth.protected_authority
+                .revalidate()
+                .map_err(protected_media_denied)?;
+            buzz_media::process_file_upload(buzz_media::upload::BufferedUploadRequest {
+                storage: &state.media_storage,
+                config: &state.config.media,
+                ctx: &auth.tenant,
+                auth_event: &auth.auth_event,
+                body: bytes,
                 attribution,
-            )
+                commit_guard: auth.protected_authority.as_ref(),
+                publication_mode,
+            })
             .await?
         }
     };
 
+    let mut prepared = prepared;
     rewrite_descriptor_urls_for_tenant(
-        &mut descriptor,
+        &mut prepared.descriptor,
         &state.config.relay_url,
         auth.tenant.host(),
     );
+
+    let descriptor =
+        commit_media_publication(&state, &auth, prepared, postgresql_visibility).await?;
+    if let Some(legacy_visibility) = legacy_visibility {
+        legacy_visibility.commit().await.map_err(|error| {
+            tracing::error!(%error, "legacy media publication fence commit failed");
+            MediaError::Internal
+        })?;
+    }
 
     // Normalize MIME to a known set to bound label cardinality.
     let mime_label = match descriptor.mime_type.as_str() {
@@ -472,33 +711,132 @@ pub async fn upload_blob(
     metrics::counter!(
         "buzz_media_uploads_total",
         "mime" => mime_label.to_owned(),
-        "community" => auth.tenant.host().to_owned()
+        "community" => crate::metrics::community_label(auth.tenant.community())
     )
     .increment(1);
 
     // Audit via bounded channel — same pattern as event audit.
-    if let Some(audit_tx) = &state.audit_tx {
-        let desc = descriptor.clone();
-        if let Err(e) = audit_tx
-            .send(NewAuditEntry {
-                community_id: auth.tenant.community(),
-                action: AuditAction::MediaUploaded,
-                actor_pubkey: Some(auth.auth_event.pubkey.to_bytes().to_vec()),
-                object_id: Some(desc.sha256.clone()),
-                detail: serde_json::json!({
-                    "sha256": desc.sha256,
-                    "size": desc.size,
-                    "mime": desc.mime_type,
-                }),
-            })
-            .await
-        {
-            tracing::error!("Media audit channel closed — entry lost: {e}");
-            metrics::counter!("buzz_audit_send_errors_total").increment(1);
+    if crate::protected_surface::require_effect_permit(
+        state
+            .protected_transport()
+            .and_then(|runtime| runtime.mode_for_domain(auth.tenant.community())),
+        crate::protected_surface::EffectSurfaceId::LegacyAuditDelivery,
+    )
+    .is_ok()
+    {
+        if let Some(audit_tx) = &state.audit_tx {
+            let desc = descriptor.clone();
+            if let Err(e) = audit_tx
+                .send(NewAuditEntry {
+                    community_id: auth.tenant.community(),
+                    action: AuditAction::MediaUploaded,
+                    actor_pubkey: Some(auth.auth_event.pubkey.to_bytes().to_vec()),
+                    object_id: Some(desc.sha256.clone()),
+                    detail: serde_json::json!({
+                        "sha256": desc.sha256,
+                        "size": desc.size,
+                        "mime": desc.mime_type,
+                    }),
+                })
+                .await
+            {
+                tracing::error!("Media audit channel closed — entry lost: {e}");
+                metrics::counter!("buzz_audit_send_errors_total").increment(1);
+            }
         }
     }
 
     Ok(Json(descriptor))
+}
+
+async fn commit_media_publication(
+    state: &AppState,
+    auth: &AuthenticatedUpload,
+    prepared: PreparedUpload,
+    postgresql_visibility: bool,
+) -> Result<BlobDescriptor, MediaError> {
+    if !postgresql_visibility {
+        return Ok(prepared.descriptor);
+    }
+    let PreparedUpload {
+        descriptor,
+        metadata,
+        object_key,
+        thumbnail_key,
+    } = prepared;
+    let metadata_json = serde_json::to_value(&metadata).map_err(|_| MediaError::Internal)?;
+    let publication = buzz_db::protected_publication::MediaPublication {
+        sha256: descriptor.sha256.clone(),
+        object_key,
+        extension: metadata.ext.clone(),
+        mime_type: metadata.mime_type.clone(),
+        object_size: metadata.size,
+        metadata: metadata_json,
+        thumbnail_key,
+        publication_version: 1,
+    };
+    if auth.protected_authority.is_enforcing() {
+        let operation_id = ProtectedOperationId::derive(
+            auth.tenant.community(),
+            "media.upload",
+            auth.auth_event.id.as_bytes(),
+        )
+        .map_err(protected_media_denied)?;
+        let mut request_digest = Sha256::new();
+        request_digest.update(b"buzz-media-publication-v1");
+        request_digest.update(descriptor.sha256.as_bytes());
+        request_digest.update(metadata.ext.as_bytes());
+        request_digest.update(metadata.mime_type.as_bytes());
+        request_digest.update(metadata.size.to_be_bytes());
+        let request_fingerprint: [u8; 32] = request_digest.finalize().into();
+        let permit = auth
+            .protected_authority
+            .seal_postgres_mutation(operation_id, "media.upload", request_fingerprint)
+            .map_err(protected_media_denied)?
+            .ok_or(MediaError::Unauthorized)?;
+        match begin_authorized_operation(state, permit)
+            .await
+            .map_err(protected_media_denied)?
+        {
+            AuthorizedOperationStart::Replay(payload) => {
+                serde_json::from_slice(&payload).map_err(|_| MediaError::Internal)
+            }
+            AuthorizedOperationStart::Execute(mut operation) => {
+                buzz_db::protected_publication::publish_media(
+                    operation.transaction(),
+                    auth.tenant.community(),
+                    &publication,
+                )
+                .await
+                .map_err(protected_media_denied)?;
+                let payload = serde_json::to_vec(&descriptor).map_err(|_| MediaError::Internal)?;
+                operation
+                    .commit(&payload)
+                    .await
+                    .map_err(protected_media_denied)?;
+                Ok(descriptor)
+            }
+        }
+    } else {
+        // Storage authority remains PostgreSQL after cutover even when the
+        // protected authorization mode is Off, Shadow, or VerifyOnly. Preserve
+        // legacy authorization semantics, publish no sidecar, and commit the
+        // immutable descriptor through the PostgreSQL visibility transaction.
+        let mut transaction = state
+            .db
+            .begin_transaction()
+            .await
+            .map_err(protected_media_denied)?;
+        buzz_db::protected_publication::publish_media(
+            &mut transaction,
+            auth.tenant.community(),
+            &publication,
+        )
+        .await
+        .map_err(protected_media_denied)?;
+        transaction.commit().await.map_err(protected_media_denied)?;
+        Ok(descriptor)
+    }
 }
 
 pub(crate) fn media_base_url_for_tenant(config_relay_url: &str, tenant_host: &str) -> String {
@@ -550,13 +888,27 @@ async fn authenticate_media_read(
 ) -> Result<MediaReadAuth, MediaError> {
     let tenant = bind_media_read_tenant(state, headers).await?;
 
-    if !state.config.require_media_get_auth {
-        return Ok(MediaReadAuth { tenant });
+    let enforcing =
+        crate::authorization_runtime::transport::legacy_identity_lane(state, tenant.community())
+            == crate::authorization_runtime::transport::LegacyIdentityLane::ProtectedEnforce;
+    if !state.config.require_media_get_auth && !enforcing {
+        return Ok(MediaReadAuth {
+            tenant,
+            protected_authority: None,
+        });
     }
 
     let auth_event = extract_blossom_auth(headers)?;
     let sha256 = sha256_ext.split('.').next().unwrap_or(sha256_ext);
-    buzz_media::auth::verify_blossom_get_auth(&auth_event, sha256, Some(tenant.host()), 3600)?;
+    let verified_blossom = VerifiedEvidenceAdapter::new()
+        .verify_blossom_download(
+            tenant.community(),
+            &auth_event,
+            sha256,
+            Some(tenant.host()),
+            3600,
+        )
+        .map_err(protected_media_denied)?;
 
     let auth_tag = headers.get("x-auth-tag").and_then(|v| v.to_str().ok());
     let identity_proof =
@@ -569,9 +921,51 @@ async fn authenticate_media_read(
     )
     .await
     .map_err(|_| MediaError::RelayMembershipRequired)?;
+    let verified_blossom = match crate::corporate_identity::verify_unconditional_nip_oa_owner(
+        auth_event.pubkey,
+        auth_tag,
+    ) {
+        Some(owner) => VerifiedEvidenceAdapter::new()
+            .attach_transport_delegation(
+                verified_blossom,
+                buzz_auth::VerifiedDelegationOutput::from_workspace_verifier(
+                    owner,
+                    auth_event.pubkey,
+                    None,
+                    true,
+                ),
+            )
+            .map_err(protected_media_denied)?,
+        None => verified_blossom,
+    };
+    let correlation_id = stable_media_correlation(&verified_blossom);
+    let verified_assertion = seal_media_assertion(
+        state,
+        &tenant,
+        identity_proof.as_ref(),
+        AuthTransport::MediaDownload,
+    )?;
+    let protected_authority = Arc::new(
+        authorize_if_configured(
+            state,
+            Arc::new(verified_blossom),
+            verified_assertion,
+            AuthorizationCapability::MediaRead,
+            correlation_id,
+            "media.read",
+        )
+        .await
+        .map_err(protected_media_denied)?,
+    );
+    protected_authority
+        .revalidate()
+        .map_err(protected_media_denied)?;
     finalize_media_corporate_identity(state, &tenant, auth_event.pubkey, identity_proof).await?;
 
-    Ok(MediaReadAuth { tenant })
+    Ok(MediaReadAuth {
+        tenant,
+        protected_authority: Some(protected_authority),
+    })
 }
 
 fn blob_cache_control(require_auth: bool) -> &'static str {
@@ -668,7 +1062,14 @@ pub async fn get_blob(
 ) -> Result<Response, MediaError> {
     validate_media_path(&sha256_ext)?;
     let media_auth = authenticate_media_read(&state, &req_headers, &sha256_ext).await?;
-    serve_blob_for_tenant(&state, &media_auth.tenant, &sha256_ext, &req_headers).await
+    serve_blob_for_tenant(
+        &state,
+        &media_auth.tenant,
+        &sha256_ext,
+        &req_headers,
+        media_auth.protected_authority,
+    )
+    .await
 }
 
 /// Serve a validated blob from an already-authorized tenant context.
@@ -681,40 +1082,17 @@ pub(crate) async fn serve_blob_for_tenant(
     tenant: &TenantContext,
     sha256_ext: &str,
     req_headers: &HeaderMap,
+    protected_authority: Option<Arc<ProtectedAuthorization>>,
 ) -> Result<Response, MediaError> {
     validate_media_path(sha256_ext)?;
-    let cache_control = blob_cache_control(state.config.require_media_get_auth);
+    if let Some(authority) = &protected_authority {
+        authority.revalidate().map_err(protected_media_denied)?;
+    }
+    let cache_control =
+        blob_cache_control(state.config.require_media_get_auth || protected_authority.is_some());
 
-    // Sidecar gate FIRST — reject before any blob I/O. Storage is not authoritative.
-    let content_type = if sha256_ext.ends_with(".thumb.jpg") {
-        let parent_hash = sha256_ext.strip_suffix(".thumb.jpg").unwrap_or(sha256_ext);
-        let _ = state
-            .media_storage
-            .read_sidecar_mime(tenant, parent_hash)
-            .await
-            .ok_or(MediaError::NotFound)?;
-        "image/jpeg".to_string()
-    } else {
-        // For explicit paths (hash.ext), verify the requested extension matches
-        // the sidecar's canonical extension — sidecar is authoritative.
-        let sidecar_mime = state
-            .media_storage
-            .read_sidecar_mime(tenant, sha256_ext)
-            .await
-            .ok_or(MediaError::NotFound)?;
-        if sha256_ext.contains('.') {
-            let requested_ext = sha256_ext.rsplit('.').next().unwrap_or("");
-            let sidecar = state
-                .media_storage
-                .get_sidecar(tenant, sha256_ext.split('.').next().unwrap_or(sha256_ext))
-                .await
-                .map_err(|_| MediaError::NotFound)?;
-            if requested_ext != sidecar.ext {
-                return Err(MediaError::NotFound);
-            }
-        }
-        sidecar_mime
-    };
+    let (content_type, key) =
+        resolve_visible_media(state, tenant, sha256_ext, &protected_authority).await?;
 
     // Images and video render inline; generic files force download. This is the
     // primary defence for non-previewable types — combined with `nosniff` and
@@ -725,8 +1103,6 @@ pub(crate) async fn serve_blob_for_tenant(
     } else {
         "attachment"
     };
-
-    let key = resolve_s3_key(&state.media_storage, tenant, sha256_ext).await?;
 
     // Parse optional Range header.
     let range_header = req_headers
@@ -741,13 +1117,24 @@ pub(crate) async fn serve_blob_for_tenant(
     match single_range {
         None => {
             // Full response — 200 OK. Stream from S3 — never loads full blob into RAM.
-            let total = state
-                .media_storage
-                .head_with_metadata(&key)
-                .await?
-                .ok_or(MediaError::NotFound)?
-                .size;
-            let stream = state.media_storage.get_stream(&key).await?;
+            let total = release_media_fetched(
+                &protected_authority,
+                state.media_storage.head_with_metadata(&key).await,
+            )??
+            .ok_or(MediaError::NotFound)?
+            .size;
+            let stream = release_media_fetched(
+                &protected_authority,
+                state.media_storage.get_stream(&key).await,
+            )??;
+            let stream = stream.map(move |item| {
+                if let Some(authority) = &protected_authority {
+                    authority
+                        .release_fetched(())
+                        .map_err(protected_media_denied)?;
+                }
+                item
+            });
             let resp = axum::response::Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, &content_type)
@@ -763,17 +1150,22 @@ pub(crate) async fn serve_blob_for_tenant(
         }
         Some(range_str) => {
             // S3-native single-range response, capped to bound request memory.
-            let total = state
-                .media_storage
-                .head_with_metadata(&key)
-                .await?
-                .ok_or(MediaError::NotFound)?
-                .size;
+            let total = release_media_fetched(
+                &protected_authority,
+                state.media_storage.head_with_metadata(&key).await,
+            )??
+            .ok_or(MediaError::NotFound)?
+            .size;
 
             let parsed = parse_byte_range(&range_str, total);
             match parsed {
                 Some((start, end)) => {
                     if start >= total {
+                        if let Some(authority) = &protected_authority {
+                            authority
+                                .release_fetched(())
+                                .map_err(protected_media_denied)?;
+                        }
                         return axum::response::Response::builder()
                             .status(StatusCode::RANGE_NOT_SATISFIABLE)
                             .header(header::CONTENT_RANGE, format!("bytes */{total}"))
@@ -785,7 +1177,13 @@ pub(crate) async fn serve_blob_for_tenant(
                     let end = end
                         .min(start.saturating_add(MAX_RANGE_CHUNK - 1))
                         .min(total.saturating_sub(1));
-                    let chunk = state.media_storage.get_range(&key, start, end).await?;
+                    if let Some(authority) = &protected_authority {
+                        authority.revalidate().map_err(protected_media_denied)?;
+                    }
+                    let chunk = release_media_fetched(
+                        &protected_authority,
+                        state.media_storage.get_range(&key, start, end).await,
+                    )??;
                     let content_range = format!("bytes {start}-{end}/{total}");
 
                     Ok(axum::response::Response::builder()
@@ -801,11 +1199,18 @@ pub(crate) async fn serve_blob_for_tenant(
                         .body(axum::body::Body::from(chunk))
                         .map_err(|_| MediaError::Internal)?)
                 }
-                None => Ok(axum::response::Response::builder()
-                    .status(StatusCode::RANGE_NOT_SATISFIABLE)
-                    .header(header::CONTENT_RANGE, format!("bytes */{total}"))
-                    .body(axum::body::Body::empty())
-                    .map_err(|_| MediaError::Internal)?),
+                None => {
+                    if let Some(authority) = &protected_authority {
+                        authority
+                            .release_fetched(())
+                            .map_err(protected_media_denied)?;
+                    }
+                    Ok(axum::response::Response::builder()
+                        .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                        .header(header::CONTENT_RANGE, format!("bytes */{total}"))
+                        .body(axum::body::Body::empty())
+                        .map_err(|_| MediaError::Internal)?)
+                }
             }
         }
     }
@@ -861,42 +1266,30 @@ pub async fn head_blob(
     Path(sha256_ext): Path<String>,
 ) -> Result<Response, MediaError> {
     validate_media_path(&sha256_ext)?;
-    let require_media_get_auth = state.config.require_media_get_auth;
     let media_auth = authenticate_media_read(&state, &headers, &sha256_ext).await?;
+    if let Some(authority) = &media_auth.protected_authority {
+        authority.revalidate().map_err(protected_media_denied)?;
+    }
     let tenant = media_auth.tenant;
-    let cache_control = blob_cache_control(require_media_get_auth);
+    let cache_control = blob_cache_control(
+        state.config.require_media_get_auth || media_auth.protected_authority.is_some(),
+    );
 
-    // Sidecar gate FIRST — reject before any blob I/O.
-    let content_type = if sha256_ext.ends_with(".thumb.jpg") {
-        let parent_hash = sha256_ext.strip_suffix(".thumb.jpg").unwrap_or(&sha256_ext);
-        let _ = state
-            .media_storage
-            .read_sidecar_mime(&tenant, parent_hash)
-            .await
-            .ok_or(MediaError::NotFound)?;
-        "image/jpeg".to_string()
-    } else {
-        let sidecar_mime = state
-            .media_storage
-            .read_sidecar_mime(&tenant, &sha256_ext)
-            .await
-            .ok_or(MediaError::NotFound)?;
-        if sha256_ext.contains('.') {
-            let requested_ext = sha256_ext.rsplit('.').next().unwrap_or("");
-            let sidecar = state
-                .media_storage
-                .get_sidecar(&tenant, sha256_ext.split('.').next().unwrap_or(&sha256_ext))
-                .await
-                .map_err(|_| MediaError::NotFound)?;
-            if requested_ext != sidecar.ext {
-                return Err(MediaError::NotFound);
-            }
-        }
-        sidecar_mime
-    };
-
-    let key = resolve_s3_key(&state.media_storage, &tenant, &sha256_ext).await?;
-    match state.media_storage.head_with_metadata(&key).await? {
+    let (content_type, key) = resolve_visible_media(
+        &state,
+        &tenant,
+        &sha256_ext,
+        &media_auth.protected_authority,
+    )
+    .await?;
+    if let Some(authority) = &media_auth.protected_authority {
+        authority.revalidate().map_err(protected_media_denied)?;
+    }
+    let metadata = release_media_fetched(
+        &media_auth.protected_authority,
+        state.media_storage.head_with_metadata(&key).await,
+    )??;
+    match metadata {
         Some(meta) => {
             let size_str = meta.size.to_string();
             Ok((
@@ -912,6 +1305,124 @@ pub async fn head_blob(
         }
         None => Ok(StatusCode::NOT_FOUND.into_response()),
     }
+}
+
+pub(crate) async fn resolve_visible_media(
+    state: &AppState,
+    tenant: &TenantContext,
+    sha256_ext: &str,
+    authority: &Option<Arc<ProtectedAuthorization>>,
+) -> Result<(String, String), MediaError> {
+    let enforcing =
+        crate::authorization_runtime::transport::legacy_identity_lane(state, tenant.community())
+            == crate::authorization_runtime::transport::LegacyIdentityLane::ProtectedEnforce;
+    let mut visibility = state
+        .db
+        .protected_object_authority(
+            tenant.community(),
+            buzz_db::protected_visibility::ProtectedObjectSurface::Media,
+        )
+        .await
+        .map_err(|_| MediaError::Internal)?;
+    if enforcing
+        && visibility.state
+            != buzz_db::protected_visibility::ProtectedObjectAuthorityState::PostgreSql
+    {
+        crate::api::media_migration::require_reconciled_authority(state, tenant)
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, "protected media authority migration unavailable");
+                MediaError::Unauthorized
+            })?;
+        visibility = state
+            .db
+            .protected_object_authority(
+                tenant.community(),
+                buzz_db::protected_visibility::ProtectedObjectSurface::Media,
+            )
+            .await
+            .map_err(|_| MediaError::Internal)?;
+    }
+    if visibility.state == buzz_db::protected_visibility::ProtectedObjectAuthorityState::PostgreSql
+    {
+        // The one-way cutover selects PostgreSQL visibility in every mode.
+        // Off, Shadow, and VerifyOnly preserve their legacy authorization
+        // decision but never regress to mutable sidecars after the sentinel.
+        let sha256 = sha256_ext.split('.').next().unwrap_or(sha256_ext);
+        let publication = release_media_fetched(
+            authority,
+            state.db.media_publication(tenant.community(), sha256).await,
+        )?
+        .map_err(protected_media_denied)?
+        .ok_or(MediaError::NotFound)?;
+        if sha256_ext.ends_with(".thumb.jpg") {
+            return Ok((
+                "image/jpeg".to_string(),
+                publication.thumbnail_key.ok_or(MediaError::NotFound)?,
+            ));
+        }
+        if sha256_ext.contains('.') {
+            let requested_ext = sha256_ext.rsplit('.').next().unwrap_or("");
+            if requested_ext != publication.extension {
+                return Err(MediaError::NotFound);
+            }
+        }
+        return Ok((publication.mime_type, publication.object_key));
+    }
+
+    if enforcing {
+        return Err(MediaError::Unauthorized);
+    }
+    crate::api::media_migration::require_legacy_sentinel_absent(state, tenant)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "legacy media visibility is permanently fenced");
+            MediaError::Unauthorized
+        })?;
+    // Before cutover, Off, Shadow, and VerifyOnly retain the exact tenant-sidecar
+    // visibility contract. A PostgreSQL marker above is monotonic and never
+    // falls back to the mutable sidecar state.
+    let content_type = if sha256_ext.ends_with(".thumb.jpg") {
+        let parent_hash = sha256_ext.strip_suffix(".thumb.jpg").unwrap_or(sha256_ext);
+        let _ = release_media_fetched(
+            authority,
+            state
+                .media_storage
+                .read_sidecar_mime(tenant, parent_hash)
+                .await,
+        )?
+        .ok_or(MediaError::NotFound)?;
+        "image/jpeg".to_string()
+    } else {
+        let sidecar_mime = release_media_fetched(
+            authority,
+            state
+                .media_storage
+                .read_sidecar_mime(tenant, sha256_ext)
+                .await,
+        )?
+        .ok_or(MediaError::NotFound)?;
+        if sha256_ext.contains('.') {
+            let requested_ext = sha256_ext.rsplit('.').next().unwrap_or("");
+            let sidecar = release_media_fetched(
+                authority,
+                state
+                    .media_storage
+                    .get_sidecar(tenant, sha256_ext.split('.').next().unwrap_or(sha256_ext))
+                    .await,
+            )?
+            .map_err(|_| MediaError::NotFound)?;
+            if requested_ext != sidecar.ext {
+                return Err(MediaError::NotFound);
+            }
+        }
+        sidecar_mime
+    };
+    let key = release_media_fetched(
+        authority,
+        resolve_s3_key(&state.media_storage, tenant, sha256_ext).await,
+    )??;
+    Ok((content_type, key))
 }
 
 /// Resolve the S3 key from a URL path segment.
@@ -970,6 +1481,7 @@ fn extract_blossom_auth(headers: &HeaderMap) -> Result<nostr::Event, MediaError>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
     use axum::{
@@ -979,6 +1491,30 @@ mod tests {
     use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag, Timestamp};
     use tower::ServiceExt;
     use uuid::Uuid;
+
+    struct ScriptedMediaFence(AtomicBool);
+
+    impl crate::connection::OutboundReleaseFence for ScriptedMediaFence {
+        fn release(&self) -> bool {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+
+    #[test]
+    fn media_outcomes_release_only_after_post_fetch_authority_check() {
+        let fence = ScriptedMediaFence(AtomicBool::new(true));
+        let success = release_media_outcome(Some(&fence), Ok::<_, &'static str>(Some("blob")))
+            .expect("current authority releases fetched success");
+        assert_eq!(success, Ok(Some("blob")));
+
+        fence.0.store(false, Ordering::SeqCst);
+        for fetched in [Ok(Some("blob")), Ok(None), Err("storage unavailable")] {
+            assert!(matches!(
+                release_media_outcome(Some(&fence), fetched),
+                Err(MediaError::Unauthorized)
+            ));
+        }
+    }
 
     const VALID_HASH: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
 
@@ -1269,6 +1805,31 @@ mod tests {
 
         drop(permit_b);
         drop(permit_a);
+    }
+
+    #[tokio::test]
+    async fn denied_protected_upload_consumes_no_rate_or_concurrency_state() {
+        let state = test_state().await;
+        let pubkey = nostr::Keys::generate().public_key();
+        let community = buzz_core::CommunityId::from_uuid(Uuid::from_u128(0xCA5));
+        let key = (community, pubkey.to_bytes());
+
+        assert!(matches!(
+            acquire_protected_upload_permit(&state, community, &pubkey, || {
+                Err(MediaError::Unauthorized)
+            }),
+            Err(MediaError::Unauthorized)
+        ));
+        assert!(!state.media_upload_rate_limiter.contains_key(&key));
+        assert!(!state.media_uploads_in_flight.contains_key(&key));
+
+        assert!(
+            !upload_rate_limited(&state, community, &pubkey),
+            "the first legacy retry must retain its full rate budget"
+        );
+        let permit = acquire_upload_permit(&state, community, &pubkey)
+            .expect("the first legacy retry must retain its concurrency slot");
+        drop(permit);
     }
 
     #[test]

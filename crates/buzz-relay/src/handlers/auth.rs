@@ -183,11 +183,14 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 }
             }
 
+            let identity_assertion = conn.corporate_identity_jwt.as_ref().map(|jwt| {
+                crate::corporate_identity::IdentityAssertionInput::legacy_jwt(jwt.clone())
+            });
             let identity_proof = match crate::corporate_identity::verify_corporate_identity(
                 &state,
                 conn.tenant.community(),
                 pubkey,
-                conn.corporate_identity_jwt.as_deref(),
+                identity_assertion.as_ref(),
                 auth_tag_json.as_deref(),
             )
             .await

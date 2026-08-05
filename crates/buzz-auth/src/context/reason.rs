@@ -154,6 +154,9 @@ pub enum AuthContextError {
     /// Proof method was not valid for the transport being authorized.
     #[error("Nostr proof method does not match authorization transport")]
     TransportProofMismatch,
+    /// Exact verifier-operation evidence was not valid for the transport.
+    #[error("Nostr operation proof does not match authorization transport")]
+    OperationProofMismatch,
     /// Direct federated authorization was attached to a delegated Nostr actor.
     #[error("direct federated authorization cannot include a delegated Nostr owner")]
     DirectAuthorizationHasOwner,
@@ -172,6 +175,12 @@ pub enum AuthContextError {
     /// Delegated owner evidence did not resolve an already-active binding.
     #[error("delegated federated authorization requires an existing active binding")]
     DelegatedBindingNotExistingActive,
+    /// Federated finalization did not consume a current provider decision.
+    #[error("federated authorization requires a current provider decision")]
+    ProviderDecisionRequired,
+    /// An issued lease did not match the context evidence being finalized.
+    #[error("authorization lease does not match finalized context evidence")]
+    FinalizedLeaseMismatch,
 }
 
 impl AuthContextError {
@@ -214,6 +223,7 @@ impl AuthContextError {
             Self::OwnerAdmissionPrincipalMismatch => "owner_admission_principal_mismatch",
             Self::AssertionPrincipalMismatch => "federated_assertion_principal_mismatch",
             Self::TransportProofMismatch => "nostr_transport_proof_mismatch",
+            Self::OperationProofMismatch => "nostr_operation_proof_mismatch",
             Self::DirectAuthorizationHasOwner => "federated_direct_has_owner",
             Self::DirectBindingKeyMismatch => "federated_direct_key_mismatch",
             Self::DelegateKeyMismatch => "federated_delegate_key_mismatch",
@@ -222,6 +232,8 @@ impl AuthContextError {
             Self::DelegatedBindingNotExistingActive => {
                 "federated_delegated_binding_not_existing_active"
             }
+            Self::ProviderDecisionRequired => "authorization_provider_decision_required",
+            Self::FinalizedLeaseMismatch => "authorization_finalized_lease_mismatch",
         }
     }
 }

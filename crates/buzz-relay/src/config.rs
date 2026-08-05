@@ -119,6 +119,19 @@ impl Default for CorporateIdentityConfig {
     }
 }
 
+impl CorporateIdentityConfig {
+    /// Whether a complete verifier is configured independently of the legacy
+    /// process-wide enforcement switch.
+    pub fn verifier_configured(&self) -> bool {
+        !self.jwt_header.is_empty()
+            && !self.jwks_uri.is_empty()
+            && !self.issuer.is_empty()
+            && !self.audience.is_empty()
+            && !self.uid_claim.is_empty()
+            && !self.display_claim.is_empty()
+    }
+}
+
 /// Relay runtime configuration, loaded from environment variables.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -558,7 +571,11 @@ fn load_corporate_identity_config() -> Result<CorporateIdentityConfig, ConfigErr
         corporate_env_trimmed("BUZZ_CORPORATE_IDENTITY_PUBLIC_DISPLAY_CLAIM")?;
     config.npub_claim = corporate_env_trimmed("BUZZ_CORPORATE_IDENTITY_NPUB_CLAIM")?;
 
-    if config.require {
+    let verifier_requested = config.require
+        || !config.jwks_uri.is_empty()
+        || !config.issuer.is_empty()
+        || !config.audience.is_empty();
+    if verifier_requested {
         let mut missing = Vec::new();
         if config.jwt_header.is_empty() {
             missing.push("BUZZ_CORPORATE_IDENTITY_JWT_HEADER");
@@ -580,7 +597,7 @@ fn load_corporate_identity_config() -> Result<CorporateIdentityConfig, ConfigErr
         }
         if !missing.is_empty() {
             return Err(ConfigError::InvalidValue(format!(
-                "BUZZ_REQUIRE_CORPORATE_IDENTITY=true but required corporate identity config is missing: {}",
+                "corporate identity verifier config is incomplete; missing: {}",
                 missing.join(", ")
             )));
         }

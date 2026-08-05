@@ -1,14 +1,12 @@
-use std::fmt;
+use std::{fmt, sync::Arc};
 
 use buzz_core::CommunityId;
 use nostr::PublicKey;
 use uuid::Uuid;
 
-use crate::Scope;
+use crate::{provider::AuthorizationProfileId, provider::CapabilitySet, Scope};
 
-#[cfg(test)]
-use super::transport_accepts_proof;
-use super::AuthContextError;
+use super::{transport_accepts_proof, AuthContextError};
 
 /// Cryptographic proof used to authenticate the Nostr actor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,7 +15,7 @@ pub enum AuthMethod {
     Nip42,
     /// NIP-98 signed HTTP request.
     Nip98,
-    /// Blossom upload authorization.
+    /// Blossom media authorization for the exact verified operation.
     Blossom,
 }
 
@@ -192,9 +190,7 @@ impl AdmissionExpiry {
 /// Server-verified Nostr authority for a request or connection.
 #[derive(PartialEq, Eq)]
 pub struct NostrAuthority {
-    actor_pubkey: PublicKey,
-    proof_method: AuthMethod,
-    verified_delegation: Option<VerifiedTransportDelegation>,
+    verified_proof: Arc<VerifiedNostrProof>,
 }
 
 impl fmt::Debug for NostrAuthority {
@@ -202,42 +198,42 @@ impl fmt::Debug for NostrAuthority {
         formatter
             .debug_struct("NostrAuthority")
             .field("actor_pubkey", &"[redacted]")
-            .field("proof_method", &self.proof_method)
+            .field("proof_method", &self.verified_proof.proof_method())
             .field("verified_delegation", &"[redacted]")
             .finish()
     }
 }
 
 impl NostrAuthority {
-    pub(super) fn new(proof: VerifiedNostrProof) -> Self {
-        Self {
-            actor_pubkey: proof.actor_pubkey,
-            proof_method: proof.proof_method,
-            verified_delegation: proof.verified_delegation,
-        }
+    pub(super) fn new(verified_proof: Arc<VerifiedNostrProof>) -> Self {
+        Self { verified_proof }
     }
 
     /// Authenticated Nostr actor.
-    pub const fn actor_pubkey(&self) -> PublicKey {
-        self.actor_pubkey
+    pub fn actor_pubkey(&self) -> PublicKey {
+        self.verified_proof.actor_pubkey()
     }
 
     /// Proof method used to authenticate the actor.
-    pub const fn proof_method(&self) -> AuthMethod {
-        self.proof_method
+    pub fn proof_method(&self) -> AuthMethod {
+        self.verified_proof.proof_method()
     }
 
     /// Cryptographically verified owner for a delegated Nostr actor.
-    pub const fn verified_owner_pubkey(&self) -> Option<PublicKey> {
-        match &self.verified_delegation {
-            Some(delegation) => Some(delegation.owner_pubkey()),
-            None => None,
-        }
+    pub fn verified_owner_pubkey(&self) -> Option<PublicKey> {
+        self.verified_proof
+            .verified_delegation()
+            .map(VerifiedTransportDelegation::owner_pubkey)
     }
 
     /// Cryptographically verified owner-to-actor delegation, when present.
-    pub const fn verified_delegation(&self) -> Option<&VerifiedTransportDelegation> {
-        self.verified_delegation.as_ref()
+    pub fn verified_delegation(&self) -> Option<&VerifiedTransportDelegation> {
+        self.verified_proof.verified_delegation()
+    }
+
+    /// Sealed proof retained from transport verification.
+    pub fn verified_proof(&self) -> &Arc<VerifiedNostrProof> {
+        &self.verified_proof
     }
 }
 
@@ -304,6 +300,10 @@ pub struct VerifiedKeyAttestation {
 }
 
 impl VerifiedKeyAttestation {
+    pub(crate) const fn from_evidence_adapter(pubkey: PublicKey) -> Self {
+        Self { pubkey }
+    }
+
     #[cfg(test)]
     pub(crate) const fn new(pubkey: PublicKey) -> Self {
         Self { pubkey }
@@ -346,6 +346,26 @@ pub struct VerifiedFederatedAssertion {
 }
 
 impl VerifiedFederatedAssertion {
+    pub(crate) const fn from_evidence_adapter(
+        authorization_domain: CommunityId,
+        authorized_transport: AuthTransport,
+        principal: FederatedPrincipal,
+        key_attestation: Option<VerifiedKeyAttestation>,
+        transport: AssertionTransport,
+        not_before: Option<AssertionNotBefore>,
+        expires_at: AssertionExpiry,
+    ) -> Self {
+        Self {
+            authorization_domain,
+            authorized_transport,
+            principal,
+            key_attestation,
+            transport,
+            not_before,
+            expires_at,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) const fn new(
         authorization_domain: CommunityId,
@@ -418,6 +438,140 @@ impl fmt::Debug for VerifiedFederatedAssertion {
     }
 }
 
+/// Provider-neutral identity and capability evidence from a verified adapter.
+///
+/// This move-only value can be created only from an already sealed federated
+/// assertion. It carries the installed server profile, normalized portable
+/// capabilities, and a hard freshness window without retaining raw headers,
+/// tokens, or provider-specific claims.
+#[derive(PartialEq, Eq)]
+pub struct VerifiedProviderEvidence {
+    assertion: VerifiedFederatedAssertion,
+    profile_id: AuthorizationProfileId,
+    capabilities: CapabilitySet,
+    issued_at: u64,
+    fresh_until: u64,
+}
+
+impl VerifiedProviderEvidence {
+    pub(crate) const fn from_evidence_adapter(
+        assertion: VerifiedFederatedAssertion,
+        profile_id: AuthorizationProfileId,
+        capabilities: CapabilitySet,
+        issued_at: u64,
+        fresh_until: u64,
+    ) -> Self {
+        Self {
+            assertion,
+            profile_id,
+            capabilities,
+            issued_at,
+            fresh_until,
+        }
+    }
+
+    /// Authorization domain for which the provider evidence was verified.
+    pub const fn authorization_domain(&self) -> CommunityId {
+        self.assertion.authorization_domain()
+    }
+
+    /// Protected transport for which the provider evidence was verified.
+    pub const fn authorized_transport(&self) -> AuthTransport {
+        self.assertion.authorized_transport()
+    }
+
+    /// Normalized issuer-qualified principal from the verified provenance.
+    pub const fn principal(&self) -> &FederatedPrincipal {
+        self.assertion.principal()
+    }
+
+    /// Installed server profile that produced this evidence.
+    pub const fn profile_id(&self) -> &AuthorizationProfileId {
+        &self.profile_id
+    }
+
+    /// Normalized capabilities granted by the verified provider result.
+    pub const fn capabilities(&self) -> &CapabilitySet {
+        &self.capabilities
+    }
+
+    /// Server-observed issuance time for this provider result.
+    pub const fn issued_at(&self) -> u64 {
+        self.issued_at
+    }
+
+    /// Exclusive hard freshness bound for this provider result.
+    pub const fn fresh_until(&self) -> u64 {
+        self.fresh_until
+    }
+
+    /// Revalidate this evidence for one exact protected request.
+    pub fn validate_for(
+        &self,
+        authorization_domain: CommunityId,
+        transport: AuthTransport,
+        installed_profile: &AuthorizationProfileId,
+        required_capabilities: &CapabilitySet,
+        now_unix_seconds: u64,
+    ) -> Result<(), ProviderEvidenceValidationError> {
+        if self.authorization_domain() != authorization_domain {
+            return Err(ProviderEvidenceValidationError::AuthorizationDomainMismatch);
+        }
+        if self.authorized_transport() != transport {
+            return Err(ProviderEvidenceValidationError::TransportMismatch);
+        }
+        if self.profile_id() != installed_profile {
+            return Err(ProviderEvidenceValidationError::ProfileMismatch);
+        }
+        if !required_capabilities
+            .as_slice()
+            .iter()
+            .all(|capability| self.capabilities.contains(*capability))
+        {
+            return Err(ProviderEvidenceValidationError::CapabilityMismatch);
+        }
+        if self.issued_at > now_unix_seconds {
+            return Err(ProviderEvidenceValidationError::NotYetValid);
+        }
+        if self.fresh_until <= now_unix_seconds {
+            return Err(ProviderEvidenceValidationError::Expired);
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for VerifiedProviderEvidence {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VerifiedProviderEvidence")
+            .field("authorization_domain", &"[redacted]")
+            .field("authorized_transport", &"[redacted]")
+            .field("principal", &"[redacted]")
+            .field("profile_id", &"[redacted]")
+            .field("capabilities", &"[redacted]")
+            .field("issued_at", &"[redacted]")
+            .field("fresh_until", &"[redacted]")
+            .finish()
+    }
+}
+
+/// Fail-closed reason provider evidence cannot authorize an exact request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderEvidenceValidationError {
+    /// Evidence belongs to another authorization domain.
+    AuthorizationDomainMismatch,
+    /// Evidence was verified for another protected transport.
+    TransportMismatch,
+    /// Evidence was produced by another installed provider profile.
+    ProfileMismatch,
+    /// Evidence does not grant every capability required by the request.
+    CapabilityMismatch,
+    /// Evidence claims an issuance time after the server clock.
+    NotYetValid,
+    /// Evidence has reached its hard freshness bound.
+    Expired,
+}
+
 /// Current admission for the owner of a delegated Nostr actor.
 ///
 /// This evidence is independent of a federated assertion: a delegated request
@@ -434,9 +588,7 @@ pub struct VerifiedOwnerAdmission {
 }
 
 impl VerifiedOwnerAdmission {
-    // Consumed by the provider finalizer in the stacked capability contract.
-    #[allow(dead_code)]
-    pub(crate) const fn new(
+    pub(crate) const fn from_capability_snapshot(
         authorization_domain: CommunityId,
         principal: FederatedPrincipal,
         fresh_until: AdmissionExpiry,
@@ -446,6 +598,15 @@ impl VerifiedOwnerAdmission {
             principal,
             fresh_until,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn new(
+        authorization_domain: CommunityId,
+        principal: FederatedPrincipal,
+        fresh_until: AdmissionExpiry,
+    ) -> Self {
+        Self::from_capability_snapshot(authorization_domain, principal, fresh_until)
     }
 
     /// Authorization domain for which owner admission was resolved.
@@ -491,6 +652,13 @@ impl fmt::Debug for DelegationCapability {
     }
 }
 
+impl DelegationCapability {
+    /// Whether the verifier proved authority for the complete transport.
+    pub const fn is_transport_wide(self) -> bool {
+        matches!(self, Self::TransportWide)
+    }
+}
+
 /// Transport-wide delegation from a bound owner to the authenticated key.
 ///
 /// A verifier may construct this only after proving the capability authorizes
@@ -522,7 +690,6 @@ impl fmt::Debug for VerifiedTransportDelegation {
 impl VerifiedTransportDelegation {
     /// Build transport-wide evidence after validating both keys and confirming
     /// that no narrower capability constraint is being discarded.
-    #[cfg(test)]
     pub(crate) fn new_unrestricted(
         owner_pubkey: PublicKey,
         delegate_pubkey: PublicKey,
@@ -560,6 +727,78 @@ impl VerifiedTransportDelegation {
     }
 }
 
+/// Class of exact verifier input retained by a sealed Nostr proof.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifiedOperationBindingKind {
+    /// NIP-42 challenge and relay URL for a WebSocket session.
+    NostrSession,
+    /// NIP-98 method, URL, and payload for an HTTP request.
+    HttpRequest,
+    /// Blossom upload verb, blob hash, server, and signed event.
+    BlossomUpload,
+    /// Blossom download verb, blob hash, server, and signed event.
+    BlossomDownload,
+}
+
+/// Opaque exact-operation fingerprint produced only by a trusted verifier.
+///
+/// It has no public constructor or serialization path. The fingerprint keeps
+/// sensitive URLs, challenges, and payloads out of the authorization context
+/// while preventing a proof from being silently widened to another verifier
+/// operation class.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct VerifiedOperationBinding {
+    kind: VerifiedOperationBindingKind,
+    fingerprint: [u8; 32],
+}
+
+impl VerifiedOperationBinding {
+    pub(crate) const fn from_evidence_adapter(
+        kind: VerifiedOperationBindingKind,
+        fingerprint: [u8; 32],
+    ) -> Self {
+        Self { kind, fingerprint }
+    }
+
+    #[cfg(test)]
+    fn for_transport(transport: AuthTransport) -> Self {
+        let kind = match transport {
+            AuthTransport::RelayWebSocket | AuthTransport::Audio => {
+                VerifiedOperationBindingKind::NostrSession
+            }
+            AuthTransport::HttpBridge | AuthTransport::Git => {
+                VerifiedOperationBindingKind::HttpRequest
+            }
+            AuthTransport::MediaUpload => VerifiedOperationBindingKind::BlossomUpload,
+            AuthTransport::MediaDownload => VerifiedOperationBindingKind::BlossomDownload,
+        };
+        Self {
+            kind,
+            fingerprint: [0; 32],
+        }
+    }
+
+    /// Exact verifier-operation class.
+    pub const fn kind(self) -> VerifiedOperationBindingKind {
+        self.kind
+    }
+
+    /// Opaque fingerprint of the exact verified operation inputs.
+    pub const fn fingerprint(self) -> [u8; 32] {
+        self.fingerprint
+    }
+}
+
+impl fmt::Debug for VerifiedOperationBinding {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VerifiedOperationBinding")
+            .field("kind", &self.kind)
+            .field("fingerprint", &"[redacted]")
+            .finish()
+    }
+}
+
 /// Cryptographically verified Nostr proof for one request or connection.
 ///
 /// Transport verifiers inside `buzz-auth` produce this evidence after checking
@@ -574,10 +813,41 @@ pub struct VerifiedNostrProof {
     authorized_transport: AuthTransport,
     actor_pubkey: PublicKey,
     proof_method: AuthMethod,
+    operation_binding: VerifiedOperationBinding,
     verified_delegation: Option<VerifiedTransportDelegation>,
 }
 
 impl VerifiedNostrProof {
+    pub(crate) fn from_evidence_adapter(
+        authorization_domain: CommunityId,
+        authorized_transport: AuthTransport,
+        actor_pubkey: PublicKey,
+        proof_method: AuthMethod,
+        operation_binding: VerifiedOperationBinding,
+        verified_delegation: Option<VerifiedTransportDelegation>,
+    ) -> Result<Self, AuthContextError> {
+        if !transport_accepts_proof(authorized_transport, proof_method) {
+            return Err(AuthContextError::TransportProofMismatch);
+        }
+        if !operation_binding_matches_transport(operation_binding.kind(), authorized_transport) {
+            return Err(AuthContextError::OperationProofMismatch);
+        }
+        if verified_delegation
+            .as_ref()
+            .is_some_and(|delegation| delegation.delegate_pubkey() != actor_pubkey)
+        {
+            return Err(AuthContextError::DelegateKeyMismatch);
+        }
+        Ok(Self {
+            authorization_domain,
+            authorized_transport,
+            actor_pubkey,
+            proof_method,
+            operation_binding,
+            verified_delegation,
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn new(
         authorization_domain: CommunityId,
@@ -600,6 +870,7 @@ impl VerifiedNostrProof {
             authorized_transport,
             actor_pubkey,
             proof_method,
+            operation_binding: VerifiedOperationBinding::for_transport(authorized_transport),
             verified_delegation,
         })
     }
@@ -624,6 +895,11 @@ impl VerifiedNostrProof {
         self.proof_method
     }
 
+    /// Opaque binding to the exact verifier operation.
+    pub const fn operation_binding(&self) -> VerifiedOperationBinding {
+        self.operation_binding
+    }
+
     /// Verified owner-to-actor delegation, when present.
     pub const fn verified_delegation(&self) -> Option<&VerifiedTransportDelegation> {
         self.verified_delegation.as_ref()
@@ -638,9 +914,32 @@ impl fmt::Debug for VerifiedNostrProof {
             .field("authorized_transport", &self.authorized_transport)
             .field("actor_pubkey", &"[redacted]")
             .field("proof_method", &self.proof_method)
+            .field("operation_binding", &self.operation_binding)
             .field("verified_delegation", &"[redacted]")
             .finish()
     }
+}
+
+const fn operation_binding_matches_transport(
+    kind: VerifiedOperationBindingKind,
+    transport: AuthTransport,
+) -> bool {
+    matches!(
+        (kind, transport),
+        (
+            VerifiedOperationBindingKind::NostrSession,
+            AuthTransport::RelayWebSocket | AuthTransport::Audio
+        ) | (
+            VerifiedOperationBindingKind::HttpRequest,
+            AuthTransport::HttpBridge | AuthTransport::Git
+        ) | (
+            VerifiedOperationBindingKind::BlossomUpload,
+            AuthTransport::MediaUpload
+        ) | (
+            VerifiedOperationBindingKind::BlossomDownload,
+            AuthTransport::MediaDownload
+        )
+    )
 }
 
 /// Successful community admission and permissions for one decision.
@@ -660,6 +959,18 @@ pub struct AuthorizedCommunityAccess {
 }
 
 impl AuthorizedCommunityAccess {
+    pub(crate) const fn from_evidence_adapter(
+        authorization_domain: CommunityId,
+        scopes: Vec<Scope>,
+        channel_ids: Option<Vec<Uuid>>,
+    ) -> Self {
+        Self {
+            authorization_domain,
+            scopes,
+            channel_ids,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) const fn new(
         authorization_domain: CommunityId,

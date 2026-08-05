@@ -149,6 +149,19 @@ pub async fn hydrate_for_read(
     result
 }
 
+/// Hydrate from a PostgreSQL-selected manifest digest.
+///
+/// The object-store pointer is deliberately bypassed; callers must obtain the
+/// digest from the active publication row in the server-resolved domain.
+pub async fn hydrate_for_published_read(
+    store: &GitStore,
+    manifest_digest: &str,
+    options: HydrationOptions<'_>,
+) -> Result<HydratedRepo, HydrateError> {
+    let manifest = load_manifest_by_digest(store, manifest_digest).await?;
+    materialize_manifest(store, &manifest, options).await
+}
+
 async fn hydrate_for_read_inner(
     store: &GitStore,
     ctx: &TenantContext,
@@ -176,6 +189,26 @@ pub async fn load_manifest_for_read(
     Ok(load_pointer(store, ctx, owner, repo)
         .await?
         .map(|(_etag, _digest, manifest)| manifest))
+}
+
+/// Load and verify a PostgreSQL-selected immutable manifest.
+pub async fn load_manifest_by_digest(
+    store: &GitStore,
+    digest: &str,
+) -> Result<Manifest, HydrateError> {
+    if digest.len() != 64
+        || !digest
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        return Err(HydrateError::InvalidPointer);
+    }
+    let manifest_key = format!("manifests/{digest}");
+    let manifest_bytes =
+        get_verified_limited(store, &manifest_key, digest, MAX_MANIFEST_BYTES).await?;
+    let manifest = Manifest::from_bytes(&manifest_bytes)?;
+    manifest.validate()?;
+    Ok(manifest)
 }
 
 async fn init_bare_repo(path: &Path) -> Result<(), HydrateError> {
@@ -239,6 +272,40 @@ pub async fn hydrate_for_write(
     }
 }
 
+/// Hydrate a write workspace from PostgreSQL-authoritative publication state.
+pub async fn hydrate_for_published_write(
+    store: &GitStore,
+    manifest_digest: Option<&str>,
+    options: HydrationOptions<'_>,
+) -> Result<(HydratedRepo, ParentState), HydrateError> {
+    match manifest_digest {
+        Some(digest) => {
+            let manifest = load_manifest_by_digest(store, digest).await?;
+            let repo = materialize_manifest(store, &manifest, options).await?;
+            Ok((
+                repo,
+                ParentState::from_published(digest.to_owned(), manifest),
+            ))
+        }
+        None => {
+            let tempdir = TempDir::new_in(options.scratch_dir).map_err(|error| {
+                HydrateError::Hydrate(format!("tempdir in {:?}: {error}", options.scratch_dir))
+            })?;
+            let path = tempdir.path().to_path_buf();
+            init_bare_repo(&path).await?;
+            Ok((
+                HydratedRepo {
+                    _tempdir: tempdir,
+                    path,
+                    hydrated_bytes: 0,
+                    hydrated_packs: 0,
+                },
+                ParentState::fresh(),
+            ))
+        }
+    }
+}
+
 /// Resolve the pointer to its `(ETag, digest, verified Manifest)` triple.
 ///
 /// `Ok(None)` if the pointer is absent (caller decides 404 vs first-push
@@ -261,11 +328,7 @@ async fn load_pointer(
     if digest.len() != 64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(HydrateError::InvalidPointer);
     }
-    let manifest_key = format!("manifests/{digest}");
-    let manifest_bytes =
-        get_verified_limited(store, &manifest_key, &digest, MAX_MANIFEST_BYTES).await?;
-    let manifest = Manifest::from_bytes(&manifest_bytes)?;
-    manifest.validate()?;
+    let manifest = load_manifest_by_digest(store, &digest).await?;
     Ok(Some((etag, digest, manifest)))
 }
 

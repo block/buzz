@@ -28,6 +28,7 @@ pub mod hook;
 pub mod hydrate;
 pub mod manifest;
 pub mod manifest_event;
+pub mod migration;
 pub mod pack_cache;
 pub mod policy;
 pub mod store;

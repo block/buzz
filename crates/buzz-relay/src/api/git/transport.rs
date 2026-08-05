@@ -13,6 +13,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
 use axum::{
     body::Body,
     extract::{Path as AxumPath, Query, State},
@@ -23,21 +24,25 @@ use axum::{
 };
 use base64::Engine;
 use hex;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::process::Command;
 use tower_http::limit::RequestBodyLimitLayer;
 use tracing::{error, info, warn};
 
 use super::binding::{resolve_repo_binding, RepoBinding};
-use super::cas_publish::{cas_publish, CasError, ParentState, PublishLimits};
+use super::cas_publish::{cas_publish, prepare_publish, CasError, ParentState, PublishLimits};
 use super::hook::install_hook;
 use super::hydrate::{
-    hydrate_for_read, hydrate_for_write, load_manifest_for_read, HydrateError, HydratedRepo,
-    HydrationOptions,
+    hydrate_for_published_read, hydrate_for_published_write, hydrate_for_read, hydrate_for_write,
+    load_manifest_by_digest, load_manifest_for_read, HydrateError, HydratedRepo, HydrationOptions,
 };
 use super::manifest_event::{build_ref_state_event, RefStateInputs};
+use crate::authorization_runtime::transport::{authorize_if_configured, ProtectedAuthorization};
 use crate::state::AppState;
+use buzz_auth::{AuthTransport, AuthorizationCapability};
 use buzz_core::TenantContext;
+use buzz_db::protected_publication::{ExpectedGitPublication, GitPublicationOutcome};
 
 /// Timeout for `info/refs` — ref advertisement is fast (essentially `git show-ref`).
 const INFO_REFS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
@@ -76,7 +81,9 @@ pub struct GitAuth {
     pub tenant: TenantContext,
     /// Cryptographically verified identity staged until repository policy
     /// authorization succeeds.
-    identity_proof: crate::corporate_identity::CorporateIdentityProof,
+    identity_proof: Option<crate::corporate_identity::CorporateIdentityProof>,
+    /// Sealed NIP-98 evidence retained for every request checkpoint.
+    verified_proof: Arc<buzz_auth::VerifiedNostrProof>,
 }
 
 impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
@@ -87,6 +94,19 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
         let method = parts.method.as_str();
+
+        // Row zero for Git HTTP: bind the request Host to a server-resolved
+        // tenant before even disclosing that this is an authenticated route.
+        // This keeps an unmapped host indistinguishable from a missing repo and
+        // matches every other protected transport's pre-auth host boundary.
+        let raw_host = parts
+            .headers
+            .get(header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let tenant = crate::tenant::bind_community(&state.db, raw_host)
+            .await
+            .map_err(|_| (StatusCode::NOT_FOUND, "repository not found").into_response())?;
 
         let auth_header = parts
             .headers
@@ -121,19 +141,10 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         let event_json = String::from_utf8(event_bytes)
             .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid utf-8").into_response())?;
 
-        // Row zero for Git HTTP: bind the request Host to a server-resolved
-        // tenant before URL verification. We still do not trust forwarded
-        // headers; the signed `u` tag is checked against the host that resolved
-        // through the authoritative communities table, not a deployment-global
-        // `config.relay_url` and not any client-supplied community value.
-        let raw_host = parts
-            .headers
-            .get(header::HOST)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        let tenant = crate::tenant::bind_community(&state.db, raw_host)
-            .await
-            .map_err(|_| (StatusCode::NOT_FOUND, "repository not found").into_response())?;
+        // We still do not trust forwarded headers: the signed `u` tag is
+        // checked against the host resolved through the authoritative
+        // communities table, not a deployment-global `config.relay_url` or a
+        // client-supplied community value.
         let expected_url = git_expected_url(
             &state.config.relay_url,
             &tenant,
@@ -187,12 +198,21 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
 
         // body=None: can't buffer streaming pack data to verify payload hash.
         // Token is time-bounded (±60s) and URL-locked — acceptable trade-off.
-        let pubkey =
-            buzz_auth::nip98::verify_nip98_event(&event_json, &expected_url, &event_method, None)
-                .map_err(|e| {
-                warn!(error = %e, "git NIP-98 auth failed");
+        let verified_proof = buzz_auth::VerifiedEvidenceAdapter::new()
+            .verify_nip98(
+                tenant.community(),
+                AuthTransport::Git,
+                &event_json,
+                &expected_url,
+                &event_method,
+                None,
+                None,
+            )
+            .map_err(|error| {
+                warn!(error = %error, "git NIP-98 auth failed");
                 (StatusCode::UNAUTHORIZED, "NIP-98 auth failed").into_response()
             })?;
+        let pubkey = verified_proof.actor_pubkey();
 
         // NOTE: NIP-98 event-ID dedup intentionally NOT implemented here.
         // Git's credential protocol reuses one signed token across multiple requests
@@ -214,22 +234,34 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
             .get("x-auth-tag")
             .and_then(|value| value.to_str().ok());
         let auth_tag = event_auth_tag.as_deref().or(header_auth_tag);
-        let identity_jwt = crate::corporate_identity::identity_jwt_from_headers(
+        let identity_assertion = crate::corporate_identity::identity_assertion_from_headers(
+            state,
+            tenant.community(),
             &parts.headers,
-            &state.config.corporate_identity,
-        );
+        )
+        .map_err(|error| (error.status_code(), error.public_message()).into_response())?;
         let identity_proof = match crate::corporate_identity::verify_corporate_identity(
             state,
             tenant.community(),
             pubkey,
-            identity_jwt.as_deref(),
+            identity_assertion.as_ref(),
             auth_tag,
         )
         .await
         {
-            Ok(proof) => proof,
+            Ok(proof) => Some(proof),
+            Err(error)
+                if crate::authorization_runtime::transport::legacy_identity_lane(
+                    state,
+                    tenant.community(),
+                )
+                    == crate::authorization_runtime::transport::LegacyIdentityLane::ObserveOnly =>
+            {
+                warn!(error = ?error, "observational git identity verification unavailable");
+                None
+            }
             Err(e) => {
-                warn!(pubkey = %pubkey.to_hex(), error = %e, "git: corporate identity denied");
+                warn!(error = ?e, "git: corporate identity denied");
                 return Err((e.status_code(), e.public_message()).into_response());
             }
         };
@@ -242,30 +274,200 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         .await
         .is_err()
         {
-            warn!(pubkey = %pubkey.to_hex(), "git: relay membership denied");
+            warn!("git: relay membership denied");
             return Err((StatusCode::FORBIDDEN, "restricted: not a relay member").into_response());
         }
+        let verified_proof =
+            match crate::corporate_identity::verify_unconditional_nip_oa_owner(pubkey, auth_tag) {
+                Some(owner) => buzz_auth::VerifiedEvidenceAdapter::new()
+                    .attach_transport_delegation(
+                        verified_proof,
+                        buzz_auth::VerifiedDelegationOutput::from_workspace_verifier(
+                            owner, pubkey, None, true,
+                        ),
+                    )
+                    .map_err(|_| {
+                        (
+                            StatusCode::UNAUTHORIZED,
+                            "NIP-98 delegation evidence mismatch",
+                        )
+                            .into_response()
+                    })?,
+                None => verified_proof,
+            };
         Ok(GitAuth {
             pubkey,
             tenant,
             identity_proof,
+            verified_proof: Arc::new(verified_proof),
         })
     }
 }
 
 async fn finalize_git_corporate_identity(state: &AppState, auth: &GitAuth) -> Result<(), Response> {
+    if crate::authorization_runtime::transport::legacy_identity_lane(state, auth.tenant.community())
+        != crate::authorization_runtime::transport::LegacyIdentityLane::Legacy
+    {
+        return Ok(());
+    }
+    let Some(proof) = auth.identity_proof.clone() else {
+        return Ok(());
+    };
     crate::corporate_identity::finalize_corporate_identity(
         state,
         auth.tenant.community(),
         auth.pubkey,
-        auth.identity_proof.clone(),
+        proof,
     )
     .await
     .map(|_| ())
     .map_err(|e| {
-        warn!(pubkey = %auth.pubkey.to_hex(), error = %e, "git: corporate identity finalization denied");
+        warn!(error = ?e, "git: corporate identity finalization denied");
         (e.status_code(), e.public_message()).into_response()
     })
+}
+
+fn protected_git_denied(error: impl std::fmt::Display) -> Response {
+    warn!(error = %error, "git: protected authorization denied");
+    (StatusCode::FORBIDDEN, "protected authorization denied").into_response()
+}
+
+#[derive(Clone)]
+enum GitPublicationLane {
+    Legacy,
+    PostgreSql(Option<ExpectedGitPublication>),
+}
+
+async fn git_publication_lane(
+    state: &AppState,
+    tenant: &TenantContext,
+    owner: &str,
+    repo_id: &str,
+    authority: &ProtectedAuthorization,
+) -> Result<GitPublicationLane, Response> {
+    let mut visibility = state
+        .db
+        .protected_object_authority(
+            tenant.community(),
+            buzz_db::protected_visibility::ProtectedObjectSurface::Git,
+        )
+        .await
+        .map_err(protected_git_denied)?;
+    if authority.is_enforcing()
+        && visibility.state
+            != buzz_db::protected_visibility::ProtectedObjectAuthorityState::PostgreSql
+    {
+        crate::api::git::migration::require_reconciled_authority(state, tenant)
+            .await
+            .map_err(protected_git_denied)?;
+        visibility = state
+            .db
+            .protected_object_authority(
+                tenant.community(),
+                buzz_db::protected_visibility::ProtectedObjectSurface::Git,
+            )
+            .await
+            .map_err(protected_git_denied)?;
+    }
+    if visibility.state == buzz_db::protected_visibility::ProtectedObjectAuthorityState::PostgreSql
+    {
+        // Cutover is monotonic, but the visibility source is independent of
+        // the protected-authorization mode. Off, Shadow, and VerifyOnly retain
+        // their legacy authorization decision while reading the same
+        // PostgreSQL publication selected in Enforce. No mode may fall back to
+        // the mutable legacy pointer after the sentinel is installed.
+        let publication = state
+            .db
+            .git_publication(tenant.community(), repo_id, owner)
+            .await
+            .map_err(protected_git_denied)?;
+        authority.revalidate().map_err(protected_git_denied)?;
+        return Ok(GitPublicationLane::PostgreSql(publication.map(
+            |publication| ExpectedGitPublication {
+                publication_version: publication.publication_version,
+                manifest_sha256: publication.manifest_sha256,
+            },
+        )));
+    }
+    if authority.is_enforcing() {
+        return Err(protected_git_denied(
+            "protected Git visibility authority is unavailable",
+        ));
+    }
+    crate::api::git::migration::require_legacy_sentinel_absent(state, tenant)
+        .await
+        .map_err(protected_git_denied)?;
+    Ok(GitPublicationLane::Legacy)
+}
+
+enum GitPublicationSource<'a> {
+    Legacy,
+    Published(&'a str),
+    Unpublished,
+}
+
+fn publication_source(lane: &GitPublicationLane) -> GitPublicationSource<'_> {
+    match lane {
+        GitPublicationLane::Legacy => GitPublicationSource::Legacy,
+        GitPublicationLane::PostgreSql(Some(publication)) => {
+            GitPublicationSource::Published(publication.manifest_sha256.as_str())
+        }
+        GitPublicationLane::PostgreSql(None) => GitPublicationSource::Unpublished,
+    }
+}
+
+async fn authorize_git_operation(
+    state: &AppState,
+    auth: &GitAuth,
+    capability: AuthorizationCapability,
+    surface: &'static str,
+) -> Result<Arc<ProtectedAuthorization>, Response> {
+    let verified_assertion = match auth.identity_proof.as_ref() {
+        Some(proof) => match crate::corporate_identity::current_verified_assertion_for_proof(
+            state,
+            proof,
+            auth.tenant.community(),
+            AuthTransport::Git,
+        ) {
+            Ok(assertion) => assertion.map(Arc::new),
+            Err(error)
+                if crate::authorization_runtime::transport::legacy_identity_lane(
+                    state,
+                    auth.tenant.community(),
+                )
+                    == crate::authorization_runtime::transport::LegacyIdentityLane::ObserveOnly =>
+            {
+                warn!(error = %error, "observational git assertion sealing unavailable");
+                None
+            }
+            Err(error) => return Err(protected_git_denied(error)),
+        },
+        None => None,
+    };
+    let fingerprint = auth.verified_proof.operation_binding().fingerprint();
+    let mut correlation = [0_u8; 16];
+    correlation.copy_from_slice(&fingerprint[..16]);
+    correlation[6] = (correlation[6] & 0x0f) | 0x50;
+    correlation[8] = (correlation[8] & 0x3f) | 0x80;
+    let authority = Arc::new(
+        authorize_if_configured(
+            state,
+            Arc::clone(&auth.verified_proof),
+            verified_assertion,
+            capability,
+            uuid::Uuid::from_bytes(correlation),
+            surface,
+        )
+        .await
+        .map_err(protected_git_denied)?,
+    );
+    authority.revalidate().map_err(protected_git_denied)?;
+    Ok(authority)
+}
+
+#[allow(clippy::result_large_err)]
+fn revalidate_git_authority(authority: &ProtectedAuthorization) -> Result<(), Response> {
+    authority.revalidate().map_err(protected_git_denied)
 }
 
 /// Construct the repo-root NIP-98 `u` URL expected for a git HTTP request.
@@ -381,8 +583,8 @@ fn acquire_git_permit(
 /// Convert a [`HydrateError`] to the HTTP response shape the read+write
 /// paths share. Below-pointer failure ⇒ 5xx; pointer-absent is signalled
 /// via `Ok(None)` from [`hydrate_for_read`] and never reaches this fn.
-fn hydrate_error_to_response(owner: &str, repo: &str, err: HydrateError) -> Response {
-    error!(error = %err, owner = %owner, repo = %repo, "hydrate failed");
+fn hydrate_error_to_response(_owner: &str, _repo: &str, err: HydrateError) -> Response {
+    error!(error = %err, "hydrate failed");
     if matches!(err, HydrateError::ResourceLimit(_)) {
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -453,7 +655,21 @@ async fn authorize_git_read(
         limit: Some(1),
         ..buzz_db::EventQuery::for_community(community)
     };
-    let repo_event = match db.query_events(&query).await {
+    let mut transaction = match db.begin_transaction().await {
+        Ok(transaction) => transaction,
+        Err(error) => {
+            error!(repo = %repo_name, %error, "git read gate: snapshot start failed (deny)");
+            return Err(denied());
+        }
+    };
+    if let Err(error) = sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *transaction)
+        .await
+    {
+        error!(repo = %repo_name, %error, "git read gate: snapshot selection failed (deny)");
+        return Err(denied());
+    }
+    let repo_event = match buzz_db::event::query_events_tx(&mut transaction, &query).await {
         Ok(mut events) => match events.pop() {
             Some(event) => event,
             None => return Err(denied()),
@@ -492,9 +708,13 @@ async fn authorize_git_read(
         }
     };
 
-    match db
-        .get_member_role(community, channel_id, &caller.to_bytes())
-        .await
+    match buzz_db::channel::get_member_role_tx(
+        &mut transaction,
+        community,
+        channel_id,
+        &caller.to_bytes(),
+    )
+    .await
     {
         Ok(role) if read_role_allows(role.as_deref()) => Ok(()),
         Ok(_) => Err(denied()),
@@ -503,6 +723,60 @@ async fn authorize_git_read(
             Err(denied())
         }
     }
+}
+
+#[async_trait]
+trait GitReadReleaseAuthority: Send + Sync {
+    async fn release(&self) -> bool;
+}
+
+struct GitReadReleaseFence {
+    db: buzz_db::Db,
+    community: buzz_core::CommunityId,
+    caller: nostr::PublicKey,
+    owner: String,
+    repo: String,
+    protected: Arc<ProtectedAuthorization>,
+}
+
+#[async_trait]
+impl GitReadReleaseAuthority for GitReadReleaseFence {
+    async fn release(&self) -> bool {
+        if self.protected.revalidate().is_err() {
+            return false;
+        }
+        if authorize_git_read(
+            &self.db,
+            self.community,
+            &self.caller,
+            &self.owner,
+            &self.repo,
+        )
+        .await
+        .is_err()
+        {
+            return false;
+        }
+        self.protected.revalidate().is_ok()
+    }
+}
+
+fn git_read_release_fence(
+    state: &AppState,
+    tenant: &TenantContext,
+    caller: &nostr::PublicKey,
+    owner: &str,
+    repo: &str,
+    protected: Arc<ProtectedAuthorization>,
+) -> Arc<dyn GitReadReleaseAuthority> {
+    Arc::new(GitReadReleaseFence {
+        db: state.db.clone(),
+        community: tenant.community(),
+        caller: *caller,
+        owner: owner.to_owned(),
+        repo: repo.to_owned(),
+        protected,
+    })
 }
 
 /// Pure decision for [`authorize_git_read`]: a read requires a current
@@ -724,8 +998,20 @@ pub async fn info_refs(
         repo_name,
     )
     .await?;
+    let capability = crate::protected_surface::git_info_refs_capability(service)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "invalid service").into_response())?;
+    let protected_authority =
+        authorize_git_operation(&state, &auth, capability, "git.info_refs").await?;
+    revalidate_git_authority(&protected_authority)?;
     finalize_git_corporate_identity(&state, &auth).await?;
-
+    let publication_lane = git_publication_lane(
+        &state,
+        &auth.tenant,
+        &params.owner,
+        repo_name,
+        &protected_authority,
+    )
+    .await?;
     // Track C fast path: only for clone advertisement. The receive-pack
     // advertisement carries a different capability set (report-status,
     // delete-refs, atomic, …) that we don't reproduce, so it always takes
@@ -733,9 +1019,33 @@ pub async fn info_refs(
     if service == "git-upload-pack" {
         // Load just the verified manifest — no object materialization, no
         // permit. `Ok(None)` = pointer absent = repo never existed → 404.
-        match load_manifest_for_read(&state.git_store, &auth.tenant, &params.owner, &params.repo)
-            .await
-        {
+        let manifest = match publication_source(&publication_lane) {
+            GitPublicationSource::Published(digest) => {
+                load_manifest_by_digest(&state.git_store, digest)
+                    .await
+                    .map(Some)
+            }
+            GitPublicationSource::Legacy => {
+                load_manifest_for_read(&state.git_store, &auth.tenant, &params.owner, &params.repo)
+                    .await
+            }
+            GitPublicationSource::Unpublished => Ok(None),
+        };
+        protected_authority
+            .release_fetched(())
+            .map_err(protected_git_denied)?;
+        let read_fence = git_read_release_fence(
+            &state,
+            &auth.tenant,
+            &auth.pubkey,
+            &params.owner,
+            repo_name,
+            Arc::clone(&protected_authority),
+        );
+        if !read_fence.release().await {
+            return Err((StatusCode::NOT_FOUND, "repository not found").into_response());
+        }
+        match manifest {
             Ok(Some(manifest)) if fast_path_eligible(&manifest) => {
                 let body = build_upload_pack_advertisement(&manifest);
                 return Ok(Response::builder()
@@ -745,7 +1055,7 @@ pub async fn info_refs(
                         "application/x-git-upload-pack-advertisement",
                     )
                     .header(header::CACHE_CONTROL, "no-cache")
-                    .body(Body::from(body))
+                    .body(guard_git_buffered_body(body, read_fence))
                     .unwrap());
             }
             // Eligible repo but has tags, or below-pointer failure handling:
@@ -760,7 +1070,16 @@ pub async fn info_refs(
 
     // Subprocess path: receive-pack advertisement, or upload-pack for a
     // tagged repo. Acquires a permit and hydrates — today's behavior.
-    info_refs_subprocess(&state, &auth.tenant, service, &params).await
+    info_refs_subprocess(
+        &state,
+        &auth.tenant,
+        service,
+        &params,
+        &auth.pubkey,
+        &protected_authority,
+        &publication_lane,
+    )
+    .await
 }
 
 /// Subprocess-backed `info/refs` advertisement: hydrate the published state
@@ -775,23 +1094,46 @@ async fn info_refs_subprocess(
     tenant: &TenantContext,
     service: &str,
     params: &GitRepoParams,
+    caller: &nostr::PublicKey,
+    protected_authority: &Arc<ProtectedAuthorization>,
+    publication_lane: &GitPublicationLane,
 ) -> Result<Response, Response> {
+    revalidate_git_authority(protected_authority)?;
     let _permit = acquire_git_permit(state, "info_refs")?;
 
-    let repo = match hydrate_for_read(
-        &state.git_store,
-        tenant,
-        &params.owner,
-        &params.repo,
-        HydrationOptions {
-            pack_cache: &state.git_pack_cache,
-            scratch_dir: &state.config.git_repo_path,
-            max_pack_bytes: state.config.git_max_pack_bytes,
-            max_repo_bytes: state.config.git_max_repo_bytes,
-        },
-    )
-    .await
-    {
+    let options = HydrationOptions {
+        pack_cache: &state.git_pack_cache,
+        scratch_dir: &state.config.git_repo_path,
+        max_pack_bytes: state.config.git_max_pack_bytes,
+        max_repo_bytes: state.config.git_max_repo_bytes,
+    };
+    let hydrated = match publication_source(publication_lane) {
+        GitPublicationSource::Published(digest) => {
+            hydrate_for_published_read(&state.git_store, digest, options)
+                .await
+                .map(Some)
+        }
+        GitPublicationSource::Legacy => {
+            hydrate_for_read(
+                &state.git_store,
+                tenant,
+                &params.owner,
+                &params.repo,
+                options,
+            )
+            .await
+        }
+        GitPublicationSource::Unpublished if service == "git-receive-pack" => {
+            hydrate_for_published_write(&state.git_store, None, options)
+                .await
+                .map(|(repo, _parent)| Some(repo))
+        }
+        GitPublicationSource::Unpublished => Ok(None),
+    };
+    protected_authority
+        .release_fetched(())
+        .map_err(protected_git_denied)?;
+    let repo = match hydrated {
         Ok(Some(repo)) => repo,
         Ok(None) => return Err((StatusCode::NOT_FOUND, "repository not found").into_response()),
         Err(e) => return Err(hydrate_error_to_response(&params.owner, &params.repo, e)),
@@ -834,8 +1176,11 @@ async fn info_refs_subprocess(
         (StatusCode::INTERNAL_SERVER_ERROR, "git error").into_response()
     })?;
 
-    let status = tokio::time::timeout(INFO_REFS_TIMEOUT, child.wait())
-        .await
+    let waited = tokio::time::timeout(INFO_REFS_TIMEOUT, child.wait()).await;
+    protected_authority
+        .release_fetched(())
+        .map_err(protected_git_denied)?;
+    let status = waited
         .map_err(|_| {
             warn!(
                 "git info_refs subprocess timed out ({}s)",
@@ -850,11 +1195,18 @@ async fn info_refs_subprocess(
 
     if !status.success() {
         let stderr = read_log_prefix(stderr_tmp.path(), 64 * 1024).await;
+        protected_authority
+            .release_fetched(())
+            .map_err(protected_git_denied)?;
         error!(stderr = %stderr, "git --advertise-refs failed");
         return Err((StatusCode::INTERNAL_SERVER_ERROR, "git error").into_response());
     }
-    let stdout_len = tokio::fs::metadata(stdout_tmp.path())
-        .await
+
+    let metadata = tokio::fs::metadata(stdout_tmp.path()).await;
+    protected_authority
+        .release_fetched(())
+        .map_err(protected_git_denied)?;
+    let stdout_len = metadata
         .map_err(|e| {
             error!(error = %e, "git info_refs stdout metadata failed");
             (StatusCode::INTERNAL_SERVER_ERROR, "git error").into_response()
@@ -872,10 +1224,26 @@ async fn info_refs_subprocess(
         )
             .into_response());
     }
-    let stdout = tokio::fs::read(stdout_tmp.path()).await.map_err(|e| {
+    let stdout_result = tokio::fs::read(stdout_tmp.path()).await;
+    protected_authority
+        .release_fetched(())
+        .map_err(protected_git_denied)?;
+    let stdout = stdout_result.map_err(|e| {
         error!(error = %e, "git info_refs stdout read failed");
         (StatusCode::INTERNAL_SERVER_ERROR, "git error").into_response()
     })?;
+    let repo_name = validate_repo_id(&params.owner, &params.repo)?;
+    let read_fence = git_read_release_fence(
+        state,
+        tenant,
+        caller,
+        &params.owner,
+        repo_name,
+        Arc::clone(protected_authority),
+    );
+    if !read_fence.release().await {
+        return Err((StatusCode::NOT_FOUND, "repository not found").into_response());
+    }
     // `repo` (the tempdir) must live until *after* the subprocess has read
     // its objects. Holding it until here is the structural lifetime that
     // guarantees that.
@@ -894,7 +1262,7 @@ async fn info_refs_subprocess(
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, content_type)
         .header(header::CACHE_CONTROL, "no-cache")
-        .body(Body::from(body))
+        .body(guard_git_buffered_body(body, read_fence))
         .unwrap())
 }
 
@@ -954,6 +1322,61 @@ fn decode_git_request_body(
     Body::from_stream(capped)
 }
 
+fn guard_git_request_body(body: Body, authority: Arc<ProtectedAuthorization>) -> Body {
+    use futures_util::StreamExt;
+
+    let stream = body.into_data_stream().map(move |item| {
+        authority.revalidate().map_err(|error| {
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, error.to_string())
+        })?;
+        item.map_err(std::io::Error::other)
+    });
+    Body::from_stream(stream)
+}
+
+fn guard_git_buffered_body(bytes: Vec<u8>, authority: Arc<dyn GitReadReleaseAuthority>) -> Body {
+    let stream = futures_util::stream::once(async move {
+        if authority.release().await {
+            Ok(bytes::Bytes::from(bytes))
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Git read authority changed before response release",
+            ))
+        }
+    });
+    Body::from_stream(stream)
+}
+
+fn guard_git_read_stream<S>(
+    stream: S,
+    authority: Arc<dyn GitReadReleaseAuthority>,
+) -> impl futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send
+where
+    S: futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static,
+{
+    futures_util::stream::unfold(
+        (Box::pin(stream), authority, false),
+        |(mut stream, authority, finished)| async move {
+            if finished {
+                return None;
+            }
+            use futures_util::StreamExt;
+            let item = stream.next().await;
+            if !authority.release().await {
+                return Some((
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "Git read authority changed during response streaming",
+                    )),
+                    (stream, authority, true),
+                ));
+            }
+            item.map(|item| (item, (stream, authority, false)))
+        },
+    )
+}
+
 /// `POST /git/{owner}/{repo}/git-upload-pack`
 ///
 /// Handles clone/fetch — client sends wants/haves, server sends pack data.
@@ -981,29 +1404,70 @@ pub async fn upload_pack(
         repo_name,
     )
     .await?;
+    let protected_authority = authorize_git_operation(
+        &state,
+        &auth,
+        AuthorizationCapability::GitRead,
+        "git.upload_pack",
+    )
+    .await?;
+    revalidate_git_authority(&protected_authority)?;
     finalize_git_corporate_identity(&state, &auth).await?;
+    let publication_lane = git_publication_lane(
+        &state,
+        &auth.tenant,
+        &params.owner,
+        repo_name,
+        &protected_authority,
+    )
+    .await?;
 
     let body = decode_git_request_body(&headers, body, UPLOAD_PACK_MAX_DECODED_BYTES);
     let permit = acquire_git_permit(&state, "upload_pack")?;
 
-    let repo = match hydrate_for_read(
-        &state.git_store,
-        &auth.tenant,
-        &params.owner,
-        &params.repo,
-        HydrationOptions {
-            pack_cache: &state.git_pack_cache,
-            scratch_dir: &state.config.git_repo_path,
-            max_pack_bytes: state.config.git_max_pack_bytes,
-            max_repo_bytes: state.config.git_max_repo_bytes,
-        },
-    )
-    .await
-    {
+    let options = HydrationOptions {
+        pack_cache: &state.git_pack_cache,
+        scratch_dir: &state.config.git_repo_path,
+        max_pack_bytes: state.config.git_max_pack_bytes,
+        max_repo_bytes: state.config.git_max_repo_bytes,
+    };
+    let hydrated = match publication_source(&publication_lane) {
+        GitPublicationSource::Published(digest) => {
+            hydrate_for_published_read(&state.git_store, digest, options)
+                .await
+                .map(Some)
+        }
+        GitPublicationSource::Legacy => {
+            hydrate_for_read(
+                &state.git_store,
+                &auth.tenant,
+                &params.owner,
+                &params.repo,
+                options,
+            )
+            .await
+        }
+        GitPublicationSource::Unpublished => Ok(None),
+    };
+    protected_authority
+        .release_fetched(())
+        .map_err(protected_git_denied)?;
+    let repo = match hydrated {
         Ok(Some(repo)) => repo,
         Ok(None) => return Err((StatusCode::NOT_FOUND, "repository not found").into_response()),
         Err(e) => return Err(hydrate_error_to_response(&params.owner, &params.repo, e)),
     };
+    let read_fence = git_read_release_fence(
+        &state,
+        &auth.tenant,
+        &auth.pubkey,
+        &params.owner,
+        repo_name,
+        Arc::clone(&protected_authority),
+    );
+    if !read_fence.release().await {
+        return Err((StatusCode::NOT_FOUND, "repository not found").into_response());
+    }
 
     // Track A: stream the subprocess stdout straight into the response body
     // instead of buffering the whole pack into RAM. `repo` (the hydrated
@@ -1012,6 +1476,8 @@ pub async fn upload_pack(
     stream_git_read(
         repo,
         permit,
+        protected_authority,
+        read_fence,
         "upload-pack",
         &[],
         body,
@@ -1055,7 +1521,23 @@ pub async fn receive_pack(
     body: Body,
 ) -> Result<Response, Response> {
     let repo_name = validate_repo_id(&params.owner, &params.repo)?;
+    let protected_authority = authorize_git_operation(
+        &state,
+        &auth,
+        AuthorizationCapability::GitWrite,
+        "git.receive_pack",
+    )
+    .await?;
+    let publication_lane = git_publication_lane(
+        &state,
+        &auth.tenant,
+        &params.owner,
+        repo_name,
+        &protected_authority,
+    )
+    .await?;
     let body = decode_git_request_body(&headers, body, state.config.git_max_pack_bytes);
+    let body = guard_git_request_body(body, Arc::clone(&protected_authority));
     let pusher_hex = hex::encode(auth.pubkey.to_bytes());
     let _permit = acquire_git_permit(&state, "receive_pack")?;
 
@@ -1067,34 +1549,49 @@ pub async fn receive_pack(
     // and CAS is the only serialization that holds. The named tradeoff:
     // two concurrent same-repo pushes each hydrate + run receive-pack,
     // and the loser's CPU/IO is thrown away on `Conflict`. **Accepted
-    // for v1** — same-ref contention is rare, and a cross-instance lock
-    // would be a distributed-lock service we explicitly don't want.
-    // If contention shows up in metrics, the fix is a short local
-    // best-effort lock as a *latency optimization*, never a correctness
-    // dependency. (Eva's call, on record in #proj-git-on-s3 with the
-    // ParentState seam review.)
+    // for v1** — same-ref contention is rare, and a cross-instance lock is
+    // deliberately outside this repository's object-store contract. A short
+    // local lock may later reduce duplicate work, but is never a correctness
+    // dependency.
 
     // Hydrate parent state + workspace in one round-trip. ParentState
     // travels with the workspace into finalize_push so the CAS predicates
     // on the same pointer ETag the workspace was hydrated from.
-    let (repo, parent_state) = hydrate_for_write(
-        &state.git_store,
-        &auth.tenant,
-        &params.owner,
-        &params.repo,
-        HydrationOptions {
-            pack_cache: &state.git_pack_cache,
-            scratch_dir: &state.config.git_repo_path,
-            max_pack_bytes: state.config.git_max_pack_bytes,
-            max_repo_bytes: state.config.git_max_repo_bytes,
-        },
-    )
-    .await
+    revalidate_git_authority(&protected_authority)?;
+    let options = HydrationOptions {
+        pack_cache: &state.git_pack_cache,
+        scratch_dir: &state.config.git_repo_path,
+        max_pack_bytes: state.config.git_max_pack_bytes,
+        max_repo_bytes: state.config.git_max_repo_bytes,
+    };
+    let (repo, parent_state) = match &publication_lane {
+        GitPublicationLane::Legacy => {
+            hydrate_for_write(
+                &state.git_store,
+                &auth.tenant,
+                &params.owner,
+                &params.repo,
+                options,
+            )
+            .await
+        }
+        GitPublicationLane::PostgreSql(publication) => {
+            hydrate_for_published_write(
+                &state.git_store,
+                publication
+                    .as_ref()
+                    .map(|publication| publication.manifest_sha256.as_str()),
+                options,
+            )
+            .await
+        }
+    }
     .map_err(|e| hydrate_error_to_response(&params.owner, &params.repo, e))?;
 
     // Install the pre-receive hook into the ephemeral workspace. The
     // hook script is fixed per-deployment; per-push state (callback URL,
     // HMAC secret, pusher pubkey) rides in env at exec time.
+    revalidate_git_authority(&protected_authority)?;
     install_hook(repo.path()).await.map_err(|e| {
         error!(error = %e, "install pre-receive hook into hydrated workspace");
         (StatusCode::INTERNAL_SERVER_ERROR, "git hook install failed").into_response()
@@ -1106,6 +1603,7 @@ pub async fn receive_pack(
         state.config.bind_addr.port()
     );
     let hooks_dir = repo.path().join("hooks").display().to_string();
+    let policy_fence_path = repo.path().join("protected-policy-fence.json");
     let mut hook_env = vec![
         ("BUZZ_HOOK_URL", hook_url),
         (
@@ -1119,12 +1617,17 @@ pub async fn receive_pack(
             auth.tenant.community().as_uuid().to_string(),
         ),
         ("BUZZ_PUSHER_PUBKEY", pusher_hex.clone()),
+        (
+            "BUZZ_POLICY_FENCE_PATH",
+            policy_fence_path.display().to_string(),
+        ),
     ];
     hook_env.extend(receive_pack_git_config(hooks_dir));
 
     // Run receive-pack against the tempdir. Returns the *owned* subprocess
     // output (PackOutput) — crucially NOT a Response, so the post-push
     // fence in finalize_push can sequence the CAS before any 2xx exists.
+    revalidate_git_authority(&protected_authority)?;
     let pack = run_git_at(
         repo.path(),
         "receive-pack",
@@ -1134,6 +1637,24 @@ pub async fn receive_pack(
         RECEIVE_PACK_MAX_OUTPUT_BYTES,
     )
     .await?;
+    revalidate_git_authority(&protected_authority)?;
+    let policy_fence = if pack.ok && matches!(publication_lane, GitPublicationLane::PostgreSql(_)) {
+        let bytes = tokio::fs::read(&policy_fence_path)
+            .await
+            .map_err(protected_git_denied)?;
+        let response: super::policy::HookCallbackResponse =
+            serde_json::from_slice(&bytes).map_err(protected_git_denied)?;
+        if !response.allowed {
+            return Err(protected_git_denied("Git policy denied publication"));
+        }
+        response
+            .policy_fence
+            .ok_or_else(|| protected_git_denied("Git policy fence unavailable"))?
+            .into()
+    } else {
+        None
+    };
+    let _ = tokio::fs::remove_file(&policy_fence_path).await;
 
     let ctx = PushContext {
         pack,
@@ -1144,6 +1665,9 @@ pub async fn receive_pack(
         pusher: auth.pubkey,
         tenant: auth.tenant,
         identity_proof: auth.identity_proof,
+        protected_authority,
+        publication_lane,
+        policy_fence,
         repo_handle: repo,
     };
     Ok(finalize_push(&state, ctx).await)
@@ -1477,6 +2001,7 @@ struct StreamingGit {
     /// Pumping the request body is detached from response polling. Abort it
     /// when the response is dropped or the subprocess times out.
     stdin_task: tokio::task::JoinHandle<()>,
+    protected_authority: Arc<ProtectedAuthorization>,
 }
 
 /// Adds a hard deadline and lifecycle metrics to upload-pack stdout.
@@ -1514,6 +2039,21 @@ where
     }
 }
 
+/// Revalidates every completed stream poll before its outcome is observable.
+///
+/// Backend errors and EOF can disclose execution state just as a successful
+/// chunk can disclose bytes, so all three `Ready` shapes cross the same final
+/// authority boundary. `Pending` emits nothing and is left untouched.
+fn release_ready_git_poll<T, E, R>(
+    poll: std::task::Poll<Option<Result<T, E>>>,
+    release: impl FnOnce() -> Result<(), R>,
+) -> Result<std::task::Poll<Option<Result<T, E>>>, R> {
+    if matches!(poll, std::task::Poll::Ready(_)) {
+        release()?;
+    }
+    Ok(poll)
+}
+
 impl futures_util::Stream for StreamingGit {
     type Item = Result<bytes::Bytes, std::io::Error>;
 
@@ -1522,6 +2062,21 @@ impl futures_util::Stream for StreamingGit {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
         let poll = std::pin::Pin::new(&mut self.inner).poll_next(cx);
+        let poll = match release_ready_git_poll(poll, || {
+            self.protected_authority.release_fetched(())
+        }) {
+            Ok(poll) => poll,
+            Err(error) => {
+                self.stdin_task.abort();
+                if let Err(kill_error) = self.child.start_kill() {
+                    warn!(error = %kill_error, "unauthorized git upload-pack could not be killed");
+                }
+                return std::task::Poll::Ready(Some(Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    error.to_string(),
+                ))));
+            }
+        };
         if matches!(
             &poll,
             std::task::Poll::Ready(Some(Err(error)))
@@ -1615,10 +2170,12 @@ impl Drop for StreamingGit {
 /// stream, not via HTTP status. The buffered [`run_git_at`] stays the push
 /// path's runner precisely because the fence needs the bytes in hand before
 /// committing to a status.
-#[allow(clippy::result_large_err)]
+#[allow(clippy::result_large_err, clippy::too_many_arguments)]
 fn stream_git_read(
     repo: HydratedRepo,
     permit: tokio::sync::OwnedSemaphorePermit,
+    protected_authority: Arc<ProtectedAuthorization>,
+    read_authority: Arc<dyn GitReadReleaseAuthority>,
     service: &'static str,
     extra_args: &[&str],
     body: Body,
@@ -1645,10 +2202,14 @@ fn stream_git_read(
     // Pump the request body into git's stdin, then close it (EOF). Detached:
     // the task ends on its own when the body ends or the write fails.
     let mut stdin = child.stdin.take().expect("stdin piped");
+    let input_authority = Arc::clone(&read_authority);
     let stdin_task = tokio::spawn(async move {
         use futures_util::StreamExt;
         let mut stream = body.into_data_stream();
         while let Some(chunk) = stream.next().await {
+            if !input_authority.release().await {
+                break;
+            }
             match chunk {
                 Ok(bytes) => {
                     if tokio::io::AsyncWriteExt::write_all(&mut stdin, &bytes)
@@ -1677,18 +2238,24 @@ fn stream_git_read(
         child,
         _repo: repo,
         stdin_task,
+        protected_authority: Arc::clone(&protected_authority),
     };
 
     // Prepend any protocol header (info/refs) ahead of git's stdout. The
     // prefix is a single ready chunk; the rest streams from the subprocess.
-    let prefix_stream =
-        futures_util::stream::once(
-            async move { Ok::<_, std::io::Error>(bytes::Bytes::from(prefix)) },
-        );
+    let prefix_stream = futures_util::stream::once(async move { Ok(bytes::Bytes::from(prefix)) });
+    let guarded_stream = guard_git_read_stream(
+        futures_util::StreamExt::chain(prefix_stream, git_stream),
+        read_authority,
+    );
     let body_stream = GitPermitStream {
-        inner: Box::pin(futures_util::StreamExt::chain(prefix_stream, git_stream)),
+        inner: Box::pin(guarded_stream),
         _permit: permit,
     };
+
+    protected_authority
+        .release_fetched(())
+        .map_err(protected_git_denied)?;
 
     Ok(Response::builder()
         .status(StatusCode::OK)
@@ -1736,11 +2303,23 @@ pub(crate) struct PushContext {
     /// any derived kind:30618 event from this push.
     pub tenant: TenantContext,
     /// Identity proof finalized only after the pre-receive policy hook accepts.
-    pub identity_proof: crate::corporate_identity::CorporateIdentityProof,
+    pub identity_proof: Option<crate::corporate_identity::CorporateIdentityProof>,
+    /// Retained GitWrite authority rechecked before identity mutation and CAS.
+    pub protected_authority: Arc<ProtectedAuthorization>,
+    /// Visibility commit primitive selected by the exact-domain mode.
+    publication_lane: GitPublicationLane,
+    /// Exact database policy decision returned by the pre-receive hook.
+    policy_fence: Option<buzz_db::protected_publication::GitPolicyCommitFence>,
     /// The hydrated workspace handle. Held until response construction
     /// (which happens *after* `cas_publish` returns) so the tempdir
     /// outlives the receive-pack subprocess and the CAS publish.
     pub repo_handle: HydratedRepo,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct GitPushReceipt {
+    manifest_sha256: String,
+    publication_version: u64,
 }
 
 /// Finalize a push request: CAS-commit the new state into the object
@@ -1773,8 +2352,6 @@ async fn finalize_push(state: &Arc<AppState>, ctx: PushContext) -> Response {
     // hook's decline message; only the publish side effects are suppressed.
     if !ctx.pack.ok {
         warn!(
-            owner = %ctx.owner,
-            repo = %ctx.repo_id,
             "receive-pack exited non-zero (e.g. pre-receive hook decline); \
              skipping CAS publish and kind:30618 — no state published"
         );
@@ -1783,47 +2360,90 @@ async fn finalize_push(state: &Arc<AppState>, ctx: PushContext) -> Response {
         return response;
     }
 
-    if let Err(error) = crate::corporate_identity::finalize_corporate_identity(
-        state,
-        ctx.tenant.community(),
-        ctx.pusher,
-        ctx.identity_proof.clone(),
-    )
-    .await
+    if let Err(response) = revalidate_git_authority(&ctx.protected_authority) {
+        return response;
+    }
+    if crate::authorization_runtime::transport::legacy_identity_lane(state, ctx.tenant.community())
+        == crate::authorization_runtime::transport::LegacyIdentityLane::Legacy
     {
-        warn!(pusher = %ctx.pusher.to_hex(), error = %error, "git: post-policy corporate identity finalization denied");
-        return (error.status_code(), error.public_message()).into_response();
+        if let Some(identity_proof) = ctx.identity_proof.clone() {
+            if let Err(error) = crate::corporate_identity::finalize_corporate_identity(
+                state,
+                ctx.tenant.community(),
+                ctx.pusher,
+                identity_proof,
+            )
+            .await
+            {
+                warn!(error = ?error, "git: post-policy corporate identity finalization denied");
+                return (error.status_code(), error.public_message()).into_response();
+            }
+        }
     }
 
     // Step 7 (CAS). The PushContext binds `parent_state` (observed at
     // hydrate) to the CAS predicate here — no re-reading of the pointer
     // between hydrate and CAS.
-    let success = match cas_publish(
-        &state.git_store,
-        &ctx.tenant,
-        ctx.repo_handle.path(),
-        &ctx.owner,
-        &ctx.repo,
-        &ctx.parent_state,
-        PublishLimits {
-            parent_hydrated_bytes: ctx.repo_handle.hydrated_bytes(),
-            max_pack_bytes: state.config.git_max_pack_bytes,
-            max_repo_bytes: state.config.git_max_repo_bytes,
-        },
-    )
-    .await
-    {
+    if let Err(response) = revalidate_git_authority(&ctx.protected_authority) {
+        return response;
+    }
+    let limits = PublishLimits {
+        parent_hydrated_bytes: ctx.repo_handle.hydrated_bytes(),
+        max_pack_bytes: state.config.git_max_pack_bytes,
+        max_repo_bytes: state.config.git_max_repo_bytes,
+    };
+    let publication = match &ctx.publication_lane {
+        GitPublicationLane::Legacy => {
+            let legacy_visibility = match state
+                .db
+                .begin_legacy_visibility_write(
+                    ctx.tenant.community(),
+                    buzz_db::protected_visibility::ProtectedObjectSurface::Git,
+                )
+                .await
+            {
+                Ok(guard) => guard,
+                Err(error) => return protected_git_denied(error),
+            };
+            if let Err(error) =
+                crate::api::git::migration::require_legacy_sentinel_absent(state, &ctx.tenant).await
+            {
+                return protected_git_denied(error);
+            }
+            let publication = cas_publish(
+                &state.git_store,
+                &ctx.tenant,
+                ctx.repo_handle.path(),
+                &ctx.owner,
+                &ctx.repo,
+                &ctx.parent_state,
+                limits,
+            )
+            .await;
+            if publication.is_ok() {
+                if let Err(error) = legacy_visibility.commit().await {
+                    return protected_git_denied(error);
+                }
+            }
+            publication
+        }
+        GitPublicationLane::PostgreSql(_) => {
+            prepare_publish(
+                &state.git_store,
+                &ctx.tenant,
+                ctx.repo_handle.path(),
+                &ctx.owner,
+                &ctx.repo,
+                &ctx.parent_state,
+                limits,
+            )
+            .await
+        }
+    };
+    let success = match publication {
         Ok(s) => s,
-        Err(CasError::Conflict {
-            winner_manifest_key,
-            ..
-        }) => {
-            warn!(
-                owner = %ctx.owner,
-                repo = %ctx.repo,
-                winner = %winner_manifest_key,
-                "push lost CAS race; tempdir dropped, returning 409"
-            );
+        Err(CasError::Conflict { .. }) => {
+            warn!("push lost CAS race; tempdir dropped, returning 409");
             return (
                 StatusCode::CONFLICT,
                 "push superseded by a concurrent writer; pull and retry",
@@ -1836,8 +2456,6 @@ async fn finalize_push(state: &Arc<AppState>, ctx: PushContext) -> Response {
             // empty head, malformed parent). Pre-CAS — no pointer was
             // written.
             warn!(
-                owner = %ctx.owner,
-                repo = %ctx.repo,
                 error = %e,
                 "push rejected: manifest validation failed"
             );
@@ -1849,8 +2467,6 @@ async fn finalize_push(state: &Arc<AppState>, ctx: PushContext) -> Response {
         }
         Err(CasError::ResourceLimit(e)) => {
             warn!(
-                owner = %ctx.owner,
-                repo = %ctx.repo,
                 error = %e,
                 "push rejected: repo exceeds relay resource limits"
             );
@@ -1867,14 +2483,155 @@ async fn finalize_push(state: &Arc<AppState>, ctx: PushContext) -> Response {
             // winner-fetch, the winner is already installed and the
             // loser's data is unrelated).
             error!(
-                owner = %ctx.owner,
-                repo = %ctx.repo,
                 error = %e,
                 "push failed pre-response"
             );
             return (StatusCode::INTERNAL_SERVER_ERROR, "git backend error").into_response();
         }
     };
+
+    let mut committed_now = true;
+    if let GitPublicationLane::PostgreSql(expected) = &ctx.publication_lane {
+        let Some(manifest_sha256) = success.manifest_key.strip_prefix("manifests/") else {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "git backend error").into_response();
+        };
+        let mut operation_key = Sha256::new();
+        operation_key.update(b"buzz-git-publish-operation-v2");
+        operation_key.update(ctx.tenant.community().as_uuid().as_bytes());
+        operation_key.update(ctx.owner.as_bytes());
+        operation_key.update(ctx.repo_id.as_bytes());
+        operation_key.update(ctx.pusher.to_bytes());
+        operation_key.update(manifest_sha256.as_bytes());
+        let operation_key: [u8; 32] = operation_key.finalize().into();
+        let operation_id =
+            match crate::authorization_runtime::executor::ProtectedOperationId::derive(
+                ctx.tenant.community(),
+                "git.publish.v2",
+                &operation_key,
+            ) {
+                Ok(operation_id) => operation_id,
+                Err(error) => return protected_git_denied(error),
+            };
+        let request_fingerprint = operation_key;
+        if ctx.protected_authority.is_enforcing() {
+            let permit = match ctx.protected_authority.seal_postgres_mutation(
+                operation_id,
+                "git.publish.v2",
+                request_fingerprint,
+            ) {
+                Ok(Some(permit)) => permit,
+                Ok(None) => {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "git authorization error")
+                        .into_response()
+                }
+                Err(error) => return protected_git_denied(error),
+            };
+            match crate::authorization_runtime::executor::begin_authorized_operation(state, permit)
+                .await
+            {
+                Ok(crate::authorization_runtime::executor::AuthorizedOperationStart::Replay(
+                    payload,
+                )) => {
+                    let receipt: GitPushReceipt = match serde_json::from_slice(&payload) {
+                        Ok(receipt) => receipt,
+                        Err(error) => return protected_git_denied(error),
+                    };
+                    if receipt.manifest_sha256 != manifest_sha256 {
+                        return (
+                            StatusCode::CONFLICT,
+                            "push operation was retried with different content",
+                        )
+                            .into_response();
+                    }
+                    committed_now = false;
+                }
+                Ok(crate::authorization_runtime::executor::AuthorizedOperationStart::Execute(
+                    mut operation,
+                )) => {
+                    let Some(policy_fence) = ctx.policy_fence.as_ref() else {
+                        return protected_git_denied("Git policy fence unavailable");
+                    };
+                    let outcome = buzz_db::protected_publication::compare_and_publish_git(
+                        operation.transaction(),
+                        buzz_db::protected_publication::GitPublicationRequest {
+                            community_id: ctx.tenant.community(),
+                            repo_id: &ctx.repo_id,
+                            owner_pubkey: &ctx.owner,
+                            expected: expected.as_ref(),
+                            manifest_sha256,
+                            pusher_pubkey: &ctx.pusher.to_bytes(),
+                            policy: policy_fence,
+                        },
+                    )
+                    .await;
+                    let published = match outcome {
+                        Ok(GitPublicationOutcome::Published(publication)) => publication,
+                        Ok(GitPublicationOutcome::Conflict) => {
+                            return (
+                                StatusCode::CONFLICT,
+                                "push superseded by a concurrent writer; pull and retry",
+                            )
+                                .into_response()
+                        }
+                        Err(error) => return protected_git_denied(error),
+                    };
+                    let receipt = GitPushReceipt {
+                        manifest_sha256: published.manifest_sha256,
+                        publication_version: published.publication_version,
+                    };
+                    let payload = match serde_json::to_vec(&receipt) {
+                        Ok(payload) => payload,
+                        Err(error) => return protected_git_denied(error),
+                    };
+                    if let Err(error) = operation.commit(&payload).await {
+                        return protected_git_denied(error);
+                    }
+                }
+                Err(error) => return protected_git_denied(error),
+            }
+        } else {
+            // After the one-way cutover, non-Enforce modes preserve legacy
+            // authorization semantics but must still publish through the
+            // PostgreSQL visibility CAS. This is intentionally not a protected
+            // authorization receipt: Shadow and VerifyOnly remain
+            // non-authoritative, while the storage authority never regresses.
+            let Some(policy_fence) = ctx.policy_fence.as_ref() else {
+                return protected_git_denied("Git policy fence unavailable");
+            };
+            let mut transaction = match state.db.begin_transaction().await {
+                Ok(transaction) => transaction,
+                Err(error) => return protected_git_denied(error),
+            };
+            match buzz_db::protected_publication::compare_and_publish_git(
+                &mut transaction,
+                buzz_db::protected_publication::GitPublicationRequest {
+                    community_id: ctx.tenant.community(),
+                    repo_id: &ctx.repo_id,
+                    owner_pubkey: &ctx.owner,
+                    expected: expected.as_ref(),
+                    manifest_sha256,
+                    pusher_pubkey: &ctx.pusher.to_bytes(),
+                    policy: policy_fence,
+                },
+            )
+            .await
+            {
+                Ok(GitPublicationOutcome::Published(_)) => {
+                    if let Err(error) = transaction.commit().await {
+                        return protected_git_denied(error);
+                    }
+                }
+                Ok(GitPublicationOutcome::Conflict) => {
+                    return (
+                        StatusCode::CONFLICT,
+                        "push superseded by a concurrent writer; pull and retry",
+                    )
+                        .into_response()
+                }
+                Err(error) => return protected_git_denied(error),
+            }
+        }
+    }
 
     // Derived after CAS: kind:30618 ref-state event over the *committed*
     // manifest's refs/head. Spec §Implementation Correspondence:
@@ -1899,7 +2656,7 @@ async fn finalize_push(state: &Arc<AppState>, ctx: PushContext) -> Response {
         (Some(before), Some(after)) => before != after,
         _ => true, // first push (parent None) or impossible-shape after key → publish
     };
-    if manifest_changed {
+    if manifest_changed && committed_now && !ctx.protected_authority.is_enforcing() {
         let inputs = RefStateInputs {
             repo_id: &ctx.repo_id,
             head: &success.manifest.head,
@@ -1925,24 +2682,13 @@ async fn finalize_push(state: &Arc<AppState>, ctx: PushContext) -> Response {
                             &stored,
                         )
                         .await;
-                        info!(
-                            owner = %ctx.owner,
-                            repo = %ctx.repo_id,
-                            manifest = %success.manifest_key,
-                            "kind:30618 published (derived after CAS)"
-                        );
+                        info!("kind:30618 published (derived after CAS)");
                     }
                     Ok((_, false)) => {
-                        info!(
-                            owner = %ctx.owner,
-                            repo = %ctx.repo_id,
-                            "kind:30618 deduplicated by relay db"
-                        );
+                        info!("kind:30618 deduplicated by relay db");
                     }
                     Err(e) => {
                         warn!(
-                            owner = %ctx.owner,
-                            repo = %ctx.repo_id,
                             error = %e,
                             "kind:30618 insert failed; push remains durable in object store"
                         );
@@ -1951,8 +2697,6 @@ async fn finalize_push(state: &Arc<AppState>, ctx: PushContext) -> Response {
             }
             Err(e) => {
                 warn!(
-                    owner = %ctx.owner,
-                    repo = %ctx.repo_id,
                     error = %e,
                     "kind:30618 build failed; push remains durable in object store"
                 );
@@ -1989,9 +2733,32 @@ mod track_c_tests {
     use crate::api::git::manifest::Manifest;
     use buzz_core::CommunityId;
     use nostr::{EventBuilder, Keys, Kind, Tag};
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, VecDeque};
     use std::io::Write;
     use std::process::Output;
+
+    struct ScriptedGitReadAuthority {
+        decisions: std::sync::Mutex<VecDeque<bool>>,
+    }
+
+    impl ScriptedGitReadAuthority {
+        fn new(decisions: impl IntoIterator<Item = bool>) -> Self {
+            Self {
+                decisions: std::sync::Mutex::new(decisions.into_iter().collect()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl GitReadReleaseAuthority for ScriptedGitReadAuthority {
+        async fn release(&self) -> bool {
+            self.decisions
+                .lock()
+                .expect("scripted Git authority lock")
+                .pop_front()
+                .unwrap_or(false)
+        }
+    }
 
     fn oid_sha1() -> String {
         "cb09a769da1c01f458fa6959d4e8eded38fac8d3".to_string()
@@ -2130,6 +2897,79 @@ mod track_c_tests {
 
         assert!(!remote.join("refs/heads/main").exists());
         assert!(remote.join("refs/heads/master").exists());
+    }
+
+    #[tokio::test]
+    async fn legacy_buffered_response_preserves_exact_body_framing() {
+        let bytes = b"legacy git advertisement".to_vec();
+        let body = guard_git_buffered_body(
+            bytes.clone(),
+            Arc::new(ScriptedGitReadAuthority::new([true])),
+        );
+        assert_eq!(
+            axum::body::to_bytes(body, usize::MAX)
+                .await
+                .expect("collect legacy body")
+                .as_ref(),
+            bytes
+        );
+    }
+
+    #[tokio::test]
+    async fn buffered_git_read_denies_membership_loss_before_first_body_poll() {
+        let body = guard_git_buffered_body(
+            b"must not be emitted".to_vec(),
+            Arc::new(ScriptedGitReadAuthority::new([false])),
+        );
+        assert!(axum::body::to_bytes(body, usize::MAX).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn streaming_git_read_denies_membership_loss_between_chunks() {
+        use futures_util::StreamExt;
+
+        let source = futures_util::stream::iter([
+            Ok(bytes::Bytes::from_static(b"first")),
+            Ok(bytes::Bytes::from_static(b"second")),
+        ]);
+        let stream = guard_git_read_stream(
+            source,
+            Arc::new(ScriptedGitReadAuthority::new([true, false])),
+        );
+        futures_util::pin_mut!(stream);
+        assert_eq!(
+            stream
+                .next()
+                .await
+                .expect("first outcome")
+                .expect("first chunk"),
+            bytes::Bytes::from_static(b"first")
+        );
+        assert_eq!(
+            stream
+                .next()
+                .await
+                .expect("denial outcome")
+                .expect_err("second chunk must be fenced")
+                .kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn git_stream_revalidates_success_error_and_eof_outcomes() {
+        let completed = [
+            std::task::Poll::Ready(Some(Ok::<u8, &str>(7))),
+            std::task::Poll::Ready(Some(Err::<u8, &str>("backend error"))),
+            std::task::Poll::Ready(None),
+        ];
+        for poll in completed {
+            assert!(release_ready_git_poll(poll, || Err::<(), _>(())).is_err());
+        }
+
+        let pending = release_ready_git_poll::<u8, &str, ()>(std::task::Poll::Pending, || Err(()))
+            .expect("pending emits no outcome and does not consult the release fence");
+        assert!(pending.is_pending());
     }
 
     /// A gzip-encoded request body is transparently inflated before it

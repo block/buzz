@@ -46,6 +46,7 @@ use buzz_core::git_perms::{
     evaluate_push, parse_protection_tags, Denial, RefUpdate, UpdateKind,
     GIT_NO_CHANNEL_BINDING_BODY,
 };
+use buzz_db::protected_publication::{GitPolicyCommitFence, GitPolicyGrant};
 use buzz_db::EventQuery;
 
 use crate::state::AppState;
@@ -88,17 +89,20 @@ pub struct HookRefUpdate {
 }
 
 /// Response to the hook — either allow or deny.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct HookCallbackResponse {
     /// Whether the push is allowed.
     pub allowed: bool,
     /// Denial reasons (empty if allowed).
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub denials: Vec<DenialResponse>,
+    /// Exact database rows that must still match at the publication commit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_fence: Option<GitPolicyCommitFence>,
 }
 
 /// A single denial reason in the hook response.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct DenialResponse {
     /// The ref that was denied.
     pub ref_name: String,
@@ -364,8 +368,10 @@ pub async fn hook_policy_check(
             }
         }
     };
-    let role = if is_repo_owner || is_managed_agent_owner {
-        MemberRole::Owner
+    let (role, grant) = if is_repo_owner {
+        (MemberRole::Owner, GitPolicyGrant::RepoOwner)
+    } else if is_managed_agent_owner {
+        (MemberRole::Owner, GitPolicyGrant::ManagedAgentOwner)
     } else {
         match channel_id {
             None => {
@@ -382,7 +388,7 @@ pub async fn hook_policy_check(
                     .await
                 {
                     Ok(Some(role_str)) => match role_str.parse::<MemberRole>() {
-                        Ok(role) => role,
+                        Ok(role) => (role, GitPolicyGrant::ChannelMember { role: role_str }),
                         Err(_) => {
                             error!(role = %role_str, "hook callback: unknown role");
                             return (StatusCode::FORBIDDEN, "internal error").into_response();
@@ -424,12 +430,18 @@ pub async fn hook_policy_check(
         Ok(()) => Json(HookCallbackResponse {
             allowed: true,
             denials: vec![],
+            policy_fence: Some(GitPolicyCommitFence {
+                announcement_id: repo_event.event.id.to_hex(),
+                channel_id,
+                grant,
+            }),
         })
         .into_response(),
         Err(denials) => {
             let response = HookCallbackResponse {
                 allowed: false,
                 denials: denials.into_iter().map(DenialResponse::from).collect(),
+                policy_fence: None,
             };
             (StatusCode::FORBIDDEN, Json(response)).into_response()
         }
@@ -983,5 +995,11 @@ printf '%s' "$HMAC_INPUT" | openssl dgst -sha256 -hmac "{secret}" -hex 2>/dev/nu
             StatusCode::OK,
             "owner push to a never-bound repo must remain allowed (got body: {body})"
         );
+        let allowed: HookCallbackResponse = serde_json::from_str(&body).expect("policy response");
+        assert!(allowed.allowed);
+        assert!(matches!(
+            allowed.policy_fence.expect("commit fence").grant,
+            GitPolicyGrant::RepoOwner
+        ));
     }
 }

@@ -7,6 +7,15 @@ use buzz_core::tenant::{CommunityId, TenantContext};
 
 use crate::config::{MediaConfig, S3AddressingStyle};
 use crate::error::MediaError;
+
+/// Result of an immutable, create-only object write.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CreateOnlyOutcome {
+    /// This caller created the object.
+    Created,
+    /// An object already existed at the key.
+    AlreadyExists,
+}
 use bytes::Bytes;
 use s3::creds::Credentials;
 use s3::{Bucket, Region};
@@ -80,6 +89,37 @@ impl MediaStorage {
         Ok(())
     }
 
+    /// Create an immutable object without overwriting an existing value.
+    pub async fn put_create_only(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        content_type: &str,
+    ) -> Result<CreateOnlyOutcome, MediaError> {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::IF_NONE_MATCH,
+            axum::http::HeaderValue::from_static("*"),
+        );
+        match self
+            .bucket
+            .put_object_with_content_type_and_headers(key, bytes, content_type, Some(headers))
+            .await
+        {
+            Ok(response) if (200..300).contains(&response.status_code()) => {
+                Ok(CreateOnlyOutcome::Created)
+            }
+            Err(s3::error::S3Error::HttpFailWithBody(412, _)) => {
+                Ok(CreateOnlyOutcome::AlreadyExists)
+            }
+            Ok(response) => Err(MediaError::StorageError(format!(
+                "create-only object write returned status {}",
+                response.status_code()
+            ))),
+            Err(error) => Err(MediaError::StorageError(error.to_string())),
+        }
+    }
+
     /// Stream a file from disk into S3 without loading it into RAM.
     ///
     /// Uses rust-s3's `put_object_stream_with_content_type` which reads from
@@ -110,6 +150,15 @@ impl MediaStorage {
             Ok(response) => Ok(response.to_vec()),
             Err(s3::error::S3Error::HttpFailWithBody(404, _)) => Err(MediaError::NotFound),
             Err(e) => Err(MediaError::StorageError(e.to_string())),
+        }
+    }
+
+    /// Retrieve an object's bytes, returning `None` only for an absent key.
+    pub async fn get_optional(&self, key: &str) -> Result<Option<Vec<u8>>, MediaError> {
+        match self.bucket.get_object(key).await {
+            Ok(response) => Ok(Some(response.to_vec())),
+            Err(s3::error::S3Error::HttpFailWithBody(404, _)) => Ok(None),
+            Err(error) => Err(MediaError::StorageError(error.to_string())),
         }
     }
 
@@ -247,15 +296,23 @@ impl MediaStorage {
         continuation_token: Option<String>,
         max_keys: usize,
     ) -> Result<crate::bucket_index::Page, MediaError> {
+        self.list_page_with_prefix(String::new(), continuation_token, max_keys)
+            .await
+    }
+
+    /// One bounded page under an exact object-key prefix.
+    ///
+    /// Migration callers use this to inventory one server-resolved community
+    /// without observing or loading another community's metadata sidecars.
+    pub async fn list_page_with_prefix(
+        &self,
+        prefix: String,
+        continuation_token: Option<String>,
+        max_keys: usize,
+    ) -> Result<crate::bucket_index::Page, MediaError> {
         let (result, _status) = self
             .bucket
-            .list_page(
-                String::new(),
-                None,
-                continuation_token,
-                None,
-                Some(max_keys),
-            )
+            .list_page(prefix, None, continuation_token, None, Some(max_keys))
             .await?;
         Ok(crate::bucket_index::Page {
             objects: result

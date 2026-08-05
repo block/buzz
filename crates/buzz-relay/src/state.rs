@@ -429,6 +429,18 @@ impl ConnectionManager {
             .and_then(|entry| entry.authenticated_pubkey.read().ok()?.clone())
     }
 
+    /// Compatibility seam for retaining protected session authority.
+    ///
+    /// No protected runtime is installable in this lower review unit, so the
+    /// session-conformance slice replaces this no-op with expiry and
+    /// invalidation retention before production installation becomes possible.
+    pub fn retain_protected_session_authority(
+        &self,
+        _conn_id: Uuid,
+        _authority: &crate::authorization_runtime::transport::ProtectedAuthorization,
+    ) {
+    }
+
     /// Sends a text message to the given connection.
     ///
     /// Returns `false` if the connection is gone or the buffer is full.
@@ -628,6 +640,22 @@ pub struct AppState {
     /// byte-identically to a relay without the mesh. Access via
     /// [`AppState::mesh`].
     pub mesh: Arc<std::sync::OnceLock<crate::mesh_boot::MeshHandle>>,
+    /// Optional exact-domain protected transport, unset by this review unit.
+    pub protected_transport: Arc<
+        std::sync::OnceLock<
+            Arc<crate::authorization_runtime::transport::ProtectedTransportRuntime>,
+        >,
+    >,
+    /// Deployment-owned assertion provenance, unset by the stock binary.
+    pub identity_assertion_provenance: Arc<
+        std::sync::OnceLock<
+            Arc<dyn crate::corporate_identity::IdentityAssertionProvenanceVerifier>,
+        >,
+    >,
+    /// Independent restore witness, unavailable until its owning slice.
+    pub restore_protection: Arc<
+        std::sync::OnceLock<Arc<crate::authorization_runtime::restore::RestoreProtectionRuntime>>,
+    >,
 }
 
 impl AppState {
@@ -804,6 +832,9 @@ impl AppState {
             // `crates/buzz-test-client` once those land).
             tracer: Arc::new(crate::conformance::NoopTracer),
             mesh: Arc::new(std::sync::OnceLock::new()),
+            protected_transport: Arc::new(std::sync::OnceLock::new()),
+            identity_assertion_provenance: Arc::new(std::sync::OnceLock::new()),
+            restore_protection: Arc::new(std::sync::OnceLock::new()),
         };
         (
             state,
@@ -818,6 +849,42 @@ impl AppState {
     /// must no-op to today's behavior. Set once by `main.rs` after boot.
     pub fn mesh(&self) -> Option<&crate::mesh_boot::MeshHandle> {
         self.mesh.get()
+    }
+
+    /// Current protected transport, if a later composition root installed it.
+    pub fn protected_transport(
+        &self,
+    ) -> Option<&Arc<crate::authorization_runtime::transport::ProtectedTransportRuntime>> {
+        self.protected_transport.get()
+    }
+
+    /// Install immutable deployment-owned assertion provenance.
+    pub fn install_identity_assertion_provenance(
+        &self,
+        verifier: Arc<dyn crate::corporate_identity::IdentityAssertionProvenanceVerifier>,
+    ) -> Result<(), Arc<dyn crate::corporate_identity::IdentityAssertionProvenanceVerifier>> {
+        self.identity_assertion_provenance.set(verifier)
+    }
+
+    /// Return deployment-owned assertion provenance, if installed.
+    pub fn identity_assertion_provenance(
+        &self,
+    ) -> Option<&Arc<dyn crate::corporate_identity::IdentityAssertionProvenanceVerifier>> {
+        self.identity_assertion_provenance.get()
+    }
+
+    /// Current independent restore witness, if installed by its owning slice.
+    pub fn restore_protection(
+        &self,
+    ) -> Option<&Arc<crate::authorization_runtime::restore::RestoreProtectionRuntime>> {
+        self.restore_protection.get()
+    }
+
+    /// Whether an exact domain is in authoritative protected enforcement.
+    pub fn is_protected_enforcing(&self, domain: CommunityId) -> bool {
+        self.protected_transport()
+            .and_then(|runtime| runtime.mode_for_domain(domain))
+            == Some(crate::authorization_runtime::finalization::AuthorizationMode::Enforce)
     }
 
     /// Record an event ID as locally-published for dedup, scoped to the

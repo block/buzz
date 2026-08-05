@@ -23,6 +23,19 @@ use axum::{
 };
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 use metrics_util::MetricKindMask;
+use sha2::{Digest, Sha256};
+
+/// Stable provider-neutral label that does not publish a tenant host.
+///
+/// This label is for ephemeral runtime metrics only. Durable audit identity
+/// and managed pseudonymization remain outside the metrics plane.
+pub(crate) fn community_label(community_id: buzz_core::CommunityId) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"buzz-runtime-community-metric-v1");
+    digest.update(community_id.as_uuid().as_bytes());
+    let encoded = hex::encode(digest.finalize());
+    encoded[..16].to_owned()
+}
 
 /// HTTP latency buckets (milliseconds) — only for `http_request_latency_ms`.
 const LATENCY_BUCKETS_MS: [f64; 11] = [
@@ -204,4 +217,19 @@ pub async fn track_metrics(req: Request, next: Next) -> Response {
     metrics::histogram!("http_request_latency_ms", &labels).record(latency_ms);
 
     response
+}
+
+#[cfg(test)]
+mod privacy_tests {
+    use super::*;
+
+    #[test]
+    fn community_metric_label_is_stable_bounded_and_opaque() {
+        let community = buzz_core::CommunityId::from_uuid(uuid::Uuid::from_u128(0xfeed));
+        let label = community_label(community);
+        assert_eq!(label, community_label(community));
+        assert_eq!(label.len(), 16);
+        assert!(!label.contains(&community.to_string()));
+        assert!(label.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
 }

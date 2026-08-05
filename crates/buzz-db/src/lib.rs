@@ -15,6 +15,8 @@ pub mod admin_moderation;
 pub mod api_token;
 /// Relay-scoped archived identity persistence (NIP-IA).
 pub mod archived_identities;
+/// Transaction-owned admission records for protected audio sessions.
+pub mod audio_admission;
 /// Channel and membership persistence.
 pub mod channel;
 /// Direct message channel persistence.
@@ -39,6 +41,12 @@ pub mod moderation;
 pub mod partition;
 /// Buzz product-feedback sidecar persistence.
 pub mod product_feedback;
+/// PostgreSQL-authoritative visibility for protected object-store content.
+pub mod protected_publication;
+/// Monotonic migration and cutover authority for protected object visibility.
+pub mod protected_visibility;
+/// Fail-closed compatibility seam replaced by the client-production slice.
+pub mod public_projection;
 /// Community-scoped push lease and durable wake-outbox persistence.
 pub mod push;
 /// Reaction persistence.
@@ -2445,6 +2453,35 @@ impl Db {
         pubkey: &[u8],
     ) -> Result<Option<String>> {
         channel::get_member_role(&self.pool, community_id, channel_id, pubkey).await
+    }
+
+    /// Revalidate uncached read access to one channel in one query.
+    pub async fn channel_read_authorized(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        pubkey: &[u8],
+    ) -> Result<bool> {
+        channel::channel_read_authorized(&self.pool, community_id, channel_id, pubkey).await
+    }
+
+    /// Revalidate uncached read access to a complete channel set in one query.
+    pub async fn channel_set_read_authorized(
+        &self,
+        community_id: CommunityId,
+        channel_ids: &[Uuid],
+        pubkey: &[u8],
+    ) -> Result<bool> {
+        channel::channel_set_read_authorized(&self.pool, community_id, channel_ids, pubkey).await
+    }
+
+    /// Fail closed before the invalidation slice owns durable operation receipts.
+    pub async fn authorization_operation_receipt_fingerprint(
+        &self,
+        _community_id: CommunityId,
+        _operation_id: Uuid,
+    ) -> Result<Option<[u8; 32]>> {
+        Ok(None)
     }
 
     /// Archive ephemeral channels whose TTL deadline has passed.

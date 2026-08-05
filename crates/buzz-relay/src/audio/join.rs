@@ -45,14 +45,17 @@ use buzz_relay_mesh::{
 };
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use uuid::Uuid;
 
-use super::mesh::spawn_remote_peer_sink;
+use super::mesh::{prepare_remote_peer_sink, spawn_remote_peer_sink, RemotePeerSinkGuard};
 use super::room::{
-    AdmissionError, AudioRoomManager, Room, RosterDelta as RoomRosterDelta, RosterPeer,
+    AdmissionError, AudioRoomManager, PendingAudioPeer, ProtectedDeadlineSchedule,
+    ProtectedPeerEffects, ProtectedPeerEpoch, Room, RoomOwnerEpoch, RosterDelta as RoomRosterDelta,
+    RosterPeer,
 };
 use crate::tunnel::directory::{ReleaseResult, RenewResult, SessionDirectory, SessionLease};
 
@@ -328,6 +331,20 @@ impl JoinOutcome {
             },
         }
     }
+}
+
+/// Revalidate the exact Redis owner/generation immediately before a prepared
+/// room admission becomes visible. The caller must perform no asynchronous
+/// work between this check and the synchronous room activation.
+pub async fn validate_join_before_visibility<D: HuddleDirectory + ?Sized>(
+    directory: &D,
+    community_id: CommunityId,
+    session_id: Uuid,
+    local_runtime_id: RuntimeId,
+    outcome: JoinOutcome,
+) -> Result<(), MeshError> {
+    let fenced = outcome.fenced_header(session_id, local_runtime_id);
+    directory.validate(community_id, &fenced).await
 }
 
 /// Outcome of [`resolve_join`]: the routing verdict plus, on the arm that
@@ -649,6 +666,7 @@ struct HuddleOwnerEntry {
 /// Owner-side signals for one huddle epoch. Returned atomically from attach so
 /// the CAS winner cannot miss a concurrent drain between installing the owner
 /// entry and looking the drain token back up.
+#[derive(Clone)]
 pub struct HuddleOwnerSignals {
     /// Fenced-loss signal.
     pub lost: CancellationToken,
@@ -681,6 +699,25 @@ impl HuddleOwnerRegistry {
     /// to close local owner WS peers and emit `Goodbye(Draining)` to remote pods.
     pub fn drain_for(&self, session_id: Uuid) -> Option<CancellationToken> {
         self.entries.get(&session_id).map(|e| e.draining.clone())
+    }
+
+    /// Return live signals only for the exact owner generation carried by a
+    /// control stream. A missing or superseded registry entry is not authority.
+    pub fn signals_for(&self, session_id: Uuid, generation: u64) -> Option<HuddleOwnerSignals> {
+        self.entries.get(&session_id).and_then(|entry| {
+            (entry.generation == generation
+                && !entry.lost.is_cancelled()
+                && !entry.draining.is_cancelled())
+            .then(|| HuddleOwnerSignals {
+                lost: entry.lost.clone(),
+                draining: entry.draining.clone(),
+            })
+        })
+    }
+
+    /// Whether this runtime still owns the exact live epoch.
+    pub fn is_current(&self, session_id: Uuid, generation: u64) -> bool {
+        self.signals_for(session_id, generation).is_some()
     }
 
     /// Install the single per-room renewer for a freshly-acquired lease and
@@ -723,15 +760,43 @@ impl HuddleOwnerRegistry {
         }
         let generation = lease.generation();
         if let Some(existing) = self.entries.get(&session_id) {
-            // A live entry already owns this room; release our extra lease
-            // cleanly rather than leaving two renewers on one session.
-            let cancel = CancellationToken::new();
-            cancel.cancel();
-            spawn_observable_huddle_renewer(directory, lease, cancel);
-            return HuddleOwnerSignals {
-                lost: existing.lost.clone(),
-                draining: existing.draining.clone(),
-            };
+            if existing.generation == generation
+                && !existing.lost.is_cancelled()
+                && !existing.draining.is_cancelled()
+            {
+                // A live entry already owns this exact epoch; release our
+                // duplicate lease rather than leaving two renewers.
+                let cancel = CancellationToken::new();
+                cancel.cancel();
+                spawn_observable_huddle_renewer(directory, lease, cancel);
+                return HuddleOwnerSignals {
+                    lost: existing.lost.clone(),
+                    draining: existing.draining.clone(),
+                };
+            }
+            if existing.generation > generation {
+                // A stale acquisition can never replace a newer observed
+                // epoch. Release it and return a fail-closed signal set.
+                let cancel = CancellationToken::new();
+                cancel.cancel();
+                spawn_observable_huddle_renewer(directory, lease, cancel);
+                let lost = CancellationToken::new();
+                let draining = CancellationToken::new();
+                lost.cancel();
+                draining.cancel();
+                return HuddleOwnerSignals { lost, draining };
+            }
+            let stale_generation = existing.generation;
+            drop(existing);
+            self.entries.remove_if(&session_id, |_, entry| {
+                if entry.generation == stale_generation {
+                    entry.draining.cancel();
+                    entry.cancel.cancel();
+                    true
+                } else {
+                    false
+                }
+            });
         }
         let cancel = CancellationToken::new();
         let renewer = spawn_observable_huddle_renewer(directory, lease, cancel.clone());
@@ -841,7 +906,7 @@ impl HuddleOwnerRegistry {
 /// [`MeshStreamFrame::Data`](buzz_relay_mesh::MeshStreamFrame)`.payload`,
 /// postcard-encoded. This schema is owned by the huddle lane; the mesh wire
 /// layer treats it as opaque bytes.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HuddleControlMsg {
     /// Non-owner → owner: register a local client as a remote peer in the
     /// owner's room. The owner allocates the `peer_index`.
@@ -913,6 +978,92 @@ pub enum HuddleControlMsg {
         /// Pubkey of the departing client.
         pubkey: String,
     },
+    // Protected variants are append-only so legacy postcard discriminants stay
+    // stable during a rolling upgrade.
+    /// Non-owner → owner: reserve a non-visible protected attachment.
+    ReservePeer {
+        /// Community that owns the huddle.
+        community_id: Uuid,
+        /// Durable PostgreSQL authorization attempt used only for correlation.
+        admission_id: Uuid,
+        /// Nostr pubkey hex of the joining client.
+        pubkey: String,
+        /// Huddle audio protocol version.
+        protocol_version: u8,
+    },
+    /// Owner → non-owner: a protected attachment has a non-visible index.
+    PeerReserved {
+        /// Correlated durable authorization attempt.
+        admission_id: Uuid,
+        /// Pubkey the reservation was for.
+        pubkey: String,
+        /// Owner-allocated index, not yet visible in the roster.
+        peer_index: u8,
+    },
+    /// Non-owner → owner: activate a previously reserved attachment.
+    ActivatePeer {
+        /// Correlated durable authorization attempt.
+        admission_id: Uuid,
+    },
+    /// Owner → non-owner: the reserved attachment is ready but still hidden.
+    PeerActivated {
+        /// Correlated durable authorization attempt.
+        admission_id: Uuid,
+        /// Pubkey the activation was for.
+        pubkey: String,
+        /// Owner-allocated index.
+        peer_index: u8,
+        /// Complete roster before the reserved peer becomes visible.
+        roster: RosterSnapshot,
+    },
+    /// Either side → owner: compensate a pending or active protected attempt.
+    AbortPeer {
+        /// Correlated durable authorization attempt.
+        admission_id: Uuid,
+    },
+    /// Non-owner → owner: publish a prepared attachment after final revalidation.
+    ConfirmPeer {
+        /// Correlated durable authorization attempt.
+        admission_id: Uuid,
+        /// Relay-signed current authority bound to this exact attachment.
+        authority: String,
+    },
+    /// Owner → non-owner: the prepared attachment is now visible.
+    PeerConfirmed {
+        /// Correlated durable authorization attempt.
+        admission_id: Uuid,
+        /// Pubkey the confirmation was for.
+        pubkey: String,
+        /// Owner-allocated index.
+        peer_index: u8,
+        /// Complete roster after confirmation.
+        roster: RosterSnapshot,
+    },
+}
+
+impl std::fmt::Debug for HuddleControlMsg {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let variant = match self {
+            Self::RegisterPeer { .. } => "RegisterPeer",
+            Self::PeerRegistered { .. } => "PeerRegistered",
+            Self::RosterSnapshot { .. } => "RosterSnapshot",
+            Self::RosterDelta { .. } => "RosterDelta",
+            Self::RosterResync => "RosterResync",
+            Self::RegisterRejected { .. } => "RegisterRejected",
+            Self::UnregisterPeer { .. } => "UnregisterPeer",
+            Self::ReservePeer { .. } => "ReservePeer",
+            Self::PeerReserved { .. } => "PeerReserved",
+            Self::ActivatePeer { .. } => "ActivatePeer",
+            Self::PeerActivated { .. } => "PeerActivated",
+            Self::AbortPeer { .. } => "AbortPeer",
+            Self::ConfirmPeer { .. } => "ConfirmPeer",
+            Self::PeerConfirmed { .. } => "PeerConfirmed",
+        };
+        formatter
+            .debug_tuple("HuddleControlMsg")
+            .field(&variant)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1017,6 +1168,23 @@ pub fn decode_control(bytes: &[u8]) -> Result<HuddleControlMsg, MeshError> {
     postcard::from_bytes(bytes).map_err(MeshError::Decode)
 }
 
+/// Opaque context bound into a protected cross-node audio confirmation.
+pub(crate) fn protected_audio_attachment_context(
+    community_id: CommunityId,
+    channel_id: Uuid,
+    admission_id: Uuid,
+    pubkey: &str,
+) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"buzz-protected-audio-attachment-v1");
+    digest.update(community_id.as_uuid().as_bytes());
+    digest.update(channel_id.as_bytes());
+    digest.update(admission_id.as_bytes());
+    digest.update((pubkey.len() as u64).to_be_bytes());
+    digest.update(pubkey.as_bytes());
+    digest.finalize().into()
+}
+
 /// The tunnel profile these control messages ride. `HuddleControl` is a
 /// reliable stream — a dropped roster delta is an unrecoverable peer-index
 /// desync, so it never rides datagrams.
@@ -1049,6 +1217,33 @@ pub struct HuddleControlAcceptor<D: HuddleDirectory + ?Sized> {
     /// the *same* renewer's `lost` — the loss surfaces as a proactive
     /// `Goodbye(StaleGeneration)` to each non-owner pod.
     owners: Arc<HuddleOwnerRegistry>,
+    authority_verifier: Option<crate::authorization_runtime::ephemeral::AuthorityTokenVerifier>,
+    media_attachments: Arc<super::mesh::MediaAttachmentRegistry>,
+}
+
+struct ProtectedRegisteredPeer {
+    pubkey: String,
+    protocol_version: u8,
+    peer_id: Uuid,
+    room: std::sync::Weak<Room>,
+    epoch: ProtectedPeerEpoch,
+    authority: crate::authorization_runtime::ephemeral::RetainedEphemeralAuthority,
+    effects: ProtectedPeerEffects,
+}
+
+impl Drop for ProtectedRegisteredPeer {
+    fn drop(&mut self) {
+        self.effects.revoke();
+        if let Some(room) = self.room.upgrade() {
+            room.remove_protected_epoch(self.epoch);
+        }
+    }
+}
+
+struct LegacyRegisteredPeer {
+    peer_id: Uuid,
+    remote_sink: RemotePeerSinkGuard,
+    _media_attachment: super::mesh::MediaAttachmentGuard,
 }
 
 impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
@@ -1062,6 +1257,7 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
         directory: Arc<D>,
         local_runtime_id: RuntimeId,
         owners: Arc<HuddleOwnerRegistry>,
+        media_attachments: Arc<super::mesh::MediaAttachmentRegistry>,
     ) -> Self {
         Self {
             rooms,
@@ -1069,7 +1265,19 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
             directory,
             local_runtime_id,
             owners,
+            authority_verifier: None,
+            media_attachments,
         }
+    }
+
+    /// Require current database authority for protected peer confirmation.
+    #[allow(dead_code)]
+    pub(crate) fn with_authority_verifier(
+        mut self,
+        verifier: crate::authorization_runtime::ephemeral::AuthorityTokenVerifier,
+    ) -> Self {
+        self.authority_verifier = Some(verifier);
+        self
     }
 
     /// Accept and validate an inbound `HuddleControl` stream, then serve its
@@ -1128,10 +1336,24 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
             });
         }
 
-        let lost = self.owners.lost_for(fenced.session_id);
-        let draining = self.owners.drain_for(fenced.session_id);
-        self.serve_control_loop(from, fenced, stream, lost, draining)
-            .await
+        let mut signals = None;
+        for _ in 0..OWNER_READY_MAX_ATTEMPTS {
+            if let Some(current) = self
+                .owners
+                .signals_for(fenced.session_id, fenced.generation)
+            {
+                signals = Some(current);
+                break;
+            }
+            tokio::time::sleep(OWNER_READY_RETRY_INTERVAL).await;
+        }
+        let Some(signals) = signals else {
+            return Err(MeshError::Transport(format!(
+                "huddle owner epoch {}:{} is not attached",
+                fenced.session_id, fenced.generation
+            )));
+        };
+        self.serve_control_loop(from, fenced, stream, signals).await
     }
 
     /// Serve register/unregister frames for one non-owner pod's stream.
@@ -1159,12 +1381,17 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
         from: RuntimeId,
         fenced: FencedHeader,
         mut stream: MeshStream,
-        lost: Option<CancellationToken>,
-        draining: Option<CancellationToken>,
+        signals: HuddleOwnerSignals,
     ) -> Result<(), MeshError> {
         let session_id = fenced.session_id;
         // pubkey -> peer_id, for UnregisterPeer and teardown on stream close.
-        let mut registered: std::collections::HashMap<String, Uuid> =
+        let mut registered: std::collections::HashMap<String, LegacyRegisteredPeer> =
+            std::collections::HashMap::new();
+        // Protected attempts are reserved without visibility and activated by
+        // durable admission id. Dropping a pending handle compensates it.
+        let mut pending: std::collections::HashMap<Uuid, (String, u8, PendingAudioPeer)> =
+            std::collections::HashMap::new();
+        let mut protected_registered: std::collections::HashMap<Uuid, ProtectedRegisteredPeer> =
             std::collections::HashMap::new();
         // Community (raw UUID) latched from the first RegisterPeer; every later
         // frame must agree. `None` until the first register arrives.
@@ -1175,22 +1402,12 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
         // sends the matching proactive Goodbye. A stream faulting on its own
         // leaves this empty and the close stays silent, as before.
         let mut teardown_reason: Option<GoodbyeReason> = None;
+        let mut authority_tick = tokio::time::interval(std::time::Duration::from_millis(100));
+        authority_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         let result = loop {
-            // A future that never resolves when there is no loss signal, so the
-            // `select!` degenerates to a plain recv for the `None` case.
-            let lost_fired = async {
-                match &lost {
-                    Some(token) => token.cancelled().await,
-                    None => std::future::pending().await,
-                }
-            };
-            let drain_fired = async {
-                match &draining {
-                    Some(token) => token.cancelled().await,
-                    None => std::future::pending().await,
-                }
-            };
+            let lost_fired = signals.lost.cancelled();
+            let drain_fired = signals.draining.cancelled();
             let roster_event = async {
                 match &mut roster_rx {
                     Some(rx) => Some(rx.recv().await),
@@ -1198,6 +1415,7 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
                 }
             };
             let frame = tokio::select! {
+                biased;
                 _ = drain_fired => {
                     teardown_reason = Some(GoodbyeReason::Draining);
                     break Ok(());
@@ -1206,12 +1424,65 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
                     teardown_reason = Some(GoodbyeReason::StaleGeneration);
                     break Ok(());
                 }
+                _ = authority_tick.tick(), if !protected_registered.is_empty() => {
+                    let checks: Vec<_> = protected_registered
+                        .iter()
+                        .map(|(admission_id, peer)| (*admission_id, peer.authority.clone()))
+                        .collect();
+                    for (admission_id, authority) in checks {
+                        if authority.release().await {
+                            continue;
+                        }
+                        let Some(peer) = protected_registered.remove(&admission_id) else {
+                            continue;
+                        };
+                        drop(peer);
+                        if let Some(room) = stream_community.and_then(|community_id| {
+                            self.rooms.get(CommunityId::from_uuid(community_id), session_id)
+                        }) {
+                            let community = CommunityId::from_uuid(
+                                stream_community.expect("protected peer requires a community"),
+                            );
+                            let owner_epoch =
+                                RoomOwnerEpoch::new(fenced.owner_runtime_id, fenced.generation);
+                            self.rooms.retire_exact_owner_if_empty(
+                                community,
+                                session_id,
+                                &room,
+                                owner_epoch,
+                                || self.owners.release(session_id, fenced.generation),
+                            );
+                        }
+                    }
+                    continue;
+                }
                 event = roster_event => {
                     let Some(event) = event else {
                         continue;
                     };
                     let msg = match event {
-                        Ok(delta) => roster_delta_msg(delta),
+                        Ok(delta) => {
+                            let Some(community_id) = stream_community else {
+                                break Ok(());
+                            };
+                            let Some(room) = self.rooms.get(
+                                CommunityId::from_uuid(community_id),
+                                session_id,
+                            ) else {
+                                break Ok(());
+                            };
+                            let current = room.roster_snapshot();
+                            if delta.joined.as_ref().is_some_and(|joined| {
+                                !current.peers.iter().any(|peer| peer == joined)
+                            }) {
+                                HuddleControlMsg::RosterSnapshot {
+                                    revision: current.revision,
+                                    peers: current.peers.into_iter().map(Into::into).collect(),
+                                }
+                            } else {
+                                roster_delta_msg(delta)
+                            }
+                        }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                             let Some(community_id) = stream_community else {
                                 break Ok(());
@@ -1261,7 +1532,608 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
                 Err(e) => break Err(e),
             };
 
+            if !self.owners.is_current(session_id, fenced.generation) {
+                teardown_reason = Some(if signals.draining.is_cancelled() {
+                    GoodbyeReason::Draining
+                } else {
+                    GoodbyeReason::StaleGeneration
+                });
+                break Ok(());
+            }
+
             match msg {
+                HuddleControlMsg::ReservePeer {
+                    community_id,
+                    admission_id,
+                    pubkey,
+                    protocol_version,
+                } => {
+                    match stream_community {
+                        None => stream_community = Some(community_id),
+                        Some(latched) if latched != community_id => {
+                            break Err(MeshError::Transport(format!(
+                                "huddle-control stream community changed {latched} -> {community_id}"
+                            )));
+                        }
+                        Some(_) => {}
+                    }
+                    if self.owners.is_draining() {
+                        teardown_reason = Some(GoodbyeReason::Draining);
+                        break Ok(());
+                    }
+                    let community = CommunityId::from_uuid(community_id);
+                    let owner_epoch =
+                        RoomOwnerEpoch::new(fenced.owner_runtime_id, fenced.generation);
+                    let room_claim = match self.rooms.get_or_create_for_owner(
+                        community,
+                        session_id,
+                        owner_epoch,
+                        |old_epoch| {
+                            if old_epoch.owner_runtime_id == self.local_runtime_id {
+                                self.owners.release(session_id, old_epoch.generation);
+                            }
+                        },
+                    ) {
+                        Ok(claim) => claim,
+                        Err(_) => {
+                            teardown_reason = Some(GoodbyeReason::StaleGeneration);
+                            break Ok(());
+                        }
+                    };
+                    let room = room_claim.room();
+                    let reply = match self.directory.validate(community, &fenced).await {
+                        Ok(()) if !self.owners.is_current(session_id, fenced.generation) => {
+                            teardown_reason = Some(GoodbyeReason::StaleGeneration);
+                            break Ok(());
+                        }
+                        Ok(()) => {
+                            if let Some((existing_pubkey, existing_version, reservation)) =
+                                pending.get(&admission_id)
+                            {
+                                if existing_pubkey != &pubkey
+                                    || *existing_version != protocol_version
+                                {
+                                    break Err(MeshError::Transport(
+                                        "conflicting huddle reservation retry".into(),
+                                    ));
+                                }
+                                HuddleControlMsg::PeerReserved {
+                                    admission_id,
+                                    pubkey: pubkey.clone(),
+                                    peer_index: reservation.peer_index(),
+                                }
+                            } else if let Some(existing) = protected_registered.get(&admission_id) {
+                                if existing.pubkey != pubkey
+                                    || existing.protocol_version != protocol_version
+                                {
+                                    break Err(MeshError::Transport(
+                                        "conflicting active huddle retry".into(),
+                                    ));
+                                }
+                                let peer_index = room
+                                    .peers
+                                    .get(&existing.peer_id)
+                                    .map(|peer| peer.peer_index)
+                                    .ok_or_else(|| {
+                                        MeshError::Transport(
+                                            "active huddle retry lost its room peer".into(),
+                                        )
+                                    })?;
+                                HuddleControlMsg::PeerReserved {
+                                    admission_id,
+                                    pubkey: pubkey.clone(),
+                                    peer_index,
+                                }
+                            } else {
+                                match room.reserve_remote_peer(
+                                    admission_id,
+                                    pubkey.clone(),
+                                    protocol_version,
+                                    from.0,
+                                ) {
+                                    Ok(reservation) => {
+                                        let peer_index = reservation.peer_index();
+                                        pending.insert(
+                                            admission_id,
+                                            (pubkey.clone(), protocol_version, reservation),
+                                        );
+                                        HuddleControlMsg::PeerReserved {
+                                            admission_id,
+                                            pubkey: pubkey.clone(),
+                                            peer_index,
+                                        }
+                                    }
+                                    Err(reason) => HuddleControlMsg::RegisterRejected {
+                                        pubkey: pubkey.clone(),
+                                        reason: admission_to_rejection(reason),
+                                    },
+                                }
+                            }
+                        }
+                        Err(e) => match FenceRejection::from_mesh_error(&e) {
+                            Some(reason) => HuddleControlMsg::RegisterRejected {
+                                pubkey: pubkey.clone(),
+                                reason: RegisterRejection::Fenced(reason),
+                            },
+                            None => break Err(e),
+                        },
+                    };
+                    stream
+                        .send_frame(MeshStreamFrame::Data {
+                            fenced,
+                            payload: encode_control(&reply)?,
+                        })
+                        .await?;
+                }
+                HuddleControlMsg::ActivatePeer { admission_id } => {
+                    let Some(community_id) = stream_community else {
+                        break Err(MeshError::Transport(
+                            "huddle activation arrived before reservation".into(),
+                        ));
+                    };
+                    let community = CommunityId::from_uuid(community_id);
+                    let owner_epoch =
+                        RoomOwnerEpoch::new(fenced.owner_runtime_id, fenced.generation);
+                    let Some(room) = self.rooms.get(community, session_id) else {
+                        teardown_reason = Some(GoodbyeReason::StaleGeneration);
+                        break Ok(());
+                    };
+                    if !room.matches_owner_epoch(owner_epoch) {
+                        teardown_reason = Some(GoodbyeReason::StaleGeneration);
+                        break Ok(());
+                    }
+                    let (pubkey, peer_index) =
+                        if let Some((pubkey, _, reservation)) = pending.get(&admission_id) {
+                            (pubkey.clone(), reservation.peer_index())
+                        } else if let Some(existing) = protected_registered.get(&admission_id) {
+                            let peer_index = room
+                                .peers
+                                .get(&existing.peer_id)
+                                .map(|peer| peer.peer_index)
+                                .ok_or_else(|| {
+                                    MeshError::Transport(
+                                        "active huddle retry lost its room peer".into(),
+                                    )
+                                })?;
+                            (existing.pubkey.clone(), peer_index)
+                        } else {
+                            break Err(MeshError::Transport(
+                                "unknown huddle admission attempt".into(),
+                            ));
+                        };
+                    if let Err(e) = self.directory.validate(community, &fenced).await {
+                        pending.remove(&admission_id);
+                        let Some(reason) = FenceRejection::from_mesh_error(&e) else {
+                            break Err(e);
+                        };
+                        stream
+                            .send_frame(MeshStreamFrame::Data {
+                                fenced,
+                                payload: encode_control(&HuddleControlMsg::RegisterRejected {
+                                    pubkey,
+                                    reason: RegisterRejection::Fenced(reason),
+                                })?,
+                            })
+                            .await?;
+                        continue;
+                    }
+                    if !self.owners.is_current(session_id, fenced.generation) {
+                        pending.remove(&admission_id);
+                        teardown_reason = Some(GoodbyeReason::StaleGeneration);
+                        break Ok(());
+                    }
+                    // Preparation is deliberately non-visible. The origin
+                    // revalidates its PostgreSQL-authorized attempt before it
+                    // sends ConfirmPeer, which owns the roster-visible effect.
+                    let reply = HuddleControlMsg::PeerActivated {
+                        admission_id,
+                        pubkey,
+                        peer_index,
+                        roster: roster_snapshot(&room),
+                    };
+                    stream
+                        .send_frame(MeshStreamFrame::Data {
+                            fenced,
+                            payload: encode_control(&reply)?,
+                        })
+                        .await?;
+                }
+                HuddleControlMsg::ConfirmPeer {
+                    admission_id,
+                    authority,
+                } => {
+                    let Some(community_id) = stream_community else {
+                        break Err(MeshError::Transport(
+                            "huddle confirmation arrived before reservation".into(),
+                        ));
+                    };
+                    let community = CommunityId::from_uuid(community_id);
+                    let owner_epoch =
+                        RoomOwnerEpoch::new(fenced.owner_runtime_id, fenced.generation);
+                    let Some(room) = self.rooms.get(community, session_id) else {
+                        teardown_reason = Some(GoodbyeReason::StaleGeneration);
+                        break Ok(());
+                    };
+                    if !room.matches_owner_epoch(owner_epoch) {
+                        teardown_reason = Some(GoodbyeReason::StaleGeneration);
+                        break Ok(());
+                    }
+                    let pubkey = protected_registered
+                        .get(&admission_id)
+                        .map(|peer| peer.pubkey.clone())
+                        .or_else(|| {
+                            pending
+                                .get(&admission_id)
+                                .map(|(pubkey, _, _)| pubkey.clone())
+                        })
+                        .ok_or_else(|| {
+                            MeshError::Transport("unknown huddle admission attempt".into())
+                        })?;
+                    let Some(verifier) = &self.authority_verifier else {
+                        break Err(MeshError::Transport(
+                            "protected huddle authority verifier is unavailable".into(),
+                        ));
+                    };
+                    let context_id = protected_audio_attachment_context(
+                        community,
+                        session_id,
+                        admission_id,
+                        &pubkey,
+                    );
+                    let verified_authority = match verifier
+                        .verify_context(community, context_id, &authority)
+                        .await
+                    {
+                        Ok(authority) => authority,
+                        Err(_) => {
+                            pending.remove(&admission_id);
+                            if let Some(peer) = protected_registered.remove(&admission_id) {
+                                drop(peer);
+                            }
+                            stream
+                                .send_frame(MeshStreamFrame::Data {
+                                    fenced,
+                                    payload: encode_control(&HuddleControlMsg::RegisterRejected {
+                                        pubkey,
+                                        reason: RegisterRejection::Fenced(
+                                            FenceRejection::NoActiveLease,
+                                        ),
+                                    })?,
+                                })
+                                .await?;
+                            continue;
+                        }
+                    };
+                    if let Some(existing_authority) = protected_registered
+                        .get(&admission_id)
+                        .map(|peer| peer.authority.clone())
+                    {
+                        if !existing_authority.release().await {
+                            if let Some(peer) = protected_registered.remove(&admission_id) {
+                                drop(peer);
+                            }
+                            stream
+                                .send_frame(MeshStreamFrame::Data {
+                                    fenced,
+                                    payload: encode_control(&HuddleControlMsg::RegisterRejected {
+                                        pubkey,
+                                        reason: RegisterRejection::Fenced(
+                                            FenceRejection::NoActiveLease,
+                                        ),
+                                    })?,
+                                })
+                                .await?;
+                            continue;
+                        }
+                        if self.directory.validate(community, &fenced).await.is_err() {
+                            if let Some(peer) = protected_registered.remove(&admission_id) {
+                                drop(peer);
+                            }
+                            teardown_reason = Some(GoodbyeReason::StaleGeneration);
+                            break Ok(());
+                        }
+                        if !self.owners.is_current(session_id, fenced.generation) {
+                            teardown_reason = Some(GoodbyeReason::StaleGeneration);
+                            break Ok(());
+                        }
+                        let peer = protected_registered
+                            .get(&admission_id)
+                            .expect("revalidated protected peer remains registered");
+                        let peer_index = room
+                            .peers
+                            .get(&peer.peer_id)
+                            .map(|peer| peer.peer_index)
+                            .ok_or_else(|| {
+                                MeshError::Transport(
+                                    "confirmed huddle retry lost its room peer".into(),
+                                )
+                            })?;
+                        stream
+                            .send_frame(MeshStreamFrame::Data {
+                                fenced,
+                                payload: encode_control(&HuddleControlMsg::PeerConfirmed {
+                                    admission_id,
+                                    pubkey: peer.pubkey.clone(),
+                                    peer_index,
+                                    roster: roster_snapshot(&room),
+                                })?,
+                            })
+                            .await?;
+                        continue;
+                    }
+                    if let Err(e) = self.directory.validate(community, &fenced).await {
+                        pending.remove(&admission_id);
+                        let Some(reason) = FenceRejection::from_mesh_error(&e) else {
+                            break Err(e);
+                        };
+                        stream
+                            .send_frame(MeshStreamFrame::Data {
+                                fenced,
+                                payload: encode_control(&HuddleControlMsg::RegisterRejected {
+                                    pubkey,
+                                    reason: RegisterRejection::Fenced(reason),
+                                })?,
+                            })
+                            .await?;
+                        continue;
+                    }
+                    // This is the last await before the synchronous visibility
+                    // transition. Keep the peer reserved and invisible until
+                    // both PostgreSQL authority and Redis ownership are fresh.
+                    if !verified_authority.release().await {
+                        pending.remove(&admission_id);
+                        stream
+                            .send_frame(MeshStreamFrame::Data {
+                                fenced,
+                                payload: encode_control(&HuddleControlMsg::RegisterRejected {
+                                    pubkey,
+                                    reason: RegisterRejection::Fenced(
+                                        FenceRejection::NoActiveLease,
+                                    ),
+                                })?,
+                            })
+                            .await?;
+                        continue;
+                    }
+                    // PostgreSQL revalidation awaited after the first Redis
+                    // fence. Revalidate Redis again so neither authority is a
+                    // stale preflight when the synchronous room transition
+                    // begins; the live owner signal compensates later loss.
+                    if let Err(e) = self.directory.validate(community, &fenced).await {
+                        pending.remove(&admission_id);
+                        let Some(reason) = FenceRejection::from_mesh_error(&e) else {
+                            break Err(e);
+                        };
+                        stream
+                            .send_frame(MeshStreamFrame::Data {
+                                fenced,
+                                payload: encode_control(&HuddleControlMsg::RegisterRejected {
+                                    pubkey,
+                                    reason: RegisterRejection::Fenced(reason),
+                                })?,
+                            })
+                            .await?;
+                        continue;
+                    }
+                    if !verified_authority.release().await {
+                        pending.remove(&admission_id);
+                        stream
+                            .send_frame(MeshStreamFrame::Data {
+                                fenced,
+                                payload: encode_control(&HuddleControlMsg::RegisterRejected {
+                                    pubkey,
+                                    reason: RegisterRejection::Fenced(
+                                        FenceRejection::NoActiveLease,
+                                    ),
+                                })?,
+                            })
+                            .await?;
+                        continue;
+                    }
+                    if !verified_authority.is_time_valid()
+                        || !self.owners.is_current(session_id, fenced.generation)
+                    {
+                        pending.remove(&admission_id);
+                        teardown_reason = Some(GoodbyeReason::StaleGeneration);
+                        break Ok(());
+                    }
+                    let new_roster_rx = room.subscribe_roster();
+                    let (_, protocol_version, reservation) = pending
+                        .remove(&admission_id)
+                        .expect("pending admission checked above");
+                    let reserved_peer_index = reservation.peer_index();
+                    let Some(media_attachment) = self.media_attachments.register_owner_ingress(
+                        fenced,
+                        from,
+                        reserved_peer_index,
+                        admission_id,
+                        verified_authority.expires_at(),
+                    ) else {
+                        stream
+                            .send_frame(MeshStreamFrame::Data {
+                                fenced,
+                                payload: encode_control(&HuddleControlMsg::RegisterRejected {
+                                    pubkey,
+                                    reason: RegisterRejection::Fenced(
+                                        FenceRejection::NoActiveLease,
+                                    ),
+                                })?,
+                            })
+                            .await?;
+                        continue;
+                    };
+                    let effects = ProtectedPeerEffects::new(CancellationToken::new());
+                    let schedule =
+                        match ProtectedDeadlineSchedule::new(verified_authority.expires_at(), None)
+                        {
+                            Ok(schedule) => schedule,
+                            Err(_) => {
+                                effects.revoke();
+                                stream
+                                    .send_frame(MeshStreamFrame::Data {
+                                        fenced,
+                                        payload: encode_control(
+                                            &HuddleControlMsg::RegisterRejected {
+                                                pubkey,
+                                                reason: RegisterRejection::Fenced(
+                                                    FenceRejection::NoActiveLease,
+                                                ),
+                                            },
+                                        )?,
+                                    })
+                                    .await?;
+                                continue;
+                            }
+                        };
+                    if !effects.install_revoker(move || drop(media_attachment)) {
+                        stream
+                            .send_frame(MeshStreamFrame::Data {
+                                fenced,
+                                payload: encode_control(&HuddleControlMsg::RegisterRejected {
+                                    pubkey,
+                                    reason: RegisterRejection::Fenced(
+                                        FenceRejection::NoActiveLease,
+                                    ),
+                                })?,
+                            })
+                            .await?;
+                        continue;
+                    }
+                    let owners = Arc::clone(&self.owners);
+                    let ((peer_id, peer_index, audio_rx, _peer_ctrl_rx), protected_epoch) =
+                        match reservation.activate_protected_with_effects_if(
+                            schedule,
+                            effects.clone(),
+                            || {
+                                verified_authority.is_time_valid()
+                                    && owners.is_current(session_id, fenced.generation)
+                            },
+                        ) {
+                            Ok(Some(activated)) => activated,
+                            Ok(None) => {
+                                effects.revoke();
+                                stream
+                                    .send_frame(MeshStreamFrame::Data {
+                                        fenced,
+                                        payload: encode_control(
+                                            &HuddleControlMsg::RegisterRejected {
+                                                pubkey,
+                                                reason: RegisterRejection::Fenced(
+                                                    FenceRejection::NoActiveLease,
+                                                ),
+                                            },
+                                        )?,
+                                    })
+                                    .await?;
+                                continue;
+                            }
+                            Err(reason) => {
+                                stream
+                                    .send_frame(MeshStreamFrame::Data {
+                                        fenced,
+                                        payload: encode_control(
+                                            &HuddleControlMsg::RegisterRejected {
+                                                pubkey,
+                                                reason: admission_to_rejection(reason),
+                                            },
+                                        )?,
+                                    })
+                                    .await?;
+                                continue;
+                            }
+                        };
+                    // Prepare and start the exact compensated media effect
+                    // while the peer is still hidden. Publication is the sole
+                    // visibility point and cannot race an unowned sink.
+                    let (remote_sink, remote_sink_start) = prepare_remote_peer_sink(
+                        Arc::clone(&self.transport),
+                        from,
+                        fenced,
+                        audio_rx,
+                        Some(schedule.wake_at()),
+                    );
+                    if !effects.install_revoker(move || remote_sink.close())
+                        || !remote_sink_start.start()
+                        || !effects.is_live()
+                    {
+                        room.remove_protected_epoch(protected_epoch);
+                        continue;
+                    }
+                    if !verified_authority.is_time_valid()
+                        || !self.owners.is_current(session_id, fenced.generation)
+                    {
+                        room.remove_protected_epoch(protected_epoch);
+                        teardown_reason = Some(GoodbyeReason::StaleGeneration);
+                        break Ok(());
+                    }
+                    let Some(owner_roster) = room.broadcast_protected_join_if_current(
+                        protected_epoch,
+                        &pubkey,
+                        peer_index,
+                    ) else {
+                        room.remove_protected_epoch(protected_epoch);
+                        stream
+                            .send_frame(MeshStreamFrame::Data {
+                                fenced,
+                                payload: encode_control(&HuddleControlMsg::RegisterRejected {
+                                    pubkey,
+                                    reason: RegisterRejection::Fenced(
+                                        FenceRejection::NoActiveLease,
+                                    ),
+                                })?,
+                            })
+                            .await?;
+                        continue;
+                    };
+                    protected_registered.insert(
+                        admission_id,
+                        ProtectedRegisteredPeer {
+                            pubkey: pubkey.clone(),
+                            protocol_version,
+                            peer_id,
+                            room: Arc::downgrade(&room),
+                            epoch: protected_epoch,
+                            authority: verified_authority,
+                            effects,
+                        },
+                    );
+                    let reply = HuddleControlMsg::PeerConfirmed {
+                        admission_id,
+                        pubkey,
+                        peer_index,
+                        roster: roster_snapshot_from_room(owner_roster),
+                    };
+                    stream
+                        .send_frame(MeshStreamFrame::Data {
+                            fenced,
+                            payload: encode_control(&reply)?,
+                        })
+                        .await?;
+                    roster_rx = Some(new_roster_rx);
+                }
+                HuddleControlMsg::AbortPeer { admission_id } => {
+                    pending.remove(&admission_id);
+                    if let Some(peer) = protected_registered.remove(&admission_id) {
+                        drop(peer);
+                        if let Some(room) = stream_community.and_then(|community_id| {
+                            self.rooms
+                                .get(CommunityId::from_uuid(community_id), session_id)
+                        }) {
+                            let community = CommunityId::from_uuid(
+                                stream_community.expect("registered peer requires a community"),
+                            );
+                            let owner_epoch =
+                                RoomOwnerEpoch::new(fenced.owner_runtime_id, fenced.generation);
+                            self.rooms.retire_exact_owner_if_empty(
+                                community,
+                                session_id,
+                                &room,
+                                owner_epoch,
+                                || self.owners.release(session_id, fenced.generation),
+                            );
+                        }
+                    }
+                }
                 HuddleControlMsg::RegisterPeer {
                     community_id,
                     pubkey,
@@ -1299,6 +2171,10 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
                     // that revision are ignored by the receiver.
                     let new_roster_rx = room.subscribe_roster();
                     let reply = match self.directory.validate(community, &fenced).await {
+                        Ok(()) if !self.owners.is_current(session_id, fenced.generation) => {
+                            teardown_reason = Some(GoodbyeReason::StaleGeneration);
+                            break Ok(());
+                        }
                         Ok(()) => self.register_remote_peer(
                             Arc::clone(&room),
                             fenced,
@@ -1329,13 +2205,15 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
                     }
                 }
                 HuddleControlMsg::UnregisterPeer { pubkey } => {
-                    if let Some(peer_id) = registered.remove(&pubkey) {
+                    if let Some(peer) = registered.remove(&pubkey) {
+                        peer.remote_sink.close();
                         if let Some(room) = stream_community.and_then(|community_id| {
                             self.rooms
                                 .get(CommunityId::from_uuid(community_id), session_id)
                         }) {
-                            let peer_index = room.peers.get(&peer_id).map(|peer| peer.peer_index);
-                            room.remove_peer(peer_id);
+                            let peer_index =
+                                room.peers.get(&peer.peer_id).map(|entry| entry.peer_index);
+                            room.remove_peer(peer.peer_id);
                             if let Some(peer_index) = peer_index {
                                 room.broadcast_control(
                                     serde_json::json!({
@@ -1366,6 +2244,9 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
                 // Owner→non-owner replies never arrive on the owner's accept
                 // side; a peer sending one is a protocol violation.
                 HuddleControlMsg::PeerRegistered { .. }
+                | HuddleControlMsg::PeerReserved { .. }
+                | HuddleControlMsg::PeerActivated { .. }
+                | HuddleControlMsg::PeerConfirmed { .. }
                 | HuddleControlMsg::RosterSnapshot { .. }
                 | HuddleControlMsg::RosterDelta { .. }
                 | HuddleControlMsg::RegisterRejected { .. } => {
@@ -1376,26 +2257,20 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
             }
         };
 
-        // Owner-initiated teardown: tell the non-owner pod why this owner is
-        // closing so it can rejoin against Redis. Best-effort — teardown
-        // proceeds even if the stream is already gone. Normal stream/client
-        // closes stay silent.
-        if let Some(reason) = teardown_reason {
-            let _ = stream
-                .send_frame(MeshStreamFrame::Goodbye { fenced, reason })
-                .await;
-        }
-
         // Teardown: drop every peer this stream registered, regardless of how
         // the loop ended. Dropping the peer drops its `audio_tx`, which ends the
-        // matching `spawn_remote_peer_sink` task.
+        // matching `spawn_remote_peer_sink` task. This must happen before an
+        // owner-loss Goodbye: a backpressured control stream must never retain
+        // old-generation media authority.
         if let Some(room) = stream_community.and_then(|community_id| {
             self.rooms
                 .get(CommunityId::from_uuid(community_id), session_id)
         }) {
-            for (pubkey, peer_id) in registered {
-                let peer_index = room.peers.get(&peer_id).map(|peer| peer.peer_index);
-                room.remove_peer(peer_id);
+            pending.clear();
+            for (pubkey, peer) in registered {
+                peer.remote_sink.close();
+                let peer_index = room.peers.get(&peer.peer_id).map(|entry| entry.peer_index);
+                room.remove_peer(peer.peer_id);
                 if let Some(peer_index) = peer_index {
                     room.broadcast_control(
                         serde_json::json!({
@@ -1406,6 +2281,34 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
                         .to_string(),
                     );
                 }
+            }
+            for (_, peer) in protected_registered {
+                drop(peer);
+            }
+            let community =
+                CommunityId::from_uuid(stream_community.expect("room lookup required a community"));
+            let owner_epoch = RoomOwnerEpoch::new(fenced.owner_runtime_id, fenced.generation);
+            if room.matches_owner_epoch(owner_epoch) {
+                self.rooms.retire_exact_owner_if_empty(
+                    community,
+                    session_id,
+                    &room,
+                    owner_epoch,
+                    || self.owners.release(session_id, fenced.generation),
+                );
+            }
+        }
+        // Owner-initiated teardown: after every peer and media attachment is
+        // revoked, tell the non-owner why the owner is closing. Bound the
+        // best-effort send so control backpressure cannot delay completion.
+        if let Some(reason) = teardown_reason {
+            let result = tokio::time::timeout(
+                std::time::Duration::from_millis(250),
+                stream.send_frame(MeshStreamFrame::Goodbye { fenced, reason }),
+            )
+            .await;
+            if !matches!(result, Ok(Ok(()))) {
+                let _ = stream.finish();
             }
         }
         result
@@ -1420,15 +2323,36 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
         from: RuntimeId,
         pubkey: &str,
         protocol_version: u8,
-        registered: &mut std::collections::HashMap<String, Uuid>,
+        registered: &mut std::collections::HashMap<String, LegacyRegisteredPeer>,
     ) -> HuddleControlMsg {
-        match room.add_peer(pubkey.to_string(), protocol_version) {
+        match room.add_remote_peer(pubkey.to_string(), protocol_version, from.0) {
             Ok((peer_id, peer_index, audio_rx, _peer_ctrl_rx)) => {
-                registered.insert(pubkey.to_string(), peer_id);
+                let Some(media_attachment) = self.media_attachments.register_owner_ingress(
+                    fenced,
+                    from,
+                    peer_index,
+                    peer_id,
+                    u64::MAX,
+                ) else {
+                    room.remove_peer(peer_id);
+                    return HuddleControlMsg::RegisterRejected {
+                        pubkey: pubkey.to_string(),
+                        reason: RegisterRejection::Fenced(FenceRejection::NoActiveLease),
+                    };
+                };
+                let remote_sink =
+                    spawn_remote_peer_sink(Arc::clone(&self.transport), from, fenced, audio_rx);
+                registered.insert(
+                    pubkey.to_string(),
+                    LegacyRegisteredPeer {
+                        peer_id,
+                        remote_sink,
+                        _media_attachment: media_attachment,
+                    },
+                );
                 // The owner's Room fans out to this remote peer's `audio_tx`;
                 // the sink drains `audio_rx` and ships each frame as a datagram
                 // to the pod that hosts the client.
-                spawn_remote_peer_sink(Arc::clone(&self.transport), from, fenced, audio_rx);
                 let joined = serde_json::json!({
                     "type": "joined",
                     "pubkey": pubkey,
@@ -1452,7 +2376,10 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
 }
 
 fn roster_snapshot(room: &Room) -> RosterSnapshot {
-    let snapshot = room.roster_snapshot();
+    roster_snapshot_from_room(room.roster_snapshot())
+}
+
+fn roster_snapshot_from_room(snapshot: super::room::RosterSnapshot) -> RosterSnapshot {
     RosterSnapshot {
         revision: snapshot.revision,
         peers: snapshot.peers.into_iter().map(Into::into).collect(),
@@ -1503,6 +2430,45 @@ pub const HUDDLE_SESSION_ENDED: GoodbyeReason = GoodbyeReason::SessionEnded;
 // the owner round-trip — `deliver_prefixed` skips a client's own index so it
 // never hears itself).
 
+/// A non-visible remote reservation correlated to a PostgreSQL admission.
+pub struct PendingRemoteHuddleSession {
+    admission_id: Uuid,
+    peer_index: u8,
+    fenced: FencedHeader,
+    owner: RuntimeId,
+    pubkey: String,
+    transport: Arc<dyn RelayPeerTransport>,
+}
+
+/// Inputs bound to one protected remote attachment attempt.
+pub struct RemoteReservationRequest {
+    /// Server-resolved community.
+    pub community_id: CommunityId,
+    /// Durable PostgreSQL admission correlation id.
+    pub admission_id: Uuid,
+    /// Joining client's Nostr pubkey hex.
+    pub pubkey: String,
+    /// Negotiated huddle protocol version.
+    pub protocol_version: u8,
+}
+
+impl PendingRemoteHuddleSession {
+    /// Owner-assigned index reserved for this attempt.
+    pub fn peer_index(&self) -> u8 {
+        self.peer_index
+    }
+
+    /// Correlated durable admission attempt.
+    pub fn admission_id(&self) -> Uuid {
+        self.admission_id
+    }
+
+    /// Owner-generation fence for compensation.
+    pub fn fenced(&self) -> FencedHeader {
+        self.fenced
+    }
+}
+
 /// A registered cross-pod huddle session on the non-owner side.
 ///
 /// Holds everything needed to forward the local client's media to the owner and
@@ -1521,6 +2487,10 @@ pub struct RemoteHuddleSession {
     owner: RuntimeId,
     /// Pubkey of the local client, for the closing `UnregisterPeer`.
     pubkey: String,
+    /// Protected attempt to abort on teardown; absent on the legacy protocol.
+    admission_id: Option<Uuid>,
+    /// Exact local admission generation permitted to author outbound media.
+    local_epoch: Option<ProtectedPeerEpoch>,
     /// Transport for datagrams and the control-stream teardown.
     transport: Arc<dyn RelayPeerTransport>,
     /// Per-datagram monotonic sequence for loss/reorder observability.
@@ -1746,6 +2716,8 @@ pub async fn dial_remote_owner(
                     fenced,
                     owner,
                     pubkey,
+                    admission_id: None,
+                    local_epoch: None,
                     transport,
                     seq: 0,
                 },
@@ -1765,11 +2737,173 @@ pub async fn dial_remote_owner(
     }
 }
 
+/// Reserve a protected remote attachment without making it roster-visible.
+pub async fn reserve_remote_owner(
+    transport: Arc<dyn RelayPeerTransport>,
+    local_runtime_id: RuntimeId,
+    owner: RuntimeId,
+    fenced: FencedHeader,
+    request: RemoteReservationRequest,
+) -> Result<(PendingRemoteHuddleSession, MeshStream), DialError> {
+    let hello = StreamHello {
+        sender: local_runtime_id,
+        role: StreamRole::Session {
+            fenced,
+            profile: Profile::HuddleControl,
+        },
+    };
+    let mut stream = transport.open_session_stream(owner, hello).await?;
+    stream
+        .send_frame(MeshStreamFrame::Data {
+            fenced,
+            payload: encode_control(&HuddleControlMsg::ReservePeer {
+                community_id: *request.community_id.as_uuid(),
+                admission_id: request.admission_id,
+                pubkey: request.pubkey.clone(),
+                protocol_version: request.protocol_version,
+            })?,
+        })
+        .await?;
+    match stream.recv_frame().await? {
+        Some(MeshStreamFrame::Data { payload, .. }) => match decode_control(&payload)? {
+            HuddleControlMsg::PeerReserved {
+                admission_id: reply_id,
+                peer_index,
+                ..
+            } if reply_id == request.admission_id => Ok((
+                PendingRemoteHuddleSession {
+                    admission_id: request.admission_id,
+                    peer_index,
+                    fenced,
+                    owner,
+                    pubkey: request.pubkey,
+                    transport,
+                },
+                stream,
+            )),
+            HuddleControlMsg::RegisterRejected { reason, .. } => Err(DialError::Rejected(reason)),
+            other => Err(DialError::Mesh(MeshError::Transport(format!(
+                "expected PeerReserved/RegisterRejected, got {other:?}"
+            )))),
+        },
+        Some(MeshStreamFrame::Goodbye { .. }) | None => Err(DialError::Mesh(MeshError::Transport(
+            "owner closed HuddleControl stream before reserving".into(),
+        ))),
+        Some(other) => Err(DialError::Mesh(MeshError::Transport(format!(
+            "unexpected HuddleControl frame from owner: {other:?}"
+        )))),
+    }
+}
+
+/// Prepare a previously reserved protected remote attachment without making it visible.
+pub async fn activate_remote_owner(
+    pending: &PendingRemoteHuddleSession,
+    stream: &mut MeshStream,
+) -> Result<RosterSnapshot, DialError> {
+    stream
+        .send_frame(MeshStreamFrame::Data {
+            fenced: pending.fenced,
+            payload: encode_control(&HuddleControlMsg::ActivatePeer {
+                admission_id: pending.admission_id,
+            })?,
+        })
+        .await?;
+    match stream.recv_frame().await? {
+        Some(MeshStreamFrame::Data { payload, .. }) => match decode_control(&payload)? {
+            HuddleControlMsg::PeerActivated {
+                admission_id,
+                peer_index,
+                roster,
+                ..
+            } if admission_id == pending.admission_id && peer_index == pending.peer_index => {
+                Ok(roster)
+            }
+            HuddleControlMsg::RegisterRejected { reason, .. } => Err(DialError::Rejected(reason)),
+            other => Err(DialError::Mesh(MeshError::Transport(format!(
+                "expected PeerActivated/RegisterRejected, got {other:?}"
+            )))),
+        },
+        Some(MeshStreamFrame::Goodbye { .. }) | None => Err(DialError::Mesh(MeshError::Transport(
+            "owner closed HuddleControl stream before activation".into(),
+        ))),
+        Some(other) => Err(DialError::Mesh(MeshError::Transport(format!(
+            "unexpected HuddleControl frame from owner: {other:?}"
+        )))),
+    }
+}
+
+/// Confirm a prepared remote attachment after the origin revalidates authority.
+pub async fn confirm_remote_owner(
+    pending: PendingRemoteHuddleSession,
+    stream: &mut MeshStream,
+    authority: String,
+) -> Result<RemoteHuddleSession, DialError> {
+    stream
+        .send_frame(MeshStreamFrame::Data {
+            fenced: pending.fenced,
+            payload: encode_control(&HuddleControlMsg::ConfirmPeer {
+                admission_id: pending.admission_id,
+                authority,
+            })?,
+        })
+        .await?;
+    match stream.recv_frame().await? {
+        Some(MeshStreamFrame::Data { payload, .. }) => match decode_control(&payload)? {
+            HuddleControlMsg::PeerConfirmed {
+                admission_id,
+                peer_index,
+                roster,
+                ..
+            } if admission_id == pending.admission_id && peer_index == pending.peer_index => {
+                Ok(RemoteHuddleSession {
+                    peer_index,
+                    roster,
+                    fenced: pending.fenced,
+                    owner: pending.owner,
+                    pubkey: pending.pubkey,
+                    admission_id: Some(pending.admission_id),
+                    local_epoch: None,
+                    transport: pending.transport,
+                    seq: 0,
+                })
+            }
+            HuddleControlMsg::RegisterRejected { reason, .. } => Err(DialError::Rejected(reason)),
+            other => Err(DialError::Mesh(MeshError::Transport(format!(
+                "expected PeerConfirmed/RegisterRejected, got {other:?}"
+            )))),
+        },
+        Some(MeshStreamFrame::Goodbye { .. }) | None => Err(DialError::Mesh(MeshError::Transport(
+            "owner closed HuddleControl stream before confirmation".into(),
+        ))),
+        Some(other) => Err(DialError::Mesh(MeshError::Transport(format!(
+            "unexpected HuddleControl frame from owner: {other:?}"
+        )))),
+    }
+}
+
+/// Compensate a protected remote reservation or active attachment.
+pub async fn abort_remote_owner(stream: &mut MeshStream, fenced: FencedHeader, admission_id: Uuid) {
+    if let Ok(payload) = encode_control(&HuddleControlMsg::AbortPeer { admission_id }) {
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            stream.send_frame(MeshStreamFrame::Data { fenced, payload }),
+        )
+        .await;
+        if !matches!(result, Ok(Ok(()))) {
+            let _ = stream.finish();
+        }
+    }
+}
+
 /// The `StreamHello.sender` for a dialed session: the fenced header carries the
 /// owner's identity, but the *sender* is this pod. The owner validates
 /// `hello.sender == authenticated peer`, so it must be our own runtime id — the
 /// handler threads `local_runtime_id` in explicitly.
 impl RemoteHuddleSession {
+    pub(crate) fn bind_local_epoch(&mut self, epoch: ProtectedPeerEpoch) {
+        self.local_epoch = Some(epoch);
+    }
+
     /// The owner-assigned index this client occupies in the owner's room.
     pub fn peer_index(&self) -> u8 {
         self.peer_index
@@ -1791,14 +2925,25 @@ impl RemoteHuddleSession {
         &self.pubkey
     }
 
+    /// Protected admission attempt, absent for the legacy registration path.
+    pub fn admission_id(&self) -> Option<Uuid> {
+        self.admission_id
+    }
+
     /// Forward one client Opus frame to the owner as a media datagram, tagged
     /// with the owner-assigned index. Drop-on-error: realtime audio never blocks
     /// on a slow or gone link (the same discipline as local fan-out).
-    pub fn forward_media(&mut self, client_frame: &[u8]) {
+    pub fn forward_media(&mut self, room: &Room, client_frame: &[u8]) {
+        if self
+            .local_epoch
+            .is_some_and(|epoch| !room.is_protected_epoch_current(epoch))
+        {
+            return;
+        }
         let dgram = media_datagram(self.peer_index, self.fenced, self.seq, client_frame);
         self.seq = self.seq.wrapping_add(1);
         if let Err(e) = self.transport.send_datagram(self.owner, dgram) {
-            debug!(owner = %self.owner, "huddle media datagram to owner failed: {e}");
+            debug!("huddle media datagram to owner failed: {e}");
         }
     }
 }
@@ -1813,17 +2958,39 @@ pub async fn send_clean_close(stream: &mut MeshStream, fenced: FencedHeader, pub
     if let Ok(payload) = encode_control(&HuddleControlMsg::UnregisterPeer {
         pubkey: pubkey.to_string(),
     }) {
-        let _ = stream
-            .send_frame(MeshStreamFrame::Data { fenced, payload })
-            .await;
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            stream.send_frame(MeshStreamFrame::Data { fenced, payload }),
+        )
+        .await;
     }
-    let _ = stream
-        .send_frame(MeshStreamFrame::Goodbye {
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        stream.send_frame(MeshStreamFrame::Goodbye {
             fenced,
             reason: HUDDLE_SESSION_ENDED,
-        })
-        .await;
+        }),
+    )
+    .await;
     let _ = stream.finish();
+}
+
+/// Close a remote session using protected compensation or legacy unregister.
+pub async fn send_remote_close(stream: &mut MeshStream, session: &RemoteHuddleSession) {
+    if let Some(admission_id) = session.admission_id() {
+        abort_remote_owner(stream, session.fenced(), admission_id).await;
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            stream.send_frame(MeshStreamFrame::Goodbye {
+                fenced: session.fenced(),
+                reason: HUDDLE_SESSION_ENDED,
+            }),
+        )
+        .await;
+        let _ = stream.finish();
+    } else {
+        send_clean_close(stream, session.fenced(), session.pubkey()).await;
+    }
 }
 
 /// Build the media datagram a non-owner ships to the owner for one client
@@ -1961,6 +3128,68 @@ mod tests {
         }
     }
 
+    struct ConfirmBarrierDir {
+        validate_calls: std::sync::atomic::AtomicUsize,
+        block_on: usize,
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    impl ConfirmBarrierDir {
+        fn new(block_on: usize) -> Self {
+            Self {
+                validate_calls: std::sync::atomic::AtomicUsize::new(0),
+                block_on,
+                entered: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl HuddleDirectory for ConfirmBarrierDir {
+        async fn owner_of(
+            &self,
+            _community: CommunityId,
+            _session: Uuid,
+        ) -> Result<Option<Ownership>, MeshError> {
+            Ok(None)
+        }
+
+        async fn acquire(
+            &self,
+            _community: CommunityId,
+            _session: Uuid,
+            _owner: RuntimeId,
+        ) -> Result<AcquireOutcome, MeshError> {
+            Err(MeshError::Transport("unexpected acquire".into()))
+        }
+
+        async fn renew(&self, _lease: &HuddleLease) -> Result<HuddleRenewOutcome, MeshError> {
+            Err(MeshError::Transport("unexpected renew".into()))
+        }
+
+        async fn release(&self, _lease: &HuddleLease) -> Result<HuddleReleaseOutcome, MeshError> {
+            Err(MeshError::Transport("unexpected release".into()))
+        }
+
+        async fn validate(
+            &self,
+            _community: CommunityId,
+            _fenced: &FencedHeader,
+        ) -> Result<(), MeshError> {
+            let call = self
+                .validate_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            if call == self.block_on {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            Ok(())
+        }
+    }
+
     /// A `HuddleLease` for renewer tests: the inner `SessionLease` is opaque to
     /// the huddle lane, so any well-formed fenced tuple works.
     fn test_lease() -> HuddleLease {
@@ -2074,7 +3303,49 @@ mod tests {
 
     #[test]
     fn control_msg_roundtrips() {
+        let admission_id = Uuid::new_v4();
         for msg in [
+            HuddleControlMsg::ReservePeer {
+                community_id: *community().as_uuid(),
+                admission_id,
+                pubkey: "abc123".into(),
+                protocol_version: 2,
+            },
+            HuddleControlMsg::PeerReserved {
+                admission_id,
+                pubkey: "abc123".into(),
+                peer_index: 42,
+            },
+            HuddleControlMsg::ActivatePeer { admission_id },
+            HuddleControlMsg::PeerActivated {
+                admission_id,
+                pubkey: "abc123".into(),
+                peer_index: 42,
+                roster: RosterSnapshot {
+                    revision: 1,
+                    peers: vec![RosterEntry {
+                        pubkey: "abc123".into(),
+                        peer_index: 42,
+                    }],
+                },
+            },
+            HuddleControlMsg::AbortPeer { admission_id },
+            HuddleControlMsg::ConfirmPeer {
+                admission_id,
+                authority: "synthetic-authority".into(),
+            },
+            HuddleControlMsg::PeerConfirmed {
+                admission_id,
+                pubkey: "abc123".into(),
+                peer_index: 42,
+                roster: RosterSnapshot {
+                    revision: 1,
+                    peers: vec![RosterEntry {
+                        pubkey: "abc123".into(),
+                        peer_index: 42,
+                    }],
+                },
+            },
             HuddleControlMsg::RegisterPeer {
                 community_id: *community().as_uuid(),
                 pubkey: "abc123".into(),
@@ -2120,6 +3391,71 @@ mod tests {
         }
     }
 
+    #[test]
+    fn control_debug_redacts_authority_and_roster_identity() {
+        let message = HuddleControlMsg::ConfirmPeer {
+            admission_id: Uuid::from_u128(0xfeed),
+            authority: "sealed-private-authority".into(),
+        };
+        let debug = format!("{message:?}");
+        assert_eq!(debug, "HuddleControlMsg(\"ConfirmPeer\")");
+        assert!(!debug.contains("sealed-private-authority"));
+        assert!(!debug.contains("feed"));
+    }
+
+    #[test]
+    fn protected_control_messages_preserve_legacy_wire_discriminants() {
+        let legacy = [
+            HuddleControlMsg::RegisterPeer {
+                community_id: Uuid::nil(),
+                pubkey: String::new(),
+                protocol_version: 1,
+            },
+            HuddleControlMsg::PeerRegistered {
+                pubkey: String::new(),
+                peer_index: 0,
+                roster: RosterSnapshot {
+                    revision: 0,
+                    peers: vec![],
+                },
+            },
+            HuddleControlMsg::RosterSnapshot {
+                revision: 0,
+                peers: vec![],
+            },
+            HuddleControlMsg::RosterDelta {
+                revision: 0,
+                joined: None,
+                left: None,
+            },
+            HuddleControlMsg::RosterResync,
+            HuddleControlMsg::RegisterRejected {
+                pubkey: String::new(),
+                reason: RegisterRejection::RoomFull,
+            },
+            HuddleControlMsg::UnregisterPeer {
+                pubkey: String::new(),
+            },
+        ];
+        for (expected, message) in legacy.into_iter().enumerate() {
+            assert_eq!(
+                encode_control(&message).unwrap()[0],
+                expected as u8,
+                "append-only protocol changes must not renumber legacy variants"
+            );
+        }
+        assert_eq!(
+            encode_control(&HuddleControlMsg::ReservePeer {
+                community_id: Uuid::nil(),
+                admission_id: Uuid::nil(),
+                pubkey: String::new(),
+                protocol_version: 1,
+            })
+            .unwrap()[0],
+            7
+        );
+    }
+
     // ── In-memory MeshStream pair for handshake round-trip tests ─────────────
     //
     // A channel-backed `StreamSendHalf`/`StreamRecvHalf` pair drives
@@ -2160,6 +3496,72 @@ mod tests {
         let owner = MeshStream::new(Box::new(ChanSend(a_tx)), Box::new(ChanRecv(b_rx)));
         let client = MeshStream::new(Box::new(ChanSend(b_tx)), Box::new(ChanRecv(a_rx)));
         (owner, client)
+    }
+
+    struct BackpressuredSend(Arc<std::sync::atomic::AtomicBool>);
+
+    impl StreamSendHalf for BackpressuredSend {
+        fn send_frame(&mut self, _frame: MeshStreamFrame) -> BoxFuture<'_, Result<(), MeshError>> {
+            Box::pin(std::future::pending())
+        }
+
+        fn finish(&mut self) -> Result<(), MeshError> {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    struct BackpressuredGoodbyeSend {
+        tx: tokio::sync::mpsc::UnboundedSender<MeshStreamFrame>,
+        finished: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl StreamSendHalf for BackpressuredGoodbyeSend {
+        fn send_frame(&mut self, frame: MeshStreamFrame) -> BoxFuture<'_, Result<(), MeshError>> {
+            if matches!(frame, MeshStreamFrame::Goodbye { .. }) {
+                return Box::pin(std::future::pending());
+            }
+            let result = self
+                .tx
+                .send(frame)
+                .map_err(|_| MeshError::Transport("peer closed".into()));
+            Box::pin(async move { result })
+        }
+
+        fn finish(&mut self) -> Result<(), MeshError> {
+            self.finished
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    struct NeverRecv;
+
+    impl StreamRecvHalf for NeverRecv {
+        fn recv_frame(&mut self) -> BoxFuture<'_, Result<Option<MeshStreamFrame>, MeshError>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    #[tokio::test]
+    async fn protected_remote_disconnect_with_backpressured_abort_forces_stream_close_and_completes(
+    ) {
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut stream = MeshStream::new(
+            Box::new(BackpressuredSend(Arc::clone(&finished))),
+            Box::new(NeverRecv),
+        );
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            abort_remote_owner(
+                &mut stream,
+                fenced_owned_by(rt(1), Uuid::new_v4()),
+                Uuid::new_v4(),
+            ),
+        )
+        .await
+        .expect("bounded abort must complete");
+        assert!(finished.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[tokio::test]
@@ -2252,6 +3654,12 @@ mod tests {
         }
     }
 
+    fn owners_for(fenced: FencedHeader) -> Arc<HuddleOwnerRegistry> {
+        let owners = Arc::new(HuddleOwnerRegistry::new());
+        owners.install_for_test(fenced.session_id, fenced.generation);
+        owners
+    }
+
     fn huddle_hello(sender: RuntimeId, fenced: FencedHeader) -> StreamHello {
         StreamHello {
             sender,
@@ -2260,6 +3668,31 @@ mod tests {
                 profile: Profile::HuddleControl,
             },
         }
+    }
+
+    #[tokio::test]
+    async fn control_stream_without_exact_owner_epoch_cannot_start() {
+        let owner_rt = rt(1);
+        let from = rt(2);
+        let fenced = fenced_owned_by(owner_rt, Uuid::new_v4());
+        let acceptor = HuddleControlAcceptor::new(
+            Arc::new(AudioRoomManager::new()),
+            Arc::new(NullTransport) as Arc<dyn RelayPeerTransport>,
+            Arc::new(FakeDir::default()),
+            owner_rt,
+            Arc::new(HuddleOwnerRegistry::new()),
+            Arc::new(crate::audio::mesh::MediaAttachmentRegistry::default()),
+        );
+        let (owner_stream, _client) = stream_pair();
+
+        let error = tokio::time::timeout(
+            Duration::from_secs(2),
+            acceptor.accept_inbound(from, huddle_hello(from, fenced), owner_stream),
+        )
+        .await
+        .expect("bounded owner-attach wait completes")
+        .expect_err("a missing exact epoch must fail closed");
+        assert!(matches!(error, MeshError::Transport(_)));
     }
 
     /// Full accept-side handshake: a structural `Hello`, then a
@@ -2278,7 +3711,8 @@ mod tests {
             Arc::new(NullTransport) as Arc<dyn RelayPeerTransport>,
             Arc::new(FakeDir::default()), // validate() succeeds by default
             owner_rt,
-            Arc::new(HuddleOwnerRegistry::new()), // no owner lease → recv-only
+            owners_for(fenced),
+            Arc::new(crate::audio::mesh::MediaAttachmentRegistry::default()),
         );
 
         let (owner_stream, mut client) = stream_pair();
@@ -2316,6 +3750,624 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn protected_remote_attachment_is_reserved_activated_and_aborted() {
+        let owner_rt = rt(1);
+        let from = rt(2);
+        let session_id = Uuid::new_v4();
+        let admission_id = Uuid::new_v4();
+        let fenced = fenced_owned_by(owner_rt, session_id);
+        let rooms = Arc::new(AudioRoomManager::new());
+        let room = rooms.get_or_create(community(), session_id);
+        let mut roster = room.subscribe_roster();
+        let acceptor = HuddleControlAcceptor::new(
+            Arc::clone(&rooms),
+            Arc::new(NullTransport) as Arc<dyn RelayPeerTransport>,
+            Arc::new(FakeDir::default()),
+            owner_rt,
+            owners_for(fenced),
+            Arc::new(crate::audio::mesh::MediaAttachmentRegistry::default()),
+        )
+        .with_authority_verifier(
+            crate::authorization_runtime::ephemeral::AuthorityTokenVerifier::allow_for_test(),
+        );
+        let (owner_stream, mut client) = stream_pair();
+        let hello = huddle_hello(from, fenced);
+        let served =
+            tokio::spawn(async move { acceptor.accept_inbound(from, hello, owner_stream).await });
+
+        client
+            .send_frame(MeshStreamFrame::Data {
+                fenced,
+                payload: encode_control(&HuddleControlMsg::ReservePeer {
+                    community_id: *community().as_uuid(),
+                    admission_id,
+                    pubkey: "protected".into(),
+                    protocol_version: 2,
+                })
+                .unwrap(),
+            })
+            .await
+            .unwrap();
+        let reserved = match client.recv_frame().await.unwrap().unwrap() {
+            MeshStreamFrame::Data { payload, .. } => decode_control(&payload).unwrap(),
+            other => panic!("expected reservation reply, got {other:?}"),
+        };
+        assert!(matches!(
+            reserved,
+            HuddleControlMsg::PeerReserved {
+                admission_id: id,
+                ..
+            } if id == admission_id
+        ));
+        assert!(room.peer_pubkeys().is_empty());
+        assert!(
+            roster.try_recv().is_err(),
+            "reservation is not roster-visible"
+        );
+
+        client
+            .send_frame(MeshStreamFrame::Data {
+                fenced,
+                payload: encode_control(&HuddleControlMsg::ActivatePeer { admission_id }).unwrap(),
+            })
+            .await
+            .unwrap();
+        let activated = match client.recv_frame().await.unwrap().unwrap() {
+            MeshStreamFrame::Data { payload, .. } => decode_control(&payload).unwrap(),
+            other => panic!("expected activation reply, got {other:?}"),
+        };
+        assert!(matches!(
+            activated,
+            HuddleControlMsg::PeerActivated {
+                admission_id: id,
+                ..
+            } if id == admission_id
+        ));
+        assert!(
+            roster.try_recv().is_err(),
+            "preparation remains roster-invisible"
+        );
+        assert!(room.peer_pubkeys().is_empty());
+
+        client
+            .send_frame(MeshStreamFrame::Data {
+                fenced,
+                payload: encode_control(&HuddleControlMsg::ConfirmPeer {
+                    admission_id,
+                    authority: "synthetic-authority".into(),
+                })
+                .unwrap(),
+            })
+            .await
+            .unwrap();
+        let confirmed = match client.recv_frame().await.unwrap().unwrap() {
+            MeshStreamFrame::Data { payload, .. } => decode_control(&payload).unwrap(),
+            other => panic!("expected confirmation reply, got {other:?}"),
+        };
+        assert!(matches!(
+            confirmed,
+            HuddleControlMsg::PeerConfirmed {
+                admission_id: id,
+                ..
+            } if id == admission_id
+        ));
+        roster
+            .recv()
+            .await
+            .expect("confirmation emits roster delta");
+        assert_eq!(room.peer_pubkeys().len(), 1);
+
+        client
+            .send_frame(MeshStreamFrame::Data {
+                fenced,
+                payload: encode_control(&HuddleControlMsg::AbortPeer { admission_id }).unwrap(),
+            })
+            .await
+            .unwrap();
+        roster.recv().await.expect("abort emits leave delta");
+        assert!(room.peer_pubkeys().is_empty());
+
+        // Removing the last peer releases this owner epoch. A retry therefore
+        // resolves a fresh owner and opens a fresh control stream; it must not
+        // reuse this now-stale stream.
+        drop(client);
+        served.await.unwrap().unwrap();
+        assert!(room.is_empty(), "abort compensates the active attachment");
+    }
+
+    #[tokio::test]
+    async fn protected_remote_confirmation_revalidates_before_roster_visibility() {
+        let owner_rt = rt(1);
+        let from = rt(2);
+        let session_id = Uuid::new_v4();
+        let admission_id = Uuid::new_v4();
+        let fenced = fenced_owned_by(owner_rt, session_id);
+        let rooms = Arc::new(AudioRoomManager::new());
+        let room = rooms.get_or_create(community(), session_id);
+        let mut roster = room.subscribe_roster();
+        let acceptor = HuddleControlAcceptor::new(
+            Arc::clone(&rooms),
+            Arc::new(NullTransport) as Arc<dyn RelayPeerTransport>,
+            Arc::new(FakeDir::default()),
+            owner_rt,
+            owners_for(fenced),
+            Arc::new(crate::audio::mesh::MediaAttachmentRegistry::default()),
+        )
+        .with_authority_verifier(
+            crate::authorization_runtime::ephemeral::AuthorityTokenVerifier::deny_for_test(),
+        );
+        let (owner_stream, mut client) = stream_pair();
+        let hello = huddle_hello(from, fenced);
+        let served =
+            tokio::spawn(async move { acceptor.accept_inbound(from, hello, owner_stream).await });
+
+        client
+            .send_frame(MeshStreamFrame::Data {
+                fenced,
+                payload: encode_control(&HuddleControlMsg::ReservePeer {
+                    community_id: *community().as_uuid(),
+                    admission_id,
+                    pubkey: "protected".into(),
+                    protocol_version: 2,
+                })
+                .unwrap(),
+            })
+            .await
+            .unwrap();
+        let _ = client.recv_frame().await.unwrap().unwrap();
+        client
+            .send_frame(MeshStreamFrame::Data {
+                fenced,
+                payload: encode_control(&HuddleControlMsg::ActivatePeer { admission_id }).unwrap(),
+            })
+            .await
+            .unwrap();
+        let _ = client.recv_frame().await.unwrap().unwrap();
+        client
+            .send_frame(MeshStreamFrame::Data {
+                fenced,
+                payload: encode_control(&HuddleControlMsg::ConfirmPeer {
+                    admission_id,
+                    authority: "expired-authority".into(),
+                })
+                .unwrap(),
+            })
+            .await
+            .unwrap();
+
+        let rejected = match client.recv_frame().await.unwrap().unwrap() {
+            MeshStreamFrame::Data { payload, .. } => decode_control(&payload).unwrap(),
+            other => panic!("expected confirmation rejection, got {other:?}"),
+        };
+        assert!(matches!(
+            rejected,
+            HuddleControlMsg::RegisterRejected {
+                reason: RegisterRejection::Fenced(FenceRejection::NoActiveLease),
+                ..
+            }
+        ));
+        assert!(room.peer_pubkeys().is_empty());
+        assert!(
+            roster.try_recv().is_err(),
+            "failed confirmation is invisible"
+        );
+
+        client.finish().unwrap();
+        drop(client);
+        served.await.unwrap().unwrap();
+        assert!(room.is_empty());
+    }
+
+    #[tokio::test]
+    async fn protected_remote_activation_fails_closed_when_fence_is_lost() {
+        let owner_rt = rt(1);
+        let from = rt(2);
+        let session_id = Uuid::new_v4();
+        let admission_id = Uuid::new_v4();
+        let fenced = fenced_owned_by(owner_rt, session_id);
+        let rooms = Arc::new(AudioRoomManager::new());
+        let room = rooms.get_or_create(community(), session_id);
+        let directory = Arc::new(FakeDir::default());
+        let acceptor = HuddleControlAcceptor::new(
+            Arc::clone(&rooms),
+            Arc::new(NullTransport) as Arc<dyn RelayPeerTransport>,
+            Arc::clone(&directory) as Arc<dyn HuddleDirectory>,
+            owner_rt,
+            owners_for(fenced),
+            Arc::new(crate::audio::mesh::MediaAttachmentRegistry::default()),
+        );
+        let (owner_stream, mut client) = stream_pair();
+        let hello = huddle_hello(from, fenced);
+        let served =
+            tokio::spawn(async move { acceptor.accept_inbound(from, hello, owner_stream).await });
+
+        client
+            .send_frame(MeshStreamFrame::Data {
+                fenced,
+                payload: encode_control(&HuddleControlMsg::ReservePeer {
+                    community_id: *community().as_uuid(),
+                    admission_id,
+                    pubkey: "protected".into(),
+                    protocol_version: 2,
+                })
+                .unwrap(),
+            })
+            .await
+            .unwrap();
+        let _ = client.recv_frame().await.unwrap().unwrap();
+        *directory.validate_fails.lock().unwrap() = true;
+        client
+            .send_frame(MeshStreamFrame::Data {
+                fenced,
+                payload: encode_control(&HuddleControlMsg::ActivatePeer { admission_id }).unwrap(),
+            })
+            .await
+            .unwrap();
+        let rejected = match client.recv_frame().await.unwrap().unwrap() {
+            MeshStreamFrame::Data { payload, .. } => decode_control(&payload).unwrap(),
+            other => panic!("expected activation rejection, got {other:?}"),
+        };
+        assert!(matches!(
+            rejected,
+            HuddleControlMsg::RegisterRejected {
+                reason: RegisterRejection::Fenced(_),
+                ..
+            }
+        ));
+        assert!(room.is_empty());
+        assert!(room.peer_pubkeys().is_empty());
+        drop(client);
+        served.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn protected_remote_attachment_self_expires_without_origin_abort() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let owner_rt = rt(1);
+        let from = rt(2);
+        let session_id = Uuid::new_v4();
+        let admission_id = Uuid::new_v4();
+        let fenced = fenced_owned_by(owner_rt, session_id);
+        let rooms = Arc::new(AudioRoomManager::new());
+        let room = rooms.get_or_create(community(), session_id);
+        let mut roster = room.subscribe_roster();
+        let attachments = Arc::new(crate::audio::mesh::MediaAttachmentRegistry::default());
+        let gate = Arc::new(AtomicBool::new(true));
+        let owners = Arc::new(HuddleOwnerRegistry::new());
+        let _lost = owners.install_for_test(session_id, fenced.generation);
+        let acceptor = HuddleControlAcceptor::new(
+            Arc::clone(&rooms),
+            Arc::new(NullTransport) as Arc<dyn RelayPeerTransport>,
+            Arc::new(FakeDir::default()),
+            owner_rt,
+            Arc::clone(&owners),
+            Arc::clone(&attachments),
+        )
+        .with_authority_verifier(
+            crate::authorization_runtime::ephemeral::AuthorityTokenVerifier::conditional_for_test(
+                Arc::clone(&gate),
+            ),
+        );
+        let (owner_stream, mut client) = stream_pair();
+        let hello = huddle_hello(from, fenced);
+        let served =
+            tokio::spawn(async move { acceptor.accept_inbound(from, hello, owner_stream).await });
+
+        client
+            .send_frame(MeshStreamFrame::Data {
+                fenced,
+                payload: encode_control(&HuddleControlMsg::ReservePeer {
+                    community_id: *community().as_uuid(),
+                    admission_id,
+                    pubkey: "protected".into(),
+                    protocol_version: 2,
+                })
+                .unwrap(),
+            })
+            .await
+            .unwrap();
+        let _ = client.recv_frame().await.unwrap().unwrap();
+        client
+            .send_frame(MeshStreamFrame::Data {
+                fenced,
+                payload: encode_control(&HuddleControlMsg::ActivatePeer { admission_id }).unwrap(),
+            })
+            .await
+            .unwrap();
+        let _ = client.recv_frame().await.unwrap().unwrap();
+        client
+            .send_frame(MeshStreamFrame::Data {
+                fenced,
+                payload: encode_control(&HuddleControlMsg::ConfirmPeer {
+                    admission_id,
+                    authority: "conditional-authority".into(),
+                })
+                .unwrap(),
+            })
+            .await
+            .unwrap();
+        let peer_index = match client.recv_frame().await.unwrap().unwrap() {
+            MeshStreamFrame::Data { payload, .. } => match decode_control(&payload).unwrap() {
+                HuddleControlMsg::PeerConfirmed { peer_index, .. } => peer_index,
+                other => panic!("expected confirmation, got {other:?}"),
+            },
+            other => panic!("expected confirmation data, got {other:?}"),
+        };
+        roster.recv().await.expect("confirmation emits join");
+        assert_eq!(room.peer_pubkeys().len(), 1);
+
+        gate.store(false, Ordering::SeqCst);
+        tokio::time::timeout(std::time::Duration::from_secs(1), roster.recv())
+            .await
+            .expect("authority watcher removes peer promptly")
+            .expect("authority watcher emits leave");
+        assert!(room.peer_pubkeys().is_empty());
+        assert!(
+            owners.lost_for(session_id).is_none(),
+            "self-expiry releases the empty room owner lease"
+        );
+
+        let router = crate::audio::mesh::MeshAudioRouter::with_fence(
+            rooms,
+            owner_rt,
+            Arc::new(crate::audio::mesh::GenerationFloor::new()),
+            attachments,
+        );
+        assert_eq!(
+            router.on_media_datagram(
+                from,
+                &MeshDatagram {
+                    fenced,
+                    seq: 1,
+                    payload: vec![peer_index, 1, 2],
+                },
+            ),
+            None
+        );
+
+        client.finish().unwrap();
+        drop(client);
+        served.await.unwrap().unwrap();
+    }
+
+    async fn assert_protected_remote_revocation_during_fence_validation_never_becomes_visible(
+        block_on: usize,
+    ) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let owner_rt = rt(1);
+        let from = rt(2);
+        let session_id = Uuid::new_v4();
+        let admission_id = Uuid::new_v4();
+        let fenced = fenced_owned_by(owner_rt, session_id);
+        let rooms = Arc::new(AudioRoomManager::new());
+        let room = rooms.get_or_create(community(), session_id);
+        let mut roster = room.subscribe_roster();
+        let directory = Arc::new(ConfirmBarrierDir::new(block_on));
+        let gate = Arc::new(AtomicBool::new(true));
+        let acceptor = HuddleControlAcceptor::new(
+            Arc::clone(&rooms),
+            Arc::new(NullTransport) as Arc<dyn RelayPeerTransport>,
+            Arc::clone(&directory),
+            owner_rt,
+            owners_for(fenced),
+            Arc::new(crate::audio::mesh::MediaAttachmentRegistry::default()),
+        )
+        .with_authority_verifier(
+            crate::authorization_runtime::ephemeral::AuthorityTokenVerifier::conditional_for_test(
+                Arc::clone(&gate),
+            ),
+        );
+        let (owner_stream, mut client) = stream_pair();
+        let hello = huddle_hello(from, fenced);
+        let served =
+            tokio::spawn(async move { acceptor.accept_inbound(from, hello, owner_stream).await });
+
+        for message in [
+            HuddleControlMsg::ReservePeer {
+                community_id: *community().as_uuid(),
+                admission_id,
+                pubkey: "protected".into(),
+                protocol_version: 2,
+            },
+            HuddleControlMsg::ActivatePeer { admission_id },
+        ] {
+            client
+                .send_frame(MeshStreamFrame::Data {
+                    fenced,
+                    payload: encode_control(&message).unwrap(),
+                })
+                .await
+                .unwrap();
+            let _ = client.recv_frame().await.unwrap().unwrap();
+        }
+        client
+            .send_frame(MeshStreamFrame::Data {
+                fenced,
+                payload: encode_control(&HuddleControlMsg::ConfirmPeer {
+                    admission_id,
+                    authority: "conditional-authority".into(),
+                })
+                .unwrap(),
+            })
+            .await
+            .unwrap();
+        directory.entered.notified().await;
+        gate.store(false, Ordering::SeqCst);
+        directory.release.notify_one();
+
+        let rejected = match client.recv_frame().await.unwrap().unwrap() {
+            MeshStreamFrame::Data { payload, .. } => decode_control(&payload).unwrap(),
+            other => panic!("expected confirmation rejection, got {other:?}"),
+        };
+        assert!(matches!(
+            rejected,
+            HuddleControlMsg::RegisterRejected {
+                reason: RegisterRejection::Fenced(FenceRejection::NoActiveLease),
+                ..
+            }
+        ));
+        assert!(room.peer_pubkeys().is_empty());
+        assert!(roster.try_recv().is_err(), "revoked peer was never visible");
+        client.finish().unwrap();
+        drop(client);
+        served.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn protected_remote_revocation_during_fence_validation_never_becomes_visible() {
+        assert_protected_remote_revocation_during_fence_validation_never_becomes_visible(3).await;
+    }
+
+    #[tokio::test]
+    async fn protected_remote_revocation_during_second_owner_fence_validation_never_becomes_visible(
+    ) {
+        assert_protected_remote_revocation_during_fence_validation_never_becomes_visible(4).await;
+    }
+
+    #[tokio::test]
+    async fn owner_loss_with_backpressured_goodbye_revokes_media_before_send() {
+        use std::sync::atomic::Ordering;
+
+        let owner_rt = rt(1);
+        let from = rt(2);
+        let session_id = Uuid::new_v4();
+        let admission_id = Uuid::new_v4();
+        let fenced = fenced_owned_by(owner_rt, session_id);
+        let rooms = Arc::new(AudioRoomManager::new());
+        let room = rooms.get_or_create(community(), session_id);
+        let attachments = Arc::new(crate::audio::mesh::MediaAttachmentRegistry::default());
+        let owners = Arc::new(HuddleOwnerRegistry::new());
+        let lost = owners.install_for_test(session_id, fenced.generation);
+        let acceptor = HuddleControlAcceptor::new(
+            Arc::clone(&rooms),
+            Arc::new(NullTransport) as Arc<dyn RelayPeerTransport>,
+            Arc::new(FakeDir::default()),
+            owner_rt,
+            Arc::clone(&owners),
+            Arc::clone(&attachments),
+        )
+        .with_authority_verifier(
+            crate::authorization_runtime::ephemeral::AuthorityTokenVerifier::conditional_for_test(
+                Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            ),
+        );
+
+        let (owner_to_client_tx, owner_to_client_rx) = tmpsc::unbounded_channel();
+        let (client_to_owner_tx, client_to_owner_rx) = tmpsc::unbounded_channel();
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let owner_stream = MeshStream::new(
+            Box::new(BackpressuredGoodbyeSend {
+                tx: owner_to_client_tx,
+                finished: Arc::clone(&finished),
+            }),
+            Box::new(ChanRecv(client_to_owner_rx)),
+        );
+        let mut client = MeshStream::new(
+            Box::new(ChanSend(client_to_owner_tx)),
+            Box::new(ChanRecv(owner_to_client_rx)),
+        );
+        let hello = huddle_hello(from, fenced);
+        let served =
+            tokio::spawn(async move { acceptor.accept_inbound(from, hello, owner_stream).await });
+
+        for message in [
+            HuddleControlMsg::ReservePeer {
+                community_id: *community().as_uuid(),
+                admission_id,
+                pubkey: "protected".into(),
+                protocol_version: 2,
+            },
+            HuddleControlMsg::ActivatePeer { admission_id },
+        ] {
+            client
+                .send_frame(MeshStreamFrame::Data {
+                    fenced,
+                    payload: encode_control(&message).unwrap(),
+                })
+                .await
+                .unwrap();
+            let _ = client.recv_frame().await.unwrap().unwrap();
+        }
+        client
+            .send_frame(MeshStreamFrame::Data {
+                fenced,
+                payload: encode_control(&HuddleControlMsg::ConfirmPeer {
+                    admission_id,
+                    authority: "conditional-authority".into(),
+                })
+                .unwrap(),
+            })
+            .await
+            .unwrap();
+        let peer_index = match client.recv_frame().await.unwrap().unwrap() {
+            MeshStreamFrame::Data { payload, .. } => match decode_control(&payload).unwrap() {
+                HuddleControlMsg::PeerConfirmed { peer_index, .. } => peer_index,
+                other => panic!("expected confirmation, got {other:?}"),
+            },
+            other => panic!("expected confirmation data, got {other:?}"),
+        };
+        assert_eq!(room.peer_pubkeys().len(), 1);
+
+        lost.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !room.peer_pubkeys().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("owner loss revokes room peer before goodbye completes");
+
+        let router = crate::audio::mesh::MeshAudioRouter::with_fence(
+            rooms,
+            owner_rt,
+            Arc::new(crate::audio::mesh::GenerationFloor::new()),
+            attachments,
+        );
+        assert_eq!(
+            router.on_media_datagram(
+                from,
+                &MeshDatagram {
+                    fenced,
+                    seq: 1,
+                    payload: vec![peer_index, 1, 2],
+                },
+            ),
+            None
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(1), served)
+            .await
+            .expect("bounded goodbye teardown completes")
+            .unwrap()
+            .unwrap();
+        assert!(finished.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn fresh_local_owner_lease_loss_before_room_activation_never_becomes_visible() {
+        let directory = FakeDir::default();
+        *directory.validate_fails.lock().unwrap() = true;
+        let room = Arc::new(Room::new(community(), Uuid::new_v4()));
+        let pending = room
+            .reserve_peer(Uuid::new_v4(), "local".into(), 2)
+            .expect("reservation is non-visible");
+
+        let denied = validate_join_before_visibility(
+            &directory,
+            community(),
+            room.channel_id,
+            rt(1),
+            JoinOutcome::LocalOwner { generation: 9 },
+        )
+        .await;
+        assert!(denied.is_err());
+        drop(pending);
+        assert!(room.peer_pubkeys().is_empty());
+        assert_eq!(room.roster_snapshot().revision, 0);
+    }
+
+    #[tokio::test]
     async fn abnormal_control_stream_close_fans_out_remote_leave() {
         let owner_rt = rt(1);
         let from = rt(2);
@@ -2333,7 +4385,8 @@ mod tests {
             Arc::new(NullTransport) as Arc<dyn RelayPeerTransport>,
             Arc::new(FakeDir::default()),
             owner_rt,
-            Arc::new(HuddleOwnerRegistry::new()),
+            owners_for(fenced),
+            Arc::new(crate::audio::mesh::MediaAttachmentRegistry::default()),
         );
         let (owner_stream, mut client) = stream_pair();
         let hello = huddle_hello(from, fenced);
@@ -2395,7 +4448,8 @@ mod tests {
             Arc::new(NullTransport) as Arc<dyn RelayPeerTransport>,
             Arc::new(dir),
             owner_rt,
-            Arc::new(HuddleOwnerRegistry::new()), // no owner lease → recv-only
+            owners_for(fenced),
+            Arc::new(crate::audio::mesh::MediaAttachmentRegistry::default()),
         );
 
         let (owner_stream, mut client) = stream_pair();
@@ -2713,6 +4767,46 @@ mod tests {
             .expect("release errors must not permanently tombstone the room");
     }
 
+    #[test]
+    fn registry_signals_are_bound_to_the_exact_live_epoch() {
+        let registry = HuddleOwnerRegistry::new();
+        let session = Uuid::new_v4();
+        let lost = registry.install_for_test(session, 7);
+
+        assert!(registry.signals_for(session, 7).is_some());
+        assert!(registry.signals_for(session, 6).is_none());
+        assert!(registry.signals_for(session, 8).is_none());
+        lost.cancel();
+        assert!(
+            registry.signals_for(session, 7).is_none(),
+            "a cancelled owner epoch is no longer admission authority"
+        );
+    }
+
+    #[tokio::test]
+    async fn registry_newer_epoch_replaces_stale_local_observation() {
+        let dir = Arc::new(FakeDir::default());
+        let registry = HuddleOwnerRegistry::new();
+        let session = Uuid::new_v4();
+
+        registry.attach(
+            session,
+            Arc::clone(&dir) as Arc<dyn HuddleDirectory>,
+            lease_for(session, 4),
+        );
+        let newer = registry.attach_signals(
+            session,
+            Arc::clone(&dir) as Arc<dyn HuddleDirectory>,
+            lease_for(session, 5),
+        );
+
+        assert!(registry.signals_for(session, 4).is_none());
+        assert!(registry.signals_for(session, 5).is_some());
+        assert!(!newer.lost.is_cancelled());
+        assert!(!newer.draining.is_cancelled());
+        await_release_calls(&dir, 1).await;
+    }
+
     /// `drain` is generation-fenced like `release`, but unlike room-empty it
     /// also cancels the drain signal so local owner peers and remote control
     /// streams can rejoin with an explicit draining cause before the renewer
@@ -2915,6 +5009,7 @@ mod tests {
             Arc::new(FakeDir::default()),
             owner_rt,
             Arc::clone(&owners),
+            Arc::new(crate::audio::mesh::MediaAttachmentRegistry::default()),
         );
 
         let (owner_stream, mut client) = stream_pair();
@@ -2922,14 +5017,41 @@ mod tests {
         let served =
             tokio::spawn(async move { acceptor.accept_inbound(from, hello, owner_stream).await });
 
+        client
+            .send_frame(MeshStreamFrame::Data {
+                fenced,
+                payload: encode_control(&HuddleControlMsg::RegisterPeer {
+                    community_id: *community().as_uuid(),
+                    pubkey: "remote".into(),
+                    protocol_version: 2,
+                })
+                .unwrap(),
+            })
+            .await
+            .unwrap();
+        let _ = client
+            .recv_frame()
+            .await
+            .expect("registration response")
+            .expect("registration frame");
+
         // Owner observes lease loss → proactive Goodbye down the client stream.
         lost.cancel();
 
-        let frame = tokio::time::timeout(Duration::from_secs(2), client.recv_frame())
-            .await
-            .expect("goodbye arrives")
-            .unwrap()
-            .unwrap();
+        let frame = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let frame = client
+                    .recv_frame()
+                    .await?
+                    .ok_or_else(|| MeshError::Transport("control stream closed".into()))?;
+                if matches!(frame, MeshStreamFrame::Goodbye { .. }) {
+                    break Ok::<_, MeshError>(frame);
+                }
+            }
+        })
+        .await
+        .expect("goodbye arrives")
+        .unwrap();
         assert!(
             matches!(
                 frame,
@@ -2954,19 +5076,29 @@ mod tests {
         let fenced = fenced_owned_by(owner_rt, session_id);
 
         let draining = CancellationToken::new();
+        let lost = CancellationToken::new();
         let acceptor = HuddleControlAcceptor::new(
             Arc::new(AudioRoomManager::new()),
             Arc::new(NullTransport) as Arc<dyn RelayPeerTransport>,
             Arc::new(FakeDir::default()),
             owner_rt,
-            Arc::new(HuddleOwnerRegistry::new()),
+            owners_for(fenced),
+            Arc::new(crate::audio::mesh::MediaAttachmentRegistry::default()),
         );
 
         let (owner_stream, mut client) = stream_pair();
         let draining_for_loop = draining.clone();
         let served = tokio::spawn(async move {
             acceptor
-                .serve_control_loop(from, fenced, owner_stream, None, Some(draining_for_loop))
+                .serve_control_loop(
+                    from,
+                    fenced,
+                    owner_stream,
+                    HuddleOwnerSignals {
+                        lost,
+                        draining: draining_for_loop,
+                    },
+                )
                 .await
         });
 
