@@ -333,6 +333,125 @@ async fn assistant_text_preserved_across_prompts() {
     h.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_mcp_servers_initialize_list_and_execute_tools() {
+    let llm = spawn_capturing_llm(vec![
+        openai_tool_call("call-alpha", "alpha__tool_0", json!({})),
+        openai_tool_call("call-beta", "beta__tool_0", json!({})),
+        openai_text("done"),
+        openai_tool_call("call-alpha-again", "alpha__tool_0", json!({})),
+        openai_tool_call("call-beta-again", "beta__tool_0", json!({})),
+        openai_text("done again"),
+    ])
+    .await;
+    let mut h = Harness::spawn(&llm.url).await;
+    let fake_mcp = env!("CARGO_BIN_EXE_fake-mcp");
+    let temp = tempfile::tempdir().unwrap();
+    let alpha_pid = temp.path().join("alpha.pid");
+    let beta_pid = temp.path().join("beta.pid");
+    let alpha_call = temp.path().join("alpha.call");
+    let beta_call = temp.path().join("beta.call");
+
+    let mcp_servers = json!([
+        {
+            "name": "alpha",
+            "command": fake_mcp,
+            "args": [],
+            "env": [
+                { "name": "FAKE_MCP_PID_FILE", "value": alpha_pid },
+                { "name": "FAKE_MCP_CALL_RECEIVED", "value": alpha_call },
+            ],
+        },
+        {
+            "name": "beta",
+            "command": fake_mcp,
+            "args": [],
+            "env": [
+                { "name": "FAKE_MCP_PID_FILE", "value": beta_pid },
+                { "name": "FAKE_MCP_CALL_RECEIVED", "value": beta_call },
+            ],
+        },
+    ]);
+    let sid = init_session(&mut h, mcp_servers.clone()).await;
+    assert!(alpha_pid.exists(), "alpha MCP server did not initialize");
+    assert!(beta_pid.exists(), "beta MCP server did not initialize");
+    let first_alpha_pid = std::fs::read_to_string(&alpha_pid).unwrap();
+    let first_beta_pid = std::fs::read_to_string(&beta_pid).unwrap();
+
+    let prompt = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"use both tools"}]}),
+        )
+        .await;
+    let response = h.recv_until(|value| value["id"] == json!(prompt)).await;
+    assert!(
+        response.get("result").is_some(),
+        "prompt failed: {response}"
+    );
+    assert!(alpha_call.exists(), "alpha MCP tool was not called");
+    assert!(beta_call.exists(), "beta MCP tool was not called");
+
+    std::fs::remove_file(&alpha_call).unwrap();
+    std::fs::remove_file(&beta_call).unwrap();
+    let second_session = h
+        .send(
+            "session/new",
+            json!({"cwd":"/tmp","mcpServers": mcp_servers}),
+        )
+        .await;
+    let second_response = h
+        .recv_until(|value| value["id"] == json!(second_session))
+        .await;
+    let second_sid = second_response["result"]["sessionId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("second session failed: {second_response}"));
+    assert_ne!(
+        std::fs::read_to_string(&alpha_pid).unwrap(),
+        first_alpha_pid,
+        "second session reused alpha MCP process"
+    );
+    assert_ne!(
+        std::fs::read_to_string(&beta_pid).unwrap(),
+        first_beta_pid,
+        "second session reused beta MCP process"
+    );
+
+    let second_prompt = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": second_sid, "prompt": [{"type":"text","text":"use both tools again"}]}),
+        )
+        .await;
+    let second_prompt_response = h
+        .recv_until(|value| value["id"] == json!(second_prompt))
+        .await;
+    assert!(
+        second_prompt_response.get("result").is_some(),
+        "second prompt failed: {second_prompt_response}"
+    );
+    assert!(alpha_call.exists(), "second alpha MCP tool was not called");
+    assert!(beta_call.exists(), "second beta MCP tool was not called");
+
+    let captured = llm.captured.lock().await;
+    let first_tools = captured[0]["tools"].as_array().expect("LLM tools");
+    assert!(first_tools
+        .iter()
+        .any(|tool| tool["function"]["name"] == "alpha__tool_0"));
+    assert!(first_tools
+        .iter()
+        .any(|tool| tool["function"]["name"] == "beta__tool_0"));
+    let second_tools = captured[3]["tools"].as_array().expect("second LLM tools");
+    assert!(second_tools
+        .iter()
+        .any(|tool| tool["function"]["name"] == "alpha__tool_0"));
+    assert!(second_tools
+        .iter()
+        .any(|tool| tool["function"]["name"] == "beta__tool_0"));
+    drop(captured);
+    h.shutdown().await;
+}
+
 /// MCP init that hangs forever must time out within ~2s, surface an error,
 /// and the child process must be killed (not lingering).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
