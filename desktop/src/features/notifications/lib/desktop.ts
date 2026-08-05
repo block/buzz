@@ -12,6 +12,8 @@ import { isLinuxPlatform, isMacPlatform } from "@/shared/lib/platform";
 // queued macOS activation becomes available. See src-tauri notification code.
 const NATIVE_NOTIFICATION_ACTIVATED_EVENT = "native-notification-activated";
 const TAKE_PENDING_MACOS_NOTIFICATION_ACTIVATIONS = "take_pending_activations";
+const MACOS_NOTIFICATION_PERMISSION_STATE = "notification_permission_state";
+const REQUEST_MACOS_NOTIFICATION_ACCESS = "request_notification_access";
 
 export type DesktopNotificationPermissionState =
   | NotificationPermission
@@ -121,9 +123,27 @@ function dispatchDesktopNotificationTarget(target: DesktopNotificationTarget) {
   );
 }
 
+function shouldUseMacDevelopmentFallback(error: unknown): boolean {
+  return String(error).includes("not running from an app bundle");
+}
+
 export async function getDesktopNotificationPermissionState(): Promise<DesktopNotificationPermissionState> {
   if (!hasNotificationApi()) {
     return "unsupported";
+  }
+
+  if (isTauri() && isMacPlatform()) {
+    try {
+      return await invoke<NotificationPermission>(
+        MACOS_NOTIFICATION_PERMISSION_STATE,
+      );
+    } catch (error) {
+      // The native API rejects the unbundled executable used by `tauri dev`.
+      // Preserve that development path through the plugin-backed shim.
+      if (!shouldUseMacDevelopmentFallback(error)) {
+        return "default";
+      }
+    }
   }
 
   if (window.Notification.permission !== "default") {
@@ -153,7 +173,18 @@ export async function requestDesktopNotificationAccess(): Promise<DesktopNotific
     return pendingPermissionRequest;
   }
 
-  pendingPermissionRequest = requestPermission().finally(() => {
+  const request =
+    isTauri() && isMacPlatform()
+      ? invoke<NotificationPermission>(REQUEST_MACOS_NOTIFICATION_ACCESS).catch(
+          (error) => {
+            if (shouldUseMacDevelopmentFallback(error)) {
+              return requestPermission();
+            }
+            throw error;
+          },
+        )
+      : requestPermission();
+  pendingPermissionRequest = request.finally(() => {
     pendingPermissionRequest = null;
   });
 

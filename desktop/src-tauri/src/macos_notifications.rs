@@ -8,7 +8,9 @@
 
 use std::{
     collections::VecDeque,
-    sync::{Mutex, OnceLock},
+    ptr::NonNull,
+    sync::{mpsc, Mutex, OnceLock},
+    time::Duration,
 };
 
 use block2::{Block, RcBlock};
@@ -20,8 +22,9 @@ use objc2::{
 };
 use objc2_foundation::{NSBundle, NSDictionary, NSError, NSObject, NSObjectProtocol, NSString};
 use objc2_user_notifications::{
-    UNAuthorizationOptions, UNMutableNotificationContent, UNNotificationDefaultActionIdentifier,
-    UNNotificationPresentationOptions, UNNotificationRequest, UNNotificationResponse,
+    UNAuthorizationOptions, UNAuthorizationStatus, UNMutableNotificationContent,
+    UNNotificationDefaultActionIdentifier, UNNotificationPresentationOptions,
+    UNNotificationRequest, UNNotificationResponse, UNNotificationSettings,
     UNUserNotificationCenter, UNUserNotificationCenterDelegate,
 };
 use tauri::{AppHandle, Emitter};
@@ -30,6 +33,24 @@ use crate::commands::NATIVE_NOTIFICATION_ACTIVATED_EVENT;
 
 const TARGET_USER_INFO_KEY: &str = "buzzNotificationTarget";
 const MAX_PENDING_ACTIVATIONS: usize = 64;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum NotificationPermissionState {
+    Default,
+    Denied,
+    Granted,
+}
+
+fn permission_state(status: UNAuthorizationStatus) -> NotificationPermissionState {
+    match status {
+        UNAuthorizationStatus::Denied => NotificationPermissionState::Denied,
+        UNAuthorizationStatus::Authorized
+        | UNAuthorizationStatus::Provisional
+        | UNAuthorizationStatus::Ephemeral => NotificationPermissionState::Granted,
+        _ => NotificationPermissionState::Default,
+    }
+}
 
 static PENDING_ACTIVATIONS: OnceLock<Mutex<VecDeque<serde_json::Value>>> = OnceLock::new();
 
@@ -118,18 +139,6 @@ pub(crate) fn init(app: &AppHandle) -> tauri::Result<()> {
         ProtocolObject::from_retained(delegate);
     center.setDelegate(Some(&delegate));
 
-    let authorization_handler = RcBlock::new(|granted: Bool, error: *mut NSError| {
-        if let Some(error) = unsafe { error.as_ref() } {
-            eprintln!("buzz-desktop: macOS notification authorization failed: {error}");
-        } else if !granted.as_bool() {
-            eprintln!("buzz-desktop: macOS notification authorization was denied");
-        }
-    });
-    center.requestAuthorizationWithOptions_completionHandler(
-        UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound,
-        &authorization_handler,
-    );
-
     // UNUserNotificationCenter.delegate is weak. This object is deliberately
     // process-lifetime state, matching the application-lifetime delegate Apple
     // documents and avoiding mutable global or per-notification registrations.
@@ -137,16 +146,80 @@ pub(crate) fn init(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-pub(crate) fn show(
+fn ensure_bundled_application() -> Result<(), String> {
+    if is_bundled_application() {
+        Ok(())
+    } else {
+        Err(
+            "macOS notifications are unavailable when Buzz is not running from an app bundle"
+                .to_string(),
+        )
+    }
+}
+
+fn notification_permission_state_sync() -> Result<NotificationPermissionState, String> {
+    ensure_bundled_application()?;
+
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let handler = RcBlock::new(move |settings: NonNull<UNNotificationSettings>| {
+        // SAFETY: Apple guarantees a live UNNotificationSettings object for
+        // the duration of this completion handler.
+        let status = unsafe { settings.as_ref() }.authorizationStatus();
+        let _ = sender.send(permission_state(status));
+    });
+    UNUserNotificationCenter::currentNotificationCenter()
+        .getNotificationSettingsWithCompletionHandler(&handler);
+
+    receiver
+        .recv_timeout(Duration::from_secs(10))
+        .map_err(|_| "macOS notification settings request timed out".to_string())
+}
+
+#[tauri::command]
+pub(crate) async fn notification_permission_state() -> Result<NotificationPermissionState, String> {
+    tokio::task::spawn_blocking(notification_permission_state_sync)
+        .await
+        .map_err(|error| format!("macOS notification settings task failed: {error}"))?
+}
+
+fn request_notification_access_sync() -> Result<NotificationPermissionState, String> {
+    ensure_bundled_application()?;
+
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let handler = RcBlock::new(move |_granted: Bool, error: *mut NSError| {
+        let result = match unsafe { error.as_ref() } {
+            Some(error) => Err(format!("macOS notification authorization failed: {error}")),
+            None => Ok(()),
+        };
+        let _ = sender.send(result);
+    });
+    UNUserNotificationCenter::currentNotificationCenter()
+        .requestAuthorizationWithOptions_completionHandler(
+            UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound,
+            &handler,
+        );
+
+    receiver
+        .recv_timeout(Duration::from_secs(60))
+        .map_err(|_| "macOS notification authorization request timed out".to_string())??;
+    notification_permission_state_sync()
+}
+
+#[tauri::command]
+pub(crate) async fn request_notification_access() -> Result<NotificationPermissionState, String> {
+    tokio::task::spawn_blocking(request_notification_access_sync)
+        .await
+        .map_err(|error| format!("macOS notification authorization task failed: {error}"))?
+}
+
+fn show_sync(
     title: String,
     body: Option<String>,
     target: Option<serde_json::Value>,
 ) -> Result<(), String> {
-    if !is_bundled_application() {
-        return Err(
-            "macOS notifications are unavailable when Buzz is not running from an app bundle"
-                .to_string(),
-        );
+    ensure_bundled_application()?;
+    if notification_permission_state_sync()? != NotificationPermissionState::Granted {
+        return Err("macOS notification permission is not granted".to_string());
     }
 
     let content = UNMutableNotificationContent::new();
@@ -172,14 +245,30 @@ pub(crate) fn show(
     let identifier = NSString::from_str(&uuid::Uuid::new_v4().to_string());
     let request =
         UNNotificationRequest::requestWithIdentifier_content_trigger(&identifier, &content, None);
-    let delivery_handler = RcBlock::new(|error: *mut NSError| {
-        if let Some(error) = unsafe { error.as_ref() } {
-            eprintln!("buzz-desktop: failed to deliver macOS notification: {error}");
-        }
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let delivery_handler = RcBlock::new(move |error: *mut NSError| {
+        let result = match unsafe { error.as_ref() } {
+            Some(error) => Err(format!("failed to deliver macOS notification: {error}")),
+            None => Ok(()),
+        };
+        let _ = sender.send(result);
     });
     UNUserNotificationCenter::currentNotificationCenter()
         .addNotificationRequest_withCompletionHandler(&request, Some(&delivery_handler));
-    Ok(())
+
+    receiver
+        .recv_timeout(Duration::from_secs(10))
+        .map_err(|_| "macOS notification delivery request timed out".to_string())?
+}
+
+pub(crate) async fn show(
+    title: String,
+    body: Option<String>,
+    target: Option<serde_json::Value>,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || show_sync(title, body, target))
+        .await
+        .map_err(|error| format!("macOS notification delivery task failed: {error}"))?
 }
 
 fn queue_activation(target: serde_json::Value) {
@@ -222,9 +311,10 @@ fn parse_target(serialized: &str) -> Option<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_bundled_application, parse_target, queue_activation, take_pending_activations,
-        MAX_PENDING_ACTIVATIONS,
+        is_bundled_application, parse_target, permission_state, queue_activation,
+        take_pending_activations, NotificationPermissionState, MAX_PENDING_ACTIVATIONS,
     };
+    use objc2_user_notifications::UNAuthorizationStatus;
 
     #[test]
     fn activation_queue_is_bounded_and_drained() {
@@ -244,6 +334,28 @@ mod tests {
     #[test]
     fn cargo_test_process_is_not_treated_as_bundled() {
         assert!(!is_bundled_application());
+    }
+
+    #[test]
+    fn maps_native_authorization_states_to_frontend_contract() {
+        assert_eq!(
+            permission_state(UNAuthorizationStatus::NotDetermined),
+            NotificationPermissionState::Default
+        );
+        assert_eq!(
+            permission_state(UNAuthorizationStatus::Denied),
+            NotificationPermissionState::Denied
+        );
+        for status in [
+            UNAuthorizationStatus::Authorized,
+            UNAuthorizationStatus::Provisional,
+            UNAuthorizationStatus::Ephemeral,
+        ] {
+            assert_eq!(
+                permission_state(status),
+                NotificationPermissionState::Granted
+            );
+        }
     }
 
     #[test]

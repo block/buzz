@@ -21,7 +21,7 @@ pub(crate) const NATIVE_NOTIFICATION_ACTIVATED_EVENT: &str = "native-notificatio
 /// one application-lifetime `UNUserNotificationCenterDelegate`; it does not
 /// allocate a listener or waiter for each notification.
 #[tauri::command]
-pub fn show_native_notification(
+pub async fn show_native_notification(
     app: tauri::AppHandle,
     title: String,
     body: Option<String>,
@@ -36,7 +36,7 @@ pub fn show_native_notification(
     #[cfg(target_os = "macos")]
     {
         let _ = app;
-        crate::macos_notifications::show(title, body, target)
+        crate::macos_notifications::show(title, body, target).await
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]

@@ -727,6 +727,10 @@ pub fn run() {
             show_native_notification,
             #[cfg(target_os = "macos")]
             macos_notifications::take_pending_activations,
+            #[cfg(target_os = "macos")]
+            macos_notifications::notification_permission_state,
+            #[cfg(target_os = "macos")]
+            macos_notifications::request_notification_access,
             upload_media,
             pick_and_upload_media,
             pick_and_upload_image,
