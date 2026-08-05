@@ -92,7 +92,11 @@ def previous_release(
     newer = [item for item in tags if item[0] > target]
     equal = [item for item in tags if item[0] == target]
     if newer or (
-        equal and (allow_target_sha is None or equal[0][2] != allow_target_sha)
+        equal and (
+            allow_target_sha is None
+            or equal[0][1] != f"desktop-v{version}"
+            or equal[0][2] != allow_target_sha
+        )
     ):
         detail = ", ".join(item[1] for item in newer + equal)
         raise SystemExit(f"desktop release version must increase beyond existing tags: {detail}")

@@ -67,6 +67,10 @@ grep -Fq 'TAG_PREFIX="desktop-v"' "$auto_tag"
 grep -Fq 'target_sha=${{ github.event.pull_request.head.sha }}' "$auto_tag"
 grep -Fq 'scripts/verify-desktop-release-merge.sh' "$auto_tag"
 candidate_workflow="$repo_root/.github/workflows/desktop-release-candidate.yml"
+grep -Eq '^  pull-requests: read$' "$candidate_workflow" || {
+  echo "desktop candidate token cannot read pull requests for prior-release lookup" >&2
+  exit 1
+}
 grep -Fq 'GH_TOKEN: ${{ github.token }}' "$candidate_workflow" || {
   echo "desktop candidate validation has no GitHub token for prior-release lookup" >&2
   exit 1

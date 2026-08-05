@@ -91,6 +91,26 @@ PY
     echo "validator accepted an equal-version tag at the wrong SHA" >&2; exit 1
   fi
   git tag -d desktop-v1.0.1 >/dev/null
+
+  # Numeric equality is not enough for prereleases: desktop-v1.0.1 is not the
+  # target tag desktop-v1.0.1-beta, even when both resolve to the candidate.
+  python3 - "$candidate" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+candidate = sys.argv[1]
+spec = importlib.util.spec_from_file_location("desktop_release", pathlib.Path("scripts/desktop_release.py"))
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module.stable_tags = lambda: [((1, 0, 1), "desktop-v1.0.1", candidate)]
+try:
+    module.previous_release("1.0.1-beta", "block/buzz", allow_target_sha=candidate)
+except SystemExit:
+    pass
+else:
+    raise SystemExit("validator accepted a mismatched stable tag for a prerelease target")
+PY
 )
 
 # Equal and decreasing versions are rejected before any GitHub lookup.
