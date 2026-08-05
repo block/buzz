@@ -701,28 +701,35 @@ use databricks::{discover_databricks_models, DatabricksAuthIntent};
 /// record's model/provider/prompt are definition-authoritative (see
 /// `effective_config::resolve_linked`), so writes to these three fields are
 /// silently dropped for a linked instance rather than persisting a byte the
-/// resolver will never read. Definition-less instances accept the patch
-/// as-is. Extracted so the guard is exercised by both `update_managed_agent`
-/// and its regression tests — a test that reimplements this check instead of
-/// calling it can go green after the real guard is deleted.
+/// resolver will never read. Definition-less instances accept the patch only
+/// after their executable name/prompt pass the shared definition validator.
+/// Extracted so both behaviors are exercised by `update_managed_agent` and its
+/// regression tests — a test that reimplements these checks instead of calling
+/// this helper can go green after the real boundary is deleted.
 fn apply_model_provider_prompt_update(
     record: &mut crate::managed_agents::ManagedAgentRecord,
     model: Option<Option<String>>,
     provider: Option<Option<String>>,
     system_prompt: Option<Option<String>>,
-) {
-    if record.persona_id.is_some() {
-        return;
+) -> Result<(), String> {
+    if record.persona_id.is_none() {
+        if let Some(model_update) = model {
+            record.model = model_update;
+        }
+        if let Some(provider_update) = provider {
+            record.provider = provider_update;
+        }
+        if let Some(prompt_update) = system_prompt {
+            record.system_prompt = prompt_update;
+        }
     }
-    if let Some(model_update) = model {
-        record.model = model_update;
-    }
-    if let Some(provider_update) = provider {
-        record.provider = provider_update;
-    }
-    if let Some(prompt_update) = system_prompt {
-        record.system_prompt = prompt_update;
-    }
+
+    crate::managed_agents::validate_managed_agent_definition_text(
+        &record.name,
+        record.persona_id.as_deref(),
+        record.system_prompt.as_deref(),
+    )
+    .map_err(|error| format!("Managed agent definition is unsafe: {error}"))
 }
 
 /// Update mutable fields on an existing managed agent record.
@@ -769,7 +776,7 @@ pub async fn update_managed_agent(
             input.model,
             input.provider,
             input.system_prompt,
-        );
+        )?;
         if let Some(parallelism) = input.parallelism {
             record.parallelism = parallelism;
         }

@@ -561,6 +561,15 @@ pub async fn list_managed_agents(app: AppHandle) -> Result<Vec<ManagedAgentSumma
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
+fn validate_create_managed_agent_definition(
+    name: &str,
+    persona_id: Option<&str>,
+    system_prompt: Option<&str>,
+) -> Result<(), String> {
+    crate::managed_agents::validate_managed_agent_definition_text(name, persona_id, system_prompt)
+        .map_err(|error| format!("Managed agent definition is unsafe: {error}"))
+}
+
 #[tauri::command]
 pub async fn create_managed_agent(
     input: CreateManagedAgentRequest,
@@ -577,6 +586,11 @@ pub async fn create_managed_agent(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
+    validate_create_managed_agent_definition(
+        &name,
+        requested_persona_id.as_deref(),
+        input.system_prompt.as_deref(),
+    )?;
     if let Some(parallelism) = input.parallelism {
         if !(1..=32).contains(&parallelism) {
             return Err("parallelism must be between 1 and 32".to_string());

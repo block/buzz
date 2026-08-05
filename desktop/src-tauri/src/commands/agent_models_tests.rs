@@ -509,7 +509,8 @@ fn linked_instance_ignores_model_provider_prompt_writes() {
         Some(Some("explicit-model".to_string())),
         Some(Some("explicit-prov".to_string())),
         Some(Some("explicit-prompt".to_string())),
-    );
+    )
+    .unwrap();
 
     assert!(
         record.model.is_none(),
@@ -560,11 +561,89 @@ fn definition_less_instance_accepts_model_provider_prompt_writes() {
         Some(Some("new-model".to_string())),
         Some(Some("new-prov".to_string())),
         Some(Some("new-prompt".to_string())),
-    );
+    )
+    .unwrap();
 
     assert_eq!(record.model.as_deref(), Some("new-model"));
     assert_eq!(record.provider.as_deref(), Some("new-prov"));
     assert_eq!(record.system_prompt.as_deref(), Some("new-prompt"));
+}
+
+#[test]
+fn definition_less_instance_rejects_invisible_prompt_update() {
+    let mut record: crate::managed_agents::ManagedAgentRecord = serde_json::from_str(
+        r#"{
+            "pubkey": "standalone1",
+            "name": "standalone-agent",
+            "private_key_nsec": "nsec1fake",
+            "relay_url": "wss://localhost:3000",
+            "acp_command": "buzz-acp",
+            "agent_command": "goose",
+            "agent_args": [],
+            "mcp_command": "",
+            "turn_timeout_seconds": 320,
+            "system_prompt": "safe prompt",
+            "model": null,
+            "provider": null,
+            "env_vars": {},
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "last_started_at": null,
+            "last_stopped_at": null,
+            "last_exit_code": null,
+            "last_error": null
+        }"#,
+    )
+    .expect("standalone agent record");
+
+    let error = crate::commands::agent_models::apply_model_provider_prompt_update(
+        &mut record,
+        None,
+        None,
+        Some(Some("Review\u{200B} code.".to_string())),
+    )
+    .expect_err("definition-less prompt update must reject invisible text");
+
+    assert!(error.contains("U+200B"), "unexpected error: {error}");
+}
+
+#[test]
+fn definition_less_instance_rejects_invisible_name_on_any_update() {
+    let mut record: crate::managed_agents::ManagedAgentRecord = serde_json::from_str(
+        r#"{
+            "pubkey": "standalone1",
+            "name": "standalone-agent",
+            "private_key_nsec": "nsec1fake",
+            "relay_url": "wss://localhost:3000",
+            "acp_command": "buzz-acp",
+            "agent_command": "goose",
+            "agent_args": [],
+            "mcp_command": "",
+            "turn_timeout_seconds": 320,
+            "system_prompt": "safe prompt",
+            "model": null,
+            "provider": null,
+            "env_vars": {},
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "last_started_at": null,
+            "last_stopped_at": null,
+            "last_exit_code": null,
+            "last_error": null
+        }"#,
+    )
+    .expect("standalone agent record");
+    record.name = "Review\u{202E}er".to_string();
+
+    let error = crate::commands::agent_models::apply_model_provider_prompt_update(
+        &mut record,
+        None,
+        None,
+        None,
+    )
+    .expect_err("definition-less name update must reject formatting controls");
+
+    assert!(error.contains("U+202E"), "unexpected error: {error}");
 }
 
 #[test]
