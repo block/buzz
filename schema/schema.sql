@@ -539,7 +539,7 @@ CREATE TABLE reactions (
     event_created_at    TIMESTAMPTZ NOT NULL,
     event_id            BYTEA NOT NULL,
     pubkey              BYTEA NOT NULL,
-    emoji               VARCHAR(64) NOT NULL,
+    emoji               VARCHAR(66) NOT NULL,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     removed_at          TIMESTAMPTZ,
     reaction_event_id   BYTEA,
