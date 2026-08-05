@@ -555,6 +555,7 @@ function MessageComposerImpl({
       (!trimmed && !hasMedia) ||
       disabledRef.current ||
       isSendingRef.current ||
+      isUploadingRef.current ||
       mentionSendFlow.isPreparingMentionSend
     ) {
       return;
@@ -804,14 +805,13 @@ function MessageComposerImpl({
   const sendDisabled = React.useMemo(
     () =>
       composerDisabled ||
-      (editTarget !== null && media.isUploading) ||
+      media.isUploading ||
       mentionSendFlow.isPreparingMentionSend ||
       (isContentEmpty &&
         media.pendingImeta.length === 0 &&
         media.queuedAttachments.length === 0),
     [
       composerDisabled,
-      editTarget,
       media.isUploading,
       mentionSendFlow.isPreparingMentionSend,
       isContentEmpty,

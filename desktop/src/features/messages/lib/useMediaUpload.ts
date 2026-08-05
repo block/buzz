@@ -781,6 +781,15 @@ export function useMediaUpload({
     [],
   );
 
+  /**
+   * True while any attachment upload is in flight.
+   *
+   * Send paths must gate on this: with `deferUploadsUntilSend`, only videos
+   * are queued locally, so an in-flight photo/file is in neither
+   * `pendingImeta` nor `queuedAttachments`. Sending mid-flight would publish
+   * the message without that attachment and land the descriptor in an
+   * already-cleared composer.
+   */
   const isUploading = uploadingCount > 0;
   const queuedPreviews = React.useMemo<UploadingAttachmentPreview[]>(
     () =>

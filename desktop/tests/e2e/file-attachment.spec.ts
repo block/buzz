@@ -82,10 +82,15 @@ test("photos upload before Send without a queued spoiler control", async ({
   await expect(page.getByTestId("composer-queued-video-spoiler")).toHaveCount(
     0,
   );
+  // Photos upload immediately, so they are in neither `pendingImeta` nor the
+  // queued list until the upload lands: Send stays blocked so the message
+  // cannot publish without the attachment.
+  await expect(page.getByTestId("send-message")).toBeDisabled();
   await expect(page.getByTestId("upload-progress")).toHaveCount(0, {
     timeout: 5_000,
   });
   await expect(page.getByTestId("composer-upload-progress")).toHaveCount(0);
+  await expect(page.getByTestId("send-message")).toBeEnabled();
 
   await expect
     .poll(() =>
