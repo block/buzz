@@ -241,6 +241,50 @@ test("@ trigger prioritizes channel members before runnable personas and other m
   expect(fizzIndex).toBeLessThan(charlieIndex);
 });
 
+test("@ includes channel-member agents that are not locally managed", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.fill("@mi");
+
+  const row = autocomplete(page).locator("button", { hasText: "mira" });
+  await expect(row).toBeVisible();
+  await expect(row.getByTestId("mention-agent-icon")).toBeVisible();
+  await expect(row.getByText("not in channel")).toHaveCount(0);
+});
+
+test("@ hides channel-member agents when the viewer is outside their allowlist", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey: PROFILE_ONLY_AGENT_PUBKEY,
+        name: "mira",
+        channelNames: ["general"],
+        respondTo: "allowlist",
+        respondToAllowlist: [TEST_IDENTITIES.alice.pubkey],
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.fill("@mi");
+
+  await expect(autocomplete(page)).not.toBeVisible();
+  await expect(
+    page.getByTestId(`mention-suggestion-${PROFILE_ONLY_AGENT_PUBKEY}`),
+  ).toHaveCount(0);
+});
+
 test("thread autocomplete keeps multiple long names readable in a narrow panel", async ({
   page,
 }) => {
