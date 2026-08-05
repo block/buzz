@@ -192,6 +192,14 @@ export function useMentions(
     () => getSharedChannelIds(channelsQuery.data),
     [channelsQuery.data],
   );
+  // Membership of the channel we are composing in. An agent present here is
+  // reachable for us right now, regardless of what its directory entry says —
+  // see `relayAgentIsSharedWithUser`.
+  const presentChannelPubkeys = React.useMemo(
+    () =>
+      new Set((members ?? []).map((member) => normalizePubkey(member.pubkey))),
+    [members],
+  );
   const mentionableAgentPubkeys = React.useMemo(
     () =>
       getMentionableAgentPubkeys({
@@ -199,10 +207,12 @@ export function useMentions(
         managedAgentPubkeys,
         relayAgents: relayAgentsQuery.data,
         sharedChannelIds,
+        presentChannelPubkeys,
       }),
     [
       currentPubkey,
       managedAgentPubkeys,
+      presentChannelPubkeys,
       relayAgentsQuery.data,
       sharedChannelIds,
     ],
@@ -246,7 +256,13 @@ export function useMentions(
       if (isArchivedDiscovery(pubkey)) {
         return;
       }
-      if (!isAgentIdentityInManagedList(candidate, managedAgentPubkeys)) {
+      if (
+        !isAgentIdentityInManagedList(
+          candidate,
+          managedAgentPubkeys,
+          mentionableAgentPubkeys,
+        )
+      ) {
         return;
       }
       if (

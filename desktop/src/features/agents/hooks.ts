@@ -36,6 +36,7 @@ import {
   invokeTauri,
   listManagedAgents,
   listRelayAgents,
+  refreshAgentDirectoryEntries,
   saveCustomHarness,
   updateManagedAgent,
 } from "@/shared/api/tauri";
@@ -324,7 +325,14 @@ export function useManagedAgentPrereqsQuery(
 export function useRelayAgentsQuery(options?: { enabled?: boolean }) {
   return useQuery({
     queryKey: relayAgentsQueryKey,
-    queryFn: listRelayAgents,
+    // Republish our own agents' entries before reading the directory: a
+    // membership change made from another device cannot reach them any other
+    // way, and a stale entry makes the agent unmentionable. Throttled in the
+    // backend and never fatal — a failure just means we read the directory as-is.
+    queryFn: async () => {
+      await refreshAgentDirectoryEntries().catch(() => {});
+      return listRelayAgents();
+    },
     staleTime: 30_000,
     // Relay agent profiles (kind:10100) are near-static and the backing
     // `list_relay_agents` command is an unfiltered relay query for the whole

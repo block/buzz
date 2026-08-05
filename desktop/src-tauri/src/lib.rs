@@ -65,7 +65,8 @@ use initial_window::*;
 use managed_agents::{
     backfill_persona_snapshots, ensure_nest, list_managed_agent_runtimes,
     put_managed_agent_runtime_lifecycle, reconcile_managed_agent_runtimes,
-    restart_managed_agent_runtime, start_managed_agent_runtime, stop_managed_agent_runtime,
+    refresh_agent_directory_entries, restart_managed_agent_runtime, start_managed_agent_runtime,
+    stop_managed_agent_runtime,
     try_regenerate_nest,
 };
 #[cfg(not(feature = "mesh-llm"))]
@@ -751,6 +752,7 @@ pub fn run() {
             start_managed_agent_runtime,
             stop_managed_agent_runtime,
             restart_managed_agent_runtime,
+            refresh_agent_directory_entries,
             reconcile_managed_agent_runtimes,
             put_managed_agent_runtime_lifecycle,
             create_managed_agent,

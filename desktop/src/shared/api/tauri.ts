@@ -830,6 +830,19 @@ export async function changeRelayMemberRole(
   await invokeTauri("change_relay_member_role", { targetPubkey, newRole });
 }
 
+/**
+ * Ask the backend to republish the directory entry of every locally managed
+ * agent.
+ *
+ * Only the machine holding an agent's key can sign its entry, so a membership
+ * change made from another device never reaches it on its own. Throttled and
+ * best-effort on the Rust side, so calling it before reading the directory is
+ * cheap.
+ */
+export async function refreshAgentDirectoryEntries(): Promise<void> {
+  await invokeTauri("refresh_agent_directory_entries");
+}
+
 export async function listRelayAgents(): Promise<RelayAgent[]> {
   return (await invokeTauri<RawRelayAgent[]>("list_relay_agents")).map(
     fromRawRelayAgent,

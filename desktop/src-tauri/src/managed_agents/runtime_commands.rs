@@ -1,6 +1,6 @@
 use std::sync::atomic::Ordering;
 
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use super::{
     agent_readiness, append_log_marker, current_instance_id, find_managed_agent_mut,
@@ -404,7 +404,7 @@ async fn probe_agent_relay_access(
     let keys = nostr::Keys::parse(record.private_key_nsec.trim())
         .map_err(|error| format!("invalid managed-agent key: {error}"))?;
     let api_base = crate::relay::relay_http_base_url(&key.relay_url);
-    tokio::time::timeout(
+    let memberships = tokio::time::timeout(
         std::time::Duration::from_secs(10),
         crate::relay::query_relay_at_with_keys(
             state,
@@ -416,7 +416,169 @@ async fn probe_agent_relay_access(
     )
     .await
     .map_err(|_| "relay access probe timed out".to_string())??;
+
+    // The probe already carries everything the directory entry needs, so
+    // refresh it here rather than issuing a second membership query.
+    publish_agent_directory_entry(state, &record, &api_base, &keys, &memberships).await;
+
     Ok((record, key, requested_relay_url))
+}
+
+/// Minimum gap between directory refreshes for the same agent.
+///
+/// The refresh is cheap (one query + one replaceable event) but the callers
+/// are UI-driven and can fire on every channel switch, so throttle per agent.
+const DIRECTORY_REFRESH_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Last directory refresh per agent pubkey, for [`DIRECTORY_REFRESH_MIN_INTERVAL`].
+static DIRECTORY_REFRESH_AT: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+fn directory_refresh_due(agent_pubkey: &str) -> bool {
+    let Ok(mut seen) = DIRECTORY_REFRESH_AT.lock() else {
+        return true;
+    };
+    let now = std::time::Instant::now();
+    match seen.get(agent_pubkey) {
+        Some(last) if now.duration_since(*last) < DIRECTORY_REFRESH_MIN_INTERVAL => false,
+        _ => {
+            seen.insert(agent_pubkey.to_string(), now);
+            true
+        }
+    }
+}
+
+/// Refresh the directory entry of every locally managed agent.
+///
+/// Only the machine holding an agent's key can sign its entry, so when someone
+/// *else* adds our agent to a channel we never learn about it through
+/// `add_channel_members`. This command lets the UI ask for a refresh at points
+/// where a stale entry would be visible — the agent would otherwise stay
+/// unmentionable in that channel until its next restart.
+///
+/// Throttled per agent and best-effort: safe to call liberally.
+#[tauri::command]
+pub async fn refresh_agent_directory_entries(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let Ok(records) = load_managed_agents(&app) else {
+        return Ok(());
+    };
+    for record in records {
+        if !directory_refresh_due(&record.pubkey) {
+            continue;
+        }
+        refresh_agent_directory_entry(&app, &state, &record.pubkey.clone()).await;
+    }
+    Ok(())
+}
+
+/// Refresh a locally managed agent's kind:10100 directory entry after its
+/// channel membership changed.
+///
+/// The entry published at start time is necessarily channel-less: kind:39002
+/// memberships do not exist until the harness first connects, so the start-time
+/// snapshot is empty for a freshly created agent. An entry that lists no
+/// channels makes the agent non-invocable for `respond_to: anyone`, so it must
+/// be refreshed once memberships actually exist — otherwise the directory
+/// advertises the agent as unreachable.
+///
+/// No-op for pubkeys that are not locally managed agents; only this machine
+/// holds their keys and may sign on their behalf. Best-effort throughout.
+pub(crate) async fn refresh_agent_directory_entry(
+    app: &AppHandle,
+    state: &AppState,
+    agent_pubkey: &str,
+) {
+    let normalized = agent_pubkey.trim().to_lowercase();
+    let Ok(records) = load_managed_agents(app) else {
+        return;
+    };
+    let Some(record) = records
+        .into_iter()
+        .find(|record| record.pubkey.trim().to_lowercase() == normalized)
+    else {
+        return;
+    };
+    let Ok(keys) = nostr::Keys::parse(record.private_key_nsec.trim()) else {
+        return;
+    };
+    let api_base = crate::relay::relay_http_base_url(&record.relay_url);
+    let memberships = match crate::relay::query_relay_at_with_keys(
+        state,
+        &api_base,
+        &[serde_json::json!({"kinds": [39002], "#p": [record.pubkey]})],
+        &keys,
+        record.auth_tag.as_deref(),
+    )
+    .await
+    {
+        Ok(events) => events,
+        Err(error) => {
+            tracing::warn!(
+                agent = %record.pubkey,
+                %error,
+                "failed to read memberships while refreshing the agent directory entry"
+            );
+            return;
+        }
+    };
+    publish_agent_directory_entry(state, &record, &api_base, &keys, &memberships).await;
+}
+
+/// Refresh the agent's kind:10100 directory entry on `api_base`.
+///
+/// Other machines discover invocable agents exclusively through this kind, so
+/// without it an agent hosted here cannot be @-mentioned anywhere else. Kept
+/// best-effort: a failure is logged and never blocks the agent from starting,
+/// since the agent is fully functional locally either way.
+async fn publish_agent_directory_entry(
+    state: &AppState,
+    record: &super::ManagedAgentRecord,
+    api_base: &str,
+    keys: &nostr::Keys,
+    memberships: &[nostr::Event],
+) {
+    let channel_ids = super::agent_events::channel_ids_from_membership_events(memberships);
+    let builder = match super::agent_events::build_agent_profile_event(record, channel_ids) {
+        Ok(builder) => builder,
+        Err(error) => {
+            tracing::warn!(
+                agent = %record.pubkey,
+                %error,
+                "failed to build agent directory entry (kind:10100)"
+            );
+            return;
+        }
+    };
+    let event = match builder.sign_with_keys(keys) {
+        Ok(event) => event,
+        Err(error) => {
+            tracing::warn!(
+                agent = %record.pubkey,
+                %error,
+                "failed to sign agent directory entry (kind:10100)"
+            );
+            return;
+        }
+    };
+    if let Err(error) = crate::relay::submit_signed_event_with_keys_at(
+        &event,
+        state,
+        api_base,
+        keys,
+        record.auth_tag.as_deref(),
+    )
+    .await
+    {
+        tracing::warn!(
+            agent = %record.pubkey,
+            %error,
+            "failed to publish agent directory entry (kind:10100)"
+        );
+    }
 }
 
 /// Build the `Failed` status row for a probe failure whose requested relay URL
