@@ -5,6 +5,7 @@ use serde::Deserialize;
 use tauri::{AppHandle, State};
 
 use super::agent_model_process::run_agent_models_command;
+use super::managed_agent_definition::apply_model_provider_prompt_update;
 // The map-only lookup is reached solely from the base-URL helpers that exist for
 // their unit tests; discovery itself always goes through the process-env variant.
 #[cfg(test)]
@@ -695,42 +696,6 @@ use databricks::{
     should_start_interactive_auth,
 };
 use databricks::{discover_databricks_models, DatabricksAuthIntent};
-
-/// Apply an `UpdateManagedAgentRequest`'s model/provider/system_prompt patch
-/// to `record`, enforcing the linked-instance write guard: a definition-linked
-/// record's model/provider/prompt are definition-authoritative (see
-/// `effective_config::resolve_linked`), so writes to these three fields are
-/// silently dropped for a linked instance rather than persisting a byte the
-/// resolver will never read. Definition-less instances accept the patch only
-/// after their executable name/prompt pass the shared definition validator.
-/// Extracted so both behaviors are exercised by `update_managed_agent` and its
-/// regression tests — a test that reimplements these checks instead of calling
-/// this helper can go green after the real boundary is deleted.
-fn apply_model_provider_prompt_update(
-    record: &mut crate::managed_agents::ManagedAgentRecord,
-    model: Option<Option<String>>,
-    provider: Option<Option<String>>,
-    system_prompt: Option<Option<String>>,
-) -> Result<(), String> {
-    if record.persona_id.is_none() {
-        if let Some(model_update) = model {
-            record.model = model_update;
-        }
-        if let Some(provider_update) = provider {
-            record.provider = provider_update;
-        }
-        if let Some(prompt_update) = system_prompt {
-            record.system_prompt = prompt_update;
-        }
-    }
-
-    crate::managed_agents::validate_managed_agent_definition_text(
-        &record.name,
-        record.persona_id.as_deref(),
-        record.system_prompt.as_deref(),
-    )
-    .map_err(|error| format!("Managed agent definition is unsafe: {error}"))
-}
 
 /// Update mutable fields on an existing managed agent record.
 ///
