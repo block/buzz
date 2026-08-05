@@ -272,12 +272,14 @@ export function useTeamActions(
       setTeamSnapshotImportState({ fileBytes, fileName, preview });
       setTeamSnapshotImportResult(null);
       setTeamSnapshotImportConfirmError(null);
+      return true;
     } catch (err) {
       actions.setActionErrorMessage(
         err instanceof Error
           ? err.message
           : "Failed to read team snapshot file.",
       );
+      return false;
     }
   }
 

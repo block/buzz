@@ -38,6 +38,18 @@ fn member(name: &str) -> AgentSnapshot {
     }
 }
 
+#[test]
+fn json_team_snapshot_uses_buzzteam_file_name() {
+    assert_eq!(
+        snapshot_file_name("review-team", false),
+        "review-team.buzzteam"
+    );
+    assert_eq!(
+        snapshot_file_name("review-team", true),
+        "review-team.team.png"
+    );
+}
+
 fn snapshot(members: Vec<AgentSnapshot>) -> TeamSnapshot {
     TeamSnapshot {
         format: FORMAT_DISCRIMINATOR.to_string(),
