@@ -513,6 +513,9 @@ impl ChannelInfoResolver {
 
 pub struct PromptContext {
     pub mcp_servers: Vec<McpServer>,
+    /// Index of the privileged Buzz companion MCP, when configured. Only this
+    /// server receives Buzz git-origin metadata.
+    pub git_origin_mcp_server_index: Option<usize>,
     pub initial_message: Option<String>,
     pub idle_timeout: Duration,
     pub max_turn_duration: Duration,
@@ -915,6 +918,7 @@ async fn create_session_and_apply_model(
         .map(|agent_name| compose_session_title(agent_name, channel_name));
     let mcp_servers = mcp_servers_with_git_origin(
         &ctx.mcp_servers,
+        ctx.git_origin_mcp_server_index,
         channel_id,
         channel_type,
         ctx.session_title.as_deref(),
@@ -1027,8 +1031,9 @@ async fn create_session_and_apply_model(
     Ok(resp.session_id)
 }
 
-fn mcp_servers_with_git_origin(
+pub(crate) fn mcp_servers_with_git_origin(
     servers: &[McpServer],
+    git_origin_mcp_server_index: Option<usize>,
     channel_id: Option<Uuid>,
     channel_type: Option<&str>,
     agent_name: Option<&str>,
@@ -1048,8 +1053,8 @@ fn mcp_servers_with_git_origin(
         (None, _) => None,
     };
     if let Some(origin) = origin {
-        for server in &mut servers {
-            server.env.push(origin.clone());
+        if let Some(server) = git_origin_mcp_server_index.and_then(|index| servers.get_mut(index)) {
+            server.env.push(origin);
         }
     }
     servers
@@ -4044,6 +4049,7 @@ mod tests {
         let channel_id = Uuid::new_v4();
         let servers = mcp_servers_with_git_origin(
             &[test_mcp_server()],
+            Some(0),
             Some(channel_id),
             Some("stream"),
             None,
@@ -4061,6 +4067,7 @@ mod tests {
     fn private_session_forwards_agent_name_without_channel_id() {
         let servers = mcp_servers_with_git_origin(
             &[test_mcp_server()],
+            Some(0),
             Some(Uuid::new_v4()),
             Some("dm"),
             Some("Builder"),
@@ -6508,6 +6515,7 @@ mod tests {
         use crate::relay::RestClient;
         PromptContext {
             mcp_servers: vec![],
+            git_origin_mcp_server_index: None,
             initial_message: None,
             idle_timeout: Duration::from_secs(60),
             max_turn_duration: Duration::from_secs(120),
