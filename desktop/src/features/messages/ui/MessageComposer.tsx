@@ -1007,15 +1007,7 @@ function MessageComposerImpl({
         </div>
       </footer>
 
-      <NonMemberMentionDialog
-        error={mentionSendFlow.nonMemberPromptError}
-        isInvitePending={mentionSendFlow.isInvitePending}
-        names={mentionSendFlow.pendingNonMemberNames}
-        onDismiss={mentionSendFlow.dismissNonMemberPrompt}
-        onDoNothing={mentionSendFlow.sendWithoutInviting}
-        onInvite={mentionSendFlow.inviteNonMembers}
-        open={mentionSendFlow.pendingNonMemberSend !== null}
-      />
+      <NonMemberMentionDialog {...mentionSendFlow.nonMemberPromptProps} />
 
       {linkEditor.card}
       {linkEditor.dialog}

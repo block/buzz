@@ -416,79 +416,37 @@ class ComposeBar extends HookConsumerWidget {
         for (final entry in mentionMap.value.entries)
           if (hasMention(text, entry.key)) entry.value,
       ];
-      final pubkeys = LinkedHashSet<String>.from(
-        selectedMentions.map((candidate) => candidate.pubkey.toLowerCase()),
-      ).toList();
-      final nonMemberAgentPubkeys = <String>[];
-      final nonMemberHumans = <MentionCandidate>[];
-      if (selectedMentions.isNotEmpty) {
-        final currentChannel = (await ref.read(
-          channelsProvider.future,
-        )).firstWhere((channel) => channel.id == channelId);
-        if (!currentChannel.isDm) {
-          final memberPubkeys = (await ref.read(
-            channelMembersProvider(channelId).future,
-          )).map((member) => member.pubkey.toLowerCase()).toSet();
-          final seenNonMembers = <String>{};
-          for (final candidate in selectedMentions) {
-            final pk = candidate.pubkey.toLowerCase();
-            if (memberPubkeys.contains(pk)) continue;
-            if (!seenNonMembers.add(pk)) continue;
-            if (candidate.isAgent) {
-              nonMemberAgentPubkeys.add(pk);
-            } else {
-              nonMemberHumans.add(candidate);
-            }
-          }
-        }
-      }
+      final outgoing = _OutgoingMentions(selectedMentions);
+      final scan = await _scanNonMemberMentions(
+        ref,
+        channelId: channelId,
+        selectedMentions: selectedMentions,
+        currentPubkey: currentPubkey,
+      );
 
       // Mentioning humans outside the channel prompts "Invite" / "Do
       // nothing" (send without inviting) — mirrors desktop's
       // NonMemberMentionDialog. Agents keep the existing silent auto-add.
-      var mentionPubkeys = pubkeys;
-      final referenceMentionTags = <List<String>>[];
-      var inviteHumanPubkeys = const <String>[];
-      if (nonMemberHumans.isNotEmpty) {
+      if (scan.humans.isNotEmpty) {
         if (!context.mounted) return;
         final choice = await _promptNonMemberMention(
           context,
-          names: [for (final candidate in nonMemberHumans) candidate.label],
+          names: [for (final candidate in scan.humans) candidate.label],
+          canInvite: scan.canAddMembers,
         );
-        switch (choice) {
-          case null:
-            return; // Dismissed — keep the draft, send nothing.
-          case _NonMemberMentionChoice.invite:
-            inviteHumanPubkeys = [
-              for (final candidate in nonMemberHumans)
-                candidate.pubkey.toLowerCase(),
-            ];
-          case _NonMemberMentionChoice.sendWithoutInviting:
-            // Strip their p-tags (no channel notification) but keep a
-            // `mention` reference tag so their name still renders —
-            // mirrors desktop's mergeOutgoingTagsWithReferenceMentions.
-            final excluded = {
-              for (final candidate in nonMemberHumans)
-                candidate.pubkey.toLowerCase(),
-            };
-            mentionPubkeys = [
-              for (final pk in pubkeys)
-                if (!excluded.contains(pk)) pk,
-            ];
-            referenceMentionTags.addAll([
-              for (final pk in excluded) ['mention', pk],
-            ]);
-        }
+        if (choice == null) return; // Dismissed — keep the draft, send nothing.
+        outgoing.resolveHumanChoice(choice, scan.humans);
       }
 
       final queuedAttachments = List<_PendingAttachment>.of(attachments.value);
       final channelActions = ref.read(channelActionsProvider);
 
-      Future<void> addMentionedNonMembers() => _addMentionedNonMembers(
+      // An add that was refused doesn't block the message: it is reported and
+      // the un-added mentions are demoted to reference tags so the send lands.
+      Future<void> addMentionedNonMembers() => outgoing.addNonMembers(
         channelActions,
-        channelId: channelId,
-        agentPubkeys: nonMemberAgentPubkeys,
-        humanPubkeys: inviteHumanPubkeys,
+        scan: scan,
+        messenger: messenger,
       );
 
       isSending.value = true;
@@ -503,12 +461,19 @@ class ComposeBar extends HookConsumerWidget {
             );
             await onSend(
               payload.content,
-              mentionPubkeys,
-              mediaTags: [...payload.mediaTags, ...referenceMentionTags],
+              outgoing.pubkeys,
+              mediaTags: [...payload.mediaTags, ...outgoing.referenceTags],
             );
             if (context.mounted) clearComposer();
           } on StateError {
             _reportSendCancelledByCommunitySwitch(messenger);
+          } catch (error) {
+            // send() runs unawaited, so a relay rejection or publish timeout
+            // would otherwise vanish with the composer looking idle. The draft
+            // is kept (clearComposer never ran) so the user can retry.
+            messenger?.showSnackBar(
+              SnackBar(content: Text(_composeSendErrorMessage(error))),
+            );
           }
           return;
         }
@@ -561,8 +526,8 @@ class ComposeBar extends HookConsumerWidget {
             if (queueGeneration != uploadGeneration.value) return;
             await delivery(
               payload.content,
-              mentionPubkeys,
-              mediaTags: [...payload.mediaTags, ...referenceMentionTags],
+              outgoing.pubkeys,
+              mediaTags: [...payload.mediaTags, ...outgoing.referenceTags],
             );
           } catch (error) {
             if (cancellation.isCancelled) return;
