@@ -76,6 +76,9 @@ test.describe("agent provider dropdown screenshots", () => {
     await expect(
       page.getByTestId("global-agent-provider-option-databricks_v2"),
     ).toHaveText("Databricks v2");
+    await expect(
+      page.getByTestId("global-agent-provider-option-venice"),
+    ).toHaveText("Venice AI");
     await page.keyboard.press("Escape");
     await expect(
       page.getByTestId("global-agent-provider-option-databricks"),
