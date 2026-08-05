@@ -46,7 +46,23 @@ const _searchBottomOverlap =
 const _searchFilterChipVerticalPadding = Grid.xxs;
 const _searchFilterBarVerticalPadding = Grid.xxs;
 const _searchHeaderFiltersMinHeight = Grid.xl;
-const _searchActiveFieldRightInset = 72.0;
+const _searchActiveFieldRightInsetMin = 72.0;
+
+/// Reserves the Cancel action's scaled label, padding, and app-bar edge inset.
+double _searchActiveFieldRightInset(BuildContext context) {
+  final textPainter = TextPainter(
+    text: TextSpan(
+      text: 'Cancel',
+      style: filterChipTextStyle.copyWith(fontWeight: FontWeight.w500),
+    ),
+    textScaler: MediaQuery.textScalerOf(context),
+    textDirection: Directionality.of(context),
+  )..layout();
+  final cancelWidth = textPainter.width + Grid.half * 2 + Grid.twelve;
+  return cancelWidth > _searchActiveFieldRightInsetMin
+      ? cancelWidth
+      : _searchActiveFieldRightInsetMin;
+}
 
 double _searchFieldHeight(BuildContext context) {
   const style = searchInputTextStyle;
@@ -114,6 +130,7 @@ class SearchPage extends HookConsumerWidget {
     final compactSearchFieldHeight = _searchFieldHeight(context);
     final idleSearchFieldHeight = _idleSearchFieldHeight(context);
     final searchHeaderFiltersHeight = _searchHeaderFiltersHeight(context);
+    final searchActiveFieldRightInset = _searchActiveFieldRightInset(context);
     // Cancel remains an accessible target without giving the text action a
     // visual button treatment.
     final searchControlHeight = compactSearchFieldHeight > Grid.xl
@@ -288,7 +305,7 @@ class SearchPage extends HookConsumerWidget {
               curve: Curves.easeInOutCubic,
               left: Grid.gutter,
               right: isSearchEditing.value
-                  ? _searchActiveFieldRightInset
+                  ? searchActiveFieldRightInset
                   : Grid.gutter,
               top: isSearchEditing.value
                   ? _searchIdleFieldTopInset

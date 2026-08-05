@@ -239,7 +239,15 @@ void main() {
     await tester.pumpAndSettle();
 
     final filters = find.byKey(const Key('search-header-filters'));
+    final activeField = find.byKey(const Key('search-field-container'));
+    final cancel = find.byKey(const Key('search-cancel'));
     expect(filters, findsOneWidget);
+    expect(cancel, findsOneWidget);
+    expect(
+      tester.getRect(activeField).right,
+      lessThanOrEqualTo(tester.getRect(cancel).left),
+      reason: 'Scaled Cancel must not overlap the active search field.',
+    );
     expect(tester.getSize(filters).height, greaterThan(Grid.xl));
     expect(
       tester.getSize(filters).height,
