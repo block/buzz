@@ -208,11 +208,7 @@ fn emit_product_feedback_success(
 /// Shared by the reaction path and the general message-write path so the
 /// two seams cannot diverge — see #4936 for the bug that motivated
 /// extracting this helper.
-fn write_trace_action(
-    event: &Event,
-    channel_id: Option<Uuid>,
-    was_inserted: bool,
-) -> TraceAction {
+fn write_trace_action(event: &Event, channel_id: Option<Uuid>, was_inserted: bool) -> TraceAction {
     let claimed = claimed_community_from_event(event);
     match (channel_id, was_inserted) {
         (Some(ch), true) => TraceAction::WriteInsert {
