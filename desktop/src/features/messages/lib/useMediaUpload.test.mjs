@@ -360,3 +360,129 @@ test("replayed updaters stay idempotent", () => {
   assert.deepEqual(state.previews, []);
   assert.equal(state.uploadingCount, 0);
 });
+
+// ── Edit mode while an upload is in flight (known limitation) ──────────
+// Entering edit mode is a wholesale `setPendingImeta(array)`, so it is a draft
+// boundary: the epoch bumps and in-flight immediate uploads are retired. The
+// composer's pre-edit snapshot is taken from `pendingImeta`, which is the
+// *compacted* slot array — an upload that has only reserved a null slot is not
+// in it. So a photo/file still uploading when the user opens "Edit message" is
+// not restored when the edit is cancelled.
+//
+// This is deliberate, and it is narrower than the alternative. Without the
+// epoch guard the descriptor lands by slot index in whatever attachment set is
+// on screen, which means it can overwrite an attachment belonging to the
+// message being edited (see the companion test below). Discarding it is a
+// clean loss instead of writing the wrong attachment onto someone else's
+// message. The caller-side fix — carrying reserved slots through the snapshot,
+// or refusing to enter edit mode while `isUploading` — lives in
+// `MessageComposer`, not here.
+//
+// These tests pin the current behaviour so a future change to it is a
+// deliberate decision rather than an accident.
+
+/**
+ * Model the composer's edit-mode round trip.
+ * `retire` selects the epoch-guarded behaviour (this branch) or the
+ * unguarded behaviour it replaced.
+ */
+function editModeRoundTrip({ retire, resolveDuringEdit, draft = [] }) {
+  const compact = (slots) => slots.filter((d) => d !== null);
+  const uploaded = { sha256: "ffff", url: "in-flight.png" };
+  const editTargetImeta = [{ sha256: "eeee", url: "edit-target.png" }];
+
+  let slots = [...draft];
+  // Attach a photo: reserve a slot and start the upload.
+  const slotIndex = slots.length;
+  slots = [...slots, null];
+  const pinnedEpoch = 0;
+  let epoch = 0;
+  const canceled = new Set();
+  const previewId = 1;
+
+  // Enter edit mode: snapshot the (compacted) draft, then seed the target's
+  // attachments. The reserved null slot is dropped by the compaction.
+  const snapshot = compact(slots);
+  if (retire) {
+    epoch += 1;
+    canceled.add(previewId);
+  }
+  slots = editTargetImeta;
+
+  const landDescriptor = () => {
+    if (canceled.has(previewId)) return;
+    if (retire && pinnedEpoch !== epoch) return;
+    const next = [...slots];
+    next[slotIndex] = uploaded;
+    slots = next;
+  };
+
+  if (resolveDuringEdit) landDescriptor();
+  const whileEditing = compact(slots);
+
+  // Cancel the edit: restore the snapshot (another wholesale replacement).
+  if (retire) epoch += 1;
+  slots = [...snapshot];
+  if (!resolveDuringEdit) landDescriptor();
+
+  return { restoredDraft: compact(slots), whileEditing };
+}
+
+test("an upload in flight when edit mode opens is not restored after cancel", () => {
+  // Known limitation: the pre-edit snapshot is built from the compacted slot
+  // array, so a reserved-but-unfilled slot is not captured.
+  const { restoredDraft } = editModeRoundTrip({
+    resolveDuringEdit: true,
+    retire: true,
+  });
+  assert.deepEqual(restoredDraft, []);
+});
+
+test("retiring the upload keeps it off the message being edited", () => {
+  // This is what the retirement buys. Unguarded, the descriptor lands at its
+  // reserved index inside the *edit target's* attachment set and replaces the
+  // attachment already there — the user would save someone else's photo onto
+  // the message they were editing.
+  const guarded = editModeRoundTrip({
+    resolveDuringEdit: true,
+    retire: true,
+  });
+  assert.deepEqual(guarded.whileEditing, [
+    { sha256: "eeee", url: "edit-target.png" },
+  ]);
+
+  const unguarded = editModeRoundTrip({
+    resolveDuringEdit: true,
+    retire: false,
+  });
+  assert.deepEqual(unguarded.whileEditing, [
+    { sha256: "ffff", url: "in-flight.png" },
+  ]);
+});
+
+test("an upload resolving after cancel is discarded rather than appended", () => {
+  // The other timing: unguarded, a descriptor arriving after the restore
+  // happens to land past the end of the restored draft and reappears. That
+  // recovery is incidental — it depends on the restored draft having exactly
+  // the length the slot index was reserved against — and the same code path is
+  // what overwrites the edit target in the test above. The guard trades it for
+  // a predictable outcome.
+  const guarded = editModeRoundTrip({
+    draft: [{ sha256: "aaaa", url: "already-there.png" }],
+    resolveDuringEdit: false,
+    retire: true,
+  });
+  assert.deepEqual(guarded.restoredDraft, [
+    { sha256: "aaaa", url: "already-there.png" },
+  ]);
+
+  const unguarded = editModeRoundTrip({
+    draft: [{ sha256: "aaaa", url: "already-there.png" }],
+    resolveDuringEdit: false,
+    retire: false,
+  });
+  assert.deepEqual(unguarded.restoredDraft, [
+    { sha256: "aaaa", url: "already-there.png" },
+    { sha256: "ffff", url: "in-flight.png" },
+  ]);
+});
