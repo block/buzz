@@ -7,7 +7,9 @@ import type {
   Profile,
   RelayAgent,
   UpdateManagedAgentInput,
+  UserProfileSummary,
 } from "@/shared/api/types";
+import { isVerifiedOwnedAgentProfile } from "@/features/profile/lib/identity";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 
 export { truncatePubkey };
@@ -118,6 +120,8 @@ export function deriveProfileChannels(
   relayAgent: RelayAgent | undefined,
   managedAgent: ManagedAgent | undefined,
   channels: Channel[] | undefined,
+  profileSummary?: Pick<UserProfileSummary, "isAgent" | "ownerPubkey">,
+  currentPubkey?: string,
 ): ProfileChannelLink[] {
   const links = new Map<string, ProfileChannelLink>();
   const channelsByName = new Map(
@@ -130,7 +134,10 @@ export function deriveProfileChannels(
     links.set(id, { id, name });
   });
 
-  if (managedAgent && channels) {
+  const useAuthoritativeMembership =
+    managedAgent !== undefined ||
+    isVerifiedOwnedAgentProfile(profileSummary, currentPubkey);
+  if (useAuthoritativeMembership && channels) {
     for (const channel of channels) {
       const isMember = channel.memberPubkeys.some(
         (memberPubkey) => memberPubkey.toLowerCase() === pubkeyLower,

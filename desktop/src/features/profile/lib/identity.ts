@@ -148,6 +148,25 @@ export function ownsAuthorAgent(
   );
 }
 
+/**
+ * Returns true only for a users-batch profile securely classified as an agent
+ * owned by the current Desktop identity.
+ */
+export function isVerifiedOwnedAgentProfile(
+  profile:
+    | Partial<Pick<UserProfileSummary, "isAgent" | "ownerPubkey">>
+    | null
+    | undefined,
+  currentPubkey: string | null | undefined,
+): boolean {
+  return (
+    profile?.isAgent === true &&
+    !!profile.ownerPubkey &&
+    !!currentPubkey &&
+    normalizePubkey(profile.ownerPubkey) === normalizePubkey(currentPubkey)
+  );
+}
+
 export function resolveUserSecondaryLabel(input: {
   pubkey: string;
   profiles?: UserProfileLookup;

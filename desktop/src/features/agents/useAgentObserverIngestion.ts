@@ -6,12 +6,18 @@ import {
   useRelayAgentsQuery,
 } from "@/features/agents/hooks";
 import { useManagedAgentObserverBridge } from "@/features/agents/observerRelayStore";
+import { useChannelsQuery } from "@/features/channels/hooks";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
+import { isVerifiedOwnedAgentProfile } from "@/features/profile/lib/identity";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import type { ManagedAgent } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
 type IngestionAgent = Pick<ManagedAgent, "pubkey" | "status">;
+type ObserverProfileSummary = {
+  isAgent?: boolean;
+  ownerPubkey?: string | null;
+};
 
 /**
  * Combine locally managed agents with relay agents the current identity
@@ -56,6 +62,50 @@ export function combineObserverIngestionAgents(
 }
 
 /**
+ * Build the owner-global observer projection from both relay-published agent
+ * profiles and agent profiles discovered through channel membership.
+ *
+ * External agents do not necessarily publish the relay-agent descriptor read
+ * by `listRelayAgents`. Channel membership supplies their candidate pubkeys;
+ * the users-batch profile remains the authority for both `isAgent` and NIP-OA
+ * ownership before the candidate reaches the observer trust gate.
+ */
+export function projectObserverIngestionAgents(
+  managedAgents: readonly IngestionAgent[],
+  relayAgentPubkeys: readonly string[],
+  channelMemberPubkeys: readonly string[],
+  profiles: Readonly<Record<string, ObserverProfileSummary>> | undefined,
+  currentPubkey: string | null | undefined,
+): IngestionAgent[] {
+  const candidateByPubkey = new Map<string, string>();
+  for (const pubkey of relayAgentPubkeys) {
+    candidateByPubkey.set(normalizePubkey(pubkey), pubkey);
+  }
+
+  const channelMembers = new Set(channelMemberPubkeys.map(normalizePubkey));
+  const ownerByPubkey = new Map<string, string>();
+  for (const [pubkey, profile] of Object.entries(profiles ?? {})) {
+    const normalizedPubkey = normalizePubkey(pubkey);
+    if (
+      channelMembers.has(normalizedPubkey) &&
+      isVerifiedOwnedAgentProfile(profile, currentPubkey)
+    ) {
+      candidateByPubkey.set(normalizedPubkey, pubkey);
+    }
+    if (profile.ownerPubkey) {
+      ownerByPubkey.set(normalizedPubkey, normalizePubkey(profile.ownerPubkey));
+    }
+  }
+
+  return combineObserverIngestionAgents(
+    managedAgents,
+    [...candidateByPubkey.values()],
+    ownerByPubkey,
+    currentPubkey,
+  );
+}
+
+/**
  * App-level owner-global observer ingestion.
  *
  * Mounted once in AppShell so observer frames (kind 24200) are received,
@@ -86,30 +136,41 @@ export function useAgentObserverIngestion() {
     [relayAgentsQuery.data],
   );
 
-  const profilesQuery = useUsersBatchQuery(relayAgentPubkeys, {
-    enabled: Boolean(currentPubkey) && relayAgentPubkeys.length > 0,
+  const channelsQuery = useChannelsQuery();
+  const channelMemberPubkeys = React.useMemo(
+    () => [
+      ...new Set(
+        (channelsQuery.data ?? []).flatMap((channel) => channel.memberPubkeys),
+      ),
+    ],
+    [channelsQuery.data],
+  );
+
+  const profileCandidatePubkeys = React.useMemo(
+    () => [...new Set([...relayAgentPubkeys, ...channelMemberPubkeys])],
+    [channelMemberPubkeys, relayAgentPubkeys],
+  );
+
+  const profilesQuery = useUsersBatchQuery(profileCandidatePubkeys, {
+    enabled: Boolean(currentPubkey) && profileCandidatePubkeys.length > 0,
   });
   const profiles = profilesQuery.data?.profiles;
 
   const ingestionAgents = React.useMemo(() => {
-    const ownerByPubkey = new Map<string, string>();
-    for (const [pubkey, summary] of Object.entries(profiles ?? {})) {
-      if (summary.ownerPubkey) {
-        // Store both key and value normalized so lookups and ownership
-        // comparisons never depend on the casing the relay happened to send.
-        ownerByPubkey.set(
-          normalizePubkey(pubkey),
-          normalizePubkey(summary.ownerPubkey),
-        );
-      }
-    }
-    return combineObserverIngestionAgents(
+    return projectObserverIngestionAgents(
       managedAgents ?? [],
       relayAgentPubkeys,
-      ownerByPubkey,
+      channelMemberPubkeys,
+      profiles,
       currentPubkey,
     );
-  }, [currentPubkey, managedAgents, profiles, relayAgentPubkeys]);
+  }, [
+    channelMemberPubkeys,
+    currentPubkey,
+    managedAgents,
+    profiles,
+    relayAgentPubkeys,
+  ]);
 
   useManagedAgentObserverBridge(ingestionAgents);
   useActiveAgentTurnsBridge(ingestionAgents);

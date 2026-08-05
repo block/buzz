@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { combineObserverIngestionAgents } from "./useAgentObserverIngestion.ts";
+import {
+  combineObserverIngestionAgents,
+  projectObserverIngestionAgents,
+} from "./useAgentObserverIngestion.ts";
 
 const ME = "aaaa1234aaaa1234aaaa1234aaaa1234aaaa1234aaaa1234aaaa1234aaaa1234";
 const OTHER =
@@ -84,5 +87,24 @@ describe("combineObserverIngestionAgents", () => {
       undefined,
     );
     assert.deepEqual(result, [{ pubkey: AGENT_LOCAL, status: "running" }]);
+  });
+});
+
+describe("projectObserverIngestionAgents", () => {
+  it("includes an owned agent profile from channel membership when listRelayAgents omits it", () => {
+    const result = projectObserverIngestionAgents(
+      [],
+      [],
+      [AGENT_REMOTE],
+      {
+        [AGENT_REMOTE]: {
+          isAgent: true,
+          ownerPubkey: ME,
+        },
+      },
+      ME,
+    );
+
+    assert.deepEqual(result, [{ pubkey: AGENT_REMOTE, status: "deployed" }]);
   });
 });
