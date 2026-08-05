@@ -108,6 +108,9 @@ class MessageContent extends HookConsumerWidget {
 
   final TextStyle? baseStyle;
 
+  /// Alignment applied to rendered markdown text.
+  final TextAlign? textAlign;
+
   final int? maxLines;
 
   /// Render a body that is nothing but emoji at [kEmojiOnlyFontSize], the way
@@ -137,6 +140,7 @@ class MessageContent extends HookConsumerWidget {
     this.onMediaReply,
     this.onMediaMore,
     this.baseStyle,
+    this.textAlign,
     this.maxLines,
     this.scaleEmojiOnly = false,
     this.mediaCarouselLeadingOverflow = 0,
@@ -269,6 +273,7 @@ class MessageContent extends HookConsumerWidget {
             _buildLink(context, ref, linkText, url, linkStyle, style),
         imageBuilder: (context, imageUrl) =>
             _buildMedia(context, imageUrl, imetaByUrl[imageUrl]),
+        textAlign: textAlign,
         maxLines: maxLines,
         inlineComponents: [
           _MentionMd(

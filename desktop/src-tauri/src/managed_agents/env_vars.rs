@@ -5,11 +5,19 @@
 //! Precedence: desktop parent env < persona env < agent env (last wins on
 //! key collision). See `runtime::spawn_agent_child`.
 //!
-//! A small set of *reserved* keys — Buzz's identity and secrets — are
-//! rejected at save time and stripped at runtime so a typo or malicious
-//! value can't swap the agent's nsec. Behavior knobs (GOOSE_MODE, BUZZ_ACP_MODEL, BUZZ_ACP_SYSTEM_PROMPT, …) remain
-//! freely overridable — those have dedicated UI fields, but power users
-//! may want to bypass them.
+//! A small set of *reserved* keys — Buzz's identity and secrets, and
+//! control-plane values set by the Desktop — are rejected at save time and
+//! stripped at runtime so a typo or malicious value can't swap the agent's
+//! nsec or bypass a harness-specific execution cap. Behavior knobs
+//! (GOOSE_MODE, BUZZ_ACP_MODEL, BUZZ_ACP_SYSTEM_PROMPT, …) remain freely
+//! overridable — those have dedicated UI fields, but power users may want
+//! to bypass them.
+//!
+//! `BUZZ_ACP_AGENTS` is reserved because the Desktop resolves the effective
+//! parallelism (applying per-harness caps such as OpenClaw's cap of 5) and
+//! writes the result into `launch.policy_env`. A user-supplied
+//! `BUZZ_ACP_AGENTS` would bypass the cap and cause OpenClaw agents to spawn
+//! uncapped workers against their single shared Gateway daemon.
 
 use std::collections::BTreeMap;
 
@@ -40,7 +48,7 @@ pub(crate) fn is_derived_provider_model_key(key: &str) -> bool {
 }
 
 /// Env var keys that Buzz sets itself and users must not override from
-/// the persona/agent env_vars UI. Three categories:
+/// the persona/agent env_vars UI. Four categories:
 ///
 /// 1. **Identity / secrets** — overriding would swap the agent's nsec or
 ///    leak credentials.
@@ -50,11 +58,15 @@ pub(crate) fn is_derived_provider_model_key(key: &str) -> bool {
 ///    relay URL would silently break the saved security settings (the UI
 ///    shows owner-only while the running agent answers anyone, for
 ///    example), or redirect the agent to an attacker-controlled relay.
+/// 4. **Control-plane execution policy** — the Desktop owns the effective
+///    value, derived from structured record fields after applying per-harness
+///    caps. A user-supplied override would bypass the cap and produce a
+///    worker pool size that neither the record nor the UI represents.
 ///
-/// This list is deliberately narrow — it only covers keys with security
-/// implications. Behavior knobs (GOOSE_MODE, BUZZ_ACP_MODEL, BUZZ_ACP_SYSTEM_PROMPT, …) remain freely
-/// overridable; those have dedicated UI fields but power users may want
-/// to bypass them.
+/// This list is deliberately narrow — it only covers keys with security or
+/// correctness implications. Behavior knobs (GOOSE_MODE, BUZZ_ACP_MODEL,
+/// BUZZ_ACP_SYSTEM_PROMPT, …) remain freely overridable; those have
+/// dedicated UI fields but power users may want to bypass them.
 pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     // Identity / secrets.
     "BUZZ_PRIVATE_KEY",
@@ -71,6 +83,11 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     "BUZZ_ACP_AGENT_COMMAND",
     "BUZZ_ACP_AGENT_ARGS",
     "BUZZ_ACP_MCP_COMMAND",
+    // Control-plane parallelism: the Desktop resolves the effective
+    // worker-pool size (applying any per-harness cap) and writes it into
+    // launch.policy_env. A user-supplied BUZZ_ACP_AGENTS would bypass the
+    // harness cap and cause OpenClaw agents to spawn uncapped workers.
+    "BUZZ_ACP_AGENTS",
     // Security gates: respond-to mode + allowlist + legacy owner-only
     // fallback. Overriding would make the running agent's gate diverge
     // from the saved/UI-visible settings.

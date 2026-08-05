@@ -50,9 +50,13 @@ class App extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final themeMode = ref.watch(themeProvider);
-    final accentIndex = ref.watch(accentProvider);
-    final schemeName = ref.watch(schemeProvider);
+    final communityTheme = ref.watch(communityThemeProvider);
+    final themeMode = communityTheme.mode;
+    final accentIndex = effectiveAccentIndex(
+      communityTheme.theme,
+      communityTheme.accent,
+    );
+    final schemeName = communityTheme.theme;
     final authState = ref.watch(authProvider);
 
     final resolved = resolveSchemes(schemeName, themeMode);

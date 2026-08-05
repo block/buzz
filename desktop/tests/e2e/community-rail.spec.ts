@@ -231,6 +231,9 @@ test.describe("community rail", () => {
       menu.getByRole("menuitem", { name: "Community settings" }),
     ).toBeVisible();
     await expect(
+      menu.getByRole("menuitem", { name: "Leave community" }),
+    ).toBeVisible();
+    await expect(
       menu.getByRole("menuitem", { name: "Add a community" }),
     ).toBeVisible();
     await expect(menu.getByRole("separator")).toHaveCount(1);
@@ -290,6 +293,9 @@ test.describe("community rail", () => {
     await expect(
       page.getByRole("dialog", { name: "Edit Community" }),
     ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Leave Community" }),
+    ).toHaveCount(0);
   });
 
   test("switches the active community on click", async ({ page }) => {
@@ -717,11 +723,12 @@ test.describe("community rail", () => {
     await page.getByTestId(`community-rail-button-${COMMUNITY_A.id}`).click();
     await page.getByTestId("channel-general").click();
 
+    await page.getByTestId("sidebar-profile-avatar-button").click();
+    await page.getByTestId("community-switcher").click();
     await page
-      .getByTestId(`community-rail-button-${COMMUNITY_A.id}`)
-      .click({ button: "right" });
-    await page.getByRole("menuitem", { name: "Community settings" }).click();
-    await page.getByRole("button", { name: "Remove Community" }).click();
+      .getByRole("menu", { name: "Community actions" })
+      .getByRole("menuitem", { name: "Leave community" })
+      .click();
 
     await expect(page).toHaveURL(randomUrl);
     await expect
@@ -759,6 +766,74 @@ test.describe("community rail", () => {
 
     // The app settles into the new community once apply completes.
     await expect(buttonB).toHaveAttribute("aria-current", "true");
+  });
+
+  test("leaving the final community returns to setup without resetting identity", async ({
+    context,
+    page,
+  }) => {
+    await installMockBridge(page, undefined, {
+      autoConnectDefaultRelay: true,
+      skipCommunitySeed: true,
+    });
+    await seedCommunities(page, [COMMUNITY_A], COMMUNITY_A.id);
+    await page.goto("/");
+
+    await expect
+      .poll(() =>
+        page.evaluate(() => typeof window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__),
+      )
+      .toBe("function");
+    const identityBefore = await page.evaluate(async () =>
+      window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__("get_identity"),
+    );
+    await page.getByTestId("sidebar-profile-avatar-button").click();
+    await page.getByTestId("community-switcher").click();
+    await page
+      .getByRole("menu", { name: "Community actions" })
+      .getByRole("menuitem", { name: "Leave community" })
+      .click();
+
+    await expect(page.getByText("Join or create a community")).toBeVisible();
+    await expect(page.getByTestId("welcome-setup-back")).toHaveCount(0);
+    await expect(page.getByTestId("community-choice-join")).toBeVisible();
+    await expect
+      .poll(() =>
+        page.evaluate(() => window.localStorage.getItem("buzz-communities")),
+      )
+      .toBeNull();
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          window.localStorage.getItem("buzz-community-discovery-after-leave"),
+        ),
+      )
+      .toBe("1");
+
+    const relaunchPage = await context.newPage();
+    await installMockBridge(relaunchPage, undefined, {
+      autoConnectDefaultRelay: true,
+      skipCommunitySeed: true,
+    });
+    await relaunchPage.goto("/");
+    await expect(
+      relaunchPage.getByText("Join or create a community"),
+    ).toBeVisible();
+    await expect(relaunchPage.getByTestId("welcome-setup-back")).toHaveCount(0);
+    await expect
+      .poll(() =>
+        relaunchPage.evaluate(() =>
+          window.localStorage.getItem("buzz-communities"),
+        ),
+      )
+      .toBeNull();
+    await expect
+      .poll(() =>
+        relaunchPage.evaluate(async () =>
+          window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__("get_identity"),
+        ),
+      )
+      .toEqual(identityBefore);
   });
 
   test("hides the rail with a single community", async ({ page }) => {

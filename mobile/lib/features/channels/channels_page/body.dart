@@ -278,7 +278,7 @@ class _SliverChannelsList extends HookConsumerWidget {
                     userSections.first.id != section.id,
                 onToggle: () => toggleSection(section.id),
                 onRename: () async {
-                  final name = await showDialog<String>(
+                  final name = await showBuzzDialog<String>(
                     context: context,
                     builder: (_) => _SectionNameDialog(
                       title: 'Rename Section',
@@ -293,7 +293,7 @@ class _SliverChannelsList extends HookConsumerWidget {
                   }
                 },
                 onDelete: () async {
-                  final confirmed = await showDialog<bool>(
+                  final confirmed = await showBuzzDialog<bool>(
                     context: context,
                     builder: (_) => AlertDialog(
                       title: Text('Delete "${section.name}"?'),
