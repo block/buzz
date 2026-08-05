@@ -10,6 +10,7 @@ import {
   useUnbanMemberMutation,
   useUntimeoutMemberMutation,
 } from "@/features/moderation/hooks";
+import { moderationCapabilities } from "@/features/moderation/lib/capabilities";
 import { useMyRelayMembershipQuery } from "@/features/community-members/hooks";
 import type { TimelineMessage } from "@/features/messages/types";
 import { isTimedOut } from "@/features/moderation/lib/restrictionState";
@@ -34,10 +35,11 @@ const TIMEOUT_PRESETS: { label: string; seconds: number }[] = [
  * kick from the current channel. Self-contained (wires its own hooks, no props
  * threaded from the message row), mirroring ReportMessageDialog.
  *
- * Renders nothing unless the viewer is a relay owner/admin, the message has a
- * real signer, and that signer is not the viewer. Actions target
- * `signerPubkey` — the raw signer, never a relay-delegated display author — per
- * the security note on TimelineMessage.
+ * Renders nothing unless the viewer holds a moderating relay role (owner, admin,
+ * or moderator), the message has a real signer, and that signer is not the
+ * viewer. Ban/Unban are hidden for moderators (admin+ only per the capability
+ * grid). Actions target `signerPubkey` — the raw signer, never a
+ * relay-delegated display author — per the security note on TimelineMessage.
  */
 export function MessageModerationMenuItems({
   channelId,
@@ -48,7 +50,7 @@ export function MessageModerationMenuItems({
 }) {
   const relayMembershipQuery = useMyRelayMembershipQuery();
   const relayRole = relayMembershipQuery.data?.role;
-  const canModerate = relayRole === "owner" || relayRole === "admin";
+  const caps = moderationCapabilities(relayRole);
 
   const identityQuery = useIdentityQuery();
   // Moderate the raw signer, never a relay-delegated display author. A message
@@ -60,9 +62,13 @@ export function MessageModerationMenuItems({
     normalizePubkey(targetPubkey) ===
       normalizePubkey(identityQuery.data.pubkey);
 
-  const enabled = canModerate && targetPubkey != null && !isSelf;
+  // At minimum, the viewer must be able to perform at least one action.
+  const canActOnAny =
+    (caps.canTimeout || caps.canKick || caps.canBan) &&
+    targetPubkey != null &&
+    !isSelf;
 
-  const restrictionsQuery = useModerationRestrictionsQuery(enabled);
+  const restrictionsQuery = useModerationRestrictionsQuery(canActOnAny);
   const banMutation = useBanMemberMutation();
   const unbanMutation = useUnbanMemberMutation();
   const timeoutMutation = useTimeoutMemberMutation();
@@ -101,60 +107,62 @@ export function MessageModerationMenuItems({
     [],
   );
 
-  if (!enabled || targetPubkey == null) return null;
+  if (!canActOnAny || targetPubkey == null) return null;
 
   return (
     <>
       <DropdownMenuSeparator />
-      {timedOut ? (
-        <DropdownMenuItem
-          data-testid={`message-untimeout-${message.id}`}
-          disabled={isPending}
-          onClick={() =>
-            void run(
-              () => untimeoutMutation.mutateAsync(targetPubkey),
-              "Timeout lifted",
-            )
-          }
-        >
-          <ShieldCheck className="h-4 w-4" />
-          Lift timeout
-        </DropdownMenuItem>
-      ) : (
-        <DropdownMenuSub>
-          <DropdownMenuSubTrigger
-            data-testid={`message-timeout-${message.id}`}
+      {caps.canTimeout ? (
+        timedOut ? (
+          <DropdownMenuItem
+            data-testid={`message-untimeout-${message.id}`}
             disabled={isPending}
+            onClick={() =>
+              void run(
+                () => untimeoutMutation.mutateAsync(targetPubkey),
+                "Timeout lifted",
+              )
+            }
           >
-            <Clock className="h-4 w-4" />
-            Time out author
-          </DropdownMenuSubTrigger>
-          <DropdownMenuSubContent>
-            {TIMEOUT_PRESETS.map((preset) => (
-              <DropdownMenuItem
-                data-testid={`message-timeout-${preset.seconds}-${message.id}`}
-                disabled={isPending}
-                key={preset.seconds}
-                onClick={() =>
-                  void run(
-                    () =>
-                      timeoutMutation.mutateAsync({
-                        pubkey: targetPubkey,
-                        expiresAt:
-                          Math.floor(Date.now() / 1000) + preset.seconds,
-                      }),
-                    "Author timed out",
-                  )
-                }
-              >
-                {preset.label}
-              </DropdownMenuItem>
-            ))}
-          </DropdownMenuSubContent>
-        </DropdownMenuSub>
-      )}
+            <ShieldCheck className="h-4 w-4" />
+            Lift timeout
+          </DropdownMenuItem>
+        ) : (
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger
+              data-testid={`message-timeout-${message.id}`}
+              disabled={isPending}
+            >
+              <Clock className="h-4 w-4" />
+              Time out author
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent>
+              {TIMEOUT_PRESETS.map((preset) => (
+                <DropdownMenuItem
+                  data-testid={`message-timeout-${preset.seconds}-${message.id}`}
+                  disabled={isPending}
+                  key={preset.seconds}
+                  onClick={() =>
+                    void run(
+                      () =>
+                        timeoutMutation.mutateAsync({
+                          pubkey: targetPubkey,
+                          expiresAt:
+                            Math.floor(Date.now() / 1000) + preset.seconds,
+                        }),
+                      "Author timed out",
+                    )
+                  }
+                >
+                  {preset.label}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+        )
+      ) : null}
 
-      {channelId ? (
+      {caps.canKick && channelId ? (
         <DropdownMenuItem
           className="text-destructive focus:text-destructive"
           data-testid={`message-kick-${message.id}`}
@@ -171,36 +179,38 @@ export function MessageModerationMenuItems({
         </DropdownMenuItem>
       ) : null}
 
-      {isBanned ? (
-        <DropdownMenuItem
-          data-testid={`message-unban-${message.id}`}
-          disabled={isPending}
-          onClick={() =>
-            void run(
-              () => unbanMutation.mutateAsync(targetPubkey),
-              "Ban lifted",
-            )
-          }
-        >
-          <CircleSlash className="h-4 w-4" />
-          Lift ban
-        </DropdownMenuItem>
-      ) : (
-        <DropdownMenuItem
-          className="text-destructive focus:text-destructive"
-          data-testid={`message-ban-${message.id}`}
-          disabled={isPending}
-          onClick={() =>
-            void run(
-              () => banMutation.mutateAsync({ pubkey: targetPubkey }),
-              "Author banned",
-            )
-          }
-        >
-          <Ban className="h-4 w-4" />
-          Ban author from community
-        </DropdownMenuItem>
-      )}
+      {caps.canBan ? (
+        isBanned ? (
+          <DropdownMenuItem
+            data-testid={`message-unban-${message.id}`}
+            disabled={isPending}
+            onClick={() =>
+              void run(
+                () => unbanMutation.mutateAsync(targetPubkey),
+                "Ban lifted",
+              )
+            }
+          >
+            <CircleSlash className="h-4 w-4" />
+            Lift ban
+          </DropdownMenuItem>
+        ) : (
+          <DropdownMenuItem
+            className="text-destructive focus:text-destructive"
+            data-testid={`message-ban-${message.id}`}
+            disabled={isPending}
+            onClick={() =>
+              void run(
+                () => banMutation.mutateAsync({ pubkey: targetPubkey }),
+                "Author banned",
+              )
+            }
+          >
+            <Ban className="h-4 w-4" />
+            Ban author from community
+          </DropdownMenuItem>
+        )
+      ) : null}
     </>
   );
 }

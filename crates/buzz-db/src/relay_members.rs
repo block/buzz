@@ -17,7 +17,7 @@ use crate::CommunityId;
 pub struct RelayMember {
     /// 64-char lowercase hex pubkey.
     pub pubkey: String,
-    /// Role: `"owner"`, `"admin"`, or `"member"`.
+    /// Role: `"owner"`, `"admin"`, `"moderator"`, or `"member"`.
     pub role: String,
     /// Hex pubkey of who added this member, or `None` for bootstrap entries.
     pub added_by: Option<String>,
@@ -303,6 +303,56 @@ pub async fn remove_relay_member_if_role(
                 // Role changed between the caller's check and this delete
                 // (e.g., target was promoted to admin). Signal that the
                 // caller no longer has authority to remove this target.
+                Ok(RemoveResult::RoleMismatch)
+            }
+        }
+    }
+}
+
+/// Atomically removes a relay member from `community` only if their role is
+/// `'member'` or `'moderator'`.  Used by the admin removal path so that an
+/// admin cannot remove a fellow admin; eliminates the TOCTOU race where the
+/// target could be promoted between a prior role read and the DELETE.
+///
+/// Returns [`RemoveResult::RoleMismatch`] when the target exists but holds a
+/// role that is not in the allowed set (e.g. `admin`).
+pub async fn remove_relay_member_if_non_admin(
+    pool: &PgPool,
+    community: CommunityId,
+    pubkey: &str,
+) -> Result<RemoveResult> {
+    // Atomic single-statement delete: role IN ('member', 'moderator').
+    // Using `= ANY(ARRAY[…])` keeps the parameter count low and avoids
+    // dynamic SQL; the constant set is determined by the function contract.
+    let result = sqlx::query(
+        "DELETE FROM relay_members \
+         WHERE community_id = $1 AND pubkey = $2 \
+         AND role = ANY(ARRAY['member','moderator'])",
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .execute(pool)
+    .await?;
+
+    if result.rows_affected() > 0 {
+        return Ok(RemoveResult::Removed);
+    }
+
+    // Zero rows deleted: distinguish not-found from an admin/owner target.
+    let row = sqlx::query("SELECT role FROM relay_members WHERE community_id = $1 AND pubkey = $2")
+        .bind(community.as_uuid())
+        .bind(pubkey)
+        .fetch_optional(pool)
+        .await?;
+
+    match row {
+        None => Ok(RemoveResult::NotFound),
+        Some(r) => {
+            let role: String = r.try_get("role")?;
+            if role == "owner" {
+                Ok(RemoveResult::IsOwner)
+            } else {
+                // admin (or any future elevated role) — caller lacks authority.
                 Ok(RemoveResult::RoleMismatch)
             }
         }

@@ -326,7 +326,7 @@ async fn execute_relay_admin_command(
             if role == "admin" && sender_role != "owner" {
                 return Err("actor not authorized: only owner can grant admin role".to_string());
             }
-            if role != "admin" && role != "member" {
+            if role != "admin" && role != "member" && role != "moderator" {
                 return Err(format!("invalid role: {role}"));
             }
 
@@ -372,14 +372,14 @@ async fn execute_relay_admin_command(
             }
 
             // Dispatch removal by sender role:
-            // - Admins: atomic conditional delete, only removes 'member' targets.
-            //   This eliminates the TOCTOU race where the target could be promoted
-            //   between a prior role read and the delete.
-            // - Owners: can remove admins and members, not other owners.
+            // - Admins: atomic conditional delete that removes 'member' or
+            //   'moderator' targets — covers the new moderator tier without a
+            //   TOCTOU race.  Uses role = ANY($3) to match both atomically.
+            // - Owners: can remove admins, moderators, and members, not other owners.
             let remove_result = if sender_role == "admin" {
                 state
                     .db
-                    .remove_relay_member_if_role(tenant.community(), &target_hex, "member")
+                    .remove_relay_member_if_non_admin(tenant.community(), &target_hex)
                     .await
                     .map_err(|e| format!("database error: {e}"))?
             } else {
@@ -400,7 +400,10 @@ async fn execute_relay_admin_command(
                     return Err(format!("member not found: {target_hex}"));
                 }
                 RemoveResult::RoleMismatch => {
-                    return Err("actor not authorized: admins can only remove members".to_string());
+                    return Err(
+                        "actor not authorized: admins can only remove members or moderators"
+                            .to_string(),
+                    );
                 }
             }
 
@@ -439,7 +442,7 @@ async fn execute_relay_admin_command(
             if new_role == "owner" {
                 return Err("cannot set role to owner".to_string());
             }
-            if new_role != "admin" && new_role != "member" {
+            if new_role != "admin" && new_role != "member" && new_role != "moderator" {
                 return Err(format!("invalid role: {new_role}"));
             }
 
@@ -894,6 +897,106 @@ mod tests {
         assert_eq!(
             stored_icon(&state, &tenant).await.as_deref(),
             Some("https://example.com/closed.png")
+        );
+    }
+
+    // ── moderator role integration tests ─────────────────────────────────────
+
+    /// Admin may remove a moderator (atomic ANY-predicate path) but not an
+    /// owner or a fellow admin. Tests the multi-role predicate from the plan's
+    /// MINOR finding.
+    ///
+    /// Discriminating: fails if the atomic predicate is split into two
+    /// sequential removes or if the admin guard rail is omitted.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn admin_can_remove_member_and_moderator_but_not_owner_or_admin() {
+        let host = format!("moderator-remove-{}.example", uuid::Uuid::new_v4().simple());
+        let (state, tenant) = workspace_profile_test_state(&host, true).await;
+        let owner_keys = Keys::generate();
+        let admin_keys = Keys::generate();
+        let mod_keys = Keys::generate();
+        let member_keys = Keys::generate();
+
+        let community = tenant.community();
+
+        state
+            .db
+            .add_relay_member(community, &owner_keys.public_key().to_hex(), "owner", None)
+            .await
+            .expect("seed owner");
+        state
+            .db
+            .add_relay_member(community, &admin_keys.public_key().to_hex(), "admin", None)
+            .await
+            .expect("seed admin");
+        state
+            .db
+            .add_relay_member(
+                community,
+                &mod_keys.public_key().to_hex(),
+                "moderator",
+                None,
+            )
+            .await
+            .expect("seed moderator");
+        state
+            .db
+            .add_relay_member(
+                community,
+                &member_keys.public_key().to_hex(),
+                "member",
+                None,
+            )
+            .await
+            .expect("seed member");
+
+        // Admin can remove a moderator (atomic ANY predicate covers both).
+        let remove_mod = state
+            .db
+            .remove_relay_member_if_non_admin(community, &mod_keys.public_key().to_hex())
+            .await
+            .expect("should not error");
+        assert_eq!(
+            remove_mod,
+            buzz_db::relay_members::RemoveResult::Removed,
+            "admin must be able to remove a moderator"
+        );
+
+        // Admin can remove a plain member.
+        let remove_member = state
+            .db
+            .remove_relay_member_if_non_admin(community, &member_keys.public_key().to_hex())
+            .await
+            .expect("should not error");
+        assert_eq!(
+            remove_member,
+            buzz_db::relay_members::RemoveResult::Removed,
+            "admin must be able to remove a plain member"
+        );
+
+        // Admin cannot remove another admin — role mismatch.
+        let remove_admin = state
+            .db
+            .remove_relay_member_if_non_admin(community, &admin_keys.public_key().to_hex())
+            .await
+            .expect("should not error");
+        assert_eq!(
+            remove_admin,
+            buzz_db::relay_members::RemoveResult::RoleMismatch,
+            "admin must NOT be able to remove a fellow admin"
+        );
+
+        // Admin cannot remove the owner — owner is separately protected.
+        let remove_owner = state
+            .db
+            .remove_relay_member_if_non_admin(community, &owner_keys.public_key().to_hex())
+            .await
+            .expect("should not error");
+        assert_eq!(
+            remove_owner,
+            buzz_db::relay_members::RemoveResult::IsOwner,
+            "admin must NOT be able to remove the owner"
         );
     }
 }

@@ -4,8 +4,12 @@ import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
 import { THREAD_REPLY_ROW_MARGIN_INLINE_REM } from "@/features/messages/lib/threadTreeLayout";
 import type { buildVideoReviewContextForMessage } from "@/features/messages/lib/videoReviewContext";
 import { canManageMessageForCurrentUser } from "@/features/messages/lib/canManageMessage";
+import { moderationCapabilities } from "@/features/moderation/lib/capabilities";
+import { useMyRelayMembershipQuery } from "@/features/community-members/hooks";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import { normalizePubkey } from "@/shared/lib/pubkey";
+import { moderatorDeleteMessage } from "@/shared/api/moderator";
 import { cn } from "@/shared/lib/cn";
 import { MessageRow } from "./MessageRow";
 import { MessageThreadSummaryRow } from "./MessageThreadSummaryRow";
@@ -131,6 +135,25 @@ export function MessageRowItem({
   const canDelete = canManage && onDelete ? onDelete : undefined;
   const canEdit = canManage && onEdit ? onEdit : undefined;
 
+  // Moderator delete affordance: relay owners, admins, and moderators may
+  // delete messages they do not own, using kind 9005 (moderator delete).
+  // Self-deletions still flow through the normal `canDelete` path (kind 5).
+  const relayMembershipQuery = useMyRelayMembershipQuery();
+  const relayRole = relayMembershipQuery.data?.role;
+  const caps = moderationCapabilities(relayRole);
+  const isOwnMessage =
+    currentPubkey != null &&
+    message.pubkey != null &&
+    normalizePubkey(message.pubkey) === normalizePubkey(currentPubkey);
+  const canModeratorDelete =
+    caps.canDelete && !isOwnMessage && channelId != null
+      ? (msg: TimelineMessage) => {
+          void moderatorDeleteMessage(channelId, msg.id).catch(() => {
+            // Failure is surfaced by the relay WebSocket rejection toast.
+          });
+        }
+      : undefined;
+
   if (summary && onOpenThread) {
     const isHighlighted = message.id === highlightedMessageId;
     return (
@@ -158,7 +181,7 @@ export function MessageRowItem({
           playEntrance={playEntrance}
           onEntranceComplete={onEntranceComplete}
           message={message}
-          onDelete={canDelete}
+          onDelete={canDelete ?? canModeratorDelete}
           onEdit={canEdit}
           onFollowThread={
             followThreadById ? () => followThreadById(message.id) : undefined
@@ -211,7 +234,7 @@ export function MessageRowItem({
         playEntrance={playEntrance}
         onEntranceComplete={onEntranceComplete}
         message={message}
-        onDelete={canDelete}
+        onDelete={canDelete ?? canModeratorDelete}
         onEdit={canEdit}
         onMarkRead={onMarkRead}
         onMarkUnread={onMarkUnread}

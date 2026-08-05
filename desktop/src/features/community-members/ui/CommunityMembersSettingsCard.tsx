@@ -1,4 +1,10 @@
-import { Crown, MoreHorizontal, Search, Shield } from "lucide-react";
+import {
+  Crown,
+  MoreHorizontal,
+  Search,
+  Shield,
+  ShieldHalf,
+} from "lucide-react";
 import { nip19 } from "nostr-tools";
 import * as React from "react";
 import { toast } from "sonner";
@@ -103,10 +109,28 @@ function RelayMemberRow({
   const canRemove =
     !isSelf &&
     member.role !== "owner" &&
-    (currentRole === "owner" || member.role === "member");
-  const canPromote = currentRole === "owner" && member.role === "member";
-  const canDemote = currentRole === "owner" && member.role === "admin";
-  const hasActions = canRemove || canPromote || canDemote;
+    (currentRole === "owner" ||
+      (currentRole === "admin" &&
+        (member.role === "member" || member.role === "moderator")));
+  // Only the owner can change roles above member.
+  const canMakeAdmin = currentRole === "owner" && member.role === "member";
+  const canMakeModerator = currentRole === "owner" && member.role === "member";
+  const canPromoteModeratorToAdmin =
+    currentRole === "owner" && member.role === "moderator";
+  const canDemoteAdminToModerator =
+    currentRole === "owner" && member.role === "admin";
+  const canDemoteModeratorToMember =
+    currentRole === "owner" && member.role === "moderator";
+  const canDemoteAdminToMember =
+    currentRole === "owner" && member.role === "admin";
+  const hasActions =
+    canRemove ||
+    canMakeAdmin ||
+    canMakeModerator ||
+    canPromoteModeratorToAdmin ||
+    canDemoteAdminToModerator ||
+    canDemoteModeratorToMember ||
+    canDemoteAdminToMember;
   const displayName = formatDisplayName(member, profile?.displayName);
 
   async function mutateWithToast(
@@ -153,6 +177,9 @@ function RelayMemberRow({
           {member.role === "admin" ? (
             <Shield className="h-4 w-4 text-blue-500" />
           ) : null}
+          {member.role === "moderator" ? (
+            <ShieldHalf className="h-4 w-4 text-green-500" />
+          ) : null}
         </div>
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
           <span className="shrink-0 capitalize">{member.role}</span>
@@ -185,7 +212,7 @@ function RelayMemberRow({
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
-            {canPromote ? (
+            {canMakeAdmin ? (
               <DropdownMenuItem
                 onClick={() =>
                   void mutateWithToast(
@@ -201,7 +228,55 @@ function RelayMemberRow({
                 Make admin
               </DropdownMenuItem>
             ) : null}
-            {canDemote ? (
+            {canMakeModerator ? (
+              <DropdownMenuItem
+                onClick={() =>
+                  void mutateWithToast(
+                    () =>
+                      changeRoleMutation.mutateAsync({
+                        pubkey: member.pubkey,
+                        role: "moderator",
+                      }),
+                    "Made community moderator",
+                  )
+                }
+              >
+                Make moderator
+              </DropdownMenuItem>
+            ) : null}
+            {canPromoteModeratorToAdmin ? (
+              <DropdownMenuItem
+                onClick={() =>
+                  void mutateWithToast(
+                    () =>
+                      changeRoleMutation.mutateAsync({
+                        pubkey: member.pubkey,
+                        role: "admin",
+                      }),
+                    "Made community admin",
+                  )
+                }
+              >
+                Make admin
+              </DropdownMenuItem>
+            ) : null}
+            {canDemoteAdminToModerator ? (
+              <DropdownMenuItem
+                onClick={() =>
+                  void mutateWithToast(
+                    () =>
+                      changeRoleMutation.mutateAsync({
+                        pubkey: member.pubkey,
+                        role: "moderator",
+                      }),
+                    "Made community moderator",
+                  )
+                }
+              >
+                Make moderator
+              </DropdownMenuItem>
+            ) : null}
+            {canDemoteAdminToMember ? (
               <DropdownMenuItem
                 onClick={() =>
                   void mutateWithToast(
@@ -217,7 +292,29 @@ function RelayMemberRow({
                 Make member
               </DropdownMenuItem>
             ) : null}
-            {canRemove && (canPromote || canDemote) ? (
+            {canDemoteModeratorToMember ? (
+              <DropdownMenuItem
+                onClick={() =>
+                  void mutateWithToast(
+                    () =>
+                      changeRoleMutation.mutateAsync({
+                        pubkey: member.pubkey,
+                        role: "member",
+                      }),
+                    "Made community member",
+                  )
+                }
+              >
+                Make member
+              </DropdownMenuItem>
+            ) : null}
+            {canRemove &&
+            (canMakeAdmin ||
+              canMakeModerator ||
+              canPromoteModeratorToAdmin ||
+              canDemoteAdminToModerator ||
+              canDemoteAdminToMember ||
+              canDemoteModeratorToMember) ? (
               <DropdownMenuSeparator />
             ) : null}
             {canRemove ? (

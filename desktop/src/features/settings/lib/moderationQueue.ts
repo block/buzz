@@ -232,7 +232,8 @@ export function groupTopReportType(group: ModerationQueueGroup): ReportType {
 }
 
 /**
- * Which one-click resolutions can actually be *enforced* for a given target.
+ * Which one-click resolutions can actually be *enforced* for a given target
+ * and viewer capabilities.
  *
  * A 9044 resolve only records the decision + DMs the reporter; the client must
  * compose the paired enforcement event (delete→9005, ban→9040, kick→9001).
@@ -244,6 +245,7 @@ export function groupTopReportType(group: ModerationQueueGroup): ReportType {
  *   only event-target reports (a pubkey report is not tied to a channel).
  * - `ban` (9040) needs only the author pubkey — event reports resolve it from
  *   the reported event's signer; pubkey reports carry it as the target.
+ *   Ban is **admin+ only** per the capability grid: hidden for moderators.
  * - `escalate` / `dismiss` are decision-only and always available.
  *
  * `timeout` is intentionally excluded until the resolve flow can collect a
@@ -253,11 +255,14 @@ export function groupTopReportType(group: ModerationQueueGroup): ReportType {
 export function resolvableActions(
   targetKind: ReportTargetKind,
   hasChannel: boolean,
+  canBan = true,
 ): ResolutionAction[] {
   const actions: ResolutionAction[] = [];
   if (targetKind === "event" && hasChannel) actions.push("delete");
   // ban needs only the author; event reports look it up from the signer.
-  if (targetKind === "event" || targetKind === "pubkey") actions.push("ban");
+  // Gated by canBan so moderators never see the ban button.
+  if (canBan && (targetKind === "event" || targetKind === "pubkey"))
+    actions.push("ban");
   if (targetKind === "event" && hasChannel) actions.push("kick");
   actions.push("escalate", "dismiss");
   return actions;

@@ -286,15 +286,15 @@ async fn cmd_list_members() -> Result<i32> {
     Ok(0)
 }
 
-/// Validate that `role` is `"member"` or `"admin"`. Rejects `"owner"`.
+/// Validate that `role` is `"member"`, `"moderator"`, or `"admin"`. Rejects `"owner"`.
 fn validate_role(role: &str) -> std::result::Result<(), String> {
     match role {
-        "member" | "admin" => Ok(()),
+        "member" | "moderator" | "admin" => Ok(()),
         "owner" => {
             Err("role 'owner' cannot be set via CLI — use RELAY_OWNER_PUBKEY config".to_string())
         }
         other => Err(format!(
-            "invalid role '{other}': must be 'member' or 'admin'"
+            "invalid role '{other}': must be 'member', 'moderator', or 'admin'"
         )),
     }
 }

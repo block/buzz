@@ -15,7 +15,12 @@ const KIND_RELAY_ADMIN_CHANGE_ROLE = 9032;
 function isRelayMemberRole(
   value: string | undefined,
 ): value is RelayMemberRole {
-  return value === "owner" || value === "admin" || value === "member";
+  return (
+    value === "owner" ||
+    value === "admin" ||
+    value === "moderator" ||
+    value === "member"
+  );
 }
 
 function normalizePubkey(pubkey: string): string {

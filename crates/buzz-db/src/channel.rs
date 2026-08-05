@@ -635,6 +635,80 @@ pub async fn remove_member(
     Ok(())
 }
 
+/// Removes a channel member as an authorized community moderator, bypassing the
+/// channel-role requirement of [`remove_member`].
+///
+/// This is the **sole** call site for moderator-initiated kicks (kind 9001
+/// third-party removal). It must only be invoked after
+/// `authorize_moderation_action(..., Kick)` has succeeded — the function name
+/// is the contract; there is no `skip_auth` boolean.
+///
+/// Acquires the same per-channel membership lock as [`remove_member`] so the
+/// last-owner check and the soft-deletion are serialized against concurrent
+/// membership writes. Re-checks target existence and last-channel-owner
+/// protection inside the transaction. The shared post-mutation path (cache
+/// invalidation, subscription eviction, etc.) must fire in the caller after
+/// this returns `Ok`.
+///
+/// Returns:
+/// - `Ok(())` — member was soft-deleted.
+/// - `Err(DbError::MemberNotFound)` — target is not an active member.
+/// - `Err(DbError::AccessDenied)` — target is the last channel owner.
+pub async fn remove_member_as_community_moderator(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    target_pubkey: &[u8],
+    actor_pubkey: &[u8],
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
+
+    // Serialize the last-owner check and the soft-delete against concurrent
+    // membership writes on this channel (same advisory key as `remove_member`).
+    acquire_channel_membership_lock(&mut tx, community_id, channel_id).await?;
+
+    // Defense-in-depth: prevent removing the last owner regardless of the
+    // community-level authority the caller holds.
+    let target_role = get_active_role_tx(&mut tx, community_id, channel_id, target_pubkey).await?;
+    if target_role.as_deref() == Some("owner") {
+        let row = sqlx::query(
+            "SELECT COUNT(*) as cnt FROM channel_members \
+             WHERE community_id = $1 AND channel_id = $2 AND role = 'owner' AND removed_at IS NULL",
+        )
+        .bind(community_id.as_uuid())
+        .bind(channel_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let owner_count: i64 = row.try_get("cnt")?;
+        if owner_count <= 1 {
+            return Err(DbError::AccessDenied(
+                "cannot remove the last owner — transfer ownership first".to_string(),
+            ));
+        }
+    }
+
+    let result = sqlx::query(
+        r#"
+        UPDATE channel_members
+        SET removed_at = NOW(), removed_by = $1
+        WHERE community_id = $2 AND channel_id = $3 AND pubkey = $4 AND removed_at IS NULL
+        "#,
+    )
+    .bind(actor_pubkey)
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .bind(target_pubkey)
+    .execute(&mut *tx)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(DbError::MemberNotFound(channel_id));
+    }
+
+    tx.commit().await?;
+    Ok(())
+}
+
 /// Returns `true` if the given pubkey is an active member of the channel.
 pub async fn is_member(
     pool: &PgPool,
@@ -2683,5 +2757,183 @@ mod tests {
             .await
             .expect("read role after restore");
         assert_eq!(restored.as_deref(), Some("owner"));
+    }
+
+    // ── remove_member_as_community_moderator ──────────────────────────────────
+
+    /// A relay-level moderator can kick an ordinary channel member even when
+    /// the moderator holds no channel role. The test exercises the DB mutation
+    /// path directly to verify that: (a) the member is removed, (b) the last-
+    /// owner guard fires when needed, and (c) a non-member target returns
+    /// `MemberNotFound`.
+    ///
+    /// Discriminating: fails if the function falls back to the standard
+    /// `remove_member` path (which requires a channel role) or if the
+    /// last-owner protection is dropped.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn test_remove_member_as_community_moderator_removes_ordinary_member() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+
+        let channel_owner_pk = random_pubkey();
+        let target_pk = random_pubkey();
+        let moderator_pk = random_pubkey(); // no channel membership
+        ensure_user(&pool, community, &channel_owner_pk)
+            .await
+            .expect("ensure channel owner");
+        ensure_user(&pool, community, &target_pk)
+            .await
+            .expect("ensure target");
+        ensure_user(&pool, community, &moderator_pk)
+            .await
+            .expect("ensure moderator");
+
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "mod-kick-test",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &channel_owner_pk,
+            None,
+        )
+        .await
+        .expect("create channel");
+
+        add_member(
+            &pool,
+            community,
+            channel.id,
+            &target_pk,
+            MemberRole::Member,
+            Some(&channel_owner_pk),
+        )
+        .await
+        .expect("add target as member");
+
+        // Moderator is NOT a channel member — the preauthorized path must still
+        // succeed.
+        remove_member_as_community_moderator(
+            &pool,
+            community,
+            channel.id,
+            &target_pk,
+            &moderator_pk,
+        )
+        .await
+        .expect("moderator must be able to kick an ordinary member");
+
+        assert!(
+            !is_member(&pool, community, channel.id, &target_pk)
+                .await
+                .expect("is_member check"),
+            "target must no longer be a member"
+        );
+    }
+
+    /// The preauthorized mutation refuses to remove the last channel owner,
+    /// preserving the same guard the standard `remove_member` path enforces.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn test_remove_member_as_community_moderator_blocks_last_owner_removal() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+
+        let only_owner_pk = random_pubkey();
+        let moderator_pk = random_pubkey();
+        ensure_user(&pool, community, &only_owner_pk)
+            .await
+            .expect("ensure owner");
+        ensure_user(&pool, community, &moderator_pk)
+            .await
+            .expect("ensure moderator");
+
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "mod-last-owner-test",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &only_owner_pk,
+            None,
+        )
+        .await
+        .expect("create channel");
+
+        let err = remove_member_as_community_moderator(
+            &pool,
+            community,
+            channel.id,
+            &only_owner_pk,
+            &moderator_pk,
+        )
+        .await;
+
+        assert!(
+            matches!(err, Err(DbError::AccessDenied(_))),
+            "must refuse to remove the last channel owner, got {err:?}"
+        );
+
+        // The owner must still be a member after the refused attempt.
+        assert!(
+            is_member(&pool, community, channel.id, &only_owner_pk)
+                .await
+                .expect("is_member check"),
+            "last owner must remain a member after a failed remove"
+        );
+    }
+
+    /// Attempting to remove a non-member returns `MemberNotFound`.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn test_remove_member_as_community_moderator_returns_not_found_for_non_member() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+
+        let channel_owner_pk = random_pubkey();
+        let non_member_pk = random_pubkey();
+        let moderator_pk = random_pubkey();
+        ensure_user(&pool, community, &channel_owner_pk)
+            .await
+            .expect("ensure channel owner");
+        ensure_user(&pool, community, &non_member_pk)
+            .await
+            .expect("ensure target");
+        ensure_user(&pool, community, &moderator_pk)
+            .await
+            .expect("ensure moderator");
+
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "mod-not-found-test",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &channel_owner_pk,
+            None,
+        )
+        .await
+        .expect("create channel");
+
+        let err = remove_member_as_community_moderator(
+            &pool,
+            community,
+            channel.id,
+            &non_member_pk,
+            &moderator_pk,
+        )
+        .await;
+
+        assert!(
+            matches!(err, Err(DbError::MemberNotFound(_))),
+            "must return MemberNotFound for a non-member target, got {err:?}"
+        );
     }
 }

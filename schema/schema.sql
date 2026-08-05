@@ -572,7 +572,7 @@ CREATE TABLE pubkey_allowlist (
 CREATE TABLE relay_members (
     community_id UUID NOT NULL REFERENCES communities(id),
     pubkey      TEXT NOT NULL,
-    role        TEXT NOT NULL CHECK (role IN ('owner', 'admin', 'member')),
+    role        TEXT NOT NULL CHECK (role IN ('owner', 'admin', 'member', 'moderator')),
     added_by    TEXT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),

@@ -64,6 +64,8 @@ pub enum ModerationAuthority {
     CommunityOwner,
     /// Actor is community `admin` in `relay_members`.
     CommunityAdmin,
+    /// Actor is community `moderator` in `relay_members`.
+    CommunityModerator,
     /// Actor is channel owner/admin of the target's channel.
     ChannelRole,
 }
@@ -100,10 +102,20 @@ pub async fn authorize_moderation_action(
         .map(|m| m.role);
 
     // The target's community role is read only for the admin guard rail — i.e.
-    // an admin actioning a pubkey with ban/timeout — so the owner and
-    // channel-role paths stay at a single query.
+    // an admin actioning a pubkey with ban/timeout — and for the moderator guard
+    // rail — a moderator cannot Kick/Timeout a community owner or admin.
     let target_role = match (actor_role.as_deref(), action, target) {
         (Some("admin"), ModerationAction::Ban | ModerationAction::Timeout, target) => {
+            match target {
+                ModerationTarget::Pubkey(pk) => state
+                    .db
+                    .get_relay_member(community, &hex::encode(pk))
+                    .await?
+                    .map(|m| m.role),
+                _ => None,
+            }
+        }
+        (Some("moderator"), ModerationAction::Kick | ModerationAction::Timeout, target) => {
             match target {
                 ModerationTarget::Pubkey(pk) => state
                     .db
@@ -119,7 +131,7 @@ pub async fn authorize_moderation_action(
     // The channel role is read only when community authority does not apply and
     // the action is channel-local (DeleteMessage/Kick within `channel_id`).
     let channel_role = match (actor_role.as_deref(), action, channel_id) {
-        (Some("owner") | Some("admin"), _, _) => None,
+        (Some("owner") | Some("admin") | Some("moderator"), _, _) => None,
         (_, ModerationAction::DeleteMessage | ModerationAction::Kick, Some(channel_id)) => {
             state
                 .db
@@ -168,8 +180,26 @@ fn decide_authority(
             }
             Ok(ModerationAuthority::CommunityAdmin)
         }
-        // Not a community owner/admin: channel owner/admin keep channel-local
-        // authority for DeleteMessage/Kick only.
+        // Moderator: ViewQueue, ResolveReport, DeleteMessage, Kick, Timeout,
+        // Untimeout — community-wide. Ban/Unban stay admin+ (only an admin or
+        // owner may lift or apply a ban). Guard rail: a moderator cannot Kick
+        // or Timeout the community owner or a fellow admin; only the owner can
+        // action an admin. Target-role reads for the guard are loaded by the
+        // caller in `authorize_moderation_action`; arriving here with a
+        // `Some("owner") | Some("admin")` target means the caller resolved it.
+        Some("moderator") => {
+            if matches!(action, ModerationAction::Ban | ModerationAction::Unban) {
+                anyhow::bail!("a moderator cannot ban or unban community members");
+            }
+            if matches!(action, ModerationAction::Kick | ModerationAction::Timeout)
+                && matches!(target_role, Some("owner") | Some("admin"))
+            {
+                anyhow::bail!("a moderator cannot kick or time out a community owner or admin");
+            }
+            Ok(ModerationAuthority::CommunityModerator)
+        }
+        // Not a community owner/admin/moderator: channel owner/admin keep
+        // channel-local authority for DeleteMessage/Kick only.
         _ => match (action, channel_role) {
             (
                 ModerationAction::DeleteMessage | ModerationAction::Kick,
@@ -331,5 +361,142 @@ mod tests {
                 "user with no role must be denied {action:?}"
             );
         }
+    }
+
+    // ── moderator tests ───────────────────────────────────────────────────────
+
+    /// Moderator can take every action except Ban/Unban, against non-privileged
+    /// targets (member, unknown, or no target).
+    #[test]
+    fn moderator_authorized_for_non_ban_actions_against_member_and_non_member() {
+        const MODERATOR_ALLOWED: [ModerationAction; 6] = [
+            ModerationAction::DeleteMessage,
+            ModerationAction::Kick,
+            ModerationAction::Timeout,
+            ModerationAction::Untimeout,
+            ModerationAction::ResolveReport,
+            ModerationAction::ViewQueue,
+        ];
+        for action in MODERATOR_ALLOWED {
+            assert_eq!(
+                ok(decide_authority(
+                    Some("moderator"),
+                    Some("member"),
+                    None,
+                    action
+                )),
+                ModerationAuthority::CommunityModerator,
+                "moderator must be authorized for {action:?} against a member"
+            );
+            assert_eq!(
+                ok(decide_authority(Some("moderator"), None, None, action)),
+                ModerationAuthority::CommunityModerator,
+                "moderator must be authorized for {action:?} against a non-member"
+            );
+        }
+    }
+
+    /// Moderator cannot ban or unban — those stay admin+.
+    #[test]
+    fn moderator_cannot_ban_or_unban() {
+        for action in [ModerationAction::Ban, ModerationAction::Unban] {
+            for target in [Some("member"), Some("moderator"), None] {
+                assert!(
+                    decide_authority(Some("moderator"), target, None, action).is_err(),
+                    "moderator must not {action:?} (target={target:?})"
+                );
+            }
+        }
+    }
+
+    /// Moderator guard rail: cannot Kick or Timeout the community owner or an admin.
+    #[test]
+    fn moderator_cannot_kick_or_timeout_owner_or_admin() {
+        for target in ["owner", "admin"] {
+            for action in [ModerationAction::Kick, ModerationAction::Timeout] {
+                assert!(
+                    decide_authority(Some("moderator"), Some(target), None, action).is_err(),
+                    "moderator must not {action:?} a community {target}"
+                );
+            }
+        }
+    }
+
+    /// Moderator guard rail is scoped to Kick/Timeout — not to Untimeout or
+    /// other actions. Reversals on admin targets are always allowed.
+    #[test]
+    fn moderator_guard_rail_scoped_to_kick_and_timeout() {
+        for action in [
+            ModerationAction::Untimeout,
+            ModerationAction::DeleteMessage,
+            ModerationAction::ResolveReport,
+            ModerationAction::ViewQueue,
+        ] {
+            // Even against an admin target: the guard rail only protects
+            // applying punitive actions, not reversals or reads.
+            assert_eq!(
+                ok(decide_authority(
+                    Some("moderator"),
+                    Some("admin"),
+                    None,
+                    action
+                )),
+                ModerationAuthority::CommunityModerator,
+                "moderator must be authorized for {action:?} even against an admin target"
+            );
+        }
+    }
+
+    /// Moderator can Kick/Timeout plain members and non-members — the guard
+    /// rail fires only on owner/admin targets.
+    #[test]
+    fn moderator_can_kick_and_timeout_plain_targets() {
+        for action in [ModerationAction::Kick, ModerationAction::Timeout] {
+            assert_eq!(
+                ok(decide_authority(
+                    Some("moderator"),
+                    Some("member"),
+                    None,
+                    action
+                )),
+                ModerationAuthority::CommunityModerator,
+                "moderator must be authorized for {action:?} against a member"
+            );
+            assert_eq!(
+                ok(decide_authority(Some("moderator"), None, None, action)),
+                ModerationAuthority::CommunityModerator,
+                "moderator must be authorized for {action:?} against a non-member"
+            );
+            // Moderator targets are peers — no guard rail there.
+            assert_eq!(
+                ok(decide_authority(
+                    Some("moderator"),
+                    Some("moderator"),
+                    None,
+                    action
+                )),
+                ModerationAuthority::CommunityModerator,
+                "moderator must be authorized for {action:?} against a fellow moderator"
+            );
+        }
+    }
+
+    /// A community moderator has no channel role loaded (the caller skips the
+    /// channel_role DB read for community-level actors), so the channel_role
+    /// fallthrough never fires for them.
+    #[test]
+    fn moderator_does_not_use_channel_role_path() {
+        // Even if a channel_role value somehow arrived (misconfigured caller),
+        // the moderator arm fires before the channel-role fallthrough.
+        assert_eq!(
+            ok(decide_authority(
+                Some("moderator"),
+                None,
+                Some("owner"),
+                ModerationAction::Kick
+            )),
+            ModerationAuthority::CommunityModerator,
+            "moderator arm must win over the channel-role fallthrough"
+        );
     }
 }

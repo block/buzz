@@ -2238,6 +2238,29 @@ impl Db {
         channel::remove_member(&self.pool, community_id, channel_id, pubkey, actor_pubkey).await
     }
 
+    /// Removes a channel member as an authorized community moderator, bypassing
+    /// the channel-role requirement of [`Self::remove_member`].
+    ///
+    /// Must only be called after `authorize_moderation_action(..., Kick)` has
+    /// succeeded — the function name is the contract; no `skip_auth` flag.
+    /// See [`channel::remove_member_as_community_moderator`].
+    pub async fn remove_member_as_community_moderator(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        target_pubkey: &[u8],
+        actor_pubkey: &[u8],
+    ) -> Result<()> {
+        channel::remove_member_as_community_moderator(
+            &self.pool,
+            community_id,
+            channel_id,
+            target_pubkey,
+            actor_pubkey,
+        )
+        .await
+    }
+
     /// Returns `true` if the pubkey is an active member.
     pub async fn is_member(
         &self,
@@ -4104,6 +4127,20 @@ impl Db {
     ) -> Result<relay_members::RemoveResult> {
         relay_members::remove_relay_member_if_role(&self.pool, community, pubkey, expected_role)
             .await
+    }
+
+    /// Atomically removes a relay member from `community` only if their role
+    /// is `'member'` or `'moderator'`.
+    ///
+    /// Used by the admin 9031 path so an admin cannot remove a fellow admin
+    /// or owner.  Returns `RoleMismatch` when the target holds an elevated
+    /// role.  See [`relay_members::remove_relay_member_if_non_admin`].
+    pub async fn remove_relay_member_if_non_admin(
+        &self,
+        community: CommunityId,
+        pubkey: &str,
+    ) -> Result<relay_members::RemoveResult> {
+        relay_members::remove_relay_member_if_non_admin(&self.pool, community, pubkey).await
     }
 
     /// Updates the role of an existing relay member in `community`. Returns `true` if updated.

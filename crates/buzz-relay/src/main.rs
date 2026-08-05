@@ -1708,7 +1708,7 @@ async fn emit_db_usage_metrics(
     // Zero-fill across all (community, role) pairs; relay_members.role is a
     // CHECK constraint over {'owner', 'admin', 'member'}.
     {
-        const RELAY_ROLES: &[&str] = &["owner", "admin", "member"];
+        const RELAY_ROLES: &[&str] = &["owner", "admin", "moderator", "member"];
         let rows: HashMap<(Uuid, &str), i64> = relay_member_rows
             .into_iter()
             .filter_map(|r| {

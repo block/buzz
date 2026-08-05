@@ -248,6 +248,43 @@ test("resolvableActions: timeout is never offered from one-click yet", () => {
   }
 });
 
+// ── canBan=false (moderator actor) ────────────────────────────────────────────
+
+test("resolvableActions: canBan=false hides ban from event target with channel", () => {
+  const actions = resolvableActions("event", true, false);
+  assert.ok(!actions.includes("ban"), "ban must not appear for moderators");
+  // delete and kick are still available (moderator can use them)
+  assert.ok(actions.includes("delete"));
+  assert.ok(actions.includes("kick"));
+  assert.ok(actions.includes("escalate"));
+  assert.ok(actions.includes("dismiss"));
+});
+
+test("resolvableActions: canBan=false hides ban from event target without channel", () => {
+  const actions = resolvableActions("event", false, false);
+  assert.ok(!actions.includes("ban"));
+  assert.ok(actions.includes("escalate"));
+  assert.ok(actions.includes("dismiss"));
+});
+
+test("resolvableActions: canBan=false hides ban from pubkey target", () => {
+  const actions = resolvableActions("pubkey", false, false);
+  assert.ok(!actions.includes("ban"));
+  // pubkey targets have no delete/kick regardless
+  assert.ok(!actions.includes("delete"));
+  assert.ok(!actions.includes("kick"));
+  assert.ok(actions.includes("escalate"));
+  assert.ok(actions.includes("dismiss"));
+});
+
+test("resolvableActions: canBan=true (default) still includes ban for event target with channel", () => {
+  // Ensure the default backward-compat value is preserved for admins.
+  const withDefault = resolvableActions("event", true);
+  const withExplicit = resolvableActions("event", true, true);
+  assert.deepEqual(withDefault, withExplicit);
+  assert.ok(withDefault.includes("ban"));
+});
+
 test("buildModerationQueue carries channelId from the report onto the group", () => {
   const t = "d".repeat(64);
   const [group] = buildModerationQueue([

@@ -716,6 +716,7 @@ pub fn run() {
             get_channel_messages_before,
             edit_message,
             delete_message,
+            moderator_delete_message,
             add_reaction,
             remove_reaction,
             get_event,

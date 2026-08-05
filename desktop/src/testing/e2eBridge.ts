@@ -367,7 +367,7 @@ type E2eConfig = {
     relayRequiresMembership?: boolean;
     /** Delay EOSE for membership snapshots after delivering the event. */
     relayMembershipEoseDelayMs?: number;
-    relayRole?: "owner" | "admin" | "member" | null;
+    relayRole?: "owner" | "admin" | "moderator" | "member" | null;
     // Descriptors returned by the mocked `pick_and_upload_media` /
     // `upload_media_bytes` commands. Lets a spec drive the attachment flow
     // (e.g. a generic PDF) without a real upload pipeline. See
@@ -543,7 +543,7 @@ type RawBlobDescriptor = {
 
 type RawRelayMember = {
   pubkey: string;
-  role: "owner" | "admin" | "member";
+  role: "owner" | "admin" | "moderator" | "member";
   added_by: string | null;
   created_at: string;
 };

@@ -12,11 +12,8 @@ import {
 } from "@/features/moderation/hooks";
 import { useMyRelayMembershipQuery } from "@/features/community-members/hooks";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
-import {
-  deleteMessage,
-  getEventById,
-  removeChannelMember,
-} from "@/shared/api/tauri";
+import { getEventById, removeChannelMember } from "@/shared/api/tauri";
+import { moderatorDeleteMessage } from "@/shared/api/moderator";
 import {
   buildModerationQueue,
   groupTopReportType,
@@ -30,6 +27,7 @@ import {
   type ReportType,
   type SeverityTier,
 } from "@/features/settings/lib/moderationQueue";
+import { moderationCapabilities } from "@/features/moderation/lib/capabilities";
 import { cn } from "@/shared/lib/cn";
 import { truncatePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
@@ -115,7 +113,9 @@ async function enforceResolution(
     case "delete":
       // Gated to event targets with a channel (resolvableActions).
       if (group.channelId == null) throw new Error("Report has no channel.");
-      await deleteMessage(group.channelId, group.target);
+      // Use kind 9005 (moderator delete) since the queue actor may not own
+      // the message. The relay validates authority via the moderation seam.
+      await moderatorDeleteMessage(group.channelId, group.target);
       return;
     case "ban":
       await ban({ pubkey: await resolveTargetAuthor(group) });
@@ -280,11 +280,13 @@ function QueueGroupCard({
   reporterNames,
   onResolve,
   disabled,
+  canBan,
 }: {
   group: ModerationQueueGroup;
   reporterNames: Record<string, string | null | undefined>;
   onResolve: (group: ModerationQueueGroup, action: ResolutionAction) => void;
   disabled: boolean;
+  canBan: boolean;
 }) {
   const topType = groupTopReportType(group);
   const tier = severityTier(topType);
@@ -321,6 +323,7 @@ function QueueGroupCard({
             allowed={resolvableActions(
               group.targetKind,
               group.channelId != null,
+              canBan,
             )}
             disabled={disabled}
             onResolve={(action) => onResolve(group, action)}
@@ -361,6 +364,8 @@ function QueueTab() {
   const auditQuery = useModerationAuditQuery();
   const resolveMutation = useResolveReportMutation();
   const banMutation = useBanMemberMutation();
+  const membershipQuery = useMyRelayMembershipQuery();
+  const caps = moderationCapabilities(membershipQuery.data?.role);
 
   const groups = useMemo(() => {
     const reports = (reportsQuery.data ?? []).map(toQueueReport);
@@ -440,6 +445,7 @@ function QueueTab() {
     <div className="space-y-3">
       {groups.map((group) => (
         <QueueGroupCard
+          canBan={caps.canBan}
           disabled={resolveMutation.isPending || banMutation.isPending}
           group={group}
           key={group.targetKey}
@@ -543,7 +549,8 @@ function AuditTab() {
 export function ModerationQueueCard() {
   const membershipQuery = useMyRelayMembershipQuery();
   const role = membershipQuery.data?.role;
-  const isModerator = role === "owner" || role === "admin";
+  const isModerator =
+    role === "owner" || role === "admin" || role === "moderator";
 
   return (
     <section

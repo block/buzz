@@ -17,6 +17,9 @@ use buzz_core::StoredEvent;
 use buzz_db::channel::{MemberRecord, MemberRole};
 
 use super::event::dispatch_persistent_event;
+use crate::handlers::moderation_authz::{
+    authorize_moderation_action, ModerationAction, ModerationTarget,
+};
 use crate::protocol::RelayMessage;
 use crate::state::AppState;
 use buzz_core::tenant::TenantContext;
@@ -480,13 +483,52 @@ pub async fn validate_admin_event(
                         {
                             Ok(())
                         } else {
-                            Err(anyhow::anyhow!("actor not authorized"))
+                            // Additive relay-role path: a community moderator
+                            // (or community owner/admin lacking a channel role)
+                            // may kick a member via 9001. `authorize_moderation_action`
+                            // resolves the target's relay role for the guard-rail
+                            // check inside the call.
+                            authorize_moderation_action(
+                                tenant,
+                                state,
+                                &actor_bytes,
+                                Some(channel_id),
+                                ModerationTarget::Pubkey(&target_pubkey),
+                                ModerationAction::Kick,
+                            )
+                            .await
+                            .map(|_| ())
+                            .map_err(|_| anyhow::anyhow!("actor not authorized"))
                         }
                     }
-                    // Non-members fall here. We intentionally do NOT check
-                    // is_agent_owner for non-members — you must be in the channel
-                    // to remove anyone, even your own bot.
-                    _ => Err(anyhow::anyhow!("actor not authorized")),
+                    // Non-members: check relay-role authority before failing.
+                    // A community moderator who holds no channel membership can
+                    // still kick via the relay-role seam.
+                    _ => {
+                        if state
+                            .db
+                            .is_agent_owner(tenant.community(), &target_pubkey, &actor_bytes)
+                            .await?
+                        {
+                            // NOTE: agent-owner callers are also channel members
+                            // (agents join before humans chat with them), but
+                            // handle the edge case uniformly — agent owners who
+                            // lost channel membership can still remove their bot.
+                            return Ok(());
+                        }
+                        // Relay-level authority path.
+                        authorize_moderation_action(
+                            tenant,
+                            state,
+                            &actor_bytes,
+                            Some(channel_id),
+                            ModerationTarget::Pubkey(&target_pubkey),
+                            ModerationAction::Kick,
+                        )
+                        .await
+                        .map(|_| ())
+                        .map_err(|_| anyhow::anyhow!("actor not authorized"))
+                    }
                 }
             }
         }
@@ -709,9 +751,31 @@ pub async fn validate_admin_event(
                 {
                     Ok(())
                 } else {
-                    Err(anyhow::anyhow!(
-                        "must be event author or channel owner/admin"
-                    ))
+                    // Additive relay-role path: community moderator (and
+                    // community owner/admin who lack a channel role) can delete
+                    // any message via 9005. The target author's role is loaded
+                    // inside `authorize_moderation_action` for the guard-rail
+                    // check; the author is already resolved above.
+                    authorize_moderation_action(
+                        tenant,
+                        state,
+                        &actor_bytes,
+                        Some(channel_id),
+                        ModerationTarget::Pubkey(&author),
+                        ModerationAction::DeleteMessage,
+                    )
+                    .await
+                    .map_err(|_| anyhow::anyhow!("must be event author or channel owner/admin"))
+                    .map(|_authority| {
+                        // authorization succeeded; log here rather than
+                        // persisting (per the plan's audit-attribution decision)
+                        tracing::debug!(
+                            actor = %hex::encode(&actor_bytes),
+                            target_author = %hex::encode(&author),
+                            channel = %channel_id,
+                            "9005 authorized via relay-role moderation seam"
+                        );
+                    })
                 }
             }
         }
@@ -1381,10 +1445,42 @@ async fn handle_remove_user(
         }
     }
 
-    state
+    // Route through the preauthorized mutation when the actor is not an active
+    // channel member (i.e., they arrived via the relay-role moderation seam —
+    // community moderator/owner/admin without a channel role). The standard
+    // `remove_member` path re-checks the channel role inside its transaction;
+    // a relay-level moderator who is not a channel member would fail that check.
+    let actor_has_channel_role = state
         .db
-        .remove_member(tenant.community(), channel_id, &target_pubkey, &actor_bytes)
-        .await?;
+        .get_member_role(tenant.community(), channel_id, &actor_bytes)
+        .await
+        .map(|r| r.is_some())
+        .unwrap_or(false);
+
+    if actor_has_channel_role || target_pubkey == actor_bytes {
+        state
+            .db
+            .remove_member(tenant.community(), channel_id, &target_pubkey, &actor_bytes)
+            .await?;
+    } else {
+        // Relay-role path: the validator already ran `authorize_moderation_action`
+        // and passed — call the preauthorized mutation (no channel-role re-check).
+        tracing::debug!(
+            actor = %hex::encode(&actor_bytes),
+            target = %hex::encode(&target_pubkey),
+            channel = %channel_id,
+            "9001 kick via relay-role moderation seam"
+        );
+        state
+            .db
+            .remove_member_as_community_moderator(
+                tenant.community(),
+                channel_id,
+                &target_pubkey,
+                &actor_bytes,
+            )
+            .await?;
+    }
     state.invalidate_membership(tenant, channel_id, &target_pubkey);
     evict_live_channel_subscriptions(tenant, state, channel_id, &target_pubkey).await;
     disable_departed_member_workflows(tenant, state, channel_id, &target_pubkey).await;

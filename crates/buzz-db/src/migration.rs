@@ -561,7 +561,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 27);
+        assert_eq!(migrations.len(), 28);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -940,6 +940,30 @@ mod tests {
             desired_schema.contains("idx_channels_id_live"),
             "desired-state schema must carry the channel-id lookup index",
         );
+
+        // Relay-member moderator role (0028): extends the relay_members.role
+        // CHECK to include 'moderator'.  The constraint is dropped and
+        // recreated by name (relay_members_role_check).  Schema snapshot must
+        // reflect the new value set; constraint in the migration must be safe
+        // to run on any brownfield that already has the three-value CHECK.
+        assert_eq!(migrations[27].version, 28);
+        let moderator_role = migrations[27].sql.as_str();
+        assert!(
+            moderator_role.contains("relay_members_role_check"),
+            "0028 must reference the constraint by its generated name",
+        );
+        assert!(
+            moderator_role.contains("'moderator'"),
+            "0028 must include 'moderator' in the new CHECK",
+        );
+        assert!(
+            moderator_role.contains("DROP CONSTRAINT IF EXISTS"),
+            "0028 must use DROP CONSTRAINT IF EXISTS for idempotency",
+        );
+        assert!(
+            desired_schema.contains("'moderator'"),
+            "desired-state schema must include 'moderator' in relay_members.role CHECK",
+        );
     }
 
     #[test]
@@ -1182,7 +1206,7 @@ mod tests {
         run_migrations(&pool)
             .await
             .expect("retry succeeds after operator repair");
-        assert_eq!(applied_versions(&pool).await.last().copied(), Some(27));
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(28));
     }
 
     #[tokio::test]

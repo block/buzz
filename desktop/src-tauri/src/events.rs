@@ -585,7 +585,7 @@ pub fn build_note(
 // ── Relay admin (NIP-43) ────────────────────────────────────────────────────
 
 /// Allowed relay member roles for NIP-43 admin commands.
-const VALID_RELAY_ROLES: &[&str] = &["owner", "admin", "member"];
+const VALID_RELAY_ROLES: &[&str] = &["owner", "admin", "moderator", "member"];
 
 fn check_relay_role(role: &str) -> Result<(), String> {
     if !VALID_RELAY_ROLES.contains(&role) {

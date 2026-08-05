@@ -68,6 +68,7 @@ use nostr::Event;
 use tracing::info;
 use uuid::Uuid;
 
+use crate::handlers::ingest::effective_message_author;
 use crate::handlers::moderation_authz::{
     authorize_moderation_action, ModerationAction, ModerationTarget,
 };
@@ -363,6 +364,18 @@ async fn handle_untimeout(
 
 // ── 9044: resolve report ─────────────────────────────────────────────────────
 
+/// The resolved report-action value: built once from the stored report and the
+/// (tombstoned-or-live) target event, then used for authorization and close.
+struct ResolvedReportAction {
+    /// The capability required to execute this action label.
+    required_capability: ModerationAction,
+    /// The effective author of the target (event reports) or the report target
+    /// itself (pubkey reports). Feeds the target-role guard rail check.
+    target_author: Vec<u8>,
+    /// Channel id from the report row, required for delete/kick actions.
+    channel_id: Option<uuid::Uuid>,
+}
+
 async fn handle_resolve(
     tenant: &TenantContext,
     state: &Arc<AppState>,
@@ -396,17 +409,6 @@ async fn handle_resolve(
         ));
     }
 
-    authorize_moderation_action(
-        tenant,
-        state,
-        actor,
-        None,
-        ModerationTarget::Event(&report_event_id),
-        ModerationAction::ResolveReport,
-    )
-    .await
-    .map_err(authz_denial)?;
-
     // Resolve the report row under this tenant only. The `report` tag carries
     // the signed 1984 event id (pinned contract); look the row up by it.
     let report = state
@@ -428,6 +430,32 @@ async fn handle_resolve(
             "report is not open (already resolved or dismissed)",
         ));
     }
+
+    // Build the resolved report-action value once from the stored report and the
+    // (tombstoned-or-live) event. This is the single source of truth for target
+    // shape, effective author, channel, and required capability.
+    let resolved = build_resolved_action(tenant, state, &action, &report).await?;
+
+    // Authorize using the action-specific capability and target author.
+    // Log the authorization decision (attempt) now; the success log fires after
+    // mutation commit below.
+    let authority = authorize_moderation_action(
+        tenant,
+        state,
+        actor,
+        resolved.channel_id,
+        ModerationTarget::Pubkey(&resolved.target_author),
+        resolved.required_capability,
+    )
+    .await
+    .map_err(authz_denial)?;
+    tracing::debug!(
+        action = %action,
+        capability = ?resolved.required_capability,
+        authority = ?authority,
+        actor = %hex::encode(actor),
+        "9044 authorization attempt"
+    );
 
     // Carry the report's own target into the audit row so `delete`/`kick`/`ban`
     // resolutions record what they acted on.
@@ -456,7 +484,7 @@ async fn handle_resolve(
     )
     .await?;
 
-    let resolved = state
+    let resolved_db = state
         .db
         .resolve_moderation_report(
             tenant.community(),
@@ -467,11 +495,20 @@ async fn handle_resolve(
         )
         .await
         .map_err(|e| error(format!("database error: {e}")))?;
-    if !resolved {
+    if !resolved_db {
         return Err(invalid(
             "report is not open (already resolved or dismissed)",
         ));
     }
+
+    // Log after mutation commit (per the plan's authority-logging disposition).
+    info!(
+        report_id = %report.id,
+        status = %status,
+        action = %action,
+        authority = ?authority,
+        "report resolved"
+    );
 
     // Close the loop: DM the reporter that their report was reviewed.
     let summary = reason.clone().unwrap_or_else(|| match status.as_str() {
@@ -493,8 +530,106 @@ async fn handle_resolve(
         info!(error = %e, "report-resolution notice DM delivery failed (report still resolved)");
     }
 
-    info!(report_id = %report.id, status = %status, action = %action, "report resolved");
     Ok(())
+}
+
+/// Build the [`ResolvedReportAction`] from the stored report and the action
+/// label. This is the normalization matrix from plan v3.2:
+///
+/// - `delete` / `kick`: require an event target **with a channel_id**; the
+///   target event is resolved via `get_event_by_id_including_deleted` (the
+///   queue enforce-first, so the 9005 target is tombstoned by 9044 time — a
+///   live-only read would strand the report open); real author via
+///   `effective_message_author`.
+/// - `ban` / `timeout`: require a pubkey target or an event target whose
+///   effective author resolves; blob targets rejected.
+/// - `dismiss` / `escalate`: decision-only, target-agnostic; target_author is
+///   set to the report's own reporter pubkey as a placeholder (it is never used
+///   in the capability check, which only requires `ResolveReport`).
+async fn build_resolved_action(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    action: &str,
+    report: &buzz_db::moderation::ReportRecord,
+) -> Result<ResolvedReportAction, String> {
+    use buzz_db::moderation::ReportTarget;
+
+    let required_capability = match action {
+        "delete" => ModerationAction::DeleteMessage,
+        "kick" => ModerationAction::Kick,
+        "ban" => ModerationAction::Ban,
+        "timeout" => ModerationAction::Timeout,
+        "dismiss" | "escalate" => ModerationAction::ResolveReport,
+        _ => return Err(invalid(format!("unknown action: {action}"))),
+    };
+
+    match action {
+        "delete" | "kick" => {
+            // Require an event target with a channel.
+            let event_id = match &report.target {
+                ReportTarget::Event(id) => id.clone(),
+                _ => {
+                    return Err(invalid(format!(
+                        "action `{action}` requires an event report target"
+                    )))
+                }
+            };
+            let channel_id = report.channel_id.ok_or_else(|| {
+                invalid(format!(
+                    "action `{action}` requires a report with a channel (event must belong to a channel)"
+                ))
+            })?;
+            // Use the including-deleted variant: the queue may have already
+            // executed a 9005 on this event before the 9044 arrived.
+            let stored = state
+                .db
+                .get_event_by_id_including_deleted(tenant.community(), &event_id)
+                .await
+                .map_err(|e| error(format!("database error looking up target event: {e}")))?
+                .ok_or_else(|| invalid("target event not found in this community"))?;
+            let target_author =
+                effective_message_author(&stored.event, &state.relay_keypair.public_key());
+            Ok(ResolvedReportAction {
+                required_capability,
+                target_author,
+                channel_id: Some(channel_id),
+            })
+        }
+        "ban" | "timeout" => {
+            // Require a pubkey target, or an event target whose effective author
+            // resolves. Blob targets are rejected.
+            let target_author = match &report.target {
+                ReportTarget::Pubkey(pk) => pk.clone(),
+                ReportTarget::Event(event_id) => {
+                    let stored = state
+                        .db
+                        .get_event_by_id_including_deleted(tenant.community(), event_id)
+                        .await
+                        .map_err(|e| error(format!("database error looking up target event: {e}")))?
+                        .ok_or_else(|| {
+                            invalid("target event not found — cannot resolve effective author")
+                        })?;
+                    effective_message_author(&stored.event, &state.relay_keypair.public_key())
+                }
+                ReportTarget::Blob(_) => {
+                    return Err(invalid(format!(
+                        "action `{action}` does not apply to blob targets"
+                    )))
+                }
+            };
+            Ok(ResolvedReportAction {
+                required_capability,
+                target_author,
+                channel_id: report.channel_id,
+            })
+        }
+        // dismiss / escalate are decision-only and target-agnostic.
+        _ => Ok(ResolvedReportAction {
+            required_capability,
+            target_author: report.reporter_pubkey.clone(),
+            channel_id: None,
+        }),
+    }
 }
 
 // ── shared helpers ────────────────────────────────────────────────────────────
