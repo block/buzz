@@ -465,9 +465,15 @@ fn deploy_payload_matches_the_shared_full_launch_fixture() {
     let agent = deploy_payload_json(
         &record,
         "wss://relay.example".into(),
-        Some("gpt-5".into()),
-        Some("openai".into()),
-        None,
+        DeployProjections {
+            effective_model: Some("gpt-5".into()),
+            effective_provider: Some("openai".into()),
+            effective_prompt: None,
+            effective_parallelism: crate::managed_agents::effective_parallelism(
+                &descriptor.command,
+                record.parallelism,
+            ),
+        },
         std::collections::BTreeMap::from([("USER_KEY".into(), "user-value".into())]),
         launch,
     );

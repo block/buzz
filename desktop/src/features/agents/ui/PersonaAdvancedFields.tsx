@@ -11,6 +11,7 @@ import {
 import {
   AGENT_PARALLELISM_HELP,
   AGENT_PARALLELISM_PLACEHOLDER,
+  parallelismCapHint,
 } from "../lib/agentParallelism";
 import {
   BuzzAgentModelTuningFields,
@@ -102,6 +103,26 @@ export function PersonaAdvancedFields({
     ],
     [hiddenEnvKeys, modelTuningRuntimeId, numericDescriptors],
   );
+
+  // Persona hint: definitions keep a portable requested value across harnesses.
+  // When the selected harness has a cap and the draft's parallelism exceeds it,
+  // explain that the agent will run at the cap — without clamping the stored value.
+  const personaParallelismHint = React.useMemo(() => {
+    if (
+      selectedRuntime?.maxParallelism === undefined ||
+      behaviorDraft.parallelism === ""
+    ) {
+      return null;
+    }
+    const requested = parseInt(behaviorDraft.parallelism, 10);
+    if (Number.isNaN(requested)) return null;
+    return parallelismCapHint(
+      selectedRuntime.label,
+      selectedRuntime.maxParallelism,
+      requested,
+    );
+  }, [selectedRuntime, behaviorDraft.parallelism]);
+
   return (
     <div className="space-y-5 pt-2">
       <CreateAgentRespondToField
@@ -159,6 +180,11 @@ export function PersonaAdvancedFields({
           <p className="text-xs text-muted-foreground">
             {AGENT_PARALLELISM_HELP}
           </p>
+          {personaParallelismHint !== null ? (
+            <p className="text-xs text-amber-600 dark:text-amber-400">
+              {personaParallelismHint}
+            </p>
+          ) : null}
         </div>
       </div>
 
