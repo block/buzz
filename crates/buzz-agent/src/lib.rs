@@ -12,7 +12,7 @@ pub mod model_capabilities;
 pub mod types;
 mod wire;
 
-pub use catalog::{discover_databricks_models, ModelEntry};
+pub use catalog::{discover_databricks_models, discover_openrouter_models, ModelEntry};
 pub use config::Provider;
 pub use types::AgentError;
 
@@ -445,6 +445,45 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
                             "Databricks model catalog unavailable; using configured model"
                         );
                         configured_model_fallback(&app.cfg.model)
+                    }
+                };
+                models
+                    .iter()
+                    .map(|m| json!({ "modelId": m.id, "name": m.name }))
+                    .collect()
+            }
+            // OpenRouter authenticates with a required static `OPENROUTER_API_KEY`
+            // (`Config::from_env` fails without one) and has no interactive OAuth
+            // path, so an auth failure here can never be recovered by a later
+            // `session/prompt`. That makes this the static-credential case the
+            // Databricks arm rejects on, with no OAuth branch to fall back to.
+            Provider::OpenRouter => {
+                let models = match resolve_models_catalog(
+                    &app.models_cache,
+                    discover_openrouter_models(&app.cfg),
+                )
+                .await
+                {
+                    Ok(models) => models,
+                    Err(error @ AgentError::LlmAuth(_)) => {
+                        return reject(wire_tx, id, error.json_rpc_code(), &error.to_string())
+                            .await;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "OpenRouter model catalog unavailable; using configured model"
+                        );
+                        // OpenRouter ids are already human-readable (`vendor/model`),
+                        // so the configured value is both id and label. The Databricks
+                        // manifest lookup in `configured_model_fallback` is deliberately
+                        // not reused — it would resolve an OpenRouter id against the
+                        // wrong registry.
+                        let model = app.cfg.model.trim().to_string();
+                        vec![ModelEntry {
+                            id: model.clone(),
+                            name: model,
+                        }]
                     }
                 };
                 models

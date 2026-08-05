@@ -1,8 +1,8 @@
-//! Databricks model catalog discovery.
+//! Model catalog discovery.
 //!
-//! Exposes [`discover_databricks_models`] — an async helper that lists
-//! available models for the `databricks` and `databricks_v2` providers
-//! without triggering a browser OAuth flow. Auth is acquired in-process via
+//! Exposes [`discover_databricks_models`] and [`discover_openrouter_models`] —
+//! async helpers that list available models for a provider without triggering a
+//! browser OAuth flow. Auth is acquired in-process via
 //! [`build_token_source`](crate::llm::build_token_source):
 //!
 //! - Static bearer (`DATABRICKS_TOKEN`): returned immediately.
@@ -135,6 +135,138 @@ async fn discover_databricks_models_with_token_source(
             result => return result,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// OpenRouter — api/v1/models/user (falls back to api/v1/models)
+// ---------------------------------------------------------------------------
+
+/// Discover available models for [`Provider::OpenRouter`].
+///
+/// Queries `/models/user` — the **account-scoped** catalog — rather than the
+/// global `/models`. This distinction is not cosmetic: `/models` lists every
+/// model OpenRouter knows about (338 at time of writing, 272 tools-capable),
+/// but a given account can only call the subset on its eligibility allowlist
+/// (21, of which 13 are tools-capable). Calling an ineligible model returns
+///
+/// > HTTP 404 "No endpoints available matching your guardrail restrictions and
+/// > data policy"
+///
+/// which reads like a privacy-settings problem and sends you looking in the
+/// wrong place. Advertising the global list in a model picker therefore offers
+/// hundreds of models that fail at request time, so `/models/user` is the
+/// correct source and `/models` is only a degraded fallback for keys whose
+/// account scope is unavailable.
+///
+/// Returns a non-empty `Vec<ModelEntry>` on success. Returns
+/// `Err(AgentError::LlmAuth)` when no token is available — callers degrade
+/// gracefully via [`discovery_failure_fallback`].
+///
+/// # Panics
+/// Never panics.
+pub async fn discover_openrouter_models(cfg: &Config) -> Result<Vec<ModelEntry>, AgentError> {
+    if cfg.provider != Provider::OpenRouter {
+        return Err(AgentError::InvalidParams(
+            "discover_openrouter_models called for non-OpenRouter provider".into(),
+        ));
+    }
+    let token_source = build_token_source(cfg)?;
+    let bearer = token_source.bearer_no_browser().await?;
+
+    let http = Client::new();
+    let host = cfg.base_url.trim_end_matches('/');
+
+    // Account-scoped first; fall back to the global catalog only if that fails.
+    match fetch_openrouter_models(&http, &format!("{host}/models/user"), &bearer).await {
+        Ok(models) => Ok(models),
+        Err(scoped_err) => {
+            tracing::debug!(
+                error = %scoped_err,
+                "OpenRouter account-scoped model discovery failed; falling back to the global catalog (may list models this account cannot call)"
+            );
+            fetch_openrouter_models(&http, &format!("{host}/models"), &bearer).await
+        }
+    }
+}
+
+async fn fetch_openrouter_models(
+    http: &Client,
+    url: &str,
+    bearer: &str,
+) -> Result<Vec<ModelEntry>, AgentError> {
+    let response = http
+        .get(url)
+        .bearer_auth(bearer)
+        .send()
+        .await
+        .map_err(|e| AgentError::Llm(format!("OpenRouter model discovery request failed: {e}")))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(AgentError::Llm(format!(
+            "OpenRouter model discovery HTTP {status}: {body}"
+        )));
+    }
+
+    let json: serde_json::Value = response.json().await.map_err(|e| {
+        AgentError::Llm(format!(
+            "OpenRouter model discovery response parse failed: {e}"
+        ))
+    })?;
+
+    parse_openrouter_models(&json)
+}
+
+/// Parse an OpenRouter `models` payload into selectable entries.
+///
+/// Keeps only models advertising the `tools` parameter: this catalog feeds an
+/// agent harness, and a model that cannot take tool calls cannot do the job, so
+/// offering it in the picker only produces a confusing failure later.
+pub(crate) fn parse_openrouter_models(
+    json: &serde_json::Value,
+) -> Result<Vec<ModelEntry>, AgentError> {
+    let data = json.get("data").and_then(|v| v.as_array()).ok_or_else(|| {
+        AgentError::Llm(
+            "OpenRouter model discovery: unexpected response (missing 'data' array)".into(),
+        )
+    })?;
+
+    let models: Vec<ModelEntry> = data
+        .iter()
+        .filter_map(|entry| {
+            let id = entry.get("id")?.as_str()?.trim();
+            if id.is_empty() {
+                return None;
+            }
+            let tools_capable = entry
+                .get("supported_parameters")
+                .and_then(|v| v.as_array())
+                .is_some_and(|params| params.iter().any(|p| p.as_str() == Some("tools")));
+            if !tools_capable {
+                return None;
+            }
+            // OpenRouter has no separate display name; `name` carries a vendor
+            // label, but the id is what the picker must round-trip.
+            let name = entry
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(id);
+            Some(ModelEntry {
+                id: id.to_string(),
+                name: name.to_string(),
+            })
+        })
+        .collect();
+
+    if models.is_empty() {
+        return Err(AgentError::Llm(
+            "OpenRouter model discovery returned no tools-capable models".into(),
+        ));
+    }
+    Ok(models)
 }
 
 // ---------------------------------------------------------------------------
@@ -478,6 +610,75 @@ mod tests {
         assert_eq!(models[0].id, "discovered-model");
         assert_eq!(source.refreshes.load(Ordering::SeqCst), 1);
         assert_eq!(requests.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn openrouter_parse_keeps_only_tools_capable_models() {
+        let json = serde_json::json!({
+            "data": [
+                // included: advertises tools
+                {"id": "openai/gpt-5.6-luna", "name": "OpenAI: GPT-5.6 Luna",
+                 "supported_parameters": ["tools", "temperature"]},
+                // included: tools among many params
+                {"id": "deepseek/deepseek-v4-flash-0731",
+                 "supported_parameters": ["temperature", "tools"]},
+                // excluded: no tools support — cannot serve an agent harness
+                {"id": "some/completion-only", "supported_parameters": ["temperature"]},
+                // excluded: supported_parameters absent entirely
+                {"id": "some/unknown-caps"},
+                // excluded: empty id
+                {"id": "   ", "supported_parameters": ["tools"]},
+            ]
+        });
+
+        let models = parse_openrouter_models(&json).unwrap();
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["openai/gpt-5.6-luna", "deepseek/deepseek-v4-flash-0731"]
+        );
+        // `name` is used when present, else the id round-trips as the label.
+        assert_eq!(models[0].name, "OpenAI: GPT-5.6 Luna");
+        assert_eq!(models[1].name, "deepseek/deepseek-v4-flash-0731");
+    }
+
+    #[test]
+    fn openrouter_parse_errors_on_missing_data_array() {
+        let json = serde_json::json!({"endpoints": []});
+        let err = parse_openrouter_models(&json).unwrap_err();
+        assert!(
+            format!("{err}").contains("missing 'data' array"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn openrouter_parse_errors_when_nothing_is_tools_capable() {
+        // A catalog that parses but offers nothing usable must be an error, not an
+        // empty picker: an empty list would make every switch_model request fail
+        // validation with no indication of why.
+        let json = serde_json::json!({
+            "data": [{"id": "a/b", "supported_parameters": ["temperature"]}]
+        });
+        let err = parse_openrouter_models(&json).unwrap_err();
+        assert!(
+            format!("{err}").contains("no tools-capable models"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn openrouter_fallback_is_the_configured_model() {
+        // Discovery failure must still leave the picker able to represent the
+        // model the agent is actually running.
+        let entries = discovery_failure_fallback(Provider::OpenRouter, "openai/gpt-5.6-luna");
+        assert_eq!(
+            entries,
+            vec![ModelEntry {
+                id: "openai/gpt-5.6-luna".into(),
+                name: "openai/gpt-5.6-luna".into()
+            }]
+        );
     }
 
     #[test]
