@@ -70,6 +70,33 @@ test("lost boot opens onboarding gate directly on the key-import page", async ({
   });
 });
 
+test("lost boot keeps the pairing-code action stable while generating", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    { identityLost: true, pairingStartDelayMs: 2_500 },
+    { skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("nostr-import-phone-link").click();
+  const copyButton = page.getByTestId("copy-identity-recovery-code");
+  await expect(copyButton).toBeVisible();
+  await expect(copyButton).toBeDisabled();
+  await expect(copyButton).toHaveText("Generating pairing code...");
+  const loadingButton = await copyButton.elementHandle();
+
+  await expect(copyButton).toBeEnabled();
+  await expect(copyButton).toHaveText("Copy pairing code");
+  expect(
+    await copyButton.evaluate(
+      (button, loading) => button === loading,
+      loadingButton,
+    ),
+  ).toBe(true);
+});
+
 test("lost boot offers phone recovery with a single-use QR", async ({
   page,
 }, testInfo) => {
@@ -186,6 +213,17 @@ test("phone recovery uses the desktop pairing card semantics", async ({
   );
   await expect(card.getByTestId("deny-identity-recovery-sas")).toHaveText(
     "Cancel",
+  );
+  const cancelBox = await card
+    .getByTestId("deny-identity-recovery-sas")
+    .boundingBox();
+  const confirmBox = await card
+    .getByTestId("confirm-identity-recovery-sas")
+    .boundingBox();
+  expect(cancelBox).not.toBeNull();
+  expect(confirmBox).not.toBeNull();
+  expect((cancelBox?.y ?? 0) - (confirmBox?.y ?? 0)).toBeGreaterThan(
+    confirmBox?.height ?? 0,
   );
 });
 

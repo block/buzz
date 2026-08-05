@@ -191,7 +191,15 @@ export function IdentityRecoveryPairing({
               This gives this desktop permanent access to your Buzz identity.
               Only continue if you trust it.
             </p>
-            <div className="flex w-full gap-2">
+            <div className="flex w-full flex-col gap-2">
+              <Button
+                className="flex-1"
+                data-testid="confirm-identity-recovery-sas"
+                onClick={() => void confirm()}
+              >
+                <Check className="mr-1.5 h-4 w-4" />
+                Codes match
+              </Button>
               <Button
                 className="flex-1"
                 data-testid="deny-identity-recovery-sas"
@@ -200,14 +208,6 @@ export function IdentityRecoveryPairing({
               >
                 <X className="mr-1.5 h-4 w-4" />
                 Cancel
-              </Button>
-              <Button
-                className="flex-1"
-                data-testid="confirm-identity-recovery-sas"
-                onClick={() => void confirm()}
-              >
-                <Check className="mr-1.5 h-4 w-4" />
-                Codes match
               </Button>
             </div>
           </div>
@@ -238,21 +238,28 @@ export function IdentityRecoveryPairing({
           </div>
         )}
       </div>
-      {step === "qr" && qrUri ? (
+      {step === "loading" || (step === "qr" && qrUri) ? (
         <Button
           className="w-full border-foreground/20 bg-white text-foreground shadow-none hover:bg-black/5"
           data-testid="copy-identity-recovery-code"
+          disabled={step === "loading"}
           onClick={() => void copyPairingCode()}
           size="sm"
           type="button"
           variant="outline"
         >
-          {copied ? (
+          {step === "loading" ? (
+            <LoaderCircle className="mr-1.5 h-4 w-4 animate-spin" />
+          ) : copied ? (
             <Check className="mr-1.5 h-4 w-4" />
           ) : (
             <Copy className="mr-1.5 h-4 w-4" />
           )}
-          {copied ? "Copied" : "Copy pairing code"}
+          {step === "loading"
+            ? "Generating pairing code..."
+            : copied
+              ? "Copied"
+              : "Copy pairing code"}
         </Button>
       ) : null}
       {step === "qr" && error ? (
