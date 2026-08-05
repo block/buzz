@@ -208,6 +208,13 @@ export function useMediaUpload({
   }, []);
   const activeUploadingPreviewIdsRef = React.useRef(new Set<number>());
   const canceledUploadingPreviewIdsRef = React.useRef(new Set<number>());
+  /**
+   * Incremented whenever the composer's attachment set is replaced wholesale
+   * (draft/channel switch, post-send clear, edit restore). Uploads capture the
+   * epoch at start and discard their result if it no longer matches, so an
+   * upload started against one draft can never land in another.
+   */
+  const uploadEpochRef = React.useRef(0);
 
   // ── Drag-over visual indicator state ───────────────────────────────
   const [isDragOver, setIsDragOver] = React.useState(false);
@@ -451,10 +458,29 @@ export function useMediaUpload({
     return startIndex;
   }, []);
 
+  /**
+   * True when the composer's attachment set was replaced since `epoch` was
+   * captured, meaning an upload that started then belongs to a draft that is
+   * no longer on screen and must not write its descriptor.
+   */
+  const isUploadStale = React.useCallback(
+    (epoch: number) => epoch !== uploadEpochRef.current,
+    [],
+  );
+
   /** Fill a previously-reserved slot by index. */
   const fillSlot = React.useCallback(
-    (index: number, descriptor: BlobDescriptor, previewId?: number) => {
+    (
+      index: number,
+      descriptor: BlobDescriptor,
+      previewId?: number,
+      epoch = uploadEpochRef.current,
+    ) => {
       if (isUploadCanceled(previewId)) return;
+      if (isUploadStale(epoch)) {
+        finishUpload(previewId);
+        return;
+      }
       setImetaSlots((prev) => {
         const next = [...prev];
         next[index] = descriptor;
@@ -462,18 +488,26 @@ export function useMediaUpload({
       });
       finishUpload(previewId);
     },
-    [finishUpload, isUploadCanceled],
+    [finishUpload, isUploadCanceled, isUploadStale],
   );
 
   /** Append a single descriptor (no pre-reserved slot). */
   const onUploaded = React.useCallback(
-    (descriptor: BlobDescriptor, previewId?: number) => {
+    (
+      descriptor: BlobDescriptor,
+      previewId?: number,
+      epoch = uploadEpochRef.current,
+    ) => {
       if (isUploadCanceled(previewId)) return;
+      if (isUploadStale(epoch)) {
+        finishUpload(previewId);
+        return;
+      }
       nextSlotRef.current += 1;
       setImetaSlots((prev) => [...prev, descriptor]);
       finishUpload(previewId);
     },
-    [finishUpload, isUploadCanceled],
+    [finishUpload, isUploadCanceled, isUploadStale],
   );
 
   const onUploadError = React.useCallback(
@@ -491,6 +525,9 @@ export function useMediaUpload({
 
       setUploadingCount((count) => count + files.length);
       const baseIndex = reserveSlots(files.length);
+      // Pin the epoch at start: if the composer swaps drafts mid-flight, these
+      // completions are discarded rather than written into the new draft.
+      const epoch = uploadEpochRef.current;
 
       for (let index = 0; index < files.length; index++) {
         const file = files[index];
@@ -506,7 +543,7 @@ export function useMediaUpload({
               file.name,
               uploadProgressId(previewId),
             );
-            fillSlot(slotIndex, descriptor, previewId);
+            fillSlot(slotIndex, descriptor, previewId, epoch);
           } catch (err) {
             onUploadError(err, previewId);
           }
@@ -546,10 +583,12 @@ export function useMediaUpload({
     // descriptor when we get them back.
     const previewId = reserveUploadingPreview();
     setUploadingCount((c) => c + 1);
+    const epoch = uploadEpochRef.current;
     try {
       const descriptors = await pickAndUploadMedia(uploadProgressId(previewId));
       if (isUploadCanceled(previewId)) return;
       finishUpload(previewId);
+      if (isUploadStale(epoch)) return;
       for (const descriptor of descriptors) {
         nextSlotRef.current += 1;
         setImetaSlots((prev) => [...prev, descriptor]);
@@ -562,6 +601,7 @@ export function useMediaUpload({
     queueUntilSend,
     finishUpload,
     isUploadCanceled,
+    isUploadStale,
     onUploadError,
     queueFiles,
     reserveUploadingPreview,
@@ -667,6 +707,7 @@ export function useMediaUpload({
       }
       const previewId = reserveUploadingPreview(file);
       setUploadingCount((c) => c + 1);
+      const epoch = uploadEpochRef.current;
       try {
         const buffer = await file.arrayBuffer();
         if (isUploadCanceled(previewId)) return;
@@ -675,7 +716,7 @@ export function useMediaUpload({
           file.name,
           uploadProgressId(previewId),
         );
-        onUploaded(descriptor, previewId);
+        onUploaded(descriptor, previewId, epoch);
       } catch (err) {
         onUploadError(err, previewId);
       }
@@ -771,6 +812,13 @@ export function useMediaUpload({
   /** Public setter — replaces all slots (used by MessageComposer to clear/restore). */
   const setPendingImeta = React.useCallback(
     (action: React.SetStateAction<BlobDescriptor[]>) => {
+      // A wholesale replacement means the composer's contents were swapped out
+      // from under any in-flight upload: draft/channel switch, post-send clear,
+      // or edit-target restore. Bump the epoch so those uploads discard their
+      // results instead of landing in (or overwriting a slot reserved by) the
+      // draft that is now on screen. The updater form is an append against the
+      // *current* draft (e.g. agent-snapshot paste), so it must NOT bump.
+      if (typeof action !== "function") uploadEpochRef.current += 1;
       setImetaSlots((prev) => {
         const current = prev.filter((d): d is BlobDescriptor => d !== null);
         const next = typeof action === "function" ? action(current) : action;

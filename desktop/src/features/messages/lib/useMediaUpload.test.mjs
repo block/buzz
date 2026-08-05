@@ -142,3 +142,57 @@ test("reserveSlots pads if slots array is shorter than expected start index", ()
   assert.equal(next[3], null); // reserved
   assert.equal(next[4], null); // reserved
 });
+
+// ── Draft-boundary epoch guard (pure logic) ───────────────────────────
+// Photos/files upload immediately, so an upload can still be in flight when
+// the composer swaps drafts (channel switch, post-send clear, edit restore).
+// Every wholesale `setPendingImeta` replacement bumps an epoch; uploads pin
+// the epoch at start and discard their descriptor if it no longer matches, so
+// one draft's attachment can never land in — or overwrite a slot reserved by —
+// another draft. Mirrors `isUploadStale` + `fillSlot`/`onUploaded`.
+
+function fillSlotIfCurrent(slots, index, descriptor, epoch, currentEpoch) {
+  if (epoch !== currentEpoch) return slots;
+  const next = [...slots];
+  next[index] = descriptor;
+  return next;
+}
+
+test("upload completing in the same draft fills its slot", () => {
+  const a = { url: "a.png", sha256: "aaaa" };
+  const next = fillSlotIfCurrent([null], 0, a, 0, 0);
+  assert.deepEqual(next, [a]);
+});
+
+test("upload completing after a draft switch is discarded", () => {
+  // Draft A reserves slot 0 at epoch 0, user switches channels (epoch → 1),
+  // then the upload resolves. It must not write into draft B's slots.
+  const a = { url: "a.png", sha256: "aaaa" };
+  const draftBSlots = [null];
+  const next = fillSlotIfCurrent(draftBSlots, 0, a, 0, 1);
+  assert.deepEqual(next, [null]);
+  assert.equal(next, draftBSlots);
+});
+
+test("stale upload cannot overwrite a slot the new draft already filled", () => {
+  // Draft B has its own attachment in slot 0; draft A's late upload targets
+  // the same index and must leave B's descriptor intact.
+  const stale = { url: "stale.png", sha256: "aaaa" };
+  const current = { url: "current.png", sha256: "bbbb" };
+  const next = fillSlotIfCurrent([current], 0, stale, 0, 2);
+  assert.deepEqual(next, [current]);
+});
+
+test("appending to the current draft does not bump the epoch", () => {
+  // Only wholesale replacement (`setPendingImeta(array)`) is a draft boundary.
+  // The updater form appends within the current draft, so in-flight uploads
+  // for that same draft must still be considered current.
+  let epoch = 0;
+  const bumpIfReplacement = (action) => {
+    if (typeof action !== "function") epoch += 1;
+  };
+  bumpIfReplacement((current) => [...current, { url: "pasted.png" }]);
+  assert.equal(epoch, 0);
+  bumpIfReplacement([]);
+  assert.equal(epoch, 1);
+});
