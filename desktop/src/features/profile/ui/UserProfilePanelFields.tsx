@@ -105,7 +105,14 @@ export function useProfileFieldBuckets({
 }) {
   return React.useMemo(() => {
     const metadataFields = [
-      ...buildPublicFields({ pubkey, profile, relayAgent, isBot, persona }),
+      ...buildPublicFields({
+        managedAgent,
+        pubkey,
+        profile,
+        relayAgent,
+        isBot,
+        persona,
+      }),
       ...(ownerDisplayName || isOwner === true
         ? buildOwnerFields({
             includeOperationalFields: isOwner === true,
@@ -145,12 +152,14 @@ export function useProfileFieldBuckets({
 
 export function buildPublicFields({
   isBot,
+  managedAgent,
   persona,
   profile,
   pubkey,
   relayAgent,
 }: {
   isBot: boolean;
+  managedAgent?: ManagedAgent;
   persona?: AgentPersona;
   profile: Profile | undefined;
   pubkey: string | null;
@@ -177,10 +186,13 @@ export function buildPublicFields({
     });
   }
 
-  if (isBot && relayAgent?.agentType) {
+  if (isBot && (managedAgent || relayAgent?.agentType)) {
+    const agentType = managedAgent
+      ? managedAgentRuntimeLabel(managedAgent)
+      : runtimeLabel(relayAgent?.agentType);
     fields.push({
-      copyValue: relayAgent.agentType,
-      displayValue: runtimeLabel(relayAgent.agentType),
+      copyValue: managedAgent?.agentCommand || relayAgent?.agentType || undefined,
+      displayValue: agentType,
       icon: Cpu,
       label: "Agent type",
       testId: "user-profile-agent-type",
@@ -287,9 +299,13 @@ export function buildOwnerFields({
     return fields;
   }
 
-  if (managedAgent?.agentCommand) {
+  if (managedAgent) {
     fields.push({
-      copyValue: managedAgent.agentCommand,
+      copyValue:
+        managedAgent.agentCommand ||
+        (managedAgent.backend.type === "provider"
+          ? managedAgent.backend.id
+          : undefined),
       displayValue: managedAgentRuntimeLabel(managedAgent),
       icon: Terminal,
       label: "Runtime",

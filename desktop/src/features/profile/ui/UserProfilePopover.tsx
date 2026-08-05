@@ -617,7 +617,7 @@ export function UserProfilePopover({
 
           {isBotProfile && (managedAgent || relayAgent) ? (
             <div className="flex flex-wrap gap-1.5">
-              {managedAgent?.agentCommand ? (
+              {managedAgent ? (
                 <InfoBadge>{managedAgentRuntimeLabel(managedAgent)}</InfoBadge>
               ) : relayAgent?.agentType ? (
                 <InfoBadge>{runtimeLabel(relayAgent.agentType)}</InfoBadge>
