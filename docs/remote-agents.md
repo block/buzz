@@ -543,14 +543,17 @@ mis-tiered (below):
   `BUZZ_ACP_MAX_TURN_DURATION`, `BUZZ_ACP_AGENTS` — resolved by the desktop
   from the record's `system_prompt` / `idle_timeout_seconds` /
   `max_turn_duration_seconds` / `parallelism` (each omitted when null,
-  matching the local spawn's conditional emission). These are **tier-1 by
-  local fact, not by choice**: the local spawn writes them before the user
-  env layer (`runtime.rs:716-729,763` vs `:860`) and none is in
-  `RESERVED_ENV_KEYS`, so a power user's env override beats them today. A
-  provider that independently mapped the top-level payload copies after
-  `launch.env` would invert that — the structured field silently defeating
-  an override that works locally — which is why the provider MUST NOT remap
-  them (§Entrypoint mapping table).
+  matching the local spawn's conditional emission). `BUZZ_ACP_AGENTS` is
+  the **effective** parallelism: `min(record.parallelism, harness_cap)`
+  where the cap is harness-specific (e.g. OpenClaw is capped at 5). These
+  are **tier-1 control-plane** keys: `BUZZ_ACP_AGENTS` is in
+  `RESERVED_ENV_KEYS` (`env_vars.rs`) so the desktop-resolved effective
+  value cannot be overridden by a definition env var; the others are
+  tier-1 by local fact (written before the user env layer). A provider
+  that independently mapped the top-level payload copies after `launch.env`
+  would invert the precedence for those remaining keys — the structured
+  field silently defeating an override that works locally — which is why
+  the provider MUST NOT remap them (§Entrypoint mapping table).
 
 `BUZZ_ACP_DEDUP` and `BUZZ_ACP_MULTIPLE_EVENT_HANDLING` are **deliberately
 unset**: the local spawn writes `queue`/`steer` (`runtime.rs:730-731`), and
@@ -564,11 +567,17 @@ process to sweep.
 
 **Environment precedence (normative) — three tiers, later wins:**
 
-1. **Overridable behavior defaults** — `launch.policy_env`. These keys are
-   deliberately non-reserved (`env_vars.rs:54-57` says so outright: power
-   users may bypass the dedicated UI fields), and locally the user env is
-   written after them (`runtime.rs:860` and its comment). A policy-wins
-   order here would make remote agents ignore overrides local agents honor.
+1. **Overridable behavior defaults** — `launch.policy_env`. Most keys here
+   are deliberately non-reserved (`env_vars.rs` documents the narrow set
+   that IS reserved): power users may bypass the dedicated UI fields for
+   system prompt, model, idle timeout, etc. Locally the user env is written
+   after them (`runtime.rs:860` and its comment). A policy-wins order here
+   would make remote agents ignore overrides local agents honor.
+   **Exception — `BUZZ_ACP_AGENTS`:** this key IS reserved
+   (`env_vars.rs:RESERVED_ENV_KEYS`) so the desktop-controlled effective
+   parallelism (applying any per-harness cap) cannot be bypassed by a
+   user-supplied definition env var. The reserved-key strip removes any
+   user copy before serialization, so the tier-1 value survives.
 2. **User/layered env** — `launch.env`. User `env_vars` need no separate
    slot: the descriptor's layering already merged them (global < persona <
    agent), so a provider applies `launch.env` and MUST NOT re-merge the
@@ -1081,7 +1090,7 @@ individually:
 | `launch.args` | `BUZZ_ACP_AGENT_ARGS`, comma-joined |
 | `launch.env`, `launch.policy_env` | verbatim, at their precedence tiers |
 | generation token (§K8s Secrets) | `BUZZ_MANAGED_AGENT_START_NONCE` — the lifecycle-frame correlator and the Secret generation are one identity (§Launch data tier 3) |
-| `system_prompt`, `idle_timeout_seconds`, `max_turn_duration_seconds`, `parallelism` | **not mapped by the provider** — the desktop resolves these into `launch.policy_env` (`BUZZ_ACP_SYSTEM_PROMPT`, `BUZZ_ACP_IDLE_TIMEOUT`, `BUZZ_ACP_MAX_TURN_DURATION`, `BUZZ_ACP_AGENTS`), because they are tier-1 behavior knobs: locally they are written *before* the user env layer and none is reserved (`runtime.rs:716-729,763` vs `:860`; `env_vars.rs:54-57`), so user env beats them. A provider that mapped the top-level copies after `launch.env` would silently defeat an override that works locally. The top-level fields remain as display/bookkeeping inputs only |
+| `system_prompt`, `idle_timeout_seconds`, `max_turn_duration_seconds`, `parallelism` | **not mapped by the provider** — the desktop resolves these into `launch.policy_env` (`BUZZ_ACP_SYSTEM_PROMPT`, `BUZZ_ACP_IDLE_TIMEOUT`, `BUZZ_ACP_MAX_TURN_DURATION`, `BUZZ_ACP_AGENTS`). `BUZZ_ACP_AGENTS` carries the **effective** parallelism (`min(record.parallelism, harness_cap)`), is reserved (`env_vars.rs:RESERVED_ENV_KEYS`), and cannot be overridden by user env. The remaining knobs are tier-1 by local fact (written before user env); a provider that mapped the top-level copies after `launch.env` would silently defeat local overrides. The top-level fields remain as display/bookkeeping inputs only |
 | `turn_timeout_seconds` | not mapped — deprecated upstream and ignored; the local spawn also does not emit it |
 | `respond_to` | `BUZZ_ACP_RESPOND_TO` |
 | `respond_to_allowlist` | `BUZZ_ACP_RESPOND_TO_ALLOWLIST`, comma-joined |

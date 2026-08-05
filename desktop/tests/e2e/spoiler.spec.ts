@@ -102,7 +102,8 @@ test("image attachments can be marked and sent as hidden spoilers", async ({
   await expect(composer.getByAltText("Attachment cccc")).toBeVisible();
 
   // Media spoilers are toggled per-attachment from the lightbox.
-  await composer.getByAltText("Attachment cccc").click();
+  await composer.getByTestId("composer-media-attachment").hover();
+  await page.getByTestId("composer-attachment-annotate").click();
   await page.getByTestId("composer-attachment-spoiler").click();
   await page.keyboard.press("Escape");
   await expect(composer.locator("[data-composer-media-spoiler]")).toBeVisible();

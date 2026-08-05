@@ -48,7 +48,6 @@ type CommunityRailProps = {
     id: string,
     updates: Partial<Pick<Community, "name" | "relayUrl" | "token">>,
   ) => void;
-  onRemoveCommunity: (id: string) => void;
   onReorderCommunities: (orderedIds: string[]) => void;
 };
 
@@ -305,7 +304,6 @@ export function CommunityRail({
   onSwitchCommunity,
   onAddCommunity,
   onUpdateCommunity,
-  onRemoveCommunity,
   onReorderCommunities,
 }: CommunityRailProps) {
   const { unreadByCommunity, markCommunityRead } = useCommunityUnread(
@@ -370,7 +368,7 @@ export function CommunityRail({
   return (
     <nav
       aria-label="Communities"
-      className="relative z-20 flex w-14 shrink-0 flex-col items-center gap-2 overflow-y-auto bg-sidebar px-2.5 pb-5 pt-[calc(var(--buzz-top-chrome-height,40px)+7px)]"
+      className="relative z-0 flex w-14 shrink-0 flex-col items-center gap-2 overflow-y-auto bg-sidebar px-2.5 pb-5 pt-[calc(var(--buzz-top-chrome-height,40px)+7px)]"
       data-testid="community-rail"
     >
       <DndContext
@@ -423,11 +421,9 @@ export function CommunityRail({
         <TooltipContent side="right">Add community</TooltipContent>
       </Tooltip>
       <EditCommunityDialog
-        canRemove={communities.length > 1}
         onOpenChange={(open) => {
           if (!open) setEditingCommunity(null);
         }}
-        onRemove={onRemoveCommunity}
         onSave={onUpdateCommunity}
         open={editingCommunity !== null}
         community={editingCommunity}

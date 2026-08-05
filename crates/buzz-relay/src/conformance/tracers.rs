@@ -17,6 +17,12 @@ pub struct NoopTracer;
 
 impl Tracer for NoopTracer {
     fn record(&self, _step: TraceStep) {}
+
+    /// Nothing is observed, so emitters should skip building inputs —
+    /// including the read-seam's per-request `channels` lookup.
+    fn enabled(&self) -> bool {
+        false
+    }
 }
 
 /// JSONL-to-file tracer for tests + the CI replay job. Each `record` call

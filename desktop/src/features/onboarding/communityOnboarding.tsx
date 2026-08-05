@@ -329,14 +329,17 @@ const CommunityOnboardingContext =
 
 export function CommunityOnboardingProvider({
   children,
+  enabled = true,
 }: {
   children: React.ReactNode;
+  enabled?: boolean;
 }) {
-  const [transaction, setTransaction] = React.useState(
-    loadCommunityOnboardingTransaction,
+  const [transaction, setTransaction] = React.useState(() =>
+    enabled ? loadCommunityOnboardingTransaction() : null,
   );
   const start = React.useCallback(
     (input: StartCommunityOnboardingInput) => {
+      if (!enabled) return false;
       if (
         transaction &&
         canonicalRelayUrl(input.relayUrl) !== transaction.relayUrl
@@ -346,20 +349,22 @@ export function CommunityOnboardingProvider({
       setTransaction(startCommunityOnboarding(input));
       return true;
     },
-    [transaction],
+    [enabled, transaction],
   );
   const update = React.useCallback(
     (patch: CommunityOnboardingTransactionPatch, expectedId?: string) => {
+      if (!enabled) return;
       setTransaction((current) =>
         updateCurrentCommunityOnboardingTransaction(current, patch, expectedId),
       );
     },
-    [],
+    [enabled],
   );
   const clear = React.useCallback(() => {
+    if (!enabled) return;
     clearCommunityOnboardingTransaction();
     setTransaction(null);
-  }, []);
+  }, [enabled]);
   const value = React.useMemo(
     () => ({ transaction, start, update, clear }),
     [clear, start, transaction, update],

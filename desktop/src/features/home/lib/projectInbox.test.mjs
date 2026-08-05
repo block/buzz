@@ -34,11 +34,19 @@ function feedItem(overrides = {}) {
   };
 }
 
-const project = {
+const repository = {
   id: "buzz",
+  dtag: "buzz",
   name: "Buzz",
   owner: OWNER,
   repoAddress: REPO_ADDRESS,
+};
+
+const project = {
+  id: "buzz-project",
+  name: "Buzz",
+  owner: OWNER,
+  repositories: [repository],
 };
 
 const pullRequest = {
@@ -109,11 +117,11 @@ test("resolves the canonical project root from status and comment events", () =>
 test("matches a selected inbox event to its canonical pull request or issue", () => {
   const workItems = {
     pullRequests: {
-      items: [{ project, pullRequest }],
+      items: [{ project, repository, pullRequest }],
       failedSections: [],
     },
     issues: {
-      items: [{ project, issue }],
+      items: [{ project, repository, issue }],
       failedSections: [],
     },
   };
@@ -121,6 +129,7 @@ test("matches a selected inbox event to its canonical pull request or issue", ()
   assert.deepEqual(resolveProjectInboxWorkItem(feedItem(), workItems), {
     type: "pull-request",
     project,
+    repository,
     pullRequest,
   });
   assert.deepEqual(
@@ -139,6 +148,7 @@ test("matches a selected inbox event to its canonical pull request or issue", ()
     {
       type: "issue",
       project,
+      repository,
       issue,
     },
   );

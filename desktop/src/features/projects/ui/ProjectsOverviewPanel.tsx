@@ -1,4 +1,4 @@
-import { CircleDot, FolderGit2, GitPullRequest, Radio } from "lucide-react";
+import { CircleDot, FolderGit2, Folders, GitPullRequest } from "lucide-react";
 import type * as React from "react";
 
 import type {
@@ -7,14 +7,13 @@ import type {
 } from "@/features/projects/hooks";
 
 export type ProjectsOverviewSection =
+  | "projects"
   | "repositories"
   | "prs"
-  | "local"
   | "issues";
 
 type ProjectsOverviewPanelProps = {
   children: React.ReactNode;
-  localRepositoryCount: number;
   metadata: React.ReactNode;
   onSelectSection: (section: ProjectsOverviewSection) => void;
   projects: Project[];
@@ -27,7 +26,7 @@ function overviewStats(
 ) {
   return projects.reduce(
     (stats, project) => {
-      const summary = summaries?.[project.repoAddress];
+      const summary = summaries?.[project.id];
       return {
         issues: stats.issues + (summary?.issueCount ?? 0),
         prs: stats.prs + (summary?.prCount ?? 0),
@@ -70,7 +69,6 @@ function StatPill({
 
 export function ProjectsOverviewPanel({
   children,
-  localRepositoryCount,
   metadata,
   onSelectSection,
   projects,
@@ -84,6 +82,15 @@ export function ProjectsOverviewPanel({
         <div className="order-1 grid grid-cols-2 gap-2 p-4 pt-0 sm:gap-3 xl:order-none xl:col-start-1 xl:row-start-1 xl:grid-cols-4">
           <StatPill
             count={projects.length}
+            icon={Folders}
+            label="Projects"
+            onClick={() => onSelectSection("projects")}
+          />
+          <StatPill
+            count={projects.reduce(
+              (count, project) => count + project.repositories.length,
+              0,
+            )}
             icon={FolderGit2}
             label="Repositories"
             onClick={() => onSelectSection("repositories")}
@@ -93,12 +100,6 @@ export function ProjectsOverviewPanel({
             icon={GitPullRequest}
             label="Pull requests"
             onClick={() => onSelectSection("prs")}
-          />
-          <StatPill
-            count={localRepositoryCount}
-            icon={Radio}
-            label="Local"
-            onClick={() => onSelectSection("local")}
           />
           <StatPill
             count={stats.issues}

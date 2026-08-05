@@ -19,27 +19,25 @@ void main() {
       ),
     );
 
-    expect(gradient?.stops, [0, 0.5, 1]);
+    expect(gradient?.stops, [0, 0.18, 0.38, 0.6, 0.8, 1]);
     expect(gradient?.colors.first.a, 0);
-    expect(gradient?.colors[1].a, 0.75);
+    expect(gradient?.colors[1].a, closeTo(0.03, 0.01));
+    expect(gradient?.colors[3].a, closeTo(0.34, 0.01));
     expect(gradient?.colors.last.a, 1);
   });
 
-  testWidgets('uses the logical bottom safe-area inset', (tester) async {
+  testWidgets('uses a fixed 180px footer backdrop height', (tester) async {
     double? height;
 
     await tester.pumpWidget(
-      MediaQuery(
-        data: const MediaQueryData(padding: EdgeInsets.only(bottom: 34)),
-        child: Builder(
-          builder: (context) {
-            height = mobileTabFooterBackdropHeight(context);
-            return const SizedBox();
-          },
-        ),
+      Builder(
+        builder: (context) {
+          height = mobileTabFooterBackdropHeight(context);
+          return const SizedBox();
+        },
       ),
     );
 
-    expect(height, 170);
+    expect(height, 180);
   });
 }

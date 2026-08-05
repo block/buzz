@@ -54,10 +54,10 @@ struct App {
     llm: Arc<Llm>,
     sessions: Mutex<HashMap<String, Session>>,
     /// Cached model catalog for Databricks providers. Populated lazily on the
-    /// first successful `session/new` discovery call. When discovery fails (e.g.
-    /// auth missing or a transient network error) the cell is intentionally left
-    /// empty so the next `session/new` call retries — a transient failure never
-    /// pins the degraded fallback catalog for the process lifetime.
+    /// first successful `session/new` discovery call. Failed discovery is never
+    /// cached: static-token authentication errors reject session creation, while
+    /// OAuth authentication and non-auth errors use the configured model for that
+    /// response and retry on the next session.
     models_cache: tokio::sync::OnceCell<Vec<ModelEntry>>,
 }
 
@@ -135,6 +135,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+pub async fn authenticate_databricks(host: &str) -> Result<(), AgentError> {
+    auth::PkceOAuthTokenSource::new(llm::databricks_pkce_config(host))?
+        .interactive_login()
+        .await
+}
+
 /// `buzz-agent auth <provider>` — run the interactive auth flow for a
 /// provider and persist the result, then exit. Today this supports Databricks
 /// OAuth 2.0 PKCE. Reads `DATABRICKS_HOST` from env; needs a browser on the
@@ -145,18 +151,7 @@ async fn auth_subcommand(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         Some("databricks" | "databricks_v2" | "databricks-v2") => {
             let host = std::env::var("DATABRICKS_HOST")
                 .map_err(|_| "auth databricks: DATABRICKS_HOST required")?;
-            let pkce = auth::PkceOAuthConfig {
-                discovery_url: format!(
-                    "{}/oidc/.well-known/oauth-authorization-server",
-                    host.trim_end_matches('/')
-                ),
-                client_id: "databricks-cli".into(),
-                scopes: vec!["all-apis".into(), "offline_access".into()],
-                cache_namespace: "databricks".into(),
-                cache_dir_override: None,
-            };
-            let src = auth::PkceOAuthTokenSource::new(pkce)?;
-            src.interactive_login().await?;
+            authenticate_databricks(&host).await?;
             eprintln!("Authenticated. Token cached under ~/.config/buzz-agent/oauth/databricks/.");
             Ok(())
         }
@@ -317,26 +312,27 @@ async fn initialize(id: Value, params: Value, wire_tx: &WireSender) {
 ///
 /// Tries to use a previously-cached successful discovery result. If the cache is empty,
 /// runs `discover` and — on success — populates the cache for future calls. On failure
-/// the cell is intentionally left empty so the next session retries; the provider-aware
-/// fallback is returned for the immediate response only.
+/// the error is returned and the cell is intentionally left empty so the next session retries.
 ///
 /// Extracted from `session_new` so that tests can drive this path with an injected
 /// discovery future without requiring a full `App` / transport stack.
 async fn resolve_models_catalog(
     cache: &tokio::sync::OnceCell<Vec<ModelEntry>>,
-    provider: crate::config::Provider,
-    model: &str,
     discover: impl std::future::Future<Output = Result<Vec<ModelEntry>, AgentError>>,
-) -> Vec<ModelEntry> {
-    match cache.get_or_try_init(|| discover).await {
-        Ok(cached) => cached.clone(),
-        Err(e) => {
-            tracing::warn!(
-                "model catalog discovery failed: {e}; using fallback (will retry next session)"
-            );
-            crate::catalog::discovery_failure_fallback(provider, model)
-        }
-    }
+) -> Result<Vec<ModelEntry>, AgentError> {
+    cache.get_or_try_init(|| discover).await.cloned()
+}
+
+/// Return the configured model as a one-entry catalog for this response.
+///
+/// This value is never written to `models_cache`; failed discovery must be retried by
+/// the next session rather than pinning degraded state for the process lifetime.
+fn configured_model_fallback(model: &str) -> Vec<ModelEntry> {
+    let model = model.trim().to_string();
+    vec![ModelEntry {
+        id: model.clone(),
+        name: model,
+    }]
 }
 
 async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSender) {
@@ -400,6 +396,50 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
         }
         Arc::from(prompt)
     };
+    // Resolve the model catalog before spawning MCP servers or registering a
+    // session. A configured static credential cannot recover interactively, so
+    // its authentication failure rejects before allocation. OAuth authentication
+    // failures and other catalog failures use only the configured model for this
+    // response, without caching, so session/prompt can run the existing PKCE flow.
+    let available_models: Vec<Value> = {
+        use crate::config::Provider;
+        match app.cfg.provider {
+            Provider::Databricks | Provider::DatabricksV2 => {
+                let models = match resolve_models_catalog(
+                    &app.models_cache,
+                    discover_databricks_models(&app.cfg),
+                )
+                .await
+                {
+                    Ok(models) => models,
+                    Err(error @ AgentError::LlmAuth(_)) if !app.cfg.api_key.is_empty() => {
+                        return reject(wire_tx, id, error.json_rpc_code(), &error.to_string())
+                            .await;
+                    }
+                    Err(error @ AgentError::LlmAuth(_)) => {
+                        tracing::warn!(
+                            error = %error,
+                            "Databricks OAuth model catalog unavailable; using configured model"
+                        );
+                        configured_model_fallback(&app.cfg.model)
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "Databricks model catalog unavailable; using configured model"
+                        );
+                        configured_model_fallback(&app.cfg.model)
+                    }
+                };
+                models
+                    .iter()
+                    .map(|m| json!({ "modelId": m.id, "name": m.name }))
+                    .collect()
+            }
+            _ => vec![json!({ "modelId": app.cfg.model, "name": app.cfg.model })],
+        }
+    };
+
     let mcp = match McpRegistry::spawn_all(&app.cfg, &p.mcp_servers, &p.cwd).await {
         Ok(m) => Arc::new(m),
         Err(e) => return reject(wire_tx, id, e.json_rpc_code(), &e.to_string()).await,
@@ -444,36 +484,6 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
         },
     );
     drop(sessions);
-
-    // Build a models catalog for the `session/new` response. For Databricks
-    // providers this advertises available models so the desktop ModelPicker and
-    // pool can resolve `session/set_model` switches. For Anthropic/OpenAI we
-    // report only the configured model — live switching on those providers
-    // effectively requires respawn.
-    //
-    // `models_cache` caches only a successful discovery result (`get_or_try_init`
-    // leaves the cell empty on error so the next `session/new` call retries). On
-    // discovery failure the fallback is used for the immediate response without
-    // being written to the cell.
-    let available_models: Vec<Value> = {
-        use crate::config::Provider;
-        match app.cfg.provider {
-            Provider::Databricks | Provider::DatabricksV2 => {
-                let models = resolve_models_catalog(
-                    &app.models_cache,
-                    app.cfg.provider,
-                    &app.cfg.model,
-                    discover_databricks_models(&app.cfg),
-                )
-                .await;
-                models
-                    .iter()
-                    .map(|m| json!({ "modelId": m.id, "name": m.name }))
-                    .collect()
-            }
-            _ => vec![json!({ "modelId": app.cfg.model, "name": app.cfg.model })],
-        }
-    };
 
     wire::send(
         wire_tx,
@@ -870,8 +880,7 @@ fn session_token() -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use crate::catalog::{discovery_failure_fallback, ModelEntry, DATABRICKS_V2_KNOWN_MODELS};
-    use crate::config::Provider;
+    use crate::catalog::ModelEntry;
     use crate::types::AgentError;
 
     /// Regression: a discovery error must not pin the models_cache for the process lifetime.
@@ -884,23 +893,14 @@ mod tests {
     #[tokio::test]
     async fn models_cache_does_not_pin_on_discovery_error() {
         let cache: tokio::sync::OnceCell<Vec<ModelEntry>> = tokio::sync::OnceCell::new();
-        let provider = Provider::DatabricksV2;
-        let model = "my-configured-model";
 
-        // First call — discovery fails. Cell must remain empty; fallback returned.
-        let first = crate::resolve_models_catalog(&cache, provider, model, async {
-            Err::<Vec<ModelEntry>, AgentError>(AgentError::LlmAuth("transient failure".into()))
+        // First call — discovery failure is surfaced and leaves the cell empty.
+        let error = crate::resolve_models_catalog(&cache, async {
+            Err::<Vec<ModelEntry>, AgentError>(AgentError::Llm("transient failure".into()))
         })
-        .await;
-        assert!(
-            cache.get().is_none(),
-            "cell must be empty after a discovery error — next session must retry"
-        );
-        let expected_fallback = discovery_failure_fallback(provider, model);
-        assert_eq!(
-            first, expected_fallback,
-            "error path must return the provider-aware fallback"
-        );
+        .await
+        .unwrap_err();
+        assert!(matches!(error, AgentError::Llm(_)));
 
         // Second call — discovery succeeds. Cell is now populated and returned.
         let discovered = vec![ModelEntry {
@@ -908,10 +908,11 @@ mod tests {
             name: "databricks-meta-llama-3-1-70b-instruct".into(),
         }];
         let discovered_clone = discovered.clone();
-        let second = crate::resolve_models_catalog(&cache, provider, model, async move {
+        let second = crate::resolve_models_catalog(&cache, async move {
             Ok::<Vec<ModelEntry>, AgentError>(discovered_clone)
         })
-        .await;
+        .await
+        .unwrap();
         assert_eq!(
             second, discovered,
             "second call must return the discovered catalog"
@@ -927,78 +928,40 @@ mod tests {
         );
     }
 
-    /// Regression: legacy `Provider::Databricks` must not advertise v2 AI Gateway model IDs
-    /// on discovery failure (Wes W1). This test calls `discovery_failure_fallback` directly —
-    /// the same helper used by `session_new` — and verifies the split behavior. It FAILS if
-    /// the arm is un-split (i.e., if both providers return the v2 catalog on failure).
-    #[test]
-    fn databricks_discovery_failure_fallback_legacy_returns_configured_model_only() {
-        let configured = "my-serving-endpoint";
-        let result = discovery_failure_fallback(Provider::Databricks, configured);
+    #[tokio::test]
+    async fn models_catalog_does_not_cache_oauth_auth_fallback() {
+        let cache: tokio::sync::OnceCell<Vec<ModelEntry>> = tokio::sync::OnceCell::new();
+        let error = crate::resolve_models_catalog(&cache, async {
+            Err::<Vec<ModelEntry>, AgentError>(AgentError::LlmAuth("sign in again".into()))
+        })
+        .await
+        .unwrap_err();
 
-        // Legacy Databricks must advertise exactly the configured model — nothing more.
-        assert_eq!(
-            result.len(),
-            1,
-            "legacy Databricks fallback must contain exactly one entry, got: {result:?}"
-        );
-        assert_eq!(
-            result[0].id, configured,
-            "legacy Databricks fallback must be the configured model"
-        );
+        assert!(matches!(error, AgentError::LlmAuth(_)));
+        assert!(cache.get().is_none());
 
-        // Crucially: must NOT contain any DATABRICKS_V2_KNOWN_MODELS entry.
-        let v2_ids: Vec<&str> = DATABRICKS_V2_KNOWN_MODELS.to_vec();
-        for id in &result {
-            assert!(
-                !v2_ids.contains(&id.id.as_str()),
-                "legacy Databricks fallback must not include v2 ID '{}' — that endpoint \
-                 may not be served by /serving-endpoints/{{model}}/invocations",
-                id.id
-            );
-        }
+        let discovered = vec![ModelEntry {
+            id: "authenticated-model".into(),
+            name: "authenticated-model".into(),
+        }];
+        let result = crate::resolve_models_catalog(&cache, async {
+            Ok::<Vec<ModelEntry>, AgentError>(discovered.clone())
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(result, discovered);
+        assert_eq!(cache.get(), Some(&discovered));
     }
 
     #[test]
-    fn databricks_discovery_failure_fallback_v2_returns_known_models_catalog() {
-        let configured = "my-configured-model";
-        let result = discovery_failure_fallback(Provider::DatabricksV2, configured);
-
-        // DatabricksV2 must return the full DATABRICKS_V2_KNOWN_MODELS list,
-        // plus the configured model so the picker can still represent the model
-        // the agent is actually running.
+    fn configured_model_fallback_is_trimmed_and_singular() {
         assert_eq!(
-            result.len(),
-            DATABRICKS_V2_KNOWN_MODELS.len() + 1,
-            "DatabricksV2 fallback must return all known models plus the configured model"
-        );
-        let result_ids: Vec<&str> = result.iter().map(|m| m.id.as_str()).collect();
-        for known_id in DATABRICKS_V2_KNOWN_MODELS {
-            assert!(
-                result_ids.contains(known_id),
-                "DatabricksV2 fallback must include known model '{known_id}'"
-            );
-        }
-        assert!(
-            result_ids.contains(&configured),
-            "DatabricksV2 fallback must include the configured model"
-        );
-    }
-
-    #[test]
-    fn databricks_discovery_failure_fallback_split_verified() {
-        // This test FAILS if the v1/v2 arms are merged back into one — it directly verifies
-        // that the two providers' error-path behavior diverges (Wes W1 protection).
-        let v1 = discovery_failure_fallback(Provider::Databricks, "my-endpoint");
-        let v2 = discovery_failure_fallback(Provider::DatabricksV2, "my-endpoint");
-
-        let v1_ids: Vec<&str> = v1.iter().map(|m| m.id.as_str()).collect();
-        let v2_ids: Vec<&str> = v2.iter().map(|m| m.id.as_str()).collect();
-
-        assert_ne!(
-            v1_ids, v2_ids,
-            "Provider::Databricks and Provider::DatabricksV2 must return different \
-             fallback catalogs — if they are equal, the W1 arm split has been reverted"
+            crate::configured_model_fallback("  configured-model  "),
+            vec![ModelEntry {
+                id: "configured-model".into(),
+                name: "configured-model".into(),
+            }]
         );
     }
 }
