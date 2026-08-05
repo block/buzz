@@ -1,7 +1,8 @@
 use super::{
     built_in_persona_records, ensure_persona_ids_are_active, ensure_persona_is_active,
-    merge_personas, migrate_retired_personas, validate_persona_activation_change,
-    validate_persona_deletion, BUILT_IN_PERSONAS, RETIRED_PERSONAS,
+    is_relay_synced_persona, merge_personas, migrate_retired_personas,
+    validate_persona_activation_change, validate_persona_deletion, BUILT_IN_PERSONAS,
+    RETIRED_PERSONAS,
 };
 use crate::managed_agents::discovery::{default_agent_command, effective_agent_command};
 use crate::managed_agents::AgentDefinition;
@@ -29,6 +30,23 @@ fn custom_persona(id: &str, display_name: &str) -> AgentDefinition {
         created_at: "2026-03-19T00:00:00Z".to_string(),
         updated_at: "2026-03-19T00:00:00Z".to_string(),
     }
+}
+
+#[test]
+fn relay_synced_persona_is_distinct_from_local_and_team_definitions() {
+    let local = custom_persona("local", "Local");
+    assert!(!is_relay_synced_persona(&local));
+
+    let mut relay_synced = custom_persona("remote", "Remote");
+    relay_synced.source_team_persona_slug = Some("remote".to_string());
+    assert!(is_relay_synced_persona(&relay_synced));
+
+    let mut team = relay_synced;
+    team.source_team = Some("team-1".to_string());
+    assert!(
+        !is_relay_synced_persona(&team),
+        "team definitions use their existing guarded deletion path"
+    );
 }
 
 #[test]

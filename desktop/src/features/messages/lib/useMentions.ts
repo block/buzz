@@ -1,6 +1,7 @@
 import * as React from "react";
 import {
   useManagedAgentsQuery,
+  useManagedAgentReferencesQuery,
   usePersonasQuery,
   useRelayAgentsQuery,
   useTeamsQuery,
@@ -34,6 +35,7 @@ import type {
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { detectPrefixQuery } from "@/shared/lib/detectPrefixQuery";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { buildManagedAgentPersonaLinks } from "@/features/agents/lib/managedAgentPersonaLinks";
 import { trimMapToSize } from "@/shared/lib/trimMapToSize";
 import { flushMentionDebounce } from "./flushMentionDebounce";
 import { hasMention } from "./hasMention";
@@ -104,6 +106,7 @@ export function useMentions(
   const members = externalMembers ?? membersQuery.data;
   const isArchivedDiscovery = useIsArchivedPredicate();
   const managedAgentsQuery = useManagedAgentsQuery();
+  const managedAgentReferencesQuery = useManagedAgentReferencesQuery();
   const relayAgentsQuery = useRelayAgentsQuery();
   const channelsQuery = useChannelsQuery();
   const personasQuery = usePersonasQuery();
@@ -139,26 +142,16 @@ export function useMentions(
       ),
     [managedAgentsQuery.data],
   );
-  const managedAgentPersonaIdsByPubkey = React.useMemo(
+  const {
+    byPubkey: managedAgentPersonaIdsByPubkey,
+    personaIds: managedAgentPersonaIds,
+  } = React.useMemo(
     () =>
-      new Map(
-        (managedAgentsQuery.data ?? [])
-          .filter((agent) => Boolean(agent.personaId))
-          .map((agent) => [
-            normalizePubkey(agent.pubkey),
-            agent.personaId as string,
-          ]),
+      buildManagedAgentPersonaLinks(
+        managedAgentsQuery.data ?? [],
+        managedAgentReferencesQuery.data ?? [],
       ),
-    [managedAgentsQuery.data],
-  );
-  const managedAgentPersonaIds = React.useMemo(
-    () =>
-      new Set(
-        (managedAgentsQuery.data ?? [])
-          .map((agent) => agent.personaId)
-          .filter((personaId): personaId is string => Boolean(personaId)),
-      ),
-    [managedAgentsQuery.data],
+    [managedAgentReferencesQuery.data, managedAgentsQuery.data],
   );
   const managedAgentPubkeys = React.useMemo(
     () =>
