@@ -2384,6 +2384,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Copy public key'), findsOneWidget);
+      expect(find.text('alice'), findsNothing);
       expect(find.byType(UserProfileSheet), findsOneWidget);
     });
 

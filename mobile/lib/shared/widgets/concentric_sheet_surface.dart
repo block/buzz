@@ -2,12 +2,13 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_hooks/flutter_hooks.dart';
 
 import '../theme/theme.dart';
 
 /// An iOS-native sheet surface that adopts the system's concentric corners on
 /// iOS 26 and newer. Other platforms keep the normal Flutter shape.
-class ConcentricSheetSurface extends StatefulWidget {
+class ConcentricSheetSurface extends HookWidget {
   const ConcentricSheetSurface({
     required this.child,
     required this.enabled,
@@ -19,43 +20,38 @@ class ConcentricSheetSurface extends StatefulWidget {
   final bool enabled;
   final Color? color;
 
-  @override
-  State<ConcentricSheetSurface> createState() => _ConcentricSheetSurfaceState();
-}
-
-class _ConcentricSheetSurfaceState extends State<ConcentricSheetSurface> {
   static const _surfaceChannel = MethodChannel('buzz/concentric_sheet_surface');
 
-  bool _nativeSurfaceSupported = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _checkNativeSurfaceSupport();
-  }
-
-  Future<void> _checkNativeSurfaceSupport() async {
-    if (!widget.enabled || defaultTargetPlatform != TargetPlatform.iOS) return;
-
+  Future<bool> _checkNativeSurfaceSupport() async {
     try {
       final supported = await _surfaceChannel.invokeMethod<bool>('isSupported');
-      if (mounted && supported == true) {
-        setState(() => _nativeSurfaceSupported = true);
-      }
+      return supported == true;
     } on MissingPluginException {
       // The registrar is unavailable, so retain the Flutter surface.
+      return false;
     } on PlatformException {
       // The native surface is optional; retain the Flutter surface on failure.
+      return false;
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    if (!widget.enabled || defaultTargetPlatform != TargetPlatform.iOS) {
-      return widget.child;
+    final shouldCheckNativeSurface =
+        enabled && defaultTargetPlatform == TargetPlatform.iOS;
+    final supportFuture = useMemoized(
+      () => shouldCheckNativeSurface
+          ? _checkNativeSurfaceSupport()
+          : Future<bool>.value(false),
+      [shouldCheckNativeSurface],
+    );
+    final nativeSurfaceSupported = useFuture(supportFuture).data ?? false;
+
+    if (!shouldCheckNativeSurface) {
+      return child;
     }
 
-    final surfaceColor = widget.color ?? context.colors.surface;
+    final surfaceColor = color ?? context.colors.surface;
 
     return Padding(
       padding: const EdgeInsets.only(
@@ -65,7 +61,7 @@ class _ConcentricSheetSurfaceState extends State<ConcentricSheetSurface> {
       ),
       child: Stack(
         children: [
-          if (_nativeSurfaceSupported)
+          if (nativeSurfaceSupported)
             Positioned.fill(
               child: ExcludeSemantics(
                 child: UiKitView(
@@ -87,7 +83,7 @@ class _ConcentricSheetSurfaceState extends State<ConcentricSheetSurface> {
                 clipBehavior: Clip.antiAlias,
               ),
             ),
-          widget.child,
+          child,
         ],
       ),
     );
