@@ -79,6 +79,18 @@ PY
     echo "validator accepted a forged previous release ledger" >&2; exit 1
   fi
   mv metadata.json .release/desktop-candidate.json
+
+  # Post-merge verification may be retried after this candidate's immutable tag
+  # already exists. Accept only the exact candidate SHA; an equal-version tag
+  # anywhere else remains a collision.
+  candidate=$(git rev-parse HEAD)
+  git -c tag.gpgSign=false tag desktop-v1.0.1 "$candidate"
+  PATH="$mock_bin:$PATH" scripts/desktop_release.py validate --version 1.0.1 --repo block/buzz
+  git -c tag.gpgSign=false tag -f desktop-v1.0.1 "$base" >/dev/null
+  if PATH="$mock_bin:$PATH" scripts/desktop_release.py validate --version 1.0.1 --repo block/buzz >/dev/null 2>&1; then
+    echo "validator accepted an equal-version tag at the wrong SHA" >&2; exit 1
+  fi
+  git tag -d desktop-v1.0.1 >/dev/null
 )
 
 # Equal and decreasing versions are rejected before any GitHub lookup.

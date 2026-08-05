@@ -66,6 +66,11 @@ grep -Fq 'git/refs' "$auto_tag"
 grep -Fq 'TAG_PREFIX="desktop-v"' "$auto_tag"
 grep -Fq 'target_sha=${{ github.event.pull_request.head.sha }}' "$auto_tag"
 grep -Fq 'scripts/verify-desktop-release-merge.sh' "$auto_tag"
+candidate_workflow="$repo_root/.github/workflows/desktop-release-candidate.yml"
+grep -Fq 'GH_TOKEN: ${{ github.token }}' "$candidate_workflow" || {
+  echo "desktop candidate validation has no GitHub token for prior-release lookup" >&2
+  exit 1
+}
 grep -Fq 'reviewed candidate' "$repo_root/scripts/prepare-desktop-release.sh"
 if grep -Fq 'current `main`' "$repo_root/scripts/prepare-desktop-release.sh"; then
   echo "desktop release PR body contains executable command substitution" >&2

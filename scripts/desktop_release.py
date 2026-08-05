@@ -84,12 +84,17 @@ def stable_tags() -> list[tuple[tuple[int, int, int], str, str]]:
     return tags
 
 
-def previous_release(version: str, repo: str) -> dict[str, str] | None:
+def previous_release(
+    version: str, repo: str, *, allow_target_sha: str | None = None
+) -> dict[str, str] | None:
     target = tuple(map(int, version.split("-", 1)[0].split(".")))
     tags = stable_tags()
-    newer = [item for item in tags if item[0] >= target]
-    if newer:
-        detail = ", ".join(item[1] for item in newer)
+    newer = [item for item in tags if item[0] > target]
+    equal = [item for item in tags if item[0] == target]
+    if newer or (
+        equal and (allow_target_sha is None or equal[0][2] != allow_target_sha)
+    ):
+        detail = ", ".join(item[1] for item in newer + equal)
         raise SystemExit(f"desktop release version must increase beyond existing tags: {detail}")
     eligible = [item for item in tags if item[0] < target]
     if not eligible:
@@ -206,7 +211,7 @@ def validate(args: argparse.Namespace) -> None:
             detail.append(f"missing required files: {', '.join(sorted(missing))}")
         raise SystemExit("candidate is not version-only (" + "; ".join(detail) + ")")
     repo = args.repo or "block/buzz"
-    previous = previous_release(version, repo)
+    previous = previous_release(version, repo, allow_target_sha=candidate)
     recorded_previous = {
         "tag": data.get("previous_tag"),
         "base_sha": data.get("previous_base_sha"),
