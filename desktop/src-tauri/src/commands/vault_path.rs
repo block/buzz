@@ -171,6 +171,21 @@ fn validate_vault_path(
     Ok(ValidatedVaultPath(normalized_path))
 }
 
+/// Rejects moving a directory into its own subtree (`mv A A/B`).
+///
+/// `fs::rename` happens to return EINVAL for this on Linux, but the check is
+/// cheap, portable, and produces a message a user can act on. Onyx's
+/// `rename_file` has no equivalent guard.
+pub fn reject_move_into_self(
+    source: &ValidatedVaultPath,
+    destination: &ValidatedVaultPath,
+) -> Result<(), String> {
+    if destination.as_path().starts_with(source.as_path()) {
+        return Err("Cannot move a folder into itself.".to_string());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

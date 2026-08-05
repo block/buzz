@@ -309,6 +309,7 @@ pub fn run() {
         .manage(commands::pairing::PairingHandle::new())
         .manage(terminal_runtime::TerminalSessions::default())
         .manage(commands::vault_path::VaultState::default())
+        .manage(commands::VaultWatcherState::default())
         .setup(move |app| {
             let app_handle = app.handle().clone();
             #[cfg(target_os = "macos")]
@@ -654,6 +655,13 @@ pub fn run() {
             read_vault_file,
             read_vault_files,
             vault_entry_exists,
+            write_vault_file,
+            create_vault_file,
+            create_vault_folder,
+            rename_vault_entry,
+            delete_vault_entry,
+            start_vault_watch,
+            stop_vault_watch,
             get_project_repo_snapshot,
             get_project_repo_diff,
             get_project_local_repo_diff,

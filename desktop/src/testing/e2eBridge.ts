@@ -1084,6 +1084,17 @@ declare global {
       ownerPubkey: string;
       kind: number;
     }) => boolean;
+    /**
+     * Writes a file into the mock vault without requiring one to be active, so
+     * specs can seed fixtures before the picker runs.
+     */
+    __BUZZ_E2E_SEED_MOCK_VAULT_FILE__?: (path: string, content: string) => void;
+    /**
+     * The mtime the mock recorded for the last write of `path`. Specs use it to
+     * emit a *matching* `vault-file-modified` event and assert the app treats
+     * it as its own echo rather than an external edit.
+     */
+    __BUZZ_E2E_GET_MOCK_VAULT_MTIME__?: (path: string) => number | null;
     /** Sets what `pick_vault_folder` returns; `null` models a cancelled dialog. */
     __BUZZ_E2E_SET_MOCK_VAULT_PICKER__?: (path: string | null) => void;
     __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
@@ -3020,9 +3031,17 @@ let mockVaultFiles = new Map<string, string>();
 let mockActiveVaultPath: string | null = null;
 /** What `pick_vault_folder` resolves to; `null` models a cancelled dialog. */
 let mockVaultPickerResult: string | null = MOCK_VAULT_PATH;
+/** Folders that exist without (yet) containing a file. */
+let mockVaultFolders = new Set<string>();
+/** Fake mtimes, so specs can exercise watcher echo-suppression. */
+let mockVaultMtimes = new Map<string, number>();
+let mockVaultMtime = 1_000;
 
 function resetMockVault() {
   mockVaultFiles = new Map(DEFAULT_MOCK_VAULT_FILES);
+  mockVaultFolders = new Set();
+  mockVaultMtimes = new Map();
+  mockVaultMtime = 1_000;
   mockActiveVaultPath = null;
   mockVaultPickerResult = MOCK_VAULT_PATH;
 }
@@ -3064,6 +3083,10 @@ function buildMockVaultTree(): MockVaultTreeEntry[] {
     });
     return children;
   };
+
+  for (const folderPath of [...mockVaultFolders].sort()) {
+    if (folderPath.startsWith(`${root}/`)) ensureDirectory(folderPath);
+  }
 
   for (const filePath of [...mockVaultFiles.keys()].sort()) {
     if (!filePath.startsWith(`${root}/`)) continue;
@@ -13055,10 +13078,91 @@ export function maybeInstallE2eTauriMocks() {
         requireMockVault();
         return mockVaultFiles.has(path);
       }
+      case "write_vault_file": {
+        const { content, path } = payload as {
+          content: string;
+          path: string;
+        };
+        requireMockVault();
+        mockVaultFiles.set(path, content);
+        // A monotonically increasing stamp models a real mtime closely enough
+        // for echo-suppression: specs assert that a *matching* stamp is ignored
+        // and a differing one is treated as an external edit.
+        mockVaultMtime += 1;
+        mockVaultMtimes.set(path, mockVaultMtime);
+        return { modified_ms: mockVaultMtime };
+      }
+      case "create_vault_file": {
+        const { path } = payload as { path: string };
+        requireMockVault();
+        if (mockVaultFiles.has(path)) {
+          throw new Error("A file with that name already exists.");
+        }
+        mockVaultFiles.set(path, "");
+        return null;
+      }
+      case "create_vault_folder": {
+        const { path } = payload as { path: string };
+        requireMockVault();
+        mockVaultFolders.add(path);
+        return null;
+      }
+      case "rename_vault_entry": {
+        const { newPath, oldPath } = payload as {
+          newPath: string;
+          oldPath: string;
+        };
+        requireMockVault();
+        if (mockVaultFiles.has(newPath)) {
+          throw new Error("Something with that name already exists.");
+        }
+        if (newPath.startsWith(`${oldPath}/`)) {
+          throw new Error("Cannot move a folder into itself.");
+        }
+        const existing = mockVaultFiles.get(oldPath);
+        if (existing !== undefined) {
+          mockVaultFiles.delete(oldPath);
+          mockVaultFiles.set(newPath, existing);
+          return null;
+        }
+        // Folder rename: move everything beneath it.
+        for (const [path, content] of [...mockVaultFiles]) {
+          if (!path.startsWith(`${oldPath}/`)) continue;
+          mockVaultFiles.delete(path);
+          mockVaultFiles.set(
+            `${newPath}${path.slice(oldPath.length)}`,
+            content,
+          );
+        }
+        mockVaultFolders.delete(oldPath);
+        mockVaultFolders.add(newPath);
+        return null;
+      }
+      case "delete_vault_entry": {
+        const { path } = payload as { path: string };
+        requireMockVault();
+        mockVaultFiles.delete(path);
+        for (const candidate of [...mockVaultFiles.keys()]) {
+          if (candidate.startsWith(`${path}/`))
+            mockVaultFiles.delete(candidate);
+        }
+        mockVaultFolders.delete(path);
+        return null;
+      }
+      case "start_vault_watch":
+      case "stop_vault_watch":
+        // The mock has no real watcher; specs drive change events directly via
+        // __BUZZ_E2E_EMIT_TAURI_EVENT__.
+        return null;
       default:
         throw new Error(`Unsupported mocked Tauri command: ${command}`);
     }
   };
+  window.__BUZZ_E2E_SEED_MOCK_VAULT_FILE__ = (path, content) => {
+    mockVaultFiles.set(path, content);
+  };
+  window.__BUZZ_E2E_GET_MOCK_VAULT_MTIME__ = (path) =>
+    mockVaultMtimes.get(path) ?? null;
   window.__BUZZ_E2E_SET_MOCK_VAULT_PICKER__ = (path) => {
     mockVaultPickerResult = path;
   };

@@ -1,8 +1,12 @@
+import { listen } from "@tauri-apps/api/event";
+
 import { invokeTauri } from "@/shared/api/tauri";
 import type {
   VaultEntry,
   VaultFileContent,
   VaultInfo,
+  VaultModifiedEntry,
+  VaultWriteResult,
 } from "@/shared/api/vaultTypes";
 
 type RawVaultEntry = {
@@ -20,6 +24,15 @@ type RawVaultFileContent = {
 type RawVaultInfo = {
   path: string;
   name: string;
+};
+
+type RawVaultWriteResult = {
+  modified_ms: number;
+};
+
+type RawVaultModifiedEntry = {
+  path: string;
+  modified_ms: number;
 };
 
 function fromRawVaultEntry(entry: RawVaultEntry): VaultEntry {
@@ -87,4 +100,75 @@ export async function readVaultFiles(
 
 export async function vaultEntryExists(path: string): Promise<boolean> {
   return await invokeTauri<boolean>("vault_entry_exists", { path });
+}
+
+/**
+ * Writes a note atomically.
+ *
+ * The returned mtime is what lets the watcher tell our own save apart from a
+ * genuine external edit — see `useVaultWatcher`.
+ */
+export async function writeVaultFile(
+  path: string,
+  content: string,
+): Promise<VaultWriteResult> {
+  const result = await invokeTauri<RawVaultWriteResult>("write_vault_file", {
+    content,
+    path,
+  });
+  return { modifiedMs: result.modified_ms };
+}
+
+export async function createVaultFile(path: string): Promise<void> {
+  await invokeTauri<void>("create_vault_file", { path });
+}
+
+export async function createVaultFolder(path: string): Promise<void> {
+  await invokeTauri<void>("create_vault_folder", { path });
+}
+
+/** Renames or moves an entry. Both endpoints must be inside the vault. */
+export async function renameVaultEntry(
+  oldPath: string,
+  newPath: string,
+): Promise<void> {
+  await invokeTauri<void>("rename_vault_entry", { newPath, oldPath });
+}
+
+export async function deleteVaultEntry(path: string): Promise<void> {
+  await invokeTauri<void>("delete_vault_entry", { path });
+}
+
+export async function startVaultWatch(): Promise<void> {
+  await invokeTauri<void>("start_vault_watch");
+}
+
+export async function stopVaultWatch(): Promise<void> {
+  await invokeTauri<void>("stop_vault_watch");
+}
+
+/** Subscribes to content changes. Resolves to an unsubscribe function. */
+export async function onVaultFileModified(
+  callback: (entries: VaultModifiedEntry[]) => void,
+): Promise<() => void> {
+  const unlisten = await listen<RawVaultModifiedEntry[]>(
+    "vault-file-modified",
+    (event) => {
+      callback(
+        event.payload.map((entry) => ({
+          modifiedMs: entry.modified_ms,
+          path: entry.path,
+        })),
+      );
+    },
+  );
+  return () => unlisten();
+}
+
+/** Subscribes to create/delete/rename events. */
+export async function onVaultFilesChanged(
+  callback: () => void,
+): Promise<() => void> {
+  const unlisten = await listen("vault-files-changed", () => callback());
+  return () => unlisten();
 }

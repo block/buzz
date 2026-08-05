@@ -1,0 +1,162 @@
+/**
+ * The corpus test: real Obsidian constructs through the real TipTap pipeline.
+ *
+ * This is the regression net for the round-trip guard. Its job is not to prove
+ * TipTap is lossless -- it demonstrably is not -- but to pin down *which*
+ * constructs survive, so that a future extension that changes the answer fails
+ * here loudly instead of silently rewriting someone's vault.
+ *
+ * Runs under jsdom because a ProseMirror editor needs a DOM.
+ */
+import assert from "node:assert/strict";
+import { before, test } from "node:test";
+import { JSDOM } from "jsdom";
+
+import { splitFrontmatter } from "./frontmatter.ts";
+import { isRoundTripStable } from "./roundTripGuard.ts";
+
+let reserializeMarkdown;
+let destroyMarkdownProbe;
+
+before(async () => {
+  const dom = new JSDOM("<!doctype html><html><body></body></html>");
+  globalThis.window = dom.window;
+  globalThis.document = dom.window.document;
+  globalThis.HTMLElement = dom.window.HTMLElement;
+  globalThis.Element = dom.window.Element;
+  globalThis.Node = dom.window.Node;
+  globalThis.DocumentFragment = dom.window.DocumentFragment;
+  globalThis.getComputedStyle = dom.window.getComputedStyle;
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: dom.window.navigator,
+  });
+
+  ({ destroyMarkdownProbe, reserializeMarkdown } = await import(
+    "./markdownRoundTrip.ts"
+  ));
+});
+
+/**
+ * Constructs the editor must not touch. A regression here is a real bug.
+ *
+ * The Obsidian entries survive because they are plain text to this schema and
+ * `toDiskMarkdown` undoes the serializer's escaping of `[`, `]`, `~` and `_`.
+ * That is exactly why the escape-stripping exists.
+ */
+const MUST_BE_STABLE = [
+  ["heading and paragraph", "# Title\n\nA paragraph."],
+  ["emphasis and strong", "Some *emphasis* and **bold**."],
+  ["inline code", "Call `useVaultEditor()` first."],
+  ["fenced code with language", "```js\nconst a = 1;\n```"],
+  ["fenced code containing dashes", "```\n---\nnot frontmatter\n---\n```"],
+  ["bullet list", "- one\n- two"],
+  ["nested bullet list", "- one\n- two\n  - nested"],
+  ["ordered list", "1. first\n2. second"],
+  ["task list", "- [ ] todo\n- [x] done"],
+  ["blockquote", "> quoted text"],
+  ["link", "See [the docs](https://example.com)."],
+  ["thematic break", "before\n\n---\n\nafter"],
+  ["multiple paragraphs", "one\n\ntwo\n\nthree"],
+  ["strikethrough", "~~gone~~"],
+  ["wikilink", "A [[Note Title]] reference."],
+  ["wikilink with alias", "See [[Note|the note]]."],
+  ["embed", "![[Some Note]]"],
+  ["block reference", "A claim. ^block-id"],
+  ["tag", "A #tag here."],
+  ["highlight", "==highlight=="],
+  ["comment", "%%comment%%"],
+  ["math", "$$x^2$$"],
+];
+
+/**
+ * Constructs the editor mangles. These are the reason the guard exists: each
+ * must be *detected* so the file opens in source mode, never silently
+ * rewritten.
+ *
+ * The table case is the sharpest one — a GFM table serializes down to its
+ * concatenated cell text (`| a | b |…` becomes `ab12`), so autosaving a note
+ * containing one would destroy it outright.
+ */
+const MUST_BE_DETECTED_LOSSY = [
+  ["table", "| a | b |\n| --- | --- |\n| 1 | 2 |"],
+  ["callout", "> [!info] Title\n> body"],
+  ["footnote", "Text[^1]\n\n[^1]: note"],
+  ["raw html", "<div>raw</div>"],
+  ["setext heading", "Title\n====="],
+  ["underscore emphasis", "_emphasis_"],
+  ["plus bullet marker", "+ item"],
+  ["star bullet marker", "* item"],
+  ["four-space nesting", "- a\n    - b"],
+  ["two-space hard break", "line one  \nline two"],
+  ["repeated ordered marker", "1. a\n1. b"],
+];
+
+test("stable constructs survive the editor untouched", () => {
+  for (const [label, source] of MUST_BE_STABLE) {
+    assert.equal(
+      isRoundTripStable(source, reserializeMarkdown),
+      true,
+      `${label} should round-trip cleanly but did not.\n` +
+        `  in:  ${JSON.stringify(source)}\n` +
+        `  out: ${JSON.stringify(reserializeMarkdown(source))}`,
+    );
+  }
+});
+
+test("lossy constructs are detected rather than silently rewritten", () => {
+  for (const [label, source] of MUST_BE_DETECTED_LOSSY) {
+    assert.equal(
+      isRoundTripStable(source, reserializeMarkdown),
+      false,
+      `${label} round-tripped cleanly — if an extension now handles it, move ` +
+        `it into MUST_BE_STABLE.`,
+    );
+  }
+});
+
+test("frontmatter is destroyed by the editor, which is why we split it off", () => {
+  // Pinning the exact failure mode: the opening `---` becomes a thematic break
+  // and the YAML becomes a heading. This is the single largest corruption
+  // source in a real vault.
+  const raw = "---\ntitle: Note\n---\n\n# Body";
+  assert.equal(
+    isRoundTripStable(raw, reserializeMarkdown),
+    false,
+    "raw frontmatter must not be considered safe to live-edit",
+  );
+
+  // Split first, and the body alone is perfectly safe.
+  const { body, frontmatter } = splitFrontmatter(raw);
+  assert.equal(frontmatter, "---\ntitle: Note\n---\n\n");
+  assert.equal(
+    isRoundTripStable(body, reserializeMarkdown),
+    true,
+    "the body below frontmatter should round-trip cleanly",
+  );
+});
+
+test("a realistic note with frontmatter and prose is editable after splitting", () => {
+  const raw = [
+    "---",
+    "title: Meeting notes",
+    "tags: [work, buzz]",
+    "---",
+    "",
+    "# Meeting notes",
+    "",
+    "- Ship Documents",
+    "- Then wikilinks",
+    "",
+    "Some **bold** and a [link](https://example.com).",
+  ].join("\n");
+
+  const { body } = splitFrontmatter(raw);
+  assert.equal(isRoundTripStable(body, reserializeMarkdown), true);
+});
+
+test("the probe can be destroyed and lazily rebuilt", () => {
+  destroyMarkdownProbe();
+  assert.equal(isRoundTripStable("# Title", reserializeMarkdown), true);
+  destroyMarkdownProbe();
+});

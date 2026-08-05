@@ -1,20 +1,25 @@
 import * as React from "react";
 import { FolderOpen } from "lucide-react";
 
-import {
-  useVaultFileQuery,
-  useVaultTreeQuery,
-} from "@/features/documents/hooks";
+import { useVaultTreeQuery } from "@/features/documents/hooks";
+import { useDocumentSession } from "@/features/documents/useDocumentSession";
 import {
   ancestorFolderPaths,
-  baseName,
   flattenVisibleRows,
-  stripMarkdownExtension,
 } from "@/features/documents/lib/treeModel";
 import { useResizableDocumentsPanes } from "@/features/documents/useResizableDocumentsPanes";
 import { useVaultLifecycle } from "@/features/documents/useVaultLifecycle";
-import { DocumentPreview } from "@/features/documents/ui/DocumentPreview";
+import { DocumentEditorPane } from "@/features/documents/ui/DocumentEditorPane";
+import { DocumentTabBar } from "@/features/documents/ui/DocumentTabBar";
 import { DocumentTreePane } from "@/features/documents/ui/DocumentTreePane";
+import { DocumentDeleteDialog } from "@/features/documents/ui/DocumentTreeContextMenu";
+import {
+  DocumentNamePromptDialog,
+  type NamePrompt,
+} from "@/features/documents/ui/DocumentNamePromptDialog";
+import { useVaultMutations } from "@/features/documents/useVaultMutations";
+import { baseName, parentOf } from "@/features/documents/lib/treeModel";
+import type { VaultEntry } from "@/shared/api/vaultTypes";
 import { VaultEmptyState } from "@/features/documents/ui/VaultEmptyState";
 import { ChatHeader } from "@/features/chat/ui/ChatHeader";
 import { cn } from "@/shared/lib/cn";
@@ -32,7 +37,8 @@ export function DocumentsView() {
   const [expandedPaths, setExpandedPaths] = React.useState<ReadonlySet<string>>(
     () => new Set(),
   );
-  const [activePath, setActivePath] = React.useState<string | null>(null);
+  const session = useDocumentSession(vaultRoot);
+  const activePath = session.state.activePath;
 
   // A different vault is a different tree; drop selection and expansion rather
   // than carrying stale paths across. Adjusting during render (React's
@@ -42,10 +48,7 @@ export function DocumentsView() {
   if (lastVaultRoot !== vaultRoot) {
     setLastVaultRoot(vaultRoot);
     setExpandedPaths(new Set());
-    setActivePath(null);
   }
-
-  const fileQuery = useVaultFileQuery(vaultRoot, activePath);
 
   const rows = React.useMemo(
     () => flattenVisibleRows(treeQuery.data ?? [], expandedPaths),
@@ -64,9 +67,51 @@ export function DocumentsView() {
     });
   }, []);
 
+  const mutations = useVaultMutations(vaultRoot);
+  const [namePrompt, setNamePrompt] = React.useState<NamePrompt | null>(null);
+  const [pendingDelete, setPendingDelete] = React.useState<VaultEntry | null>(
+    null,
+  );
+
+  /** New entries go inside a folder, or beside a file. */
+  const containerFor = React.useCallback(
+    (entry: VaultEntry) =>
+      entry.isDirectory ? entry.path : parentOf(entry.path),
+    [],
+  );
+
+  const handleNameSubmit = React.useCallback(
+    async (value: string) => {
+      const prompt = namePrompt;
+      setNamePrompt(null);
+      if (!prompt) return;
+
+      if (prompt.kind === "note") {
+        const created = await mutations.createNote(prompt.contextPath, value);
+        // Open the new note so the user can start typing straight away.
+        if (created) void session.openFile(created);
+        return;
+      }
+      if (prompt.kind === "folder") {
+        await mutations.createFolder(prompt.contextPath, value);
+        return;
+      }
+
+      const isDirectory = !prompt.contextPath.match(/\.(?:md|markdown)$/i);
+      const renamed = await mutations.rename(
+        prompt.contextPath,
+        value,
+        isDirectory,
+      );
+      // Keep any open buffer pointed at the file rather than a dead path.
+      if (renamed) session.notePathRenamed(prompt.contextPath, renamed);
+    },
+    [mutations, namePrompt, session],
+  );
+
   const handleSelectFile = React.useCallback(
     (path: string) => {
-      setActivePath(path);
+      void session.openFile(path);
       // Reveal the file's folders so the selection is visible after a jump.
       if (vaultRoot) {
         const ancestors = ancestorFolderPaths(vaultRoot, path);
@@ -75,7 +120,7 @@ export function DocumentsView() {
         }
       }
     },
-    [vaultRoot],
+    [session.openFile, vaultRoot],
   );
 
   if (!isReady) {
@@ -139,6 +184,28 @@ export function DocumentsView() {
           ) : (
             <DocumentTreePane
               activePath={activePath}
+              onCreateFolderIn={(entry) =>
+                setNamePrompt({
+                  contextPath: containerFor(entry),
+                  initialValue: "",
+                  kind: "folder",
+                })
+              }
+              onCreateNoteIn={(entry) =>
+                setNamePrompt({
+                  contextPath: containerFor(entry),
+                  initialValue: "",
+                  kind: "note",
+                })
+              }
+              onDelete={setPendingDelete}
+              onRename={(entry) =>
+                setNamePrompt({
+                  contextPath: entry.path,
+                  initialValue: baseName(entry.path),
+                  kind: "rename",
+                })
+              }
               onSelectFile={handleSelectFile}
               onToggleFolder={handleToggleFolder}
               rows={rows}
@@ -158,33 +225,68 @@ export function DocumentsView() {
           type="button"
         />
 
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto">
-          {activePath === null ? (
-            <p className="p-6 text-sm text-muted-foreground">
-              Select a note to read it.
-            </p>
-          ) : fileQuery.isLoading ? (
-            <div className="space-y-3 p-6">
-              <Skeleton className="h-6 w-64" />
-              <Skeleton className="h-4 w-full max-w-2xl" />
-              <Skeleton className="h-4 w-4/5 max-w-2xl" />
-            </div>
-          ) : fileQuery.isError ? (
-            <p className="p-6 text-sm text-destructive">
-              {fileQuery.error instanceof Error
-                ? fileQuery.error.message
-                : "Could not read that note."}
-            </p>
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          <DocumentTabBar
+            activePath={activePath}
+            onActivate={session.activateFile}
+            onClose={(path) => void session.closeFile(path)}
+            tabs={session.state.tabs}
+          />
+
+          {session.activeTab ? (
+            <DocumentEditorPane
+              hasExternalChange={session.externalChanges.has(
+                session.activeTab.path,
+              )}
+              onChange={(markdown) => {
+                if (session.activeTab) {
+                  session.updateTabContent(session.activeTab.path, markdown);
+                }
+              }}
+              onKeepMine={() => {
+                if (session.activeTab) {
+                  session.keepLocalVersion(session.activeTab.path);
+                }
+              }}
+              onReload={() => {
+                if (session.activeTab) {
+                  void session.reloadFile(session.activeTab.path);
+                }
+              }}
+              onSave={() => {
+                if (session.activeTab) {
+                  void session.saveTab(session.activeTab.path);
+                }
+              }}
+              onSetViewMode={(mode) => {
+                if (session.activeTab) {
+                  session.setViewMode(session.activeTab.path, mode);
+                }
+              }}
+              tab={session.activeTab}
+            />
           ) : (
-            <article className="p-6">
-              <h1 className="mb-4 text-lg font-medium">
-                {stripMarkdownExtension(baseName(activePath))}
-              </h1>
-              <DocumentPreview content={fileQuery.data ?? ""} />
-            </article>
+            <p className="p-6 text-sm text-muted-foreground">
+              Select a note to open it.
+            </p>
           )}
         </div>
       </div>
+
+      <DocumentNamePromptDialog
+        onCancel={() => setNamePrompt(null)}
+        onSubmit={(value) => void handleNameSubmit(value)}
+        prompt={namePrompt}
+      />
+      <DocumentDeleteDialog
+        entry={pendingDelete}
+        onCancel={() => setPendingDelete(null)}
+        onConfirm={() => {
+          const target = pendingDelete;
+          setPendingDelete(null);
+          if (target) void session.deleteEntry(target.path);
+        }}
+      />
     </>
   );
 }

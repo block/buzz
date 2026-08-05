@@ -99,7 +99,7 @@ test.describe("Documents vault empty state", () => {
     expect(storedPath).toBeNull();
   });
 
-  test("expanding a folder reveals its notes and opens one for reading", async ({
+  test("expanding a folder reveals its notes and opens one for editing", async ({
     page,
   }) => {
     await page.goto("/");
@@ -120,9 +120,11 @@ test.describe("Documents vault empty state", () => {
     await expect(page.getByTestId("documents-folder-Archive")).toBeVisible();
     await expect(page.getByTestId("documents-file-Old note.md")).toHaveCount(0);
 
+    // Opening a note now mounts the editor rather than a read-only preview.
     await page.getByTestId("documents-file-Meeting notes.md").click();
-    const preview = page.getByTestId("document-preview");
-    await expect(preview).toBeVisible();
-    await expect(preview).toContainText("Ship Documents");
+    await expect(page.getByTestId("documents-tab-Meeting notes")).toBeVisible();
+    await expect(
+      page.locator('[data-testid="documents-live-editor"] .ProseMirror'),
+    ).toContainText("Ship Documents");
   });
 });
