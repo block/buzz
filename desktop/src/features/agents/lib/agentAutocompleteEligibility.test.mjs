@@ -7,6 +7,7 @@ import {
   getSharedChannelIds,
   isAgentIdentityInManagedList,
   relayAgentIsSharedWithUser,
+  shouldDropAgentMentionCandidate,
   shouldHideAgentFromMentions,
 } from "./agentAutocompleteEligibility.ts";
 
@@ -159,6 +160,44 @@ test("isAgentIdentityInManagedList: keeps people and only current managed agent 
       managedAgentPubkeys,
     ),
     false,
+  );
+});
+
+test("shouldDropAgentMentionCandidate: keeps channel-member agents from other owners (#2508)", () => {
+  const managedAgentPubkeys = new Set([PUB_A]);
+
+  // A channel-member agent managed on someone else's machine must stay
+  // mentionable for every member of the channel.
+  assert.equal(
+    shouldDropAgentMentionCandidate(
+      { isAgent: true, isMember: true, pubkey: PUB_B },
+      managedAgentPubkeys,
+    ),
+    false,
+  );
+  // Locally managed agents stay mentionable even when not channel members.
+  assert.equal(
+    shouldDropAgentMentionCandidate(
+      { isAgent: true, isMember: false, pubkey: PUB_A },
+      managedAgentPubkeys,
+    ),
+    false,
+  );
+  // People are never dropped.
+  assert.equal(
+    shouldDropAgentMentionCandidate(
+      { isAgent: false, isMember: false, pubkey: PUB_B },
+      managedAgentPubkeys,
+    ),
+    false,
+  );
+  // Non-member agent identities from other owners remain restricted (#2149).
+  assert.equal(
+    shouldDropAgentMentionCandidate(
+      { isAgent: true, isMember: false, pubkey: PUB_B },
+      managedAgentPubkeys,
+    ),
+    true,
   );
 });
 

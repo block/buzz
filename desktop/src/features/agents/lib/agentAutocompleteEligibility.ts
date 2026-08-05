@@ -64,6 +64,25 @@ export function isAgentIdentityInManagedList(
   );
 }
 
+/**
+ * Composer drop gate for agent identities (#2508).
+ *
+ * A channel-member agent is never dropped: an agent that has been added to
+ * the channel must stay mentionable for every member, not only the person
+ * whose desktop manages it. The managed-list restriction (#2149) still
+ * applies to non-member agent identities (stale kind:0 discoveries, global
+ * search strays), which is the duplicate-noise case it was introduced for.
+ */
+export function shouldDropAgentMentionCandidate(
+  candidate: { isAgent?: boolean; isMember?: boolean; pubkey: string },
+  managedAgentPubkeys: ReadonlySet<string>,
+) {
+  return (
+    candidate.isMember !== true &&
+    !isAgentIdentityInManagedList(candidate, managedAgentPubkeys)
+  );
+}
+
 export function shouldHideAgentFromMentions({
   isAgent,
   isMember,
