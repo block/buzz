@@ -563,6 +563,63 @@ fn provider_operation(
         .ok_or_else(|| format!("{operation} response missing agent_id"))
 }
 
+fn canonical_remote_path(path: &str, user: &str) -> String {
+    let mut path = path.trim().replace('\\', "/");
+    if !user.is_empty() {
+        for root in [format!("/Users/{user}"), format!("/home/{user}")] {
+            if path == root {
+                path = "~".to_string();
+                break;
+            }
+            if let Some(rest) = path.strip_prefix(&(root.clone() + "/")) {
+                path = format!("~/{rest}");
+                break;
+            }
+        }
+    } else {
+        for root in ["/Users/", "/home/"] {
+            if let Some(rest) = path.strip_prefix(root) {
+                path = match rest.split_once('/') {
+                    Some((_, suffix)) => format!("~/{suffix}"),
+                    None => "~".to_string(),
+                };
+                break;
+            }
+        }
+    }
+    let tilde = path == "~" || path.starts_with("~/");
+    let absolute = path.starts_with('/');
+    let normalized_input = if tilde {
+        path.strip_prefix("~/")
+            .or_else(|| path.strip_prefix('~'))
+            .unwrap_or(&path)
+    } else {
+        path.as_str()
+    };
+    let mut parts = Vec::new();
+    for part in normalized_input.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            value => parts.push(value),
+        }
+    }
+    let joined = parts.join("/");
+    if tilde {
+        if joined.is_empty() {
+            "~".to_string()
+        } else {
+            format!("~/{joined}")
+        }
+    } else if absolute {
+        format!("/{joined}")
+    } else {
+        joined
+    }
+}
+
 /// Return the canonical lifecycle scope for a native Hermes provider.
 ///
 /// One supervised Hermes unit owns one identity. Optional provider settings
