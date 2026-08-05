@@ -1,24 +1,61 @@
 import type { RelayEvent } from "@/shared/api/types";
+import { collectWithConcurrency } from "@/shared/api/concurrency";
 import { KIND_GIT_ISSUE_ASSIGNEE } from "@/shared/constants/kinds";
+import { verifyEvent } from "nostr-tools/pure";
 
-const MAX_ASSIGNMENT_HEADS_PER_ISSUE = 2;
 const RELAY_MAX_PAGE_SIZE = 1_000;
-const ISSUE_IDS_PER_QUERY =
-  RELAY_MAX_PAGE_SIZE / MAX_ASSIGNMENT_HEADS_PER_ISSUE;
+const MAX_FILTERS_PER_REQ = 10;
+const ASSIGNMENT_REQ_CONCURRENCY = 4;
+const REPO_ADDRESS_PATTERN = /^30617:([a-f0-9]{64}):([A-Za-z0-9._-]{1,64})$/;
 
 type AssignmentFilter = {
   kinds: number[];
+  authors: string[];
   "#a": string[];
   "#d": string[];
   limit: number;
 };
 
-type FetchEvents = (filter: AssignmentFilter) => Promise<RelayEvent[]>;
+type FetchEvents = (
+  filters: AssignmentFilter | AssignmentFilter[],
+) => Promise<RelayEvent[]>;
+
+type WriterGroup = {
+  author: string;
+  repoAddress: string;
+  issueIds: Set<string>;
+};
+
+function validRepoOwner(repoAddress: string): string | null {
+  const match = REPO_ADDRESS_PATTERN.exec(repoAddress);
+  const repoId = match?.[2] ?? "";
+  return match && !repoId.startsWith(".") && !repoId.includes("..")
+    ? match[1]
+    : null;
+}
+
+function addWriterGroup(
+  groups: Map<string, WriterGroup>,
+  author: string,
+  repoAddress: string,
+  issueId: string,
+) {
+  const key = `${repoAddress}\u0000${author}`;
+  const group = groups.get(key) ?? {
+    author,
+    repoAddress,
+    issueIds: new Set<string>(),
+  };
+  group.issueIds.add(issueId);
+  groups.set(key, group);
+}
 
 /**
- * Fetches every authorized NIP-33 assignment head without crossing the
- * relay's 1,000-event page clamp. Each issue has at most two authorized
- * author-scoped heads: one from the issue author and one from the repo owner.
+ * Fetches every authorized NIP-33 assignment head without allowing unrelated
+ * author heads to consume the relay limit. One NIP-01 REQ carries exact
+ * author/issue filters for each verified root's author and repository owner.
+ * Requests respect the relay's ten-filter NIP-11 boundary and use bounded
+ * concurrency when many distinct issue authors require separate filters.
  */
 export async function fetchIssueAssignmentEvents(
   issueEvents: RelayEvent[],
@@ -27,30 +64,58 @@ export async function fetchIssueAssignmentEvents(
 ): Promise<RelayEvent[]> {
   if (repoAddresses.length === 0) return [];
 
-  const issueIds = [
-    ...new Set(
-      issueEvents
-        .map((event) => event.id.toLowerCase())
-        .filter((id) => /^[a-f0-9]{64}$/.test(id)),
-    ),
-  ];
-
-  const queries: Array<Promise<RelayEvent[]>> = [];
-  for (
-    let offset = 0;
-    offset < issueIds.length;
-    offset += ISSUE_IDS_PER_QUERY
-  ) {
-    const ids = issueIds.slice(offset, offset + ISSUE_IDS_PER_QUERY);
-    queries.push(
-      fetchEvents({
-        kinds: [KIND_GIT_ISSUE_ASSIGNEE],
-        "#a": repoAddresses,
-        "#d": ids,
-        limit: ids.length * MAX_ASSIGNMENT_HEADS_PER_ISSUE,
-      }),
-    );
+  const allowedRepos = new Set(repoAddresses);
+  const groups = new Map<string, WriterGroup>();
+  for (const issue of issueEvents) {
+    const issueId = issue.id.toLowerCase();
+    const author = issue.pubkey.toLowerCase();
+    const repoTags = issue.tags.filter((tag) => tag[0] === "a");
+    const repoAddress = repoTags.length === 1 ? repoTags[0][1] : undefined;
+    const repoOwner = repoAddress ? validRepoOwner(repoAddress) : null;
+    if (
+      issue.kind !== 1621 ||
+      !/^[a-f0-9]{64}$/.test(issueId) ||
+      !/^[a-f0-9]{64}$/.test(author) ||
+      !repoAddress ||
+      !allowedRepos.has(repoAddress) ||
+      !repoOwner
+    ) {
+      continue;
+    }
+    try {
+      if (!verifyEvent(issue)) continue;
+    } catch {
+      continue;
+    }
+    addWriterGroup(groups, author, repoAddress, issueId);
+    addWriterGroup(groups, repoOwner, repoAddress, issueId);
   }
 
-  return (await Promise.all(queries)).flat();
+  const filters: AssignmentFilter[] = [];
+  for (const { author, repoAddress, issueIds } of groups.values()) {
+    const ids = [...issueIds];
+    for (let offset = 0; offset < ids.length; offset += RELAY_MAX_PAGE_SIZE) {
+      const chunk = ids.slice(offset, offset + RELAY_MAX_PAGE_SIZE);
+      filters.push({
+        kinds: [KIND_GIT_ISSUE_ASSIGNEE],
+        authors: [author],
+        "#a": [repoAddress],
+        "#d": chunk,
+        limit: chunk.length,
+      });
+    }
+  }
+
+  if (filters.length === 0) return [];
+
+  const requestBatches: AssignmentFilter[][] = [];
+  for (let offset = 0; offset < filters.length; offset += MAX_FILTERS_PER_REQ) {
+    requestBatches.push(filters.slice(offset, offset + MAX_FILTERS_PER_REQ));
+  }
+  const events = await collectWithConcurrency(
+    requestBatches,
+    ASSIGNMENT_REQ_CONCURRENCY,
+    fetchEvents,
+  );
+  return events.flat();
 }

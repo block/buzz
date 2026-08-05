@@ -38,6 +38,10 @@ export type RelaySubscriptionFilter = {
   until?: number;
 } & Partial<Record<`#${string}`, string[]>>;
 
+export type RelaySubscriptionFilters =
+  | RelaySubscriptionFilter
+  | RelaySubscriptionFilter[];
+
 type HistorySubscription = {
   mode: "history";
   events: RelayEvent[];

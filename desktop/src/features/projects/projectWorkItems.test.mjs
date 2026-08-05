@@ -46,6 +46,32 @@ test("assignment queries require a repository coordinate", async () => {
   assert.equal(queryCount, 0);
 });
 
+test("assignment queries batch exact writer filters at the relay boundary", async () => {
+  const roots = Array.from({ length: 11 }, (_, index) =>
+    finalizeEvent(
+      {
+        kind: 1621,
+        created_at: index + 1,
+        content: `Issue ${index}`,
+        tags: [["a", REPO_ADDRESS]],
+      },
+      new Uint8Array(32).fill(index + 2),
+    ),
+  );
+  const requestSizes = [];
+
+  await fetchIssueAssignmentEvents(roots, [REPO_ADDRESS], async (filters) => {
+    assert.ok(Array.isArray(filters));
+    requestSizes.push(filters.length);
+    for (const filter of filters) {
+      assert.equal(filter.authors.length, 1);
+    }
+    return [];
+  });
+
+  assert.deepEqual(requestSizes, [10, 2]);
+});
+
 // Minimal valid NIP-34 issue event for the shared repo.
 function makeIssue(id, updatedAt = 100) {
   return {
@@ -190,10 +216,17 @@ const assignmentEvent = finalizeEvent(
 
 test("aggregate work-item queries fetch and project issue assignments", async () => {
   const filters = [];
-  const fetchEvents = async (filter) => {
-    filters.push(filter);
-    if (filter.kinds.includes(1621)) return [assignedIssue];
-    if (filter.kinds.includes(32001)) return [assignmentEvent];
+  const fetchEvents = async (filterOrFilters) => {
+    const requestFilters = Array.isArray(filterOrFilters)
+      ? filterOrFilters
+      : [filterOrFilters];
+    filters.push(...requestFilters);
+    if (requestFilters.some((filter) => filter.kinds.includes(1621))) {
+      return [assignedIssue];
+    }
+    if (requestFilters.some((filter) => filter.kinds.includes(32001))) {
+      return [assignmentEvent];
+    }
     return [];
   };
 
@@ -208,42 +241,84 @@ test("aggregate work-item queries fetch and project issue assignments", async ()
       (filter) =>
         filter.kinds.length === 1 &&
         filter.kinds[0] === 32001 &&
+        filter.authors?.length === 1 &&
+        filter.authors[0] === REPO_OWNER &&
         filter["#a"]?.[0] === REPO_ADDRESS &&
         filter["#d"]?.length === 1 &&
         filter["#d"]?.[0] === ASSIGNED_ISSUE_ID &&
-        filter.limit === 2,
+        filter.limit === 1,
     ),
-    "aggregate query must request both authorized writer heads by issue id",
+    "aggregate query must scope the repository-owner head by author and issue",
+  );
+  assert.ok(
+    filters.some(
+      (filter) =>
+        filter.kinds.length === 1 &&
+        filter.kinds[0] === 32001 &&
+        filter.authors?.length === 1 &&
+        filter.authors[0] === assignedIssue.pubkey &&
+        filter["#a"]?.[0] === REPO_ADDRESS &&
+        filter["#d"]?.length === 1 &&
+        filter["#d"]?.[0] === ASSIGNED_ISSUE_ID &&
+        filter.limit === 1,
+    ),
+    "aggregate query must scope the issue-author head by author and issue",
   );
 });
 
-test("assignment queries stay complete across the relay page clamp", async () => {
-  const roots = Array.from({ length: 501 }, (_, index) =>
-    makeIssue(index.toString(16).padStart(64, "0")),
+test("author-scoped assignment filters stay complete across the relay page clamp", async () => {
+  const roots = Array.from({ length: 1_001 }, (_, index) =>
+    finalizeEvent(
+      {
+        kind: 1621,
+        created_at: index + 1,
+        content: `Issue ${index}`,
+        tags: [["a", REPO_ADDRESS]],
+      },
+      AUTHOR_SECRET,
+    ),
   );
   const assignmentFilters = [];
-  const fetchEvents = async (filter) => {
-    if (filter.kinds.includes(1621)) return roots;
-    if (filter.kinds.includes(32001)) assignmentFilters.push(filter);
+  const fetchEvents = async (filterOrFilters) => {
+    const requestFilters = Array.isArray(filterOrFilters)
+      ? filterOrFilters
+      : [filterOrFilters];
+    if (requestFilters.some((filter) => filter.kinds.includes(1621))) {
+      return roots;
+    }
+    assignmentFilters.push(
+      ...requestFilters.filter((filter) => filter.kinds.includes(32001)),
+    );
     return [];
   };
 
   await fetchProjectsWorkItems([projectA], fetchEvents);
 
-  assert.equal(assignmentFilters.length, 2);
+  assert.equal(assignmentFilters.length, 4);
   assert.deepEqual(
-    assignmentFilters.map((filter) => [filter["#d"].length, filter.limit]),
+    assignmentFilters.map((filter) => [
+      filter.authors.length,
+      filter["#d"].length,
+      filter.limit,
+    ]),
     [
-      [500, 1_000],
-      [1, 2],
+      [1, 1_000, 1_000],
+      [1, 1, 1],
+      [1, 1_000, 1_000],
+      [1, 1, 1],
     ],
   );
 });
 
 test("assignment query failure preserves issues and reports partial data", async () => {
-  const fetchEvents = async (filter) => {
-    if (filter.kinds.includes(1621)) return [assignedIssue];
-    if (filter.kinds.includes(32001)) {
+  const fetchEvents = async (filterOrFilters) => {
+    const requestFilters = Array.isArray(filterOrFilters)
+      ? filterOrFilters
+      : [filterOrFilters];
+    if (requestFilters.some((filter) => filter.kinds.includes(1621))) {
+      return [assignedIssue];
+    }
+    if (requestFilters.some((filter) => filter.kinds.includes(32001))) {
       throw new Error("assignment query unavailable");
     }
     return [];
