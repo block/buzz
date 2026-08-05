@@ -11,7 +11,7 @@ use super::{
     ManagedAgentRuntimeKey, ManagedAgentRuntimeLifecycle, ManagedAgentRuntimeReceipt,
     ManagedAgentRuntimeStatus,
 };
-use crate::app_state::AppState;
+use crate::{app_state::AppState, managed_agents::readiness::EffectiveAgentEnv};
 
 const STATUS_EVENT: &str = "managed-agent-runtime-status";
 
@@ -135,6 +135,39 @@ pub fn put_managed_agent_runtime_lifecycle(
     let status = status_for(&app, record, &key, Some(runtime), None);
     emit_status(&app, &status);
     Ok(status)
+}
+
+fn readiness_for_record(
+    record: &super::ManagedAgentRecord,
+    personas: &[super::AgentDefinition],
+    global: &super::GlobalAgentConfig,
+) -> Result<AgentReadiness, String> {
+    let descriptor = super::resolve_effective_harness_descriptor(record, personas, global)?;
+    let metadata = super::known_acp_runtime(&descriptor.command);
+    let effective = EffectiveAgentEnv {
+        env: descriptor.env,
+        config_file_path: metadata.and_then(|runtime| runtime.config_file_path),
+        effective_command: descriptor.command,
+    };
+    Ok(agent_readiness(&effective))
+}
+
+/// Return backend-authoritative readiness for the exact managed instance the
+/// caller intends to start. This follows the same runtime and layered env
+/// resolution as spawning, including baked release defaults.
+#[tauri::command]
+pub fn get_managed_agent_readiness(
+    pubkey: String,
+    app: AppHandle,
+) -> Result<AgentReadiness, String> {
+    let records = load_managed_agents(&app)?;
+    let record = records
+        .iter()
+        .find(|record| record.pubkey.eq_ignore_ascii_case(&pubkey))
+        .ok_or_else(|| format!("agent {pubkey} not found"))?;
+    let personas = load_personas(&app).unwrap_or_default();
+    let global = load_global_agent_config(&app).unwrap_or_default();
+    readiness_for_record(record, &personas, &global)
 }
 
 #[tauri::command]
@@ -604,6 +637,45 @@ mod tests {
             "aa".repeat(32)
         ))
         .unwrap()
+    }
+
+    fn record_with_command(command: &str) -> super::super::ManagedAgentRecord {
+        let mut record = record_with_relay("");
+        record.agent_command_override = Some(command.to_string());
+        record
+    }
+
+    #[test]
+    fn readiness_is_evaluated_for_the_selected_instance_runtime() {
+        let selected = record_with_command("buzz-agent");
+        let unrelated_ready_command = std::env::current_exe()
+            .expect("current test executable must be available")
+            .to_string_lossy()
+            .into_owned();
+        let unrelated_ready_runtime = record_with_command(&unrelated_ready_command);
+        let global = super::super::GlobalAgentConfig::default();
+
+        assert!(matches!(
+            readiness_for_record(&selected, &[], &global),
+            Ok(AgentReadiness::NotReady { .. })
+        ));
+        assert!(matches!(
+            readiness_for_record(&unrelated_ready_runtime, &[], &global),
+            Ok(AgentReadiness::Ready)
+        ));
+    }
+
+    #[test]
+    fn readiness_rejects_a_dangling_selected_runtime_like_spawn() {
+        let mut selected = record_with_command("buzz-agent");
+        selected.agent_command_override = None;
+        selected.runtime = Some("removed-harness".to_string());
+
+        let error =
+            readiness_for_record(&selected, &[], &super::super::GlobalAgentConfig::default())
+                .expect_err("dangling runtime must not fall through to a default command");
+
+        assert_eq!(error, "DANGLING_HARNESS_ID:removed-harness");
     }
 
     #[test]

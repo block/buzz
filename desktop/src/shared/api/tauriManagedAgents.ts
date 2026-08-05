@@ -50,6 +50,16 @@ export async function setManagedAgentAutoRestart(
   return fromRawManagedAgent(response);
 }
 
+export type ManagedAgentReadiness =
+  | { status: "ready" }
+  | { status: "not_ready"; requirements: unknown[] };
+
+export async function getManagedAgentReadiness(
+  pubkey: string,
+): Promise<ManagedAgentReadiness> {
+  return invokeTauri("get_managed_agent_readiness", { pubkey });
+}
+
 export async function listManagedAgentRuntimes(): Promise<
   ManagedAgentRuntimeStatus[]
 > {

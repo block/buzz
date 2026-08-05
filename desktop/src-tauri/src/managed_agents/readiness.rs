@@ -163,8 +163,14 @@ pub(crate) fn resolve_effective_harness_descriptor(
 
     // Env: full layered resolution (same as resolve_effective_agent_env).
     // Pass harness_def directly to avoid a second lookup.
-    let effective_env =
-        resolve_effective_agent_env_with_def(record, personas, runtime_meta, global, harness_def);
+    let effective_env = resolve_effective_agent_env_with_def(
+        record,
+        personas,
+        runtime_meta,
+        global,
+        harness_def,
+        baked_build_env(),
+    );
 
     Ok(EffectiveHarnessDescriptor {
         command: effective_command,
@@ -183,11 +189,12 @@ pub(crate) fn resolve_effective_harness_descriptor(
 /// * `runtime` — the `KnownAcpRuntime` for the effective command, if any
 /// * `global` — global agent config defaults (lowest user layer; pass
 ///   `&GlobalAgentConfig::default()` in tests that don't need global config)
-pub(crate) fn resolve_effective_agent_env(
+fn effective_agent_env_with_floor(
     record: &ManagedAgentRecord,
     personas: &[AgentDefinition],
     runtime: Option<&KnownAcpRuntime>,
     global: &GlobalAgentConfig,
+    env: BTreeMap<String, String>,
 ) -> EffectiveAgentEnv {
     // Look up the harness definition for definition-level env (preset/custom).
     // Same resolution logic as spawn_agent_child: record runtime id first, then
@@ -208,7 +215,16 @@ pub(crate) fn resolve_effective_agent_env(
         crate::managed_agents::custom_harnesses::lookup_loaded_harness_by_id(runtime_id)
     };
 
-    resolve_effective_agent_env_with_def(record, personas, runtime, global, harness_def)
+    resolve_effective_agent_env_with_def(record, personas, runtime, global, harness_def, env)
+}
+
+pub(crate) fn resolve_effective_agent_env(
+    record: &ManagedAgentRecord,
+    personas: &[AgentDefinition],
+    runtime: Option<&KnownAcpRuntime>,
+    global: &GlobalAgentConfig,
+) -> EffectiveAgentEnv {
+    effective_agent_env_with_floor(record, personas, runtime, global, baked_build_env())
 }
 
 /// Inner implementation that accepts a pre-fetched `harness_def` to avoid a
@@ -220,11 +236,12 @@ fn resolve_effective_agent_env_with_def(
     runtime: Option<&KnownAcpRuntime>,
     global: &GlobalAgentConfig,
     harness_def: Option<std::sync::Arc<crate::managed_agents::custom_harnesses::HarnessDefinition>>,
+    mut env: BTreeMap<String, String>,
 ) -> EffectiveAgentEnv {
     let effective_command = crate::managed_agents::record_agent_command(record, personas);
 
-    // Layer 1: baked build defaults (floor — internal builds only; OSS = empty).
-    let mut env = baked_build_env();
+    // Layer 1 is supplied by the caller. Production uses baked build defaults;
+    // tests can inject the exact release floor without relying on option_env!.
 
     let (effective_model, effective_provider) =
         super::global_config::resolve_effective_model_provider(record, personas, global);
@@ -1545,194 +1562,19 @@ mod tests {
             Some("claude-opus-4-5")
         );
     }
-
-    // ── provider-specific model fallback tests ────────────────────────────
-
-    #[test]
-    fn buzz_agent_databricks_v2_with_databricks_model_but_no_buzz_agent_model_is_ready() {
-        // The baked buzz-releases env sets DATABRICKS_MODEL but not BUZZ_AGENT_MODEL.
-        // An agent with only DATABRICKS_MODEL must pass the readiness gate.
-        let env = make_env(
-            "buzz-agent",
-            env_with(&[
-                ("BUZZ_AGENT_PROVIDER", "databricks_v2"),
-                ("DATABRICKS_MODEL", "goose-claude-4-6-sonnet"),
-                ("DATABRICKS_HOST", "https://dbc.example.com"),
-            ]),
-        );
-        assert!(
-            agent_readiness(&env).is_ready(),
-            "DATABRICKS_MODEL must satisfy the model requirement for databricks_v2"
-        );
-    }
-
-    #[test]
-    fn buzz_agent_databricks_v2_hyphen_alias_with_databricks_model_is_ready() {
-        // buzz-agent accepts both "databricks_v2" and "databricks-v2". The
-        // readiness gate must recognize the hyphen alias and accept DATABRICKS_MODEL.
-        let env = make_env(
-            "buzz-agent",
-            env_with(&[
-                ("BUZZ_AGENT_PROVIDER", "databricks-v2"),
-                ("DATABRICKS_MODEL", "goose-claude-4-6-sonnet"),
-                ("DATABRICKS_HOST", "https://dbc.example.com"),
-            ]),
-        );
-        assert!(
-            agent_readiness(&env).is_ready(),
-            "databricks-v2 alias with DATABRICKS_MODEL must be Ready"
-        );
-    }
-
-    #[test]
-    fn buzz_agent_databricks_hyphen_alias_missing_host_returns_not_ready() {
-        // The hyphen alias "databricks-v2" requires DATABRICKS_HOST just like
-        // the underscore variants. Without it the agent cannot reach the endpoint.
-        let env = make_env(
-            "buzz-agent",
-            env_with(&[
-                ("BUZZ_AGENT_PROVIDER", "databricks-v2"),
-                ("DATABRICKS_MODEL", "goose-claude-4-6-sonnet"),
-                // DATABRICKS_HOST intentionally absent
-            ]),
-        );
-        let result = agent_readiness(&env);
-        assert!(
-            !result.is_ready(),
-            "databricks-v2 without DATABRICKS_HOST must be NotReady"
-        );
-        let reqs = result.requirements();
-        assert!(
-            reqs.iter()
-                .any(|r| matches!(r, Requirement::EnvKey { key } if key == "DATABRICKS_HOST")),
-            "missing requirements must include DATABRICKS_HOST; got {reqs:?}"
-        );
-    }
-
-    #[test]
-    fn buzz_agent_databricks_v1_with_databricks_model_but_no_buzz_agent_model_is_ready() {
-        // V1 (Model Serving) also resolves DATABRICKS_MODEL — same fallback applies.
-        let env = make_env(
-            "buzz-agent",
-            env_with(&[
-                ("BUZZ_AGENT_PROVIDER", "databricks"),
-                ("DATABRICKS_MODEL", "dbrx-instruct"),
-                ("DATABRICKS_HOST", "https://dbc.example.com"),
-            ]),
-        );
-        assert!(
-            agent_readiness(&env).is_ready(),
-            "DATABRICKS_MODEL must satisfy the model requirement for databricks (V1)"
-        );
-    }
-
-    #[test]
-    fn buzz_agent_anthropic_with_anthropic_model_but_no_buzz_agent_model_is_ready() {
-        let env = make_env(
-            "buzz-agent",
-            env_with(&[
-                ("BUZZ_AGENT_PROVIDER", "anthropic"),
-                ("ANTHROPIC_MODEL", "claude-opus-4-5"),
-                ("ANTHROPIC_API_KEY", "sk-test"),
-            ]),
-        );
-        assert!(
-            agent_readiness(&env).is_ready(),
-            "ANTHROPIC_MODEL must satisfy the model requirement for anthropic"
-        );
-    }
-
-    #[test]
-    fn buzz_agent_openai_with_openai_compat_model_but_no_buzz_agent_model_is_ready() {
-        let env = make_env(
-            "buzz-agent",
-            env_with(&[
-                ("BUZZ_AGENT_PROVIDER", "openai"),
-                ("OPENAI_COMPAT_MODEL", "gpt-4o"),
-                ("OPENAI_COMPAT_API_KEY", "sk-test"),
-            ]),
-        );
-        assert!(
-            agent_readiness(&env).is_ready(),
-            "OPENAI_COMPAT_MODEL must satisfy the model requirement for openai"
-        );
-    }
-
-    #[test]
-    fn buzz_agent_empty_provider_model_fallback_key_is_not_ready() {
-        // An empty DATABRICKS_MODEL with no BUZZ_AGENT_MODEL must still be NotReady.
-        let env = make_env(
-            "buzz-agent",
-            env_with(&[
-                ("BUZZ_AGENT_PROVIDER", "databricks_v2"),
-                ("DATABRICKS_MODEL", ""),
-                ("DATABRICKS_HOST", "https://dbc.example.com"),
-            ]),
-        );
-        let result = agent_readiness(&env);
-        assert!(
-            !result.is_ready(),
-            "empty DATABRICKS_MODEL with no BUZZ_AGENT_MODEL must be NotReady"
-        );
-        assert!(result
-            .requirements()
-            .contains(&Requirement::NormalizedField {
-                field: "model".to_string()
-            }));
-    }
-
-    // ── OpenRouter readiness ─────────────────────────────────────────────
-
-    #[test]
-    fn buzz_agent_openrouter_with_all_fields_is_ready() {
-        let env = make_env(
-            "buzz-agent",
-            env_with(&[
-                ("BUZZ_AGENT_PROVIDER", "openrouter"),
-                ("BUZZ_AGENT_MODEL", "anthropic/claude-sonnet-4"),
-                ("OPENROUTER_API_KEY", "sk-or-test-key"),
-            ]),
-        );
-        let result = agent_readiness(&env);
-        assert!(
-            result.is_ready(),
-            "openrouter with all fields should be ready"
-        );
-    }
-
-    #[test]
-    fn buzz_agent_openrouter_missing_key_returns_not_ready() {
-        let env = make_env(
-            "buzz-agent",
-            env_with(&[
-                ("BUZZ_AGENT_PROVIDER", "openrouter"),
-                ("BUZZ_AGENT_MODEL", "anthropic/claude-sonnet-4"),
-            ]),
-        );
-        let result = agent_readiness(&env);
-        assert!(!result.is_ready());
-        assert!(result.requirements().contains(&Requirement::EnvKey {
-            key: "OPENROUTER_API_KEY".to_string()
-        }));
-    }
-
-    #[test]
-    fn buzz_agent_openrouter_with_provider_model_fallback_is_ready() {
-        let env = make_env(
-            "buzz-agent",
-            env_with(&[
-                ("BUZZ_AGENT_PROVIDER", "openrouter"),
-                ("OPENROUTER_MODEL", "google/gemini-2.5-flash"),
-                ("OPENROUTER_API_KEY", "sk-or-test-key"),
-            ]),
-        );
-        let result = agent_readiness(&env);
-        assert!(
-            result.is_ready(),
-            "OPENROUTER_MODEL fallback should satisfy model requirement"
-        );
-    }
 }
+
+// Provider fallback readiness tests live in a sibling file so this module
+// stays under the desktop file-size ratchet.
+#[cfg(test)]
+#[path = "readiness_provider_fallback_tests.rs"]
+mod provider_fallback_tests;
+
+// Release-floor layering regression tests live in a sibling file so this
+// module stays under the desktop file-size ratchet.
+#[cfg(test)]
+#[path = "readiness_release_floor_tests.rs"]
+mod release_floor_tests;
 
 // Goose file-config-aware requirement tests live in a sibling file so this
 // module stays under the desktop file-size ratchet.

@@ -12061,6 +12061,14 @@ export function maybeInstallE2eTauriMocks() {
         return handleStopManagedAgent(
           payload as Parameters<typeof handleStopManagedAgent>[0],
         );
+      case "get_managed_agent_readiness": {
+        const { pubkey } = payload as { pubkey: string };
+        const agent = mockManagedAgents.find(
+          (candidate) => candidate.pubkey === pubkey,
+        );
+        if (!agent) throw new Error(`agent ${pubkey} not found`);
+        return { status: "ready" };
+      }
       case "list_managed_agent_runtimes":
         return mockManagedAgentRuntimes.map((row) => ({ ...row }));
       case "start_managed_agent_runtime":

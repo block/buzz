@@ -63,10 +63,10 @@ use huddle::{
 };
 use initial_window::*;
 use managed_agents::{
-    backfill_persona_snapshots, ensure_nest, list_managed_agent_runtimes,
-    put_managed_agent_runtime_lifecycle, reconcile_managed_agent_runtimes,
-    restart_managed_agent_runtime, start_managed_agent_runtime, stop_managed_agent_runtime,
-    try_regenerate_nest,
+    backfill_persona_snapshots, ensure_nest, get_managed_agent_readiness,
+    list_managed_agent_runtimes, put_managed_agent_runtime_lifecycle,
+    reconcile_managed_agent_runtimes, restart_managed_agent_runtime, start_managed_agent_runtime,
+    stop_managed_agent_runtime, try_regenerate_nest,
 };
 #[cfg(not(feature = "mesh-llm"))]
 use mesh_llm_stubs::*;
@@ -747,6 +747,7 @@ pub fn run() {
             resolve_oa_owner,
             list_relay_agents,
             list_managed_agents,
+            get_managed_agent_readiness,
             list_managed_agent_runtimes,
             start_managed_agent_runtime,
             stop_managed_agent_runtime,
@@ -908,7 +909,6 @@ pub fn run() {
 
     #[cfg(unix)]
     shutdown::install_signal_handler(app.handle().clone(), Arc::clone(&shutdown_done));
-
     let run_shutdown_done = Arc::clone(&shutdown_done);
     let restart_requested = Arc::new(AtomicBool::new(false));
     app.run(move |app_handle, event| match event {

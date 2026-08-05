@@ -2863,19 +2863,11 @@ test("successful starter channel retry clears its actionable toast", async ({
   await expectStarterChannels(page);
 });
 
-test("first-run onboarding posts the live Fizz kickoff", async ({ page }) => {
+test("first-run onboarding with empty persisted agent config posts the live Fizz kickoff", async ({
+  page,
+}) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
-  await installMockBridge(
-    page,
-    {
-      globalAgentConfig: {
-        env_vars: { OPENAI_API_KEY: "e2e-placeholder" },
-        provider: "openai",
-        model: "gpt-5.5",
-      },
-    },
-    { skipOnboardingSeed: true },
-  );
+  await installMockBridge(page, undefined, { skipOnboardingSeed: true });
   await page.goto("/");
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
@@ -2890,6 +2882,7 @@ test("first-run onboarding posts the live Fizz kickoff", async ({ page }) => {
   await expect(page.getByTestId("message-timeline")).toContainText(
     "Honey and Bumble, introduce yourselves",
   );
+  expect(await commandCount(page, "get_managed_agent_readiness")).toBe(1);
 });
 
 test("first-run onboarding lands before Welcome team bootstrap completes", async ({

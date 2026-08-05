@@ -9,7 +9,6 @@ import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 import { clearActiveTurnsForAgentOnStop } from "@/features/agents/managedAgentRuntimeHooks";
 import { useCommunities } from "@/features/communities/useCommunities";
 import { welcomeKickoffMarker } from "@/features/onboarding/devFreshOnboarding";
-import { resolveAgentReadiness } from "@/features/onboarding/ui/agentReadiness";
 import {
   ensureWelcomeTeam,
   pickWelcomeTeamStarterAgentForRelay,
@@ -20,6 +19,7 @@ import { isWelcomeChannel } from "@/features/onboarding/welcome";
 import { getThreadReference } from "@/features/messages/lib/threading";
 import { useThreadReplies } from "@/features/messages/useThreadReplies";
 import {
+  getManagedAgentReadiness,
   startManagedAgent,
   stopManagedAgent,
 } from "@/shared/api/tauriManagedAgents";
@@ -496,7 +496,7 @@ export function useWelcomeKickoff(
   const { activeCommunity } = useCommunities();
   const runtimesQuery = useAcpRuntimesQuery();
   const managedAgentsQuery = useManagedAgentsQuery();
-  const { globalConfig, isLoading: configLoading } = useGlobalAgentConfig();
+  const { isLoading: configLoading } = useGlobalAgentConfig();
   const channelId = activeChannel?.id ?? null;
   const isActiveWelcome = isWelcomeChannel(activeChannel);
   const focusedWelcomeChannelRef = React.useRef<string | null>(null);
@@ -547,10 +547,6 @@ export function useWelcomeKickoff(
       ),
     [activeCommunity?.relayUrl, managedAgentsQuery.data],
   );
-  const readiness = React.useMemo(
-    () => resolveAgentReadiness(runtimesQuery.data ?? [], globalConfig),
-    [globalConfig, runtimesQuery.data],
-  );
   React.useEffect(() => {
     if (
       !channelId ||
@@ -583,7 +579,10 @@ export function useWelcomeKickoff(
         if (await markerExists(channelId, closerMarker)) {
           return;
         }
-        if (!readiness.ready) {
+        const readiness = await getManagedAgentReadiness(
+          resolvedAgentSet.lead.pubkey,
+        );
+        if (readiness.status !== "ready") {
           await sendManagedAgentChannelMessage({
             agentPubkey: resolvedAgentSet.lead.pubkey,
             channelId,
@@ -692,7 +691,6 @@ export function useWelcomeKickoff(
     isActiveWelcome,
     onKickoffOpenerPosted,
     queryClient,
-    readiness,
     runtimesQuery.isPending,
   ]);
 
