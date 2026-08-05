@@ -287,10 +287,10 @@ void _showProfileCopyToast(BuildContext context) {
   );
   late final OverlayEntry entry;
   entry = OverlayEntry(
-    builder: (_) => Positioned(
+    builder: (overlayContext) => Positioned(
       left: Grid.gutter,
       right: Grid.gutter,
-      bottom: MediaQuery.viewPaddingOf(context).bottom + Grid.xs,
+      bottom: MediaQuery.viewPaddingOf(overlayContext).bottom + Grid.xs,
       child: Material(
         color: colors.inverseSurface,
         elevation: 6,

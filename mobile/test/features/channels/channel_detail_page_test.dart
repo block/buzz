@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollDirection;
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -2386,6 +2387,31 @@ void main() {
       expect(find.text('Copy public key'), findsOneWidget);
       expect(find.text('alice'), findsNothing);
       expect(find.byType(UserProfileSheet), findsOneWidget);
+
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, (_) async => null);
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(SystemChannels.platform, null),
+      );
+      await tester.ensureVisible(find.text('Copy public key'));
+      await tester.pumpAndSettle();
+      final copyAction = find
+          .ancestor(
+            of: find.text('Copy public key'),
+            matching: find.byType(GestureDetector),
+          )
+          .last;
+      tester.widget<GestureDetector>(copyAction).onTap!();
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('Public key copied'), findsOneWidget);
+
+      await tester.tap(find.byTooltip('Close sheet'));
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(seconds: 2));
+
+      expect(tester.takeException(), isNull);
     });
 
     testWidgets('opens a profile sheet from a huddle system avatar', (
