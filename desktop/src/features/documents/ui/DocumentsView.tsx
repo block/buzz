@@ -1,5 +1,5 @@
 import * as React from "react";
-import { FolderOpen } from "lucide-react";
+import { FolderOpen, PanelRight } from "lucide-react";
 
 import {
   useVaultContentsQuery,
@@ -114,6 +114,27 @@ export function DocumentsView() {
 
   const [headings, setHeadings] = React.useState<OutlineHeading[]>([]);
   const [activeHeading, setActiveHeading] = React.useState(-1);
+  const [railOpen, setRailOpen] = React.useState(() => {
+    try {
+      return window.localStorage.getItem("buzz.documents.railOpen") !== "0";
+    } catch {
+      return true;
+    }
+  });
+  const toggleRail = React.useCallback(() => {
+    setRailOpen((current) => {
+      const next = !current;
+      try {
+        window.localStorage.setItem(
+          "buzz.documents.railOpen",
+          next ? "1" : "0",
+        );
+      } catch {
+        // Losing the preference is not worth failing the interaction.
+      }
+      return next;
+    });
+  }, []);
   // Set by the live editor once it mounts; the outline lives beside the editor
   // rather than inside it, so it cannot reach the view directly.
   const scrollToHeadingRef = React.useRef<((position: number) => void) | null>(
@@ -230,16 +251,33 @@ export function DocumentsView() {
     <>
       <ChatHeader
         actions={
-          <Button
-            data-testid="documents-change-vault"
-            onClick={() => void chooseVault()}
-            size="sm"
-            type="button"
-            variant="ghost"
-          >
-            <FolderOpen className="h-4 w-4" />
-            Change folder
-          </Button>
+          <>
+            <Button
+              aria-pressed={railOpen}
+              data-testid="documents-toggle-rail"
+              onClick={toggleRail}
+              size="sm"
+              title={
+                railOpen
+                  ? "Hide outline and backlinks"
+                  : "Show outline and backlinks"
+              }
+              type="button"
+              variant="ghost"
+            >
+              <PanelRight className="h-4 w-4" />
+            </Button>
+            <Button
+              data-testid="documents-change-vault"
+              onClick={() => void chooseVault()}
+              size="sm"
+              type="button"
+              variant="ghost"
+            >
+              <FolderOpen className="h-4 w-4" />
+              Change folder
+            </Button>
+          </>
         }
         mode="documents"
         title={activation.name}
@@ -359,7 +397,7 @@ export function DocumentsView() {
           )}
         </div>
 
-        {session.activeTab ? (
+        {session.activeTab && railOpen ? (
           <>
             <button
               aria-label="Resize the backlinks rail"

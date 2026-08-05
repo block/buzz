@@ -154,3 +154,48 @@ test("alignment colons in a delimiter row are preserved", () => {
     false,
   );
 });
+
+test("soft-wrapped prose inside a blockquote is tolerated", () => {
+  // Prose wraps inside `>` blocks the same as outside, and the serializer
+  // joins it the same way.
+  const wrapped =
+    "> Grounded in an audit.\n> The app is more complete\n> than assumed.";
+  const joined =
+    "> Grounded in an audit. The app is more complete than assumed.";
+  assert.equal(
+    isRoundTripStable(wrapped, () => joined),
+    true,
+  );
+});
+
+test("a callout's line break is NOT joined", () => {
+  // Load-bearing: a callout's first line is its title. Joining it into the body
+  // would change the rendered callout, so callouts must keep failing the guard.
+  const callout = "> [!info] Title\n> body text";
+  assert.equal(
+    isRoundTripStable(callout, () => "> [!info] Title body text"),
+    false,
+  );
+});
+
+test("bullet marker style is cosmetic, inside and outside quotes", () => {
+  assert.equal(
+    isRoundTripStable("* one\n* two", () => "- one\n- two"),
+    true,
+  );
+  assert.equal(
+    isRoundTripStable("+ one", () => "- one"),
+    true,
+  );
+  assert.equal(
+    isRoundTripStable("> * one\n> * two", () => "> - one\n> - two"),
+    true,
+  );
+});
+
+test("normalizing markers does not hide a lost list item", () => {
+  assert.equal(
+    isRoundTripStable("* one\n* two", () => "- one"),
+    false,
+  );
+});

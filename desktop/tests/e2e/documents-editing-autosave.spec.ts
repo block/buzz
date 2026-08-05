@@ -290,8 +290,8 @@ test.describe("Documents always-live-preview setting", () => {
   test("a lossy note opens in live preview when the setting is on", async ({
     page,
   }) => {
-    // The guard still classifies the file — the setting only changes which
-    // mode it starts in, so the notice remains visible as a warning.
+    // The guard still classifies the file — the setting changes which mode it
+    // opens in, and suppresses the now-redundant warning.
     await page.addInitScript(() => {
       window.localStorage.removeItem("buzz.documents.vaultPath.v1");
       window.localStorage.setItem("buzz.documents.alwaysLivePreview.v1", "1");
@@ -317,8 +317,11 @@ test.describe("Documents always-live-preview setting", () => {
 
     await expect(page.getByTestId("documents-live-editor")).toBeVisible();
     await expect(page.getByTestId("documents-source-editor")).toHaveCount(0);
-    // Still warned, just not forced.
-    await expect(page.getByTestId("documents-round-trip-banner")).toBeVisible();
+    // With the setting on the user has already accepted the reformatting, so
+    // repeating the warning on every note is noise.
+    await expect(page.getByTestId("documents-round-trip-banner")).toHaveCount(
+      0,
+    );
   });
 
   test("only one live-preview control is offered", async ({ page }) => {

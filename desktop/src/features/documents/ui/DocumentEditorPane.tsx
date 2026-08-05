@@ -6,6 +6,7 @@ import type { DocumentTab } from "@/features/documents/lib/documentTabs";
 import { useVaultEditor } from "@/features/documents/lib/editor/useVaultEditor";
 import type { WikilinkClickHandler } from "@/features/documents/lib/editor/wikilinkExtension";
 import type { NoteIndex } from "@/features/documents/lib/noteIndex";
+import { useAlwaysLivePreview } from "@/features/documents/useDocumentsPreferences";
 import {
   activeHeadingIndex,
   type OutlineHeading,
@@ -229,18 +230,22 @@ export function DocumentEditorPane({
   tab: DocumentTab;
 }) {
   const isSource = tab.viewMode === "source";
+  // With the setting on, the user has already accepted that these files get
+  // reformatted; repeating the warning on every note is just noise.
+  const alwaysLivePreview = useAlwaysLivePreview();
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       {hasExternalChange ? (
         <ExternalChangeBanner onKeepMine={onKeepMine} onReload={onReload} />
       ) : null}
-      {tab.roundTrip === "lossy" ? <RoundTripNotice /> : null}
+      {tab.roundTrip === "lossy" && !alwaysLivePreview ? (
+        <RoundTripNotice />
+      ) : null}
 
-      <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border/60 px-4 py-1.5">
-        <span className="truncate text-sm text-muted-foreground">
-          {tab.name}
-        </span>
+      {/* The tab bar above already names the file; repeating it here was
+          redundant. This row is just the mode toggle. */}
+      <div className="flex shrink-0 items-center justify-end border-b border-border/60 px-4 py-1.5">
         <Button
           className={cn("shrink-0", isSource && "text-foreground")}
           data-testid="documents-toggle-view-mode"

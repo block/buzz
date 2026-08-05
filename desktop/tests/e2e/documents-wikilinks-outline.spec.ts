@@ -245,3 +245,20 @@ test.describe("Documents session restore", () => {
     ).toBeVisible();
   });
 });
+
+test.describe("Documents right rail", () => {
+  test("toggles the outline and backlinks rail, remembering the choice", async ({
+    page,
+  }) => {
+    await openVaultWith(page, [[`${VAULT}/Note.md`, "# Note\n\nBody.\n"]]);
+    await page.getByTestId("documents-file-Note.md").click();
+    await expect(page.getByTestId("documents-outline")).toBeVisible();
+
+    await page.getByTestId("documents-toggle-rail").click();
+    await expect(page.getByTestId("documents-outline")).toHaveCount(0);
+    await expect(page.getByTestId("documents-backlinks")).toHaveCount(0);
+
+    await page.getByTestId("documents-toggle-rail").click();
+    await expect(page.getByTestId("documents-outline")).toBeVisible();
+  });
+});

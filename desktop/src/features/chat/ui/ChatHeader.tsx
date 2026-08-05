@@ -155,17 +155,21 @@ export function ChatHeader({
             >
               {title}
             </h1>
-            <Button
-              aria-label={`Copy channel name: ${title}`}
-              className="h-6 w-6 shrink-0 opacity-0 text-muted-foreground transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover/title:opacity-100"
-              onClick={() => void handleCopyTitle()}
-              size="icon-xs"
-              title="Copy channel name"
-              type="button"
-              variant="ghost"
-            >
-              <Copy className="h-3.5 w-3.5" />
-            </Button>
+            {/* Copying the title is a channel affordance — a document's title
+                is its filename, and "Copy channel name" is simply wrong there. */}
+            {mode === "documents" ? null : (
+              <Button
+                aria-label={`Copy channel name: ${title}`}
+                className="h-6 w-6 shrink-0 opacity-0 text-muted-foreground transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover/title:opacity-100"
+                onClick={() => void handleCopyTitle()}
+                size="icon-xs"
+                title="Copy channel name"
+                type="button"
+                variant="ghost"
+              >
+                <Copy className="h-3.5 w-3.5" />
+              </Button>
+            )}
             {statusBadge ? (
               <div className="flex shrink-0 flex-wrap items-center gap-1">
                 {statusBadge}

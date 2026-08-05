@@ -14,6 +14,8 @@
  * why. Editing is still possible; silent reformatting is not.
  */
 
+import { parseCallout } from "@/features/documents/lib/obsidianSyntax";
+
 export type RoundTripStatus = "stable" | "lossy" | "unknown";
 
 /** Lines that begin a block and must never be joined to the previous one. */
@@ -35,6 +37,78 @@ const BLOCK_START =
  * and fenced regions are skipped entirely. Failing to join something merely
  * routes that file to source mode, which is the safe direction.
  */
+/**
+ * Canonicalises `*` and `+` bullet markers to `-`, including inside
+ * blockquotes.
+ *
+ * All three are the same list in CommonMark; the serializer emits `-`. Treating
+ * the choice of marker as a content change flagged files that differ only in
+ * typing habit.
+ */
+function normalizeBulletMarkers(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => line.replace(/^(\s*(?:>\s*)*)[*+](\s)/, "$1-$2"))
+    .join("\n");
+}
+
+/** A blockquote line, capturing its `>` prefix and the content after it. */
+const QUOTE_LINE = /^( {0,3}>\s?)(.*)$/;
+
+/**
+ * Joins soft-wrapped lines inside a blockquote, unless it is a callout.
+ *
+ * Prose inside a `>` block wraps just like prose outside one, and the
+ * serializer joins it the same way. The exception is load-bearing: an Obsidian
+ * callout puts its title on the first line and its body on the next, so joining
+ * those two would change the rendered callout. Callouts must keep failing the
+ * guard until an extension can round-trip them.
+ */
+function joinSoftWrappedQuotes(text: string): string {
+  const lines = text.split("\n");
+  const out: string[] = [];
+  let inCallout = false;
+
+  for (const line of lines) {
+    const match = QUOTE_LINE.exec(line);
+    if (!match) {
+      inCallout = false;
+      out.push(line);
+      continue;
+    }
+
+    const [, , content] = match;
+    const previous = out.at(-1);
+    const previousMatch =
+      previous === undefined ? null : QUOTE_LINE.exec(previous);
+
+    if (!previousMatch) {
+      // First line of a blockquote decides whether the whole block is a
+      // callout and therefore off-limits for joining.
+      inCallout = parseCallout(`> ${content}`) !== null;
+      out.push(line);
+      continue;
+    }
+
+    const canJoin =
+      !inCallout &&
+      content.trim() !== "" &&
+      previousMatch[2].trim() !== "" &&
+      !BLOCK_START.test(content) &&
+      !BLOCK_START.test(previousMatch[2]) &&
+      !/ {2}$/.test(previousMatch[2]);
+
+    if (canJoin) {
+      out[out.length - 1] =
+        `${previousMatch[1]}${previousMatch[2]} ${content.trim()}`;
+    } else {
+      out.push(line);
+    }
+  }
+
+  return out.join("\n");
+}
+
 function joinSoftWrappedLines(text: string): string {
   const lines = text.split("\n");
   const joined: string[] = [];
@@ -98,13 +172,16 @@ function normalizeTableDelimiters(text: string): string {
  *  - A trailing newline. Serializers routinely add or drop the final one.
  *  - Soft-wrapped paragraph lines, per `joinSoftWrappedLines`.
  *  - Table delimiter dash counts, per `normalizeTableDelimiters`.
+ *  - Soft-wrapped prose inside non-callout blockquotes.
+ *  - `*` and `+` bullet markers, which mean the same as `-`.
  *
  * Everything else — dropped links, escaped HTML, destroyed tables, merged
  * callouts, renormalized list markers — still counts as lossy.
  */
 function normalizeForComparison(text: string): string {
+  const base = text.replace(/\r\n/g, "\n").replace(/\n+$/, "");
   return normalizeTableDelimiters(
-    joinSoftWrappedLines(text.replace(/\r\n/g, "\n").replace(/\n+$/, "")),
+    normalizeBulletMarkers(joinSoftWrappedQuotes(joinSoftWrappedLines(base))),
   );
 }
 
