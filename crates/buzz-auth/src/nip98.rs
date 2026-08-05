@@ -149,6 +149,18 @@ fn normalize_url(raw: &str) -> String {
         Ok(u) => u,
         Err(_) => return raw.to_lowercase(),
     };
+    // Loopback is always the same machine: buzz-core's normalize_relay_url
+    // canonicalizes localhost -> 127.0.0.1, so agents sign with the IP while
+    // the relay's tenant host may be "localhost". Collapsing loopback
+    // spellings here closes no multi-tenant door — distinct DOMAINS still
+    // verify distinctly; only same-machine aliases merge.
+    if let Some(host) = parsed.host_str() {
+        let is_loopback = host.eq_ignore_ascii_case("localhost")
+            || host.parse::<std::net::IpAddr>().map(|a| a.is_loopback()).unwrap_or(false);
+        if is_loopback {
+            let _ = parsed.set_host(Some("localhost"));
+        }
+    }
     let path = parsed.path().trim_end_matches('/').to_string();
     parsed.set_path(&path);
     parsed.to_string()
@@ -288,32 +300,36 @@ mod tests {
     }
 
     #[test]
-    fn loopback_aliases_are_distinct_hosts() {
-        // Under multi-tenant, the `u`-tag host is the row-zero community
-        // binding. An event signed for `localhost` MUST NOT pass against an
-        // expected URL on `127.0.0.1` (or `::1`) — collapsing the three would
-        // be a host-check side door. Production reconstructs `expected_url`
-        // from the community-bound host; tests do the same.
+    fn loopback_aliases_verify_but_distinct_domains_do_not() {
+        // buzz-core's normalize_relay_url canonicalizes loopback to 127.0.0.1
+        // while a relay tenant may be bound to "localhost" — same machine, two
+        // spellings, and agents signed one while the relay expected the other
+        // (2026-08-04: every desktop-spawned agent 401'd on /query). Loopback
+        // aliases MUST verify as one host. The multi-tenant boundary lives
+        // between distinct domains, which still fail below.
         let keys = Keys::generate();
         let localhost_url = "http://localhost:3000/api/tokens";
         let loopback_url = "http://127.0.0.1:3000/api/tokens";
         let json = make_nip98_event(&keys, localhost_url, TEST_METHOD, None, None);
-        let result = verify_nip98_event(&json, loopback_url, TEST_METHOD, None);
         assert!(
-            matches!(result, Err(AuthError::Nip98Invalid(_))),
-            "localhost u-tag must NOT match a 127.0.0.1 expected_url; got {result:?}"
+            verify_nip98_event(&json, loopback_url, TEST_METHOD, None).is_ok(),
+            "localhost u-tag must match a 127.0.0.1 expected_url (same machine)"
         );
-
-        // Symmetric: signed-for-127.0.0.1 against expected localhost — same answer.
         let json2 = make_nip98_event(&keys, loopback_url, TEST_METHOD, None, None);
-        let result2 = verify_nip98_event(&json2, localhost_url, TEST_METHOD, None);
         assert!(
-            matches!(result2, Err(AuthError::Nip98Invalid(_))),
-            "127.0.0.1 u-tag must NOT match a localhost expected_url; got {result2:?}"
+            verify_nip98_event(&json2, localhost_url, TEST_METHOD, None).is_ok(),
+            "127.0.0.1 u-tag must match a localhost expected_url (same machine)"
         );
 
-        // And identity still holds — same host on both sides verifies.
-        let json3 = make_nip98_event(&keys, loopback_url, TEST_METHOD, None, None);
-        assert!(verify_nip98_event(&json3, loopback_url, TEST_METHOD, None).is_ok());
+        // Distinct domains remain distinct — the cross-community side door
+        // stays closed.
+        let json3 = make_nip98_event(&keys, localhost_url, TEST_METHOD, None, None);
+        let cross = verify_nip98_event(
+            &json3,
+            "http://other.example.com:3000/api/tokens",
+            TEST_METHOD,
+            None,
+        );
+        assert!(matches!(cross, Err(AuthError::Nip98Invalid(_))));
     }
 }
