@@ -772,11 +772,13 @@ impl ObserverChunkCoalescer {
         event: observer::ObserverEvent,
         text: String,
     ) {
-        // The serialized skeleton already carries this entry's first chunk
-        // text (`text` is an extracted copy, later written back at flush), so
-        // the entry starts at its full serialized weight and appends add
-        // exactly their text length.
-        let bytes = serialized_len(&event);
+        // The entry RETAINS the first chunk's text twice until flush: once
+        // inside the serialized skeleton (`event.payload` still carries it)
+        // and once as the extracted `text` copy that appends grow. Both are
+        // real memory, so both count — charging only `serialized_len` lets a
+        // high-cardinality flood retain up to 2x the byte budget (each entry
+        // undercounts by exactly its first chunk's length).
+        let bytes = serialized_len(&event) + text.len();
         self.pending_bytes += bytes;
         self.pending.push(PendingObserverChunk {
             key,
@@ -5236,6 +5238,27 @@ mod observer_publish_queue_tests {
         }
     }
 
+    /// Retained bytes computed by WALKING the entries, independently of the
+    /// queue's own accumulator. Cap regressions must assert on this, not on
+    /// `total_pending_bytes()` — asserting the counter against itself passed
+    /// while the process retained ~2x the budget (Sami/Max round 3: each
+    /// pending coalescer entry holds the first chunk's text twice, in the
+    /// serialized skeleton AND the extracted `text` copy).
+    fn walked_retained_bytes(queue: &ObserverPublishQueue) -> usize {
+        let fifo: usize = queue
+            .events
+            .iter()
+            .map(|(_, _, event)| serialized_len(event))
+            .sum();
+        let coalescer: usize = queue
+            .coalescer
+            .pending
+            .iter()
+            .map(|pending| serialized_len(&pending.event) + pending.text.len())
+            .sum();
+        fifo + coalescer
+    }
+
     /// Two or more pending events for one channel ship as a single batch
     /// envelope whose payload carries every inner event in arrival order.
     #[test]
@@ -5493,8 +5516,9 @@ mod observer_publish_queue_tests {
             "a 5MB backlog must overflow the 4MiB budget"
         );
         assert!(
-            queue.total_pending_bytes() <= OBSERVER_PENDING_QUEUE_MAX_BYTES,
-            "eviction must restore the byte budget"
+            walked_retained_bytes(&queue) <= OBSERVER_PENDING_QUEUE_MAX_BYTES,
+            "eviction must restore the byte budget (entry-walked), got {}",
+            walked_retained_bytes(&queue)
         );
 
         let frames = drain_frames(&mut queue);
@@ -5514,9 +5538,12 @@ mod observer_publish_queue_tests {
 
     /// Max's coalescer-bypass regression: a flood of chunks with DISTINCT
     /// messageIds never flushes on its own, so every chunk sits in the
-    /// coalescer's pending buffer. Those bytes MUST count against the byte
-    /// budget and be evicted with accounting — pre-fix this retained ~25MB
-    /// against the 4 MiB cap with `pending_bytes == 0` and zero drops.
+    /// coalescer's pending buffer. TRUE retained bytes — walked from the
+    /// entries, never the queue's own accumulator — MUST respect the byte
+    /// budget with event-level drop accounting. Pre-fix this retained ~25MB
+    /// against the 4 MiB cap with `pending_bytes == 0` and zero drops; the
+    /// round-3 refinement (Sami/Max) caught the accumulator itself reading
+    /// under cap while true retention was 1.99x over.
     #[test]
     fn distinct_key_chunk_floods_are_bounded_by_the_byte_budget() {
         let big_text = "z".repeat(50_000);
@@ -5539,10 +5566,16 @@ mod observer_publish_queue_tests {
             queue.ingest(e);
         }
 
+        let walked = walked_retained_bytes(&queue);
         assert!(
-            queue.total_pending_bytes() <= OBSERVER_PENDING_QUEUE_MAX_BYTES,
-            "total retained bytes (FIFO + coalescer pending) must respect the \
-             cap, got {}",
+            walked <= OBSERVER_PENDING_QUEUE_MAX_BYTES,
+            "TRUE retained bytes (walked from entries) must respect the cap, \
+             got {walked}"
+        );
+        assert!(
+            queue.total_pending_bytes() >= walked,
+            "the accumulator must never under-count true retention \
+             (accumulator {} < walked {walked})",
             queue.total_pending_bytes()
         );
         assert!(
@@ -5609,8 +5642,9 @@ mod observer_publish_queue_tests {
         }
 
         assert!(
-            queue.total_pending_bytes() <= OBSERVER_PENDING_QUEUE_MAX_BYTES,
-            "eviction must restore the byte budget"
+            walked_retained_bytes(&queue) <= OBSERVER_PENDING_QUEUE_MAX_BYTES,
+            "eviction must restore the byte budget (entry-walked), got {}",
+            walked_retained_bytes(&queue)
         );
         let frames = drain_frames(&mut queue);
         assert!(
@@ -5627,6 +5661,86 @@ mod observer_publish_queue_tests {
         assert_eq!(
             survived + queue.dropped_events,
             merged_sources + flood,
+            "accounting: published sources + dropped sources == ingested"
+        );
+    }
+
+    /// Sami's M13 / Max's forced-flush probe: the OTHER eviction arm. A
+    /// merged entry FLUSHED into the publish FIFO (by a non-chunk event) must
+    /// still charge every absorbed source on eviction — the FIFO stores the
+    /// per-entry count precisely so the ledger survives flush. The
+    /// coalescer-side regression above never exercises this arm; mutating the
+    /// FIFO eviction to `dropped += 1` survived all 687 tests until this one.
+    #[test]
+    fn evicting_a_flushed_merged_entry_from_the_fifo_accounts_every_source_event() {
+        fn chunk(seq: u64, message_id: &str, text: &str) -> observer::ObserverEvent {
+            let mut e = event(seq, "acp_read", Some("chan-a"));
+            e.payload = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "session-1",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "messageId": message_id,
+                        "content": { "type": "text", "text": text },
+                    },
+                },
+            });
+            e
+        }
+
+        let mut queue = ObserverPublishQueue::default();
+        // 50 × 1KB chunks merge under one messageId in the coalescer…
+        let merged_text = "m".repeat(1_000);
+        let merged_sources = 50u64;
+        for seq in 1..=merged_sources {
+            queue.ingest(chunk(seq, "message-merged", &merged_text));
+        }
+        // …then a non-chunk event force-flushes the merged entry into the
+        // publish FIFO. From here eviction happens on the FIFO arm.
+        queue.ingest(event(merged_sources + 1, "tool_call", Some("chan-a")));
+        assert!(
+            queue.coalescer.pending.is_empty(),
+            "the non-chunk event must have flushed the merged entry"
+        );
+        assert_eq!(
+            queue.events.front().expect("flushed entry queued").1,
+            merged_sources,
+            "the FIFO front must carry the merged source count"
+        );
+
+        // Distinct-key flood forces byte-budget eviction of the FIFO front.
+        let flood_text = "f".repeat(50_000);
+        let flood = 100u64;
+        for seq in 1..=flood {
+            queue.ingest(chunk(
+                merged_sources + 1 + seq,
+                &format!("message-{seq}"),
+                &flood_text,
+            ));
+        }
+
+        assert!(
+            walked_retained_bytes(&queue) <= OBSERVER_PENDING_QUEUE_MAX_BYTES,
+            "eviction must restore the byte budget (entry-walked), got {}",
+            walked_retained_bytes(&queue)
+        );
+        let frames = drain_frames(&mut queue);
+        assert!(
+            !frames
+                .iter()
+                .flat_map(frame_seqs)
+                .any(|seq| seq <= merged_sources),
+            "the flushed merged entry (globally oldest) must have been evicted"
+        );
+        // Ledger in source units: survivors are unmerged (1 source each), the
+        // evicted merged FIFO entry must charge all 50 sources.
+        let survived: u64 = frames.iter().map(|f| frame_seqs(f).len() as u64).sum();
+        let ingested = merged_sources + 1 + flood;
+        assert_eq!(
+            survived + queue.dropped_events,
+            ingested,
             "accounting: published sources + dropped sources == ingested"
         );
     }

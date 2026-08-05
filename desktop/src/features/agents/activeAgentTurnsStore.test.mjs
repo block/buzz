@@ -1790,6 +1790,57 @@ describe("community-switch save / restore", () => {
     assert.equal(turns.length, 1, "stale event must not add a turn");
   });
 
+  it("snapshot watermarks are isolated — live advances after save must not leak into the snapshot", () => {
+    // Save with the channel watermark at seq 5.
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({
+        seq: 5,
+        turnId: "t1",
+        channelId: "c1",
+        timestamp: "2024-01-01T00:00:00Z",
+      }),
+    ]);
+    saveActiveAgentTurnsForCommunity("ws-a");
+
+    // Keep working in the live store AFTER the save: the watermark advances
+    // to seq 10 by mutating the same inner per-agent map the snapshot cloned.
+    // If save aliased instead of deep-cloning, this leaks into the snapshot.
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({
+        seq: 10,
+        turnId: "t10",
+        channelId: "c1",
+        timestamp: "2024-01-01T00:00:20Z",
+      }),
+    ]);
+
+    resetActiveAgentTurnsStore();
+    restoreActiveAgentTurnsForCommunity("ws-a");
+
+    // seq 7 is FRESH relative to the saved watermark (5) and must be
+    // processed — processing notifies listeners (stale events do not, per
+    // the gate). Under save-side aliasing the leaked watermark (10) wrongly
+    // skips it as stale and no notification fires.
+    let notified = 0;
+    const unsub = subscribeActiveAgentTurns(() => {
+      notified++;
+    });
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({
+        seq: 7,
+        turnId: "t7",
+        channelId: "c1",
+        timestamp: "2024-01-01T00:00:10Z",
+      }),
+    ]);
+    unsub();
+    assert.ok(
+      notified > 0,
+      "event fresh vs the SAVED watermark must be processed — a live " +
+        "watermark advancing after save must not leak into the snapshot",
+    );
+  });
+
   it("terminal tombstones are preserved — a stale liveness cannot resurrect a completed turn", () => {
     // Complete a turn before saving.
     syncAgentTurnsFromEvents(AGENT, [
