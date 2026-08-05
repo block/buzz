@@ -225,6 +225,14 @@ pub async fn confirm_pairing_sas(pairing: State<'_, PairingHandle>) -> Result<()
 /// Cancel the active pairing session.
 #[tauri::command]
 pub async fn cancel_pairing(pairing: State<'_, PairingHandle>) -> Result<(), String> {
+    // Invalidate the task before waiting for its session lock. Recovery may be
+    // blocked on identity persistence after releasing this lock, and must see
+    // cancellation before crossing the durable commit boundary.
+    pairing.generation.fetch_add(1, Ordering::SeqCst);
+    if let Some(token) = pairing.cancel.lock().map_err(|e| e.to_string())?.take() {
+        token.cancel();
+    }
+
     let abort_json = {
         let mut guard = pairing.session.lock().await;
         if let Some(session) = guard.as_mut() {
@@ -249,11 +257,6 @@ pub async fn cancel_pairing(pairing: State<'_, PairingHandle>) -> Result<(), Str
         }
     }
 
-    pairing.generation.fetch_add(1, Ordering::SeqCst);
-
-    if let Some(token) = pairing.cancel.lock().map_err(|e| e.to_string())?.take() {
-        token.cancel();
-    }
     pairing.clear();
 
     {
@@ -395,27 +398,34 @@ async fn pairing_ws_task_inner(
                                 break;
                             }
 
-                            let imported = import_recovered_identity(app, payload).await;
+                            let payload = payload;
+                            drop(guard);
+
+                            let imported = import_recovered_identity(
+                                app,
+                                payload,
+                                &context.generation,
+                                context.task_generation,
+                            )
+                            .await;
                             let success = imported.is_ok();
-                            let complete = s
-                                .send_source_complete(success)
-                                .map_err(|e| e.to_string())?;
-                            write
+                            let complete = {
+                                let mut guard = session.lock().await;
+                                if !pairing_task_is_current(
+                                    &context.generation,
+                                    context.task_generation,
+                                ) {
+                                    break;
+                                }
+                                let Some(s) = guard.as_mut() else { break };
+                                s.send_source_complete(success)
+                                    .map_err(|e| e.to_string())?
+                            };
+                            let completion_result = write
                                 .send(Message::Text(event_to_relay_json(&complete).into()))
                                 .await
-                                .map_err(|e| format!("publish complete failed: {e}"))?;
-                            match imported {
-                                Ok(()) => {
-                                    if pairing_task_is_current(&context.generation, context.task_generation) {
-                                        let _ = app.emit("pairing-complete", serde_json::json!({}));
-                                    }
-                                }
-                                Err(message) => {
-                                    if pairing_task_is_current(&context.generation, context.task_generation) {
-                                        let _ = app.emit("pairing-error", PairingErrorPayload { message });
-                                    }
-                                }
-                            }
+                                .map_err(|e| format!("publish complete failed: {e}"));
+                            finish_recovery(imported, completion_result, context, app)?;
                             break;
                         }
                     } else {
@@ -445,28 +455,85 @@ async fn pairing_ws_task_inner(
     Ok(())
 }
 
-async fn import_recovered_identity(app: &AppHandle, nsec: Zeroizing<String>) -> Result<(), String> {
+async fn import_recovered_identity(
+    app: &AppHandle,
+    nsec: Zeroizing<String>,
+    generation: &Arc<AtomicU64>,
+    task_generation: u64,
+) -> Result<(), String> {
     let app = app.clone();
+    let generation = Arc::clone(generation);
     tokio::task::spawn_blocking(move || {
         let keys = nostr::Keys::parse(nsec.trim())
             .map_err(|e| format!("Phone sent an invalid identity: {e}"))?;
         let state = app.state::<AppState>();
         let _mutation_guard = state.identity_mutation.lock().map_err(|e| e.to_string())?;
-        let data_dir = app
-            .path()
-            .app_data_dir()
-            .map_err(|e| format!("app data dir: {e}"))?;
-        std::fs::create_dir_all(&data_dir).map_err(|e| format!("create app data dir: {e}"))?;
-        let key_path = data_dir.join("identity.key");
-        crate::commands::identity::commit_imported_identity(&state, &data_dir, keys, |keys| {
-            let store =
-                crate::secret_store::SecretStore::shared(crate::app_state::keyring_service());
-            crate::app_state::persist_imported_identity(store, keys, &key_path, &data_dir)
-        })?;
-        Ok(())
+        commit_recovery_if_current(&generation, task_generation, || {
+            let data_dir = app
+                .path()
+                .app_data_dir()
+                .map_err(|e| format!("app data dir: {e}"))?;
+            std::fs::create_dir_all(&data_dir).map_err(|e| format!("create app data dir: {e}"))?;
+            let key_path = data_dir.join("identity.key");
+            crate::commands::identity::commit_imported_identity(&state, &data_dir, keys, |keys| {
+                let store =
+                    crate::secret_store::SecretStore::shared(crate::app_state::keyring_service());
+                crate::app_state::persist_imported_identity(store, keys, &key_path, &data_dir)
+            })?;
+            Ok(())
+        })
     })
     .await
     .map_err(|e| format!("identity recovery task failed: {e}"))?
+}
+
+fn ensure_pairing_task_is_current(
+    generation: &AtomicU64,
+    task_generation: u64,
+) -> Result<(), String> {
+    if pairing_task_is_current(generation, task_generation) {
+        Ok(())
+    } else {
+        Err("Pairing session was superseded or cancelled".into())
+    }
+}
+
+fn commit_recovery_if_current<T>(
+    generation: &AtomicU64,
+    task_generation: u64,
+    commit: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    ensure_pairing_task_is_current(generation, task_generation)?;
+    commit()
+}
+
+fn recovery_result_after_completion(
+    imported: Result<(), String>,
+    _completion_result: Result<(), String>,
+) -> Result<(), String> {
+    // Once the identity is durable, notifying the peer cannot roll it back.
+    imported
+}
+
+fn finish_recovery(
+    imported: Result<(), String>,
+    completion_result: Result<(), String>,
+    context: &PairingTaskContext,
+    app: &AppHandle,
+) -> Result<(), String> {
+    if !pairing_task_is_current(&context.generation, context.task_generation) {
+        return Ok(());
+    }
+
+    match recovery_result_after_completion(imported, completion_result) {
+        Ok(()) => {
+            let _ = app.emit("pairing-complete", serde_json::json!({}));
+        }
+        Err(message) => {
+            let _ = app.emit("pairing-error", PairingErrorPayload { message });
+        }
+    }
+    Ok(())
 }
 
 fn pairing_task_is_current(generation: &AtomicU64, task_generation: u64) -> bool {
@@ -708,7 +775,8 @@ mod pairing_generation_tests {
     use std::time::Duration;
 
     use super::{
-        clear_pairing_session_if_current, validate_recovery_payload_type, PairingHandle,
+        clear_pairing_session_if_current, commit_recovery_if_current,
+        recovery_result_after_completion, validate_recovery_payload_type, PairingHandle,
         PairingSession, PayloadType,
     };
 
@@ -736,6 +804,53 @@ mod pairing_generation_tests {
             validate_recovery_payload_type(PayloadType::Custom).unwrap_err(),
             "Mobile device sent an unsupported recovery payload"
         );
+    }
+
+    #[test]
+    fn superseded_recovery_cannot_commit_identity() {
+        let generation = AtomicU64::new(2);
+        let committed = std::sync::atomic::AtomicBool::new(false);
+
+        let result = commit_recovery_if_current(&generation, 1, || {
+            committed.store(true, Ordering::SeqCst);
+            Ok(())
+        });
+
+        assert_eq!(
+            result.unwrap_err(),
+            "Pairing session was superseded or cancelled"
+        );
+        assert!(!committed.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn cancelled_recovery_waiting_for_mutation_cannot_commit_identity() {
+        let generation = Arc::new(AtomicU64::new(7));
+        let mutation = Arc::new(std::sync::Mutex::new(()));
+        let blocker = mutation.lock().expect("lock identity mutation");
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let task_generation = 7;
+        let task_mutation = Arc::clone(&mutation);
+        let task_generation_state = Arc::clone(&generation);
+        let recovery = std::thread::spawn(move || {
+            started_tx.send(()).expect("signal recovery started");
+            let _guard = task_mutation.lock().expect("wait for identity mutation");
+            commit_recovery_if_current(&task_generation_state, task_generation, || Ok(()))
+        });
+
+        started_rx.recv().expect("recovery started");
+        generation.fetch_add(1, Ordering::SeqCst);
+        drop(blocker);
+
+        assert_eq!(
+            recovery.join().expect("recovery task").unwrap_err(),
+            "Pairing session was superseded or cancelled"
+        );
+    }
+
+    #[test]
+    fn completion_publish_failure_does_not_undo_successful_import() {
+        assert!(recovery_result_after_completion(Ok(()), Err("socket closed".into())).is_ok());
     }
 
     #[tokio::test]
