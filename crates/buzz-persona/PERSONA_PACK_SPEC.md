@@ -426,13 +426,14 @@ enforce required metadata fields (see PF-5).
 ## 7. MCP Server Configuration
 
 MCP servers provide external tool access (GitHub, Semgrep, databases, etc.). Configuration is
-defined at two levels: pack-level (shared across all agents) and per-persona (agent-specific).
-buzz-acp merges them and passes the result via the ACP protocol — no filesystem placement required.
+defined at two authoring levels: pack-level (shared across all agents) and per-persona
+(agent-specific). `buzz-persona` currently parses and merges these declarations, but
+`buzz-acp` does not yet consume the resolved persona MCP list. Persona MCP declarations
+therefore do not reach a running session in the current implementation.
 
-> **Transport Warning**: Only `stdio` and `streamable_http` transports are supported. SSE transport
-> is rejected by the ACP runtime with the error `"SSE is unsupported, migrate to streamable_http"` and
-> will cause session startup to fail. Migrate any SSE-based MCP servers to streamable_http before
-> packaging.
+The runtime launch boundary is a separate, versioned MCP launch document. A future
+resolver must convert approved persona or template requirements and Project Connections
+into that document. Version 1 of the launch document supports stdio only.
 
 ### Pack-Level: `.mcp.json`
 
@@ -469,13 +470,14 @@ mcp_servers:
 
 1. Pack-level servers are the base set; per-persona servers merged on top.
 2. **Name collision**: per-persona entry wins entirely (no partial merge).
-3. The merged set is passed to the agent runtime via `NewSessionRequest.mcp_servers`.
+3. The merged set remains authoring output until an explicit launch resolver converts it
+   into the runtime MCP launch document.
 
 ### Environment Variable Interpolation
 
 > **Implementation note**: MCP env var interpolation (`${VAR_NAME}` resolution) is planned but not
-> yet implemented. In the current release, `${VAR_NAME}` strings are passed through as literals
-> to the agent runtime, which may resolve them via its own MCP server configuration handling.
+> yet implemented. In the current release, persona MCP declarations remain authoring data and
+> do not reach the agent runtime.
 
 When implemented, all `env` values will be scanned for `${VAR_NAME}`. buzz-acp will resolve
 from the process environment **before** passing to the agent runtime. Unresolved variables will
@@ -483,7 +485,10 @@ cause a startup error.
 
 ### Delivery
 
-buzz-acp passes the merged config via `NewSessionRequest.mcp_servers`. **No `.mcp.json` is written to the agent's working directory.**
+Persona MCP delivery is not wired yet. The launch resolver must validate and bind the
+authoring declarations before `buzz-acp` passes the resulting servers through
+`NewSessionRequest.mcp_servers`. No `.mcp.json` should be written into the agent's
+working directory.
 
 ---
 
@@ -935,7 +940,7 @@ How each pack component reaches the running agent:
 | Component | Delivery Method | Mechanism | Filesystem Write? |
 |-----------|----------------|-----------|-------------------|
 | Skills | Copy at deploy time (planned) | buzz-acp will copy `skills/` → `$AGENT_CWD/.agents/skills/` | ✅ Yes (only one) |
-| MCP servers | ACP protocol | `NewSessionRequest.mcp_servers` | ❌ No |
+| MCP servers | Not wired | Parsed by `buzz-persona`; requires an explicit resolver into the MCP launch document | ❌ No |
 | Persona prompt | User message prefix | `[System]` block prepended to user message text by buzz-acp | ❌ No |
 | Pack instructions | User message prefix | Appended to `[System]` block in user message text | ❌ No |
 | Lifecycle hooks | Harness internal | buzz-acp fires shell commands directly | ❌ No |
@@ -987,7 +992,7 @@ The `[System]` prefix re-sends the full persona prompt on every turn. True syste
 | `rules/*.mdc` files | Agent runtimes typically don't read `.mdc` files |
 | `skills/` at pack root (without copying) | Agent runtimes scan `.agents/skills/`, not `skills/` |
 | Hooks in goose config | Agent runtimes have no hook system; hooks are a harness feature |
-| SSE transport in `.mcp.json` | ACP runtime rejects SSE; use stdio or streamable_http |
+| Assuming `.mcp.json` is live runtime configuration | Persona MCP declarations are parsed but are not yet connected to the ACP launch path |
 | SKILL.md without `name:` or `description:` | Skill silently skipped; no fallback |
 | Setting `GOOSE_MODEL` on parent process (multi-persona) | Affects all agents; use per-subprocess injection via `extra_env` |
 | Expecting `defaults` sub-key inheritance | No deep merge; object/array fields replaced entirely |
@@ -999,10 +1004,10 @@ The `[System]` prefix re-sends the full persona prompt on every turn. True syste
 ### Secret Management
 
 Never embed secrets in pack files. Use `${VAR_NAME}` references in all `env` blocks. Currently,
-`${VAR_NAME}` strings are passed through as literals to the agent runtime (see Section 7). When
-harness-side interpolation is implemented, buzz-acp will resolve them from the process
-environment at startup and refuse to start if any are unresolved. Inject secrets via your
-deployment mechanism (systemd env files, Vault, Kubernetes secrets, etc.).
+persona MCP declarations are not delivered to the agent runtime (see Section 7). When an
+approved launch resolver and harness-side interpolation are implemented, unresolved references
+must fail startup rather than becoming literal credentials. Inject secrets through the
+target-local deployment mechanism rather than embedding them in the pack.
 
 ### Pack Integrity
 
