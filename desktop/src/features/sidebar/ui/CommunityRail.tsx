@@ -106,7 +106,7 @@ function CommunityButton({
   dragAttributes?: React.HTMLAttributes<HTMLElement>;
   isDragging?: boolean;
 }) {
-  const { mentionCount, showBadge, showDot, badgeLabel } =
+  const { mentionCount, showBadge, showDot, pending, badgeLabel } =
     communityRailIndicators(unread);
 
   const tooltipLabel = showBadge
@@ -137,6 +137,7 @@ function CommunityButton({
                 className={cn(
                   "flex h-9 w-9 items-center justify-center overflow-hidden rounded-xl bg-sidebar-accent/60 text-xs font-semibold text-sidebar-foreground/80 outline-2 outline-offset-2 outline-primary/0 transition-[outline-color]",
                   isActive ? "outline-primary" : "hover:outline-primary/50",
+                  pending && !isActive && "opacity-60",
                 )}
               >
                 {iconUrl ? (
