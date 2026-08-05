@@ -27,6 +27,7 @@ import 'package:buzz/features/channels/small_avatar.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/features/profile/user_cache_provider.dart';
 import 'package:buzz/features/profile/user_profile.dart';
+import 'package:buzz/features/profile/user_profile_sheet.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
@@ -2354,6 +2355,92 @@ void main() {
         tester.getSize(find.byType(CircleAvatar)),
         const Size.square(messageAvatarSize),
       );
+    });
+
+    testWidgets('opens a profile sheet from a membership system avatar', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _systemMsg(
+              id: 'sys-membership-avatar',
+              payload: {
+                'type': 'member_joined',
+                'actor': 'alice',
+                'target': 'bob',
+              },
+            ),
+          ],
+          users: {
+            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': const UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byType(CircleAvatar));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Copy public key'), findsOneWidget);
+      expect(find.byType(UserProfileSheet), findsOneWidget);
+    });
+
+    testWidgets('opens a profile sheet from a huddle system avatar', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _huddleMsg(
+              id: 'sys-huddle-avatar',
+              kind: EventKind.huddleStarted,
+              pubkey: 'alice',
+            ),
+          ],
+          users: {
+            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byType(CircleAvatar));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Copy public key'), findsOneWidget);
+      expect(find.byType(UserProfileSheet), findsOneWidget);
+    });
+
+    testWidgets('opens a profile sheet from a generic system avatar', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _systemMsg(
+              id: 'sys-removed-avatar',
+              payload: {
+                'type': 'member_removed',
+                'actor': 'alice',
+                'target': 'bob',
+              },
+            ),
+          ],
+          users: {
+            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': const UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byType(CircleAvatar).first);
+      await tester.pumpAndSettle();
+
+      expect(find.text('Copy public key'), findsOneWidget);
+      expect(find.byType(UserProfileSheet), findsOneWidget);
     });
 
     testWidgets('renders member_joined (added by other) system event', (

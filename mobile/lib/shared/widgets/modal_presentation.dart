@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -41,8 +42,7 @@ Future<T?> showBuzzModalBottomSheet<T>({
   AnimationStyle? sheetAnimationStyle,
   bool? requestFocus,
 }) {
-  final platform = Theme.of(context).platform;
-  final isIos = platform == TargetPlatform.iOS;
+  final isIos = defaultTargetPlatform == TargetPlatform.iOS;
   final theme = Theme.of(context);
   final surfaceColor =
       backgroundColor ??
@@ -70,7 +70,7 @@ Future<T?> showBuzzModalBottomSheet<T>({
     useRootNavigator: useRootNavigator,
     isDismissible: isDismissible,
     enableDrag: enableDrag,
-    showDragHandle: false,
+    showDragHandle: showDragHandle,
     useSafeArea: useSafeArea,
     routeSettings: routeSettings,
     transitionAnimationController: transitionAnimationController,

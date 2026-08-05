@@ -165,6 +165,7 @@ void showImageActions({
 }) {
   showBuzzModalBottomSheet<void>(
     context: context,
+    isScrollControlled: true,
     showDragHandle: true,
     builder: (sheetContext) => SafeArea(
       child: IconTheme.merge(

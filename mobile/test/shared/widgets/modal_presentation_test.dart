@@ -1,9 +1,40 @@
+import 'package:buzz/shared/widgets/concentric_sheet_surface.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/modal_presentation.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  testWidgets(
+    'keeps an opaque Flutter surface when iOS native support is unavailable',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      try {
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: AppTheme.light(),
+            home: const ConcentricSheetSurface(
+              enabled: true,
+              color: Colors.red,
+              child: SizedBox(height: 80, child: Text('Sheet body')),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byWidgetPredicate(
+            (widget) => widget is Material && widget.color == Colors.red,
+          ),
+          findsOneWidget,
+        );
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    },
+  );
+
   testWidgets('bottom sheets use the shared 44 point close control', (
     tester,
   ) async {
@@ -51,7 +82,7 @@ void main() {
     expect(gutterRect.right - closeRect.right, Grid.gutter);
     expect(
       tester.widget<BottomSheet>(find.byType(BottomSheet)).showDragHandle,
-      isFalse,
+      isTrue,
     );
     expect(find.text('Sheet body'), findsOneWidget);
 

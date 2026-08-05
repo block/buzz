@@ -15,6 +15,7 @@ import '../../shared/widgets/modal_presentation.dart';
 import '../channels/channel.dart';
 import '../channels/channel_detail_page.dart';
 import '../channels/channel_management_provider.dart';
+import '../channels/message_content.dart';
 import 'presence_cache_provider.dart';
 import 'user_cache_provider.dart';
 import 'user_status_cache_provider.dart';
@@ -171,6 +172,30 @@ class UserProfileSheet extends HookConsumerWidget {
                         ),
                       ),
                     ),
+                    if (displayName != null && displayName.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: Grid.xxs),
+                        child: Center(
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                LucideIcons.key,
+                                size: 14,
+                                color: context.colors.onSurfaceVariant,
+                              ),
+                              const SizedBox(width: Grid.xxs),
+                              Text(
+                                shortPubkey(pubkey),
+                                style: context.textTheme.bodySmall?.copyWith(
+                                  color: context.colors.onSurfaceVariant,
+                                  fontFamily: 'monospace',
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
                     // Match Settings: status is quiet, centered copy directly
                     // below the profile name rather than a separate information row.
                     if (userStatus != null && !userStatus.isEmpty)
@@ -183,16 +208,15 @@ class UserProfileSheet extends HookConsumerWidget {
                             right: Grid.gutter,
                             bottom: Grid.xxs,
                           ),
-                          child: Text(
-                            userStatus.text.isNotEmpty
+                          child: MessageContent(
+                            content: userStatus.text.isNotEmpty
                                 ? '${userStatus.emoji.isNotEmpty ? '${userStatus.emoji} ' : ''}${userStatus.text}'
                                 : userStatus.emoji,
-                            style: context.textTheme.bodySmall?.copyWith(
+                            baseStyle: context.textTheme.bodySmall?.copyWith(
                               color: context.colors.onSurfaceVariant,
                             ),
                             textAlign: TextAlign.center,
                             maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
                           ),
                         ),
                       ),
