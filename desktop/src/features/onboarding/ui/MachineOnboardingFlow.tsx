@@ -382,7 +382,6 @@ export function MachineOnboardingFlow({
                   closeButtonClassName={ONBOARDING_INK_ICON_CLASS}
                   data-system-color-scheme="light"
                   data-testid="backup-recovery-dialog"
-                  overlayVariant="transparent"
                   surface="textured"
                 >
                   <div className="mx-auto w-full max-w-[35rem] py-10 text-center max-sm:py-6">
@@ -414,7 +413,6 @@ export function MachineOnboardingFlow({
                   closeButtonClassName={ONBOARDING_INK_ICON_CLASS}
                   data-system-color-scheme="light"
                   data-testid="phone-recovery-dialog"
-                  overlayVariant="transparent"
                   surface="textured"
                 >
                   <div className="mx-auto flex w-full max-w-[35rem] flex-col items-center py-8 text-center max-sm:py-4">
