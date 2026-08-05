@@ -15,6 +15,7 @@ import { listPersonas, setPersonaActive } from "@/shared/api/tauriPersonas";
 import type {
   AcpRuntime,
   AgentPersona,
+  ChannelMember,
   CreateManagedAgentInput,
   ManagedAgent,
 } from "@/shared/api/types";
@@ -183,11 +184,9 @@ async function ensureWelcomeTeamMembership(
   agents: WelcomeTeamAgents,
 ) {
   const members = await getChannelMembers(channelId).catch(() => []);
-  const memberPubkeys = new Set(
-    members.map((member) => normalizePubkey(member.pubkey)),
-  );
-  const missingAgents = agents.filter(
-    (agent) => !memberPubkeys.has(normalizePubkey(agent.pubkey)),
+  const missingAgents = filterWelcomeTeamAgentsMissingFromChannel(
+    agents,
+    members,
   );
   if (missingAgents.length === 0) {
     return;
@@ -204,6 +203,35 @@ async function ensureWelcomeTeamMembership(
   if (unexpectedError) {
     throw new Error(unexpectedError.error);
   }
+}
+
+/**
+ * Welcome Team agents that still need channel membership.
+ *
+ * Skips pubkeys already in the channel, and skips local starters whose display
+ * name is already used by another agent member — a second Desktop install must
+ * not mint parallel Fizz/Honey/Bumble identities into the shared roster (#2648).
+ */
+export function filterWelcomeTeamAgentsMissingFromChannel(
+  agents: readonly ManagedAgent[],
+  members: readonly ChannelMember[],
+): ManagedAgent[] {
+  const memberPubkeys = new Set(
+    members.map((member) => normalizePubkey(member.pubkey)),
+  );
+  const occupiedAgentNames = new Set(
+    members
+      .filter((member) => member.isAgent)
+      .map((member) => member.displayName?.trim().toLowerCase())
+      .filter((name): name is string => Boolean(name)),
+  );
+  return agents.filter((agent) => {
+    if (memberPubkeys.has(normalizePubkey(agent.pubkey))) {
+      return false;
+    }
+    const name = agent.name.trim().toLowerCase();
+    return !occupiedAgentNames.has(name);
+  });
 }
 
 export async function buildWelcomeStarterCreateInput(
