@@ -3394,6 +3394,50 @@ test("home inbox manage affordance opens management without leaving home", async
   await expect(page).not.toHaveURL(/#\/channels\//);
 });
 
+test("members sidebar can invite relay-authorized agents", async ({ page }) => {
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey: DM_RELAY_AGENT_PUBKEY,
+        name: "quinn",
+        respondTo: "allowlist",
+        respondToAllowlist: [MOCK_IDENTITY_PUBKEY],
+      },
+    ],
+  });
+  await page.goto("/");
+  await openMembersSidebar(page, "general");
+
+  await page.getByTestId("channel-management-search-users").fill("quinn");
+
+  await expect(
+    page.getByTestId(`channel-user-search-result-${DM_RELAY_AGENT_PUBKEY}`),
+  ).toBeVisible();
+});
+
+test("members sidebar hides relay agents that are not authorized", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey: DM_RELAY_AGENT_PUBKEY,
+        name: "quinn",
+        respondTo: "allowlist",
+        respondToAllowlist: [TEST_IDENTITIES.outsider.pubkey],
+      },
+    ],
+  });
+  await page.goto("/");
+  await openMembersSidebar(page, "general");
+
+  await page.getByTestId("channel-management-search-users").fill("quinn");
+
+  await expect(
+    page.getByTestId(`channel-user-search-result-${DM_RELAY_AGENT_PUBKEY}`),
+  ).toHaveCount(0);
+});
+
 test("members sidebar can invite and remove managed agents", async ({
   page,
 }) => {

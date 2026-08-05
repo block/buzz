@@ -5,11 +5,14 @@ import {
   invalidateChannelState,
   useAddChannelMembersMutation,
   useChannelMembersQuery,
+  useChannelsQuery,
 } from "@/features/channels/hooks";
 import { attachManagedAgentToChannel } from "@/features/agents/channelAgents";
 import {
   coalesceAgentAutocompleteCandidates,
-  isAgentIdentityInManagedList,
+  getMentionableAgentPubkeys,
+  getSharedChannelIds,
+  isAgentIdentityInAllowedList,
 } from "@/features/agents/lib/agentAutocompleteEligibility";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useClassifiedMembers } from "@/features/channels/lib/useClassifiedMembers";
@@ -155,6 +158,7 @@ export function MembersSidebar({
   >(() => new Set());
   const identityQuery = useIdentityQuery();
   const membersQuery = useChannelMembersQuery(channelId, open);
+  const channelsQuery = useChannelsQuery({ enabled: open });
   const addMembersMutation = useAddChannelMembersMutation(channelId);
   const changeRoleMutation = useMutation({
     mutationFn: async ({ pubkey, role }: { pubkey: string; role: string }) => {
@@ -271,7 +275,14 @@ export function MembersSidebar({
         .map((member) => member.displayName?.trim().toLowerCase())
         .filter((label): label is string => Boolean(label)),
     );
-    const managedAgentPubkeys = new Set(managedAgentsByPubkey.keys());
+    const sharedChannelIds = getSharedChannelIds(channelsQuery.data);
+    const allowedAgentPubkeys = getMentionableAgentPubkeys({
+      currentPubkey,
+      eligibilityScope: { type: "community" },
+      managedAgentPubkeys: managedAgentsByPubkey.keys(),
+      relayAgents: relayAgentsQuery.data,
+      sharedChannelIds,
+    });
 
     const addCandidate = (candidate: AddMemberSearchCandidate) => {
       const pubkey = normalizePubkey(candidate.pubkey);
@@ -282,7 +293,7 @@ export function MembersSidebar({
           )) ||
         memberPubkeys.has(pubkey) ||
         isArchivedDiscovery(pubkey) ||
-        !isAgentIdentityInManagedList(candidate, managedAgentPubkeys)
+        !isAgentIdentityInAllowedList(candidate, allowedAgentPubkeys)
       ) {
         return;
       }
@@ -361,6 +372,7 @@ export function MembersSidebar({
     });
   }, [
     canAddMembers,
+    channelsQuery.data,
     isArchivedDiscovery,
     currentPubkey,
     managedAgentsQuery.data,
@@ -373,7 +385,8 @@ export function MembersSidebar({
   const isAddSearchLoading =
     userSearchQuery.isLoading ||
     managedAgentsQuery.isLoading ||
-    relayAgentsQuery.isLoading;
+    relayAgentsQuery.isLoading ||
+    channelsQuery.isLoading;
   const handlePeopleSearchScroll = useUserSearchFetchMoreOnScroll(
     userSearchQuery,
     canAddMembers && normalizedDeferredSearchQuery.length > 0,
