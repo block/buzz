@@ -1768,6 +1768,143 @@ void main() {
       );
     });
 
+    testWidgets(
+      'keeps the followed tail anchored through composer and keyboard resize',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        addTearDown(tester.view.reset);
+
+        final messages = [
+          for (var i = 0; i < 20; i++)
+            _textMsg(
+              id: 'msg$i',
+              pubkey: i.isEven ? 'alice' : 'bob',
+              content: 'Message $i',
+              createdAt: 1000 + i * 1000,
+            ),
+        ];
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: messages,
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final latestMessage = find.byKey(
+          const ValueKey('channel-message-group-msg19'),
+        );
+        final composerDock = find.byKey(
+          const ValueKey('channel-composer-dock'),
+        );
+        final compactDockHeight = tester.getSize(composerDock).height;
+
+        expect(latestMessage, findsOneWidget);
+        expect(
+          tester.getBottomLeft(latestMessage).dy,
+          lessThanOrEqualTo(tester.getTopLeft(composerDock).dy + 1),
+        );
+
+        await tester.tap(find.text('Message #general'));
+        await tester.pumpAndSettle();
+
+        expect(
+          tester.getSize(composerDock).height,
+          greaterThan(compactDockHeight),
+        );
+        expect(
+          tester.getBottomLeft(latestMessage).dy,
+          lessThanOrEqualTo(tester.getTopLeft(composerDock).dy + 1),
+        );
+        expect(
+          find.byKey(const ValueKey('channel-jump-to-latest')),
+          findsNothing,
+        );
+
+        tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+        await tester.pumpAndSettle();
+
+        expect(latestMessage, findsOneWidget);
+        expect(
+          tester.getBottomLeft(latestMessage).dy,
+          lessThanOrEqualTo(tester.getTopLeft(composerDock).dy + 1),
+        );
+        expect(
+          find.byKey(const ValueKey('channel-jump-to-latest')),
+          findsNothing,
+        );
+      },
+    );
+
+    testWidgets(
+      'does not realign a user-detached timeline on keyboard resize',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 600);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        addTearDown(tester.view.reset);
+
+        final messages = [
+          for (var i = 0; i < 40; i++)
+            _textMsg(
+              id: 'msg$i',
+              pubkey: 'alice',
+              content: 'Message $i',
+              createdAt: 1000 + i,
+            ),
+        ];
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: messages,
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final messageList = find.byKey(const ValueKey('channel-message-list'));
+        await tester.drag(messageList, const Offset(0, 300));
+        await tester.pumpAndSettle();
+
+        expect(findRichText('Message 39'), findsNothing);
+        expect(
+          find.byKey(const ValueKey('channel-jump-to-latest')),
+          findsOneWidget,
+        );
+
+        tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+        await tester.pumpAndSettle();
+
+        expect(findRichText('Message 39'), findsNothing);
+        expect(
+          find.byKey(const ValueKey('channel-jump-to-latest')),
+          findsOneWidget,
+        );
+        final positions = tester
+            .widget<ScrollablePositionedList>(messageList)
+            .itemPositionsNotifier!
+            .itemPositions
+            .value;
+        expect(
+          positions.any(
+            (position) =>
+                position.index == 0 && position.itemLeadingEdge.abs() < 0.01,
+          ),
+          isFalse,
+        );
+      },
+    );
+
     testWidgets('can jump back to latest after a non-drag user scroll', (
       tester,
     ) async {
