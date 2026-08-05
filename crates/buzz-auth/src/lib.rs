@@ -27,6 +27,8 @@ pub mod nip42;
 pub mod nip98;
 /// NIP-98 replay protection — shared, community-scoped, atomic seen-set.
 pub mod nip98_replay;
+/// Provider-neutral authorization policy and validated capability snapshots.
+pub mod provider;
 /// Per-connection rate limiting.
 pub mod rate_limit;
 /// OAuth scope parsing and enforcement.
@@ -51,6 +53,15 @@ pub use nip98::verify_nip98_event;
 pub use nip98_replay::{
     nip98_replay_key, nip98_replay_key_for_scope, Nip98ReplayGuard, DEFAULT_REPLAY_TTL_SECS,
     MAX_REPLAY_TTL_SECS,
+};
+pub use provider::{
+    AuthorizationAuthority, AuthorizationCapability, AuthorizationClock, AuthorizationDenial,
+    AuthorizationDenialReason, AuthorizationOutcome, AuthorizationProfileId, AuthorizationProvider,
+    AuthorizationProviderFuture, AuthorizationRequest, AuthorizationRuntime, CapabilitySet,
+    CapabilitySnapshot, DecisionSource, PolicyVersion, ProviderAllow, ProviderAllowReason,
+    ProviderAuthorizationError, ProviderContractError, ProviderDecision, ProviderTimeout,
+    ProviderUnavailable, ProviderUnavailableReason, RetryAfter, MAX_PROVIDER_FRESHNESS_SECONDS,
+    MAX_PROVIDER_TIMEOUT,
 };
 pub use rate_limit::{
     ip_rate_limit_key, rate_limit_key, LimitType, RateLimitConfig, RateLimitResult, RateLimiter,
