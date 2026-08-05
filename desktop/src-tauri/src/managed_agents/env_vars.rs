@@ -88,6 +88,9 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     // ambient env var must not be able to forge setup mode (NotReady) on a
     // Ready agent or suppress it (empty/stale payload) on a NotReady one.
     "BUZZ_ACP_SETUP_PAYLOAD",
+    // Exact session-to-agent identity receipt. Desktop derives a pair-scoped
+    // app-data path; allowing overrides could mix or redirect identities.
+    "BUZZ_ACP_SESSION_IDENTITY_LOG",
     // Desktop ownership markers: these brand every spawned harness with the
     // launching Desktop instance. A user-supplied override would let a
     // definition masquerade as a different instance or fake the nonce used

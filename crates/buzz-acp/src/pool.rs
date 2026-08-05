@@ -21,6 +21,7 @@
 
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -560,6 +561,9 @@ pub struct PromptContext {
     /// Harness identity string for NIP-AM `harness` field. Derived from the
     /// configured `agent_command` at startup (e.g. `"goose"`, `"buzz-agent"`).
     pub harness_name: String,
+    /// Append-only local receipt mapping exact ACP session IDs to the signed
+    /// managed-agent identity. Desktop supplies a pair-scoped app-data path.
+    pub session_identity_log_path: Option<PathBuf>,
     /// Relay URL this harness is connected to. Rides in observer payloads that
     /// the desktop keys per (agent, relay) pair, e.g. `session_config_captured`,
     /// mirroring the `managed_agent_runtime_lifecycle` frames.
@@ -934,6 +938,23 @@ async fn create_session_and_apply_model(
             session_title.as_deref(),
         )
         .await?;
+
+    if let Some(path) = ctx.session_identity_log_path.as_deref() {
+        if let Err(error) = crate::session_identity::append_receipt(
+            path,
+            &resp.session_id,
+            &ctx.agent_keys.public_key().to_hex(),
+            &ctx.harness_name,
+        ) {
+            // Identity telemetry must never make an otherwise valid ACP
+            // session unavailable. Missing receipts remain explicit unknowns.
+            tracing::warn!(
+                target: "buzz_acp::session_identity",
+                session_id = %resp.session_id,
+                "managed session identity receipt unavailable: {error}"
+            );
+        }
+    }
 
     if is_goose && agent.goose_system_prompt_supported != Some(false) {
         if let Some(prompt) = combined_system_prompt.as_deref() {
@@ -6541,8 +6562,84 @@ mod tests {
             agent_owner_pubkey: owner_pubkey,
             memory_enabled: false,
             harness_name: "goose".to_string(),
+            session_identity_log_path: None,
             relay_url: "ws://127.0.0.1:3000".to_string(),
         }
+    }
+
+    async fn fake_acp_agent(session_id: &str) -> OwnedAgent {
+        let script = format!(
+            r#"
+                read -r _init
+                echo '{{"jsonrpc":"2.0","id":0,"result":{{"protocolVersion":2,"agentCapabilities":{{}}}}}}'
+                read -r _session
+                echo '{{"jsonrpc":"2.0","id":1,"result":{{"sessionId":"{session_id}"}}}}'
+                sleep 1
+            "#
+        );
+        let mut acp = AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
+            .await
+            .expect("spawn fake ACP agent");
+        acp.initialize().await.expect("initialize fake ACP agent");
+        OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            agent_name: "codex-acp".to_string(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+        }
+    }
+
+    #[tokio::test]
+    async fn new_acp_session_persists_the_exact_managed_identity() {
+        let session_id = "019fcac1-a301-7780-b42c-aebc569b4928";
+        let mut agent = fake_acp_agent(session_id).await;
+        let keys = nostr::Keys::generate();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let receipt_path = temp.path().join("session-identities.jsonl");
+        let mut ctx = make_prompt_context_impl(&keys, None);
+        ctx.harness_name = "codex-acp".to_string();
+        ctx.session_identity_log_path = Some(receipt_path.clone());
+
+        let created = create_session_and_apply_model(&mut agent, &ctx, None, None, None)
+            .await
+            .expect("create ACP session");
+        let receipts = crate::session_identity::read_receipts(&receipt_path)
+            .expect("read persisted identity receipt");
+
+        assert_eq!(created, session_id);
+        assert_eq!(receipts[session_id].session_id, session_id);
+        assert_eq!(
+            receipts[session_id].agent_pubkey,
+            keys.public_key().to_hex()
+        );
+        assert_eq!(receipts[session_id].harness, "codex-acp");
+    }
+
+    #[tokio::test]
+    async fn unavailable_receipt_path_does_not_fail_session_creation() {
+        let session_id = "3e404b95-9c13-4dfa-ac65-6f47da5b2bc6";
+        let mut agent = fake_acp_agent(session_id).await;
+        let keys = nostr::Keys::generate();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let missing_path = temp
+            .path()
+            .join("missing-parent")
+            .join("session-identities.jsonl");
+        let mut ctx = make_prompt_context_impl(&keys, None);
+        ctx.harness_name = "claude-agent-acp".to_string();
+        ctx.session_identity_log_path = Some(missing_path.clone());
+
+        let created = create_session_and_apply_model(&mut agent, &ctx, None, None, None)
+            .await
+            .expect("receipt failure must not fail ACP session creation");
+
+        assert_eq!(created, session_id);
+        assert!(!missing_path.exists());
     }
 
     // ── render_canvas_section ────────────────────────────────────────────────

@@ -146,6 +146,14 @@ fn reserved_keys_include_agent_owner_for_legacy_records() {
 }
 
 #[test]
+fn reserved_keys_include_session_identity_receipt_path() {
+    assert!(is_reserved_env_key("BUZZ_ACP_SESSION_IDENTITY_LOG"));
+    let agent = map(&[("BUZZ_ACP_SESSION_IDENTITY_LOG", "/tmp/forged.jsonl")]);
+    let merged = merged_user_env(&BTreeMap::new(), &agent);
+    assert!(merged.is_empty());
+}
+
+#[test]
 fn reserved_keys_include_respond_to_gate() {
     // Respond-to mode + allowlist control who the agent answers.
     // Overriding via env_vars would let the running agent answer
