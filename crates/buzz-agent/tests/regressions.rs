@@ -2402,6 +2402,10 @@ async fn handoff_cap_resets_per_turn_not_per_session() {
 /// returns a tool call, causing a second round. Round 2's preflight sees that
 /// turn_handoff_count=1 == max_handoffs=1, so it refuses and emits WARN.
 ///
+/// A steer is injected while the run is active to prove that the steer path
+/// does NOT reset `handoff_attempts` — the cap must still fire on round 1 with
+/// no second summarize call.
+///
 /// This test requires a fake MCP server to produce a tool-call round.
 /// It drives via `fake-mcp` — the same binary used in other multi-round tests.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2410,10 +2414,10 @@ async fn handoff_cap_binds_within_a_single_turn() {
     //  req 1: turn 1 complete()            → usage=950 (over threshold=900)
     //  req 2: turn 2 round 0 summarize()   → summary (handoff_attempts: 0→1)
     //  req 3: turn 2 round 0 complete()    → tool_call + usage=950 (re-arms gate)
-    //         [fake-mcp tool executes]
+    //         [fake-mcp tool executes; steer queued while run is active]
     //  req 4: turn 2 round 1 preflight     → 950 >= 900 AND attempts=1 >= max=1
     //                                         → WARN, skip (cap exhausted for this turn)
-    //  req 5: turn 2 round 1 complete()    → end_turn
+    //  req 5: turn 2 round 1 complete()    → end_turn (steer text folded into messages)
     let fake_mcp = env!("CARGO_BIN_EXE_fake-mcp");
     // Build a tool-call response that also carries usage so the gate re-arms
     // on round 1's preflight (without usage, last_request_input_tokens is None
@@ -2484,7 +2488,8 @@ async fn handoff_cap_binds_within_a_single_turn() {
     let _ = h.recv_until(|v| v["id"] == json!(p1)).await;
 
     // Turn 2: triggers a handoff at round 0, then a tool call, then round 1
-    // where the cap is already exhausted.
+    // where the cap is already exhausted.  A steer is injected while the run
+    // is active to prove mid-turn steers cannot reset `handoff_attempts`.
     let p2 = h
         .send(
             "session/prompt",
@@ -2492,9 +2497,50 @@ async fn handoff_cap_binds_within_a_single_turn() {
         )
         .await;
 
-    // Drain until the final response, approving any tool permission requests.
+    // Drain until the final response, approving tool-permission requests,
+    // capturing the activeRunId once it is broadcast, sending one steer,
+    // and verifying that it is accepted in the live run.
+    let mut run_id: Option<String> = None;
+    let mut steer_id: i64 = -1;
+    let mut steer_accepted = false;
     loop {
         let v = h.recv().await;
+
+        // Capture the run id from the first session/update that carries it,
+        // then immediately queue a steer.  This must happen before round 1 so
+        // the steer text is present but the cap check still fires — proving
+        // the counter is not reset by the steer path.
+        if run_id.is_none() {
+            if let Some(rid) = v["params"]["update"]["_meta"]["goose"]["activeRunId"].as_str() {
+                run_id = Some(rid.to_owned());
+                steer_id = h
+                    .send(
+                        "_goose/unstable/session/steer",
+                        json!({
+                            "sessionId": sid,
+                            "expectedRunId": rid,
+                            "prompt": [{"type":"text","text":"STEER-CANARY: also consider the edge case"}],
+                        }),
+                    )
+                    .await;
+            }
+        }
+
+        // Steer response: assert it was accepted in the live run.
+        if steer_id >= 0 && v["id"] == json!(steer_id) {
+            assert!(
+                v.get("result").is_some(),
+                "steer must be accepted while the run is active; got: {v}"
+            );
+            assert_eq!(
+                v["result"]["runId"].as_str(),
+                run_id.as_deref(),
+                "steer must reference the live run id"
+            );
+            steer_accepted = true;
+            continue;
+        }
+
         if v.get("method") == Some(&json!("session/request_permission")) {
             let id = v["id"].clone();
             h.write(json!({
@@ -2514,6 +2560,11 @@ async fn handoff_cap_binds_within_a_single_turn() {
         }
     }
 
+    assert!(
+        steer_accepted,
+        "steer was never accepted during turn 2; the steer arm is missing coverage"
+    );
+
     // 4 LLM requests: seed + summarize + tool-call-with-usage + final-complete.
     let count = llm.captured.lock().await.len();
     assert_eq!(
@@ -2525,6 +2576,18 @@ async fn handoff_cap_binds_within_a_single_turn() {
     assert!(
         stderr.contains("handoff cap reached"),
         "expected cap-reached WARN in stderr; got: {stderr}"
+    );
+    assert!(
+        stderr.contains("reason=\"preflight\""),
+        "expected reason=\"preflight\" field in cap WARN; got: {stderr}"
+    );
+    assert!(
+        stderr.contains("handoff_attempts="),
+        "expected handoff_attempts field in cap WARN; got: {stderr}"
+    );
+    assert!(
+        stderr.contains("max_handoffs="),
+        "expected max_handoffs field in cap WARN; got: {stderr}"
     );
 
     h.shutdown().await;

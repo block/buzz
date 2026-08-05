@@ -38,11 +38,12 @@ impl RunCtx<'_> {
                 token_threshold(self.cfg.max_context_tokens, self.cfg.max_output_tokens);
             tracing::warn!(
                 session_id = self.session_id,
+                reason = "preflight",
+                handoff_attempts = *handoff_attempts,
+                max_handoffs = self.cfg.max_handoffs,
                 projected_tokens = projected,
                 threshold_tokens = threshold,
-                "handoff cap reached ({cap}/{max}); using truncation (projected {projected} tokens, threshold {threshold})",
-                cap = handoff_attempts,
-                max = self.cfg.max_handoffs,
+                "handoff cap reached; using truncation",
             );
             return HandoffOutcome::Skipped;
         }
