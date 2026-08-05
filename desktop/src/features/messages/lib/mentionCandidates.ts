@@ -25,6 +25,7 @@ export type MentionCandidate = {
   isAgent: boolean;
   isManagedAgent?: boolean;
   isGlobalSearchResult?: boolean;
+  unavailableReason?: string | null;
 };
 
 export function mentionCandidateLabel(candidate: MentionCandidate) {

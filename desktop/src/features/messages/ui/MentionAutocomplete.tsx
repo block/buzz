@@ -12,6 +12,7 @@ import {
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { safeNpub } from "@/shared/lib/nostrUtils";
 import { truncatePubkey } from "@/shared/lib/pubkey";
+import { toast } from "sonner";
 
 export type MentionSuggestion = {
   pubkey?: string;
@@ -25,6 +26,7 @@ export type MentionSuggestion = {
   notInChannel?: boolean;
   ownerLabel?: string | null;
   role?: string | null;
+  unavailableReason?: string | null;
 };
 
 type MentionAutocompleteProps = {
@@ -120,6 +122,10 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
               key={suggestionKey}
               onMouseDown={(event) => {
                 event.preventDefault();
+                if (suggestion.unavailableReason) {
+                  toast.error(suggestion.unavailableReason);
+                  return;
+                }
                 onSelect(suggestion);
               }}
               tabIndex={-1}
@@ -169,7 +175,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                           className="h-3.5 w-3.5"
                           data-testid="mention-agent-icon"
                         />
-                        {agentLabel}
+                        {suggestion.unavailableReason ?? agentLabel}
                       </span>
                     ) : suggestion.role ? (
                       <Badge

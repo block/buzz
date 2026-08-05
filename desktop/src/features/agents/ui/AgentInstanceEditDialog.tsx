@@ -23,7 +23,11 @@ import { Button } from "@/shared/ui/button";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
 import { Dialog } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
-import { setManagedAgentAutoRestart } from "@/shared/api/tauriManagedAgents";
+import {
+  setManagedAgentAutoRestart,
+  startManagedAgent,
+  stopManagedAgent,
+} from "@/shared/api/tauriManagedAgents";
 import { EditAgentAdvancedFields } from "./EditAgentAdvancedFields";
 import {
   ADVANCED_FIELDS_MOTION_TRANSITION,
@@ -723,6 +727,8 @@ export function AgentInstanceEditDialog({
             : undefined,
       };
 
+      const accessPolicyChanged =
+        input.respondTo !== undefined || input.respondToAllowlist !== undefined;
       const result = await updateMutation.mutateAsync(input);
       if (autoRestartOnConfigChange !== agent.autoRestartOnConfigChange) {
         // Standalone setter (mirrors start-on-app-launch) — not part of
@@ -732,20 +738,45 @@ export function AgentInstanceEditDialog({
           autoRestartOnConfigChange,
         );
       }
-      showAgentProfileSyncWarning(result.agent.name, result.profileSyncError);
+      let savedAgent = result.agent;
+      if (
+        accessPolicyChanged &&
+        isManagedAgentActive(result.agent) &&
+        result.agent.needsRestart
+      ) {
+        toast.loading(`Applying ${result.agent.name}'s access policy...`, {
+          id: `agent-policy-restart-${result.agent.pubkey}`,
+        });
+        try {
+          await stopManagedAgent(result.agent.pubkey);
+          savedAgent = await startManagedAgent(result.agent.pubkey);
+          toast.success(`${savedAgent.name}'s access policy is live.`, {
+            id: `agent-policy-restart-${savedAgent.pubkey}`,
+          });
+        } catch (error) {
+          toast.error(
+            error instanceof Error
+              ? `Access policy saved, but ${result.agent.name} failed to restart: ${error.message}`
+              : `Access policy saved, but ${result.agent.name} failed to restart.`,
+            { id: `agent-policy-restart-${result.agent.pubkey}` },
+          );
+          throw error;
+        }
+      }
+      showAgentProfileSyncWarning(savedAgent.name, result.profileSyncError);
       handleOpenChange(false);
-      onUpdated?.(result.agent);
+      onUpdated?.(savedAgent);
       // The auto-restart policy deliberately never fires for a stopped or
       // failing agent (a broken agent must not auto-loop), so an edit meant
       // to FIX one silently waits for a manual start. Offer that start
       // explicitly instead of relying on the user to know the policy.
-      if (!isManagedAgentActive(result.agent)) {
-        const startedName = result.agent.name;
+      if (!isManagedAgentActive(savedAgent)) {
+        const startedName = savedAgent.name;
         toast(`${startedName} saved while stopped.`, {
           action: {
             label: "Start now",
             onClick: () => {
-              startMutation.mutate(result.agent.pubkey, {
+              startMutation.mutate(savedAgent.pubkey, {
                 onSuccess: () => toast.success(`${startedName} started.`),
                 onError: (error) =>
                   toast.error(
