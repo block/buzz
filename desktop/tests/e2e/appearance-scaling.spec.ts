@@ -36,6 +36,7 @@ async function openAppearance(page: import("@playwright/test").Page) {
     await openSettings(page, "appearance");
   }
   await expect(page.getByTestId("interface-scale-slider")).toBeVisible();
+  await expect(page.getByTestId("appearance-scale-reset-all")).toBeVisible();
 }
 
 async function setScaleToMax(
@@ -62,6 +63,11 @@ test.describe("Appearance scaling", () => {
     for (const prefix of SCALE_PREFIXES) {
       await setScaleToMax(page, prefix);
     }
+
+    await expect(
+      page.getByTestId("interface-scale-extreme-warning"),
+    ).toBeVisible();
+    await expect(page.getByTestId("appearance-scale-reset-all")).toBeEnabled();
 
     await expect(page.getByTestId("settings-content-scroll")).not.toHaveCSS(
       "overflow-x",

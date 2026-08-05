@@ -20,11 +20,7 @@ import type { ActiveChannelTurnSummary } from "@/features/agents/activeAgentTurn
 import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
 import { getEphemeralChannelDisplay } from "@/features/channels/lib/ephemeralChannel";
 import { EphemeralChannelBadge } from "@/features/channels/ui/EphemeralChannelBadge";
-import {
-  DEFAULT_HOVER_PROFILE_STATUS_GEOMETRY,
-  ProfileAvatarWithStatus,
-  scaleProfileAvatarStatusGeometry,
-} from "@/features/profile/ui/ProfileAvatarWithStatus";
+import { ProfileAvatarWithStatus } from "@/features/profile/ui/ProfileAvatarWithStatus";
 import type { Channel, PresenceStatus } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { useNow } from "@/shared/lib/useNow";
@@ -52,10 +48,6 @@ const SIDEBAR_ROW_ACTION_REPLACED_BADGE_CLASS =
 const SIDEBAR_ROW_ICON_ACTION_CLASS =
   "flex size-6 items-center justify-center p-1 text-sidebar-foreground/45 transition-colors hover:text-sidebar-foreground focus-visible:text-sidebar-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-sidebar-ring peer-data-[active=true]/menu-button:text-sidebar-active-foreground/75 peer-data-[active=true]/menu-button:hover:text-sidebar-active-foreground [&>svg]:size-4 [&>svg]:shrink-0";
 const DM_AVATAR_SIZE = 24;
-const DM_AVATAR_STATUS_GEOMETRY = scaleProfileAvatarStatusGeometry(
-  DEFAULT_HOVER_PROFILE_STATUS_GEOMETRY,
-  DM_AVATAR_SIZE,
-);
 
 function formatUnreadCount(count: number): string {
   return count > 99 ? "99+" : String(count);
@@ -198,7 +190,6 @@ function DmChannelIcon({
           avatarClassName="bg-sidebar-accent/80 text-2xs text-sidebar-foreground shadow-none"
           avatarUrl={primaryParticipant.avatarUrl}
           className="h-6 w-6"
-          geometry={DM_AVATAR_STATUS_GEOMETRY}
           iconClassName="h-3.5 w-3.5"
           label={primaryParticipant.label}
           size={DM_AVATAR_SIZE}

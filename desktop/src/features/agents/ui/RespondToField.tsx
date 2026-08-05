@@ -361,7 +361,9 @@ function AllowlistPicker({
                 key={pubkey}
               >
                 <UserAvatar
+                  appearanceScale={false}
                   avatarUrl={null}
+                  className="h-5 w-5"
                   displayName={truncatePubkey(pubkey)}
                   size="xs"
                 />
@@ -397,7 +399,9 @@ function AllowlistPicker({
                   >
                     <div className="flex items-center gap-2 min-w-0">
                       <UserAvatar
+                        appearanceScale={false}
                         avatarUrl={result.avatarUrl}
+                        className="h-5 w-5"
                         displayName={formatSearchUserName(result)}
                         size="xs"
                       />
@@ -423,7 +427,9 @@ function AllowlistPicker({
               >
                 <div className="flex items-center gap-2 min-w-0">
                   <UserAvatar
+                    appearanceScale={false}
                     avatarUrl={null}
+                    className="h-5 w-5"
                     displayName={truncatePubkey(deferredQuery)}
                     size="xs"
                   />

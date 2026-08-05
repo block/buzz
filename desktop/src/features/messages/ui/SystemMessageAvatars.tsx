@@ -4,7 +4,6 @@ import {
 } from "@/features/profile/lib/identity";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { getAvatarSizeRem } from "@/shared/lib/avatarScale";
-import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { useAvatarScale } from "@/shared/lib/useAvatarScale";
 import { UserAvatar } from "@/shared/ui/UserAvatar";

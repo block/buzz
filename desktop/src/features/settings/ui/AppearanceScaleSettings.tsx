@@ -1,3 +1,13 @@
+import type { ReactNode } from "react";
+
+import {
+  APPEARANCE_NAMED_PRESETS,
+  APPEARANCE_NAMED_PRESET_LABELS,
+  APPEARANCE_NAMED_PRESET_ORDER,
+  INTERFACE_SCALE_SOFT_WARN_THRESHOLD,
+  isAppearanceNamedPresetActive,
+  type AppearanceNamedPresetId,
+} from "@/shared/lib/appearanceScalePresets";
 import {
   AVATAR_SCALE_PRESETS,
   DEFAULT_AVATAR_SCALE,
@@ -16,6 +26,7 @@ import {
   formatChatScalePercent,
   setChatScale,
 } from "@/shared/lib/chatScale";
+import { cn } from "@/shared/lib/cn";
 import {
   DEFAULT_TEXT_SCALE,
   MAX_TEXT_SCALE,
@@ -43,6 +54,7 @@ type AppearanceScaleRowProps = {
   presetIndex: number;
   onChange: (scale: number) => void;
   onReset: () => void;
+  warning?: ReactNode;
 };
 
 function AppearanceScaleRow({
@@ -57,6 +69,7 @@ function AppearanceScaleRow({
   presetIndex,
   onChange,
   onReset,
+  warning,
 }: AppearanceScaleRowProps) {
   return (
     <SettingsOptionRow className="flex-col items-stretch gap-3">
@@ -120,8 +133,22 @@ function AppearanceScaleRow({
           Reset
         </Button>
       </div>
+      {warning}
     </SettingsOptionRow>
   );
+}
+
+function applyAppearanceNamedPreset(id: AppearanceNamedPresetId): void {
+  const preset = APPEARANCE_NAMED_PRESETS[id];
+  setTextScale(preset.interface);
+  setChatScale(preset.chat);
+  setAvatarScale(preset.avatar);
+}
+
+function resetAllAppearanceScales(): void {
+  setTextScale(DEFAULT_TEXT_SCALE);
+  setChatScale(DEFAULT_CHAT_SCALE);
+  setAvatarScale(DEFAULT_AVATAR_SCALE);
 }
 
 /**
@@ -133,8 +160,52 @@ export function AppearanceScaleSettings() {
   const chatScale = useChatScale();
   const avatarScale = useAvatarScale();
 
+  const currentScales = {
+    interface: textScale,
+    chat: chatScale,
+    avatar: avatarScale,
+  };
+  const allDefault =
+    textScale === DEFAULT_TEXT_SCALE &&
+    chatScale === DEFAULT_CHAT_SCALE &&
+    avatarScale === DEFAULT_AVATAR_SCALE;
+  const showInterfaceExtremeWarning =
+    textScale > INTERFACE_SCALE_SOFT_WARN_THRESHOLD;
+
   return (
     <SettingsOptionGroup className="mb-6">
+      <SettingsOptionRow className="flex-col items-stretch gap-2">
+        <div className="min-w-0 flex-1 basis-full">
+          <p className="text-sm font-medium">Quick presets</p>
+          <p className="text-sm font-normal text-muted-foreground">
+            Apply Interface, Chat text, and Avatar together. Chat and Avatar
+            stay relative to Interface scale.
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {APPEARANCE_NAMED_PRESET_ORDER.map((id) => {
+            const active = isAppearanceNamedPresetActive(id, currentScales);
+            return (
+              <button
+                aria-pressed={active}
+                className={cn(
+                  "h-7 rounded-full border px-3 text-xs font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
+                  active
+                    ? "border-primary bg-primary/10 text-foreground"
+                    : "border-border/50 bg-muted/45 text-muted-foreground hover:bg-muted/70 hover:text-foreground",
+                )}
+                data-testid={`appearance-preset-${id}`}
+                key={id}
+                onClick={() => applyAppearanceNamedPreset(id)}
+                type="button"
+              >
+                {APPEARANCE_NAMED_PRESET_LABELS[id]}
+              </button>
+            );
+          })}
+        </div>
+      </SettingsOptionRow>
+
       <AppearanceScaleRow
         description="Enlarge or shrink the whole app UI. Keyboard: Cmd/Ctrl + / − / 0. Chat and avatar sizes are relative to this."
         isDefault={textScale === DEFAULT_TEXT_SCALE}
@@ -147,6 +218,18 @@ export function AppearanceScaleSettings() {
         testIdPrefix="interface-scale"
         title="Interface scale"
         valueLabel={formatTextScalePercent(textScale)}
+        warning={
+          showInterfaceExtremeWarning ? (
+            <p
+              className="text-xs text-amber-600 dark:text-amber-400"
+              data-testid="interface-scale-extreme-warning"
+              role="status"
+            >
+              Sizes above 200% can make chrome hard to use. Prefer Chat text /
+              Avatar size for content only.
+            </p>
+          ) : null
+        }
       />
       <AppearanceScaleRow
         description="Message body and author names in channels and threads. Relative to Interface scale."
@@ -174,6 +257,20 @@ export function AppearanceScaleSettings() {
         title="Avatar & profile size"
         valueLabel={formatAvatarScalePercent(avatarScale)}
       />
+
+      <SettingsOptionRow className="justify-end">
+        <Button
+          className="h-7 shrink-0 rounded-full border border-border/50 bg-muted/45 px-2.5 text-xs font-medium shadow-none hover:bg-muted/70 disabled:opacity-40"
+          data-testid="appearance-scale-reset-all"
+          disabled={allDefault}
+          onClick={resetAllAppearanceScales}
+          size="sm"
+          type="button"
+          variant="ghost"
+        >
+          Reset all
+        </Button>
+      </SettingsOptionRow>
     </SettingsOptionGroup>
   );
 }

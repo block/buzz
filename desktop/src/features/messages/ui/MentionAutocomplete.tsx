@@ -131,7 +131,9 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                 </span>
               ) : (
                 <UserAvatar
+                  appearanceScale={false}
                   avatarUrl={suggestion.avatarUrl ?? null}
+                  className="h-5 w-5"
                   displayName={suggestion.displayName}
                   size="xs"
                   testId="mention-suggestion-avatar"
