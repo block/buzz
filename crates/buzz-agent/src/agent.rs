@@ -229,6 +229,14 @@ impl RunCtx<'_> {
         *self.turn_output_tokens = None;
         *self.turn_cached_input_tokens = None;
         *self.turn_total_state = TurnTotalState::Unseen;
+        // Per-turn handoff-attempt counter. Scoped here (not persisted in the
+        // session) so `BUZZ_AGENT_MAX_HANDOFFS` bounds compactions per
+        // `session/prompt` turn rather than per session lifetime. A
+        // long-lived session legitimately needs unbounded handoffs across
+        // prompts; the cap only exists to stop runaway within a single turn.
+        // The session-cumulative `handoff_count` (used in log lines) is not
+        // reset: it reflects total compactions since session start.
+        let mut handoff_attempts: usize = 0;
 
         let mut round = 0u32;
         // Per-prompt `_Stop` objection count. Bounded per prompt (not per
@@ -255,7 +263,7 @@ impl RunCtx<'_> {
             // its next request — the turn continues, it is not restarted. Drain
             // non-blocking; an empty queue is the common case.
             self.drain_steers();
-            match self.maybe_handoff().await {
+            match self.maybe_handoff(&mut handoff_attempts).await {
                 HandoffOutcome::Cancelled => return Ok(StopReason::Cancelled),
                 // Context was just reset — the prior request's token count no
                 // longer describes the (now much smaller) history. Clear both

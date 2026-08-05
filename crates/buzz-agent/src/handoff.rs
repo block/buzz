@@ -28,17 +28,30 @@ you accomplished, key decisions made, what remains, and one concrete next step. 
 text only — no tool calls, no JSON. Stay under 8192 tokens.";
 
 impl RunCtx<'_> {
-    pub(crate) async fn maybe_handoff(&mut self) -> HandoffOutcome {
+    pub(crate) async fn maybe_handoff(&mut self, handoff_attempts: &mut usize) -> HandoffOutcome {
         if !self.should_handoff() {
             return HandoffOutcome::Skipped;
         }
-        if *self.handoff_count >= self.cfg.max_handoffs {
-            tracing::info!(
-                "handoff cap reached ({}); using truncation",
-                self.cfg.max_handoffs
+        if *handoff_attempts >= self.cfg.max_handoffs {
+            let projected = self.projected_handoff_input_tokens();
+            let threshold =
+                token_threshold(self.cfg.max_context_tokens, self.cfg.max_output_tokens);
+            tracing::warn!(
+                session_id = self.session_id,
+                reason = "preflight",
+                handoff_attempts = *handoff_attempts,
+                max_handoffs = self.cfg.max_handoffs,
+                projected_tokens = projected,
+                threshold_tokens = threshold,
+                "handoff cap reached; using truncation",
             );
             return HandoffOutcome::Skipped;
         }
+        // Consume one attempt slot before calling summarize(). This ensures
+        // that empty-summary, summarize-error, and cancellation outcomes all
+        // burn budget — not just successful compactions — so the cap cannot
+        // be bypassed by a flaky summarizer.
+        *handoff_attempts += 1;
         let prompt = self.build_handoff_prompt();
         let tokens_before = self.projected_handoff_input_tokens();
         let summary = tokio::select! {

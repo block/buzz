@@ -714,6 +714,11 @@ pub struct Config {
     /// operators lower/raise it for other models. Set via
     /// `BUZZ_AGENT_MAX_CONTEXT_TOKENS`.
     pub max_context_tokens: u64,
+    /// Maximum context-handoff attempts permitted within a single
+    /// `session/prompt` turn. Caps runaway compaction loops inside one turn;
+    /// does NOT limit handoffs across a session's lifetime — a long-lived
+    /// session can compact on every successive turn without hitting this bound.
+    /// Set via `BUZZ_AGENT_MAX_HANDOFFS`. Default 10.
     pub max_handoffs: usize,
     pub max_parallel_tools: usize,
     pub hook_timeout: Duration,
