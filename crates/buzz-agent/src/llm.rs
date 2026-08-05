@@ -158,7 +158,7 @@ impl Llm {
                 let v = self.post_openrouter(cfg, &body).await?;
                 parse_openai_with_reasoning_details(v)
             }
-            Provider::OpenAi | Provider::Databricks => {
+            Provider::OpenAi | Provider::Venice | Provider::Databricks => {
                 self.openai_request(
                     cfg,
                     effective_model,
@@ -183,9 +183,14 @@ impl Llm {
                                 parse_responses as OpenAiParse,
                             )
                         } else {
+                            let parse = if cfg.provider == Provider::Venice {
+                                parse_openai_with_reasoning_details as OpenAiParse
+                            } else {
+                                parse_openai as OpenAiParse
+                            };
                             (
                                 openai_body(cfg, system_prompt, history, tools, request_model, e),
-                                parse_openai as OpenAiParse,
+                                parse,
                             )
                         }
                     },
@@ -270,7 +275,7 @@ impl Llm {
                 let v = self.post_openrouter(cfg, &body).await?;
                 Ok(parse_openai(v)?.text)
             }
-            Provider::OpenAi | Provider::Databricks => {
+            Provider::OpenAi | Provider::Venice | Provider::Databricks => {
                 let r = self
                     .openai_request(
                         cfg,
@@ -288,18 +293,19 @@ impl Llm {
                                     parse_responses as OpenAiParse,
                                 )
                             } else {
-                                (
-                                    json!({
-                                        "model": request_model,
-                                        "stream": false,
-                                        "max_completion_tokens": max_output_tokens,
-                                        "messages": [
-                                            { "role": "system", "content": system_prompt },
-                                            { "role": "user", "content": user_prompt },
-                                        ],
-                                    }),
-                                    parse_openai as OpenAiParse,
-                                )
+                                let mut body = json!({
+                                    "model": request_model,
+                                    "stream": false,
+                                    "max_completion_tokens": max_output_tokens,
+                                    "messages": [
+                                        { "role": "system", "content": system_prompt },
+                                        { "role": "user", "content": user_prompt },
+                                    ],
+                                });
+                                if cfg.provider == Provider::Venice {
+                                    apply_venice_mutations(&mut body);
+                                }
+                                (body, parse_openai as OpenAiParse)
                             }
                         },
                     )
@@ -862,6 +868,12 @@ fn anthropic_tool_result_content(content: &[ToolResultContent]) -> Vec<Value> {
         .collect()
 }
 
+fn apply_venice_mutations(body: &mut Value) {
+    body["venice_parameters"] = json!({
+        "include_venice_system_prompt": false,
+    });
+}
+
 fn openai_body(
     cfg: &Config,
     system_prompt: &str,
@@ -951,6 +963,9 @@ fn openai_body(
         .collect();
     let mut body = json!({ "model": effective_model, "stream": false,
         "max_completion_tokens": cfg.max_output_tokens, "messages": messages });
+    if cfg.provider == Provider::Venice {
+        apply_venice_mutations(&mut body);
+    }
     if let Some(e) = effort {
         body["reasoning_effort"] = json!(e.openai_effort_str());
     }
@@ -1948,7 +1963,7 @@ pub(crate) fn databricks_pkce_config(host: &str) -> PkceOAuthConfig {
 ///   flow; subsequent requests use the cache + refresh transparently.
 pub(crate) fn build_token_source(cfg: &Config) -> Result<Arc<dyn TokenSource>, AgentError> {
     match cfg.provider {
-        Provider::Anthropic | Provider::OpenAi | Provider::OpenRouter => {
+        Provider::Anthropic | Provider::OpenAi | Provider::OpenRouter | Provider::Venice => {
             Ok(Arc::new(StaticTokenSource::new(cfg.api_key.clone())))
         }
         Provider::Databricks | Provider::DatabricksV2 => {
@@ -3754,6 +3769,22 @@ mod tests {
         assert!(
             body.get("reasoning_effort").is_none(),
             "reasoning_effort must be absent when effort is None"
+        );
+    }
+
+    #[test]
+    fn venice_body_disables_provider_system_prompt() {
+        let body = openai_body(
+            &cfg(Provider::Venice),
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "zai-org-glm-5",
+            None,
+        );
+        assert_eq!(
+            body["venice_parameters"]["include_venice_system_prompt"],
+            false
         );
     }
 

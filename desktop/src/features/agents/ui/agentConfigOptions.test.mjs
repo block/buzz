@@ -5,7 +5,9 @@ import {
   getDefaultPersonaRuntime,
   getPersonaModelOptions,
   getPersonaProviderOptions,
+  getProviderApiKeyEnvVar,
   getProviderApiKeyLabel,
+  requiredCredentialEnvKeys,
   resetConfigForHarnessChange,
   runtimeSupportsLlmProviderSelection,
 } from "./agentConfigOptions.tsx";
@@ -31,6 +33,14 @@ test("getPersonaProviderOptions returns databricks v1 and v2 when hideProviderId
   const ids = options.map((o) => o.id);
   assert.ok(ids.includes("databricks"), "databricks v1 present");
   assert.ok(ids.includes("databricks_v2"), "databricks v2 present");
+});
+
+test("getPersonaProviderOptions includes first-class Venice AI", () => {
+  const options = getPersonaProviderOptions("", "buzz-agent");
+  assert.deepEqual(
+    options.find((option) => option.id === "venice"),
+    { id: "venice", label: "Venice AI" },
+  );
 });
 
 test("getPersonaProviderOptions hides databricks v1 when it is in hideProviderIds", () => {
@@ -216,6 +226,14 @@ test("getPersonaModelOptions for buzz-agent with anthropic filters out zero-valu
   );
 });
 
+test("getPersonaModelOptions requires an explicit Venice model", () => {
+  const options = getPersonaModelOptions("buzz-agent", "venice");
+  assert.equal(
+    options.some((option) => option.id === ""),
+    false,
+  );
+});
+
 test("getPersonaModelOptions for buzz-agent with no provider returns default model", () => {
   const options = getPersonaModelOptions("buzz-agent", "");
   assert.equal(options.length, 1);
@@ -275,6 +293,17 @@ test("getProviderApiKeyLabel_openai_compat_returns_distinct_label", () => {
 test("getProviderApiKeyLabel_openrouter_returns_openrouter_label", () => {
   // Key fix: OpenRouter was mislabeled "OpenAI API Key" before this change.
   assert.equal(getProviderApiKeyLabel("openrouter"), "OpenRouter API Key");
+});
+
+test("Venice uses its dedicated API key for Buzz Agent and Goose", () => {
+  assert.equal(getProviderApiKeyLabel("venice"), "Venice AI API Key");
+  assert.equal(getProviderApiKeyEnvVar("venice"), "VENICE_API_KEY");
+  assert.deepEqual(requiredCredentialEnvKeys("buzz-agent", "venice"), [
+    "VENICE_API_KEY",
+  ]);
+  assert.deepEqual(requiredCredentialEnvKeys("goose", "venice"), [
+    "VENICE_API_KEY",
+  ]);
 });
 
 test("getProviderApiKeyLabel_databricks_returns_null", () => {

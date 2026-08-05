@@ -35,6 +35,15 @@ test("envVarsClearingManagedApiKey clears when leaving to a custom/empty provide
   assert.deepEqual(next, {});
 });
 
+test("envVarsClearingManagedApiKey clears Venice credentials on provider switch", () => {
+  const next = envVarsClearingManagedApiKey(
+    { VENICE_API_KEY: "vapi-secret", KEEP: "x" },
+    "venice",
+    "anthropic",
+  );
+  assert.deepEqual(next, { KEEP: "x" });
+});
+
 test("envVarsClearingManagedApiKey is a no-op when the managed key is shared or absent", () => {
   const current = { ANTHROPIC_API_KEY: "sk-1" };
   assert.equal(
