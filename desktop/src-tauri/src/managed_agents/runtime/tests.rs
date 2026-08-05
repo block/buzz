@@ -1,5 +1,13 @@
 use crate::managed_agents::known_acp_runtime;
 
+#[test]
+fn agent_connection_preserves_loopback_authority() {
+    assert_eq!(
+        super::connection_relay_url(" ws://localhost:3200/ "),
+        "ws://localhost:3200/"
+    );
+}
+
 // ── desktop binary name tests ───────────────────────────────────────────
 
 #[test]
