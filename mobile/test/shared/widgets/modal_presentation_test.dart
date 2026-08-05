@@ -3,6 +3,7 @@ import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/modal_presentation.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -30,6 +31,45 @@ void main() {
           findsOneWidget,
         );
       } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    },
+  );
+
+  testWidgets(
+    'replaces the Flutter fallback when native support is available',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      const surfaceChannel = MethodChannel('buzz/concentric_sheet_surface');
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        surfaceChannel,
+        (call) async => call.method == 'isSupported' ? true : null,
+      );
+      try {
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: AppTheme.light(),
+            home: const ConcentricSheetSurface(
+              enabled: true,
+              color: Colors.red,
+              child: SizedBox(height: 80, child: Text('Sheet body')),
+            ),
+          ),
+        );
+        await tester.pump();
+
+        expect(find.byType(UiKitView), findsOneWidget);
+        expect(
+          find.byWidgetPredicate(
+            (widget) => widget is Material && widget.color == Colors.red,
+          ),
+          findsNothing,
+        );
+      } finally {
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          surfaceChannel,
+          null,
+        );
         debugDefaultTargetPlatformOverride = null;
       }
     },

@@ -65,13 +65,6 @@ class _ConcentricSheetSurfaceState extends State<ConcentricSheetSurface> {
       ),
       child: Stack(
         children: [
-          Positioned.fill(
-            child: Material(
-              color: surfaceColor,
-              borderRadius: BorderRadius.circular(Radii.dialog),
-              clipBehavior: Clip.antiAlias,
-            ),
-          ),
           if (_nativeSurfaceSupported)
             Positioned.fill(
               child: ExcludeSemantics(
@@ -84,6 +77,14 @@ class _ConcentricSheetSurfaceState extends State<ConcentricSheetSurface> {
                   },
                   creationParamsCodec: const StandardMessageCodec(),
                 ),
+              ),
+            )
+          else
+            Positioned.fill(
+              child: Material(
+                color: surfaceColor,
+                borderRadius: BorderRadius.circular(Radii.dialog),
+                clipBehavior: Clip.antiAlias,
               ),
             ),
           widget.child,
