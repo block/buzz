@@ -657,6 +657,21 @@ pub const HANDOFF_ORIGINAL_TASK_MAX_BYTES: usize = 16 * 1024;
 
 pub const HANDOFF_MAX_TOOL_NAMES: usize = 20;
 
+/// Maximum reactive context-recovery attempts per `run()`. A provider
+/// context-window 400 is recoverable — shrink history and retry — but the
+/// retry must be bounded: `max_rounds` defaults to `0` (unbounded), so without
+/// its own budget a request that stays oversized after every rescue would
+/// retry forever. On exhaustion the error surfaces to the caller, which is a
+/// visible failure rather than a silent infinite rescue.
+pub const MAX_CONTEXT_RECOVERIES_PER_RUN: u32 = 3;
+
+/// Floor for the reactive handoff's history-prompt budget, in bytes. Each
+/// recovery attempt halves the budget so the rescue summarize call can escape
+/// an overstated `max_context_tokens`, but halving must terminate: below this
+/// the prompt can no longer carry a useful summary, so the recovery gives up
+/// and surfaces the error instead of issuing ever-smaller doomed requests.
+pub const HANDOFF_MIN_PROMPT_BUDGET_BYTES: usize = 4 * 1024;
+
 const DEFAULT_SYSTEM_PROMPT: &str =
     "You are buzz-agent. Use the provided tools to act. Tool calls are your only output.";
 
