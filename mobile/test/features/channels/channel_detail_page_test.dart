@@ -1465,6 +1465,16 @@ void main() {
       );
       await tester.pumpAndSettle();
 
+      // History requests are deliberately scheduled after the current frame.
+      // Advance the test clock until the capped chain has settled.
+      for (
+        var frame = 0;
+        frame < 8 && messagesNotifier.fetchOlderCalls < 4;
+        frame++
+      ) {
+        await tester.pump(const Duration(milliseconds: 1));
+      }
+
       expect(messagesNotifier.fetchOlderCalls, 4);
       final unreadButton = find.byKey(
         const ValueKey('channel-jump-to-oldest-unread'),
