@@ -164,6 +164,28 @@ export function CausalSessionTimeline({
         </div>
       </div>
 
+      {explanation.remediation ? (
+        <div className="border-t border-border/60 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
+              Controlled replay
+            </p>
+            <Badge variant="outline" className="capitalize">
+              {explanation.remediation.status.replace("_", " ")}
+            </Badge>
+          </div>
+          <p className="mt-2 text-sm font-medium">
+            {explanation.remediation.remedy}
+          </p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Changed: {explanation.remediation.controlledChange}
+          </p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Result: {explanation.remediation.result}
+          </p>
+        </div>
+      ) : null}
+
       <p className="border-t border-border/60 px-4 py-3 text-xs text-muted-foreground">
         Activity and raw telemetry continue below as supporting detail.
       </p>

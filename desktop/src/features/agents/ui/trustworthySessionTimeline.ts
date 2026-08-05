@@ -30,6 +30,14 @@ export type CausalTimelineEvent = {
 
 export type SessionOutcome = "succeeded" | "failed" | "in_progress" | "unknown";
 
+export type RemediationVerification = {
+  remedy: string;
+  controlledChange: string;
+  status: "validated" | "rejected" | "inconclusive" | "not_tested";
+  result: string;
+  evidenceIds: string[];
+};
+
 export type SessionExplanation = {
   task: string;
   outcome: SessionOutcome;
@@ -38,6 +46,7 @@ export type SessionExplanation = {
   evidence: CausalTimelineEvent[];
   unknowns: CausalTimelineEvent[];
   nextAction: string;
+  remediation: RemediationVerification | null;
 };
 
 const REQUIRED_SOURCE_LAYERS = [
@@ -55,6 +64,12 @@ function stringValue(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
+function stringValues(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === "string")
+    : [];
+}
+
 function observerEventId(event: ObserverEvent): string {
   return `observer:${event.sessionId ?? "unknown"}:${event.seq}`;
 }
@@ -62,6 +77,46 @@ function observerEventId(event: ObserverEvent): string {
 function projectObserverEvent(event: ObserverEvent): CausalTimelineEvent {
   const payload = objectPayload(event);
   const eventId = observerEventId(event);
+
+  if (event.kind === "host_operation") {
+    const operation = stringValue(payload.operation) ?? "Host operation";
+    const target = stringValue(payload.target) ?? "unknown target";
+    const path = stringValue(payload.executionPath) ?? "host runtime";
+    return {
+      id: eventId,
+      timestamp: event.timestamp,
+      class: "fact",
+      title: `${operation} ${target}`,
+      detail: `The ${path} performed this operation.`,
+      sourceSystem: stringValue(payload.observedBy) ?? "Host runtime",
+      sourceLayer: "host_workspace",
+      observerRole: "observed",
+      confidence: "direct",
+      sessionId: event.sessionId,
+      turnId: event.turnId,
+      evidenceIds: [eventId],
+    };
+  }
+
+  if (event.kind === "causal_hypothesis") {
+    return {
+      id: eventId,
+      timestamp: event.timestamp,
+      class: "inference",
+      title: stringValue(payload.title) ?? "Causal hypothesis",
+      detail:
+        stringValue(payload.summary) ??
+        "Buzz does not have a summary for this hypothesis.",
+      sourceSystem: "Buzz causal graph",
+      sourceLayer: "causal_correlation",
+      observerRole: "inferred",
+      confidence:
+        stringValue(payload.confidence) === "high" ? "correlated" : "unknown",
+      sessionId: event.sessionId,
+      turnId: event.turnId,
+      evidenceIds: stringValues(payload.evidenceIds),
+    };
+  }
 
   if (event.kind === "permission_decision") {
     const decision = stringValue(payload.decision) ?? "unknown";
@@ -204,6 +259,9 @@ export function explainSession(
       (event) =>
         event.class === "inference" && event.confidence === "correlated",
     );
+  const causalHypothesis = [...timeline]
+    .reverse()
+    .find((event) => event.sourceLayer === "causal_correlation");
   const deniedDecision = [...timeline]
     .reverse()
     .find(
@@ -220,7 +278,12 @@ export function explainSession(
       : latestStarted
         ? "in_progress"
         : "unknown";
-  const cause = strongestFinding ?? latestError ?? deniedDecision ?? null;
+  const cause =
+    causalHypothesis ??
+    strongestFinding ??
+    latestError ??
+    deniedDecision ??
+    null;
   const why = cause
     ? cause.detail === "Captured by the Buzz ACP observer."
       ? cause.title
@@ -235,19 +298,82 @@ export function explainSession(
         ? "medium"
         : "low";
 
+  const taskEvent = [...observerEvents]
+    .reverse()
+    .find((event) => event.kind === "task_captured");
+  const taskPayload = taskEvent ? objectPayload(taskEvent) : {};
+  const task =
+    stringValue(taskPayload.description) ??
+    (stringValue(taskPayload.sourceMessageId)
+      ? `Task captured from message ${stringValue(taskPayload.sourceMessageId)}`
+      : "Task description unavailable from current session evidence");
+  const remedyEvent = [...observerEvents]
+    .reverse()
+    .find((event) => event.kind === "remediation_proposed");
+  const replayEvent = [...observerEvents]
+    .reverse()
+    .find((event) => event.kind === "replay_result");
+  const remedyPayload = remedyEvent ? objectPayload(remedyEvent) : {};
+  const replayPayload = replayEvent ? objectPayload(replayEvent) : {};
+  const replayOutcome = stringValue(replayPayload.outcome);
+  const expectedCauseObserved = replayPayload.expectedCauseObserved === true;
+  const remedyEventId = remedyEvent ? observerEventId(remedyEvent) : null;
+  const replayValidatesRemedy =
+    remedyEventId !== null &&
+    stringValue(replayPayload.validatesRemedyId) === remedyEventId;
+  const replayRequestedPermission = replayEvent
+    ? observerEvents.some(
+        (event) =>
+          event.kind === "permission_decision" &&
+          event.sessionId === replayEvent.sessionId &&
+          event.turnId === replayEvent.turnId &&
+          event.timestamp <= replayEvent.timestamp,
+      )
+    : false;
+  const remediation = remedyEvent
+    ? {
+        remedy:
+          stringValue(remedyPayload.summary) ??
+          "Proposed remediation unavailable",
+        controlledChange:
+          stringValue(remedyPayload.controlledChange) ??
+          "Controlled change unavailable",
+        status:
+          replayEvent && replayValidatesRemedy
+            ? replayOutcome === "succeeded" &&
+              expectedCauseObserved &&
+              replayRequestedPermission
+              ? ("validated" as const)
+              : replayOutcome === "failed"
+                ? ("rejected" as const)
+                : ("inconclusive" as const)
+            : ("not_tested" as const),
+        result: replayEvent
+          ? (stringValue(replayPayload.summary) ?? "Replay result unavailable")
+          : "No controlled replay has tested this remedy yet.",
+        evidenceIds: replayEvent ? [observerEventId(replayEvent)] : [],
+      }
+    : null;
+
   return {
-    task: "Task description unavailable from current session evidence",
+    task,
     outcome,
     why,
     confidence,
     evidence: facts.slice(-5),
     unknowns: gaps,
-    nextAction: deniedDecision
-      ? "Review the denied tool request and grant only the access the task requires."
-      : latestError
-        ? "Open the failed event below and address its diagnostic before retrying."
-        : strongestFinding
-          ? "Review the highest-confidence finding and its linked evidence before retrying."
-          : "Collect the missing outcome evidence before choosing a fix.",
+    nextAction:
+      remediation?.status === "validated"
+        ? "Use the validated governed execution path for the next run."
+        : remediation?.status === "not_tested"
+          ? `Replay with one controlled change: ${remediation.controlledChange}`
+          : deniedDecision
+            ? "Review the denied tool request and grant only the access the task requires."
+            : latestError
+              ? "Open the failed event below and address its diagnostic before retrying."
+              : strongestFinding
+                ? "Review the highest-confidence finding and its linked evidence before retrying."
+                : "Collect the missing outcome evidence before choosing a fix.",
+    remediation,
   };
 }
