@@ -19,6 +19,11 @@ const buzzModalAnimationStyle = AnimationStyle(
   reverseDuration: Duration(milliseconds: 220),
 );
 
+/// Shows a bottom sheet with Buzz's shared motion and sheet chrome.
+///
+/// Sheets include the shared close control by default. On iOS, the surface
+/// uses native concentric corners when available and paints a requested drag
+/// handle inside that inset surface; other platforms retain Flutter's handle.
 Future<T?> showBuzzModalBottomSheet<T>({
   required BuildContext context,
   required WidgetBuilder builder,
@@ -177,6 +182,7 @@ class _SheetDragHandle extends StatelessWidget {
   }
 }
 
+/// Shows a dialog with Buzz's shared motion, respecting reduced-motion settings.
 Future<T?> showBuzzDialog<T>({
   required BuildContext context,
   required WidgetBuilder builder,
