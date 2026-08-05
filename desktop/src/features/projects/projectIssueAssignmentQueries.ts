@@ -1,6 +1,9 @@
 import type { RelayEvent } from "@/shared/api/types";
 import { collectWithConcurrency } from "@/shared/api/concurrency";
-import { KIND_GIT_ISSUE_ASSIGNEE } from "@/shared/constants/kinds";
+import {
+  KIND_GIT_ISSUE,
+  KIND_GIT_ISSUE_ASSIGNEE,
+} from "@/shared/constants/kinds";
 import { verifyEvent } from "nostr-tools/pure";
 
 const RELAY_MAX_PAGE_SIZE = 1_000;
@@ -67,13 +70,22 @@ export async function fetchIssueAssignmentEvents(
   const allowedRepos = new Set(repoAddresses);
   const groups = new Map<string, WriterGroup>();
   for (const issue of issueEvents) {
+    if (
+      typeof issue?.id !== "string" ||
+      typeof issue.pubkey !== "string" ||
+      !Array.isArray(issue.tags)
+    ) {
+      continue;
+    }
     const issueId = issue.id.toLowerCase();
     const author = issue.pubkey.toLowerCase();
-    const repoTags = issue.tags.filter((tag) => tag[0] === "a");
+    const repoTags = issue.tags.filter(
+      (tag) => Array.isArray(tag) && tag[0] === "a",
+    );
     const repoAddress = repoTags.length === 1 ? repoTags[0][1] : undefined;
     const repoOwner = repoAddress ? validRepoOwner(repoAddress) : null;
     if (
-      issue.kind !== 1621 ||
+      issue.kind !== KIND_GIT_ISSUE ||
       !/^[a-f0-9]{64}$/.test(issueId) ||
       !/^[a-f0-9]{64}$/.test(author) ||
       !repoAddress ||

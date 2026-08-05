@@ -72,6 +72,25 @@ test("assignment queries batch exact writer filters at the relay boundary", asyn
   assert.deepEqual(requestSizes, [10, 2]);
 });
 
+test("assignment queries skip malformed relay roots before field access", async () => {
+  let queryCount = 0;
+  await fetchIssueAssignmentEvents(
+    [
+      { id: null, pubkey: REPO_OWNER, tags: [] },
+      { id: "a".repeat(64), pubkey: null, tags: [] },
+      { id: "b".repeat(64), pubkey: REPO_OWNER, tags: null },
+      { id: "c".repeat(64), pubkey: REPO_OWNER, tags: [null] },
+    ],
+    [REPO_ADDRESS],
+    async () => {
+      queryCount += 1;
+      return [];
+    },
+  );
+
+  assert.equal(queryCount, 0);
+});
+
 // Minimal valid NIP-34 issue event for the shared repo.
 function makeIssue(id, updatedAt = 100) {
   return {
@@ -295,18 +314,19 @@ test("author-scoped assignment filters stay complete across the relay page clamp
   await fetchProjectsWorkItems([projectA], fetchEvents);
 
   assert.equal(assignmentFilters.length, 4);
+  const filterShapes = assignmentFilters
+    .map((filter) => [filter.authors[0], filter["#d"].length, filter.limit])
+    .sort(
+      (left, right) =>
+        left[0].localeCompare(right[0]) || Number(right[1]) - Number(left[1]),
+    );
+  const expectedAuthors = [assignedIssue.pubkey, REPO_OWNER].sort();
   assert.deepEqual(
-    assignmentFilters.map((filter) => [
-      filter.authors.length,
-      filter["#d"].length,
-      filter.limit,
+    filterShapes,
+    expectedAuthors.flatMap((author) => [
+      [author, 1_000, 1_000],
+      [author, 1, 1],
     ]),
-    [
-      [1, 1_000, 1_000],
-      [1, 1, 1],
-      [1, 1_000, 1_000],
-      [1, 1, 1],
-    ],
   );
 });
 
