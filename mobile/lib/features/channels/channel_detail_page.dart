@@ -27,6 +27,7 @@ import '../forum/forum_posts_view.dart';
 import 'channel.dart';
 import 'channel_actions_sheet.dart';
 import 'channel_link_navigation.dart';
+import 'agent_activity/show_agent_activity_sheet.dart';
 import 'agent_activity/working_bots_provider.dart';
 import 'channel_management_provider.dart';
 import 'channel_sections/channel_sections_provider.dart';
@@ -336,6 +337,7 @@ class ChannelDetailPage extends HookConsumerWidget {
                 ],
               ),
         actions: [
+          _AgentActivityButton(channelId: resolvedChannel.id),
           _MembersButton(
             channelId: resolvedChannel.id,
             channel: resolvedChannel,

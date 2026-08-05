@@ -6,8 +6,8 @@ import '../channel_typing_provider.dart';
 /// Derived provider that computes which bot members in a channel are currently
 /// typing (i.e. "working"). Returns a set of lowercase pubkeys.
 ///
-/// Used by both the members button badge and the members sheet to avoid
-/// duplicating the bot-typing cross-reference logic.
+/// Used by the members button badge, the channel-header activity shortcut, and
+/// the members sheet so bot-typing detection stays in one place (#3907).
 final workingBotPubkeysProvider = Provider.autoDispose
     .family<Set<String>, String>((ref, channelId) {
       final typingEntries = ref.watch(channelTypingProvider(channelId));
