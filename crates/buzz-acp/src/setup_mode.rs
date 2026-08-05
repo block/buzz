@@ -435,6 +435,7 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
             &config.respond_to_allowlist,
             &author_hex,
             is_dm,
+            config.allow_dm_allowlist,
             &owner_cache,
             &rest_client,
         )
