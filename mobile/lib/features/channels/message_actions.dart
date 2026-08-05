@@ -52,7 +52,7 @@ void showMessageActions({
     context: context,
     isScrollControlled: true,
     showDragHandle: true,
-    showCloseButton: !message.isSystem || canManageMessage,
+    showCloseButton: false,
     builder: (sheetContext) => SafeArea(
       child: IconTheme.merge(
         data: const IconThemeData(size: 22),
@@ -670,41 +670,59 @@ class _QuickReactionRow extends ConsumerWidget {
       pageRef.read(channelActionsProvider).addReaction(message.id, value);
     }
 
-    final circles = <Widget>[
-      for (final value in emoji)
-        _QuickReactionCircle(
-          key: ValueKey('quick-reaction-$value'),
-          onTap: () {
-            Navigator.of(sheetContext).pop();
-            react(value);
-          },
-          child: _QuickReactionGlyph(
-            value: value,
-            customByShortcode: customByShortcode,
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        const desiredCircleSize = 52.0;
+        const minimumCircleSize = 44.0;
+        final itemCount = emoji.length + 1;
+        final gapCount = itemCount - 1;
+        final circleSize =
+            ((constraints.maxWidth - (Grid.twelve * gapCount)) / itemCount)
+                .clamp(minimumCircleSize, desiredCircleSize)
+                .toDouble();
+        final gap =
+            ((constraints.maxWidth - (circleSize * itemCount)) / gapCount)
+                .clamp(0.0, Grid.twelve)
+                .toDouble();
+        final circles = <Widget>[
+          for (final value in emoji)
+            _QuickReactionCircle(
+              key: ValueKey('quick-reaction-$value'),
+              size: circleSize,
+              onTap: () {
+                Navigator.of(sheetContext).pop();
+                react(value);
+              },
+              child: _QuickReactionGlyph(
+                value: value,
+                customByShortcode: customByShortcode,
+              ),
+            ),
+          _QuickReactionCircle(
+            key: const ValueKey('quick-reaction-more'),
+            size: circleSize,
+            onTap: () {
+              Navigator.of(sheetContext).pop();
+              showEmojiPicker(context: pageContext, onSelect: react);
+            },
+            child: Icon(
+              LucideIcons.plus,
+              size: 24,
+              color: context.colors.onSurfaceVariant,
+            ),
           ),
-        ),
-      _QuickReactionCircle(
-        key: const ValueKey('quick-reaction-more'),
-        onTap: () {
-          Navigator.of(sheetContext).pop();
-          showEmojiPicker(context: pageContext, onSelect: react);
-        },
-        child: Icon(
-          LucideIcons.plus,
-          size: 24,
-          color: context.colors.onSurfaceVariant,
-        ),
-      ),
-    ];
+        ];
 
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        for (var index = 0; index < circles.length; index++) ...[
-          circles[index],
-          if (index < circles.length - 1) const SizedBox(width: Grid.twelve),
-        ],
-      ],
+        return Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            for (var index = 0; index < circles.length; index++) ...[
+              circles[index],
+              if (index < circles.length - 1) SizedBox(width: gap),
+            ],
+          ],
+        );
+      },
     );
   }
 }
@@ -742,11 +760,13 @@ class _QuickReactionGlyph extends StatelessWidget {
 class _QuickReactionCircle extends StatelessWidget {
   final VoidCallback onTap;
   final Widget child;
+  final double size;
 
   const _QuickReactionCircle({
     super.key,
     required this.onTap,
     required this.child,
+    required this.size,
   });
 
   @override
@@ -757,8 +777,8 @@ class _QuickReactionCircle extends StatelessWidget {
         onTap();
       },
       child: Container(
-        width: 44,
-        height: 44,
+        width: size,
+        height: size,
         alignment: Alignment.center,
         decoration: BoxDecoration(
           color: context.colors.surfaceContainerHighest,
