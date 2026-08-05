@@ -29,7 +29,6 @@ import type {
   AgentPersona,
   ChannelMember,
   ChannelType,
-  UserSearchResult,
 } from "@/shared/api/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { detectPrefixQuery } from "@/shared/lib/detectPrefixQuery";
@@ -41,7 +40,10 @@ import { useDraftMentionRouting } from "./useDraftMentionRouting";
 import { rankMentionCandidates } from "./mentionRanking";
 import { mapMentionCandidateToSuggestion } from "./mentionSuggestionMapping";
 import {
+  appendUniqueName,
   buildTeamMentionCandidates,
+  formatSearchUserDisplayName,
+  formatSearchUserSecondaryLabel,
   formatTeamMention,
   globalSearchIdentityKey,
   type MentionCandidate,
@@ -56,24 +58,6 @@ export type PersonaMentionTarget = {
 type UseMentionsOptions = {
   channelType?: ChannelType | null;
 };
-function formatSearchUserDisplayName(user: UserSearchResult) {
-  return user.displayName?.trim() || user.nip05Handle?.trim() || null;
-}
-function formatSearchUserSecondaryLabel(user: UserSearchResult) {
-  const displayName = user.displayName?.trim();
-  const nip05Handle = user.nip05Handle?.trim();
-  if (displayName && nip05Handle) {
-    return nip05Handle;
-  }
-  return null;
-}
-function appendUniqueName(current: string[], name: string): string[] {
-  return current.some(
-    (candidate) => candidate.toLowerCase() === name.toLowerCase(),
-  )
-    ? current
-    : [...current, name];
-}
 export function useMentions(
   channelId: string | null,
   externalMembers?: ChannelMember[],
@@ -246,7 +230,13 @@ export function useMentions(
       if (isArchivedDiscovery(pubkey)) {
         return;
       }
-      if (!isAgentIdentityInManagedList(candidate, managedAgentPubkeys)) {
+      if (
+        !isAgentIdentityInManagedList(
+          candidate,
+          managedAgentPubkeys,
+          currentPubkey,
+        )
+      ) {
         return;
       }
       if (

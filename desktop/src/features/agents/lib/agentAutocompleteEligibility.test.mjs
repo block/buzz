@@ -136,13 +136,14 @@ test("getMentionableAgentPubkeys: keeps managed agents and shared relay agents",
   assert.deepEqual(result, new Set([PUB_A, PUB_B, PUB_C]));
 });
 
-test("isAgentIdentityInManagedList: keeps people and only current managed agent identities", () => {
+test("isAgentIdentityInManagedList: keeps people and current managed agent identities", () => {
   const managedAgentPubkeys = new Set([PUB_A]);
 
   assert.equal(
     isAgentIdentityInManagedList(
       { isAgent: false, pubkey: PUB_B },
       managedAgentPubkeys,
+      CURRENT_PUBKEY,
     ),
     true,
   );
@@ -150,13 +151,68 @@ test("isAgentIdentityInManagedList: keeps people and only current managed agent 
     isAgentIdentityInManagedList(
       { isAgent: true, pubkey: PUB_A.toUpperCase() },
       managedAgentPubkeys,
+      CURRENT_PUBKEY,
     ),
     true,
   );
+});
+
+test("isAgentIdentityInManagedList: keeps agents owned by others or with unknown owner", () => {
+  const managedAgentPubkeys = new Set([PUB_A]);
+
+  // Foreign-owned agent (e.g. a channel-member agent someone else manages) —
+  // not ours to prune; directory policy decides visibility downstream.
+  assert.equal(
+    isAgentIdentityInManagedList(
+      { isAgent: true, pubkey: PUB_B, ownerPubkey: OTHER_OWNER_PUBKEY },
+      managedAgentPubkeys,
+      CURRENT_PUBKEY,
+    ),
+    true,
+  );
+  // Unknown ownership (no verified NIP-OA tag) — keep.
   assert.equal(
     isAgentIdentityInManagedList(
       { isAgent: true, pubkey: PUB_B },
       managedAgentPubkeys,
+      CURRENT_PUBKEY,
+    ),
+    true,
+  );
+  // Unknown current user — cannot attribute, keep.
+  assert.equal(
+    isAgentIdentityInManagedList(
+      { isAgent: true, pubkey: PUB_B, ownerPubkey: CURRENT_PUBKEY },
+      managedAgentPubkeys,
+      null,
+    ),
+    true,
+  );
+});
+
+test("isAgentIdentityInManagedList: drops stale self-owned agent identities", () => {
+  const managedAgentPubkeys = new Set([PUB_A]);
+
+  // Proves our ownership but is not a current managed identity — a stale
+  // incarnation of one of our own recreated agents.
+  assert.equal(
+    isAgentIdentityInManagedList(
+      { isAgent: true, pubkey: PUB_B, ownerPubkey: CURRENT_PUBKEY },
+      managedAgentPubkeys,
+      CURRENT_PUBKEY,
+    ),
+    false,
+  );
+  // Owner comparison is case-insensitive.
+  assert.equal(
+    isAgentIdentityInManagedList(
+      {
+        isAgent: true,
+        pubkey: PUB_B,
+        ownerPubkey: CURRENT_PUBKEY.toUpperCase(),
+      },
+      managedAgentPubkeys,
+      CURRENT_PUBKEY,
     ),
     false,
   );

@@ -282,7 +282,11 @@ export function MembersSidebar({
           )) ||
         memberPubkeys.has(pubkey) ||
         isArchivedDiscovery(pubkey) ||
-        !isAgentIdentityInManagedList(candidate, managedAgentPubkeys)
+        !isAgentIdentityInManagedList(
+          candidate,
+          managedAgentPubkeys,
+          currentPubkey,
+        )
       ) {
         return;
       }
