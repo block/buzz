@@ -28,6 +28,18 @@ export type CausalTimelineEvent = {
   evidenceIds: string[];
 };
 
+export type SessionOutcome = "succeeded" | "failed" | "in_progress" | "unknown";
+
+export type SessionExplanation = {
+  task: string;
+  outcome: SessionOutcome;
+  why: string;
+  confidence: "high" | "medium" | "low";
+  evidence: CausalTimelineEvent[];
+  unknowns: CausalTimelineEvent[];
+  nextAction: string;
+};
+
 const REQUIRED_SOURCE_LAYERS = [
   { layer: "host_workspace", system: "Host workspace tools" },
   { layer: "os_sandbox", system: "Operating-system sandbox" },
@@ -168,4 +180,74 @@ export function buildTrustworthySessionTimeline(
     const byTime = Date.parse(left.timestamp) - Date.parse(right.timestamp);
     return byTime || left.id.localeCompare(right.id);
   });
+}
+
+export function explainSession(
+  observerEvents: readonly ObserverEvent[],
+  findings: readonly NumbatFinding[],
+): SessionExplanation | null {
+  const timeline = buildTrustworthySessionTimeline(observerEvents, findings);
+  if (timeline.length === 0) return null;
+
+  const latestError = [...timeline]
+    .reverse()
+    .find((event) => event.title === "Turn failed");
+  const latestCompleted = [...observerEvents]
+    .reverse()
+    .find((event) => event.kind === "turn_completed");
+  const latestStarted = [...observerEvents]
+    .reverse()
+    .find((event) => event.kind === "turn_started");
+  const strongestFinding = [...timeline]
+    .reverse()
+    .find(
+      (event) =>
+        event.class === "inference" && event.confidence === "correlated",
+    );
+  const deniedDecision = [...timeline]
+    .reverse()
+    .find(
+      (event) =>
+        event.class === "decision" && event.title === "Tool request denied",
+    );
+  const gaps = timeline.filter((event) => event.class === "gap");
+  const facts = timeline.filter((event) => event.class !== "gap");
+
+  const outcome: SessionOutcome = latestError
+    ? "failed"
+    : latestCompleted
+      ? "succeeded"
+      : latestStarted
+        ? "in_progress"
+        : "unknown";
+  const cause = strongestFinding ?? latestError ?? deniedDecision ?? null;
+  const why = cause
+    ? cause.detail === "Captured by the Buzz ACP observer."
+      ? cause.title
+      : cause.detail
+    : outcome === "in_progress"
+      ? "The task is still running. Buzz does not have a final cause yet."
+      : "Buzz does not have enough evidence to explain the outcome yet.";
+  const confidence =
+    cause?.confidence === "direct" && gaps.length === 0
+      ? "high"
+      : cause && cause.confidence !== "unknown"
+        ? "medium"
+        : "low";
+
+  return {
+    task: "Task description unavailable from current session evidence",
+    outcome,
+    why,
+    confidence,
+    evidence: facts.slice(-5),
+    unknowns: gaps,
+    nextAction: deniedDecision
+      ? "Review the denied tool request and grant only the access the task requires."
+      : latestError
+        ? "Open the failed event below and address its diagnostic before retrying."
+        : strongestFinding
+          ? "Review the highest-confidence finding and its linked evidence before retrying."
+          : "Collect the missing outcome evidence before choosing a fix.",
+  };
 }

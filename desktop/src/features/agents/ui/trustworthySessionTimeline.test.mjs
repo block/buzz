@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildTrustworthySessionTimeline } from "./trustworthySessionTimeline.ts";
+import {
+  buildTrustworthySessionTimeline,
+  explainSession,
+} from "./trustworthySessionTimeline.ts";
 
 const base = {
   agentIndex: 0,
@@ -65,4 +68,52 @@ test("keeps Numbat conclusions distinct from directly observed facts", () => {
 
 test("does not invent gaps before a session has any evidence", () => {
   assert.deepEqual(buildTrustworthySessionTimeline([], []), []);
+});
+
+test("explains a failed session before exposing raw telemetry", () => {
+  const explanation = explainSession(
+    [
+      {
+        ...base,
+        seq: 1,
+        timestamp: "2026-08-05T12:00:00Z",
+        kind: "turn_started",
+        payload: {},
+      },
+      {
+        ...base,
+        seq: 2,
+        timestamp: "2026-08-05T12:00:02Z",
+        kind: "turn_error",
+        payload: { error: "cargo build exited 101" },
+      },
+    ],
+    [],
+  );
+
+  assert.equal(explanation.outcome, "failed");
+  assert.equal(explanation.why, "cargo build exited 101");
+  assert.equal(explanation.confidence, "medium");
+  assert.match(explanation.nextAction, /failed event/i);
+  assert.equal(explanation.unknowns.length, 2);
+});
+
+test("does not invent a cause or fix when evidence is incomplete", () => {
+  const explanation = explainSession(
+    [
+      {
+        ...base,
+        seq: 1,
+        timestamp: "2026-08-05T12:00:00Z",
+        kind: "turn_started",
+        payload: {},
+      },
+    ],
+    [],
+  );
+
+  assert.equal(explanation.outcome, "in_progress");
+  assert.match(explanation.why, /still running/i);
+  assert.equal(explanation.confidence, "low");
+  assert.match(explanation.nextAction, /missing outcome evidence/i);
 });
