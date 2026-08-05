@@ -4722,21 +4722,39 @@ mod tests {
     /// Non-timeout transport errors preserve the original reqwest error text.
     #[tokio::test]
     async fn classify_transport_error_non_timeout_preserves_reqwest_text() {
-        // Connect to a port that should refuse (OS never accepts on port 1).
+        // Bind an ephemeral loopback port, capture its address, then drop the
+        // listener before dialling — the kernel releases the port and the
+        // subsequent connect gets a deterministic connection-refused.  This
+        // avoids the fixed-port-1 assumption (a privileged process could bind
+        // port 1) while keeping zero network egress beyond loopback.
+        //
+        // Bind-then-drop is the chosen shape rather than accept-then-close
+        // because dropping the TcpListener atomically releases the port before
+        // the connect, which avoids a race window where the accept loop could
+        // still serve the connection.  Rapid port reuse is a theoretical
+        // concern, but in practice the kernel will not reuse an ephemeral port
+        // instantaneously within the same process, so this is deterministic in
+        // all tested environments.
+        let addr = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            listener.local_addr().unwrap()
+            // `listener` dropped here — port released
+        };
+
         let client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_millis(200))
             .build()
             .unwrap();
 
         let err = client
-            .get("http://127.0.0.1:1/")
+            .get(format!("http://{addr}/"))
             .send()
             .await
-            .expect_err("must fail to connect");
+            .expect_err("must fail to connect to dropped port");
 
         assert!(
             !err.is_timeout(),
-            "precondition: connect-refused is not a timeout"
+            "precondition: connection-refused is not a timeout: {err}"
         );
 
         let msg = classify_transport_error(&err, std::time::Duration::from_secs(240));
