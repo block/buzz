@@ -956,18 +956,10 @@ pub fn build_trigger_context(event: &buzz_core::StoredEvent) -> executor::Trigge
     let kind_u32 = event_kind_u32(&event.event);
     let content = event.event.content.clone();
 
-    let author = event
-        .event
-        .tags
-        .iter()
-        .find_map(|tag| {
-            if tag.kind().to_string() == "actor" {
-                tag.content().map(|value| value.to_string())
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| event.event.pubkey.to_hex());
+    // Workflow conditions make authorization decisions from `trigger_author`,
+    // so it must come from the event signature. An `actor` tag is ordinary
+    // signer-controlled metadata and cannot speak for another pubkey.
+    let author = event.event.pubkey.to_hex();
 
     // For reaction events (NIP-25), the content field holds the emoji character
     // or shortcode (e.g. "👍", "+", "-"). Expose it as `emoji`.
@@ -1606,6 +1598,24 @@ steps:
         // Pubkey hex is 64 lowercase hex characters.
         assert_eq!(ctx.author.len(), 64);
         assert!(ctx.author.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn build_trigger_context_ignores_actor_tag() {
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+
+        let signer = Keys::generate();
+        let impersonated = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(9), "forged actor")
+            .tags([Tag::parse(["actor", &impersonated.public_key().to_hex()]).expect("actor tag")])
+            .sign_with_keys(&signer)
+            .expect("sign");
+        let stored = buzz_core::StoredEvent::new(event, Some(uuid::Uuid::new_v4()));
+
+        let ctx = build_trigger_context(&stored);
+
+        assert_eq!(ctx.author, signer.public_key().to_hex());
+        assert_ne!(ctx.author, impersonated.public_key().to_hex());
     }
 
     #[test]

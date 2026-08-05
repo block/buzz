@@ -22,7 +22,7 @@ async function enableProjectsFeature(page: import("@playwright/test").Page) {
 async function openBuzzProject(page: import("@playwright/test").Page) {
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-projects-view").click();
-  await page.getByRole("button", { name: "Repositories", exact: true }).click();
+  await page.getByTestId("projects-section-projects").click();
   const projectEntry = page
     .locator(
       '[data-testid="project-card-buzz"], [data-testid="project-row-buzz"]',
@@ -119,7 +119,7 @@ test("PR creator/owner can toggle draft, request reviews, and approve", async ({
   const header = page.getByRole("heading", { level: 3 });
   await expect(header.first()).toBeVisible();
   const sourceChannelLink = page.getByRole("button", {
-    name: "Open author-claimed source channel #general",
+    name: "Open author-claimed origin channel #general",
     exact: true,
   });
   await expect(sourceChannelLink).toBeVisible();
@@ -827,6 +827,70 @@ test("project pull requests preserve partial results from batched queries", asyn
   ).toHaveCount(0);
 });
 
+test("project pull request author rollover stays identity-only", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-projects-view").click();
+  await page
+    .getByRole("button", { name: "Pull Requests", exact: true })
+    .click();
+  await page.getByRole("button", { name: "List layout" }).click();
+
+  const row = page.locator('[data-testid^="projects-pr-row-"]').first();
+  const author = row.getByTestId("projects-pr-author");
+  await expect(author).toBeVisible();
+  await expect(
+    author.locator(
+      '[data-testid="projects-pr-author-avatar-image"], [data-testid="projects-pr-author-avatar-fallback"]',
+    ),
+  ).toBeVisible();
+
+  const authorLabel = (
+    await author.getByTestId("projects-pr-author-label").innerText()
+  ).trim();
+  await author.hover();
+  const rollover = page.getByTestId("projects-pr-author-rollover");
+  await expect(rollover).toBeVisible();
+  await expect(rollover).toContainText(authorLabel);
+  await expect(rollover).toContainText(/Agent|Person/);
+  await expect(rollover).not.toContainText("Created");
+  await expect(page.getByTestId("user-profile-popover")).toHaveCount(0);
+});
+
+test("project issue author rollover matches pull requests", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-projects-view").click();
+  await page.getByRole("button", { name: "Issues", exact: true }).click();
+  await page.getByRole("button", { name: "List layout" }).click();
+
+  const row = page.locator('[data-testid^="projects-issue-row-"]').first();
+  const author = row.getByTestId("projects-issue-author");
+  await expect(author).toBeVisible();
+  await expect(
+    author.locator(
+      '[data-testid="projects-issue-author-avatar-image"], [data-testid="projects-issue-author-avatar-fallback"]',
+    ),
+  ).toBeVisible();
+
+  const authorLabel = (
+    await author.getByTestId("projects-issue-author-label").innerText()
+  ).trim();
+  await author.hover();
+  const rollover = page.getByTestId("projects-issue-author-rollover");
+  await expect(rollover).toBeVisible();
+  await expect(rollover).toContainText(authorLabel);
+  await expect(rollover).toContainText(/Agent|Person/);
+  await expect(rollover).not.toContainText("Created");
+  await expect(page.getByTestId("user-profile-popover")).toHaveCount(0);
+});
+
 test("project pull requests report aggregate root query failures", async ({
   page,
 }) => {
@@ -945,6 +1009,33 @@ test("project overview does not paint a background behind its cards", async ({
   }
 });
 
+test("repository rows identify their git host", async ({ page }) => {
+  await enableProjectsFeature(page);
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-projects-view").click();
+  await page.getByRole("button", { name: "Repositories", exact: true }).click();
+  await page.getByRole("button", { name: "List layout" }).click();
+
+  const buzzHostIcon = page
+    .getByTestId("repository-row-buzz")
+    .getByTestId("repository-host-icon");
+  await expect(buzzHostIcon).toHaveAttribute(
+    "aria-label",
+    "Buzz-hosted repository",
+  );
+  await expect(
+    page
+      .getByTestId("repository-row-relay-tools")
+      .getByTestId("repository-host-icon"),
+  ).toHaveAttribute("aria-label", "Git data hosted on github.com");
+
+  await buzzHostIcon.hover();
+  await expect(
+    page.getByRole("tooltip", { name: "Buzz-hosted repository" }),
+  ).toBeVisible();
+});
+
 test("project subsections do not paint backgrounds behind list or grid items", async ({
   page,
 }) => {
@@ -953,20 +1044,33 @@ test("project subsections do not paint backgrounds behind list or grid items", a
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-projects-view").click();
 
-  for (const section of ["Repositories", "Pull Requests", "Issues"]) {
+  for (const section of ["Repositories", "Pull Requests", "Issues"] as const) {
     await page.getByRole("button", { name: section, exact: true }).click();
     await page.getByRole("button", { name: "List layout" }).click();
 
-    const listContainer = page.getByTestId("projects-list-container");
-    await expect(listContainer).toBeVisible();
-    await expect(listContainer).toHaveCSS(
-      "background-color",
-      "rgba(0, 0, 0, 0)",
+    const listItems = page.locator(
+      section === "Repositories"
+        ? '[data-testid^="repository-row-"]'
+        : section === "Pull Requests"
+          ? '[data-testid^="projects-pr-row-"]'
+          : '[data-testid^="projects-issue-row-"]',
     );
-    await expect(listContainer).toHaveCSS("border-style", "solid");
+    await expect(listItems.first()).toBeVisible();
+    const listItemCount = await listItems.count();
+    for (let index = 0; index < listItemCount; index += 1) {
+      await expect(listItems.nth(index)).toHaveCSS(
+        "background-color",
+        "rgba(0, 0, 0, 0)",
+      );
+      await expect(listItems.nth(index)).toHaveCSS("border-style", "solid");
+    }
 
     await page.getByRole("button", { name: "Grid layout" }).click();
-    const gridCards = page.locator("[data-projects-grid-card]");
+    const gridCards = page.locator(
+      section === "Repositories"
+        ? '[data-testid^="repository-card-"]'
+        : "[data-projects-grid-card]",
+    );
     await expect(gridCards.first()).toBeVisible();
     const gridCardCount = await gridCards.count();
     for (let index = 0; index < gridCardCount; index += 1) {
@@ -1026,10 +1130,10 @@ test("project without a checkout offers fetch feedback and dropdown cloning", as
   await openBuzzProject(page);
 
   await expect(
-    page.getByRole("button", { name: "Remote", exact: true }),
+    page.getByRole("button", { name: "Buzz", exact: true }),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Remote", exact: true }),
+    page.getByRole("button", { name: "Buzz", exact: true }),
   ).toHaveClass(/\bborder-input\/40\b/);
   await expect(page.getByRole("button", { name: /main/ })).toHaveClass(
     /\bborder-input\/40\b/,
@@ -1040,7 +1144,7 @@ test("project without a checkout offers fetch feedback and dropdown cloning", as
   await page.getByRole("button", { name: "Fetch", exact: true }).click();
   await expect(page.getByText("Remote state refreshed.")).toBeVisible();
 
-  await page.getByRole("button", { name: "Remote", exact: true }).click();
+  await page.getByRole("button", { name: "Buzz", exact: true }).click();
   const cloneItem = page.getByRole("menuitem", {
     name: "Local missing Clone",
   });
@@ -1052,9 +1156,6 @@ test("project without a checkout offers fetch feedback and dropdown cloning", as
   );
   await cloneItem.click();
   await expect(page.getByText("Cloned repository.")).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "Local", exact: true }),
-  ).toBeVisible();
   const commands = await page.evaluate(
     () => window.__BUZZ_E2E_COMMANDS__ ?? [],
   );
@@ -1125,7 +1226,7 @@ test("repository tags can be browsed as immutable remote snapshots", async ({
 
   await expect(page.getByRole("button", { name: /v1\.0\.0/ })).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Remote", exact: true }),
+    page.getByRole("button", { name: "Buzz", exact: true }),
   ).toBeVisible();
   await expect
     .poll(() =>
@@ -1201,7 +1302,6 @@ test("pushed local branch can open a pull request", async ({ page }) => {
       can_pull: false,
       pull_block_reason: "Local branch is up to date.",
     };
-    window.__BUZZ_E2E_REJECT_PROJECT_EVENT_KINDS__ = [1619];
   });
   await installMockBridge(page);
   await openBuzzProject(page);
@@ -1253,61 +1353,6 @@ test("pushed local branch can open a pull request", async ({ page }) => {
     "subject",
     "Complete the Projects git workflow",
   ]);
-
-  await page.getByRole("tab", { name: "Overview" }).click();
-  await page.evaluate(async () => {
-    const status = window.__BUZZ_E2E_PROJECT_REPO_SYNC_STATUS__;
-    if (!status) throw new Error("Missing mocked repository status.");
-    status.local_head = "abcdef0123456789abcdef0123456789abcdef01";
-    status.local_short_head = status.local_head.slice(0, 7);
-    status.ahead_count = 1;
-    status.can_push = true;
-    status.push_block_reason = null;
-    await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
-      queryKey: ["project"],
-    });
-  });
-  await page.getByRole("button", { name: "Push", exact: true }).click();
-  await expect(page.getByText("mock project event rejection")).toBeVisible();
-  await expect
-    .poll(() =>
-      page.evaluate(
-        () =>
-          window.__BUZZ_E2E_SIGNED_EVENTS__?.filter(
-            (event) => event.kind === 1619,
-          ).length ?? 0,
-      ),
-    )
-    .toBe(1);
-  await expect(
-    page.getByRole("button", { name: "Update PR", exact: true }),
-  ).toBeVisible();
-  await page.getByRole("button", { name: "Update PR", exact: true }).click();
-  await expect(page.getByText(/Pull request updated/)).toBeVisible();
-  await expect
-    .poll(() =>
-      page.evaluate(
-        () =>
-          window.__BUZZ_E2E_SIGNED_EVENTS__?.filter(
-            (event) => event.kind === 1619,
-          ).length ?? 0,
-      ),
-    )
-    .toBe(2);
-  await expect(
-    page.getByRole("button", { name: "Update PR", exact: true }),
-  ).toHaveCount(0);
-
-  const updateEvent = await page.evaluate(() =>
-    window.__BUZZ_E2E_SIGNED_EVENTS__
-      ?.filter((event) => event.kind === 1619)
-      .at(-1),
-  );
-  expect(updateEvent?.tags).toContainEqual([
-    "c",
-    "abcdef0123456789abcdef0123456789abcdef01",
-  ]);
-  expect(updateEvent?.tags.some((tag) => tag[0] === "E")).toBe(true);
 });
 
 test("project issue can be created from the issues header", async ({

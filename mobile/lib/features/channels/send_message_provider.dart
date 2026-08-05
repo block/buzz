@@ -15,6 +15,7 @@ class SendMessage {
   final void Function(String channelId, NostrEvent event) _addLocalMessage;
   final void Function(String channelId, String eventId) _completeLocalMessage;
   final void Function(String channelId, String eventId) _removeLocalMessage;
+  final bool Function()? _isDeliveryValid;
 
   SendMessage({
     required SignedEventRelay signedEventRelay,
@@ -25,12 +26,14 @@ class SendMessage {
     required void Function(String channelId, String eventId)
     completeLocalMessage,
     required void Function(String channelId, String eventId) removeLocalMessage,
+    bool Function()? isDeliveryValid,
   }) : _signedEventRelay = signedEventRelay,
        _fetchMembers = fetchMembers,
        _readUserCache = readUserCache,
        _addLocalMessage = addLocalMessage,
        _completeLocalMessage = completeLocalMessage,
-       _removeLocalMessage = removeLocalMessage;
+       _removeLocalMessage = removeLocalMessage,
+       _isDeliveryValid = isDeliveryValid;
 
   /// Send a text message to a channel.
   ///
@@ -47,6 +50,7 @@ class SendMessage {
     List<String>? mentionPubkeys,
     List<List<String>> mediaTags = const [],
   }) async {
+    _ensureDeliveryValid();
     // Use explicitly passed pubkeys, or resolve @mentions against
     // channel members to avoid matching the wrong user.
     final resolvedMentions =
@@ -69,6 +73,7 @@ class SendMessage {
       ...mediaTags,
     ];
 
+    _ensureDeliveryValid();
     NostrEvent? localMessage;
     try {
       await _signedEventRelay.submit(
@@ -86,6 +91,14 @@ class SendMessage {
       final event = localMessage;
       if (event != null) _removeLocalMessage(channelId, event.id);
       rethrow;
+    }
+  }
+
+  void _ensureDeliveryValid() {
+    if (_isDeliveryValid?.call() == false) {
+      throw StateError(
+        'Message delivery cancelled because the active community changed',
+      );
     }
   }
 
@@ -179,5 +192,10 @@ final sendMessageProvider = Provider<SendMessage>((ref) {
     removeLocalMessage: (channelId, eventId) => ref
         .read(channelMessagesProvider(channelId).notifier)
         .removeLocalMessage(eventId),
+    isDeliveryValid: () {
+      final currentConfig = ref.read(relayConfigProvider);
+      return currentConfig.baseUrl == config.baseUrl &&
+          currentConfig.nsec == config.nsec;
+    },
   );
 });

@@ -82,7 +82,7 @@ pub(crate) struct EffectiveAgentEnv {
 //
 // A single owned type that fully describes what a spawn would run.  Produced
 // by `resolve_effective_harness_descriptor` and consumed by spawn_agent_child,
-// spawn_config_hash, build_managed_agent_summary, get_agent_models, and
+// spawn_snapshot, build_managed_agent_summary, get_agent_models, and
 // agent_readiness — so the harness-definition lookup and arg/env resolution
 // happen exactly once, in one place.
 
@@ -1051,19 +1051,16 @@ mod tests {
             thinking_env_var: None,
             max_tokens_env_var: None,
             context_limit_env_var: None,
+            max_rounds_env_var: None,
             required_normalized_fields: &[],
             login_hint: None,
             auth_probe_args: None,
         }
     }
 
-    /// Returns the absolute path of the currently-running test binary as a
-    /// `&'static str`.  Host-portable stand-in for a "present" binary:
-    /// the path is absolute so `find_command` resolves it via `path.exists()`
-    /// rather than searching `PATH`, and the file always exists on the host.
-    ///
-    /// The tiny allocation is intentionally leaked — this runs at most once per
-    /// test process and the process exits immediately after tests complete.
+    /// Returns the absolute path of the currently-running test binary as a `&'static str`.
+    /// Host-portable stand-in for a "present" binary: absolute path so `find_command` resolves
+    /// it via `path.exists()`. Leaked allocation is intentional — process exits after tests.
     fn present_binary_str() -> &'static str {
         let path = std::env::current_exe().expect("current_exe must be available in tests");
         Box::leak(path.to_string_lossy().into_owned().into_boxed_str())
@@ -1246,6 +1243,7 @@ mod tests {
             thinking_env_var: None,
             max_tokens_env_var: None,
             context_limit_env_var: None,
+            max_rounds_env_var: None,
             required_normalized_fields: &[],
             login_hint: None,
             auth_probe_args: None,

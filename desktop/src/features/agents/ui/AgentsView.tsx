@@ -319,7 +319,13 @@ export function AgentsView() {
           }}
           onSubmitDefinition={personas.handleSubmit}
           runtimes={personas.acpRuntimesQuery.data ?? []}
-          runtimesLoading={personas.acpRuntimesQuery.isLoading}
+          runtimeCatalogStatus={
+            personas.acpRuntimesQuery.isLoading
+              ? "loading"
+              : personas.acpRuntimesQuery.isError
+                ? "error"
+                : "ready"
+          }
         />
       ) : null}
       {agents.agentToAddToChannel ? (
@@ -368,7 +374,13 @@ export function AgentsView() {
           isPending={personas.isPending}
           mode="definition-edit"
           runtimes={personas.acpRuntimesQuery.data ?? []}
-          runtimesLoading={personas.acpRuntimesQuery.isLoading}
+          runtimeCatalogStatus={
+            personas.acpRuntimesQuery.isLoading
+              ? "loading"
+              : personas.acpRuntimesQuery.isError
+                ? "error"
+                : "ready"
+          }
           onOpenChange={(open) => {
             if (!open) {
               personas.setPersonaDialogState(null);

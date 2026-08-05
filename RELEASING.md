@@ -48,28 +48,30 @@ or mobile GitHub Release.
 ### Desktop
 
 1. Run `just release-desktop <version>` from a clean, up-to-date `main` checkout.
-   The script fetches the current `origin/main`, regenerates
-   `version-bump/<version>` as one
-   deterministic candidate commit, records the frozen base and proposed
-   `desktop-v<version>` tag in `.release/desktop-candidate.json`, updates every
-   desktop manifest and lockfile, writes a full-SHA changelog, and opens or
-   updates the PR.
-2. Review the recorded base and candidate SHA, the complete changelog, and CI.
-   The required **Desktop Release Candidate** check validates the exact head.
-   A trusted repository member, owner, or collaborator must approve that exact
-   candidate head. Any regeneration or push changes the head, invalidates the
-   prior approval, and requires both the checks and approval to run again.
-3. **Squash merge** the PR. The protected branch must still be exactly the
-   recorded base; otherwise regenerate the candidate from current `main`.
-4. `auto-tag-on-release-pr-merge` verifies the frozen parent, full-tree identity,
-   required checks, and trusted approval on the exact candidate head, then tags
-   the squash commit as `desktop-v<version>`. An admin or ruleset bypass does not
-   authorize desktop tagging.
-5. The tag triggers `release.yml`. It builds and stages Apple Silicon and Intel
-   macOS, Windows, and Linux artifacts; publishes the versioned release only
-   after the complete set succeeds; then updates the rolling updater manifest
-   last for stable versions. A failed platform leaves no partially published
-   versioned release.
+   The script creates one deterministic candidate commit and records both its
+   frozen base and the verified prior release ledger in candidate metadata.
+2. Review the exact candidate SHA, complete changelog, and CI. Regenerating or
+   pushing the branch creates a new candidate and requires checks to run again.
+3. **Squash merge** the PR after all protected-branch checks pass. The merge is
+   the human authorization event; an authorized owner/admin bypass is treated
+   the same way. Unrelated changes reaching `main` do not invalidate the
+   reviewed candidate.
+4. `auto-tag-on-release-pr-merge` verifies the closed event against GitHub's PR
+   identity, validates candidate content, and proves every required check came
+   from its trusted producer and was successful when the PR merged. It creates
+   `desktop-v<version>` at the exact reviewed PR head—not the squash commit.
+   Retries accept that tag only at the same SHA and never move it. GitHub does
+   not expose when an individual check rerun was created, so an ordinary rerun
+   after merge deliberately makes tag verification fail closed; inspect that
+   run and create a new candidate version rather than retrying the blocked tag.
+5. The tag triggers `release.yml`. It builds and stages all platform artifacts,
+   publishes the versioned release only after the complete set succeeds, then
+   updates the rolling updater manifest last for stable versions.
+
+Because squash merging leaves immutable candidate tags on side history, the next
+release uses validated prior candidate metadata as its ledger boundary. It
+includes unrelated commits after the prior frozen base and excludes exactly the
+prior release's recorded squash commit; tag ancestry is deliberately irrelevant.
 
 ### Relay
 

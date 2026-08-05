@@ -31,8 +31,8 @@ use uuid::Uuid;
 
 use crate::acp::{
     extract_model_config_options, extract_model_state, model_in_catalog,
-    resolve_model_switch_method, AcpClient, AcpError, McpServer, ModelSwitchMethod, StopReason,
-    SystemPromptTransport,
+    resolve_model_switch_method, AcpClient, AcpError, EnvVar, McpServer, ModelSwitchMethod,
+    StopReason, SystemPromptTransport,
 };
 use crate::config::{compose_session_title, DedupMode, PermissionMode};
 use crate::observer;
@@ -867,13 +867,13 @@ const UNKNOWN_CHANNEL_NAME: &str = "unknown";
 async fn resolve_new_session_channel_context(
     channel_info: &ChannelInfoResolver,
     channel_id: Uuid,
-) -> (bool, Option<String>) {
+) -> (bool, Option<String>, Option<String>) {
     let Some(info) = channel_info.resolve(channel_id).await else {
-        return (true, None);
+        return (true, None, None);
     };
     let is_dm = info.channel_type == "dm";
     let title_channel = (!is_dm && info.name != UNKNOWN_CHANNEL_NAME).then_some(info.name);
-    (is_dm, title_channel)
+    (is_dm, title_channel, Some(info.channel_type))
 }
 
 /// Create a new ACP session via `session_new_full()`, populate model capabilities
@@ -888,6 +888,8 @@ async fn create_session_and_apply_model(
     agent_core: Option<&str>,
     agent_canvas: Option<&str>,
     channel_name: Option<&str>,
+    channel_id: Option<Uuid>,
+    channel_type: Option<&str>,
 ) -> Result<String, AcpError> {
     // Build base_prompt + system_prompt + agent core + canvas metadata into a
     // single prompt. Standard protocol-v2 agents receive it in `session/new`;
@@ -911,12 +913,18 @@ async fn create_session_and_apply_model(
         .session_title
         .as_deref()
         .map(|agent_name| compose_session_title(agent_name, channel_name));
+    let mcp_servers = mcp_servers_with_git_origin(
+        &ctx.mcp_servers,
+        channel_id,
+        channel_type,
+        ctx.session_title.as_deref(),
+    );
 
     let resp = agent
         .acp
         .session_new_full(
             &ctx.cwd,
-            ctx.mcp_servers.clone(),
+            mcp_servers,
             session_new_system_prompt(
                 is_goose,
                 agent.protocol_version,
@@ -1009,7 +1017,7 @@ async fn create_session_and_apply_model(
     // Apply permission mode if not the agent's built-in default AND the agent
     // advertises the requested mode in session/new. Agents that don't support
     // the mode (e.g., goose crashes on unrecognized set_config_option values)
-    // are safely skipped — the harness auto-approves via handle_permission_request.
+    // are safely skipped — the harness rejects interactive permission requests.
     if !ctx.permission_mode.is_default()
         && agent_supports_mode(&resp.raw, ctx.permission_mode.as_wire_str())
     {
@@ -1017,6 +1025,34 @@ async fn create_session_and_apply_model(
     }
 
     Ok(resp.session_id)
+}
+
+fn mcp_servers_with_git_origin(
+    servers: &[McpServer],
+    channel_id: Option<Uuid>,
+    channel_type: Option<&str>,
+    agent_name: Option<&str>,
+) -> Vec<McpServer> {
+    let mut servers = servers.to_vec();
+    let origin = match (channel_id, channel_type) {
+        (Some(channel_id), Some("stream")) => Some(EnvVar {
+            name: "BUZZ_GIT_ORIGIN_CHANNEL_ID".into(),
+            value: channel_id.to_string(),
+        }),
+        (Some(_), _) => agent_name
+            .filter(|name| !name.trim().is_empty())
+            .map(|name| EnvVar {
+                name: "BUZZ_GIT_ORIGIN_AGENT_NAME".into(),
+                value: name.trim().to_string(),
+            }),
+        (None, _) => None,
+    };
+    if let Some(origin) = origin {
+        for server in &mut servers {
+            server.env.push(origin.clone());
+        }
+    }
+    servers
 }
 
 /// Send the appropriate ACP model-switch request with a timeout.
@@ -1094,11 +1130,7 @@ async fn apply_model_switch(
     Ok(())
 }
 
-/// Set the session permission mode via `session/set_config_option`.
-///
-/// Non-fatal for most errors: logs and proceeds. The agent falls back
-/// to its default permission mode (`"default"`), which still works via
-/// Check if the agent's `session/new` response advertises a given mode ID
+/// Check whether the agent's `session/new` response advertises a given mode ID
 /// in `result.modes.availableModes[].id`. Returns `false` if the modes
 /// field is absent or the mode isn't listed.
 fn agent_supports_mode(session_new_result: &serde_json::Value, mode_wire: &str) -> bool {
@@ -1114,7 +1146,11 @@ fn agent_supports_mode(session_new_result: &serde_json::Value, mode_wire: &str) 
         .unwrap_or(false)
 }
 
-/// per-tool auto-approval in `handle_permission_request`.
+/// Set the session permission mode via `session/set_config_option`.
+///
+/// Non-fatal for most errors: logs and proceeds. The agent falls back to its
+/// default mode, and any interactive permission request is rejected by
+/// `handle_permission_request`.
 ///
 /// **Fatal exception:** if the agent process exits (e.g., goose crashes on
 /// unrecognized methods), returns `Err(AgentExited)` so the caller can respawn.
@@ -1154,7 +1190,7 @@ async fn apply_permission_mode(
         Ok(Err(e)) => {
             tracing::warn!(
                 target: "pool::permission",
-                "failed to set permission mode {wire:?}: {e} — falling back to per-tool auto-approval"
+                "failed to set permission mode {wire:?}: {e} — falling back to per-tool rejection"
             );
         }
         Err(_) => {
@@ -1519,14 +1555,15 @@ pub async fn run_prompt_task(
     // Channel name for the session title, from the same single resolve the
     // canvas DM check uses — see `resolve_new_session_channel_context`.
     let mut title_channel: Option<String> = None;
+    let mut origin_channel_type: Option<String> = None;
     if let PromptSource::Channel(cid) = &source {
         let is_new_channel_session = !agent.state.sessions.contains_key(cid);
         let needs_canvas = is_new_channel_session && !agent.state.canvas_sections.contains_key(cid);
-        let needs_title = is_new_channel_session && ctx.session_title.is_some();
-        if needs_canvas || needs_title {
-            let (is_dm, resolved_channel) =
+        if is_new_channel_session {
+            let (is_dm, resolved_channel, resolved_channel_type) =
                 resolve_new_session_channel_context(&ctx.channel_info, *cid).await;
             title_channel = resolved_channel;
+            origin_channel_type = resolved_channel_type;
             // A confirmed DM never receives a canvas section; an undeterminable
             // channel type fails closed as a DM for the same reason.
             if needs_canvas && !is_dm {
@@ -1571,6 +1608,8 @@ pub async fn run_prompt_task(
                     agent_core.as_deref(),
                     agent_canvas.as_deref(),
                     title_channel.as_deref(),
+                    Some(*cid),
+                    origin_channel_type.as_deref(),
                 )
                 .await
                 {
@@ -1618,7 +1657,9 @@ pub async fn run_prompt_task(
             if let Some(sid) = &agent.state.heartbeat_session {
                 (sid.clone(), false)
             } else {
-                match create_session_and_apply_model(&mut agent, &ctx, None, None, None).await {
+                match create_session_and_apply_model(&mut agent, &ctx, None, None, None, None, None)
+                    .await
+                {
                     Ok(sid) => {
                         tracing::info!(
                             target: "pool::session",
@@ -3988,6 +4029,50 @@ mod tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
+
+    fn test_mcp_server() -> McpServer {
+        McpServer {
+            name: "dev".into(),
+            command: "buzz-dev-mcp".into(),
+            args: vec![],
+            env: vec![],
+        }
+    }
+
+    #[test]
+    fn public_session_forwards_channel_origin_to_mcp() {
+        let channel_id = Uuid::new_v4();
+        let servers = mcp_servers_with_git_origin(
+            &[test_mcp_server()],
+            Some(channel_id),
+            Some("stream"),
+            None,
+        );
+        assert!(servers[0].env.iter().any(|entry| {
+            entry.name == "BUZZ_GIT_ORIGIN_CHANNEL_ID" && entry.value == channel_id.to_string()
+        }));
+        assert!(!servers[0]
+            .env
+            .iter()
+            .any(|entry| entry.name == "BUZZ_GIT_ORIGIN_AGENT_NAME"));
+    }
+
+    #[test]
+    fn private_session_forwards_agent_name_without_channel_id() {
+        let servers = mcp_servers_with_git_origin(
+            &[test_mcp_server()],
+            Some(Uuid::new_v4()),
+            Some("dm"),
+            Some("Builder"),
+        );
+        assert!(servers[0].env.iter().any(|entry| {
+            entry.name == "BUZZ_GIT_ORIGIN_AGENT_NAME" && entry.value == "Builder"
+        }));
+        assert!(!servers[0]
+            .env
+            .iter()
+            .any(|entry| entry.name == "BUZZ_GIT_ORIGIN_CHANNEL_ID"));
+    }
 
     // These pin the initial_message dispatch path (run_prompt_task, ~line 855):
     // a legacy agent WITH a base_prompt must get [Base] prepended to the user
@@ -6833,12 +6918,14 @@ mod tests {
         let response = channel_metadata_response(id, &[["name", "buzz-dev"], ["t", "stream"]]);
         let (resolver, requests, server) = counting_resolver(response).await;
 
-        let (is_dm, title_channel) = resolve_new_session_channel_context(&resolver, id).await;
+        let (is_dm, title_channel, channel_type) =
+            resolve_new_session_channel_context(&resolver, id).await;
         assert!(!is_dm, "a stream channel is not a DM");
         assert_eq!(title_channel.as_deref(), Some("buzz-dev"));
+        assert_eq!(channel_type.as_deref(), Some("stream"));
         assert_eq!(requests.load(Ordering::SeqCst), 1);
 
-        let (_, again) = resolve_new_session_channel_context(&resolver, id).await;
+        let (_, again, _) = resolve_new_session_channel_context(&resolver, id).await;
         assert_eq!(again.as_deref(), Some("buzz-dev"));
         assert_eq!(
             requests.load(Ordering::SeqCst),
@@ -6856,8 +6943,10 @@ mod tests {
         let response = channel_metadata_response(id, &[["name", "DM"], ["t", "dm"]]);
         let (resolver, _requests, server) = counting_resolver(response).await;
 
-        let (is_dm, title_channel) = resolve_new_session_channel_context(&resolver, id).await;
+        let (is_dm, title_channel, channel_type) =
+            resolve_new_session_channel_context(&resolver, id).await;
         assert!(is_dm);
+        assert_eq!(channel_type.as_deref(), Some("dm"));
         assert_eq!(
             title_channel, None,
             "a DM name must never reach the session title"
@@ -6874,7 +6963,7 @@ mod tests {
         let response = channel_metadata_response(id, &[["t", "stream"]]);
         let (resolver, _requests, server) = counting_resolver(response).await;
 
-        let (is_dm, title_channel) = resolve_new_session_channel_context(&resolver, id).await;
+        let (is_dm, title_channel, _) = resolve_new_session_channel_context(&resolver, id).await;
         assert!(!is_dm, "a nameless stream channel is still not a DM");
         assert_eq!(
             title_channel, None,
@@ -6894,10 +6983,11 @@ mod tests {
 
         let (resolver, requests, server) = counting_resolver(json!([])).await;
 
-        let (is_dm, title_channel) =
+        let (is_dm, title_channel, channel_type) =
             resolve_new_session_channel_context(&resolver, Uuid::new_v4()).await;
         assert!(is_dm, "an undeterminable channel type must fail closed");
         assert_eq!(title_channel, None, "unresolved channels get a bare title");
+        assert_eq!(channel_type, None);
         assert_eq!(
             requests.load(Ordering::SeqCst),
             2,

@@ -213,7 +213,9 @@ struct TrayMenuState<R: Runtime> {
 pub enum TrayAction {
     NewChannel,
     OpenChannel {
+        #[serde(rename = "channelId")]
         channel_id: String,
+        #[serde(rename = "communityGeneration")]
         community_generation: u64,
     },
 }
@@ -613,6 +615,23 @@ pub fn update_tray_agent_activity<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::{requeue_actions, TrayAction, TrayActionQueue};
+
+    #[test]
+    fn open_channel_action_serializes_with_frontend_field_names() {
+        let action = TrayAction::OpenChannel {
+            channel_id: "channel-123".into(),
+            community_generation: 7,
+        };
+
+        assert_eq!(
+            serde_json::to_value(action).expect("tray action should serialize"),
+            serde_json::json!({
+                "kind": "openChannel",
+                "channelId": "channel-123",
+                "communityGeneration": 7,
+            })
+        );
+    }
 
     #[test]
     fn stale_channel_actions_are_not_requeued_after_community_change() {
