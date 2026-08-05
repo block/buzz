@@ -645,12 +645,26 @@ test("fresh existing-identity path leads with private-key recovery", async ({
   );
   await expect(page.getByTestId("identity-recovery-pairing")).toHaveCount(0);
 
-  await page.getByTestId("nostr-import-phone-link").click();
+  await page.getByTestId("nostr-import-file-button").click();
+  const backupDialog = page.getByTestId("backup-recovery-dialog");
+  await expect(backupDialog).toBeVisible();
   await expect(
-    page.getByRole("heading", { name: "Use your Buzz identity" }),
+    backupDialog.getByRole("heading", { name: "Restore from a backup file" }),
   ).toBeVisible();
-  await expect(page.getByTestId("identity-recovery-qr")).toBeVisible();
-  await expect(page.getByTestId("nostr-import-card")).toHaveCount(0);
+  await expect(
+    backupDialog.getByTestId("nostr-import-backup-picker"),
+  ).toBeVisible();
+  await expect(page.getByTestId("nostr-import-card")).toBeVisible();
+  await backupDialog.getByRole("button", { name: "Close" }).click();
+
+  await page.getByTestId("nostr-import-phone-link").click();
+  const phoneDialog = page.getByTestId("phone-recovery-dialog");
+  await expect(phoneDialog).toBeVisible();
+  await expect(
+    phoneDialog.getByRole("heading", { name: "Use your Buzz identity" }),
+  ).toBeVisible();
+  await expect(phoneDialog.getByTestId("identity-recovery-qr")).toBeVisible();
+  await expect(page.getByTestId("nostr-import-card")).toBeVisible();
 });
 
 test("first-launch key import continues to machine setup", async ({ page }) => {
@@ -740,8 +754,10 @@ test("first-launch import accepts an .ncryptsec backup file", async ({
   // exactly the identity.ncryptsec our own save dialog produced. The accept
   // attribute is asserted explicitly because setInputFiles bypasses it — the
   // OS picker is what filters on it in real use.
-  await expect(page.getByTestId("nostr-import-file-button")).toBeVisible();
-  const fileInput = page.getByTestId("nostr-import-file-input");
+  await page.getByTestId("nostr-import-file-button").click();
+  const fileInput = page
+    .getByTestId("backup-recovery-dialog")
+    .getByTestId("nostr-import-file-input");
   await expect(fileInput).toHaveAttribute(
     "accept",
     ".key,.ncryptsec,text/plain",
@@ -752,9 +768,11 @@ test("first-launch import accepts an .ncryptsec backup file", async ({
     mimeType: "text/plain",
     name: "not-a-backup.txt",
   });
-  await expect(page.getByTestId("nostr-import-feedback")).toContainText(
-    /too large to be a key backup/i,
-  );
+  await expect(
+    page
+      .getByTestId("backup-recovery-dialog")
+      .getByTestId("nostr-import-feedback"),
+  ).toContainText(/too large to be a key backup/i);
 
   // Spec-vector blob the mock bridge accepts with the mock passphrase.
   const mockNcryptsec =
@@ -765,31 +783,33 @@ test("first-launch import accepts an .ncryptsec backup file", async ({
     name: "identity.ncryptsec",
   });
 
-  // File contents advance to the same focused password stage as manual input.
+  // File contents advance to the password stage inside the same dialog.
+  const backupDialog = page.getByTestId("backup-recovery-dialog");
   await expect(
-    page.getByRole("heading", { name: "Unlock your account" }),
+    backupDialog.getByTestId("backup-password-timeline"),
   ).toBeVisible();
-  await expect(page.getByTestId("backup-password-timeline")).toBeVisible();
-  await expect(page.getByTestId("nostr-import-passphrase")).toBeFocused();
+  await expect(
+    backupDialog.getByTestId("nostr-import-passphrase"),
+  ).toBeFocused();
 
-  // Back first returns to key/file selection instead of leaving import.
-  await page.getByRole("button", { name: "Back", exact: true }).click();
+  // Back first returns to backup-file selection instead of closing the dialog.
+  await backupDialog.getByRole("button", { name: "Back", exact: true }).click();
   await expect(
-    page.getByRole("heading", { name: "Enter your private key" }),
+    backupDialog.getByRole("heading", { name: "Restore from a backup file" }),
   ).toBeVisible();
-  await expect(page.getByTestId("nostr-import-card")).toBeVisible();
-  await expect(page.getByTestId("nostr-import-file-button")).toBeVisible();
-  await expect(page.getByTestId("nostr-import-nsec-input")).toHaveValue("");
+  await expect(
+    backupDialog.getByTestId("nostr-import-backup-picker"),
+  ).toBeVisible();
 
   await fileInput.setInputFiles({
     buffer: Buffer.from(`${mockNcryptsec}\n`),
     mimeType: "text/plain",
     name: "identity.ncryptsec",
   });
-  await page
+  await backupDialog
     .getByTestId("nostr-import-passphrase")
     .fill("mock horse battery staple lake orbit");
-  await page.getByTestId("nostr-import-submit").click();
+  await backupDialog.getByTestId("nostr-import-submit").click();
 
   await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
   await expect(page.getByTestId("machine-onboarding-gate")).toBeVisible();

@@ -31,6 +31,10 @@ type NostrKeyImportFormProps = {
   onImport: (nsec: string, password?: string) => Promise<void>;
   onStageChange?: (stage: NostrKeyImportStage) => void;
   showBack?: boolean;
+  /** Restrict this instance to selecting a backup file instead of typing a key. */
+  mode?: "key" | "backup";
+  /** Dialogs keep their actions inside the surface instead of the onboarding dock. */
+  footerMode?: "onboarding" | "inline";
   /** "spotlight" is the first-launch treatment: glowy centered input, no drop zone, pill buttons. */
   variant?: "default" | "spotlight";
 };
@@ -50,6 +54,8 @@ export function NostrKeyImportForm({
   onImport,
   onStageChange,
   showBack = true,
+  mode = "key",
+  footerMode = "onboarding",
   variant = "default",
 }: NostrKeyImportFormProps) {
   const [nsecInput, setNsecInput] = React.useState("");
@@ -91,6 +97,7 @@ export function NostrKeyImportForm({
     previewNpub === null &&
     trimmedInput.length >= 5;
   const errorMessage = importError ?? externalErrorMessage;
+  const Footer = footerMode === "inline" ? "div" : OnboardingFooter;
 
   React.useLayoutEffect(() => {
     if (isPasswordStage) {
@@ -201,7 +208,7 @@ export function NostrKeyImportForm({
         void handleSubmit();
       }}
     >
-      {!isPasswordStage ? (
+      {!isPasswordStage && mode === "key" ? (
         <div className="space-y-1.5 text-left">
           <label
             className={cn(
@@ -288,22 +295,40 @@ export function NostrKeyImportForm({
       {/* Hidden file input shared by both variants: the default drop zone and
           the spotlight "Choose a backup file" button both open it. Accepts the
           .ncryptsec backups our own save flow emits alongside raw .key files. */}
-      <input
-        accept=".key,.ncryptsec,text/plain"
-        className="sr-only"
-        data-testid="nostr-import-file-input"
-        disabled={isInteractionDisabled}
-        id="nostr-import-file-input"
-        onChange={(event) => {
-          void handleFiles(event.currentTarget.files);
-          event.currentTarget.value = "";
-        }}
-        ref={fileInputRef}
-        tabIndex={-1}
-        type="file"
-      />
+      {mode === "backup" || variant !== "spotlight" ? (
+        <input
+          accept=".key,.ncryptsec,text/plain"
+          className="sr-only"
+          data-testid="nostr-import-file-input"
+          disabled={isInteractionDisabled}
+          id={
+            mode === "backup"
+              ? "nostr-import-backup-file-input"
+              : "nostr-import-file-input"
+          }
+          onChange={(event) => {
+            void handleFiles(event.currentTarget.files);
+            event.currentTarget.value = "";
+          }}
+          ref={fileInputRef}
+          tabIndex={-1}
+          type="file"
+        />
+      ) : null}
 
-      {!isPasswordStage && variant !== "spotlight" ? (
+      {!isPasswordStage && mode === "backup" ? (
+        <Button
+          className="mx-auto h-12 rounded-full px-7"
+          data-testid="nostr-import-backup-picker"
+          disabled={isInteractionDisabled}
+          onClick={openFilePicker}
+          type="button"
+        >
+          Choose a backup file
+        </Button>
+      ) : null}
+
+      {!isPasswordStage && mode === "key" && variant !== "spotlight" ? (
         <button
           className={cn(
             "relative flex h-[120px] flex-col items-center justify-center gap-3 overflow-hidden rounded-xl border border-transparent bg-muted text-foreground transition-[background-color,border-color,box-shadow,color] duration-[250ms] ease-out hover:bg-muted/80 disabled:opacity-60",
@@ -477,30 +502,41 @@ export function NostrKeyImportForm({
         </div>
       ) : null}
 
-      <OnboardingFooter>
-        <Button
-          className={
-            // Only the spotlight (onboarding) treatment gets the docked pill CTA.
-            // The default variant renders outside the onboarding footer provider
-            // (e.g. KeyringLockedScreen) and must stay full-width to match its
-            // sibling Back button.
-            variant === "spotlight"
-              ? ONBOARDING_PRIMARY_CTA_CLASS
-              : "h-10 w-full"
-          }
-          data-testid="nostr-import-submit"
-          disabled={!isValid || isInteractionDisabled}
-          onClick={() => void handleSubmit()}
-          type="button"
-        >
-          {isImporting ? (
-            <Spinner aria-label="Importing key" className="h-4 w-4 border-2" />
-          ) : variant === "spotlight" ? (
-            "Next"
-          ) : (
-            "Continue with this key"
-          )}
-        </Button>
+      <Footer
+        className={
+          footerMode === "inline"
+            ? "mt-6 flex flex-col items-center gap-2"
+            : undefined
+        }
+      >
+        {mode === "key" || isPasswordStage ? (
+          <Button
+            className={
+              // Only the spotlight (onboarding) treatment gets the docked pill CTA.
+              // The default variant renders outside the onboarding footer provider
+              // (e.g. KeyringLockedScreen) and must stay full-width to match its
+              // sibling Back button.
+              variant === "spotlight"
+                ? ONBOARDING_PRIMARY_CTA_CLASS
+                : "h-10 w-full"
+            }
+            data-testid="nostr-import-submit"
+            disabled={!isValid || isInteractionDisabled}
+            onClick={() => void handleSubmit()}
+            type="button"
+          >
+            {isImporting ? (
+              <Spinner
+                aria-label="Importing key"
+                className="h-4 w-4 border-2"
+              />
+            ) : variant === "spotlight" ? (
+              "Next"
+            ) : (
+              "Continue with this key"
+            )}
+          </Button>
+        ) : null}
 
         {showBack || isPasswordStage ? (
           <Button
@@ -517,7 +553,7 @@ export function NostrKeyImportForm({
             {isPasswordStage ? "Back" : backLabel}
           </Button>
         ) : null}
-      </OnboardingFooter>
+      </Footer>
     </form>
   );
 }
