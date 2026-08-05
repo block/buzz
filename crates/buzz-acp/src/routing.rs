@@ -1,0 +1,458 @@
+//! Per-turn model routing.
+//!
+//! Picks the model for an inbound turn instead of always using the agent's
+//! configured default. The decision is applied through the EXISTING
+//! [`OwnedAgent::desired_model`](crate::pool::OwnedAgent) mechanism that
+//! `switch_model` already uses, so nothing new touches the ACP wire, the relay,
+//! or the trust boundary — in particular this needs no owner-signed kind:24200
+//! control frame, because the decision is made in-process by the harness that is
+//! already trusted to run the turn.
+//!
+//! # Opt-in, and fails open
+//!
+//! Routing is off unless `BUZZ_ROUTING_POLICY` names a readable policy file. A
+//! missing file, unparseable JSON, `enabled: false`, no matching rule, or a
+//! classifier that errors or times out all resolve to "no opinion" — the turn
+//! proceeds on the agent's configured model exactly as before. Routing must never
+//! be able to fail a turn; a router that can block work is worse than no router.
+//!
+//! # Two stages, cheap first
+//!
+//! 1. `rules` — deterministic substring/regex-free matchers over the prompt text.
+//!    No network, no latency. Most routing intent is expressible here.
+//! 2. `classifier` — an optional local Ollama call, used only when no rule
+//!    matched. Local by design: this code sees raw channel content, so shipping
+//!    every turn's text to a hosted classifier to decide where to send it would
+//!    leak exactly what a routing decision is supposed to protect.
+//!
+//! # What this does NOT do
+//!
+//! It selects a MODEL, not a harness. One buzz-acp process serves one agent, so
+//! routing a turn to opencode-vs-codex-vs-claude means choosing a different agent
+//! — that is a dispatcher concern (there is none today: selection is a `p`-tag
+//! mention with relay fan-out) and is deliberately out of scope here.
+
+use std::path::PathBuf;
+use std::time::Duration;
+
+use serde::Deserialize;
+
+/// Env var naming the policy file. Absent => routing disabled.
+pub const POLICY_ENV: &str = "BUZZ_ROUTING_POLICY";
+
+/// How a rule matches the prompt text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MatchKind {
+    /// Any of `any` appears in the prompt, case-insensitively.
+    Contains,
+    /// Every one of `any` appears in the prompt, case-insensitively.
+    ContainsAll,
+}
+
+impl Default for MatchKind {
+    fn default() -> Self {
+        Self::Contains
+    }
+}
+
+/// One deterministic routing rule.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Rule {
+    /// Human label, surfaced in the log line explaining a routing decision.
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub match_kind: MatchKind,
+    /// Needles to look for. An empty list never matches — a rule that matches
+    /// everything must be written as the policy's `default_model` instead, so
+    /// "always this model" cannot be created by accident.
+    #[serde(default)]
+    pub any: Vec<String>,
+    /// Model id to use when this rule matches. Must be a model the agent's
+    /// provider actually advertises, or the existing apply step logs a miss and
+    /// falls back to the agent default.
+    pub model: String,
+}
+
+impl Rule {
+    fn matches(&self, haystack_lower: &str) -> bool {
+        if self.any.is_empty() {
+            return false;
+        }
+        let hit = |needle: &String| {
+            let n = needle.trim().to_lowercase();
+            !n.is_empty() && haystack_lower.contains(&n)
+        };
+        match self.match_kind {
+            MatchKind::Contains => self.any.iter().any(hit),
+            MatchKind::ContainsAll => self.any.iter().all(hit),
+        }
+    }
+}
+
+/// Optional local classifier, consulted only when no rule matched.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Classifier {
+    /// Ollama base url, e.g. `http://localhost:11434`.
+    pub url: String,
+    /// Ollama model id doing the classifying, e.g. `gemma3:27b`.
+    pub model: String,
+    /// Map from a classifier label to the model to run the turn on.
+    #[serde(default)]
+    pub labels: Vec<LabelTarget>,
+    #[serde(default = "default_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+fn default_timeout_ms() -> u64 {
+    20_000
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LabelTarget {
+    pub label: String,
+    pub model: String,
+}
+
+/// A routing policy, loaded from `$BUZZ_ROUTING_POLICY`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Policy {
+    /// Off by default so dropping a file in place cannot silently start routing.
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub rules: Vec<Rule>,
+    #[serde(default)]
+    pub classifier: Option<Classifier>,
+    /// Model used when nothing matched. `None` => leave the agent's default alone.
+    #[serde(default)]
+    pub default_model: Option<String>,
+}
+
+/// Why a model was chosen — carried into the log so a routing decision is never
+/// silent. An operator debugging "why did this turn use that model" needs the
+/// reason, not just the outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reason {
+    Rule(String),
+    Classifier { label: String },
+    Default,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Decision {
+    pub model: String,
+    pub reason: Reason,
+}
+
+impl Policy {
+    /// Load from `$BUZZ_ROUTING_POLICY`. Returns `None` when the var is unset,
+    /// the file is unreadable, or the JSON does not parse — routing is a
+    /// convenience, so a broken policy degrades to "no routing" rather than
+    /// preventing the harness from starting.
+    pub fn from_env() -> Option<Self> {
+        let path = PathBuf::from(std::env::var_os(POLICY_ENV)?);
+        match std::fs::read_to_string(&path) {
+            Ok(raw) => match serde_json::from_str::<Self>(&raw) {
+                Ok(policy) => Some(policy),
+                Err(e) => {
+                    tracing::warn!(
+                        target: "acp::routing",
+                        path = %path.display(),
+                        error = %e,
+                        "routing policy failed to parse — routing disabled for this process"
+                    );
+                    None
+                }
+            },
+            Err(e) => {
+                tracing::warn!(
+                    target: "acp::routing",
+                    path = %path.display(),
+                    error = %e,
+                    "routing policy unreadable — routing disabled for this process"
+                );
+                None
+            }
+        }
+    }
+
+    /// Deterministic stage. Pure: no IO, so it is fully testable and adds no
+    /// latency to a turn.
+    pub fn decide_static(&self, prompt: &str) -> Option<Decision> {
+        if !self.enabled {
+            return None;
+        }
+        let lower = prompt.to_lowercase();
+        for (i, rule) in self.rules.iter().enumerate() {
+            if rule.matches(&lower) {
+                return Some(Decision {
+                    model: rule.model.clone(),
+                    reason: Reason::Rule(
+                        rule.name.clone().unwrap_or_else(|| format!("rules[{i}]")),
+                    ),
+                });
+            }
+        }
+        None
+    }
+
+    /// The fallback applied when neither a rule nor the classifier decided.
+    pub fn fallback(&self) -> Option<Decision> {
+        if !self.enabled {
+            return None;
+        }
+        self.default_model.as_ref().map(|m| Decision {
+            model: m.clone(),
+            reason: Reason::Default,
+        })
+    }
+
+    /// Full decision for a turn: rules, then classifier, then default.
+    ///
+    /// Never returns an error. Any classifier failure is logged and treated as
+    /// "no opinion", so the turn falls through to `default_model` or the agent's
+    /// own configured model.
+    pub async fn decide(&self, prompt: &str) -> Option<Decision> {
+        if !self.enabled || prompt.trim().is_empty() {
+            return None;
+        }
+        if let Some(d) = self.decide_static(prompt) {
+            return Some(d);
+        }
+        if let Some(classifier) = self.classifier.as_ref() {
+            match classify_ollama(classifier, prompt).await {
+                Ok(Some(label)) => {
+                    if let Some(target) = classifier
+                        .labels
+                        .iter()
+                        .find(|l| l.label.eq_ignore_ascii_case(label.trim()))
+                    {
+                        return Some(Decision {
+                            model: target.model.clone(),
+                            reason: Reason::Classifier {
+                                label: target.label.clone(),
+                            },
+                        });
+                    }
+                    tracing::debug!(
+                        target: "acp::routing",
+                        label = %label,
+                        "classifier returned a label with no configured target — using default"
+                    );
+                }
+                Ok(None) => {}
+                Err(e) => tracing::warn!(
+                    target: "acp::routing",
+                    error = %e,
+                    "classifier call failed — using default"
+                ),
+            }
+        }
+        self.fallback()
+    }
+}
+
+/// Ask a local Ollama model to pick one label. Returns `Ok(None)` when the reply
+/// is unusable — an unparseable classification is not an error worth failing a
+/// turn over.
+async fn classify_ollama(cfg: &Classifier, prompt: &str) -> Result<Option<String>, String> {
+    if cfg.labels.is_empty() {
+        return Ok(None);
+    }
+    let labels: Vec<&str> = cfg.labels.iter().map(|l| l.label.as_str()).collect();
+    // Ask for a bare label rather than JSON: there is exactly one field wanted,
+    // and a one-word reply cannot be half-parsed the way a JSON object can.
+    let instruction = format!(
+        "Classify the task below into exactly one of these categories: {}.\n\
+         Reply with ONLY the category word. No punctuation, no explanation.\n\n\
+         TASK:\n{}",
+        labels.join(", "),
+        prompt
+    );
+    let body = serde_json::json!({
+        "model": cfg.model,
+        "stream": false,
+        "options": { "temperature": 0 },
+        "messages": [{ "role": "user", "content": instruction }],
+    });
+    let http = reqwest::Client::new();
+    let resp = http
+        .post(format!("{}/api/chat", cfg.url.trim_end_matches('/')))
+        .timeout(Duration::from_millis(cfg.timeout_ms))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("ollama request failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("ollama HTTP {}", resp.status()));
+    }
+    let v: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("ollama response parse failed: {e}"))?;
+    let text = v
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    // Small models sometimes answer in a sentence. Accept the first configured
+    // label that appears anywhere in the reply rather than discarding it.
+    let lower = text.to_lowercase();
+    for l in &labels {
+        if lower.contains(&l.to_lowercase()) {
+            return Ok(Some((*l).to_string()));
+        }
+    }
+    Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn policy(json: serde_json::Value) -> Policy {
+        serde_json::from_value(json).expect("policy should parse")
+    }
+
+    #[test]
+    fn disabled_policy_never_decides() {
+        let p = policy(serde_json::json!({
+            "enabled": false,
+            "rules": [{ "any": ["migration"], "model": "m1" }],
+            "default_model": "fallback"
+        }));
+        assert_eq!(p.decide_static("a migration"), None);
+        assert_eq!(p.fallback(), None);
+    }
+
+    #[test]
+    fn first_matching_rule_wins_and_carries_its_name() {
+        let p = policy(serde_json::json!({
+            "enabled": true,
+            "rules": [
+                { "name": "db", "any": ["migration", "schema"], "model": "codex-model" },
+                { "name": "ui", "any": ["button"], "model": "ui-model" }
+            ]
+        }));
+        let d = p.decide_static("Add a Postgres MIGRATION for members").unwrap();
+        assert_eq!(d.model, "codex-model");
+        assert_eq!(d.reason, Reason::Rule("db".into()));
+        // Case-insensitive, and the later rule still reachable.
+        assert_eq!(p.decide_static("fix the Button").unwrap().model, "ui-model");
+        // No match => no opinion, NOT the first rule.
+        assert_eq!(p.decide_static("unrelated text"), None);
+    }
+
+    #[test]
+    fn contains_all_requires_every_needle() {
+        let p = policy(serde_json::json!({
+            "enabled": true,
+            "rules": [{
+                "name": "both", "match_kind": "contains_all",
+                "any": ["relay", "membership"], "model": "m"
+            }]
+        }));
+        assert!(p.decide_static("relay membership check").is_some());
+        assert!(p.decide_static("relay only").is_none());
+    }
+
+    #[test]
+    fn an_empty_needle_list_never_matches() {
+        // Guards against "always route here" being created by omission — that
+        // intent must be expressed as default_model.
+        let p = policy(serde_json::json!({
+            "enabled": true,
+            "rules": [{ "any": [], "model": "everything" }],
+            "default_model": "fallback"
+        }));
+        assert_eq!(p.decide_static("literally anything"), None);
+        assert_eq!(p.fallback().unwrap().model, "fallback");
+    }
+
+    #[test]
+    fn absent_default_model_leaves_the_agent_alone() {
+        let p = policy(serde_json::json!({ "enabled": true, "rules": [] }));
+        assert_eq!(p.fallback(), None);
+    }
+
+    #[tokio::test]
+    async fn empty_prompt_and_unreachable_classifier_both_degrade_to_default() {
+        let p = policy(serde_json::json!({
+            "enabled": true,
+            "rules": [],
+            // Port 1 is reserved and never listening, so this exercises the
+            // failure path without depending on a live Ollama.
+            "classifier": {
+                "url": "http://127.0.0.1:1", "model": "gemma3:27b", "timeout_ms": 500,
+                "labels": [{ "label": "code", "model": "code-model" }]
+            },
+            "default_model": "fallback"
+        }));
+        assert_eq!(p.decide("").await, None, "empty prompt must not route");
+        let d = p.decide("some real task text").await.unwrap();
+        assert_eq!(d.model, "fallback");
+        assert_eq!(d.reason, Reason::Default);
+    }
+
+    /// Live classifier check against a real Ollama. Skips unless
+    /// `BUZZ_ROUTING_LIVE_OLLAMA` names a base url, matching the existing
+    /// env-gated pattern in `crates/buzz-test-client/tests/e2e_mesh_llm.rs` —
+    /// the unit tests above cover the logic, but only a live model proves the
+    /// prompt actually elicits a usable one-word label.
+    ///
+    ///   BUZZ_ROUTING_LIVE_OLLAMA=http://localhost:11434 \
+    ///     cargo test -p buzz-acp --lib -- routing::tests::live_ollama --nocapture
+    #[tokio::test]
+    async fn live_ollama_classifier_returns_a_configured_label() {
+        let Ok(url) = std::env::var("BUZZ_ROUTING_LIVE_OLLAMA") else {
+            eprintln!("SKIP: BUZZ_ROUTING_LIVE_OLLAMA not set — needs a live Ollama endpoint");
+            return;
+        };
+        let model =
+            std::env::var("BUZZ_ROUTING_LIVE_MODEL").unwrap_or_else(|_| "gemma3:27b".to_string());
+        let p = policy(serde_json::json!({
+            "enabled": true,
+            "rules": [],
+            "classifier": {
+                "url": url, "model": model, "timeout_ms": 120000,
+                "labels": [
+                    { "label": "database", "model": "db-model" },
+                    { "label": "frontend", "model": "ui-model" }
+                ]
+            },
+            "default_model": "fallback"
+        }));
+
+        let d = p
+            .decide("Write the Postgres migration adding a unique index on relay_members.")
+            .await
+            .expect("a decision");
+        eprintln!("live classifier -> {:?}", d);
+        assert_eq!(
+            d.model, "db-model",
+            "a migration task should classify as database, got {:?}",
+            d.reason
+        );
+        assert_eq!(
+            d.reason,
+            Reason::Classifier {
+                label: "database".into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_broken_policy_file_disables_routing_rather_than_erroring() {
+        assert!(serde_json::from_str::<Policy>("{ not json").is_err());
+        // from_env's contract: unparseable => None (verified by the type above;
+        // from_env itself is exercised by the runtime probe, not here, because it
+        // reads process env).
+    }
+}

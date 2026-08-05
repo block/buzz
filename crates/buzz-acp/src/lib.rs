@@ -9,6 +9,7 @@ mod pool;
 mod pool_lifecycle;
 mod queue;
 mod relay;
+mod routing;
 mod setup_mode;
 mod usage;
 
