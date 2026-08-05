@@ -10,6 +10,7 @@ import { attachManagedAgentToChannel } from "@/features/agents/channelAgents";
 import {
   coalesceAgentAutocompleteCandidates,
   isAgentIdentityInManagedList,
+  relayAgentIsInvocableByUser,
 } from "@/features/agents/lib/agentAutocompleteEligibility";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useClassifiedMembers } from "@/features/channels/lib/useClassifiedMembers";
@@ -271,7 +272,15 @@ export function MembersSidebar({
         .map((member) => member.displayName?.trim().toLowerCase())
         .filter((label): label is string => Boolean(label)),
     );
-    const managedAgentPubkeys = new Set(managedAgentsByPubkey.keys());
+    // Agents addable to this channel: locally managed ones plus relay-directory
+    // agents that would respond to this user. Channel overlap is deliberately
+    // not required — adding the agent to this channel is what creates it.
+    const addableAgentPubkeys = new Set(managedAgentsByPubkey.keys());
+    for (const agent of relayAgentsQuery.data ?? []) {
+      if (relayAgentIsInvocableByUser(agent, currentPubkey)) {
+        addableAgentPubkeys.add(normalizePubkey(agent.pubkey));
+      }
+    }
 
     const addCandidate = (candidate: AddMemberSearchCandidate) => {
       const pubkey = normalizePubkey(candidate.pubkey);
@@ -282,7 +291,7 @@ export function MembersSidebar({
           )) ||
         memberPubkeys.has(pubkey) ||
         isArchivedDiscovery(pubkey) ||
-        !isAgentIdentityInManagedList(candidate, managedAgentPubkeys)
+        !isAgentIdentityInManagedList(candidate, addableAgentPubkeys)
       ) {
         return;
       }
