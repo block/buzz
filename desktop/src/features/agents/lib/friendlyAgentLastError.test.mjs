@@ -6,6 +6,7 @@ import {
   friendlyTurnErrorCopy,
   CLI_ACP_INTERNAL_ERROR_COPY,
   MODEL_NOT_FOUND_COPY,
+  PROVIDER_UNAVAILABLE_COPY,
   RELAY_MESH_DENIED_COPY,
 } from "./friendlyAgentLastError.ts";
 
@@ -153,15 +154,41 @@ test("friendlyTurnErrorCopy: unknown code passes raw text through", () => {
 // --- structured-code hardening ---
 
 test("unknown code prevents string-pattern cross-classification", () => {
-  // code -32003 is structured and unrecognized — must NOT fall through to
+  // code -32004 is structured and unrecognized — must NOT fall through to
   // the legacy string path that would wrongly promote this to denied.
+  // (-32003 was this fixture until buzz-agent claimed it for provider
+  // failover; an unclaimed code is the whole point of the test.)
   const result = friendlyAgentLastError(
     "llm auth: rate limiter denial",
-    -32003,
+    -32004,
   );
   assert.deepEqual(result, {
     severity: "generic",
     copy: "llm auth: rate limiter denial",
+  });
+});
+
+test("code -32003 → provider-unavailable copy (severity: generic)", () => {
+  // The failover chain walked every configured provider and none recovered
+  // the turn (e.g. z.ai's `1310` weekly limit with no fallback left).
+  const result = friendlyAgentLastError(
+    "Agent reported error (code -32003): llm unavailable (quota): (glm-5.2) all 2 providers failed; last: exhausted retries: 429",
+    -32003,
+  );
+  assert.deepEqual(result, {
+    severity: "generic",
+    copy: PROVIDER_UNAVAILABLE_COPY,
+  });
+});
+
+test("embedded code -32003 recovered from message → provider-unavailable copy", () => {
+  const result = friendlyAgentLastError(
+    "Agent reported error (code -32003): llm unavailable (quota): exhausted retries: 429",
+    null,
+  );
+  assert.deepEqual(result, {
+    severity: "generic",
+    copy: PROVIDER_UNAVAILABLE_COPY,
   });
 });
 

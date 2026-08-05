@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -10,10 +10,12 @@ use tokio::time::Instant;
 use crate::auth::{PkceOAuthConfig, PkceOAuthTokenSource, StaticTokenSource, TokenSource};
 use crate::config::{
     is_openai_host, normalize_effort_for_anthropic_route, normalize_effort_for_openai_route,
-    Config, OpenAiApi, Provider, ThinkingEffort,
+    Config, Endpoint, OpenAiApi, Provider, ThinkingEffort,
 };
+use crate::health::Breaker;
 use crate::types::{
-    AgentError, HistoryItem, LlmResponse, ProviderStop, ToolCall, ToolDef, ToolResultContent,
+    AgentError, CutoverKind, HistoryItem, LlmResponse, ProviderStop, ToolCall, ToolDef,
+    ToolResultContent,
 };
 
 /// Databricks OAuth client_id — the public Databricks-published CLI client.
@@ -85,6 +87,59 @@ enum DatabricksV2Route {
     MlflowChatCompletions,
 }
 
+/// One endpoint to try, fully resolved: the config aimed at it, the model to
+/// ask it for, and the circuit key its outcome is recorded against.
+struct Attempt {
+    key: String,
+    provider: Provider,
+    cfg: Config,
+    model: String,
+}
+
+impl Attempt {
+    /// Record that a fallback rescued a call the primary could not serve.
+    /// `index` is the position in the chain, so 0 (the primary) says nothing —
+    /// the ordinary case should not produce log noise.
+    fn note_rescue(&self, index: usize, what: &str) {
+        if index > 0 {
+            tracing::info!(
+                provider = ?self.provider,
+                model = %self.model,
+                "llm: {what} served by a fallback provider"
+            );
+        }
+    }
+
+    fn note_failure(&self, kind: CutoverKind, error: &AgentError) {
+        tracing::warn!(
+            provider = ?self.provider,
+            model = %self.model,
+            kind = kind.as_str(),
+            error = %error,
+            "llm: endpoint failed"
+        );
+    }
+}
+
+/// The error to surface once every endpoint in the chain has failed.
+///
+/// Reworded only when more than one endpoint was in play, so a
+/// single-provider deployment's errors read exactly as they did before
+/// failover existed.
+fn chain_exhausted(last_error: Option<AgentError>, tried: usize) -> AgentError {
+    match last_error {
+        Some(AgentError::LlmUnavailable { kind, detail }) if tried > 1 => {
+            AgentError::LlmUnavailable {
+                kind,
+                detail: format!("all {tried} providers failed; last: {detail}"),
+            }
+        }
+        Some(error) => error,
+        // Unreachable — the chain always holds at least the primary.
+        None => AgentError::Llm("no provider endpoint configured".into()),
+    }
+}
+
 pub struct Llm {
     http: Client,
     /// One-shot sticky flag: set when a Chat Completions request comes
@@ -101,7 +156,23 @@ pub struct Llm {
     /// (the `DATABRICKS_TOKEN` env var); a refreshable PKCE engine for
     /// Databricks otherwise. Anthropic doesn't use this — it always
     /// reads `cfg.api_key` directly because the API expects `x-api-key`.
+    ///
+    /// This covers the PRIMARY endpoint only. See [`Llm::auth_for`].
     auth: Arc<dyn TokenSource>,
+    /// Circuit key of the endpoint `auth` belongs to, so a request can tell
+    /// whether it is the primary before reaching for the fallback cache.
+    primary_key: String,
+    /// Token sources for fallback endpoints, built on first use and cached.
+    ///
+    /// A cutover cannot reuse `auth`: it holds the *primary's* credential, and
+    /// sending that to a different provider's base URL is an instant 401. They
+    /// are cached rather than rebuilt per turn because a sustained outage
+    /// means every turn cuts over, and rebuilding would repeat the work on
+    /// each one.
+    fallback_auth: std::sync::Mutex<HashMap<String, Arc<dyn TokenSource>>>,
+    /// Which endpoints are known to be down, so a turn skips them instead of
+    /// re-discovering the outage. See [`crate::health`].
+    breaker: Breaker,
 }
 
 impl Llm {
@@ -117,10 +188,118 @@ impl Llm {
             auto_upgraded: AtomicBool::new(false),
             mesh_auto_state: Mutex::new(MeshAutoState::default()),
             auth,
+            primary_key: cfg.primary_endpoint().circuit_key(),
+            fallback_auth: std::sync::Mutex::new(HashMap::new()),
+            breaker: Breaker::new(),
         })
     }
 
+    /// The token source for whichever endpoint `cfg` points at.
+    ///
+    /// Returns the primary's source unchanged in the common case. On a
+    /// cutover, `cfg` is a [`Config::with_endpoint`] clone aimed elsewhere, and
+    /// this mints (once) and caches that endpoint's own source. Getting this
+    /// wrong is silent and total: the request goes to the fallback's URL
+    /// carrying the primary's key, and every cutover 401s.
+    fn auth_for(&self, cfg: &Config) -> Result<Arc<dyn TokenSource>, AgentError> {
+        let key = cfg.primary_endpoint().circuit_key();
+        if key == self.primary_key {
+            return Ok(Arc::clone(&self.auth));
+        }
+        let mut cache = self
+            .fallback_auth
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(existing) = cache.get(&key) {
+            return Ok(Arc::clone(existing));
+        }
+        let source = build_token_source(cfg)?;
+        cache.insert(key, Arc::clone(&source));
+        Ok(source)
+    }
+
+    /// Run one turn, failing over to the next configured provider when the
+    /// current one cannot serve it.
+    ///
+    /// The chain is the primary followed by [`Config::fallback`]. Endpoints the
+    /// circuit breaker has benched are skipped — unless that would leave
+    /// nothing to try, in which case the whole chain is attempted anyway. Stale
+    /// breaker state must never be the reason a turn has nowhere to go.
+    ///
+    /// A stop-class error (malformed request, unknown model) returns
+    /// immediately. Those fail identically on every provider, so walking the
+    /// chain would only reach the same answer more slowly while burning quota
+    /// on the way.
     pub async fn complete(
+        &self,
+        cfg: &Config,
+        system_prompt: &str,
+        history: &[HistoryItem],
+        tools: &[ToolDef],
+        effective_model: &str,
+    ) -> Result<LlmResponse, AgentError> {
+        let chain = self.attempt_chain(cfg, effective_model);
+        let total = chain.len();
+        let mut last_error: Option<AgentError> = None;
+        for (index, attempt) in chain.into_iter().enumerate() {
+            match self
+                .complete_once(&attempt.cfg, system_prompt, history, tools, &attempt.model)
+                .await
+            {
+                Ok(response) => {
+                    self.breaker.record_success(&attempt.key);
+                    attempt.note_rescue(index, "turn");
+                    return Ok(response);
+                }
+                Err(error) => {
+                    let Some(kind) = cutover_kind(&error) else {
+                        // Stop-class: the same request fails the same way on
+                        // every provider. Surface it rather than burn the chain.
+                        return Err(error);
+                    };
+                    self.breaker.record_failure(&attempt.key, kind);
+                    attempt.note_failure(kind, &error);
+                    last_error = Some(error);
+                }
+            }
+        }
+        Err(chain_exhausted(last_error, total))
+    }
+
+    /// The endpoints to try for this call, in order, each paired with the
+    /// config aimed at it.
+    ///
+    /// The primary honors the caller's effective model — a `session/set_model`
+    /// override arrives that way. Each fallback uses its own slot's model
+    /// instead: the primary's model id means nothing to a different provider.
+    ///
+    /// Endpoints the breaker has benched are dropped, unless that would leave
+    /// nothing to try — then the whole chain comes back. Stale breaker state
+    /// must never be the reason a call has nowhere to go.
+    fn attempt_chain(&self, cfg: &Config, effective_model: &str) -> Vec<Attempt> {
+        let mut candidates: Vec<(Endpoint, &str)> = Vec::with_capacity(1 + cfg.fallback.len());
+        candidates.push((cfg.primary_endpoint(), effective_model));
+        for endpoint in &cfg.fallback {
+            candidates.push((endpoint.clone(), endpoint.model.as_str()));
+        }
+        let any_live = candidates
+            .iter()
+            .any(|(endpoint, _)| !self.breaker.is_open(&endpoint.circuit_key()));
+        candidates
+            .into_iter()
+            .filter(|(endpoint, _)| !any_live || !self.breaker.is_open(&endpoint.circuit_key()))
+            .map(|(endpoint, model)| Attempt {
+                key: endpoint.circuit_key(),
+                provider: endpoint.provider,
+                cfg: cfg.with_endpoint(&endpoint),
+                model: model.to_owned(),
+            })
+            .collect()
+    }
+
+    /// One turn against exactly one endpoint. No failover: `cfg` names the
+    /// provider, and `effective_model` is that provider's own model.
+    async fn complete_once(
         &self,
         cfg: &Config,
         system_prompt: &str,
@@ -235,11 +414,62 @@ impl Llm {
             AgentError::LlmModelNotFound(s) => {
                 AgentError::LlmModelNotFound(format!("({effective_model}) {s}"))
             }
+            AgentError::LlmUnavailable { kind, detail } => AgentError::LlmUnavailable {
+                kind,
+                detail: format!("({effective_model}) {detail}"),
+            },
             other => other,
         })
     }
 
+    /// Summarize, failing over exactly as [`Llm::complete`] does.
+    ///
+    /// This is not a nice-to-have. Summarization drives handoff and context
+    /// compaction, so a primary that cannot serve it strands a long
+    /// conversation at the context ceiling with no way to continue — the same
+    /// outage the completion path exists to survive, arriving by another door.
     pub async fn summarize(
+        &self,
+        cfg: &Config,
+        system_prompt: &str,
+        user_prompt: &str,
+        max_output_tokens: u32,
+        effective_model: &str,
+    ) -> Result<String, AgentError> {
+        let chain = self.attempt_chain(cfg, effective_model);
+        let total = chain.len();
+        let mut last_error: Option<AgentError> = None;
+        for (index, attempt) in chain.into_iter().enumerate() {
+            match self
+                .summarize_once(
+                    &attempt.cfg,
+                    system_prompt,
+                    user_prompt,
+                    max_output_tokens,
+                    &attempt.model,
+                )
+                .await
+            {
+                Ok(text) => {
+                    self.breaker.record_success(&attempt.key);
+                    attempt.note_rescue(index, "summary");
+                    return Ok(text);
+                }
+                Err(error) => {
+                    let Some(kind) = cutover_kind(&error) else {
+                        return Err(error);
+                    };
+                    self.breaker.record_failure(&attempt.key, kind);
+                    attempt.note_failure(kind, &error);
+                    last_error = Some(error);
+                }
+            }
+        }
+        Err(chain_exhausted(last_error, total))
+    }
+
+    /// One summary against exactly one endpoint. No failover.
+    async fn summarize_once(
         &self,
         cfg: &Config,
         system_prompt: &str,
@@ -493,8 +723,17 @@ impl Llm {
 
     async fn observe_mesh_virtual_model(&self, cfg: &Config) -> MeshCatalogObservation {
         let url = format!("{}/models", cfg.base_url.trim_end_matches('/'));
-        let bearer = match self.auth.bearer().await {
-            Ok(bearer) => bearer,
+        let bearer = match self.auth_for(cfg) {
+            Ok(auth) => match auth.bearer().await {
+                Ok(bearer) => bearer,
+                Err(error) => {
+                    tracing::debug!(
+                        %error,
+                        "relay-mesh auto: catalog auth unavailable; preserving last confirmed route"
+                    );
+                    return MeshCatalogObservation::Unknown;
+                }
+            },
             Err(error) => {
                 tracing::debug!(
                     %error,
@@ -649,7 +888,8 @@ impl Llm {
         // rejection can never suppress a later turn's legitimate retry. Both
         // statuses map to `LlmAuth` in `post`: a 403 is indistinguishable from
         // an expired-token 403 here, so we refresh once and let it propagate.
-        let mut bearer = self.auth.bearer().await.map_err(PostError::from)?;
+        let auth = self.auth_for(cfg).map_err(PostError::from)?;
+        let mut bearer = auth.bearer().await.map_err(PostError::from)?;
         let mut refreshed = false;
         loop {
             match post(
@@ -663,11 +903,7 @@ impl Llm {
             {
                 Err(PostError::Agent(AgentError::LlmAuth(_))) if !refreshed => {
                     refreshed = true;
-                    bearer = self
-                        .auth
-                        .refresh_now(&bearer)
-                        .await
-                        .map_err(PostError::from)?;
+                    bearer = auth.refresh_now(&bearer).await.map_err(PostError::from)?;
                 }
                 result => return result,
             }
@@ -676,13 +912,14 @@ impl Llm {
 
     async fn post_openrouter(&self, cfg: &Config, body: &Value) -> Result<Value, AgentError> {
         let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
-        let mut bearer = self.auth.bearer().await?;
+        let auth = self.auth_for(cfg)?;
+        let mut bearer = auth.bearer().await?;
         let mut refreshed = false;
         loop {
             match openrouter_post(&self.http, &url, body, &bearer).await {
                 Err(AgentError::LlmAuth(_)) if !refreshed => {
                     refreshed = true;
-                    let new_bearer = self.auth.refresh_now(&bearer).await?;
+                    let new_bearer = auth.refresh_now(&bearer).await?;
                     // A static key refreshes to itself — a byte-identical retry
                     // would be a guaranteed duplicate request against a key the
                     // server just rejected. Fail terminal immediately; the retry
@@ -1706,15 +1943,25 @@ fn is_retryable_transport_error(e: &reqwest::Error) -> bool {
     e.is_timeout() || e.is_connect() || e.is_request()
 }
 
-/// Build the terminal `AgentError::Llm` for a `post()` exit that has given up
-/// retrying — persistent retryable status, transport failure, or a body-read
-/// break. `detail` carries the specific cause (status/body, or the transport
-/// error text); `elapsed` and `attempts` are the cumulative cost of every
-/// attempt made on this call, including the retries that failed before this
-/// one. When cumulative time crosses `STALL_NOTICE_THRESHOLD`, this also logs
-/// a `tracing::warn!` so a slow-building outage is visible in logs even
-/// before an operator reads the returned error text.
-fn terminal_llm_error(elapsed: std::time::Duration, attempts: u32, detail: &str) -> AgentError {
+/// Build the terminal error for a `post()` exit that has given up retrying —
+/// persistent retryable status, transport failure, or a body-read break.
+/// `detail` carries the specific cause (status/body, or the transport error
+/// text); `elapsed` and `attempts` are the cumulative cost of every attempt
+/// made on this call, including the retries that failed before this one. When
+/// cumulative time crosses `STALL_NOTICE_THRESHOLD`, this also logs a
+/// `tracing::warn!` so a slow-building outage is visible in logs even before
+/// an operator reads the returned error text.
+///
+/// Every exit here is cutover-class by construction: retrying the same
+/// endpoint has already been tried and failed, so `kind` records what sort of
+/// failure it was and the caller decides whether another provider can do
+/// better.
+fn terminal_llm_error(
+    kind: CutoverKind,
+    elapsed: std::time::Duration,
+    attempts: u32,
+    detail: &str,
+) -> AgentError {
     if elapsed >= STALL_NOTICE_THRESHOLD {
         tracing::warn!(
             cumulative_stall = ?elapsed,
@@ -1722,10 +1969,31 @@ fn terminal_llm_error(elapsed: std::time::Duration, attempts: u32, detail: &str)
             "llm: cumulative stall {elapsed:?} across {attempts} attempts ({detail})"
         );
     }
-    AgentError::Llm(format!(
-        "{detail} (cumulative {elapsed:?}, {attempts} attempt{})",
-        if attempts == 1 { "" } else { "s" },
-    ))
+    AgentError::LlmUnavailable {
+        kind,
+        detail: format!(
+            "{detail} (cumulative {elapsed:?}, {attempts} attempt{})",
+            if attempts == 1 { "" } else { "s" },
+        ),
+    }
+}
+
+/// Whether `err` is worth retrying on a *different* provider, and what sort of
+/// failure it was.
+///
+/// The distinction that matters: a 400 or an unknown model id fails identically
+/// everywhere, so cutting over just burns the whole chain to reach the same
+/// answer more slowly. Quota, credentials, upstream 5xx, and transport are the
+/// failures another provider genuinely might not share.
+fn cutover_kind(err: &AgentError) -> Option<CutoverKind> {
+    match err {
+        AgentError::LlmUnavailable { kind, .. } => Some(*kind),
+        // The token source already spent its one refresh inside the provider
+        // call. A credential still rejected after that is this endpoint's
+        // problem — another provider's key may be perfectly good.
+        AgentError::LlmAuth(_) => Some(CutoverKind::Auth),
+        _ => None,
+    }
 }
 
 /// Internal HTTP failure that preserves a mesh-specific MoA failure as a
@@ -1816,6 +2084,7 @@ where
                     continue;
                 }
                 return Err(PostError::Agent(terminal_llm_error(
+                    CutoverKind::Transport,
                     call_start.elapsed(),
                     attempt + 1,
                     &format!("transport: {e}"),
@@ -1854,11 +2123,30 @@ where
                 backoff_with_jitter(attempt).await;
                 continue;
             }
+            // 429 is the quota/rate wall (z.ai's weekly `1310` lands here) and
+            // holds for a provider-side window; 5xx/499 is an upstream that is
+            // usually back shortly. The breaker benches them for different
+            // lengths of time.
+            let kind = if status == 429 {
+                CutoverKind::Quota
+            } else {
+                CutoverKind::Server
+            };
             return Err(PostError::Agent(terminal_llm_error(
+                kind,
                 call_start.elapsed(),
                 attempt + 1,
                 &format!("exhausted retries: {status}: {body}"),
             )));
+        }
+        // Credit/balance exhaustion. Retrying this endpoint is pointless — the
+        // balance will not change mid-turn — but another provider may still
+        // have credit, so it cuts over rather than stopping the turn.
+        if status == 402 {
+            return Err(PostError::Agent(AgentError::LlmUnavailable {
+                kind: CutoverKind::Quota,
+                detail: format!("{status}: {}", read_error_body(resp).await),
+            }));
         }
         // Not a stall path: the model is misconfigured, not the transport or
         // upstream capacity — no retry was attempted, so cumulative duration
@@ -1897,6 +2185,7 @@ where
                 Ok(None) => break,
                 Err(e) => {
                     return Err(PostError::Agent(terminal_llm_error(
+                        CutoverKind::Transport,
                         call_start.elapsed(),
                         attempt + 1,
                         &format!("body read: {e}"),
@@ -2081,6 +2370,7 @@ async fn openrouter_post(
                     continue;
                 }
                 return Err(terminal_llm_error(
+                    CutoverKind::Transport,
                     call_start.elapsed(),
                     attempt + 1,
                     &format!("transport: {e}"),
@@ -2105,9 +2395,12 @@ async fn openrouter_post(
             )));
         }
         if status == 402 {
-            return Err(AgentError::Llm(
-                "OpenRouter credits exhausted — check https://openrouter.ai/credits".into(),
-            ));
+            // Cutover-class, not terminal: this account is out of credit, but
+            // a different provider in the chain may not be.
+            return Err(AgentError::LlmUnavailable {
+                kind: CutoverKind::Quota,
+                detail: "OpenRouter credits exhausted — check https://openrouter.ai/credits".into(),
+            });
         }
         if status == 404 {
             // OpenRouter overloads 404: a genuinely unknown/unavailable model id
@@ -2156,6 +2449,7 @@ async fn openrouter_post(
             // Terminal: classify for the user
             return if status == 429 {
                 Err(terminal_llm_error(
+                    CutoverKind::Quota,
                     call_start.elapsed(),
                     attempt + 1,
                     &format!("rate limited: {error_body}"),
@@ -2173,6 +2467,7 @@ async fn openrouter_post(
                     openrouter_parameter_routing_error(&error_body)
                 } else {
                     terminal_llm_error(
+                        CutoverKind::Server,
                         call_start.elapsed(),
                         attempt + 1,
                         &format!("exhausted retries: {status}: {error_body}"),
@@ -2208,6 +2503,7 @@ async fn openrouter_post(
                 Ok(None) => break,
                 Err(e) => {
                     return Err(terminal_llm_error(
+                        CutoverKind::Transport,
                         call_start.elapsed(),
                         attempt + 1,
                         &format!("body read: {e}"),
@@ -2218,6 +2514,7 @@ async fn openrouter_post(
         return serde_json::from_slice(&buf).map_err(|e| AgentError::Llm(format!("json: {e}")));
     }
     Err(terminal_llm_error(
+        CutoverKind::Server,
         call_start.elapsed(),
         MAX_RETRIES,
         "exhausted retries",
@@ -2341,6 +2638,7 @@ mod tests {
     fn cfg(provider: Provider) -> Config {
         Config {
             provider,
+            fallback: Vec::new(),
             system_prompt: "system".into(),
             max_rounds: 10,
             max_output_tokens: 1024,
@@ -2487,6 +2785,11 @@ mod tests {
                 });
                 let status_text = match response.status {
                     200 => "OK",
+                    400 => "Bad Request",
+                    401 => "Unauthorized",
+                    402 => "Payment Required",
+                    404 => "Not Found",
+                    429 => "Too Many Requests",
                     500 => "Internal Server Error",
                     502 => "Bad Gateway",
                     503 => "Service Unavailable",
@@ -4243,7 +4546,10 @@ mod tests {
             .await
             .unwrap_err();
         match &err {
-            PostError::Agent(AgentError::Llm(msg)) => {
+            PostError::Agent(AgentError::LlmUnavailable {
+                kind: CutoverKind::Server,
+                detail: msg,
+            }) => {
                 assert!(
                     msg.contains("exhausted retries") && msg.contains("499"),
                     "expected 'exhausted retries' + '499' in error, got: {msg}"
@@ -4253,7 +4559,9 @@ mod tests {
                     "expected cumulative duration + exact attempt count, got: {msg}"
                 );
             }
-            other => panic!("expected PostError::Agent(AgentError::Llm), got: {other:?}"),
+            other => panic!(
+                "a persistent 499 must be cutover-class Server so the chain can move on, got: {other:?}"
+            ),
         }
         assert_eq!(
             accepts.load(Ordering::SeqCst),
@@ -4267,9 +4575,14 @@ mod tests {
     /// (a handful of quick retries), not an outage.
     #[test]
     fn terminal_llm_error_below_threshold_carries_detail_no_stall_claim() {
-        let err = terminal_llm_error(Duration::from_secs(2), 3, "exhausted retries: 499: body");
+        let err = terminal_llm_error(
+            CutoverKind::Server,
+            Duration::from_secs(2),
+            3,
+            "exhausted retries: 499: body",
+        );
         match err {
-            AgentError::Llm(msg) => {
+            AgentError::LlmUnavailable { detail: msg, .. } => {
                 assert!(msg.contains("cumulative 2s"), "must carry duration: {msg}");
                 assert!(
                     msg.contains("3 attempts"),
@@ -4290,9 +4603,14 @@ mod tests {
     /// Singular "1 attempt" (not "1 attempts") confirms the pluralization.
     #[test]
     fn terminal_llm_error_above_threshold_uses_singular_attempt() {
-        let err = terminal_llm_error(Duration::from_secs(301), 1, "transport: connection reset");
+        let err = terminal_llm_error(
+            CutoverKind::Transport,
+            Duration::from_secs(301),
+            1,
+            "transport: connection reset",
+        );
         match err {
-            AgentError::Llm(msg) => {
+            AgentError::LlmUnavailable { detail: msg, .. } => {
                 assert!(
                     msg.contains("cumulative 301s"),
                     "must carry duration: {msg}"
@@ -4376,7 +4694,12 @@ mod tests {
     #[test]
     fn terminal_llm_error_below_threshold_emits_no_stall_warning() {
         let warnings = count_stall_warnings(|| {
-            let _ = terminal_llm_error(Duration::from_secs(299), 3, "exhausted retries: 499");
+            let _ = terminal_llm_error(
+                CutoverKind::Server,
+                Duration::from_secs(299),
+                3,
+                "exhausted retries: 499",
+            );
         });
         assert_eq!(warnings, 0, "no stall warning below STALL_NOTICE_THRESHOLD");
     }
@@ -4389,7 +4712,12 @@ mod tests {
     #[test]
     fn terminal_llm_error_at_threshold_emits_one_stall_warning() {
         let warnings = count_stall_warnings(|| {
-            let _ = terminal_llm_error(Duration::from_secs(300), 5, "transport: connection reset");
+            let _ = terminal_llm_error(
+                CutoverKind::Transport,
+                Duration::from_secs(300),
+                5,
+                "transport: connection reset",
+            );
         });
         assert_eq!(
             warnings, 1,
@@ -4873,7 +5201,12 @@ mod tests {
         url
     }
 
-    fn llm_with(auth: Arc<dyn TokenSource>) -> Llm {
+    /// An `Llm` whose primary endpoint is `cfg`'s, wired to the supplied token
+    /// source. `cfg` must be fully built (including `base_url`) before this is
+    /// called: `auth_for` matches on the endpoint's circuit key, so an `Llm`
+    /// stamped with a different key would quietly mint its own source and
+    /// ignore the one injected here.
+    fn llm_with(auth: Arc<dyn TokenSource>, cfg: &Config) -> Llm {
         Llm {
             http: Client::builder()
                 .timeout(Duration::from_secs(5))
@@ -4882,6 +5215,9 @@ mod tests {
             auto_upgraded: std::sync::atomic::AtomicBool::new(false),
             mesh_auto_state: Mutex::new(MeshAutoState::default()),
             auth,
+            primary_key: cfg.primary_endpoint().circuit_key(),
+            fallback_auth: std::sync::Mutex::new(HashMap::new()),
+            breaker: Breaker::new(),
         }
     }
 
@@ -4897,9 +5233,9 @@ mod tests {
         let auth = Arc::new(CountingAuth {
             refreshes: AtomicU32::new(0),
         });
-        let llm = llm_with(auth.clone());
         let mut c = cfg(Provider::OpenAi);
         c.base_url = base;
+        let llm = llm_with(auth.clone(), &c);
 
         let out = llm
             .post_openai(&c, "/v1/x", &json!({}), "model")
@@ -4933,9 +5269,9 @@ mod tests {
         let auth = Arc::new(CountingAuth {
             refreshes: AtomicU32::new(0),
         });
-        let llm = llm_with(auth.clone());
         let mut c = cfg(Provider::OpenAi);
         c.base_url = base;
+        let llm = llm_with(auth.clone(), &c);
 
         let err = llm
             .post_openai(&c, "/v1/x", &json!({}), "model")
@@ -4964,9 +5300,9 @@ mod tests {
         let auth = Arc::new(CountingAuth {
             refreshes: AtomicU32::new(0),
         });
-        let llm = llm_with(auth.clone());
         let mut c = cfg(Provider::OpenAi);
         c.base_url = base;
+        let llm = llm_with(auth.clone(), &c);
 
         let err = llm
             .post_openai(&c, "/v1/x", &json!({}), "model")
@@ -4995,9 +5331,9 @@ mod tests {
         let auth = Arc::new(CountingAuth {
             refreshes: AtomicU32::new(0),
         });
-        let llm = llm_with(auth.clone());
         let mut c = cfg(Provider::OpenAi);
         c.base_url = base;
+        let llm = llm_with(auth.clone(), &c);
 
         let out = llm
             .post_openai(&c, "/v1/x", &json!({}), "model")
@@ -6177,8 +6513,12 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(&err, AgentError::Llm(s) if s.contains("credits exhausted")),
-            "got {err:?}"
+            matches!(
+                &err,
+                AgentError::LlmUnavailable { kind: CutoverKind::Quota, detail }
+                    if detail.contains("credits exhausted")
+            ),
+            "402 must be Quota-class so the turn fails over to a provider with credit: got {err:?}"
         );
         assert_eq!(
             attempts.load(std::sync::atomic::Ordering::SeqCst),
@@ -6447,11 +6787,15 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(&err, AgentError::Llm(s) if s.contains("body read")),
-            "truncated body must surface as AgentError::Llm with 'body read': got {err:?}"
+            matches!(
+                &err,
+                AgentError::LlmUnavailable { kind: CutoverKind::Transport, detail }
+                    if detail.contains("body read")
+            ),
+            "a truncated body is a Transport-class failure: got {err:?}"
         );
         assert!(
-            matches!(&err, AgentError::Llm(s) if s.contains("cumulative")),
+            matches!(&err, AgentError::LlmUnavailable { detail, .. } if detail.contains("cumulative")),
             "body-read error must include terminal_llm_error's cumulative context: got {err:?}"
         );
     }
@@ -6507,9 +6851,9 @@ mod tests {
         let auth = Arc::new(StaticAuth {
             token: "static-key".into(),
         });
-        let llm = llm_with(auth);
         let mut c = cfg(Provider::OpenRouter);
         c.base_url = url;
+        let llm = llm_with(auth, &c);
 
         let err = llm.post_openrouter(&c, &json!({})).await.unwrap_err();
         assert!(
@@ -6541,9 +6885,9 @@ mod tests {
             fresh: "fresh".into(),
             refreshes: std::sync::atomic::AtomicU32::new(0),
         });
-        let llm = llm_with(auth.clone());
         let mut c = cfg(Provider::OpenRouter);
         c.base_url = base;
+        let llm = llm_with(auth.clone(), &c);
 
         let result = llm.post_openrouter(&c, &json!({})).await;
         // `spawn_auth_stub` returns `{"ok":true}` on success.
@@ -6556,5 +6900,280 @@ mod tests {
             1,
             "exactly one refresh"
         );
+    }
+
+    // ---- provider failover ------------------------------------------------
+
+    /// A fallback endpoint pointed at `base_url`, carrying its own model.
+    fn fallback_endpoint(base_url: String, model: &str) -> Endpoint {
+        Endpoint {
+            provider: Provider::OpenAi,
+            api_key: "fallback-key".into(),
+            model: model.into(),
+            base_url,
+            openai_api: OpenAiApi::Chat,
+        }
+    }
+
+    /// The model id each captured request asked for.
+    async fn requested_models(captured: &Arc<Mutex<Vec<CapturedHttpRequest>>>) -> Vec<String> {
+        captured
+            .lock()
+            .await
+            .iter()
+            .filter_map(|r| r.body.as_ref()?.get("model")?.as_str().map(str::to_owned))
+            .collect()
+    }
+
+    #[test]
+    fn cutover_kind_classifies_only_what_another_provider_could_fix() {
+        assert_eq!(
+            cutover_kind(&AgentError::LlmUnavailable {
+                kind: CutoverKind::Quota,
+                detail: String::new()
+            }),
+            Some(CutoverKind::Quota)
+        );
+        // A rejected credential survived its one refresh — another provider's
+        // key may still be good.
+        assert_eq!(
+            cutover_kind(&AgentError::LlmAuth("401".into())),
+            Some(CutoverKind::Auth)
+        );
+        // Stop-class: identical failure everywhere, so cutting over only
+        // wastes the rest of the chain.
+        assert_eq!(
+            cutover_kind(&AgentError::Llm("400 bad request".into())),
+            None
+        );
+        assert_eq!(
+            cutover_kind(&AgentError::LlmModelNotFound("404".into())),
+            None
+        );
+        assert_eq!(cutover_kind(&AgentError::Cancelled), None);
+    }
+
+    /// The outage this feature exists for: the primary is out of quota, and the
+    /// turn is served by the next provider instead of dying.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn complete_fails_over_to_the_next_provider_on_quota() {
+        let (primary_url, primary_seen) =
+            spawn_sequence_stub(vec![StubHttpResponse::error(402, "quota exhausted")]).await;
+        let (fallback_url, fallback_seen) =
+            spawn_sequence_stub(vec![StubHttpResponse::ok(chat_response("from fallback"))]).await;
+
+        let mut c = cfg(Provider::OpenAi);
+        c.base_url = primary_url;
+        c.fallback = vec![fallback_endpoint(fallback_url, "fallback-model")];
+        let llm = Llm::new(&c).unwrap();
+
+        let response = complete_model(&llm, &c, "primary-model")
+            .await
+            .expect("a quota wall on the primary must not fail the turn");
+        assert_eq!(response.text, "from fallback");
+
+        assert_eq!(
+            requested_models(&primary_seen).await,
+            vec!["primary-model"],
+            "the primary is asked first, with the caller's effective model"
+        );
+        assert_eq!(
+            requested_models(&fallback_seen).await,
+            vec!["fallback-model"],
+            "the fallback must be asked for ITS OWN model — sending the \
+             primary's model id to another provider is a guaranteed 404"
+        );
+    }
+
+    /// A malformed request fails the same way everywhere. Walking the chain
+    /// would reach the same answer more slowly while burning the fallbacks.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn complete_does_not_fail_over_on_a_bad_request() {
+        let (primary_url, _) =
+            spawn_sequence_stub(vec![StubHttpResponse::error(400, "malformed")]).await;
+        let (fallback_url, fallback_seen) =
+            spawn_sequence_stub(vec![StubHttpResponse::ok(chat_response("unreachable"))]).await;
+
+        let mut c = cfg(Provider::OpenAi);
+        c.base_url = primary_url;
+        c.fallback = vec![fallback_endpoint(fallback_url, "fallback-model")];
+        let llm = Llm::new(&c).unwrap();
+
+        let err = complete_model(&llm, &c, "primary-model")
+            .await
+            .expect_err("a 400 must surface, not cut over");
+        assert!(
+            matches!(&err, AgentError::Llm(s) if s.contains("400")),
+            "got {err:?}"
+        );
+        assert!(
+            requested_models(&fallback_seen).await.is_empty(),
+            "the fallback must never be contacted for a stop-class failure"
+        );
+    }
+
+    /// When every endpoint is down the turn still fails — but the error says
+    /// the whole chain was tried, not just that one provider misbehaved.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn complete_reports_the_whole_chain_when_all_endpoints_fail() {
+        let (primary_url, primary_seen) =
+            spawn_sequence_stub(vec![StubHttpResponse::error(402, "quota exhausted")]).await;
+        let (fallback_url, fallback_seen) =
+            spawn_sequence_stub(vec![StubHttpResponse::error(402, "also broke")]).await;
+
+        let mut c = cfg(Provider::OpenAi);
+        c.base_url = primary_url;
+        c.fallback = vec![fallback_endpoint(fallback_url, "fallback-model")];
+        let llm = Llm::new(&c).unwrap();
+
+        let err = complete_model(&llm, &c, "primary-model")
+            .await
+            .expect_err("no endpoint could serve the turn");
+        assert!(
+            matches!(
+                &err,
+                AgentError::LlmUnavailable { kind: CutoverKind::Quota, detail }
+                    if detail.contains("all 2 providers failed")
+            ),
+            "got {err:?}"
+        );
+        assert_eq!(requested_models(&primary_seen).await.len(), 1);
+        assert_eq!(requested_models(&fallback_seen).await.len(), 1);
+    }
+
+    /// Once the breaker has benched the primary, later turns skip it outright
+    /// instead of re-paying for the same wall. This is the difference between
+    /// failover costing one slow turn and costing every turn of the outage.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_benched_primary_is_skipped_on_later_turns() {
+        let (primary_url, primary_seen) = spawn_sequence_stub(vec![
+            StubHttpResponse::error(402, "quota exhausted"),
+            StubHttpResponse::error(402, "quota exhausted"),
+            StubHttpResponse::error(402, "quota exhausted"),
+        ])
+        .await;
+        let (fallback_url, fallback_seen) = spawn_sequence_stub(vec![
+            StubHttpResponse::ok(chat_response("one")),
+            StubHttpResponse::ok(chat_response("two")),
+            StubHttpResponse::ok(chat_response("three")),
+        ])
+        .await;
+
+        let mut c = cfg(Provider::OpenAi);
+        c.base_url = primary_url;
+        c.fallback = vec![fallback_endpoint(fallback_url, "fallback-model")];
+        let llm = Llm::new(&c).unwrap();
+
+        for _ in 0..3 {
+            complete_model(&llm, &c, "primary-model")
+                .await
+                .expect("the fallback serves every turn");
+        }
+
+        // Two failures open the circuit, so the third turn never touches it.
+        assert_eq!(
+            requested_models(&primary_seen).await.len(),
+            2,
+            "the primary must stop being retried once its circuit opens"
+        );
+        assert_eq!(
+            requested_models(&fallback_seen).await.len(),
+            3,
+            "every turn is still served"
+        );
+    }
+
+    /// With no fallback configured, behavior is exactly what it was before
+    /// failover existed: one endpoint, and its error surfaces unwrapped.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_single_provider_deployment_is_unchanged() {
+        let (primary_url, primary_seen) =
+            spawn_sequence_stub(vec![StubHttpResponse::error(402, "quota exhausted")]).await;
+
+        let mut c = cfg(Provider::OpenAi);
+        c.base_url = primary_url;
+        assert!(c.fallback.is_empty());
+        let llm = Llm::new(&c).unwrap();
+
+        let err = complete_model(&llm, &c, "primary-model").await.unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                AgentError::LlmUnavailable { detail, .. } if !detail.contains("providers failed")
+            ),
+            "a single-provider error must not gain chain wording: got {err:?}"
+        );
+        assert_eq!(requested_models(&primary_seen).await.len(), 1);
+    }
+
+    /// Summarization drives handoff and context compaction. Without failover a
+    /// quota wall strands a long conversation at the context ceiling — the same
+    /// outage the completion path survives, arriving by another door.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn summarize_fails_over_to_the_next_provider() {
+        let (primary_url, primary_seen) =
+            spawn_sequence_stub(vec![StubHttpResponse::error(402, "quota exhausted")]).await;
+        let (fallback_url, fallback_seen) = spawn_sequence_stub(vec![StubHttpResponse::ok(
+            chat_response("summary from fallback"),
+        )])
+        .await;
+
+        let mut c = cfg(Provider::OpenAi);
+        c.base_url = primary_url;
+        c.fallback = vec![fallback_endpoint(fallback_url, "fallback-model")];
+        let llm = Llm::new(&c).unwrap();
+
+        let text = llm
+            .summarize(&c, "system", "summarize this", 256, "primary-model")
+            .await
+            .expect("a quota wall on the primary must not strand compaction");
+        assert_eq!(text, "summary from fallback");
+
+        assert_eq!(requested_models(&primary_seen).await, vec!["primary-model"]);
+        assert_eq!(
+            requested_models(&fallback_seen).await,
+            vec!["fallback-model"],
+            "the summary must be asked of the fallback's own model"
+        );
+    }
+
+    /// The breaker is shared across both paths. A primary benched by failed
+    /// turns is skipped by summarization too, rather than each path paying to
+    /// rediscover the same outage.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_primary_benched_by_turns_is_skipped_by_summarize() {
+        let (primary_url, primary_seen) = spawn_sequence_stub(vec![
+            StubHttpResponse::error(402, "quota exhausted"),
+            StubHttpResponse::error(402, "quota exhausted"),
+        ])
+        .await;
+        let (fallback_url, fallback_seen) = spawn_sequence_stub(vec![
+            StubHttpResponse::ok(chat_response("one")),
+            StubHttpResponse::ok(chat_response("two")),
+            StubHttpResponse::ok(chat_response("the summary")),
+        ])
+        .await;
+
+        let mut c = cfg(Provider::OpenAi);
+        c.base_url = primary_url;
+        c.fallback = vec![fallback_endpoint(fallback_url, "fallback-model")];
+        let llm = Llm::new(&c).unwrap();
+
+        // Two turns fail the primary over — that opens its circuit.
+        for _ in 0..2 {
+            complete_model(&llm, &c, "primary-model").await.unwrap();
+        }
+        let text = llm
+            .summarize(&c, "system", "summarize this", 256, "primary-model")
+            .await
+            .unwrap();
+        assert_eq!(text, "the summary");
+
+        assert_eq!(
+            requested_models(&primary_seen).await.len(),
+            2,
+            "summarize must not re-probe a primary the turns already benched"
+        );
+        assert_eq!(requested_models(&fallback_seen).await.len(), 3);
     }
 }

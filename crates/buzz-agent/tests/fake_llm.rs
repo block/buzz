@@ -155,6 +155,15 @@ impl Harness {
             .env("OPENAI_COMPAT_API_KEY", "test")
             .env("OPENAI_COMPAT_MODEL", "fake-model")
             .env("OPENAI_COMPAT_BASE_URL", base_url)
+            // Pin failover OFF. `cmd.env()` adds to the inherited environment
+            // rather than replacing it, so on a developer box or CI runner that
+            // exports a real OPENROUTER_/OLLAMA_ key AND model, the agent would
+            // auto-derive a fallback chain and answer these tests from a REAL
+            // provider the moment a canned response looked cutover-class —
+            // nondeterministic, and billable. These tests assert
+            // single-provider behavior; a test that wants failover sets its own
+            // chain.
+            .env("BUZZ_AGENT_FALLBACK_PROVIDERS", "none")
             .env("BUZZ_AGENT_LLM_TIMEOUT_SECS", "5")
             .env("BUZZ_AGENT_TOOL_TIMEOUT_SECS", "5")
             .env("BUZZ_AGENT_MAX_ROUNDS", "4")
