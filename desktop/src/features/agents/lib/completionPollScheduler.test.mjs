@@ -36,7 +36,7 @@ function fakeTimers() {
   };
 }
 
-test("concurrent triggers share one unresolved poll", async () => {
+test("repeated timer ticks while a poll is unresolved produce exactly one call", async () => {
   const gate = deferred();
   const timers = fakeTimers();
   let calls = 0;

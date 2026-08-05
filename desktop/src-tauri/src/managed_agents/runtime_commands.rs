@@ -218,14 +218,21 @@ pub async fn list_managed_agent_runtimes(
 }
 
 #[derive(Clone)]
-struct RuntimeStatusSnapshot {
+struct RuntimeProcessSnapshot {
     key: ManagedAgentRuntimeKey,
-    record: super::ManagedAgentRecord,
     lifecycle: ManagedAgentRuntimeLifecycle,
-    pid: Option<u32>,
+    tracked_pid: u32,
+    status_pid: Option<u32>,
     error: Option<String>,
-    start_nonce: Option<String>,
-    emit_after_reap: bool,
+    start_nonce: String,
+    exited: bool,
+    exit_code: Option<i32>,
+}
+
+#[derive(Clone)]
+struct RuntimeStatusSnapshot {
+    process: RuntimeProcessSnapshot,
+    record: super::ManagedAgentRecord,
 }
 
 fn status_for_snapshot(
@@ -238,96 +245,171 @@ fn status_for_snapshot(
     let effective =
         resolve_effective_agent_env(&snapshot.record, inputs.personas, metadata, inputs.global);
     ManagedAgentRuntimeStatus {
-        pubkey: snapshot.key.pubkey.clone(),
-        relay_url: snapshot.key.relay_url.clone(),
+        pubkey: snapshot.process.key.pubkey.clone(),
+        relay_url: snapshot.process.key.relay_url.clone(),
         requested_relay_url: None,
         local_setup: matches!(agent_readiness(&effective), AgentReadiness::Ready),
-        lifecycle: snapshot.lifecycle.clone(),
-        pid: snapshot.pid,
-        error: snapshot.error.clone(),
-        log_path: managed_agent_runtime_log_path(app, &snapshot.key)
+        lifecycle: snapshot.process.lifecycle.clone(),
+        pid: snapshot.process.status_pid,
+        error: snapshot.process.error.clone(),
+        log_path: managed_agent_runtime_log_path(app, &snapshot.process.key)
             .ok()
             .map(|path| path.display().to_string()),
     }
 }
 
-fn list_managed_agent_runtimes_blocking(
-    app: AppHandle,
-) -> Result<Vec<ManagedAgentRuntimeStatus>, String> {
-    // This command is polled whenever the members sidebar opens and refetched
-    // on every status event — load the per-row status inputs once, outside
-    // the locks, instead of hitting disk per row while holding them.
-    let personas = load_personas(&app).unwrap_or_default();
-    let global = load_global_agent_config(&app).unwrap_or_default();
-    let state = app.state::<AppState>();
+fn collect_runtime_process_snapshots(
+    state: &AppState,
+) -> Result<(u64, Vec<RuntimeProcessSnapshot>), String> {
+    // Phase 1: hold the runtime-management locks only long enough to inspect
+    // child generations and copy immutable scalar state. No file or command
+    // discovery and no authentication process is allowed in this scope.
     let _transition = state
         .managed_agent_runtime_transition
         .lock()
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| error.to_string())?;
     let _store = state
         .managed_agents_store_lock
         .lock()
-        .map_err(|e| e.to_string())?;
-    let mut records = load_managed_agents(&app)?;
+        .map_err(|error| error.to_string())?;
+    let store_generation = super::managed_agent_store_generation();
     let mut runtimes = state
         .managed_agent_processes
         .lock()
-        .map_err(|e| e.to_string())?;
-    let exited_keys: Vec<_> = runtimes
+        .map_err(|error| error.to_string())?;
+    let snapshots = runtimes
         .iter_mut()
-        .filter_map(|(key, runtime)| match runtime.child.try_wait() {
-            Ok(Some(_)) | Err(_) => Some(key.clone()),
-            Ok(None) => None,
+        .map(|(key, runtime)| {
+            let tracked_pid = runtime.child.id();
+            let (exited, exit_code, error) = match runtime.child.try_wait() {
+                Ok(Some(status)) => (
+                    true,
+                    status.code(),
+                    Some(format!(
+                        "managed agent runtime exited unexpectedly ({status})"
+                    )),
+                ),
+                Err(error) => (
+                    true,
+                    None,
+                    Some(format!("failed to inspect managed agent runtime: {error}")),
+                ),
+                Ok(None) => (false, None, runtime.error.clone()),
+            };
+            RuntimeProcessSnapshot {
+                key: key.clone(),
+                lifecycle: if exited {
+                    ManagedAgentRuntimeLifecycle::Failed
+                } else {
+                    runtime.lifecycle.clone()
+                },
+                tracked_pid,
+                status_pid: (!exited).then_some(tracked_pid),
+                error,
+                start_nonce: runtime.start_nonce.clone(),
+                exited,
+                exit_code,
+            }
         })
         .collect();
-    let records_changed = !exited_keys.is_empty();
-    let mut snapshots = Vec::new();
-    for key in exited_keys {
-        runtimes.remove(&key);
-        super::remove_agent_runtime_receipt(&app, &key);
-        state.clear_agent_session_cache(&key);
-        if let Some(record) = records
-            .iter_mut()
-            .find(|record| record.pubkey.eq_ignore_ascii_case(&key.pubkey))
-        {
-            record.updated_at = crate::util::now_iso();
-            record.last_stopped_at = Some(record.updated_at.clone());
-            snapshots.push(RuntimeStatusSnapshot {
-                key,
-                record: record.clone(),
-                lifecycle: ManagedAgentRuntimeLifecycle::Stopped,
-                pid: None,
-                error: None,
-                start_nonce: None,
-                emit_after_reap: true,
-            });
+    Ok((store_generation, snapshots))
+}
+
+fn persist_exited_runtime_snapshots(
+    app: &AppHandle,
+    state: &AppState,
+    store_generation: u64,
+    snapshots: &[RuntimeStatusSnapshot],
+    records: &mut [super::ManagedAgentRecord],
+) -> Result<(), String> {
+    let exited: Vec<_> = snapshots
+        .iter()
+        .filter(|snapshot| snapshot.process.exited)
+        .collect();
+    if exited.is_empty() {
+        return Ok(());
+    }
+
+    // Phase 4: only exited-runtime persistence reacquires the locks. Verify
+    // both the store and process generation before applying delayed results.
+    let _transition = state
+        .managed_agent_runtime_transition
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let _store = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|error| error.to_string())?;
+    if super::managed_agent_store_generation() != store_generation {
+        return Err("managed-agent store changed while status probes were in flight".into());
+    }
+    let mut runtimes = state
+        .managed_agent_processes
+        .lock()
+        .map_err(|error| error.to_string())?;
+    for snapshot in &exited {
+        let process = &snapshot.process;
+        let unchanged = runtimes.get_mut(&process.key).is_some_and(|runtime| {
+            runtime.start_nonce == process.start_nonce
+                && runtime.child.id() == process.tracked_pid
+                && !matches!(runtime.child.try_wait(), Ok(None))
+        });
+        if !unchanged {
+            return Err("managed runtime changed while status probes were in flight".into());
         }
     }
-    snapshots.extend(runtimes.iter().filter_map(|(key, runtime)| {
-        let record = records
-            .iter()
-            .find(|record| record.pubkey.eq_ignore_ascii_case(&key.pubkey))?;
-        Some(RuntimeStatusSnapshot {
-            key: key.clone(),
-            record: record.clone(),
-            lifecycle: runtime.lifecycle.clone(),
-            pid: Some(runtime.child.id()),
-            error: runtime.error.clone(),
-            start_nonce: Some(runtime.start_nonce.clone()),
-            emit_after_reap: false,
-        })
-    }));
-    drop(runtimes);
-    // Records are only mutated above when a runtime exited — skip the store
-    // rewrite on the common nothing-changed poll.
-    if records_changed {
-        save_managed_agents(&app, &records)?;
-    }
-    drop(_store);
-    drop(_transition);
 
-    // CLI readiness probes may spawn external processes. They run only after
-    // all runtime-management locks have been released.
+    for snapshot in &exited {
+        let process = &snapshot.process;
+        if let Some(record) = records
+            .iter_mut()
+            .find(|record| record.pubkey.eq_ignore_ascii_case(&process.key.pubkey))
+        {
+            record.updated_at = snapshot.record.updated_at.clone();
+            record.last_stopped_at = snapshot.record.last_stopped_at.clone();
+            record.last_exit_code = process.exit_code;
+            record.last_error = process.error.clone();
+            record.last_error_code = process.exit_code.map(i64::from);
+        }
+    }
+    save_managed_agents(app, records)?;
+    for snapshot in exited {
+        runtimes.remove(&snapshot.process.key);
+        super::remove_agent_runtime_receipt(app, &snapshot.process.key);
+        state.clear_agent_session_cache(&snapshot.process.key);
+    }
+    Ok(())
+}
+
+fn list_managed_agent_runtimes_blocking(
+    app: AppHandle,
+) -> Result<Vec<ManagedAgentRuntimeStatus>, String> {
+    let state = app.state::<AppState>();
+    let (store_generation, process_snapshots) = collect_runtime_process_snapshots(&state)?;
+
+    // Phase 3: all filesystem reads, command discovery, and authentication
+    // probes happen after every runtime-management lock has been released.
+    let personas = load_personas(&app).unwrap_or_default();
+    let global = load_global_agent_config(&app).unwrap_or_default();
+    let mut records = load_managed_agents(&app)?;
+    if super::managed_agent_store_generation() != store_generation {
+        return Err("managed-agent store changed during status snapshot".into());
+    }
+    let snapshots: Vec<_> = process_snapshots
+        .into_iter()
+        .filter_map(|process| {
+            let record = records
+                .iter()
+                .find(|record| record.pubkey.eq_ignore_ascii_case(&process.key.pubkey))?;
+            let mut record = record.clone();
+            if process.exited {
+                record.updated_at = crate::util::now_iso();
+                record.last_stopped_at = Some(record.updated_at.clone());
+            }
+            Some(RuntimeStatusSnapshot { process, record })
+        })
+        .collect();
+
     let statuses: Vec<_> = snapshots
         .iter()
         .map(|snapshot| {
@@ -342,46 +424,10 @@ fn list_managed_agent_runtimes_blocking(
         })
         .collect();
 
-    // Validate that no agent or harness generation changed while the probes
-    // ran. Delayed results are never applied to a newer generation.
-    let _transition = state
-        .managed_agent_runtime_transition
-        .lock()
-        .map_err(|e| e.to_string())?;
-    let _store = state
-        .managed_agents_store_lock
-        .lock()
-        .map_err(|e| e.to_string())?;
-    let current_records = load_managed_agents(&app)?;
-    let mut current_runtimes = state
-        .managed_agent_processes
-        .lock()
-        .map_err(|e| e.to_string())?;
-    for snapshot in &snapshots {
-        let unchanged_record = current_records.iter().any(|record| {
-            record.pubkey.eq_ignore_ascii_case(&snapshot.key.pubkey)
-                && record.updated_at == snapshot.record.updated_at
-        });
-        let unchanged_runtime = match snapshot.start_nonce.as_deref() {
-            Some(start_nonce) => current_runtimes
-                .get_mut(&snapshot.key)
-                .is_some_and(|runtime| {
-                    runtime.start_nonce == start_nonce
-                        && runtime.child.id() == snapshot.pid.unwrap_or_default()
-                        && runtime.child.try_wait().ok().flatten().is_none()
-                }),
-            None => !current_runtimes.contains_key(&snapshot.key),
-        };
-        if !unchanged_record || !unchanged_runtime {
-            return Err("managed runtime changed while status probes were in flight".into());
-        }
-    }
-    drop(current_runtimes);
-    drop(_store);
-    drop(_transition);
+    persist_exited_runtime_snapshots(&app, &state, store_generation, &snapshots, &mut records)?;
 
     for (snapshot, status) in snapshots.iter().zip(&statuses) {
-        if snapshot.emit_after_reap {
+        if snapshot.process.exited {
             emit_status(&app, status);
         }
     }
@@ -816,6 +862,30 @@ mod tests {
         release.notify_one();
         assert!(second.await.is_ok());
         assert!(finished.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn runtime_lifecycle_locks_are_available_while_readiness_is_blocked() {
+        use std::sync::{mpsc, Arc};
+
+        let state = Arc::new(crate::app_state::build_app_state());
+        let (probe_started_tx, probe_started_rx) = mpsc::channel();
+        let (release_probe_tx, release_probe_rx) = mpsc::channel();
+        let worker_state = Arc::clone(&state);
+        let worker = std::thread::spawn(move || {
+            let snapshot = collect_runtime_process_snapshots(&worker_state)
+                .expect("runtime snapshot should succeed");
+            probe_started_tx.send(()).expect("announce fake probe");
+            release_probe_rx.recv().expect("release fake probe");
+            snapshot
+        });
+
+        probe_started_rx.recv().expect("fake readiness started");
+        assert!(state.managed_agent_runtime_transition.try_lock().is_ok());
+        assert!(state.managed_agents_store_lock.try_lock().is_ok());
+        assert!(state.managed_agent_processes.try_lock().is_ok());
+        release_probe_tx.send(()).expect("release fake readiness");
+        let _ = worker.join().expect("snapshot worker");
     }
 
     fn payload(

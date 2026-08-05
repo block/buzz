@@ -1,11 +1,12 @@
 use std::{
     collections::HashMap,
+    ffi::OsString,
     io::Read,
     path::{Path, PathBuf},
     process::Stdio,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Mutex, OnceLock,
+        Arc, Condvar, Mutex, OnceLock,
     },
     time::{Duration, Instant},
 };
@@ -63,26 +64,156 @@ struct ProbeCacheKey {
     binary_path: PathBuf,
     args: Vec<String>,
     effective_path: Option<String>,
+    effective_environment: Vec<(&'static str, Option<OsString>)>,
 }
 
-fn probe_cache_generation() -> &'static AtomicU64 {
-    static GENERATION: AtomicU64 = AtomicU64::new(0);
-    &GENERATION
+#[derive(Debug)]
+struct ProbeFlight {
+    result: Mutex<Option<ProbeOutcome>>,
+    ready: Condvar,
 }
 
-fn probe_cache() -> &'static Mutex<HashMap<ProbeCacheKey, (Instant, ProbeOutcome)>> {
-    static CACHE: OnceLock<Mutex<HashMap<ProbeCacheKey, (Instant, ProbeOutcome)>>> =
-        OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+impl ProbeFlight {
+    fn wait(&self) -> ProbeOutcome {
+        let mut result = self
+            .result
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        while result.is_none() {
+            result = self
+                .ready
+                .wait(result)
+                .unwrap_or_else(|error| error.into_inner());
+        }
+        result.clone().unwrap_or(ProbeOutcome::LoggedOut)
+    }
+
+    fn publish(&self, outcome: ProbeOutcome) {
+        let mut result = self
+            .result
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *result = Some(outcome);
+        self.ready.notify_all();
+    }
+}
+
+#[derive(Debug)]
+enum ProbeCacheEntry {
+    InFlight(Arc<ProbeFlight>),
+    Complete {
+        completed_at: Instant,
+        outcome: ProbeOutcome,
+    },
+}
+
+#[derive(Default)]
+struct LoginProbeCache {
+    generation: AtomicU64,
+    entries: Mutex<HashMap<ProbeCacheKey, ProbeCacheEntry>>,
+}
+
+enum ProbeDecision {
+    Cached(ProbeOutcome),
+    Wait(Arc<ProbeFlight>),
+    Run(Arc<ProbeFlight>),
+}
+
+impl LoginProbeCache {
+    fn probe<F, N>(&self, mut key: ProbeCacheKey, now: N, run: F) -> ProbeOutcome
+    where
+        F: FnOnce() -> ProbeOutcome,
+        N: Fn() -> Instant,
+    {
+        key.generation = self.generation.load(Ordering::Acquire);
+        let decision = {
+            let observed_at = now();
+            let mut entries = self
+                .entries
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            entries.retain(|candidate, _| candidate.generation == key.generation);
+            let cached = entries.get(&key).and_then(|entry| match entry {
+                ProbeCacheEntry::Complete {
+                    completed_at,
+                    outcome,
+                } => {
+                    let ttl = if matches!(outcome, ProbeOutcome::ConfigInvalid { .. }) {
+                        CONFIG_ERROR_CACHE_TTL
+                    } else {
+                        LOGIN_PROBE_CACHE_TTL
+                    };
+                    (observed_at.saturating_duration_since(*completed_at) < ttl)
+                        .then(|| outcome.clone())
+                }
+                ProbeCacheEntry::InFlight(_) => None,
+            });
+            if let Some(outcome) = cached {
+                ProbeDecision::Cached(outcome)
+            } else if let Some(ProbeCacheEntry::InFlight(flight)) = entries.get(&key) {
+                ProbeDecision::Wait(Arc::clone(flight))
+            } else {
+                entries.remove(&key);
+                let flight = Arc::new(ProbeFlight {
+                    result: Mutex::new(None),
+                    ready: Condvar::new(),
+                });
+                entries.insert(key.clone(), ProbeCacheEntry::InFlight(Arc::clone(&flight)));
+                ProbeDecision::Run(flight)
+            }
+        };
+
+        match decision {
+            ProbeDecision::Cached(outcome) => outcome,
+            ProbeDecision::Wait(flight) => flight.wait(),
+            ProbeDecision::Run(flight) => {
+                // The external command runs without the cache mutex. Identical
+                // callers wait on this key's flight; different keys remain
+                // independent and may probe concurrently.
+                let outcome = run();
+                flight.publish(outcome.clone());
+                let completed_at = now();
+                let mut entries = self
+                    .entries
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                if self.generation.load(Ordering::Acquire) == key.generation
+                    && matches!(
+                        entries.get(&key),
+                        Some(ProbeCacheEntry::InFlight(current)) if Arc::ptr_eq(current, &flight)
+                    )
+                {
+                    entries.insert(
+                        key,
+                        ProbeCacheEntry::Complete {
+                            completed_at,
+                            outcome: outcome.clone(),
+                        },
+                    );
+                }
+                outcome
+            }
+        }
+    }
+
+    fn invalidate(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        self.entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+    }
+}
+
+fn login_probe_cache() -> &'static LoginProbeCache {
+    static CACHE: OnceLock<LoginProbeCache> = OnceLock::new();
+    CACHE.get_or_init(LoginProbeCache::default)
 }
 
 pub(crate) fn clear_login_probe_cache() {
-    probe_cache_generation().fetch_add(1, Ordering::AcqRel);
-    // Invalidation must never wait behind a slow external probe, especially
-    // when a config save currently owns a runtime-management lock.
-    if let Ok(mut cache) = probe_cache().try_lock() {
-        cache.clear();
-    }
+    // The cache mutex is never held while an external process runs, so
+    // configuration writes and manual discovery refreshes invalidate promptly.
+    login_probe_cache().invalidate();
 }
 
 /// Signals emitted to stderr by codex (and related CLI tools) when they
@@ -115,36 +246,24 @@ fn login_probe_with_timeout(
     timeout: Duration,
 ) -> ProbeOutcome {
     let key = ProbeCacheKey {
-        generation: probe_cache_generation().load(Ordering::Acquire),
+        generation: 0,
         runtime: probe_args.first().copied().unwrap_or_default().to_string(),
-        binary_path: binary_path.to_path_buf(),
+        binary_path: binary_path
+            .canonicalize()
+            .unwrap_or_else(|_| binary_path.to_path_buf()),
         args: probe_args
             .iter()
             .map(|value| (*value).to_string())
             .collect(),
         effective_path: augmented_path.map(str::to_owned),
+        effective_environment: ["HOME", "XDG_CONFIG_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR"]
+            .into_iter()
+            .map(|name| (name, std::env::var_os(name)))
+            .collect(),
     };
-    let mut cache = probe_cache()
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    cache.retain(|candidate, _| candidate.generation == key.generation);
-    if let Some((created_at, outcome)) = cache.get(&key) {
-        let ttl = if matches!(outcome, ProbeOutcome::ConfigInvalid { .. }) {
-            CONFIG_ERROR_CACHE_TTL
-        } else {
-            LOGIN_PROBE_CACHE_TTL
-        };
-        if created_at.elapsed() < ttl {
-            return outcome.clone();
-        }
-    }
-    cache.remove(&key);
-
-    let outcome = run_login_probe(binary_path, probe_args, augmented_path, timeout);
-    // Config parse failures receive the shorter TTL above. This still
-    // deduplicates a multi-row list call without hiding an external repair.
-    cache.insert(key, (Instant::now(), outcome.clone()));
-    outcome
+    login_probe_cache().probe(key, Instant::now, || {
+        run_login_probe(binary_path, probe_args, augmented_path, timeout)
+    })
 }
 
 fn run_login_probe(
@@ -207,10 +326,7 @@ where
     std::thread::spawn(move || {
         let mut retained = Vec::new();
         let mut chunk = [0_u8; 8 * 1024];
-        loop {
-            let Ok(count) = reader.read(&mut chunk) else {
-                break;
-            };
+        while let Ok(count) = reader.read(&mut chunk) {
             if count == 0 {
                 break;
             }
@@ -229,19 +345,19 @@ fn join_reader(reader: Option<std::thread::JoinHandle<Vec<u8>>>) -> Vec<u8> {
 
 fn kill_probe_process_tree(child: &mut std::process::Child) {
     #[cfg(unix)]
-    // SAFETY: the child was placed in a fresh process group whose id is its
-    // pid. A negative pid targets only that group.
-    unsafe {
-        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    {
+        use nix::{
+            sys::signal::{killpg, Signal},
+            unistd::Pid,
+        };
+        let _ = killpg(Pid::from_raw(child.id() as i32), Signal::SIGKILL);
     }
     let _ = child.kill();
 }
 
 /// Classify collected probe output into a `ProbeOutcome`.
 ///
-/// Shared between `login_probe` (which has the full `Output`) and the
-/// process-level timeout path in `probe_auth_status` (which drains stderr
-/// on a background thread and collects it separately).
+/// Shared by the bounded process runner and classification-focused tests.
 pub(crate) fn classify_probe_output(stderr_bytes: &[u8], exit_success: bool) -> ProbeOutcome {
     if exit_success {
         return ProbeOutcome::LoggedIn;
@@ -263,7 +379,20 @@ pub(crate) fn classify_probe_output(stderr_bytes: &[u8], exit_success: bool) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::{ProbeOutcome, CONFIG_PARSE_SIGNALS};
+    use super::{
+        LoginProbeCache, ProbeCacheKey, ProbeOutcome, CONFIG_PARSE_SIGNALS, LOGIN_PROBE_CACHE_TTL,
+    };
+
+    fn cache_key(runtime: &str) -> ProbeCacheKey {
+        ProbeCacheKey {
+            generation: 0,
+            runtime: runtime.to_string(),
+            binary_path: std::path::PathBuf::from(format!("/test/{runtime}")),
+            args: vec![runtime.to_string(), "login".into(), "status".into()],
+            effective_path: Some("/test/bin".into()),
+            effective_environment: Vec::new(),
+        }
+    }
 
     #[cfg(unix)]
     fn executable_script(contents: &str) -> (tempfile::TempDir, std::path::PathBuf) {
@@ -301,8 +430,10 @@ mod tests {
             .expect("pid marker")
             .parse()
             .expect("numeric pid");
-        // SAFETY: signal 0 only checks whether this exact pid still exists.
-        assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "probe child survived");
+        assert!(
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_err(),
+            "probe child survived"
+        );
     }
 
     #[cfg(unix)]
@@ -325,47 +456,130 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn login_probe_cache_deduplicates_and_explicitly_invalidates() {
-        use std::fs;
+    fn ten_equivalent_agents_share_one_authentication_probe() {
+        use std::sync::{atomic::AtomicUsize, Arc, Barrier};
 
-        super::clear_login_probe_cache();
-        let (temp, script_path) = executable_script("#!/bin/sh\nprintf x >> \"$1\"\nexit 0\n");
-        let marker = temp.path().join("calls");
-        let marker_arg = marker.to_string_lossy().into_owned();
-        let args = ["probe-script", marker_arg.as_str()];
-        let mut stable_generation_observed = false;
-        for _ in 0..20 {
-            super::clear_login_probe_cache();
-            let _ = fs::remove_file(&marker);
-            let generation =
-                super::probe_cache_generation().load(std::sync::atomic::Ordering::Acquire);
-            assert_eq!(
-                super::login_probe(&script_path, &args, None),
-                ProbeOutcome::LoggedIn
-            );
-            assert_eq!(
-                super::login_probe(&script_path, &args, None),
-                ProbeOutcome::LoggedIn
-            );
-            if generation
-                == super::probe_cache_generation().load(std::sync::atomic::Ordering::Acquire)
-            {
-                assert_eq!(fs::read_to_string(&marker).expect("call marker"), "x");
-                stable_generation_observed = true;
-                break;
-            }
+        let cache = Arc::new(LoginProbeCache::default());
+        let start = Arc::new(Barrier::new(11));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut threads = Vec::new();
+        for _ in 0..10 {
+            let cache = Arc::clone(&cache);
+            let start = Arc::clone(&start);
+            let calls = Arc::clone(&calls);
+            threads.push(std::thread::spawn(move || {
+                start.wait();
+                cache.probe(cache_key("codex"), std::time::Instant::now, || {
+                    calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(75));
+                    ProbeOutcome::LoggedIn
+                })
+            }));
         }
-        assert!(
-            stable_generation_observed,
-            "probe cache was invalidated continuously during the test"
-        );
+        start.wait();
+        for thread in threads {
+            assert_eq!(thread.join().expect("probe caller"), ProbeOutcome::LoggedIn);
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
 
-        super::clear_login_probe_cache();
+    #[test]
+    fn different_probe_keys_run_independently() {
+        use std::sync::{atomic::AtomicUsize, Arc, Barrier};
+
+        let cache = Arc::new(LoginProbeCache::default());
+        let start = Arc::new(Barrier::new(3));
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let mut threads = Vec::new();
+        for runtime in ["codex", "claude"] {
+            let cache = Arc::clone(&cache);
+            let start = Arc::clone(&start);
+            let active = Arc::clone(&active);
+            let max_active = Arc::clone(&max_active);
+            threads.push(std::thread::spawn(move || {
+                start.wait();
+                cache.probe(cache_key(runtime), std::time::Instant::now, || {
+                    let count = active.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    max_active.fetch_max(count, std::sync::atomic::Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                    ProbeOutcome::LoggedIn
+                })
+            }));
+        }
+        start.wait();
+        for thread in threads {
+            assert_eq!(thread.join().expect("probe caller"), ProbeOutcome::LoggedIn);
+        }
+        assert_eq!(max_active.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn probe_cache_expiration_and_explicit_invalidation_use_fake_time() {
+        use std::cell::Cell;
+
+        let cache = LoginProbeCache::default();
+        let started_at = std::time::Instant::now();
+        let now = Cell::new(started_at);
+        let calls = Cell::new(0_u32);
+        let key = cache_key("codex");
+        let mut run = || {
+            calls.set(calls.get() + 1);
+            ProbeOutcome::LoggedIn
+        };
+
         assert_eq!(
-            super::login_probe(&script_path, &args, None),
+            cache.probe(key.clone(), || now.get(), &mut run),
             ProbeOutcome::LoggedIn
         );
-        assert_eq!(fs::read_to_string(marker).expect("call marker"), "xx");
+        assert_eq!(
+            cache.probe(key.clone(), || now.get(), &mut run),
+            ProbeOutcome::LoggedIn
+        );
+        assert_eq!(calls.get(), 1);
+
+        now.set(started_at + LOGIN_PROBE_CACHE_TTL + std::time::Duration::from_millis(1));
+        assert_eq!(
+            cache.probe(key.clone(), || now.get(), &mut run),
+            ProbeOutcome::LoggedIn
+        );
+        assert_eq!(calls.get(), 2);
+
+        cache.invalidate();
+        assert_eq!(
+            cache.probe(key, || now.get(), &mut run),
+            ProbeOutcome::LoggedIn
+        );
+        assert_eq!(calls.get(), 3);
+    }
+
+    #[test]
+    fn configuration_errors_expire_quickly_instead_of_being_cached_indefinitely() {
+        use std::cell::Cell;
+
+        let cache = LoginProbeCache::default();
+        let started_at = std::time::Instant::now();
+        let now = Cell::new(started_at);
+        let calls = Cell::new(0_u32);
+        let key = cache_key("codex-invalid-config");
+        let mut run = || {
+            calls.set(calls.get() + 1);
+            ProbeOutcome::ConfigInvalid {
+                stderr_excerpt: "invalid config".into(),
+            }
+        };
+
+        assert!(matches!(
+            cache.probe(key.clone(), || now.get(), &mut run),
+            ProbeOutcome::ConfigInvalid { .. }
+        ));
+        now.set(started_at + super::CONFIG_ERROR_CACHE_TTL + std::time::Duration::from_millis(1));
+        assert!(matches!(
+            cache.probe(key, || now.get(), &mut run),
+            ProbeOutcome::ConfigInvalid { .. }
+        ));
+        assert_eq!(calls.get(), 2);
     }
 
     #[cfg(unix)]

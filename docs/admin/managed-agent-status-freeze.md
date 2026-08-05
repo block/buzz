@@ -20,10 +20,11 @@ runtime-management locks were held.
 
 Runtime status polling is completion-based and single-flight in both the UI and
 backend. The backend snapshots runtime generations under its locks, releases
-them before any readiness process starts, then revalidates the snapshot before
-returning results. Login probes are cached by effective command and PATH,
-invalidated on successful configuration writes, limited to one active probe,
-and killed and reaped after five seconds. Output is drained continuously while
+them before any readiness process starts, then revalidates exited generations
+before persisting their delayed state. Login probes are cached by effective command and relevant
+environment, invalidated on successful configuration writes, limited to one
+active probe per effective key while different keys remain independent, and
+killed and reaped after five seconds. Output is drained continuously while
 at most 64 KiB is retained.
 
 Unexpected local listener exits use three bounded recovery attempts after 5
@@ -35,10 +36,12 @@ a successful restart command alone is not considered recovery.
 
 1. Record the current executable checksum, process thread count, configured
    listener count, and listener health.
-2. Build with Hermit using `pnpm build` and
-   `cargo build --manifest-path src-tauri/Cargo.toml --release` from `desktop/`.
-   Do not add a `custom-protocol` flag: this desktop crate does not define that
-   Cargo feature.
+2. Build from the Hermit environment through Tauri's production pipeline:
+   `cd desktop && pnpm tauri build --verbose --ci --bundles deb,appimage --features mesh-llm --config src-tauri/tauri.release.conf.json`.
+   Tauri runs the configured frontend build and compiles the desktop with its
+   production custom protocol, matching the Linux release workflow. A plain
+   `cargo build --release` is not a releasable artifact because it does not
+   prove that the production frontend was embedded.
 3. Run frontend tests and type checking, Rust formatting, the complete Rust
    suite, and repository checks. Stop if a new failure appears.
 4. Copy the installed executable to a uniquely timestamped rollback path.
