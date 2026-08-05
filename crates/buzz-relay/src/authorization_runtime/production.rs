@@ -9,10 +9,10 @@ use async_trait::async_trait;
 use buzz_auth::{
     resolve_current_federated_policy, AccessLeasePolicy, ActiveBindingResolution,
     ApplicationLeaseLimit, AuthContextInput, AuthorizationClockSkew, AuthorizationOutcome,
-    AuthorizationProvider, BindingLeaseBound, BindingSource, CapabilitySet, EnrollmentMode,
-    FederatedAuthorization, LeaseVersion, ProviderTimeout, ResolvedFederatedPolicy, Scope,
-    SharedAuthorizationClock, SystemAuthorizationClock, VerificationStatusPolicy,
-    VerifiedEvidenceAdapter,
+    AuthorizationProfileId, AuthorizationProvider, BindingLeaseBound, BindingSource, CapabilitySet,
+    EnrollmentMode, FederatedAuthorization, LeaseVersion, ProviderTimeout, ResolvedFederatedPolicy,
+    Scope, SharedAuthorizationClock, SystemAuthorizationClock, VerificationStatusPolicy,
+    VerifiedEvidenceAdapter, VerifiedProviderEvidence,
 };
 use buzz_core::{CommunityId, TenantContext};
 use sha2::{Digest, Sha256};
@@ -31,6 +31,7 @@ use super::{
         DomainTransportPolicy, LeaseCurrentState, LeaseCurrentStateError,
         LeaseCurrentStateObserver, ProtectedAuthorizationResolver, ProtectedOperationRequest,
         ProtectedResolution, ProtectedResolutionError, ProtectedTransportRuntime,
+        VerifiedProviderEvidenceResolver,
     },
 };
 
@@ -127,6 +128,7 @@ struct ProductionResolver {
     finalizer: RelayAuthorizationFinalizer,
     invalidation: AuthorizationInvalidationRuntime,
     clock: SharedAuthorizationClock,
+    profiles: HashMap<CommunityId, AuthorizationProfileId>,
 }
 
 impl ProductionResolver {
@@ -237,6 +239,52 @@ impl ProductionResolver {
             )
             .map_err(|_| ProtectedResolutionError::new("assertion_stale"))
     }
+
+    fn normalized_provider_evidence(
+        &self,
+        request: &ProtectedOperationRequest,
+        capabilities: &CapabilitySet,
+    ) -> Result<Arc<VerifiedProviderEvidence>, ProtectedResolutionError> {
+        let profile = self
+            .profiles
+            .get(&request.authorization_domain())
+            .ok_or(ProtectedResolutionError::new("provider_profile_missing"))?;
+        let now = self
+            .clock
+            .now()
+            .map_err(|_| ProtectedResolutionError::new("authorization_clock"))?
+            .unix_seconds();
+
+        if let Some(evidence) = request.provider_evidence() {
+            evidence
+                .validate_for(
+                    request.authorization_domain(),
+                    request.transport(),
+                    profile,
+                    capabilities,
+                    now,
+                )
+                .map_err(|_| ProtectedResolutionError::new("provider_evidence_invalid"))?;
+            return Ok(Arc::clone(evidence));
+        }
+
+        let assertion = request
+            .verified_assertion()
+            .ok_or(ProtectedResolutionError::new("provider_evidence_missing"))?;
+        let assertion = self.reseal_assertion(assertion)?;
+        let fresh_until = assertion.expires_at().unix_seconds();
+        VerifiedEvidenceAdapter::new()
+            .provider_evidence_from_verified_assertion(
+                assertion,
+                profile.clone(),
+                capabilities.clone(),
+                now,
+                fresh_until,
+                now,
+            )
+            .map(Arc::new)
+            .map_err(|_| ProtectedResolutionError::new("provider_evidence_invalid"))
+    }
 }
 
 #[async_trait]
@@ -253,12 +301,14 @@ impl ProtectedAuthorizationResolver for ProductionResolver {
             .map_err(|_| ProtectedResolutionError::new("invalidation_unavailable"))?;
         self.require_membership(request).await?;
         let capabilities = CapabilitySet::single(request.capability());
+        let provider_evidence = self.normalized_provider_evidence(request, &capabilities)?;
+        let assertion = provider_evidence.verified_assertion();
         let federated_policy = self
             .current_policy(request.authorization_domain(), request.correlation_id())
             .await?;
         let outcome = if let Some(owner) = request.owner_pubkey() {
             let binding = self
-                .active_binding(request.authorization_domain(), owner, None)
+                .active_binding(request.authorization_domain(), owner, Some(assertion))
                 .await?;
             self.finalizer
                 .evaluate_delegated(
@@ -266,14 +316,11 @@ impl ProtectedAuthorizationResolver for ProductionResolver {
                     request.verified_proof(),
                     &binding,
                     federated_policy,
-                    capabilities,
+                    capabilities.clone(),
                     request.correlation_id(),
                 )
                 .await
         } else {
-            let assertion = request
-                .verified_assertion()
-                .ok_or(ProtectedResolutionError::new("direct_assertion_required"))?;
             let _binding = self
                 .active_binding(
                     request.authorization_domain(),
@@ -287,7 +334,7 @@ impl ProtectedAuthorizationResolver for ProductionResolver {
                     request.verified_proof(),
                     assertion,
                     federated_policy,
-                    capabilities,
+                    capabilities.clone(),
                     request.correlation_id(),
                 )
                 .await
@@ -317,9 +364,9 @@ impl ProtectedAuthorizationResolver for ProductionResolver {
             .await
             .map_err(|_| ProtectedResolutionError::new("invalidation_unavailable"))?;
         self.require_membership(request).await?;
-        let assertion = request
-            .verified_assertion()
-            .ok_or(ProtectedResolutionError::new("direct_assertion_required"))?;
+        let capabilities = CapabilitySet::single(request.capability());
+        let provider_evidence = self.normalized_provider_evidence(request, &capabilities)?;
+        let assertion = provider_evidence.verified_assertion();
         let binding = self
             .active_binding(
                 request.authorization_domain(),
@@ -337,7 +384,7 @@ impl ProtectedAuthorizationResolver for ProductionResolver {
                 request.verified_proof(),
                 assertion,
                 evaluation_policy,
-                CapabilitySet::single(request.capability()),
+                capabilities,
                 request.correlation_id(),
             )
             .await
@@ -380,9 +427,7 @@ impl ProtectedAuthorizationResolver for ProductionResolver {
             )
             .map_err(|_| ProtectedResolutionError::new("status_finalization"))?;
         let dependencies = AuthorizationDependencies::from_verification_only(
-            request
-                .session_id()
-                .unwrap_or_else(|| request.correlation_id()),
+            request.session_target(),
             &disposition,
         )
         .map_err(|_| ProtectedResolutionError::new("invalidation_dependencies"))?;
@@ -416,8 +461,10 @@ impl ProtectedAuthorizationResolver for ProductionResolver {
             .await
             .map_err(|_| ProtectedResolutionError::new("invalidation_unavailable"))?;
         let capabilities = CapabilitySet::single(request.capability());
+        let provider_evidence = self.normalized_provider_evidence(request, &capabilities)?;
+        let assertion = provider_evidence.verified_assertion();
 
-        if let Some(assertion) = request.enrollment_assertion() {
+        if request.enrollment_requested() {
             let evaluation_policy = self
                 .current_policy(request.authorization_domain(), request.correlation_id())
                 .await?;
@@ -428,7 +475,7 @@ impl ProtectedAuthorizationResolver for ProductionResolver {
                     request.verified_proof(),
                     assertion,
                     evaluation_policy,
-                    capabilities,
+                    capabilities.clone(),
                     request.correlation_id(),
                 )
                 .await
@@ -450,13 +497,9 @@ impl ProtectedAuthorizationResolver for ProductionResolver {
                     request.correlation_id(),
                 )
                 .map_err(|_| ProtectedResolutionError::new("enrollment_finalization"))?;
-            let dependencies = AuthorizationDependencies::from_enrollment(
-                request
-                    .session_id()
-                    .unwrap_or_else(|| request.correlation_id()),
-                &disposition,
-            )
-            .map_err(|_| ProtectedResolutionError::new("invalidation_dependencies"))?;
+            let dependencies =
+                AuthorizationDependencies::from_enrollment(request.session_target(), &disposition)
+                    .map_err(|_| ProtectedResolutionError::new("invalidation_dependencies"))?;
             let observer = self
                 .invalidation
                 .observe_authority(fence, dependencies, request.cancellation())
@@ -482,7 +525,7 @@ impl ProtectedAuthorizationResolver for ProductionResolver {
             .await?;
         let (authorization, snapshot) = if let Some(owner) = request.owner_pubkey() {
             let binding = self
-                .active_binding(request.authorization_domain(), owner, None)
+                .active_binding(request.authorization_domain(), owner, Some(assertion))
                 .await?;
             let outcome = self
                 .finalizer
@@ -491,7 +534,7 @@ impl ProtectedAuthorizationResolver for ProductionResolver {
                     request.verified_proof(),
                     &binding,
                     evaluation_policy,
-                    capabilities,
+                    capabilities.clone(),
                     request.correlation_id(),
                 )
                 .await
@@ -510,9 +553,6 @@ impl ProtectedAuthorizationResolver for ProductionResolver {
                 snapshot,
             )
         } else {
-            let assertion = request
-                .verified_assertion()
-                .ok_or(ProtectedResolutionError::new("direct_assertion_required"))?;
             let binding = self
                 .active_binding(
                     request.authorization_domain(),
@@ -527,7 +567,7 @@ impl ProtectedAuthorizationResolver for ProductionResolver {
                     request.verified_proof(),
                     assertion,
                     evaluation_policy,
-                    capabilities,
+                    capabilities.clone(),
                     request.correlation_id(),
                 )
                 .await
@@ -586,13 +626,9 @@ impl ProtectedAuthorizationResolver for ProductionResolver {
                 "non_authoritative_disposition",
             ));
         };
-        let dependencies = AuthorizationDependencies::from_context(
-            request
-                .session_id()
-                .unwrap_or_else(|| request.correlation_id()),
-            &context,
-        )
-        .map_err(|_| ProtectedResolutionError::new("invalidation_dependencies"))?;
+        let dependencies =
+            AuthorizationDependencies::from_context(request.session_target(), &context)
+                .map_err(|_| ProtectedResolutionError::new("invalidation_dependencies"))?;
         let observer = self
             .invalidation
             .observe_authority(fence, dependencies, request.cancellation())
@@ -644,10 +680,26 @@ pub async fn install_from_environment_with_providers(
     state: &Arc<crate::state::AppState>,
     providers: ProductionProviderRegistry,
 ) -> Result<ProtectedRuntimeInstallation, ProductionRuntimeError> {
+    install_from_environment_with_providers_and_evidence(state, providers, None).await
+}
+
+/// Build and install one runtime with an optional provider-neutral evidence seam.
+///
+/// When installed, the resolver must return zero, exactly one, or ambiguous
+/// sealed evidence for every protected request. JWT verification remains an
+/// optional provider profile and conflicts with supplied neutral evidence.
+pub async fn install_from_environment_with_providers_and_evidence(
+    state: &Arc<crate::state::AppState>,
+    providers: ProductionProviderRegistry,
+    evidence_resolver: Option<Arc<dyn VerifiedProviderEvidenceResolver>>,
+) -> Result<ProtectedRuntimeInstallation, ProductionRuntimeError> {
     if state.protected_transport().is_some() || state.restore_protection().is_some() {
         return Err(ProductionRuntimeError::AlreadyInstalled);
     }
-    let Some(installed) = build_from_environment_with_providers(state, providers).await? else {
+    let Some(installed) =
+        build_from_environment_with_providers_and_evidence(state, providers, evidence_resolver)
+            .await?
+    else {
         return Ok(ProtectedRuntimeInstallation::Disabled);
     };
     let InstalledProtectedRuntime {
@@ -724,6 +776,15 @@ pub async fn build_from_environment_with_providers(
     state: &crate::state::AppState,
     providers: ProductionProviderRegistry,
 ) -> Result<Option<InstalledProtectedRuntime>, ProductionRuntimeError> {
+    build_from_environment_with_providers_and_evidence(state, providers, None).await
+}
+
+/// Build the disabled-by-default runtime with optional verified evidence input.
+pub async fn build_from_environment_with_providers_and_evidence(
+    state: &crate::state::AppState,
+    providers: ProductionProviderRegistry,
+    evidence_resolver: Option<Arc<dyn VerifiedProviderEvidenceResolver>>,
+) -> Result<Option<InstalledProtectedRuntime>, ProductionRuntimeError> {
     let raw = env::var(DOMAINS_ENV).unwrap_or_default();
     let configured = parse_domains(&raw)?;
     let activated = state.db.activated_authorization_domains().await?;
@@ -732,7 +793,8 @@ pub async fn build_from_environment_with_providers(
         return Ok(None);
     }
     validate_provider_coverage(&configured, &providers)?;
-    if configured.values().any(|mode| mode.evaluates_provider())
+    if evidence_resolver.is_none()
+        && configured.values().any(|mode| mode.evaluates_provider())
         && state.identity_assertion_provenance().is_none()
     {
         return Err(ProductionRuntimeError::AssertionProvenanceMissing);
@@ -740,7 +802,10 @@ pub async fn build_from_environment_with_providers(
     let protected_domains = protected_domains(&configured);
     let enforcing_domains = enforcing_domains(&configured);
     let projection_domains = projection_reconciliation_domains(&configured);
-    if !enforcing_domains.is_empty() && state.corporate_identity.is_none() {
+    if evidence_resolver.is_none()
+        && !enforcing_domains.is_empty()
+        && state.corporate_identity.is_none()
+    {
         return Err(ProductionRuntimeError::VerifierMissing);
     }
     let clock: SharedAuthorizationClock = Arc::new(SystemAuthorizationClock);
@@ -749,12 +814,15 @@ pub async fn build_from_environment_with_providers(
         &protected_domains,
     )?;
     let profile = env::var(PROFILE_ENV).unwrap_or_else(|_| "current-membership-v1".to_owned());
+    let installed_profile = AuthorizationProfileId::from_server_configuration(profile.clone())
+        .map_err(|_| ProductionRuntimeError::InvalidConfiguration)?;
     let lease_seconds = parse_positive_seconds(LEASE_SECONDS_ENV, 300)?;
     let lease_limit = ApplicationLeaseLimit::from_seconds(lease_seconds)?;
     let status_limit = ApplicationLeaseLimit::from_seconds(lease_seconds.min(60))?;
     let skew = AuthorizationClockSkew::from_seconds(0)?;
     let mut policies = Vec::with_capacity(configured.len());
     let mut transports = Vec::with_capacity(configured.len());
+    let mut profiles = HashMap::with_capacity(configured.len());
     for (domain, mode) in &configured {
         transports.push(DomainTransportPolicy::from_server_configuration(
             *domain, *mode,
@@ -763,6 +831,7 @@ pub async fn build_from_environment_with_providers(
             continue;
         }
         let provider = providers.provider_for(*domain)?;
+        profiles.insert(*domain, installed_profile.clone());
         policies.push(DomainAuthorizationPolicy::from_server_configuration(
             *domain,
             profile.clone(),
@@ -822,8 +891,13 @@ pub async fn build_from_environment_with_providers(
         finalizer,
         invalidation: invalidation.clone(),
         clock: Arc::clone(&clock),
+        profiles,
     });
-    let transport = Arc::new(ProtectedTransportRuntime::new(transports, resolver, clock)?);
+    let mut transport = ProtectedTransportRuntime::new(transports, resolver, clock)?;
+    if let Some(evidence_resolver) = evidence_resolver {
+        transport = transport.with_provider_evidence_resolver(evidence_resolver);
+    }
+    let transport = Arc::new(transport);
     Ok(Some(InstalledProtectedRuntime {
         transport,
         invalidation,

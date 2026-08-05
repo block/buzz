@@ -93,16 +93,12 @@ pub mod relay_members {
                             .await
                             .map_err(|e| format!("relay membership check (owner) failed: {e}"))?;
                         if owner_is_member {
-                            debug!(
-                                agent = %pubkey_hex,
-                                owner = %owner_hex,
-                                "NIP-OA membership granted via owner"
-                            );
+                            debug!("NIP-OA membership granted via owner");
                             return Ok(MembershipDecision::ViaOwner(owner_pubkey));
                         }
                     }
                     Err(e) => {
-                        info!(agent = %pubkey_hex, "NIP-OA auth tag invalid: {e}");
+                        info!("NIP-OA auth tag invalid: {e}");
                     }
                 }
             }
@@ -187,7 +183,7 @@ pub mod relay_members {
                 Ok(true) => {
                     metrics::counter!(
                         "buzz_users_created_total",
-                        "community" => tenant.host().to_owned()
+                        "community" => crate::metrics::community_label(tenant.community())
                     )
                     .increment(1);
                 }

@@ -18,7 +18,7 @@ use buzz_db::authorization_invalidation::{
     AuthorizationInvalidationEntry, AuthorizationInvalidationFloor,
     AuthorizationInvalidationReceipt, AuthorizationInvalidationRequest,
     AuthorizationInvalidationResult, AuthorizationInvalidationSnapshot, AuthorizationSelector,
-    AuthorizationSelectorKind,
+    AuthorizationSelectorKind, AuthorizationSessionTarget,
 };
 use buzz_db::{Db, DbError};
 use buzz_pubsub::authorization_invalidation::{
@@ -206,51 +206,49 @@ impl AuthorizationDependencies {
     /// direct binding. This registration can withdraw presentation but cannot
     /// authorize access or create a lease.
     pub fn from_verification_only(
-        session_id: Uuid,
+        session_target: Option<AuthorizationSessionTarget>,
         disposition: &VerificationOnlyDisposition,
     ) -> Result<Self, AuthorizationInvalidationRuntimeError> {
-        Self::from_selectors(
-            disposition.authorization_domain(),
-            vec![
-                AuthorizationSelector::nostr_key(disposition.actor_pubkey().to_bytes()),
-                AuthorizationSelector::binding(
-                    disposition.binding_id(),
-                    disposition.binding_version().get(),
-                )
+        let mut selectors = vec![
+            AuthorizationSelector::nostr_key(disposition.actor_pubkey().to_bytes()),
+            AuthorizationSelector::binding(
+                disposition.binding_id(),
+                disposition.binding_version().get(),
+            )
+            .map_err(|_| AuthorizationInvalidationRuntimeError::InvalidDependencies)?,
+            AuthorizationSelector::domain(),
+            AuthorizationSelector::policy_version(disposition.policy_version().as_str())
                 .map_err(|_| AuthorizationInvalidationRuntimeError::InvalidDependencies)?,
-                AuthorizationSelector::session(session_id)
-                    .map_err(|_| AuthorizationInvalidationRuntimeError::InvalidDependencies)?,
-                AuthorizationSelector::domain(),
-                AuthorizationSelector::policy_version(disposition.policy_version().as_str())
-                    .map_err(|_| AuthorizationInvalidationRuntimeError::InvalidDependencies)?,
-            ],
-        )
+        ];
+        if let Some(target) = session_target {
+            selectors.push(AuthorizationSelector::session(target));
+        }
+        Self::from_selectors(disposition.authorization_domain(), selectors)
     }
 
     /// Derive the pre-binding dependencies for one staged direct enrollment.
     /// The transaction revalidates these selectors before it may create the
     /// first binding or membership row.
     pub fn from_enrollment(
-        session_id: Uuid,
+        session_target: Option<AuthorizationSessionTarget>,
         disposition: &super::finalization::EnrollmentDisposition,
     ) -> Result<Self, AuthorizationInvalidationRuntimeError> {
         let actor = disposition.actor_pubkey().to_bytes();
-        Self::from_selectors(
-            disposition.authorization_domain(),
-            vec![
-                AuthorizationSelector::principal(
-                    disposition.principal().issuer(),
-                    disposition.principal().subject(),
-                )
+        let mut selectors = vec![
+            AuthorizationSelector::principal(
+                disposition.principal().issuer(),
+                disposition.principal().subject(),
+            )
+            .map_err(|_| AuthorizationInvalidationRuntimeError::InvalidDependencies)?,
+            AuthorizationSelector::nostr_key(actor),
+            AuthorizationSelector::domain(),
+            AuthorizationSelector::policy_version(disposition.policy_version().as_str())
                 .map_err(|_| AuthorizationInvalidationRuntimeError::InvalidDependencies)?,
-                AuthorizationSelector::nostr_key(actor),
-                AuthorizationSelector::session(session_id)
-                    .map_err(|_| AuthorizationInvalidationRuntimeError::InvalidDependencies)?,
-                AuthorizationSelector::domain(),
-                AuthorizationSelector::policy_version(disposition.policy_version().as_str())
-                    .map_err(|_| AuthorizationInvalidationRuntimeError::InvalidDependencies)?,
-            ],
-        )
+        ];
+        if let Some(target) = session_target {
+            selectors.push(AuthorizationSelector::session(target));
+        }
+        Self::from_selectors(disposition.authorization_domain(), selectors)
     }
 
     /// Derive every invalidation dependency from one finalized enforcing
@@ -259,35 +257,48 @@ impl AuthorizationDependencies {
     /// The principal is read from the same active binding that the finalizer
     /// bound to the lease. It is never accepted as an independent argument.
     pub fn from_context(
-        session_id: Uuid,
+        session_target: Option<AuthorizationSessionTarget>,
         context: &AuthContext,
     ) -> Result<Self, AuthorizationInvalidationRuntimeError> {
         let lease = context
             .authorization_lease()
             .ok_or(AuthorizationInvalidationRuntimeError::InvalidDependencies)?;
-        let (binding, delegated_owner) = match context.federated_authorization() {
-            FederatedAuthorization::Direct { binding, .. } => {
-                if lease.owner_pubkey().is_some()
-                    || binding.bound_pubkey() != context.pubkey()
-                    || context.agent_owner_pubkey().is_some()
-                {
+        let (binding, delegated_owner, delegated_relationship) =
+            match context.federated_authorization() {
+                FederatedAuthorization::Direct { binding, .. } => {
+                    if lease.owner_pubkey().is_some()
+                        || binding.bound_pubkey() != context.pubkey()
+                        || context.agent_owner_pubkey().is_some()
+                    {
+                        return Err(AuthorizationInvalidationRuntimeError::InvalidDependencies);
+                    }
+                    (binding, None, None)
+                }
+                FederatedAuthorization::Delegated { owner, .. } => {
+                    let owner_key = owner.bound_pubkey();
+                    let delegation = context
+                        .nostr()
+                        .verified_delegation()
+                        .ok_or(AuthorizationInvalidationRuntimeError::InvalidDependencies)?;
+                    if lease.owner_pubkey() != Some(owner_key)
+                        || context.agent_owner_pubkey() != Some(owner_key)
+                        || delegation.owner_pubkey() != owner_key
+                    {
+                        return Err(AuthorizationInvalidationRuntimeError::InvalidDependencies);
+                    }
+                    (
+                        owner,
+                        Some(owner_key),
+                        Some((
+                            delegation.relationship_id().as_uuid(),
+                            delegation.relationship_revision().get(),
+                        )),
+                    )
+                }
+                FederatedAuthorization::NotRequired => {
                     return Err(AuthorizationInvalidationRuntimeError::InvalidDependencies);
                 }
-                (binding, None)
-            }
-            FederatedAuthorization::Delegated { owner, .. } => {
-                let owner_key = owner.bound_pubkey();
-                if lease.owner_pubkey() != Some(owner_key)
-                    || context.agent_owner_pubkey() != Some(owner_key)
-                {
-                    return Err(AuthorizationInvalidationRuntimeError::InvalidDependencies);
-                }
-                (owner, Some(owner_key))
-            }
-            FederatedAuthorization::NotRequired => {
-                return Err(AuthorizationInvalidationRuntimeError::InvalidDependencies);
-            }
-        };
+            };
         if !matches!(
             context.federated_policy().requirement(),
             FederatedIdentityRequirement::Required(_)
@@ -312,14 +323,24 @@ impl AuthorizationDependencies {
             AuthorizationSelector::nostr_key(actor),
             AuthorizationSelector::binding(lease.binding_id(), lease.binding_version().get())
                 .map_err(|_| AuthorizationInvalidationRuntimeError::InvalidDependencies)?,
-            AuthorizationSelector::session(session_id)
-                .map_err(|_| AuthorizationInvalidationRuntimeError::InvalidDependencies)?,
             AuthorizationSelector::domain(),
             AuthorizationSelector::policy_version(lease.policy_version().as_str())
                 .map_err(|_| AuthorizationInvalidationRuntimeError::InvalidDependencies)?,
         ];
+        if let Some(target) = session_target {
+            selectors.push(AuthorizationSelector::session(target));
+        }
         if let Some(owner) = delegated_owner {
             selectors.extend(delegated_owner_selectors(owner.to_bytes()));
+        }
+        if let Some((relationship_id, relationship_revision)) = delegated_relationship {
+            selectors.push(
+                AuthorizationSelector::delegated_relationship(
+                    relationship_id,
+                    relationship_revision,
+                )
+                .map_err(|_| AuthorizationInvalidationRuntimeError::InvalidDependencies)?,
+            );
         }
         Self::from_selectors(lease.authorization_domain(), selectors)
     }
@@ -1310,7 +1331,9 @@ mod tests {
     async fn two_nodes_converge_after_lost_reordered_and_replayed_hints() {
         let store = Arc::new(FakeStore::default());
         let community_id = domain(1);
-        let selector = AuthorizationSelector::session(Uuid::new_v4()).expect("valid session");
+        let selector = AuthorizationSelector::session(
+            AuthorizationSessionTarget::new(Uuid::new_v4(), Uuid::new_v4()).expect("valid session"),
+        );
         store.set(AuthorizationInvalidationSnapshot {
             community_id,
             generation: 0,
@@ -1893,7 +1916,10 @@ mod tests {
 
         for selector in [
             AuthorizationSelector::binding(Uuid::new_v4(), 1).expect("valid binding"),
-            AuthorizationSelector::session(Uuid::new_v4()).expect("valid session"),
+            AuthorizationSelector::session(
+                AuthorizationSessionTarget::new(Uuid::new_v4(), Uuid::new_v4())
+                    .expect("valid session"),
+            ),
             AuthorizationSelector::domain(),
             AuthorizationSelector::policy_version("private-policy").expect("valid policy"),
         ] {
@@ -1981,7 +2007,7 @@ mod tests {
     fn public_constructor_has_no_caller_supplied_principal_slot() {
         fn assert_context_only_signature(
             _constructor: fn(
-                Uuid,
+                Option<AuthorizationSessionTarget>,
                 &AuthContext,
             ) -> Result<
                 AuthorizationDependencies,

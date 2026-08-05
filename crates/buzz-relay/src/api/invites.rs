@@ -308,30 +308,41 @@ async fn authenticate(
         .and_then(|value| value.to_str().ok());
     let identity_lane =
         crate::authorization_runtime::transport::legacy_identity_lane(state, tenant.community());
-    let identity_proof = match crate::corporate_identity::verify_corporate_identity(
-        state,
-        tenant.community(),
-        pubkey,
-        identity_assertion.as_ref(),
-        auth_tag,
-    )
-    .await
-    {
-        Ok(proof) => Some(proof),
-        Err(error)
-            if identity_lane
-                == crate::authorization_runtime::transport::LegacyIdentityLane::ObserveOnly =>
+    let neutral_evidence = identity_assertion.is_none()
+        && crate::authorization_runtime::transport::provider_evidence_resolver_is_installed(
+            state,
+            tenant.community(),
+        );
+    let identity_proof = if neutral_evidence {
+        None
+    } else {
+        match crate::corporate_identity::verify_corporate_identity(
+            state,
+            tenant.community(),
+            pubkey,
+            identity_assertion.as_ref(),
+            auth_tag,
+        )
+        .await
         {
-            tracing::warn!(error = ?error, "observational invite identity verification unavailable");
-            None
+            Ok(proof) => Some(proof),
+            Err(error)
+                if identity_lane
+                    == crate::authorization_runtime::transport::LegacyIdentityLane::ObserveOnly =>
+            {
+                tracing::warn!(error = ?error, "observational invite identity verification unavailable");
+                None
+            }
+            Err(error) => return Err(error.into_api_error()),
         }
-        Err(error) => return Err(error.into_api_error()),
     };
 
     let verified_proof = bridge::retain_bridge_proof(verified_proof, auth_tag)?
         .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "NIP-98 evidence required"))?;
 
-    let enrollment_assertion = if state
+    let enrollment_assertion = if neutral_evidence {
+        None
+    } else if state
         .protected_transport()
         .and_then(|runtime| runtime.mode_for_domain(tenant.community()))
         == Some(AuthorizationMode::Enforce)
@@ -625,13 +636,10 @@ pub async fn claim_invite(
 
         let token_hash = hash_v2_code(&request.code);
         if enforcing {
-            let assertion = enrollment_assertion.ok_or_else(|| {
-                api_error(StatusCode::FORBIDDEN, "relay identity verification failed")
-            })?;
             let enrollment = authorize_enrollment_if_configured(
                 &state,
                 Arc::clone(&verified_proof),
-                assertion,
+                enrollment_assertion,
                 stable_correlation_from_proof(&verified_proof),
             )
             .await

@@ -634,7 +634,8 @@ CREATE TABLE authorization_invalidation_floors (
         'session',
         'domain',
         'policy_version',
-        'delegated_owner'
+        'delegated_owner',
+        'delegated_relationship'
     )),
     selector_fingerprint  BYTEA NOT NULL CHECK (length(selector_fingerprint) = 32),
     generation            BIGINT NOT NULL CHECK (generation > 0),

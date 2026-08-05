@@ -1038,6 +1038,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-auth"
+version = "0.1.0"
+dependencies = [
+ "buzz-core",
+ "hex",
+ "nostr",
+ "rand 0.10.2",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "buzz-core"
 version = "0.1.0"
 dependencies = [
@@ -1156,6 +1174,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "blurhash",
+ "buzz-auth",
  "buzz-core",
  "bytes",
  "chrono",

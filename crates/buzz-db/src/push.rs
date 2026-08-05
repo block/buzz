@@ -821,10 +821,21 @@ pub async fn claim_due_match_batch(
     limit: i64,
     lease_until: DateTime<Utc>,
 ) -> Result<Option<ClaimedMatchBatch>> {
-    claim_due_match_batch_with_loader(
+    claim_due_match_batch_excluding(pool, limit, lease_until, &[]).await
+}
+
+/// Claim a matcher batch without touching exact protected Enforce domains.
+pub async fn claim_due_match_batch_excluding(
+    pool: &PgPool,
+    limit: i64,
+    lease_until: DateTime<Utc>,
+    excluded_communities: &[Uuid],
+) -> Result<Option<ClaimedMatchBatch>> {
+    claim_due_match_batch_with_loader_excluding(
         pool,
         limit,
         lease_until,
+        excluded_communities,
         |pool, community, ids| async move {
             let refs: Vec<&[u8]> = ids.iter().map(Vec::as_slice).collect();
             crate::event::get_events_by_ids(&pool, community, &refs).await
@@ -833,10 +844,11 @@ pub async fn claim_due_match_batch(
     .await
 }
 
-async fn claim_due_match_batch_with_loader<F, Fut>(
+async fn claim_due_match_batch_with_loader_excluding<F, Fut>(
     pool: &PgPool,
     limit: i64,
     lease_until: DateTime<Utc>,
+    excluded_communities: &[Uuid],
     load: F,
 ) -> Result<Option<ClaimedMatchBatch>>
 where
@@ -850,6 +862,7 @@ where
             SELECT community_id
             FROM push_match_queue
             WHERE attempts < $3
+              AND NOT (community_id = ANY($5::uuid[]))
               AND next_attempt_at <= now()
               AND (state = 'pending' OR (state = 'matching' AND lease_until < now()))
             ORDER BY next_attempt_at, created_at
@@ -860,6 +873,7 @@ where
             FROM push_match_queue q
             JOIN target t ON q.community_id = t.community_id
             WHERE q.attempts < $3
+              AND NOT (q.community_id = ANY($5::uuid[]))
               AND q.next_attempt_at <= now()
               AND (q.state = 'pending' OR (q.state = 'matching' AND q.lease_until < now()))
             ORDER BY q.next_attempt_at, q.created_at
@@ -877,6 +891,7 @@ where
     .bind(lease_until)
     .bind(MAX_MATCH_ATTEMPTS)
     .bind(limit)
+    .bind(excluded_communities)
     .fetch_all(pool)
     .await?;
     if rows.is_empty() {
@@ -931,11 +946,21 @@ where
 /// served by the due partial index, so putting it in every claim made claims
 /// slower exactly when a backlog needed them fastest.
 pub async fn reap_exhausted_matches(pool: &PgPool) -> Result<u64> {
+    reap_exhausted_matches_excluding(pool, &[]).await
+}
+
+/// Reap exhausted matcher jobs outside exact protected Enforce domains.
+pub async fn reap_exhausted_matches_excluding(
+    pool: &PgPool,
+    excluded_communities: &[Uuid],
+) -> Result<u64> {
     Ok(sqlx::query(
         "DELETE FROM push_match_queue WHERE attempts >= $1 \
+         AND NOT (community_id = ANY($2::uuid[])) \
          AND (state='pending' OR (state='matching' AND lease_until < now()))",
     )
     .bind(MAX_MATCH_ATTEMPTS)
+    .bind(excluded_communities)
     .execute(pool)
     .await?
     .rows_affected())
@@ -1891,6 +1916,18 @@ mod tests {
         .await
         .expect("read matcher queue");
         assert_eq!(queued, vec![9]);
+        assert!(
+            claim_due_match_batch_excluding(
+                &pool,
+                16,
+                Utc::now() + chrono::Duration::minutes(1),
+                &[*community.as_uuid()],
+            )
+            .await
+            .expect("excluded protected matcher claim")
+            .is_none(),
+            "an excluded domain must remain unclaimed"
+        );
 
         sqlx::query("UPDATE events SET deleted_at=now() WHERE community_id=$1 AND id=$2")
             .bind(community.as_uuid())
@@ -1927,10 +1964,11 @@ mod tests {
             .await
             .expect("insert event");
 
-        let error = claim_due_match_batch_with_loader(
+        let error = claim_due_match_batch_with_loader_excluding(
             &pool,
             16,
             Utc::now() - chrono::Duration::seconds(1),
+            &[],
             |_pool, _community, _event_ids| async {
                 Err(crate::DbError::InvalidData("injected load failure".into()))
             },

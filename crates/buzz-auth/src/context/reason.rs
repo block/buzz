@@ -79,6 +79,12 @@ pub enum AuthContextError {
     /// Delegation expiry was not a valid Unix timestamp.
     #[error("delegation expiry must be greater than zero")]
     InvalidDelegationExpiry,
+    /// Delegated-relationship identity was the nil UUID.
+    #[error("delegated relationship identifier must not be nil")]
+    InvalidDelegatedRelationshipId,
+    /// Delegated-relationship revision was zero.
+    #[error("delegated relationship revision must be greater than zero")]
+    InvalidDelegatedRelationshipRevision,
     /// Admission expiry was not a valid Unix timestamp.
     #[error("admission expiry must be greater than zero")]
     InvalidAdmissionExpiry,
@@ -198,6 +204,10 @@ impl AuthContextError {
             Self::InvalidFederatedPolicyInterval => "federated_policy_invalid_interval",
             Self::InvalidAssertionExpiry => "federated_assertion_invalid_expiry",
             Self::InvalidDelegationExpiry => "delegation_invalid_expiry",
+            Self::InvalidDelegatedRelationshipId => "delegation_invalid_relationship_id",
+            Self::InvalidDelegatedRelationshipRevision => {
+                "delegation_invalid_relationship_revision"
+            }
             Self::InvalidAdmissionExpiry => "owner_admission_invalid_expiry",
             Self::AssertionExpired => "federated_assertion_expired",
             Self::BindingExpired => "federated_binding_expired",

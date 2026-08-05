@@ -12,6 +12,9 @@
 use std::sync::Arc;
 
 use axum::extract::ws::Message as WsMessage;
+use buzz_auth::{
+    AuthTransport, VerifiedDelegationOutput, VerifiedEvidenceAdapter, VerifiedNostrProof,
+};
 use tracing::{debug, info, warn};
 
 use crate::connection::{AuthState, ConnectionState};
@@ -42,6 +45,7 @@ pub fn extract_auth_tag_json(event: &nostr::Event) -> Option<String> {
 #[tracing::instrument(skip_all, fields(event_id, conn_id))]
 pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state: Arc<AppState>) {
     let event_id_hex = event.id.to_hex();
+    let verified_event = event.clone();
     let (challenge, conn_id) = {
         let auth = conn.auth_state.read().await;
         match &*auth {
@@ -146,7 +150,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                     Ok(state) if state.banned => BanOutcome::Banned,
                     Ok(_) => BanOutcome::Clear,
                     Err(e) => {
-                        warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), error = %e,
+                        warn!(conn_id = %conn_id, error = %e,
                               "ban-state DB lookup failed, denying (fail-closed)");
                         BanOutcome::DbError
                     }
@@ -168,7 +172,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                             Ok(state) if state.banned => BanOutcome::Banned,
                             Ok(_) => BanOutcome::Clear,
                             Err(e) => {
-                                warn!(conn_id = %conn_id, owner = %owner.to_hex(), error = %e,
+                                warn!(conn_id = %conn_id, error = %e,
                                       "owner ban-state DB lookup failed, denying (fail-closed)");
                                 BanOutcome::DbError
                             }
@@ -188,7 +192,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 };
 
                 if let Some((metric_reason, deny_reason)) = denial {
-                    warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), reason = deny_reason, "principal denied at ban seam");
+                    warn!(conn_id = %conn_id, reason = deny_reason, "principal denied at ban seam");
                     metrics::counter!("buzz_auth_failures_total", "reason" => metric_reason)
                         .increment(1);
                     *conn.auth_state.write().await = AuthState::Failed;
@@ -205,26 +209,70 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 }
             }
 
-            let identity_proof = match crate::corporate_identity::verify_corporate_identity(
+            let identity_lane = crate::authorization_runtime::transport::legacy_identity_lane(
                 &state,
                 conn.tenant.community(),
-                pubkey,
-                conn.corporate_identity_assertion.as_ref(),
-                auth_tag_json.as_deref(),
-            )
-            .await
-            {
-                Ok(proof) => proof,
-                Err(e) => {
-                    warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), error = %e, "corporate identity denied");
-                    *conn.auth_state.write().await = AuthState::Failed;
-                    conn.send(RelayMessage::ok(
-                        &event_id_hex,
-                        false,
-                        &format!("restricted: {}", e.public_message()),
-                    ));
-                    return;
+            );
+            let neutral_evidence = conn.corporate_identity_assertion.is_none()
+                && crate::authorization_runtime::transport::provider_evidence_resolver_is_installed(
+                    &state,
+                    conn.tenant.community(),
+                );
+            let identity_proof = if neutral_evidence {
+                None
+            } else {
+                match crate::corporate_identity::verify_corporate_identity(
+                    &state,
+                    conn.tenant.community(),
+                    pubkey,
+                    conn.corporate_identity_assertion.as_ref(),
+                    auth_tag_json.as_deref(),
+                )
+                .await
+                {
+                    Ok(proof) => Some(proof),
+                    Err(e) => {
+                        warn!(conn_id = %conn_id, error = ?e, "corporate identity denied");
+                        if identity_lane
+                        == crate::authorization_runtime::transport::LegacyIdentityLane::ObserveOnly
+                    {
+                        None
+                    } else {
+                        *conn.auth_state.write().await = AuthState::Failed;
+                        conn.send(RelayMessage::ok(
+                            &event_id_hex,
+                            false,
+                            &format!("restricted: {}", e.public_message()),
+                        ));
+                        return;
+                    }
+                    }
                 }
+            };
+
+            let verified_assertion = match identity_proof.as_ref() {
+                Some(proof) => {
+                    match crate::corporate_identity::current_verified_assertion_for_proof(
+                        &state,
+                        proof,
+                        conn.tenant.community(),
+                        AuthTransport::RelayWebSocket,
+                    ) {
+                        Ok(assertion) => assertion.map(Arc::new),
+                        Err(error) => {
+                            warn!(conn_id = %conn_id, error = %error, "federated evidence sealing failed");
+                            if identity_lane
+                                == crate::authorization_runtime::transport::LegacyIdentityLane::ObserveOnly
+                            {
+                                None
+                            } else {
+                            *conn.auth_state.write().await = AuthState::Failed;
+                            return;
+                            }
+                        }
+                    }
+                }
+                None => None,
             };
 
             // Pubkey allowlist gate — only for pubkey-only auth.
@@ -238,13 +286,13 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 {
                     Ok(v) => v,
                     Err(e) => {
-                        warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), error = %e,
+                        warn!(conn_id = %conn_id, error = %e,
                               "allowlist DB lookup failed, denying (fail-closed)");
                         false
                     }
                 };
                 if !allowed {
-                    warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), "pubkey not in allowlist");
+                    warn!(conn_id = %conn_id, "pubkey not in allowlist");
                     metrics::counter!("buzz_auth_failures_total", "reason" => "allowlist_denied")
                         .increment(1);
                     *conn.auth_state.write().await = AuthState::Failed;
@@ -268,7 +316,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             {
                 Ok(owner) => owner,
                 Err(e) => {
-                    warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), error = ?e, "not a relay member");
+                    warn!(conn_id = %conn_id, error = ?e, "not a relay member");
                     metrics::counter!("buzz_auth_failures_total", "reason" => "not_relay_member")
                         .increment(1);
                     *conn.auth_state.write().await = AuthState::Failed;
@@ -281,30 +329,40 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 }
             };
 
-            let identity_decision = match crate::corporate_identity::finalize_corporate_identity(
-                &state,
-                conn.tenant.community(),
-                pubkey,
-                identity_proof,
-            )
-            .await
+            let identity_decision = if identity_lane
+                == crate::authorization_runtime::transport::LegacyIdentityLane::Legacy
             {
-                Ok(decision) => decision,
-                Err(e) => {
-                    warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), error = %e, "corporate identity finalization denied");
-                    *conn.auth_state.write().await = AuthState::Failed;
-                    conn.send(RelayMessage::ok(
-                        &event_id_hex,
-                        false,
-                        &format!("restricted: {}", e.public_message()),
-                    ));
-                    return;
+                if let Some(identity_proof) = identity_proof.clone() {
+                    match crate::corporate_identity::finalize_corporate_identity(
+                        &state,
+                        conn.tenant.community(),
+                        pubkey,
+                        identity_proof,
+                    )
+                    .await
+                    {
+                        Ok(decision) => Some(decision),
+                        Err(e) => {
+                            warn!(conn_id = %conn_id, error = ?e, "corporate identity finalization denied");
+                            *conn.auth_state.write().await = AuthState::Failed;
+                            conn.send(RelayMessage::ok(
+                                &event_id_hex,
+                                false,
+                                &format!("restricted: {}", e.public_message()),
+                            ));
+                            return;
+                        }
+                    }
+                } else {
+                    None
                 }
+            } else {
+                None
             };
-            if let crate::corporate_identity::CorporateIdentityDecision::Delegated {
+            if let Some(crate::corporate_identity::CorporateIdentityDecision::Delegated {
                 owner_pubkey,
                 ..
-            } = &identity_decision
+            }) = &identity_decision
             {
                 auth_ctx.agent_owner_pubkey = Some(*owner_pubkey);
             }
@@ -327,37 +385,102 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             // Stash NIP-OA owner on the auth context only after the shared
             // backfill confirms the first-write-wins relationship.
             if let Some(owner) = nip_oa_owner {
-                if crate::api::relay_members::materialize_nip_oa_owner(
-                    &state,
-                    &conn.tenant,
-                    &pubkey,
-                    &owner,
-                )
-                .await
-                {
+                let owner_is_current = identity_lane
+                    != crate::authorization_runtime::transport::LegacyIdentityLane::Legacy
+                    || crate::api::relay_members::materialize_nip_oa_owner(
+                        &state,
+                        &conn.tenant,
+                        &pubkey,
+                        &owner,
+                    )
+                    .await;
+                if owner_is_current {
                     auth_ctx.agent_owner_pubkey = Some(owner);
                 } else {
                     warn!(
                         conn_id = %conn_id,
-                        agent = %pubkey.to_hex(),
-                        nip_oa_owner = %owner.to_hex(),
                         "NIP-OA owner could not be materialized"
                     );
                 }
             }
 
-            info!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), "NIP-42 auth successful");
+            info!(conn_id = %conn_id, "NIP-42 auth successful");
+            let transport_delegation =
+                crate::corporate_identity::verify_unconditional_nip_oa_relationship(
+                    pubkey,
+                    auth_tag_json.as_deref(),
+                )
+                .map(|relationship| {
+                    VerifiedDelegationOutput::from_workspace_verifier(
+                        relationship.owner_pubkey(),
+                        pubkey,
+                        relationship.relationship_id(),
+                        relationship.relationship_revision(),
+                        None,
+                        true,
+                    )
+                });
+            let verified_proof: Arc<VerifiedNostrProof> = match VerifiedEvidenceAdapter::new()
+                .verify_nip42(
+                    conn.tenant.community(),
+                    AuthTransport::RelayWebSocket,
+                    &verified_event,
+                    &challenge,
+                    &relay_url,
+                    transport_delegation,
+                ) {
+                Ok(proof) => Arc::new(proof),
+                Err(error) => {
+                    warn!(conn_id = %conn_id, error = %error, "sealed NIP-42 evidence creation failed");
+                    *conn.auth_state.write().await = AuthState::Failed;
+                    conn.send(RelayMessage::ok(
+                        &event_id_hex,
+                        false,
+                        "auth-required: verification failed",
+                    ));
+                    return;
+                }
+            };
             *conn.auth_state.write().await = AuthState::Authenticated(auth_ctx);
-            state
-                .conn_manager
-                .set_authenticated_pubkey(conn_id, pubkey.to_bytes().to_vec());
-            crate::corporate_identity::spawn_session_revalidation(
-                Arc::clone(&state),
-                conn.tenant.community(),
-                pubkey,
-                identity_decision,
-                conn.cancel.clone(),
+            state.conn_manager.set_authenticated_authority(
+                conn_id,
+                Arc::clone(&verified_proof),
+                verified_assertion.clone(),
             );
+            if let (Some(runtime), Some(assertion)) =
+                (state.client_status_runtime().cloned(), verified_assertion)
+            {
+                if let Err(error) = runtime
+                    .present_after_auth(
+                        Arc::clone(&state),
+                        verified_proof,
+                        assertion,
+                        conn_id,
+                        conn.cancel.clone(),
+                    )
+                    .await
+                {
+                    // Presentation failure never widens or narrows access. The
+                    // client receives no current indicator and clears any old
+                    // status on its existing freshness/disconnect boundary.
+                    metrics::counter!("buzz_client_status_degradation_total").increment(1);
+                    warn!(
+                        conn_id = %conn_id,
+                        reason = "client_status_unavailable",
+                        "client binding status withheld"
+                    );
+                    tracing::debug!(error = %error, "client binding status detail");
+                }
+            }
+            if let Some(identity_decision) = identity_decision {
+                crate::corporate_identity::spawn_session_revalidation(
+                    Arc::clone(&state),
+                    conn.tenant.community(),
+                    pubkey,
+                    identity_decision,
+                    conn.cancel.clone(),
+                );
+            }
             conn.send(RelayMessage::ok(&event_id_hex, true, ""));
         }
         Err(e) => {
@@ -377,6 +500,48 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
 mod tests {
     use super::extract_auth_tag_json;
     use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    #[test]
+    fn observational_auth_cannot_enter_mutating_identity_lane() {
+        use crate::authorization_runtime::{
+            finalization::AuthorizationMode,
+            transport::{legacy_identity_lane_for_mode, LegacyIdentityLane},
+        };
+
+        let mut binding_writes = 0;
+        let mut membership_writes = 0;
+        let mut public_projection_writes = 0;
+        for mode in [
+            AuthorizationMode::Shadow,
+            AuthorizationMode::VerifyOnly,
+            AuthorizationMode::Enforce,
+        ] {
+            if legacy_identity_lane_for_mode(Some(mode)) == LegacyIdentityLane::Legacy {
+                binding_writes += 1;
+                membership_writes += 1;
+                public_projection_writes += 1;
+            }
+        }
+        assert_eq!(binding_writes, 0);
+        assert_eq!(membership_writes, 0);
+        assert_eq!(public_projection_writes, 0);
+        assert_eq!(
+            legacy_identity_lane_for_mode(Some(AuthorizationMode::Off)),
+            LegacyIdentityLane::Legacy
+        );
+        assert_eq!(
+            legacy_identity_lane_for_mode(Some(AuthorizationMode::Shadow)),
+            LegacyIdentityLane::ObserveOnly
+        );
+        assert_eq!(
+            legacy_identity_lane_for_mode(Some(AuthorizationMode::VerifyOnly)),
+            LegacyIdentityLane::ObserveOnly
+        );
+        assert_eq!(
+            legacy_identity_lane_for_mode(Some(AuthorizationMode::Enforce)),
+            LegacyIdentityLane::ProtectedEnforce
+        );
+    }
 
     /// Build a signed NIP-98 (kind 27235) event carrying the given tags. The
     /// `auth` tag lives inside the signed event exactly as the git and

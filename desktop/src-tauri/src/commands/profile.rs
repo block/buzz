@@ -89,33 +89,56 @@ fn verified_identities(
             let parts = tag.as_slice();
             (parts.len() == 2).then(|| parts[1].as_str())
         };
+        let canonical_tag_set = |active: bool| {
+            let allowed: &[&str] = if active {
+                &["d", "p", "verified", "active", "expiration", "display_name"]
+            } else {
+                &["d", "p", "verified", "active", "expiration"]
+            };
+            event.tags.len() == allowed.len()
+                && event.tags.iter().all(|tag| {
+                    let parts = tag.as_slice();
+                    parts.len() == 2
+                        && allowed.contains(&parts[0].as_str())
+                        && event
+                            .tags
+                            .iter()
+                            .filter(|candidate| candidate.as_slice().first() == parts.first())
+                            .count()
+                            == 1
+                })
+        };
         // Select the signed replaceable-event head before validating its
         // payload. Otherwise a newer malformed assertion could be skipped and
         // silently resurrect the older active label returned alongside it.
-        let identity = match (tag_value("d"), tag_value("verified"), tag_value("p")) {
-            (Some(assertion_d), Some("relay"), Some(asserted_subject))
-                if assertion_d == subject && asserted_subject == subject =>
-            {
-                match tag_value("active") {
-                    Some("false") => None,
-                    Some("true") => match (
-                        tag_value("expiration")
-                            .and_then(|value| value.parse::<u64>().ok())
-                            .filter(|expiration| *expiration > now),
-                        tag_value("display_name")
-                            .map(str::trim)
-                            .filter(|value| !value.is_empty()),
-                    ) {
-                        (Some(expires_at), Some(display_name)) => Some(VerifiedIdentity {
-                            display_name: display_name.to_string(),
-                            expires_at,
-                        }),
+        let identity = if event.content.is_empty() {
+            match (tag_value("d"), tag_value("verified"), tag_value("p")) {
+                (Some(assertion_d), Some("relay"), Some(asserted_subject))
+                    if assertion_d == subject && asserted_subject == subject =>
+                {
+                    match tag_value("active") {
+                        Some("false") if canonical_tag_set(false) => None,
+                        Some("true") if canonical_tag_set(true) => match (
+                            tag_value("expiration")
+                                .and_then(|value| value.parse::<u64>().ok())
+                                .filter(|expiration| *expiration > now),
+                            tag_value("display_name")
+                                .map(str::trim)
+                                .filter(|value| !value.is_empty()),
+                        ) {
+                            (Some(expires_at), Some(display_name)) => Some(VerifiedIdentity {
+                                display_name: display_name.to_string(),
+                                expires_at,
+                            }),
+                            _ => None,
+                        },
                         _ => None,
-                    },
-                    _ => None,
+                    }
                 }
+                _ => None,
             }
-            _ => None,
+        } else {
+            None
         };
         let created_at = event.created_at.as_secs();
         let event_id = event.id.to_hex();
@@ -648,6 +671,85 @@ mod tests {
         assert!(
             verified_identities(&[active, inactive], Some(&relay.public_key().to_hex())).is_empty()
         );
+    }
+
+    #[test]
+    fn newer_nonempty_projection_removes_verified_identity() {
+        let relay = nostr::Keys::generate();
+        let subject = nostr::Keys::generate().public_key().to_hex();
+        let created_at = nostr::Timestamp::now().as_secs();
+        let expires_at = created_at + 60;
+        let canonical_tags = || {
+            [
+                nostr::Tag::parse(["d", subject.as_str()]).unwrap(),
+                nostr::Tag::parse(["p", subject.as_str()]).unwrap(),
+                nostr::Tag::parse(["verified", "relay"]).unwrap(),
+                nostr::Tag::parse(["active", "true"]).unwrap(),
+                nostr::Tag::parse(["expiration", &expires_at.to_string()]).unwrap(),
+                nostr::Tag::parse(["display_name", "Example User"]).unwrap(),
+            ]
+        };
+        let active =
+            nostr::EventBuilder::new(nostr::Kind::Custom(KIND_USER_TRUSTED_ASSERTION as u16), "")
+                .tags(canonical_tags())
+                .custom_created_at(nostr::Timestamp::from(created_at))
+                .sign_with_keys(&relay)
+                .unwrap();
+        let nonempty = nostr::EventBuilder::new(
+            nostr::Kind::Custom(KIND_USER_TRUSTED_ASSERTION as u16),
+            "private content must never be projected",
+        )
+        .tags(canonical_tags())
+        .custom_created_at(nostr::Timestamp::from(created_at + 1))
+        .sign_with_keys(&relay)
+        .unwrap();
+
+        assert!(
+            verified_identities(&[active, nonempty], Some(&relay.public_key().to_hex())).is_empty(),
+            "a malformed newer head must withdraw rather than reveal or resurrect a label"
+        );
+    }
+
+    #[test]
+    fn newer_projection_with_unknown_or_duplicate_tags_removes_verified_identity() {
+        let relay = nostr::Keys::generate();
+        let subject = nostr::Keys::generate().public_key().to_hex();
+        let created_at = nostr::Timestamp::now().as_secs();
+        let expires_at = created_at + 60;
+        let canonical =
+            nostr::EventBuilder::new(nostr::Kind::Custom(KIND_USER_TRUSTED_ASSERTION as u16), "")
+                .tags([
+                    nostr::Tag::parse(["d", subject.as_str()]).unwrap(),
+                    nostr::Tag::parse(["p", subject.as_str()]).unwrap(),
+                    nostr::Tag::parse(["verified", "relay"]).unwrap(),
+                    nostr::Tag::parse(["active", "true"]).unwrap(),
+                    nostr::Tag::parse(["expiration", &expires_at.to_string()]).unwrap(),
+                    nostr::Tag::parse(["display_name", "Example User"]).unwrap(),
+                ])
+                .custom_created_at(nostr::Timestamp::from(created_at))
+                .sign_with_keys(&relay)
+                .unwrap();
+
+        for extra in [
+            nostr::Tag::parse(["issuer", "private.invalid"]).unwrap(),
+            nostr::Tag::parse(["display_name", "Replacement"]).unwrap(),
+        ] {
+            let mut tags = canonical.tags.clone().to_vec();
+            tags.push(extra);
+            let malformed = nostr::EventBuilder::new(
+                nostr::Kind::Custom(KIND_USER_TRUSTED_ASSERTION as u16),
+                "",
+            )
+            .tags(tags)
+            .custom_created_at(nostr::Timestamp::from(created_at + 1))
+            .sign_with_keys(&relay)
+            .unwrap();
+            assert!(verified_identities(
+                &[canonical.clone(), malformed],
+                Some(&relay.public_key().to_hex())
+            )
+            .is_empty());
+        }
     }
 
     #[test]

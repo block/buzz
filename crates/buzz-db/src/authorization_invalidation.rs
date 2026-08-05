@@ -34,6 +34,8 @@ pub enum AuthorizationSelectorKind {
     PolicyVersion,
     /// Exact delegated owner Nostr key.
     DelegatedOwner,
+    /// Exact verified delegated relationship and monotonic revision.
+    DelegatedRelationship,
 }
 
 impl AuthorizationSelectorKind {
@@ -47,6 +49,7 @@ impl AuthorizationSelectorKind {
             Self::Domain => "domain",
             Self::PolicyVersion => "policy_version",
             Self::DelegatedOwner => "delegated_owner",
+            Self::DelegatedRelationship => "delegated_relationship",
         }
     }
 
@@ -59,10 +62,57 @@ impl AuthorizationSelectorKind {
             "domain" => Ok(Self::Domain),
             "policy_version" => Ok(Self::PolicyVersion),
             "delegated_owner" => Ok(Self::DelegatedOwner),
+            "delegated_relationship" => Ok(Self::DelegatedRelationship),
             _ => Err(DbError::InvalidData(
                 "authorization invalidation selector kind is invalid".into(),
             )),
         }
+    }
+}
+
+/// Exact server-issued runtime session target.
+///
+/// A connection UUID is insufficient because UUID reuse would silently target
+/// another issuance. The independent non-reuse fence is generated once when
+/// the server registers the session and retained for its complete lifetime.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AuthorizationSessionTarget {
+    session_id: Uuid,
+    issuance_fence: Uuid,
+}
+
+impl AuthorizationSessionTarget {
+    /// Construct one exact session issuance from server-owned identifiers.
+    pub fn new(session_id: Uuid, issuance_fence: Uuid) -> Result<Self> {
+        if session_id.is_nil() || issuance_fence.is_nil() {
+            return Err(DbError::InvalidData(
+                "authorization session target requires non-nil session and issuance IDs".into(),
+            ));
+        }
+        Ok(Self {
+            session_id,
+            issuance_fence,
+        })
+    }
+
+    /// Runtime connection identifier.
+    pub const fn session_id(self) -> Uuid {
+        self.session_id
+    }
+
+    /// Server-issued fence that prevents session identity reuse.
+    pub const fn issuance_fence(self) -> Uuid {
+        self.issuance_fence
+    }
+}
+
+impl fmt::Debug for AuthorizationSessionTarget {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AuthorizationSessionTarget")
+            .field("session_id", &"[redacted]")
+            .field("issuance_fence", &"[redacted]")
+            .finish()
     }
 }
 
@@ -80,14 +130,21 @@ pub enum AuthorizationSelector {
         /// All binding versions through this value are invalid.
         invalid_through: u64,
     },
-    /// Exact runtime session.
-    Session(Uuid),
+    /// Exact runtime session issuance.
+    Session(AuthorizationSessionTarget),
     /// Entire authorization domain.
     Domain,
     /// Exact opaque provider policy version.
     PolicyVersion(String),
     /// Exact delegated owner key.
     DelegatedOwner([u8; 32]),
+    /// Exact delegated relationship identity and invalid-through revision.
+    DelegatedRelationship {
+        /// Verifier-defined relationship identifier.
+        relationship_id: Uuid,
+        /// All relationship revisions through this value are invalid.
+        relationship_revision: u64,
+    },
 }
 
 impl fmt::Debug for AuthorizationSelector {
@@ -137,14 +194,9 @@ impl AuthorizationSelector {
         })
     }
 
-    /// Select an exact non-nil runtime session.
-    pub fn session(session_id: Uuid) -> Result<Self> {
-        if session_id.is_nil() {
-            return Err(DbError::InvalidData(
-                "authorization session selector must not be nil".into(),
-            ));
-        }
-        Ok(Self::Session(session_id))
+    /// Select one exact server-issued runtime session.
+    pub const fn session(target: AuthorizationSessionTarget) -> Self {
+        Self::Session(target)
     }
 
     /// Select the entire authorization domain.
@@ -168,6 +220,23 @@ impl AuthorizationSelector {
         Self::DelegatedOwner(key)
     }
 
+    /// Select one exact verified delegated relationship revision.
+    pub fn delegated_relationship(
+        relationship_id: Uuid,
+        relationship_revision: u64,
+    ) -> Result<Self> {
+        if relationship_id.is_nil() || relationship_revision == 0 {
+            return Err(DbError::InvalidData(
+                "delegated relationship selector requires a non-nil ID and positive revision"
+                    .into(),
+            ));
+        }
+        Ok(Self::DelegatedRelationship {
+            relationship_id,
+            relationship_revision,
+        })
+    }
+
     /// Selector class.
     pub const fn kind(&self) -> AuthorizationSelectorKind {
         match self {
@@ -178,6 +247,7 @@ impl AuthorizationSelector {
             Self::Domain => AuthorizationSelectorKind::Domain,
             Self::PolicyVersion(_) => AuthorizationSelectorKind::PolicyVersion,
             Self::DelegatedOwner(_) => AuthorizationSelectorKind::DelegatedOwner,
+            Self::DelegatedRelationship { .. } => AuthorizationSelectorKind::DelegatedRelationship,
         }
     }
 
@@ -189,12 +259,28 @@ impl AuthorizationSelector {
             Self::Binding { binding_id, .. } => {
                 tagged_fingerprint(b"binding", &[binding_id.as_bytes()])
             }
-            Self::Session(session_id) => tagged_fingerprint(b"session", &[session_id.as_bytes()]),
+            Self::Session(target) => tagged_fingerprint(
+                b"session-issuance-v2",
+                &[
+                    target.session_id().as_bytes(),
+                    target.issuance_fence().as_bytes(),
+                ],
+            ),
             Self::Domain => tagged_fingerprint(b"domain", &[]),
             Self::PolicyVersion(version) => {
                 tagged_fingerprint(b"policy-version", &[version.as_bytes()])
             }
             Self::DelegatedOwner(key) => tagged_fingerprint(b"delegated-owner", &[key]),
+            Self::DelegatedRelationship {
+                relationship_id,
+                relationship_revision,
+            } => tagged_fingerprint(
+                b"delegated-relationship-v1",
+                &[
+                    relationship_id.as_bytes(),
+                    &relationship_revision.to_be_bytes(),
+                ],
+            ),
         }
     }
 
@@ -258,7 +344,7 @@ impl AuthorizationInvalidationEntry {
     }
 
     /// Fence authority captured before reversible admission loss for one exact
-    /// principal, Nostr key, or delegated owner.
+    /// principal, Nostr key, delegated owner, or exact delegated relationship.
     ///
     /// This is intentionally unavailable for bindings, sessions, domains, and
     /// policy versions. Binding invalidation uses a monotonic version floor,
@@ -269,9 +355,11 @@ impl AuthorizationInvalidationEntry {
             AuthorizationSelectorKind::PrincipalFingerprint
                 | AuthorizationSelectorKind::NostrKey
                 | AuthorizationSelectorKind::DelegatedOwner
+                | AuthorizationSelectorKind::DelegatedRelationship
         ) {
             return Err(DbError::InvalidData(
-                "authorization admission loss requires a principal, key, or delegated owner".into(),
+                "authorization admission loss requires a principal, key, owner, or relationship"
+                    .into(),
             ));
         }
         Ok(Self {
@@ -337,6 +425,7 @@ impl AuthorizationInvalidationRequest {
                     AuthorizationSelectorKind::PrincipalFingerprint
                     | AuthorizationSelectorKind::NostrKey
                     | AuthorizationSelectorKind::DelegatedOwner
+                    | AuthorizationSelectorKind::DelegatedRelationship
                     | AuthorizationSelectorKind::Domain,
                     AuthorizationInvalidationEffect::Fence,
                 )
@@ -849,7 +938,10 @@ mod tests {
 
         for selector in [
             AuthorizationSelector::binding(Uuid::new_v4(), 1).expect("valid binding"),
-            AuthorizationSelector::session(Uuid::new_v4()).expect("valid session"),
+            AuthorizationSelector::session(
+                AuthorizationSessionTarget::new(Uuid::new_v4(), Uuid::new_v4())
+                    .expect("valid session"),
+            ),
             AuthorizationSelector::domain(),
             AuthorizationSelector::policy_version("policy").expect("valid policy"),
         ] {
@@ -948,7 +1040,10 @@ mod tests {
 
         let second = request(
             Uuid::new_v4(),
-            AuthorizationSelector::session(Uuid::new_v4()).expect("valid session"),
+            AuthorizationSelector::session(
+                AuthorizationSessionTarget::new(Uuid::new_v4(), Uuid::new_v4())
+                    .expect("valid session"),
+            ),
         );
         let third = request(
             Uuid::new_v4(),

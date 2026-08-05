@@ -1,6 +1,9 @@
 //! NIP-11 relay information document.
 
+use std::num::NonZeroU64;
+
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 #[cfg(test)]
 use crate::config::DEFAULT_MAX_FRAME_BYTES;
@@ -19,6 +22,143 @@ pub(crate) const SUPPORTED_NIPS: &[u32] = &[1, 2, 10, 11, 16, 17, 23, 25, 29, 33
 /// stable signing key — both are required for kind 13534/8000/8001 events
 /// to be verifiable by clients.
 pub(crate) const NIP_RELAY_MEMBERSHIP: u32 = 43;
+
+/// Provider-neutral NIP-FI assertion transport profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NipFiTransportProfile {
+    /// Assertions are injected only by an origin-isolated trusted proxy that
+    /// strips untrusted inbound copies of the configured assertion header.
+    TrustedProxy,
+    /// Assertions are attached by the client to the same protected HTTP
+    /// request as its NIP-98 proof.
+    ClientAttached,
+}
+
+/// Provider-neutral NIP-FI enrollment mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NipFiEnrollmentMode {
+    /// First enrollment requires an assertion key attestation.
+    AttestedKey,
+    /// Binding creation requires a separate privileged transition.
+    Provisioned,
+    /// First valid use may create the binding under explicit TOFU policy.
+    Tofu,
+}
+
+/// Provider-neutral NIP-FI discovery object.
+///
+/// Construction makes the delegation bound invariant unrepresentable:
+/// delegation is `true` exactly when a positive finite maximum is present.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NipFiDiscovery {
+    transports: Vec<NipFiTransportProfile>,
+    enrollment: NipFiEnrollmentMode,
+    delegation: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    delegated_lease_max_seconds: Option<NonZeroU64>,
+}
+
+impl NipFiDiscovery {
+    /// Validate provider-neutral discovery configuration.
+    pub fn new(
+        mut transports: Vec<NipFiTransportProfile>,
+        enrollment: NipFiEnrollmentMode,
+        delegated_lease_max_seconds: Option<NonZeroU64>,
+    ) -> Result<Self, NipFiDiscoveryError> {
+        if transports.is_empty() {
+            return Err(NipFiDiscoveryError::NoTransport);
+        }
+        transports.sort_unstable();
+        let original_len = transports.len();
+        transports.dedup();
+        if transports.len() != original_len {
+            return Err(NipFiDiscoveryError::DuplicateTransport);
+        }
+
+        Ok(Self {
+            transports,
+            enrollment,
+            delegation: delegated_lease_max_seconds.is_some(),
+            delegated_lease_max_seconds,
+        })
+    }
+
+    fn includes_transport(&self, transport: NipFiTransportProfile) -> bool {
+        self.transports.contains(&transport)
+    }
+}
+
+/// Complete-stack conformance input supplied by the release/conformance lane.
+///
+/// A source may return `true` only when every applicable NIP-FI row passed
+/// against the same reviewed implementation revision. Trusted-proxy support
+/// additionally requires deployment evidence for origin isolation and inbound
+/// header stripping; synthetic code tests alone are insufficient.
+pub trait CompleteNipFiRuntimeConformance: Send + Sync {
+    /// Exact reviewed implementation revision used for every applicable row.
+    fn reviewed_implementation_revision(&self) -> &str;
+
+    /// Whether every applicable row passed at the reviewed revision.
+    fn all_applicable_rows_passed_at_same_revision(&self) -> bool;
+
+    /// Whether trusted-proxy deployment controls and negative tests passed.
+    fn trusted_proxy_deployment_evidence_passed(&self) -> bool;
+}
+
+/// Discovery proven ready by an injected complete-stack conformance source.
+///
+/// The reviewed revision and evidence are deliberately not serialized into
+/// NIP-11. This wrapper has no public field or unchecked constructor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConformanceReadyNipFiDiscovery(NipFiDiscovery);
+
+impl ConformanceReadyNipFiDiscovery {
+    /// Gate discovery on complete same-revision runtime and deployment proof.
+    pub fn from_complete_stack(
+        discovery: NipFiDiscovery,
+        conformance: &dyn CompleteNipFiRuntimeConformance,
+    ) -> Result<Self, NipFiDiscoveryError> {
+        let revision = conformance.reviewed_implementation_revision();
+        if revision.len() != 40
+            || !revision
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(NipFiDiscoveryError::InvalidReviewedRevision);
+        }
+        if !conformance.all_applicable_rows_passed_at_same_revision() {
+            return Err(NipFiDiscoveryError::IncompleteConformance);
+        }
+        if discovery.includes_transport(NipFiTransportProfile::TrustedProxy)
+            && !conformance.trusted_proxy_deployment_evidence_passed()
+        {
+            return Err(NipFiDiscoveryError::MissingTrustedProxyEvidence);
+        }
+        Ok(Self(discovery))
+    }
+}
+
+/// Fail-closed NIP-FI discovery construction error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum NipFiDiscoveryError {
+    /// At least one supported transport must be advertised.
+    #[error("NIP-FI discovery requires at least one transport")]
+    NoTransport,
+    /// Each supported transport may appear only once.
+    #[error("NIP-FI discovery contains a duplicate transport")]
+    DuplicateTransport,
+    /// The complete-stack report did not identify one exact Git revision.
+    #[error("NIP-FI conformance report has an invalid reviewed revision")]
+    InvalidReviewedRevision,
+    /// Not every applicable row passed at the same revision.
+    #[error("NIP-FI complete-stack conformance is incomplete")]
+    IncompleteConformance,
+    /// Trusted-proxy origin isolation and header stripping were not proven.
+    #[error("NIP-FI trusted-proxy deployment evidence is incomplete")]
+    MissingTrustedProxyEvidence,
+}
 
 /// Relay information document served at `GET /` with `Accept: application/nostr+json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,6 +195,10 @@ pub struct RelayInfo {
     /// Relay's own signing pubkey (NIP-11 `self` field, NIP-43).
     #[serde(rename = "self", skip_serializing_if = "Option::is_none")]
     pub relay_self: Option<String>,
+    /// Provider-neutral NIP-FI capabilities. Omitted until a complete-stack
+    /// same-revision conformance input explicitly enables discovery.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    federated_identity: Option<NipFiDiscovery>,
 }
 
 /// Protocol and resource limits advertised in the NIP-11 document.
@@ -85,6 +229,9 @@ pub struct RelayLimitation {
     /// NIP-ER: maximum allowed `not_before` horizon in seconds from now.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_not_before_delta: Option<u64>,
+    /// NIP-FI support. Omitted until complete-stack conformance is proven.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    federated_identity: Option<bool>,
 }
 
 /// Canonical `RelayLimitation` advertised by this relay.
@@ -116,6 +263,7 @@ fn relay_limitation(max_message_length: usize) -> RelayLimitation {
         restricted_writes: true,
         due_delivery_mode: Some("push".to_string()),
         max_not_before_delta: Some(max_not_before_delta),
+        federated_identity: None,
     }
 }
 
@@ -169,7 +317,24 @@ impl RelayInfo {
             limitation: Some(relay_limitation(max_message_length)),
             pairing_relay_url: pairing_relay_url.map(str::to_string),
             relay_self: relay_self.map(|s| s.to_string()),
+            federated_identity: None,
         }
+    }
+
+    /// Add provider-neutral NIP-FI discovery after complete-stack proof.
+    ///
+    /// There is intentionally no raw boolean/configuration overload. The
+    /// normal runtime build path has no readiness input and therefore remains
+    /// silent until the release/conformance lane supplies this gated value.
+    pub fn with_conformant_federated_identity(
+        mut self,
+        ready: ConformanceReadyNipFiDiscovery,
+    ) -> Self {
+        if let Some(limitation) = &mut self.limitation {
+            limitation.federated_identity = Some(true);
+        }
+        self.federated_identity = Some(ready.0);
+        self
     }
 }
 
@@ -267,6 +432,9 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
             .push("nip-pl".to_string());
         info.push = Some(push);
     }
+    if let Some(ready) = state.nip_fi_discovery().cloned() {
+        info = info.with_conformant_federated_identity(ready);
+    }
     info
 }
 
@@ -350,6 +518,34 @@ const _RELAY_INFO_BUILD_STATIC_INPUT_FENCE: fn(
 mod tests {
     use super::*;
 
+    struct SyntheticConformance {
+        revision: &'static str,
+        complete: bool,
+        trusted_proxy_evidence: bool,
+    }
+
+    impl CompleteNipFiRuntimeConformance for SyntheticConformance {
+        fn reviewed_implementation_revision(&self) -> &str {
+            self.revision
+        }
+
+        fn all_applicable_rows_passed_at_same_revision(&self) -> bool {
+            self.complete
+        }
+
+        fn trusted_proxy_deployment_evidence_passed(&self) -> bool {
+            self.trusted_proxy_evidence
+        }
+    }
+
+    fn complete_conformance() -> SyntheticConformance {
+        SyntheticConformance {
+            revision: "0123456789abcdef0123456789abcdef01234567",
+            complete: true,
+            trusted_proxy_evidence: true,
+        }
+    }
+
     #[test]
     fn push_descriptor_is_gated_by_gateway_configuration_and_tenant_binding() {
         let keys = nostr::Keys::generate();
@@ -400,6 +596,142 @@ mod tests {
     fn build_advertises_buzz_repository_url() {
         let info = RelayInfo::build(None, None, false, DEFAULT_MAX_FRAME_BYTES, None);
         assert_eq!(info.software, "https://github.com/block/buzz");
+    }
+
+    #[test]
+    fn default_discovery_is_silent_until_complete_stack_input_exists() {
+        let info = RelayInfo::build(None, None, false, DEFAULT_MAX_FRAME_BYTES, None);
+        let json = serde_json::to_value(info).expect("serialize default NIP-11");
+
+        assert!(json.get("federated_identity").is_none());
+        assert!(json["limitation"].get("federated_identity").is_none());
+    }
+
+    #[test]
+    fn discovery_rejects_empty_duplicate_and_incomplete_inputs() {
+        assert_eq!(
+            NipFiDiscovery::new(Vec::new(), NipFiEnrollmentMode::AttestedKey, None),
+            Err(NipFiDiscoveryError::NoTransport)
+        );
+        assert_eq!(
+            NipFiDiscovery::new(
+                vec![
+                    NipFiTransportProfile::ClientAttached,
+                    NipFiTransportProfile::ClientAttached,
+                ],
+                NipFiEnrollmentMode::Provisioned,
+                None,
+            ),
+            Err(NipFiDiscoveryError::DuplicateTransport)
+        );
+
+        let discovery = NipFiDiscovery::new(
+            vec![NipFiTransportProfile::ClientAttached],
+            NipFiEnrollmentMode::Provisioned,
+            None,
+        )
+        .expect("synthetic discovery is valid");
+        for conformance in [
+            SyntheticConformance {
+                revision: "not-a-revision",
+                complete: true,
+                trusted_proxy_evidence: true,
+            },
+            SyntheticConformance {
+                revision: "0123456789abcdef0123456789abcdef01234567",
+                complete: false,
+                trusted_proxy_evidence: true,
+            },
+        ] {
+            assert!(ConformanceReadyNipFiDiscovery::from_complete_stack(
+                discovery.clone(),
+                &conformance,
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn trusted_proxy_advertisement_requires_deployment_evidence() {
+        let discovery = NipFiDiscovery::new(
+            vec![NipFiTransportProfile::TrustedProxy],
+            NipFiEnrollmentMode::AttestedKey,
+            None,
+        )
+        .expect("synthetic discovery is valid");
+        let conformance = SyntheticConformance {
+            revision: "0123456789abcdef0123456789abcdef01234567",
+            complete: true,
+            trusted_proxy_evidence: false,
+        };
+
+        assert_eq!(
+            ConformanceReadyNipFiDiscovery::from_complete_stack(discovery, &conformance),
+            Err(NipFiDiscoveryError::MissingTrustedProxyEvidence)
+        );
+    }
+
+    #[test]
+    fn conformant_discovery_is_provider_neutral_and_delegation_bounded() {
+        let max = NonZeroU64::new(300).expect("synthetic bound is positive");
+        let discovery = NipFiDiscovery::new(
+            vec![
+                NipFiTransportProfile::TrustedProxy,
+                NipFiTransportProfile::ClientAttached,
+            ],
+            NipFiEnrollmentMode::AttestedKey,
+            Some(max),
+        )
+        .expect("synthetic discovery is valid");
+        let ready =
+            ConformanceReadyNipFiDiscovery::from_complete_stack(discovery, &complete_conformance())
+                .expect("complete synthetic report enables discovery");
+        let info = RelayInfo::build(None, None, false, DEFAULT_MAX_FRAME_BYTES, None)
+            .with_conformant_federated_identity(ready);
+        let json = serde_json::to_value(info).expect("serialize conformant discovery");
+
+        assert_eq!(json["limitation"]["federated_identity"], true);
+        assert_eq!(
+            json["federated_identity"],
+            serde_json::json!({
+                "transports": ["trusted-proxy", "client-attached"],
+                "enrollment": "attested-key",
+                "delegation": true,
+                "delegated_lease_max_seconds": 300,
+            })
+        );
+        let encoded = json.to_string();
+        for private in [
+            "synthetic-issuer",
+            "synthetic-subject",
+            "tenant.example",
+            "private-audience",
+            "assertion-header-name",
+        ] {
+            assert!(!encoded.contains(private));
+        }
+    }
+
+    #[test]
+    fn discovery_without_delegation_omits_lease_bound() {
+        let discovery = NipFiDiscovery::new(
+            vec![NipFiTransportProfile::ClientAttached],
+            NipFiEnrollmentMode::Tofu,
+            None,
+        )
+        .expect("synthetic discovery is valid");
+        let ready =
+            ConformanceReadyNipFiDiscovery::from_complete_stack(discovery, &complete_conformance())
+                .expect("complete synthetic report enables discovery");
+        let info = RelayInfo::build(None, None, false, DEFAULT_MAX_FRAME_BYTES, None)
+            .with_conformant_federated_identity(ready);
+        let json = serde_json::to_value(info).expect("serialize conformant discovery");
+
+        assert_eq!(json["federated_identity"]["delegation"], false);
+        assert!(json["federated_identity"]
+            .get("delegated_lease_max_seconds")
+            .is_none());
+        assert_eq!(json["supported_nips"], serde_json::json!(SUPPORTED_NIPS));
     }
 
     #[test]

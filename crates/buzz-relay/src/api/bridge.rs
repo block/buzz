@@ -201,13 +201,19 @@ pub(crate) fn retain_bridge_proof(
         return Ok(None);
     };
     let actor = proof.actor_pubkey();
-    let proof = match crate::corporate_identity::verify_unconditional_nip_oa_owner(actor, auth_tag)
-    {
-        Some(owner) => buzz_auth::VerifiedEvidenceAdapter::new()
+    let proof = match crate::corporate_identity::verify_unconditional_nip_oa_relationship(
+        actor, auth_tag,
+    ) {
+        Some(relationship) => buzz_auth::VerifiedEvidenceAdapter::new()
             .attach_transport_delegation(
                 proof,
                 buzz_auth::VerifiedDelegationOutput::from_workspace_verifier(
-                    owner, actor, None, true,
+                    relationship.owner_pubkey(),
+                    actor,
+                    relationship.relationship_id(),
+                    relationship.relationship_revision(),
+                    None,
+                    true,
                 ),
             )
             .map_err(|_| {
@@ -289,6 +295,14 @@ async fn verify_bridge_corporate_identity(
         headers,
     )
     .map_err(crate::corporate_identity::CorporateIdentityError::into_api_error)?;
+    if identity_assertion.is_none()
+        && crate::authorization_runtime::transport::provider_evidence_resolver_is_installed(
+            state,
+            tenant.community(),
+        )
+    {
+        return Ok(None);
+    }
     match crate::corporate_identity::verify_corporate_identity(
         state,
         tenant.community(),

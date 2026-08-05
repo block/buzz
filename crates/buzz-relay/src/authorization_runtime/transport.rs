@@ -13,9 +13,10 @@ use buzz_auth::{
     AuthContext, AuthTransport, AuthorizationCapability, AuthorizationLease,
     AuthorizationLeaseValidator, AuthorizationProfileId, BindingVersion, LeaseUseRequirement,
     LeaseValidationError, PolicyVersion, SharedAuthorizationClock, VerificationOnlyDisposition,
-    VerifiedFederatedAssertion, VerifiedNostrProof,
+    VerifiedFederatedAssertion, VerifiedNostrProof, VerifiedProviderEvidence,
 };
 use buzz_core::CommunityId;
+use buzz_db::authorization_invalidation::AuthorizationSessionTarget;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -70,6 +71,45 @@ pub struct DomainTransportPolicy {
     mode: AuthorizationMode,
 }
 
+/// Exact result produced by one installed provider-neutral evidence resolver.
+pub enum VerifiedProviderEvidenceResolution {
+    /// No verified evidence was available for this request.
+    Absent,
+    /// Exactly one sealed evidence object was available.
+    One(Arc<VerifiedProviderEvidence>),
+    /// More than one source or value was present; callers must deny.
+    Ambiguous,
+}
+
+impl fmt::Debug for VerifiedProviderEvidenceResolution {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Absent => "VerifiedProviderEvidenceResolution::Absent",
+            Self::One(_) => "VerifiedProviderEvidenceResolution::One([redacted])",
+            Self::Ambiguous => "VerifiedProviderEvidenceResolution::Ambiguous",
+        })
+    }
+}
+
+/// Redacted failure from the deployment-installed evidence resolver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("verified provider evidence resolution failed")]
+pub struct VerifiedProviderEvidenceResolutionError;
+
+/// Deployment adapter that supplies already-verified provider-neutral evidence.
+///
+/// The adapter receives only typed protected-request metadata. Raw headers,
+/// tokens, and transport classifications cannot construct the returned sealed
+/// value. Implementations must return [`VerifiedProviderEvidenceResolution::Ambiguous`]
+/// when multiple or conflicting sources are observed.
+pub trait VerifiedProviderEvidenceResolver: Send + Sync {
+    /// Resolve zero, exactly one, or ambiguous evidence for one exact request.
+    fn resolve(
+        &self,
+        request: &ProtectedOperationRequest,
+    ) -> Result<VerifiedProviderEvidenceResolution, VerifiedProviderEvidenceResolutionError>;
+}
+
 impl DomainTransportPolicy {
     /// Construct policy from immutable server configuration.
     pub const fn from_server_configuration(
@@ -99,11 +139,13 @@ pub struct ProtectedOperationRequest {
     verified_proof: Arc<VerifiedNostrProof>,
     capability: AuthorizationCapability,
     correlation_id: Uuid,
-    session_id: Option<Uuid>,
+    session_target: Option<AuthorizationSessionTarget>,
     surface: &'static str,
     cancellation: Option<CancellationToken>,
     verified_assertion: Option<Arc<VerifiedFederatedAssertion>>,
     enrollment_assertion: Option<Arc<VerifiedFederatedAssertion>>,
+    enrollment_requested: bool,
+    provider_evidence: Option<Arc<VerifiedProviderEvidence>>,
 }
 
 impl ProtectedOperationRequest {
@@ -132,14 +174,11 @@ impl ProtectedOperationRequest {
         capability: AuthorizationCapability,
         correlation_id: Uuid,
         surface: &'static str,
-        session_id: Option<Uuid>,
+        session_target: Option<AuthorizationSessionTarget>,
         cancellation: Option<CancellationToken>,
     ) -> Result<Self, ProtectedTransportError> {
         if correlation_id.is_nil() {
             return Err(ProtectedTransportError::InvalidCorrelationId);
-        }
-        if session_id == Some(Uuid::nil()) {
-            return Err(ProtectedTransportError::InvalidSessionId);
         }
         if surface.is_empty() {
             return Err(ProtectedTransportError::InvalidSurface);
@@ -155,28 +194,31 @@ impl ProtectedOperationRequest {
             verified_proof,
             capability,
             correlation_id,
-            session_id,
+            session_target,
             surface,
             cancellation,
             verified_assertion,
             enrollment_assertion: None,
+            enrollment_requested: false,
+            provider_evidence: None,
         })
     }
 
     fn new_enrollment(
         verified_proof: Arc<VerifiedNostrProof>,
-        assertion: Arc<VerifiedFederatedAssertion>,
+        assertion: Option<Arc<VerifiedFederatedAssertion>>,
         correlation_id: Uuid,
         surface: &'static str,
     ) -> Result<Self, ProtectedTransportError> {
         let mut request = Self::new(
             verified_proof,
-            Some(Arc::clone(&assertion)),
+            assertion.clone(),
             AuthorizationCapability::InviteClaim,
             correlation_id,
             surface,
         )?;
-        request.enrollment_assertion = Some(assertion);
+        request.enrollment_assertion = assertion;
+        request.enrollment_requested = true;
         Ok(request)
     }
 
@@ -217,6 +259,16 @@ impl ProtectedOperationRequest {
         self.verified_assertion.as_ref()
     }
 
+    /// Whether this request is the dedicated first-enrollment operation.
+    pub const fn enrollment_requested(&self) -> bool {
+        self.enrollment_requested
+    }
+
+    /// Exactly one provider-neutral evidence object resolved for this request.
+    pub fn provider_evidence(&self) -> Option<&Arc<VerifiedProviderEvidence>> {
+        self.provider_evidence.as_ref()
+    }
+
     /// Exact dynamically selected capability.
     pub const fn capability(&self) -> AuthorizationCapability {
         self.capability
@@ -227,9 +279,9 @@ impl ProtectedOperationRequest {
         self.correlation_id
     }
 
-    /// Stable server-owned session identity for long-lived transports.
-    pub const fn session_id(&self) -> Option<Uuid> {
-        self.session_id
+    /// Exact server-issued target for a long-lived transport session.
+    pub const fn session_target(&self) -> Option<AuthorizationSessionTarget> {
+        self.session_target
     }
 
     /// Stable low-cardinality surface name for resolver telemetry.
@@ -501,6 +553,7 @@ pub enum LeaseCurrentStateError {
 pub struct ProtectedTransportRuntime {
     domains: HashMap<CommunityId, AuthorizationMode>,
     resolver: Arc<dyn ProtectedAuthorizationResolver>,
+    provider_evidence_resolver: Option<Arc<dyn VerifiedProviderEvidenceResolver>>,
     validator: AuthorizationLeaseValidator,
 }
 
@@ -523,8 +576,49 @@ impl ProtectedTransportRuntime {
         Ok(Self {
             domains,
             resolver,
+            provider_evidence_resolver: None,
             validator: AuthorizationLeaseValidator::new(clock),
         })
+    }
+
+    /// Install exactly one immutable provider-neutral evidence resolver.
+    pub fn with_provider_evidence_resolver(
+        mut self,
+        resolver: Arc<dyn VerifiedProviderEvidenceResolver>,
+    ) -> Self {
+        self.provider_evidence_resolver = Some(resolver);
+        self
+    }
+
+    /// Whether the production composition installed the neutral evidence seam.
+    pub const fn has_provider_evidence_resolver(&self) -> bool {
+        self.provider_evidence_resolver.is_some()
+    }
+
+    fn resolve_provider_evidence(
+        &self,
+        request: &ProtectedOperationRequest,
+    ) -> Result<ProtectedOperationRequest, ProtectedTransportError> {
+        let Some(resolver) = self.provider_evidence_resolver.as_ref() else {
+            return Ok(request.clone());
+        };
+        let resolution = resolver
+            .resolve(request)
+            .map_err(|_| ProtectedTransportError::ProviderEvidenceUnavailable)?;
+        match resolution {
+            VerifiedProviderEvidenceResolution::Absent => Ok(request.clone()),
+            VerifiedProviderEvidenceResolution::Ambiguous => {
+                Err(ProtectedTransportError::AmbiguousProviderEvidence)
+            }
+            VerifiedProviderEvidenceResolution::One(evidence) => {
+                if request.verified_assertion.is_some() || request.provider_evidence.is_some() {
+                    return Err(ProtectedTransportError::ConflictingProviderEvidence);
+                }
+                let mut resolved = request.clone();
+                resolved.provider_evidence = Some(evidence);
+                Ok(resolved)
+            }
+        }
     }
 
     /// Return the exact configured mode, if this runtime owns the domain.
@@ -556,14 +650,17 @@ impl ProtectedTransportRuntime {
             AuthorizationMode::Shadow | AuthorizationMode::VerifyOnly => {
                 // Observation failures are telemetry only. These modes must
                 // never alter the inherited access result.
-                let _ = self.resolver.observe(request).await;
+                if let Ok(request) = self.resolve_provider_evidence(request) {
+                    let _ = self.resolver.observe(&request).await;
+                }
                 Ok(ProtectedAuthorization::Legacy)
             }
             AuthorizationMode::DenyProtected => deny_protected_request(request),
             AuthorizationMode::Enforce => {
+                let request = self.resolve_provider_evidence(request)?;
                 let resolution = self
                     .resolver
-                    .resolve(request)
+                    .resolve(&request)
                     .await
                     .map_err(ProtectedTransportError::Resolution)?;
                 let (context, observer) = match resolution.kind {
@@ -582,7 +679,7 @@ impl ProtectedTransportRuntime {
                     validator: self.validator.clone(),
                     observer,
                 };
-                authority.validate_exact_request(request)?;
+                authority.validate_exact_request(&request)?;
                 authority.revalidate()?;
                 Ok(ProtectedAuthorization::Access(authority))
             }
@@ -596,12 +693,14 @@ impl ProtectedTransportRuntime {
         request: &ProtectedOperationRequest,
     ) -> Result<Option<ProtectedStatusResolution>, ProtectedTransportError> {
         match self.mode_for_domain(request.authorization_domain()) {
-            Some(AuthorizationMode::VerifyOnly | AuthorizationMode::Enforce) => self
-                .resolver
-                .present(request)
-                .await
-                .map(Some)
-                .map_err(ProtectedTransportError::Resolution),
+            Some(AuthorizationMode::VerifyOnly | AuthorizationMode::Enforce) => {
+                let request = self.resolve_provider_evidence(request)?;
+                self.resolver
+                    .present(&request)
+                    .await
+                    .map(Some)
+                    .map_err(ProtectedTransportError::Resolution)
+            }
             Some(AuthorizationMode::DenyProtected) => Err(ProtectedTransportError::DenyProtected),
             None | Some(AuthorizationMode::Off | AuthorizationMode::Shadow) => Ok(None),
         }
@@ -621,15 +720,16 @@ impl ProtectedTransportRuntime {
             }
             AuthorizationMode::DenyProtected => Err(ProtectedTransportError::DenyProtected),
             AuthorizationMode::Enforce => {
+                let request = self.resolve_provider_evidence(request)?;
                 if request.capability() != AuthorizationCapability::InviteClaim
-                    || request.enrollment_assertion().is_none()
+                    || !request.enrollment_requested()
                     || request.owner_pubkey().is_some()
                 {
                     return Err(ProtectedTransportError::EnrollmentEvidenceRequired);
                 }
                 let resolution = self
                     .resolver
-                    .resolve(request)
+                    .resolve(&request)
                     .await
                     .map_err(ProtectedTransportError::Resolution)?;
                 let (disposition, observer) = match resolution.kind {
@@ -644,7 +744,7 @@ impl ProtectedTransportRuntime {
                     observer,
                     validator: self.validator.clone(),
                 };
-                authority.validate_exact_request(request)?;
+                authority.validate_exact_request(&request)?;
                 authority.revalidate()?;
                 Ok(ProtectedEnrollmentAuthorization::Enrollment(authority))
             }
@@ -690,6 +790,44 @@ pub async fn authorize_session_if_configured(
     session_id: Uuid,
     cancellation: CancellationToken,
 ) -> Result<ProtectedAuthorization, ProtectedTransportError> {
+    if state.protected_transport().is_none() {
+        return Ok(ProtectedAuthorization::Legacy);
+    }
+    let session_target = state
+        .conn_manager
+        .authorization_session_target(session_id)
+        .filter(|target| target.session_id() == session_id)
+        .ok_or(ProtectedTransportError::InvalidSessionId)?;
+    let authority = authorize_exact_session_if_configured(
+        state,
+        verified_proof,
+        verified_assertion,
+        capability,
+        correlation_id,
+        surface,
+        session_target,
+        cancellation,
+    )
+    .await?;
+    state
+        .conn_manager
+        .retain_protected_session_authority(session_id, &authority);
+    Ok(authority)
+}
+
+/// Consult the runtime for a server-issued session target that is not managed
+/// by the ordinary relay connection registry (for example, protected audio).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn authorize_exact_session_if_configured(
+    state: &crate::state::AppState,
+    verified_proof: Arc<VerifiedNostrProof>,
+    verified_assertion: Option<Arc<VerifiedFederatedAssertion>>,
+    capability: AuthorizationCapability,
+    correlation_id: Uuid,
+    surface: &'static str,
+    session_target: AuthorizationSessionTarget,
+    cancellation: CancellationToken,
+) -> Result<ProtectedAuthorization, ProtectedTransportError> {
     let Some(runtime) = state.protected_transport() else {
         return Ok(ProtectedAuthorization::Legacy);
     };
@@ -699,21 +837,17 @@ pub async fn authorize_session_if_configured(
         capability,
         correlation_id,
         surface,
-        Some(session_id),
+        Some(session_target),
         Some(cancellation),
     )?;
-    let authority = runtime.authorize(&request).await?;
-    state
-        .conn_manager
-        .retain_protected_session_authority(session_id, &authority);
-    Ok(authority)
+    runtime.authorize(&request).await
 }
 
 /// Resolve staged direct authority for atomic invite enrollment.
 pub async fn authorize_enrollment_if_configured(
     state: &crate::state::AppState,
     verified_proof: Arc<VerifiedNostrProof>,
-    assertion: Arc<VerifiedFederatedAssertion>,
+    assertion: Option<Arc<VerifiedFederatedAssertion>>,
     correlation_id: Uuid,
 ) -> Result<ProtectedEnrollmentAuthorization, ProtectedTransportError> {
     let Some(runtime) = state.protected_transport() else {
@@ -726,6 +860,17 @@ pub async fn authorize_enrollment_if_configured(
         "invite.claim",
     )?;
     runtime.authorize_enrollment(&request).await
+}
+
+/// Whether an enforcing domain can resolve provider-neutral verified evidence.
+pub fn provider_evidence_resolver_is_installed(
+    state: &crate::state::AppState,
+    authorization_domain: CommunityId,
+) -> bool {
+    state.protected_transport().is_some_and(|runtime| {
+        runtime.mode_for_domain(authorization_domain) == Some(AuthorizationMode::Enforce)
+            && runtime.has_provider_evidence_resolver()
+    })
 }
 
 /// Preserve legacy behavior only when an unwired surface cannot enter an
@@ -787,6 +932,7 @@ impl fmt::Debug for ProtectedTransportRuntime {
             .debug_struct("ProtectedTransportRuntime")
             .field("domains", &"[redacted]")
             .field("resolver", &"[configured]")
+            .field("provider_evidence_resolver", &"[configured]")
             .field("validator", &self.validator)
             .finish()
     }
@@ -1110,6 +1256,15 @@ pub enum ProtectedTransportError {
     /// An enforcing surface did not retain sealed verifier evidence.
     #[error("protected authorization requires verified transport evidence")]
     MissingVerifiedProof,
+    /// The installed evidence adapter could not resolve the request.
+    #[error("verified provider evidence is unavailable")]
+    ProviderEvidenceUnavailable,
+    /// Multiple provider-neutral evidence values or sources were present.
+    #[error("verified provider evidence is ambiguous")]
+    AmbiguousProviderEvidence,
+    /// JWT-derived and provider-neutral evidence were both present.
+    #[error("verified provider evidence sources conflict")]
+    ConflictingProviderEvidence,
     /// The exact domain is in the explicit fail-safe protected-denial mode.
     #[error("protected authorization is unavailable in deny-protected mode")]
     DenyProtected,

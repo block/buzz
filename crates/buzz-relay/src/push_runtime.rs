@@ -58,8 +58,13 @@ pub async fn run_matcher(state: Arc<AppState>) {
     let mut idle_delay = IDLE_POLL_FLOOR;
     let mut last_reap = tokio::time::Instant::now();
     loop {
+        let excluded = state.enforcing_protected_domain_ids();
         if last_reap.elapsed() >= REAP_INTERVAL {
-            match state.db.reap_exhausted_push_matches().await {
+            match state
+                .db
+                .reap_exhausted_push_matches_excluding(&excluded)
+                .await
+            {
                 Ok(reaped) if reaped > 0 => warn!(reaped, "reaped exhausted push match jobs"),
                 Ok(_) => {}
                 Err(e) => error!("push match reap failed: {e}"),
@@ -69,7 +74,7 @@ pub async fn run_matcher(state: Arc<AppState>) {
         let until = Utc::now() + TimeDelta::seconds(CLAIM_SECS);
         match state
             .db
-            .claim_due_push_match_batch(MATCH_BATCH_LIMIT, until)
+            .claim_due_push_match_batch_excluding(MATCH_BATCH_LIMIT, until, &excluded)
             .await
         {
             Ok(Some(batch)) => {
@@ -321,6 +326,9 @@ pub async fn run_delivery_worker(state: Arc<AppState>) {
             Ok(communities) => {
                 for community in communities {
                     let community = buzz_core::CommunityId::from_uuid(community.id);
+                    if state.is_protected_enforcing(community) {
+                        continue;
+                    }
                     let until = Utc::now() + TimeDelta::seconds(CLAIM_SECS);
                     match state.db.claim_due_push_wakes(community, 16, until).await {
                         Ok(wakes) => {
@@ -351,6 +359,9 @@ async fn deliver_one(
     http: &reqwest::Client,
     claimed: buzz_db::push::ClaimedWake,
 ) {
+    if state.is_protected_enforcing(claimed.community) {
+        return;
+    }
     let outcome = match state
         .db
         .revalidate_push_wake(claimed.community, claimed.id, claimed.claim_id)

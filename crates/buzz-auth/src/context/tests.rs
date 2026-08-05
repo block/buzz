@@ -288,6 +288,8 @@ fn input_with_delegation_expiry(
         VerifiedTransportDelegation::new_unrestricted(
             owner_pubkey,
             actor_pubkey,
+            Uuid::from_u128(0x601),
+            1,
             Some(
                 DelegationExpiry::new(delegation_expiry)
                     .expect("synthetic delegation expiry is valid"),
@@ -644,6 +646,8 @@ fn verified_nostr_proof_requires_the_authenticated_delegate() {
     let delegation = VerifiedTransportDelegation::new_unrestricted(
         owner.public_key(),
         other_delegate.public_key(),
+        Uuid::from_u128(0x602),
+        1,
         None,
     )
     .expect("synthetic owner and delegate are distinct");
@@ -1856,9 +1860,14 @@ fn nostr_only_authorization_may_preserve_a_verified_owner() {
 #[test]
 fn transport_delegation_rejects_self_reference() {
     let actor = Keys::generate();
-    let error =
-        VerifiedTransportDelegation::new_unrestricted(actor.public_key(), actor.public_key(), None)
-            .expect_err("an actor cannot be its own verified owner");
+    let error = VerifiedTransportDelegation::new_unrestricted(
+        actor.public_key(),
+        actor.public_key(),
+        Uuid::from_u128(0x603),
+        1,
+        None,
+    )
+    .expect_err("an actor cannot be its own verified owner");
 
     assert_eq!(error, AuthContextError::SelfDelegation);
 }
@@ -1870,6 +1879,8 @@ fn transport_delegation_is_explicitly_transport_wide() {
     let delegation = VerifiedTransportDelegation::new_unrestricted(
         owner.public_key(),
         delegate.public_key(),
+        Uuid::from_u128(0x604),
+        1,
         None,
     )
     .expect("synthetic owner and delegate are distinct");

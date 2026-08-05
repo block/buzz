@@ -319,7 +319,7 @@ async fn main() -> anyhow::Result<()> {
         (deployment_community, config.relay_owner_pubkey.as_ref())
     {
         match db.bootstrap_owner(community, owner_pubkey).await {
-            Ok(()) => info!(pubkey = %owner_pubkey, "Relay owner bootstrapped"),
+            Ok(()) => info!("Relay owner bootstrapped"),
             Err(e) => {
                 if config.require_relay_membership {
                     // Membership enforcement is on — a missing owner means no one
@@ -427,7 +427,6 @@ async fn main() -> anyhow::Result<()> {
             "0000000000000000000000000000000000000000000000000000000000000001";
         let keys = nostr::Keys::parse(DEV_RELAY_PRIVKEY).expect("hardcoded dev key is valid");
         tracing::warn!(
-            pubkey = %keys.public_key().to_hex(),
             "Using hardcoded dev relay keypair (BUZZ_REQUIRE_AUTH_TOKEN=false). \
              Set BUZZ_RELAY_PRIVATE_KEY for production."
         );
@@ -461,6 +460,15 @@ async fn main() -> anyhow::Result<()> {
     );
     let state = Arc::new(app_state);
 
+    // Protected authorization is absent unless exact domains are named in
+    // server configuration. When present, durable invalidation snapshots are
+    // initialized before the runtime becomes reachable by any transport.
+    if buzz_relay::authorization_runtime::production::install_from_environment(&state).await?
+        == buzz_relay::authorization_runtime::production::ProtectedRuntimeInstallation::Installed
+    {
+        info!("Protected authorization runtime installed");
+    }
+
     // Inter-relay mesh (BUZZ_MESH seam). `boot_mesh` returns None when the
     // kill switch is off — nothing is bound, published, or spawned, so the
     // relay behaves byte-identically to a build without the mesh. When
@@ -480,6 +488,8 @@ async fn main() -> anyhow::Result<()> {
         // BUZZ_MESH_DEMO_ECHO) before peers can route traffic here.
         handle.wire_consumers(
             Arc::clone(&state.audio_rooms),
+            state.db.clone(),
+            state.relay_keypair.secret_key().as_secret_bytes(),
             state.config.mesh_demo_echo,
             Arc::clone(&state.shutting_down),
         );
@@ -525,6 +535,41 @@ async fn main() -> anyhow::Result<()> {
             transport_drops = report.transport_drops,
             "git object-store backend admitted: A3 conformance probe passed"
         );
+    }
+
+    // Enforce startup is verification-only for protected-object cutover.
+    // The resumable one-way preparation must complete before the independent
+    // restore anchor is provisioned; mutating PostgreSQL after anchor
+    // verification would create an unwitnessed authority advance.
+    if let Some(runtime) = state.protected_transport() {
+        let enforcing = runtime.enforcing_domains();
+        if !enforcing.is_empty() {
+            let hosts = state
+                .db
+                .usage_community_hosts()
+                .await?
+                .into_iter()
+                .map(|record| (buzz_core::CommunityId::from_uuid(record.id), record.host))
+                .collect::<std::collections::HashMap<_, _>>();
+            for community_id in enforcing {
+                let host = hosts.get(&community_id).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "protected object verification domain has no active community mapping"
+                    )
+                })?;
+                let tenant = buzz_core::TenantContext::resolved(community_id, host);
+                let verification = async {
+                    buzz_relay::api::git::migration::require_reconciled_authority(&state, &tenant)
+                        .await?;
+                    buzz_relay::api::media_migration::require_reconciled_authority(&state, &tenant)
+                        .await?;
+                    anyhow::Ok(())
+                };
+                tokio::time::timeout(std::time::Duration::from_secs(600), verification)
+                    .await
+                    .map_err(|_| anyhow::anyhow!("protected object verification timed out"))??;
+            }
+        }
     }
 
     // NIP-43: reconcile the event-backed roster for every provisioned
@@ -616,8 +661,12 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // Wire the action sink — must happen after AppState (which creates
-    // sub_registry, conn_manager) and before the cron loop starts.
+    // Wire the provider-neutral mutation gate and action sink after AppState
+    // construction and before any scheduled workflow can start.
+    let mutation_gate = Arc::new(buzz_relay::workflow_sink::RelayWorkflowMutationGate::new(
+        &state,
+    ));
+    workflow_engine.set_mutation_gate(mutation_gate);
     let action_sink = Arc::new(buzz_relay::workflow_sink::RelayActionSink::new(&state));
     workflow_engine.set_action_sink(action_sink);
 
@@ -645,7 +694,12 @@ async fn main() -> anyhow::Result<()> {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(reaper_interval_secs)).await;
 
-                let expired = match reaper_state.db.reap_expired_ephemeral_channels().await {
+                let excluded = reaper_state.enforcing_protected_domain_ids();
+                let expired = match reaper_state
+                    .db
+                    .reap_expired_ephemeral_channels_excluding(&excluded)
+                    .await
+                {
                     Ok(ids) => ids,
                     Err(e) => {
                         error!("Ephemeral reaper tick failed: {e}");
@@ -748,9 +802,10 @@ async fn main() -> anyhow::Result<()> {
                 tokio::time::sleep(std::time::Duration::from_secs(scheduler_interval_secs)).await;
 
                 let now_secs = chrono::Utc::now().timestamp();
+                let excluded = scheduler_state.enforcing_protected_domain_ids();
                 let due = match scheduler_state
                     .db
-                    .query_due_reminders(now_secs, scheduler_batch_limit)
+                    .query_due_reminders_excluding(now_secs, scheduler_batch_limit, &excluded)
                     .await
                 {
                     Ok(reminders) => reminders,
@@ -1506,9 +1561,10 @@ async fn run_usage_metrics_tick(
             return Err(error);
         }
         let invite_retention_cutoff = chrono::Utc::now() - chrono::Duration::days(30);
+        let excluded = state.enforcing_protected_domain_ids();
         match state
             .db
-            .reap_expired_relay_invites(invite_retention_cutoff)
+            .reap_expired_relay_invites_excluding(invite_retention_cutoff, &excluded)
             .await
         {
             Ok(deleted) if deleted > 0 => {

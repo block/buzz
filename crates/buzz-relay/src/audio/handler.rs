@@ -37,7 +37,7 @@ use buzz_auth::{
     VerifiedEvidenceAdapter,
 };
 use buzz_core::{tenant::TenantContext, CommunityId};
-use buzz_db::channel::MemberRole;
+use buzz_db::{authorization_invalidation::AuthorizationSessionTarget, channel::MemberRole};
 
 use buzz_core::StoredEvent;
 use buzz_pubsub::EventTopic;
@@ -47,7 +47,7 @@ use crate::audio::room::{
     ProtectedPeerEpoch, Room, RoomOwnerEpoch,
 };
 use crate::authorization_runtime::transport::{
-    authorize_session_if_configured, ProtectedAuthorization,
+    authorize_exact_session_if_configured, ProtectedAuthorization,
 };
 use crate::state::{run_registered_community_connection, AppState};
 
@@ -269,6 +269,10 @@ async fn handle_active_audio_connection(
     cancel: CancellationToken,
     corporate_identity_assertion: Option<crate::corporate_identity::IdentityAssertionInput>,
 ) {
+    let Ok(session_target) = AuthorizationSessionTarget::new(session_id, Uuid::new_v4()) else {
+        cancel.cancel();
+        return;
+    };
     let (mut ws_send, mut ws_recv) = socket.split();
 
     let challenge = generate_challenge();
@@ -342,31 +346,40 @@ async fn handle_active_audio_connection(
 
     let identity_lane =
         crate::authorization_runtime::transport::legacy_identity_lane(&state, tenant.community());
-    let identity_proof = match crate::corporate_identity::verify_corporate_identity(
-        &state,
-        tenant.community(),
-        pubkey,
-        corporate_identity_assertion.as_ref(),
-        auth_tag_json.as_deref(),
-    )
-    .await
-    {
-        Ok(proof) => Some(proof),
-        Err(e) => {
-            warn!(error = ?e, "audio: corporate identity denied");
-            if identity_lane
-                == crate::authorization_runtime::transport::LegacyIdentityLane::ObserveOnly
-            {
-                None
-            } else {
-                let _ = ws_send
-                    .send(WsMessage::Text(
-                        serde_json::json!({"type": "error", "message": e.public_message()})
-                            .to_string()
-                            .into(),
-                    ))
-                    .await;
-                return;
+    let neutral_evidence = corporate_identity_assertion.is_none()
+        && crate::authorization_runtime::transport::provider_evidence_resolver_is_installed(
+            &state,
+            tenant.community(),
+        );
+    let identity_proof = if neutral_evidence {
+        None
+    } else {
+        match crate::corporate_identity::verify_corporate_identity(
+            &state,
+            tenant.community(),
+            pubkey,
+            corporate_identity_assertion.as_ref(),
+            auth_tag_json.as_deref(),
+        )
+        .await
+        {
+            Ok(proof) => Some(proof),
+            Err(e) => {
+                warn!(error = ?e, "audio: corporate identity denied");
+                if identity_lane
+                    == crate::authorization_runtime::transport::LegacyIdentityLane::ObserveOnly
+                {
+                    None
+                } else {
+                    let _ = ws_send
+                        .send(WsMessage::Text(
+                            serde_json::json!({"type": "error", "message": e.public_message()})
+                                .to_string()
+                                .into(),
+                        ))
+                        .await;
+                    return;
+                }
             }
         }
     };
@@ -391,11 +404,20 @@ async fn handle_active_audio_connection(
         return;
     }
 
-    let transport_delegation = crate::corporate_identity::verify_unconditional_nip_oa_owner(
+    let transport_delegation = crate::corporate_identity::verify_unconditional_nip_oa_relationship(
         pubkey,
         auth_tag_json.as_deref(),
     )
-    .map(|owner| VerifiedDelegationOutput::from_workspace_verifier(owner, pubkey, None, true));
+    .map(|relationship| {
+        VerifiedDelegationOutput::from_workspace_verifier(
+            relationship.owner_pubkey(),
+            pubkey,
+            relationship.relationship_id(),
+            relationship.relationship_revision(),
+            None,
+            true,
+        )
+    });
     let verified_proof = match VerifiedEvidenceAdapter::new().verify_nip42(
         tenant.community(),
         AuthTransport::Audio,
@@ -436,14 +458,14 @@ async fn handle_active_audio_connection(
         },
         None => None,
     };
-    let protected_authority = match authorize_session_if_configured(
+    let protected_authority = match authorize_exact_session_if_configured(
         &state,
         Arc::clone(&verified_proof),
         verified_assertion,
         AuthorizationCapability::AudioJoin,
         Uuid::from_bytes(correlation),
         "audio.join",
-        session_id,
+        session_target,
         cancel.clone(),
     )
     .await

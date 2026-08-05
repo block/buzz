@@ -505,6 +505,11 @@ impl VerifiedProviderEvidence {
         self.fresh_until
     }
 
+    /// Sealed normalized assertion carried by this verified evidence object.
+    pub const fn verified_assertion(&self) -> &VerifiedFederatedAssertion {
+        &self.assertion
+    }
+
     /// Revalidate this evidence for one exact protected request.
     pub fn validate_for(
         &self,
@@ -659,6 +664,67 @@ impl DelegationCapability {
     }
 }
 
+/// Exact authority-defined identity of one verified delegated relationship.
+///
+/// This identifier must come from the successful delegation verifier. It is
+/// deliberately distinct from owner, delegate, and identity-binding IDs so a
+/// broad principal selector cannot stand in for one signed relationship.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DelegatedRelationshipId(Uuid);
+
+impl DelegatedRelationshipId {
+    pub(crate) fn new(value: Uuid) -> Result<Self, AuthContextError> {
+        if value.is_nil() {
+            return Err(AuthContextError::InvalidDelegatedRelationshipId);
+        }
+        Ok(Self(value))
+    }
+
+    /// Opaque stable relationship identifier.
+    pub const fn as_uuid(self) -> Uuid {
+        self.0
+    }
+}
+
+impl fmt::Debug for DelegatedRelationshipId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("DelegatedRelationshipId")
+            .field(&"[redacted]")
+            .finish()
+    }
+}
+
+/// Monotonic authority revision for one delegated relationship.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DelegatedRelationshipRevision(u64);
+
+impl DelegatedRelationshipRevision {
+    /// Initial revision of an immutable signed relationship issuance.
+    pub const INITIAL: Self = Self(1);
+
+    pub(crate) fn new(value: u64) -> Result<Self, AuthContextError> {
+        if value == 0 {
+            return Err(AuthContextError::InvalidDelegatedRelationshipRevision);
+        }
+        Ok(Self(value))
+    }
+
+    /// Positive monotonic relationship revision.
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl fmt::Debug for DelegatedRelationshipRevision {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("DelegatedRelationshipRevision")
+            .field(&"[redacted]")
+            .finish()
+    }
+}
+
 /// Transport-wide delegation from a bound owner to the authenticated key.
 ///
 /// A verifier may construct this only after proving the capability authorizes
@@ -671,6 +737,8 @@ impl DelegationCapability {
 pub struct VerifiedTransportDelegation {
     owner_pubkey: PublicKey,
     delegate_pubkey: PublicKey,
+    relationship_id: DelegatedRelationshipId,
+    relationship_revision: DelegatedRelationshipRevision,
     capability: DelegationCapability,
     expires_at: Option<DelegationExpiry>,
 }
@@ -681,6 +749,8 @@ impl fmt::Debug for VerifiedTransportDelegation {
             .debug_struct("VerifiedTransportDelegation")
             .field("owner_pubkey", &"[redacted]")
             .field("delegate_pubkey", &"[redacted]")
+            .field("relationship_id", &"[redacted]")
+            .field("relationship_revision", &"[redacted]")
             .field("capability", &"[redacted]")
             .field("expires_at", &"[redacted]")
             .finish()
@@ -693,6 +763,8 @@ impl VerifiedTransportDelegation {
     pub(crate) fn new_unrestricted(
         owner_pubkey: PublicKey,
         delegate_pubkey: PublicKey,
+        relationship_id: Uuid,
+        relationship_revision: u64,
         expires_at: Option<DelegationExpiry>,
     ) -> Result<Self, AuthContextError> {
         if owner_pubkey == delegate_pubkey {
@@ -701,6 +773,8 @@ impl VerifiedTransportDelegation {
         Ok(Self {
             owner_pubkey,
             delegate_pubkey,
+            relationship_id: DelegatedRelationshipId::new(relationship_id)?,
+            relationship_revision: DelegatedRelationshipRevision::new(relationship_revision)?,
             capability: DelegationCapability::TransportWide,
             expires_at,
         })
@@ -714,6 +788,16 @@ impl VerifiedTransportDelegation {
     /// Authenticated delegate key.
     pub const fn delegate_pubkey(&self) -> PublicKey {
         self.delegate_pubkey
+    }
+
+    /// Exact verifier-defined delegated-relationship identity.
+    pub const fn relationship_id(&self) -> DelegatedRelationshipId {
+        self.relationship_id
+    }
+
+    /// Exact monotonic revision of the delegated relationship.
+    pub const fn relationship_revision(&self) -> DelegatedRelationshipRevision {
+        self.relationship_revision
     }
 
     /// Verified capability scope.

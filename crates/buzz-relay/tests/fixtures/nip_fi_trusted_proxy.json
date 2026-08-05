@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "fixture_classification": "synthetic-only",
+  "full_stack_conformance_claim": false,
+  "presentation_gate": "disabled",
+  "trusted_proxy_cases": [
+    {
+      "row": "TR-1.direct-bypass",
+      "origin_isolation_enforced": false,
+      "inbound_assertion_header_stripped": true,
+      "expected": "deny-before-verification"
+    },
+    {
+      "row": "TR-1.inbound-header-copy",
+      "origin_isolation_enforced": true,
+      "inbound_assertion_header_stripped": false,
+      "expected": "deny-before-verification"
+    },
+    {
+      "row": "TR-1.complete-deployment-evidence",
+      "origin_isolation_enforced": true,
+      "inbound_assertion_header_stripped": true,
+      "expected": "eligible-for-provider-verification"
+    }
+  ],
+  "nip_fi_rows": [
+    {
+      "row": "AS-3.future-iat",
+      "owner": "o4-client-status",
+      "status": "covered"
+    },
+    {
+      "row": "BD-1.cross-domain",
+      "owner": "authorization-runtime",
+      "status": "required-before-full-stack-claim"
+    },
+    {
+      "row": "SE-4.invalidation",
+      "owner": "invalidation-runtime",
+      "status": "required-before-full-stack-claim"
+    },
+    {
+      "row": "DG-3.no-finite-bound",
+      "owner": "delegation-runtime",
+      "status": "required-before-full-stack-claim"
+    },
+    {
+      "row": "OP-2.discovery",
+      "owner": "o4-client-status",
+      "status": "covered"
+    },
+    {
+      "row": "OP-3.absent",
+      "owner": "o4-client-status",
+      "status": "covered"
+    },
+    {
+      "row": "OP-3.implemented",
+      "owner": "o4-client-status",
+      "status": "disabled-pending-approved-rfc-presentation-gate"
+    },
+    {
+      "row": "OP-4.privacy",
+      "owner": "o4-client-status",
+      "status": "covered"
+    }
+  ],
+  "j3c_rows": [
+    "J3C-STATUS-RELAY-SIGNER",
+    "J3C-STATUS-EXACT-SCOPE",
+    "J3C-STATUS-FRESHNESS",
+    "J3C-STATUS-REVISION-FOLD",
+    "J3C-STATUS-WITHDRAWAL",
+    "J3C-STATUS-PRIVACY",
+    "J3C-STATUS-VERIFY-ONLY",
+    "J3C-STATUS-DEDICATED-TRANSPORT",
+    "J3C-STATUS-REAL-USER-HIDDEN"
+  ],
+  "forbidden_public_fields": [
+    "iss",
+    "sub",
+    "display_name",
+    "bearer_assertion",
+    "private_audience",
+    "provider_tenant_url",
+    "corporate_history",
+    "historical_label",
+    "employment_history"
+  ]
+}

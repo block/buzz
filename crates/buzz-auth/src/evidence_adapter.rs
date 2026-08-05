@@ -43,6 +43,8 @@ pub enum ActiveBindingResolution {
 pub struct VerifiedDelegationOutput {
     owner_pubkey: PublicKey,
     delegate_pubkey: PublicKey,
+    relationship_id: Uuid,
+    relationship_revision: u64,
     expires_at: Option<u64>,
     transport_wide: bool,
 }
@@ -52,12 +54,16 @@ impl VerifiedDelegationOutput {
     pub const fn from_workspace_verifier(
         owner_pubkey: PublicKey,
         delegate_pubkey: PublicKey,
+        relationship_id: Uuid,
+        relationship_revision: u64,
         expires_at: Option<u64>,
         transport_wide: bool,
     ) -> Self {
         Self {
             owner_pubkey,
             delegate_pubkey,
+            relationship_id,
+            relationship_revision,
             expires_at,
             transport_wide,
         }
@@ -288,6 +294,8 @@ impl VerifiedEvidenceAdapter {
         VerifiedTransportDelegation::new_unrestricted(
             output.owner_pubkey,
             output.delegate_pubkey,
+            output.relationship_id,
+            output.relationship_revision,
             expires_at,
         )
         .map_err(Into::into)
@@ -650,6 +658,8 @@ mod tests {
                 Some(VerifiedDelegationOutput::from_workspace_verifier(
                     owner.public_key(),
                     actor.public_key(),
+                    Uuid::from_u128(0x701),
+                    1,
                     None,
                     true,
                 )),
@@ -694,6 +704,8 @@ mod tests {
                 Some(VerifiedDelegationOutput::from_workspace_verifier(
                     owner.public_key(),
                     Keys::generate().public_key(),
+                    Uuid::from_u128(0x702),
+                    1,
                     None,
                     true,
                 )),

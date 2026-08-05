@@ -4,7 +4,7 @@
 
 mod admission;
 
-/// Provider-neutral protected-transport authorization seams.
+/// Provider-neutral runtime authorization and bounded finalization.
 pub mod authorization_runtime;
 
 /// REST API route handlers.
@@ -34,7 +34,7 @@ pub mod mesh_boot;
 pub mod metrics;
 /// NIP-11 relay information document.
 pub mod nip11;
-/// Fail-closed protected-surface compatibility seam.
+/// Provider-neutral inventory of every protected relay surface.
 pub mod protected_surface;
 /// NIP-01 client/relay message parsing.
 pub mod protocol;

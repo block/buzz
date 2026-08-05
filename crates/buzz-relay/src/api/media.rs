@@ -130,6 +130,14 @@ async fn verify_media_corporate_identity(
         headers,
     )
     .map_err(protected_media_denied)?;
+    if identity_assertion.is_none()
+        && crate::authorization_runtime::transport::provider_evidence_resolver_is_installed(
+            state,
+            tenant.community(),
+        )
+    {
+        return Ok(None);
+    }
     match crate::corporate_identity::verify_corporate_identity(
         state,
         tenant.community(),
@@ -394,23 +402,26 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedUpload {
         )
         .await
         .map_err(|_| MediaError::RelayMembershipRequired)?;
-        let verified_blossom = match crate::corporate_identity::verify_unconditional_nip_oa_owner(
-            auth_event.pubkey,
-            auth_tag,
-        ) {
-            Some(owner) => VerifiedEvidenceAdapter::new()
-                .attach_transport_delegation(
-                    verified_blossom,
-                    buzz_auth::VerifiedDelegationOutput::from_workspace_verifier(
-                        owner,
-                        auth_event.pubkey,
-                        None,
-                        true,
-                    ),
-                )
-                .map_err(protected_media_denied)?,
-            None => verified_blossom,
-        };
+        let verified_blossom =
+            match crate::corporate_identity::verify_unconditional_nip_oa_relationship(
+                auth_event.pubkey,
+                auth_tag,
+            ) {
+                Some(relationship) => VerifiedEvidenceAdapter::new()
+                    .attach_transport_delegation(
+                        verified_blossom,
+                        buzz_auth::VerifiedDelegationOutput::from_workspace_verifier(
+                            relationship.owner_pubkey(),
+                            auth_event.pubkey,
+                            relationship.relationship_id(),
+                            relationship.relationship_revision(),
+                            None,
+                            true,
+                        ),
+                    )
+                    .map_err(protected_media_denied)?,
+                None => verified_blossom,
+            };
         let correlation_id = stable_media_correlation(&verified_blossom);
         let verified_assertion = seal_media_assertion(
             state,
@@ -921,16 +932,18 @@ async fn authenticate_media_read(
     )
     .await
     .map_err(|_| MediaError::RelayMembershipRequired)?;
-    let verified_blossom = match crate::corporate_identity::verify_unconditional_nip_oa_owner(
+    let verified_blossom = match crate::corporate_identity::verify_unconditional_nip_oa_relationship(
         auth_event.pubkey,
         auth_tag,
     ) {
-        Some(owner) => VerifiedEvidenceAdapter::new()
+        Some(relationship) => VerifiedEvidenceAdapter::new()
             .attach_transport_delegation(
                 verified_blossom,
                 buzz_auth::VerifiedDelegationOutput::from_workspace_verifier(
-                    owner,
+                    relationship.owner_pubkey(),
                     auth_event.pubkey,
+                    relationship.relationship_id(),
+                    relationship.relationship_revision(),
                     None,
                     true,
                 ),

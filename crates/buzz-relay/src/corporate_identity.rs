@@ -20,6 +20,7 @@ use jsonwebtoken::{
 use nostr::{Event, EventBuilder, FromBech32, Kind, PublicKey, Tag, Timestamp};
 use serde::Deserialize;
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, warn};
@@ -1633,7 +1634,9 @@ async fn verify_delegated_corporate_identity(
     auth_tag_json: Option<&str>,
 ) -> Result<CorporateIdentityProof, CorporateIdentityError> {
     if config.allow_delegation {
-        if let Some(owner_pubkey) = verify_unconditional_nip_oa_owner(signer, auth_tag_json) {
+        if let Some(relationship) = verify_unconditional_nip_oa_relationship(signer, auth_tag_json)
+        {
+            let owner_pubkey = relationship.owner_pubkey();
             let owner_binding = db
                 .get_active_identity_binding_by_pubkey(community_id, owner_pubkey.as_bytes())
                 .await?;
@@ -1654,6 +1657,76 @@ async fn verify_delegated_corporate_identity(
     }
 }
 
+/// Exact verified identity and revision of one immutable NIP-OA relationship.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct VerifiedNipOaRelationship {
+    owner_pubkey: PublicKey,
+    relationship_id: uuid::Uuid,
+    relationship_revision: u64,
+}
+
+impl VerifiedNipOaRelationship {
+    /// Verified owner that signed the relationship.
+    pub const fn owner_pubkey(self) -> PublicKey {
+        self.owner_pubkey
+    }
+
+    /// Domain-separated identity of the exact verified signed relationship.
+    pub const fn relationship_id(self) -> uuid::Uuid {
+        self.relationship_id
+    }
+
+    /// Monotonic revision of this immutable relationship issuance.
+    pub const fn relationship_revision(self) -> u64 {
+        self.relationship_revision
+    }
+}
+
+impl fmt::Debug for VerifiedNipOaRelationship {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VerifiedNipOaRelationship")
+            .field("owner_pubkey", &"[redacted]")
+            .field("relationship_id", &"[redacted]")
+            .field("relationship_revision", &"[redacted]")
+            .finish()
+    }
+}
+
+/// Verify and identify an unconditional NIP-OA relationship.
+///
+/// The exact relationship ID is derived only after signature verification
+/// from the canonical signed tag and authenticated delegate key. Each signed
+/// immutable issuance starts at revision one; a different issuance receives a
+/// different relationship ID rather than reusing an owner-wide selector.
+pub fn verify_unconditional_nip_oa_relationship(
+    signer: PublicKey,
+    auth_tag_json: Option<&str>,
+) -> Option<VerifiedNipOaRelationship> {
+    let tag_json = auth_tag_json?;
+    let tag: Vec<Value> = serde_json::from_str(tag_json).ok()?;
+    if tag.len() != 4 || tag.get(2).and_then(Value::as_str) != Some("") {
+        return None;
+    }
+    let owner_pubkey = buzz_sdk::nip_oa::verify_auth_tag(tag_json, &signer).ok()?;
+    let canonical_tag = serde_json::to_vec(&tag).ok()?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"buzz:nip-oa:delegated-relationship:v1");
+    hasher.update(signer.to_bytes());
+    hasher.update((canonical_tag.len() as u64).to_be_bytes());
+    hasher.update(canonical_tag);
+    let digest = hasher.finalize();
+    let mut identity = [0_u8; 16];
+    identity.copy_from_slice(&digest[..16]);
+    identity[6] = (identity[6] & 0x0f) | 0x80;
+    identity[8] = (identity[8] & 0x3f) | 0x80;
+    Some(VerifiedNipOaRelationship {
+        owner_pubkey,
+        relationship_id: uuid::Uuid::from_bytes(identity),
+        relationship_revision: 1,
+    })
+}
+
 /// Verify an unconditional NIP-OA owner attestation for transport-wide use.
 ///
 /// Conditional attestations are deliberately rejected because their narrower
@@ -1662,12 +1735,8 @@ pub fn verify_unconditional_nip_oa_owner(
     signer: PublicKey,
     auth_tag_json: Option<&str>,
 ) -> Option<PublicKey> {
-    let tag_json = auth_tag_json?;
-    let tag: Vec<Value> = serde_json::from_str(tag_json).ok()?;
-    if tag.len() != 4 || tag.get(2).and_then(Value::as_str) != Some("") {
-        return None;
-    }
-    buzz_sdk::nip_oa::verify_auth_tag(tag_json, &signer).ok()
+    verify_unconditional_nip_oa_relationship(signer, auth_tag_json)
+        .map(VerifiedNipOaRelationship::owner_pubkey)
 }
 
 fn is_allowed_jwt_algorithm(algorithm: Algorithm) -> bool {
@@ -1951,6 +2020,81 @@ mod tests {
         fn now(&self) -> Result<AuthorizationTime, AuthorizationClockError> {
             Ok(AuthorizationTime::from_unix_seconds(self.0))
         }
+    }
+
+    #[test]
+    fn o4_shared_contract_repairs_are_redacted_and_revision_exact() {
+        let sentinel_key = "private_raw_claim_key";
+        let sentinel_value = "private_raw_claim_value";
+        let raw_claims = RawJwtClaims {
+            claims: Map::from_iter([(
+                sentinel_key.to_string(),
+                Value::String(sentinel_value.to_string()),
+            )]),
+        };
+        let debug = format!("{raw_claims:?}");
+        let delegation_evidence = include_str!("../../buzz-auth/src/context/evidence.rs");
+        let invalidation_contract = include_str!("../../buzz-db/src/authorization_invalidation.rs");
+
+        let mut missing = Vec::new();
+        if debug.contains(sentinel_key) || debug.contains(sentinel_value) {
+            missing.push("raw-jwt-debug-redaction");
+        }
+        if !(delegation_evidence.contains("DelegatedRelationshipId")
+            && delegation_evidence.contains("DelegatedRelationshipRevision")
+            && delegation_evidence.contains("relationship_id")
+            && delegation_evidence.contains("relationship_revision"))
+        {
+            missing.push("delegated-relationship-identity-and-revision");
+        }
+        if !(invalidation_contract.contains("AuthorizationSessionTarget")
+            && invalidation_contract.contains("issuance_fence")
+            && invalidation_contract.contains("session-issuance-v2"))
+        {
+            missing.push("session-issuance-nonreuse-fence");
+        }
+
+        assert!(
+            missing.is_empty(),
+            "missing O4 shared-contract repairs: {missing:?}"
+        );
+
+        let session_id = Uuid::from_u128(0x801);
+        let first_session = buzz_db::authorization_invalidation::AuthorizationSessionTarget::new(
+            session_id,
+            Uuid::from_u128(0x802),
+        )
+        .expect("first session issuance is valid");
+        let second_session = buzz_db::authorization_invalidation::AuthorizationSessionTarget::new(
+            session_id,
+            Uuid::from_u128(0x803),
+        )
+        .expect("second session issuance is valid");
+        let first_session_fingerprint =
+            buzz_db::authorization_invalidation::AuthorizationSelector::session(first_session)
+                .fingerprint();
+        let second_session_fingerprint =
+            buzz_db::authorization_invalidation::AuthorizationSelector::session(second_session)
+                .fingerprint();
+        assert_ne!(first_session_fingerprint, second_session_fingerprint);
+
+        let relationship_id = Uuid::from_u128(0x804);
+        let first_relationship =
+            buzz_db::authorization_invalidation::AuthorizationSelector::delegated_relationship(
+                relationship_id,
+                1,
+            )
+            .expect("first relationship revision is valid");
+        let second_relationship =
+            buzz_db::authorization_invalidation::AuthorizationSelector::delegated_relationship(
+                relationship_id,
+                2,
+            )
+            .expect("second relationship revision is valid");
+        assert_ne!(
+            first_relationship.fingerprint(),
+            second_relationship.fingerprint()
+        );
     }
 
     #[test]

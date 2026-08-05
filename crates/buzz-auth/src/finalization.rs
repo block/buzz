@@ -962,6 +962,8 @@ mod tests {
                 VerifiedTransportDelegation::new_unrestricted(
                     owner,
                     delegate,
+                    Uuid::from_u128(0x401),
+                    1,
                     Some(
                         DelegationExpiry::new(1_050).expect("synthetic delegation expiry is valid"),
                     ),
