@@ -246,7 +246,13 @@ export function useMentions(
       if (isArchivedDiscovery(pubkey)) {
         return;
       }
-      if (!isAgentIdentityInManagedList(candidate, managedAgentPubkeys)) {
+      // Gate on the full invocable set (locally managed ∪ relay agents this
+      // viewer can invoke), not the managed list alone. With managed-only,
+      // externally-hosted agents were dropped here before
+      // `shouldHideAgentFromMentions` could apply its invocable-⇒-show rule,
+      // making that path unreachable — an external agent (kind:10100 with
+      // respond_to allowlisting the viewer) could never be @-mentioned.
+      if (!isAgentIdentityInManagedList(candidate, mentionableAgentPubkeys)) {
         return;
       }
       if (
@@ -420,7 +426,6 @@ export function useMentions(
     managedAgentNamesByPubkey,
     managedAgentPersonaIds,
     managedAgentPersonaIdsByPubkey,
-    managedAgentPubkeys,
     managedAgentsQuery.data,
     memberPubkeys,
     members,
