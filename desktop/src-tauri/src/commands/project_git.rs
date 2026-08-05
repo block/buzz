@@ -8,6 +8,15 @@ use crate::app_state::AppState;
 use serde::Serialize;
 use std::time::UNIX_EPOCH;
 use tauri::State;
+
+// Bound eager snapshot payloads without truncating the repository tree. Later
+// paths remain browseable without embedded content.
+const MAX_EAGER_FILE_PREVIEWS: usize = 250;
+
+#[cfg(test)]
+#[path = "project_git_tests.rs"]
+mod tests;
+
 #[derive(Clone, Serialize)]
 pub struct ProjectRepoCommitInfo {
     pub hash: String,
@@ -251,7 +260,8 @@ fn parse_worktree_files(
     output
         .split('\0')
         .filter(|path| !path.trim().is_empty())
-        .filter_map(|path| {
+        .enumerate()
+        .filter_map(|(index, path)| {
             let full_path = repo_dir.join(path);
             let metadata = std::fs::metadata(&full_path).ok()?;
             if !metadata.is_file() {
@@ -263,7 +273,9 @@ fn parse_worktree_files(
                 path: path.to_string(),
                 kind: "blob".to_string(),
                 size,
-                preview_content: read_preview_content(repo_dir, path, size),
+                preview_content: (index < MAX_EAGER_FILE_PREVIEWS)
+                    .then(|| read_preview_content(repo_dir, path, size))
+                    .flatten(),
                 last_changed_at: latest_commit
                     .as_ref()
                     .map(|commit| commit.timestamp)
@@ -271,7 +283,6 @@ fn parse_worktree_files(
                 latest_commit,
             })
         })
-        .take(250)
         .collect()
 }
 
@@ -316,14 +327,15 @@ fn parse_ls_tree(
 ) -> Vec<ProjectRepoFileInfo> {
     output
         .lines()
-        .filter_map(|line| {
+        .enumerate()
+        .filter_map(|(index, line)| {
             let (meta, path) = line.split_once('\t')?;
             let mut parts = meta.split_whitespace();
             let _mode = parts.next()?;
             let kind = parts.next()?.to_string();
             let _object = parts.next()?;
             let size = parts.next().and_then(|value| value.parse::<u64>().ok());
-            let preview_content = if kind == "blob" {
+            let preview_content = if kind == "blob" && index < MAX_EAGER_FILE_PREVIEWS {
                 read_preview_content(repo_dir, path, size)
             } else {
                 None
@@ -339,7 +351,6 @@ fn parse_ls_tree(
                 latest_commit: latest_commit_by_path.get(path).cloned(),
             })
         })
-        .take(250)
         .collect()
 }
 
