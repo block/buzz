@@ -11,7 +11,9 @@ mod mcp;
 pub mod types;
 mod wire;
 
-pub use catalog::{discover_databricks_models, ModelEntry, DATABRICKS_V2_KNOWN_MODELS};
+pub use catalog::{
+    discover_databricks_models, discover_openrouter_models, ModelEntry, DATABRICKS_V2_KNOWN_MODELS,
+};
 pub use config::Provider;
 pub use types::AgentError;
 
@@ -445,11 +447,16 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
     );
     drop(sessions);
 
-    // Build a models catalog for the `session/new` response. For Databricks
-    // providers this advertises available models so the desktop ModelPicker and
-    // pool can resolve `session/set_model` switches. For Anthropic/OpenAI we
-    // report only the configured model — live switching on those providers
-    // effectively requires respawn.
+    // Build a models catalog for the `session/new` response. For Databricks and
+    // OpenRouter providers this advertises available models so the desktop
+    // ModelPicker and pool can resolve `session/set_model` switches. For
+    // Anthropic/OpenAI we report only the configured model — live switching on
+    // those providers effectively requires respawn.
+    //
+    // Advertising a real catalog is what makes kind:24200 `switch_model` usable:
+    // both the idle and busy switch paths validate the requested model against
+    // this list, so a single-entry catalog makes every switch return
+    // `UnsupportedModel`.
     //
     // `models_cache` caches only a successful discovery result (`get_or_try_init`
     // leaves the cell empty on error so the next `session/new` call retries). On
@@ -457,21 +464,33 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
     // being written to the cell.
     let available_models: Vec<Value> = {
         use crate::config::Provider;
-        match app.cfg.provider {
-            Provider::Databricks | Provider::DatabricksV2 => {
-                let models = resolve_models_catalog(
+        let discovered = match app.cfg.provider {
+            Provider::Databricks | Provider::DatabricksV2 => Some(
+                resolve_models_catalog(
                     &app.models_cache,
                     app.cfg.provider,
                     &app.cfg.model,
                     discover_databricks_models(&app.cfg),
                 )
-                .await;
-                models
-                    .iter()
-                    .map(|m| json!({ "modelId": m.id, "name": m.name }))
-                    .collect()
-            }
-            _ => vec![json!({ "modelId": app.cfg.model, "name": app.cfg.model })],
+                .await,
+            ),
+            Provider::OpenRouter => Some(
+                resolve_models_catalog(
+                    &app.models_cache,
+                    app.cfg.provider,
+                    &app.cfg.model,
+                    discover_openrouter_models(&app.cfg),
+                )
+                .await,
+            ),
+            Provider::Anthropic | Provider::OpenAi => None,
+        };
+        match discovered {
+            Some(models) => models
+                .iter()
+                .map(|m| json!({ "modelId": m.id, "name": m.name }))
+                .collect(),
+            None => vec![json!({ "modelId": app.cfg.model, "name": app.cfg.model })],
         }
     };
 
