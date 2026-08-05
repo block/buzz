@@ -36,12 +36,18 @@ a successful restart command alone is not considered recovery.
 
 1. Record the current executable checksum, process thread count, configured
    listener count, and listener health.
-2. Build from the Hermit environment through Tauri's production pipeline:
-   `cd desktop && pnpm tauri build --verbose --ci --bundles deb,appimage --features mesh-llm --config src-tauri/tauri.release.conf.json`.
-   Tauri runs the configured frontend build and compiles the desktop with its
-   production custom protocol, matching the Linux release workflow. A plain
-   `cargo build --release` is not a releasable artifact because it does not
-   prove that the production frontend was embedded.
+2. Build from the Hermit environment through Tauri's production pipeline. For
+   an official release, first provide `BUZZ_UPDATER_PUBLIC_KEY` and
+   `BUZZ_UPDATER_ENDPOINT`, run
+   `cd desktop && node scripts/build-release-config.mjs`, then run
+   `pnpm tauri build --verbose --ci --bundles deb,appimage --features mesh-llm --config src-tauri/tauri.release.conf.json`.
+   For a local incident rollout that must not claim updater signing metadata,
+   use the base configuration with
+   `cd desktop && pnpm tauri build --verbose --ci --bundles deb --features mesh-llm`.
+   Both commands run the configured frontend build and compile the desktop with
+   Tauri's production custom protocol. A plain `cargo build --release` is not a
+   releasable artifact because it does not prove that the production frontend
+   was embedded.
 3. Run frontend tests and type checking, Rust formatting, the complete Rust
    suite, and repository checks. Stop if a new failure appears.
 4. Copy the installed executable to a uniquely timestamped rollback path.
