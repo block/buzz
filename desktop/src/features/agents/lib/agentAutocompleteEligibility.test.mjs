@@ -5,7 +5,7 @@ import {
   coalesceAgentAutocompleteCandidates,
   getMentionableAgentPubkeys,
   getSharedChannelIds,
-  isAgentIdentityInManagedList,
+  isKnownLiveAgentIdentity,
   relayAgentIsSharedWithUser,
   shouldHideAgentFromMentions,
 } from "./agentAutocompleteEligibility.ts";
@@ -136,27 +136,44 @@ test("getMentionableAgentPubkeys: keeps managed agents and shared relay agents",
   assert.deepEqual(result, new Set([PUB_A, PUB_B, PUB_C]));
 });
 
-test("isAgentIdentityInManagedList: keeps people and only current managed agent identities", () => {
+test("isKnownLiveAgentIdentity: keeps people, managed agents, and directory-listed foreign agents", () => {
   const managedAgentPubkeys = new Set([PUB_A]);
+  const directoryAgentPubkeys = new Set([PUB_C]);
 
+  // People always pass.
   assert.equal(
-    isAgentIdentityInManagedList(
+    isKnownLiveAgentIdentity(
       { isAgent: false, pubkey: PUB_B },
       managedAgentPubkeys,
+      directoryAgentPubkeys,
     ),
     true,
   );
+  // Locally managed agent passes (pubkey normalization included).
   assert.equal(
-    isAgentIdentityInManagedList(
+    isKnownLiveAgentIdentity(
       { isAgent: true, pubkey: PUB_A.toUpperCase() },
       managedAgentPubkeys,
+      directoryAgentPubkeys,
     ),
     true,
   );
+  // Foreign agent with a live relay directory entry (kind:10100) passes —
+  // e.g. an agent managed by another desktop that is a channel member.
   assert.equal(
-    isAgentIdentityInManagedList(
+    isKnownLiveAgentIdentity(
+      { isAgent: true, pubkey: PUB_C },
+      managedAgentPubkeys,
+      directoryAgentPubkeys,
+    ),
+    true,
+  );
+  // Stale agent identity — neither managed nor in the directory — is dropped.
+  assert.equal(
+    isKnownLiveAgentIdentity(
       { isAgent: true, pubkey: PUB_B },
       managedAgentPubkeys,
+      directoryAgentPubkeys,
     ),
     false,
   );

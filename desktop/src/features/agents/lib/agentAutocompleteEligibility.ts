@@ -54,13 +54,26 @@ export function getMentionableAgentPubkeys({
   return pubkeys;
 }
 
-export function isAgentIdentityInManagedList(
+/**
+ * A concrete agent identity is kept in autocomplete only when there is live
+ * evidence for it: the current user's managed Agents list, or a relay agent
+ * directory entry (kind:10100) published by its owning desktop. Stale
+ * identities — old p-tag/channel-member keys with no directory entry — are
+ * dropped. People are always kept. Whether a surviving foreign agent is
+ * ultimately shown is decided by `shouldHideAgentFromMentions`, which hides
+ * explicitly non-invocable ones.
+ */
+export function isKnownLiveAgentIdentity(
   candidate: { isAgent?: boolean; pubkey: string },
   managedAgentPubkeys: ReadonlySet<string>,
+  directoryAgentPubkeys: ReadonlySet<string>,
 ) {
+  if (candidate.isAgent !== true) {
+    return true;
+  }
+  const normalized = normalizePubkey(candidate.pubkey);
   return (
-    candidate.isAgent !== true ||
-    managedAgentPubkeys.has(normalizePubkey(candidate.pubkey))
+    managedAgentPubkeys.has(normalized) || directoryAgentPubkeys.has(normalized)
   );
 }
 
