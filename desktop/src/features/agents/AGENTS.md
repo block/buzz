@@ -153,6 +153,12 @@ with a TypeScript lookup table or an id comparison in a component.
    themselves. Never synthesize a run location a surface doesn't have. Don't
    expose `respond-to`, `allowlist`, Nostr, or harness jargon in primary UI
    copy.
+12. **First-class LLM providers must be wired end to end.** A provider option
+   is incomplete unless its credential key is represented in
+   `PROVIDER_CREDENTIAL_CONFIG`, Rust readiness covers both Buzz Agent and
+   Goose where supported, and model discovery returns only models that can use
+   tools. Venice uses `VENICE_API_KEY` for both harnesses and filters its text
+   catalog on `model_spec.capabilities.supportsFunctionCalling`.
 
 ## The tests that enforce this
 

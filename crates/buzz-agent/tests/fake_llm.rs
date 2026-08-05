@@ -173,12 +173,40 @@ struct Harness {
 
 impl Harness {
     async fn spawn(base_url: &str) -> Self {
+        Self::spawn_for_provider(
+            base_url,
+            "openai",
+            "OPENAI_COMPAT_API_KEY",
+            "OPENAI_COMPAT_MODEL",
+            "OPENAI_COMPAT_BASE_URL",
+        )
+        .await
+    }
+
+    async fn spawn_venice(base_url: &str) -> Self {
+        Self::spawn_for_provider(
+            base_url,
+            "venice",
+            "VENICE_API_KEY",
+            "VENICE_MODEL",
+            "VENICE_BASE_URL",
+        )
+        .await
+    }
+
+    async fn spawn_for_provider(
+        base_url: &str,
+        provider: &str,
+        api_key_env: &str,
+        model_env: &str,
+        base_url_env: &str,
+    ) -> Self {
         let bin = env!("CARGO_BIN_EXE_buzz-agent");
         let mut cmd = tokio::process::Command::new(bin);
-        cmd.env("BUZZ_AGENT_PROVIDER", "openai")
-            .env("OPENAI_COMPAT_API_KEY", "test")
-            .env("OPENAI_COMPAT_MODEL", "fake-model")
-            .env("OPENAI_COMPAT_BASE_URL", base_url)
+        cmd.env("BUZZ_AGENT_PROVIDER", provider)
+            .env(api_key_env, "test")
+            .env(model_env, "fake-model")
+            .env(base_url_env, base_url)
             .env("BUZZ_AGENT_LLM_TIMEOUT_SECS", "5")
             .env("BUZZ_AGENT_TOOL_TIMEOUT_SECS", "5")
             .env("BUZZ_AGENT_MAX_ROUNDS", "4")
@@ -300,6 +328,34 @@ async fn text_only_end_turn() {
         .await;
     let v = h.recv_until(|v| v["id"] == json!(p_id)).await;
     assert_eq!(v["result"]["stopReason"], "end_turn");
+    h.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn venice_uses_chat_completions_body_and_disables_provider_prompt() {
+    let (url, captures) = spawn_capturing_fake_llm(vec![openai_text("done")]).await;
+    let mut h = Harness::spawn_venice(&url).await;
+    let sid = init_session(&mut h).await;
+    let prompt_id = h
+        .send(
+            "session/prompt",
+            json!({
+                "sessionId": sid,
+                "prompt": [{ "type": "text", "text": "hi" }],
+            }),
+        )
+        .await;
+    let response = h.recv_until(|value| value["id"] == prompt_id).await;
+    assert_eq!(response["result"]["stopReason"], "end_turn");
+
+    let requests = captures.lock().await;
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0]["messages"].is_array());
+    assert_eq!(
+        requests[0]["venice_parameters"]["include_venice_system_prompt"],
+        false
+    );
+    drop(requests);
     h.shutdown().await;
 }
 
