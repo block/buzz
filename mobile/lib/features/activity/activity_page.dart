@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
@@ -59,7 +60,10 @@ EdgeInsets _activityScrollPadding(
 /// navigation. Row taps deep-link to the represented message (oldest unread
 /// for grouped conversations) rather than just opening the channel.
 class ActivityPage extends HookConsumerWidget {
-  const ActivityPage({super.key});
+  const ActivityPage({this.tabReselection, super.key});
+
+  /// Notifies this page when its already-selected tab is tapped again.
+  final ValueListenable<int>? tabReselection;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -67,6 +71,32 @@ class ActivityPage extends HookConsumerWidget {
     final channelsAsync = ref.watch(channelsProvider);
     final filter = useState(InboxFilter.all);
     final unreadOnly = useState(false);
+    final scrollController = useScrollController();
+    final reducedMotion = MediaQuery.disableAnimationsOf(context);
+    useEffect(() {
+      final tabReselection = this.tabReselection;
+      if (tabReselection == null) return null;
+
+      void scrollToTop() {
+        if (!scrollController.hasClients) return;
+        final position = scrollController.position;
+        if (position.pixels <= position.minScrollExtent + 0.5) return;
+        if (reducedMotion) {
+          scrollController.jumpTo(position.minScrollExtent);
+          return;
+        }
+        unawaited(
+          scrollController.animateTo(
+            position.minScrollExtent,
+            duration: const Duration(milliseconds: 260),
+            curve: Curves.easeOutCubic,
+          ),
+        );
+      }
+
+      tabReselection.addListener(scrollToTop);
+      return () => tabReselection.removeListener(scrollToTop);
+    }, [tabReselection, scrollController, reducedMotion]);
     final headerTitleStyle = context.textTheme.titleMedium?.copyWith(
       fontSize: 22,
       fontWeight: FontWeight.w600,
@@ -253,10 +283,15 @@ class ActivityPage extends HookConsumerWidget {
     late final Widget body;
     var bodyRidesOverTopSection = false;
     if (filter.value == InboxFilter.reminders) {
-      body = _RemindersList(onOpen: openReminder, onRefresh: refresh);
+      body = _RemindersList(
+        scrollController: scrollController,
+        onOpen: openReminder,
+        onRefresh: refresh,
+      );
     } else if (filter.value == InboxFilter.drafts) {
       body = _DraftsList(
         drafts: drafts,
+        scrollController: scrollController,
         channelById: channelById,
         myPubkey: myPk,
         onOpen: openDraft,
@@ -266,7 +301,7 @@ class ActivityPage extends HookConsumerWidget {
     } else if (feedAsync.hasError && allItems.isEmpty) {
       body = _ErrorView(onRetry: refresh);
     } else if (!hasLoadedOnce.value && allItems.isEmpty) {
-      body = const _LoadingSkeleton();
+      body = _LoadingSkeleton(scrollController: scrollController);
     } else if (visibleItems.isEmpty) {
       body = _EmptyFilterState(
         filter: filter.value,
@@ -286,6 +321,7 @@ class ActivityPage extends HookConsumerWidget {
         edgeOffset: topSectionHeight,
         onRefresh: refresh,
         child: CustomScrollView(
+          controller: scrollController,
           slivers: [
             SliverToBoxAdapter(child: SizedBox(height: topSectionHeight)),
             DecoratedSliver(

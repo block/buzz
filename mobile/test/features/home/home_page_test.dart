@@ -71,7 +71,7 @@ void main() {
     );
   });
 
-  testWidgets('keeps the Buzz backdrop behind the stationary Home screen', (
+  testWidgets('keeps the Buzz backdrop behind the scalable Home screen', (
     tester,
   ) async {
     const gradient = LinearGradient(
@@ -90,7 +90,24 @@ void main() {
     expect(decoration.gradient, gradient);
     expect(
       find.byKey(const ValueKey('home-settings-transition-scale')),
-      findsNothing,
+      findsOneWidget,
+    );
+    expect(
+      tester
+          .widget<Transform>(
+            find.byKey(const ValueKey('home-settings-transition-scale')),
+          )
+          .transform
+          .getMaxScaleOnAxis(),
+      1,
+    );
+    expect(
+      tester
+          .widget<Opacity>(
+            find.byKey(const ValueKey('home-settings-transition-opacity')),
+          )
+          .opacity,
+      1,
     );
   });
 

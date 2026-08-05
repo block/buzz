@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -39,6 +40,9 @@ const _searchTitleReturnDuration = Duration(milliseconds: 80);
 const _searchCancelEnterDuration = Duration(milliseconds: 80);
 const _searchCancelExitDuration = Duration(milliseconds: 60);
 const _searchIdleFieldTopInset = Grid.half;
+const _searchActiveFieldTopOffset = 42.0;
+const _searchBottomOverlap =
+    _searchActiveFieldTopOffset + _searchIdleFieldTopInset;
 const _searchFilterChipVerticalPadding = Grid.xxs;
 const _searchFilterBarVerticalPadding = Grid.xxs;
 const _searchHeaderFiltersMinHeight = Grid.xl;
@@ -81,7 +85,10 @@ double _searchHeaderFiltersHeight(BuildContext context) {
 }
 
 class SearchPage extends HookConsumerWidget {
-  const SearchPage({super.key});
+  const SearchPage({this.tabReselection, super.key});
+
+  /// Notifies this page when its already-selected tab is tapped again.
+  final ValueListenable<int>? tabReselection;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -95,6 +102,7 @@ class SearchPage extends HookConsumerWidget {
     final focusNode = useFocusNode();
     final isSearchEditing = useState(false);
     final showSearchTitle = useState(true);
+    final isTabActivationInFlight = useRef(false);
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
     final searchSurfaceColor = navigationSearchSurface(context);
     final searchPrimaryColor = navigationPrimaryForeground(context);
@@ -142,8 +150,29 @@ class SearchPage extends HookConsumerWidget {
     }
 
     useEffect(() {
+      final tabReselection = this.tabReselection;
+      if (tabReselection == null) return null;
+
+      void reactivateSearch() {
+        // The same tab gesture can report focus loss after this callback. Keep
+        // that notification from starting a competing return animation while
+        // the normal field activation path restores focus.
+        isTabActivationInFlight.value = true;
+        activateSearch();
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          isTabActivationInFlight.value = false;
+        });
+      }
+
+      tabReselection.addListener(reactivateSearch);
+      return () => tabReselection.removeListener(reactivateSearch);
+    }, [tabReselection, focusNode]);
+
+    useEffect(() {
       void resetIdlePromptWhenFocusLeaves() {
-        if (!focusNode.hasFocus) deactivateSearch();
+        if (!focusNode.hasFocus && !isTabActivationInFlight.value) {
+          deactivateSearch();
+        }
       }
 
       focusNode.addListener(resetIdlePromptWhenFocusLeaves);
@@ -250,6 +279,7 @@ class SearchPage extends HookConsumerWidget {
           ),
         ],
         bottomHeight: searchHeaderBottomHeight,
+        bottomOverlap: _searchBottomOverlap,
         bottom: Stack(
           clipBehavior: Clip.none,
           children: [
@@ -260,7 +290,9 @@ class SearchPage extends HookConsumerWidget {
               right: isSearchEditing.value
                   ? _searchActiveFieldRightInset
                   : Grid.gutter,
-              top: _searchIdleFieldTopInset,
+              top: isSearchEditing.value
+                  ? _searchIdleFieldTopInset
+                  : _searchBottomOverlap + _searchIdleFieldTopInset,
               height: isSearchEditing.value
                   ? compactSearchFieldHeight
                   : idleSearchFieldHeight,
@@ -311,11 +343,7 @@ class SearchPage extends HookConsumerWidget {
                     ? Align(
                         alignment: Alignment.topCenter,
                         child: Padding(
-                          padding: EdgeInsets.only(
-                            top:
-                                _searchIdleFieldTopInset +
-                                compactSearchFieldHeight,
-                          ),
+                          padding: EdgeInsets.only(top: _searchBottomOverlap),
                           child: SizedBox(
                             key: const ValueKey('search-header-filters'),
                             height: searchHeaderFiltersHeight,

@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:buzz/features/activity/activity_page.dart';
 import 'package:buzz/features/activity/activity_provider.dart';
 import 'package:buzz/features/activity/feed_item.dart';
@@ -115,6 +116,7 @@ void main() {
     List<Channel>? channels,
     TextScaler? textScaler,
     EdgeInsets mediaPadding = EdgeInsets.zero,
+    ValueListenable<int>? tabReselection,
   }) async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -143,7 +145,7 @@ void main() {
           ).copyWith(textScaler: textScaler, padding: mediaPadding),
           child: child!,
         ),
-        home: const ActivityPage(),
+        home: ActivityPage(tabReselection: tabReselection),
       ),
     );
   }
@@ -239,6 +241,41 @@ void main() {
       ),
     );
     expect(padding.padding, const EdgeInsets.fromLTRB(0, Grid.xxs, 0, 96));
+  });
+
+  testWidgets('scrolls Activity to the top when its tab is selected again', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(320, 180);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final tabReselection = ValueNotifier(0);
+    addTearDown(tabReselection.dispose);
+    await tester.pumpWidget(
+      await buildTestable(tabReselection: tabReselection),
+    );
+    await tester.pumpAndSettle();
+
+    final scrollable = tester.state<ScrollableState>(
+      find
+          .descendant(
+            of: find.byType(CustomScrollView),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+    );
+    expect(scrollable.position.maxScrollExtent, greaterThan(0));
+    scrollable.position.jumpTo(scrollable.position.maxScrollExtent);
+    tabReselection.value++;
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 130));
+
+    expect(
+      scrollable.position.pixels,
+      lessThan(scrollable.position.maxScrollExtent),
+    );
+    await tester.pumpAndSettle();
+    expect(scrollable.position.pixels, scrollable.position.minScrollExtent);
   });
 
   testWidgets('shows error view with retry button', (tester) async {

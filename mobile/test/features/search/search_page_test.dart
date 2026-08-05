@@ -19,6 +19,61 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import '../../helpers/widget_helpers.dart';
 
 void main() {
+  testWidgets('reselecting Search uses the field activation path', (
+    tester,
+  ) async {
+    final tabReselection = ValueNotifier(0);
+    addTearDown(tabReselection.dispose);
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          searchProvider.overrideWith(
+            () => _FakeSearchNotifier(const SearchState.initial()),
+          ),
+          recentSearchesProvider.overrideWith(
+            () => _FakeRecentSearchesNotifier(const []),
+          ),
+          profileProvider.overrideWith(() => _FakeProfileNotifier()),
+        ],
+        child: SearchPage(tabReselection: tabReselection),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('search-cancel')), findsNothing);
+    tabReselection.value++;
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.byKey(const Key('search-cancel')), findsOneWidget);
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).focusNode?.hasFocus,
+      isTrue,
+    );
+
+    final focusNode = tester
+        .widget<TextField>(find.byType(TextField))
+        .focusNode!;
+    // Reproduce the real tab-tap ordering where the destination callback can
+    // run immediately before the same pointer gesture dismisses the field.
+    tabReselection.value++;
+    focusNode.unfocus();
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.byKey(const Key('search-cancel')), findsOneWidget);
+    expect(focusNode.hasFocus, isTrue);
+    expect(
+      tester
+          .widget<AnimatedOpacity>(
+            find.byKey(const Key('search-header-title-opacity')),
+          )
+          .opacity,
+      0,
+      reason: 'The tab gesture must not paint a close-and-reopen flicker.',
+    );
+  });
+
   testWidgets('uses the shared frosted navigation surface', (tester) async {
     await tester.pumpWidget(
       WidgetHelpers.testable(
@@ -218,6 +273,7 @@ void main() {
       const Key('search-field-container'),
     );
     final unfocusedWidth = tester.getSize(searchFieldContainer).width;
+    final unfocusedTop = tester.getRect(searchFieldContainer).top;
     expect(find.byKey(const Key('search-cancel')), findsNothing);
     await tester.tap(searchField);
     await tester.pump();
@@ -244,7 +300,13 @@ void main() {
 
     await tester.pump(const Duration(milliseconds: 160));
     final focusedWidth = tester.getSize(searchFieldContainer).width;
+    final focusedRect = tester.getRect(searchFieldContainer);
     expect(focusedWidth, lessThan(unfocusedWidth));
+    expect(
+      focusedRect.top,
+      lessThan(unfocusedTop),
+      reason: 'The active field translates upward into the title row.',
+    );
     expect(find.byKey(const Key('search-header-filters')), findsOneWidget);
     final settledSlide = tester.widget<SlideTransition>(
       find.ancestor(of: cancel, matching: find.byType(SlideTransition)).first,
@@ -259,10 +321,11 @@ void main() {
     );
     expect(iconScale.scale, lessThan(1));
     expect(movingField.top, Grid.half);
+    final appBarRect = tester.getRect(find.byType(FrostedAppBar));
     expect(
-      tester.getRect(searchField).top,
-      greaterThanOrEqualTo(tester.getRect(find.byType(FrostedAppBar)).top),
-      reason: 'The active field remains inside the app bar hit-test box.',
+      appBarRect.contains(focusedRect.center),
+      isTrue,
+      reason: 'The translated field remains inside the app bar hit-test box.',
     );
 
     await tester.enterText(editingField, 'design');

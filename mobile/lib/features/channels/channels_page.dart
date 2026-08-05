@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:math' show max, min, pi;
 import 'dart:ui';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
@@ -65,11 +66,14 @@ const double _kChannelLeadingWidth = 22.0;
 const double _kChannelIconSize = 18.0;
 const double _kChannelLabelGap = Grid.xxs;
 const double _kChannelRowVerticalPadding = Grid.xxs + Grid.quarter;
-const double _kSectionHeaderVerticalPadding = _kChannelRowVerticalPadding;
+const double _kSectionSpacingTightening = Grid.half;
+const double _kSectionHeaderVerticalPadding =
+    _kChannelRowVerticalPadding - _kSectionSpacingTightening;
 // Section headers include touch targets for their actions, so their visual
 // centre sits lower than a channel row's. This keeps an expanded section's
 // final row equally spaced from the following divider.
-const double _kExpandedSectionTrailingPadding = 11.0;
+const double _kExpandedSectionTrailingPadding =
+    11.0 - _kSectionSpacingTightening;
 const double _kChannelLabelInset =
     _kChannelSectionInset + _kChannelLeadingWidth + _kChannelLabelGap;
 
@@ -150,9 +154,20 @@ _UnreadChannelState _computeUnreadChannelState({
 }
 
 class ChannelsPage extends HookConsumerWidget {
-  const ChannelsPage({required this.settingsPageBuilder, super.key});
+  const ChannelsPage({
+    required this.settingsPageBuilder,
+    required this.onSettingsTransitionProgress,
+    this.tabReselection,
+    super.key,
+  });
 
   final WidgetBuilder settingsPageBuilder;
+
+  /// Reports the Settings route's raw animation progress from 0 to 1.
+  final ValueChanged<double> onSettingsTransitionProgress;
+
+  /// Notifies this page when its already-selected tab is tapped again.
+  final ValueListenable<int>? tabReselection;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -173,6 +188,7 @@ class ChannelsPage extends HookConsumerWidget {
       bottomHeight: _kTopSectionBottomPadding,
     );
     final channelsScrollController = useScrollController();
+    final reducedMotion = MediaQuery.disableAnimationsOf(context);
     final headerFrostProgress = useState(0.0);
     useEffect(() {
       void updateHeaderTreatment() {
@@ -190,6 +206,30 @@ class ChannelsPage extends HookConsumerWidget {
       return () =>
           channelsScrollController.removeListener(updateHeaderTreatment);
     }, [channelsScrollController]);
+    useEffect(() {
+      final tabReselection = this.tabReselection;
+      if (tabReselection == null) return null;
+
+      void scrollToTop() {
+        if (!channelsScrollController.hasClients) return;
+        final position = channelsScrollController.position;
+        if (position.pixels <= position.minScrollExtent + 0.5) return;
+        if (reducedMotion) {
+          channelsScrollController.jumpTo(position.minScrollExtent);
+          return;
+        }
+        unawaited(
+          channelsScrollController.animateTo(
+            position.minScrollExtent,
+            duration: const Duration(milliseconds: 260),
+            curve: Curves.easeOutCubic,
+          ),
+        );
+      }
+
+      tabReselection.addListener(scrollToTop);
+      return () => tabReselection.removeListener(scrollToTop);
+    }, [tabReselection, channelsScrollController, reducedMotion]);
 
     // Cache the last successfully loaded channels so the UI never flashes
     // back to a loading state when the provider rebuilds (e.g. reconnect).
@@ -302,9 +342,12 @@ class ChannelsPage extends HookConsumerWidget {
                 size: _kTopSectionAvatarSize,
                 onTap: () {
                   unawaited(HapticFeedback.lightImpact());
-                  Navigator.of(
-                    context,
-                  ).push(_SettingsPageRoute(builder: settingsPageBuilder));
+                  Navigator.of(context).push(
+                    _SettingsPageRoute(
+                      builder: settingsPageBuilder,
+                      onTransitionProgress: onSettingsTransitionProgress,
+                    ),
+                  );
                 },
               ),
             ),
@@ -334,15 +377,38 @@ class ChannelsPage extends HookConsumerWidget {
 /// transition on Home. Settings has a centered scale-and-fade transition, not
 /// a lateral page push.
 class _SettingsPageRoute extends PageRouteBuilder<void> {
-  _SettingsPageRoute({required WidgetBuilder builder})
-    : super(
-        pageBuilder: (context, animation, secondaryAnimation) =>
-            builder(context),
-        transitionsBuilder: _buildSettingsTransition,
-        opaque: false,
-        transitionDuration: const Duration(milliseconds: 190),
-        reverseTransitionDuration: const Duration(milliseconds: 190),
-      );
+  _SettingsPageRoute({
+    required WidgetBuilder builder,
+    required this.onTransitionProgress,
+  }) : super(
+         pageBuilder: (context, animation, secondaryAnimation) =>
+             builder(context),
+         transitionsBuilder: _buildSettingsTransition,
+         opaque: false,
+         transitionDuration: const Duration(milliseconds: 190),
+         reverseTransitionDuration: const Duration(milliseconds: 190),
+       );
+
+  final ValueChanged<double> onTransitionProgress;
+
+  Animation<double>? _progressAnimation;
+
+  @override
+  void install() {
+    super.install();
+    _progressAnimation = animation?..addListener(_reportProgress);
+    _reportProgress();
+  }
+
+  void _reportProgress() {
+    onTransitionProgress(_progressAnimation?.value ?? 0);
+  }
+
+  @override
+  void dispose() {
+    _progressAnimation?.removeListener(_reportProgress);
+    super.dispose();
+  }
 
   static Widget _buildSettingsTransition(
     BuildContext context,
@@ -358,12 +424,35 @@ class _SettingsPageRoute extends PageRouteBuilder<void> {
       reverseCurve: Curves.easeOutCubic,
     );
     return FadeTransition(
-      opacity: Tween<double>(begin: 0.8, end: 1).animate(incoming),
-      child: ScaleTransition(
-        scale: Tween<double>(begin: 1.04, end: 1).animate(incoming),
-        alignment: Alignment.center,
-        child: child,
+      key: const ValueKey('settings-transition-opacity'),
+      opacity: _SettingsOpacityAnimation(incoming),
+      child: RepaintBoundary(
+        key: const ValueKey('settings-transition-layer'),
+        child: ScaleTransition(
+          scale: Tween<double>(begin: 1.04, end: 1).animate(incoming),
+          alignment: Alignment.center,
+          child: child,
+        ),
       ),
     );
+  }
+}
+
+/// Keeps Settings already composed on entry while retaining a complete exit
+/// fade. Reading the parent live also keeps opacity synchronized with scale on
+/// the route's first frame.
+class _SettingsOpacityAnimation extends Animation<double>
+    with AnimationWithParentMixin<double> {
+  _SettingsOpacityAnimation(this.parent);
+
+  @override
+  final Animation<double> parent;
+
+  @override
+  double get value {
+    final progress = parent.value;
+    return parent.status == AnimationStatus.reverse
+        ? progress
+        : 0.8 + (0.2 * progress);
   }
 }

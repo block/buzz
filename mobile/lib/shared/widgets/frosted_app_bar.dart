@@ -98,6 +98,11 @@ class FrostedAppBar extends StatelessWidget {
   /// Height reserved for [bottom].
   final double bottomHeight;
 
+  /// Extends [bottom] upward into the title row without moving the app bar's
+  /// outer bounds. This keeps overlapping controls inside the app bar's hit
+  /// test region as well as its paint region.
+  final double bottomOverlap;
+
   /// Widgets displayed on the trailing (right) side.
   final List<Widget> actions;
 
@@ -139,6 +144,7 @@ class FrostedAppBar extends StatelessWidget {
     this.titleContentHeight = 0,
     this.bottom,
     this.bottomHeight = 0,
+    this.bottomOverlap = 0,
     this.actions = const [],
     this.horizontalInset = Grid.quarter,
     this.iconColor,
@@ -149,6 +155,8 @@ class FrostedAppBar extends StatelessWidget {
     this.showBottomDivider = true,
     this.bottomDividerOpacity = 0.15,
   }) : assert(bottom == null || bottomHeight > 0),
+       assert(bottomOverlap >= 0),
+       assert(bottom != null || bottomOverlap == 0),
        assert(frostedBlurSigma >= 0),
        assert(bottomDividerOpacity >= 0 && bottomDividerOpacity <= 1);
 
@@ -178,57 +186,76 @@ class FrostedAppBar extends StatelessWidget {
               )
             : null);
 
+    final titleRow = SizedBox(
+      height: barContentHeight,
+      child: Padding(
+        padding: EdgeInsets.symmetric(horizontal: horizontalInset),
+        child: IconTheme.merge(
+          data: IconThemeData(color: iconColor),
+          child: Row(
+            children: [
+              ?effectiveLeading,
+              if (title != null)
+                Expanded(
+                  child: Padding(
+                    padding: EdgeInsets.only(
+                      left: effectiveLeading != null
+                          ? 0
+                          : horizontalInset < Grid.gutter
+                          ? Grid.gutter - horizontalInset
+                          : 0,
+                      right: actions.isEmpty
+                          ? horizontalInset < Grid.gutter
+                                ? Grid.gutter - horizontalInset
+                                : 0
+                          : 0,
+                    ),
+                    child: DefaultTextStyle.merge(
+                      style: effectiveTitleStyle,
+                      overflow: TextOverflow.ellipsis,
+                      maxLines: 1,
+                      child: title!,
+                    ),
+                  ),
+                )
+              else
+                const Spacer(),
+              ...actions,
+            ],
+          ),
+        ),
+      ),
+    );
+    final contentBody = bottom != null && bottomOverlap > 0
+        ? SizedBox(
+            height: barContentHeight + bottomHeight,
+            child: Stack(
+              children: [
+                Positioned(top: 0, left: 0, right: 0, child: titleRow),
+                Positioned(
+                  top: barContentHeight - bottomOverlap,
+                  left: 0,
+                  right: 0,
+                  height: bottomHeight + bottomOverlap,
+                  child: bottom!,
+                ),
+              ],
+            ),
+          )
+        : Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              titleRow,
+              if (bottom != null) SizedBox(height: bottomHeight, child: bottom),
+            ],
+          );
+
     final content = DirectionalTransitionMotion(
       transformKey: const ValueKey(
         'frosted-app-bar-content-transition-transform',
       ),
       opacityKey: const ValueKey('frosted-app-bar-content-transition-opacity'),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          SizedBox(
-            height: barContentHeight,
-            child: Padding(
-              padding: EdgeInsets.symmetric(horizontal: horizontalInset),
-              child: IconTheme.merge(
-                data: IconThemeData(color: iconColor),
-                child: Row(
-                  children: [
-                    ?effectiveLeading,
-                    if (title != null)
-                      Expanded(
-                        child: Padding(
-                          padding: EdgeInsets.only(
-                            left: effectiveLeading != null
-                                ? 0
-                                : horizontalInset < Grid.gutter
-                                ? Grid.gutter - horizontalInset
-                                : 0,
-                            right: actions.isEmpty
-                                ? horizontalInset < Grid.gutter
-                                      ? Grid.gutter - horizontalInset
-                                      : 0
-                                : 0,
-                          ),
-                          child: DefaultTextStyle.merge(
-                            style: effectiveTitleStyle,
-                            overflow: TextOverflow.ellipsis,
-                            maxLines: 1,
-                            child: title!,
-                          ),
-                        ),
-                      )
-                    else
-                      const Spacer(),
-                    ...actions,
-                  ],
-                ),
-              ),
-            ),
-          ),
-          if (bottom != null) SizedBox(height: bottomHeight, child: bottom),
-        ],
-      ),
+      child: contentBody,
     );
 
     final background = Container(

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -38,6 +39,8 @@ void main() {
     ValueChanged<String>? onCommunityIconLoad,
     TextScaler textScaler = TextScaler.noScaling,
     Gradient? topSectionGradient,
+    ValueChanged<double>? onSettingsTransitionProgress,
+    ValueListenable<int>? tabReselection,
   }) {
     return ProviderScope(
       overrides: [
@@ -64,10 +67,15 @@ void main() {
           ),
           child: child!,
         ),
-        home: const Stack(
+        home: Stack(
           children: [
-            ChannelsPage(settingsPageBuilder: _buildSettingsPage),
-            Positioned.fill(
+            ChannelsPage(
+              settingsPageBuilder: _buildSettingsPage,
+              onSettingsTransitionProgress:
+                  onSettingsTransitionProgress ?? (_) {},
+              tabReselection: tabReselection,
+            ),
+            const Positioned.fill(
               child: ChannelQuickActionsLauncher(
                 visible: true,
                 navigationBarHeight: 60,
@@ -349,6 +357,45 @@ void main() {
     appBar = tester.widget<FrostedAppBar>(find.byType(FrostedAppBar).last);
     expect(appBar.frostedSurfaceOpacity, 0);
     expect(appBar.frostedBlurSigma, 23.12);
+  });
+
+  testWidgets('scrolls Home to the top when its tab is selected again', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(320, 160);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final tabReselection = ValueNotifier(0);
+    addTearDown(tabReselection.dispose);
+    await tester.pumpWidget(
+      buildTestable(
+        tabReselection: tabReselection,
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final scrollable = tester.state<ScrollableState>(
+      find
+          .descendant(
+            of: find.byType(CustomScrollView),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+    );
+    scrollable.position.jumpTo(scrollable.position.maxScrollExtent);
+    tabReselection.value++;
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 130));
+
+    expect(
+      scrollable.position.pixels,
+      lessThan(scrollable.position.maxScrollExtent),
+    );
+    await tester.pumpAndSettle();
+    expect(scrollable.position.pixels, scrollable.position.minScrollExtent);
   });
 
   testWidgets('truncates long custom section names beside the menu', (
@@ -648,6 +695,83 @@ void main() {
     final route = ModalRoute.of(tester.element(find.text('Injected settings')));
     expect(route, isNot(isA<MaterialPageRoute<void>>()));
     expect(route?.opaque, isFalse);
+  });
+
+  testWidgets('reports Settings progress in both directions', (tester) async {
+    final progress = <double>[];
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+        ],
+        onSettingsTransitionProgress: progress.add,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byType(ProfileAvatar));
+    await tester.pumpAndSettle();
+    expect(progress.any((value) => value > 0 && value < 1), isTrue);
+    expect(progress.last, 1);
+
+    final reverseStart = progress.length;
+    Navigator.of(tester.element(find.text('Injected settings'))).pop();
+    await tester.pumpAndSettle();
+    expect(
+      progress.skip(reverseStart).any((value) => value > 0 && value < 1),
+      isTrue,
+    );
+    expect(progress.last, 0);
+  });
+
+  testWidgets('paints Settings content with its surface from the first frame', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byType(ProfileAvatar));
+    await tester.pump();
+
+    final transition = find.byKey(
+      const ValueKey('settings-transition-opacity'),
+      skipOffstage: false,
+    );
+    expect(transition, findsOneWidget);
+    expect(
+      find.descendant(
+        of: transition,
+        matching: find.byKey(
+          const ValueKey('settings-transition-layer'),
+          skipOffstage: false,
+        ),
+      ),
+      findsOneWidget,
+    );
+    expect(tester.widget<FadeTransition>(transition).opacity.value, 0.8);
+
+    await tester.pump(const Duration(milliseconds: 95));
+    expect(
+      tester.widget<FadeTransition>(transition).opacity.value,
+      inExclusiveRange(0.8, 1),
+    );
+    await tester.pumpAndSettle();
+    expect(tester.widget<FadeTransition>(transition).opacity.value, 1);
+
+    Navigator.of(tester.element(find.text('Injected settings'))).pop();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 95));
+    expect(
+      tester.widget<FadeTransition>(transition).opacity.value,
+      inExclusiveRange(0, 1),
+      reason: 'The complete Settings layer still fades out on exit.',
+    );
   });
 
   testWidgets('gives feedback for the profile and community controls', (

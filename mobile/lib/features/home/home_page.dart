@@ -36,6 +36,7 @@ class HomePage extends HookConsumerWidget {
   static const double _fabClearance = _tabBarHeight + _tabBarBottomGap;
   static const Duration _tabIconWeightDuration = Duration(milliseconds: 120);
   static const Duration _tabUnreadBadgeDuration = Duration(milliseconds: 220);
+  static const double _settingsBackgroundScale = 0.97;
   static const Duration _tabContentTransitionDuration = Duration(
     milliseconds: 240,
   );
@@ -71,6 +72,10 @@ class HomePage extends HookConsumerWidget {
     final tabContentTransitionValue = useAnimation(
       tabContentTransitionController,
     );
+    final homeReselection = useValueNotifier(0);
+    final activityReselection = useValueNotifier(0);
+    final searchReselection = useValueNotifier(0);
+    final settingsTransitionProgress = useValueNotifier(0.0);
     final reducedMotion = MediaQuery.of(context).disableAnimations;
     final tabContentTransitionProgress = reducedMotion
         ? 1.0
@@ -82,17 +87,23 @@ class HomePage extends HookConsumerWidget {
     );
 
     final pages = [
-      ChannelsPage(settingsPageBuilder: settingsPageBuilder),
-      const ActivityPage(),
-      const SearchPage(),
+      ChannelsPage(
+        settingsPageBuilder: settingsPageBuilder,
+        tabReselection: homeReselection,
+        onSettingsTransitionProgress: (progress) {
+          if (settingsTransitionProgress.value != progress) {
+            settingsTransitionProgress.value = progress;
+          }
+        },
+      ),
+      ActivityPage(tabReselection: activityReselection),
+      SearchPage(tabReselection: searchReselection),
     ];
 
     final settingsTransitionGradient = tabIndex.value == 0
         ? context.appColors.topSectionGradient
         : null;
 
-    // Settings owns its scale-and-fade transition. Keep Home stationary behind
-    // it so the source avatar and navigation do not appear to travel.
     return Stack(
       fit: StackFit.expand,
       children: [
@@ -107,78 +118,108 @@ class HomePage extends HookConsumerWidget {
             ),
           ),
         ),
-        Scaffold(
-          backgroundColor: Colors.transparent,
-          // Keep the floating navigation and Home quick actions anchored while the
-          // keyboard is visible on any tab.
-          resizeToAvoidBottomInset: false,
-          extendBody: true,
-          body: SizedBox.expand(
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                Positioned.fill(
-                  child: ColoredBox(color: context.colors.surface),
-                ),
-                Positioned.fill(
-                  child: MediaQuery(
-                    data: _mediaQueryWithFloatingTabBarClearance(
-                      context,
-                      HomePage._fabClearance,
-                    ),
-                    child: DirectionalTransitionScope(
-                      horizontalOffset:
-                          tabContentTransitionDirection.value *
-                          _tabContentTransitionDistance *
-                          (1 - tabContentTransitionProgress),
-                      opacity: tabContentTransitionProgress,
-                      child: ClipRect(
-                        child: IndexedStack(
-                          index: tabIndex.value,
-                          children: pages,
+        ValueListenableBuilder<double>(
+          valueListenable: settingsTransitionProgress,
+          child: Scaffold(
+            backgroundColor: Colors.transparent,
+            // Keep the floating navigation and Home quick actions anchored while the
+            // keyboard is visible on any tab.
+            resizeToAvoidBottomInset: false,
+            extendBody: true,
+            body: SizedBox.expand(
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  Positioned.fill(
+                    child: ColoredBox(color: context.colors.surface),
+                  ),
+                  Positioned.fill(
+                    child: MediaQuery(
+                      data: _mediaQueryWithFloatingTabBarClearance(
+                        context,
+                        HomePage._fabClearance,
+                      ),
+                      child: DirectionalTransitionScope(
+                        horizontalOffset:
+                            tabContentTransitionDirection.value *
+                            _tabContentTransitionDistance *
+                            (1 - tabContentTransitionProgress),
+                        opacity: tabContentTransitionProgress,
+                        child: ClipRect(
+                          child: IndexedStack(
+                            index: tabIndex.value,
+                            children: pages,
+                          ),
                         ),
                       ),
                     ),
                   ),
-                ),
-                Align(
-                  alignment: Alignment.bottomCenter,
-                  child: IgnorePointer(
-                    child: MobileTabFooterBackdrop(
-                      height: mobileTabFooterBackdropHeight(context),
-                      tint: context.colors.primaryContainer,
+                  Align(
+                    alignment: Alignment.bottomCenter,
+                    child: IgnorePointer(
+                      child: MobileTabFooterBackdrop(
+                        height: mobileTabFooterBackdropHeight(context),
+                        tint: context.colors.primaryContainer,
+                      ),
                     ),
                   ),
-                ),
-                Positioned.fill(
-                  child: ChannelQuickActionsLauncher(
-                    visible: tabIndex.value == 0,
-                    navigationBarHeight: HomePage._tabBarHeight,
-                    navigationBarBottomGap: HomePage._tabBarBottomGap,
-                    navigationBarWidth: navigationBarWidth,
-                    systemBottomInset: systemBottomInset,
-                    rightInset: Grid.sm,
+                  Positioned.fill(
+                    child: ChannelQuickActionsLauncher(
+                      visible: tabIndex.value == 0,
+                      navigationBarHeight: HomePage._tabBarHeight,
+                      navigationBarBottomGap: HomePage._tabBarBottomGap,
+                      navigationBarWidth: navigationBarWidth,
+                      systemBottomInset: systemBottomInset,
+                      rightInset: Grid.sm,
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
+            ),
+            bottomNavigationBar: _FloatingTabBar(
+              selectedIndex: tabIndex.value,
+              hasUnreadInbox: hasUnreadInbox,
+              onDestinationSelected: (i) {
+                if (i == tabIndex.value) {
+                  switch (i) {
+                    case 0:
+                      homeReselection.value++;
+                    case 1:
+                      activityReselection.value++;
+                    case 2:
+                      searchReselection.value++;
+                  }
+                  return;
+                }
+                tabContentTransitionDirection.value = i > tabIndex.value
+                    ? 1
+                    : -1;
+                unawaited(HapticFeedback.selectionClick());
+                tabIndex.value = i;
+                if (reducedMotion) {
+                  tabContentTransitionController.value = 1;
+                } else {
+                  unawaited(tabContentTransitionController.forward(from: 0));
+                }
+              },
+              destinations: _destinations,
             ),
           ),
-          bottomNavigationBar: _FloatingTabBar(
-            selectedIndex: tabIndex.value,
-            hasUnreadInbox: hasUnreadInbox,
-            onDestinationSelected: (i) {
-              if (i == tabIndex.value) return;
-              tabContentTransitionDirection.value = i > tabIndex.value ? 1 : -1;
-              unawaited(HapticFeedback.selectionClick());
-              tabIndex.value = i;
-              if (reducedMotion) {
-                tabContentTransitionController.value = 1;
-              } else {
-                unawaited(tabContentTransitionController.forward(from: 0));
-              }
-            },
-            destinations: _destinations,
-          ),
+          builder: (context, progress, child) {
+            final curvedProgress = reducedMotion
+                ? 0.0
+                : Curves.easeOutCubic.transform(progress);
+            return Opacity(
+              key: const ValueKey('home-settings-transition-opacity'),
+              opacity: 1 - curvedProgress,
+              child: Transform.scale(
+                key: const ValueKey('home-settings-transition-scale'),
+                scale: lerpDouble(1, _settingsBackgroundScale, curvedProgress),
+                alignment: Alignment.center,
+                child: child,
+              ),
+            );
+          },
         ),
       ],
     );
