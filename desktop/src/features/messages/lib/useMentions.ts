@@ -246,7 +246,13 @@ export function useMentions(
       if (isArchivedDiscovery(pubkey)) {
         return;
       }
-      if (!isAgentIdentityInManagedList(candidate, managedAgentPubkeys)) {
+      // JDD fork: also keep eligible relay agents (owned by another desktop,
+      // e.g. the operator) so they surface in @mention, not just agents in
+      // this desktop's own managed list.
+      if (
+        !isAgentIdentityInManagedList(candidate, managedAgentPubkeys) &&
+        !mentionableAgentPubkeys.has(pubkey)
+      ) {
         return;
       }
       if (
