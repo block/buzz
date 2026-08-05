@@ -149,13 +149,26 @@ fn reconcile_inbound_persona_event_blocking(
 
     match kind {
         KIND_PERSONA => {
-            let mut personas = load_personas(&app)?;
-            // `inbound_persona` is `Some` for KIND_PERSONA (set above).
-            apply_inbound_persona(
-                &mut personas,
-                inbound_persona.expect("persona parsed above"),
-            );
-            save_personas(&app, &personas)?;
+            let inbound = inbound_persona.expect("persona parsed above");
+            let provider_owned = load_managed_agents(&app)?.iter().any(|record| {
+                matches!(
+                    &record.backend,
+                    crate::managed_agents::BackendKind::Provider { id, .. } if id == "hermes"
+                ) && (record.pubkey == d_tag
+                    || record.persona_id.as_deref() == Some(d_tag.as_str()))
+            });
+
+            // Native Hermes identities have a real local provider record and
+            // must never be projected into a keyless persona definition. The
+            // definition path would make the UI offer a second local ACP
+            // instance, which then fails when its Hermes provider is injected
+            // into buzz-acp. The provider record already carries the identity
+            // and its local persona linkage.
+            if !provider_owned {
+                let mut personas = load_personas(&app)?;
+                apply_inbound_persona(&mut personas, inbound);
+                save_personas(&app, &personas)?;
+            }
         }
         KIND_TEAM => {
             let mut teams = load_teams(&app)?;
