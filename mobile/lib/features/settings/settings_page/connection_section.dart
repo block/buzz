@@ -1,7 +1,9 @@
 part of '../settings_page.dart';
 
 class _ConnectionSection extends ConsumerWidget {
-  const _ConnectionSection();
+  const _ConnectionSection({required this.identityRecoveryPageBuilder});
+
+  final WidgetBuilder identityRecoveryPageBuilder;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -24,12 +26,7 @@ class _ConnectionSection extends ConsumerWidget {
             subtitle: 'Scan a recovery code shown by Buzz Desktop',
             trailing: const _RowChevron(),
             onTap: () => Navigator.of(context).push(
-              MaterialPageRoute<void>(
-                builder: (_) => const PairingPage(
-                  addingCommunity: true,
-                  identityRecoveryOnly: true,
-                ),
-              ),
+              MaterialPageRoute<void>(builder: identityRecoveryPageBuilder),
             ),
           ),
         ],

@@ -8,7 +8,6 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:package_info_plus/package_info_plus.dart';
 
-import '../../features/pairing/pairing_page.dart';
 import '../../shared/auth/auth.dart';
 import '../../shared/clipboard_utils.dart';
 import '../../shared/relay/relay.dart';
@@ -25,9 +24,14 @@ part 'settings_page/appearance_section.dart';
 part 'settings_page/connection_section.dart';
 
 class SettingsPage extends HookConsumerWidget {
-  const SettingsPage({super.key, required this.profileHeader});
+  const SettingsPage({
+    super.key,
+    required this.profileHeader,
+    required this.identityRecoveryPageBuilder,
+  });
 
   final Widget profileHeader;
+  final WidgetBuilder identityRecoveryPageBuilder;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -68,7 +72,9 @@ class SettingsPage extends HookConsumerWidget {
               children: [
                 profileHeader,
                 const _AppearanceSection(),
-                const _ConnectionSection(),
+                _ConnectionSection(
+                  identityRecoveryPageBuilder: identityRecoveryPageBuilder,
+                ),
                 const _RemoveCommunitySection(),
               ],
             ),

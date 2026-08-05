@@ -50,6 +50,9 @@ struct PairingTaskContext {
 pub struct PairingHandle {
     session: Arc<tokio::sync::Mutex<Option<PairingSession>>>,
     generation: Arc<AtomicU64>,
+    /// Serializes session setup so an older start cannot resume after relay
+    /// discovery and overwrite a newer session's shared state.
+    start_lock: tokio::sync::Mutex<()>,
     cancel: std::sync::Mutex<Option<CancellationToken>>,
     /// Send JSON-serialized events to the background WS task for relay publication.
     outbound_tx: std::sync::Mutex<Option<mpsc::Sender<String>>>,
@@ -64,6 +67,7 @@ impl PairingHandle {
         Self {
             session: Arc::new(tokio::sync::Mutex::new(None)),
             generation: Arc::new(AtomicU64::new(0)),
+            start_lock: tokio::sync::Mutex::new(()),
             cancel: std::sync::Mutex::new(None),
             outbound_tx: std::sync::Mutex::new(None),
             payload: std::sync::Mutex::new(None),
@@ -105,6 +109,7 @@ async fn start_pairing_session(
     pairing: State<'_, PairingHandle>,
     mode: PairingMode,
 ) -> Result<String, String> {
+    let _start_guard = pairing.start_lock.lock().await;
     let task_generation = pairing
         .generation
         .fetch_add(1, Ordering::SeqCst)
@@ -369,7 +374,27 @@ async fn pairing_ws_task_inner(
                     }
 
                     if context.mode == PairingMode::RecoverIdentity {
-                        if let Ok((PayloadType::Nsec, payload)) = s.handle_return_payload(&event) {
+                        if let Ok((payload_type, payload)) = s.handle_return_payload(&event) {
+                            if let Err(message) = validate_recovery_payload_type(payload_type) {
+                                let complete = s
+                                    .send_source_complete(false)
+                                    .map_err(|e| e.to_string())?;
+                                write
+                                    .send(Message::Text(event_to_relay_json(&complete).into()))
+                                    .await
+                                    .map_err(|e| format!("publish complete failed: {e}"))?;
+                                if pairing_task_is_current(
+                                    &context.generation,
+                                    context.task_generation,
+                                ) {
+                                    let _ = app.emit(
+                                        "pairing-error",
+                                        PairingErrorPayload { message },
+                                    );
+                                }
+                                break;
+                            }
+
                             let imported = import_recovered_identity(app, payload).await;
                             let success = imported.is_ok();
                             let complete = s
@@ -446,6 +471,14 @@ async fn import_recovered_identity(app: &AppHandle, nsec: Zeroizing<String>) -> 
 
 fn pairing_task_is_current(generation: &AtomicU64, task_generation: u64) -> bool {
     generation.load(Ordering::SeqCst) == task_generation
+}
+
+fn validate_recovery_payload_type(payload_type: PayloadType) -> Result<(), String> {
+    if payload_type == PayloadType::Nsec {
+        Ok(())
+    } else {
+        Err("Mobile device sent an unsupported recovery payload".into())
+    }
 }
 
 async fn clear_pairing_session_if_current(
@@ -672,8 +705,38 @@ where
 mod pairing_generation_tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
+    use std::time::Duration;
 
-    use super::{clear_pairing_session_if_current, PairingSession};
+    use super::{
+        clear_pairing_session_if_current, validate_recovery_payload_type, PairingHandle,
+        PairingSession, PayloadType,
+    };
+
+    #[tokio::test]
+    async fn overlapping_starts_are_serialized() {
+        let pairing = Arc::new(PairingHandle::new());
+        let first_pairing = Arc::clone(&pairing);
+        let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+        let first = tokio::spawn(async move {
+            let _guard = first_pairing.start_lock.lock().await;
+            locked_tx.send(()).expect("signal acquired start lock");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        });
+
+        locked_rx.await.expect("first start acquired lock");
+        assert!(pairing.start_lock.try_lock().is_err());
+        first.await.expect("first start task");
+        assert!(pairing.start_lock.try_lock().is_ok());
+    }
+
+    #[test]
+    fn recovery_rejects_non_nsec_payloads() {
+        assert!(validate_recovery_payload_type(PayloadType::Nsec).is_ok());
+        assert_eq!(
+            validate_recovery_payload_type(PayloadType::Custom).unwrap_err(),
+            "Mobile device sent an unsupported recovery payload"
+        );
+    }
 
     #[tokio::test]
     async fn stale_task_does_not_clear_replacement_session() {
