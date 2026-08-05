@@ -54,7 +54,6 @@ function createCatalogEvent(input: {
 }
 
 test.beforeEach(async ({ page }) => {
-  await seedActiveIdentity(page, TEST_IDENTITIES.tyler);
   await installMockBridge(page);
 });
 
@@ -1463,6 +1462,10 @@ test("custom personas share with people and keep export separate", async ({
 
 test("custom personas can be shared to the relay catalog", async ({ page }) => {
   const personaId = "custom:catalog-analyst";
+  // Catalog heads must be signed by the active identity. Keep the real-key
+  // override scoped to this publication test: the default mock community is
+  // intentionally populated for its synthetic `deadbeef…` identity.
+  await seedActiveIdentity(page, TEST_IDENTITIES.tyler);
   await installMockBridge(page, {
     globalAgentConfig: {
       env_vars: { ANTHROPIC_API_KEY: "sk-ant-test" },
