@@ -64,6 +64,32 @@ export function isAgentIdentityInManagedList(
   );
 }
 
+export function isAgentIdentityReachableForMentions(
+  candidate: { isAgent?: boolean; isMember?: boolean; pubkey: string },
+  managedAgentPubkeys: ReadonlySet<string>,
+  relayAgentDirectoryReady: boolean,
+) {
+  // `managedAgentPubkeys` only ever lists agents this Desktop install runs, so
+  // it cannot decide whether a channel member is invocable — an agent owned by
+  // a teammate is absent from it no matter how its `respond_to` is configured.
+  // Members are therefore left to `shouldHideAgentFromMentions`, which reads
+  // the relay directory. Non-members keep the managed-list gate so the
+  // composer still does not offer unreachable identities.
+  //
+  // The member pass-through waits for the relay directory because
+  // `shouldHideAgentFromMentions` reads an absent directory entry as "unknown
+  // invocability => show". Without this guard, an agent whose directory entry
+  // excludes the viewer would be offered for as long as that query is in
+  // flight. While the query is still loading, readiness stays false and
+  // members stay hidden (same as pre-fix). An errored or empty directory
+  // still counts as ready, so a finished-but-empty/failed fetch degrades to
+  // Option B (show) rather than hiding members indefinitely.
+  return (
+    (candidate.isMember === true && relayAgentDirectoryReady) ||
+    isAgentIdentityInManagedList(candidate, managedAgentPubkeys)
+  );
+}
+
 export function shouldHideAgentFromMentions({
   isAgent,
   isMember,
@@ -95,6 +121,43 @@ export function shouldHideAgentFromMentions({
   // mentionability is still loading could be hidden prematurely — keep the
   // two sets derived from the same query.
   return directoryAgentPubkeys.has(normalized);
+}
+
+/**
+ * The full mention-autocomplete admission check: reachability first, then the
+ * invocability gate. Kept here as one exported step so the composer has a
+ * single call and tests exercise the real chain instead of a copy of it.
+ */
+export function shouldOfferAgentIdentityForMentions({
+  candidate,
+  managedAgentPubkeys,
+  mentionableAgentPubkeys,
+  directoryAgentPubkeys,
+  relayAgentDirectoryReady,
+}: {
+  candidate: { isAgent?: boolean; isMember?: boolean; pubkey: string };
+  managedAgentPubkeys: ReadonlySet<string>;
+  mentionableAgentPubkeys: ReadonlySet<string>;
+  directoryAgentPubkeys: ReadonlySet<string>;
+  relayAgentDirectoryReady: boolean;
+}) {
+  if (
+    !isAgentIdentityReachableForMentions(
+      candidate,
+      managedAgentPubkeys,
+      relayAgentDirectoryReady,
+    )
+  ) {
+    return false;
+  }
+
+  return !shouldHideAgentFromMentions({
+    isAgent: candidate.isAgent === true,
+    isMember: candidate.isMember === true,
+    pubkey: candidate.pubkey,
+    mentionableAgentPubkeys,
+    directoryAgentPubkeys,
+  });
 }
 
 type AgentAutocompleteCandidate = {

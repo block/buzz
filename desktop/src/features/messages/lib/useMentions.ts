@@ -16,8 +16,7 @@ import {
   coalesceAutocompleteCandidatesByKey,
   getMentionableAgentPubkeys,
   getSharedChannelIds,
-  isAgentIdentityInManagedList,
-  shouldHideAgentFromMentions,
+  shouldOfferAgentIdentityForMentions,
 } from "@/features/agents/lib/agentAutocompleteEligibility";
 import {
   useInfiniteUserSearchQuery,
@@ -246,16 +245,13 @@ export function useMentions(
       if (isArchivedDiscovery(pubkey)) {
         return;
       }
-      if (!isAgentIdentityInManagedList(candidate, managedAgentPubkeys)) {
-        return;
-      }
       if (
-        shouldHideAgentFromMentions({
-          isAgent: candidate.isAgent === true,
-          isMember: candidate.isMember === true,
-          pubkey,
+        !shouldOfferAgentIdentityForMentions({
+          candidate: { ...candidate, pubkey },
+          managedAgentPubkeys,
           mentionableAgentPubkeys,
           directoryAgentPubkeys,
+          relayAgentDirectoryReady,
         })
       ) {
         return;
@@ -427,6 +423,7 @@ export function useMentions(
     mentionableAgentPubkeys,
     personaNameByPubkey,
     profiles,
+    relayAgentDirectoryReady,
     relayAgentNamesByPubkey,
     relayAgentsQuery.data,
   ]);

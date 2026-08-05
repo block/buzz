@@ -6,8 +6,10 @@ import {
   getMentionableAgentPubkeys,
   getSharedChannelIds,
   isAgentIdentityInManagedList,
+  isAgentIdentityReachableForMentions,
   relayAgentIsSharedWithUser,
   shouldHideAgentFromMentions,
+  shouldOfferAgentIdentityForMentions,
 } from "./agentAutocompleteEligibility.ts";
 
 const CURRENT_PUBKEY = "a".repeat(64);
@@ -157,6 +159,224 @@ test("isAgentIdentityInManagedList: keeps people and only current managed agent 
     isAgentIdentityInManagedList(
       { isAgent: true, pubkey: PUB_B },
       managedAgentPubkeys,
+    ),
+    false,
+  );
+});
+
+test("isAgentIdentityReachableForMentions: keeps channel members the viewer does not manage", () => {
+  const managedAgentPubkeys = new Set([PUB_A]);
+
+  assert.equal(
+    isAgentIdentityReachableForMentions(
+      { isAgent: true, isMember: true, pubkey: PUB_B },
+      managedAgentPubkeys,
+      true,
+    ),
+    true,
+  );
+  assert.equal(
+    isAgentIdentityReachableForMentions(
+      { isAgent: true, isMember: false, pubkey: PUB_B },
+      managedAgentPubkeys,
+      true,
+    ),
+    false,
+  );
+  assert.equal(
+    isAgentIdentityReachableForMentions(
+      { isAgent: true, isMember: false, pubkey: PUB_A.toUpperCase() },
+      managedAgentPubkeys,
+      true,
+    ),
+    true,
+  );
+  assert.equal(
+    isAgentIdentityReachableForMentions(
+      { isAgent: false, isMember: false, pubkey: PUB_B },
+      managedAgentPubkeys,
+      true,
+    ),
+    true,
+  );
+});
+
+test("isAgentIdentityReachableForMentions: holds the member pass-through until the relay directory is ready", () => {
+  const managedAgentPubkeys = new Set([PUB_A]);
+
+  assert.equal(
+    isAgentIdentityReachableForMentions(
+      { isAgent: true, isMember: true, pubkey: PUB_B },
+      managedAgentPubkeys,
+      false,
+    ),
+    false,
+  );
+  // A managed agent and a human are unaffected by the directory load state.
+  assert.equal(
+    isAgentIdentityReachableForMentions(
+      { isAgent: true, isMember: true, pubkey: PUB_A },
+      managedAgentPubkeys,
+      false,
+    ),
+    true,
+  );
+  assert.equal(
+    isAgentIdentityReachableForMentions(
+      { isAgent: false, isMember: true, pubkey: PUB_B },
+      managedAgentPubkeys,
+      false,
+    ),
+    true,
+  );
+});
+
+/**
+ * Drives the real admission check `useMentions`' `addCandidate` calls, building
+ * its pubkey sets the same way the hook does from `relayAgentsQuery.data`.
+ * `tests/e2e/mentions.spec.ts` covers the same scenarios through the composer.
+ */
+function mentionCandidateIsOffered(
+  candidate,
+  {
+    managedAgentPubkeys,
+    relayAgents,
+    sharedChannelIds,
+    relayAgentDirectoryReady = true,
+  },
+) {
+  return shouldOfferAgentIdentityForMentions({
+    candidate,
+    managedAgentPubkeys,
+    mentionableAgentPubkeys: getMentionableAgentPubkeys({
+      currentPubkey: CURRENT_PUBKEY,
+      managedAgentPubkeys,
+      relayAgents,
+      sharedChannelIds,
+    }),
+    directoryAgentPubkeys: new Set(
+      relayAgents.map((agent) => agent.pubkey.toLowerCase()),
+    ),
+    relayAgentDirectoryReady,
+  });
+}
+
+test("mention path offers an invocable channel bot from another install", () => {
+  const crossOwnerBot = { isAgent: true, isMember: true, pubkey: PUB_B };
+
+  assert.equal(
+    mentionCandidateIsOffered(crossOwnerBot, {
+      managedAgentPubkeys: new Set([PUB_A]),
+      relayAgents: [
+        {
+          pubkey: PUB_B,
+          respondTo: "allowlist",
+          respondToAllowlist: [CURRENT_PUBKEY],
+          channelIds: ["general"],
+        },
+      ],
+      sharedChannelIds: new Set(["general"]),
+    }),
+    true,
+  );
+  assert.equal(
+    mentionCandidateIsOffered(crossOwnerBot, {
+      managedAgentPubkeys: new Set([PUB_A]),
+      relayAgents: [
+        {
+          pubkey: PUB_B,
+          respondTo: "anyone",
+          respondToAllowlist: [],
+          channelIds: ["general"],
+        },
+      ],
+      sharedChannelIds: new Set(["general"]),
+    }),
+    true,
+  );
+});
+
+test("mention path still hides a channel bot whose directory entry excludes the viewer", () => {
+  assert.equal(
+    mentionCandidateIsOffered(
+      { isAgent: true, isMember: true, pubkey: PUB_B },
+      {
+        managedAgentPubkeys: new Set([PUB_A]),
+        relayAgents: [
+          {
+            pubkey: PUB_B,
+            respondTo: "owner-only",
+            respondToAllowlist: [],
+            channelIds: ["general"],
+          },
+        ],
+        sharedChannelIds: new Set(["general"]),
+      },
+    ),
+    false,
+  );
+  assert.equal(
+    mentionCandidateIsOffered(
+      { isAgent: true, isMember: true, pubkey: PUB_B },
+      {
+        managedAgentPubkeys: new Set([PUB_A]),
+        relayAgents: [
+          {
+            pubkey: PUB_B,
+            respondTo: "allowlist",
+            respondToAllowlist: [OTHER_OWNER_PUBKEY],
+            channelIds: ["general"],
+          },
+        ],
+        sharedChannelIds: new Set(["general"]),
+      },
+    ),
+    false,
+  );
+});
+
+test("mention path does not offer a channel bot while the relay directory is still loading", () => {
+  // In flight, `relayAgents` is empty: the bot is neither invocable nor
+  // directory-present, so `shouldHideAgentFromMentions` would read it as
+  // unknown-invocability and show it. Readiness is what keeps it hidden until
+  // the directory can answer.
+  assert.equal(
+    mentionCandidateIsOffered(
+      { isAgent: true, isMember: true, pubkey: PUB_B },
+      {
+        managedAgentPubkeys: new Set([PUB_A]),
+        relayAgents: [],
+        sharedChannelIds: new Set(["general"]),
+        relayAgentDirectoryReady: false,
+      },
+    ),
+    false,
+  );
+  // Once ready, an empty or errored directory falls back to Option B (unknown
+  // invocability => show) rather than hiding members indefinitely.
+  assert.equal(
+    mentionCandidateIsOffered(
+      { isAgent: true, isMember: true, pubkey: PUB_B },
+      {
+        managedAgentPubkeys: new Set([PUB_A]),
+        relayAgents: [],
+        sharedChannelIds: new Set(["general"]),
+        relayAgentDirectoryReady: true,
+      },
+    ),
+    true,
+  );
+});
+
+test("mention path keeps unreachable non-member agents out of the composer", () => {
+  assert.equal(
+    mentionCandidateIsOffered(
+      { isAgent: true, isMember: false, pubkey: PUB_B },
+      {
+        managedAgentPubkeys: new Set([PUB_A]),
+        relayAgents: [],
+        sharedChannelIds: new Set(["general"]),
+      },
     ),
     false,
   );
