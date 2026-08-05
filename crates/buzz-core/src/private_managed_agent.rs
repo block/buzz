@@ -123,7 +123,7 @@ pub struct InstanceBinding {
 }
 
 /// Secret agent identity material. It never appears in public projections.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PrivateIdentity {
     /// Agent private key in nsec form.
@@ -133,8 +133,18 @@ pub struct PrivateIdentity {
     pub auth_tag: Option<String>,
 }
 
+impl fmt::Debug for PrivateIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PrivateIdentity")
+            .field("private_key_nsec", &"<redacted>")
+            .field("auth_tag", &self.auth_tag.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
 /// Portable private runnable configuration.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PrivateConfig {
     /// Explicit kind:30175 coordinate, when definition-backed.
@@ -171,6 +181,15 @@ pub struct PrivateConfig {
     /// Versioned provider/definition relay-mesh marker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_mesh: Option<Value>,
+}
+
+impl fmt::Debug for PrivateConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PrivateConfig")
+            .field("contents", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Fields present only when [`Payload::state`] is [`State::Active`].
@@ -876,6 +895,30 @@ mod tests {
         assert_eq!(envelope.owner_pubkey, owner.public_key());
         assert_eq!(envelope.generation, 1);
         assert_eq!(envelope.state, State::Active);
+    }
+
+    #[test]
+    fn debug_output_redacts_private_material() {
+        let owner = Keys::generate();
+        let agent = Keys::generate();
+        let mut candidate = payload(&owner, &agent);
+        let private_key_nsec = candidate
+            .active
+            .as_ref()
+            .unwrap()
+            .identity
+            .private_key_nsec
+            .clone();
+        let active = candidate.active.as_mut().unwrap();
+        active.identity.auth_tag = Some("secret-auth-tag".into());
+        active.config.backend = serde_json::json!({"token": "secret-backend-token"});
+
+        let debug = format!("{candidate:?}");
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains(&private_key_nsec));
+        assert!(!debug.contains("secret-auth-tag"));
+        assert!(!debug.contains("not-public"));
+        assert!(!debug.contains("secret-backend-token"));
     }
 
     #[test]
