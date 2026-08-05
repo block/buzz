@@ -92,25 +92,52 @@ PY
   fi
   git tag -d desktop-v1.0.1 >/dev/null
 
-  # Numeric equality is not enough for prereleases: desktop-v1.0.1 is not the
-  # target tag desktop-v1.0.1-beta, even when both resolve to the candidate.
-  python3 - "$candidate" <<'PY'
+  # Prerelease tags are not prior-release ledgers, but the exact target tag is
+  # still a collision boundary: same-SHA retry passes; wrong-SHA reuse fails.
+  git -c tag.gpgSign=false tag desktop-v1.0.1-beta "$candidate"
+  PATH="$mock_bin:$PATH" python3 - <<'PY'
 import importlib.util
 import pathlib
-import sys
 
-candidate = sys.argv[1]
 spec = importlib.util.spec_from_file_location("desktop_release", pathlib.Path("scripts/desktop_release.py"))
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
-module.stable_tags = lambda: [((1, 0, 1), "desktop-v1.0.1", candidate)]
-try:
-    module.previous_release("1.0.1-beta", "block/buzz", allow_target_sha=candidate)
-except SystemExit:
-    pass
-else:
-    raise SystemExit("validator accepted a mismatched stable tag for a prerelease target")
+candidate = module.git("rev-parse", "HEAD")
+module.previous_release("1.0.1-beta", "block/buzz", allow_target_sha=candidate)
 PY
+  git -c tag.gpgSign=false tag -f desktop-v1.0.1-beta "$base" >/dev/null
+  if PATH="$mock_bin:$PATH" python3 - <<'PY'
+import importlib.util
+import pathlib
+
+spec = importlib.util.spec_from_file_location("desktop_release", pathlib.Path("scripts/desktop_release.py"))
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+candidate = module.git("rev-parse", "HEAD")
+module.previous_release("1.0.1-beta", "block/buzz", allow_target_sha=candidate)
+PY
+  then
+    echo "validator accepted a prerelease target tag at the wrong SHA" >&2; exit 1
+  fi
+  git tag -d desktop-v1.0.1-beta >/dev/null
+
+  # A stable tag with the same numeric tuple is a different tag and cannot
+  # authorize a prerelease retry, even when it points at the candidate.
+  git -c tag.gpgSign=false tag desktop-v1.0.1 "$candidate"
+  if PATH="$mock_bin:$PATH" python3 - <<'PY'
+import importlib.util
+import pathlib
+
+spec = importlib.util.spec_from_file_location("desktop_release", pathlib.Path("scripts/desktop_release.py"))
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+candidate = module.git("rev-parse", "HEAD")
+module.previous_release("1.0.1-beta", "block/buzz", allow_target_sha=candidate)
+PY
+  then
+    echo "validator accepted a mismatched stable tag for a prerelease target" >&2; exit 1
+  fi
+  git tag -d desktop-v1.0.1 >/dev/null
 )
 
 # Equal and decreasing versions are rejected before any GitHub lookup.

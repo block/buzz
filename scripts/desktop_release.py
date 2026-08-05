@@ -88,17 +88,31 @@ def previous_release(
     version: str, repo: str, *, allow_target_sha: str | None = None
 ) -> dict[str, str] | None:
     target = tuple(map(int, version.split("-", 1)[0].split(".")))
+    target_tag = f"desktop-v{version}"
+    target_refs = git("tag", "--list", target_tag).splitlines()
+    target_ref = (
+        (target_tag, git("rev-list", "-n", "1", target_tag))
+        if target_refs
+        else None
+    )
+    target_collision = target_ref is not None and (
+        allow_target_sha is None or target_ref[1] != allow_target_sha
+    )
     tags = stable_tags()
     newer = [item for item in tags if item[0] > target]
     equal = [item for item in tags if item[0] == target]
-    if newer or (
-        equal and (
-            allow_target_sha is None
-            or equal[0][1] != f"desktop-v{version}"
-            or equal[0][2] != allow_target_sha
-        )
-    ):
-        detail = ", ".join(item[1] for item in newer + equal)
+    allowed_stable_retry = (
+        "-" not in version
+        and len(equal) == 1
+        and allow_target_sha is not None
+        and equal[0][1] == target_tag
+        and equal[0][2] == allow_target_sha
+    )
+    if target_collision or newer or (equal and not allowed_stable_retry):
+        blocked = [item[1] for item in newer + equal]
+        if target_collision and target_tag not in blocked:
+            blocked.append(target_tag)
+        detail = ", ".join(blocked)
         raise SystemExit(f"desktop release version must increase beyond existing tags: {detail}")
     eligible = [item for item in tags if item[0] < target]
     if not eligible:
