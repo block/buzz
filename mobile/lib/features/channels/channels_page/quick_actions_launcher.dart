@@ -85,7 +85,7 @@ class ChannelQuickActionsLauncher extends HookConsumerWidget {
 
       switch (action) {
         case _QuickAction.createChannel:
-          final created = await showModalBottomSheet<Channel>(
+          final created = await showBuzzModalBottomSheet<Channel>(
             context: context,
             constraints: _quickActionSheetConstraints(context),
             isScrollControlled: true,
@@ -96,7 +96,7 @@ class ChannelQuickActionsLauncher extends HookConsumerWidget {
             await openChannel(created);
           }
         case _QuickAction.newDm:
-          final opened = await showModalBottomSheet<Channel>(
+          final opened = await showBuzzModalBottomSheet<Channel>(
             context: context,
             constraints: _quickActionSheetConstraints(context),
             isScrollControlled: true,

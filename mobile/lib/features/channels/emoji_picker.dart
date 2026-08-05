@@ -11,6 +11,7 @@ import '../../shared/emoji/emoji_data_provider.dart';
 import '../../shared/emoji/emoji_search.dart';
 import '../../shared/emoji/native_emoji_glyph.dart';
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/modal_presentation.dart';
 import 'recent_emoji_provider.dart';
 
 part 'emoji_picker/search_field.dart';
@@ -33,7 +34,7 @@ void showEmojiPicker({
   required void Function(String emoji) onSelect,
   VoidCallback? onDismiss,
 }) {
-  showModalBottomSheet<void>(
+  showBuzzModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
     showDragHandle: true,

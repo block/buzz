@@ -63,6 +63,15 @@ import UserNotifications
       )
     }
 
+    if let concentricSheetRegistrar = engineBridge.pluginRegistry.registrar(
+      forPlugin: "BuzzConcentricSheetSurface"
+    ) {
+      concentricSheetRegistrar.register(
+        ConcentricSheetSurfaceFactory(),
+        withId: "buzz/concentric_sheet_surface"
+      )
+    }
+
     let nativeAttachmentRegistrar = engineBridge.pluginRegistry.registrar(
       forPlugin: "BuzzNativeAttachmentPopover"
     )

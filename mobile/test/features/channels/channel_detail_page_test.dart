@@ -2254,6 +2254,82 @@ void main() {
       );
     });
 
+    testWidgets(
+      'keeps membership and huddle rows evenly spaced with authored messages',
+      (tester) async {
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [
+              _textMsg(
+                id: 'message-alice',
+                pubkey: 'alice',
+                content: 'First message',
+                createdAt: 1000,
+              ),
+              _textMsg(
+                id: 'message-bob',
+                pubkey: 'bob',
+                content: 'Second message',
+                createdAt: 1010,
+              ),
+              _systemMsg(
+                id: 'membership-carol',
+                payload: {
+                  'type': 'member_joined',
+                  'actor': 'alice',
+                  'target': 'carol',
+                },
+                createdAt: 1020,
+              ),
+              _huddleMsg(
+                id: 'huddle-dave',
+                kind: EventKind.huddleStarted,
+                pubkey: 'dave',
+                createdAt: 1030,
+              ),
+              _textMsg(
+                id: 'message-erin',
+                pubkey: 'erin',
+                content: 'Third message',
+                createdAt: 1040,
+              ),
+            ],
+            users: {
+              for (final name in ['alice', 'bob', 'carol', 'dave', 'erin'])
+                name: UserProfile(pubkey: name, displayName: name),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        Rect avatarRect(String rowKey) => tester.getRect(
+          find
+              .descendant(
+                of: find.byKey(ValueKey(rowKey)),
+                matching: find.byType(CircleAvatar),
+              )
+              .first,
+        );
+
+        final avatars = [
+          avatarRect('message-row-message-alice'),
+          avatarRect('message-row-message-bob'),
+          avatarRect('system-message-row-membership-carol'),
+          avatarRect('system-message-row-huddle-dave'),
+          avatarRect('message-row-message-erin'),
+        ];
+        final authoredMessageGap = avatars[1].top - avatars[0].bottom;
+
+        for (var index = 2; index < avatars.length; index++) {
+          expect(
+            avatars[index].top - avatars[index - 1].bottom,
+            closeTo(authoredMessageGap, 1),
+            reason: 'row $index should use the authored-message gap',
+          );
+        }
+      },
+    );
+
     testWidgets('renders member_joined (self-join) system event', (
       tester,
     ) async {
