@@ -110,9 +110,15 @@ export function useAppNavigation() {
         pullRequestId?: string;
         issueId?: string;
         repositoryId?: string;
+        repoRef?: string;
+        repoPath?: string;
       },
-    ) =>
-      commitNavigation(
+    ) => {
+      const repositoryTarget =
+        behavior?.repoRef && behavior.repoPath
+          ? { repoRef: behavior.repoRef, repoPath: behavior.repoPath }
+          : {};
+      return commitNavigation(
         {
           to: "/projects/$projectId",
           params: {
@@ -129,10 +135,12 @@ export function useAppNavigation() {
             ...(behavior?.repositoryId
               ? { repositoryId: behavior.repositoryId }
               : {}),
+            ...repositoryTarget,
           },
         },
         behavior,
-      ),
+      );
+    },
     [commitNavigation],
   );
 

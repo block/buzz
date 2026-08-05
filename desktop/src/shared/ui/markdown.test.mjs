@@ -638,6 +638,15 @@ test("buzzDeepLinkUrlTransform: preserves buzz://repo entity link href", () => {
   assert.doesNotMatch(html, /href=""/);
 });
 
+test("buzzDeepLinkUrlTransform: preserves canonical repository target href", () => {
+  const targetLink = `buzz://repo?owner=${OWNER_HEX}&d=buzz-world&ref=feature%2Frepo-links&path=GUIDES%2FRUNBOOK.md`;
+  const html = renderMarkdown(`[Runbook](${targetLink})`);
+  assert.match(html, /href="buzz:\/\/repo\?/);
+  assert.match(html, /ref=feature%2Frepo-links/);
+  assert.match(html, /path=GUIDES%2FRUNBOOK\.md/);
+  assert.doesNotMatch(html, /href=""/);
+});
+
 test("buzzDeepLinkUrlTransform: strips malformed buzz://pr (unknown param)", () => {
   // Strict parser rejects unknown params — transform falls back to default sanitizer.
   const html = renderMarkdown(
@@ -711,6 +720,38 @@ test("renderEntityLinkAnchor_noRelayOrigin_cloneUrlReturnsNull", () => {
     null,
     "clone URL without a relay origin must return null (fail closed)",
   );
+});
+
+test("renderEntityLinkAnchor_repositoryTarget_preservesNavigationTarget", () => {
+  const targetLink = `buzz://repo?owner=${OWNER_HEX}&d=buzz-world&ref=feature%2Frepo-links&path=GUIDES%2FRUNBOOK.md`;
+  let opened = null;
+  let prevented = false;
+  const el = renderEntityLinkAnchor({
+    anchorProps: {},
+    children: React.createElement("span", null, "Runbook"),
+    href: targetLink,
+    onOpenEntityLink: (link) => {
+      opened = link;
+    },
+    relayOrigin: null,
+  });
+  assert.notEqual(el, null);
+  el.props.onClick({
+    preventDefault() {
+      prevented = true;
+    },
+  });
+  assert.equal(prevented, true);
+  assert.deepEqual(opened, {
+    type: "repo",
+    owner: OWNER_HEX,
+    dtag: "buzz-world",
+    target: {
+      ref: "feature/repo-links",
+      refKind: "branch",
+      path: "GUIDES/RUNBOOK.md",
+    },
+  });
 });
 
 test("renderEntityLinkAnchor_directEntityLink_returnsAnchorRegardlessOfOrigin", () => {

@@ -267,13 +267,29 @@ pub(crate) fn clean_branch(value: Option<String>) -> Option<String> {
 
 pub(crate) fn clean_target_ref(value: Option<String>) -> Option<String> {
     let value = value?.trim().to_string();
-    for prefix in ["refs/tags/", "refs/nostr/"] {
+    for prefix in ["refs/heads/", "refs/tags/", "refs/nostr/"] {
         if let Some(name) = value.strip_prefix(prefix) {
             let clean_name = clean_branch(Some(name.to_string()))?;
+            if prefix == "refs/heads/"
+                && (clean_name.ends_with('.')
+                    || clean_name.ends_with(".lock")
+                    || clean_name.contains("//")
+                    || clean_name
+                        .split('/')
+                        .any(|component| component.starts_with('.')))
+            {
+                return None;
+            }
             return (clean_name == name).then_some(format!("{prefix}{clean_name}"));
         }
     }
     None
+}
+
+pub(crate) fn clean_target_commit(value: Option<String>) -> Option<String> {
+    let value = value?.trim().to_ascii_lowercase();
+    (matches!(value.len(), 40 | 64) && value.chars().all(|c| c.is_ascii_hexdigit()))
+        .then_some(value)
 }
 
 pub(crate) fn validate_clone_url(clone_url: &str) -> Result<(), String> {
@@ -393,9 +409,9 @@ fn validate_clone_url_against_relay(clone_url: &str, relay_base: &str) -> Result
 #[cfg(test)]
 mod tests {
     use super::{
-        clean_branch, clean_target_ref, credential_helper_config_value, git_needs_credentials,
-        git_subcommand, validate_clone_url, validate_clone_url_against_relay,
-        validate_local_clone_url,
+        clean_branch, clean_target_commit, clean_target_ref, credential_helper_config_value,
+        git_needs_credentials, git_subcommand, validate_clone_url,
+        validate_clone_url_against_relay, validate_local_clone_url,
     };
 
     #[test]
@@ -463,7 +479,11 @@ mod tests {
     }
 
     #[test]
-    fn clean_target_ref_accepts_only_tags_and_pull_request_refs() {
+    fn clean_target_ref_accepts_heads_tags_and_pull_request_refs() {
+        assert_eq!(
+            clean_target_ref(Some("refs/heads/feature/x-1".into())),
+            Some("refs/heads/feature/x-1".to_string())
+        );
         assert_eq!(
             clean_target_ref(Some("refs/tags/v1.0.0".into())),
             Some("refs/tags/v1.0.0".to_string())
@@ -472,8 +492,36 @@ mod tests {
             clean_target_ref(Some("refs/nostr/abc123".into())),
             Some("refs/nostr/abc123".to_string())
         );
-        assert_eq!(clean_target_ref(Some("refs/heads/main".into())), None);
+        assert_eq!(clean_target_ref(Some("refs/heads/../main".into())), None);
         assert_eq!(clean_target_ref(Some("refs/tags/../main".into())), None);
+    }
+
+    #[test]
+    fn clean_target_ref_rejects_noncanonical_head_names() {
+        for value in [
+            "refs/heads/main.",
+            "refs/heads/main.lock",
+            "refs/heads/feature//main",
+            "refs/heads/.hidden/main",
+            "refs/heads/feature/.hidden",
+        ] {
+            assert_eq!(clean_target_ref(Some(value.into())), None, "{value}");
+        }
+    }
+
+    #[test]
+    fn clean_target_commit_accepts_full_hashes_and_rejects_other_values() {
+        assert_eq!(
+            clean_target_commit(Some(" AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA ".into())),
+            Some("a".repeat(40))
+        );
+        assert_eq!(
+            clean_target_commit(Some("B".repeat(64))),
+            Some("b".repeat(64))
+        );
+        for value in ["", "abc", &"g".repeat(40), &"a".repeat(39)] {
+            assert_eq!(clean_target_commit(Some(value.into())), None, "{value}");
+        }
     }
 
     #[test]

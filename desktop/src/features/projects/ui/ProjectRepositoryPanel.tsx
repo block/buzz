@@ -21,11 +21,19 @@ import {
   Terminal,
 } from "lucide-react";
 import * as React from "react";
+import { toast } from "sonner";
 
 import type {
   ProjectRepoFile,
   ProjectRepoSnapshot,
 } from "@/features/projects/hooks";
+import {
+  type RepositoryTargetAttempt,
+  repositoryRootToastAction,
+  repositoryTargetResultKey,
+  resolveRepositoryDeepLinkTarget,
+  shouldResolveRepositoryTarget,
+} from "@/features/projects/lib/repositoryDeepLinkTarget";
 import { relativeTime } from "@/features/projects/lib/projectsViewHelpers";
 import { useUserSearchQuery } from "@/features/profile/hooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
@@ -44,6 +52,7 @@ import {
   RepoSyncActionButton,
   RepositoryBranchDropdown,
 } from "./ProjectRepositorySource";
+import { RepositoryTargetRef } from "./RepositoryTargetRef";
 
 function pluralize(count: number, singular: string) {
   return `${count} ${singular}${count === 1 ? "" : "s"}`;
@@ -618,7 +627,10 @@ export function RepositoryFilesPanel({
   profiles,
   fallbackAuthorPubkey,
   sourceControls,
+  targetPath,
+  targetRef,
   unavailableMessage,
+  onOpenRepositoryRoot,
 }: {
   files: ProjectRepoFile[];
   snapshot: ProjectRepoSnapshot | null | undefined;
@@ -628,7 +640,10 @@ export function RepositoryFilesPanel({
   fallbackAuthorPubkey?: string;
   /** Branch picker + remote/local toggle rendered in the panel header. */
   sourceControls?: RepoSourceHeaderControls;
+  targetPath?: string;
+  targetRef?: string;
   unavailableMessage?: string;
+  onOpenRepositoryRoot: () => void;
 }) {
   const [currentPath, setCurrentPath] = React.useState("");
   const [selectedFile, setSelectedFile] =
@@ -681,6 +696,67 @@ export function RepositoryFilesPanel({
     setSelectedFile(null);
   }, [filesKey]);
 
+  const targetAttemptRef = React.useRef<RepositoryTargetAttempt | null>(null);
+  const targetKey = targetPath ? `${targetRef ?? ""}\0${targetPath}` : null;
+  const targetSnapshotKey = `${latestCommit?.hash ?? ""}\0${filesKey}`;
+  const targetResolutionKey = targetKey
+    ? repositoryTargetResultKey(targetKey, targetSnapshotKey)
+    : null;
+
+  React.useEffect(() => {
+    if (!targetResolutionKey) {
+      targetAttemptRef.current = null;
+      return;
+    }
+    if (
+      !shouldResolveRepositoryTarget({
+        attempt: targetAttemptRef.current,
+        hasError: Boolean(error || unavailableMessage),
+        isLoading,
+        resolutionKey: targetResolutionKey,
+      })
+    ) {
+      return;
+    }
+
+    setCurrentPath("");
+    setSelectedFile(null);
+    if (error || unavailableMessage) {
+      targetAttemptRef.current = { key: targetResolutionKey, outcome: "error" };
+      toast.error("Could not open repository link.", {
+        action: repositoryRootToastAction(onOpenRepositoryRoot),
+        description:
+          unavailableMessage ?? "The requested repository ref is unavailable.",
+      });
+      return;
+    }
+
+    targetAttemptRef.current = {
+      key: targetResolutionKey,
+      outcome: "resolved",
+    };
+    const target = resolveRepositoryDeepLinkTarget(files, targetPath ?? "");
+    if (target.kind === "file") {
+      setCurrentPath(target.parentPath);
+      setSelectedFile(target.file);
+    } else if (target.kind === "directory") {
+      setCurrentPath(target.path);
+    } else {
+      toast.error("Repository path not found.", {
+        action: repositoryRootToastAction(onOpenRepositoryRoot),
+        description: targetPath,
+      });
+    }
+  }, [
+    files,
+    isLoading,
+    onOpenRepositoryRoot,
+    error,
+    targetPath,
+    targetResolutionKey,
+    unavailableMessage,
+  ]);
+
   // Loading/error/empty states keep the header controls visible — the
   // remote/local toggle must stay reachable when one source fails to load.
   const stateMessage = isLoading
@@ -693,7 +769,7 @@ export function RepositoryFilesPanel({
           ? "No files have been pushed yet."
           : null;
   if (stateMessage) {
-    if (!sourceControls) {
+    if (!sourceControls && !targetRef) {
       return (
         <div
           className={PROJECT_DETAIL_PANEL_MESSAGE_CLASS}
@@ -706,25 +782,31 @@ export function RepositoryFilesPanel({
     return (
       <div className={PROJECT_DETAIL_PANEL_CLASS} data-project-detail-panel>
         <div className="flex min-h-14 min-w-0 items-center gap-1 border-border/50 border-b px-3 py-3">
-          <RepoSourceDropdown controls={sourceControls} />
-          <RepositoryBranchDropdown
-            branch={sourceControls.branch}
-            branchOptions={sourceControls.branchOptions}
-            compact
-            createBranchDisabled={sourceControls.createBranchDisabled}
-            createBranchTitle={sourceControls.createBranchTitle}
-            deleteBranchDisabled={sourceControls.deleteBranchDisabled}
-            deleteBranchTitle={sourceControls.deleteBranchTitle}
-            onBranchChange={sourceControls.onBranchChange}
-            onCreateBranch={sourceControls.onCreateBranch}
-            onDeleteBranch={sourceControls.onDeleteBranch}
-            onTagChange={sourceControls.onTagChange}
-            selectedTag={sourceControls.selectedTag}
-            tagOptions={sourceControls.tagOptions}
-          />
-          <div className="ml-auto flex shrink-0 items-center">
-            <RepoSyncActionButton controls={sourceControls} />
-          </div>
+          {targetRef ? (
+            <RepositoryTargetRef value={targetRef} />
+          ) : sourceControls ? (
+            <>
+              <RepoSourceDropdown controls={sourceControls} />
+              <RepositoryBranchDropdown
+                branch={sourceControls.branch}
+                branchOptions={sourceControls.branchOptions}
+                compact
+                createBranchDisabled={sourceControls.createBranchDisabled}
+                createBranchTitle={sourceControls.createBranchTitle}
+                deleteBranchDisabled={sourceControls.deleteBranchDisabled}
+                deleteBranchTitle={sourceControls.deleteBranchTitle}
+                onBranchChange={sourceControls.onBranchChange}
+                onCreateBranch={sourceControls.onCreateBranch}
+                onDeleteBranch={sourceControls.onDeleteBranch}
+                onTagChange={sourceControls.onTagChange}
+                selectedTag={sourceControls.selectedTag}
+                tagOptions={sourceControls.tagOptions}
+              />
+              <div className="ml-auto flex shrink-0 items-center">
+                <RepoSyncActionButton controls={sourceControls} />
+              </div>
+            </>
+          ) : null}
         </div>
         <div className="p-4 text-sm text-muted-foreground">{stateMessage}</div>
       </div>
@@ -746,7 +828,9 @@ export function RepositoryFilesPanel({
   return (
     <div className={PROJECT_DETAIL_PANEL_CLASS} data-project-detail-panel>
       <div className="flex min-h-14 min-w-0 items-center gap-1 border-border/50 border-b px-3 py-3">
-        {sourceControls ? (
+        {targetRef ? (
+          <RepositoryTargetRef value={targetRef} />
+        ) : sourceControls ? (
           <>
             <RepoSourceDropdown controls={sourceControls} />
             <RepositoryBranchDropdown
@@ -770,7 +854,7 @@ export function RepositoryFilesPanel({
             Files
           </BreadcrumbButton>
         )}
-        {sourceControls && pathSegments.length > 0 ? (
+        {(sourceControls || targetRef) && pathSegments.length > 0 ? (
           <>
             <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
             <BreadcrumbButton onClick={() => setCurrentPath("")}>
@@ -789,7 +873,7 @@ export function RepositoryFilesPanel({
             </React.Fragment>
           );
         })}
-        {sourceControls ? (
+        {sourceControls && !targetRef ? (
           <div className="ml-auto flex shrink-0 items-center">
             <RepoSyncActionButton controls={sourceControls} />
           </div>

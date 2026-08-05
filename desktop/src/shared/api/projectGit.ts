@@ -162,6 +162,7 @@ export async function getProjectRepoSnapshot(input: {
   baseBranch?: string | null;
   targetRef?: string | null;
   targetCommit?: string | null;
+  targetPath?: string | null;
 }): Promise<ProjectRepoSnapshot> {
   const snapshot = await invokeTauri<RawProjectRepoSnapshot>(
     "get_project_repo_snapshot",
@@ -171,6 +172,7 @@ export async function getProjectRepoSnapshot(input: {
       baseBranch: input.baseBranch ?? null,
       targetRef: input.targetRef ?? null,
       targetCommit: input.targetCommit ?? null,
+      targetPath: input.targetPath ?? null,
     },
   );
   return fromRawProjectRepoSnapshot(snapshot);
