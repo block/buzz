@@ -136,7 +136,7 @@ async function captureVideoPosterFrame(
 }
 
 type UseMediaUploadOptions = {
-  /** Keep newly selected files local until the message is submitted. */
+  /** Keep newly selected videos local until the message is submitted. */
   deferUploadsUntilSend?: boolean;
 };
 
@@ -151,6 +151,10 @@ export function useMediaUpload({
   const queueUntilSend =
     deferUploadsUntilSend &&
     (!e2eConfig || e2eConfig.mock?.deferredComposerUploads === true);
+  const shouldQueueFile = React.useCallback(
+    (file: File) => queueUntilSend && file.type.startsWith("video/"),
+    [queueUntilSend],
+  );
   const [uploadState, setUploadState] = React.useState<UploadState>({
     status: "idle",
   });
@@ -481,6 +485,43 @@ export function useMediaUpload({
     [finishUpload, isUploadCanceled],
   );
 
+  const uploadFiles = React.useCallback(
+    (files: File[]) => {
+      if (files.length === 0) return;
+
+      setUploadingCount((count) => count + files.length);
+      const baseIndex = reserveSlots(files.length);
+
+      for (let index = 0; index < files.length; index++) {
+        const file = files[index];
+        const slotIndex = baseIndex + index;
+        const previewId = reserveUploadingPreview(file, slotIndex);
+        // Fire-and-forget each upload concurrently — slot preserves order.
+        void (async () => {
+          try {
+            const buffer = await file.arrayBuffer();
+            if (isUploadCanceled(previewId)) return;
+            const descriptor = await uploadMediaBytes(
+              [...new Uint8Array(buffer)],
+              file.name,
+              uploadProgressId(previewId),
+            );
+            fillSlot(slotIndex, descriptor, previewId);
+          } catch (err) {
+            onUploadError(err, previewId);
+          }
+        })();
+      }
+    },
+    [
+      fillSlot,
+      isUploadCanceled,
+      onUploadError,
+      reserveSlots,
+      reserveUploadingPreview,
+    ],
+  );
+
   const handlePaperclip = React.useCallback(async () => {
     if (queueUntilSend) {
       const input = document.createElement("input");
@@ -488,7 +529,11 @@ export function useMediaUpload({
       input.multiple = true;
       input.addEventListener(
         "change",
-        () => queueFiles(Array.from(input.files ?? [])),
+        () => {
+          const files = Array.from(input.files ?? []);
+          queueFiles(files.filter(shouldQueueFile));
+          uploadFiles(files.filter((file) => !shouldQueueFile(file)));
+        },
         { once: true },
       );
       input.click();
@@ -520,6 +565,8 @@ export function useMediaUpload({
     onUploadError,
     queueFiles,
     reserveUploadingPreview,
+    shouldQueueFile,
+    uploadFiles,
   ]);
 
   const handleDrop = React.useCallback(
@@ -534,44 +581,10 @@ export function useMediaUpload({
       // (active-content + executables) and size caps; everything else uploads.
       const validFiles = files;
 
-      if (queueUntilSend) {
-        queueFiles(validFiles);
-        return;
-      }
-
-      setUploadingCount((c) => c + validFiles.length);
-      const baseIndex = reserveSlots(validFiles.length);
-
-      for (let i = 0; i < validFiles.length; i++) {
-        const file = validFiles[i];
-        const slotIndex = baseIndex + i;
-        const previewId = reserveUploadingPreview(file, slotIndex);
-        // Fire-and-forget each upload concurrently — slot preserves order
-        (async () => {
-          try {
-            const buffer = await file.arrayBuffer();
-            if (isUploadCanceled(previewId)) return;
-            const descriptor = await uploadMediaBytes(
-              [...new Uint8Array(buffer)],
-              file.name,
-              uploadProgressId(previewId),
-            );
-            fillSlot(slotIndex, descriptor, previewId);
-          } catch (err) {
-            onUploadError(err, previewId);
-          }
-        })();
-      }
+      queueFiles(validFiles.filter(shouldQueueFile));
+      uploadFiles(validFiles.filter((file) => !shouldQueueFile(file)));
     },
-    [
-      reserveSlots,
-      queueUntilSend,
-      fillSlot,
-      isUploadCanceled,
-      onUploadError,
-      queueFiles,
-      reserveUploadingPreview,
-    ],
+    [queueFiles, shouldQueueFile, uploadFiles],
   );
 
   const handleDragEnter = React.useCallback(
@@ -639,49 +652,16 @@ export function useMediaUpload({
 
       event.preventDefault();
 
-      if (queueUntilSend) {
-        queueFiles(mediaFiles);
-        return;
-      }
-
-      setUploadingCount((c) => c + mediaFiles.length);
-      const baseIndex = reserveSlots(mediaFiles.length);
-
-      for (let i = 0; i < mediaFiles.length; i++) {
-        const file = mediaFiles[i];
-        const slotIndex = baseIndex + i;
-        const previewId = reserveUploadingPreview(file, slotIndex);
-        (async () => {
-          try {
-            const buffer = await file.arrayBuffer();
-            if (isUploadCanceled(previewId)) return;
-            const descriptor = await uploadMediaBytes(
-              [...new Uint8Array(buffer)],
-              file.name,
-              uploadProgressId(previewId),
-            );
-            fillSlot(slotIndex, descriptor, previewId);
-          } catch (err) {
-            onUploadError(err, previewId);
-          }
-        })();
-      }
+      queueFiles(mediaFiles.filter(shouldQueueFile));
+      uploadFiles(mediaFiles.filter((file) => !shouldQueueFile(file)));
     },
-    [
-      reserveSlots,
-      queueUntilSend,
-      fillSlot,
-      isUploadCanceled,
-      onUploadError,
-      queueFiles,
-      reserveUploadingPreview,
-    ],
+    [queueFiles, shouldQueueFile, uploadFiles],
   );
 
   /** Upload a File directly — used by Tiptap's editorProps.handlePaste. */
   const uploadFile = React.useCallback(
     async (file: File) => {
-      if (queueUntilSend) {
+      if (shouldQueueFile(file)) {
         queueFiles([file]);
         return;
       }
@@ -701,12 +681,12 @@ export function useMediaUpload({
       }
     },
     [
-      queueUntilSend,
       isUploadCanceled,
       onUploaded,
       onUploadError,
       queueFiles,
       reserveUploadingPreview,
+      shouldQueueFile,
     ],
   );
 

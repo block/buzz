@@ -51,12 +51,59 @@ async function chooseLargeVideo(page: Page) {
   });
 }
 
+async function choosePhoto(page: Page) {
+  const [chooser] = await Promise.all([
+    page.waitForEvent("filechooser"),
+    page.getByRole("button", { name: "Attach image" }).click(),
+  ]);
+  await chooser.setFiles({
+    buffer: Buffer.from("photo"),
+    mimeType: "image/png",
+    name: "photo.png",
+  });
+}
+
+test("photos upload before Send without a queued spoiler control", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.evaluate(() => {
+    const e2e = (
+      window as Window & {
+        __BUZZ_E2E__?: { mock?: { uploadDelayMs?: number } };
+      }
+    ).__BUZZ_E2E__;
+    if (e2e?.mock) e2e.mock.uploadDelayMs = 1_000;
+  });
+  await page.getByTestId("channel-general").click();
+  await choosePhoto(page);
+
+  await expect(page.getByTestId("upload-progress")).toBeVisible();
+  await expect(page.getByTestId("composer-queued-video-spoiler")).toHaveCount(
+    0,
+  );
+  await expect(page.getByTestId("upload-progress")).toHaveCount(0, {
+    timeout: 5_000,
+  });
+  await expect(page.getByTestId("composer-upload-progress")).toHaveCount(0);
+
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as Window & { __BUZZ_E2E_COMMANDS__?: string[] })
+            .__BUZZ_E2E_COMMANDS__ ?? [],
+      ),
+    )
+    .toContain("upload_media_bytes");
+});
+
 test("upload a file and see a FileCard in the timeline", async ({ page }) => {
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
-  // The paperclip queues the local file without starting its upload.
+  // Non-video files keep the established immediate-upload behavior.
   await chooseQuarterlyReport(page);
 
   // The composer shows a chip with the original filename.
@@ -103,13 +150,18 @@ test("sends immediately and keeps upload progress across channels", async ({
     if (e2e?.mock) e2e.mock.uploadDelayMs = 1_000;
   });
   await page.getByTestId("channel-general").click();
-  await chooseQuarterlyReport(page);
+  await chooseLargeVideo(page);
 
   await expect(page.getByTestId("composer-upload-progress")).toHaveCount(0);
+  await expect(page.getByTestId("composer-video-spoiler")).toHaveCount(0);
+  const queuedSpoiler = page.getByTestId("composer-queued-video-spoiler");
+  await expect(queuedSpoiler).toBeHidden();
+  await page.getByTestId("composer-queued-media-attachment").hover();
+  await expect(queuedSpoiler).toBeVisible();
   await page.getByTestId("send-message").click();
 
   await expect(page.getByTestId("message-composer")).not.toContainText(
-    "quarterly-report.pdf",
+    "large-video.mp4",
   );
   await expect(page.getByTestId("composer-upload-progress")).toBeVisible();
 
@@ -226,7 +278,7 @@ test("canceling a background upload prevents the message from publishing", async
     if (e2e?.mock) e2e.mock.uploadDelayMs = 1_000;
   });
   await page.getByTestId("channel-general").click();
-  await chooseQuarterlyReport(page);
+  await chooseLargeVideo(page);
   await page.getByTestId("send-message").click();
 
   await page.getByTestId("composer-upload-cancel").click();
@@ -259,7 +311,7 @@ test("upload progress floats above the dock and lifts Jump to latest", async ({
   await expect(jumpToLatest).toBeVisible();
   const restingBox = await jumpToLatest.boundingBox();
 
-  await chooseQuarterlyReport(page);
+  await chooseLargeVideo(page);
   await page.getByTestId("send-message").click();
   const uploadMotion = page.getByTestId("composer-upload-progress-motion");
   await expect(uploadMotion).toBeVisible();
