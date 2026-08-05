@@ -20,6 +20,10 @@ export const KIND_STREAM_MESSAGE_EDIT = 40003;
 export const KIND_CHANNEL_THREAD_SUMMARY = 39005;
 export const KIND_CHANNEL_WINDOW_BOUNDS = 39006;
 export const KIND_STREAM_MESSAGE_DIFF = 40008;
+// Interactive-card check-off response (e tag → card event, item tag → item).
+// Deliberately absent from every timeline/unread set below: responses are not
+// rows — TodoCardAttachment folds them via its own per-card subscription.
+export const KIND_CARD_RESPONSE = 40009;
 export const KIND_REMINDER = 40007;
 export const KIND_SYSTEM_MESSAGE = 40099;
 export const KIND_JOB_REQUEST = 43001;

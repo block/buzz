@@ -35,6 +35,8 @@ import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
 import { parseImetaTags } from "@/shared/ui/markdown/parseImeta";
 import { useMessageEmoji } from "@/features/messages/lib/useMessageEmoji";
+import { extractTodoCard } from "@/features/messages/lib/todoCard";
+import { TodoCardAttachment } from "@/features/messages/ui/TodoCardAttachment";
 import { parseWaveMessageContent } from "@/features/messages/lib/waveMessage";
 import { resolveSnapshotSharedBy } from "@/features/messages/lib/snapshotSharedBy";
 import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
@@ -350,6 +352,20 @@ export const MessageRow = React.memo(
                   fallbackText={waveMessage.fallbackText}
                   huddleMemberPubkeys={huddleMemberPubkeys}
                   huddleMemberPubkeysPending={huddleMemberPubkeysPending}
+                />
+              );
+            }
+            // Interactive to-do card sentinel replaces the prose fallback.
+            // Requires a channelId (responses carry it as `h`); surfaces
+            // without one render the prose + fence instead.
+            const todoCard = channelId ? extractTodoCard(message.body) : null;
+            if (todoCard && channelId) {
+              return (
+                <TodoCardAttachment
+                  card={todoCard}
+                  cardEventId={message.id}
+                  channelId={channelId}
+                  className="mt-2"
                 />
               );
             }
