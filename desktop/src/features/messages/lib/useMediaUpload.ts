@@ -6,6 +6,7 @@ import {
   uploadMediaBytes,
 } from "@/shared/api/tauri";
 import type { QueuedMediaAttachment } from "./backgroundMediaUploadStore";
+import { isVideoFile, videoMimeForFile } from "./videoFileType";
 
 /**
  * First 4 hex chars of the sha256 — used as a short display name.
@@ -33,6 +34,12 @@ export type UploadingAttachmentPreview = {
   slotIndex?: number;
   spoilered?: boolean;
   type?: string;
+  /**
+   * Upload epoch this preview was created in. Cancel handling compares it
+   * against the current epoch so a preview left over from a replaced draft
+   * cannot null a slot belonging to the draft now on screen.
+   */
+  uploadEpoch?: number;
 };
 
 /** Correlation id for the Rust `media-upload-progress` events. */
@@ -85,9 +92,16 @@ type CapturedVideoPoster = {
 async function captureVideoPosterFrame(
   file: File,
 ): Promise<CapturedVideoPoster | null> {
-  if (!file.type.startsWith("video/")) return null;
+  const videoMime = videoMimeForFile(file);
+  if (!videoMime) return null;
 
-  const objectUrl = URL.createObjectURL(file);
+  // A blob URL inherits the File's own MIME type, so a video whose type is
+  // empty or `application/octet-stream` would be rejected by the <video>
+  // element and yield no poster. Re-type the bytes with the MIME we derived
+  // from the extension; `slice` wraps the same bytes without copying them.
+  const objectUrl = URL.createObjectURL(
+    file.type === videoMime ? file : file.slice(0, file.size, videoMime),
+  );
   const video = document.createElement("video");
   video.muted = true;
   video.playsInline = true;
@@ -152,7 +166,7 @@ export function useMediaUpload({
     deferUploadsUntilSend &&
     (!e2eConfig || e2eConfig.mock?.deferredComposerUploads === true);
   const shouldQueueFile = React.useCallback(
-    (file: File) => queueUntilSend && file.type.startsWith("video/"),
+    (file: File) => queueUntilSend && isVideoFile(file),
     [queueUntilSend],
   );
   const [uploadState, setUploadState] = React.useState<UploadState>({
@@ -306,7 +320,7 @@ export function useMediaUpload({
         const previewUrl = file.type.startsWith("image/")
           ? URL.createObjectURL(file)
           : undefined;
-        if (file.type.startsWith("video/")) {
+        if (isVideoFile(file)) {
           void captureVideoPosterFrame(file).then((poster) => {
             if (poster) updateQueuedVideoPoster(id, poster.posterUrl);
           });
@@ -394,10 +408,18 @@ export function useMediaUpload({
 
       setUploadingPreviews((prev) => [
         ...prev,
-        { id, filename: file?.name, slotIndex, type: file?.type },
+        {
+          id,
+          filename: file?.name,
+          slotIndex,
+          // Normalize an extension-detected video to its MIME type so the
+          // preview renders (and offers a spoiler toggle) like any other video.
+          type: file ? (videoMimeForFile(file) ?? file.type) : undefined,
+          uploadEpoch: uploadEpochRef.current,
+        },
       ]);
 
-      if (file?.type.startsWith("video/")) {
+      if (file && isVideoFile(file)) {
         void captureVideoPosterFrame(file).then((poster) => {
           if (!poster || isUploadCanceled(id)) return;
           setUploadingPreviews((prev) =>
@@ -427,10 +449,17 @@ export function useMediaUpload({
   const cancelUpload = React.useCallback(
     (previewId: number) => {
       canceledUploadingPreviewIdsRef.current.add(previewId);
-      const slotIndex = uploadingPreviewsRef.current.find(
-        (preview) => preview.id === previewId,
-      )?.slotIndex;
-      if (slotIndex !== undefined) {
+      const preview = uploadingPreviewsRef.current.find(
+        (candidate) => candidate.id === previewId,
+      );
+      const slotIndex = preview?.slotIndex;
+      // Only null the slot when the preview still belongs to the draft on
+      // screen. A preview left over from a replaced draft carries that draft's
+      // slotIndex, which may now address a different attachment.
+      const isStalePreview =
+        preview?.uploadEpoch !== undefined &&
+        preview.uploadEpoch !== uploadEpochRef.current;
+      if (slotIndex !== undefined && !isStalePreview) {
         setImetaSlots((prev) => {
           if (slotIndex >= prev.length) return prev;
           const next = [...prev];
@@ -846,7 +875,7 @@ export function useMediaUpload({
         id: attachment.id,
         posterUrl: attachment.previewUrl,
         spoilered: attachment.spoilered,
-        type: attachment.file.type,
+        type: videoMimeForFile(attachment.file) ?? attachment.file.type,
       })),
     [queuedAttachments],
   );

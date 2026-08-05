@@ -196,3 +196,31 @@ test("appending to the current draft does not bump the epoch", () => {
   bumpIfReplacement([]);
   assert.equal(epoch, 1);
 });
+
+// ── Cancel guard for stale previews (pure logic) ───────────────────────
+// The epoch bump makes completions discard their descriptors, but the old
+// preview row (and its cancel button) can still be on screen. Cancelling it
+// must not null a slot in the draft now on screen, because the preview carries
+// the *previous* draft's slotIndex. Mirrors `cancelUpload`'s `isStalePreview`.
+
+function cancelSlotIndex(preview, currentEpoch) {
+  if (preview?.slotIndex === undefined) return undefined;
+  const isStale =
+    preview.uploadEpoch !== undefined && preview.uploadEpoch !== currentEpoch;
+  return isStale ? undefined : preview.slotIndex;
+}
+
+test("cancelling a preview from the current draft nulls its slot", () => {
+  assert.equal(cancelSlotIndex({ slotIndex: 1, uploadEpoch: 3 }, 3), 1);
+});
+
+test("cancelling a stale preview does not null the new draft's slot", () => {
+  // Draft A reserved slot 0 at epoch 0; draft B now owns slot 0. Cancelling
+  // A's leftover preview must leave B's attachment intact.
+  assert.equal(cancelSlotIndex({ slotIndex: 0, uploadEpoch: 0 }, 1), undefined);
+});
+
+test("cancelling a preview with no slot is a no-op for slots", () => {
+  // `handlePaperclip`'s native-picker preview has no reserved slot.
+  assert.equal(cancelSlotIndex({ uploadEpoch: 0 }, 0), undefined);
+});
