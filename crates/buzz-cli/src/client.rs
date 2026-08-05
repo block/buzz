@@ -1303,7 +1303,10 @@ fn to_ws_url(http_url: &str) -> String {
 }
 
 /// Normalize raw event JSON array into consistent shape.
-/// Each event becomes: {id, pubkey, kind, content, created_at, tags}
+/// Each event becomes: {id, pubkey, kind, content, created_at, tags, sig}.
+///
+/// `sig` is part of the canonical Nostr wire event, not presentation metadata. Consumers that
+/// authorize an event by its signer must be able to verify the normalized JSON independently.
 pub fn normalize_events(events: &[serde_json::Value]) -> String {
     let normalized: Vec<serde_json::Value> = events
         .iter()
@@ -1315,6 +1318,7 @@ pub fn normalize_events(events: &[serde_json::Value]) -> String {
                 "content": e.get("content").and_then(|v| v.as_str()).unwrap_or(""),
                 "created_at": e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
                 "tags": e.get("tags").cloned().unwrap_or(serde_json::json!([])),
+                "sig": e.get("sig").and_then(|v| v.as_str()).unwrap_or(""),
             })
         })
         .collect();
@@ -2304,9 +2308,24 @@ mod retry_policy_tests {
 mod tests {
     use super::{
         advance_query_cursor, create_response_with_id_if_accepted, extract_relay_response_field,
-        BuzzClient,
+        normalize_events, BuzzClient,
     };
     use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    #[test]
+    fn normalized_events_preserve_the_canonical_signature() {
+        let sig = "b".repeat(128);
+        let raw = serde_json::json!({
+            "id": "a".repeat(64), "pubkey": "c".repeat(64), "kind": 9,
+            "content": "signed instruction", "created_at": 1_700_000_000,
+            "tags": [["h", "channel"]], "sig": sig,
+            "relay_internal_field": "must not escape",
+        });
+        let normalized: serde_json::Value =
+            serde_json::from_str(&normalize_events(&[raw])).unwrap();
+        assert_eq!(normalized[0]["sig"], serde_json::json!("b".repeat(128)));
+        assert!(normalized[0].get("relay_internal_field").is_none());
+    }
 
     #[test]
     fn query_cursor_uses_last_events_composite_sort_key() {
