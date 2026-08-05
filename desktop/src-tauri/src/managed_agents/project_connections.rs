@@ -7,7 +7,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    io::Read as _,
     path::{Path, PathBuf},
     sync::{Mutex, MutexGuard},
 };
@@ -35,7 +34,12 @@ const HEALTH_STALE_AFTER_SECONDS: i64 = 24 * 60 * 60;
 
 static PROJECT_CONNECTIONS_LOCK: Mutex<()> = Mutex::new(());
 
+mod approval;
+mod credential_journal;
 mod transactions;
+use approval::{approved_execution_sha256, canonical_connection_command};
+#[cfg(test)]
+use approval::executable_sha256;
 use transactions::{commit_delete, commit_update, UpdateTransaction};
 
 pub(super) fn lock_project_connections() -> MutexGuard<'static, ()> {
@@ -53,6 +57,7 @@ pub struct ProjectConnectionScope {
     ///
     /// Legacy one-repository Projects use their NIP-34 repository coordinate
     /// (`30617:<owner>:<d-tag>`).
+    #[serde(alias = "repoAddress")]
     pub project_address: String,
 }
 
@@ -62,6 +67,7 @@ pub enum ProjectConnectionHealthStatus {
     Ready,
     NotTested,
     CheckNeeded,
+    ApprovalRequired,
     SignInRequired,
     MissingAccess,
     Unavailable,
@@ -394,10 +400,11 @@ fn load_store_unlocked(
 ) -> Result<ProjectConnectionStore, String> {
     let path = connection_store_path(app, scope)?;
     reject_unsafe_owner_file(&path)?;
-    let bytes = match fs::read(&path) {
-        Ok(bytes) => bytes,
+    let store = match fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|error| format!("failed to parse Project connections: {error}"))?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(ProjectConnectionStore::default());
+            ProjectConnectionStore::default()
         }
         Err(error) => {
             return Err(format!(
@@ -406,8 +413,6 @@ fn load_store_unlocked(
             ));
         }
     };
-    let store: ProjectConnectionStore = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("failed to parse Project connections: {error}"))?;
     if store.version != CONNECTION_STORE_VERSION {
         return Err(format!(
             "unsupported Project connection store version {}",
@@ -420,6 +425,7 @@ fn load_store_unlocked(
     for connection in &store.connections {
         validate_stored_connection(connection)?;
     }
+    credential_journal::reconcile(app, scope, &store)?;
     Ok(store)
 }
 
@@ -665,51 +671,6 @@ fn validate_connection_input(
     Ok(())
 }
 
-fn executable_sha256(path: &Path) -> Result<String, String> {
-    let mut file =
-        fs::File::open(path).map_err(|_| "Buzz could not read this executable.".to_string())?;
-    let mut digest = Sha256::new();
-    let mut buffer = [0u8; 64 * 1024];
-    loop {
-        let count = file
-            .read(&mut buffer)
-            .map_err(|_| "Buzz could not read this executable.".to_string())?;
-        if count == 0 {
-            break;
-        }
-        digest.update(&buffer[..count]);
-    }
-    Ok(hex::encode(digest.finalize()))
-}
-
-fn canonical_connection_command(command: &str) -> Result<(String, String), String> {
-    let path = Path::new(command.trim());
-    if !path.is_absolute() {
-        return Err("Enter the executable's absolute path.".to_string());
-    }
-    let canonical =
-        fs::canonicalize(path).map_err(|_| "Buzz could not verify this executable.".to_string())?;
-    let metadata = canonical
-        .metadata()
-        .map_err(|_| "Buzz could not verify this executable.".to_string())?;
-    if !metadata.is_file() {
-        return Err("The MCP server path is not an executable file.".to_string());
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        if metadata.permissions().mode() & 0o111 == 0 {
-            return Err("The MCP server file is not executable.".to_string());
-        }
-    }
-    let canonical = canonical
-        .to_str()
-        .map(str::to_string)
-        .ok_or_else(|| "The MCP server path is not valid Unicode.".to_string())?;
-    let fingerprint = executable_sha256(Path::new(&canonical))?;
-    Ok((canonical, fingerprint))
-}
-
 fn health_for_display(mut connection: StoredProjectConnection) -> StoredProjectConnection {
     if connection.health.status == ProjectConnectionHealthStatus::Ready {
         let stale = connection
@@ -733,13 +694,30 @@ fn find_connection<'a>(
     project_scope: &ProjectConnectionScope,
     connection_id: &str,
 ) -> Result<&'a StoredProjectConnection, String> {
+    find_connection_index(store, project_scope, connection_id)
+        .map(|index| &store.connections[index])
+        .ok_or_else(|| "This connection no longer exists in this Project.".to_string())
+}
+
+fn find_connection_index(
+    store: &ProjectConnectionStore,
+    project_scope: &ProjectConnectionScope,
+    connection_id: &str,
+) -> Option<usize> {
+    store.connections.iter().position(|connection| {
+        connection.id == connection_id && connection.project_scope == *project_scope
+    })
+}
+
+fn project_connection_count(
+    store: &ProjectConnectionStore,
+    project_scope: &ProjectConnectionScope,
+) -> usize {
     store
         .connections
         .iter()
-        .find(|connection| {
-            connection.id == connection_id && connection.project_scope == *project_scope
-        })
-        .ok_or_else(|| "This connection no longer exists in this Project.".to_string())
+        .filter(|connection| connection.project_scope == *project_scope)
+        .count()
 }
 
 pub fn list_project_connections(
@@ -780,9 +758,10 @@ pub fn create_project_connection(
         return Err("Review and acknowledge this local program before saving.".to_string());
     }
     let (command, executable_sha256) = canonical_connection_command(&input.command)?;
+    let executable_sha256 = approved_execution_sha256(&executable_sha256, &input.args)?;
     let _guard = lock_project_connections();
     let mut store = load_store_unlocked(app, &input.project_scope)?;
-    if store.connections.len() >= MAX_CONNECTIONS {
+    if project_connection_count(&store, &input.project_scope) >= MAX_CONNECTIONS {
         return Err("Buzz has reached the Project connection limit.".to_string());
     }
     let id = Uuid::new_v4().simple().to_string();
@@ -806,6 +785,12 @@ pub fn create_project_connection(
         updated_at: now,
     };
     if !input.env.is_empty() {
+        credential_journal::begin(
+            app,
+            &input.project_scope,
+            &id,
+            vec![credential_generation.clone()],
+        )?;
         store_secrets(
             app,
             &input.project_scope,
@@ -827,6 +812,13 @@ pub fn create_project_connection(
         }
         return Err(error);
     }
+    if !input.env.is_empty() {
+        if let Err(error) = credential_journal::complete(app, &input.project_scope) {
+            eprintln!(
+                "buzz-desktop: Project connection credential recovery marker remains after create: {error}"
+            );
+        }
+    }
     Ok(connection.into())
 }
 
@@ -841,77 +833,94 @@ pub fn update_project_connection(
         }
     }
     let (command, executable_sha256) = canonical_connection_command(&input.command)?;
-    let _guard = lock_project_connections();
-    let mut store = load_store_unlocked(app, &input.project_scope)?;
-    let previous = find_connection(&store, &input.project_scope, &input.id)?.clone();
-    let previous_secrets = load_secrets(app, &previous)?;
-    let mut next_secrets = previous_secrets.clone();
-    for key in &input.remove_env_keys {
-        next_secrets.remove(key);
-    }
-    next_secrets.extend(input.env);
-    validate_connection_input(
-        &input.name,
-        &input.provider,
-        &command,
-        &input.args,
-        &next_secrets,
-    )?;
-    let execution_changed = previous.command != command
-        || previous.executable_sha256 != executable_sha256
-        || previous.args != input.args
-        || previous_secrets != next_secrets;
-    if execution_changed && !input.execution_acknowledged {
-        return Err(
-            "Review and acknowledge the changed program, arguments, and credentials before saving."
-                .to_string(),
-        );
-    }
-    let index = store
-        .connections
-        .iter()
-        .position(|connection| connection.id == input.id)
-        .ok_or_else(|| "This connection no longer exists.".to_string())?;
-    let mut updated = previous.clone();
-    updated.name = input.name.trim().to_string();
-    updated.provider = input.provider.trim().to_string();
-    updated.command = command;
-    updated.executable_sha256 = executable_sha256;
-    updated.args = input.args;
-    updated.env_keys = next_secrets.keys().cloned().collect();
-    updated.generation = next_generation();
-    updated.updated_at = now_iso();
-    if execution_changed {
-        updated.capability_ids.clear();
-        updated.discovered_tools.clear();
-        updated.health = ProjectConnectionHealth::default();
-    }
+    let executable_sha256 = approved_execution_sha256(&executable_sha256, &input.args)?;
+    probe::with_project_connection_probe_excluded(|| {
+        let _guard = lock_project_connections();
+        let mut store = load_store_unlocked(app, &input.project_scope)?;
+        let previous = find_connection(&store, &input.project_scope, &input.id)?.clone();
+        let previous_secrets = load_secrets(app, &previous)?;
+        let mut next_secrets = previous_secrets.clone();
+        for key in &input.remove_env_keys {
+            next_secrets.remove(key);
+        }
+        next_secrets.extend(input.env);
+        validate_connection_input(
+            &input.name,
+            &input.provider,
+            &command,
+            &input.args,
+            &next_secrets,
+        )?;
+        let execution_changed = previous.command != command
+            || previous.executable_sha256 != executable_sha256
+            || previous.args != input.args
+            || previous_secrets != next_secrets;
+        if execution_changed && !input.execution_acknowledged {
+            return Err(
+                "Review and acknowledge the changed program, arguments, and credentials before saving."
+                    .to_string(),
+            );
+        }
+        let index = find_connection_index(&store, &input.project_scope, &input.id)
+            .ok_or_else(|| "This connection no longer exists.".to_string())?;
+        let mut updated = previous.clone();
+        updated.name = input.name.trim().to_string();
+        updated.provider = input.provider.trim().to_string();
+        updated.command = command;
+        updated.executable_sha256 = executable_sha256;
+        updated.args = input.args;
+        updated.env_keys = next_secrets.keys().cloned().collect();
+        updated.generation = next_generation();
+        updated.updated_at = now_iso();
+        if execution_changed {
+            updated.capability_ids.clear();
+            updated.discovered_tools.clear();
+            updated.health = ProjectConnectionHealth::default();
+        }
 
-    let secrets_changed = previous_secrets != next_secrets;
-    if secrets_changed {
-        updated.credential_generation = next_generation();
-    }
-    commit_update(
-        &mut store,
-        UpdateTransaction {
-            index,
-            previous: &previous,
-            updated: &updated,
-            secrets_changed,
-        },
-        || {
-            store_secrets(
+        let secrets_changed = previous_secrets != next_secrets;
+        if secrets_changed {
+            updated.credential_generation = next_generation();
+            credential_journal::begin(
                 app,
                 &input.project_scope,
                 &input.id,
-                &updated.credential_generation,
-                &next_secrets,
-            )
-        },
-        |candidate| save_store_unlocked(app, &input.project_scope, candidate),
-        |generation| delete_secrets(app, &input.project_scope, &input.id, generation),
-    )?;
-    Ok(updated.into())
+                vec![
+                    previous.credential_generation.clone(),
+                    updated.credential_generation.clone(),
+                ],
+            )?;
+        }
+        let result = commit_update(
+            &mut store,
+            UpdateTransaction {
+                index,
+                previous: &previous,
+                updated: &updated,
+                secrets_changed,
+            },
+            || {
+                store_secrets(
+                    app,
+                    &input.project_scope,
+                    &input.id,
+                    &updated.credential_generation,
+                    &next_secrets,
+                )
+            },
+            |candidate| save_store_unlocked(app, &input.project_scope, candidate),
+            |generation| delete_secrets(app, &input.project_scope, &input.id, generation),
+        );
+        if result.is_ok() && secrets_changed {
+            if let Err(error) = credential_journal::complete(app, &input.project_scope) {
+                eprintln!(
+                    "buzz-desktop: Project connection credential recovery marker remains after update: {error}"
+                );
+            }
+        }
+        result?;
+        Ok(updated.into())
+    })
 }
 
 pub fn delete_project_connection(
@@ -920,21 +929,35 @@ pub fn delete_project_connection(
     connection_id: &str,
 ) -> Result<(), String> {
     let project_scope = validate_project_scope_for_app(app, project_scope)?;
-    let _guard = lock_project_connections();
-    let mut store = load_store_unlocked(app, &project_scope)?;
-    let index = store
-        .connections
-        .iter()
-        .position(|connection| {
-            connection.id == connection_id && connection.project_scope == project_scope
-        })
-        .ok_or_else(|| "This connection no longer exists in this Project.".to_string())?;
-    commit_delete(
-        &mut store,
-        index,
-        |candidate| save_store_unlocked(app, &project_scope, candidate),
-        |generation| delete_secrets(app, &project_scope, connection_id, generation),
-    )
+    probe::with_project_connection_probe_excluded(|| {
+        let _guard = lock_project_connections();
+        let mut store = load_store_unlocked(app, &project_scope)?;
+        let index = find_connection_index(&store, &project_scope, connection_id)
+            .ok_or_else(|| "This connection no longer exists in this Project.".to_string())?;
+        let removed = store.connections[index].clone();
+        if !removed.env_keys.is_empty() {
+            credential_journal::begin(
+                app,
+                &project_scope,
+                connection_id,
+                vec![removed.credential_generation.clone()],
+            )?;
+        }
+        let result = commit_delete(
+            &mut store,
+            index,
+            |candidate| save_store_unlocked(app, &project_scope, candidate),
+            |generation| delete_secrets(app, &project_scope, connection_id, generation),
+        );
+        if result.is_ok() && !removed.env_keys.is_empty() {
+            if let Err(error) = credential_journal::complete(app, &project_scope) {
+                eprintln!(
+                    "buzz-desktop: Project connection credential recovery marker remains after delete: {error}"
+                );
+            }
+        }
+        result
+    })
 }
 
 mod probe;

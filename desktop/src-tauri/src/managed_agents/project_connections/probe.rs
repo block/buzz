@@ -1,23 +1,35 @@
 use std::{
     collections::BTreeMap,
-    io::{BufRead, BufReader, Write as _},
+    io::{BufRead, BufReader, Read as _, Write as _},
     process::{Child, Command, Stdio},
-    sync::Mutex,
+    sync::{Mutex, MutexGuard},
     time::Duration,
 };
 
 use super::*;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(8);
-const CLEANUP_TIMEOUT: Duration = Duration::from_millis(500);
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_DISCOVERED_TOOLS: usize = 256;
 const PROBE_BUSY_ERROR: &str =
     "Another Project connection is being tested. Try again when it finishes.";
 const EXECUTABLE_CHANGED_ERROR: &str =
-    "This executable changed after it was approved. Edit the connection and review it again.";
+    "This connection's executable or files changed after approval. Edit the connection and review it again.";
 
 static PROJECT_CONNECTION_PROBE_LOCK: Mutex<()> = Mutex::new(());
+
+fn try_lock_project_connection_probe() -> Result<MutexGuard<'static, ()>, String> {
+    PROJECT_CONNECTION_PROBE_LOCK
+        .try_lock()
+        .map_err(|_| PROBE_BUSY_ERROR.to_string())
+}
+
+pub(super) fn with_project_connection_probe_excluded<T>(operation: impl FnOnce() -> T) -> T {
+    let _guard = PROJECT_CONNECTION_PROBE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    operation()
+}
 
 enum ReaderMessage {
     Line(Vec<u8>),
@@ -97,42 +109,15 @@ fn read_bounded_line(reader: &mut impl BufRead) -> Result<Option<Vec<u8>>, ()> {
 }
 
 fn stop_child(child: &mut Child, pid: u32) -> Result<(), String> {
-    let termination = super::super::runtime::terminate_process(pid);
-    let deadline = std::time::Instant::now() + CLEANUP_TIMEOUT;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => {
-                return termination.map_err(|_| {
-                    "Buzz stopped the MCP server, but could not verify process-group cleanup."
-                        .to_string()
-                })
-            }
-            Ok(None) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Ok(None) => break,
-            Err(_) => return Err("Buzz could not verify that the MCP server stopped.".to_string()),
-        }
-    }
-    let _ = child.kill();
-    let kill_deadline = std::time::Instant::now() + CLEANUP_TIMEOUT;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => {
-                return Err("Buzz had to force-stop this MCP server after the test.".to_string());
-            }
-            Ok(None) if std::time::Instant::now() < kill_deadline => {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            _ => {
-                return Err("Buzz could not stop this MCP server after the test.".to_string());
-            }
-        }
-    }
+    debug_assert_eq!(child.id(), pid);
+    super::super::runtime::terminate_child_process_group(child).map_err(|_| {
+        "Buzz stopped the MCP server, but could not verify process-group cleanup.".to_string()
+    })
 }
 
 fn verify_saved_executable(connection: &StoredProjectConnection) -> Result<(), String> {
-    let (canonical, fingerprint) = canonical_connection_command(&connection.command)?;
+    let (canonical, executable_fingerprint) = canonical_connection_command(&connection.command)?;
+    let fingerprint = approved_execution_sha256(&executable_fingerprint, &connection.args)?;
     if canonical != connection.command || fingerprint != connection.executable_sha256 {
         return Err(EXECUTABLE_CHANGED_ERROR.to_string());
     }
@@ -143,9 +128,7 @@ fn probe_mcp_connection(
     connection: &StoredProjectConnection,
     secrets: &BTreeMap<String, String>,
 ) -> Result<Vec<String>, String> {
-    let _probe_guard = PROJECT_CONNECTION_PROBE_LOCK
-        .try_lock()
-        .map_err(|_| PROBE_BUSY_ERROR.to_string())?;
+    verify_saved_executable(connection)?;
     let mut command = Command::new(&connection.command);
     command
         .args(&connection.args)
@@ -274,12 +257,17 @@ fn safe_health_detail(error: &str) -> String {
     }
 }
 
+fn tool_capability_id(connection_id: &str, tool: &str) -> String {
+    format!("mcp.tool.{connection_id}.{tool}")
+}
+
 pub fn test_project_connection(
     app: &AppHandle,
     project_scope: &ProjectConnectionScope,
     connection_id: &str,
 ) -> Result<ProjectConnection, String> {
     let project_scope = validate_project_scope_for_app(app, project_scope)?;
+    let _probe_guard = try_lock_project_connection_probe()?;
     let connection = {
         let _guard = lock_project_connections();
         let store = load_store_unlocked(app, &project_scope)?;
@@ -295,7 +283,7 @@ pub fn test_project_connection(
         }) {
             current.updated_at = now_iso();
             current.health = ProjectConnectionHealth {
-                status: ProjectConnectionHealthStatus::CheckNeeded,
+                status: ProjectConnectionHealthStatus::ApprovalRequired,
                 last_verified_at: None,
                 detail: Some("Executable approval is out of date.".to_string()),
             };
@@ -325,9 +313,6 @@ pub fn test_project_connection(
         }
     };
     let result = probe_mcp_connection(&connection, &secrets);
-    if matches!(&result, Err(error) if error == PROBE_BUSY_ERROR) {
-        return Err(PROBE_BUSY_ERROR.to_string());
-    }
     let _guard = lock_project_connections();
     let mut store = load_store_unlocked(app, &project_scope)?;
     let index = store
@@ -347,7 +332,7 @@ pub fn test_project_connection(
             connection.discovered_tools = tools.clone();
             connection.capability_ids = tools
                 .iter()
-                .map(|tool| format!("mcp.tool.{tool}"))
+                .map(|tool| tool_capability_id(&connection.id, tool))
                 .collect();
             connection.health = ProjectConnectionHealth {
                 status: ProjectConnectionHealthStatus::Ready,
@@ -375,6 +360,10 @@ mod tests {
     use super::*;
     use std::io::Cursor;
     use std::path::Path;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
 
     #[test]
     fn synthetic_server_proves_initialize_and_tool_discovery() {
@@ -383,7 +372,9 @@ mod tests {
         let script = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../tests/fixtures/synthetic-project-connection-mcp.mjs");
         assert!(script.is_file(), "missing fixture {}", script.display());
-        let executable_sha256 = executable_sha256(&node).unwrap();
+        let args = vec![script.to_string_lossy().to_string()];
+        let executable_sha256 =
+            approved_execution_sha256(&executable_sha256(&node).unwrap(), &args).unwrap();
         let connection = StoredProjectConnection {
             id: "synthetic-project-connection".to_string(),
             project_scope: ProjectConnectionScope {
@@ -395,7 +386,7 @@ mod tests {
             provider: "Buzz test fixture".to_string(),
             capability_ids: Vec::new(),
             command: node.to_string_lossy().to_string(),
-            args: vec![script.to_string_lossy().to_string()],
+            args,
             env_keys: vec!["PROJECT_CONNECTION_CANARY".to_string()],
             discovered_tools: Vec::new(),
             health: ProjectConnectionHealth::default(),
@@ -422,6 +413,49 @@ mod tests {
         assert!(read_bounded_line(&mut input).is_err());
     }
 
+    #[test]
+    fn capability_ids_distinguish_the_same_tool_on_different_connections() {
+        assert_ne!(
+            tool_capability_id("analytics", "run_report"),
+            tool_capability_id("warehouse", "run_report")
+        );
+    }
+
+    #[test]
+    fn mutations_wait_until_the_probe_releases_credentialed_execution() {
+        let probe = try_lock_project_connection_probe().unwrap();
+        assert_eq!(
+            try_lock_project_connection_probe().unwrap_err(),
+            PROBE_BUSY_ERROR
+        );
+
+        let state = Arc::new(AtomicUsize::new(0));
+        let worker_state = Arc::clone(&state);
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            with_project_connection_probe_excluded(|| {
+                worker_state.store(1, Ordering::SeqCst);
+            });
+            finished_tx.send(()).unwrap();
+        });
+
+        started_rx.recv().unwrap();
+        assert!(
+            finished_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err(),
+            "a mutation completed while the probe still owned its credential boundary"
+        );
+        assert_eq!(state.load(Ordering::SeqCst), 0);
+
+        drop(probe);
+        finished_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        worker.join().unwrap();
+        assert_eq!(state.load(Ordering::SeqCst), 1);
+    }
+
     #[cfg(unix)]
     #[test]
     fn executable_replacement_invalidates_approval() {
@@ -433,6 +467,7 @@ mod tests {
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
         let (command, executable_sha256) =
             canonical_connection_command(executable.to_str().unwrap()).unwrap();
+        let executable_sha256 = approved_execution_sha256(&executable_sha256, &[]).unwrap();
         let connection = StoredProjectConnection {
             id: "c".repeat(32),
             project_scope: ProjectConnectionScope {
@@ -457,6 +492,50 @@ mod tests {
 
         assert!(verify_saved_executable(&connection).is_ok());
         fs::write(&executable, b"second").unwrap();
+        assert_eq!(
+            verify_saved_executable(&connection).unwrap_err(),
+            EXECUTABLE_CHANGED_ERROR
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn script_replacement_invalidates_approval() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("runtime");
+        let script = dir.path().join("server.mjs");
+        fs::write(&executable, b"runtime").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(&script, b"first").unwrap();
+        let args = vec![script.to_string_lossy().to_string()];
+        let (command, executable_fingerprint) =
+            canonical_connection_command(executable.to_str().unwrap()).unwrap();
+        let connection = StoredProjectConnection {
+            id: "c".repeat(32),
+            project_scope: ProjectConnectionScope {
+                relay_url: "ws://127.0.0.1:3000".to_string(),
+                operator_pubkey: "a".repeat(64),
+                project_address: format!("30621:{}:portable-agents", "a".repeat(64)),
+            },
+            name: "Test".to_string(),
+            provider: "Fixture".to_string(),
+            capability_ids: Vec::new(),
+            command,
+            args: args.clone(),
+            env_keys: Vec::new(),
+            discovered_tools: Vec::new(),
+            health: ProjectConnectionHealth::default(),
+            executable_sha256: approved_execution_sha256(&executable_fingerprint, &args).unwrap(),
+            generation: next_generation(),
+            credential_generation: next_generation(),
+            created_at: now_iso(),
+            updated_at: now_iso(),
+        };
+
+        assert!(verify_saved_executable(&connection).is_ok());
+        fs::write(&script, b"second").unwrap();
         assert_eq!(
             verify_saved_executable(&connection).unwrap_err(),
             EXECUTABLE_CHANGED_ERROR

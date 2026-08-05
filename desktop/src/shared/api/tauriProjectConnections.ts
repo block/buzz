@@ -5,6 +5,7 @@ export type ProjectConnectionHealthStatus =
   | "ready"
   | "not_tested"
   | "check_needed"
+  | "approval_required"
   | "sign_in_required"
   | "missing_access"
   | "unavailable";

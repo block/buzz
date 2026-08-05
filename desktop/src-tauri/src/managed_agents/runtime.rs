@@ -29,7 +29,6 @@ pub(crate) use metadata::{
 mod stop;
 pub(crate) use stop::managed_agent_runtime_keys;
 pub use stop::{stop_managed_agent_process, stop_managed_agent_workspace_pair};
-
 mod sweep;
 pub(crate) use sweep::sweep_untracked_bundle_harnesses;
 
@@ -41,7 +40,8 @@ use process::{
 };
 pub(crate) use process::{
     current_instance_id, process_belongs_to_us, process_has_buzz_marker, process_is_running,
-    terminate_process, terminate_untracked_pair_runtime, valid_agent_runtime_receipt,
+    terminate_child_process_group, terminate_process, terminate_untracked_pair_runtime,
+    valid_agent_runtime_receipt,
 };
 
 mod orphan_sweep;

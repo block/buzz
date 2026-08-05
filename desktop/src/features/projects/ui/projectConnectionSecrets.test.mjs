@@ -78,3 +78,50 @@ test("explicit removals stay separate from replacement values", () => {
     },
   );
 });
+
+test("rejects Buzz-managed and NUL-containing secret values", () => {
+  assert.deepEqual(
+    buildProjectConnectionSecretChanges(
+      [{ key: "BUZZ_PRIVATE_KEY", value: "value" }],
+      [],
+      [],
+    ),
+    {
+      ok: false,
+      error: "BUZZ_PRIVATE_KEY is managed by Buzz and cannot be used here.",
+    },
+  );
+  assert.deepEqual(
+    buildProjectConnectionSecretChanges(
+      [{ key: "API_TOKEN", value: "before\0after" }],
+      [],
+      [],
+    ),
+    {
+      ok: false,
+      error: "Remove the invalid character from API_TOKEN.",
+    },
+  );
+});
+
+test("rejects secret count and aggregate byte limits before saving", () => {
+  const tooMany = Array.from({ length: 129 }, (_, index) => ({
+    key: `TOKEN_${index}`,
+    value: "value",
+  }));
+  assert.deepEqual(buildProjectConnectionSecretChanges(tooMany, [], []), {
+    ok: false,
+    error: "Use no more than 128 secrets for one connection.",
+  });
+  assert.deepEqual(
+    buildProjectConnectionSecretChanges(
+      [{ key: "TOKEN", value: "x".repeat(64 * 1024) }],
+      [],
+      [],
+    ),
+    {
+      ok: false,
+      error: "Keep the connection's secret values within 64 KiB.",
+    },
+  );
+});

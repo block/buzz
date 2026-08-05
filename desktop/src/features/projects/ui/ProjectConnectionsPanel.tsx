@@ -28,7 +28,6 @@ import type {
 import type { ProjectConnectionScope } from "@/shared/api/projectConnectionTypes";
 import {
   AlertDialog,
-  AlertDialogAction,
   AlertDialogCancel,
   AlertDialogContent,
   AlertDialogDescription,
@@ -51,6 +50,7 @@ import { Textarea } from "@/shared/ui/textarea";
 import {
   PROJECT_DETAIL_PANEL_CLASS,
   PROJECT_DETAIL_PANEL_MESSAGE_CLASS,
+  PROJECT_PANEL_ACTION_BUTTON_CLASS,
 } from "./projectPanelStyles";
 import { buildProjectConnectionSecretChanges } from "./projectConnectionSecrets";
 
@@ -70,6 +70,10 @@ const HEALTH_COPY: Record<
     label: "Check needed",
     className: "bg-amber-500/10 text-amber-700 dark:text-amber-300",
   },
+  approval_required: {
+    label: "Approval required",
+    className: "bg-amber-500/10 text-amber-700 dark:text-amber-300",
+  },
   sign_in_required: {
     label: "Sign-in required",
     className: "bg-amber-500/10 text-amber-700 dark:text-amber-300",
@@ -85,16 +89,54 @@ const HEALTH_COPY: Record<
 };
 
 type SecretRow = { id: string; key: string; value: string };
+const TOOL_PREVIEW_LIMIT = 4;
+const MAX_NAME_BYTES = 128;
+const MAX_PROVIDER_BYTES = 64;
+const MAX_COMMAND_BYTES = 1024;
+const MAX_ARGS = 128;
+const MAX_ARG_BYTES = 4096;
+
+function utf8ByteLength(value: string) {
+  return new TextEncoder().encode(value).byteLength;
+}
 
 function emptySecretRow(): SecretRow {
   return { id: crypto.randomUUID(), key: "", value: "" };
 }
 
-function capabilityLabel(capability: string) {
-  return capability
-    .replace(/^mcp\.tool\./, "")
+function toolLabel(tool: string) {
+  return tool
     .replaceAll("_", " ")
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function connectionNeedsEditing(connection: ProjectConnection) {
+  return (
+    connection.health.status === "sign_in_required" ||
+    connection.health.status === "missing_access" ||
+    connection.health.status === "approval_required" ||
+    (connection.health.status === "unavailable" &&
+      connection.health.detail === "Buzz could not start this MCP server.")
+  );
+}
+
+function connectionActionLabel(connection: ProjectConnection) {
+  if (connection.health.status === "sign_in_required") {
+    return "Update sign-in";
+  }
+  if (connection.health.status === "missing_access") {
+    return "Update credentials";
+  }
+  if (connection.health.status === "approval_required") {
+    return "Review command";
+  }
+  if (
+    connection.health.status === "unavailable" &&
+    connection.health.detail === "Buzz could not start this MCP server."
+  ) {
+    return "Review setup";
+  }
+  return connection.health.status === "not_tested" ? "Test" : "Test again";
 }
 
 function formatVerificationTime(timestamp: string | null) {
@@ -124,13 +166,17 @@ function ConnectionDialog({
   connection,
   onOpenChange,
   onSave,
+  onTest,
   open,
   pending,
   projectScope,
 }: {
   connection: ProjectConnection | null;
   onOpenChange: (open: boolean) => void;
-  onSave: (input: ProjectConnectionDraft & { id?: string }) => Promise<unknown>;
+  onSave: (
+    input: ProjectConnectionDraft & { id?: string },
+  ) => Promise<ProjectConnection>;
+  onTest: (connection: ProjectConnection) => Promise<void>;
   open: boolean;
   pending: boolean;
   projectScope: ProjectConnectionScope;
@@ -143,6 +189,7 @@ function ConnectionDialog({
   const [secrets, setSecrets] = React.useState<SecretRow[]>([]);
   const [removedEnvKeys, setRemovedEnvKeys] = React.useState<string[]>([]);
   const [trusted, setTrusted] = React.useState(false);
+  const [executionDirty, setExecutionDirty] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
 
   React.useEffect(() => {
@@ -154,6 +201,7 @@ function ConnectionDialog({
       setSecrets([]);
       setRemovedEnvKeys([]);
       setTrusted(false);
+      setExecutionDirty(false);
       setError(null);
       return;
     }
@@ -170,46 +218,73 @@ function ConnectionDialog({
     );
     setRemovedEnvKeys([]);
     setShowTechnicalDetails(Boolean(connection));
-    setTrusted(Boolean(connection));
+    setTrusted(false);
+    setExecutionDirty(!connection || connectionNeedsEditing(connection));
     setError(null);
   }, [connection, open]);
 
-  const canSave =
+  const requiresApproval = !connection || executionDirty;
+  const parsedArgs = argsText
+    .split("\n")
+    .map((arg) => arg.trim())
+    .filter(Boolean);
+  const nameError =
+    name.trim() && utf8ByteLength(name.trim()) > MAX_NAME_BYTES
+      ? `Keep the connection name to ${MAX_NAME_BYTES} bytes or fewer.`
+      : null;
+  const providerError =
+    provider.trim() && utf8ByteLength(provider.trim()) > MAX_PROVIDER_BYTES
+      ? `Keep the service name to ${MAX_PROVIDER_BYTES} bytes or fewer.`
+      : null;
+  const commandError =
+    command.trim() && utf8ByteLength(command.trim()) > MAX_COMMAND_BYTES
+      ? `Keep the command to ${MAX_COMMAND_BYTES} bytes or fewer.`
+      : null;
+  const argsError =
+    parsedArgs.length > MAX_ARGS ||
+    parsedArgs.some((arg) => utf8ByteLength(arg) > MAX_ARG_BYTES)
+      ? `Use no more than ${MAX_ARGS} arguments, with each ${MAX_ARG_BYTES} bytes or fewer.`
+      : null;
+  const hasValidFields = Boolean(
+    name.trim() &&
+      provider.trim() &&
+      command.trim() &&
+      !nameError &&
+      !providerError &&
+      !commandError &&
+      !argsError,
+  );
+  const secretChanges = buildProjectConnectionSecretChanges(
+    secrets,
+    connection?.envKeys ?? [],
+    removedEnvKeys,
+  );
+  const canSubmit =
     !pending &&
-    name.trim().length > 0 &&
-    provider.trim().length > 0 &&
-    command.trim().length > 0;
-  const canSubmit = canSave && trusted;
+    hasValidFields &&
+    secretChanges.ok &&
+    (!requiresApproval || trusted);
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
     if (!canSubmit) return;
-    const secretChanges = buildProjectConnectionSecretChanges(
-      secrets,
-      connection?.envKeys ?? [],
-      removedEnvKeys,
-    );
-    if (!secretChanges.ok) {
-      setError(secretChanges.error);
-      return;
-    }
     setError(null);
     try {
-      await onSave({
+      const saved = await onSave({
         ...(connection ? { id: connection.id } : {}),
         projectScope,
         name: name.trim(),
         provider: provider.trim(),
         command: command.trim(),
-        args: argsText
-          .split("\n")
-          .map((arg) => arg.trim())
-          .filter(Boolean),
+        args: parsedArgs,
         env: secretChanges.env,
         removeEnvKeys: secretChanges.removeEnvKeys,
-        executionAcknowledged: trusted,
+        executionAcknowledged: requiresApproval ? trusted : false,
       });
       onOpenChange(false);
+      if (requiresApproval) {
+        await onTest(saved);
+      }
     } catch (cause) {
       setError(
         cause instanceof Error
@@ -220,17 +295,22 @@ function ConnectionDialog({
   }
 
   return (
-    <Dialog onOpenChange={onOpenChange} open={open}>
-      <DialogContent className="max-w-xl">
+    <Dialog
+      onOpenChange={(nextOpen) => {
+        if (!pending) onOpenChange(nextOpen);
+      }}
+      open={open}
+    >
+      <DialogContent className="max-w-xl" showCloseButton={!pending}>
         <form onSubmit={handleSubmit}>
           <DialogHeader>
             <DialogTitle>
-              {connection ? "Edit connection" : "Add connection"}
+              {connection?.name ?? "Add Project connection"}
             </DialogTitle>
             <DialogDescription>
               {connection
-                ? "Save changes to this Project connection. Test it again after changing how it runs."
-                : "Save a local MCP connection for this Project. Secret values stay outside portable agent configuration."}
+                ? "Edit this Project connection. It applies across every repository in the Project; its credentials stay on this device."
+                : "Connect an MCP server to this Project. The connection applies across every repository; its credentials stay on this device."}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-5">
@@ -239,55 +319,103 @@ function ConnectionDialog({
                 className="text-sm font-medium text-foreground"
                 htmlFor="connection-name"
               >
-                Connection name
+                Connection name <span aria-hidden="true">*</span>
               </label>
               <Input
+                aria-describedby={
+                  nameError ? "connection-name-error" : undefined
+                }
+                aria-invalid={Boolean(nameError) || undefined}
                 disabled={pending}
                 id="connection-name"
+                maxLength={128}
                 onChange={(event) => setName(event.target.value)}
                 placeholder="Analytics"
+                required
                 value={name}
               />
+              {nameError ? (
+                <p
+                  className="text-xs text-destructive"
+                  id="connection-name-error"
+                >
+                  {nameError}
+                </p>
+              ) : null}
             </div>
             <div className="space-y-1.5">
               <label
                 className="text-sm font-medium text-foreground"
                 htmlFor="connection-provider"
               >
-                Service
+                Service <span aria-hidden="true">*</span>
               </label>
               <Input
+                aria-describedby={
+                  providerError ? "connection-provider-error" : undefined
+                }
+                aria-invalid={Boolean(providerError) || undefined}
                 disabled={pending}
                 id="connection-provider"
+                maxLength={64}
                 onChange={(event) => setProvider(event.target.value)}
                 placeholder="Google Analytics"
+                required
                 value={provider}
               />
+              {providerError ? (
+                <p
+                  className="text-xs text-destructive"
+                  id="connection-provider-error"
+                >
+                  {providerError}
+                </p>
+              ) : null}
             </div>
             <div className="space-y-1.5">
               <label
                 className="text-sm font-medium text-foreground"
                 htmlFor="connection-command"
               >
-                Connection command
+                Connection command <span aria-hidden="true">*</span>
               </label>
               <Input
                 autoCapitalize="off"
                 autoCorrect="off"
                 disabled={pending}
+                aria-describedby={
+                  commandError
+                    ? "connection-command-help connection-command-error"
+                    : "connection-command-help"
+                }
+                aria-invalid={Boolean(commandError) || undefined}
                 id="connection-command"
+                maxLength={1024}
                 onChange={(event) => {
                   setCommand(event.target.value);
+                  setExecutionDirty(true);
                   setTrusted(false);
                 }}
                 placeholder="/absolute/path/to/mcp-server"
+                required
                 spellCheck={false}
                 value={command}
               />
-              <p className="text-xs text-muted-foreground">
+              <p
+                className="text-xs text-muted-foreground"
+                id="connection-command-help"
+              >
                 Enter the executable's absolute path. Buzz runs it directly
                 without a shell.
               </p>
+              {commandError ? (
+                <p
+                  className="text-xs text-destructive"
+                  id="connection-command-error"
+                >
+                  {commandError}
+                </p>
+              ) : null}
             </div>
             <button
               aria-expanded={showTechnicalDetails}
@@ -310,11 +438,16 @@ function ConnectionDialog({
                     Arguments
                   </label>
                   <Textarea
+                    aria-describedby={
+                      argsError ? "connection-args-error" : undefined
+                    }
+                    aria-invalid={Boolean(argsError) || undefined}
                     className="min-h-24 font-mono text-xs"
                     disabled={pending}
                     id="connection-args"
                     onChange={(event) => {
                       setArgsText(event.target.value);
+                      setExecutionDirty(true);
                       setTrusted(false);
                     }}
                     placeholder={"--account\n123456"}
@@ -324,6 +457,14 @@ function ConnectionDialog({
                     Enter one argument per non-empty line. Buzz trims
                     surrounding whitespace. Do not put secrets here.
                   </p>
+                  {argsError ? (
+                    <p
+                      className="text-xs text-destructive"
+                      id="connection-args-error"
+                    >
+                      {argsError}
+                    </p>
+                  ) : null}
                 </div>
                 <div className="space-y-2">
                   <div className="flex items-center justify-between gap-3">
@@ -339,6 +480,7 @@ function ConnectionDialog({
                       disabled={pending}
                       onClick={() => {
                         setSecrets((rows) => [...rows, emptySecretRow()]);
+                        setExecutionDirty(true);
                         setTrusted(false);
                       }}
                       size="xs"
@@ -349,6 +491,16 @@ function ConnectionDialog({
                       Add secret
                     </Button>
                   </div>
+                  {secrets.length > 0 ? (
+                    <div
+                      aria-hidden="true"
+                      className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)_auto] gap-2 px-0.5 text-2xs font-medium text-muted-foreground"
+                    >
+                      <span>Name</span>
+                      <span>Value</span>
+                      <span className="w-6" />
+                    </div>
+                  ) : null}
                   {secrets.map((row, index) => (
                     <div
                       className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)_auto] gap-2"
@@ -369,6 +521,7 @@ function ConnectionDialog({
                               rowIndex === index ? { ...item, key } : item,
                             ),
                           );
+                          setExecutionDirty(true);
                           setTrusted(false);
                         }}
                         placeholder="API_TOKEN"
@@ -386,6 +539,7 @@ function ConnectionDialog({
                               rowIndex === index ? { ...item, value } : item,
                             ),
                           );
+                          setExecutionDirty(true);
                           setTrusted(false);
                         }}
                         placeholder={
@@ -406,6 +560,7 @@ function ConnectionDialog({
                           setSecrets((rows) =>
                             rows.filter((_, rowIndex) => rowIndex !== index),
                           );
+                          setExecutionDirty(true);
                           setTrusted(false);
                         }}
                         size="icon-xs"
@@ -416,25 +571,32 @@ function ConnectionDialog({
                       </Button>
                     </div>
                   ))}
+                  {!secretChanges.ok ? (
+                    <p className="text-xs text-destructive" role="alert">
+                      {secretChanges.error}
+                    </p>
+                  ) : null}
                 </div>
               </div>
             ) : null}
-            <label
-              className="flex items-start gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-foreground"
-              htmlFor="connection-trusted-command"
-            >
-              <Checkbox
-                checked={trusted}
-                disabled={pending}
-                id="connection-trusted-command"
-                onCheckedChange={(checked) => setTrusted(checked === true)}
-              />
-              <span>
-                I trust this executable and the arguments above to run without a
-                sandbox. It can access my files and network, plus these secrets
-                and anything their credentials allow.
-              </span>
-            </label>
+            {requiresApproval ? (
+              <label
+                className="flex items-start gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-foreground"
+                htmlFor="connection-trusted-command"
+              >
+                <Checkbox
+                  checked={trusted}
+                  disabled={pending}
+                  id="connection-trusted-command"
+                  onCheckedChange={(checked) => setTrusted(checked === true)}
+                />
+                <span>
+                  I trust this executable and the arguments above to run without
+                  a sandbox. It can access my files and network, plus these
+                  secrets and anything their credentials allow.
+                </span>
+              </label>
+            ) : null}
             {error ? (
               <p className="text-sm text-destructive" role="alert">
                 {error}
@@ -451,12 +613,159 @@ function ConnectionDialog({
               Cancel
             </Button>
             <Button disabled={!canSubmit} type="submit">
-              {pending ? "Saving..." : "Save connection"}
+              {pending
+                ? "Saving…"
+                : requiresApproval
+                  ? "Save and test"
+                  : "Save changes"}
             </Button>
           </DialogFooter>
         </form>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function ConnectionRow({
+  connection,
+  onEdit,
+  onRemove,
+  onTest,
+  testPending,
+  testing,
+}: {
+  connection: ProjectConnection;
+  onEdit: () => void;
+  onRemove: () => void;
+  onTest: () => void;
+  testPending: boolean;
+  testing: boolean;
+}) {
+  const recoveryNeedsEdit = connectionNeedsEditing(connection);
+  const [showAllTools, setShowAllTools] = React.useState(false);
+  const visibleTools = showAllTools
+    ? connection.discoveredTools
+    : connection.discoveredTools.slice(0, TOOL_PREVIEW_LIMIT);
+  const hiddenToolCount = Math.max(
+    0,
+    connection.discoveredTools.length - TOOL_PREVIEW_LIMIT,
+  );
+  const actionLabel = connectionActionLabel(connection);
+
+  return (
+    <div
+      aria-busy={testing || undefined}
+      className="flex min-w-0 flex-wrap items-start gap-3 px-4 py-3"
+      data-testid={`project-connection-${connection.id}`}
+    >
+      <Wrench className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+      <div className="min-w-0 flex-1 basis-64 space-y-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <p
+            className="min-w-0 truncate text-sm font-medium text-foreground"
+            title={connection.name}
+          >
+            {connection.name}
+          </p>
+          <ConnectionHealthBadge status={connection.health.status} />
+        </div>
+        <div className="space-y-0.5">
+          <p
+            className="truncate text-xs text-muted-foreground"
+            title={connection.provider}
+          >
+            {connection.provider}
+          </p>
+          <p
+            aria-live="polite"
+            className="text-xs text-muted-foreground"
+            role="status"
+          >
+            {testing
+              ? `Testing ${connection.name}…`
+              : formatVerificationTime(connection.health.lastVerifiedAt)}
+          </p>
+          {connection.health.detail ? (
+            <p className="text-xs text-muted-foreground">
+              {connection.health.detail}
+            </p>
+          ) : null}
+        </div>
+        {visibleTools.length > 0 ? (
+          <div className="flex flex-wrap items-center gap-1.5">
+            {visibleTools.map((tool) => (
+              <span
+                className="max-w-48 truncate rounded-md bg-muted px-2 py-1 text-2xs text-muted-foreground"
+                key={tool}
+                title={tool}
+              >
+                {toolLabel(tool)}
+              </span>
+            ))}
+            {hiddenToolCount > 0 ? (
+              <Button
+                aria-expanded={showAllTools}
+                className="h-6 px-1.5 text-2xs"
+                onClick={() => setShowAllTools((value) => !value)}
+                size="xs"
+                type="button"
+                variant="ghost"
+              >
+                {showAllTools ? "Show fewer" : `Show ${hiddenToolCount} more`}
+              </Button>
+            ) : null}
+          </div>
+        ) : (
+          <p className="text-xs text-muted-foreground">
+            {connection.health.status === "not_tested"
+              ? "Test this connection to discover its tools."
+              : "No tools are currently available."}
+          </p>
+        )}
+      </div>
+      <div className="ml-7 flex shrink-0 items-center gap-1 sm:ml-0">
+        <Button
+          aria-label={
+            testing
+              ? `Testing ${connection.name}`
+              : `${actionLabel} ${connection.name}`
+          }
+          disabled={testPending}
+          onClick={recoveryNeedsEdit ? onEdit : onTest}
+          size="sm"
+          variant="outline"
+        >
+          {testing ? (
+            <LoaderCircle className="h-4 w-4 animate-spin" />
+          ) : recoveryNeedsEdit ? (
+            <KeyRound className="h-4 w-4" />
+          ) : (
+            <RefreshCw className="h-4 w-4" />
+          )}
+          {testing ? "Testing…" : actionLabel}
+        </Button>
+        <Button
+          aria-label={`Edit ${connection.name}`}
+          disabled={testing}
+          onClick={onEdit}
+          size="icon-xs"
+          title={`Edit ${connection.name}`}
+          variant="ghost"
+        >
+          <Pencil className="h-4 w-4" />
+        </Button>
+        <Button
+          aria-label={`Remove ${connection.name}`}
+          disabled={testing}
+          onClick={onRemove}
+          size="icon-xs"
+          title={`Remove ${connection.name}`}
+          variant="ghost"
+        >
+          <Trash2 className="h-4 w-4" />
+        </Button>
+      </div>
+    </div>
   );
 }
 
@@ -475,20 +784,41 @@ export function ProjectConnectionsPanel({
   const [removing, setRemoving] = React.useState<ProjectConnection | null>(
     null,
   );
+  const [removeError, setRemoveError] = React.useState<string | null>(null);
 
   function openAdd() {
     setEditing(null);
     setDialogOpen(true);
   }
 
+  async function handleTest(connection: ProjectConnection) {
+    try {
+      const tested = await testMutation.mutateAsync(connection.id);
+      if (tested.health.status === "ready") {
+        toast.success(`Tools found for ${connection.name}.`);
+      } else {
+        toast.error(
+          tested.health.detail ?? `${connection.name} needs attention.`,
+        );
+      }
+    } catch (cause) {
+      toast.error(
+        cause instanceof Error
+          ? `Couldn't test ${connection.name}: ${cause.message}`
+          : `Couldn't test ${connection.name}. Check its details and try again.`,
+      );
+    }
+  }
+
   async function handleDelete() {
     if (!removing) return;
+    setRemoveError(null);
     try {
       await deleteMutation.mutateAsync(removing.id);
       toast.success(`${removing.name} removed.`);
       setRemoving(null);
     } catch (cause) {
-      toast.error(
+      setRemoveError(
         cause instanceof Error
           ? `Couldn't remove ${removing.name}: ${cause.message}`
           : `Couldn't remove ${removing.name}. Nothing was changed.`,
@@ -505,24 +835,34 @@ export function ProjectConnectionsPanel({
         data-project-detail-panel
         data-testid="project-connections-panel"
       >
-        <div className="flex min-h-14 items-center gap-3 border-border/50 border-b px-4 py-3">
-          <Link2 className="h-4 w-4 text-muted-foreground" />
-          <div className="min-w-0 flex-1">
-            <h3 className="text-sm font-medium text-foreground">Connections</h3>
-            <p className="text-xs text-muted-foreground">
-              Save and verify MCP connections for this Project.
-            </p>
+        <div className="flex min-h-14 flex-wrap items-center gap-3 border-border/50 border-b px-4 py-3">
+          <div className="flex min-w-[min(100%,18rem)] flex-1 items-start gap-3">
+            <Link2 className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+            <div className="min-w-0 flex-1">
+              <h3 className="text-sm font-medium text-foreground">
+                Connections
+              </h3>
+              <p className="text-xs text-muted-foreground">
+                Connect MCP servers across this Project. Credentials stay on
+                this device.
+              </p>
+            </div>
           </div>
-          <Button onClick={openAdd} size="sm" title="Add connection">
+          <Button
+            className={`${PROJECT_PANEL_ACTION_BUTTON_CLASS} ml-auto`}
+            onClick={openAdd}
+            size="sm"
+            title="Add connection"
+          >
             <Plus className="h-4 w-4" />
             Add connection
           </Button>
         </div>
 
         {query.isPending ? (
-          <div className={PROJECT_DETAIL_PANEL_MESSAGE_CLASS}>
+          <div className={PROJECT_DETAIL_PANEL_MESSAGE_CLASS} role="status">
             <LoaderCircle className="mx-auto mb-2 h-5 w-5 animate-spin" />
-            Loading connections...
+            Loading connections…
           </div>
         ) : query.isError ? (
           <div className={PROJECT_DETAIL_PANEL_MESSAGE_CLASS}>
@@ -555,103 +895,24 @@ export function ProjectConnectionsPanel({
         ) : (
           <div className="divide-y divide-border/50">
             {connections.map((connection) => (
-              <div
-                className="flex items-start gap-3 px-4 py-4"
+              <ConnectionRow
+                connection={connection}
                 key={connection.id}
-              >
-                <div className="mt-0.5 rounded-lg bg-muted p-2">
-                  <KeyRound className="h-4 w-4 text-muted-foreground" />
-                </div>
-                <div className="min-w-0 flex-1 space-y-2">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <p className="font-medium text-foreground">
-                      {connection.name}
-                    </p>
-                    <ConnectionHealthBadge status={connection.health.status} />
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    {connection.provider} ·{" "}
-                    {formatVerificationTime(connection.health.lastVerifiedAt)}
-                  </p>
-                  {connection.health.detail ? (
-                    <p className="text-xs text-muted-foreground">
-                      {connection.health.detail}
-                    </p>
-                  ) : null}
-                  {connection.capabilityIds.length > 0 ? (
-                    <div className="flex flex-wrap gap-1.5">
-                      {connection.capabilityIds.map((capability) => (
-                        <span
-                          className="inline-flex items-center gap-1 rounded-md border border-border/60 bg-muted/30 px-2 py-1 text-2xs text-muted-foreground"
-                          key={capability}
-                          title={capability}
-                        >
-                          <Wrench className="h-3 w-3" />
-                          {capabilityLabel(capability)}
-                        </span>
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="text-xs text-muted-foreground">
-                      Test this connection to discover its tools.
-                    </p>
-                  )}
-                </div>
-                <div className="flex shrink-0 items-center gap-1">
-                  <Button
-                    disabled={testMutation.isPending}
-                    onClick={async () => {
-                      try {
-                        const tested = await testMutation.mutateAsync(
-                          connection.id,
-                        );
-                        if (tested.health.status === "ready") {
-                          toast.success(`Tools found for ${connection.name}.`);
-                        } else {
-                          toast.error(
-                            tested.health.detail ??
-                              `${connection.name} needs attention.`,
-                          );
-                        }
-                      } catch (cause) {
-                        toast.error(
-                          cause instanceof Error
-                            ? `Couldn't test ${connection.name}: ${cause.message}`
-                            : `Couldn't test ${connection.name}. Check its details and try again.`,
-                        );
-                      }
-                    }}
-                    size="sm"
-                    variant="outline"
-                  >
-                    {testMutation.isPending ? (
-                      <LoaderCircle className="h-4 w-4 animate-spin" />
-                    ) : (
-                      <RefreshCw className="h-4 w-4" />
-                    )}
-                    Test
-                  </Button>
-                  <Button
-                    aria-label={`Edit ${connection.name}`}
-                    onClick={() => {
-                      setEditing(connection);
-                      setDialogOpen(true);
-                    }}
-                    size="icon-xs"
-                    variant="ghost"
-                  >
-                    <Pencil className="h-4 w-4" />
-                  </Button>
-                  <Button
-                    aria-label={`Remove ${connection.name}`}
-                    onClick={() => setRemoving(connection)}
-                    size="icon-xs"
-                    variant="ghost"
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </Button>
-                </div>
-              </div>
+                onEdit={() => {
+                  setEditing(connection);
+                  setDialogOpen(true);
+                }}
+                onRemove={() => {
+                  setRemoveError(null);
+                  setRemoving(connection);
+                }}
+                onTest={() => void handleTest(connection)}
+                testPending={testMutation.isPending}
+                testing={
+                  testMutation.isPending &&
+                  testMutation.variables === connection.id
+                }
+              />
             ))}
           </div>
         )}
@@ -668,6 +929,7 @@ export function ProjectConnectionsPanel({
               })
             : createMutation.mutateAsync(input)
         }
+        onTest={handleTest}
         open={dialogOpen}
         pending={createMutation.isPending || updateMutation.isPending}
         projectScope={projectScope}
@@ -675,7 +937,10 @@ export function ProjectConnectionsPanel({
 
       <AlertDialog
         onOpenChange={(open) => {
-          if (!open) setRemoving(null);
+          if (!open && !deleteMutation.isPending) {
+            setRemoving(null);
+            setRemoveError(null);
+          }
         }}
         open={Boolean(removing)}
       >
@@ -689,17 +954,22 @@ export function ProjectConnectionsPanel({
               this device. This does not delete data from the connected service.
             </AlertDialogDescription>
           </AlertDialogHeader>
+          {removeError ? (
+            <p className="text-sm text-destructive" role="alert">
+              {removeError}
+            </p>
+          ) : null}
           <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction asChild>
-              <Button
-                disabled={deleteMutation.isPending}
-                onClick={() => void handleDelete()}
-                variant="destructive"
-              >
-                {deleteMutation.isPending ? "Removing..." : "Remove connection"}
-              </Button>
-            </AlertDialogAction>
+            <AlertDialogCancel disabled={deleteMutation.isPending}>
+              Cancel
+            </AlertDialogCancel>
+            <Button
+              disabled={deleteMutation.isPending}
+              onClick={() => void handleDelete()}
+              variant="destructive"
+            >
+              {deleteMutation.isPending ? "Removing…" : "Remove connection"}
+            </Button>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

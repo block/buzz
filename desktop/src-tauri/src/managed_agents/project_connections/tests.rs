@@ -51,6 +51,22 @@ fn project_scope_requires_canonical_relay_identity_and_coordinate() {
 }
 
 #[test]
+fn connection_store_reads_the_pre_project_address_field() {
+    let connection = stored_connection();
+    let mut json = serde_json::to_value(ProjectConnectionStore {
+        version: CONNECTION_STORE_VERSION,
+        connections: vec![connection.clone()],
+    })
+    .unwrap();
+    let scope = &mut json["connections"][0]["projectScope"];
+    scope["repoAddress"] = scope["projectAddress"].take();
+    scope.as_object_mut().unwrap().remove("projectAddress");
+
+    let restored: ProjectConnectionStore = serde_json::from_value(json).unwrap();
+    assert_eq!(restored.connections, [connection]);
+}
+
+#[test]
 fn public_projection_omits_secret_values_and_internal_generation() {
     let public = ProjectConnection::from(stored_connection());
     let json = serde_json::to_value(public).unwrap();
@@ -203,6 +219,35 @@ fn connection_lookup_cannot_cross_project_boundaries() {
     let mut other_project = connection.project_scope;
     other_project.project_address = format!("30621:{}:other-project", "a".repeat(64));
     assert!(find_connection(&store, &other_project, &connection.id).is_err());
+}
+
+#[test]
+fn duplicate_ids_are_resolved_within_the_requested_project() {
+    let first = stored_connection();
+    let mut second = first.clone();
+    second.project_scope.project_address = format!("30621:{}:other-project", "a".repeat(64));
+    let store = ProjectConnectionStore {
+        version: CONNECTION_STORE_VERSION,
+        connections: vec![first, second.clone()],
+    };
+
+    assert_eq!(
+        find_connection_index(&store, &second.project_scope, &second.id),
+        Some(1)
+    );
+}
+
+#[test]
+fn connection_limit_is_counted_per_project() {
+    let target_scope = scope();
+    let mut other = stored_connection();
+    other.project_scope.project_address = format!("30621:{}:other-project", "a".repeat(64));
+    let store = ProjectConnectionStore {
+        version: CONNECTION_STORE_VERSION,
+        connections: vec![other; MAX_CONNECTIONS],
+    };
+
+    assert_eq!(project_connection_count(&store, &target_scope), 0);
 }
 
 #[cfg(unix)]
