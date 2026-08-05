@@ -57,10 +57,16 @@ export function getMentionableAgentPubkeys({
 export function isAgentIdentityInManagedList(
   candidate: { isAgent?: boolean; pubkey: string },
   managedAgentPubkeys: ReadonlySet<string>,
+  mentionableAgentPubkeys?: ReadonlySet<string>,
 ) {
+  const pubkey = normalizePubkey(candidate.pubkey);
   return (
     candidate.isAgent !== true ||
-    managedAgentPubkeys.has(normalizePubkey(candidate.pubkey))
+    managedAgentPubkeys.has(pubkey) ||
+    // Externally-hosted agents (relay directory, kind:10100) that are
+    // invocable for the current user are legitimate mention targets even
+    // though no local managed-agent record exists for them.
+    (mentionableAgentPubkeys?.has(pubkey) ?? false)
   );
 }
 
