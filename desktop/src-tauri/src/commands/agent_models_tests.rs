@@ -577,6 +577,29 @@ fn is_databricks_provider_matches_both_variants() {
 }
 
 #[test]
+fn databricks_interactive_auth_requires_explicit_intent_and_no_static_token() {
+    assert!(should_start_interactive_auth(
+        "",
+        DatabricksAuthIntent::InteractiveModelPicker
+    ));
+    assert!(!should_start_interactive_auth(
+        "",
+        DatabricksAuthIntent::PassiveDraftDiscovery
+    ));
+    assert!(!should_start_interactive_auth(
+        "static-token",
+        DatabricksAuthIntent::InteractiveModelPicker
+    ));
+}
+
+#[test]
+fn databricks_passive_auth_error_has_reachable_create_flow_guidance() {
+    let error = databricks_sign_in_required_error();
+    assert!(error.contains("save this agent, then open its model picker"));
+    assert!(error.contains("buzz-agent auth databricks"));
+}
+
+#[test]
 fn model_discovery_error_converts_dangling_sentinel_to_sentence() {
     // get_agent_models is a user-facing surface: a dangling harness must
     // render as a sentence, never as the raw DANGLING_HARNESS_ID: sentinel.
@@ -880,4 +903,22 @@ fn draft_agent_model_discovery_env_layers_all_three_tiers_in_order() {
             "env key `{key}` must resolve to {want:?} after three-tier layering"
         );
     }
+}
+
+#[test]
+fn databricks_static_token_error_redacts_echoed_token() {
+    let token = "secret-databricks-token";
+    let redaction_env = BTreeMap::from([("DATABRICKS_TOKEN".to_string(), token.to_string())]);
+
+    let error = databricks_static_token_error(
+        &format!("Databricks rejected bearer {token}"),
+        &redaction_env,
+    );
+
+    assert!(error.contains("[REDACTED]"), "got: {error}");
+    assert!(!error.contains(token), "token leaked in error: {error}");
+    assert!(
+        error.contains("update it in agent settings"),
+        "error lost its remediation: {error}"
+    );
 }

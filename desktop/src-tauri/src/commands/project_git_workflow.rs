@@ -3,8 +3,9 @@
 use super::project_git::{first_output_line, normalize_branch_option};
 use super::project_git_diff::clean_commit;
 use super::project_git_exec::{
-    build_git_auth_config, build_git_auth_config_for_keys, clone_url_owner, run_git,
-    validate_clone_url, validate_workspace_clone_url, GitAuthConfig,
+    build_git_auth_config_for_keys, build_git_clone_auth_config, clone_url_owner, run_git,
+    validate_local_clone_url, validate_local_clone_url_for_workspace, validate_workspace_clone_url,
+    GitAuthConfig,
 };
 use super::project_repo_paths::{
     canonical_repos_roots, canonicalize_repos_root, default_repos_root_candidates,
@@ -353,7 +354,7 @@ pub(crate) fn clone_project_repository_blocking(
     default_branch: Option<&str>,
     auth: &GitAuthConfig,
 ) -> Result<ProjectRepoCloneResult, String> {
-    validate_clone_url(clone_url)?;
+    validate_local_clone_url(clone_url)?;
     let branch = normalize_branch_option(default_branch);
     if let Some(repo_dir) = find_local_repo_dir(repos_dir, project_dtag, Some(clone_url))? {
         return Ok(ProjectRepoCloneResult {
@@ -411,8 +412,8 @@ pub async fn clone_project_repository(
     default_branch: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<ProjectRepoCloneResult, String> {
-    validate_workspace_clone_url(&clone_url, &state)?;
-    let auth = build_git_auth_config(&state)?;
+    validate_local_clone_url_for_workspace(&clone_url, &state)?;
+    let auth = build_git_clone_auth_config(&clone_url, &state)?;
     tauri::async_runtime::spawn_blocking(move || {
         clone_project_repository_blocking(
             repos_dir.as_deref(),

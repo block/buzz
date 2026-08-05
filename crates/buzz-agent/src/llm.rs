@@ -1910,6 +1910,22 @@ where
     unreachable!("loop always returns on its final iteration (attempt + 1 == MAX_RETRIES)");
 }
 
+pub(crate) fn databricks_pkce_config(host: &str) -> PkceOAuthConfig {
+    PkceOAuthConfig {
+        discovery_url: format!(
+            "{}/oidc/.well-known/oauth-authorization-server",
+            host.trim_end_matches('/')
+        ),
+        client_id: DATABRICKS_CLIENT_ID.into(),
+        scopes: DATABRICKS_OAUTH_SCOPES
+            .iter()
+            .map(|scope| (*scope).into())
+            .collect(),
+        cache_namespace: "databricks".into(),
+        cache_dir_override: None,
+    }
+}
+
 /// Build the `TokenSource` for the configured provider.
 ///
 /// - `Provider::Anthropic`: a static source seeded from `cfg.api_key`. It's
@@ -1929,21 +1945,9 @@ pub(crate) fn build_token_source(cfg: &Config) -> Result<Arc<dyn TokenSource>, A
             if !cfg.api_key.is_empty() {
                 return Ok(Arc::new(StaticTokenSource::new(cfg.api_key.clone())));
             }
-            let discovery_url = format!(
-                "{}/oidc/.well-known/oauth-authorization-server",
-                cfg.base_url.trim_end_matches('/')
-            );
-            let pkce = PkceOAuthConfig {
-                discovery_url,
-                client_id: DATABRICKS_CLIENT_ID.into(),
-                scopes: DATABRICKS_OAUTH_SCOPES
-                    .iter()
-                    .map(|s| (*s).into())
-                    .collect(),
-                cache_namespace: "databricks".into(),
-                cache_dir_override: None,
-            };
-            Ok(PkceOAuthTokenSource::new(pkce)?)
+            Ok(PkceOAuthTokenSource::new(databricks_pkce_config(
+                &cfg.base_url,
+            ))?)
         }
     }
 }
