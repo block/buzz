@@ -178,6 +178,34 @@ when the rest of the workflow lives in WSL2:
 > codex login
 ```
 
+Not every harness needs an adapter, and not every installer puts its binary
+somewhere `PATH` already covers. The difference matters on Windows because the
+desktop resolves harnesses by scanning `PATH` only:
+
+| Harness | Adapter required | Installs to | On `PATH` after install |
+|---|---|---|---|
+| Claude Code | `claude-agent-acp` (npm) | `%APPDATA%\npm` | yes |
+| Codex | `codex-acp` (npm) | `%LOCALAPPDATA%\Programs\OpenAI\Codex\bin` | yes |
+| Goose | none — native ACP | `%USERPROFILE%\.local\bin` | **no** — must be added |
+| Grok Build | none — native ACP | `%USERPROFILE%\.grok\bin` | yes — installer adds it |
+| Hermes Agent | none — `hermes-acp` ships with it | its own venv `Scripts` directory | yes |
+
+Harnesses that speak ACP natively (`goose`, `grok`, `hermes-acp`) are a single
+binary; the adapter-backed ones are two, and both must resolve.
+
+When an installer does not modify `PATH`, add its directory to the **User**
+scope rather than following the common `$env:PATH + ';…'` suggestion — that
+form copies every Machine-scope entry into the user's own `PATH` and duplicates
+them permanently:
+
+```powershell
+$userPath = [Environment]::GetEnvironmentVariable('PATH', 'User')
+$target   = "$env:USERPROFILE\.local\bin"
+if ($userPath -split ';' -notcontains $target) {
+    [Environment]::SetEnvironmentVariable('PATH', "$userPath;$target", 'User')
+}
+```
+
 npm's global prefix (`%APPDATA%\npm`) is on `PATH` by default, so both binaries
 become resolvable. Two notes:
 
