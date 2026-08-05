@@ -64,6 +64,26 @@ export function isAgentIdentityInManagedList(
   );
 }
 
+/**
+ * Mention autocomplete also admits bot-role channel members owned elsewhere.
+ * Their runtime remains the authority for the respond-to policy; this gate
+ * only allows the later relay-policy check to evaluate them.
+ */
+export function isAgentIdentityMentionable(
+  candidate: {
+    isAgent?: boolean;
+    isMember?: boolean;
+    pubkey: string;
+    role?: string | null;
+  },
+  managedAgentPubkeys: ReadonlySet<string>,
+) {
+  return (
+    isAgentIdentityInManagedList(candidate, managedAgentPubkeys) ||
+    (candidate.isMember === true && candidate.role === "bot")
+  );
+}
+
 export function shouldHideAgentFromMentions({
   isAgent,
   isMember,
