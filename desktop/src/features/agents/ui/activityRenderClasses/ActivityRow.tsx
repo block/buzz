@@ -42,6 +42,7 @@ export function ActivityRow({
   testId,
   title,
 }: ActivityRowProps) {
+  const variant = useAgentSessionTranscriptVariant();
   const childArray = React.Children.toArray(children);
   const summaryChildren = childArray.filter(
     (child) => !isActivityRowContent(child),
@@ -68,6 +69,7 @@ export function ActivityRow({
         className,
       )}
       data-testid={testId}
+      open={variant === "inlineTimeline" && openToneScope === "summary"}
       title={title}
     >
       <summary
@@ -115,7 +117,7 @@ export function ActivityRowLabel({
   title?: string;
 }) {
   const variant = useAgentSessionTranscriptVariant();
-  const isCompactPreview = variant === "compactPreview";
+  const isCompactPreview = variant !== "default";
 
   return (
     <span

@@ -180,7 +180,7 @@ export function AgentSessionTranscriptList({
     scrollContainerRef,
   });
 
-  const isCompactPreview = variant === "compactPreview";
+  const isCompactPreview = variant !== "default";
   const animationPreferenceEnabled = useTranscriptAnimationEnabled();
   const shouldReduceMotion = useReducedMotion();
   const animationsDisabled =
@@ -302,7 +302,7 @@ function hasRenderableDisplayContent(
   displayBlocks: TranscriptDisplayBlock[],
   variant: AgentSessionTranscriptVariant,
 ) {
-  if (variant !== "compactPreview") {
+  if (variant === "default") {
     return displayBlocks.length > 0;
   }
 
@@ -360,7 +360,7 @@ function TranscriptDisplayBlockView({
   profiles?: UserProfileLookup;
 }) {
   const variant = useAgentSessionTranscriptVariant();
-  const isCompactPreview = variant === "compactPreview";
+  const isCompactPreview = variant !== "default";
   const animationPreferenceEnabled = useTranscriptAnimationEnabled();
   const shouldReduceMotion = useReducedMotion();
   // Streaming tool calls land as new segments inside the current turn block
@@ -508,7 +508,7 @@ function SameKindSummaryItem({
   );
   const variant = useAgentSessionTranscriptVariant();
   const timestampsEnabled = useTranscriptTimestampsEnabled();
-  const showTimestamp = timestampsEnabled && variant !== "compactPreview";
+  const showTimestamp = timestampsEnabled && variant === "default";
   // Mixed bursts expand to their child segments in original order: raw tool
   // rows plus nested same-kind summaries that joined the burst (which stay
   // expandable to their own child rows).

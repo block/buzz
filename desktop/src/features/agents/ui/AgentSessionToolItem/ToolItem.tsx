@@ -7,6 +7,7 @@ import {
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import type { TranscriptItem } from "../agentSessionTypes";
+import { useAgentSessionTranscriptVariant } from "../agentSessionTranscriptContext";
 import { getBuzzToolInfo } from "../agentSessionToolCatalog";
 import { buildCompactToolSummary } from "../agentSessionToolSummary";
 import type { AgentTranscriptIdentityProps } from "../activityRenderClasses/types";
@@ -34,6 +35,7 @@ export function ToolItem({
   profiles?: UserProfileLookup;
 }) {
   const [isExpanded, setIsExpanded] = React.useState(false);
+  const transcriptVariant = useAgentSessionTranscriptVariant();
   const hasArgs = Object.keys(item.args).length > 0;
   const hasResult = item.result.trim().length > 0;
   const canonicalToolName = item.buzzToolName ?? item.toolName;
@@ -57,7 +59,10 @@ export function ToolItem({
     [],
   );
 
-  if (compactSummary.presentation === "message") {
+  if (
+    compactSummary.presentation === "message" &&
+    transcriptVariant !== "inlineTimeline"
+  ) {
     return (
       <div
         className="not-prose w-full"

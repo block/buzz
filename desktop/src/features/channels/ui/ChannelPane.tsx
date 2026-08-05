@@ -40,6 +40,7 @@ import { useChannelWorkingAgentPubkeys } from "@/features/agents/agentWorkingSig
 import { useCardMintJobs } from "@/features/agents/cardMintStore";
 import { BotActivityComposerAction } from "@/features/channels/ui/BotActivityBar";
 import { ChannelComposerActivityAccessory } from "@/features/channels/ui/ChannelComposerActivityAccessory";
+import { useChannelMainTimeline } from "@/features/channels/ui/useChannelMainTimeline";
 import {
   containsWelcomePersonaMention,
   WelcomeComposerGuidanceLayer,
@@ -51,7 +52,6 @@ import { useChannelIntro } from "@/features/channels/ui/useChannelIntro";
 import type { ChannelPaneProps } from "@/features/channels/ui/ChannelPane.types";
 import * as agentSessionSelection from "@/features/channels/ui/agentSessionSelection";
 import { usePrepareDmSendChannel } from "@/features/channels/ui/usePrepareDmSendChannel";
-import { useChannelPaneMessages } from "@/features/channels/ui/useChannelPaneMessages";
 import { Button } from "@/shared/ui/button";
 import { useRenderScopedReactionHydration } from "@/features/messages/lib/useRenderScopedReactionHydration";
 import type { TimelineMessage } from "@/features/messages/types";
@@ -389,12 +389,20 @@ export const ChannelPane = React.memo(function ChannelPane({
     onWelcomeAddAgent: onAddAgent ? handleWelcomeAddAgent : undefined,
   });
   const channelIntro = isHuddleTranscript ? null : standardChannelIntro;
-  const { mainTimelineEntries, visibleMessages } = useChannelPaneMessages({
+  const {
+    mainTimelineEntries,
+    messageLeadingContent,
+    trailingContent,
+    visibleMessages,
+  } = useChannelMainTimeline({
     activeChannel,
+    activityAgents,
     isHuddleTranscript,
     messages,
+    onOpenAgentSession,
     profiles,
     threadSummaries,
+    workingBotPubkeys: composerWorkingBotPubkeys,
   });
   useRenderScopedReactionHydration({
     activeChannel,
@@ -610,6 +618,7 @@ export const ChannelPane = React.memo(function ChannelPane({
             entranceMessageId={entranceMessageId}
             onEntranceMessageComplete={onEntranceMessageComplete}
             mainEntries={mainTimelineEntries}
+            messageLeadingContent={messageLeadingContent}
             threadSummaries={threadSummaries}
             messages={visibleMessages}
             firstUnreadMessageId={firstUnreadMessageId}
@@ -638,6 +647,7 @@ export const ChannelPane = React.memo(function ChannelPane({
               Boolean(openThreadHeadId)
             }
             threadUnreadCounts={threadUnreadCounts}
+            trailingContent={trailingContent}
           />
           {isNonMemberView ? (
             <div
