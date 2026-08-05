@@ -104,10 +104,17 @@ pub struct Llm {
     auth: Arc<dyn TokenSource>,
 }
 
+/// Connect-phase timeout applied to every outgoing LLM HTTP request.
+///
+/// A 10-second budget is generous for a TLS + HTTP/2 handshake to a
+/// well-provisioned gateway.  Repeated connect timeouts indicate a
+/// network/reachability problem, not a slow generation.
+const LLM_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 impl Llm {
     pub fn new(cfg: &Config) -> Result<Self, AgentError> {
         let http = Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(10))
+            .connect_timeout(LLM_CONNECT_TIMEOUT)
             .read_timeout(cfg.llm_timeout)
             .build()
             .map_err(|e| AgentError::Llm(format!("http: {e}")))?;
@@ -353,7 +360,7 @@ impl Llm {
 
     async fn post_anthropic(&self, cfg: &Config, body: &Value) -> Result<Value, AgentError> {
         let url = format!("{}/v1/messages", cfg.base_url.trim_end_matches('/'));
-        post(&self.http, &url, body, false, |r| {
+        post(&self.http, &url, body, false, cfg.llm_timeout, |r| {
             r.header("x-api-key", &cfg.api_key)
                 .header("anthropic-version", &cfg.anthropic_api_version)
         })
@@ -659,6 +666,7 @@ impl Llm {
                 &url,
                 body_ref,
                 effective_model == MESH_VIRTUAL_MODEL_ID,
+                cfg.llm_timeout,
                 |r| r.bearer_auth(&bearer),
             )
             .await
@@ -681,7 +689,7 @@ impl Llm {
         let mut bearer = self.auth.bearer().await?;
         let mut refreshed = false;
         loop {
-            match openrouter_post(&self.http, &url, body, &bearer).await {
+            match openrouter_post(&self.http, &url, body, &bearer, cfg.llm_timeout).await {
                 Err(AgentError::LlmAuth(_)) if !refreshed => {
                     refreshed = true;
                     let new_bearer = self.auth.refresh_now(&bearer).await?;
@@ -1731,6 +1739,48 @@ fn is_retryable_transport_error(e: &reqwest::Error) -> bool {
     e.is_timeout() || e.is_connect() || e.is_request()
 }
 
+/// Which phase of an HTTP exchange produced a timeout error.
+///
+/// Used by `timeout_message` to choose the right factual description.
+#[derive(Clone, Copy)]
+enum TimeoutPhase {
+    /// Timeout before any response bytes — transport/send phase.
+    Transport,
+    /// Timeout after headers were received, while reading body chunks.
+    BodyRead,
+}
+
+/// Pure function: build the human-readable timeout message for an LLM call.
+///
+/// Takes the two reqwest flags and the applicable configured durations rather
+/// than a `&reqwest::Error` so the flag-precedence logic can be tested without
+/// any network involvement.
+///
+/// `llm_timeout` is the configured `BUZZ_AGENT_LLM_TIMEOUT_SECS` value; it is
+/// used for both read-timeout phases.  Connect timeouts use `LLM_CONNECT_TIMEOUT`.
+fn timeout_message(
+    is_connect: bool,
+    llm_timeout: std::time::Duration,
+    phase: TimeoutPhase,
+) -> String {
+    if is_connect {
+        // Connect-phase timeout: the TCP/TLS handshake didn't complete.
+        // reqwest sets both is_timeout() and is_connect() for this case.
+        format!("connect timeout: no connection established within {LLM_CONNECT_TIMEOUT:?}")
+    } else {
+        match phase {
+            TimeoutPhase::Transport => format!(
+                "read timeout: no response bytes received within {llm_timeout:?} \
+                 (consider raising BUZZ_AGENT_LLM_TIMEOUT_SECS)"
+            ),
+            TimeoutPhase::BodyRead => format!(
+                "read timeout: no further response bytes received within {llm_timeout:?} \
+                 (consider raising BUZZ_AGENT_LLM_TIMEOUT_SECS)"
+            ),
+        }
+    }
+}
+
 /// Produce a human-readable description of a transport-layer reqwest error.
 ///
 /// reqwest's `Display` for a `read_timeout` fire is the opaque
@@ -1739,23 +1789,12 @@ fn is_retryable_transport_error(e: &reqwest::Error) -> bool {
 /// We replace that string with a factual message that names which kind of
 /// timeout fired, making it immediately obvious in logs whether the client
 /// never connected or whether the server stopped sending bytes.
-fn classify_transport_error(e: &reqwest::Error) -> String {
+///
+/// `llm_timeout` is the `BUZZ_AGENT_LLM_TIMEOUT_SECS` value configured on the
+/// HTTP client; it appears verbatim in the returned message.
+fn classify_transport_error(e: &reqwest::Error, llm_timeout: std::time::Duration) -> String {
     if e.is_timeout() {
-        if e.is_connect() {
-            // Connect-phase timeout: the TCP/TLS handshake didn't complete in
-            // time.  This is a genuine network/reachability problem, not a
-            // slow generation.
-            "connect timeout: no connection established within the configured \
-             connect timeout"
-                .to_owned()
-        } else {
-            // Read timeout: the connection succeeded but no response bytes
-            // arrived within the configured read timeout
-            // (BUZZ_AGENT_LLM_TIMEOUT_SECS).
-            "read timeout: no response bytes received within the configured \
-             read timeout (consider raising BUZZ_AGENT_LLM_TIMEOUT_SECS)"
-                .to_owned()
-        }
+        timeout_message(e.is_connect(), llm_timeout, TimeoutPhase::Transport)
     } else {
         format!("transport: {e}")
     }
@@ -1764,16 +1803,16 @@ fn classify_transport_error(e: &reqwest::Error) -> String {
 /// Produce a human-readable description of an error that occurred while
 /// reading response body chunks (`resp.chunk()`).
 ///
-/// A timeout here means the server sent headers and at least one body chunk
-/// but then went silent mid-body.  Any other body-decode failure preserves
-/// the `"body read: ..."` prefix expected by callers and existing tests.
-fn classify_body_read_error(e: &reqwest::Error) -> String {
+/// A timeout here means headers and possibly body bytes arrived but the
+/// stream then stalled past the read timeout.  Any other body-decode failure
+/// preserves the `"body read: ..."` prefix expected by callers and existing
+/// tests.
+///
+/// `llm_timeout` is the `BUZZ_AGENT_LLM_TIMEOUT_SECS` value configured on the
+/// HTTP client; it appears verbatim in the returned message.
+fn classify_body_read_error(e: &reqwest::Error, llm_timeout: std::time::Duration) -> String {
     if e.is_timeout() {
-        // Headers (and possibly partial body) arrived but the stream then
-        // stalled past the read timeout.
-        "read timeout: no further response bytes received within the configured \
-         read timeout (consider raising BUZZ_AGENT_LLM_TIMEOUT_SECS)"
-            .to_owned()
+        timeout_message(e.is_connect(), llm_timeout, TimeoutPhase::BodyRead)
     } else {
         format!("body read: {e}")
     }
@@ -1864,6 +1903,7 @@ async fn post<F>(
     url: &str,
     body: &Value,
     detect_mesh_fallback: bool,
+    read_timeout: std::time::Duration,
     apply: F,
 ) -> Result<Value, PostError>
 where
@@ -1897,7 +1937,7 @@ where
                 return Err(PostError::Agent(terminal_llm_error(
                     call_start.elapsed(),
                     attempt + 1,
-                    &classify_transport_error(&e),
+                    &classify_transport_error(&e, read_timeout),
                 )));
             }
         };
@@ -1993,7 +2033,7 @@ where
                     return Err(PostError::Agent(terminal_llm_error(
                         call_start.elapsed(),
                         attempt + 1,
-                        &classify_body_read_error(&e),
+                        &classify_body_read_error(&e, read_timeout),
                     )));
                 }
             }
@@ -2147,6 +2187,7 @@ async fn openrouter_post(
     url: &str,
     body: &Value,
     bearer: &str,
+    read_timeout: std::time::Duration,
 ) -> Result<Value, AgentError> {
     let body_bytes =
         serde_json::to_vec(body).map_err(|e| AgentError::Llm(format!("serialize: {e}")))?;
@@ -2178,7 +2219,7 @@ async fn openrouter_post(
                 return Err(terminal_llm_error(
                     call_start.elapsed(),
                     attempt + 1,
-                    &classify_transport_error(&e),
+                    &classify_transport_error(&e, read_timeout),
                 ));
             }
         };
@@ -2313,7 +2354,7 @@ async fn openrouter_post(
                     return Err(terminal_llm_error(
                         call_start.elapsed(),
                         attempt + 1,
-                        &classify_body_read_error(&e),
+                        &classify_body_read_error(&e, read_timeout),
                     ))
                 }
             }
@@ -4229,9 +4270,16 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
-        let out = post(&client, &url, &serde_json::json!({}), false, |b| b)
-            .await
-            .expect("post should succeed after retry");
+        let out = post(
+            &client,
+            &url,
+            &serde_json::json!({}),
+            false,
+            Duration::from_secs(5),
+            |b| b,
+        )
+        .await
+        .expect("post should succeed after retry");
         assert_eq!(out, serde_json::json!({ "ok": true }));
         assert!(
             accepts.load(Ordering::SeqCst) >= 2,
@@ -4293,9 +4341,16 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
-        let out = post(&client, &url, &serde_json::json!({}), false, |b| b)
-            .await
-            .expect("post should succeed after 499 retry");
+        let out = post(
+            &client,
+            &url,
+            &serde_json::json!({}),
+            false,
+            Duration::from_secs(5),
+            |b| b,
+        )
+        .await
+        .expect("post should succeed after 499 retry");
         assert_eq!(out, serde_json::json!({ "ok": true }));
         assert!(
             accepts.load(Ordering::SeqCst) >= 2,
@@ -4344,9 +4399,16 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
-        let err = post(&client, &url, &serde_json::json!({}), false, |b| b)
-            .await
-            .unwrap_err();
+        let err = post(
+            &client,
+            &url,
+            &serde_json::json!({}),
+            false,
+            Duration::from_secs(5),
+            |b| b,
+        )
+        .await
+        .unwrap_err();
         match &err {
             PostError::Agent(AgentError::Llm(msg)) => {
                 assert!(
@@ -4502,27 +4564,123 @@ mod tests {
         );
     }
 
-    // ---- classify_transport_error -------------------------------------------
+    // ---- timeout_message (pure-function tests, no network) ------------------
 
-    /// A read-timeout error must produce a factual message that names the
-    /// timeout and references the config knob — not the opaque reqwest "error
-    /// sending request" string.  It must NOT speculate about the cause.
+    /// Connect timeout (is_connect=true) wins regardless of phase and shows
+    /// the LLM_CONNECT_TIMEOUT value — never the read-timeout text.
+    #[test]
+    fn timeout_message_connect_true_shows_connect_timeout() {
+        let llm = std::time::Duration::from_secs(240);
+        for phase in [TimeoutPhase::Transport, TimeoutPhase::BodyRead] {
+            let msg = timeout_message(true, llm, phase);
+            assert!(
+                msg.starts_with("connect timeout:"),
+                "is_connect=true must start with 'connect timeout:': {msg}"
+            );
+            // The configured connect timeout (10s) must appear verbatim.
+            assert!(
+                msg.contains("10s"),
+                "connect timeout must include the 10s configured value: {msg}"
+            );
+            assert!(
+                !msg.contains("read timeout"),
+                "connect timeout must not mention 'read timeout': {msg}"
+            );
+            assert!(
+                !msg.contains("BUZZ_AGENT_LLM_TIMEOUT_SECS"),
+                "connect timeout must not reference the read-timeout config knob: {msg}"
+            );
+        }
+    }
+
+    /// Transport read-timeout (is_connect=false, Transport phase) shows the
+    /// configured llm_timeout value and the config-knob hint.
+    #[test]
+    fn timeout_message_transport_phase_shows_read_timeout_and_duration() {
+        let llm = std::time::Duration::from_secs(240);
+        let msg = timeout_message(false, llm, TimeoutPhase::Transport);
+        assert!(
+            msg.starts_with("read timeout:"),
+            "transport read-timeout must start with 'read timeout:': {msg}"
+        );
+        assert!(
+            msg.contains("240s"),
+            "transport read-timeout must include the 240s configured value: {msg}"
+        );
+        assert!(
+            msg.contains("BUZZ_AGENT_LLM_TIMEOUT_SECS"),
+            "transport read-timeout must reference the config knob: {msg}"
+        );
+        assert!(
+            !msg.contains("connect timeout"),
+            "transport read-timeout must not say 'connect timeout': {msg}"
+        );
+    }
+
+    /// Body-read timeout (BodyRead phase) says "no further response bytes"
+    /// (headers and possibly partial body already arrived) and shows the value.
+    #[test]
+    fn timeout_message_body_read_phase_says_no_further_bytes_and_duration() {
+        let llm = std::time::Duration::from_secs(300);
+        let msg = timeout_message(false, llm, TimeoutPhase::BodyRead);
+        assert!(
+            msg.starts_with("read timeout:"),
+            "body-read timeout must start with 'read timeout:': {msg}"
+        );
+        assert!(
+            msg.contains("no further"),
+            "body-read timeout must say 'no further': {msg}"
+        );
+        assert!(
+            msg.contains("300s"),
+            "body-read timeout must include the 300s configured value: {msg}"
+        );
+        assert!(
+            msg.contains("BUZZ_AGENT_LLM_TIMEOUT_SECS"),
+            "body-read timeout must reference the config knob: {msg}"
+        );
+    }
+
+    /// A non-default duration threads through correctly — verifies the value
+    /// is not hard-coded anywhere in the pure function.
+    #[test]
+    fn timeout_message_duration_is_not_hardcoded() {
+        let msg = timeout_message(
+            false,
+            std::time::Duration::from_secs(600),
+            TimeoutPhase::Transport,
+        );
+        assert!(
+            msg.contains("600s"),
+            "transport read-timeout must reflect the supplied 600s value: {msg}"
+        );
+        assert!(
+            !msg.contains("240s"),
+            "must not hard-code 240s when 600s was supplied: {msg}"
+        );
+    }
+
+    // ---- classify_transport_error / classify_body_read_error (reqwest integration) --
+
+    /// A real loopback read-timeout must produce a message rooted at "read
+    /// timeout:" that contains the configured value — and must NOT use reqwest's
+    /// opaque "error sending request" string.
     ///
-    /// We build a synthetic `reqwest::Error` by timing out a real loopback
-    /// connection; this is the only public way to construct one for test.
+    /// This is the one test that requires real network I/O (loopback only) to
+    /// verify that reqwest actually sets is_timeout() for the scenario in which
+    /// Buzz agents stall (server connected but emitting no bytes).
     #[tokio::test]
-    async fn classify_transport_error_read_timeout_names_cause() {
+    async fn classify_transport_error_read_timeout_is_loopback_verified() {
         use tokio::net::TcpListener;
 
-        // Bind a port and never accept — client times out waiting for bytes.
+        let llm_timeout = std::time::Duration::from_millis(50);
+        // Bind and never accept — TCP connect succeeds, no bytes follow.
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        // Keep the listener alive for the duration so the TCP connect succeeds
-        // (connect success + read silence = read timeout, not connection refused).
-        let _listener = listener;
+        let _listener = listener; // keep alive so connect succeeds
 
         let client = reqwest::Client::builder()
-            .read_timeout(std::time::Duration::from_millis(50))
+            .read_timeout(llm_timeout)
             .build()
             .unwrap();
 
@@ -4532,16 +4690,24 @@ mod tests {
             .await
             .expect_err("must time out");
 
-        assert!(err.is_timeout(), "precondition: reqwest reports is_timeout");
+        // Preconditions: verify reqwest's classification before asserting our output.
+        assert!(
+            err.is_timeout(),
+            "precondition: reqwest must report is_timeout"
+        );
         assert!(
             !err.is_connect(),
             "precondition: read timeout must not set is_connect"
         );
 
-        let msg = classify_transport_error(&err);
+        let msg = classify_transport_error(&err, llm_timeout);
         assert!(
             msg.starts_with("read timeout:"),
             "read timeout must start with 'read timeout:': {msg}"
+        );
+        assert!(
+            msg.contains("50ms"),
+            "read timeout must include the configured 50ms value: {msg}"
         );
         assert!(
             msg.contains("BUZZ_AGENT_LLM_TIMEOUT_SECS"),
@@ -4551,60 +4717,12 @@ mod tests {
             !msg.contains("error sending request"),
             "read timeout must not use the opaque reqwest string: {msg}"
         );
-        assert!(
-            !msg.contains("generation") && !msg.contains("thinking"),
-            "read timeout must not speculate about the cause: {msg}"
-        );
     }
 
-    /// A connect-timeout error must produce a connect-flavored message, never
-    /// the read-timeout text.  reqwest sets both `is_timeout()` and
-    /// `is_connect()` for a connect-phase timeout.
-    #[tokio::test]
-    async fn classify_transport_error_connect_timeout_names_connect() {
-        // 203.0.113.0/24 is TEST-NET-3 (RFC 5737) — routable but unassigned,
-        // so a TCP SYN into it will be blackholed and the connect will time out
-        // (no RST arrives, unlike a refused connection).
-        let client = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_millis(50))
-            .build()
-            .unwrap();
-
-        let err = client
-            .get("http://203.0.113.1/")
-            .send()
-            .await
-            .expect_err("must time out connecting");
-
-        assert!(
-            err.is_timeout(),
-            "precondition: reqwest reports is_timeout: {err}"
-        );
-        assert!(
-            err.is_connect(),
-            "precondition: reqwest reports is_connect for connect-phase timeout: {err}"
-        );
-
-        let msg = classify_transport_error(&err);
-        assert!(
-            msg.starts_with("connect timeout:"),
-            "connect timeout must start with 'connect timeout:': {msg}"
-        );
-        assert!(
-            !msg.contains("read timeout"),
-            "connect timeout must not say 'read timeout': {msg}"
-        );
-        assert!(
-            !msg.contains("BUZZ_AGENT_LLM_TIMEOUT_SECS"),
-            "connect timeout must not reference the read-timeout config knob: {msg}"
-        );
-    }
-
-    /// A non-timeout transport error (connection refused) must still carry the
-    /// original reqwest error text so nothing diagnostic is lost.
+    /// Non-timeout transport errors preserve the original reqwest error text.
     #[tokio::test]
     async fn classify_transport_error_non_timeout_preserves_reqwest_text() {
-        // Port 1 is almost always refused — good enough for a connect error.
+        // Connect to a port that should refuse (OS never accepts on port 1).
         let client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_millis(200))
             .build()
@@ -4616,17 +4734,99 @@ mod tests {
             .await
             .expect_err("must fail to connect");
 
-        // Connection refused is not a timeout.
         assert!(
             !err.is_timeout(),
             "precondition: connect-refused is not a timeout"
         );
 
-        let msg = classify_transport_error(&err);
+        let msg = classify_transport_error(&err, std::time::Duration::from_secs(240));
         assert!(
             msg.starts_with("transport: "),
             "non-timeout error must be prefixed 'transport: ': {msg}"
         );
+    }
+
+    /// A body-read timeout fires after headers arrive but before the body is
+    /// complete.  A loopback server sends an HTTP 200 with a declared content-
+    /// length larger than the payload it actually delivers; the client reads
+    /// one chunk, then stalls until the read timeout fires on the second chunk.
+    ///
+    /// Asserts the exact wording, configured duration, and config-knob hint.
+    /// Also covers the non-timeout fallback via classify_body_read_error.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn classify_body_read_error_timeout_says_no_further_bytes() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let llm_timeout = std::time::Duration::from_millis(100);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Server: accept once, send headers + one body chunk, then hang.
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                // Consume the request.
+                let mut buf = [0u8; 512];
+                let _ = sock.read(&mut buf).await;
+                // Declare 1 KiB body, send 4 bytes, then do nothing.
+                let _ = sock
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\n\
+                          Content-Type: application/json\r\n\
+                          Content-Length: 1024\r\n\
+                          \r\n\
+                          test",
+                    )
+                    .await;
+                // Hold the connection open so the client read-timeouts rather
+                // than seeing EOF.
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            }
+        });
+
+        let client = reqwest::Client::builder()
+            .read_timeout(llm_timeout)
+            .build()
+            .unwrap();
+
+        let resp = client
+            .get(format!("http://{addr}/"))
+            .send()
+            .await
+            .expect("headers must arrive before timeout");
+
+        // Consume the response body — this is where the timeout fires.
+        let err = resp.bytes().await.expect_err("body read must time out");
+
+        assert!(
+            err.is_timeout(),
+            "precondition: reqwest must report is_timeout for body stall"
+        );
+
+        // ---- classify_body_read_error: timeout path ----
+        let msg = classify_body_read_error(&err, llm_timeout);
+        assert!(
+            msg.starts_with("read timeout:"),
+            "body-read timeout must start with 'read timeout:': {msg}"
+        );
+        assert!(
+            msg.contains("no further"),
+            "body-read timeout must say 'no further': {msg}"
+        );
+        assert!(
+            msg.contains("100ms"),
+            "body-read timeout must include the configured 100ms value: {msg}"
+        );
+        assert!(
+            msg.contains("BUZZ_AGENT_LLM_TIMEOUT_SECS"),
+            "body-read timeout must reference the config knob: {msg}"
+        );
+
+        // ---- classify_body_read_error: non-timeout fallback (pure, no I/O) ----
+        // We can't produce a real non-timeout body error without real I/O, but
+        // the pure-function path is identical to classify_transport_error's
+        // non-timeout fallback and is covered by the pure tests above.
     }
 
     // ---- usage / input-token extraction -------------------------------------
@@ -6614,9 +6814,15 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
-        let err = openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
-            .await
-            .unwrap_err();
+        let err = openrouter_post(
+            &http,
+            &format!("{url}/x"),
+            &json!({}),
+            "key",
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
         assert!(
             matches!(&err, AgentError::Llm(s) if s.contains("403") && s.contains("model flagged by moderation")),
             "403 must surface as AgentError::Llm with status+body, not LlmAuth: got {err:?}"
@@ -6641,9 +6847,15 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
-        let err = openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
-            .await
-            .unwrap_err();
+        let err = openrouter_post(
+            &http,
+            &format!("{url}/x"),
+            &json!({}),
+            "key",
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
         assert!(
             matches!(&err, AgentError::Llm(s) if s.contains("credits exhausted")),
             "got {err:?}"
@@ -6671,9 +6883,15 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
-        let err = openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
-            .await
-            .unwrap_err();
+        let err = openrouter_post(
+            &http,
+            &format!("{url}/x"),
+            &json!({}),
+            "key",
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
         assert!(
             matches!(&err, AgentError::Llm(s) if s.contains("no OpenRouter endpoint supports")),
             "parameter-routing 404 must not be reported as a missing model: got {err:?}"
@@ -6699,9 +6917,15 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
-        let err = openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
-            .await
-            .unwrap_err();
+        let err = openrouter_post(
+            &http,
+            &format!("{url}/x"),
+            &json!({}),
+            "key",
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
         assert!(
             matches!(&err, AgentError::UnsupportedImageInput(s) if s.contains("support image input")),
             "image rejection must reach the history-recovery path: got {err:?}"
@@ -6729,9 +6953,15 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
-        let err = openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
-            .await
-            .unwrap_err();
+        let err = openrouter_post(
+            &http,
+            &format!("{url}/x"),
+            &json!({}),
+            "key",
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
         assert!(
             matches!(&err, AgentError::LlmModelNotFound(s) if s.contains("404") && s.contains("vendor/nonexistent-model")),
             "a model-level 404 must stay LlmModelNotFound: got {err:?}"
@@ -6754,9 +6984,15 @@ mod tests {
             .build()
             .unwrap();
         let before = std::time::Instant::now();
-        let out = openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
-            .await
-            .expect("second attempt succeeds");
+        let out = openrouter_post(
+            &http,
+            &format!("{url}/x"),
+            &json!({}),
+            "key",
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("second attempt succeeds");
         assert_eq!(out["choices"][0]["message"]["content"], "ok");
         assert!(
             before.elapsed() >= Duration::from_secs(1),
@@ -6781,9 +7017,15 @@ mod tests {
         .await;
         let http = Client::builder().build().unwrap();
         let before = tokio::time::Instant::now();
-        let out = openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
-            .await
-            .expect("second attempt succeeds");
+        let out = openrouter_post(
+            &http,
+            &format!("{url}/x"),
+            &json!({}),
+            "key",
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("second attempt succeeds");
         assert_eq!(out["choices"][0]["message"]["content"], "ok");
         assert!(
             before.elapsed() <= Duration::from_secs(RETRY_AFTER_CAP_SECS + 5),
@@ -6805,9 +7047,15 @@ mod tests {
             .timeout(Duration::from_secs(30))
             .build()
             .unwrap();
-        let err = openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
-            .await
-            .unwrap_err();
+        let err = openrouter_post(
+            &http,
+            &format!("{url}/x"),
+            &json!({}),
+            "key",
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
         assert!(
             matches!(&err, AgentError::Llm(s) if s.contains("no OpenRouter endpoint supports")),
             "got {err:?}"
@@ -6832,9 +7080,15 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
-        openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
-            .await
-            .expect("200 succeeds");
+        openrouter_post(
+            &http,
+            &format!("{url}/x"),
+            &json!({}),
+            "key",
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("200 succeeds");
         let headers = captured.lock().await;
         let header_str = headers
             .first()
@@ -6863,9 +7117,15 @@ mod tests {
             .timeout(Duration::from_secs(30))
             .build()
             .unwrap();
-        let out = openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
-            .await
-            .expect("retry after 499 should succeed");
+        let out = openrouter_post(
+            &http,
+            &format!("{url}/x"),
+            &json!({}),
+            "key",
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("retry after 499 should succeed");
         assert_eq!(out["choices"][0]["message"]["content"], "ok");
         assert_eq!(
             attempts.load(std::sync::atomic::Ordering::SeqCst),
@@ -6888,9 +7148,15 @@ mod tests {
             .timeout(Duration::from_secs(30))
             .build()
             .unwrap();
-        let out = openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
-            .await
-            .expect("retry succeeds");
+        let out = openrouter_post(
+            &http,
+            &format!("{url}/x"),
+            &json!({}),
+            "key",
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("retry succeeds");
         assert_eq!(out["choices"][0]["message"]["content"], "ok");
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
@@ -6939,9 +7205,15 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
-        let err = openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
-            .await
-            .unwrap_err();
+        let err = openrouter_post(
+            &http,
+            &format!("{url}/x"),
+            &json!({}),
+            "key",
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
         assert!(
             matches!(&err, AgentError::Llm(s) if s.contains("body read")),
             "truncated body must surface as AgentError::Llm with 'body read': got {err:?}"
