@@ -1073,6 +1073,13 @@ async fn apply_model_switch(
         }
         ModelSwitchMethod::SetModel { .. } => "set_model".to_string(),
     };
+    // The RPC this switch actually sends, for the outer-timeout error below.
+    // `method_label` above is prose for humans; naming the wrong method in an
+    // error would be worse than naming none.
+    let rpc_method = match method {
+        ModelSwitchMethod::ConfigOption { .. } => "session/set_config_option",
+        ModelSwitchMethod::SetModel { .. } => "session/set_model",
+    };
 
     let result = tokio::time::timeout(MODEL_SWITCH_TIMEOUT, async {
         match method {
@@ -1101,7 +1108,7 @@ async fn apply_model_switch(
         // so the caller can respawn the agent instead of reusing a poisoned one.
         Ok(Err(e @ AcpError::Io(_)))
         | Ok(Err(e @ AcpError::WriteTimeout(_)))
-        | Ok(Err(e @ AcpError::Timeout(_)))
+        | Ok(Err(e @ AcpError::Timeout { .. }))
         | Ok(Err(e @ AcpError::Protocol(_)))
         | Ok(Err(e @ AcpError::AgentExited)) => {
             tracing::error!(
@@ -1124,7 +1131,10 @@ async fn apply_model_switch(
                 target: "pool::model",
                 "model set via {method_label} timed out ({MODEL_SWITCH_TIMEOUT:?}) — treating as fatal"
             );
-            return Err(AcpError::Timeout(MODEL_SWITCH_TIMEOUT));
+            return Err(AcpError::Timeout {
+                method: rpc_method,
+                elapsed: MODEL_SWITCH_TIMEOUT,
+            });
         }
     }
     Ok(())
@@ -1177,7 +1187,7 @@ async fn apply_permission_mode(
         // so the caller can respawn the agent.
         Ok(Err(e @ AcpError::Io(_)))
         | Ok(Err(e @ AcpError::WriteTimeout(_)))
-        | Ok(Err(e @ AcpError::Timeout(_)))
+        | Ok(Err(e @ AcpError::Timeout { .. }))
         | Ok(Err(e @ AcpError::Protocol(_)))
         | Ok(Err(e @ AcpError::AgentExited)) => {
             tracing::error!(
@@ -1199,7 +1209,10 @@ async fn apply_permission_mode(
                 target: "pool::permission",
                 "permission mode set timed out ({PERMISSION_MODE_TIMEOUT:?}) — treating as fatal"
             );
-            return Err(AcpError::Timeout(PERMISSION_MODE_TIMEOUT));
+            return Err(AcpError::Timeout {
+                method: "session/set_config_option",
+                elapsed: PERMISSION_MODE_TIMEOUT,
+            });
         }
     }
     Ok(())
