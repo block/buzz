@@ -12,6 +12,7 @@ mod huddle;
 mod identity_storage;
 mod initial_window;
 mod key_backup;
+mod link_preview_tags;
 mod linux_media;
 #[cfg(target_os = "macos")]
 mod macos_notifications;
@@ -82,7 +83,6 @@ use tauri::{Emitter, Manager, RunEvent, WindowEvent};
 use tauri_plugin_window_state::StateFlags;
 #[cfg(target_os = "macos")]
 use tray_menu::show_main_window;
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // mesh-llm's async chains (model download, node start/join) overflow
@@ -672,7 +672,7 @@ pub fn run() {
             get_relay_ws_url,
             get_relay_http_url,
             get_media_proxy_port,
-            fetch_link_preview_title,
+            fetch_link_preview_metadata,
             discover_acp_auth_methods,
             discover_acp_providers,
             discover_git_bash_prerequisite,

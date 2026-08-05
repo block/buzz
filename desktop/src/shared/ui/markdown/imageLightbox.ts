@@ -316,9 +316,15 @@ function imageGalleryItemFromTrigger(
     return null;
   }
 
+  const image = trigger.querySelector("img");
+  const inferredDim =
+    image && image.naturalWidth > 0 && image.naturalHeight > 0
+      ? `${image.naturalWidth}x${image.naturalHeight}`
+      : undefined;
+
   return {
     alt: trigger.dataset.imageLightboxAlt || undefined,
-    dim: trigger.dataset.imageLightboxDim || undefined,
+    dim: trigger.dataset.imageLightboxDim || inferredDim,
     resolvedSrc,
     src: trigger.dataset.imageLightboxSrc || undefined,
     thumbnailBox: thumbnail?.box,
@@ -402,4 +408,26 @@ export function visibleImageGalleryForTrigger(
     galleryIndex,
     galleryItems: galleryItems.length > 1 ? galleryItems : undefined,
   };
+}
+
+export function getImageLightboxFocusableElements(
+  container: HTMLElement,
+): HTMLElement[] {
+  return Array.from(
+    container.querySelectorAll<HTMLElement>(
+      [
+        "a[href]",
+        "button:not(:disabled)",
+        "input:not(:disabled)",
+        "select:not(:disabled)",
+        "textarea:not(:disabled)",
+        "[tabindex]:not([tabindex='-1'])",
+      ].join(","),
+    ),
+  ).filter(
+    (element) =>
+      !element.hasAttribute("disabled") &&
+      element.getAttribute("aria-hidden") !== "true" &&
+      element.getClientRects().length > 0,
+  );
 }

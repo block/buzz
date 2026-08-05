@@ -659,14 +659,23 @@ pub(crate) fn spawn_transcription_task(
                 .clone();
 
             let p_tags: Vec<&str> = agent_pubkeys.iter().map(|s| s.as_str()).collect();
-            let builder =
-                match events::build_message(channel_uuid, &t, None, &p_tags, &[], &[], &[]) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        eprintln!("buzz-desktop: STT build_message: {e}");
-                        continue;
-                    }
-                };
+            let builder = match events::build_message(
+                channel_uuid,
+                &t,
+                None,
+                &p_tags,
+                &[],
+                &[],
+                &[],
+                &[],
+                &crate::relay::relay_api_base_url(),
+            ) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("buzz-desktop: STT build_message: {e}");
+                    continue;
+                }
+            };
             // Wait before signing: the relay enforces NIP-98 freshness (±60s)
             // and the gate may hold for up to MAX_HINT_SECONDS (300s). Sign
             // the kind event and build NIP-98 auth after the wait so both

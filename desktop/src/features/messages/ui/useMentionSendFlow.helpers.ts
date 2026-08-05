@@ -36,6 +36,7 @@ export type SendMessageWithMentionFlowInput = {
   capturedThreadContext?: PendingNonMemberMentionSend["capturedThreadContext"];
   pendingImeta: ImetaMedia[];
   queuedAttachments?: QueuedMediaAttachment[];
+  linkPreviewTags?: string[][];
   sentDraftKey: string | null | undefined;
   recoveryDraftKey: string | null | undefined;
   spoileredAttachmentUrls?: ReadonlySet<string>;

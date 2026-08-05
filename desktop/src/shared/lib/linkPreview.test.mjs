@@ -71,12 +71,12 @@ test("parseSupportedLinkPreview parses Buzz relay git clone URLs", () => {
       typeLabel: "repo",
     },
   );
-  // Same URL without a matching origin stays external.
+  // Same URL without a matching origin stays an ordinary external preview.
   assert.equal(
     parseSupportedLinkPreview(
       `https://buzz.block.builderlab.xyz/git/${BUZZ_OWNER}/buzz-world-galaxy`,
-    ),
-    null,
+    )?.kind,
+    "generic-link",
   );
 });
 
@@ -108,10 +108,10 @@ test("parseSupportedLinkPreview rejects malformed Buzz git URLs", () => {
     // Deeper transport paths are not repo links.
     `https://relay.example/git/${BUZZ_OWNER}/repo/info/refs`,
   ]) {
-    // Even with a matching origin, structural issues return null.
+    // Structural non-matches remain ordinary external previews.
     assert.equal(
-      parseSupportedLinkPreview(href, "https://relay.example"),
-      null,
+      parseSupportedLinkPreview(href, "https://relay.example")?.kind,
+      "generic-link",
       href,
     );
   }
@@ -123,8 +123,8 @@ test("parseSupportedLinkPreview rejects clone URLs from non-relay hosts", () => 
     parseSupportedLinkPreview(
       `https://evil.example/git/${BUZZ_OWNER}/my-repo`,
       "https://buzz.block.builderlab.xyz",
-    ),
-    null,
+    )?.kind,
+    "generic-link",
   );
   // github.com sharing the path shape must never become a Buzz repo card.
   assert.equal(
@@ -139,8 +139,8 @@ test("parseSupportedLinkPreview rejects clone URLs from non-relay hosts", () => 
     parseSupportedLinkPreview(
       `https://buzz.block.builderlab.xyz/git/${BUZZ_OWNER}/buzz-world`,
       null,
-    ),
-    null,
+    )?.kind,
+    "generic-link",
   );
 });
 
@@ -288,8 +288,8 @@ test("extractSupportedLinkPreviews picks up bare Buzz clone URLs in prose", () =
   assert.deepEqual(
     extractSupportedLinkPreviews(
       `clone: https://buzz.block.builderlab.xyz/git/${BUZZ_OWNER}/buzz-world-galaxy`,
-    ),
-    [],
+    ).map((preview) => preview.kind),
+    ["generic-link"],
   );
 });
 
@@ -323,6 +323,7 @@ test("clone URLs and buzz://repo links for the same repo dedupe to one card", ()
         `https://relay.example/git/${BUZZ_OWNER}/buzz-world-galaxy`,
         `buzz://repo?owner=${BUZZ_OWNER}&d=buzz-world-galaxy`,
       ].join(" "),
+      "https://relay.example",
     ).map((preview) => preview.href),
     [`buzz://repo?owner=${BUZZ_OWNER}&d=buzz-world-galaxy`],
   );
@@ -412,7 +413,7 @@ test("extractSupportedLinkPreviews skips markdown image link URLs", () => {
   );
 });
 
-test("extractSupportedLinkPreviews requires bare URL boundaries", () => {
+test("extractSupportedLinkPreviews treats other absolute HTTPS URLs as generic", () => {
   assert.deepEqual(
     extractSupportedLinkPreviews(
       [
@@ -421,7 +422,7 @@ test("extractSupportedLinkPreviews requires bare URL boundaries", () => {
         "(https://github.com/block/sprout/pull/2)",
       ].join(" "),
     ).map((preview) => preview.title),
-    ["block/sprout #2"],
+    ["evil-github.com", "example.com", "block/sprout #2"],
   );
 });
 
@@ -467,105 +468,38 @@ test("isSupportedLinkAutolinkLabel matches normalized bare URL labels", () => {
   assert.equal(isSupportedLinkAutolinkLabel("review this", preview), false);
 });
 
-// ── useResolvedLinkPreviews: behavioral regression pins ──────────────────────
-//
-// These tests pin the three behaviors that were implemented without tests in
-// the initial fix round. They use the exported pure helpers directly so no
-// React hook environment is required.
-
-import {
-  getLinkPreviewCacheGeneration,
-  resetLinkPreviewTitleCache,
-  shouldResolveTitle,
-} from "./useResolvedLinkPreviews.ts";
-import { buzzEntityFallbackTitle } from "./linkPreview.ts";
-
-const OWNER_HEX =
-  "71d67180ba17e749ee825fc8819c9c6ee7003617e1c126504f9b658070ab9224";
-const EVENT_HEX =
-  "c3b589fa5713ba25bad6dc095e2de00a4ac8f50050fdea00fc6444e603be1dd1";
-
-function makePrPreview(title) {
-  return {
-    kind: "buzz-pull-request",
-    href: `buzz://pr?id=${EVENT_HEX}&owner=${OWNER_HEX}&d=buzz-world`,
-    title,
-    provider: "Buzz",
-    typeLabel: "pr",
-  };
-}
-
-// 1. Cache epoch: stale promise cannot seed the new generation.
-//    `resetLinkPreviewTitleCache` must increment the generation counter so that
-//    a promise captured before the reset sees a different generation and skips
-//    writing back.
-test("resetLinkPreviewTitleCache_incrementsGenerationCounter", () => {
-  const before = getLinkPreviewCacheGeneration();
-  resetLinkPreviewTitleCache();
-  const after = getLinkPreviewCacheGeneration();
-  assert.equal(after, before + 1, "each reset must bump the generation by 1");
-  resetLinkPreviewTitleCache();
-  assert.equal(
-    getLinkPreviewCacheGeneration(),
-    before + 2,
-    "second reset must increment again",
+test("parseSupportedLinkPreview parses generic HTTPS URLs", () => {
+  assert.deepEqual(
+    parseSupportedLinkPreview("https://example.com/articles/rich-previews"),
+    {
+      kind: "generic-link",
+      href: "https://example.com/articles/rich-previews",
+      provider: "example.com",
+      title: "example.com",
+      typeLabel: "link",
+    },
   );
 });
 
-// 2. Mismatched a-tag: shouldResolveTitle uses buzzEntityFallbackTitle to
-//    decide whether to attempt a relay lookup. When the link's href parses to a
-//    PR/issue with the expected fallback title, resolution should proceed. When
-//    the title has already been set to something else (explicit label or earlier
-//    relay result), shouldResolveTitle must return false so the label wins.
-test("shouldResolveTitle_fallbackTitle_returnsTrue", () => {
-  const parsed = {
-    ok: true,
-    value: { type: "pr", id: EVENT_HEX, owner: OWNER_HEX, dtag: "buzz-world" },
-  };
-  // Construct the expected fallback title and verify shouldResolveTitle allows lookup.
-  const fallback = buzzEntityFallbackTitle(parsed.value);
-  const preview = makePrPreview(fallback);
+test("parseSupportedLinkPreview rejects generic HTTP URLs", () => {
   assert.equal(
-    shouldResolveTitle(preview),
-    true,
-    "fallback title should trigger relay lookup",
+    parseSupportedLinkPreview("http://example.com/articles/rich-previews"),
+    null,
   );
 });
 
-test("shouldResolveTitle_customLabel_returnsFalse_labelMustWin", () => {
-  // User has written `[My custom PR title](buzz://pr?...)` — the label must
-  // win; shouldResolveTitle must return false to skip writing the relay title.
-  const preview = makePrPreview("My custom PR title");
-  assert.equal(
-    shouldResolveTitle(preview),
-    false,
-    "custom label must suppress relay title lookup (label-must-win invariant)",
-  );
-});
-
-// 3. Label-rerender: converting a bare link to `[label](link)` changes the
-//    preview title away from the fallback — shouldResolveTitle transitions
-//    from true to false, so a cached relay title is not applied.
-test("shouldResolveTitle_transitionsFromTrueToFalseWhenLabelApplied", () => {
-  const parsed = {
-    ok: true,
-    value: { type: "pr", id: EVENT_HEX, owner: OWNER_HEX, dtag: "buzz-world" },
-  };
-  const fallback = buzzEntityFallbackTitle(parsed.value);
-
-  // Before the label: bare link with fallback title — should resolve.
-  const barePreview = makePrPreview(fallback);
-  assert.equal(
-    shouldResolveTitle(barePreview),
-    true,
-    "bare link should resolve",
-  );
-
-  // After the label: same href but title is now the user's label — must NOT resolve.
-  const labeledPreview = makePrPreview("My labeled PR");
-  assert.equal(
-    shouldResolveTitle(labeledPreview),
-    false,
-    "labeled link must not overwrite label with cached relay title",
+test("extractSupportedLinkPreviews finds generic links and preserves exclusions", () => {
+  assert.deepEqual(
+    extractSupportedLinkPreviews(
+      [
+        "Read https://example.com/article first.",
+        "`https://hidden.example.com/secret`",
+        "then [the details](https://docs.example.org/details)",
+      ].join(" "),
+    ).map(({ kind, title }) => ({ kind, title })),
+    [
+      { kind: "generic-link", title: "example.com" },
+      { kind: "generic-link", title: "the details" },
+    ],
   );
 });

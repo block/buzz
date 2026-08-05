@@ -57,6 +57,7 @@ import { usePersistentAgentMentionHydration } from "./usePersistentAgentMentionH
 import { useComposerContentState } from "./useComposerContentState";
 import { useDraftPersistLifecycle } from "./useDraftPersistSnapshot";
 import { submitMessageEdit } from "./submitMessageEdit";
+import { useComposerLinkPreviews } from "./useComposerLinkPreviews";
 import type { MessageComposerProps } from "./MessageComposer.types";
 function MessageComposerImpl({
   audienceContext = null,
@@ -98,6 +99,12 @@ function MessageComposerImpl({
     syncComposerContentFromEditor,
     syncContentRefFromEditorRef,
   } = useComposerContentState();
+  const [previewContent, setPreviewContent] = React.useState("");
+  const deferredPreviewContent = React.useDeferredValue(previewContent);
+  const {
+    previewList: composerLinkPreviews,
+    getReadyTags: getReadyLinkPreviewTags,
+  } = useComposerLinkPreviews(deferredPreviewContent);
   const [isEmojiPickerOpen, setIsEmojiPickerOpen] = React.useState(false);
   const [isFormattingOpen, setIsFormattingOpen] = React.useState(false);
   const [spoileredAttachmentUrls, setSpoileredAttachmentUrls] = React.useState<
@@ -255,8 +262,9 @@ function MessageComposerImpl({
     onEditLink: (info) => onEditLinkRef.current?.(info),
     onLinkSelectionChange: (info) => onLinkSelectionChangeRef.current?.(info),
     onLinkShortcut: () => onLinkShortcutRef.current?.() ?? false,
-    onUpdate: ({ cursor, text }) => {
+    onUpdate: ({ cursor, linkPreviewContent, text }) => {
       setComposerContentFromText(text);
+      setPreviewContent(linkPreviewContent);
       mentions.updateMentionQuery(text, cursor);
       channelLinks.updateChannelQuery(text, cursor);
       emojiAutocomplete.updateEmojiQuery(text, cursor);
@@ -499,7 +507,6 @@ function MessageComposerImpl({
     richText.focus,
     mentions.updateMentionQuery,
   ]);
-  // ── Submit message ──────────────────────────────────────────────────
   const submitMessage = React.useCallback(async () => {
     const trimmed = syncComposerContentFromEditor().trim();
     // Edit mode
@@ -575,6 +582,7 @@ function MessageComposerImpl({
         capturedThreadContext,
         pendingImeta: currentPendingImeta,
         queuedAttachments: currentQueuedAttachments,
+        linkPreviewTags: getReadyLinkPreviewTags(),
         sentDraftKey: resolveSentDraftKey(
           effectiveDraftKeyRef.current,
           drafts.loadDraft,
@@ -595,6 +603,7 @@ function MessageComposerImpl({
     customEmoji,
     drafts.loadDraft,
     emojiAutocomplete.clearEmojis,
+    getReadyLinkPreviewTags,
     media.clearQueuedAttachments,
     media.pendingImetaRef,
     media.queuedAttachmentsRef,
@@ -699,7 +708,6 @@ function MessageComposerImpl({
         }
         return;
       }
-
       // Escape in edit mode
       if (
         event.key === "Escape" &&
@@ -725,14 +733,11 @@ function MessageComposerImpl({
       onCancelEdit,
     ],
   );
-
   // ── Media paste + ⌘K link shortcut via Tiptap editorProps ──────────
   const uploadFileRef = React.useRef(media.uploadFile);
   uploadFileRef.current = media.uploadFile;
-
   React.useEffect(() => {
     if (!richText.editor) return;
-
     richText.editor.setOptions({
       editorProps: {
         ...richText.editor.options.editorProps,
@@ -750,7 +755,6 @@ function MessageComposerImpl({
             }
             return true;
           }
-
           // --- Buzz code-block paste ---
           // The code block copy button writes a small Buzz marker alongside
           // plain text. Use it to paste back as a literal code block so Markdown
@@ -777,7 +781,6 @@ function MessageComposerImpl({
             scrollComposerToBottom();
             return true;
           }
-
           // Restore Buzz snapshots before normal styled-HTML normalization.
           if (handleAgentSnapshotPaste(event, media.setPendingImeta))
             return true;
@@ -789,18 +792,15 @@ function MessageComposerImpl({
             _view.pasteHTML(cleanHtml);
             return true;
           }
-
           const plainText = event.clipboardData?.getData("text/plain") ?? "";
           if (plainText.includes("\n")) {
             scrollComposerToBottom();
           }
-
           return false;
         },
       },
     });
   }, [media.setPendingImeta, richText.editor, scrollComposerToBottom]);
-
   // ── Send button state ───────────────────────────────────────────────
   const sendDisabled = React.useMemo(
     () =>
@@ -819,7 +819,6 @@ function MessageComposerImpl({
       media.queuedAttachments.length,
     ],
   );
-
   const handleCaptureSelection = React.useCallback(() => {}, []);
 
   const handlePaperclipClick = React.useCallback(() => {
@@ -951,6 +950,7 @@ function MessageComposerImpl({
               </div>
             ) : null}
 
+            {composerLinkPreviews}
             {(media.pendingImeta.length > 0 ||
               media.queuedAttachments.length > 0 ||
               media.isUploading) && (
