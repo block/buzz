@@ -28,6 +28,7 @@ class SettingsProfileHeader extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final profile = ref.watch(profileProvider).asData?.value;
     final status = ref.watch(userStatusProvider).asData?.value;
+    final hasStatus = status != null && !status.isEmpty;
     final presence = ref.watch(presenceProvider).value ?? 'offline';
 
     void openStatusSheet() =>
@@ -62,6 +63,29 @@ class SettingsProfileHeader extends ConsumerWidget {
             style: context.textTheme.titleMedium,
             textAlign: TextAlign.center,
           ),
+          // Keep the status text visible even when no emoji is set. NIP-38
+          // permits text-only statuses, which the avatar badge cannot represent.
+          if (hasStatus)
+            GestureDetector(
+              onTap: openStatusSheet,
+              child: Padding(
+                padding: const EdgeInsets.only(
+                  top: Grid.quarter,
+                  left: Grid.gutter,
+                  right: Grid.gutter,
+                  bottom: Grid.half,
+                ),
+                child: Text(
+                  status.text.isNotEmpty ? status.text : status.emoji,
+                  style: context.textTheme.bodySmall?.copyWith(
+                    color: context.colors.onSurfaceVariant,
+                  ),
+                  textAlign: TextAlign.center,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ),
           _PresencePill(
             presence: presence,
             onSelected: (nextPresence) => unawaited(

@@ -50,87 +50,98 @@ void main() {
     );
   });
 
-  testWidgets('replaces the status line with a changeable presence pill', (
-    tester,
-  ) async {
-    final presenceNotifier = _FakePresenceNotifier('away');
-    await tester.pumpWidget(
-      WidgetHelpers.testable(
-        overrides: [
-          profileProvider.overrideWith(_FakeProfileNotifier.new),
-          presenceProvider.overrideWith(() => presenceNotifier),
-          userStatusProvider.overrideWith(
-            () => _FakeUserStatusNotifier(
-              const UserStatus(text: 'Focusing', emoji: '🎯', updatedAt: 1),
+  testWidgets(
+    'keeps text-only status visible beside a changeable presence pill',
+    (tester) async {
+      final presenceNotifier = _FakePresenceNotifier('away');
+      await tester.pumpWidget(
+        WidgetHelpers.testable(
+          overrides: [
+            profileProvider.overrideWith(_FakeProfileNotifier.new),
+            presenceProvider.overrideWith(() => presenceNotifier),
+            userStatusProvider.overrideWith(
+              () => _FakeUserStatusNotifier(
+                const UserStatus(text: 'Focusing', emoji: '', updatedAt: 1),
+              ),
             ),
-          ),
-          customEmojiListProvider.overrideWithValue(const []),
-        ],
-        child: const SettingsProfileHeader(),
-      ),
-    );
-    await tester.pumpAndSettle();
+            customEmojiListProvider.overrideWithValue(const []),
+          ],
+          child: const SettingsProfileHeader(),
+        ),
+      );
+      await tester.pumpAndSettle();
 
-    expect(find.text('Focusing'), findsNothing);
-    expect(
-      find.byKey(const ValueKey('settings-presence-label')),
-      findsOneWidget,
-    );
-    expect(find.text('Away'), findsOneWidget);
-    expect(
-      tester
-          .widget<Text>(find.byKey(const ValueKey('settings-presence-label')))
-          .style
-          ?.fontSize,
-      filterChipTextStyle.fontSize,
-    );
-    expect(
-      tester
-          .getSize(find.byKey(const ValueKey('settings-presence-target')))
-          .height,
-      48,
-    );
-    expect(
-      tester
-          .getSize(find.byKey(const ValueKey('settings-presence-pill')))
-          .height,
-      greaterThanOrEqualTo(31),
-    );
+      expect(find.text('Focusing'), findsOneWidget);
+      await tester.tap(find.text('Focusing'));
+      await tester.pumpAndSettle();
+      expect(find.text('Set a status'), findsOneWidget);
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller?.text,
+        'Focusing',
+      );
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
 
-    final presenceTarget = find.byKey(
-      const ValueKey('settings-presence-target'),
-    );
-    final targetRect = tester.getRect(presenceTarget);
-    await tester.tapAt(Offset(targetRect.center.dx, targetRect.bottom - 1));
-    await tester.pump();
+      expect(
+        find.byKey(const ValueKey('settings-presence-label')),
+        findsOneWidget,
+      );
+      expect(find.text('Away'), findsOneWidget);
+      expect(
+        tester
+            .widget<Text>(find.byKey(const ValueKey('settings-presence-label')))
+            .style
+            ?.fontSize,
+        filterChipTextStyle.fontSize,
+      );
+      expect(
+        tester
+            .getSize(find.byKey(const ValueKey('settings-presence-target')))
+            .height,
+        48,
+      );
+      expect(
+        tester
+            .getSize(find.byKey(const ValueKey('settings-presence-pill')))
+            .height,
+        greaterThanOrEqualTo(31),
+      );
 
-    final scale = tester.widget<ScaleTransition>(
-      find.byKey(const ValueKey('activity-popover-scale')),
-    );
-    expect(scale.alignment, Alignment.topCenter);
-    expect(
-      find.byKey(const ValueKey('settings-presence-popover')),
-      findsOneWidget,
-    );
-    await tester.pumpAndSettle();
+      final presenceTarget = find.byKey(
+        const ValueKey('settings-presence-target'),
+      );
+      final targetRect = tester.getRect(presenceTarget);
+      await tester.tapAt(Offset(targetRect.center.dx, targetRect.bottom - 1));
+      await tester.pump();
 
-    expect(
-      find.byKey(const ValueKey('settings-presence-online')),
-      findsOneWidget,
-    );
-    expect(
-      find.byKey(const ValueKey('settings-presence-away')),
-      findsOneWidget,
-    );
-    expect(
-      find.byKey(const ValueKey('settings-presence-offline')),
-      findsOneWidget,
-    );
+      final scale = tester.widget<ScaleTransition>(
+        find.byKey(const ValueKey('activity-popover-scale')),
+      );
+      expect(scale.alignment, Alignment.topCenter);
+      expect(
+        find.byKey(const ValueKey('settings-presence-popover')),
+        findsOneWidget,
+      );
+      await tester.pumpAndSettle();
 
-    await tester.tap(find.byKey(const ValueKey('settings-presence-offline')));
-    await tester.pumpAndSettle();
-    expect(presenceNotifier.selected, ['offline']);
-  });
+      expect(
+        find.byKey(const ValueKey('settings-presence-online')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('settings-presence-away')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('settings-presence-offline')),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.byKey(const ValueKey('settings-presence-offline')));
+      await tester.pumpAndSettle();
+      expect(presenceNotifier.selected, ['offline']);
+    },
+  );
 }
 
 class _FakeProfileNotifier extends ProfileNotifier {
