@@ -16,6 +16,8 @@ import { DocumentEditorPane } from "@/features/documents/ui/DocumentEditorPane";
 import { DocumentTabBar } from "@/features/documents/ui/DocumentTabBar";
 import { DocumentTreePane } from "@/features/documents/ui/DocumentTreePane";
 import { DocumentBacklinksPanel } from "@/features/documents/ui/DocumentBacklinksPanel";
+import { DocumentOutlinePanel } from "@/features/documents/ui/DocumentOutlinePanel";
+import type { OutlineHeading } from "@/features/documents/lib/obsidianSyntax";
 import { getBacklinks } from "@/features/documents/lib/backlinks";
 import { buildNoteIndex } from "@/features/documents/lib/noteIndex";
 import { collectFilePaths } from "@/features/documents/lib/treeModel";
@@ -80,6 +82,20 @@ export function DocumentsView() {
       targetPath: activePath,
     });
   }, [activePath, contentsQuery.data, noteIndex]);
+
+  const [headings, setHeadings] = React.useState<OutlineHeading[]>([]);
+  const [activeHeading, setActiveHeading] = React.useState(-1);
+  // Set by the live editor once it mounts; the outline lives beside the editor
+  // rather than inside it, so it cannot reach the view directly.
+  const scrollToHeadingRef = React.useRef<((position: number) => void) | null>(
+    null,
+  );
+  const registerScroll = React.useCallback(
+    (scroll: ((position: number) => void) | null) => {
+      scrollToHeadingRef.current = scroll;
+    },
+    [],
+  );
 
   const handleWikilinkClick = React.useCallback(
     ({ exists, path }: { exists: boolean; path: string | null }) => {
@@ -274,7 +290,11 @@ export function DocumentsView() {
               hasExternalChange={session.externalChanges.has(
                 session.activeTab.path,
               )}
+              headings={headings}
               noteIndex={noteIndex}
+              onActiveHeadingChange={setActiveHeading}
+              onHeadingsChange={setHeadings}
+              onRegisterScroll={registerScroll}
               onWikilinkClick={handleWikilinkClick}
               onChange={(markdown) => {
                 if (session.activeTab) {
@@ -327,10 +347,19 @@ export function DocumentsView() {
               className="flex min-h-0 shrink-0 flex-col border-l border-border/60"
               style={{ width: `${rail.widthPx}px` }}
             >
-              <DocumentBacklinksPanel
-                backlinks={backlinks}
-                onOpen={(path) => void session.openFile(path)}
-              />
+              <div className="min-h-0 flex-1 overflow-y-auto">
+                <DocumentOutlinePanel
+                  activeIndex={activeHeading}
+                  headings={headings}
+                  onSelect={(heading) =>
+                    scrollToHeadingRef.current?.(heading.position)
+                  }
+                />
+                <DocumentBacklinksPanel
+                  backlinks={backlinks}
+                  onOpen={(path) => void session.openFile(path)}
+                />
+              </div>
             </div>
           </>
         ) : null}

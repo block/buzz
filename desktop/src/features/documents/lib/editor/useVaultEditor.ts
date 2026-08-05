@@ -18,8 +18,13 @@ import {
   type WikilinkClickHandler,
   type WikilinkStorage,
 } from "@/features/documents/lib/editor/wikilinkExtension";
+import {
+  obsidianSyntaxKey,
+  type ObsidianSyntaxStorage,
+} from "@/features/documents/lib/editor/obsidianSyntaxExtension";
 import { toDiskMarkdown } from "@/features/documents/lib/markdownEscapes";
 import type { NoteIndex } from "@/features/documents/lib/noteIndex";
+import type { OutlineHeading } from "@/features/documents/lib/obsidianSyntax";
 
 export type UseVaultEditorOptions = {
   /** Path of the note being edited, for same-folder wikilink resolution. */
@@ -31,6 +36,9 @@ export type UseVaultEditorOptions = {
   /** Ctrl/Cmd+S. */
   onSave: () => void;
   onWikilinkClick: WikilinkClickHandler;
+  /** Receives the heading list whenever the document changes. */
+  onHeadingsChange?: (headings: OutlineHeading[]) => void;
+  onTagClick?: (tag: string) => void;
 };
 
 function readMarkdown(editor: {
@@ -53,7 +61,9 @@ export function useVaultEditor({
   currentPath,
   noteIndex,
   onChange,
+  onHeadingsChange,
   onSave,
+  onTagClick,
   onWikilinkClick,
 }: UseVaultEditorOptions) {
   const onChangeRef = React.useRef(onChange);
@@ -117,6 +127,20 @@ export function useVaultEditor({
     editor.view.dispatch(editor.state.tr.setMeta(wikilinkKey, true));
   }, [currentPath, editor, noteIndex, onWikilinkClick]);
 
+  React.useEffect(() => {
+    if (!editor) return;
+    const storage = (editor.storage as unknown as Record<string, unknown>)
+      .documentsObsidianSyntax as ObsidianSyntaxStorage | undefined;
+    if (!storage) return;
+
+    storage.onHeadingsChange = onHeadingsChange ?? null;
+    storage.onTagClick = onTagClick ?? null;
+    // Publish the current headings immediately; the plugin only emits on
+    // change, so a freshly loaded document would otherwise show no outline.
+    onHeadingsChange?.(storage.headings);
+    editor.view.dispatch(editor.state.tr.setMeta(obsidianSyntaxKey, true));
+  }, [editor, onHeadingsChange, onTagClick]);
+
   /** Loads a document without marking it dirty. */
   const loadDocument = React.useCallback(
     (markdown: string) => {
@@ -131,6 +155,44 @@ export function useVaultEditor({
     [editor],
   );
 
+  /**
+   * Moves the caret to a document position and scrolls it into view. Used by
+   * the outline panel, which knows heading positions but not the editor.
+   */
+  const scrollToPosition = React.useCallback(
+    (position: number) => {
+      if (!editor) return;
+      editor.chain().focus().setTextSelection(position).scrollIntoView().run();
+    },
+    [editor],
+  );
+
+  /**
+   * Vertical offsets of `positions` relative to the scroll container, for
+   * scroll-spy. Returns an empty list when the view is not laid out yet.
+   */
+  const measureOffsets = React.useCallback(
+    (positions: readonly number[]): number[] => {
+      if (!editor?.view.dom.isConnected) return [];
+      const container = editor.view.dom.parentElement;
+      if (!container) return [];
+      const containerTop = container.getBoundingClientRect().top;
+      return positions.map((position) => {
+        try {
+          return (
+            editor.view.coordsAtPos(position).top -
+            containerTop +
+            container.scrollTop
+          );
+        } catch {
+          // A position can briefly be out of range mid-update.
+          return Number.POSITIVE_INFINITY;
+        }
+      });
+    },
+    [editor],
+  );
+
   const getMarkdown = React.useCallback((): string | null => {
     if (!editor) return null;
     try {
@@ -140,5 +202,11 @@ export function useVaultEditor({
     }
   }, [editor]);
 
-  return { editor, getMarkdown, loadDocument };
+  return {
+    editor,
+    getMarkdown,
+    loadDocument,
+    measureOffsets,
+    scrollToPosition,
+  };
 }

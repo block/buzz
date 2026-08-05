@@ -28,3 +28,71 @@
   text-decoration: underline dotted;
   text-underline-offset: 2px;
 }
+
+/* `==highlight==` */
+.documents-editor .obsidian-highlight {
+  background-color: color-mix(in oklab, var(--color-primary) 22%, transparent);
+  border-radius: 0.125rem;
+  padding: 0 0.125rem;
+}
+
+/* `%%comment%%` — Obsidian hides these when rendering, so mute them heavily. */
+.documents-editor .obsidian-comment {
+  color: var(--color-muted-foreground);
+  opacity: 0.6;
+}
+
+.documents-editor .obsidian-tag {
+  color: var(--color-primary);
+  cursor: pointer;
+}
+
+.documents-editor .obsidian-tag:hover {
+  text-decoration: underline;
+}
+
+/**
+ * Callouts. The accent is driven by a custom property so each type sets one
+ * value rather than repeating the whole rule, and all of them resolve through
+ * theme tokens so light mode stays readable — Onyx hardcodes hex colours that
+ * only work on a dark background.
+ */
+.documents-editor .callout {
+  --callout-accent: var(--color-muted-foreground);
+  background-color: color-mix(in oklab, var(--callout-accent) 10%, transparent);
+  border-left: 3px solid var(--callout-accent);
+  border-radius: 0.25rem;
+  padding: 0.5rem 0.75rem;
+}
+
+.documents-editor .callout-info,
+.documents-editor .callout-note,
+.documents-editor .callout-todo {
+  --callout-accent: var(--color-primary);
+}
+
+.documents-editor .callout-tip,
+.documents-editor .callout-success {
+  --callout-accent: var(--color-success, oklch(0.72 0.16 155));
+}
+
+.documents-editor .callout-warning,
+.documents-editor .callout-question {
+  --callout-accent: oklch(0.75 0.15 75);
+}
+
+.documents-editor .callout-danger,
+.documents-editor .callout-failure,
+.documents-editor .callout-bug {
+  --callout-accent: var(--color-destructive);
+}
+
+.documents-editor .callout-quote,
+.documents-editor .callout-summary,
+.documents-editor .callout-example {
+  --callout-accent: var(--color-muted-foreground);
+}
+
+.documents-editor .obsidian-task {
+  cursor: pointer;
+}

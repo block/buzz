@@ -6,6 +6,10 @@ import type { DocumentTab } from "@/features/documents/lib/documentTabs";
 import { useVaultEditor } from "@/features/documents/lib/editor/useVaultEditor";
 import type { WikilinkClickHandler } from "@/features/documents/lib/editor/wikilinkExtension";
 import type { NoteIndex } from "@/features/documents/lib/noteIndex";
+import {
+  activeHeadingIndex,
+  type OutlineHeading,
+} from "@/features/documents/lib/obsidianSyntax";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 
@@ -122,17 +126,25 @@ function DocumentSourceEditor({
 }
 
 function DocumentLiveEditor({
+  headings,
   noteIndex,
+  onActiveHeadingChange,
   onChange,
+  onHeadingsChange,
+  onRegisterScroll,
   onSave,
   onWikilinkClick,
   tab,
 }: {
   noteIndex: NoteIndex | null;
   onChange: (markdown: string) => void;
+  onActiveHeadingChange: (index: number) => void;
+  onHeadingsChange: (headings: OutlineHeading[]) => void;
+  onRegisterScroll: (scroll: ((position: number) => void) | null) => void;
   onSave: () => void;
   onWikilinkClick: WikilinkClickHandler;
   tab: DocumentTab;
+  headings: readonly OutlineHeading[];
 }) {
   /**
    * The last content this editor itself produced.
@@ -153,13 +165,40 @@ function DocumentLiveEditor({
     [onChange],
   );
 
-  const { editor, loadDocument } = useVaultEditor({
-    currentPath: tab.path,
-    noteIndex,
-    onChange: handleChange,
-    onSave,
-    onWikilinkClick,
-  });
+  const { editor, loadDocument, measureOffsets, scrollToPosition } =
+    useVaultEditor({
+      currentPath: tab.path,
+      noteIndex,
+      onChange: handleChange,
+      onHeadingsChange,
+      onSave,
+      onWikilinkClick,
+    });
+
+  // Hand the scroll function up so the outline panel (a sibling of this
+  // component) can jump to a heading.
+  React.useEffect(() => {
+    onRegisterScroll(editor ? scrollToPosition : null);
+    return () => onRegisterScroll(null);
+  }, [editor, onRegisterScroll, scrollToPosition]);
+
+  // Scroll-spy: recompute which heading is active as the editor scrolls.
+  React.useEffect(() => {
+    const container = editor?.view.dom.parentElement;
+    if (!container || headings.length === 0) {
+      onActiveHeadingChange(-1);
+      return;
+    }
+    const update = () => {
+      const offsets = measureOffsets(
+        headings.map((heading) => heading.position),
+      );
+      onActiveHeadingChange(activeHeadingIndex(offsets, container.scrollTop));
+    };
+    update();
+    container.addEventListener("scroll", update, { passive: true });
+    return () => container.removeEventListener("scroll", update);
+  }, [editor, headings, measureOffsets, onActiveHeadingChange]);
 
   React.useEffect(() => {
     if (!editor) return;
@@ -179,9 +218,13 @@ function DocumentLiveEditor({
 
 export function DocumentEditorPane({
   hasExternalChange,
+  headings,
   noteIndex,
+  onActiveHeadingChange,
   onChange,
+  onHeadingsChange,
   onKeepMine,
+  onRegisterScroll,
   onReload,
   onSave,
   onSetViewMode,
@@ -190,8 +233,12 @@ export function DocumentEditorPane({
 }: {
   hasExternalChange: boolean;
   noteIndex: NoteIndex | null;
+  onActiveHeadingChange: (index: number) => void;
   onChange: (markdown: string) => void;
+  onHeadingsChange: (headings: OutlineHeading[]) => void;
   onKeepMine: () => void;
+  onRegisterScroll: (scroll: ((position: number) => void) | null) => void;
+  headings: readonly OutlineHeading[];
   onReload: () => void;
   onSave: () => void;
   onSetViewMode: (mode: "live" | "source") => void;
@@ -241,9 +288,13 @@ export function DocumentEditorPane({
         // Remounting per path keeps the editor's history from leaking across
         // files — undo must never resurrect a different note's text.
         <DocumentLiveEditor
+          headings={headings}
           key={tab.path}
           noteIndex={noteIndex}
+          onActiveHeadingChange={onActiveHeadingChange}
           onChange={onChange}
+          onHeadingsChange={onHeadingsChange}
+          onRegisterScroll={onRegisterScroll}
           onSave={onSave}
           onWikilinkClick={onWikilinkClick}
           tab={tab}

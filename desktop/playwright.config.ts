@@ -26,6 +26,7 @@ export default defineConfig({
         "**/navigation.spec.ts",
         "**/documents-vault-empty.spec.ts",
         "**/documents-editing-autosave.spec.ts",
+        "**/documents-wikilinks-outline.spec.ts",
         "**/channels.spec.ts",
         "**/channel-shared-header-backdrop.spec.ts",
         "**/channel-composer-overflow.spec.ts",

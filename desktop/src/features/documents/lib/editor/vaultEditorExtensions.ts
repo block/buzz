@@ -16,6 +16,7 @@ import type { Extensions } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
 import { Markdown } from "tiptap-markdown";
 
+import { ObsidianSyntaxExtension } from "@/features/documents/lib/editor/obsidianSyntaxExtension";
 import { WikilinkExtension } from "@/features/documents/lib/editor/wikilinkExtension";
 
 export function vaultEditorExtensions(): Extensions {
@@ -48,8 +49,10 @@ export function vaultEditorExtensions(): Extensions {
       linkify: false,
       transformPastedText: false,
     }),
-    // Decoration-only: wikilinks stay plain text in the document, so they
-    // serialize back byte-identically and the round-trip guard still passes.
+    // Both decoration-only: wikilinks, callouts, highlights, comments and tags
+    // stay plain text in the document, so they serialize back byte-identically
+    // and the round-trip guard still passes.
     WikilinkExtension,
+    ObsidianSyntaxExtension,
   ];
 }
