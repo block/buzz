@@ -1758,6 +1758,97 @@ void main() {
       );
     });
 
+    testWidgets(
+      'still offers the unread jump once the user pages the target in',
+      (tester) async {
+        // The unread boundary sits further back than the automatic fetch cap
+        // can reach, so the initial load gives up before the target arrives.
+        // A user who keeps scrolling brings that page in themselves, and the
+        // jump control has to come back when it does.
+        List<NostrEvent> page(int from, int to) => [
+          for (var i = from; i < to; i++)
+            _textMsg(
+              id: 'msg$i',
+              pubkey: 'alice',
+              content: 'Message $i',
+              createdAt: 1000 + i,
+            ),
+        ];
+
+        final messagesNotifier = _FakeMessagesNotifier(
+          page(250, 300),
+          olderPages: [
+            page(200, 250),
+            page(150, 200),
+            page(100, 150),
+            page(50, 100),
+            page(0, 50),
+          ],
+        );
+        final channelsNotifier = _FakeChannelsNotifier(
+          [_testChannel],
+          observedUnread: {
+            _channelId: [
+              makeObservedUnreadEvent(
+                id: 'msg5',
+                createdAt: 1005,
+                rootId: null,
+                highPriority: false,
+                channelType: 'stream',
+                isThreadedReply: false,
+              ),
+            ],
+          },
+        );
+        final readState = _SynchronousReadStateNotifier(
+          const ReadStateState(
+            isReady: true,
+            pubkey: 'self',
+            contexts: {_channelId: 1004},
+            version: 0,
+          ),
+        );
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: const [],
+            messagesNotifier: messagesNotifier,
+            channelsNotifier: channelsNotifier,
+            readStateNotifier: readState,
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        // The cap is spent and the target is still missing, so no control yet.
+        expect(messagesNotifier.fetchOlderCalls, 4);
+        expect(
+          find.byKey(const ValueKey('channel-jump-to-oldest-unread')),
+          findsNothing,
+        );
+
+        // The user scrolls back until the notifier runs out of history.
+        final list = find.byKey(const ValueKey('channel-message-list'));
+        for (var i = 0; i < 40 && !messagesNotifier.reachedOldest; i++) {
+          await tester.drag(list, const Offset(0, 600));
+          await tester.pumpAndSettle();
+        }
+        expect(messagesNotifier.reachedOldest, isTrue);
+
+        // Tapping has to land on the unread message, not merely render a
+        // control: presence alone would pass even if the jump did nothing.
+        final unreadButton = find.byKey(
+          const ValueKey('channel-jump-to-oldest-unread'),
+        );
+        expect(unreadButton, findsOneWidget);
+        await tester.tap(unreadButton);
+        await tester.pumpAndSettle();
+        expect(findRichText('Message 5'), findsOneWidget);
+      },
+    );
+
     testWidgets('can jump back to latest after a non-drag user scroll', (
       tester,
     ) async {

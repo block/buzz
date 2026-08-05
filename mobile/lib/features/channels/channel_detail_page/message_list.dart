@@ -64,7 +64,6 @@ class _MessageList extends HookConsumerWidget {
         if (!hasInitialUnread ||
             hasUnreadDeepLink ||
             oldestUnreadMessageId.value != null ||
-            unreadBoundaryLoadFailed.value ||
             entries.isEmpty) {
           return null;
         }
@@ -104,6 +103,8 @@ class _MessageList extends HookConsumerWidget {
           return () => cancelled = true;
         }
 
+        // Giving up only stops further fetching. Resolution below still runs,
+        // so a target the user pages in later can still be offered.
         if (hasKnownTarget &&
             !hasLoadedFetchTarget &&
             !notifier.reachedOldest) {
