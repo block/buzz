@@ -3,8 +3,6 @@ mod app_state;
 mod archive;
 mod builderlab;
 mod commands;
-#[cfg(test)]
-mod csp_tests;
 mod deep_link;
 mod egress_guard;
 mod event_sync;

@@ -36,7 +36,7 @@
     ],
     "macOSPrivateApi": true,
     "security": {
-      "csp": "default-src 'self'; base-uri 'self'; form-action 'none'; frame-ancestors 'none'; object-src 'none'; script-src 'self' 'wasm-unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost buzz-media: http://buzz-media.localhost https: http: wss: ws:; img-src 'self' buzz-media: http://buzz-media.localhost data: blob: https: http:; media-src 'self' buzz-media: http://buzz-media.localhost data: blob: https: http:; worker-src 'self' blob:"
+      "csp": "default-src 'self'; base-uri 'self'; form-action 'none'; frame-ancestors 'none'; object-src 'none'; script-src 'self' 'wasm-unsafe-eval' https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm/vision_wasm_internal.js https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm/vision_wasm_nosimd_internal.js; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost buzz-media: http://buzz-media.localhost https: http: wss: ws:; img-src 'self' buzz-media: http://buzz-media.localhost data: blob: https: http:; media-src 'self' buzz-media: http://buzz-media.localhost data: blob: https: http:; worker-src 'self' blob:"
     }
   },
   "plugins": {

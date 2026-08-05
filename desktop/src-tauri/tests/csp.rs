@@ -5,6 +5,9 @@
 //! `vite preview`) can catch a policy that breaks the app. These tests pin the
 //! non-obvious sources the frontend actually needs, so a future tightening
 //! fails here instead of in a signed build.
+//!
+//! Kept as an integration test so the policy can be checked without the app
+//! crate having to declare a test-only module.
 
 use std::collections::HashMap;
 
@@ -41,12 +44,88 @@ fn script_src_allows_wasm_instantiation() {
     assert!(sources("script-src").contains(&"'wasm-unsafe-eval'".to_owned()));
 }
 
+/// The `MEDIAPIPE_WASM_BASE` literal the frontend hands to `FilesetResolver`.
+fn mediapipe_wasm_base() -> String {
+    const CAPTURE: &str = include_str!("../../src/features/profile/lib/animatedAvatarCapture.ts");
+
+    let after = CAPTURE
+        .split_once("const MEDIAPIPE_WASM_BASE =")
+        .expect("animatedAvatarCapture.ts declares MEDIAPIPE_WASM_BASE")
+        .1;
+    let url = after
+        .split_once('"')
+        .expect("MEDIAPIPE_WASM_BASE is a double-quoted string literal")
+        .1;
+    url.split_once('"')
+        .expect("MEDIAPIPE_WASM_BASE literal is terminated")
+        .0
+        .to_owned()
+}
+
 #[test]
-fn script_src_allows_the_mediapipe_loader_cdn() {
-    // `animatedAvatarCapture.ts` loads the pinned tasks-vision wasm loader from
-    // jsDelivr. The 32MB asset set is too large to vendor, so the CDN origin
-    // stays allowlisted; self-hosting it would let this source be dropped.
-    assert!(sources("script-src").contains(&"https://cdn.jsdelivr.net".to_owned()));
+fn script_src_pins_the_mediapipe_loader_urls() {
+    // `FilesetResolver.forVisionTasks` appends exactly one of these two files
+    // (it probes for wasm SIMD at runtime) and loads it via a `<script>` tag,
+    // so both must be allowed. Deriving them from the frontend constant keeps
+    // a version bump in `animatedAvatarCapture.ts` from silently outrunning the
+    // policy — the packaged app is the only place that would notice.
+    let base = mediapipe_wasm_base();
+    let allowed = sources("script-src");
+    for loader in ["vision_wasm_internal.js", "vision_wasm_nosimd_internal.js"] {
+        let url = format!("{base}/{loader}");
+        assert!(
+            allowed.contains(&url),
+            "script-src must allow the pinned loader {url}"
+        );
+    }
+}
+
+/// Whether a `script-src` source names one specific script rather than a host
+/// that could serve others. CSP keywords (`'self'`, `'wasm-unsafe-eval'`) pass;
+/// so does a full URL ending in `.js`, as long as its host isn't a wildcard.
+fn is_pinned_script_source(source: &str) -> bool {
+    if source.starts_with('\'') {
+        return true;
+    }
+    source.ends_with(".js") && !source.contains('*')
+}
+
+#[test]
+fn script_src_trusts_no_bare_origins() {
+    // The point of pinning full URLs: jsDelivr serves arbitrary npm and GitHub
+    // content, so allowing the origin would let any renderer injection that can
+    // append a `<script>` pull attacker-chosen code.
+    for source in sources("script-src") {
+        assert!(
+            is_pinned_script_source(&source),
+            "script-src must pin exact scripts, found broad source `{source}`"
+        );
+    }
+}
+
+#[test]
+fn pinned_script_source_rejects_broad_sources() {
+    // Guards the guard: the check above is only worth having if it fails on the
+    // shapes that reopen the allowlist.
+    for allowed in [
+        "'self'",
+        "'wasm-unsafe-eval'",
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm/vision_wasm_internal.js",
+    ] {
+        assert!(is_pinned_script_source(allowed), "{allowed} should pass");
+    }
+    for rejected in [
+        "https://cdn.jsdelivr.net",
+        "https://cdn.jsdelivr.net/npm/",
+        "https://*.jsdelivr.net/loader.js",
+        "https:",
+        "*",
+    ] {
+        assert!(
+            !is_pinned_script_source(rejected),
+            "{rejected} should be rejected"
+        );
+    }
 }
 
 #[test]
