@@ -88,43 +88,59 @@ fn mediapipe_wasm_base_matches_the_installed_package() {
     );
 }
 
+/// The npm scope the MediaPipe loader must come from. A CSP source ending in
+/// `/` is a path *prefix* — paths can't be wildcarded — so this admits any
+/// `@mediapipe` package while excluding the rest of what jsDelivr serves.
+const MEDIAPIPE_SCOPE: &str = "https://cdn.jsdelivr.net/npm/@mediapipe/";
+
 #[test]
-fn script_src_pins_the_mediapipe_loader_urls() {
-    // `FilesetResolver.forVisionTasks` appends exactly one of these two files
-    // (it probes for wasm SIMD at runtime) and loads it via a `<script>` tag,
-    // so both must be allowed. Deriving them from the frontend constant keeps
-    // a version bump in `animatedAvatarCapture.ts` from silently outrunning the
-    // policy — the packaged app is the only place that would notice.
-    let base = mediapipe_wasm_base();
+fn script_src_scopes_the_mediapipe_loader() {
+    // `FilesetResolver.forVisionTasks` loads `vision_wasm[_nosimd]_internal.js`
+    // via a `<script>` tag (which of the two depends on a runtime SIMD probe),
+    // so the loader URL the frontend builds has to fall inside the allowlisted
+    // prefix — checked here rather than discovered in a signed build.
     let allowed = sources("script-src");
-    for loader in ["vision_wasm_internal.js", "vision_wasm_nosimd_internal.js"] {
-        let url = format!("{base}/{loader}");
-        assert!(
-            allowed.contains(&url),
-            "script-src must allow the pinned loader {url}"
-        );
+    assert!(
+        allowed.contains(&MEDIAPIPE_SCOPE.to_owned()),
+        "script-src must allow {MEDIAPIPE_SCOPE}"
+    );
+
+    let base = mediapipe_wasm_base();
+    assert!(
+        base.starts_with(MEDIAPIPE_SCOPE),
+        "MEDIAPIPE_WASM_BASE ({base}) must sit under the allowlisted {MEDIAPIPE_SCOPE}"
+    );
+}
+
+/// How many path segments a source narrows to past its origin.
+fn path_depth(source: &str) -> usize {
+    let Some((_scheme, authority)) = source.split_once("://") else {
+        return 0;
+    };
+    match authority.split_once('/') {
+        Some((_host, path)) => path.split('/').filter(|part| !part.is_empty()).count(),
+        None => 0,
     }
 }
 
-/// Whether a `script-src` source names one specific script rather than a host
-/// that could serve others. CSP keywords (`'self'`, `'wasm-unsafe-eval'`) pass;
-/// so does a full URL ending in `.js`, as long as its host isn't a wildcard.
+/// Whether a `script-src` source is narrow enough to be worth allowing. CSP
+/// keywords (`'self'`, `'wasm-unsafe-eval'`) pass. A remote source must name a
+/// non-wildcard host *and* a path reaching at least a publisher scope — a bare
+/// origin, a scheme, or a registry root would put arbitrary third-party code
+/// one injected `<script>` away.
 fn is_pinned_script_source(source: &str) -> bool {
     if source.starts_with('\'') {
         return true;
     }
-    source.ends_with(".js") && !source.contains('*')
+    !source.contains('*') && path_depth(source) >= 2
 }
 
 #[test]
 fn script_src_trusts_no_bare_origins() {
-    // The point of pinning full URLs: jsDelivr serves arbitrary npm and GitHub
-    // content, so allowing the origin would let any renderer injection that can
-    // append a `<script>` pull attacker-chosen code.
     for source in sources("script-src") {
         assert!(
             is_pinned_script_source(&source),
-            "script-src must pin exact scripts, found broad source `{source}`"
+            "script-src must stay scoped, found broad source `{source}`"
         );
     }
 }
@@ -136,14 +152,17 @@ fn pinned_script_source_rejects_broad_sources() {
     for allowed in [
         "'self'",
         "'wasm-unsafe-eval'",
+        MEDIAPIPE_SCOPE,
         "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm/vision_wasm_internal.js",
     ] {
         assert!(is_pinned_script_source(allowed), "{allowed} should pass");
     }
     for rejected in [
         "https://cdn.jsdelivr.net",
+        "https://cdn.jsdelivr.net/",
         "https://cdn.jsdelivr.net/npm/",
-        "https://*.jsdelivr.net/loader.js",
+        "https://cdn.jsdelivr.net/gh/",
+        "https://*.jsdelivr.net/npm/@mediapipe/",
         "https:",
         "*",
     ] {

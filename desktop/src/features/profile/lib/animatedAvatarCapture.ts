@@ -107,11 +107,10 @@ const PERSON_OUTLINE_OFFSETS = [
 
 // Pinned to the installed @mediapipe/tasks-vision version so the wasm loader
 // always matches the JS API — which is why the dependency itself carries no
-// caret. `script-src` in tauri.conf.json allowlists the two loader URLs derived
-// from this base: the exact files, not the jsDelivr origin, which serves
-// arbitrary npm and GitHub scripts. Bumping the package means bumping this URL
-// and the CSP together, or the packaged app silently loses segmentation;
-// `src-tauri/tests/csp.rs` reads this literal back and enforces all three.
+// caret. `script-src` in tauri.conf.json allowlists the jsDelivr path prefix
+// for the @mediapipe npm scope rather than the whole origin, which also serves
+// arbitrary npm and GitHub scripts; this URL must stay under that prefix.
+// `src-tauri/tests/csp.rs` checks both couplings.
 const MEDIAPIPE_WASM_BASE =
   "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm";
 const SELFIE_SEGMENTER_MODEL_URL =
