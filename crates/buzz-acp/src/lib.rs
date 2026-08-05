@@ -4277,6 +4277,49 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
     Ok(())
 }
 
+/// Identity and secret env keys that must NEVER be re-forwarded to the MCP
+/// tool server under their own name via [`forwarded_env_names`].
+///
+/// These mirror the desktop's reserved-key contract (identity/secrets and the
+/// relay URL). The desktop already strips them from an agent's configured
+/// env_vars before spawn, so they should never appear in `BUZZ_ACP_FORWARD_ENV`
+/// — this is a defense-in-depth guard so a bug or crafted list can't smuggle a
+/// forged nsec/auth-tag/relay into the tool shell. Comparison is
+/// case-insensitive, matching the desktop's `is_reserved_env_key`.
+const RESERVED_FORWARD_KEYS: &[&str] = &[
+    "BUZZ_PRIVATE_KEY",
+    "NOSTR_PRIVATE_KEY",
+    "BUZZ_AUTH_TAG",
+    "BUZZ_API_TOKEN",
+    "BUZZ_ACP_PRIVATE_KEY",
+    "BUZZ_ACP_API_TOKEN",
+    "BUZZ_RELAY_URL",
+];
+
+/// True when `key` is a reserved identity/secret key that must not be forwarded.
+fn is_reserved_forward_key(key: &str) -> bool {
+    RESERVED_FORWARD_KEYS
+        .iter()
+        .any(|reserved| reserved.eq_ignore_ascii_case(key))
+}
+
+/// Parse the comma-separated agent-configured env key names the desktop set in
+/// `BUZZ_ACP_FORWARD_ENV`. Blank entries are dropped and surrounding whitespace
+/// trimmed. Returns an empty vec when the var is unset — so agents launched
+/// without the desktop (or on older desktops) keep the prior fixed-allowlist
+/// behavior unchanged.
+fn forwarded_env_names() -> Vec<String> {
+    match std::env::var("BUZZ_ACP_FORWARD_ENV") {
+        Ok(raw) => raw
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
 fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
     if config.mcp_command.is_empty() {
         return vec![];
@@ -4327,6 +4370,38 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
                         name: "BUZZ_ACP_DISPLAY_NAME".into(),
                         value: display_name,
                     });
+                }
+            }
+            // Forward the agent's own configured env_vars into the MCP tool
+            // server so they reach the tool shell. Without this, a var the
+            // operator sets on the agent (e.g. NOTION_FULL_TOKEN) reaches the
+            // buzz-acp process but is dropped at the buzz-acp -> buzz-dev-mcp
+            // spawn, and no tool command ever sees it.
+            //
+            // The desktop lists the exact agent-configured key NAMES in
+            // BUZZ_ACP_FORWARD_ENV (comma-separated). We forward ONLY those
+            // names, reading each value from this process's env — never the
+            // whole environment, so unrelated process vars (git config,
+            // internal BUZZ_ACP_* plumbing) stay out of the tool shell.
+            for name in forwarded_env_names() {
+                // Defense in depth: never re-forward an identity/secret key
+                // under its own name, even if one somehow appears in the list.
+                // These are already provided (or deliberately withheld) above.
+                if is_reserved_forward_key(&name) {
+                    tracing::warn!(
+                        "buzz-acp: refusing to forward reserved env key `{name}` to MCP server"
+                    );
+                    continue;
+                }
+                // Skip names the fixed allowlist already set, so the forward
+                // list can't silently override BUZZ_RELAY_URL/BUZZ_PRIVATE_KEY.
+                if env.iter().any(|e| e.name == name) {
+                    continue;
+                }
+                // Listed-but-unset names are skipped (not forwarded as empty):
+                // absence and empty are semantically distinct downstream.
+                if let Ok(value) = std::env::var(&name) {
+                    env.push(EnvVar { name, value });
                 }
             }
             env
@@ -5240,6 +5315,132 @@ mod build_mcp_servers_tests {
                 .iter()
                 .any(|e| e.name == "BUZZ_ACP_DISPLAY_NAME"),
             "empty display name should not be forwarded"
+        );
+    }
+
+    // ── Agent-configured env forwarding (BUZZ_ACP_FORWARD_ENV) ───────────
+    //
+    // The desktop writes each agent's configured env_vars onto the buzz-acp
+    // process and lists their key names in BUZZ_ACP_FORWARD_ENV. build_mcp_servers
+    // must forward exactly those names (values read from the process env) into
+    // the MCP server's env so they reach the tool shell — without leaking any
+    // other process env var. See the env-forwarding bug: agent secrets reached
+    // buzz-acp but were dropped at the buzz-acp -> buzz-dev-mcp spawn.
+
+    #[test]
+    fn forward_env_named_vars_reach_mcp_server() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var(
+            "BUZZ_ACP_FORWARD_ENV",
+            "NOTION_FULL_TOKEN,ANTHROPIC_API_KEY",
+        );
+        std::env::set_var("NOTION_FULL_TOKEN", "notion-value");
+        std::env::set_var("ANTHROPIC_API_KEY", "anthropic-value");
+        let config = test_config();
+        let servers = build_mcp_servers(&config);
+        std::env::remove_var("BUZZ_ACP_FORWARD_ENV");
+        std::env::remove_var("NOTION_FULL_TOKEN");
+        std::env::remove_var("ANTHROPIC_API_KEY");
+
+        let env = &servers[0].env;
+        let notion = env.iter().find(|e| e.name == "NOTION_FULL_TOKEN");
+        let anthropic = env.iter().find(|e| e.name == "ANTHROPIC_API_KEY");
+        assert_eq!(
+            notion.map(|e| e.value.as_str()),
+            Some("notion-value"),
+            "a forwarded agent env var must reach the MCP server verbatim"
+        );
+        assert_eq!(
+            anthropic.map(|e| e.value.as_str()),
+            Some("anthropic-value"),
+            "all names in BUZZ_ACP_FORWARD_ENV must be forwarded"
+        );
+    }
+
+    #[test]
+    fn forward_env_does_not_leak_unlisted_process_vars() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // Only NOTION_FULL_TOKEN is listed; UNLISTED_SECRET is present in the
+        // process env but not named, so it must NOT be forwarded.
+        std::env::set_var("BUZZ_ACP_FORWARD_ENV", "NOTION_FULL_TOKEN");
+        std::env::set_var("NOTION_FULL_TOKEN", "notion-value");
+        std::env::set_var("UNLISTED_SECRET", "must-not-leak");
+        let config = test_config();
+        let servers = build_mcp_servers(&config);
+        std::env::remove_var("BUZZ_ACP_FORWARD_ENV");
+        std::env::remove_var("NOTION_FULL_TOKEN");
+        std::env::remove_var("UNLISTED_SECRET");
+
+        let env = &servers[0].env;
+        assert!(
+            env.iter().any(|e| e.name == "NOTION_FULL_TOKEN"),
+            "listed var must be forwarded"
+        );
+        assert!(
+            !env.iter().any(|e| e.name == "UNLISTED_SECRET"),
+            "an unlisted process env var must never be forwarded (least privilege)"
+        );
+    }
+
+    #[test]
+    fn forward_env_never_forwards_reserved_keys() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // Defense in depth: even if a reserved identity/secret key is somehow
+        // named in the forward list, build_mcp_servers must refuse to re-forward
+        // it under that name. BUZZ_PRIVATE_KEY / BUZZ_RELAY_URL are set by the
+        // fixed allowlist below; a forwarded NOSTR_PRIVATE_KEY must never appear.
+        std::env::set_var("BUZZ_ACP_FORWARD_ENV", "NOSTR_PRIVATE_KEY,BUZZ_AUTH_TAG");
+        std::env::set_var("NOSTR_PRIVATE_KEY", "leaked-nsec");
+        std::env::remove_var("BUZZ_AUTH_TAG");
+        let config = test_config();
+        let servers = build_mcp_servers(&config);
+        std::env::remove_var("BUZZ_ACP_FORWARD_ENV");
+        std::env::remove_var("NOSTR_PRIVATE_KEY");
+
+        assert!(
+            !servers[0].env.iter().any(|e| e.name == "NOSTR_PRIVATE_KEY"),
+            "reserved identity/secret keys must never be forwarded via BUZZ_ACP_FORWARD_ENV"
+        );
+    }
+
+    #[test]
+    fn forward_env_skips_listed_but_unset_vars() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("BUZZ_ACP_FORWARD_ENV", "PRESENT_VAR,ABSENT_VAR");
+        std::env::set_var("PRESENT_VAR", "present-value");
+        std::env::remove_var("ABSENT_VAR");
+        let config = test_config();
+        let servers = build_mcp_servers(&config);
+        std::env::remove_var("BUZZ_ACP_FORWARD_ENV");
+        std::env::remove_var("PRESENT_VAR");
+
+        let env = &servers[0].env;
+        assert!(
+            env.iter().any(|e| e.name == "PRESENT_VAR"),
+            "a present listed var must be forwarded"
+        );
+        assert!(
+            !env.iter().any(|e| e.name == "ABSENT_VAR"),
+            "a listed-but-unset var must be skipped, not forwarded as empty"
+        );
+    }
+
+    #[test]
+    fn forward_env_unset_leaves_fixed_allowlist_unchanged() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("BUZZ_ACP_FORWARD_ENV");
+        std::env::remove_var("BUZZ_AUTH_TAG");
+        std::env::remove_var("BUZZ_ACP_DISPLAY_NAME");
+        let config = test_config();
+        let servers = build_mcp_servers(&config);
+
+        let names: Vec<&str> = servers[0].env.iter().map(|e| e.name.as_str()).collect();
+        // With no forward list and no optional vars, only the two always-present
+        // fixed-allowlist entries remain — existing behavior is unchanged.
+        assert_eq!(
+            names,
+            vec!["BUZZ_RELAY_URL", "BUZZ_PRIVATE_KEY"],
+            "with BUZZ_ACP_FORWARD_ENV unset the fixed allowlist must be untouched; got {names:?}"
         );
     }
 

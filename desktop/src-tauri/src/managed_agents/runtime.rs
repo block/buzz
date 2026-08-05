@@ -850,6 +850,33 @@ pub fn spawn_agent_child(
     for (key, value) in &descriptor.env {
         command.env(key, value);
     }
+
+    // ── Forward agent env vars into the MCP tool server ───────────────────
+    //
+    // `descriptor.env` reaches the buzz-acp agent process (written just above),
+    // but the harness spawns the MCP tool server (buzz-dev-mcp) with a fixed
+    // env allowlist — so without this, an operator-set env var (e.g. a Notion
+    // or provider API token) never reaches the shell that tool calls run in.
+    //
+    // We hand buzz-acp the exact set of key NAMES to forward, comma-separated,
+    // via BUZZ_ACP_FORWARD_ENV. buzz-acp reads each value from its own process
+    // env and adds only these names to the MCP server's env — never the whole
+    // environment, so Buzz's own plumbing (git config, BUZZ_ACP_* internals)
+    // stays out of the tool shell. Reserved identity/secret keys were already
+    // stripped from `descriptor.env`, and buzz-acp additionally refuses to
+    // forward them as a defense-in-depth guard.
+    //
+    // A well-formed POSIX key cannot contain a comma, so a comma-separated list
+    // is unambiguous. Empty set → the var is left unset and buzz-acp keeps its
+    // prior fixed-allowlist behavior.
+    match crate::managed_agents::env_vars::mcp_forward_env_manifest(&descriptor.env) {
+        Some(manifest) => {
+            command.env("BUZZ_ACP_FORWARD_ENV", manifest);
+        }
+        None => {
+            command.env_remove("BUZZ_ACP_FORWARD_ENV");
+        }
+    }
     configure_runtime_cli(&mut command, runtime_meta);
 
     // Buzz shared compute is stored as a native provider; derive the OpenAI-compatible
