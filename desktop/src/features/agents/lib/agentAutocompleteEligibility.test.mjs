@@ -243,6 +243,48 @@ test("shouldHideAgentFromMentions: normalizes the pubkey before lookup", () => {
   );
 });
 
+test("shouldHideAgentFromMentions: shows an owner-only agent to its own owner (buzz#2987)", () => {
+  assert.equal(
+    shouldHideAgentFromMentions({
+      isAgent: true,
+      isMember: false,
+      isOwnAgent: true,
+      pubkey: PUB_A,
+      mentionableAgentPubkeys: new Set(),
+      directoryAgentPubkeys: new Set([PUB_A]),
+    }),
+    false,
+  );
+});
+
+test("shouldHideAgentFromMentions: isOwnAgent does not override the non-agent guard", () => {
+  assert.equal(
+    shouldHideAgentFromMentions({
+      isAgent: false,
+      isMember: false,
+      isOwnAgent: true,
+      pubkey: PUB_A,
+      mentionableAgentPubkeys: new Set(),
+      directoryAgentPubkeys: new Set([PUB_A]),
+    }),
+    false,
+  );
+});
+
+test("shouldHideAgentFromMentions: still hides a non-owned non-invocable agent", () => {
+  assert.equal(
+    shouldHideAgentFromMentions({
+      isAgent: true,
+      isMember: false,
+      isOwnAgent: false,
+      pubkey: PUB_A,
+      mentionableAgentPubkeys: new Set(),
+      directoryAgentPubkeys: new Set([PUB_A]),
+    }),
+    true,
+  );
+});
+
 test("coalesceAgentAutocompleteCandidates: merges agents with the same persona id", () => {
   const first = makeAgent({ pubkey: PUB_A, personaId: "pinky" });
   const second = makeAgent({
