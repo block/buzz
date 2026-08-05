@@ -111,6 +111,12 @@ pub fn agent_event_content(record: &ManagedAgentRecord) -> ManagedAgentEventCont
 /// Returns an unsigned `EventBuilder` — the caller signs and submits. The
 /// `d_tag` is the agent's pubkey.
 pub fn build_agent_event(record: &ManagedAgentRecord) -> Result<EventBuilder, String> {
+    super::validate_managed_agent_definition_text(
+        &record.name,
+        record.persona_id.as_deref(),
+        record.system_prompt.as_deref(),
+    )
+    .map_err(|error| format!("Managed agent definition is unsafe to publish: {error}"))?;
     let content = serde_json::to_string(&agent_event_content(record))
         .map_err(|e| format!("failed to serialize managed-agent content: {e}"))?;
     let tags =
@@ -225,6 +231,31 @@ mod tests {
         let keys = nostr::Keys::generate();
         let event = builder.sign_with_keys(&keys).unwrap();
         assert_eq!(event.kind.as_u16() as u32, KIND_MANAGED_AGENT);
+    }
+
+    #[test]
+    fn publication_rejects_unsafe_definition_less_name_and_prompt() {
+        let mut unsafe_name = sample_agent();
+        unsafe_name.persona_id = None;
+        unsafe_name.name = "Review\u{200B}er".to_string();
+        let error = build_agent_event(&unsafe_name)
+            .expect_err("publication must reject an invisible agent name");
+        assert!(error.contains("U+200B"), "unexpected error: {error}");
+
+        let mut unsafe_prompt = sample_agent();
+        unsafe_prompt.persona_id = None;
+        unsafe_prompt.system_prompt = Some("Review\u{202E} code.".to_string());
+        let error = build_agent_event(&unsafe_prompt)
+            .expect_err("publication must reject bidi formatting in instructions");
+        assert!(error.contains("U+202E"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn publication_ignores_inert_linked_record_prompt() {
+        let mut linked = sample_agent();
+        linked.system_prompt = Some("stale\u{200B} prompt".to_string());
+        build_agent_event(&linked)
+            .expect("linked record prompt is omitted in favor of the validated persona");
     }
 
     #[test]

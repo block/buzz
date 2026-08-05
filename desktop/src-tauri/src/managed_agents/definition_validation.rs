@@ -41,6 +41,25 @@ pub(crate) fn validate_agent_definition_text(
     validate_visible_text(system_prompt, "Agent instructions", true)
 }
 
+/// Validate the human-reviewed definition text carried by a managed agent.
+///
+/// Definition-linked agents resolve their executable prompt through the
+/// separately validated persona, so only their instance name is checked here.
+/// Definition-less agents carry their executable prompt directly and must
+/// validate both fields at every local, inbound, and publication boundary.
+pub(crate) fn validate_managed_agent_definition_text(
+    name: &str,
+    persona_id: Option<&str>,
+    system_prompt: Option<&str>,
+) -> Result<(), String> {
+    let executable_prompt = if persona_id.is_none() {
+        system_prompt.unwrap_or_default()
+    } else {
+        ""
+    };
+    validate_agent_definition_text(name, executable_prompt)
+}
+
 fn validate_visible_text(
     value: &str,
     label: &str,
@@ -215,5 +234,37 @@ mod tests {
     fn enforces_display_name_and_prompt_bounds() {
         assert!(validate_agent_definition_text(&"a".repeat(129), "prompt").is_err());
         assert!(validate_agent_definition_text("Reviewer", &"a".repeat(64 * 1024 + 1)).is_err());
+    }
+
+    #[test]
+    fn definition_less_managed_agent_validates_its_own_name_and_prompt() {
+        assert!(validate_managed_agent_definition_text(
+            "Review\u{200B}er",
+            None,
+            Some("Review code."),
+        )
+        .is_err());
+        assert!(validate_managed_agent_definition_text(
+            "Reviewer",
+            None,
+            Some("Review\u{200B} code."),
+        )
+        .is_err());
+        assert!(validate_managed_agent_definition_text(
+            "Reviewer 🐝",
+            None,
+            Some("Review changes.\n\tCall out risks."),
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn definition_linked_managed_agent_ignores_inert_record_prompt() {
+        assert!(validate_managed_agent_definition_text(
+            "Reviewer",
+            Some("custom:reviewer"),
+            Some("stale\u{200B} prompt"),
+        )
+        .is_ok());
     }
 }

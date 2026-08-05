@@ -201,16 +201,12 @@ fn validate_inbound_persona_definition(persona: &AgentDefinition) -> Result<(), 
 fn validate_inbound_managed_agent_definition(
     managed_agent: &ManagedAgentEventContent,
 ) -> Result<(), String> {
-    // Slimmed, definition-linked events resolve their prompt through the
-    // already-validated persona. Legacy definition-less records carry their
-    // executable prompt directly on kind:30177 and must validate it here.
-    let system_prompt = if managed_agent.persona_id.is_none() {
-        managed_agent.system_prompt.as_deref().unwrap_or_default()
-    } else {
-        ""
-    };
-    crate::managed_agents::validate_agent_definition_text(&managed_agent.name, system_prompt)
-        .map_err(|error| format!("Inbound managed-agent definition is unsafe: {error}"))
+    crate::managed_agents::validate_managed_agent_definition_text(
+        &managed_agent.name,
+        managed_agent.persona_id.as_deref(),
+        managed_agent.system_prompt.as_deref(),
+    )
+    .map_err(|error| format!("Inbound managed-agent definition is unsafe: {error}"))
 }
 
 /// Parse an inbound wire event and enforce the signature gate. Everything

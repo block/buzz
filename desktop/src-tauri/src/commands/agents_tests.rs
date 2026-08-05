@@ -90,6 +90,35 @@ fn persona_record(id: &str, model: Option<&str>, provider: Option<&str>) -> Agen
     }
 }
 
+#[test]
+fn create_definition_less_agent_rejects_invisible_name_or_prompt() {
+    let name_error =
+        validate_create_managed_agent_definition("Review\u{200B}er", None, Some("Review code."))
+            .expect_err("create must reject an invisible character in the agent name");
+    assert!(
+        name_error.contains("U+200B"),
+        "unexpected error: {name_error}"
+    );
+
+    let prompt_error =
+        validate_create_managed_agent_definition("Reviewer", None, Some("Review\u{202E} code."))
+            .expect_err("create must reject bidi formatting in executable instructions");
+    assert!(
+        prompt_error.contains("U+202E"),
+        "unexpected error: {prompt_error}"
+    );
+}
+
+#[test]
+fn create_definition_less_agent_accepts_visible_multiline_prompt() {
+    validate_create_managed_agent_definition(
+        "Reviewer 🐝",
+        None,
+        Some("Review changes.\n\tCall out security risks."),
+    )
+    .expect("visible multiline instructions should remain valid");
+}
+
 /// Auto-archive uses the same NIP-IA wire builder as the explicit GUI action,
 /// attaches owner consent, and marks a deliberate delete as `retired`.
 #[test]
