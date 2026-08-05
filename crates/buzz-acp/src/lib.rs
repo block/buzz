@@ -2,6 +2,7 @@
 
 mod acp;
 mod config;
+mod delivery;
 mod engram_fetch;
 mod filter;
 mod observer;
@@ -1364,6 +1365,42 @@ async fn tokio_main() -> Result<()> {
             }),
         );
     }
+
+    // Codex keeps direct relay networking as the primary path. Give its child
+    // processes a narrow filesystem fallback for bounded queries/counts and
+    // exact signed message events when that direct transport fails. The
+    // capability and path are generated per harness lifetime and are forced
+    // into the child environment below; other runtimes retain direct HTTP.
+    let _delivery_broker = if config.has_generated_codex_config {
+        let auth_tag_json = std::env::var("BUZZ_AUTH_TAG")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .and_then(|value| buzz_sdk::nip_oa::parse_auth_tag(&value).ok())
+            .and_then(|tag| serde_json::to_string(tag.as_slice()).ok());
+        match delivery::DeliveryBroker::start(&config.relay_url, config.keys.clone(), auth_tag_json)
+            .and_then(|broker| {
+                let environment = broker.environment()?;
+                Ok((broker, environment))
+            }) {
+            Ok((broker, environment)) => {
+                config.persona_env_vars.extend(environment);
+                tracing::info!("harness delivery broker enabled for Codex message transport");
+                Some(broker)
+            }
+            Err(error) => {
+                // The broker must never widen an overlapping workspace merely
+                // to start. Keep Codex's direct network path available and make
+                // the missing fallback visible instead of taking the agent
+                // completely offline.
+                tracing::warn!(
+                    "harness delivery broker disabled; Codex will use direct relay transport only: {error}"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     let mut pool = if config.lazy_pool {
         AgentPool::from_slots((0..config.agents).map(|_| None).collect())
@@ -3832,6 +3869,35 @@ fn normalized_agent_name(init_result: &serde_json::Value) -> String {
         .to_ascii_lowercase()
 }
 
+fn validate_codex_workspace_write_capability(
+    init_result: &serde_json::Value,
+    required: bool,
+) -> Result<()> {
+    if !required {
+        return Ok(());
+    }
+    let capability = init_result.pointer("/_meta/codex/workspaceWriteConfig");
+    let supported = capability
+        .and_then(|value| value.get("version"))
+        .and_then(serde_json::Value::as_u64)
+        .is_some_and(|version| version >= 1)
+        && capability
+            .and_then(|value| value.get("networkAccess"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        && capability
+            .and_then(|value| value.get("writableRoots"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
+    if supported {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "Codex adapter is incompatible: this Buzz build requires per-turn workspace-write network and writable-root configuration; update @agentclientprotocol/codex-acp"
+        )
+    }
+}
+
 async fn shutdown_agent_slots(slots: &mut [Option<OwnedAgent>]) {
     for slot in slots {
         if let Some(mut agent) = slot.take() {
@@ -3909,6 +3975,15 @@ async fn initialize_agent_pool(
                 };
                 match initialize_result {
                     Ok(Ok(init_result)) => {
+                        if let Err(error) = validate_codex_workspace_write_capability(
+                            &init_result,
+                            startup.has_generated_codex_config,
+                        ) {
+                            tracing::error!(agent = i, "agent initialize rejected: {error}");
+                            acp.shutdown().await;
+                            agent_slots.push(None);
+                            continue;
+                        }
                         tracing::info!(agent = i, "agent initialized: {init_result}");
                         let protocol_version =
                             init_result["protocolVersion"].as_u64().unwrap_or(1) as u32;
@@ -3999,6 +4074,12 @@ async fn spawn_and_init(
 
     match acp.initialize().await {
         Ok(init_result) => {
+            if let Err(error) =
+                validate_codex_workspace_write_capability(&init_result, has_generated_codex_config)
+            {
+                acp.shutdown().await;
+                return Err(error);
+            }
             tracing::info!("agent initialized: {init_result}");
             let protocol_version = init_result["protocolVersion"].as_u64().unwrap_or(1) as u32;
             acp.observe(
@@ -4326,6 +4407,22 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
                     env.push(EnvVar {
                         name: "BUZZ_ACP_DISPLAY_NAME".into(),
                         value: display_name,
+                    });
+                }
+            }
+            for broker_name in [
+                buzz_core::delivery_broker::BROKER_DIR_ENV,
+                buzz_core::delivery_broker::BROKER_CAPABILITY_ENV,
+                buzz_core::delivery_broker::BROKER_RESPONSE_PUBKEY_ENV,
+            ] {
+                if let Some((_, value)) = config
+                    .persona_env_vars
+                    .iter()
+                    .find(|(name, _)| name == broker_name)
+                {
+                    env.push(EnvVar {
+                        name: broker_name.into(),
+                        value: value.clone(),
                     });
                 }
             }
@@ -5376,6 +5473,36 @@ mod error_outcome_emission_tests {
             })),
             "buzz-agent"
         );
+    }
+
+    #[test]
+    fn codex_workspace_write_capability_is_required_only_for_codex_policy() {
+        let compatible = serde_json::json!({
+            "_meta": {
+                "codex": {
+                    "workspaceWriteConfig": {
+                        "version": 1,
+                        "networkAccess": true,
+                        "writableRoots": true
+                    }
+                }
+            }
+        });
+        assert!(validate_codex_workspace_write_capability(&compatible, true).is_ok());
+        assert!(validate_codex_workspace_write_capability(
+            &serde_json::json!({"agentInfo": {"name": "goose"}}),
+            false
+        )
+        .is_ok());
+
+        for incompatible in [
+            serde_json::json!({}),
+            serde_json::json!({"_meta":{"codex":{"workspaceWriteConfig":{"version":0,"networkAccess":true,"writableRoots":true}}}}),
+            serde_json::json!({"_meta":{"codex":{"workspaceWriteConfig":{"version":1,"networkAccess":false,"writableRoots":true}}}}),
+            serde_json::json!({"_meta":{"codex":{"workspaceWriteConfig":{"version":1,"networkAccess":true,"writableRoots":false}}}}),
+        ] {
+            assert!(validate_codex_workspace_write_capability(&incompatible, true).is_err());
+        }
     }
 
     /// Spawn a real but inert agent subprocess (`cat`) so the error paths have

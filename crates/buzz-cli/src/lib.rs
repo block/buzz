@@ -1,6 +1,7 @@
 pub mod agent_management;
 mod client;
 mod commands;
+mod delivery_broker;
 mod error;
 mod links;
 mod validate;

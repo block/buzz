@@ -683,12 +683,27 @@ pub(crate) fn normalize_agent_command_identity(command: &str) -> String {
         .iter()
         .find_map(|extension| lower.strip_suffix(extension))
         .unwrap_or(&lower);
-    stem.chars()
+    let identity: String = stem
+        .chars()
         .map(|character| match character {
             ' ' | '_' => '-',
             _ => character,
         })
-        .collect()
+        .collect();
+    // Standalone codex-acp releases use platform-qualified binary names. They
+    // are the same runtime identity and must receive the generated Codex
+    // network policy, broker environment, and capability gate even when Buzz
+    // launches the downloaded artifact directly rather than through an npm
+    // shim named `codex-acp`.
+    match identity.as_str() {
+        "codex-acp-x64-linux"
+        | "codex-acp-arm64-linux"
+        | "codex-acp-x64-darwin"
+        | "codex-acp-arm64-darwin"
+        | "codex-acp-x64-windows"
+        | "codex-acp-arm64-windows" => "codex-acp".into(),
+        _ => identity,
+    }
 }
 
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
@@ -729,11 +744,12 @@ pub(crate) fn default_agent_env(command: &str) -> &'static [(&'static str, &'sta
 /// Returns `Some(("CODEX_CONFIG", "{\"sandbox_workspace_write\":{\"network_access\":true}}"))` for
 /// Codex agents, or `None` for non-Codex agents or when the relay URL cannot be parsed.
 ///
-/// The env var is forwarded by the `@agentclientprotocol/codex-acp` adapter (1.x) as a
-/// session-level config override (via `CODEX_CONFIG` → `thread/start config`), which is
-/// equivalent to the TOML override `sandbox_workspace_write.network_access = true`.
-/// That sets `NetworkSandboxPolicy::Enabled`, causing the Seatbelt policy to include
-/// `(allow network-outbound)` — full outbound TCP/TLS at the OS level.
+/// The env var is forwarded by a compatible `@agentclientprotocol/codex-acp` adapter as
+/// both the session-level config override and the per-turn workspace-write policy. The
+/// per-turn propagation matters because Codex treats that policy as authoritative over
+/// the thread configuration. It is equivalent to the TOML override
+/// `sandbox_workspace_write.network_access = true`, which enables outbound TCP/TLS while
+/// retaining the workspace-write filesystem sandbox.
 ///
 /// URL validation is preserved as a guard: injection is skipped when the relay URL cannot
 /// be parsed, avoiding accidental sandbox widening for malformed configs.
@@ -1632,6 +1648,37 @@ mod tests {
         assert_eq!(normalize_agent_command_identity("   "), "");
         assert_eq!(normalize_agent_command_identity("/"), "");
         assert_eq!(normalize_agent_command_identity("///"), "");
+    }
+
+    #[test]
+    fn packaged_codex_acp_commands_activate_the_codex_delivery_path() {
+        let packaged_commands = [
+            "/opt/buzz/codex-acp-x64-linux",
+            "/opt/buzz/codex-acp-arm64-linux",
+            "/opt/buzz/codex-acp-x64-darwin",
+            "/opt/buzz/codex-acp-arm64-darwin",
+            r"C:\Buzz\codex-acp-x64-windows.exe",
+            r"C:\Buzz\codex-acp-arm64-windows.exe",
+        ];
+        let private_key = Keys::generate().secret_key().to_secret_hex();
+
+        for command in packaged_commands {
+            assert_eq!(normalize_agent_command_identity(command), "codex-acp");
+            assert!(codex_network_env(command, "wss://relay.example.com").is_some());
+
+            let args = CliArgs::parse_from([
+                "buzz-acp",
+                "--private-key",
+                &private_key,
+                "--agent-command",
+                command,
+            ]);
+            let config = Config::from_args(args).expect("packaged Codex config");
+            assert!(
+                config.has_generated_codex_config,
+                "packaged command did not activate Codex policy: {command}"
+            );
+        }
     }
 
     #[test]

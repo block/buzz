@@ -254,7 +254,9 @@ fn deep_merge(
 ///    deep-merged into the result (parent wins on colliding keys at every nesting level;
 ///    unrelated keys from either side survive).
 /// 4. **Forced overlay** — `sandbox_workspace_write.network_access = true` is applied
-///    last so relay access is guaranteed regardless of operator / persona config.
+///    last so relay access is guaranteed regardless of operator / persona config. When
+///    a harness delivery broker is present, its isolated `requests` directory is appended
+///    to `sandbox_workspace_write.writable_roots` without replacing existing roots.
 ///
 /// When `has_generated_codex_config` is false, the function returns `None` and the
 /// caller handles any persona-supplied `CODEX_CONFIG` with ordinary operator-wins
@@ -264,7 +266,8 @@ fn deep_merge(
 ///
 /// Returns `Err(AcpError::Protocol)` when `has_generated_codex_config` is true and any
 /// `CODEX_CONFIG` value is not valid JSON or is not a JSON object, or when
-/// `sandbox_workspace_write` is present but not an object after all merges.
+/// `sandbox_workspace_write` is present but not an object after all merges, or when its
+/// `writable_roots` value is not an array.
 pub(crate) fn build_codex_config_env(
     extra_env: &[(String, String)],
     parent_codex_config: Option<&str>,
@@ -335,13 +338,82 @@ pub(crate) fn build_codex_config_env(
         }
     }
 
-    // Force sandbox_workspace_write.network_access = true (our invariant, always wins).
+    let broker_request_root = extra_env
+        .iter()
+        .rev()
+        .find(|(key, _)| key == buzz_core::delivery_broker::BROKER_DIR_ENV)
+        .map(|(_, root)| std::path::Path::new(root).join("requests"));
+
+    // Force sandbox_workspace_write.network_access = true (our invariant, always wins)
+    // and add only the broker request inbox as writable. The broker parent,
+    // processing directory, and signed-response directory remain outside the
+    // sandbox's writable roots.
     let sws_entry = base
         .entry("sandbox_workspace_write")
         .or_insert_with(|| serde_json::json!({}));
     match sws_entry {
         serde_json::Value::Object(sws_obj) => {
             sws_obj.insert("network_access".to_string(), serde_json::Value::Bool(true));
+            if let Some(request_root) = broker_request_root {
+                let request_root = request_root.to_str().ok_or_else(|| {
+                    AcpError::Protocol("delivery broker request path is not valid UTF-8".into())
+                })?;
+                let writable_roots = sws_obj
+                    .entry("writable_roots")
+                    .or_insert_with(|| serde_json::json!([]));
+                let serde_json::Value::Array(roots) = writable_roots else {
+                    return Err(AcpError::Protocol(
+                        "CODEX_CONFIG sandbox_workspace_write.writable_roots is not an array"
+                            .into(),
+                    ));
+                };
+                let canonical_request_root = std::fs::canonicalize(request_root).map_err(|e| {
+                    AcpError::Protocol(format!(
+                        "canonicalize delivery broker request root {request_root}: {e}"
+                    ))
+                })?;
+                let canonical_broker_root = canonical_request_root.parent().ok_or_else(|| {
+                    AcpError::Protocol("delivery broker request root has no parent".into())
+                })?;
+                for existing in roots.iter() {
+                    let existing = existing.as_str().ok_or_else(|| {
+                        AcpError::Protocol(
+                            "CODEX_CONFIG writable_roots entries must be strings".into(),
+                        )
+                    })?;
+                    let existing_path = std::path::PathBuf::from(existing);
+                    let existing_path = if existing_path.is_absolute() {
+                        existing_path
+                    } else {
+                        std::env::current_dir()
+                            .map_err(|e| AcpError::Protocol(e.to_string()))?
+                            .join(existing_path)
+                    };
+                    let canonical_existing =
+                        std::fs::canonicalize(&existing_path).map_err(|e| {
+                            AcpError::Protocol(format!(
+                                "canonicalize CODEX_CONFIG writable root {}: {e}",
+                                existing_path.display()
+                            ))
+                        })?;
+                    if canonical_existing != canonical_request_root
+                        && (canonical_broker_root.starts_with(&canonical_existing)
+                            || canonical_existing.starts_with(canonical_broker_root))
+                    {
+                        return Err(AcpError::Protocol(format!(
+                            "CODEX_CONFIG writable root {} overlaps protected delivery broker root {}",
+                            canonical_existing.display(),
+                            canonical_broker_root.display()
+                        )));
+                    }
+                }
+                if !roots
+                    .iter()
+                    .any(|value| value.as_str() == Some(request_root))
+                {
+                    roots.push(serde_json::Value::String(request_root.into()));
+                }
+            }
         }
         other => {
             return Err(AcpError::Protocol(format!(
@@ -503,6 +575,17 @@ impl AcpClient {
         for (key, value) in extra_env {
             if key == "CODEX_CONFIG" && codex_merge_active {
                 // Handled by build_codex_config_env; skip here to avoid double-setting.
+                continue;
+            }
+            if matches!(
+                key.as_str(),
+                buzz_core::delivery_broker::BROKER_DIR_ENV
+                    | buzz_core::delivery_broker::BROKER_CAPABILITY_ENV
+                    | buzz_core::delivery_broker::BROKER_RESPONSE_PUBKEY_ENV
+            ) {
+                // These values are generated per harness lifetime. A stale
+                // inherited value must never override the live broker.
+                cmd.env(key, value);
                 continue;
             }
             if std::env::var_os(key).is_none() {
@@ -4464,6 +4547,92 @@ mod tests {
             v["some_operator_key"], "val",
             "operator top-level key must survive"
         );
+    }
+
+    #[test]
+    fn build_codex_config_env_appends_only_broker_request_writable_root() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let broker_root = temp.path().join("broker");
+        let existing_root = temp.path().join("existing");
+        std::fs::create_dir_all(broker_root.join("requests")).expect("requests");
+        std::fs::create_dir(&existing_root).expect("existing root");
+        let broker_root_text = broker_root.to_string_lossy().into_owned();
+        let persona = serde_json::json!({
+            "sandbox_workspace_write": {
+                "writable_roots": [existing_root.to_string_lossy()]
+            }
+        })
+        .to_string();
+        let extra = vec![
+            ("CODEX_CONFIG".into(), persona),
+            ("CODEX_CONFIG".into(), GENERATED.into()),
+            (
+                buzz_core::delivery_broker::BROKER_DIR_ENV.into(),
+                broker_root_text,
+            ),
+        ];
+        let merged = build_codex_config_env(&extra, None, true).unwrap().unwrap();
+        let value: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        let roots = value["sandbox_workspace_write"]["writable_roots"]
+            .as_array()
+            .expect("writable roots");
+        assert!(roots
+            .iter()
+            .any(|root| root.as_str() == Some(existing_root.to_string_lossy().as_ref())));
+        let expected = broker_root.join("requests").to_string_lossy().into_owned();
+        assert_eq!(
+            roots
+                .iter()
+                .filter(|root| root.as_str() == Some(expected.as_str()))
+                .count(),
+            1
+        );
+        assert!(!roots
+            .iter()
+            .any(|root| root.as_str() == Some(broker_root.to_string_lossy().as_ref())));
+    }
+
+    #[test]
+    fn build_codex_config_env_rejects_non_array_writable_roots_for_broker() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let broker_root = temp.path().join("broker");
+        std::fs::create_dir_all(broker_root.join("requests")).expect("requests");
+        let extra = vec![
+            (
+                "CODEX_CONFIG".into(),
+                r#"{"sandbox_workspace_write":{"writable_roots":"/too-broad"}}"#.into(),
+            ),
+            ("CODEX_CONFIG".into(), GENERATED.into()),
+            (
+                buzz_core::delivery_broker::BROKER_DIR_ENV.into(),
+                broker_root.to_string_lossy().into_owned(),
+            ),
+        ];
+        let error = build_codex_config_env(&extra, None, true).expect_err("invalid roots");
+        assert!(error.to_string().contains("writable_roots"));
+    }
+
+    #[test]
+    fn build_codex_config_env_rejects_writable_root_overlapping_broker_parent() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let broker_root = temp.path().join("broker");
+        std::fs::create_dir_all(broker_root.join("requests")).expect("requests");
+        let persona = serde_json::json!({
+            "sandbox_workspace_write": {
+                "writable_roots": [temp.path().to_string_lossy()]
+            }
+        })
+        .to_string();
+        let extra = vec![
+            ("CODEX_CONFIG".into(), persona),
+            ("CODEX_CONFIG".into(), GENERATED.into()),
+            (
+                buzz_core::delivery_broker::BROKER_DIR_ENV.into(),
+                broker_root.to_string_lossy().into_owned(),
+            ),
+        ];
+        let error = build_codex_config_env(&extra, None, true).expect_err("overlap");
+        assert!(error.to_string().contains("overlaps protected"));
     }
 
     #[test]
