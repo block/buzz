@@ -403,7 +403,10 @@ async fn probe_agent_relay_access(
     let key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), &requested_relay_url)?;
     let keys = nostr::Keys::parse(record.private_key_nsec.trim())
         .map_err(|error| format!("invalid managed-agent key: {error}"))?;
-    let api_base = crate::relay::relay_http_base_url(&key.relay_url);
+    // Probe the community the user actually configured: relay tenancy is
+    // host-derived, so the canonical key spelling can resolve to a different
+    // (or unmapped) community than the requested URL.
+    let api_base = crate::relay::relay_http_base_url(&requested_relay_url);
     tokio::time::timeout(
         std::time::Duration::from_secs(10),
         crate::relay::query_relay_at_with_keys(
@@ -504,7 +507,10 @@ pub async fn reconcile_managed_agent_runtimes(
                 Ok((record, key, requested)) => {
                     match start_pair(
                         record.pubkey.clone(),
-                        key.relay_url.clone(),
+                        // Start with the requested spelling so the spawned
+                        // child connects to the community that was probed.
+                        // start_pair re-derives the same canonical key.
+                        requested.clone(),
                         true,
                         Some(&record.updated_at),
                         app.clone(),
