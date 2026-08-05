@@ -196,6 +196,18 @@ void main() {
       expect(find.text('Remind me'), findsNothing);
       expect(find.text('Edit message'), findsNothing);
       expect(find.text('Delete message'), findsNothing);
+      expect(find.byTooltip('Close sheet'), findsOneWidget);
+      expect(find.byKey(const ValueKey('quick-reaction-more')), findsOneWidget);
+      expect(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget.key is ValueKey<String> &&
+              (widget.key! as ValueKey<String>).value.startsWith(
+                'quick-reaction-',
+              ),
+        ),
+        findsNWidgets(6),
+      );
     });
 
     testWidgets('promotes Reply, Copy link, and Remind me to the fast-actions '
@@ -227,6 +239,17 @@ void main() {
       expect(find.text('Follow thread'), findsNothing);
       expect(find.text('Reply'), findsNothing);
       expect(find.text('Remind me'), findsNothing);
+      expect(find.byTooltip('Close sheet'), findsNothing);
+      expect(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget.key is ValueKey<String> &&
+              (widget.key! as ValueKey<String>).value.startsWith(
+                'quick-reaction-',
+              ),
+        ),
+        findsNWidgets(6),
+      );
     });
 
     testWidgets('shows Edit/Delete only with manage rights', (tester) async {

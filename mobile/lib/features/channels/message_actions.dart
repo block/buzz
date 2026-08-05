@@ -52,6 +52,7 @@ void showMessageActions({
     context: context,
     isScrollControlled: true,
     showDragHandle: true,
+    showCloseButton: !message.isSystem || canManageMessage,
     builder: (sheetContext) => SafeArea(
       child: IconTheme.merge(
         data: const IconThemeData(size: 22),
@@ -669,31 +670,40 @@ class _QuickReactionRow extends ConsumerWidget {
       pageRef.read(channelActionsProvider).addReaction(message.id, value);
     }
 
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-      children: [
-        for (final value in emoji)
-          _QuickReactionCircle(
-            onTap: () {
-              Navigator.of(sheetContext).pop();
-              react(value);
-            },
-            child: _QuickReactionGlyph(
-              value: value,
-              customByShortcode: customByShortcode,
-            ),
-          ),
+    final circles = <Widget>[
+      for (final value in emoji)
         _QuickReactionCircle(
+          key: ValueKey('quick-reaction-$value'),
           onTap: () {
             Navigator.of(sheetContext).pop();
-            showEmojiPicker(context: pageContext, onSelect: react);
+            react(value);
           },
-          child: Icon(
-            LucideIcons.plus,
-            size: 24,
-            color: context.colors.onSurfaceVariant,
+          child: _QuickReactionGlyph(
+            value: value,
+            customByShortcode: customByShortcode,
           ),
         ),
+      _QuickReactionCircle(
+        key: const ValueKey('quick-reaction-more'),
+        onTap: () {
+          Navigator.of(sheetContext).pop();
+          showEmojiPicker(context: pageContext, onSelect: react);
+        },
+        child: Icon(
+          LucideIcons.plus,
+          size: 24,
+          color: context.colors.onSurfaceVariant,
+        ),
+      ),
+    ];
+
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        for (var index = 0; index < circles.length; index++) ...[
+          circles[index],
+          if (index < circles.length - 1) const SizedBox(width: Grid.twelve),
+        ],
       ],
     );
   }
@@ -733,7 +743,11 @@ class _QuickReactionCircle extends StatelessWidget {
   final VoidCallback onTap;
   final Widget child;
 
-  const _QuickReactionCircle({required this.onTap, required this.child});
+  const _QuickReactionCircle({
+    super.key,
+    required this.onTap,
+    required this.child,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -743,8 +757,8 @@ class _QuickReactionCircle extends StatelessWidget {
         onTap();
       },
       child: Container(
-        width: 52,
-        height: 52,
+        width: 44,
+        height: 44,
         alignment: Alignment.center,
         decoration: BoxDecoration(
           color: context.colors.surfaceContainerHighest,

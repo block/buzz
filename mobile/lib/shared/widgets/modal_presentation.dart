@@ -35,6 +35,7 @@ Future<T?> showBuzzModalBottomSheet<T>({
   bool isDismissible = true,
   bool enableDrag = true,
   bool? showDragHandle,
+  bool showCloseButton = true,
   bool useSafeArea = false,
   RouteSettings? routeSettings,
   AnimationController? transitionAnimationController,
@@ -56,7 +57,11 @@ Future<T?> showBuzzModalBottomSheet<T>({
     builder: (sheetContext) => ConcentricSheetSurface(
       enabled: isIos,
       color: surfaceColor,
-      child: _SheetContentWithCloseButton(child: builder(sheetContext)),
+      child: _SheetContent(
+        showCloseButton: showCloseButton,
+        showDragHandle: isIos && showDragHandle == true,
+        child: builder(sheetContext),
+      ),
     ),
     backgroundColor: isIos ? Colors.transparent : backgroundColor,
     barrierLabel: barrierLabel,
@@ -70,7 +75,9 @@ Future<T?> showBuzzModalBottomSheet<T>({
     useRootNavigator: useRootNavigator,
     isDismissible: isDismissible,
     enableDrag: enableDrag,
-    showDragHandle: showDragHandle,
+    // The iOS route is transparent so its stock handle sits outside the inset
+    // concentric surface. Paint it inside the surface above instead.
+    showDragHandle: isIos ? false : showDragHandle,
     useSafeArea: useSafeArea,
     routeSettings: routeSettings,
     transitionAnimationController: transitionAnimationController,
@@ -82,47 +89,90 @@ Future<T?> showBuzzModalBottomSheet<T>({
   );
 }
 
-class _SheetContentWithCloseButton extends StatelessWidget {
-  const _SheetContentWithCloseButton({required this.child});
+class _SheetContent extends StatelessWidget {
+  const _SheetContent({
+    required this.child,
+    required this.showCloseButton,
+    required this.showDragHandle,
+  });
 
   final Widget child;
+  final bool showCloseButton;
+  final bool showDragHandle;
 
   @override
   Widget build(BuildContext context) {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Padding(
-          padding: const EdgeInsets.only(
-            top: Grid.gutter,
-            right: Grid.gutter,
-            bottom: Grid.xs,
-          ),
-          child: Align(
-            alignment: Alignment.centerRight,
-            child: SizedBox.square(
-              dimension: 44,
-              child: IconButton(
-                tooltip: 'Close sheet',
-                onPressed: () {
-                  unawaited(HapticFeedback.lightImpact());
-                  Navigator.of(context).pop();
-                },
-                style: IconButton.styleFrom(
-                  padding: EdgeInsets.zero,
-                  backgroundColor: context.colors.surfaceContainerHighest,
-                  foregroundColor: context.colors.onSurface,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(Radii.dialog),
+        if (showCloseButton)
+          Padding(
+            padding: const EdgeInsets.only(
+              top: Grid.xxs,
+              left: Grid.gutter,
+              right: Grid.gutter,
+              bottom: Grid.xs,
+            ),
+            child: SizedBox(
+              height: 56,
+              child: Stack(
+                alignment: Alignment.topCenter,
+                children: [
+                  if (showDragHandle) const _SheetDragHandle(),
+                  Align(
+                    alignment: Alignment.bottomRight,
+                    child: SizedBox.square(
+                      dimension: 44,
+                      child: IconButton(
+                        tooltip: 'Close sheet',
+                        onPressed: () {
+                          unawaited(HapticFeedback.lightImpact());
+                          Navigator.of(context).pop();
+                        },
+                        style: IconButton.styleFrom(
+                          padding: EdgeInsets.zero,
+                          backgroundColor:
+                              context.colors.surfaceContainerHighest,
+                          foregroundColor: context.colors.onSurface,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(Radii.dialog),
+                          ),
+                        ),
+                        icon: const Icon(LucideIcons.x, size: 22),
+                      ),
+                    ),
                   ),
-                ),
-                icon: const Icon(LucideIcons.x, size: 22),
+                ],
               ),
             ),
+          )
+        else if (showDragHandle)
+          const Padding(
+            padding: EdgeInsets.only(top: Grid.xxs, bottom: Grid.xs),
+            child: _SheetDragHandle(),
           ),
-        ),
         Flexible(child: child),
       ],
+    );
+  }
+}
+
+class _SheetDragHandle extends StatelessWidget {
+  const _SheetDragHandle();
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      label: 'Drag handle',
+      child: Container(
+        key: const ValueKey('buzz-sheet-drag-handle'),
+        width: 32,
+        height: 4,
+        decoration: BoxDecoration(
+          color: context.colors.onSurfaceVariant.withValues(alpha: 0.4),
+          borderRadius: BorderRadius.circular(Radii.full),
+        ),
+      ),
     );
   }
 }
