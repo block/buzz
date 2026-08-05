@@ -128,6 +128,7 @@ export function TerminalSubstrate({
   );
   const [owner, setOwner] = React.useState<"buzz" | "terminal">("buzz");
   const [viewport, setViewport] = React.useState({ columns: 1, rows: 1 });
+  const [selectionText, setSelectionText] = React.useState("");
   const [welcomeVisible, setWelcomeVisible] = React.useState(false);
   const [cursorPainted, setCursorPainted] = React.useState(true);
   const [cursorReset, setCursorReset] = React.useState(0);
@@ -457,6 +458,7 @@ export function TerminalSubstrate({
     gridRef.current = activeSessionId
       ? (gridsRef.current.get(activeSessionId) ?? null)
       : null;
+    setSelectionText(gridRef.current?.text() ?? "");
 
     paintTerminal();
   }, [activeSessionId, cursorPainted, frames, terminalPalette]);
@@ -672,17 +674,19 @@ export function TerminalSubstrate({
           </button>
         </div>
       </div>
-      {/* biome-ignore lint/a11y/noStaticElementInteractions: the hidden textarea owns keyboard semantics; this only preserves its focus across canvas clicks. */}
-      <div
-        className="buzz-terminal-viewport px-5 pt-2"
-        onMouseDown={(event) => {
-          // Preventing the canvas mousedown also suppresses selection. Revisit
-          // this when the terminal gains mouse selection support.
-          event.preventDefault();
-          textareaRef.current?.focus({ preventScroll: true });
-        }}
-      >
+      <div className="buzz-terminal-viewport px-5 pt-2">
         <canvas ref={canvasRef} />
+        <pre
+          aria-hidden="true"
+          className="buzz-terminal-selection-layer"
+          onMouseUp={() => {
+            if (window.getSelection()?.isCollapsed !== false) {
+              textareaRef.current?.focus({ preventScroll: true });
+            }
+          }}
+        >
+          {selectionText}
+        </pre>
         {welcomeVisible && banner ? (
           <canvas className="buzz-terminal-welcome" ref={bannerCanvasRef} />
         ) : null}

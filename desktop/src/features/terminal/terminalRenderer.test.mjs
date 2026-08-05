@@ -165,3 +165,38 @@ test("cursor visibility can blink without a new terminal frame", () => {
   grid.paint(restored, metrics, palette);
   assert.ok(restored.fills.some((fill) => fill[0] === 20 && fill[2] === 1.2));
 });
+
+test("text reconstructs selectable viewport content with cell alignment", () => {
+  const grid = new TerminalGrid({ generation: 0, columns: 8, screenLines: 2 });
+  grid.apply({
+    viewport: grid.viewport,
+    full: true,
+    cursor: { line: 0, column: 0, visible: false },
+    rows: [
+      {
+        line: 0,
+        spans: [
+          {
+            style: { fg: 0, bg: 0, flags: 0 },
+            clusters: [
+              { column: 1, text: "A", width: 1 },
+              { column: 3, text: "😀", width: 2 },
+              { column: 6, text: "B", width: 1 },
+            ],
+          },
+        ],
+      },
+      {
+        line: 1,
+        spans: [
+          {
+            style: { fg: 0, bg: 0, flags: 0 },
+            clusters: [{ column: 0, text: "é", width: 1 }],
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.equal(grid.text(), " A 😀 B\né");
+});

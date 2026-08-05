@@ -857,3 +857,25 @@ test("the handoff chord still toggles with the tab layer installed", async () =>
 // Splash animation lifecycle.
 //
 // This substrate is mounted unconditionally on every route and merely
+
+test("mirrors the active canvas grid into a selectable plain-text layer", async () => {
+  const subject = fixture({
+    sessionFrames: [
+      { frame: frameWith("one"), sessionId: "one" },
+      { frame: frameWith("two"), sessionId: "two" },
+    ],
+    sessions: TWO_SESSIONS,
+  });
+  await ready(subject.view);
+  const selectionLayer = subject.view.container.querySelector(
+    ".buzz-terminal-selection-layer",
+  );
+  await waitFor(() =>
+    assert.equal(selectionLayer.textContent.split("\n")[0], "one"),
+  );
+
+  subject.rerender({ sessions: SWAPPED_SESSIONS });
+  await waitFor(() =>
+    assert.equal(selectionLayer.textContent.split("\n")[0], "two"),
+  );
+});

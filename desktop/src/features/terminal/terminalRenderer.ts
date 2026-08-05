@@ -128,6 +128,23 @@ export class TerminalGrid {
     return this.#viewport;
   }
 
+  text(): string {
+    return this.#rows
+      .map((spans) => {
+        const cells = Array.from({ length: this.#viewport.columns }, () => " ");
+        for (const span of spans) {
+          for (const cluster of span.clusters) {
+            cells[cluster.column] = cluster.text;
+            for (let offset = 1; offset < cluster.width; offset++) {
+              cells[cluster.column + offset] = "";
+            }
+          }
+        }
+        return cells.join("").trimEnd();
+      })
+      .join("\n");
+  }
+
   apply(frame: TerminalFrame): boolean {
     if (
       frame.viewport.generation !== this.#viewport.generation ||
