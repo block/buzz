@@ -144,6 +144,26 @@ export function useDocumentSession(vaultRoot: string | null) {
     [clearTimer, saveTab],
   );
 
+  /** Re-opens a set of paths without stealing focus from `activePath`. */
+  const restoreFiles = React.useCallback(
+    async (paths: readonly string[], activePath: string | null) => {
+      for (const path of paths) {
+        try {
+          const raw = await readVaultFile(path);
+          setState((current) => openTabIn(current, buildTab(path, raw)));
+        } catch {
+          // A note deleted since last session simply does not come back.
+        }
+      }
+      if (activePath) {
+        setState((current) =>
+          findTab(current, activePath) ? { ...current, activePath } : current,
+        );
+      }
+    },
+    [],
+  );
+
   const openFile = React.useCallback(async (path: string) => {
     if (findTab(stateRef.current, path)) {
       setState((current) =>
@@ -339,6 +359,7 @@ export function useDocumentSession(vaultRoot: string | null) {
     notePathRenamed,
     openFile,
     reloadFile,
+    restoreFiles,
     saveAllDirty,
     saveTab,
     setViewMode,

@@ -74,6 +74,27 @@ export function findTags(text: string): InlineMatch[] {
 }
 
 /**
+ * `^block-id` — a block reference anchor, valid only at the end of a line.
+ *
+ * Must not match a caret inside a wikilink (`[[Note^id]]` is the *link*, not an
+ * anchor), so callers filter those out; see `findBlockIds`.
+ */
+const BLOCK_ID_PATTERN = /(?<=\s)\^([A-Za-z0-9-]+)\s*$/;
+
+/**
+ * The trailing block anchor on a line, or `null`.
+ *
+ * Onyx's plugin scans for these and then separately excludes ones inside
+ * wikilinks; anchoring to end-of-line makes that exclusion automatic, because a
+ * wikilink's caret is always followed by `]]`.
+ */
+export function findBlockId(line: string): InlineMatch | null {
+  const match = BLOCK_ID_PATTERN.exec(line);
+  if (!match) return null;
+  return { content: match[1], index: match.index, raw: match[0].trimEnd() };
+}
+
+/**
  * Obsidian's callout aliases, mapped to the canonical type whose styling they
  * share. Ported from Onyx's table.
  */

@@ -96,3 +96,10 @@
 .documents-editor .obsidian-task {
   cursor: pointer;
 }
+
+/* `^block-id` anchors — present for reference, not meant to draw the eye. */
+.documents-editor .obsidian-block-id {
+  color: var(--color-muted-foreground);
+  font-size: 0.85em;
+  opacity: 0.7;
+}

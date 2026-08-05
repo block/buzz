@@ -13,6 +13,7 @@ import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 
 import {
+  findBlockId,
   findComments,
   findHighlights,
   findTags,
@@ -58,6 +59,16 @@ function decorateText(
         {
           class: "obsidian-comment",
         },
+      ),
+    );
+  }
+  const blockId = findBlockId(text);
+  if (blockId) {
+    decorations.push(
+      Decoration.inline(
+        from + blockId.index,
+        from + blockId.index + blockId.raw.length,
+        { class: "obsidian-block-id", "data-block-id": blockId.content },
       ),
     );
   }
@@ -150,9 +161,11 @@ export const ObsidianSyntaxExtension = Extension.create({
 
             if (element?.classList.contains("obsidian-tag")) {
               const tag = element.getAttribute("data-tag");
-              if (tag) {
+              // Without a handler, fall through so the click still places the
+              // caret — swallowing it would make tagged text unselectable.
+              if (tag && storage.onTagClick) {
                 event.preventDefault();
-                storage.onTagClick?.(tag);
+                storage.onTagClick(tag);
                 return true;
               }
             }

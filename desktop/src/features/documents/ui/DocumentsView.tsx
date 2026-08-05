@@ -18,6 +18,10 @@ import { DocumentTreePane } from "@/features/documents/ui/DocumentTreePane";
 import { DocumentBacklinksPanel } from "@/features/documents/ui/DocumentBacklinksPanel";
 import { DocumentOutlinePanel } from "@/features/documents/ui/DocumentOutlinePanel";
 import type { OutlineHeading } from "@/features/documents/lib/obsidianSyntax";
+import {
+  readSessionSnapshot,
+  writeSessionSnapshot,
+} from "@/features/documents/lib/documentSession";
 import { getBacklinks } from "@/features/documents/lib/backlinks";
 import { buildNoteIndex } from "@/features/documents/lib/noteIndex";
 import { collectFilePaths } from "@/features/documents/lib/treeModel";
@@ -82,6 +86,31 @@ export function DocumentsView() {
       targetPath: activePath,
     });
   }, [activePath, contentsQuery.data, noteIndex]);
+
+  // Restore the previous session once per vault. Content is never persisted —
+  // each note is re-read from disk, so a file changed since last run wins.
+  const restoredForRef = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    if (!vaultRoot || restoredForRef.current === vaultRoot) return;
+    restoredForRef.current = vaultRoot;
+
+    const snapshot = readSessionSnapshot(vaultRoot);
+    if (!snapshot) return;
+    setExpandedPaths(new Set(snapshot.expandedPaths));
+    void session.restoreFiles(snapshot.openPaths, snapshot.activePath);
+  }, [session.restoreFiles, vaultRoot]);
+
+  // Persist after the restore has run, so an empty initial state cannot
+  // clobber a saved session.
+  React.useEffect(() => {
+    if (!vaultRoot || restoredForRef.current !== vaultRoot) return;
+    writeSessionSnapshot({
+      activePath: session.state.activePath,
+      expandedPaths: [...expandedPaths],
+      openPaths: session.state.tabs.map((tab) => tab.path),
+      vaultPath: vaultRoot,
+    });
+  }, [expandedPaths, session.state, vaultRoot]);
 
   const [headings, setHeadings] = React.useState<OutlineHeading[]>([]);
   const [activeHeading, setActiveHeading] = React.useState(-1);

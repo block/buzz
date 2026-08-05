@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   activeHeadingIndex,
+  findBlockId,
   findComments,
   findHighlights,
   findTags,
@@ -85,6 +86,23 @@ test("a plain blockquote is not a callout", () => {
   assert.equal(parseCallout("> just a quote"), null);
   assert.equal(parseCallout("not a quote at all"), null);
   assert.equal(parseCallout("> [not a callout]"), null);
+});
+
+test("finds a trailing block-id anchor", () => {
+  assert.equal(findBlockId("A claim. ^my-block").content, "my-block");
+  assert.equal(findBlockId("Trailing space. ^abc123  ").content, "abc123");
+});
+
+test("a caret inside a wikilink is not a block anchor", () => {
+  // `[[Note^id]]` is a block *reference*; the anchor form only ends a line.
+  assert.equal(findBlockId("See [[Note^id]] here."), null);
+  assert.equal(findBlockId("See [[Note^id]]"), null);
+});
+
+test("ignores carets that are not anchors", () => {
+  assert.equal(findBlockId("2^10 is 1024"), null);
+  assert.equal(findBlockId("no caret at all"), null);
+  assert.equal(findBlockId("^leading-only"), null, "needs preceding space");
 });
 
 test("scroll-spy picks the last heading at or above the viewport", () => {

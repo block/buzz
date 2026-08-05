@@ -205,3 +205,41 @@ test.describe("Documents outline and Obsidian syntax", () => {
     );
   });
 });
+
+test.describe("Documents session restore", () => {
+  test("reopens the previous tabs and re-reads them from disk", async ({
+    page,
+  }) => {
+    // Uses the bridge's default vault rather than seeded files: `resetMockVault`
+    // runs on every page load, so seeded fixtures would vanish across the
+    // reload this test depends on.
+    await page.addInitScript(() => {
+      window.localStorage.setItem("buzz.documents.vaultPath.v1", "/mock/vault");
+    });
+    await installMockBridge(page);
+    await page.goto("/");
+    await page.getByTestId("open-documents-view").click();
+    await expect(page.getByTestId("documents-tree")).toBeVisible();
+
+    await page.getByTestId("documents-file-Welcome.md").click();
+    await page.getByTestId("documents-folder-Notes").click();
+    await page.getByTestId("documents-file-Meeting notes.md").click();
+    await expect(page.getByTestId("documents-tab-Welcome")).toBeVisible();
+    await expect(page.getByTestId("documents-tab-Meeting notes")).toBeVisible();
+
+    const stored = await page.evaluate(() =>
+      window.localStorage.getItem("buzz.documents.session.v1"),
+    );
+    expect(stored).toContain("Welcome.md");
+
+    await page.reload();
+    await page.getByTestId("open-documents-view").click();
+
+    // Both tabs come back, and the expanded folder with them.
+    await expect(page.getByTestId("documents-tab-Welcome")).toBeVisible();
+    await expect(page.getByTestId("documents-tab-Meeting notes")).toBeVisible();
+    await expect(
+      page.getByTestId("documents-file-Meeting notes.md"),
+    ).toBeVisible();
+  });
+});
