@@ -85,7 +85,7 @@ importers:
         specifier: ^5.2.8
         version: 5.2.8
       '@mediapipe/tasks-vision':
-        specifier: ^0.10.35
+        specifier: 0.10.35
         version: 0.10.35
       '@radix-ui/react-alert-dialog':
         specifier: ^1.1.15

@@ -63,6 +63,32 @@ fn mediapipe_wasm_base() -> String {
 }
 
 #[test]
+fn mediapipe_wasm_base_matches_the_installed_package() {
+    // The CDN URL names a version, so the fetched wasm is only guaranteed to
+    // match the bundled JS API if that version is the one npm installed. The
+    // dependency is pinned exactly (no caret) so this comparison is meaningful
+    // — a range would let the lockfile move underneath the URL.
+    const PACKAGE_JSON: &str = include_str!("../../package.json");
+
+    let manifest: serde_json::Value =
+        serde_json::from_str(PACKAGE_JSON).expect("desktop/package.json is valid JSON");
+    let installed = manifest["dependencies"]["@mediapipe/tasks-vision"]
+        .as_str()
+        .expect("desktop depends on @mediapipe/tasks-vision");
+    assert!(
+        !installed.starts_with(['^', '~', '>', '<', '*']),
+        "@mediapipe/tasks-vision must be pinned exactly, found `{installed}`"
+    );
+
+    let base = mediapipe_wasm_base();
+    let expected = format!("@mediapipe/tasks-vision@{installed}/wasm");
+    assert!(
+        base.ends_with(&expected),
+        "MEDIAPIPE_WASM_BASE ({base}) must serve the installed version {installed}"
+    );
+}
+
+#[test]
 fn script_src_pins_the_mediapipe_loader_urls() {
     // `FilesetResolver.forVisionTasks` appends exactly one of these two files
     // (it probes for wasm SIMD at runtime) and loads it via a `<script>` tag,
