@@ -56,6 +56,17 @@ pub struct DiffMeta {
     pub alt_text: Option<String>,
 }
 
+/// One item in a `buzz:todo-card` interactive card message
+/// (see `docs/nips/NIP-TC.md`).
+pub struct TodoCardItem {
+    /// Card-unique item id, referenced by kind:40009 response `item` tags.
+    pub id: String,
+    /// Human-readable item text.
+    pub text: String,
+    /// Optional assignee pubkey (64-char hex). Absent = anyone may complete.
+    pub assignee: Option<String>,
+}
+
 /// Vote direction for `build_vote`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VoteDirection {

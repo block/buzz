@@ -1,13 +1,13 @@
-//! Typed event builder functions (38 builders).
+//! Typed event builder functions (40 builders).
 //!
 //! All functions return `Result<nostr::EventBuilder, SdkError>`.
 //! The caller signs: `builder.sign_with_keys(&keys)?`.
 
 use buzz_core::{
     kind::{
-        KIND_AGENT_OBSERVER_FRAME, KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_DELETION,
-        KIND_DM_ADD_MEMBER, KIND_DM_OPEN, KIND_EMOJI_SET, KIND_GIT_ISSUE, KIND_GIT_PATCH,
-        KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT,
+        KIND_AGENT_OBSERVER_FRAME, KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_CARD_RESPONSE,
+        KIND_DELETION, KIND_DM_ADD_MEMBER, KIND_DM_OPEN, KIND_EMOJI_SET, KIND_GIT_ISSUE,
+        KIND_GIT_PATCH, KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT,
         KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED,
         KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST,
         KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
@@ -23,7 +23,8 @@ use nostr::{EventBuilder, Kind, Tag};
 use uuid::Uuid;
 
 use crate::{
-    ChannelKind, CustomEmoji, DiffMeta, MemberRole, SdkError, ThreadRef, Visibility, VoteDirection,
+    ChannelKind, CustomEmoji, DiffMeta, MemberRole, SdkError, ThreadRef, TodoCardItem, Visibility,
+    VoteDirection,
 };
 
 /// Parse a tag slice, mapping errors to `SdkError::InvalidTag`.
@@ -457,6 +458,96 @@ pub fn build_vote(
         tag(&["e", &target_event_id.to_hex()])?,
     ];
     Ok(EventBuilder::new(Kind::Custom(45002), content).tags(tags))
+}
+
+/// Maximum items allowed in a `buzz:todo-card` payload (NIP-TC MVP cap).
+pub const MAX_TODO_CARD_ITEMS: usize = 20;
+
+/// Build a stream message (kind 9) carrying a `buzz:todo-card` v1 sentinel.
+///
+/// `prose` is the plaintext fallback rendered by clients without card
+/// support; the fenced JSON payload is appended after it. Each assignee is
+/// p-tagged so they get mentioned. Check-offs come back as kind:40009
+/// responses referencing the signed message's event id (see NIP-TC).
+pub fn build_todo_card_message(
+    channel_id: Uuid,
+    prose: &str,
+    title: Option<&str>,
+    items: &[TodoCardItem],
+) -> Result<EventBuilder, SdkError> {
+    if items.is_empty() || items.len() > MAX_TODO_CARD_ITEMS {
+        return Err(SdkError::InvalidInput(format!(
+            "todo card needs 1..={MAX_TODO_CARD_ITEMS} items (got {})",
+            items.len()
+        )));
+    }
+    let mut seen_ids = std::collections::HashSet::new();
+    for item in items {
+        if item.id.is_empty() || !seen_ids.insert(item.id.as_str()) {
+            return Err(SdkError::InvalidInput(format!(
+                "todo card item ids must be non-empty and unique (got {:?})",
+                item.id
+            )));
+        }
+    }
+
+    let mut json_items = Vec::with_capacity(items.len());
+    let mut assignees: Vec<String> = Vec::new();
+    for item in items {
+        let mut obj = serde_json::Map::new();
+        obj.insert("id".into(), serde_json::json!(item.id));
+        obj.insert("text".into(), serde_json::json!(item.text));
+        if let Some(assignee) = &item.assignee {
+            let assignee = check_pubkey_hex(assignee, "assignee")?;
+            obj.insert("assignee".into(), serde_json::json!(assignee));
+            if !assignees.contains(&assignee) {
+                assignees.push(assignee);
+            }
+        }
+        json_items.push(serde_json::Value::Object(obj));
+    }
+    let mut payload = serde_json::Map::new();
+    payload.insert("v".into(), serde_json::json!(1));
+    if let Some(title) = title {
+        payload.insert("title".into(), serde_json::json!(title));
+    }
+    payload.insert("items".into(), serde_json::Value::Array(json_items));
+    let json = serde_json::Value::Object(payload).to_string();
+
+    let content = format!("{prose}\n\n```buzz:todo-card\n{json}\n```");
+    check_content(&content, 64 * 1024)?;
+
+    let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
+    for assignee in &assignees {
+        tags.push(tag(&["p", assignee])?);
+    }
+    Ok(EventBuilder::new(Kind::Custom(9), content).tags(tags))
+}
+
+/// Build a to-do card check-off response (kind 40009, NIP-TC).
+///
+/// `done: true` checks the item off; `false` un-checks the signer's own
+/// completion. State is folded client-side: the latest response per
+/// (item, pubkey) wins.
+pub fn build_card_response(
+    channel_id: Uuid,
+    card_event_id: nostr::EventId,
+    item_id: &str,
+    done: bool,
+) -> Result<EventBuilder, SdkError> {
+    if item_id.is_empty() {
+        return Err(SdkError::InvalidInput("item_id must be non-empty".into()));
+    }
+    let tags = vec![
+        tag(&["h", &channel_id.to_string()])?,
+        tag(&["e", &card_event_id.to_hex()])?,
+        tag(&["item", item_id])?,
+    ];
+    Ok(EventBuilder::new(
+        Kind::Custom(KIND_CARD_RESPONSE as u16),
+        serde_json::json!({ "done": done }).to_string(),
+    )
+    .tags(tags))
 }
 
 /// Build a NIP-25 reaction event (kind 7). Emoji max 64 chars.
@@ -2237,6 +2328,95 @@ mod tests {
             let s = t.as_slice();
             s.first().map(|v| v.as_str()) == Some(key) && s.get(1).map(|v| v.as_str()) == Some(val)
         })
+    }
+
+    #[test]
+    fn todo_card_message_round_trips_fenced_payload() {
+        let cid = uuid();
+        let assignee = keys().public_key().to_hex();
+        let items = [
+            TodoCardItem {
+                id: "a1".into(),
+                text: "Tom: flip the flag".into(),
+                assignee: Some(assignee.clone()),
+            },
+            TodoCardItem {
+                id: "b2".into(),
+                text: "Anyone: verify dashboards".into(),
+                assignee: None,
+            },
+        ];
+        let ev = sign(
+            build_todo_card_message(cid, "Launch checklist:", Some("Launch"), &items).unwrap(),
+        );
+        assert_eq!(ev.kind.as_u16(), 9);
+        assert!(has_tag(&ev, "h", &cid.to_string()));
+        assert!(has_tag(&ev, "p", &assignee));
+        assert!(ev
+            .content
+            .starts_with("Launch checklist:\n\n```buzz:todo-card\n"));
+        assert!(ev.content.ends_with("\n```"));
+
+        // Round-trip: the fenced JSON parses back to the same card.
+        let json = ev
+            .content
+            .split("```buzz:todo-card\n")
+            .nth(1)
+            .and_then(|rest| rest.strip_suffix("\n```"))
+            .expect("fenced payload");
+        let parsed: serde_json::Value = serde_json::from_str(json).expect("valid JSON");
+        assert_eq!(parsed["v"], 1);
+        assert_eq!(parsed["title"], "Launch");
+        assert_eq!(parsed["items"][0]["id"], "a1");
+        assert_eq!(parsed["items"][0]["assignee"], serde_json::json!(assignee));
+        assert_eq!(parsed["items"][1]["id"], "b2");
+        assert!(parsed["items"][1].get("assignee").is_none());
+    }
+
+    #[test]
+    fn todo_card_message_rejects_invalid_items() {
+        let cid = uuid();
+        assert!(build_todo_card_message(cid, "p", None, &[]).is_err());
+
+        let dup = |id: &str| TodoCardItem {
+            id: id.into(),
+            text: "x".into(),
+            assignee: None,
+        };
+        assert!(build_todo_card_message(cid, "p", None, &[dup("a"), dup("a")]).is_err());
+        assert!(build_todo_card_message(cid, "p", None, &[dup("")]).is_err());
+
+        let too_many: Vec<TodoCardItem> = (0..=MAX_TODO_CARD_ITEMS)
+            .map(|i| dup(&format!("item-{i}")))
+            .collect();
+        assert!(build_todo_card_message(cid, "p", None, &too_many).is_err());
+
+        let bad_assignee = [TodoCardItem {
+            id: "a".into(),
+            text: "x".into(),
+            assignee: Some("not-hex".into()),
+        }];
+        assert!(build_todo_card_message(cid, "p", None, &bad_assignee).is_err());
+    }
+
+    #[test]
+    fn card_response_happy_path() {
+        let cid = uuid();
+        let card = event_id();
+        let ev = sign(build_card_response(cid, card, "a1", true).unwrap());
+        assert_eq!(ev.kind.as_u16(), 40009);
+        assert!(has_tag(&ev, "h", &cid.to_string()));
+        assert!(has_tag(&ev, "e", &card.to_hex()));
+        assert!(has_tag(&ev, "item", "a1"));
+        assert_eq!(ev.content, r#"{"done":true}"#);
+
+        let uncheck = sign(build_card_response(cid, card, "a1", false).unwrap());
+        assert_eq!(uncheck.content, r#"{"done":false}"#);
+    }
+
+    #[test]
+    fn card_response_rejects_empty_item_id() {
+        assert!(build_card_response(uuid(), event_id(), "", true).is_err());
     }
 
     #[test]
