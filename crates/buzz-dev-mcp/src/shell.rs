@@ -15,6 +15,8 @@ use tokio_util::sync::CancellationToken;
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_TIMEOUT_MS: u64 = 600_000;
+/// Operator override for the shell-timeout ceiling, in milliseconds (#4638).
+const MAX_TIMEOUT_ENV: &str = "BUZZ_DEV_MCP_MAX_TIMEOUT_MS";
 const MAX_COMMAND_BYTES: usize = 1_000_000;
 const CAPTURE_CAP: usize = 10 * 1024 * 1024;
 const MAX_BYTES: usize = 50 * 1024;
@@ -28,6 +30,10 @@ pub struct SharedState {
     pub shim: Shim,
     pub session_dir: TempDir,
     pub bootstrap_instructions: String,
+    /// Ceiling for `ShellParams::timeout_ms`, resolved once at startup from
+    /// `BUZZ_DEV_MCP_MAX_TIMEOUT_MS` (default 600 000 ms). The clamp itself is
+    /// applied — and reported — per call in [`run`].
+    pub max_timeout_ms: u64,
     /// The shell resolved at construction: `Ok((path, display_name))` when a shell
     /// is available, `Err(msg)` when none was found. Stored once so both the
     /// bootstrap hint and every `run()` call read the SAME resolution — no drift.
@@ -57,6 +63,7 @@ impl SharedState {
             session_dir,
             bootstrap_instructions,
             resolved_shell,
+            max_timeout_ms: resolve_max_timeout_ms(std::env::var(MAX_TIMEOUT_ENV).ok()),
             artifacts: Mutex::new(VecDeque::with_capacity(ARTIFACT_RING_SIZE)),
             next_call_id: Mutex::new(0),
         })
@@ -69,6 +76,18 @@ impl SharedState {
         };
         *g += 1;
         *g
+    }
+}
+
+/// Resolve the effective shell-timeout ceiling from the operator override.
+///
+/// Unparseable or zero values fall back to the built-in [`MAX_TIMEOUT_MS`]
+/// rather than lowering or disabling the ceiling — a misconfigured knob must
+/// never make every command die instantly.
+fn resolve_max_timeout_ms(raw: Option<String>) -> u64 {
+    match raw.as_deref().map(|v| v.trim().parse::<u64>()) {
+        Some(Ok(v)) if v > 0 => v,
+        _ => MAX_TIMEOUT_MS,
     }
 }
 
@@ -121,7 +140,10 @@ pub struct ShellParams {
     pub command: String,
     #[serde(default)]
     pub workdir: Option<String>,
-    /// Defaults to 120000 ms (2 min) if omitted; capped at 600000 ms (10 min).
+    /// Defaults to 120000 ms (2 min) if omitted. Capped at the server's
+    /// ceiling — 600000 ms (10 min) unless the operator raised it via
+    /// BUZZ_DEV_MCP_MAX_TIMEOUT_MS; requests above the ceiling are clamped
+    /// and the clamp is reported in the result's `notes`.
     /// For long-running commands (git push with hooks, cargo build, test suites), use 300000+.
     #[serde(default)]
     pub timeout_ms: Option<u64>,
@@ -138,10 +160,8 @@ pub async fn run(
             None,
         ));
     }
-    let timeout_ms = p
-        .timeout_ms
-        .unwrap_or(DEFAULT_TIMEOUT_MS)
-        .min(MAX_TIMEOUT_MS);
+    let requested_timeout_ms = p.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
+    let timeout_ms = requested_timeout_ms.min(state.max_timeout_ms);
     let workdir: PathBuf = p
         .workdir
         .as_deref()
@@ -215,6 +235,15 @@ pub async fn run(
 
     let timeout_dur = Duration::from_millis(timeout_ms);
     let mut notes: Vec<String> = Vec::new();
+    if requested_timeout_ms > timeout_ms {
+        // The silent version of this clamp cost real debugging time (#4638):
+        // a caller that asked for an hour and was given ten minutes could not
+        // distinguish the ceiling from a crash.
+        notes.push(format!(
+            "requested timeout_ms {requested_timeout_ms} exceeds the {timeout_ms} ms ceiling; \
+             clamped (set {MAX_TIMEOUT_ENV} to raise the ceiling)"
+        ));
+    }
     let (status, timed_out) = tokio::select! {
         biased;
         _ = ct.cancelled() => {
@@ -243,6 +272,12 @@ pub async fn run(
             (None, false)
         }
         Err(_) => {
+            // Name the effective timeout in the result: the child's own output
+            // dies with the process group, so without this note a killed job
+            // reads as a truncated stream, not as the ceiling firing (#4638).
+            notes.push(format!(
+                "process group killed at the {timeout_ms} ms timeout"
+            ));
             // Kill process group — this closes the pipes, causing reads to EOF.
             kill_group.kill_graceful().await;
             // Reap the child so it doesn't become a zombie.
@@ -1046,6 +1081,62 @@ mod tests {
         let v = body(r);
         assert_eq!(v["timed_out"], true);
         assert_eq!(v["exit_code"], 124);
+        // The kill must be attributed to the timeout in-band — a killed job's
+        // truncated output is otherwise indistinguishable from a crash.
+        assert!(
+            v["notes"].as_array().expect("notes array").iter().any(|n| n
+                .as_str()
+                .unwrap_or("")
+                .contains("killed at the 150 ms timeout")),
+            "timeout note missing from {:?}",
+            v["notes"]
+        );
+    }
+
+    #[test]
+    fn max_timeout_resolves_from_env_value() {
+        assert_eq!(resolve_max_timeout_ms(None), MAX_TIMEOUT_MS);
+        assert_eq!(resolve_max_timeout_ms(Some("3600000".into())), 3_600_000);
+        assert_eq!(resolve_max_timeout_ms(Some(" 250 ".into())), 250);
+        // Misconfiguration never lowers the ceiling to zero or garbage.
+        assert_eq!(resolve_max_timeout_ms(Some("0".into())), MAX_TIMEOUT_MS);
+        assert_eq!(resolve_max_timeout_ms(Some("-5".into())), MAX_TIMEOUT_MS);
+        assert_eq!(
+            resolve_max_timeout_ms(Some("ten minutes".into())),
+            MAX_TIMEOUT_MS
+        );
+        assert_eq!(resolve_max_timeout_ms(Some(String::new())), MAX_TIMEOUT_MS);
+    }
+
+    /// A request above the ceiling is honored at the ceiling and the clamp is
+    /// reported in-band — the silent version of this clamp is what #4638 is
+    /// about.
+    #[tokio::test(flavor = "current_thread")]
+    async fn clamped_timeout_is_reported_in_notes() {
+        let dir = tempdir().expect("tempdir");
+        let mut state = make_state(dir.path());
+        state.max_timeout_ms = 5_000;
+        let r = run(
+            &state,
+            ShellParams {
+                command: "echo capped".into(),
+                workdir: None,
+                timeout_ms: Some(60_000),
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("ok");
+        let v = body(r);
+        assert_eq!(v["exit_code"], 0);
+        assert!(
+            v["notes"].as_array().expect("notes array").iter().any(|n| {
+                let n = n.as_str().unwrap_or("");
+                n.contains("60000") && n.contains("5000 ms ceiling") && n.contains(MAX_TIMEOUT_ENV)
+            }),
+            "clamp note missing from {:?}",
+            v["notes"]
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
