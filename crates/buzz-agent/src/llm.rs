@@ -4720,26 +4720,23 @@ mod tests {
     }
 
     /// Non-timeout transport errors preserve the original reqwest error text.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn classify_transport_error_non_timeout_preserves_reqwest_text() {
-        // Bind an ephemeral loopback port, capture its address, then drop the
-        // listener before dialling — the kernel releases the port and the
-        // subsequent connect gets a deterministic connection-refused.  This
-        // avoids the fixed-port-1 assumption (a privileged process could bind
-        // port 1) while keeping zero network egress beyond loopback.
-        //
-        // Bind-then-drop is the chosen shape rather than accept-then-close
-        // because dropping the TcpListener atomically releases the port before
-        // the connect, which avoids a race window where the accept loop could
-        // still serve the connection.  Rapid port reuse is a theoretical
-        // concern, but in practice the kernel will not reuse an ephemeral port
-        // instantaneously within the same process, so this is deterministic in
-        // all tested environments.
-        let addr = {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            listener.local_addr().unwrap()
-            // `listener` dropped here — port released
-        };
+        use tokio::net::TcpListener;
+
+        // Accept-then-close: keep the listener alive so the endpoint stays
+        // owned throughout, spawn a task that accepts exactly one connection
+        // and immediately drops the socket.  Produces a deterministic
+        // non-timeout reqwest error (request-class, not is_timeout()) while
+        // the test holds exclusive ownership of the address — no released-port
+        // race possible.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((sock, _)) = listener.accept().await {
+                drop(sock); // close immediately, no response written
+            }
+        });
 
         let client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_millis(200))
@@ -4750,17 +4747,16 @@ mod tests {
             .get(format!("http://{addr}/"))
             .send()
             .await
-            .expect_err("must fail to connect to dropped port");
+            .expect_err("must fail: server closes connection before response");
 
         assert!(
             !err.is_timeout(),
-            "precondition: connection-refused is not a timeout: {err}"
+            "precondition: connection-closed is not a timeout: {err}"
         );
 
-        let msg = classify_transport_error(&err, std::time::Duration::from_secs(240));
-        assert!(
-            msg.starts_with("transport: "),
-            "non-timeout error must be prefixed 'transport: ': {msg}"
+        assert_eq!(
+            classify_transport_error(&err, std::time::Duration::from_secs(240)),
+            format!("transport: {err}")
         );
     }
 
