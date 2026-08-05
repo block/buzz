@@ -62,6 +62,7 @@ import { useLoadOlderOnScroll } from "@/features/messages/ui/useLoadOlderOnScrol
 import type { ChannelAgentSessionAgent } from "./useChannelAgentSessions";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { CausalSessionTimeline } from "@/features/agents/ui/CausalSessionTimeline";
+import { CausalCandidateCard } from "@/features/agents/ui/CausalCandidateCard";
 
 type AgentSessionThreadPanelProps = {
   agent: ChannelAgentSessionAgent;
@@ -128,6 +129,12 @@ export function AgentSessionThreadPanel({
   const combinedHeaderEvents = React.useMemo(
     () => mergeObserverEventWindows(scopedEvents, archivedChannelEvents),
     [scopedEvents, archivedChannelEvents],
+  );
+  const activeSessionId = React.useMemo(
+    () =>
+      combinedHeaderEvents.findLast((event) => Boolean(event.sessionId))
+        ?.sessionId ?? null,
+    [combinedHeaderEvents],
   );
   const latestActivityAt = React.useMemo(
     () => getLatestActivityTimestamp(combinedHeaderEvents),
@@ -497,6 +504,7 @@ export function AgentSessionThreadPanel({
             events={combinedHeaderEvents}
             findings={[]}
           />
+          <CausalCandidateCard sessionId={activeSessionId} />
           <ManagedAgentSessionPanel
             agent={agent}
             channelId={sessionChannelId}
