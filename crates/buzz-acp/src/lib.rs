@@ -375,15 +375,23 @@ async fn check_sibling_via_profile(
 /// price of doubled viewer latency; this constant is the knob.
 const OBSERVER_PUBLISH_TICK: Duration = Duration::from_secs(1);
 
-/// Byte budget for events queued awaiting a publish slot, measured in
-/// serialized (post-`fit_observer_event_to_budget`) bytes. Lossless-ness is
-/// bounded by this budget: at one ~64KB frame per second the queue drains at
-/// most ~64KB/s, so 4 MiB buys roughly **64 seconds** of sustained
-/// over-production (at any event size — both the cap and the drain rate are
-/// bytes) before the oldest events are dropped WITH accounting (a warn
-/// carrying the dropped-event count). Beyond-budget floods therefore degrade
-/// to designed, visible loss — strictly better than the pre-batching pacer's
-/// silent 90/min drop.
+/// Byte budget for EVERYTHING retained while awaiting a publish slot: the
+/// event FIFO (serialized, post-`fit_observer_event_to_budget` bytes) PLUS
+/// the chunk coalescer's pending buffer (serialized event skeletons + raw
+/// accumulated text). Both stores count against this one cap — a
+/// high-cardinality chunk flood (many distinct coalescer keys) is bounded
+/// exactly like a plain event flood; neither buffer is a bypass around the
+/// other. Lossless-ness is bounded by this budget: each publish slot packs
+/// one ~64KB frame, gathered queue-wide for the front channel, so a single
+/// channel drains at ~64KB/s and 4 MiB buys roughly **64 seconds** of
+/// sustained over-production before the oldest items are dropped WITH
+/// accounting (a warn carrying the dropped-event count). With C channels
+/// producing concurrently the slots round-robin between them, so the
+/// per-channel drain is ~64KB/Cs and the budget shortens accordingly —
+/// still bytes-per-slot, never events-per-slot (see
+/// [`ObserverPublishQueue::next_frame`]). Beyond-budget floods therefore
+/// degrade to designed, visible loss — strictly better than the
+/// pre-batching pacer's silent 90/min drop.
 const OBSERVER_PENDING_QUEUE_MAX_BYTES: usize = 4 * 1024 * 1024;
 
 /// Observer event kind for a batch envelope wrapping multiple events.
@@ -429,6 +437,7 @@ impl ObserverPublishQueue {
         for ready in self.coalescer.ingest(event) {
             self.enqueue(ready);
         }
+        self.enforce_byte_budget();
     }
 
     fn enqueue(&mut self, mut event: observer::ObserverEvent) {
@@ -439,13 +448,33 @@ impl ObserverPublishQueue {
         let bytes = serialized_len(&event);
         self.pending_bytes += bytes;
         self.events.push_back((bytes, event));
+    }
 
+    /// Total bytes retained across BOTH stores — the event FIFO and the
+    /// coalescer's pending chunk buffer. The budget binds this sum; counting
+    /// only the FIFO would let a high-cardinality chunk flood (many distinct
+    /// coalescer keys, nothing ever flushing) grow unbounded outside the cap.
+    fn total_pending_bytes(&self) -> usize {
+        self.pending_bytes + self.coalescer.pending_bytes
+    }
+
+    /// Enforce [`OBSERVER_PENDING_QUEUE_MAX_BYTES`] over the total, dropping
+    /// OLDEST items first with accounting. Global age order across the two
+    /// stores is structural: every enqueue path flushes the coalescer first,
+    /// so every pending coalescer entry is strictly newer than every queued
+    /// event — eviction is queue front, then coalescer front. The `> 1`
+    /// guard never drops the sole remaining item (any single fitted event or
+    /// pre-flush-capped chunk entry is far under the budget).
+    fn enforce_byte_budget(&mut self) {
         let mut dropped = 0u64;
-        // `len() > 1`: never drop the event just enqueued (a fitted event is
-        // ≤ OBSERVER_MAX_PLAINTEXT_LEN, far under the queue budget).
-        while self.pending_bytes > OBSERVER_PENDING_QUEUE_MAX_BYTES && self.events.len() > 1 {
-            let (bytes, _) = self.events.pop_front().expect("len > 1");
-            self.pending_bytes -= bytes;
+        while self.total_pending_bytes() > OBSERVER_PENDING_QUEUE_MAX_BYTES
+            && self.events.len() + self.coalescer.pending.len() > 1
+        {
+            if let Some((bytes, _)) = self.events.pop_front() {
+                self.pending_bytes -= bytes;
+            } else {
+                self.coalescer.drop_oldest().expect("guard ensures an item");
+            }
             dropped += 1;
         }
         if dropped > 0 {
@@ -453,7 +482,7 @@ impl ObserverPublishQueue {
             tracing::warn!(
                 dropped,
                 total_dropped = self.dropped_events,
-                pending_bytes = self.pending_bytes,
+                pending_bytes = self.total_pending_bytes(),
                 "observer publish queue over byte budget; dropped oldest events"
             );
         }
@@ -465,22 +494,30 @@ impl ObserverPublishQueue {
         self.events.is_empty() && self.coalescer.pending.is_empty()
     }
 
-    /// Pack and remove AT MOST ONE publishable frame: the maximal run of
-    /// same-channel events at the FRONT of the queue, packed greedily until
+    /// Pack and remove AT MOST ONE publishable frame: the front event's
+    /// channel, gathered queue-wide in FIFO order (packed greedily until
     /// adding the next event would push the envelope over
-    /// `OBSERVER_MAX_PLAINTEXT_LEN`. Singletons ship unwrapped.
+    /// `OBSERVER_MAX_PLAINTEXT_LEN`). Singletons ship unwrapped.
     ///
-    /// Strict FIFO-prefix packing is load-bearing twice over:
-    /// - A frame must never mix channels (the desktop archive indexes a frame
-    ///   under its decrypted top-level `channelId`).
-    /// - Frames must publish in GLOBAL event order, not per-channel order:
-    ///   the desktop's `activeAgentTurnsStore` keeps one `(timestamp, seq)`
-    ///   watermark per agent and SKIPS events that sort at or before it, so
-    ///   publishing channel A's newer events ahead of channel B's older ones
-    ///   would make the watermark silently discard B's turn-state events.
-    ///   Packing only the front run — never reaching past a foreign-channel
-    ///   event — makes cross-channel inversion structurally impossible, and
-    ///   makes fairness automatic (pure FIFO, no channel can starve another).
+    /// Two invariants bound the gather:
+    /// - A frame never mixes channels (the desktop archive indexes a frame
+    ///   under its decrypted top-level `channelId`), and events keep their
+    ///   FIFO order *within* each channel. Cross-channel frame order MAY
+    ///   differ from arrival order — the desktop tolerates that everywhere:
+    ///   the transcript store sorts + rebuilds on out-of-order arrival, the
+    ///   archive is per-channel by construction, and the turn store's
+    ///   watermark is keyed per (agent, channel).
+    /// - A NULL-channel event is a BARRIER nothing gathers across: null-scope
+    ///   events (`agent_panic`-class) can causally couple to any channel, so
+    ///   their relative order against every channel is preserved exactly.
+    ///   Null-channel events themselves ship only as their contiguous front
+    ///   run.
+    ///
+    /// Gathering queue-wide (not just the front run) is what keeps the drain
+    /// rate in BYTES per slot rather than front-run-length events per slot:
+    /// with round-robin producers (channel A, B, A, B, ...) a front-run
+    /// packer degrades to ~1 event per slot regardless of size, silently
+    /// growing latency without ever tripping the byte budget.
     ///
     /// Pending coalesced chunks are flushed into the queue first, so a
     /// publish slot never leaves merged chunk text stranded behind the tick.
@@ -491,24 +528,33 @@ impl ObserverPublishQueue {
         let channel = self.events.front()?.1.channel_id.clone();
 
         let mut picked: Vec<observer::ObserverEvent> = Vec::new();
-        while let Some((bytes, event)) = self.events.front() {
-            if event.channel_id != channel {
-                break;
+        let mut kept: VecDeque<(usize, observer::ObserverEvent)> =
+            VecDeque::with_capacity(self.events.len());
+        let mut gathering = true;
+        while let Some((bytes, event)) = self.events.pop_front() {
+            if gathering && event.channel_id == channel {
+                picked.push(event);
+                if picked.len() > 1
+                    && serialized_len(&batch_envelope(&picked)) > OBSERVER_MAX_PLAINTEXT_LEN
+                {
+                    // Frame full: the overflow event stays queued and leads
+                    // its channel's next slot.
+                    let event = picked.pop().expect("len > 1");
+                    kept.push_back((bytes, event));
+                    gathering = false;
+                } else {
+                    self.pending_bytes -= bytes;
+                }
+            } else {
+                if gathering && (channel.is_none() || event.channel_id.is_none()) {
+                    // Null-channel barrier (or, for a null-channel frame, the
+                    // end of its contiguous front run): stop gathering.
+                    gathering = false;
+                }
+                kept.push_back((bytes, event));
             }
-            let bytes = *bytes;
-            let (_, event) = self.events.pop_front().expect("front exists");
-            picked.push(event);
-            if picked.len() > 1
-                && serialized_len(&batch_envelope(&picked)) > OBSERVER_MAX_PLAINTEXT_LEN
-            {
-                // Frame full: the overflow event returns to the front and
-                // leads the next slot's packing.
-                let event = picked.pop().expect("len > 1");
-                self.events.push_front((bytes, event));
-                break;
-            }
-            self.pending_bytes -= bytes;
         }
+        self.events = kept;
         Some(seal_batch(picked))
     }
 }
@@ -641,12 +687,21 @@ async fn run_relay_observer_publisher(
 #[derive(Default)]
 struct ObserverChunkCoalescer {
     pending: Vec<PendingObserverChunk>,
+    /// Approximate serialized bytes retained in `pending` (each entry's
+    /// serialized skeleton at creation plus appended chunk text). Counted
+    /// against [`OBSERVER_PENDING_QUEUE_MAX_BYTES`] by the owning
+    /// [`ObserverPublishQueue`] so this buffer can never grow outside the
+    /// queue's byte budget (a distinct-key chunk flood parks everything here
+    /// and nothing would otherwise bound it).
+    pending_bytes: usize,
 }
 
 struct PendingObserverChunk {
     key: ObserverChunkKey,
     event: observer::ObserverEvent,
     text: String,
+    /// Bytes this entry contributes to `pending_bytes`.
+    bytes: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -679,20 +734,54 @@ impl ObserverChunkCoalescer {
             if pending.text.len() + text.len() >= OBSERVER_CHUNK_MAX_TEXT_BYTES {
                 let events = self.flush();
                 // Start a new pending entry with the current chunk.
-                self.pending.push(PendingObserverChunk { key, event, text });
+                self.push_pending(key, event, text);
                 return events;
             }
             pending.text.push_str(&text);
+            pending.bytes += text.len();
+            self.pending_bytes += text.len();
             pending.event.seq = event.seq;
             pending.event.timestamp = event.timestamp;
             return Vec::new();
         }
 
-        self.pending.push(PendingObserverChunk { key, event, text });
+        self.push_pending(key, event, text);
         Vec::new()
     }
 
+    fn push_pending(
+        &mut self,
+        key: ObserverChunkKey,
+        event: observer::ObserverEvent,
+        text: String,
+    ) {
+        // The serialized skeleton already carries this entry's first chunk
+        // text (`text` is an extracted copy, later written back at flush), so
+        // the entry starts at its full serialized weight and appends add
+        // exactly their text length.
+        let bytes = serialized_len(&event);
+        self.pending_bytes += bytes;
+        self.pending.push(PendingObserverChunk {
+            key,
+            event,
+            text,
+            bytes,
+        });
+    }
+
+    /// Evict the OLDEST pending entry for byte-budget enforcement. Returns
+    /// `None` when there is nothing to drop.
+    fn drop_oldest(&mut self) -> Option<()> {
+        if self.pending.is_empty() {
+            return None;
+        }
+        let removed = self.pending.remove(0);
+        self.pending_bytes -= removed.bytes;
+        Some(())
+    }
+
     fn flush(&mut self) -> Vec<observer::ObserverEvent> {
+        self.pending_bytes = 0;
         self.pending
             .drain(..)
             .map(|mut pending| {
@@ -5167,13 +5256,14 @@ mod observer_publish_queue_tests {
         assert!(queue.is_empty());
     }
 
-    /// Frames never mix channels AND always publish in global arrival order.
-    /// Interleaved channels therefore produce one frame per same-channel run:
-    /// a frame must not reach past a foreign-channel event, or the desktop's
-    /// per-agent (timestamp, seq) watermark would skip the delayed channel's
-    /// events as stale.
+    /// Frames never mix channels, and each channel's events keep their FIFO
+    /// order. Gathering is QUEUE-WIDE: the front event's channel collects its
+    /// events from anywhere in the queue (that is what keeps the drain rate
+    /// in bytes per slot under interleaving), so cross-channel frame order
+    /// MAY differ from arrival order — but a null-channel event is a barrier
+    /// nothing gathers across.
     #[test]
-    fn frames_never_mix_channels_and_never_reorder_across_channels() {
+    fn frames_never_mix_channels_and_gather_queue_wide() {
         let mut queue = queue_of(vec![
             event(1, "acp_read", Some("chan-a")),
             event(2, "acp_write", Some("chan-a")),
@@ -5185,8 +5275,8 @@ mod observer_publish_queue_tests {
         let frames = drain_frames(&mut queue);
         assert_eq!(
             frames.len(),
-            4,
-            "runs: [1,2]@a, [3]@b, [4]@a, [5]@None — one frame each"
+            3,
+            "gathered: [1,2,4]@a, [3]@b, [5]@None — one frame each"
         );
         for frame in &frames {
             let channels: HashSet<Option<String>> = match frame.payload.get("events") {
@@ -5198,16 +5288,76 @@ mod observer_publish_queue_tests {
             };
             assert_eq!(channels.len(), 1, "a frame never mixes channels");
         }
-        let published: Vec<u64> = frames.iter().flat_map(frame_seqs).collect();
         assert_eq!(
-            published,
-            [1, 2, 3, 4, 5],
-            "global arrival order survives packing"
+            frame_seqs(&frames[0]),
+            [1, 2, 4],
+            "chan-a gathers queue-wide, FIFO within the channel"
         );
         assert_eq!(frames[0].channel_id.as_deref(), Some("chan-a"));
-        assert_eq!(frames[1].kind, "acp_read", "singleton run stays unwrapped");
-        assert_eq!(frames[2].channel_id.as_deref(), Some("chan-a"));
-        assert_eq!(frames[3].channel_id, None);
+        assert_eq!(frames[1].kind, "acp_read", "singleton stays unwrapped");
+        assert_eq!(frames[1].channel_id.as_deref(), Some("chan-b"));
+        assert_eq!(frames[2].channel_id, None);
+    }
+
+    /// A NULL-channel event is a barrier: channel events queued BEHIND it
+    /// must not gather into a frame ahead of it, so causally-global events
+    /// (`agent_panic`-class) keep their exact order against every channel.
+    /// The null event itself ships only its contiguous front run.
+    #[test]
+    fn null_channel_events_are_gather_barriers() {
+        let mut queue = queue_of(vec![
+            event(1, "acp_read", Some("chan-a")),
+            event(2, "acp_read", Some("chan-b")),
+            event(3, "agent_panic", None),
+            event(4, "acp_write", Some("chan-a")),
+        ]);
+
+        let frames = drain_frames(&mut queue);
+        let published: Vec<Vec<u64>> = frames.iter().map(frame_seqs).collect();
+        assert_eq!(
+            published,
+            [vec![1], vec![2], vec![3], vec![4]],
+            "seq 4 must not gather past the null barrier into frame 1"
+        );
+    }
+
+    /// The drain-rate regression Sami measured: with two channels strictly
+    /// alternating, a front-run packer degrades to ONE event per slot
+    /// (~275 B/s regardless of the 64KB frame budget). Queue-wide gathering
+    /// must drain an interleaved backlog in ~ceil(events / per-frame-fit)
+    /// slots per channel, not one slot per event.
+    #[test]
+    fn interleaved_channels_drain_at_bytes_per_slot_not_events_per_slot() {
+        let mut events = Vec::new();
+        for i in 0..100u64 {
+            events.push(event(2 * i + 1, "acp_read", Some("chan-a")));
+            events.push(event(2 * i + 2, "acp_read", Some("chan-b")));
+        }
+        let mut queue = queue_of(events);
+
+        let frames = drain_frames(&mut queue);
+        assert!(
+            frames.len() <= 4,
+            "200 tiny alternating events must gather into a few full frames, \
+             got {} (front-run packing would need 200 slots)",
+            frames.len()
+        );
+        for frame in &frames {
+            assert!(serialized_len(frame) <= OBSERVER_MAX_PLAINTEXT_LEN);
+        }
+        // Within each channel, FIFO order survives the gather.
+        let mut seqs_a = Vec::new();
+        let mut seqs_b = Vec::new();
+        for frame in &frames {
+            match frame.channel_id.as_deref() {
+                Some("chan-a") => seqs_a.extend(frame_seqs(frame)),
+                Some("chan-b") => seqs_b.extend(frame_seqs(frame)),
+                other => panic!("unexpected channel {other:?}"),
+            }
+        }
+        assert!(seqs_a.windows(2).all(|w| w[0] < w[1]), "chan-a FIFO");
+        assert!(seqs_b.windows(2).all(|w| w[0] < w[1]), "chan-b FIFO");
+        assert_eq!(seqs_a.len() + seqs_b.len(), 200, "nothing lost");
     }
 
     /// A same-channel backlog that cannot fit one 64KB frame splits across
@@ -5324,7 +5474,7 @@ mod observer_publish_queue_tests {
             "a 5MB backlog must overflow the 4MiB budget"
         );
         assert!(
-            queue.pending_bytes <= OBSERVER_PENDING_QUEUE_MAX_BYTES,
+            queue.total_pending_bytes() <= OBSERVER_PENDING_QUEUE_MAX_BYTES,
             "eviction must restore the byte budget"
         );
 
@@ -5341,6 +5491,57 @@ mod observer_publish_queue_tests {
             total as u64,
             "accounting: published + dropped == ingested"
         );
+    }
+
+    /// Max's coalescer-bypass regression: a flood of chunks with DISTINCT
+    /// messageIds never flushes on its own, so every chunk sits in the
+    /// coalescer's pending buffer. Those bytes MUST count against the byte
+    /// budget and be evicted with accounting — pre-fix this retained ~25MB
+    /// against the 4 MiB cap with `pending_bytes == 0` and zero drops.
+    #[test]
+    fn distinct_key_chunk_floods_are_bounded_by_the_byte_budget() {
+        let big_text = "z".repeat(50_000);
+        let total = 500u64; // ~25MB pending chunk text vs a 4MiB budget
+        let mut queue = ObserverPublishQueue::default();
+        for seq in 1..=total {
+            let mut e = event(seq, "acp_read", Some("chan-a"));
+            e.payload = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "session-1",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "messageId": format!("message-{seq}"),
+                        "content": { "type": "text", "text": big_text },
+                    },
+                },
+            });
+            queue.ingest(e);
+        }
+
+        assert!(
+            queue.total_pending_bytes() <= OBSERVER_PENDING_QUEUE_MAX_BYTES,
+            "total retained bytes (FIFO + coalescer pending) must respect the \
+             cap, got {}",
+            queue.total_pending_bytes()
+        );
+        assert!(
+            queue.dropped_events > 0,
+            "a ~25MB distinct-key chunk flood must record drops"
+        );
+        // Event-level accounting: everything that survives publishes, and
+        // survivors + dropped == ingested.
+        let frames = drain_frames(&mut queue);
+        let survived: u64 = frames.iter().map(|f| frame_seqs(f).len() as u64).sum();
+        assert_eq!(
+            survived + queue.dropped_events,
+            total,
+            "accounting: published + dropped == ingested"
+        );
+        // The survivors are the NEWEST events (drop-oldest).
+        let last_frame_seqs = frame_seqs(frames.last().expect("frames"));
+        assert_eq!(*last_frame_seqs.last().expect("seqs"), total);
     }
 
     /// Under the byte budget the queue is lossless: every ingested event
@@ -5401,10 +5602,10 @@ mod observer_publish_cadence_tests {
     }
 
     /// THE regression Max demanded: with a backlog needing multiple frames
-    /// (multiple channels — the interleaving forces one frame per run), no
-    /// frame publishes before its tick. Startup publishes NOTHING at t=0
-    /// (Sami's Finding 1: a full replay buffer must not burst on reconnect),
-    /// frame 1 arrives at +1s, frame 2 no earlier than +2s, and so on.
+    /// (two channels — a frame never mixes channels, so the backlog takes two
+    /// publish slots), no frame publishes before its tick. Startup publishes
+    /// NOTHING at t=0 (Sami's Finding 1: a full replay buffer must not burst
+    /// on reconnect), frame 1 arrives at +1s, frame 2 no earlier than +2s.
     #[tokio::test(start_paused = true)]
     async fn one_frame_per_second_and_no_startup_burst() {
         let observer = observer::ObserverHandle::in_process();
@@ -5451,13 +5652,13 @@ mod observer_publish_cadence_tests {
             "no frame may publish before the first tick"
         );
 
-        // t=1s: exactly ONE frame (the chan-a run: a1 only — b1 arrived
-        // before a2, so the front run is a1 alone).
+        // t=1s: exactly ONE frame — chan-a gathered queue-wide, so a1 AND a2
+        // ride the first slot together.
         tokio::time::advance(Duration::from_millis(1)).await;
         settle().await;
         let frames = recv_all(&mut published_rx);
         assert_eq!(frames.len(), 1, "tick 1 publishes exactly one frame");
-        assert_eq!(count_inner(&owner_keys, &frames[0]), 1);
+        assert_eq!(count_inner(&owner_keys, &frames[0]), 2, "a1 + a2 gathered");
 
         // t=1.5s: between ticks, nothing.
         tokio::time::advance(Duration::from_millis(500)).await;
@@ -5468,13 +5669,10 @@ mod observer_publish_cadence_tests {
             "frame 2 must wait for tick 2"
         );
 
-        // t=2s and t=3s: one frame per tick until the backlog drains.
+        // t=2s: the chan-b frame drains on its own tick.
         tokio::time::advance(Duration::from_millis(500)).await;
         settle().await;
         assert_eq!(recv_all(&mut published_rx).len(), 1, "tick 2: one frame");
-        tokio::time::advance(Duration::from_secs(1)).await;
-        settle().await;
-        assert_eq!(recv_all(&mut published_rx).len(), 1, "tick 3: one frame");
 
         // Backlog drained; a quiet tick publishes nothing.
         tokio::time::advance(Duration::from_secs(1)).await;
@@ -5524,7 +5722,7 @@ mod observer_publish_cadence_tests {
         );
 
         let mut markers = Vec::new();
-        for tick in 1..=3 {
+        for tick in 1..=2 {
             tokio::time::advance(Duration::from_secs(1)).await;
             settle().await;
             let frames = recv_all(&mut published_rx);
@@ -5540,12 +5738,66 @@ mod observer_publish_cadence_tests {
                 None => markers.push(payload["payload"]["marker"].as_str().unwrap().to_string()),
             }
         }
-        assert_eq!(markers, ["a1", "b1", "a2"], "paced drain loses nothing");
+        // Gather-packing: chan-a (a1+a2) ships tick 1, chan-b tick 2.
+        assert_eq!(markers, ["a1", "a2", "b1"], "paced drain loses nothing");
 
         // Queue empty + closed: the loop must have exited on its own.
         tokio::time::advance(Duration::from_secs(1)).await;
         settle().await;
         assert!(task.is_finished(), "publisher exits after paced drain");
+    }
+
+    /// Pins `MissedTickBehavior::Skip` (Sami's M6 mutant): when the publisher
+    /// misses ticks — relay backpressure can stall the tick arm past several
+    /// deadlines, since `publish_event` awaits a bounded mpsc — the interval
+    /// must fire ONE catch-up tick and realign, not fire once per missed
+    /// deadline. With `Burst`, a 10s stall against a multi-frame backlog
+    /// would replay all 10 missed ticks back-to-back: an unpaced burst that
+    /// bypasses exactly what the pacer exists to prevent.
+    #[tokio::test(start_paused = true)]
+    async fn missed_ticks_skip_instead_of_bursting() {
+        let observer = observer::ObserverHandle::in_process();
+        let agent_keys = Keys::generate();
+        let owner_keys = Keys::generate();
+        let (publisher, mut published_rx) = RelayEventPublisher::test_pair();
+
+        // Three channels => three frames pending (a frame never mixes
+        // channels), so a bursting interval would have work for every
+        // spurious catch-up tick.
+        for chan in 0..3 {
+            emit_on(&observer, Some(uuid::Uuid::new_v4()), &format!("c{chan}"));
+        }
+        let rx = observer.subscribe();
+        let snapshot = observer.snapshot();
+
+        let task = tokio::spawn(run_relay_observer_publisher(
+            snapshot,
+            rx,
+            publisher,
+            agent_keys.clone(),
+            agent_keys.public_key().to_hex(),
+            owner_keys.public_key().to_hex(),
+            owner_keys.public_key(),
+        ));
+        settle().await;
+
+        // Jump 10 seconds in ONE advance — the loop was never polled in
+        // between, exactly like a stall across 10 deadlines.
+        tokio::time::advance(Duration::from_secs(10)).await;
+        settle().await;
+        assert_eq!(
+            recv_all(&mut published_rx).len(),
+            1,
+            "Skip: one catch-up frame after a stall — Burst would publish \
+             one per missed deadline"
+        );
+
+        // The interval realigned: the remaining backlog stays paced.
+        tokio::time::advance(Duration::from_secs(1)).await;
+        settle().await;
+        assert_eq!(recv_all(&mut published_rx).len(), 1, "paced after realign");
+
+        task.abort();
     }
 }
 
