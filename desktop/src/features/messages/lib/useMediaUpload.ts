@@ -446,6 +446,35 @@ export function useMediaUpload({
     [removeUploadingPreview],
   );
 
+  /**
+   * Mark a draft boundary: the composer's attachment set was replaced
+   * wholesale (channel/draft switch, post-send clear, edit-target restore), so
+   * every upload in flight belongs to a draft that is no longer on screen.
+   *
+   * Bumping the epoch makes those uploads discard their descriptors, and
+   * retiring them drops their preview rows and their share of
+   * `uploadingCount` immediately — otherwise the previous draft's uploads
+   * would appear under the new draft and hold its send gate closed until they
+   * finished. Marking them canceled also suppresses their completion and error
+   * paths, so a failure the user has switched away from cannot raise a banner.
+   *
+   * Bump and retire are deliberately one operation: an epoch bump without the
+   * retire is what left stale previews (and a stuck send gate) behind.
+   */
+  const beginNewDraftEpoch = React.useCallback(() => {
+    uploadEpochRef.current += 1;
+    const retiredIds = activeUploadingPreviewIdsRef.current;
+    if (retiredIds.size === 0) return;
+    for (const id of retiredIds) {
+      canceledUploadingPreviewIdsRef.current.add(id);
+    }
+    setUploadingPreviews((prev) =>
+      prev.filter((preview) => !retiredIds.has(preview.id)),
+    );
+    setUploadingCount((count) => Math.max(0, count - retiredIds.size));
+    retiredIds.clear();
+  }, []);
+
   const cancelUpload = React.useCallback(
     (previewId: number) => {
       canceledUploadingPreviewIdsRef.current.add(previewId);
@@ -847,7 +876,9 @@ export function useMediaUpload({
       // results instead of landing in (or overwriting a slot reserved by) the
       // draft that is now on screen. The updater form is an append against the
       // *current* draft (e.g. agent-snapshot paste), so it must NOT bump.
-      if (typeof action !== "function") uploadEpochRef.current += 1;
+      if (typeof action !== "function") {
+        beginNewDraftEpoch();
+      }
       setImetaSlots((prev) => {
         const current = prev.filter((d): d is BlobDescriptor => d !== null);
         const next = typeof action === "function" ? action(current) : action;
@@ -855,7 +886,7 @@ export function useMediaUpload({
         return next;
       });
     },
-    [],
+    [beginNewDraftEpoch],
   );
 
   /**

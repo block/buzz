@@ -224,3 +224,82 @@ test("cancelling a preview with no slot is a no-op for slots", () => {
   // `handlePaperclip`'s native-picker preview has no reserved slot.
   assert.equal(cancelSlotIndex({ uploadEpoch: 0 }, 0), undefined);
 });
+
+// ── Retiring in-flight uploads at a draft boundary (pure logic) ────────
+// Bumping the epoch alone discards descriptors but leaves the previous draft's
+// preview rows on screen and its uploads counted, which keeps `isUploading`
+// true and holds the *new* draft's send gate closed. A wholesale replacement
+// must therefore retire those uploads outright. Mirrors `beginNewDraftEpoch`.
+
+function beginNewDraftEpoch(state) {
+  const next = {
+    epoch: state.epoch + 1,
+    active: new Set(state.active),
+    canceled: new Set(state.canceled),
+    previews: state.previews,
+    uploadingCount: state.uploadingCount,
+  };
+  if (next.active.size === 0) return next;
+  for (const id of next.active) next.canceled.add(id);
+  next.previews = state.previews.filter(
+    (preview) => !next.active.has(preview.id),
+  );
+  next.uploadingCount = Math.max(0, state.uploadingCount - next.active.size);
+  next.active = new Set();
+  return next;
+}
+
+test("a draft boundary retires in-flight uploads so the new draft can send", () => {
+  // Draft A has one upload in flight; switching to draft B must leave B with
+  // no previews and nothing counted as uploading.
+  const after = beginNewDraftEpoch({
+    epoch: 0,
+    active: new Set([1]),
+    canceled: new Set(),
+    previews: [{ id: 1, slotIndex: 0, uploadEpoch: 0 }],
+    uploadingCount: 1,
+  });
+  assert.equal(after.epoch, 1);
+  assert.deepEqual(after.previews, []);
+  assert.equal(after.uploadingCount, 0);
+  assert.equal(after.active.size, 0);
+  // Canceled so the late completion/error paths stay silent in the new draft.
+  assert.ok(after.canceled.has(1));
+});
+
+test("retiring several concurrent uploads clears the count exactly once each", () => {
+  const after = beginNewDraftEpoch({
+    epoch: 4,
+    active: new Set([7, 8, 9]),
+    canceled: new Set(),
+    previews: [{ id: 7 }, { id: 8 }, { id: 9 }],
+    uploadingCount: 3,
+  });
+  assert.equal(after.uploadingCount, 0);
+  assert.deepEqual(after.previews, []);
+});
+
+test("a draft boundary with no uploads in flight still advances the epoch", () => {
+  const after = beginNewDraftEpoch({
+    epoch: 2,
+    active: new Set(),
+    canceled: new Set(),
+    previews: [],
+    uploadingCount: 0,
+  });
+  assert.equal(after.epoch, 3);
+  assert.equal(after.uploadingCount, 0);
+});
+
+test("the retired count never drives uploadingCount negative", () => {
+  // Defensive: a preview already settled by finishUpload must not be
+  // double-decremented into a negative count that would wedge the gate.
+  const after = beginNewDraftEpoch({
+    epoch: 0,
+    active: new Set([1, 2]),
+    canceled: new Set(),
+    previews: [{ id: 1 }, { id: 2 }],
+    uploadingCount: 1,
+  });
+  assert.equal(after.uploadingCount, 0);
+});
