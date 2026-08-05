@@ -39,6 +39,21 @@ fn sign_blossom_auth(keys: &Keys, sha256: &str) -> nostr::Event {
         .unwrap()
 }
 
+/// Sign a kind:24242 Blossom *read* auth event. Reads are authenticated
+/// unconditionally, so round-trip GETs must present one of these.
+fn sign_blossom_get_auth(keys: &Keys, sha256: &str) -> nostr::Event {
+    let now = Timestamp::now().as_secs();
+    let tags = vec![
+        Tag::parse(["t", "get"]).unwrap(),
+        Tag::parse(["x", sha256]).unwrap(),
+        Tag::parse(["expiration", &(now + 300).to_string()]).unwrap(),
+    ];
+    EventBuilder::new(Kind::from(24242), "Get test")
+        .tags(tags)
+        .sign_with_keys(keys)
+        .unwrap()
+}
+
 fn blossom_auth_header(event: &nostr::Event) -> String {
     format!(
         "Nostr {}",
@@ -168,9 +183,14 @@ async fn test_upload_png_roundtrip() {
     assert!(desc["url"].as_str().unwrap().ends_with(".png"));
     println!("✅ PNG upload: {}", desc["url"]);
 
-    // GET back
+    // GET back — reads are authenticated, so scope a token to the uploaded hash.
+    let sha256 = desc["sha256"].as_str().expect("descriptor sha256");
     let get = client
         .get(desc["url"].as_str().unwrap())
+        .header(
+            "Authorization",
+            blossom_auth_header(&sign_blossom_get_auth(&keys, sha256)),
+        )
         .send()
         .await
         .unwrap();
@@ -192,8 +212,13 @@ async fn test_upload_gif_roundtrip() {
     assert!(desc["url"].as_str().unwrap().ends_with(".gif"));
     println!("✅ GIF upload: {}", desc["url"]);
 
+    let sha256 = desc["sha256"].as_str().expect("descriptor sha256");
     let get = client
         .get(desc["url"].as_str().unwrap())
+        .header(
+            "Authorization",
+            blossom_auth_header(&sign_blossom_get_auth(&keys, sha256)),
+        )
         .send()
         .await
         .unwrap();
