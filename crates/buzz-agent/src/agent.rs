@@ -21,6 +21,34 @@ use crate::wire::{self, WireSender};
 const ERROR_REFLECTION_SUFFIX: &str =
     "\n\n[Reflect] Before retrying, identify the cause and change your approach.";
 
+const UNSUPPORTED_IMAGE_TOOL_MESSAGE: &str = "The current model does not support image input. The image was removed from conversation history so this turn can continue. Use a text-based inspection tool or ask the user for a textual description instead.";
+
+/// Remove image blocks that the provider has explicitly rejected while keeping
+/// their surrounding tool result (and therefore the tool-call/result pairing)
+/// intact. Returns the number of images removed; zero means the provider error
+/// cannot be safely recovered by mutating history.
+fn replace_unsupported_images(history: &mut [HistoryItem]) -> usize {
+    let mut replaced = 0;
+    for item in history {
+        let HistoryItem::ToolResult(result) = item else {
+            continue;
+        };
+        let before = result.content.len();
+        result
+            .content
+            .retain(|content| !matches!(content, ToolResultContent::Image { .. }));
+        let removed = before - result.content.len();
+        if removed > 0 {
+            replaced += removed;
+            result.is_error = true;
+            result.content.push(ToolResultContent::Text(
+                UNSUPPORTED_IMAGE_TOOL_MESSAGE.to_string(),
+            ));
+        }
+    }
+    replaced
+}
+
 /// Maximum reply reminders emitted per prompt when `require_reply` is on.
 ///
 /// After this many, the turn is allowed to end whether or not anything was
@@ -249,10 +277,10 @@ impl RunCtx<'_> {
                 tools.push(builtin::load_skill_def());
             }
             round = round.saturating_add(1);
-            let response = tokio::select! {
+            let response_result = tokio::select! {
                 biased;
                 _ = self.cancel.changed() => return Ok(StopReason::Cancelled),
-                r = self.llm.complete(self.cfg, self.system_prompt, self.history, &tools, self.effective_model) => r?,
+                r = self.llm.complete(self.cfg, self.system_prompt, self.history, &tools, self.effective_model) => r,
                 _ = async {
                     // Keepalive ticker: emit a lightweight session update every 30s
                     // while waiting on the LLM provider. This resets the ACP harness
@@ -274,6 +302,22 @@ impl RunCtx<'_> {
                         .await;
                     }
                 } => unreachable!(),
+            };
+            let response = match response_result {
+                Ok(response) => response,
+                Err(AgentError::UnsupportedImageInput(detail)) => {
+                    let removed = replace_unsupported_images(self.history);
+                    if removed == 0 {
+                        return Err(AgentError::UnsupportedImageInput(detail));
+                    }
+                    tracing::warn!(
+                        model = self.effective_model,
+                        removed_images = removed,
+                        "provider rejected image input; removed images from history and continuing turn"
+                    );
+                    continue;
+                }
+                Err(error) => return Err(error),
             };
 
             // Record provider-reported input usage so the next loop iteration's
@@ -1073,6 +1117,47 @@ mod tests {
         );
         let total_after: usize = history.iter().map(HistoryItem::estimated_bytes).sum();
         assert!(total_after <= max_bytes);
+    }
+
+    #[test]
+    fn unsupported_images_become_recoverable_tool_errors() {
+        let mut history = vec![
+            HistoryItem::Assistant {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    provider_id: "call-image".into(),
+                    name: "dev__view_image".into(),
+                    arguments: json!({ "source": "spec.png" }),
+                    provider_extra: Default::default(),
+                }],
+                reasoning_details: None,
+            },
+            HistoryItem::ToolResult(ToolResult {
+                provider_id: "call-image".into(),
+                content: vec![
+                    ToolResultContent::Text("10x10 image from spec.png".into()),
+                    ToolResultContent::Image {
+                        data: "aW1n".into(),
+                        mime_type: "image/png".into(),
+                    },
+                ],
+                is_error: false,
+            }),
+        ];
+
+        assert_eq!(replace_unsupported_images(&mut history), 1);
+        let HistoryItem::ToolResult(result) = &history[1] else {
+            panic!("tool result must stay paired with the assistant tool call");
+        };
+        assert_eq!(result.provider_id, "call-image");
+        assert!(result.is_error);
+        assert!(result
+            .content
+            .iter()
+            .all(|content| !matches!(content, ToolResultContent::Image { .. })));
+        assert!(result.text().contains("does not support image input"));
+        assert!(result.text().contains("10x10 image from spec.png"));
+        assert_eq!(replace_unsupported_images(&mut history), 0);
     }
 
     #[test]

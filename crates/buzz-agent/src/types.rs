@@ -388,6 +388,10 @@ pub enum AgentError {
     Llm(String),
     LlmAuth(String),
     LlmModelNotFound(String),
+    /// The provider explicitly rejected image content for the selected model.
+    /// Kept distinct so the agent loop can remove the unsupported image from
+    /// replayed history and give the model a recoverable tool error.
+    UnsupportedImageInput(String),
     Mcp(String),
     Cancelled,
 }
@@ -399,6 +403,7 @@ impl std::fmt::Display for AgentError {
             Self::Llm(s) => write!(f, "llm: {s}"),
             Self::LlmAuth(s) => write!(f, "llm auth: {s}"),
             Self::LlmModelNotFound(s) => write!(f, "llm model not found: {s}"),
+            Self::UnsupportedImageInput(s) => write!(f, "llm image input unsupported: {s}"),
             Self::Mcp(s) => write!(f, "mcp: {s}"),
             Self::Cancelled => write!(f, "cancelled"),
         }

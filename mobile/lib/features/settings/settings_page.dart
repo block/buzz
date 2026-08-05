@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -28,17 +31,38 @@ class SettingsPage extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final packageInfoFuture = useMemoized(() => PackageInfo.fromPlatform());
     final packageInfo = useFuture(packageInfoFuture);
+    final topSectionHeight = frostedAppBarHeight(
+      context,
+      bottomHeight: Grid.xxs,
+    );
 
     return FrostedScaffold(
-      appBar: const FrostedAppBar(title: Text('Settings')),
+      backgroundColor: context.colors.surface,
+      appBar: FrostedAppBar(
+        automaticallyImplyLeading: false,
+        horizontalInset: Grid.gutter,
+        showBottomDivider: false,
+        leading: SizedBox(
+          width: Grid.xl,
+          height: Grid.xl,
+          child: IconButton(
+            tooltip: 'Close settings',
+            onPressed: () {
+              unawaited(HapticFeedback.lightImpact());
+              Navigator.of(context).pop();
+            },
+            color: navigationPrimaryForeground(context),
+            icon: const Icon(LucideIcons.x),
+          ),
+        ),
+        bottomHeight: Grid.xxs,
+        bottom: const SizedBox.expand(),
+      ),
       body: Column(
         children: [
           Expanded(
             child: ListView(
-              padding: EdgeInsets.only(
-                top: frostedAppBarHeight(context),
-                bottom: Grid.xs,
-              ),
+              padding: EdgeInsets.only(top: topSectionHeight, bottom: Grid.xs),
               children: [
                 profileHeader,
                 const _AppearanceSection(),
