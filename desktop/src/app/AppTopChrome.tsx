@@ -1,4 +1,5 @@
 import * as React from "react";
+import { getName } from "@tauri-apps/api/app";
 import {
   ChevronLeft,
   ChevronRight,
@@ -53,6 +54,43 @@ function TopChromeSidebarTrigger() {
       {sidebar?.open ? <PanelLeftClose /> : <PanelLeftOpen />}
       <span className="sr-only">Toggle Sidebar</span>
     </Button>
+  );
+}
+
+function DevBuildBadge() {
+  const [label, setLabel] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    void getName()
+      .then((name) => {
+        if (cancelled) return;
+        // Official installs report "Buzz". Dev / worktree builds use
+        // "Buzz Dev" (see tauri.dev.conf.json) so both can run side by side.
+        if (name && name !== "Buzz") {
+          setLabel(name);
+        }
+      })
+      .catch(() => {
+        // Browser/e2e without Tauri — no badge.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (!label) {
+    return null;
+  }
+
+  return (
+    <span
+      className="ml-2 shrink-0 rounded-full border border-amber-500/40 bg-amber-500/15 px-2 py-0.5 text-2xs font-semibold tracking-wide text-amber-600 dark:text-amber-300"
+      data-testid="dev-build-badge"
+      title="Development build — safe to run next to the official Buzz app"
+    >
+      {label}
+    </span>
   );
 }
 
@@ -130,6 +168,7 @@ export function AppTopChrome({
         >
           <ChevronRight />
         </Button>
+        <DevBuildBadge />
       </div>
     </div>
   );

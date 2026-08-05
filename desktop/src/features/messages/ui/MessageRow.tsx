@@ -31,6 +31,8 @@ import {
 import { getConfigNudgeAuthorPubkey } from "@/features/messages/ui/configNudgeAuthPubkey";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { getAvatarSizeRem } from "@/shared/lib/avatarScale";
+import { useAvatarScale } from "@/shared/lib/useAvatarScale";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
 import { parseImetaTags } from "@/shared/ui/markdown/parseImeta";
@@ -145,6 +147,9 @@ export const MessageRow = React.memo(
     showDepthGuides?: boolean;
     videoReviewContext?: VideoReviewContext;
   }) {
+    // Subscribe so thread rails + gutter recompute when Avatar size slider moves.
+    const avatarScale = useAvatarScale();
+    const messageAvatarRem = getAvatarSizeRem("md", avatarScale);
     // Keep the transient send state with its timestamp rather than collapsing
     // it into a grouped message row with no header.
     const isDisplayedAsContinuation = isContinuation && !message.pending;
@@ -245,13 +250,13 @@ export const MessageRow = React.memo(
 
     const { nonDmChannelNames: channelNames } = useChannelNavigation();
 
-    const indentRem = getThreadReplyIndentRem(message.depth);
+    const indentRem = getThreadReplyIndentRem(message.depth, avatarScale);
     const descendantGuideOffsetRem = connectDescendants
-      ? getThreadReplyAvatarCenterRem(message.depth)
+      ? getThreadReplyAvatarCenterRem(message.depth, avatarScale)
       : null;
     const replyConnector = React.useMemo(() => {
-      return getThreadReplyConnectorLayout(message.depth);
-    }, [message.depth]);
+      return getThreadReplyConnectorLayout(message.depth, avatarScale);
+    }, [avatarScale, message.depth]);
     const depthGuideItems = React.useMemo(() => {
       const depths =
         depthGuideDepths ??
@@ -262,9 +267,9 @@ export const MessageRow = React.memo(
 
       return depths.map((depth) => ({
         depth,
-        offset: getThreadReplyAvatarCenterRem(depth),
+        offset: getThreadReplyAvatarCenterRem(depth, avatarScale),
       }));
-    }, [depthGuideDepths, message.depth]);
+    }, [avatarScale, depthGuideDepths, message.depth]);
     const handleCollapseDescendants = React.useCallback(
       (event: React.MouseEvent<HTMLButtonElement>) => {
         event.preventDefault();
@@ -359,7 +364,11 @@ export const MessageRow = React.memo(
             <Markdown
               channelNames={channelNames}
               className={cn(
-                "max-w-full text-sm",
+                // Chat scale (Appearance → Chat text size). Uses CSS var on <html>
+                // so the body tracks the slider without a per-row store subscription.
+                // `text-[length:…]` is a real Tailwind font-size utility so twMerge
+                // drops Markdown's default `text-sm` instead of fighting it.
+                "max-w-full text-[length:calc(0.875rem*var(--buzz-chat-scale))] leading-[calc(1.25rem*var(--buzz-chat-scale))]",
                 emojiOnly &&
                   "text-4xl leading-tight [&_p]:leading-tight [&_img[data-custom-emoji]]:h-[1.45em] [&_img[data-custom-emoji]]:align-middle [&_button:has(img[data-custom-emoji])]:align-middle",
               )}
@@ -437,9 +446,13 @@ export const MessageRow = React.memo(
       <div
         aria-hidden="true"
         className={cn(
-          "flex w-9 shrink-0 justify-end items-start pt-0.5",
+          "flex shrink-0 justify-end items-start pt-0.5",
           isThreadReplyLayout ? "self-start" : "self-stretch",
         )}
+        style={{
+          width: `${messageAvatarRem}rem`,
+          minWidth: `${messageAvatarRem}rem`,
+        }}
       >
         <MessageTimestamp
           className="opacity-0 transition-opacity group-hover/message:opacity-100 group-focus-within/message:opacity-100"
@@ -748,7 +761,9 @@ export const MessageRow = React.memo(
                 bottom: threadReplyLength(-guideBleedRem),
                 borderLeftWidth: threadReplyLength(THREAD_REPLY_LINE_WIDTH_REM),
                 left: threadReplyLength(descendantGuideOffsetRem),
-                top: threadReplyLength(getThreadReplyDescendantRailStartYRem()),
+                top: threadReplyLength(
+                  getThreadReplyDescendantRailStartYRem(avatarScale),
+                ),
               }}
             />
             {onCollapseDescendants ? (
@@ -766,7 +781,9 @@ export const MessageRow = React.memo(
                 onMouseLeave={() => handleCollapseDescendantsHoverChange(false)}
                 style={{
                   left: threadReplyLength(descendantGuideOffsetRem),
-                  top: threadReplyLength(getThreadReplyAvatarCenterYRem()),
+                  top: threadReplyLength(
+                    getThreadReplyAvatarCenterYRem(avatarScale),
+                  ),
                 }}
                 type="button"
               />

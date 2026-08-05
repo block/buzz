@@ -3,8 +3,10 @@ import {
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
+import { getAvatarSizeRem } from "@/shared/lib/avatarScale";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { useAvatarScale } from "@/shared/lib/useAvatarScale";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 const MAX_MEMBERSHIP_AVATARS = 5;
@@ -47,6 +49,9 @@ export function SystemMessageAvatar({
   profiles: UserProfileLookup | undefined;
   targetPubkey: string | undefined;
 }) {
+  const avatarScale = useAvatarScale();
+  // Dual-stack frame matches the md message avatar so rails stay aligned.
+  const mdBoxRem = getAvatarSizeRem("md", avatarScale);
   const hasActorAndTarget =
     actorPubkey && targetPubkey && actorPubkey !== targetPubkey;
   const actorLabel = actorPubkey
@@ -69,7 +74,7 @@ export function SystemMessageAvatar({
     const avatar = (
       <UserAvatar
         avatarUrl={resolveAvatarUrl(singlePubkey, profiles)}
-        className="!h-9 !w-9 shrink-0 text-2xs"
+        className="shrink-0 text-2xs"
         displayName={actorLabel}
         testId="system-message-avatar"
       />
@@ -108,18 +113,24 @@ export function SystemMessageAvatar({
   });
   const dualAvatar = (
     <div
-      className="relative h-9 w-9 shrink-0"
+      className="relative shrink-0"
       data-testid="system-message-avatar"
+      style={{
+        width: `${mdBoxRem}rem`,
+        height: `${mdBoxRem}rem`,
+      }}
     >
       <UserAvatar
         avatarUrl={resolveAvatarUrl(actorPubkey, profiles)}
-        className="!h-7 !w-7 border-2 border-background text-2xs"
+        className="border-2 border-background text-2xs"
         displayName={actorLabel}
+        size="sm"
       />
       <UserAvatar
         avatarUrl={resolveAvatarUrl(targetPubkey, profiles)}
-        className="!absolute !bottom-0 !right-0 !h-7 !w-7 border-2 border-background text-2xs"
+        className="!absolute !bottom-0 !right-0 border-2 border-background text-2xs"
         displayName={targetLabel}
+        size="sm"
       />
     </div>
   );
@@ -148,6 +159,11 @@ export function MembershipAvatarStack({
   profiles: UserProfileLookup | undefined;
   pubkeys: readonly string[];
 }) {
+  const avatarScale = useAvatarScale();
+  const smRem = getAvatarSizeRem("sm", avatarScale);
+  const maskRadiusRem = smRem * 0.58;
+  const maskOffsetRem = smRem * 0.25;
+  const overlapRem = smRem * 0.17;
   const visiblePubkeys = pubkeys.slice(0, MAX_MEMBERSHIP_AVATARS);
   if (visiblePubkeys.length === 0) return null;
   return (
@@ -166,24 +182,26 @@ export function MembershipAvatarStack({
         });
         return (
           <div
-            className={cn("relative", index > 0 && "-ml-1")}
+            className="relative"
             data-testid="system-message-avatar"
             key={pubkey}
-            style={{ zIndex: index + 1 }}
+            style={{
+              zIndex: index + 1,
+              marginLeft: index > 0 ? `-${overlapRem}rem` : undefined,
+            }}
           >
             <span
               className="block"
               style={{
                 ...(index < visiblePubkeys.length - 1 && {
-                  mask: "radial-gradient(circle 14px at calc(100% + 6px) 50%, transparent 99%, #fff 100%)",
-                  WebkitMask:
-                    "radial-gradient(circle 14px at calc(100% + 6px) 50%, transparent 99%, #fff 100%)",
+                  mask: `radial-gradient(circle ${maskRadiusRem}rem at calc(100% + ${maskOffsetRem}rem) 50%, transparent 99%, #fff 100%)`,
+                  WebkitMask: `radial-gradient(circle ${maskRadiusRem}rem at calc(100% + ${maskOffsetRem}rem) 50%, transparent 99%, #fff 100%)`,
                 }),
               }}
             >
               <UserAvatar
                 avatarUrl={resolveAvatarUrl(pubkey, profiles)}
-                className="h-6 w-6 text-2xs"
+                className="shrink-0 text-2xs"
                 displayName={label}
                 size="sm"
               />

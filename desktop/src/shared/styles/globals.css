@@ -34,3 +34,12 @@
 /* The app persists its selected theme on the root `.dark` class. Use that
    class, rather than the system preference, for every `dark:` utility. */
 @custom-variant dark (&:where(.dark, .dark *));
+
+/* Appearance scale defaults. JS (avatarScale / chatScale stores) overwrites
+   these on boot and when the Appearance sliders move. Keeping fallbacks here
+   means first paint and SSR-less web previews still have valid calc() inputs. */
+:root {
+  --buzz-chat-scale: 1;
+  --buzz-avatar-scale: 1;
+  --buzz-message-avatar-size: 3rem;
+}

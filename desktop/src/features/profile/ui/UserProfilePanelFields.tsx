@@ -262,7 +262,7 @@ export function buildOwnerFields({
         avatarUrl={ownerAvatarUrl}
         className="shrink-0"
         displayName={ownerHandle ?? ownerDisplayName ?? ""}
-        size="xs"
+        size="sm"
         testId="user-profile-owner-avatar"
       />
       <span className="truncate">{ownerDisplayName}</span>

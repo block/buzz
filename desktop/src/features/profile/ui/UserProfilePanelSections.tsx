@@ -33,10 +33,15 @@ import {
   ProfileTabBar,
 } from "@/features/profile/ui/UserProfilePanelTabs";
 import {
+  PROFILE_HERO_STATUS_RATIOS,
+  resolveAvatarStatusGeometry,
+} from "@/features/profile/lib/avatarStatusGeometry";
+import {
   MaskedAvatarBadgeFrame,
   STATUS_DOT_MASK_CURVE,
 } from "@/features/profile/ui/MaskedAvatarBadgeFrame";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
+import { useAvatarScale } from "@/shared/lib/useAvatarScale";
 import {
   ProfilePersonaPrimaryActions,
   ProfilePrimaryActions,
@@ -112,20 +117,8 @@ export type ProfileSummaryViewProps = {
 
 type RuntimeTabStatus = "running" | "stopped" | "error";
 
-const PROFILE_HERO_SPACING = {
-  "0": 0,
-  "6": 24,
-} as const;
-
-const PROFILE_HERO_PRESENCE_BADGE = {
-  cutout: { cx: 68, cy: 68, r: 15 },
-  shell: {
-    bottom: PROFILE_HERO_SPACING["0"],
-    height: PROFILE_HERO_SPACING["6"],
-    right: PROFILE_HERO_SPACING["0"],
-    width: PROFILE_HERO_SPACING["6"],
-  },
-} as const;
+/** Profile panel hero avatar at Appearance → Avatar size = 100%. */
+const PROFILE_HERO_AVATAR_BASE_PX = 96;
 
 function resolveRuntimeTabStatus({
   diagnosticsError,
@@ -490,7 +483,13 @@ function ProfileHero({
   profile: ProfileSummaryViewProps["profile"];
   userStatus: ProfileSummaryViewProps["userStatus"];
 }) {
-  const presenceDotClassName = isBot ? "h-4.5 w-4.5" : "h-3.5 w-3.5";
+  // Appearance → Avatar size also scales the open profile panel hero.
+  const avatarScale = useAvatarScale();
+  const heroSizePx = Math.round(PROFILE_HERO_AVATAR_BASE_PX * avatarScale);
+  const heroPresence = resolveAvatarStatusGeometry(
+    heroSizePx,
+    PROFILE_HERO_STATUS_RATIOS,
+  );
 
   return (
     <div className="flex flex-col items-center gap-3 text-center">
@@ -499,27 +498,24 @@ function ProfileHero({
           presenceStatus ? (
             <span
               aria-label={getPresenceLabel(presenceStatus)}
-              className="flex h-6 w-6 items-center justify-center rounded-full"
+              className="flex h-full w-full items-center justify-center rounded-full"
               data-testid="user-profile-presence-badge"
               role="img"
             >
-              <PresenceDot
-                className={presenceDotClassName}
-                status={presenceStatus}
-              />
+              <PresenceDot className="h-full w-full" status={presenceStatus} />
             </span>
           ) : null
         }
-        badgeBox={PROFILE_HERO_PRESENCE_BADGE.shell}
-        className="h-20 w-20"
+        badgeBox={heroPresence.badgeBox}
+        className="shrink-0"
         curve={STATUS_DOT_MASK_CURVE}
-        cutout={PROFILE_HERO_PRESENCE_BADGE.cutout}
-        size={80}
+        cutout={heroPresence.cutout}
+        size={heroSizePx}
       >
         <ProfileAvatar
           avatarUrl={profile?.avatarUrl ?? null}
-          className="h-full w-full text-xl"
-          iconClassName="h-8 w-8"
+          className="h-full w-full text-2xl"
+          iconClassName="h-10 w-10"
           label={displayName}
           plain
           testId="user-profile-avatar"
@@ -528,14 +524,14 @@ function ProfileHero({
 
       <div className="flex flex-col items-center gap-1">
         <div className="flex items-center justify-center gap-2">
-          <h3 className="text-xl font-semibold tracking-tight">
+          <h3 className="text-2xl font-semibold tracking-tight">
             {displayName}
           </h3>
           {isBot ? (
             <BotIdenticon
               className="shrink-0 rounded"
               data-testid="profile-bot-indicator"
-              size={20}
+              size={Math.max(20, Math.round(24 * avatarScale))}
               value={displayName}
             />
           ) : null}

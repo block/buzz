@@ -1,6 +1,8 @@
 import * as React from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 
+import { applyCurrentAvatarScale } from "@/shared/lib/avatarScale";
+import { applyCurrentChatScale } from "@/shared/lib/chatScale";
 import {
   adjustTextScale,
   applyCurrentTextScale,
@@ -51,6 +53,8 @@ export function useWebviewZoomShortcuts() {
     const webview = getCurrentWebview();
 
     applyCurrentTextScale();
+    applyCurrentChatScale();
+    applyCurrentAvatarScale();
 
     // Keep the webview coordinate system stable; only text should scale.
     void webview.setZoom(DEFAULT_TEXT_SCALE).catch((error) => {

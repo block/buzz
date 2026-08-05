@@ -11,20 +11,17 @@
  * React hook: {@link useTextScale} in `./useTextScale`.
  */
 
+import { APPEARANCE_SCALE_PRESETS } from "./appearanceScalePresets";
+
 export const TEXT_SCALE_STORAGE_KEY = "buzz:text-scale";
 
 export const DEFAULT_TEXT_SCALE = 1;
-export const MIN_TEXT_SCALE = 0.75;
-export const MAX_TEXT_SCALE = 1.5;
-export const TEXT_SCALE_STEP = 0.1;
+export const TEXT_SCALE_PRESETS = APPEARANCE_SCALE_PRESETS;
+export const MIN_TEXT_SCALE = TEXT_SCALE_PRESETS[0];
+export const MAX_TEXT_SCALE = TEXT_SCALE_PRESETS[TEXT_SCALE_PRESETS.length - 1];
 
-/**
- * Discrete levels for the Appearance slider. Matches the keyboard path from
- * 100% (Cmd/Ctrl +/- steps of 10%) plus the 75% floor reached by clamping.
- */
-export const TEXT_SCALE_PRESETS = [
-  0.75, 0.8, 0.9, 1, 1.1, 1.2, 1.3, 1.4, 1.5,
-] as const;
+/** @deprecated Prefer stepping via {@link adjustTextScale} preset indices. */
+export const TEXT_SCALE_STEP = 0.1;
 
 const BASE_FONT_SIZE_PX = 16;
 
@@ -42,11 +39,6 @@ export function clampTextScale(scale: number): number {
 
 /**
  * Snap a raw scale to the nearest supported preset.
- *
- * Note: 0.75 is intentionally supported even though it is not on the 0.1
- * grid from 1.0 — keyboard zoom reaches it by clamping a stepped 0.7.
- * Do not round-then-clamp with `Math.round(x * 10) / 10` alone: that turns
- * 0.75 into 0.8.
  */
 export function normalizeTextScale(scale: number): number {
   if (!Number.isFinite(scale)) {
@@ -115,7 +107,7 @@ export function getTextScale(): number {
 
 /**
  * Set text scale, apply it to the document root, persist, and notify
- * subscribers. Values outside the supported range are clamped.
+ * subscribers. Values outside the supported range are clamped to presets.
  */
 export function setTextScale(scale: number): void {
   const next = normalizeTextScale(scale);
@@ -132,19 +124,20 @@ export function setTextScale(scale: number): void {
 
 export type TextScaleAction = "increase" | "decrease" | "reset";
 
-/** Step text scale up/down or reset to default (same steps as keyboard zoom). */
+/** Step text scale by adjacent preset (same path as keyboard zoom). */
 export function adjustTextScale(action: TextScaleAction): number {
   if (action === "reset") {
     setTextScale(DEFAULT_TEXT_SCALE);
     return textScale;
   }
 
-  if (action === "increase") {
-    setTextScale(textScale + TEXT_SCALE_STEP);
-    return textScale;
-  }
-
-  setTextScale(textScale - TEXT_SCALE_STEP);
+  const currentIndex = textScalePresetIndex(textScale);
+  const direction = action === "increase" ? 1 : -1;
+  const nextIndex = Math.min(
+    Math.max(currentIndex + direction, 0),
+    TEXT_SCALE_PRESETS.length - 1,
+  );
+  setTextScale(TEXT_SCALE_PRESETS[nextIndex] ?? DEFAULT_TEXT_SCALE);
   return textScale;
 }
 
@@ -179,7 +172,8 @@ export function formatTextScalePercent(scale: number): string {
 /** Nearest index into {@link TEXT_SCALE_PRESETS} for a scale factor. */
 export function textScalePresetIndex(scale: number): number {
   const target = normalizeTextScale(scale);
-  return TEXT_SCALE_PRESETS.indexOf(
+  const index = TEXT_SCALE_PRESETS.indexOf(
     target as (typeof TEXT_SCALE_PRESETS)[number],
   );
+  return index >= 0 ? index : 0;
 }

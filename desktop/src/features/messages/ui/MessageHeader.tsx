@@ -39,7 +39,7 @@ export function MessageAuthorText({
   return (
     <Component
       className={cn(
-        "truncate text-sm font-semibold leading-4 tracking-tight",
+        "truncate font-semibold tracking-tight text-[length:calc(0.875rem*var(--buzz-chat-scale))] leading-[calc(1rem*var(--buzz-chat-scale))]",
         hoverUnderline && "hover:underline",
         className,
       )}

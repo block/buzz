@@ -36,11 +36,12 @@ const TAILWIND_SPACING = {
 
 const AGENT_AVATAR_SIZE = TAILWIND_SPACING["24"];
 const ACTION_BADGE_SIZE = TAILWIND_SPACING["11"];
-const ACTIVE_BADGE_SIZE = TAILWIND_SPACING["6"];
+// Running-state presence is a small status pip, not a second disc on the 96px avatar.
+const ACTIVE_BADGE_SIZE = 12;
 const ACTION_BADGE_OFFSET = TAILWIND_SPACING["2.5"];
 const ACTIVE_BADGE_INSET = TAILWIND_SPACING["1"];
-const ACTIVE_DOT_CLASS_NAME = "h-4.5 w-4.5";
-const PROFILE_STATUS_CUTOUT_RATIO = 1.25;
+const ACTIVE_DOT_CLASS_NAME = "h-2.5 w-2.5";
+const PROFILE_STATUS_CUTOUT_RATIO = 1.35;
 
 function getBadgeCenter(badgeSize: number, outwardOffset: number) {
   return AGENT_AVATAR_SIZE + outwardOffset - badgeSize / 2;
@@ -122,7 +123,7 @@ export function AgentRuntimeAvatarControl({
           {isActive ? (
             <span
               aria-label={`${label} is running`}
-              className="flex h-6 w-6 items-center justify-center rounded-full"
+              className="flex h-full w-full items-center justify-center rounded-full"
               data-testid={activeTestId}
               role="img"
               title={`${label} is running`}

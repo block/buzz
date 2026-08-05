@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { APPEARANCE_SCALE_PRESETS } from "./appearanceScalePresets.ts";
+
 const KEY = "buzz:text-scale";
 let importSequence = 0;
 
@@ -49,12 +51,12 @@ test("missing, malformed, and unreadable preferences default to 1", async () => 
 test("loads a stored scale and clamps out-of-range values", async () => {
   await withStorage(
     {
-      getItem: (key) => (key === KEY ? "1.2" : null),
+      getItem: (key) => (key === KEY ? "1.25" : null),
       setItem() {},
       removeItem() {},
     },
     ({ getTextScale }) => {
-      assert.equal(getTextScale(), 1.2);
+      assert.equal(getTextScale(), 1.25);
     },
   );
 
@@ -91,9 +93,9 @@ test("writes non-default scale and removes storage at default", async () => {
       removeItem: (key) => removals.push(key),
     },
     ({ setTextScale, getTextScale, DEFAULT_TEXT_SCALE }) => {
-      setTextScale(1.3);
-      assert.equal(getTextScale(), 1.3);
-      assert.deepEqual(writes, [[KEY, "1.3"]]);
+      setTextScale(1.25);
+      assert.equal(getTextScale(), 1.25);
+      assert.deepEqual(writes, [[KEY, "1.25"]]);
 
       setTextScale(DEFAULT_TEXT_SCALE);
       assert.equal(getTextScale(), DEFAULT_TEXT_SCALE);
@@ -111,7 +113,6 @@ test("adjustTextScale steps and resets within bounds", async () => {
     },
     ({
       adjustTextScale,
-      getTextScale,
       setTextScale,
       MIN_TEXT_SCALE,
       MAX_TEXT_SCALE,
@@ -125,8 +126,32 @@ test("adjustTextScale steps and resets within bounds", async () => {
       setTextScale(MAX_TEXT_SCALE);
       assert.equal(adjustTextScale("increase"), MAX_TEXT_SCALE);
 
+      setTextScale(1.5);
+      assert.equal(adjustTextScale("increase"), 1.75);
+
+      setTextScale(4);
+      assert.equal(adjustTextScale("increase"), 5);
+      assert.equal(adjustTextScale("increase"), 5);
+
       setTextScale(MIN_TEXT_SCALE);
       assert.equal(adjustTextScale("decrease"), MIN_TEXT_SCALE);
+    },
+  );
+});
+
+test("keyboard increase advances beyond 150% and stops at 500%", async () => {
+  await withStorage(
+    {
+      getItem: () => null,
+      setItem() {},
+      removeItem() {},
+    },
+    ({ adjustTextScale, setTextScale }) => {
+      setTextScale(1.5);
+      assert.equal(adjustTextScale("increase"), 1.75);
+      setTextScale(4);
+      assert.equal(adjustTextScale("increase"), 5);
+      assert.equal(adjustTextScale("increase"), 5);
     },
   );
 });
@@ -140,21 +165,20 @@ test("formatTextScalePercent and normalize helpers", async () => {
       clampTextScale,
       textScalePresetIndex,
       TEXT_SCALE_PRESETS,
+      MAX_TEXT_SCALE,
     }) => {
+      assert.deepEqual([...TEXT_SCALE_PRESETS], [...APPEARANCE_SCALE_PRESETS]);
       assert.equal(formatTextScalePercent(1), "100%");
-      // Midpoint 1.25 is equidistant from 1.2 and 1.3; first-best wins → 1.2.
-      assert.equal(formatTextScalePercent(1.25), "120%");
-      assert.equal(normalizeTextScale(1.26), 1.3);
-      assert.equal(normalizeTextScale(1.24), 1.2);
+      assert.equal(formatTextScalePercent(1.25), "125%");
+      assert.equal(formatTextScalePercent(5), "500%");
+      assert.equal(normalizeTextScale(1.26), 1.25);
+      assert.equal(normalizeTextScale(1.4), 1.5);
       assert.equal(normalizeTextScale(0.75), 0.75);
-      assert.equal(clampTextScale(2), 1.5);
+      assert.equal(clampTextScale(9), MAX_TEXT_SCALE);
       assert.equal(normalizeTextScale(Number.NaN), 1);
       assert.equal(textScalePresetIndex(1), TEXT_SCALE_PRESETS.indexOf(1));
       assert.equal(textScalePresetIndex(0.75), 0);
-      assert.equal(
-        textScalePresetIndex(1.5),
-        TEXT_SCALE_PRESETS.length - 1,
-      );
+      assert.equal(textScalePresetIndex(5), TEXT_SCALE_PRESETS.length - 1);
     },
   );
 });
@@ -171,8 +195,8 @@ test("keeps the in-memory choice when persistence fails", async () => {
       },
     },
     ({ getTextScale, setTextScale }) => {
-      assert.doesNotThrow(() => setTextScale(1.4));
-      assert.equal(getTextScale(), 1.4);
+      assert.doesNotThrow(() => setTextScale(1.5));
+      assert.equal(getTextScale(), 1.5);
     },
   );
 });

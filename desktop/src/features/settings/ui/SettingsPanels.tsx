@@ -29,6 +29,7 @@ import type {
   NotificationSettings,
 } from "@/features/notifications/hooks";
 import type { SoundName, SoundSlot } from "@/features/notifications/lib/sound";
+import { AppearanceScaleSettings } from "@/features/settings/ui/AppearanceScaleSettings";
 import { CommunityMembersSettingsCard } from "@/features/community-members/ui/CommunityMembersSettingsCard";
 import { CustomEmojiSettingsCard } from "@/features/custom-emoji/ui/CustomEmojiSettingsCard";
 import { LocalArchiveSettingsCard } from "@/features/local-archive/ui/LocalArchiveSettingsCard";
@@ -38,16 +39,6 @@ import {
   type ThreadViewMode,
 } from "@/features/channels/lib/threadViewModePreference";
 import { cn } from "@/shared/lib/cn";
-import {
-  DEFAULT_TEXT_SCALE,
-  formatTextScalePercent,
-  MAX_TEXT_SCALE,
-  MIN_TEXT_SCALE,
-  setTextScale,
-  TEXT_SCALE_PRESETS,
-  textScalePresetIndex,
-} from "@/shared/lib/textScale";
-import { useTextScale } from "@/shared/lib/useTextScale";
 import { Button } from "@/shared/ui/button";
 import {
   DropdownMenu,
@@ -536,10 +527,10 @@ function ThemeSettingsCard() {
     >
       <SettingsSectionHeader
         title="Appearance"
-        description="Choose a theme and interface scale for Buzz."
+        description="Choose a theme, interface scale, chat text size, and avatar size for Buzz."
       />
 
-      <TextScaleSetting />
+      <AppearanceScaleSettings />
 
       {/* Mode selector: System / Light / Dark */}
       <div className="mb-4 flex gap-2">
@@ -669,81 +660,6 @@ function ThemeSettingsCard() {
 
       <ThreadLayoutSetting />
     </section>
-  );
-}
-
-/**
- * Interface scale slider. Shares the same text-scale store as Cmd/Ctrl +/-
- * so keyboard zoom and this control stay in sync.
- */
-function TextScaleSetting() {
-  const textScale = useTextScale();
-  const isDefault = textScale === DEFAULT_TEXT_SCALE;
-  const presetIndex = textScalePresetIndex(textScale);
-
-  return (
-    <SettingsOptionGroup className="mb-6">
-      <SettingsOptionRow className="flex-col items-stretch gap-3 sm:flex-row sm:items-center">
-        <div className="min-w-0 flex-1">
-          <p className="text-sm font-medium">Interface scale</p>
-          <p className="text-sm font-normal text-muted-foreground">
-            Enlarge or shrink text and UI. Keyboard: Cmd/Ctrl + / − / 0.
-          </p>
-        </div>
-        <div className="flex min-w-0 items-center gap-3 sm:max-w-xs sm:flex-1">
-          <span
-            aria-hidden="true"
-            className="shrink-0 text-2xs tabular-nums text-muted-foreground"
-          >
-            {formatTextScalePercent(MIN_TEXT_SCALE)}
-          </span>
-          <input
-            aria-label="Interface scale"
-            aria-valuemax={TEXT_SCALE_PRESETS.length - 1}
-            aria-valuemin={0}
-            aria-valuenow={presetIndex}
-            aria-valuetext={formatTextScalePercent(textScale)}
-            className="h-1.5 w-full min-w-24 cursor-pointer appearance-none rounded-full bg-foreground/15 accent-primary"
-            data-testid="interface-scale-slider"
-            max={TEXT_SCALE_PRESETS.length - 1}
-            min={0}
-            onChange={(event) => {
-              const index = Number(event.target.value);
-              const next = TEXT_SCALE_PRESETS[index];
-              if (next != null) {
-                setTextScale(next);
-              }
-            }}
-            step={1}
-            type="range"
-            value={presetIndex}
-          />
-          <span
-            aria-hidden="true"
-            className="shrink-0 text-2xs tabular-nums text-muted-foreground"
-          >
-            {formatTextScalePercent(MAX_TEXT_SCALE)}
-          </span>
-          <span
-            className="w-10 shrink-0 text-right text-sm tabular-nums font-medium text-foreground"
-            data-testid="interface-scale-value"
-          >
-            {formatTextScalePercent(textScale)}
-          </span>
-          <Button
-            className="h-7 shrink-0 rounded-full border border-border/50 bg-muted/45 px-2.5 text-xs font-medium shadow-none hover:bg-muted/70 disabled:opacity-40"
-            data-testid="interface-scale-reset"
-            disabled={isDefault}
-            onClick={() => setTextScale(DEFAULT_TEXT_SCALE)}
-            size="sm"
-            type="button"
-            variant="ghost"
-          >
-            Reset
-          </Button>
-        </div>
-      </SettingsOptionRow>
-    </SettingsOptionGroup>
   );
 }
 

@@ -1,25 +1,41 @@
 import * as React from "react";
 
 import { parseAnimatedAvatarUrl } from "@/shared/lib/animatedAvatar";
+import {
+  type AvatarSize,
+  avatarSizeStyle,
+  getAvatarSizeRem,
+  getAvatarScale,
+} from "@/shared/lib/avatarScale";
 import { cn } from "@/shared/lib/cn";
 import { getInitials } from "@/shared/lib/initials";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
+import { useAvatarScale } from "@/shared/lib/useAvatarScale";
 import { Avatar, AvatarFallback, AvatarImage } from "@/shared/ui/avatar";
 
-type UserAvatarSize = "xs" | "sm" | "md";
-
-const sizeClasses: Record<UserAvatarSize, string> = {
-  xs: "h-5 w-5 text-3xs",
-  sm: "h-6 w-6 text-2xs",
-  md: "h-9 w-9 text-xs",
+const sizeTextClasses: Record<AvatarSize, string> = {
+  xs: "text-3xs",
+  sm: "text-2xs",
+  md: "text-xs",
 };
 
 type UserAvatarProps = {
   avatarUrl: string | null;
   displayName: string;
-  size?: UserAvatarSize;
+  size?: AvatarSize;
+  /**
+   * When true (default), width/height follow Appearance → Avatar size.
+   * Set false for decorative/editor surfaces that must ignore the slider.
+   */
+  appearanceScale?: boolean;
+  /**
+   * @deprecated Use {@link appearanceScale}. Kept temporarily for call-sites
+   * still passing `messageScale`; treated as appearanceScale when provided.
+   */
+  messageScale?: boolean;
   accent?: boolean;
   className?: string;
+  style?: React.CSSProperties;
   fallbackDelayMs?: number;
   testId?: string;
 };
@@ -28,14 +44,18 @@ export function UserAvatar({
   avatarUrl,
   displayName,
   size = "md",
+  appearanceScale,
+  messageScale,
   accent = false,
   className,
+  style,
   fallbackDelayMs = 200,
   testId,
 }: UserAvatarProps) {
+  // Default on; explicit messageScale remains supported as an alias.
+  const scaleEnabled = appearanceScale ?? messageScale ?? true;
+  const avatarScale = useAvatarScale();
   const initials = getInitials(displayName);
-  // Animated avatars show their static poster frame until hovered, then play
-  // the animation.
   const animated = parseAnimatedAvatarUrl(avatarUrl);
   const [isHovered, setIsHovered] = React.useState(false);
   const src = animated
@@ -44,13 +64,25 @@ export function UserAvatar({
       ? rewriteRelayUrl(avatarUrl)
       : null;
 
+  const scaledStyle = scaleEnabled
+    ? avatarSizeStyle(size, avatarScale)
+    : undefined;
+  const mergedStyle: React.CSSProperties | undefined = scaleEnabled
+    ? { ...scaledStyle, ...style }
+    : style;
+
   return (
     <Avatar
-      // Animated avatars carry their own backdrop disc and transparent
-      // surroundings — any container fill would flatten the pop-out.
-      className={cn(sizeClasses[size], !animated && "shadow-xs", className)}
+      className={cn(
+        "shrink-0",
+        sizeTextClasses[size],
+        !animated && "shadow-xs",
+        className,
+      )}
+      data-avatar-scale={scaleEnabled ? String(avatarScale) : undefined}
       onMouseEnter={animated ? () => setIsHovered(true) : undefined}
       onMouseLeave={animated ? () => setIsHovered(false) : undefined}
+      style={mergedStyle}
     >
       {src ? (
         <AvatarImage
@@ -75,4 +107,12 @@ export function UserAvatar({
       </AvatarFallback>
     </Avatar>
   );
+}
+
+/** @deprecated Prefer {@link getAvatarSizeRem} from `@/shared/lib/avatarScale`. */
+export function getScaledMessageAvatarRem(
+  size: AvatarSize = "md",
+  scale = getAvatarScale(),
+): number {
+  return getAvatarSizeRem(size, scale);
 }

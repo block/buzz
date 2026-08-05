@@ -84,8 +84,9 @@ function ReplyParentContext({
             >
               <UserAvatar
                 avatarUrl={parentAvatarUrl}
-                className="!h-4 !w-4 shrink-0"
+                className="shrink-0"
                 displayName={parentDisplayName ?? "Parent note author"}
+                size="xs"
               />
             </button>
           </UserProfilePopover>
@@ -168,8 +169,9 @@ export function NoteCard({
         >
           <UserAvatar
             avatarUrl={avatarUrl}
-            className="!h-9 !w-9 shrink-0"
+            className="shrink-0"
             displayName={displayName}
+            size="md"
           />
           {isAgent ? (
             <Bot className="absolute -bottom-0.5 -right-0.5 h-4 w-4 rounded-full bg-background p-0.5 text-muted-foreground" />
@@ -297,8 +299,9 @@ export function NoteCard({
                 <div className="flex min-w-0 items-center gap-2">
                   <UserAvatar
                     avatarUrl={currentUserAvatarUrl}
-                    className="!h-8 !w-8 shrink-0"
+                    className="shrink-0"
                     displayName={currentUserDisplayName}
+                    size="sm"
                   />
                   <span className="max-w-32 truncate text-sm font-medium text-foreground">
                     {currentUserDisplayName}
