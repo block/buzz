@@ -6,6 +6,8 @@
 //! extension lanes.
 
 pub(crate) mod ephemeral;
+/// Durable decision-evidence acceptance and fail-closed release.
+pub mod evidence;
 /// Transaction-owned protected mutation execution and idempotency.
 pub mod executor;
 /// Exact-domain provider selection and authorization finalization.

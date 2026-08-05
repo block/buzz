@@ -20,6 +20,10 @@ use buzz_core::{CommunityId, TenantContext};
 use crate::handlers::community_provisioning::{
     normalize_candidate_host, validate_pubkey_hex, ProvisionCommunityRequest,
 };
+use crate::operator_runtime::{
+    OpaqueOperatorReference, OperatorIntent, OperatorInvocation, OperatorInvocationContext,
+    OperatorOutcome, OperatorReasonCode, OperatorRuntime, OperatorRuntimeError,
+};
 use crate::state::AppState;
 
 use super::{api_error, bridge, internal_error};
@@ -495,6 +499,172 @@ pub async fn community_availability(
         "available": existing.is_none(),
         "community_id": existing.map(|record| record.id.to_string()),
     })))
+}
+
+#[derive(Debug, Deserialize)]
+struct LifecycleRequestContext {
+    domain_id: Uuid,
+    operation_id: Uuid,
+    correlation_id: Uuid,
+    reason: OperatorReasonCode,
+    expected_revision: u64,
+    #[serde(default)]
+    approval_references: Vec<OpaqueOperatorReference>,
+}
+
+impl LifecycleRequestContext {
+    fn into_runtime(self) -> Result<OperatorInvocationContext, OperatorRuntimeError> {
+        OperatorInvocationContext::new(
+            self.domain_id,
+            self.operation_id,
+            self.correlation_id,
+            self.reason,
+            self.expected_revision,
+            self.approval_references,
+        )
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ListLifecycleRequest {
+    #[serde(flatten)]
+    context: LifecycleRequestContext,
+    limit: u16,
+    after: Option<OpaqueOperatorReference>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReplaceLifecycleRequest {
+    #[serde(flatten)]
+    context: LifecycleRequestContext,
+    target: OpaqueOperatorReference,
+    replacement: OpaqueOperatorReference,
+}
+
+#[derive(Debug, Deserialize)]
+struct RevokeLifecycleRequest {
+    #[serde(flatten)]
+    context: LifecycleRequestContext,
+    target: OpaqueOperatorReference,
+}
+
+type LifecycleResponse = Result<Json<OperatorOutcome>, (StatusCode, Json<Value>)>;
+
+/// Construct the provider-neutral lifecycle router from complete external
+/// authentication, authorization, durable-executor, and clock dependencies.
+///
+/// The stock relay router does not call this function or register these paths.
+/// A deployment composition root must explicitly construct [`OperatorRuntime`]
+/// and merge this returned router.
+pub fn lifecycle_router(runtime: Arc<OperatorRuntime>) -> axum::Router {
+    use axum::routing::post;
+
+    axum::Router::new()
+        .route("/operator/v1/lifecycle/list", post(list_lifecycle))
+        .route("/operator/v1/lifecycle/preview", post(preview_lifecycle))
+        .route("/operator/v1/lifecycle/revoke", post(revoke_lifecycle))
+        .route("/operator/v1/lifecycle/rotate", post(rotate_lifecycle))
+        .with_state(runtime)
+}
+
+async fn list_lifecycle(
+    State(runtime): State<Arc<OperatorRuntime>>,
+    headers: HeaderMap,
+    Json(request): Json<ListLifecycleRequest>,
+) -> LifecycleResponse {
+    let invocation = OperatorInvocation::new(
+        request.context.into_runtime().map_err(lifecycle_error)?,
+        OperatorIntent::List {
+            limit: request.limit,
+            after: request.after,
+        },
+    )
+    .map_err(lifecycle_error)?;
+    invoke_lifecycle(runtime, &headers, invocation).await
+}
+
+async fn preview_lifecycle(
+    State(runtime): State<Arc<OperatorRuntime>>,
+    headers: HeaderMap,
+    Json(request): Json<ReplaceLifecycleRequest>,
+) -> LifecycleResponse {
+    let invocation = OperatorInvocation::new(
+        request.context.into_runtime().map_err(lifecycle_error)?,
+        OperatorIntent::Preview {
+            target: request.target,
+            replacement: request.replacement,
+        },
+    )
+    .map_err(lifecycle_error)?;
+    invoke_lifecycle(runtime, &headers, invocation).await
+}
+
+async fn revoke_lifecycle(
+    State(runtime): State<Arc<OperatorRuntime>>,
+    headers: HeaderMap,
+    Json(request): Json<RevokeLifecycleRequest>,
+) -> LifecycleResponse {
+    let invocation = OperatorInvocation::new(
+        request.context.into_runtime().map_err(lifecycle_error)?,
+        OperatorIntent::Revoke {
+            target: request.target,
+        },
+    )
+    .map_err(lifecycle_error)?;
+    invoke_lifecycle(runtime, &headers, invocation).await
+}
+
+async fn rotate_lifecycle(
+    State(runtime): State<Arc<OperatorRuntime>>,
+    headers: HeaderMap,
+    Json(request): Json<ReplaceLifecycleRequest>,
+) -> LifecycleResponse {
+    let invocation = OperatorInvocation::new(
+        request.context.into_runtime().map_err(lifecycle_error)?,
+        OperatorIntent::Rotate {
+            target: request.target,
+            replacement: request.replacement,
+        },
+    )
+    .map_err(lifecycle_error)?;
+    invoke_lifecycle(runtime, &headers, invocation).await
+}
+
+async fn invoke_lifecycle(
+    runtime: Arc<OperatorRuntime>,
+    headers: &HeaderMap,
+    invocation: OperatorInvocation,
+) -> LifecycleResponse {
+    let header = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .ok_or_else(|| lifecycle_error(OperatorRuntimeError::MissingCredential))?;
+    let credential = crate::operator_runtime::OperatorCredential::from_authorization_header(header)
+        .map_err(lifecycle_error)?;
+    runtime
+        .invoke(&credential, invocation)
+        .await
+        .map(Json)
+        .map_err(lifecycle_error)
+}
+
+fn lifecycle_error(error: OperatorRuntimeError) -> (StatusCode, Json<Value>) {
+    let status = match error {
+        OperatorRuntimeError::MissingCredential
+        | OperatorRuntimeError::InvalidCredential
+        | OperatorRuntimeError::Unauthenticated => StatusCode::UNAUTHORIZED,
+        OperatorRuntimeError::CrossDomain
+        | OperatorRuntimeError::StaleAuthority
+        | OperatorRuntimeError::MissingCapability
+        | OperatorRuntimeError::MissingApproval
+        | OperatorRuntimeError::SelfApproval
+        | OperatorRuntimeError::ReplayedAuthority
+        | OperatorRuntimeError::InvalidAuthority => StatusCode::FORBIDDEN,
+        OperatorRuntimeError::InvalidRequest => StatusCode::BAD_REQUEST,
+        OperatorRuntimeError::IdempotencyConflict => StatusCode::CONFLICT,
+        OperatorRuntimeError::StorageUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+        OperatorRuntimeError::ExecutorContract => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (status, Json(serde_json::json!({ "error": error.code() })))
 }
 
 #[cfg(test)]

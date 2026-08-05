@@ -606,6 +606,14 @@ impl ProtectedTransportRuntime {
             .resolve(request)
             .map_err(|_| ProtectedTransportError::ProviderEvidenceUnavailable)?;
         match resolution {
+            VerifiedProviderEvidenceResolution::Absent
+                if request.verified_assertion().is_none()
+                    && request.provider_evidence().is_none() =>
+            {
+                Err(ProtectedTransportError::Resolution(
+                    ProtectedResolutionError::new("provider_evidence_missing"),
+                ))
+            }
             VerifiedProviderEvidenceResolution::Absent => Ok(request.clone()),
             VerifiedProviderEvidenceResolution::Ambiguous => {
                 Err(ProtectedTransportError::AmbiguousProviderEvidence)

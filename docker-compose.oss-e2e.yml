@@ -1,0 +1,75 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: buzz
+      POSTGRES_PASSWORD: buzz_oss_e2e
+      POSTGRES_DB: buzz
+    ports:
+      - "5546:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U buzz -d buzz"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6546:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 3s
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: buzz_oss_e2e
+      MINIO_ROOT_PASSWORD: buzz_oss_e2e_synthetic_secret
+    ports:
+      - "9546:9000"
+      - "9547:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+        mc alias set local http://minio:9000 buzz_oss_e2e buzz_oss_e2e_synthetic_secret &&
+        mc mb --ignore-existing local/buzz-media &&
+        mc anonymous set none local/buzz-media
+      "
+    restart: "no"
+
+volumes:
+  postgres-data:
+  minio-data:

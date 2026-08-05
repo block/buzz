@@ -19,6 +19,8 @@
 
 /// Audit action types recorded in the log.
 pub mod action;
+/// Closed, redaction-safe authorization evidence contracts.
+pub mod authorization;
 /// Audit log entry types (stored and input).
 pub mod entry;
 /// Error types for audit operations.

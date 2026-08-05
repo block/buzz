@@ -5,6 +5,10 @@ separate disabled relay-authenticated client-status contract. It does not
 authorize enabling a provider, a client presentation surface, or a conformance
 claim.
 
+For the deployment composition, provider registration, configuration, staged
+activation, and pre-enforcement checks, see
+[FEDERATED_AUTHORIZATION_DEPLOYMENT.md](FEDERATED_AUTHORIZATION_DEPLOYMENT.md).
+
 ## Session and reconnect behavior
 
 For WebSocket authorization, the assertion belongs on the upgrade request and

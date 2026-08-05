@@ -34,6 +34,10 @@ pub mod mesh_boot;
 pub mod metrics;
 /// NIP-11 relay information document.
 pub mod nip11;
+/// PostgreSQL executor for explicitly composed operator lifecycle runtimes.
+pub mod operator_persistence;
+/// Disabled-by-default provider-neutral operator lifecycle composition root.
+pub mod operator_runtime;
 /// Provider-neutral inventory of every protected relay surface.
 pub mod protected_surface;
 /// NIP-01 client/relay message parsing.

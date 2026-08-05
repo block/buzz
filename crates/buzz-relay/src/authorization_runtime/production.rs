@@ -6,15 +6,22 @@
 use std::{collections::HashMap, env, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use buzz_audit::authorization::{
+    ActorReference, AttemptId, AuthorizationEventV1, CorrelationId, DecisionReason, EventId,
+    EventKind, EventPayloadV1, EventResult, EvidenceHealthSignal, OperationClass, PseudonymKey,
+    Pseudonymizer, ReferenceKind, SourceClass, TransportClass, VersionVectorV1,
+};
 use buzz_auth::{
     resolve_current_federated_policy, AccessLeasePolicy, ActiveBindingResolution,
-    ApplicationLeaseLimit, AuthContextInput, AuthorizationClockSkew, AuthorizationOutcome,
+    ApplicationLeaseLimit, AuthContextInput, AuthTransport, AuthorizationCapability,
+    AuthorizationClockSkew, AuthorizationDenialReason, AuthorizationOutcome,
     AuthorizationProfileId, AuthorizationProvider, BindingLeaseBound, BindingSource, CapabilitySet,
     EnrollmentMode, FederatedAuthorization, LeaseVersion, ProviderTimeout, ResolvedFederatedPolicy,
     Scope, SharedAuthorizationClock, SystemAuthorizationClock, VerificationStatusPolicy,
     VerifiedEvidenceAdapter, VerifiedProviderEvidence,
 };
 use buzz_core::{CommunityId, TenantContext};
+use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -39,6 +46,8 @@ const DOMAINS_ENV: &str = "BUZZ_PROTECTED_AUTHORIZATION_DOMAINS";
 const PROFILE_ENV: &str = "BUZZ_PROTECTED_AUTHORIZATION_PROFILE";
 const LEASE_SECONDS_ENV: &str = "BUZZ_PROTECTED_AUTHORIZATION_LEASE_SECONDS";
 const RESTORE_BOOTSTRAPS_ENV: &str = "BUZZ_PROTECTED_AUTHORIZATION_RESTORE_BOOTSTRAPS";
+const AUDIT_PSEUDONYM_KEY_ENV: &str = "BUZZ_AUTHORIZATION_AUDIT_PSEUDONYM_KEY_HEX";
+const AUDIT_PSEUDONYM_KEY_EPOCH_ENV: &str = "BUZZ_AUTHORIZATION_AUDIT_PSEUDONYM_KEY_EPOCH";
 const MAX_AUDIO_RECONCILIATION_SWEEPS: usize = 8;
 
 /// Runtime plus its durable invalidation worker.
@@ -129,9 +138,210 @@ struct ProductionResolver {
     invalidation: AuthorizationInvalidationRuntime,
     clock: SharedAuthorizationClock,
     profiles: HashMap<CommunityId, AuthorizationProfileId>,
+    evidence_pseudonymizer: Option<Pseudonymizer>,
+    evidence_health: EvidenceHealthSignal,
 }
 
 impl ProductionResolver {
+    fn decision_event(
+        &self,
+        request: &ProtectedOperationRequest,
+        outcome: &AuthorizationOutcome,
+    ) -> Result<AuthorizationEventV1, ProtectedResolutionError> {
+        let domain = request.authorization_domain();
+        let pseudonymizer = self
+            .evidence_pseudonymizer
+            .as_ref()
+            .ok_or(ProtectedResolutionError::new("evidence_configuration"))?;
+        let actor = pseudonymizer
+            .derive(
+                domain,
+                ReferenceKind::Actor,
+                &request.actor_pubkey().to_bytes(),
+            )
+            .map_err(|_| ProtectedResolutionError::new("evidence_pseudonym"))?;
+        let actor = if let Some(delegation) = request.verified_proof().verified_delegation() {
+            let owner = pseudonymizer
+                .derive(
+                    domain,
+                    ReferenceKind::Actor,
+                    &delegation.owner_pubkey().to_bytes(),
+                )
+                .map_err(|_| ProtectedResolutionError::new("evidence_pseudonym"))?;
+            ActorReference::delegated(actor, owner, delegation.relationship_revision().get())
+                .map_err(|_| ProtectedResolutionError::new("evidence_pseudonym"))?
+        } else {
+            ActorReference::direct(actor)
+                .map_err(|_| ProtectedResolutionError::new("evidence_pseudonym"))?
+        };
+        let delegated = request.owner_pubkey().is_some();
+        let (kind, result, reason, versions) = match outcome {
+            AuthorizationOutcome::Allow(snapshot) => {
+                let mut policy = Sha256::new();
+                policy.update(b"buzz-authorization-policy-version-v1");
+                policy.update(snapshot.policy_version().as_str().as_bytes());
+                (
+                    if delegated {
+                        EventKind::DelegatedAllowed
+                    } else {
+                        EventKind::AdmissionAllowed
+                    },
+                    EventResult::Allowed,
+                    DecisionReason::PolicyAllowed,
+                    VersionVectorV1 {
+                        binding: snapshot.binding_version().map(|value| value.get()),
+                        lease: None,
+                        lifecycle: None,
+                        invalidation: None,
+                        policy_digest: Some(policy.finalize().into()),
+                    },
+                )
+            }
+            AuthorizationOutcome::Deny(denial) => (
+                if delegated {
+                    EventKind::DelegatedDenied
+                } else {
+                    EventKind::AdmissionDenied
+                },
+                EventResult::Denied,
+                decision_reason_for_denial(denial.reason()),
+                VersionVectorV1::default(),
+            ),
+            AuthorizationOutcome::Unavailable(_) => (
+                if delegated {
+                    EventKind::DelegatedDenied
+                } else {
+                    EventKind::AdmissionDenied
+                },
+                EventResult::Unavailable,
+                DecisionReason::EvidenceUnavailable,
+                VersionVectorV1::default(),
+            ),
+            _ => (
+                if delegated {
+                    EventKind::DelegatedDenied
+                } else {
+                    EventKind::AdmissionDenied
+                },
+                EventResult::Unavailable,
+                DecisionReason::SchemaUnsupported,
+                VersionVectorV1::default(),
+            ),
+        };
+        let occurred_at = self
+            .clock
+            .now()
+            .ok()
+            .and_then(|time| DateTime::<Utc>::from_timestamp(time.unix_seconds() as i64, 0))
+            .ok_or(ProtectedResolutionError::new("authorization_clock"))?;
+        let key_reference = pseudonymizer
+            .derive(
+                domain,
+                ReferenceKind::Key,
+                &request.actor_pubkey().to_bytes(),
+            )
+            .map_err(|_| ProtectedResolutionError::new("evidence_pseudonym"))?;
+        let principal = match outcome {
+            AuthorizationOutcome::Allow(snapshot) => Some(snapshot.principal()),
+            _ => request
+                .provider_evidence()
+                .map(|evidence| evidence.verified_assertion().principal())
+                .or_else(|| {
+                    request
+                        .verified_assertion()
+                        .map(|assertion| assertion.principal())
+                }),
+        };
+        let principal_reference = principal
+            .map(|principal| {
+                let issuer = principal.issuer().as_bytes();
+                let subject = principal.subject().as_bytes();
+                let mut input = Vec::with_capacity(16 + issuer.len() + subject.len());
+                input.extend_from_slice(&(issuer.len() as u64).to_be_bytes());
+                input.extend_from_slice(issuer);
+                input.extend_from_slice(&(subject.len() as u64).to_be_bytes());
+                input.extend_from_slice(subject);
+                pseudonymizer.derive(domain, ReferenceKind::Principal, &input)
+            })
+            .transpose()
+            .map_err(|_| ProtectedResolutionError::new("evidence_pseudonym"))?;
+        AuthorizationEventV1::new(
+            EventId::generate(),
+            domain,
+            occurred_at,
+            None,
+            CorrelationId::from_uuid(request.correlation_id())
+                .map_err(|_| ProtectedResolutionError::new("evidence_correlation"))?,
+            AttemptId::generate(),
+            None,
+            actor,
+            transport_class(request.transport()),
+            operation_class(request.capability()),
+            SourceClass::Policy,
+            kind,
+            result,
+            reason,
+            versions,
+            EventPayloadV1::None,
+        )
+        .with_subject_references(principal_reference, Some(key_reference))
+        .map_err(|_| ProtectedResolutionError::new("evidence_pseudonym"))
+    }
+
+    async fn accept_outcome(
+        &self,
+        request: &ProtectedOperationRequest,
+        outcome: AuthorizationOutcome,
+    ) -> Result<AuthorizationOutcome, ProtectedResolutionError> {
+        use super::evidence::{
+            accept_authorization_decision, AcceptedAuthorizationDecision, DecisionDisposition,
+        };
+
+        let event = self.decision_event(request, &outcome)?;
+        let disposition = if matches!(outcome, AuthorizationOutcome::Allow(_)) {
+            DecisionDisposition::Allow
+        } else {
+            DecisionDisposition::Deny
+        };
+        match accept_authorization_decision(
+            &self.db,
+            &self.evidence_health,
+            &event,
+            disposition,
+            outcome,
+        )
+        .await
+        {
+            Ok(AcceptedAuthorizationDecision::Allow { value, .. }) => Ok(value),
+            Ok(AcceptedAuthorizationDecision::Deny { value, evidence }) => {
+                if evidence.is_none() {
+                    metrics::counter!(
+                        "buzz_authorization_evidence_control_total",
+                        "code" => "acceptance_unavailable"
+                    )
+                    .increment(1);
+                    tracing::error!(
+                        code = "acceptance_unavailable",
+                        "authorization denial evidence was unavailable; denial preserved"
+                    );
+                }
+                Ok(value)
+            }
+            Err(error) => {
+                metrics::counter!(
+                    "buzz_authorization_evidence_control_total",
+                    "code" => "allow_acceptance_unavailable"
+                )
+                .increment(1);
+                tracing::error!(
+                    code = error.code(),
+                    "authorization allow rejected because durable evidence was unavailable"
+                );
+                Err(ProtectedResolutionError::new(error.code()))
+            }
+        }
+    }
+
     fn tenant(&self, domain: CommunityId) -> Result<&TenantContext, ProtectedResolutionError> {
         self.tenants
             .get(&domain)
@@ -340,6 +550,7 @@ impl ProtectedAuthorizationResolver for ProductionResolver {
                 .await
         }
         .map_err(|_| ProtectedResolutionError::new("provider_request_invalid"))?;
+        let outcome = self.accept_outcome(request, outcome).await?;
         if !matches!(outcome, AuthorizationOutcome::Allow(_)) {
             return Err(ProtectedResolutionError::new("provider_denied"));
         }
@@ -377,7 +588,7 @@ impl ProtectedAuthorizationResolver for ProductionResolver {
         let evaluation_policy = self
             .current_policy(request.authorization_domain(), request.correlation_id())
             .await?;
-        let snapshot = match self
+        let outcome = self
             .finalizer
             .evaluate_direct(
                 tenant,
@@ -388,8 +599,8 @@ impl ProtectedAuthorizationResolver for ProductionResolver {
                 request.correlation_id(),
             )
             .await
-            .map_err(|_| ProtectedResolutionError::new("provider_request_invalid"))?
-        {
+            .map_err(|_| ProtectedResolutionError::new("provider_request_invalid"))?;
+        let snapshot = match self.accept_outcome(request, outcome).await? {
             AuthorizationOutcome::Allow(snapshot) => snapshot,
             _ => return Err(ProtectedResolutionError::new("provider_denied")),
         };
@@ -480,6 +691,7 @@ impl ProtectedAuthorizationResolver for ProductionResolver {
                 )
                 .await
                 .map_err(|_| ProtectedResolutionError::new("provider_request_invalid"))?;
+            let outcome = self.accept_outcome(request, outcome).await?;
             let AuthorizationOutcome::Allow(snapshot) = outcome else {
                 return Err(ProtectedResolutionError::new("provider_denied"));
             };
@@ -539,6 +751,7 @@ impl ProtectedAuthorizationResolver for ProductionResolver {
                 )
                 .await
                 .map_err(|_| ProtectedResolutionError::new("provider_request_invalid"))?;
+            let outcome = self.accept_outcome(request, outcome).await?;
             let AuthorizationOutcome::Allow(snapshot) = outcome else {
                 return Err(ProtectedResolutionError::new("provider_denied"));
             };
@@ -572,6 +785,7 @@ impl ProtectedAuthorizationResolver for ProductionResolver {
                 )
                 .await
                 .map_err(|_| ProtectedResolutionError::new("provider_request_invalid"))?;
+            let outcome = self.accept_outcome(request, outcome).await?;
             let AuthorizationOutcome::Allow(snapshot) = outcome else {
                 return Err(ProtectedResolutionError::new("provider_denied"));
             };
@@ -792,6 +1006,11 @@ pub async fn build_from_environment_with_providers_and_evidence(
     if configured.is_empty() {
         return Ok(None);
     }
+    let evidence_pseudonymizer = if configured.values().any(|mode| mode.evaluates_provider()) {
+        Some(parse_evidence_pseudonymizer()?)
+    } else {
+        None
+    };
     validate_provider_coverage(&configured, &providers)?;
     if evidence_resolver.is_none()
         && configured.values().any(|mode| mode.evaluates_provider())
@@ -892,6 +1111,8 @@ pub async fn build_from_environment_with_providers_and_evidence(
         invalidation: invalidation.clone(),
         clock: Arc::clone(&clock),
         profiles,
+        evidence_pseudonymizer,
+        evidence_health: EvidenceHealthSignal::default(),
     });
     let mut transport = ProtectedTransportRuntime::new(transports, resolver, clock)?;
     if let Some(evidence_resolver) = evidence_resolver {
@@ -906,6 +1127,69 @@ pub async fn build_from_environment_with_providers_and_evidence(
         enforcing_domains,
         projection_domains,
     }))
+}
+
+fn parse_evidence_pseudonymizer() -> Result<Pseudonymizer, ProductionRuntimeError> {
+    let raw_key = env::var(AUDIT_PSEUDONYM_KEY_ENV)
+        .map_err(|_| ProductionRuntimeError::EvidenceConfigurationMissing)?;
+    let decoded =
+        hex::decode(raw_key).map_err(|_| ProductionRuntimeError::EvidenceConfigurationInvalid)?;
+    let key: [u8; 32] = decoded
+        .try_into()
+        .map_err(|_| ProductionRuntimeError::EvidenceConfigurationInvalid)?;
+    let epoch = env::var(AUDIT_PSEUDONYM_KEY_EPOCH_ENV)
+        .map_err(|_| ProductionRuntimeError::EvidenceConfigurationMissing)?
+        .parse::<u32>()
+        .map_err(|_| ProductionRuntimeError::EvidenceConfigurationInvalid)?;
+    if epoch == 0 {
+        return Err(ProductionRuntimeError::EvidenceConfigurationInvalid);
+    }
+    let key =
+        PseudonymKey::new(key).map_err(|_| ProductionRuntimeError::EvidenceConfigurationInvalid)?;
+    Ok(Pseudonymizer::new(key, epoch))
+}
+
+fn transport_class(transport: AuthTransport) -> TransportClass {
+    match transport {
+        AuthTransport::RelayWebSocket => TransportClass::WebSocket,
+        AuthTransport::HttpBridge => TransportClass::Http,
+        AuthTransport::Git => TransportClass::Repository,
+        AuthTransport::MediaUpload | AuthTransport::MediaDownload => TransportClass::Media,
+        AuthTransport::Audio => TransportClass::Audio,
+    }
+}
+
+fn operation_class(capability: AuthorizationCapability) -> OperationClass {
+    match capability {
+        AuthorizationCapability::CommunityRead
+        | AuthorizationCapability::MediaRead
+        | AuthorizationCapability::GitRead => OperationClass::Read,
+        AuthorizationCapability::CommunityWrite => OperationClass::Publish,
+        AuthorizationCapability::MediaWrite | AuthorizationCapability::GitWrite => {
+            OperationClass::Write
+        }
+        AuthorizationCapability::AudioJoin => OperationClass::Join,
+        AuthorizationCapability::Moderate
+        | AuthorizationCapability::InviteMint
+        | AuthorizationCapability::InviteClaim => OperationClass::Lifecycle,
+        _ => OperationClass::NotApplicable,
+    }
+}
+
+fn decision_reason_for_denial(reason: AuthorizationDenialReason) -> DecisionReason {
+    match reason {
+        AuthorizationDenialReason::ProviderDenied
+        | AuthorizationDenialReason::AuthorizationProfileMismatch
+        | AuthorizationDenialReason::FederatedPolicyNotCurrent => DecisionReason::PolicyDenied,
+        AuthorizationDenialReason::AuthorizationDomainMismatch => DecisionReason::DomainMismatch,
+        AuthorizationDenialReason::PrincipalMismatch => DecisionReason::TargetMismatch,
+        AuthorizationDenialReason::MissingCapability => DecisionReason::OperationMismatch,
+        AuthorizationDenialReason::StaleDecision
+        | AuthorizationDenialReason::IdentityEvidenceExpired => DecisionReason::EvidenceExpired,
+        AuthorizationDenialReason::FutureDecision
+        | AuthorizationDenialReason::IdentityEvidenceNotYetValid => DecisionReason::EvidenceInvalid,
+        _ => DecisionReason::SchemaUnsupported,
+    }
 }
 
 async fn activate_protected_domains(
@@ -1226,6 +1510,12 @@ pub enum ProductionRuntimeError {
     /// Configuration was malformed or ambiguous.
     #[error("protected authorization configuration is invalid")]
     InvalidConfiguration,
+    /// An evaluating domain has no audit-only pseudonymization key or epoch.
+    #[error("authorization evidence configuration is missing")]
+    EvidenceConfigurationMissing,
+    /// The audit-only pseudonymization key or epoch is malformed.
+    #[error("authorization evidence configuration is invalid")]
+    EvidenceConfigurationInvalid,
     /// An exact configured domain has no durable host mapping.
     #[error("protected authorization domain is not present")]
     ConfiguredDomainMissing,
@@ -1288,6 +1578,74 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn every_production_provider_evaluation_reaches_durable_acceptance() {
+        fn offsets(section: &str, needles: &[&str]) -> Vec<usize> {
+            let mut offsets = needles
+                .iter()
+                .flat_map(|needle| section.match_indices(needle).map(|(offset, _)| offset))
+                .collect::<Vec<_>>();
+            offsets.sort_unstable();
+            offsets
+        }
+
+        let source = include_str!("production.rs");
+        let production = source
+            .split_once("\n#[cfg(test)]\nmod tests")
+            .map(|(production, _)| production)
+            .expect("production source has a bounded test module");
+        let present_start = production
+            .find("    async fn present(")
+            .expect("production resolver has present");
+        let resolve_start = production
+            .find("    async fn resolve(")
+            .expect("production resolver has resolve");
+        let observe = &production[..present_start];
+        let present = &production[present_start..resolve_start];
+        let resolve = &production[resolve_start..];
+        let evaluation_needles = [".evaluate_direct(", ".evaluate_delegated("];
+        let acceptance_needles = [".accept_outcome(request, outcome).await?"];
+
+        let evaluations = offsets(production, &evaluation_needles);
+        let acceptances = offsets(production, &acceptance_needles);
+        assert_eq!(evaluations.len(), 6, "inventory all six decision branches");
+        assert_eq!(acceptances.len(), 5, "inventory five durable joins");
+
+        let observe_evaluations = offsets(observe, &evaluation_needles);
+        let observe_acceptances = offsets(observe, &acceptance_needles);
+        assert_eq!(observe_evaluations.len(), 2);
+        assert_eq!(observe_acceptances.len(), 1);
+        assert!(observe.contains("let outcome = if let Some(owner)"));
+        assert!(
+            observe_evaluations
+                .iter()
+                .all(|evaluation| *evaluation < observe_acceptances[0]),
+            "both mutually exclusive observe branches must converge on the durable join"
+        );
+
+        for (section, expected_evaluations) in [(present, 1_usize), (resolve, 3_usize)] {
+            let section_evaluations = offsets(section, &evaluation_needles);
+            let section_acceptances = offsets(section, &acceptance_needles);
+            assert_eq!(section_evaluations.len(), expected_evaluations);
+            assert_eq!(section_acceptances.len(), expected_evaluations);
+            assert!(
+                section_evaluations
+                    .iter()
+                    .zip(section_acceptances.iter())
+                    .all(|(evaluation, acceptance)| evaluation < acceptance),
+                "no production decision branch may bypass its durable acceptance join"
+            );
+        }
+
+        assert_eq!(
+            observe_evaluations.len()
+                + offsets(present, &evaluation_needles).len()
+                + offsets(resolve, &evaluation_needles).len(),
+            evaluations.len(),
+            "every intended production decision branch remains in the structural inventory"
+        );
+    }
 
     struct SyntheticUnavailableProvider;
 

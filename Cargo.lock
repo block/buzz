@@ -888,6 +888,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "hex",
+ "hmac 0.13.0",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -896,6 +897,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -1003,10 +1005,12 @@ dependencies = [
 name = "buzz-db"
 version = "0.1.0"
 dependencies = [
+ "buzz-audit",
  "buzz-auth",
  "buzz-core",
  "chrono",
  "hex",
+ "hmac 0.13.0",
  "metrics",
  "metrics-util",
  "nostr",
@@ -1019,6 +1023,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -1200,6 +1205,7 @@ dependencies = [
  "buzz-sdk",
  "buzz-search",
  "buzz-workflow",
+ "buzz-ws-client",
  "bytes",
  "chrono",
  "dashmap",

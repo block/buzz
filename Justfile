@@ -263,6 +263,30 @@ desktop-e2e-smoke:
 desktop-e2e-integration: _ensure-migrations
     cd {{desktop_dir}} && pnpm test:e2e:integration
 
+# Start the isolated OSS-only authorization/lifecycle playground.
+oss-e2e-setup:
+    ./scripts/oss-e2e.sh setup
+
+# Run all synthetic OSS-only authorization/lifecycle scenarios.
+oss-e2e:
+    ./scripts/oss-e2e.sh run
+
+# Run one scenario ID, for example: `just oss-e2e-scenario O501`.
+oss-e2e-scenario SCENARIO:
+    ./scripts/oss-e2e.sh scenario {{SCENARIO}}
+
+# Delete only the isolated playground's synthetic volumes and restart it.
+oss-e2e-reset:
+    ./scripts/oss-e2e.sh reset
+
+# Stop the isolated playground while retaining its synthetic volumes.
+oss-e2e-stop:
+    ./scripts/oss-e2e.sh stop
+
+# Show isolated playground service health.
+oss-e2e-status:
+    ./scripts/oss-e2e.sh status
+
 # Run only the e2e specs changed vs origin/main (both projects) before pushing
 desktop-e2e-pre-push: _ensure-migrations
     git fetch origin main
@@ -277,7 +301,7 @@ ci: check test-unit desktop-test desktop-build desktop-tauri-check desktop-tauri
 test:
     ./scripts/run-tests.sh all
 
-# Run unit tests only (no infra needed)
+# Run unit tests. The O5 buzz-db gates require a reachable test PostgreSQL.
 test-unit:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -285,12 +309,11 @@ test-unit:
         cargo nextest run -p buzz-core -p buzz-auth --lib
         cargo nextest run -p buzz-voice --lib
         cargo nextest run -p buzz-cli
-        # buzz-db migrator/lint tests: pure SQL-parsing unit tests (no infra).
-        # They guard the embedded-migrator invariant (exactly the consolidated
-        # 0001; cutover/backfill stays an operator script, not startup state)
-        # and the tenant-scoping lints. The Postgres-backed buzz-db tests are
-        # #[ignore]d, so --lib runs only the infra-free set. Without this gate a
-        # stray file in migrations/ or a broken lint ships green.
+        # buzz-db includes pure migration/lint tests and non-vacuous O5
+        # PostgreSQL atomicity/concurrency gates. CI supplies an isolated
+        # service; local callers must provide BUZZ_TEST_DATABASE_URL or the
+        # documented localhost test database. Without this gate, migration
+        # drift or an unreachable database could ship green.
         cargo nextest run -p buzz-db --lib
         # Multi-tenant conformance gate (buzz-conformance): the independent
         # replay checker + golden fixtures. No infra — pure in-process trace

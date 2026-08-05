@@ -112,6 +112,20 @@ jobs:
     name: Unit Tests
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: buzz
+          POSTGRES_PASSWORD: buzz_dev
+          POSTGRES_DB: buzz
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U buzz -d buzz"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
     needs: [changes]
     if: github.event_name == 'push' || needs.changes.outputs.rust == 'true'
     permissions:
@@ -129,6 +143,8 @@ jobs:
           tool: cargo-nextest@0.9.136
       - name: Unit tests
         run: just test-unit
+        env:
+          BUZZ_TEST_DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
 
   desktop-core:
     name: Desktop Core

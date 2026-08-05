@@ -17,6 +17,8 @@ pub mod api_token;
 pub mod archived_identities;
 /// Transaction-owned admission records for protected audio sessions.
 pub mod audio_admission;
+/// Transactional durable authorization decision evidence and bounded export state.
+pub mod authorization_evidence;
 /// Durable provider-neutral authorization invalidation authority.
 pub mod authorization_invalidation;
 /// Restore-independent high-water snapshots for protected authority.
@@ -43,6 +45,8 @@ pub mod identity_lifecycle;
 pub mod migration;
 /// Community moderation: reports, bans/timeouts, audit actions.
 pub mod moderation;
+/// Atomic persistence for the disabled authenticated operator lifecycle surface.
+pub mod operator_lifecycle;
 /// Monthly table partition management.
 pub mod partition;
 /// Buzz product-feedback sidecar persistence.
@@ -71,6 +75,9 @@ pub mod usage;
 pub mod user;
 /// Workflow, run, and approval persistence.
 pub mod workflow;
+
+#[cfg(test)]
+mod test_support;
 
 pub use error::{DbError, Result};
 pub use event::{EventQuery, ReactionEventInsertOutcome, DEFAULT_MAX_PAGE_LIMIT};

@@ -566,7 +566,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 45);
+        assert_eq!(migrations.len(), 50);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1085,6 +1085,32 @@ mod tests {
         assert!(delegated_relationship.contains("delegated_relationship"));
         assert!(delegated_relationship
             .contains("authorization_invalidation_floors_selector_kind_check"));
+
+        assert_eq!(migrations[45].version, 46);
+        let audit_outbox = migrations[45].sql.as_str();
+        assert!(audit_outbox.contains("authorization_audit_outbox"));
+        assert!(audit_outbox.contains("authorization_immutable_row_guard"));
+        assert!(!audit_outbox.contains("JSONB"));
+
+        assert_eq!(migrations[46].version, 47);
+        let decisions = migrations[46].sql.as_str();
+        assert!(decisions.contains("authorization_decision_events"));
+        assert!(decisions.contains("authorization_decision_events_immutable"));
+
+        assert_eq!(migrations[47].version, 48);
+        let delivery = migrations[47].sql.as_str();
+        assert!(delivery.contains("authorization_evidence_dead_letters"));
+        assert!(delivery.contains("allow_reserve"));
+
+        assert_eq!(migrations[48].version, 49);
+        let operator = migrations[48].sql.as_str();
+        assert!(operator.contains("authorization_operator_operation_receipts"));
+        assert!(operator.contains("authorization_operator_authority_consumptions"));
+
+        assert_eq!(migrations[49].version, 50);
+        let previews = migrations[49].sql.as_str();
+        assert!(previews.contains("authorization_lifecycle_previews"));
+        assert!(previews.contains("authorization_decision_events"));
     }
 
     fn additive_identity_executable_sql(sql: &str) -> String {

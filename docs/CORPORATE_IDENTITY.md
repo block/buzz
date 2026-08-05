@@ -5,6 +5,10 @@ Corporate identity is an optional relay policy enabled with
 after the request proves control of a Nostr key, then admits the request only
 when the existing community policy also succeeds.
 
+For custom providers, exact per-community authorization modes, restore
+protection, and the optional lifecycle operator surface, see
+[FEDERATED_AUTHORIZATION_DEPLOYMENT.md](FEDERATED_AUTHORIZATION_DEPLOYMENT.md).
+
 ## Required JWT policy
 
 - `BUZZ_CORPORATE_IDENTITY_JWKS_URI` must be HTTPS and contain no credentials.

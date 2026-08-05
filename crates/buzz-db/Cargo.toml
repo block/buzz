@@ -8,6 +8,7 @@ repository.workspace = true
 description = "Postgres event store and data access layer for Buzz"
 
 [dependencies]
+buzz-audit = { workspace = true }
 buzz-auth = { workspace = true }
 buzz-core = { workspace = true }
 sqlx        = { workspace = true }
@@ -18,6 +19,8 @@ uuid        = { workspace = true }
 chrono      = { workspace = true }
 hex         = { workspace = true }
 sha2        = { workspace = true }
+hmac        = { workspace = true }
+zeroize     = { workspace = true }
 tracing     = { workspace = true }
 thiserror   = { workspace = true }
 nostr       = { workspace = true }
