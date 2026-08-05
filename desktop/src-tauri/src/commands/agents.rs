@@ -464,7 +464,7 @@ async fn deploy_to_provider(
     config: &serde_json::Value,
     agent_json: serde_json::Value,
     cached_binary_path: Option<&str>,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     // Resolve via discovered candidates only. Cached path must match BOTH
     // "is a discovered candidate" AND "belongs to this provider_id". A tampered
     // record cannot redirect deploys to a different provider's binary.
@@ -497,8 +497,9 @@ async fn deploy_to_provider(
         .ok_or_else(|| format!("agent {pubkey} not found"))?;
 
     match deploy_result {
-        Ok(backend_agent_id) => {
-            rec.backend_agent_id = Some(backend_agent_id);
+        Ok(result) => {
+            let enrollment_command = result.enrollment_command;
+            rec.backend_agent_id = Some(result.agent_id);
             rec.last_started_at = Some(now_iso());
             rec.updated_at = now_iso();
             rec.last_error = None;
@@ -511,7 +512,7 @@ async fn deploy_to_provider(
         }
     }
     save_managed_agents(app, &records)?;
-    Ok(())
+    Ok(enrollment_command)
 }
 
 // Async so the blocking body (disk reads of agent/persona records, per-agent
@@ -999,6 +1000,7 @@ pub async fn create_managed_agent(
         .err();
 
     // ── Phase 5: provider deploy (async, outside lock) ───────────────────────
+    let mut enrollment_command = None;
     let spawn_error = if input.spawn_after_create && input.backend != BackendKind::Local {
         if let BackendKind::Provider { ref id, ref config } = input.backend {
             // Read the saved record to build the deploy payload (record has the
@@ -1016,7 +1018,10 @@ pub async fn create_managed_agent(
                 build_deploy_payload(&app, &state, rec)?
             };
             match deploy_to_provider(&app, &state, &pubkey, id, config, agent_json, None).await {
-                Ok(()) => spawn_error,
+                Ok(command) => {
+                    enrollment_command = command;
+                    spawn_error
+                }
                 Err(e) => Some(e),
             }
         } else {
@@ -1058,6 +1063,7 @@ pub async fn create_managed_agent(
         private_key_nsec,
         profile_sync_error,
         spawn_error,
+        enrollment_command,
     })
 }
 

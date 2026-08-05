@@ -20,11 +20,11 @@ must answer `info` first, with protocol version `1`:
   "config_schema": {
     "type": "object",
     "properties": {
-      "host": { "type": "string", "description": "SSH destination, e.g. openclaw@agent-host" },
+      "host": { "type": "string", "description": "Optional SSH destination (advanced fallback)" },
       "rooms": { "type": "string", "description": "Comma-separated Buzz room UUIDs" },
       "port": { "type": "string", "description": "Optional SSH port" }
     },
-    "required": ["host", "rooms"]
+    "required": ["rooms"]
   },
   "enrollment": {
     "operation": "enroll",
@@ -72,8 +72,16 @@ After `info`, Desktop invokes the same staged provider binary once with:
 ```
 
 The exact managed-agent payload is the source of truth; providers must not
-reconstruct identity from `env_vars`. The provider uses SSH only for this
-one-time handoff, running `openclaw buzz enroll --stdin` on the remote host.
+reconstruct identity from `env_vars`. Without `host`, the provider generates
+a signed, short-lived code and returns a copyable command for the Desktop
+operator:
+
+```bash
+openclaw buzz enroll --code 'buzz-enroll-v1....'
+```
+
+With `host`, the provider preserves the legacy SSH handoff and runs
+`openclaw buzz enroll --stdin` on the remote host.
 It imports the identity and room configuration into OpenClaw and returns a
 stable host-side identifier:
 

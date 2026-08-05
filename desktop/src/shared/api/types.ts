@@ -455,6 +455,7 @@ export type CreateManagedAgentResponse = {
   privateKeyNsec: string;
   profileSyncError: string | null;
   spawnError: string | null;
+  enrollmentCommand: string | null;
 };
 
 export type ManagedAgentLog = {

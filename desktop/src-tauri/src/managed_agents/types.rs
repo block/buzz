@@ -574,6 +574,7 @@ pub struct CreateManagedAgentResponse {
     pub private_key_nsec: String,
     pub profile_sync_error: Option<String>,
     pub spawn_error: Option<String>,
+    pub enrollment_command: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

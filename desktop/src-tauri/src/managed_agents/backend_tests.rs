@@ -160,7 +160,7 @@ esac"#,
 
     let id = provider_deploy(&provider, &serde_json::json!({}), &serde_json::json!({}))
         .expect("staged deploy");
-    assert_eq!(id, "remote-1");
+    assert_eq!(id.agent_id, "remote-1");
     let paths: Vec<_> = std::fs::read_to_string(log)
         .unwrap()
         .lines()
@@ -194,7 +194,7 @@ esac"#,
 
     let id = provider_deploy(&provider, &serde_json::json!({}), &serde_json::json!({}))
         .expect("staged enrollment");
-    assert_eq!(id, "openclaw-1");
+    assert_eq!(id.agent_id, "openclaw-1");
     assert_eq!(std::fs::read_to_string(seen).unwrap(), "enroll");
 }
 
@@ -239,7 +239,7 @@ esac"#,
     let id = provider_deploy(&provider, &serde_json::json!({}), &serde_json::json!({}))
         .expect("deploy from immutable staged copy");
 
-    assert_eq!(id, "original-staged-bytes");
+    assert_eq!(id.agent_id, "original-staged-bytes");
     assert_eq!(
         std::fs::metadata(&provider).unwrap().ino(),
         inode_before,
@@ -280,7 +280,7 @@ esac"#,
     let id = provider_deploy(&provider, &serde_json::json!({}), &serde_json::json!({}))
         .expect("deploy from immutable staged copy");
 
-    assert_eq!(id, "original-staged-bytes");
+    assert_eq!(id.agent_id, "original-staged-bytes");
     assert_ne!(
         std::fs::metadata(&provider).unwrap().ino(),
         inode_before,

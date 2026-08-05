@@ -539,11 +539,16 @@ fn stage_provider(
 
 /// Deploy through one immutable staged copy: negotiate protocol v1 before the
 /// secret-bearing request, then invoke deploy on those exact same bytes.
+pub struct ProviderDeployResult {
+    pub agent_id: String,
+    pub enrollment_command: Option<String>,
+}
+
 pub fn provider_deploy(
     binary: &Path,
     agent: &serde_json::Value,
     provider_config: &serde_json::Value,
-) -> Result<String, String> {
+) -> Result<ProviderDeployResult, String> {
     let (_directory, staged, _digest, _execution_guard) = stage_provider(binary)?;
     let info_request = serde_json::json!({
         "op": "info",
@@ -563,10 +568,14 @@ pub fn provider_deploy(
         request["enrollment"] = serde_json::json!({ "version": 1, "mode": "one-time" });
     }
     let resp = invoke_provider(&staged, &request, Duration::from_secs(600))?;
-    resp["agent_id"]
+    let agent_id = resp["agent_id"]
         .as_str()
         .map(String::from)
-        .ok_or_else(|| "deploy response missing agent_id".to_string())
+        .ok_or_else(|| "deploy response missing agent_id".to_string())?;
+    Ok(ProviderDeployResult {
+        agent_id,
+        enrollment_command: resp["enrollment_command"].as_str().map(String::from),
+    })
 }
 
 /// Validate provider_config: flat object, scalar values, no secret-like keys.
