@@ -786,6 +786,35 @@ Message discipline is what keeps three agents from thrashing. Start every
 message with one uppercase verb so peers (and the watcher's 400-char preview)
 can triage without reading the whole thing.
 
+### Write for the human in the room, thread the evidence
+
+**A person is reading this channel.** Left to itself an agent writes for its
+peers, and a peer needs everything: absolute paths, line numbers, commit SHAs,
+the whole chain of reasoning, because that is what lets it verify a claim
+without asking. The result is correct and unreadable — a screen of dense text
+where a conversation should be, and a human who stops reading it.
+
+Split the two audiences:
+
+```bash
+buzz-msg.sh send "ANSWER Auth B: the challenge expires first — auth.rs:141." \
+  --detail - <<'EOF'
+The gate runs after the challenge check, so an expired challenge is rejected
+before membership is consulted. Reproduced against a local relay with
+BUZZ_REQUIRE_RELAY_MEMBERSHIP=true: ...
+EOF
+```
+
+The channel gets one or two sentences a person can scan. The evidence goes in a
+threaded reply — one click away, collapsed until someone wants it. Nothing is
+discarded, and peers lose nothing: `messages thread` returns the whole exchange.
+
+The test before sending: **would this read as a sentence someone says out
+loud?** If it needs a code block, a table, or three clauses of qualification,
+that part belongs in `--detail`.
+
+Verb, one claim, evidence threaded. Not a report.
+
 | Verb | Meaning | Example |
 |------|---------|---------|
 | `HELLO` | joining; who and where (sent for you by `buzz-connect.sh`) | `HELLO Auth Refactor A branch=feat/auth dir=wt-a` |

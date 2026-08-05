@@ -2,8 +2,15 @@
 # buzz-msg.sh — post to, or catch up on, the coordination channel.
 #
 #   buzz-msg.sh send "CLAIM crates/buzz-auth/**"
-#   buzz-msg.sh send -            (long content on stdin: diffs, stack traces)
+#   buzz-msg.sh send -                        (long content on stdin)
+#   buzz-msg.sh send "<one line>" --detail -  (line in the channel, evidence
+#                                              in a threaded reply on stdin)
 #   buzz-msg.sh read [limit]      (default 50, oldest first)
+#
+# Prefer the --detail form for anything with evidence in it. A human is reading
+# this room, and an unguided peer-to-peer message is a wall of paths, line
+# numbers and SHAs — correct, and unreadable. Say what happened in a sentence;
+# thread the proof.
 #
 # Both load this session's identity themselves. Nothing is sourced by hand and
 # no channel UUID has to be pasted. The channel is, in order: --channel (a UUID
@@ -21,12 +28,14 @@ HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib.sh"
 
 CHANNEL_ARG=""
+DETAIL=""
 cmd="${1:-}"
 [ $# -gt 0 ] && shift
 ARGS=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --channel) CHANNEL_ARG="${2:-}"; shift ;;
+    --detail) DETAIL="${2:-}"; shift ;;
     *) ARGS="${ARGS:+$ARGS }$1" ;;
   esac
   shift
@@ -53,7 +62,7 @@ watcher_warning "$SESSION_NAME" "$CHANNEL" || true
 
 case "$cmd" in
   send)
-    [ -n "$ARGS" ] || die "usage: $0 send <text|->"
+    [ -n "$ARGS" ] || die "usage: $0 send <text|-> [--detail <text|->]"
     if [ "$ARGS" = "-" ]; then
       buzz_run messages send --channel "$CHANNEL" --content -
     else
@@ -69,6 +78,35 @@ case "$cmd" in
       exit "$rc"
     fi
     echo "sent to ${CHANNEL_NAME:-$CHANNEL} as $SESSION_NAME"
+
+    # --detail puts the evidence in a threaded reply instead of the channel.
+    #
+    # Peers write for each other, so an unguided message carries everything
+    # needed to verify it: paths, line numbers, SHAs, the whole chain. That is
+    # right for a peer and unreadable for the human in the room, who sees a
+    # wall of text where a conversation should be. Threading keeps both: a
+    # sentence in the channel, the proof one click away, nothing discarded.
+    if [ -n "$DETAIL" ]; then
+      ROOT=$(printf '%s' "$BUZZ_OUT" | python3 -c 'import json,sys
+try: sys.stdout.write(json.load(sys.stdin).get("event_id",""))
+except Exception: pass')
+      if [ -z "$ROOT" ]; then
+        note "posted, but could not read the event id back — detail not threaded."
+        note "  It is not lost: re-send it with --reply-to <id> once you have one."
+        exit 0
+      fi
+      if [ "$DETAIL" = "-" ]; then
+        buzz_run messages send --channel "$CHANNEL" --reply-to "$ROOT" --content -
+      else
+        buzz_run messages send --channel "$CHANNEL" --reply-to "$ROOT" --content "$DETAIL"
+      fi || {
+        note "detail did not post: ${BUZZ_ERR:-(no detail)}"
+        note "  The channel line stands on its own; re-send the detail with"
+        note "  --reply-to $ROOT"
+        exit 0
+      }
+      echo "detail threaded under $ROOT"
+    fi
     ;;
 
   read)
