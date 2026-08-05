@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
 
+import { isAgentIdentityInManagedList } from "../../src/features/agents/lib/agentAutocompleteEligibility";
+
 import {
   installMockBridge,
   openChannelBrowser,
@@ -35,6 +37,19 @@ const DM_THREAD_AGENT_MENTION_ERROR_TEXT =
   "Agents must already be in a DM to be mentioned in its threads. Start a new conversation that includes the agent.";
 const DM_THREAD_MEMBERS_LOADING_ERROR_TEXT =
   "Checking conversation members. Try again in a moment.";
+
+test("in-channel relay agents pass autocomplete eligibility without a local management record", () => {
+  expect(
+    isAgentIdentityInManagedList(
+      {
+        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        isAgent: true,
+        isMember: true,
+      },
+      new Set(),
+    ),
+  ).toBe(true);
+});
 
 /** Locator scoped to the mention autocomplete dropdown inside the composer. */
 function autocomplete(page: import("@playwright/test").Page) {
