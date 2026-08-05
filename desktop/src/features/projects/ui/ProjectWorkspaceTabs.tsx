@@ -23,6 +23,7 @@ import {
   type ViewerGitIdentity,
 } from "@/features/projects/lib/projectContributorMatching";
 import type { ProjectRepoHost } from "@/features/projects/lib/projectRepoHost";
+import { projectTabForRepositoryTarget } from "@/features/projects/lib/repositoryDeepLinkTarget";
 import { projectRepoUnavailableReason } from "@/features/projects/lib/projectRepoAvailability";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { Button } from "@/shared/ui/button";
@@ -142,6 +143,7 @@ export function WorkspaceTabs({
   onSelectedTabChange,
   onBranchChange,
   onOpenMergeRecoveryTerminal,
+  onOpenRepositoryRoot,
   onOpenTerminal,
   snapshot,
   snapshotError,
@@ -150,6 +152,8 @@ export function WorkspaceTabs({
   repoContributors,
   repoSource,
   repoHost,
+  repositoryPath,
+  repositoryRef,
   sourceControls,
   terminalTitle,
   viewerGitIdentity,
@@ -181,6 +185,7 @@ export function WorkspaceTabs({
   onSelectedTabChange?: (tab: string) => void;
   onBranchChange: (branch: string | null) => void;
   onOpenMergeRecoveryTerminal?: OpenMergeRecoveryTerminal;
+  onOpenRepositoryRoot: () => void;
   onOpenTerminal?: () => void;
   snapshot: ProjectRepoSnapshot | null | undefined;
   snapshotError: unknown;
@@ -189,6 +194,8 @@ export function WorkspaceTabs({
   repoContributors: ProjectRepoContributor[];
   repoSource: "remote" | "local";
   repoHost: ProjectRepoHost;
+  repositoryPath?: string;
+  repositoryRef?: string;
   /** Branch picker + remote/local toggle for the Code tab header. */
   sourceControls?: RepoSourceHeaderControls;
   terminalTitle?: string;
@@ -240,7 +247,9 @@ export function WorkspaceTabs({
     [pullRequests, selectedCommitHash],
   );
   const isPullRequestSelected = Boolean(selectedPullRequest);
-  const [selectedTab, setSelectedTab] = React.useState("overview");
+  const [selectedTab, setSelectedTab] = React.useState<string>(() =>
+    projectTabForRepositoryTarget(repositoryPath),
+  );
   const [pullRequestCommentTarget, setPullRequestCommentTarget] =
     React.useState<{
       anchor: ProjectPullRequestCommentAnchor;
@@ -249,6 +258,10 @@ export function WorkspaceTabs({
   const [createIssueOpen, setCreateIssueOpen] = React.useState(false);
   const [createPullRequestOpen, setCreatePullRequestOpen] =
     React.useState(false);
+
+  React.useEffect(() => {
+    setSelectedTab(projectTabForRepositoryTarget(repositoryPath));
+  }, [repositoryPath]);
 
   React.useEffect(() => {
     onSelectedTabChange?.(selectedTab);
@@ -525,9 +538,12 @@ export function WorkspaceTabs({
           fallbackAuthorPubkey={project.owner}
           files={files}
           isLoading={displayedSnapshotLoading}
+          onOpenRepositoryRoot={onOpenRepositoryRoot}
           profiles={profiles}
           snapshot={displayedSnapshot}
           sourceControls={sourceControls}
+          targetPath={repositoryPath}
+          targetRef={repositoryRef}
           unavailableMessage={
             externalHost
               ? `Not mirrored on Buzz. Repository files are hosted on ${externalHost}.`

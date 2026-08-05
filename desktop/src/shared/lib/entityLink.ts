@@ -13,12 +13,29 @@
  * must stay compatible (see the golden-format tests on both sides).
  */
 
+import {
+  normalizeRepositoryPath,
+  parseRepositoryRef,
+  type RepositoryRefKind,
+} from "./repositoryTarget.ts";
+
 const ENTITY_LINK_SCHEME = "buzz:";
+
+export type RepositoryEntityTarget = {
+  ref: string;
+  refKind: RepositoryRefKind;
+  path: string;
+};
 
 export type ParsedEntityLink =
   | { type: "pr"; id: string; owner: string; dtag: string }
   | { type: "issue"; id: string; owner: string; dtag: string }
-  | { type: "repo"; owner: string; dtag: string };
+  | {
+      type: "repo";
+      owner: string;
+      dtag: string;
+      target?: RepositoryEntityTarget;
+    };
 
 export type EntityLinkParseResult =
   | { ok: true; value: ParsedEntityLink }
@@ -50,6 +67,27 @@ function checkEventId(id: string): void {
 export function buildRepoLink(input: { owner: string; dtag: string }): string {
   checkCoordinate(input.owner, input.dtag);
   return `buzz://repo?owner=${input.owner.toLowerCase()}&d=${input.dtag}`;
+}
+
+/** Build a canonical repository link with an atomic ref/path target. */
+export function buildRepoTargetLink(input: {
+  owner: string;
+  dtag: string;
+  ref: string;
+  path: string;
+}): string {
+  checkCoordinate(input.owner, input.dtag);
+  const parsedRef = parseRepositoryRef(input.ref);
+  const path = normalizeRepositoryPath(input.path);
+  if (!parsedRef) throw new Error("entityLink: invalid repository ref");
+  if (!path) throw new Error("entityLink: invalid repository path");
+  const params = new URLSearchParams({
+    owner: input.owner.toLowerCase(),
+    d: input.dtag,
+    ref: parsedRef.value,
+    path,
+  });
+  return `buzz://repo?${params.toString()}`;
 }
 
 /** Build a `buzz://pr` link for a pull request event (kind 1618). */
@@ -120,6 +158,10 @@ export function parseEntityLink(url: string): EntityLinkParseResult {
     return { ok: false, reason: "wrong-host" };
   }
 
+  if (parsed.username || parsed.password || parsed.port) {
+    return { ok: false, reason: "invalid-structure" };
+  }
+
   // Require empty/root path — path segments are reserved for future versioning.
   if (parsed.pathname !== "" && parsed.pathname !== "/") {
     return { ok: false, reason: "unexpected-path" };
@@ -131,7 +173,7 @@ export function parseEntityLink(url: string): EntityLinkParseResult {
   }
 
   // Validate known params and reject unknown ones, and enforce single-instance.
-  const KNOWN_REPO_PARAMS = new Set(["owner", "d"]);
+  const KNOWN_REPO_PARAMS = new Set(["owner", "d", "ref", "path"]);
   const KNOWN_EVENT_PARAMS = new Set(["id", "owner", "d"]);
   const knownParams = host === "repo" ? KNOWN_REPO_PARAMS : KNOWN_EVENT_PARAMS;
 
@@ -157,9 +199,30 @@ export function parseEntityLink(url: string): EntityLinkParseResult {
   }
 
   if (host === "repo") {
+    const hasRef = parsed.searchParams.has("ref");
+    const hasPath = parsed.searchParams.has("path");
+    if (hasRef !== hasPath) {
+      return { ok: false, reason: "incomplete-repo-target" };
+    }
+    if (!hasRef) {
+      return {
+        ok: true,
+        value: { type: "repo", owner: owner.toLowerCase(), dtag },
+      };
+    }
+
+    const parsedRef = parseRepositoryRef(parsed.searchParams.get("ref") ?? "");
+    if (!parsedRef) return { ok: false, reason: "invalid-ref" };
+    const path = normalizeRepositoryPath(parsed.searchParams.get("path") ?? "");
+    if (!path) return { ok: false, reason: "invalid-path" };
     return {
       ok: true,
-      value: { type: "repo", owner: owner.toLowerCase(), dtag },
+      value: {
+        type: "repo",
+        owner: owner.toLowerCase(),
+        dtag,
+        target: { ref: parsedRef.value, refKind: parsedRef.kind, path },
+      },
     };
   }
 

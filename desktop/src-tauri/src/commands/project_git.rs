@@ -1,6 +1,8 @@
 use super::project_git_exec::{
-    build_git_auth_config, clean_branch, clean_target_ref, run_git, validate_workspace_clone_url,
-    GitAuthConfig,
+    build_git_auth_config, clean_branch, run_git, validate_workspace_clone_url, GitAuthConfig,
+};
+use super::project_git_focus::{
+    clean_repository_target, select_repository_tree_lines, RepositoryTarget,
 };
 use super::project_git_push::push_project_local_repository_blocking;
 use super::project_repo_paths::{canonical_repos_roots, find_local_repo_dir};
@@ -313,9 +315,10 @@ fn parse_ls_tree(
     repo_dir: &std::path::Path,
     output: &str,
     latest_commit_by_path: &std::collections::HashMap<String, ProjectRepoCommitInfo>,
+    focus_path: Option<&str>,
 ) -> Vec<ProjectRepoFileInfo> {
-    output
-        .lines()
+    select_repository_tree_lines(output, focus_path, 250, 250)
+        .into_iter()
         .filter_map(|line| {
             let (meta, path) = line.split_once('\t')?;
             let mut parts = meta.split_whitespace();
@@ -339,7 +342,6 @@ fn parse_ls_tree(
                 latest_commit: latest_commit_by_path.get(path).cloned(),
             })
         })
-        .take(250)
         .collect()
 }
 
@@ -348,6 +350,7 @@ fn snapshot_from_repo(
     auth: &GitAuthConfig,
     branch_name: Option<&str>,
     base_branch: Option<&str>,
+    focus_path: Option<&str>,
 ) -> ProjectRepoSnapshotInfo {
     let latest_commit = run_git(
         &["log", "-1", "--format=%H%x00%h%x00%an%x00%ae%x00%at%x00%s"],
@@ -397,10 +400,13 @@ fn snapshot_from_repo(
         )
         .map(|output| parse_latest_commit_by_path(&output))
         .unwrap_or_default();
-
-        run_git(&["ls-tree", "-r", "--long", "HEAD"], Some(repo_dir), auth)
-            .map(|output| parse_ls_tree(repo_dir, &output, &latest_commit_by_path))
-            .unwrap_or_default()
+        run_git(
+            &["ls-tree", "-r", "--long", "-z", "HEAD"],
+            Some(repo_dir),
+            auth,
+        )
+        .map(|output| parse_ls_tree(repo_dir, &output, &latest_commit_by_path, focus_path))
+        .unwrap_or_default()
     } else {
         Vec::new()
     };
@@ -712,18 +718,18 @@ pub async fn get_project_repo_snapshot(
     base_branch: Option<String>,
     target_ref: Option<String>,
     target_commit: Option<String>,
+    target_path: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<ProjectRepoSnapshotInfo, String> {
     validate_workspace_clone_url(&clone_url, &state)?;
     let auth = build_git_auth_config(&state)?;
     let branch = clean_branch(default_branch);
     let base_branch = clean_branch(base_branch);
-    let target_ref = clean_target_ref(target_ref);
-    let target_commit = target_commit
-        .map(|value| value.to_ascii_lowercase())
-        .filter(|value| matches!(value.len(), 40 | 64))
-        .filter(|value| value.chars().all(|c| c.is_ascii_hexdigit()));
-
+    let RepositoryTarget {
+        target_ref,
+        target_commit,
+        target_path,
+    } = clean_repository_target(target_ref, target_commit, target_path)?;
     tauri::async_runtime::spawn_blocking(move || {
         let temp_dir = tempfile::tempdir().map_err(|error| format!("create temp dir: {error}"))?;
         let repo_dir = temp_dir.path().join("repo");
@@ -783,8 +789,13 @@ pub async fn get_project_repo_snapshot(
             }
         }
 
-        let snapshot =
-            snapshot_from_repo(&repo_dir, &auth, branch.as_deref(), base_branch.as_deref());
+        let snapshot = snapshot_from_repo(
+            &repo_dir,
+            &auth,
+            branch.as_deref(),
+            base_branch.as_deref(),
+            target_path.as_deref(),
+        );
         Ok(snapshot)
     })
     .await

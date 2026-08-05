@@ -38,6 +38,10 @@ import type {
   RelayEvent,
 } from "@/shared/api/types";
 import { summarizeProjectActivityEvents } from "./projectActivity.mjs";
+import {
+  projectRepoSnapshotCloneUrl,
+  projectRepoSnapshotTarget,
+} from "./lib/projectRepoSnapshotTarget";
 import type { ProjectIssue } from "./projectIssues.mjs";
 import {
   nextProjectIssueCommentCreatedAt,
@@ -428,23 +432,27 @@ async function createProjectIssueComment({
 
 async function fetchProjectRepoSnapshot(
   project: Repository,
-  branchName?: string | null,
+  selectedBranch?: string | null,
   pullRequest?: ProjectPullRequest | null,
   tag?: { name: string; commit: string } | null,
+  repositoryTarget?: { ref: string; path: string } | null,
 ): Promise<ProjectRepoSnapshot | null> {
-  const cloneUrl = pullRequest?.cloneUrls[0] ?? project.cloneUrls[0];
+  const cloneUrl = projectRepoSnapshotCloneUrl({
+    projectCloneUrls: project.cloneUrls,
+    pullRequestCloneUrls: pullRequest?.cloneUrls,
+    repositoryTarget,
+  });
   if (!cloneUrl) return null;
-
   return getProjectRepoSnapshot({
     cloneUrl,
-    defaultBranch: branchName ?? project.defaultBranch,
-    baseBranch: project.defaultBranch,
-    targetCommit: tag?.commit ?? pullRequest?.commit ?? null,
-    targetRef: tag
-      ? `refs/tags/${tag.name}`
-      : pullRequest
-        ? `refs/nostr/${pullRequest.id}`
-        : null,
+    targetPath: repositoryTarget?.path ?? null,
+    ...projectRepoSnapshotTarget({
+      selectedBranch,
+      projectDefaultBranch: project.defaultBranch,
+      pullRequest,
+      tag,
+      repositoryRef: repositoryTarget?.ref,
+    }),
   });
 }
 
@@ -658,6 +666,7 @@ export function useProjectRepoSnapshotQuery(
   pullRequest?: ProjectPullRequest | null,
   tag?: { name: string; commit: string } | null,
   enabled = true,
+  repositoryTarget?: { ref: string; path: string } | null,
 ) {
   const selectedBranch = branchName ?? project?.defaultBranch ?? null;
 
@@ -672,6 +681,8 @@ export function useProjectRepoSnapshotQuery(
       pullRequest?.commit ?? "none",
       tag?.name ?? "no-tag",
       tag?.commit ?? "no-tag-commit",
+      repositoryTarget?.ref ?? "no-repository-ref",
+      repositoryTarget?.path ?? "no-repository-path",
     ],
     queryFn: () => {
       if (!project) throw new Error("No project selected.");
@@ -680,6 +691,7 @@ export function useProjectRepoSnapshotQuery(
         selectedBranch,
         pullRequest,
         tag,
+        repositoryTarget,
       );
     },
     staleTime: 30_000,

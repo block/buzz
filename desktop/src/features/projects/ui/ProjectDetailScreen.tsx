@@ -59,6 +59,12 @@ import {
   projectBranchOptionsFromSync,
   resolveProjectDefaultBranch,
 } from "@/features/projects/lib/projectBranches";
+import {
+  PROJECT_DETAIL_PANEL_SEARCH_KEYS,
+  PROJECT_REPOSITORY_SEARCH_KEYS,
+  type ProjectDetailScreenProps,
+} from "@/features/projects/lib/projectDetailRouteState";
+import { effectiveProjectRepoSource } from "@/features/projects/lib/repositoryDeepLinkTarget";
 import { normalizeRepositoryUrl } from "@/features/projects/lib/projectsViewHelpers";
 import { selectProjectRepository } from "@/features/projects/projectModels";
 import { KIND_REPO_ANNOUNCEMENT } from "@/shared/constants/kinds";
@@ -82,28 +88,16 @@ import {
   snapshotHasContent,
 } from "./projectDetailHelpers";
 
-type ProjectDetailScreenProps = {
-  commitHash?: string;
-  projectId: string;
-  pullRequestId?: string;
-  issueId?: string;
-  repositoryId?: string;
-};
-
-const PROJECT_DETAIL_PANEL_SEARCH_KEYS = [
-  "profile",
-  "profileTab",
-  "profileView",
-] as const;
-const PROJECT_REPOSITORY_SEARCH_KEYS = [
-  "repositoryId",
-  "issueId",
-  "pullRequestId",
-  "commitHash",
-] as const;
-
 export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
-  const { commitHash, projectId, pullRequestId, issueId, repositoryId } = props;
+  const {
+    commitHash,
+    projectId,
+    pullRequestId,
+    issueId,
+    repoPath,
+    repoRef,
+    repositoryId,
+  } = props;
   const { goChannel, goProject, goProjects } = useAppNavigation();
   const { activeCommunity } = useCommunities();
   const mainInsetRef = useMainInsetRef();
@@ -205,6 +199,16 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     },
     [],
   );
+  const handleGoToProjectHome = React.useCallback(() => {
+    if (repoPath) {
+      void goProject(projectId, { replace: true });
+      return;
+    }
+    setSelectedPullRequestId(null);
+    setSelectedIssueId(null);
+    setSelectedCommitHash(null);
+    setTabsResetKey((key) => key + 1);
+  }, [goProject, projectId, repoPath]);
   const issuesQuery = useProjectIssuesQuery(repository);
   const selectedBranchPullRequest = React.useMemo(() => {
     const projectRepositories = new Set(
@@ -231,30 +235,32 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
   const [repoSource, setRepoSource] = React.useState<"remote" | "local">(
     "remote",
   );
+  const effectiveRepoSource = effectiveProjectRepoSource(repoSource, repoPath);
   const repoSnapshotQuery = useProjectRepoSnapshotQuery(
     repository,
     activeBranch,
     selectedTag ? null : selectedBranchPullRequest,
     activeTag,
     repoRemote.host.kind === "buzz",
+    repoRef && repoPath ? { ref: repoRef, path: repoPath } : null,
   );
   const repoDiffQuery = useProjectRepoDiffQuery(
     repository,
     activeBranch,
     activeRepoPullRequest,
-    repoSource === "remote",
+    effectiveRepoSource === "remote",
   );
   const localRepoDiffQuery = useProjectLocalRepoDiffQuery(
     repository,
     activeCommunity?.reposDir,
     activeBranch,
     activeRepoPullRequest,
-    repoSource === "local" && Boolean(activeRepoPullRequest),
+    effectiveRepoSource === "local" && Boolean(activeRepoPullRequest),
   );
   const commitDiffQuery = useProjectCommitDiffQuery(
     repository,
     selectedCommitHash,
-    repoSource,
+    effectiveRepoSource,
     activeCommunity?.reposDir,
   );
   const localRepoSnapshotQuery = useProjectLocalRepoSnapshotQuery(
@@ -292,11 +298,15 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
   );
   const hasRemoteSnapshot = snapshotHasContent(repoSnapshotQuery.data);
   const displayedRepoDiff =
-    repoSource === "local" ? localRepoDiffQuery.data : repoDiffQuery.data;
+    effectiveRepoSource === "local"
+      ? localRepoDiffQuery.data
+      : repoDiffQuery.data;
   const displayedRepoDiffError =
-    repoSource === "local" ? localRepoDiffQuery.error : repoDiffQuery.error;
+    effectiveRepoSource === "local"
+      ? localRepoDiffQuery.error
+      : repoDiffQuery.error;
   const displayedRepoDiffLoading =
-    repoSource === "local"
+    effectiveRepoSource === "local"
       ? localRepoDiffQuery.isLoading
       : repoDiffQuery.isLoading;
   const branchOptionsWithLocal = projectBranchOptionsFromSync(
@@ -322,13 +332,13 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
       selectBranch(branch);
       if (
         branch &&
-        repoSource === "local" &&
+        effectiveRepoSource === "local" &&
         branch !== repoSyncStatusQuery.data?.localBranch
       ) {
         setRepoSource("remote");
       }
     },
-    [repoSource, repoSyncStatusQuery.data?.localBranch, selectBranch],
+    [effectiveRepoSource, repoSyncStatusQuery.data?.localBranch, selectBranch],
   );
   const handleTagChange = React.useCallback(
     (tag: string) => {
@@ -386,7 +396,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     deleteBranchDisabled:
       branchActions.deletePending || Boolean(deleteBranchReason),
     deleteBranchTitle: deleteBranchReason ?? "Delete this remote branch",
-    source: selectedTag ? "remote" : repoSource,
+    source: selectedTag ? "remote" : effectiveRepoSource,
     onSourceChange: setRepoSource,
     localDisabled:
       Boolean(selectedTag) ||
@@ -775,7 +785,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
   const selectedIssue =
     issuesQuery.data?.find((item) => item.id === selectedIssueId) ?? null;
   const displayedSnapshotCommits =
-    repoSource === "local"
+    effectiveRepoSource === "local"
       ? (localRepoSnapshotQuery.data?.snapshot.commits ?? [])
       : (repoSnapshotQuery.data?.commits ?? []);
   const selectedCommit = selectedCommitHash
@@ -810,17 +820,11 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
   const activeTabCrumb = activeWorkItemCrumb
     ? null
     : (PROJECT_TAB_CRUMB_LABELS[activeTab] ?? null);
-  const handleGoToProjectHome = () => {
-    setSelectedPullRequestId(null);
-    setSelectedIssueId(null);
-    setSelectedCommitHash(null);
-    // Remount the workspace tabs so the project page opens on Overview
-    // instead of whatever tab the work item left behind.
-    setTabsResetKey((key) => key + 1);
-  };
   const handleRepositoryChange = (nextRepositoryId: string) => {
     applyRepositorySearch({
       repositoryId: nextRepositoryId,
+      repoRef: null,
+      repoPath: null,
       issueId: null,
       pullRequestId: null,
       commitHash: null,
@@ -867,7 +871,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                       </h2>
                       {repoRemote.webUrl &&
                       (repoRemote.host.kind !== "external" ||
-                        repoSource === "local") ? (
+                        effectiveRepoSource === "local") ? (
                         <Button
                           asChild
                           aria-label="Open project web page"
@@ -933,6 +937,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                 localSnapshotLoading={localRepoSnapshotQuery.isLoading}
                 onBranchChange={handleBranchChange}
                 onOpenMergeRecoveryTerminal={handleOpenMergeRecoveryTerminal}
+                onOpenRepositoryRoot={handleGoToProjectHome}
                 onOpenTerminal={() => {
                   void handleOpenTerminal();
                 }}
@@ -954,7 +959,9 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                 pullRequestsLoading={pullRequestsQuery.isLoading}
                 repoContributors={repoContributors}
                 repoHost={repoRemote.host}
-                repoSource={repoSource}
+                repoSource={effectiveRepoSource}
+                repositoryPath={repoPath}
+                repositoryRef={repoRef}
                 selectedCommitHash={selectedCommitHash}
                 selectedIssueId={selectedIssueId}
                 selectedPullRequestId={selectedPullRequestId}

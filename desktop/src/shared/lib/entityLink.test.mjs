@@ -5,6 +5,7 @@ import {
   buildIssueLink,
   buildPullRequestLink,
   buildRepoLink,
+  buildRepoTargetLink,
   entityLinkProjectRouteId,
   isEntityLink,
   parseEntityLink,
@@ -59,6 +60,114 @@ test("parseEntityLink round-trips built links", () => {
     ok: true,
     value: { type: "repo", owner: OWNER, dtag: "buzz-world" },
   });
+});
+
+test("repository target builder preserves root identity and round-trips", () => {
+  const href = buildRepoTargetLink({
+    owner: OWNER.toUpperCase(),
+    dtag: "buzz-world",
+    ref: "feature/repo-links",
+    path: "PLANS/Plan 1.md",
+  });
+  assert.equal(
+    href,
+    `buzz://repo?owner=${OWNER}&d=buzz-world&ref=feature%2Frepo-links&path=PLANS%2FPlan+1.md`,
+  );
+  assert.deepEqual(parseEntityLink(href), {
+    ok: true,
+    value: {
+      type: "repo",
+      owner: OWNER,
+      dtag: "buzz-world",
+      target: {
+        ref: "feature/repo-links",
+        refKind: "branch",
+        path: "PLANS/Plan 1.md",
+      },
+    },
+  });
+  const parsed = parseEntityLink(href);
+  assert.ok(parsed.ok);
+  assert.equal(
+    entityLinkProjectRouteId(parsed.value),
+    `30617:${OWNER}:buzz-world`,
+  );
+  assert.equal(
+    buildRepoLink({ owner: OWNER, dtag: "buzz-world" }),
+    `buzz://repo?owner=${OWNER}&d=buzz-world`,
+  );
+});
+
+test("repository target classifies full commits", () => {
+  const commit = "B".repeat(40);
+  const parsed = parseEntityLink(
+    buildRepoTargetLink({
+      owner: OWNER,
+      dtag: "buzz-world",
+      ref: commit,
+      path: "README.md",
+    }),
+  );
+  assert.ok(parsed.ok && parsed.value.type === "repo" && parsed.value.target);
+  assert.deepEqual(parsed.value.target, {
+    ref: commit.toLowerCase(),
+    refKind: "commit",
+    path: "README.md",
+  });
+});
+
+test("repository target rejects incomplete, duplicate, old, and invalid coordinates", () => {
+  const base = `buzz://repo?owner=${OWNER}&d=buzz-world`;
+  const cases = [
+    [`${base}&ref=main`, "incomplete-repo-target"],
+    [`${base}&path=README.md`, "incomplete-repo-target"],
+    [`${base}&ref=main&ref=dev&path=README.md`, "duplicate-param"],
+    [`${base}&ref=main&path=README.md&path=OTHER.md`, "duplicate-param"],
+    [
+      `buzz://repo?owner=${OWNER}&repo=buzz&ref=main&path=README.md`,
+      "unknown-param",
+    ],
+    [`${base}&ref=refs%2Ftags%2Fv1&path=README.md`, "invalid-ref"],
+    [`${base}&ref=feature%2F..%2Fmain&path=README.md`, "invalid-ref"],
+    [`${base}&ref=bad+ref&path=README.md`, "invalid-ref"],
+    [`${base}&ref=main&path=%2Fetc%2Fpasswd`, "invalid-path"],
+    [`${base}&ref=main&path=docs%2F..%2FREADME.md`, "invalid-path"],
+    [`${base}&ref=main&path=docs%5CREADME.md`, "invalid-path"],
+    [`${base}&ref=main&path=docs%2F%2FREADME.md`, "invalid-path"],
+  ];
+  for (const [href, reason] of cases) {
+    assert.deepEqual(parseEntityLink(href), { ok: false, reason }, href);
+  }
+});
+
+test("repository target rejects URL credentials and ports", () => {
+  assert.deepEqual(
+    parseEntityLink(`buzz://user@repo?owner=${OWNER}&d=buzz-world`),
+    { ok: false, reason: "invalid-structure" },
+  );
+  assert.deepEqual(
+    parseEntityLink(`buzz://repo:99?owner=${OWNER}&d=buzz-world`),
+    { ok: false, reason: "invalid-structure" },
+  );
+});
+
+test("repository target builder rejects invalid ref and path", () => {
+  assert.throws(() =>
+    buildRepoTargetLink({
+      owner: OWNER,
+      dtag: "buzz-world",
+      ref: "bad ref",
+      path: "README.md",
+    }),
+  );
+  assert.throws(() =>
+    buildRepoTargetLink({
+      owner: OWNER,
+      dtag: "buzz-world",
+      ref: "main",
+      path: "../README.md",
+    }),
+  );
 });
 
 test("parseEntityLink lowercase-normalizes hex identifiers", () => {

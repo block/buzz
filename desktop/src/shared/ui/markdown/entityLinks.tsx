@@ -24,6 +24,9 @@ export function useOpenEntityLink(): (link: ParsedEntityLink) => void {
       void goProject(entityLinkProjectRouteId(link), {
         ...(link.type === "pr" ? { pullRequestId: link.id } : {}),
         ...(link.type === "issue" ? { issueId: link.id } : {}),
+        ...(link.type === "repo" && link.target
+          ? { repoRef: link.target.ref, repoPath: link.target.path }
+          : {}),
       });
     },
     [goProject],
