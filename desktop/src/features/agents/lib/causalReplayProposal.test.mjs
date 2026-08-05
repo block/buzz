@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildApprovedReplayProposal } from "./causalReplayProposal.ts";
+import {
+  buildApprovedReplayProposal,
+  buildIndependentEvaluation,
+  buildReplayDispatchMessage,
+  buildReplayDispatchReceipt,
+  proposalIdFromReplayTask,
+} from "./causalReplayProposal.ts";
 
 const candidate = {
   schema: "causal-experiment/v1",
@@ -75,5 +81,82 @@ test("refuses to replay an already evaluated candidate", () => {
         { experimentId: "proposal-1", recordedAt: "2026-08-05T01:00:00Z" },
       ),
     /Only an untested candidate/,
+  );
+});
+
+test("dispatches an approved replay with a durable correlation marker", () => {
+  const proposal = buildApprovedReplayProposal(
+    candidate,
+    {
+      failureFingerprint: "failure/v1",
+      cause: "A cause",
+      changedVariable: "one variable",
+      successCriteria: "A measured result",
+    },
+    { experimentId: "proposal-1", recordedAt: "2026-08-05T01:00:00Z" },
+  );
+  const message = buildReplayDispatchMessage(proposal);
+  assert.equal(proposalIdFromReplayTask(message), "proposal-1");
+  assert.match(message, /disposable workspace/);
+  assert.match(message, /Change exactly one variable: one variable/);
+
+  const receipt = buildReplayDispatchReceipt(
+    proposal,
+    "event-1",
+    "2026-08-05T01:01:00Z",
+  );
+  assert.equal(receipt.task.sourceMessageId, "event-1");
+  assert.equal(receipt.execution.replayOf, proposal.experimentId);
+  assert.deepEqual(receipt.result.evidenceIds, ["message:event-1"]);
+});
+
+test("requires cited evidence before sealing an independent verdict", () => {
+  const replay = {
+    ...candidate,
+    experimentId: "replay-1",
+    execution: { ...candidate.execution, replayOf: "proposal-1" },
+  };
+  assert.throws(
+    () =>
+      buildIndependentEvaluation(
+        replay,
+        { outcome: "validated", evidenceIds: " ", rationale: "It worked" },
+        { experimentId: "evaluation-1", recordedAt: "2026-08-05T02:00:00Z" },
+      ),
+    /At least one evidence ID/,
+  );
+  const evaluation = buildIndependentEvaluation(
+    replay,
+    {
+      outcome: "rejected",
+      evidenceIds: "observer:1\nreceipt:2",
+      rationale: "The success criterion was not met.",
+    },
+    { experimentId: "evaluation-1", recordedAt: "2026-08-05T02:00:00Z" },
+  );
+  assert.equal(evaluation.execution.replayOf, replay.experimentId);
+  assert.equal(evaluation.result.outcome, "rejected");
+  assert.deepEqual(evaluation.relations.contradicts, [replay.experimentId]);
+  assert.equal(evaluation.evaluation.evaluator, "owner-independent");
+});
+
+test("refuses to validate a replay while an execution layer is missing", () => {
+  const replay = {
+    ...candidate,
+    experimentId: "replay-1",
+    execution: { ...candidate.execution, replayOf: "proposal-1" },
+  };
+  assert.throws(
+    () =>
+      buildIndependentEvaluation(
+        replay,
+        {
+          outcome: "validated",
+          evidenceIds: "observer:1",
+          rationale: "The observed portion worked.",
+        },
+        { experimentId: "evaluation-1", recordedAt: "2026-08-05T02:00:00Z" },
+      ),
+    /missing coverage cannot be validated/,
   );
 });

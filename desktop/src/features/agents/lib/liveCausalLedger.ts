@@ -4,6 +4,7 @@ import {
   CausalLedger,
   type CausalExperiment,
 } from "./causalLedger";
+import { proposalIdFromReplayTask } from "./causalReplayProposal";
 
 export type CausalLedgerPersistence = {
   loadJournal(): Promise<string>;
@@ -79,6 +80,14 @@ export class LiveCausalLedger {
       if (event.kind !== "turn_completed" && event.kind !== "turn_error")
         return;
 
+      // Owner actions can append approvals/evaluations while this live ingestor
+      // remains mounted. Refresh before closing the turn so correlation and the
+      // next hash are based on the same durable ledger the UI just changed.
+      const latestJournal = await this.#persistence.loadJournal();
+      this.#ledger = latestJournal
+        ? await CausalLedger.fromJournal(latestJournal)
+        : new CausalLedger();
+
       const experimentId = `live:${agentPubkey.toLowerCase()}:${event.sessionId}`;
       if (
         this.#ledger
@@ -111,6 +120,27 @@ export class LiveCausalLedger {
   ): CausalExperiment {
     const taskEvent = events.find((event) => event.kind === "task_captured");
     const taskPayload = taskEvent ? payload(taskEvent) : {};
+    const taskDescription =
+      text(taskPayload.description) ??
+      "Task unavailable from observer evidence";
+    const sourceMessageId = text(taskPayload.sourceMessageId);
+    const proposalId = proposalIdFromReplayTask(taskDescription);
+    const markedProposal = proposalId
+      ? this.#ledger
+          .entries()
+          .find((entry) => entry.experiment.experimentId === proposalId)
+          ?.experiment
+      : undefined;
+    const hasDispatchReceipt = this.#ledger
+      .entries()
+      .some(
+        (entry) =>
+          entry.experiment.execution.replayOf ===
+            markedProposal?.experimentId &&
+          entry.experiment.execution.sessionId.startsWith("replay-dispatch:") &&
+          entry.experiment.task.sourceMessageId === sourceMessageId,
+      );
+    const proposal = hasDispatchReceipt ? markedProposal : undefined;
     const layers = new Set(
       events.map((event) => {
         if (event.kind === "host_operation") return "host_workspace";
@@ -123,22 +153,28 @@ export class LiveCausalLedger {
       experimentId,
       recordedAt: events.at(-1)?.timestamp ?? new Date().toISOString(),
       task: {
-        description:
-          text(taskPayload.description) ??
-          "Task unavailable from observer evidence",
-        sourceMessageId: text(taskPayload.sourceMessageId),
+        description: proposal?.task.description ?? taskDescription,
+        sourceMessageId,
       },
-      execution: { sessionId, turnId: turnId ?? "unknown", replayOf: null },
-      failureFingerprint: "unclassified-live-candidate/v1",
-      context: {
+      execution: {
+        sessionId,
+        turnId: turnId ?? "unknown",
+        replayOf: proposal?.experimentId ?? null,
+      },
+      failureFingerprint:
+        proposal?.failureFingerprint ?? "unclassified-live-candidate/v1",
+      context: proposal?.context ?? {
         codeVersion: "unknown",
         policyVersion: "unknown",
         modelVersion: "unknown",
         toolVersion: "buzz-acp-observer/v1",
         environmentVersion: "unknown",
       },
-      hypothesis: { cause: "unclassified", evidenceIds: [] },
-      intervention: {
+      hypothesis: proposal?.hypothesis ?? {
+        cause: "unclassified",
+        evidenceIds: [],
+      },
+      intervention: proposal?.intervention ?? {
         remedyId: "unclassified",
         changedVariable: "unclassified",
       },

@@ -7,17 +7,27 @@ import {
   appendCausalExperiment,
   readCausalLedger,
 } from "@/shared/api/tauriCausalLedger";
+import { sendChannelMessage } from "@/shared/api/tauri";
 import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
 
-import { buildApprovedReplayProposal } from "../lib/causalReplayProposal";
+import {
+  buildApprovedReplayProposal,
+  buildIndependentEvaluation,
+  buildReplayDispatchMessage,
+  buildReplayDispatchReceipt,
+} from "../lib/causalReplayProposal";
 import { inspectCausalCandidate } from "./causalCandidateInspection";
 
 export function CausalCandidateCard({
+  agentPubkey,
+  channelId,
   sessionId,
 }: {
+  agentPubkey: string;
+  channelId: string | null;
   sessionId: string | null;
 }) {
   const queryClient = useQueryClient();
@@ -28,15 +38,60 @@ export function CausalCandidateCard({
     refetchInterval: 5_000,
   });
   const inspection = inspectCausalCandidate(query.data ?? [], sessionId);
-  const candidate = query.data
-    ?.map((entry) => entry.experiment)
-    .find((experiment) => experiment.experimentId === inspection?.experimentId);
-  const approvedProposal = query.data
-    ?.map((entry) => entry.experiment)
-    .find(
+  const experiments = query.data?.map((entry) => entry.experiment) ?? [];
+  const candidate = experiments.find(
+    (experiment) => experiment.experimentId === inspection?.experimentId,
+  );
+  const activeEvaluation = candidate?.evaluation ? candidate : undefined;
+  const replayFromEvaluation = activeEvaluation
+    ? experiments.find(
+        (experiment) =>
+          experiment.experimentId === activeEvaluation.execution.replayOf,
+      )
+    : undefined;
+  const parentOfActive = candidate?.execution.replayOf
+    ? experiments.find(
+        (experiment) =>
+          experiment.experimentId === candidate.execution.replayOf,
+      )
+    : undefined;
+  const activeReplay =
+    !candidate?.evaluation &&
+    parentOfActive?.intervention.approvedAt &&
+    !candidate?.execution.sessionId.startsWith("replay-dispatch:")
+      ? candidate
+      : undefined;
+  const approvedProposal = replayFromEvaluation
+    ? experiments.find(
+        (experiment) =>
+          experiment.experimentId === replayFromEvaluation.execution.replayOf,
+      )
+    : activeReplay
+      ? parentOfActive
+      : experiments.find(
+          (experiment) =>
+            experiment.execution.replayOf === inspection?.experimentId &&
+            experiment.intervention.approvedAt,
+        );
+  const dispatchReceipt = experiments.find(
+    (experiment) =>
+      experiment.execution.replayOf === approvedProposal?.experimentId &&
+      experiment.execution.sessionId.startsWith("replay-dispatch:"),
+  );
+  const completedReplay =
+    replayFromEvaluation ??
+    activeReplay ??
+    experiments.find(
       (experiment) =>
-        experiment.execution.replayOf === inspection?.experimentId &&
-        experiment.intervention.approvedAt,
+        experiment.execution.replayOf === approvedProposal?.experimentId &&
+        !experiment.execution.sessionId.startsWith("replay-dispatch:"),
+    );
+  const evaluation =
+    activeEvaluation ??
+    experiments.find(
+      (experiment) =>
+        experiment.execution.replayOf === completedReplay?.experimentId &&
+        experiment.evaluation,
     );
   const [draft, setDraft] = React.useState({
     failureFingerprint: "",
@@ -63,6 +118,40 @@ export function CausalCandidateCard({
         error instanceof Error
           ? error.message
           : "Could not approve the replay.",
+      );
+    },
+  });
+  const dispatchMutation = useMutation({
+    mutationFn: async () => {
+      if (!approvedProposal || !channelId) {
+        throw new Error(
+          "Open this candidate inside its channel to run the replay.",
+        );
+      }
+      const result = await sendChannelMessage(
+        channelId,
+        buildReplayDispatchMessage(approvedProposal),
+        undefined,
+        undefined,
+        [agentPubkey],
+      );
+      return appendCausalExperiment(
+        buildReplayDispatchReceipt(
+          approvedProposal,
+          result.eventId,
+          new Date().toISOString(),
+        ),
+      );
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["causal-ledger"] });
+      toast.success("Controlled replay dispatched to a fresh agent turn.");
+    },
+    onError: (error) => {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : "Could not dispatch the replay.",
       );
     },
   });
@@ -120,7 +209,18 @@ export function CausalCandidateCard({
         </div>
       </div>
 
-      {approvedProposal ? (
+      {evaluation ? (
+        <EvaluationResult evaluation={evaluation} />
+      ) : completedReplay ? (
+        <IndependentEvaluationForm
+          replay={completedReplay}
+          onSaved={async () => {
+            await queryClient.invalidateQueries({
+              queryKey: ["causal-ledger"],
+            });
+          }}
+        />
+      ) : approvedProposal ? (
         <div
           className="border-t border-border/60 p-4"
           data-testid="approved-replay-proposal"
@@ -129,7 +229,9 @@ export function CausalCandidateCard({
             <p className="text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
               Owner-approved replay
             </p>
-            <Badge variant="outline">Awaiting evaluator</Badge>
+            <Badge variant="outline">
+              {dispatchReceipt ? "Replay running" : "Ready to run"}
+            </Badge>
           </div>
           <p className="mt-2 text-sm font-medium">
             Change only: {approvedProposal.intervention.changedVariable}
@@ -141,6 +243,23 @@ export function CausalCandidateCard({
             Approval does not prove the remedy. Buzz will keep this untested
             until a linked replay and independent evidence produce a verdict.
           </p>
+          {!dispatchReceipt ? (
+            <Button
+              className="mt-3"
+              disabled={!channelId || dispatchMutation.isPending}
+              onClick={() => dispatchMutation.mutate()}
+              size="sm"
+            >
+              {dispatchMutation.isPending
+                ? "Dispatching replay…"
+                : "Run controlled replay"}
+            </Button>
+          ) : (
+            <p className="mt-3 text-xs text-muted-foreground">
+              Buzz linked the dispatch receipt. The independent verdict unlocks
+              when the agent turn reaches a terminal event.
+            </p>
+          )}
         </div>
       ) : candidate?.result.outcome === "untested" ? (
         <ReplayApprovalForm
@@ -153,6 +272,119 @@ export function CausalCandidateCard({
         />
       ) : null}
     </section>
+  );
+}
+
+function IndependentEvaluationForm({
+  replay,
+  onSaved,
+}: {
+  replay: import("../lib/causalLedger").CausalExperiment;
+  onSaved: () => Promise<void>;
+}) {
+  const [outcome, setOutcome] = React.useState<
+    "validated" | "rejected" | "inconclusive"
+  >("inconclusive");
+  const [evidenceIds, setEvidenceIds] = React.useState(
+    replay.result.evidenceIds.join("\n"),
+  );
+  const [rationale, setRationale] = React.useState("");
+  const mutation = useMutation({
+    mutationFn: () => {
+      const recordedAt = new Date().toISOString();
+      return appendCausalExperiment(
+        buildIndependentEvaluation(
+          replay,
+          { outcome, evidenceIds, rationale },
+          {
+            experimentId: `evaluation:${replay.experimentId}:${crypto.randomUUID()}`,
+            recordedAt,
+          },
+        ),
+      );
+    },
+    onSuccess: async () => {
+      await onSaved();
+      toast.success("Independent verdict sealed in the causal ledger.");
+    },
+    onError: (error) => {
+      toast.error(
+        error instanceof Error ? error.message : "Could not save the verdict.",
+      );
+    },
+  });
+  return (
+    <form
+      className="space-y-3 border-t border-border/60 p-4"
+      data-testid="independent-evaluation-form"
+      onSubmit={(event) => {
+        event.preventDefault();
+        mutation.mutate();
+      }}
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
+          Independent evaluation
+        </p>
+        <Badge variant="outline">Replay complete</Badge>
+      </div>
+      <label className="block text-xs font-medium" htmlFor="causal-verdict">
+        Verdict
+      </label>
+      <select
+        className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+        id="causal-verdict"
+        onChange={(event) => setOutcome(event.target.value as typeof outcome)}
+        value={outcome}
+      >
+        <option value="validated">Validated</option>
+        <option value="rejected">Rejected</option>
+        <option value="inconclusive">Inconclusive</option>
+      </select>
+      <Textarea
+        aria-label="Evaluation evidence IDs"
+        onChange={(event) => setEvidenceIds(event.target.value)}
+        placeholder="One evidence ID per line"
+        value={evidenceIds}
+      />
+      <Textarea
+        aria-label="Evaluation rationale"
+        onChange={(event) => setRationale(event.target.value)}
+        placeholder="Why the evidence meets or fails the success criteria"
+        value={rationale}
+      />
+      <Button disabled={mutation.isPending} size="sm" type="submit">
+        {mutation.isPending ? "Sealing verdict…" : "Seal independent verdict"}
+      </Button>
+    </form>
+  );
+}
+
+function EvaluationResult({
+  evaluation,
+}: {
+  evaluation: import("../lib/causalLedger").CausalExperiment;
+}) {
+  return (
+    <div
+      className="border-t border-border/60 p-4"
+      data-testid="causal-evaluation-result"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
+          Independent verdict
+        </p>
+        <Badge variant="outline" className="capitalize">
+          {evaluation.result.outcome}
+        </Badge>
+      </div>
+      <p className="mt-2 text-sm">{evaluation.evaluation?.rationale}</p>
+      <p className="mt-1 text-xs text-muted-foreground">
+        {evaluation.result.evidenceIds.length} cited evidence receipt
+        {evaluation.result.evidenceIds.length === 1 ? "" : "s"}; sealed in the
+        owner-local ledger.
+      </p>
+    </div>
   );
 }
 

@@ -30,6 +30,11 @@ export type CausalExperiment = {
     approvedAt?: string;
   };
   result: { outcome: ExperimentOutcome; evidenceIds: string[] };
+  evaluation?: {
+    evaluator: "owner-independent";
+    rationale: string;
+    evaluatedAt: string;
+  };
   coverage: Record<string, EvidenceCoverage>;
   relations: {
     supports: string[];
