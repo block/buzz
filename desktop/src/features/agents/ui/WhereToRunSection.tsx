@@ -2,6 +2,7 @@ import { AlertTriangle } from "lucide-react";
 import * as React from "react";
 
 import { useBackendProvidersQuery } from "@/features/agents/hooks";
+import { useChannelsQuery } from "@/features/channels/hooks";
 import { probeBackendProvider } from "@/shared/api/tauri";
 
 import { ProviderConfigFields } from "./ProviderConfigFields";
@@ -24,6 +25,7 @@ export function WhereToRunSection({
   const backendProviders = useBackendProvidersQuery().data ?? [];
   const [probeError, setProbeError] = React.useState<string | null>(null);
   const isProviderMode = draft.runOn !== "local";
+  const channelsQuery = useChannelsQuery({ enabled: isProviderMode });
   const selectedBackendProvider = React.useMemo(
     () =>
       backendProviders.find((provider) => provider.id === draft.runOn) ?? null,
@@ -50,6 +52,16 @@ export function WhereToRunSection({
   const selectedBinaryPath = isProviderMode
     ? (selectedBackendProvider?.binaryPath ?? null)
     : null;
+  const providerSchema = draft.probedProvider?.config_schema as
+    | Record<string, unknown>
+    | undefined;
+  const roomProperty = (providerSchema?.properties as
+    | Record<string, Record<string, unknown>>
+    | undefined)?.rooms;
+  const hasRoomPicker = roomProperty?.format === "buzz-room-picker";
+  const discoverableRooms = (channelsQuery.data ?? []).filter(
+    (channel) => channel.channelType !== "dm" && !channel.archivedAt,
+  );
   React.useEffect(() => {
     if (!selectedBinaryPath) {
       setProbeError(null);
@@ -119,12 +131,65 @@ export function WhereToRunSection({
               Could not probe provider: {probeError}
             </p>
           ) : null}
-          {draft.probedProvider?.enrollment ? (
+          {draft.probedProvider?.enrollment && !hasRoomPicker ? (
             <p className="rounded-2xl border border-primary/30 bg-primary/5 px-4 py-3 text-sm">
               This provider uses a one-time enrollment import. Buzz Desktop
               hands the agent identity to the trusted provider and keeps no
               runtime connection to the remote host.
             </p>
+          ) : null}
+          {hasRoomPicker ? (
+            <div className="space-y-2">
+              <label className="text-sm font-medium">
+                Buzz rooms <span className="text-destructive">*</span>
+              </label>
+              <p className="text-xs text-muted-foreground">
+                Select the rooms this provider should receive.
+              </p>
+              <div className="max-h-48 space-y-1 overflow-y-auto rounded-md border border-input p-2">
+                {discoverableRooms.length === 0 ? (
+                  <p className="p-2 text-sm text-muted-foreground">
+                    No rooms available.
+                  </p>
+                ) : (
+                  discoverableRooms.map((channel) => {
+                    const selected = (draft.providerConfig.rooms ?? "")
+                      .split(",")
+                      .filter(Boolean)
+                      .includes(channel.id);
+                    return (
+                      <label
+                        className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-sm hover:bg-muted"
+                        key={channel.id}
+                      >
+                        <input
+                          checked={selected}
+                          disabled={isPending}
+                          onChange={() => {
+                            const ids = new Set(
+                              (draft.providerConfig.rooms ?? "")
+                                .split(",")
+                                .filter(Boolean),
+                            );
+                            if (selected) ids.delete(channel.id);
+                            else ids.add(channel.id);
+                            onDraftChange({
+                              ...draft,
+                              providerConfig: {
+                                ...draft.providerConfig,
+                                rooms: [...ids].join(","),
+                              },
+                            });
+                          }}
+                          type="checkbox"
+                        />
+                        <span>{channel.name}</span>
+                      </label>
+                    );
+                  })
+                )}
+              </div>
+            </div>
           ) : null}
           {draft.probedProvider?.config_schema ? (
             <ProviderConfigFields
@@ -133,6 +198,7 @@ export function WhereToRunSection({
                 onDraftChange({ ...draft, providerConfig })
               }
               schema={draft.probedProvider.config_schema}
+              excludeKeys={hasRoomPicker ? ["rooms"] : []}
             />
           ) : null}
         </div>

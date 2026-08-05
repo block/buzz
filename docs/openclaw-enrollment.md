@@ -20,9 +20,7 @@ must answer `info` first, with protocol version `1`:
   "config_schema": {
     "type": "object",
     "properties": {
-      "host": { "type": "string", "description": "Optional SSH destination (advanced fallback)" },
-      "rooms": { "type": "string", "description": "Comma-separated Buzz room UUIDs" },
-      "port": { "type": "string", "description": "Optional SSH port" }
+      "rooms": { "type": "string", "format": "buzz-room-picker", "description": "Buzz rooms selected in Desktop" }
     },
     "required": ["rooms"]
   },
@@ -37,8 +35,8 @@ must answer `info` first, with protocol version `1`:
 `config_schema` is persisted in the agent record and is therefore not a place
 for credentials. Desktop rejects secret-shaped keys (`key`, `token`,
 `credential`, `password`, `secret`) and nested values in provider config.
-Host authentication belongs to the provider's normal local trust mechanism
-(for example, an existing OpenClaw CLI login or OS credential store).
+The selected room IDs are the only provider configuration; the generated
+command is copied to and run by the operator on the OpenClaw server.
 
 After `info`, Desktop invokes the same staged provider binary once with:
 
@@ -62,28 +60,21 @@ After `info`, Desktop invokes the same staged provider binary once with:
       "owner_pubkey": "hex"
     }
   },
-  "provider_config": {
-    "host": "openclaw@agent-host",
-    "rooms": "ROOM_UUID_1,ROOM_UUID_2",
-    "port": "22"
-  },
+  "provider_config": { "rooms": "ROOM_UUID_1,ROOM_UUID_2" },
   "enrollment": { "version": 1, "mode": "one-time" }
 }
 ```
 
 The exact managed-agent payload is the source of truth; providers must not
-reconstruct identity from `env_vars`. Without `host`, the provider generates
-a signed, short-lived code and returns a copyable command for the Desktop
-operator:
+reconstruct identity from `env_vars`. The provider generates a signed,
+short-lived code and returns a copyable command for the Desktop operator:
 
 ```bash
 openclaw buzz enroll --code 'buzz-enroll-v1....'
 ```
 
-With `host`, the provider preserves the legacy SSH handoff and runs
-`openclaw buzz enroll --stdin` on the remote host.
-It imports the identity and room configuration into OpenClaw and returns a
-stable host-side identifier:
+The command imports the identity and room configuration into OpenClaw and
+returns a stable host-side identifier:
 
 ```json
 { "ok": true, "agent_id": "openclaw-host-agent-id" }

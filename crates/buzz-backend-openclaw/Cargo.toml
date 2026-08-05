@@ -11,6 +11,8 @@ name = "buzz-backend-openclaw"
 path = "src/main.rs"
 
 [dependencies]
+base64 = { workspace = true }
+nostr = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
