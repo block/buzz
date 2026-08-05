@@ -1513,7 +1513,7 @@ mod inactivity_tests {
 }
 
 pub fn run() -> Result<()> {
-    config::propagate_legacy_env_vars();
+    config::prepare_process_env();
     tokio_main()
 }
 
@@ -1811,6 +1811,7 @@ async fn tokio_main() -> Result<()> {
     let base_prompt_content = config.base_prompt_content.take();
     let ctx = Arc::new(PromptContext {
         mcp_servers: build_mcp_servers(&config),
+        git_origin_mcp_server_index: (!config.mcp_command.is_empty()).then_some(0),
         initial_message: config.initial_message.clone(),
         idle_timeout: Duration::from_secs(config.idle_timeout_secs),
         max_turn_duration: Duration::from_secs(config.max_turn_duration_secs),
@@ -4509,60 +4510,83 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
 }
 
 fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
-    if config.mcp_command.is_empty() {
-        return vec![];
+    let mut servers = Vec::with_capacity(
+        usize::from(!config.mcp_command.is_empty()) + config.configured_mcp_servers.len(),
+    );
+
+    if !config.mcp_command.is_empty() {
+        servers.push(McpServer {
+            name: config::legacy_mcp_server_name(&config.mcp_command),
+            command: config.mcp_command.clone(),
+            args: vec![],
+            env: {
+                let mut env = vec![
+                    EnvVar {
+                        name: "BUZZ_RELAY_URL".into(),
+                        value: config.relay_url.clone(),
+                    },
+                    EnvVar {
+                        name: "BUZZ_PRIVATE_KEY".into(),
+                        // bech32 encoding of a valid secret key is infallible.
+                        // Panic here is correct: injecting a bogus secret would cause
+                        // delayed, hard-to-diagnose agent failures downstream.
+                        value: config
+                            .keys
+                            .secret_key()
+                            .to_bech32()
+                            .expect("secret key bech32 encoding should never fail"),
+                    },
+                ];
+                // Forward BUZZ_AUTH_TAG (NIP-OA owner attestation credential)
+                // so the MCP server can attach it to every signed event.
+                if let Ok(auth_tag) = std::env::var("BUZZ_AUTH_TAG") {
+                    if !auth_tag.is_empty() {
+                        env.push(EnvVar {
+                            name: "BUZZ_AUTH_TAG".into(),
+                            value: auth_tag,
+                        });
+                    }
+                }
+                // Forward the agent's display name so dev-mcp can use it as the git
+                // author name instead of the raw npub. Read from the process env
+                // rather than Config: this is a pass-through of a contract owned
+                // upstream, and absent simply means dev-mcp falls back to the npub.
+                if let Ok(display_name) = std::env::var("BUZZ_ACP_DISPLAY_NAME") {
+                    if !display_name.is_empty() {
+                        env.push(EnvVar {
+                            name: "BUZZ_ACP_DISPLAY_NAME".into(),
+                            value: display_name,
+                        });
+                    }
+                }
+                env
+            },
+        });
     }
-    vec![McpServer {
-        name: std::path::Path::new(&config.mcp_command)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("mcp")
-            .to_string(),
-        command: config.mcp_command.clone(),
-        args: vec![],
-        env: {
-            let mut env = vec![
-                EnvVar {
-                    name: "BUZZ_RELAY_URL".into(),
-                    value: config.relay_url.clone(),
-                },
-                EnvVar {
-                    name: "BUZZ_PRIVATE_KEY".into(),
-                    // bech32 encoding of a valid secret key is infallible.
-                    // Panic here is correct: injecting a bogus secret would cause
-                    // delayed, hard-to-diagnose agent failures downstream.
-                    value: config
-                        .keys
-                        .secret_key()
-                        .to_bech32()
-                        .expect("secret key bech32 encoding should never fail"),
-                },
-            ];
-            // Forward BUZZ_AUTH_TAG (NIP-OA owner attestation credential)
-            // so the MCP server can attach it to every signed event.
-            if let Ok(auth_tag) = std::env::var("BUZZ_AUTH_TAG") {
-                if !auth_tag.is_empty() {
-                    env.push(EnvVar {
-                        name: "BUZZ_AUTH_TAG".into(),
-                        value: auth_tag,
-                    });
-                }
-            }
-            // Forward the agent's display name so dev-mcp can use it as the git
-            // author name instead of the raw npub. Read from the process env
-            // rather than Config: this is a pass-through of a contract owned
-            // upstream, and absent simply means dev-mcp falls back to the npub.
-            if let Ok(display_name) = std::env::var("BUZZ_ACP_DISPLAY_NAME") {
-                if !display_name.is_empty() {
-                    env.push(EnvVar {
-                        name: "BUZZ_ACP_DISPLAY_NAME".into(),
-                        value: display_name,
-                    });
-                }
-            }
-            env
-        },
-    }]
+
+    servers.extend(config.configured_mcp_servers.iter().map(|configured| {
+        match configured {
+            config::ConfiguredMcpServer::Stdio {
+                name,
+                command,
+                args,
+                env,
+            } => McpServer {
+                name: name.clone(),
+                command: command.clone(),
+                args: args.clone(),
+                env: env
+                    .iter()
+                    .map(|(name, value)| EnvVar {
+                        name: name.clone(),
+                        value: value.clone(),
+                    })
+                    .collect(),
+            },
+        }
+    }));
+
+    servers
 }
 
 #[cfg(test)]
@@ -6163,6 +6187,8 @@ mod observer_chunk_coalescer_tests {
 #[cfg(test)]
 mod build_mcp_servers_tests {
     use super::*;
+    use clap::Parser;
+    use std::collections::BTreeMap;
     use std::sync::Mutex;
 
     /// Env-var-touching tests must run serially — env vars are process-global.
@@ -6175,6 +6201,7 @@ mod build_mcp_servers_tests {
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
             mcp_command: "test-mcp-server".into(),
+            configured_mcp_servers: Vec::new(),
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
@@ -6211,6 +6238,50 @@ mod build_mcp_servers_tests {
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
+        }
+    }
+
+    fn configured_server(
+        name: &str,
+        command: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+    ) -> config::ConfiguredMcpServer {
+        config::ConfiguredMcpServer::Stdio {
+            name: name.into(),
+            command: command.into(),
+            args: args.iter().map(|arg| (*arg).to_string()).collect(),
+            env: env
+                .iter()
+                .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+                .collect::<BTreeMap<_, _>>(),
+        }
+    }
+
+    struct TempMcpConfig {
+        path: std::path::PathBuf,
+    }
+
+    impl TempMcpConfig {
+        fn write(content: &[u8]) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "buzz-acp-mcp-build-test-{}.json",
+                uuid::Uuid::new_v4()
+            ));
+            std::fs::write(&path, content).expect("write temporary MCP config");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                    .expect("restrict temporary MCP config permissions");
+            }
+            Self { path }
+        }
+    }
+
+    impl Drop for TempMcpConfig {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
         }
     }
 
@@ -6329,6 +6400,226 @@ mod build_mcp_servers_tests {
     }
 
     #[test]
+    fn structured_servers_preserve_order_and_literal_values_without_legacy_credentials() {
+        let mut config = test_config();
+        config.mcp_command.clear();
+        config.configured_mcp_servers = vec![
+            configured_server(
+                "analytics",
+                "/opt/MCP Servers/analytics,prod",
+                &[
+                    "--stdio",
+                    "two words",
+                    "comma,value",
+                    "\"quoted\"",
+                    r"C:\Program Files\MCP\server.exe",
+                    "雪",
+                    "$(literal)",
+                    "`literal`",
+                    "a|b;c",
+                ],
+                &[
+                    ("ANALYTICS_ENDPOINT", "https://example.test/a=b"),
+                    ("LITERAL_VALUE", "$HOME;`id`|雪"),
+                ],
+            ),
+            configured_server("search", "/opt/search-mcp", &[], &[]),
+        ];
+
+        let servers = build_mcp_servers(&config);
+
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[0].name, "analytics");
+        assert_eq!(servers[1].name, "search");
+        assert_eq!(servers[0].command, "/opt/MCP Servers/analytics,prod");
+        assert_eq!(
+            servers[0].args,
+            vec![
+                "--stdio",
+                "two words",
+                "comma,value",
+                "\"quoted\"",
+                r"C:\Program Files\MCP\server.exe",
+                "雪",
+                "$(literal)",
+                "`literal`",
+                "a|b;c",
+            ]
+        );
+        assert_eq!(
+            servers[0]
+                .env
+                .iter()
+                .map(|entry| (entry.name.as_str(), entry.value.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("ANALYTICS_ENDPOINT", "https://example.test/a=b"),
+                ("LITERAL_VALUE", "$HOME;`id`|雪"),
+            ]
+        );
+        assert!(
+            servers[0].env.iter().all(|entry| !matches!(
+                entry.name.as_str(),
+                "BUZZ_PRIVATE_KEY" | "BUZZ_AUTH_TAG" | "BUZZ_RELAY_URL"
+            )),
+            "structured servers must receive only their declared environment"
+        );
+    }
+
+    #[test]
+    fn legacy_server_remains_first_when_structured_servers_are_present() {
+        let mut config = test_config();
+        config.configured_mcp_servers = vec![configured_server(
+            "analytics",
+            "/opt/analytics-mcp",
+            &["--stdio"],
+            &[("ANALYTICS_TOKEN", "opaque-test-token")],
+        )];
+
+        let servers = build_mcp_servers(&config);
+
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[0].name, "test-mcp-server");
+        assert_eq!(servers[1].name, "analytics");
+        assert!(servers[0]
+            .env
+            .iter()
+            .any(|entry| entry.name == "BUZZ_PRIVATE_KEY"));
+        assert_eq!(
+            servers[1]
+                .env
+                .iter()
+                .map(|entry| (entry.name.as_str(), entry.value.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("ANALYTICS_TOKEN", "opaque-test-token")]
+        );
+    }
+
+    #[test]
+    fn git_origin_is_added_only_to_the_privileged_legacy_companion() {
+        let mut config = test_config();
+        config.configured_mcp_servers = vec![configured_server(
+            "analytics",
+            "/opt/analytics-mcp",
+            &["--stdio"],
+            &[("ANALYTICS_TOKEN", "opaque-test-token")],
+        )];
+        let channel_id = uuid::Uuid::new_v4();
+
+        let servers = pool::mcp_servers_with_git_origin(
+            &build_mcp_servers(&config),
+            (!config.mcp_command.is_empty()).then_some(0),
+            Some(channel_id),
+            Some("stream"),
+            None,
+        );
+
+        assert!(servers[0].env.iter().any(|entry| {
+            entry.name == "BUZZ_GIT_ORIGIN_CHANNEL_ID" && entry.value == channel_id.to_string()
+        }));
+        assert_eq!(
+            servers[1]
+                .env
+                .iter()
+                .map(|entry| (entry.name.as_str(), entry.value.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("ANALYTICS_TOKEN", "opaque-test-token")],
+            "session enrichment must not widen a structured server's declared environment"
+        );
+    }
+
+    #[test]
+    fn structured_only_sessions_do_not_receive_git_origin_metadata() {
+        let mut config = test_config();
+        config.mcp_command.clear();
+        config.configured_mcp_servers = vec![configured_server(
+            "analytics",
+            "/opt/analytics-mcp",
+            &[],
+            &[("ANALYTICS_TOKEN", "opaque-test-token")],
+        )];
+
+        let servers = pool::mcp_servers_with_git_origin(
+            &build_mcp_servers(&config),
+            (!config.mcp_command.is_empty()).then_some(0),
+            Some(uuid::Uuid::new_v4()),
+            Some("stream"),
+            None,
+        );
+
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].env.len(), 1);
+        assert_eq!(servers[0].env[0].name, "ANALYTICS_TOKEN");
+    }
+
+    #[test]
+    fn structured_json_reaches_initial_repeated_and_respawn_session_lists() {
+        let document = serde_json::json!({
+            "version": 1,
+            "servers": [
+                {
+                    "name": "analytics",
+                    "transport": "stdio",
+                    "command": "/opt/MCP Servers/analytics,prod",
+                    "args": ["--stdio", "literal value"],
+                    "env": {
+                        "ANALYTICS_ENDPOINT": "https://example.test/a=b"
+                    }
+                },
+                {
+                    "name": "search",
+                    "transport": "stdio",
+                    "command": "/opt/search-mcp",
+                    "args": [],
+                    "env": {}
+                }
+            ]
+        });
+        let file = TempMcpConfig::write(
+            &serde_json::to_vec(&document).expect("serialize MCP config fixture"),
+        );
+        let private_key = nostr::Keys::generate()
+            .secret_key()
+            .to_bech32()
+            .expect("encode temporary private key");
+        let args = config::CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            private_key.as_str(),
+            "--mcp-command",
+            "/opt/buzz-dev-mcp",
+            "--mcp-config",
+            file.path.to_str().expect("temporary path is UTF-8"),
+        ])
+        .expect("parse MCP arguments");
+        let config = Config::from_args(args).expect("load structured MCP config");
+
+        let initial_session = build_mcp_servers(&config);
+        let repeated_session = initial_session.clone();
+        let respawned_session = repeated_session.clone();
+        let initial_json =
+            serde_json::to_value(&initial_session).expect("serialize initial MCP list");
+        let repeated_json =
+            serde_json::to_value(&repeated_session).expect("serialize repeated MCP list");
+        let respawned_json =
+            serde_json::to_value(&respawned_session).expect("serialize respawned MCP list");
+
+        assert_eq!(initial_json, repeated_json);
+        assert_eq!(initial_json, respawned_json);
+        assert_eq!(initial_json.as_array().map(Vec::len), Some(3));
+        assert_eq!(initial_json[0]["name"], "buzz-dev-mcp");
+        assert_eq!(initial_json[1]["name"], "analytics");
+        assert_eq!(initial_json[2]["name"], "search");
+        assert_eq!(
+            initial_json[1]["env"],
+            serde_json::json!([{
+                "name": "ANALYTICS_ENDPOINT",
+                "value": "https://example.test/a=b"
+            }])
+        );
+    }
+
+    #[test]
     fn absolute_path_mcp_command_uses_file_stem_as_name() {
         let mut config = test_config();
         config.mcp_command = "/opt/bin/my-mcp-server".into();
@@ -6397,6 +6688,7 @@ mod error_outcome_emission_tests {
             agent_command: "true".into(),
             agent_args: vec![],
             mcp_command: "test-mcp-server".into(),
+            configured_mcp_servers: Vec::new(),
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
