@@ -48,6 +48,7 @@ pub fn show_native_notification(
 
 #[cfg(target_os = "linux")]
 mod linux {
+    use super::NATIVE_NOTIFICATION_ACTIVATED_EVENT;
     use tauri::Emitter;
 
     pub fn show(
