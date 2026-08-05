@@ -291,6 +291,8 @@ type UsersBatchEntry = {
   fetchedAt: number;
 };
 
+const USERS_BATCH_RELAY_QUERY_LIMIT = 1_000;
+
 const usersBatchEntryKey = (pubkey: string) => ["users-batch-entry", pubkey];
 
 /**
@@ -356,18 +358,28 @@ export function useUsersBatchQuery(
         }
       }
       if (toFetch.length > 0) {
-        const fresh = await getUsersBatch(toFetch);
-        if (relayUrl) {
-          writeCachedUserLabels(relayUrl, fresh.profiles, fresh.missing);
-        }
-        for (const pubkey of toFetch) {
-          const summary = fresh.profiles[pubkey] ?? null;
-          queryClient.setQueryData<UsersBatchEntry>(
-            usersBatchEntryKey(pubkey),
-            { summary, fetchedAt: now },
+        for (
+          let offset = 0;
+          offset < toFetch.length;
+          offset += USERS_BATCH_RELAY_QUERY_LIMIT
+        ) {
+          const batch = toFetch.slice(
+            offset,
+            offset + USERS_BATCH_RELAY_QUERY_LIMIT,
           );
-          if (summary) profiles[pubkey] = summary;
-          else missing.push(pubkey);
+          const fresh = await getUsersBatch(batch);
+          if (relayUrl) {
+            writeCachedUserLabels(relayUrl, fresh.profiles, fresh.missing);
+          }
+          for (const pubkey of batch) {
+            const summary = fresh.profiles[pubkey] ?? null;
+            queryClient.setQueryData<UsersBatchEntry>(
+              usersBatchEntryKey(pubkey),
+              { summary, fetchedAt: now },
+            );
+            if (summary) profiles[pubkey] = summary;
+            else missing.push(pubkey);
+          }
         }
       }
       return { profiles, missing };
