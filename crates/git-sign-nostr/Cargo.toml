@@ -28,6 +28,7 @@ hex = { workspace = true }
 
 # Secret key zeroization on drop.
 zeroize = { workspace = true, features = ["derive"] }
+daz-secrets = { workspace = true }
 
 # Nostr key parsing (nsec/npub bech32), secp256k1 Schnorr signing, SHA-256.
 # Uses the full default feature set because we need: Keys, PublicKey,

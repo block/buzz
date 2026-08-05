@@ -130,7 +130,7 @@ async fn load_source(
         }
         Ok((bytes, "data:URL".to_string()))
     } else if src.starts_with("http://") || src.starts_with("https://") {
-        let bytes = fetch_url(src).await?;
+        let bytes = fetch_url(state, src).await?;
         Ok((bytes, src.to_string()))
     } else if src.contains("://") {
         // Treat any other `scheme://...` form as an explicit reject so
@@ -283,45 +283,57 @@ fn server_authority(url: &reqwest::Url) -> Option<String> {
     }
 }
 
-/// Mint a `t=get` Authorization header for `url` when it is relay-hosted
-/// media and `BUZZ_PRIVATE_KEY` is available; `None` otherwise.
+/// Mint a `t=get` Authorization header for relay-hosted media using the
+/// configured daz-secrets identity; `None` for non-relay URLs.
 ///
 /// Fail-open by design: while the relay's media-read-auth flag is off, an
 /// unauthenticated request still succeeds, so a missing/invalid key degrades
 /// to an unsigned fetch instead of an error. Once the flag is on, the fetch
 /// 403s and the error path below names the missing key.
-fn relay_media_get_auth(url: &reqwest::Url) -> Option<String> {
-    let relay = std::env::var("BUZZ_RELAY_URL").ok()?;
-    let relay = reqwest::Url::parse(&relay).ok()?;
-    if !is_relay_media_url(url, &relay) {
-        return None;
-    }
-    let key = std::env::var("BUZZ_PRIVATE_KEY").ok()?;
-    let keys = match nostr::Keys::parse(&key) {
-        Ok(k) => k,
-        Err(e) => {
-            tracing::warn!("BUZZ_PRIVATE_KEY invalid; fetching relay media unauthenticated: {e}");
-            return None;
-        }
+fn relay_media_get_auth(
+    state: &SharedState,
+    url: &reqwest::Url,
+) -> Result<Option<String>, ErrorData> {
+    let Some(relay) = std::env::var("BUZZ_RELAY_URL")
+        .ok()
+        .and_then(|value| reqwest::Url::parse(&value).ok())
+    else {
+        return Ok(None);
     };
-    let authority = server_authority(url)?;
-    match sign_media_get_auth(&keys, &authority) {
-        Ok(header) => Some(header),
-        Err(e) => {
-            tracing::warn!("media get auth signing failed; fetching unauthenticated: {e}");
-            None
-        }
+    if !is_relay_media_url(url, &relay) {
+        return Ok(None);
     }
+    let client = daz_secrets::BlockingClient::from_default_config().map_err(|_| {
+        ErrorData::internal_error("secret provider is unavailable".to_string(), None)
+    })?;
+    let secret = client
+        .get(&state.secret_service, &state.secret_account)
+        .map_err(|_| {
+            ErrorData::internal_error("relay media identity is unavailable".to_string(), None)
+        })?;
+    let secret_value = zeroize::Zeroizing::new(secret.value);
+    let encoded = std::str::from_utf8(&secret_value).map_err(|_| {
+        ErrorData::internal_error("relay media identity is invalid".to_string(), None)
+    })?;
+    let keys = nostr::Keys::parse(encoded.trim()).map_err(|_| {
+        ErrorData::internal_error("relay media identity is invalid".to_string(), None)
+    })?;
+    let authority = server_authority(url).ok_or_else(|| {
+        ErrorData::internal_error("relay media URL has no authority".to_string(), None)
+    })?;
+    sign_media_get_auth(&keys, &authority)
+        .map(Some)
+        .map_err(|_| ErrorData::internal_error("media auth signing failed".to_string(), None))
 }
 
 /// Fetch an http(s) URL with a streaming read and a hard byte cap.
 /// Refuses up-front if `Content-Length` advertises more than the cap.
 /// Relay-hosted `/media/` URLs get a signed Blossom `t=get` header when
-/// `BUZZ_RELAY_URL` + `BUZZ_PRIVATE_KEY` are configured.
-async fn fetch_url(url: &str) -> Result<Vec<u8>, ErrorData> {
+/// the relay URL and secret-provider coordinates are configured.
+async fn fetch_url(state: &SharedState, url: &str) -> Result<Vec<u8>, ErrorData> {
     let parsed = reqwest::Url::parse(url)
         .map_err(|e| invalid_params(format!("invalid URL: {url} ({e})")))?;
-    let auth = relay_media_get_auth(&parsed);
+    let auth = relay_media_get_auth(state, &parsed)?;
     let mut client_builder = reqwest::Client::builder()
         .connect_timeout(FETCH_TIMEOUT)
         .timeout(FETCH_TIMEOUT);
@@ -353,7 +365,7 @@ async fn fetch_url(url: &str) -> Result<Vec<u8>, ErrorData> {
         if matches!(status.as_u16(), 401 | 403) && !authed {
             return Err(invalid_params(format!(
                 "fetch {url} returned HTTP {status} — this relay requires authenticated media \
-                 reads; set BUZZ_PRIVATE_KEY (and BUZZ_RELAY_URL) to a member identity"
+                 reads; configure a member identity in the local secret provider"
             )));
         }
         return Err(invalid_params(format!(
@@ -682,8 +694,14 @@ mod tests {
     use tempfile::tempdir;
 
     fn make_state(cwd: &std::path::Path) -> SharedState {
-        let shim = crate::shim::Shim::install().expect("shim install");
-        SharedState::new(cwd.to_path_buf(), shim).expect("state new")
+        let shim = crate::shim::Shim::install_without_identity().expect("shim install");
+        SharedState::new(
+            cwd.to_path_buf(),
+            shim,
+            "buzz-test".into(),
+            "identity".into(),
+        )
+        .expect("state new")
     }
 
     fn write_png_rgba(path: &std::path::Path, w: u32, h: u32) -> Vec<u8> {

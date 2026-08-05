@@ -3,7 +3,7 @@
 //! **Worktree sync** (`sync_shared_agent_data`): Per-launch symlink creation
 //! from the current worktree data directory to the canonical dev data
 //! directory (`xyz.block.buzz.app.dev`). Only runs when
-//! `BUZZ_SHARE_IDENTITY=1` and `BUZZ_PRIVATE_KEY` is set. All dev
+//! `BUZZ_SHARE_IDENTITY=1` and the configured provider identity exists. All dev
 //! instances share the same physical files — edits in any worktree are
 //! immediately visible to all others.
 //!
@@ -27,8 +27,8 @@ const LEGACY_RELEASE_IDENTIFIER: &str = "xyz.block.sprout.app";
 
 /// JSON files symlinked from worktree data directories to the canonical
 /// dev data directory. Only data files — never `agent-pids/` or `logs/`.
-/// `identity.key` is deliberately excluded because worktree instances
-/// receive their identity via the `BUZZ_PRIVATE_KEY` env var.
+/// `identity.key` is deliberately excluded because worktree instances resolve
+/// their identity from the configured secret provider.
 const SHARED_AGENT_FILES: &[&str] = &[
     "agents/managed-agents.json",
     "agents/personas.json",
@@ -760,25 +760,14 @@ fn replace_builtin_avatar(record: &mut serde_json::Value, persona_id: &str, now:
 ///
 /// Guards:
 /// - `BUZZ_SHARE_IDENTITY` must be `"1"`
-/// - `BUZZ_PRIVATE_KEY` must parse as valid `nostr::Keys`
+/// - The configured provider identity must parse as valid `nostr::Keys`
 /// - The canonical dir must differ from the current dir (skip if we ARE canonical)
 /// - The canonical dir must exist
 pub fn sync_shared_agent_data(app: &tauri::AppHandle) {
-    // Guard: only runs when sharing identity with a worktree.
-    let is_shared = std::env::var("BUZZ_SHARE_IDENTITY")
-        .map(|v| v == "1")
-        .unwrap_or(false);
-    if !is_shared {
-        return;
-    }
-
-    // Guard: BUZZ_PRIVATE_KEY must be a valid nostr key.
-    let has_valid_key = std::env::var("BUZZ_PRIVATE_KEY")
-        .ok()
-        .and_then(|k| k.parse::<nostr::Keys>().ok())
-        .is_some();
-    if !has_valid_key {
-        eprintln!("buzz-desktop: shared-agent-sync: BUZZ_PRIVATE_KEY missing or invalid, skipping");
+    if !crate::commands::is_shared_identity() {
+        eprintln!(
+            "buzz-desktop: shared-agent-sync: provider identity missing or invalid, skipping"
+        );
         return;
     }
 

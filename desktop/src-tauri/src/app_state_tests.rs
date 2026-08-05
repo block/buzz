@@ -4,50 +4,6 @@ fn assert_key_eq(a: &Keys, b: &Keys) {
     assert_eq!(a.public_key().to_hex(), b.public_key().to_hex());
 }
 
-/// `BUZZ_PRIVATE_KEY` is process-global; serialize the env-mutating tests
-/// so they don't race each other under the parallel test runner.
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Run `body` with `BUZZ_PRIVATE_KEY` set to `value` (or unset when `None`),
-/// restoring the prior value afterward.
-fn with_env_key<T>(value: Option<&str>, body: impl FnOnce() -> T) -> T {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prior = std::env::var("BUZZ_PRIVATE_KEY").ok();
-    match value {
-        Some(v) => std::env::set_var("BUZZ_PRIVATE_KEY", v),
-        None => std::env::remove_var("BUZZ_PRIVATE_KEY"),
-    }
-    let out = body();
-    match prior {
-        Some(v) => std::env::set_var("BUZZ_PRIVATE_KEY", v),
-        None => std::env::remove_var("BUZZ_PRIVATE_KEY"),
-    }
-    out
-}
-
-#[test]
-fn identity_from_env_wins_when_valid() {
-    let configured = Keys::generate();
-    let nsec = configured.secret_key().to_bech32().unwrap();
-
-    let resolved =
-        with_env_key(Some(&nsec), identity_from_env).expect("valid env key must resolve");
-
-    assert_key_eq(&configured, &resolved);
-}
-
-#[test]
-fn identity_from_env_none_when_absent() {
-    assert!(with_env_key(None, identity_from_env).is_none());
-}
-
-#[test]
-fn identity_from_env_none_when_malformed() {
-    // A malformed env var falls through to persisted resolution rather than
-    // winning — otherwise a typo'd key would silently shadow the real one.
-    assert!(with_env_key(Some("not-a-valid-nsec"), identity_from_env).is_none());
-}
-
 #[test]
 fn save_and_load_round_trip() {
     let dir = tempfile::tempdir().unwrap();
@@ -403,50 +359,29 @@ fn valid_keyring_is_used_and_matching_leftover_file_cleaned_up() {
 }
 
 #[test]
-fn unreachable_post_migration_boots_keyring_locked_recovery() {
-    // After a migration the file is gone and the marker exists. A later boot
-    // with the keyring unreachable must NOT generate a fresh key (that would
-    // silently rotate the identity), but must also allow the app to open
-    // instead of hard-aborting. The result is a keyring-locked recovery boot:
-    // ephemeral key held in memory only, nothing persisted anywhere.
-    //
-    // Fail-closed semantics are preserved: no identity is ever written to disk
-    // or the keyring under the ephemeral key, so no silent rotation occurs.
-    // The abort is replaced by a graceful recovery screen.
+fn unreachable_post_migration_fails_closed() {
     let dir = tempfile::tempdir().unwrap();
     let legacy_path = dir.path().join("identity.key");
     write_migration_marker(&migration_marker_path(dir.path())).unwrap();
     assert!(!legacy_path.exists());
 
     let store = FakeIdentityStore::unreachable();
-    let resolved = resolve_identity_with_store(&store, &legacy_path, dir.path()).unwrap();
-
-    // KeyringLocked recovery: ephemeral key returned, nothing persisted.
-    assert_eq!(resolved.recovery, RecoveryState::KeyringLocked);
-    // No identity.key was written.
+    assert!(resolve_identity_with_store(&store, &legacy_path, dir.path()).is_err());
     assert!(!legacy_path.exists());
-    // Keyring store was never called (it is unreachable).
     assert!(store.slot.borrow().is_empty());
     assert!(store.deleted.borrow().is_empty());
 }
 
 #[test]
-fn unreachable_first_run_generates_to_file_when_no_marker() {
-    // Genuine first-EVER launch on a machine whose keyring is down: no file,
-    // no marker. There is no prior identity to protect, so generating to the
-    // `0o600` file is correct — fail-closed here would block a legitimate
-    // first launch.
+fn unreachable_first_run_fails_without_creating_secret_file() {
     let dir = tempfile::tempdir().unwrap();
     let legacy_path = dir.path().join("identity.key");
     assert!(!legacy_path.exists());
     assert!(!migration_marker_path(dir.path()).exists());
 
     let store = FakeIdentityStore::unreachable();
-    let resolved = resolve_identity_with_store(&store, &legacy_path, dir.path()).unwrap();
-
-    // A fresh key was generated and persisted to the file (keyring is down).
-    let from_file = load_key_file(&legacy_path).unwrap();
-    assert_key_eq(&resolved.keys, &from_file);
+    assert!(resolve_identity_with_store(&store, &legacy_path, dir.path()).is_err());
+    assert!(!legacy_path.exists());
 }
 
 #[test]
@@ -497,7 +432,7 @@ fn fresh_keyring_generate_writes_marker() {
 }
 
 #[test]
-fn fresh_keyring_generate_then_unreachable_boots_locked_recovery() {
+fn fresh_provider_generate_then_unreachable_boot_fails_closed() {
     // End-to-end guard for Fix 1: after a fresh keyring-created identity
     // (marker written, no file), a later boot with the keyring unreachable
     // must NOT generate a new key and rotate identity. Instead it boots
@@ -511,40 +446,21 @@ fn fresh_keyring_generate_then_unreachable_boots_locked_recovery() {
     assert!(!legacy_path.exists());
     assert!(migration_marker_path(dir.path()).exists());
 
-    // Second boot: keyring is down. No file + marker present → locked recovery.
+    // Second boot: provider is down. No secret fallback may be created.
     let unreachable = FakeIdentityStore::unreachable();
-    let resolved = resolve_identity_with_store(&unreachable, &legacy_path, dir.path()).unwrap();
-
-    assert_eq!(
-        resolved.recovery,
-        RecoveryState::KeyringLocked,
-        "second boot must boot keyring-locked, not generate a fresh key"
-    );
-    // No identity.key was written — nothing new persisted.
+    assert!(resolve_identity_with_store(&unreachable, &legacy_path, dir.path()).is_err());
     assert!(!legacy_path.exists());
 }
 
 #[test]
-fn fresh_generate_keyring_failure_falls_back_to_file_without_marker() {
-    // Fix 1 correctness on the file-fallback arm: when the keyring write
-    // FAILS during a fresh generate, the key must land in the `0o600` file
-    // and the marker must NOT be written — a marker here would wrongly trip
-    // the next Unreachable boot into failing closed even though the key is
-    // sitting in the file.
+fn fresh_generate_provider_failure_creates_no_secret_file() {
     let dir = tempfile::tempdir().unwrap();
     let legacy_path = dir.path().join("identity.key");
 
     let store = FakeIdentityStore::store_failing();
-    let resolved = resolve_identity_with_store(&store, &legacy_path, dir.path()).unwrap();
-
-    // Key persisted to the file (fallback), and recoverable from it.
-    let from_file = load_key_file(&legacy_path).unwrap();
-    assert_key_eq(&resolved.keys, &from_file);
-    // No marker: the file is the authoritative store, not the keyring.
-    assert!(
-        !migration_marker_path(dir.path()).exists()
-            && resolved.storage == IdentityStorage::LocalFile
-    );
+    assert!(resolve_identity_with_store(&store, &legacy_path, dir.path()).is_err());
+    assert!(!legacy_path.exists());
+    assert!(!migration_marker_path(dir.path()).exists());
 }
 
 // ── New tests for the three defects fixed in this PR ─────────────────────
@@ -639,12 +555,7 @@ fn present_keyring_with_mismatched_file_adopts_file_key() {
 }
 
 #[test]
-fn present_keyring_mismatched_file_adoption_store_failure_boots_with_file_key() {
-    // Present + mismatched identity.key + keyring write fails during adoption.
-    // Boot must succeed with the FILE's key (the user's intent). The file must
-    // survive on disk because the write was rejected — adoption retries on the
-    // next boot when the keyring is reachable. The keyring slot must be
-    // unchanged (shadow nsec still present, not overwritten).
+fn present_provider_mismatched_file_adoption_failure_fails_closed() {
     let dir = tempfile::tempdir().unwrap();
     let legacy_path = dir.path().join("identity.key");
 
@@ -656,17 +567,10 @@ fn present_keyring_mismatched_file_adoption_store_failure_boots_with_file_key() 
     save_key_file(&legacy_path, &file_keys).unwrap();
 
     let store = FakeIdentityStore::present_with_store_failing(&keyring_nsec);
-    let resolved = resolve_identity_with_store(&store, &legacy_path, dir.path()).unwrap();
-
-    // File key (user's explicit import) is returned.
-    assert_key_eq(&file_keys, &resolved.keys);
-    assert_eq!(resolved.recovery, RecoveryState::None);
-
-    // identity.key must survive — adoption write failed, so it is the only
-    // durable copy of the imported key until the next-boot retry.
+    assert!(resolve_identity_with_store(&store, &legacy_path, dir.path()).is_err());
     assert!(
         legacy_path.exists(),
-        "identity.key must be kept when keyring adoption write fails"
+        "legacy source must remain available for a later verified migration"
     );
 
     // Keyring slot unchanged — write was rejected, no overwrite occurred.
@@ -775,11 +679,7 @@ fn reachable_but_empty_with_marker_and_no_file_returns_lost() {
 }
 
 #[test]
-fn persist_imported_identity_falls_back_to_file_on_keyring_failure() {
-    // `persist_imported_identity_impl` with a failing store returns Ok and
-    // writes identity.key as a fallback. No migration marker is written — a
-    // marker here would cause fail-closed on a later Unreachable boot even
-    // though the key is in the file, not the keyring.
+fn persist_imported_identity_provider_failure_creates_no_file_fallback() {
     let dir = tempfile::tempdir().unwrap();
     let legacy_path = dir.path().join("identity.key");
     let imported_keys = Keys::generate();
@@ -788,14 +688,8 @@ fn persist_imported_identity_falls_back_to_file_on_keyring_failure() {
 
     let result = persist_imported_identity_impl(&store, &imported_keys, &legacy_path, dir.path());
 
-    // The policy core handles the keyring failure — Ok, not Err.
-    assert_eq!(result.unwrap(), IdentityStorage::LocalFile);
-
-    // Key is recoverable from the file on next boot.
-    let from_file = load_key_file(&legacy_path).unwrap();
-    assert_key_eq(&imported_keys, &from_file);
-
-    // No marker written — the file is the authoritative store, not the keyring.
+    assert!(result.is_err());
+    assert!(!legacy_path.exists());
     assert!(!migration_marker_path(dir.path()).exists());
 
     // The underlying kernel still propagates keyring failure (low-level
@@ -809,13 +703,7 @@ fn persist_imported_identity_falls_back_to_file_on_keyring_failure() {
 }
 
 #[test]
-fn persist_to_keyring_marker_failure_writes_file_when_absent_preserves_invariant() {
-    // (f) Marker-write failure after a verified keyring write when no
-    // identity.key exists (e.g. import from a lost state where the file
-    // was already deleted). The invariant "keyring-only implies marker
-    // exists" must be preserved: persist_identity_to_keyring must write
-    // identity.key as a fallback so a later keyring-unreachable boot does
-    // NOT treat the machine as a fresh install and silently rotate identity.
+fn persist_to_provider_marker_failure_creates_no_secret_file() {
     let dir = tempfile::tempdir().unwrap();
     let legacy_path = dir.path().join("identity.key");
     assert!(!legacy_path.exists()); // no file — simulates import from lost state
@@ -829,24 +717,9 @@ fn persist_to_keyring_marker_failure_writes_file_when_absent_preserves_invariant
     let marker_path = migration_marker_path(dir.path());
     std::fs::create_dir_all(&marker_path).unwrap();
 
-    // persist_identity_to_keyring will: store to keyring (succeeds), read-
-    // back verify (succeeds), attempt write_migration_marker (fails because
-    // marker_path is a directory), then write identity.key as a fallback.
     let result = persist_identity_to_keyring(&store, &imported_keys, &legacy_path, dir.path());
-
-    // The function returns Ok — the error is handled, not propagated.
-    assert!(
-        result.is_ok(),
-        "persist_identity_to_keyring must not propagate marker failure"
-    );
-
-    // identity.key was written as a fallback — invariant preserved.
-    assert!(
-        legacy_path.exists(),
-        "identity.key must exist as fallback when marker write failed and file was absent"
-    );
-    let from_file = load_key_file(&legacy_path).unwrap();
-    assert_key_eq(&imported_keys, &from_file);
+    assert!(result.is_err());
+    assert!(!legacy_path.exists());
 }
 
 #[test]
@@ -1001,50 +874,31 @@ fn signing_keys_identity_lost_takes_priority_over_keyring_locked() {
 // ── Keyring-locked recovery mode tests ───────────────────────────────────
 
 #[test]
-fn keyring_locked_recovery_ephemeral_never_persisted() {
-    // Unreachable + marker + no file → KeyringLocked recovery. The ephemeral
-    // key is held in memory only; no identity.key is created, no keyring
-    // slot is touched. Fail-closed semantics: no identity is ever rotated.
+fn unavailable_provider_returns_error_without_persisting() {
     let dir = tempfile::tempdir().unwrap();
     let legacy_path = dir.path().join("identity.key");
     write_migration_marker(&migration_marker_path(dir.path())).unwrap();
     assert!(!legacy_path.exists());
 
     let store = FakeIdentityStore::unreachable();
-    let resolved = resolve_identity_with_store(&store, &legacy_path, dir.path()).unwrap();
-
-    assert_eq!(resolved.recovery, RecoveryState::KeyringLocked);
-    // Nothing written to disk — ephemeral key is transient.
+    assert!(resolve_identity_with_store(&store, &legacy_path, dir.path()).is_err());
     assert!(!legacy_path.exists());
-    // Keyring was never contacted (it is unreachable).
     assert!(store.slot.borrow().is_empty());
     assert!(store.deleted.borrow().is_empty());
 }
 
 #[test]
-fn keyring_locked_recovery_distinct_ephemeral_per_boot() {
-    // Each locked-state boot produces a distinct ephemeral key and persists
-    // nothing — mirroring the lost-state guarantee.
+fn repeated_unavailable_provider_boots_both_fail_closed() {
     let dir = tempfile::tempdir().unwrap();
     let legacy_path = dir.path().join("identity.key");
     write_migration_marker(&migration_marker_path(dir.path())).unwrap();
     assert!(!legacy_path.exists());
 
     let store1 = FakeIdentityStore::unreachable();
-    let resolved1 = resolve_identity_with_store(&store1, &legacy_path, dir.path()).unwrap();
-    assert_eq!(resolved1.recovery, RecoveryState::KeyringLocked);
+    assert!(resolve_identity_with_store(&store1, &legacy_path, dir.path()).is_err());
 
     let store2 = FakeIdentityStore::unreachable();
-    let resolved2 = resolve_identity_with_store(&store2, &legacy_path, dir.path()).unwrap();
-    assert_eq!(resolved2.recovery, RecoveryState::KeyringLocked);
-
-    // Two ephemeral keys are different (probabilistic — collision negligible).
-    assert_ne!(
-        resolved1.keys.public_key().to_hex(),
-        resolved2.keys.public_key().to_hex(),
-        "each locked-state boot produces a distinct ephemeral key"
-    );
-    // Neither boot persisted anything.
+    assert!(resolve_identity_with_store(&store2, &legacy_path, dir.path()).is_err());
     assert!(!legacy_path.exists());
 }
 
@@ -1076,9 +930,7 @@ fn persist_identity_to_keyring_readback_corrupt_returns_err() {
 }
 
 #[test]
-fn persist_imported_identity_impl_readback_corrupt_falls_back_to_file() {
-    // B1.2: persist_imported_identity_impl with a readback-corrupt store returns
-    // Ok and writes identity.key as a fallback, and the file holds the original key.
+fn persist_imported_identity_readback_corrupt_fails_without_file() {
     let dir = tempfile::tempdir().unwrap();
     let legacy_path = dir.path().join("identity.key");
 
@@ -1089,17 +941,8 @@ fn persist_imported_identity_impl_readback_corrupt_falls_back_to_file() {
 
     let result = persist_imported_identity_impl(&store, &imported_keys, &legacy_path, dir.path());
 
-    assert!(
-        result.is_ok(),
-        "must return Ok when file fallback succeeds after readback corruption: {:?}",
-        result.err()
-    );
-    assert!(
-        legacy_path.exists(),
-        "identity.key must be written as fallback"
-    );
-    let from_file = load_key_file(&legacy_path).unwrap();
-    assert_key_eq(&imported_keys, &from_file);
+    assert!(result.is_err());
+    assert!(!legacy_path.exists());
 }
 
 // ── B2: corrupt key material recovery ────────────────────────────────────
@@ -1164,20 +1007,14 @@ fn present_corrupt_keyring_and_corrupt_file_generates_fresh() {
 // ── B3: Unreachable probe branches ───────────────────────────────────────
 
 #[test]
-fn unreachable_with_valid_file_resolves_to_file_key() {
-    // B3.a+b (inputs are indistinguishable at this level): Unreachable + valid
-    // identity.key → resolves to the file's key. The keyring is never contacted
-    // and the file is kept on disk (no migration when keyring is down).
+fn unreachable_with_valid_legacy_file_fails_closed() {
     let dir = tempfile::tempdir().unwrap();
     let legacy_path = dir.path().join("identity.key");
     let file_keys = Keys::generate();
     save_key_file(&legacy_path, &file_keys).unwrap();
 
     let store = FakeIdentityStore::unreachable();
-    let resolved = resolve_identity_with_store(&store, &legacy_path, dir.path()).unwrap();
-
-    assert_key_eq(&file_keys, &resolved.keys);
-    assert_eq!(resolved.recovery, RecoveryState::None);
+    assert!(resolve_identity_with_store(&store, &legacy_path, dir.path()).is_err());
     assert!(
         legacy_path.exists(),
         "identity.key must not be deleted when keyring is unreachable"
@@ -1189,11 +1026,7 @@ fn unreachable_with_valid_file_resolves_to_file_key() {
 }
 
 #[test]
-fn unreachable_valid_file_with_marker_resolves_to_file_not_locked_recovery() {
-    // Unreachable + valid identity.key + marker present → resolves to the file
-    // key, NOT KeyringLocked recovery. The locked-recovery branch only fires
-    // when the file is ABSENT; a present file is always used as a direct
-    // fallback regardless of the marker.
+fn unreachable_valid_legacy_file_with_marker_still_fails_closed() {
     let dir = tempfile::tempdir().unwrap();
     let legacy_path = dir.path().join("identity.key");
     let file_keys = Keys::generate();
@@ -1201,45 +1034,29 @@ fn unreachable_valid_file_with_marker_resolves_to_file_not_locked_recovery() {
     write_migration_marker(&migration_marker_path(dir.path())).unwrap();
 
     let store = FakeIdentityStore::unreachable();
-    let resolved = resolve_identity_with_store(&store, &legacy_path, dir.path()).unwrap();
-
-    assert_key_eq(&file_keys, &resolved.keys);
-    assert_eq!(
-        resolved.recovery,
-        RecoveryState::None,
-        "must not enter locked-recovery when a valid file is present"
-    );
+    assert!(resolve_identity_with_store(&store, &legacy_path, dir.path()).is_err());
+    assert!(legacy_path.exists());
 }
 
 #[test]
-fn unreachable_corrupt_file_generates_fresh() {
-    // B3.c: Unreachable + corrupt identity.key → load_file_or_generate quarantines
-    // the corrupt file, generates a fresh key, and saves it to identity.key.
+fn unreachable_corrupt_legacy_file_fails_closed_without_rewrite() {
     let dir = tempfile::tempdir().unwrap();
     let legacy_path = dir.path().join("identity.key");
     std::fs::write(&legacy_path, b"this-is-not-a-valid-nsec").unwrap();
     assert!(!migration_marker_path(dir.path()).exists());
 
     let store = FakeIdentityStore::unreachable();
-    let resolved = resolve_identity_with_store(&store, &legacy_path, dir.path()).unwrap();
-
-    assert_eq!(resolved.recovery, RecoveryState::None);
-    // A fresh key was saved to identity.key (quarantine renames the corrupt file).
-    assert!(
-        legacy_path.exists(),
-        "fresh key must be saved to identity.key"
+    assert!(resolve_identity_with_store(&store, &legacy_path, dir.path()).is_err());
+    assert_eq!(
+        std::fs::read(&legacy_path).unwrap(),
+        b"this-is-not-a-valid-nsec"
     );
-    let from_file = load_key_file(&legacy_path).unwrap();
-    assert_key_eq(&resolved.keys, &from_file);
 }
 
 // ── B4: marker-write failure variants ────────────────────────────────────
 
 #[test]
-fn persist_identity_to_keyring_marker_failure_file_fallback_returns_ok() {
-    // B4.1: marker write fails (data_dir is an existing file, so the marker
-    // path cannot be created), but the file fallback succeeds — returns Ok and
-    // identity.key exists and holds the original key.
+fn persist_identity_marker_failure_returns_error_without_file_fallback() {
     let dir = tempfile::tempdir().unwrap();
     let key_dir = tempfile::tempdir().unwrap();
     let legacy_path = key_dir.path().join("identity.key");
@@ -1254,17 +1071,8 @@ fn persist_identity_to_keyring_marker_failure_file_fallback_returns_ok() {
 
     let result = persist_identity_to_keyring(&store, &imported_keys, &legacy_path, &data_dir_file);
 
-    assert!(
-        result.is_ok(),
-        "must return Ok when file fallback succeeds despite marker failure: {:?}",
-        result.err()
-    );
-    assert!(
-        legacy_path.exists(),
-        "identity.key must be written as fallback"
-    );
-    let from_file = load_key_file(&legacy_path).unwrap();
-    assert_key_eq(&imported_keys, &from_file);
+    assert!(result.is_err());
+    assert!(!legacy_path.exists());
 }
 
 #[test]

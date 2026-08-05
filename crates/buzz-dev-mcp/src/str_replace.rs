@@ -229,8 +229,14 @@ mod tests {
     }
 
     fn make_state(cwd: &std::path::Path) -> SharedState {
-        let shim = crate::shim::Shim::install().expect("shim install");
-        SharedState::new(cwd.to_path_buf(), shim).expect("state new")
+        let shim = crate::shim::Shim::install_without_identity().expect("shim install");
+        SharedState::new(
+            cwd.to_path_buf(),
+            shim,
+            "buzz-test".into(),
+            "identity".into(),
+        )
+        .expect("state new")
     }
 
     #[test]

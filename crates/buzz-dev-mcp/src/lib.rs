@@ -170,6 +170,8 @@ async fn async_main(cmd: String) -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(buzz_cli::run_from_args(std::env::args()).await);
     }
 
+    let (secret_service, secret_account) = parse_secret_coordinates()?;
+
     // MCP server mode — safe to init tracing now.
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
@@ -177,12 +179,38 @@ async fn async_main(cmd: String) -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let cwd = std::env::current_dir()?;
-    let shim = shim::Shim::install()?;
-    let state = Arc::new(shell::SharedState::new(cwd, shim)?);
+    let shim = shim::Shim::install(&secret_service, &secret_account)?;
+    let state = Arc::new(shell::SharedState::new(
+        cwd,
+        shim,
+        secret_service,
+        secret_account,
+    )?);
 
     let service = DevMcp::new(state).serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
+}
+
+fn parse_secret_coordinates() -> Result<(String, String), Box<dyn std::error::Error>> {
+    let mut service = "buzz-desktop".to_string();
+    let mut account = "identity".to_string();
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        let target = match arg.as_str() {
+            "--secret-service" => &mut service,
+            "--secret-account" => &mut account,
+            _ => return Err(format!("unknown buzz-dev-mcp argument: {arg}").into()),
+        };
+        let value = args
+            .next()
+            .ok_or_else(|| format!("{arg} requires a value"))?;
+        if value.trim().is_empty() {
+            return Err(format!("{arg} must not be empty").into());
+        }
+        *target = value;
+    }
+    Ok((service, account))
 }
 
 /// Suppress the console window that Windows otherwise allocates for every

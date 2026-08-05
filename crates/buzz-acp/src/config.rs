@@ -45,6 +45,9 @@ pub enum ConfigError {
 
     #[error("config file error: {0}")]
     ConfigFile(String),
+
+    #[error("secret provider unavailable")]
+    SecretProvider,
 }
 
 #[derive(Debug, Clone, PartialEq, clap::ValueEnum)]
@@ -235,8 +238,13 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_RELAY_URL", default_value = "ws://localhost:3000")]
     pub relay_url: String,
 
-    #[arg(long, env = "BUZZ_PRIVATE_KEY", hide_env_values = true)]
-    pub private_key: String,
+    /// daz-secrets service containing the harness identity.
+    #[arg(long, default_value = "buzz-desktop")]
+    pub secret_service: String,
+
+    /// daz-secrets account containing the harness identity.
+    #[arg(long, default_value = "identity")]
+    pub secret_account: String,
 
     /// Agent owner pubkey (64-char hex). Used for --respond-to=owner-only gate.
     #[arg(long, env = "BUZZ_ACP_AGENT_OWNER")]
@@ -490,6 +498,10 @@ pub struct ChannelFilter {
 #[derive(Debug)]
 pub struct Config {
     pub keys: Keys,
+    /// Non-secret daz-secrets coordinates for child tools that need the same
+    /// identity. The secret itself is never forwarded through argv or env.
+    pub secret_service: String,
+    pub secret_account: String,
     pub relay_url: String,
     pub agent_command: String,
     pub agent_args: Vec<String>,
@@ -798,7 +810,7 @@ pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<Strin
     normalized
 }
 
-/// Propagate legacy env-var aliases to their canonical names.
+/// Propagate legacy nonsecret env-var aliases to their canonical names.
 ///
 /// Must be called **before** the tokio runtime starts — i.e. from the sync
 /// `fn main()` wrapper, not from inside `#[tokio::main]`.
@@ -809,10 +821,7 @@ pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<Strin
 ///
 /// // Must be called before tokio runtime starts — see Rust 2024 edition safety.
 pub fn propagate_legacy_env_vars() {
-    for (legacy, canonical) in [
-        ("BUZZ_ACP_PRIVATE_KEY", "BUZZ_PRIVATE_KEY"),
-        ("BUZZ_ACP_API_TOKEN", "BUZZ_API_TOKEN"),
-    ] {
+    for (legacy, canonical) in [("BUZZ_ACP_API_TOKEN", "BUZZ_API_TOKEN")] {
         if std::env::var(canonical).is_err() {
             if let Ok(val) = std::env::var(legacy) {
                 std::env::set_var(canonical, &val);
@@ -833,15 +842,20 @@ impl Config {
     /// Build a `Config` from already-parsed `CliArgs`. Separated from `from_cli()` so
     /// tests can construct `CliArgs` via `CliArgs::try_parse_from` and exercise the full
     /// validation path without going through process args.
-    pub fn from_args(mut args: CliArgs) -> Result<Self, ConfigError> {
-        let keys = Keys::parse(&args.private_key)?;
-        // Best-effort zeroize: overwrite the raw private key string to reduce
-        // exposure via core dumps or heap inspection (#41). Without the `zeroize`
-        // crate we can only clear the String — the allocator may retain copies.
-        args.private_key
-            .replace_range(.., &"0".repeat(args.private_key.len()));
-        args.private_key.clear();
+    pub fn from_args(args: CliArgs) -> Result<Self, ConfigError> {
+        let client = daz_secrets::BlockingClient::from_default_config()
+            .map_err(|_| ConfigError::SecretProvider)?;
+        let secret = client
+            .get(&args.secret_service, &args.secret_account)
+            .map_err(|_| ConfigError::SecretProvider)?;
+        let secret_value = zeroize::Zeroizing::new(secret.value);
+        let encoded =
+            std::str::from_utf8(&secret_value).map_err(|_| ConfigError::SecretProvider)?;
+        let keys = Keys::parse(encoded.trim())?;
+        Self::from_args_with_keys(args, keys)
+    }
 
+    fn from_args_with_keys(args: CliArgs, keys: Keys) -> Result<Self, ConfigError> {
         let system_prompt = if let Some(text) = args.system_prompt {
             Some(text)
         } else if let Some(ref path) = args.system_prompt_file {
@@ -1056,6 +1070,8 @@ impl Config {
 
         let config = Config {
             keys,
+            secret_service: args.secret_service,
+            secret_account: args.secret_account,
             relay_url: args.relay_url,
             agent_command,
             agent_args,
@@ -1435,6 +1451,8 @@ mod tests {
     fn test_config(mode: SubscribeMode) -> Config {
         Config {
             keys: nostr::Keys::generate(),
+            secret_service: "buzz-test".into(),
+            secret_account: "identity".into(),
             relay_url: "ws://localhost:3000".into(),
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
@@ -2188,16 +2206,14 @@ channels = "ALL"
 
     #[test]
     fn lazy_pool_defaults_off() {
-        let key = "0".repeat(64);
-        assert!(!CliArgs::parse_from(["buzz-acp", "--private-key", &key]).lazy_pool);
+        assert!(!CliArgs::parse_from(["buzz-acp"]).lazy_pool);
     }
 
     #[test]
     fn lazy_pool_cli_flag_enables_deferred_startup() {
-        let key = "0".repeat(64);
-        let args = CliArgs::try_parse_from(["buzz-acp", "--private-key", &key, "--lazy-pool=true"]);
+        let args = CliArgs::try_parse_from(["buzz-acp", "--lazy-pool=true"]);
         assert!(args.is_err(), "bool flags do not take an explicit value");
-        assert!(CliArgs::parse_from(["buzz-acp", "--private-key", &key, "--lazy-pool"]).lazy_pool);
+        assert!(CliArgs::parse_from(["buzz-acp", "--lazy-pool"]).lazy_pool);
     }
 
     #[test]
@@ -2552,7 +2568,7 @@ channels = "ALL"
     fn test_multiple_event_handling_default_is_steer() {
         // Parse a minimal arg set; the default for --multiple-event-handling
         // must be `steer` (steering is the default mid-turn delivery path).
-        let args = CliArgs::parse_from(["buzz-acp", "--private-key", &"0".repeat(64)]);
+        let args = CliArgs::parse_from(["buzz-acp"]);
         assert_eq!(args.multiple_event_handling, MultipleEventHandling::Steer);
         // Dedup default must remain `queue` so steering's requirement is met.
         assert!(matches!(args.dedup, DedupMode::Queue));
@@ -2733,7 +2749,7 @@ channels = "ALL"
     // std::env::set_var to avoid test-parallelism races on shared env state.
     // The env-var wiring is covered by the clap #[arg(env)] attribute itself.
 
-    // A minimal valid private key for test use (secp256k1 scalar = 1).
+    // A minimal valid private key for exercising post-provider validation.
     const TEST_PRIVATE_KEY: &str =
         "0000000000000000000000000000000000000000000000000000000000000001";
 
@@ -2742,15 +2758,13 @@ channels = "ALL"
         // --allowed-respond-to=owner-only,allowlist + --respond-to=anyone → ConfigError
         let args = CliArgs::try_parse_from([
             "buzz-acp",
-            "--private-key",
-            TEST_PRIVATE_KEY,
             "--respond-to",
             "anyone",
             "--allowed-respond-to",
             "owner-only,allowlist",
         ])
         .expect("clap should parse args");
-        let result = Config::from_args(args);
+        let result = Config::from_args_with_keys(args, Keys::parse(TEST_PRIVATE_KEY).unwrap());
 
         assert!(
             result.is_err(),
@@ -2772,15 +2786,13 @@ channels = "ALL"
         // --allowed-respond-to=owner-only,allowlist + --respond-to=owner-only → Ok
         let args = CliArgs::try_parse_from([
             "buzz-acp",
-            "--private-key",
-            TEST_PRIVATE_KEY,
             "--respond-to",
             "owner-only",
             "--allowed-respond-to",
             "owner-only,allowlist",
         ])
         .expect("clap should parse args");
-        let result = Config::from_args(args);
+        let result = Config::from_args_with_keys(args, Keys::parse(TEST_PRIVATE_KEY).unwrap());
 
         assert!(
             result.is_ok(),
@@ -2791,15 +2803,9 @@ channels = "ALL"
     #[test]
     fn allowed_respond_to_full_path_unset_allows_all() {
         // No --allowed-respond-to flag → anyone is accepted.
-        let args = CliArgs::try_parse_from([
-            "buzz-acp",
-            "--private-key",
-            TEST_PRIVATE_KEY,
-            "--respond-to",
-            "anyone",
-        ])
-        .expect("clap should parse args");
-        let result = Config::from_args(args);
+        let args = CliArgs::try_parse_from(["buzz-acp", "--respond-to", "anyone"])
+            .expect("clap should parse args");
+        let result = Config::from_args_with_keys(args, Keys::parse(TEST_PRIVATE_KEY).unwrap());
 
         assert!(
             result.is_ok(),
@@ -2813,13 +2819,11 @@ channels = "ALL"
     fn max_turn_duration_at_ceiling_is_accepted() {
         let args = CliArgs::try_parse_from([
             "buzz-acp",
-            "--private-key",
-            TEST_PRIVATE_KEY,
             "--max-turn-duration",
             &MAX_TURN_DURATION_CEILING_SECS.to_string(),
         ])
         .expect("clap should parse args");
-        let result = Config::from_args(args);
+        let result = Config::from_args_with_keys(args, Keys::parse(TEST_PRIVATE_KEY).unwrap());
 
         assert!(
             result.is_ok(),
@@ -2830,15 +2834,9 @@ channels = "ALL"
     #[test]
     fn max_turn_duration_above_ceiling_is_rejected() {
         let over = MAX_TURN_DURATION_CEILING_SECS + 1;
-        let args = CliArgs::try_parse_from([
-            "buzz-acp",
-            "--private-key",
-            TEST_PRIVATE_KEY,
-            "--max-turn-duration",
-            &over.to_string(),
-        ])
-        .expect("clap should parse args");
-        let result = Config::from_args(args);
+        let args = CliArgs::try_parse_from(["buzz-acp", "--max-turn-duration", &over.to_string()])
+            .expect("clap should parse args");
+        let result = Config::from_args_with_keys(args, Keys::parse(TEST_PRIVATE_KEY).unwrap());
 
         assert!(
             result.is_err(),

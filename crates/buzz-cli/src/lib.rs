@@ -10,6 +10,7 @@ use client::BuzzClient;
 use error::CliError;
 use nostr::Keys;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 /// Run the Buzz CLI from raw arguments (including `argv[0]`).
 ///
@@ -69,7 +70,8 @@ Buzz CLI — interact with a Buzz relay
 
 Configuration (flags override env vars):
   BUZZ_RELAY_URL     Relay base URL        [default: http://localhost:3000]
-  BUZZ_PRIVATE_KEY   Nostr private key (hex or nsec)  [required]
+  --secret-service   daz-secrets service   [default: git config or buzz-desktop]
+  --secret-account   daz-secrets account   [default: git config or identity]
   BUZZ_AUTH_TAG      NIP-OA auth tag JSON  [optional]
 
 The 'pack' subcommand runs locally and does not require a relay connection.
@@ -82,9 +84,13 @@ struct Cli {
     #[arg(long, env = "BUZZ_RELAY_URL", default_value = "http://localhost:3000")]
     relay: String,
 
-    /// Nostr private key (hex or nsec). This is the CLI's identity.
-    #[arg(long, env = "BUZZ_PRIVATE_KEY", hide_env_values = true)]
-    private_key: Option<String>,
+    /// daz-secrets service containing the Nostr identity.
+    #[arg(long)]
+    secret_service: Option<String>,
+
+    /// daz-secrets account containing the Nostr identity.
+    #[arg(long)]
+    secret_account: Option<String>,
 
     /// NIP-OA auth tag JSON (owner attestation). Injected into every signed event.
     #[arg(long, env = "BUZZ_AUTH_TAG", hide_env_values = true)]
@@ -1934,13 +1940,28 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         };
     }
 
-    // Auth: private key is required for all relay operations.
-    // The keypair IS the identity — no tokens, no other auth.
-    let private_key_str = cli.private_key.ok_or_else(|| {
-        CliError::Auth("BUZZ_PRIVATE_KEY is required (use --private-key or set env var)".into())
-    })?;
-    let keys = Keys::parse(&private_key_str)
-        .map_err(|e| CliError::Key(format!("invalid BUZZ_PRIVATE_KEY: {e}")))?;
+    // Auth: the keypair IS the identity. Load it directly from daz-secrets so
+    // private bytes never enter argv, environment variables, or plaintext
+    // files. Managed-agent runtimes expose their nonsecret coordinates through
+    // process-local git config; standalone installs use the desktop identity.
+    let secret_service = cli
+        .secret_service
+        .or_else(|| git_config("nostr.secretService"))
+        .unwrap_or_else(|| "buzz-desktop".to_string());
+    let secret_account = cli
+        .secret_account
+        .or_else(|| git_config("nostr.secretAccount"))
+        .unwrap_or_else(|| "identity".to_string());
+    let provider = daz_secrets::BlockingClient::from_default_config()
+        .map_err(|_| CliError::Auth("daz-secrets provider is unavailable".into()))?;
+    let secret = provider
+        .get(&secret_service, &secret_account)
+        .map_err(|_| CliError::Auth("Nostr identity is unavailable from daz-secrets".into()))?;
+    let private_key = Zeroizing::new(secret.value);
+    let private_key_str = std::str::from_utf8(&private_key)
+        .map_err(|_| CliError::Auth("Nostr identity has invalid encoding".into()))?;
+    let keys = Keys::parse(private_key_str.trim())
+        .map_err(|_| CliError::Key("invalid Nostr identity in daz-secrets".into()))?;
 
     // NIP-OA: parse and verify the auth tag if provided.
     //
@@ -1995,6 +2016,19 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
         Cmd::Pack(_) => unreachable!("handled above"),
     }
+}
+
+fn git_config(key: &str) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["config", "--get", key])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 #[cfg(test)]

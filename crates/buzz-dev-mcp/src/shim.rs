@@ -1,19 +1,19 @@
 use nostr::ToBech32;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
-use zeroize::Zeroize;
+use zeroize::Zeroizing;
 
 /// Session-scoped shim directory providing tools and git config to shell children.
 ///
 /// On install:
 /// 1. Creates a 0700 tempdir with symlinks back to our binary (multicall)
-/// 2. If `NOSTR_PRIVATE_KEY` is set: writes a 0600 keyfile, derives the pubkey,
-///    builds ephemeral `GIT_CONFIG_*` env vars, then removes the env var
+/// 2. Resolves the identity from daz-secrets long enough to derive its public
+///    key, then builds ephemeral `GIT_CONFIG_*` entries containing only the
+///    provider coordinates and public identity
 /// 3. Prepends the shim dir to PATH
 ///
-/// Shell children receive `path_env`, `git_env`, and `BUZZ_PRIVATE_KEY` (for
-/// the buzz CLI). `NOSTR_PRIVATE_KEY` is removed from the process env after
-/// the keyfile is written — git helpers read from the keyfile only.
+/// Shell children receive `path_env` and non-secret `git_env`. They never
+/// receive private key bytes through files, argv, or environment variables.
 /// Cleaned up on drop (TempDir).
 pub struct Shim {
     _dir: TempDir,
@@ -22,7 +22,27 @@ pub struct Shim {
 }
 
 impl Shim {
-    pub fn install() -> std::io::Result<Self> {
+    pub fn install(secret_service: &str, secret_account: &str) -> std::io::Result<Self> {
+        let client =
+            daz_secrets::BlockingClient::from_default_config().map_err(secret_provider_error)?;
+        let secret = client
+            .get(secret_service, secret_account)
+            .map_err(secret_provider_error)?;
+        let secret_value = Zeroizing::new(secret.value);
+        let encoded = std::str::from_utf8(&secret_value)
+            .map_err(|_| secret_provider_error("identity is not valid UTF-8"))?;
+        let keys = nostr::Keys::parse(encoded.trim())
+            .map_err(|_| secret_provider_error("identity is not a valid Nostr key"))?;
+        let info = KeyInfo::new(&keys, secret_service, secret_account);
+        Self::install_with_identity(Some(&info))
+    }
+
+    #[cfg(test)]
+    pub fn install_without_identity() -> std::io::Result<Self> {
+        Self::install_with_identity(None)
+    }
+
+    fn install_with_identity(info: Option<&KeyInfo>) -> std::io::Result<Self> {
         let dir = tempfile::Builder::new().prefix("buzz-dev-mcp-").tempdir()?;
         set_owner_only(dir.path())?;
 
@@ -48,24 +68,7 @@ impl Shim {
             .to_string_lossy()
             .into_owned();
 
-        // Read and unconditionally remove NOSTR_PRIVATE_KEY from this process's
-        // env. The key must never leak to child processes regardless of whether
-        // keyfile creation succeeds.
-        let mut nostr_key = std::env::var("NOSTR_PRIVATE_KEY").ok();
-        std::env::remove_var("NOSTR_PRIVATE_KEY");
-
-        // Ephemeral git config: write key to 0600 keyfile, derive pubkey, build
-        // GIT_CONFIG_* env vars for nostr auth + signing.
-        let git_env = match nostr_key
-            .as_deref()
-            .and_then(|k| write_keyfile(dir.path(), k))
-        {
-            Some(info) => build_git_env(&info),
-            None => Vec::new(),
-        };
-        if let Some(ref mut k) = nostr_key {
-            k.zeroize();
-        }
+        let git_env = info.map(build_git_env).unwrap_or_default();
 
         Ok(Self {
             _dir: dir,
@@ -76,76 +79,30 @@ impl Shim {
 }
 
 struct KeyInfo {
-    keyfile_path: String,
+    secret_service: String,
+    secret_account: String,
     pubkey_hex: String,
     npub: String,
 }
 
-/// Write the nostr private key to an owner-only file in the shim dir.
-/// Returns key metadata or None if key is empty/invalid.
-/// Warns to stderr if the key is invalid (operator mistake).
-fn write_keyfile(shim_dir: &Path, raw: &str) -> Option<KeyInfo> {
-    if raw.is_empty() {
-        return None;
-    }
-    let keys = match nostr::Keys::parse(raw) {
-        Ok(k) => k,
-        Err(e) => {
-            eprintln!(
-                "buzz-dev-mcp: warning: NOSTR_PRIVATE_KEY is set but invalid ({e}); \
-                 git auth/signing will be disabled"
-            );
-            return None;
+impl KeyInfo {
+    fn new(keys: &nostr::Keys, secret_service: &str, secret_account: &str) -> Self {
+        let pubkey_hex = keys.public_key().to_hex();
+        let npub = keys
+            .public_key()
+            .to_bech32()
+            .unwrap_or_else(|_| pubkey_hex.clone());
+        Self {
+            secret_service: secret_service.to_string(),
+            secret_account: secret_account.to_string(),
+            pubkey_hex,
+            npub,
         }
-    };
-    let pubkey_hex = keys.public_key().to_hex();
-    let npub = keys
-        .public_key()
-        .to_bech32()
-        .unwrap_or_else(|_| pubkey_hex.clone());
-
-    let keyfile = shim_dir.join(".nostr-key");
-    if write_keyfile_atomic(&keyfile, raw.as_bytes()).is_err() {
-        eprintln!(
-            "buzz-dev-mcp: warning: failed to write nostr keyfile; git auth/signing disabled"
-        );
-        return None;
     }
-    let keyfile_path = match keyfile.to_str() {
-        Some(s) => s.to_owned(),
-        None => {
-            eprintln!(
-                "buzz-dev-mcp: warning: tempdir path is not valid UTF-8; git auth/signing disabled"
-            );
-            return None;
-        }
-    };
-
-    Some(KeyInfo {
-        keyfile_path,
-        pubkey_hex,
-        npub,
-    })
 }
 
-/// Write `data` to `path` with 0600 permissions set at creation time via
-/// `OpenOptions::mode()` (no window where the file is world-readable).
-/// Non-Unix: plain write — acceptable inside our 0700 tempdir.
-#[cfg(unix)]
-fn write_keyfile_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)?;
-    f.write_all(data)
-}
-
-#[cfg(not(unix))]
-fn write_keyfile_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    std::fs::write(path, data)
+fn secret_provider_error(error: impl std::fmt::Display) -> std::io::Error {
+    std::io::Error::other(format!("daz-secrets identity lookup failed: {error}"))
 }
 
 /// Derive a NIP-05-style email from the pubkey and relay URL.
@@ -299,7 +256,8 @@ fn build_git_env(info: &KeyInfo) -> Vec<(String, String)> {
         // Required: Buzz relay verifies NIP-98 against the full repo-root URL.
         // Without useHttpPath, git only passes the host and auth is rejected.
         ("credential.useHttpPath", "true".into()),
-        ("nostr.keyfile", info.keyfile_path.clone()),
+        ("nostr.secretService", info.secret_service.clone()),
+        ("nostr.secretAccount", info.secret_account.clone()),
         ("gpg.format", "x509".into()),
         ("gpg.x509.program", "git-sign-nostr".into()),
         ("commit.gpgSign", "true".into()),
@@ -374,7 +332,8 @@ mod git_user_name_tests {
 
     fn key_info() -> KeyInfo {
         KeyInfo {
-            keyfile_path: "/tmp/.nostr-key".into(),
+            secret_service: "buzz-test".into(),
+            secret_account: "identity".into(),
             pubkey_hex: PUBKEY_HEX.into(),
             npub: NPUB.into(),
         }

@@ -135,28 +135,6 @@ pub struct AppState {
     pub pending_owned_channels: Mutex<std::collections::HashSet<(String, String)>>,
 }
 
-/// Parse the `BUZZ_PRIVATE_KEY` env var into identity keys. `Some` means the
-/// env var was present and valid and MUST win over any persisted/keyring key
-/// (the dev/CI/harness override). `None` means absent or malformed — callers
-/// fall through to persisted resolution. A malformed value is logged and
-/// treated as absent rather than left on an ephemeral identity.
-fn identity_from_env() -> Option<Keys> {
-    match std::env::var("BUZZ_PRIVATE_KEY") {
-        Ok(nsec) => match Keys::parse(nsec.trim()) {
-            Ok(keys) => Some(keys),
-            Err(error) => {
-                eprintln!("buzz-desktop: invalid BUZZ_PRIVATE_KEY: {error}");
-                None
-            }
-        },
-        Err(std::env::VarError::NotUnicode(_)) => {
-            eprintln!("buzz-desktop: BUZZ_PRIVATE_KEY contains invalid UTF-8");
-            None
-        }
-        Err(std::env::VarError::NotPresent) => None,
-    }
-}
-
 /// Build the no-redirect HTTP client used for authenticated relay media
 /// fetches (download / copy).
 ///
@@ -179,22 +157,11 @@ pub fn build_media_fetch_client() -> reqwest::Result<reqwest::Client> {
 }
 
 pub fn build_app_state() -> AppState {
-    // Env var takes precedence (dev/CI). If absent, resolve_persisted_identity()
-    // in setup() will replace the ephemeral placeholder with a persisted key.
-    let (keys, identity_storage) = match identity_from_env() {
-        Some(keys) => {
-            eprintln!(
-                "buzz-desktop: configured identity pubkey {}",
-                keys.public_key().to_hex()
-            );
-            (keys, IdentityStorage::Environment)
-        }
-        None => (Keys::generate(), IdentityStorage::Ephemeral),
-    };
-
     AppState {
-        keys: Mutex::new(keys),
-        identity_storage: AtomicU8::new(identity_storage as u8),
+        // setup() replaces this non-persisted placeholder from the provider
+        // before identity-dependent work is enabled.
+        keys: Mutex::new(Keys::generate()),
+        identity_storage: AtomicU8::new(IdentityStorage::Ephemeral as u8),
         http_client: reqwest::Client::builder()
             .resolve("localhost", std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
             .pool_idle_timeout(std::time::Duration::from_secs(10))
@@ -343,8 +310,8 @@ impl AppState {
 /// Resolve the user's identity key from the app data directory and wire
 /// the resulting [`RecoveryState`] into `AppState`.
 ///
-/// Priority: `BUZZ_PRIVATE_KEY` env var (already handled in `build_app_state`)
-/// → keyring → `{app_data_dir}/identity.key` file → generate + save.
+/// Priority: configured secret provider, with a one-time migration from the
+/// legacy `{app_data_dir}/identity.key` file when present.
 ///
 /// On success, writes the resolved keys into `state.keys` (with the mutex)
 /// before storing the recovery flags (Release), so any thread that reads
@@ -356,13 +323,6 @@ impl AppState {
 /// but inaccessible this boot). Both states boot with an ephemeral key; the
 /// frontend shows different recovery screens for each.
 pub fn resolve_persisted_identity(app: &AppHandle, state: &AppState) -> Result<(), String> {
-    // Only skip file-based resolution if the env var was present AND parsed
-    // successfully. A malformed env var should fall through to the persisted
-    // key rather than leaving the app on an ephemeral identity.
-    if identity_from_env().is_some() {
-        return Ok(());
-    }
-
     let data_dir = app
         .path()
         .app_data_dir()
@@ -447,14 +407,9 @@ impl IdentityKeyStore for crate::secret_store::SecretStore {
 fn load_or_create_identity(data_dir: &std::path::Path) -> Result<ResolvedIdentity, String> {
     let legacy_path = data_dir.join("identity.key");
 
-    // No keyring available in this build: the `0o600` file is the only store.
+    // Secrets must never fall back to a file in provider-disabled builds.
     if !cfg!(feature = "system-keyring") {
-        let keys = load_file_or_generate(&legacy_path, data_dir)?;
-        return Ok(ResolvedIdentity {
-            keys,
-            recovery: RecoveryState::None,
-            storage: IdentityStorage::LocalFile,
-        });
+        return Err("secret-provider support is disabled".to_string());
     }
 
     let store = crate::secret_store::SecretStore::shared(keyring_service());
@@ -496,31 +451,16 @@ fn resolve_identity_with_store(
                                          adopting imported key {}",
                                         file_keys.public_key().to_hex()
                                     );
-                                    // Delegate the store→read-back-verify→marker→delete
-                                    // sequence to `persist_identity_to_keyring`, which owns
-                                    // the marker-before-delete invariant and the fallback
-                                    // logic that keeps identity.key when the marker write
-                                    // fails. A transient keyring failure must not abort
-                                    // boot — the file key is safe and adoption retries next
-                                    // boot when the keyring is reachable again.
-                                    let storage = if let Err(e) = persist_identity_to_keyring(
+                                    persist_identity_to_keyring(
                                         store,
                                         &file_keys,
                                         legacy_path,
                                         data_dir,
-                                    ) {
-                                        eprintln!(
-                                            "buzz-desktop: keyring adoption of identity.key \
-                                             failed ({e}); using file key, will retry next boot"
-                                        );
-                                        IdentityStorage::LocalFile
-                                    } else {
-                                        IdentityStorage::SystemKeyring
-                                    };
+                                    )?;
                                     return Ok(ResolvedIdentity {
                                         keys: file_keys,
                                         recovery: RecoveryState::None,
-                                        storage,
+                                        storage: IdentityStorage::SystemKeyring,
                                     });
                                 }
                                 // Corrupt file — keyring is authoritative. Log before
@@ -614,41 +554,7 @@ fn resolve_identity_with_store(
                 });
             }
         }
-        KeyringProbe::Unreachable => {
-            // Keyring down this boot. If a recoverable file is present, use it
-            // (and do NOT migrate — re-importing later could resurrect a
-            // rotated key). With NO file, the marker disambiguates two states
-            // that are otherwise byte-identical (Unreachable + no file):
-            //   - marker present → the key was migrated into the keyring and the
-            //     file deleted. The real key is unreachable this boot but still
-            //     exists in the keyring. Boot keyring-locked recovery (ephemeral
-            //     key, all signing disabled) so the app can at least open; the
-            //     frontend shows a "unlock the keyring and relaunch" screen.
-            //     Fail-closed semantics are preserved: nothing is ever persisted
-            //     under the ephemeral key, so no silent identity rotation occurs.
-            //   - no marker → genuine first-ever launch with nothing to protect.
-            //     Generate to the `0o600` file (legitimate first-run).
-            if !legacy_path.exists() && migration_marker_path(data_dir).exists() {
-                let ephemeral = Keys::generate();
-                eprintln!(
-                    "buzz-desktop: keyring unreachable but migration marker present; \
-                     booting keyring-locked recovery with ephemeral key {} — \
-                     unlock the keyring and relaunch",
-                    ephemeral.public_key().to_hex()
-                );
-                return Ok(ResolvedIdentity {
-                    keys: ephemeral,
-                    recovery: RecoveryState::KeyringLocked,
-                    storage: IdentityStorage::Ephemeral,
-                });
-            }
-            let keys = load_file_or_generate(legacy_path, data_dir)?;
-            return Ok(ResolvedIdentity {
-                keys,
-                recovery: RecoveryState::None,
-                storage: IdentityStorage::LocalFile,
-            });
-        }
+        KeyringProbe::Unreachable => return Err("secret provider unavailable".to_string()),
     }
 
     let (keys, storage) = generate_and_persist(store, legacy_path, data_dir)?;
@@ -711,33 +617,6 @@ fn recover_from_keyring(
     })
 }
 
-/// Load the `0o600` identity file, quarantining corruption, else generate and
-/// save a fresh key to the file. Used when no keyring is available.
-fn load_file_or_generate(
-    legacy_path: &std::path::Path,
-    data_dir: &std::path::Path,
-) -> Result<Keys, String> {
-    if legacy_path.exists() {
-        match load_key_file(legacy_path) {
-            Ok(keys) => {
-                eprintln!(
-                    "buzz-desktop: persisted identity pubkey {}",
-                    keys.public_key().to_hex()
-                );
-                return Ok(keys);
-            }
-            Err(error) => quarantine_corrupt_key(legacy_path, data_dir, &error),
-        }
-    }
-    let keys = Keys::generate();
-    save_key_file(legacy_path, &keys)?;
-    eprintln!(
-        "buzz-desktop: generated and saved identity pubkey {}",
-        keys.public_key().to_hex()
-    );
-    Ok(keys)
-}
-
 /// Import the plaintext `identity.key` into the store, verify the round-trip,
 /// then delete the file. Returns `Ok(None)` if the file was corrupt (caller
 /// continues to generate-and-save).
@@ -769,25 +648,13 @@ fn migrate_identity_file(
     if !verify_ok {
         return Err("keyring read-back verify failed for identity key".to_string());
     }
-    // Crash-safe ordering: record that the key now lives in the keyring
-    // (marker write + fsync) BEFORE deleting the file. A crash between
-    // the two must never leave "file gone, no marker" — that state is
-    // indistinguishable from a fresh install and would silently rotate
-    // the identity on the next keyring-unreachable boot. If the marker
-    // cannot be written, keep the file so the key is never stranded.
+    // The provider read-back is the authoritative durability proof. The
+    // marker is nonsecret recovery metadata; write it before deleting the
+    // legacy file, and fail the migration if either operation fails.
     let marker_path = migration_marker_path(data_dir);
-    if let Err(e) = write_migration_marker(&marker_path) {
-        eprintln!(
-            "buzz-desktop: keyring import ok but failed to write migration marker ({e}); \
-             keeping identity.key so the key is not stranded"
-        );
-        return Ok(Some(keys));
-    }
-    if let Err(e) = std::fs::remove_file(legacy_path) {
-        eprintln!("buzz-desktop: keyring import ok but failed to delete identity.key: {e}");
-    } else {
-        eprintln!("buzz-desktop: migrated identity key into OS keyring");
-    }
+    write_migration_marker(&marker_path)?;
+    std::fs::remove_file(legacy_path).map_err(|e| format!("remove migrated identity.key: {e}"))?;
+    eprintln!("buzz-desktop: migrated identity key into secret provider");
     Ok(Some(keys))
 }
 
@@ -810,7 +677,7 @@ fn persist_identity_to_keyring(
         .to_bech32()
         .map_err(|e| format!("encode nsec: {e}"))?;
 
-    // Will error if the keyring is unavailable — caller falls back to the file.
+    // Provider failures propagate. Secret files are never a fallback.
     store.store(IDENTITY_KEY_NAME, &nsec)?;
 
     // Read-back verify before touching durable state. Uses verify_stored()
@@ -824,37 +691,7 @@ fn persist_identity_to_keyring(
 
     // Write marker before deleting the file (crash-safe ordering).
     let marker_path = migration_marker_path(data_dir);
-    if let Err(e) = write_migration_marker(&marker_path) {
-        // Keyring holds the key but no marker exists. Preserve the invariant
-        // "keyring-only implies marker exists" by ensuring identity.key is
-        // present as a fallback: write it if absent, leave it if already there.
-        // This prevents a later keyring-unreachable + no-marker boot from
-        // treating this as a fresh install and silently rotating identity.
-        if !legacy_path.exists() {
-            if let Err(write_err) = save_key_file(legacy_path, keys) {
-                eprintln!(
-                    "buzz-desktop: keyring ok but marker write failed ({e}) and \
-                     identity.key write also failed ({write_err}); key may be unrecoverable"
-                );
-                return Err(format!(
-                    "keyring ok but neither migration marker nor identity.key fallback \
-                     could be written (marker: {e}; file: {write_err}); \
-                     identity must not be treated as durably persisted — retry the import"
-                ));
-            } else {
-                eprintln!(
-                    "buzz-desktop: keyring ok but marker write failed ({e}); \
-                     wrote identity.key as fallback so the key is not stranded"
-                );
-            }
-        } else {
-            eprintln!(
-                "buzz-desktop: keyring ok but marker write failed ({e}); \
-                 keeping existing identity.key so the key is not stranded"
-            );
-        }
-        return Ok(());
-    }
+    write_migration_marker(&marker_path)?;
 
     if legacy_path.exists() {
         if let Err(e) = std::fs::remove_file(legacy_path) {
@@ -865,27 +702,15 @@ fn persist_identity_to_keyring(
     Ok(())
 }
 
-/// Core implementation of imported-identity persistence. Tries the OS keyring
-/// first via [`persist_identity_to_keyring`]; if the keyring is unavailable,
-/// falls back to the `0o600` identity.key file. Returns `Err` only when both
-/// the keyring write and the file fallback fail.
+/// Core implementation of provider-only imported-identity persistence.
 fn persist_imported_identity_impl(
     store: &impl IdentityKeyStore,
     keys: &Keys,
     legacy_path: &std::path::Path,
     data_dir: &std::path::Path,
 ) -> Result<IdentityStorage, String> {
-    match persist_identity_to_keyring(store, keys, legacy_path, data_dir) {
-        Ok(()) => Ok(IdentityStorage::SystemKeyring),
-        Err(e) => {
-            eprintln!(
-                "buzz-desktop: keyring write failed during import ({e}), \
-                 falling back to identity.key"
-            );
-            save_key_file(legacy_path, keys)?;
-            Ok(IdentityStorage::LocalFile)
-        }
-    }
+    persist_identity_to_keyring(store, keys, legacy_path, data_dir)?;
+    Ok(IdentityStorage::SystemKeyring)
 }
 
 /// Public entry point binding [`persist_imported_identity_impl`] to the shared
@@ -937,16 +762,7 @@ fn generate_and_persist(
 ) -> Result<(Keys, IdentityStorage), String> {
     let keys = Keys::generate();
     let storage = store_key_preferring_keyring(store, &keys, legacy_path)?;
-    if storage == IdentityStorage::SystemKeyring {
-        let marker_path = migration_marker_path(data_dir);
-        if let Err(e) = write_migration_marker(&marker_path) {
-            eprintln!(
-                "buzz-desktop: stored identity in keyring but failed to write migration marker \
-                 ({e}); saving identity.key fallback so the key is not stranded"
-            );
-            save_key_file(legacy_path, &keys)?;
-        }
-    }
+    write_migration_marker(&migration_marker_path(data_dir))?;
     eprintln!(
         "buzz-desktop: generated and saved identity pubkey {}",
         keys.public_key().to_hex()
@@ -954,11 +770,7 @@ fn generate_and_persist(
     Ok((keys, storage))
 }
 
-/// Persist `keys` through the store, silently falling back to the `0o600` file
-/// when the keyring write fails on an availability error. Reports which backend
-/// held the key (no verify/marker/delete — those belong to callers that own the
-/// full migration contract) so the caller can write the migration marker only on
-/// keyring success.
+/// Persist `keys` through the configured provider without a file fallback.
 fn store_key_preferring_keyring(
     store: &impl IdentityKeyStore,
     keys: &Keys,
@@ -968,14 +780,9 @@ fn store_key_preferring_keyring(
         .secret_key()
         .to_bech32()
         .map_err(|e| format!("encode nsec: {e}"))?;
-    match store.store(IDENTITY_KEY_NAME, &nsec) {
-        Ok(()) => Ok(IdentityStorage::SystemKeyring),
-        Err(keyring_err) => {
-            eprintln!("buzz-desktop: keyring write failed ({keyring_err}), using file fallback");
-            save_key_file(legacy_path, keys)?;
-            Ok(IdentityStorage::LocalFile)
-        }
-    }
+    let _ = legacy_path;
+    store.store(IDENTITY_KEY_NAME, &nsec)?;
+    Ok(IdentityStorage::SystemKeyring)
 }
 
 /// Ensure the migration marker exists (writing it if absent), then remove the
@@ -1013,24 +820,6 @@ fn cleanup_leftover_identity_file(legacy_path: &std::path::Path) {
     }
 }
 
-/// Quarantine a corrupt `identity.key` with a timestamp so prior backups are
-/// never overwritten.
-fn quarantine_corrupt_key(key_path: &std::path::Path, data_dir: &std::path::Path, error: &str) {
-    if !key_path.exists() {
-        return;
-    }
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let bad_name = format!("identity.key.bad.{ts}");
-    eprintln!("buzz-desktop: corrupt identity.key ({error}), quarantining to {bad_name}");
-    let bad_path = data_dir.join(bad_name);
-    if std::fs::rename(key_path, &bad_path).is_err() {
-        let _ = std::fs::remove_file(key_path);
-    }
-}
-
 fn load_key_file(path: &std::path::Path) -> Result<Keys, String> {
     let content = std::fs::read_to_string(path).map_err(|e| format!("read identity.key: {e}"))?;
     let trimmed = content.trim();
@@ -1049,6 +838,7 @@ fn load_key_file(path: &std::path::Path) -> Result<Keys, String> {
 /// On Unix, the file is created with mode 0600 (owner read/write only).
 /// On Windows, default ACLs apply — the app data directory is already
 /// per-user, so the key is not world-readable in practice.
+#[cfg(test)]
 pub(crate) fn save_key_file(path: &std::path::Path, keys: &Keys) -> Result<(), String> {
     use atomic_write_file::AtomicWriteFile;
 

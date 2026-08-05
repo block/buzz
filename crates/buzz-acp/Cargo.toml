@@ -20,6 +20,7 @@ path = "src/main.rs"
 buzz-core = { workspace = true }
 buzz-sdk = { workspace = true }
 buzz-persona = { path = "../buzz-persona" }
+daz-secrets = { workspace = true }
 
 # Nostr
 nostr = { workspace = true }
@@ -61,6 +62,7 @@ tracing-subscriber = { workspace = true }
 # Error handling
 thiserror = { workspace = true }
 anyhow = { workspace = true }
+zeroize = { workspace = true }
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }

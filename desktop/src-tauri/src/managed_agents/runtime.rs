@@ -567,7 +567,14 @@ pub fn spawn_agent_child(
         command.env("PATH", path);
     }
     command.env("RUST_LOG", child_rust_log_filter());
-    command.env("BUZZ_PRIVATE_KEY", &record.private_key_nsec);
+    let secret_service = crate::app_state::keyring_service();
+    let secret_account = super::storage::agent_keyring_name(&record.pubkey);
+    command.args([
+        "--secret-service",
+        secret_service,
+        "--secret-account",
+        &secret_account,
+    ]);
     command.env("BUZZ_RELAY_URL", &effective_relay_url);
     command.env("BUZZ_ACP_LAZY_POOL", if lazy { "true" } else { "false" });
     command.env("BUZZ_ACP_AGENT_COMMAND", &resolved_agent_command);
@@ -801,24 +808,13 @@ pub fn spawn_agent_child(
     }
 
     command.env("BUZZ_ACP_RELAY_OBSERVER", "true");
-
-    // ── Git credential helper for Buzz relay ──────────────────────────
-    //
-    // Agents need to clone/push repos hosted on the Buzz relay's git
-    // server, which authenticates via NIP-98. The `git-credential-nostr`
-    // binary signs auth events using the agent's nostr key.
-    //
-    // We configure git via GIT_CONFIG_COUNT env vars (ephemeral, no
-    // filesystem writes) scoped to the relay's git URL so we don't
-    // interfere with other remotes (e.g. GitHub).
-    //
-    // NOSTR_PRIVATE_KEY mirrors BUZZ_PRIVATE_KEY — keep in sync.
+    // Git's nonsecret process-local config points the NIP-98 helper at the key
+    // in daz-secrets.
     if let Some(cred_helper) = resolve_command("git-credential-nostr") {
         let relay_http_url = crate::relay::relay_http_base_url(&effective_relay_url);
 
-        command.env("NOSTR_PRIVATE_KEY", &record.private_key_nsec);
         command.env("GIT_TERMINAL_PROMPT", "0");
-        command.env("GIT_CONFIG_COUNT", "2");
+        command.env("GIT_CONFIG_COUNT", "4");
         command.env(
             "GIT_CONFIG_KEY_0",
             format!("credential.{relay_http_url}/git.helper"),
@@ -830,6 +826,10 @@ pub fn spawn_agent_child(
             format!("credential.{relay_http_url}/git.useHttpPath"),
         );
         command.env("GIT_CONFIG_VALUE_1", "true");
+        command.env("GIT_CONFIG_KEY_2", "nostr.secretService");
+        command.env("GIT_CONFIG_VALUE_2", secret_service);
+        command.env("GIT_CONFIG_KEY_3", "nostr.secretAccount");
+        command.env("GIT_CONFIG_VALUE_3", &secret_account);
     } else {
         eprintln!(
             "buzz-desktop: git-credential-nostr not found — agent {} will not have automatic Buzz git auth",

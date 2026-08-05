@@ -24,9 +24,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [features]
 default = ["system-keyring"]
 mesh-llm = ["dep:iroh", "dep:mesh-llm-sdk", "dep:mesh-llm-host-runtime", "dep:mesh-llm-client", "dep:mesh-llm-node", "dep:mesh-llm-system", "dep:mesh-llm-events"]
-# OS keyring backing for desktop secret storage (nsec private keys). When
-# disabled, secrets fall back to 0o600 files. On by default for real builds.
-system-keyring = ["dep:keyring"]
+# Process-isolated secret-provider backing for desktop nsec private keys. The
+# historical feature name is retained for downstream build compatibility; it
+# no longer links or calls an operating-system keyring.
+system-keyring = ["dep:daz-secrets"]
 
 [build-dependencies]
 base64 = "0.22"
@@ -39,7 +40,6 @@ libc = "0.2"
 ctrlc = { version = "3", features = ["termination"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-keyring = { version = "3.6.3", default-features = false, features = ["sync-secret-service", "vendored"], optional = true }
 # Used directly (alongside tauri-plugin-notification) so we can hold the posting
 # D-Bus connection open. GNOME 46+ dismisses a notification the moment that
 # connection is dropped, which the plugin does immediately. Default features
@@ -56,20 +56,18 @@ objc2 = { version = "0.6.4", default-features = false }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSEvent", "NSHapticFeedback", "NSMenu", "NSMenuItem", "NSStatusItem", "block2"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSDictionary", "NSError", "NSBundle", "NSObject", "NSProcessInfo", "NSString"] }
 objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["block2", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSettings", "UNNotificationTrigger", "UNUserNotificationCenter"] }
-keyring = { version = "3.6.3", default-features = false, features = ["apple-native", "vendored"], optional = true }
-security-framework = { version = "3.7.0", features = ["OSX_10_15"] }
 window-vibrancy = "0.6"
 user-idle = { version = "0.6", default-features = false }
 plist = "1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Security", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Registry", "Win32_System_Threading", "Win32_Foundation"] }
-keyring = { version = "3.6.3", default-features = false, features = ["windows-native", "vendored"], optional = true }
 user-idle = { version = "0.6", default-features = false }
 
 [dependencies]
 atomic-write-file = "0.3"
 anyhow = "1"
+daz-secrets = { git = "https://github.com/darrenoakey/daz-secrets", rev = "ef01d96a2fa8d661a6a2ad7dace77fce0f2f60aa", optional = true }
 dirs = "6"
 tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
 tauri-plugin-deep-link = "2"
@@ -109,14 +107,14 @@ buzz_voice_pkg = { package = "buzz-voice", path = "../../crates/buzz-voice" }
 buzz_terminal = { package = "buzz-terminal", path = "crates/buzz-terminal" }
 portable-pty = "0.9"
 iroh = { version = "1.0.2", optional = true }
-mesh-llm-sdk = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.74.0", package = "mesh-llm-sdk", default-features = false, features = ["client", "serving"], optional = true }
-mesh-llm-host-runtime = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.74.0", package = "mesh-llm-host-runtime", default-features = false, features = ["dynamic-native-runtime"], optional = true }
+mesh-llm-sdk = { git = "https://github.com/darrenoakey/mesh-llm.git", rev = "9a8590d2791f7f5f91d4779b4259ff0491ecbfe6", package = "mesh-llm-sdk", default-features = false, features = ["client", "serving"], optional = true }
+mesh-llm-host-runtime = { git = "https://github.com/darrenoakey/mesh-llm.git", rev = "9a8590d2791f7f5f91d4779b4259ff0491ecbfe6", package = "mesh-llm-host-runtime", default-features = false, features = ["dynamic-native-runtime"], optional = true }
 # Model catalog + hardware survey for the Share-compute model picker (same
 # diagnose pattern as mesh-console). Lib name of mesh-llm-client is mesh_client.
-mesh-llm-client = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.74.0", package = "mesh-llm-client", optional = true }
-mesh-llm-node = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.74.0", package = "mesh-llm-node", optional = true }
-mesh-llm-system = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.74.0", package = "mesh-llm-system", optional = true }
-mesh-llm-events = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.74.0", package = "mesh-llm-events", optional = true }
+mesh-llm-client = { git = "https://github.com/darrenoakey/mesh-llm.git", rev = "9a8590d2791f7f5f91d4779b4259ff0491ecbfe6", package = "mesh-llm-client", optional = true }
+mesh-llm-node = { git = "https://github.com/darrenoakey/mesh-llm.git", rev = "9a8590d2791f7f5f91d4779b4259ff0491ecbfe6", package = "mesh-llm-node", optional = true }
+mesh-llm-system = { git = "https://github.com/darrenoakey/mesh-llm.git", rev = "9a8590d2791f7f5f91d4779b4259ff0491ecbfe6", package = "mesh-llm-system", optional = true }
+mesh-llm-events = { git = "https://github.com/darrenoakey/mesh-llm.git", rev = "9a8590d2791f7f5f91d4779b4259ff0491ecbfe6", package = "mesh-llm-events", optional = true }
 base64 = "0.22"
 sha2 = "0.11"
 tar = "0.4"

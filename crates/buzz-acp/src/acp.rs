@@ -2469,16 +2469,10 @@ mod tests {
             name: "test-mcp".into(),
             command: "/usr/local/bin/test-mcp-server".into(),
             args: vec![],
-            env: vec![
-                EnvVar {
-                    name: "BUZZ_RELAY_URL".into(),
-                    value: "ws://localhost:3000".into(),
-                },
-                EnvVar {
-                    name: "BUZZ_PRIVATE_KEY".into(),
-                    value: "nsec1abc".into(),
-                },
-            ],
+            env: vec![EnvVar {
+                name: "BUZZ_RELAY_URL".into(),
+                value: "ws://localhost:3000".into(),
+            }],
         };
         let serialized = serde_json::to_value(&server).unwrap();
         assert_eq!(serialized["name"].as_str(), Some("test-mcp"));
@@ -2489,7 +2483,7 @@ mod tests {
         assert!(serialized["args"].is_array());
         assert_eq!(serialized["args"].as_array().unwrap().len(), 0);
         assert!(serialized["env"].is_array());
-        assert_eq!(serialized["env"].as_array().unwrap().len(), 2);
+        assert_eq!(serialized["env"].as_array().unwrap().len(), 1);
         assert_eq!(
             serialized["env"][0]["name"].as_str(),
             Some("BUZZ_RELAY_URL")
