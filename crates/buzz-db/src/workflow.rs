@@ -12,7 +12,7 @@ use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Row};
+use sqlx::{Executor, PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 use buzz_core::CommunityId;
@@ -320,6 +320,62 @@ pub async fn upsert_workflow(
     definition_json: &str,
     definition_hash: &[u8],
 ) -> Result<()> {
+    upsert_workflow_with_executor(
+        pool,
+        community_id,
+        id,
+        channel_id,
+        owner_pubkey,
+        name,
+        definition_json,
+        definition_hash,
+    )
+    .await
+}
+
+/// Insert or update a workflow inside an existing transaction.
+///
+/// The relay uses this variant to commit the signed kind-30620 event and its
+/// executable registry projection together. A rollback must leave neither
+/// representation behind.
+#[allow(clippy::too_many_arguments)]
+pub async fn upsert_workflow_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    id: Uuid,
+    channel_id: Option<Uuid>,
+    owner_pubkey: &[u8],
+    name: &str,
+    definition_json: &str,
+    definition_hash: &[u8],
+) -> Result<()> {
+    upsert_workflow_with_executor(
+        &mut **tx,
+        community_id,
+        id,
+        channel_id,
+        owner_pubkey,
+        name,
+        definition_json,
+        definition_hash,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn upsert_workflow_with_executor<'e, E>(
+    executor: E,
+    community_id: CommunityId,
+    id: Uuid,
+    channel_id: Option<Uuid>,
+    owner_pubkey: &[u8],
+    name: &str,
+    definition_json: &str,
+    definition_hash: &[u8],
+) -> Result<()>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     let row = sqlx::query(
         r#"
         INSERT INTO workflows
@@ -342,7 +398,7 @@ pub async fn upsert_workflow(
     .bind(channel_id)
     .bind(definition_json)
     .bind(definition_hash)
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await?;
 
     if row.is_none() {
@@ -1768,6 +1824,153 @@ mod tests {
         .await
         .expect("insert channel");
         id
+    }
+
+    /// A failed relay ingest must not leave an executable registry row without
+    /// its signed kind-30620 source event. The relay now writes both through one
+    /// transaction; this pins the registry half of that rollback boundary.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn transactional_upsert_rolls_back_registry_projection() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let owner = vec![0xb3; 32];
+        ensure_user(&pool, community, &owner)
+            .await
+            .expect("ensure owner");
+        let channel_id = make_channel(&pool, community, &owner).await;
+        let workflow_id = Uuid::new_v4();
+
+        let mut tx = pool.begin().await.expect("begin transaction");
+        upsert_workflow_tx(
+            &mut tx,
+            community,
+            workflow_id,
+            Some(channel_id),
+            &owner,
+            "atomic projection",
+            r#"{"name":"atomic projection","trigger":{"on":"schedule"},"steps":[]}"#,
+            &[0x44; 32],
+        )
+        .await
+        .expect("transactional workflow upsert");
+
+        let inside_tx: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM workflows WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(workflow_id)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("read uncommitted workflow in its transaction");
+        assert_eq!(inside_tx, 1);
+
+        tx.rollback().await.expect("rollback transaction");
+
+        let after_rollback: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM workflows WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(workflow_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read workflow after rollback");
+        assert_eq!(
+            after_rollback, 0,
+            "rollback must not leave a registry-only workflow projection"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn transactional_upsert_is_idempotent_and_rejects_owner_or_channel_changes() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let owner = vec![0xb4; 32];
+        let other_owner = vec![0xb5; 32];
+        ensure_user(&pool, community, &owner)
+            .await
+            .expect("ensure owner");
+        ensure_user(&pool, community, &other_owner)
+            .await
+            .expect("ensure other owner");
+        let channel = make_channel(&pool, community, &owner).await;
+        let other_channel = make_channel(&pool, community, &owner).await;
+        let workflow_id = Uuid::new_v4();
+        let initial = r#"{"name":"initial","trigger":{"on":"schedule"},"steps":[]}"#;
+        let updated = r#"{"name":"updated","trigger":{"on":"schedule"},"steps":[]}"#;
+
+        let mut create_tx = pool.begin().await.expect("begin create transaction");
+        upsert_workflow_tx(
+            &mut create_tx,
+            community,
+            workflow_id,
+            Some(channel),
+            &owner,
+            "initial",
+            initial,
+            &[0x45; 32],
+        )
+        .await
+        .expect("initial transactional upsert");
+        create_tx.commit().await.expect("commit initial workflow");
+
+        let mut retry_tx = pool.begin().await.expect("begin retry transaction");
+        upsert_workflow_tx(
+            &mut retry_tx,
+            community,
+            workflow_id,
+            Some(channel),
+            &owner,
+            "updated",
+            updated,
+            &[0x46; 32],
+        )
+        .await
+        .expect("same owner/channel retry");
+        retry_tx.commit().await.expect("commit retry");
+
+        let stored: (i64, String) = sqlx::query_as(
+            "SELECT COUNT(*) OVER(), name FROM workflows WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(workflow_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read idempotently updated workflow");
+        assert_eq!(stored, (1, "updated".to_string()));
+
+        let mut owner_tx = pool.begin().await.expect("begin wrong-owner transaction");
+        let owner_error = upsert_workflow_tx(
+            &mut owner_tx,
+            community,
+            workflow_id,
+            Some(channel),
+            &other_owner,
+            "stolen",
+            updated,
+            &[0x47; 32],
+        )
+        .await
+        .expect_err("different owner must be rejected");
+        assert!(matches!(owner_error, DbError::AccessDenied(_)));
+        owner_tx.rollback().await.expect("rollback wrong owner");
+
+        let mut channel_tx = pool.begin().await.expect("begin wrong-channel transaction");
+        let channel_error = upsert_workflow_tx(
+            &mut channel_tx,
+            community,
+            workflow_id,
+            Some(other_channel),
+            &owner,
+            "moved",
+            updated,
+            &[0x48; 32],
+        )
+        .await
+        .expect_err("different channel must be rejected");
+        assert!(matches!(channel_error, DbError::AccessDenied(_)));
+        channel_tx.rollback().await.expect("rollback wrong channel");
     }
 
     /// Insert a workflow whose tenant is `community`'s channel. Returns the
