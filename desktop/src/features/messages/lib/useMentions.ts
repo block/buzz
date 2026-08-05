@@ -246,7 +246,7 @@ export function useMentions(
       if (isArchivedDiscovery(pubkey)) {
         return;
       }
-      if (!isAgentIdentityInManagedList(candidate, managedAgentPubkeys)) {
+      if (!isAgentIdentityInManagedList(candidate, mentionableAgentPubkeys)) {
         return;
       }
       if (
@@ -420,7 +420,6 @@ export function useMentions(
     managedAgentNamesByPubkey,
     managedAgentPersonaIds,
     managedAgentPersonaIdsByPubkey,
-    managedAgentPubkeys,
     managedAgentsQuery.data,
     memberPubkeys,
     members,
