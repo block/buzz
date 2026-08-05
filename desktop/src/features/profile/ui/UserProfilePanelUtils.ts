@@ -153,6 +153,35 @@ export function deriveProfileChannels(
   );
 }
 
+export function useDerivedProfileChannels(
+  pubkeyLower: string,
+  relayAgent: RelayAgent | undefined,
+  managedAgent: ManagedAgent | undefined,
+  channels: Channel[] | undefined,
+  profileSummary?: Pick<UserProfileSummary, "isAgent" | "ownerPubkey">,
+  currentPubkey?: string,
+): ProfileChannelLink[] {
+  return React.useMemo(
+    () =>
+      deriveProfileChannels(
+        pubkeyLower,
+        relayAgent,
+        managedAgent,
+        channels,
+        profileSummary,
+        currentPubkey,
+      ),
+    [
+      pubkeyLower,
+      relayAgent,
+      managedAgent,
+      channels,
+      profileSummary,
+      currentPubkey,
+    ],
+  );
+}
+
 export function getRelayAgentChannelIds(
   relayAgents: readonly RelayAgent[] | undefined,
   agentPubkey: string,
