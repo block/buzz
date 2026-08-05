@@ -23,7 +23,12 @@ export type CausalExperiment = {
     environmentVersion: string;
   };
   hypothesis: { cause: string; evidenceIds: string[] };
-  intervention: { remedyId: string; changedVariable: string };
+  intervention: {
+    remedyId: string;
+    changedVariable: string;
+    successCriteria?: string;
+    approvedAt?: string;
+  };
   result: { outcome: ExperimentOutcome; evidenceIds: string[] };
   coverage: Record<string, EvidenceCoverage>;
   relations: {
