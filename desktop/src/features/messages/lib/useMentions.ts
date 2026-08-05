@@ -53,9 +53,7 @@ export type PersonaMentionTarget = {
   displayName: string;
   persona: AgentPersona;
 };
-type UseMentionsOptions = {
-  channelType?: ChannelType | null;
-};
+type UseMentionsOptions = { channelType?: ChannelType | null };
 function formatSearchUserDisplayName(user: UserSearchResult) {
   return user.displayName?.trim() || user.nip05Handle?.trim() || null;
 }
@@ -240,13 +238,18 @@ export function useMentions(
   );
   const mentionCandidates = React.useMemo<MentionCandidate[]>(() => {
     const candidatesByPubkey = new Map<string, MentionCandidate>();
-
     const addCandidate = (candidate: MentionCandidate & { pubkey: string }) => {
       const pubkey = normalizePubkey(candidate.pubkey);
       if (isArchivedDiscovery(pubkey)) {
         return;
       }
-      if (!isAgentIdentityInManagedList(candidate, managedAgentPubkeys)) {
+      if (
+        !isAgentIdentityInManagedList(
+          candidate,
+          managedAgentPubkeys,
+          directoryAgentPubkeys,
+        )
+      ) {
         return;
       }
       if (
@@ -265,7 +268,6 @@ export function useMentions(
         candidatesByPubkey.set(pubkey, { ...candidate, pubkey });
         return;
       }
-
       candidatesByPubkey.set(pubkey, {
         ...current,
         avatarUrl: current.avatarUrl ?? candidate.avatarUrl ?? null,
@@ -330,7 +332,6 @@ export function useMentions(
             : null,
       });
     }
-
     for (const agent of relayAgentsQuery.data ?? []) {
       const pubkey = normalizePubkey(agent.pubkey);
       addCandidate({
@@ -345,7 +346,6 @@ export function useMentions(
         isAgent: true,
       });
     }
-
     for (const agent of managedAgentsQuery.data ?? []) {
       addCandidate({
         kind: "identity",

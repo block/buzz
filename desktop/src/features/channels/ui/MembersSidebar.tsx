@@ -58,6 +58,7 @@ import {
 import { EditRespondToDialog } from "./EditRespondToDialog";
 import { useMembersSidebarActions } from "./useMembersSidebarActions";
 import { useMembersSidebarModeration } from "./useMembersSidebarModeration";
+import { shouldRefreshMembersOnOpen } from "./membersSidebarRefresh";
 const MEMBER_ADD_RESULT_LIMIT = 50;
 const MEMBER_SEARCH_MIN_QUERY_LENGTH = 2;
 const MEMBER_ROW_INSET_DIVIDER_CLASS =
@@ -155,6 +156,14 @@ export function MembersSidebar({
   >(() => new Set());
   const identityQuery = useIdentityQuery();
   const membersQuery = useChannelMembersQuery(channelId, open);
+  const wasOpenRef = React.useRef(false);
+  React.useEffect(() => {
+    const shouldRefresh = shouldRefreshMembersOnOpen(open, wasOpenRef.current);
+    wasOpenRef.current = open;
+    if (shouldRefresh && channelId) {
+      void membersQuery.refetch();
+    }
+  }, [channelId, membersQuery.refetch, open]);
   const addMembersMutation = useAddChannelMembersMutation(channelId);
   const changeRoleMutation = useMutation({
     mutationFn: async ({ pubkey, role }: { pubkey: string; role: string }) => {
@@ -272,6 +281,11 @@ export function MembersSidebar({
         .filter((label): label is string => Boolean(label)),
     );
     const managedAgentPubkeys = new Set(managedAgentsByPubkey.keys());
+    const relayAgentPubkeys = new Set(
+      (relayAgentsQuery.data ?? []).map((agent) =>
+        normalizePubkey(agent.pubkey),
+      ),
+    );
 
     const addCandidate = (candidate: AddMemberSearchCandidate) => {
       const pubkey = normalizePubkey(candidate.pubkey);
@@ -282,7 +296,11 @@ export function MembersSidebar({
           )) ||
         memberPubkeys.has(pubkey) ||
         isArchivedDiscovery(pubkey) ||
-        !isAgentIdentityInManagedList(candidate, managedAgentPubkeys)
+        !isAgentIdentityInManagedList(
+          candidate,
+          managedAgentPubkeys,
+          relayAgentPubkeys,
+        )
       ) {
         return;
       }
