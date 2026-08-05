@@ -5,6 +5,7 @@ import {
   pickAndUploadMedia,
   uploadMediaBytes,
 } from "@/shared/api/tauri";
+import { uploadMediaFile } from "@/shared/api/tauriMedia";
 import type { QueuedMediaAttachment } from "./backgroundMediaUploadStore";
 import { applyImetaUpdate, compactImetaSlots } from "./imetaSlots";
 import { isVideoFile, videoMimeForFile } from "./videoFileType";
@@ -602,11 +603,8 @@ export function useMediaUpload({
         // Fire-and-forget each upload concurrently — slot preserves order.
         void (async () => {
           try {
-            const buffer = await file.arrayBuffer();
-            if (isUploadCanceled(previewId)) return;
-            const descriptor = await uploadMediaBytes(
-              [...new Uint8Array(buffer)],
-              file.name,
+            const descriptor = await uploadMediaFile(
+              file,
               uploadProgressId(previewId),
             );
             fillSlot(slotIndex, descriptor, previewId, epoch);
@@ -616,13 +614,7 @@ export function useMediaUpload({
         })();
       }
     },
-    [
-      fillSlot,
-      isUploadCanceled,
-      onUploadError,
-      reserveSlots,
-      reserveUploadingPreview,
-    ],
+    [fillSlot, onUploadError, reserveSlots, reserveUploadingPreview],
   );
 
   const handlePaperclip = React.useCallback(async () => {
@@ -775,11 +767,8 @@ export function useMediaUpload({
       setUploadingCount((c) => c + 1);
       const epoch = uploadEpochRef.current;
       try {
-        const buffer = await file.arrayBuffer();
-        if (isUploadCanceled(previewId)) return;
-        const descriptor = await uploadMediaBytes(
-          [...new Uint8Array(buffer)],
-          file.name,
+        const descriptor = await uploadMediaFile(
+          file,
           uploadProgressId(previewId),
         );
         onUploaded(descriptor, previewId, epoch);
@@ -788,7 +777,6 @@ export function useMediaUpload({
       }
     },
     [
-      isUploadCanceled,
       onUploaded,
       onUploadError,
       queueFiles,

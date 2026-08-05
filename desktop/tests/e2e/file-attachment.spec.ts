@@ -5,6 +5,15 @@ import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
 import { expectCornerRadiusPx, expectSmoothCorners } from "../helpers/css";
 
+async function openMoreActionsMenu(page: Page, messageId: string) {
+  const row = page.locator(`[data-message-id="${messageId}"]`);
+  await row.hover();
+  await page.getByTestId(`more-actions-${messageId}`).click();
+  await expect(page.locator('[role="menuitem"]').first()).toBeVisible({
+    timeout: 5_000,
+  });
+}
+
 // Exercises the generic file-attachment UI contract end-to-end through the
 // mock Tauri bridge: paperclip upload → composer chip → send → FileCard in the
 // timeline. This guards the frontend wiring (the riskiest, previously
@@ -100,7 +109,43 @@ test("photos upload before Send without a queued spoiler control", async ({
             .__BUZZ_E2E_COMMANDS__ ?? [],
       ),
     )
-    .toContain("upload_media_bytes");
+    .toContain("upload_media_bytes_raw");
+});
+
+test("opening edit during an immediate photo upload preserves the draft", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.evaluate(() => {
+    const e2e = (
+      window as Window & {
+        __BUZZ_E2E__?: { mock?: { uploadDelayMs?: number } };
+      }
+    ).__BUZZ_E2E__;
+    if (e2e?.mock) e2e.mock.uploadDelayMs = 1_000;
+  });
+  await page.getByTestId("channel-general").click();
+  await choosePhoto(page);
+  await expect(page.getByTestId("upload-progress")).toBeVisible();
+
+  await openMoreActionsMenu(page, "mock-general-welcome");
+  await page.getByTestId("edit-message-mock-general-welcome").click();
+
+  // Edit entry is rejected while the compacted draft cannot represent the
+  // reserved upload slot. The upload remains current and lands in the draft.
+  await expect(page.getByTestId("edit-target")).toHaveCount(0);
+  await expect(page.getByTestId("upload-progress")).toBeVisible();
+  await expect(page.getByTestId("upload-progress")).toHaveCount(0, {
+    timeout: 5_000,
+  });
+  await expect(page.getByTestId("message-composer")).toContainText(
+    "quarterly-report.pdf",
+  );
+
+  // Once settled, the same edit action enters edit mode normally.
+  await openMoreActionsMenu(page, "mock-general-welcome");
+  await page.getByTestId("edit-message-mock-general-welcome").click();
+  await expect(page.getByTestId("edit-target")).toBeVisible();
 });
 
 test("upload a file and see a FileCard in the timeline", async ({ page }) => {

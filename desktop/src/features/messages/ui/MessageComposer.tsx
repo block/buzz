@@ -329,8 +329,8 @@ function MessageComposerImpl({
   }, [isDeferredEditPending, onDeferredEditPendingChange]);
   // biome-ignore lint/correctness/useExhaustiveDependencies: editTarget?.id is the trigger
   React.useEffect(() => {
+    if (editTarget && media.isUploading) return onCancelEdit?.();
     if (editTarget) {
-      // Preserve the user's in-flight draft while editing another message.
       preEditSnapshotRef.current = {
         content: syncComposerContentFromEditor(),
         pendingImeta: [...media.pendingImetaRef.current],
