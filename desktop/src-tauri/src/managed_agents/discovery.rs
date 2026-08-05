@@ -18,7 +18,9 @@ pub(crate) use presets::{
     preset_harness_ids,
 };
 use presets::{preset_catalog_entry, PRESET_HARNESSES};
-pub(crate) use runtime_metadata::KnownAcpRuntime;
+pub(crate) use runtime_metadata::{
+    EffortNormalization, KnownAcpRuntime, CLAUDE_EFFORT_NORMALIZATION, GOOSE_EFFORT_NORMALIZATION,
+};
 
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
 const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default";
@@ -75,7 +77,7 @@ fn common_binary_paths() -> &'static [PathBuf] {
     })
 }
 
-const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
+pub(crate) const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
     KnownAcpRuntime {
         id: "goose",
         label: "Goose",
@@ -104,6 +106,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         config_file_format: Some("yaml"),
         supports_acp_native_config: true,
         thinking_env_var: Some("GOOSE_THINKING_EFFORT"),
+        effort_normalization: Some(&GOOSE_EFFORT_NORMALIZATION),
         max_tokens_env_var: Some("GOOSE_MAX_TOKENS"),
         context_limit_env_var: Some("GOOSE_CONTEXT_LIMIT"),
         max_rounds_env_var: None,
@@ -136,7 +139,8 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         config_file_path: Some("~/.claude/settings.json"),
         config_file_format: Some("json"),
         supports_acp_native_config: false,
-        thinking_env_var: None,
+        thinking_env_var: Some("CLAUDE_CODE_EFFORT_LEVEL"),
+        effort_normalization: Some(&CLAUDE_EFFORT_NORMALIZATION),
         max_tokens_env_var: None,
         context_limit_env_var: None,
         max_rounds_env_var: None,
@@ -170,6 +174,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         config_file_format: Some("toml"),
         supports_acp_native_config: false,
         thinking_env_var: None,
+        effort_normalization: None,
         max_tokens_env_var: None,
         context_limit_env_var: None,
         max_rounds_env_var: None,
@@ -204,6 +209,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         config_file_format: None,
         supports_acp_native_config: false,
         thinking_env_var: Some("BUZZ_AGENT_THINKING_EFFORT"),
+        effort_normalization: None, // buzz-agent: per-model catalog; see getProviderEffortConfig() in TS
         max_tokens_env_var: Some("BUZZ_AGENT_MAX_OUTPUT_TOKENS"),
         context_limit_env_var: Some("BUZZ_AGENT_MAX_CONTEXT_TOKENS"),
         max_rounds_env_var: Some("BUZZ_AGENT_MAX_ROUNDS"),
@@ -580,14 +586,8 @@ pub fn clear_resolve_cache() {
 }
 
 // ── Adapter availability cache (Phase-2 badge fallback) ─────────────────────
-//
-// `build_managed_agent_summary` needs to compare the spawn-time adapter
-// availability against the *current* availability without triggering a live
-// `probe_codex_acp_version` subprocess on every poll cycle.  This cache
-// stores the last availability status of the codex-acp binary at its resolved
-// path.  It is warmed by `discover_acp_runtimes` (which already probes), so
-// the badge path reads warm data, and is invalidated by `clear_resolve_cache`
-// (called on every Doctor install and every `discover_acp_providers` call).
+// Warmed by `discover_acp_runtimes`; invalidated by `clear_resolve_cache`.
+// Allows `build_managed_agent_summary` to check adapter availability without re-probing.
 
 fn adapter_availability_cache() -> &'static std::sync::Mutex<Option<AcpAvailabilityStatus>> {
     use std::sync::{Mutex, OnceLock};
@@ -716,10 +716,7 @@ fn resolve_command_uncached(command: &str) -> Option<PathBuf> {
         }
     }
 
-    // Check nvm's default Node.js bin directory — nvm initializes via
-    // ~/.zshrc (interactive) which is not loaded by a login shell, so
-    // `node`, `npm`, and npm-global shims installed there are otherwise
-    // invisible.
+    // Check nvm's default Node.js bin directory (not on PATH in login shells).
     if let Some(home) = dirs::home_dir() {
         if let Some(nvm_bin) = find_nvm_default_bin(&home) {
             for basename in &basenames {
@@ -1390,6 +1387,15 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntr
             model_env_var: runtime.model_env_var.map(str::to_string),
             provider_env_var: runtime.provider_env_var.map(str::to_string),
             thinking_env_var: runtime.thinking_env_var.map(str::to_string),
+            accepted_effort_values: runtime
+                .effort_normalization
+                .map(|n| n.canonical_values().iter().map(|s| s.to_string()).collect()),
+            effort_aliases: runtime.effort_normalization.map(|n| {
+                n.aliases
+                    .iter()
+                    .map(|(a, c)| (a.to_string(), c.to_string()))
+                    .collect()
+            }),
             max_tokens_env_var: runtime.max_tokens_env_var.map(str::to_string),
             context_limit_env_var: runtime.context_limit_env_var.map(str::to_string),
             max_rounds_env_var: runtime.max_rounds_env_var.map(str::to_string),
@@ -1538,19 +1544,19 @@ pub fn discover_acp_runtimes_from(
             entries.push(AcpRuntimeCatalogEntry {
                 id: def.id.clone(),
                 label: def.label.clone(),
-                // F1 security fix: never copy user-supplied avatar URL into the catalog.
-                // All icons are bundled assets; customs fall back to TerminalSquare in the UI.
+                // Security: never copy user-supplied avatar URL; all icons are bundled assets.
                 avatar_url: String::new(),
                 availability,
                 command,
                 binary_path,
                 default_args,
-                // Custom harnesses are plain ACP — no MCP sidecar, no env-var
-                // model switching, no thinking knobs.
+                // Custom harnesses are plain ACP — no MCP sidecar, no env-var model switching, no thinking knobs.
                 mcp_command: None,
                 model_env_var: None,
                 provider_env_var: None,
                 thinking_env_var: None,
+                accepted_effort_values: None,
+                effort_aliases: None,
                 max_tokens_env_var: None,
                 context_limit_env_var: None,
                 max_rounds_env_var: None,
@@ -1565,23 +1571,16 @@ pub fn discover_acp_runtimes_from(
                 auth_status: AuthStatus::NotApplicable,
                 login_hint: None,
                 source: HarnessSource::Custom,
-                // Carry definition env into the catalog so the edit form can
-                // read it back — prevents silently erasing env on save.
+                // Carry definition env — prevents silently erasing env on save.
                 definition_env: def.env.clone(),
             });
         }
     }
 
-    // Publish the loaded-harness registry from a FRESH directory read under the
-    // persist mutex — never from the snapshot taken before the auth probes ran.
-    // A save/delete landing during Phase 2 already re-warmed the registry; a
-    // stale-snapshot publish here would clobber it (the just-saved harness
-    // would become unresolvable at spawn until the next discovery).
-    //
-    // This exact line is pinned by `discovery_publish_path_survives_mid_flight_save`
-    // / `..._drops_mid_flight_delete` (discovery tests), which land a save/delete
-    // through the pre-publish test hook below and red if this reverts to
-    // publishing a stale snapshot.
+    // Publish from a FRESH directory read under the persist mutex — never from
+    // the snapshot taken before auth probes ran. A save/delete during Phase 2
+    // already re-warmed the registry; a stale publish here would clobber it.
+    // (Pinned by discovery_publish_path_survives_mid_flight_save and _delete.)
     #[cfg(test)]
     pre_publish_test_hook::run();
     crate::managed_agents::custom_harnesses::warm_harness_registry_locked(custom_harnesses_dir);

@@ -13,6 +13,7 @@ import type { AgentPersona } from "@/shared/api/types";
 import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
 import {
   BuzzAgentModelTuningFields,
+  HarnessNativeEffortFields,
   NumericTuningFields,
 } from "./buzzAgentModelTuningFields";
 import {
@@ -24,6 +25,7 @@ import {
   deriveNumericDescriptors,
   structuredEnvKeys,
   type RuntimeCatalogStatus,
+  resolveEffortFromEnv,
 } from "../lib/agentConfigCore";
 
 export function EditAgentAdvancedFields({
@@ -115,17 +117,58 @@ export function EditAgentAdvancedFields({
     [catalogStatus, selectedRuntime],
   );
 
+  // Harness-native effort: shown when the runtime declares a static canonical
+  // effort vocabulary (e.g. Goose). The native key is hidden from the generic
+  // env editor. The legacy key is hidden only when it was validly consumed.
+  const harnessNativeEffort =
+    catalogStatus === "ready"
+      ? (selectedRuntime?.acceptedEffortValues ?? null)
+      : null;
+  const harnessNativeEffortKey = selectedRuntime?.thinkingEnvVar ?? null;
+  const harnessNativeEffortAliases =
+    catalogStatus === "ready" ? (selectedRuntime?.effortAliases ?? null) : null;
+  // EditAgentAdvancedFields operates at "instance" scope — legacy fallback applies.
+  // resolveEffortFromEnv is the single policy source; the component reads the same fn.
+  const legacyEffortConsumed = React.useMemo(() => {
+    if (!harnessNativeEffort || !harnessNativeEffortKey) return false;
+    return resolveEffortFromEnv(
+      envVars,
+      harnessNativeEffortKey,
+      BUZZ_AGENT_THINKING_EFFORT,
+      harnessNativeEffort,
+      harnessNativeEffortAliases,
+    ).legacyConsumed;
+  }, [
+    envVars,
+    harnessNativeEffort,
+    harnessNativeEffortKey,
+    harnessNativeEffortAliases,
+  ]);
+
   // Build the effective hidden-key list: caller's secrets + effort key (when
-  // rendered by BuzzAgentModelTuningFields) + numeric keys via structuredEnvKeys.
+  // rendered by BuzzAgentModelTuningFields or HarnessNativeEffortFields) + numeric keys.
   const effectiveHiddenKeys = React.useMemo(
     () => [
       ...hiddenEnvKeys,
       ...(isBuzzAgentRuntime(modelTuningRuntimeId)
         ? [BUZZ_AGENT_THINKING_EFFORT]
         : []),
+      ...(harnessNativeEffort && harnessNativeEffortKey
+        ? [
+            harnessNativeEffortKey,
+            ...(legacyEffortConsumed ? [BUZZ_AGENT_THINKING_EFFORT] : []),
+          ]
+        : []),
       ...structuredEnvKeys(numericDescriptors),
     ],
-    [hiddenEnvKeys, modelTuningRuntimeId, numericDescriptors],
+    [
+      hiddenEnvKeys,
+      modelTuningRuntimeId,
+      harnessNativeEffort,
+      harnessNativeEffortKey,
+      legacyEffortConsumed,
+      numericDescriptors,
+    ],
   );
 
   return (
@@ -334,7 +377,7 @@ export function EditAgentAdvancedFields({
         />
       ) : null}
 
-      {/* Effort-tuning knob — only shown for buzz-agent. */}
+      {/* Effort-tuning knob — buzz-agent (catalog-based) or harness-native. */}
       {isBuzzAgentRuntime(modelTuningRuntimeId) ? (
         <BuzzAgentModelTuningFields
           envVars={envVars}
@@ -350,6 +393,16 @@ export function EditAgentAdvancedFields({
             onEnvVarsChange(next);
           }}
           provider={provider}
+        />
+      ) : harnessNativeEffort && harnessNativeEffortKey ? (
+        <HarnessNativeEffortFields
+          acceptedEffortValues={harnessNativeEffort}
+          effortAliases={harnessNativeEffortAliases}
+          envVars={envVars}
+          inheritedEnvVars={inheritedEnvVars}
+          legacyEnvKey={BUZZ_AGENT_THINKING_EFFORT}
+          nativeEffortKey={harnessNativeEffortKey}
+          onEnvVarsChange={onEnvVarsChange}
         />
       ) : null}
     </div>

@@ -28,8 +28,10 @@ import {
   filterBakedGenericRows,
 } from "@/features/agents/lib/agentConfigCore";
 import {
+  bakedStructuredKeys,
   getBakedProviderInheritLabel,
   getGlobalModelFallback,
+  resolveBakedEffort,
 } from "@/features/agents/ui/bakedEnvHelpers";
 import {
   AUTO_PROVIDER_DROPDOWN_VALUE,
@@ -56,6 +58,7 @@ import {
   EffortSelectField,
   NumericTuningFields,
   useEffortAutoClear,
+  applyHarnessNativeEffortChange,
   type NumericDescriptor,
 } from "@/features/agents/ui/buzzAgentModelTuningFields";
 import { SettingsOptionGroup } from "@/features/settings/ui/SettingsOptionGroup";
@@ -70,12 +73,6 @@ export const EMPTY_GLOBAL_CONFIG: GlobalAgentConfig = {
   preferred_runtime: null,
 };
 
-const BAKED_STRUCTURED_KEYS = new Set([
-  "BUZZ_AGENT_PROVIDER",
-  "BUZZ_AGENT_MODEL",
-  BUZZ_AGENT_THINKING_EFFORT,
-]);
-
 const PROGRESSIVE_FIELDS_TRANSITION = {
   duration: 0.22,
   ease: [0.23, 1, 0.32, 1],
@@ -85,14 +82,7 @@ type AgentConfigDisclosure =
   | "onboarding-essential"
   | "progressive-defaults";
 
-// Canonical behaviors (PR 2 flag cleanup). These were per-surface props;
-// onboarding's values won every call and are now the only behavior:
-// - auto-select a valid model when the provider changes
-// - keep the model select usable during discovery
-// - preserve credential env vars across provider switches (the abandoned
-//   provider's key stays in env_vars — visible/deletable under Advanced)
-// - require a provider before model/effort are editable (no saveable
-//   invalid state — design principle #4)
+// Canonical behaviors (PR 2 flag cleanup — baked-in for all surfaces):
 const autoSelectModelOnProviderChange = true;
 const disableModelSelectDuringDiscovery = false;
 const preserveCredentialEnvVarsOnProviderChange = true;
@@ -254,6 +244,7 @@ export function AgentConfigFields({
     effortField?.currentPersistence.kind === "envVar"
       ? effortField.currentPersistence.key
       : null;
+  const isHarnessNativeEffort = effortField?.optionSource === "harnessNative";
 
   const numericDescriptors = fieldModel.fields.filter(
     (d): d is NumericDescriptor =>
@@ -262,10 +253,15 @@ export function AgentConfigFields({
         d.kind === "maxRounds") &&
       d.render === "control",
   );
-  const allStructuredKeys = structuredEnvKeys([
-    ...(effortField ? [effortField] : []),
-    ...numericDescriptors,
-  ]);
+  const allStructuredKeys = React.useMemo(() => {
+    const keys = structuredEnvKeys([
+      ...(effortField ? [effortField] : []),
+      ...numericDescriptors,
+    ]);
+    if (effortField?.legacyConsumedKey)
+      keys.push(effortField.legacyConsumedKey);
+    return keys;
+  }, [effortField, numericDescriptors]);
   const bakedEnvMap = Object.fromEntries(bakedEnv.map((e) => [e.key, e.value]));
   const bakedProvider = React.useMemo(
     () => bakedEnv.find((e) => e.key === "BUZZ_AGENT_PROVIDER")?.value ?? null,
@@ -286,25 +282,23 @@ export function AgentConfigFields({
   const modelField = fieldModel.fields.find(
     (field) => field.kind === "model" && field.render === "control",
   );
-  // CLI-login harnesses apply this setting through ACP rather than an env var
-  // and provide their own default when no model override is persisted.
   const modelIsOptional = modelField?.targetApplication.kind === "acpNative";
   const modelIsValid =
     modelIsOptional ||
     (config.model?.trim().length ?? 0) > 0 ||
     fallbackModel !== null;
+  const bakedEffortKey = effortPersistenceKey ?? BUZZ_AGENT_THINKING_EFFORT;
   const bakedEffort = React.useMemo(
-    () =>
-      bakedEnv.find((e) => e.key === BUZZ_AGENT_THINKING_EFFORT)?.value ?? null,
-    [bakedEnv],
+    () => resolveBakedEffort(bakedEnv, bakedEffortKey, selectedRuntime),
+    [bakedEnv, bakedEffortKey, selectedRuntime],
   );
   const bakedGenericRows = React.useMemo<readonly InheritedEnvRow[]>(
     () =>
       filterBakedGenericRows(bakedEnv, [
-        ...BAKED_STRUCTURED_KEYS,
+        ...bakedStructuredKeys(effortPersistenceKey ?? undefined),
         ...allStructuredKeys,
       ]),
-    [bakedEnv, allStructuredKeys],
+    [bakedEnv, allStructuredKeys, effortPersistenceKey],
   );
 
   const providerValue = providerFieldVisible ? (config.provider ?? "") : "";
@@ -383,20 +377,12 @@ export function AgentConfigFields({
     showCustomModelOption,
   });
 
-  // Mount-time healing policy: onboarding page 4 edits the root config during
-  // first-run (no higher layers to inherit from), so acting on open is safe
-  // and intentional there — it heals stale state and picks a valid model.
-  // Evergreen surfaces (Settings, dialogs) edit saved data that may pair with
-  // higher layers (see PR #2148 review thread), so they only act after the
-  // user explicitly edits the provider in this session.
+  // Mount-time healing (onboarding page 4 only). Evergreen surfaces wait for
+  // explicit provider edit (see PR #2148).
   const healOnMount =
     fieldModel.dependentValuePolicy.onCatalogMismatch === "onboardingCleanup";
   const userEditedProviderRef = React.useRef(false);
-  // Advanced visibility is user-controlled. Provider changes can add required
-  // rows, but must not open this section without an explicit toggle click.
   const [advancedOpen, setAdvancedOpen] = React.useState(false);
-  // Read inside effects via ref so biome's exhaustive-deps stays honest:
-  // refs are stable, and healOnMount is captured at declaration.
   const mayMutateDependentFieldsRef = React.useRef(false);
   mayMutateDependentFieldsRef.current =
     healOnMount || userEditedProviderRef.current;
@@ -437,15 +423,12 @@ export function AgentConfigFields({
   const currentEffortForAutoClear = effortPersistenceKey
     ? (config.env_vars[effortPersistenceKey] ?? "")
     : "";
+  const effortValidForAutoClear = isHarnessNativeEffort
+    ? (selectedRuntime?.acceptedEffortValues ?? [])
+    : null;
 
-  // When the selected harness changes outside this component (Back → setup
-  // page → choose a different harness → Next), the saved model can belong to
-  // the old harness. In onboarding, heal that stale value as soon as the new
-  // harness catalog proves it is unsupported; otherwise a Codex id like
-  // `gpt-5.5[low]` appears as a Claude Code custom model.
-  // Also clear when the Model control is omitted after a confirmed successful
-  // empty catalog — never while discovery failed/unavailable (transient
-  // failures must not erase saved model/effort).
+  // Stale-model heal: onboarding heals on mount; evergreen waits for provider edit.
+  // See PR #2148 for why evergreen uses a ref-gated mutation policy.
   React.useEffect(() => {
     if (!healOnMount) return;
     const currentModel = (config.model ?? "").trim();
@@ -462,7 +445,9 @@ export function AgentConfigFields({
     if (!catalogMiss && !omittedAfterSuccessfulEmpty) return;
 
     const nextEnvVars = { ...config.env_vars };
-    if (effortPersistenceKey) delete nextEnvVars[effortPersistenceKey];
+    if (effortPersistenceKey && !isHarnessNativeEffort)
+      delete nextEnvVars[effortPersistenceKey];
+    if (!isHarnessNativeEffort) delete nextEnvVars[BUZZ_AGENT_THINKING_EFFORT];
     onCustomModelEditingChange(false);
     onConfigChange({ ...config, env_vars: nextEnvVars, model: null });
   }, [
@@ -476,28 +461,24 @@ export function AgentConfigFields({
     onCustomModelEditingChange,
     healOnMount,
     effortPersistenceKey,
+    isHarnessNativeEffort,
   ]);
 
-  // Orphan-model clearing follows the mount-time healing policy above: the
-  // backend resolves provider and model independently across layers
-  // (agent → definition → global), so a saved global model WITHOUT a global
-  // provider can be a deliberate, working pattern (provider supplied by a
-  // higher layer). Clearing it on page-open in evergreen surfaces silently
-  // breaks that agent on its next restart — see PR #2148 review thread.
-  // Onboarding heals on open by design (discriminating spec: "gates stale
-  // saved model and effort until provider selection").
+  // Orphan-model clear: same ref-gated policy as mount-time heal (see PR #2148).
   React.useEffect(() => {
     if (!mayMutateDependentFieldsRef.current) return;
     if (!dependentFieldsDisabled) return;
     if (
       (config.model ?? "").trim().length === 0 &&
-      currentEffortForAutoClear.length === 0
+      (currentEffortForAutoClear.length === 0 || isHarnessNativeEffort)
     ) {
       return;
     }
 
     const nextEnvVars = { ...config.env_vars };
-    if (effortPersistenceKey) delete nextEnvVars[effortPersistenceKey];
+    if (effortPersistenceKey && !isHarnessNativeEffort)
+      delete nextEnvVars[effortPersistenceKey];
+    if (!isHarnessNativeEffort) delete nextEnvVars[BUZZ_AGENT_THINKING_EFFORT];
     onCustomModelEditingChange(false);
     onConfigChange({ ...config, env_vars: nextEnvVars, model: null });
   }, [
@@ -507,17 +488,20 @@ export function AgentConfigFields({
     onConfigChange,
     onCustomModelEditingChange,
     effortPersistenceKey,
+    isHarnessNativeEffort,
   ]);
-  const { validValues: effortValidForAutoClear } = getProviderEffortConfig(
+  const { validValues: providerModelEffortValid } = getProviderEffortConfig(
     config.provider ?? "",
     config.model ?? "",
   );
   useEffortAutoClear({
-    currentEffort: currentEffortForAutoClear,
-    effortValid: effortValidForAutoClear,
+    currentEffort: isHarnessNativeEffort ? "" : currentEffortForAutoClear,
+    effortValid: effortValidForAutoClear ?? providerModelEffortValid,
     onClear: () => {
       const nextEnvVars = { ...config.env_vars };
       if (effortPersistenceKey) delete nextEnvVars[effortPersistenceKey];
+      if (!isHarnessNativeEffort)
+        delete nextEnvVars[BUZZ_AGENT_THINKING_EFFORT];
       onConfigChange({ ...config, env_vars: nextEnvVars });
     },
   });
@@ -634,9 +618,11 @@ export function AgentConfigFields({
     : implicitEffortProvider;
   const { validValues: effortValid, defaultValue: effortDefault } =
     getProviderEffortConfig(effortProvider, config.model ?? "");
-  const currentEffort = effortPersistenceKey
-    ? (config.env_vars[effortPersistenceKey] ?? "")
-    : "";
+  const currentEffort = isHarnessNativeEffort
+    ? (effortField?.value ?? "")
+    : effortPersistenceKey
+      ? (config.env_vars[effortPersistenceKey] ?? "")
+      : "";
   const effortFieldVisible = showEffortField && effortField !== undefined;
 
   const progressiveDefaults = disclosure === "progressive-defaults";
@@ -848,42 +834,60 @@ export function AgentConfigFields({
       {effortFieldVisible ? (
         <div className={blockClassName}>
           <EffortSelectField
+            canonicalValues={selectedRuntime?.acceptedEffortValues ?? undefined}
             currentEffort={dependentFieldsDisabled ? "" : currentEffort}
             disabled={dependentFieldsDisabled}
+            effortDefault={isHarnessNativeEffort ? null : effortDefault}
+            effortValid={
+              isHarnessNativeEffort
+                ? (selectedRuntime?.acceptedEffortValues ?? [])
+                : effortValid
+            }
             emptyOptionLabel={
-              // Semantic, not copy: onboarding-essential hides inheritance
-              // concepts (first-run users pick, they don't inherit), so the
-              // zero option is a plain placeholder. Full disclosure leaves
-              // this unset so EffortSelectField computes the inherit/default
-              // label ("Default (medium)", "Inherit (high)", …).
-              disclosure === "onboarding-essential"
+              !isHarnessNativeEffort && disclosure === "onboarding-essential"
                 ? "Select effort level"
                 : undefined
             }
-            effortDefault={effortDefault}
-            effortValid={effortValid}
             fieldClassName={unstyled ? fieldClassName : undefined}
             htmlFor="global-agent-thinking-effort"
             inheritFallbackLabel={
-              effortDefault !== null ? `Default (${effortDefault})` : undefined
+              !isHarnessNativeEffort && effortDefault !== null
+                ? `Default (${effortDefault})`
+                : undefined
             }
             inheritedEffort={bakedEffort ?? undefined}
             label="Effort"
             labelClassName={fieldLabelClassName}
             onChange={(value) => {
-              const nextEnvVars = { ...config.env_vars };
-              if (value === "") {
-                if (effortPersistenceKey)
-                  delete nextEnvVars[effortPersistenceKey];
-              } else {
-                if (effortPersistenceKey)
-                  nextEnvVars[effortPersistenceKey] = value;
+              if (isHarnessNativeEffort) {
+                if (!effortPersistenceKey) return;
+                onConfigChange({
+                  ...config,
+                  env_vars: applyHarnessNativeEffortChange(
+                    config.env_vars,
+                    effortPersistenceKey,
+                    null,
+                    value,
+                  ),
+                });
+                return;
               }
-              onConfigChange({ ...config, env_vars: nextEnvVars });
+              const next = { ...config.env_vars };
+              if (value === "") {
+                if (effortPersistenceKey) delete next[effortPersistenceKey];
+                delete next[BUZZ_AGENT_THINKING_EFFORT];
+              } else {
+                if (effortPersistenceKey) next[effortPersistenceKey] = value;
+                if (effortPersistenceKey !== BUZZ_AGENT_THINKING_EFFORT)
+                  delete next[BUZZ_AGENT_THINKING_EFFORT];
+              }
+              onConfigChange({ ...config, env_vars: next });
             }}
             placeholderClassName={placeholderClassName}
             selectClassName={selectClassName}
-            showUnavailableOptions={showUnavailableEffortOptions}
+            showUnavailableOptions={
+              isHarnessNativeEffort ? undefined : showUnavailableEffortOptions
+            }
             testId="global-agent-thinking-effort-select"
             useCustomSelect={useCustomSelect}
           />

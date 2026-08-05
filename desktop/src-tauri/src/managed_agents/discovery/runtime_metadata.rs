@@ -1,3 +1,79 @@
+/// Canonicalization contract for a harness's thinking-effort env var.
+///
+/// The authority for UI choices, spawn bridge, and reader. All candidates
+/// are normalized through `normalize()` before any validity, precedence,
+/// override, or B-equality check.
+///
+/// Source for Goose: `crates/goose-provider-types/src/thinking.rs`
+///   • `FromStr` (aliases, case-insensitive): `off|disabled|none`, `low`,
+///     `medium|med`, `high`, `max|xhigh`
+///   • `Display` (canonical): `off`, `low`, `medium`, `high`, `max`
+///   • Live ACP emits Display values via `response_builder.rs:326-337`.
+pub(crate) struct EffortNormalization {
+    /// Canonical values in UI display order (drive choices, persistence, ACP comparison).
+    pub canonical: &'static [&'static str],
+    /// `(alias, canonical)` pairs, case-insensitive. Only aliases that differ
+    /// from their canonical form are listed.
+    pub aliases: &'static [(&'static str, &'static str)],
+}
+
+/// Goose thinking-effort canonicalization contract.
+///
+/// Source: `crates/goose-provider-types/src/thinking.rs` at Goose `2db0e31fe`.
+/// Canonical Display values: `off`, `low`, `medium`, `high`, `max`.
+/// Aliases (case-insensitive): `none|disabled→off`, `med→medium`, `xhigh→max`.
+/// `minimal` (Buzz-only) is invalid — skipped as absent at every tier.
+pub(crate) static GOOSE_EFFORT_NORMALIZATION: EffortNormalization = EffortNormalization {
+    canonical: &["off", "low", "medium", "high", "max"],
+    aliases: &[
+        ("none", "off"),
+        ("disabled", "off"),
+        ("med", "medium"),
+        ("xhigh", "max"),
+    ],
+};
+
+/// Claude Code thinking-effort canonicalization contract.
+///
+/// Source: https://code.claude.com/docs/en/env-vars (`CLAUDE_CODE_EFFORT_LEVEL`)
+/// and https://code.claude.com/docs/en/model-config#adjust-effort-level.
+///
+/// Canonical values: `low`, `medium`, `high`, `xhigh`, `max`.
+/// No aliases — Claude accepts these natively, no alias mapping needed.
+/// Note: `auto` (model default) is deliberately excluded from the vocabulary;
+/// unset env already means model-default, so `auto` would create two spellings
+/// of the same state. Available levels are per-model (Opus 4.6/Sonnet 4.6 lack
+/// `xhigh`), but Claude Code falls back to the nearest supported level, so a
+/// static vocabulary declaration is safe.
+pub(crate) static CLAUDE_EFFORT_NORMALIZATION: EffortNormalization = EffortNormalization {
+    canonical: &["low", "medium", "high", "xhigh", "max"],
+    aliases: &[],
+};
+
+impl EffortNormalization {
+    /// Normalize `raw` to a `String` canonical form.
+    /// `None` → invalid for this harness; caller must treat as absent (skip-as-absent policy).
+    pub fn normalize_str(&self, raw: &str) -> Option<String> {
+        let lower = raw.to_lowercase();
+        // Check direct canonical match first.
+        if self.canonical.contains(&lower.as_str()) {
+            return Some(lower);
+        }
+        // Check aliases.
+        for &(alias, canon) in self.aliases {
+            if lower == alias {
+                return Some(canon.to_string());
+            }
+        }
+        None
+    }
+
+    /// Return the canonical values slice (for UI choices).
+    pub fn canonical_values(&self) -> &'static [&'static str] {
+        self.canonical
+    }
+}
+
 /// Static capabilities and installation metadata for a known ACP runtime.
 pub(crate) struct KnownAcpRuntime {
     pub id: &'static str,
@@ -47,6 +123,20 @@ pub(crate) struct KnownAcpRuntime {
     pub config_file_format: Option<&'static str>,
     pub supports_acp_native_config: bool, // tier 1a: config/read+write
     pub thinking_env_var: Option<&'static str>,
+    /// Canonicalization contract for `thinking_env_var` on this harness.
+    ///
+    /// `Some(contract)` — harness uses a finite, static effort vocabulary.
+    /// All candidates (native env, legacy env, ACP tier, file tier) are
+    /// normalized through this contract before validity checks, precedence
+    /// resolution, override tracking, and B-equality comparison.
+    ///
+    /// `None` — harness accepts any provider/model-specific value via its own
+    /// catalog (buzz-agent); see `getProviderEffortConfig()` in TS for that path.
+    ///
+    /// The single canonical authority shared by UI choices, spawn bridge, and
+    /// reader. No value-authority logic may live outside this struct for
+    /// harnesses that declare one.
+    pub effort_normalization: Option<&'static EffortNormalization>,
     /// Env var for normalizing `max_output_tokens`. `None` when the harness
     /// does not have a first-class env var for this field (config-file only).
     pub max_tokens_env_var: Option<&'static str>,
@@ -122,5 +212,38 @@ mod tests {
         );
         assert!(codex.adapter_install_instructions_url.contains("codex-acp"));
         assert!(codex.cli_install_hint.contains("Codex CLI"));
+    }
+
+    /// Claude Code catalog entry declares `CLAUDE_CODE_EFFORT_LEVEL` as its
+    /// native effort key with a static 5-value vocabulary and no aliases.
+    /// Pins the IPC contract that the UI and spawn bridge depend on.
+    #[test]
+    fn claude_effort_catalog_entry_pins() {
+        let claude = known_acp_runtime_exact("claude").unwrap();
+        assert_eq!(
+            claude.thinking_env_var,
+            Some("CLAUDE_CODE_EFFORT_LEVEL"),
+            "Claude Code must declare CLAUDE_CODE_EFFORT_LEVEL as its native effort key"
+        );
+        let norm = claude
+            .effort_normalization
+            .expect("Claude Code must have an effort normalization contract");
+        assert_eq!(
+            norm.canonical,
+            &["low", "medium", "high", "xhigh", "max"],
+            "Claude Code must declare the five-value static vocabulary"
+        );
+        assert!(
+            norm.aliases.is_empty(),
+            "Claude Code must declare no aliases — values are consumed natively"
+        );
+        // xhigh is canonical for Claude (not an alias like for Goose)
+        assert_eq!(norm.normalize_str("xhigh"), Some("xhigh".to_string()));
+        // "off" is valid for Goose but not Claude
+        assert_eq!(
+            norm.normalize_str("off"),
+            None,
+            "off is not in Claude's vocabulary"
+        );
     }
 }

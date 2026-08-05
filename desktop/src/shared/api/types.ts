@@ -310,11 +310,8 @@ export type ManagedAgent = {
   pubkey: string;
   name: string;
   personaId: string | null;
-  /**
-   * The record's harness/runtime id (e.g. "goose", "my-custom-harness").
-   * `null` means the agent inherits its harness from the linked persona.
-   * Used to count agents referencing a harness definition (delete confirm).
-   */
+  /** The record's harness/runtime id (`null` = inherits from persona).
+   * Used to count agents referencing a harness definition (delete confirm). */
   runtime: string | null;
   teamId?: string | null;
   relayUrl: string;
@@ -517,6 +514,9 @@ export type AcpRuntimeCatalogEntry = {
   providerEnvVar: string | null;
   /** Environment variable used to apply thinking effort, when supported. */
   thinkingEnvVar: string | null;
+  /** Canonical effort values for runtimes with a static vocabulary; `null` for buzz-agent. */
+  acceptedEffortValues: string[] | null;
+  effortAliases: Array<[string, string]> | null;
   maxTokensEnvVar: string | null;
   contextLimitEnvVar: string | null;
   maxRoundsEnvVar: string | null;

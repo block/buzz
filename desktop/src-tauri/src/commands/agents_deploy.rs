@@ -261,4 +261,69 @@ mod tests {
         assert_eq!(launch["policy_env"]["BUZZ_ACP_AGENTS"], "4");
         assert_eq!(launch["owner_pubkey"], "owner-hex");
     }
+
+    /// Deploy parity (plan v3 Delta 4): for a legacy-only Goose record, the bridged
+    /// descriptor feeds `launch.env` with the native key, while the separately-merged
+    /// top-level `env_vars` retains the legacy key untouched.
+    ///
+    /// Contract: providers execute `launch`; top-level `env_vars` is compatibility
+    /// bookkeeping. This test pins that boundary.
+    #[test]
+    fn deploy_parity_launch_env_carries_native_goose_effort() {
+        use crate::managed_agents::known_acp_runtime_exact;
+        use crate::managed_agents::{
+            global_config::GlobalAgentConfig, resolve_effective_agent_env,
+        };
+
+        // Goose record with only legacy BUZZ_AGENT_THINKING_EFFORT.
+        let record: ManagedAgentRecord = serde_json::from_value(serde_json::json!({
+            "pubkey": "pk",
+            "name": "goose-agent",
+            "private_key_nsec": "",
+            "relay_url": "",
+            "acp_command": "goose-acp",
+            "agent_command": "goose",
+            "agent_args": [],
+            "mcp_command": "",
+            "turn_timeout_seconds": 320,
+            "parallelism": 1,
+            "respond_to": "owner-only",
+            "respond_to_allowlist": [],
+            "env_vars": { "BUZZ_AGENT_THINKING_EFFORT": "high" },
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap();
+
+        let runtime = known_acp_runtime_exact("goose");
+        let global = GlobalAgentConfig::default();
+        // The descriptor (= what launch.env uses) comes from resolve_effective_agent_env.
+        let descriptor = resolve_effective_agent_env(&record, &[], runtime, &global);
+
+        // launch.env: legacy key translated → native key.
+        assert_eq!(
+            descriptor
+                .env
+                .get("GOOSE_THINKING_EFFORT")
+                .map(String::as_str),
+            Some("high"),
+            "launch.env must carry native GOOSE_THINKING_EFFORT"
+        );
+        assert!(
+            !descriptor.env.contains_key("BUZZ_AGENT_THINKING_EFFORT"),
+            "launch.env must not carry legacy key"
+        );
+
+        // top-level env_vars (unmodified raw input): legacy key is still there.
+        // (The deploy payload's `env_vars` field is merged_user_env of the raw record —
+        // the bridge only affects the descriptor/launch path.)
+        assert_eq!(
+            record
+                .env_vars
+                .get("BUZZ_AGENT_THINKING_EFFORT")
+                .map(String::as_str),
+            Some("high"),
+            "top-level env_vars retains legacy key as compatibility bookkeeping"
+        );
+    }
 }

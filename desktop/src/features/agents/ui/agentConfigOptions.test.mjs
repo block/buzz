@@ -147,19 +147,52 @@ test("runtimeSupportsLlmProviderSelection is false for codex and claude", () => 
   assert.equal(runtimeSupportsLlmProviderSelection("claude"), false);
 });
 
-test("resetConfigForHarnessChange clears harness-specific values", () => {
+test("resetConfigForHarnessChange clears harness-specific values but preserves effort keys", () => {
+  // Delta-5 global-scope rule: ALL effort keys are preserved across runtime
+  // switches at global scope. Both BUZZ_AGENT_THINKING_EFFORT and
+  // GOOSE_THINKING_EFFORT survive a switch — each runtime reads only its own key.
   const config = {
-    env_vars: { BUZZ_AGENT_THINKING_EFFORT: "high", KEEP_ME: "yes" },
+    env_vars: {
+      BUZZ_AGENT_THINKING_EFFORT: "high",
+      GOOSE_THINKING_EFFORT: "medium",
+      KEEP_ME: "yes",
+    },
     model: "claude-opus",
     preferred_runtime: "buzz-agent",
     provider: "anthropic",
   };
 
   assert.deepEqual(resetConfigForHarnessChange(config, "claude"), {
-    env_vars: { KEEP_ME: "yes" },
+    env_vars: {
+      BUZZ_AGENT_THINKING_EFFORT: "high",
+      GOOSE_THINKING_EFFORT: "medium",
+      KEEP_ME: "yes",
+    },
     model: null,
     preferred_runtime: "claude",
     provider: null,
+  });
+});
+
+test("resetConfigForHarnessChange buzz-to-goose preserves both runtimes native effort keys", () => {
+  // Global switch: BUZZ_AGENT_THINKING_EFFORT and GOOSE_THINKING_EFFORT both
+  // survive. Each runtime descriptor uses only its own key; the other is a
+  // foreign key that its descriptor strips (Phase 3 invariant). At the global
+  // mutation layer, no key is deleted.
+  const config = {
+    env_vars: {
+      BUZZ_AGENT_THINKING_EFFORT: "high",
+      GOOSE_THINKING_EFFORT: "low",
+    },
+    model: "gpt-4",
+    preferred_runtime: "buzz-agent",
+    provider: "openai",
+  };
+
+  const result = resetConfigForHarnessChange(config, "goose");
+  assert.deepEqual(result.env_vars, {
+    BUZZ_AGENT_THINKING_EFFORT: "high",
+    GOOSE_THINKING_EFFORT: "low",
   });
 });
 

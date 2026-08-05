@@ -36,11 +36,17 @@ import {
   countNonSecretInheritedEnvVars,
   getBakedModelInheritLabel,
   getAdvancedInheritedSummary,
+  bakedStructuredKeys,
   getGlobalModelFallback,
   getInheritedAgentDefaults,
   getBakedProviderInheritLabel,
   resolveInheritedDefault,
+  resolveBakedEffort,
 } from "./bakedEnvHelpers.ts";
+import {
+  deriveAgentConfigFieldModel,
+  getRenderableEffortField,
+} from "../lib/agentConfigCore.ts";
 
 // ── Core predicate: provider-selection support ─────────────────────────────
 
@@ -1441,4 +1447,457 @@ test("inherited defaults expose a provider-specific model fallback to agent dial
     source: "build",
     value: "goose-claude-opus-4-8",
   });
+});
+
+// ── Baked effort: native-only for non-buzz-agent runtimes ─────────────────
+//
+// Plan v3 Delta 4: baked legacy key (BUZZ_AGENT_THINKING_EFFORT) must NOT be
+// shown as Goose inherited effort. Only the native key is honoured at the baked tier.
+// Paired with the ★ baked-unmasking pin from pass-3.
+
+test("baked_legacy_effort_excluded_for_goose_runtime", () => {
+  // Baked env has BUZZ_AGENT_THINKING_EFFORT=high but NOT GOOSE_THINKING_EFFORT.
+  // For a Goose runtime, the baked legacy key must not seed inherited effort.
+  const defaults = getInheritedAgentDefaults(
+    { env_vars: {}, provider: null, model: null },
+    [{ key: "BUZZ_AGENT_THINKING_EFFORT", value: "high", masked: false }],
+    { nativeEffortKey: "GOOSE_THINKING_EFFORT" },
+  );
+  assert.deepEqual(
+    defaults.effort,
+    { source: null, value: "" },
+    "baked legacy must not seed Goose inherited effort",
+  );
+});
+
+test("baked_native_effort_included_for_goose_runtime", () => {
+  // Baked env has GOOSE_THINKING_EFFORT=medium. For a Goose runtime, the baked
+  // native key must seed inherited effort (★ baked unmasking pin: value usable,
+  // not ••••••).
+  const defaults = getInheritedAgentDefaults(
+    { env_vars: {}, provider: null, model: null },
+    [{ key: "GOOSE_THINKING_EFFORT", value: "medium", masked: false }],
+    { nativeEffortKey: "GOOSE_THINKING_EFFORT" },
+  );
+  assert.deepEqual(
+    defaults.effort,
+    { source: "build", value: "medium" },
+    "baked native must seed Goose inherited effort",
+  );
+});
+
+test("baked_masked_native_effort_excluded_from_inherited_defaults", () => {
+  // A masked baked value (•••) must not be treated as a real inherited effort.
+  // (★ baked unmasking pin: masked ••••••must never read as a real inherited value.)
+  const defaults = getInheritedAgentDefaults(
+    { env_vars: {}, provider: null, model: null },
+    [{ key: "GOOSE_THINKING_EFFORT", value: "••••••", masked: true }],
+    { nativeEffortKey: "GOOSE_THINKING_EFFORT" },
+  );
+  assert.deepEqual(
+    defaults.effort,
+    { source: null, value: "" },
+    "masked baked value must not seed inherited effort",
+  );
+});
+
+// ── Baked effort: alias normalization and invalid-value skip ──────────────
+//
+// The baked tier must normalize values through the same contract as every
+// other tier — xhigh→max and invalid values produce absent inherited effort.
+// Paired with Rust `baked_xhigh_normalizes_to_max` and `baked_invalid_minimal_skipped`
+// in config_bridge/mod.rs which verify the spawn side; these verify the display side.
+
+test("baked_xhigh_normalizes_to_max_in_inherited_defaults", () => {
+  // Baked env has GOOSE_THINKING_EFFORT=xhigh (alias for max).
+  // getInheritedAgentDefaults must normalize it to canonical "max" before display.
+  const gooseAliases = [
+    ["none", "off"],
+    ["disabled", "off"],
+    ["med", "medium"],
+    ["xhigh", "max"],
+  ];
+  const defaults = getInheritedAgentDefaults(
+    { env_vars: {}, provider: null, model: null },
+    [{ key: "GOOSE_THINKING_EFFORT", value: "xhigh", masked: false }],
+    {
+      nativeEffortKey: "GOOSE_THINKING_EFFORT",
+      acceptedEffortValues: ["off", "low", "medium", "high", "max"],
+      effortAliases: gooseAliases,
+    },
+  );
+  assert.deepEqual(
+    defaults.effort,
+    { source: "build", value: "max" },
+    "baked xhigh alias must normalize to canonical max for display",
+  );
+});
+
+test("baked_invalid_minimal_absent_in_inherited_defaults", () => {
+  // Baked env has GOOSE_THINKING_EFFORT=minimal (invalid for Goose static vocab).
+  // getInheritedAgentDefaults must skip it — UI shows no inherited effort value.
+  const gooseAliases = [
+    ["none", "off"],
+    ["disabled", "off"],
+    ["med", "medium"],
+    ["xhigh", "max"],
+  ];
+  const defaults = getInheritedAgentDefaults(
+    { env_vars: {}, provider: null, model: null },
+    [{ key: "GOOSE_THINKING_EFFORT", value: "minimal", masked: false }],
+    {
+      nativeEffortKey: "GOOSE_THINKING_EFFORT",
+      acceptedEffortValues: ["off", "low", "medium", "high", "max"],
+      effortAliases: gooseAliases,
+    },
+  );
+  assert.deepEqual(
+    defaults.effort,
+    { source: null, value: "" },
+    "baked invalid value must be skipped — no inherited effort displayed",
+  );
+});
+
+// These two tests exercise `resolveBakedEffort` directly — the production
+// helper used by AgentConfigFields (global/onboarding baked display).
+// Paired with the getInheritedAgentDefaults tests above; both paths must
+// normalize through the same contract (alias→canonical, invalid→absent).
+
+test("resolveBakedEffort_xhigh_normalizes_to_max", () => {
+  // The global/onboarding control calls resolveBakedEffort(bakedEnv, key, selectedRuntime).
+  // Baked GOOSE_THINKING_EFFORT=xhigh must display as canonical "max".
+  const gooseRuntime = {
+    acceptedEffortValues: ["off", "low", "medium", "high", "max"],
+    effortAliases: [
+      ["none", "off"],
+      ["disabled", "off"],
+      ["med", "medium"],
+      ["xhigh", "max"],
+    ],
+  };
+  const result = resolveBakedEffort(
+    [{ key: "GOOSE_THINKING_EFFORT", value: "xhigh", masked: false }],
+    "GOOSE_THINKING_EFFORT",
+    gooseRuntime,
+  );
+  assert.equal(
+    result,
+    "max",
+    "resolveBakedEffort must alias xhigh→max for Goose runtime",
+  );
+});
+
+test("resolveBakedEffort_invalid_minimal_returns_null", () => {
+  // Baked GOOSE_THINKING_EFFORT=minimal is invalid for Goose static vocab.
+  // resolveBakedEffort must return null so the control shows no inherited value.
+  const gooseRuntime = {
+    acceptedEffortValues: ["off", "low", "medium", "high", "max"],
+    effortAliases: [
+      ["none", "off"],
+      ["disabled", "off"],
+      ["med", "medium"],
+      ["xhigh", "max"],
+    ],
+  };
+  const result = resolveBakedEffort(
+    [{ key: "GOOSE_THINKING_EFFORT", value: "minimal", masked: false }],
+    "GOOSE_THINKING_EFFORT",
+    gooseRuntime,
+  );
+  assert.equal(
+    result,
+    null,
+    "resolveBakedEffort must return null for invalid vocab value",
+  );
+});
+
+// ── bakedStructuredKeys: runtime-sensitive hidden-key set ─────────────────
+
+test("bakedStructuredKeys_with_native_effort_key_hides_both_fixed_and_native", () => {
+  const keys = bakedStructuredKeys("GOOSE_THINKING_EFFORT");
+  assert.ok(
+    keys.has("BUZZ_AGENT_PROVIDER"),
+    "BUZZ_AGENT_PROVIDER always hidden",
+  );
+  assert.ok(keys.has("BUZZ_AGENT_MODEL"), "BUZZ_AGENT_MODEL always hidden");
+  assert.ok(keys.has("GOOSE_THINKING_EFFORT"), "native effort key hidden");
+  assert.equal(
+    keys.has("BUZZ_AGENT_THINKING_EFFORT"),
+    false,
+    "legacy key NOT hidden for Goose (global legacy stays as advanced row)",
+  );
+});
+
+test("bakedStructuredKeys_without_native_effort_key_hides_only_fixed", () => {
+  const keys = bakedStructuredKeys(undefined);
+  assert.ok(keys.has("BUZZ_AGENT_PROVIDER"));
+  assert.ok(keys.has("BUZZ_AGENT_MODEL"));
+  assert.equal(keys.has("GOOSE_THINKING_EFFORT"), false);
+  assert.equal(keys.has("BUZZ_AGENT_THINKING_EFFORT"), false);
+});
+
+// ── getInheritedAgentDefaults: global-tier legacy exclusion + normalization ─
+//
+// Plan v3 Delta 4: global legacy is never consumed as structured effort.
+// Plan v3 Delta 1: global native value normalized before display.
+
+test("global_legacy_effort_ignored_for_goose_in_inherited_defaults", () => {
+  // Global config has only the legacy key (BUZZ_AGENT_THINKING_EFFORT=high).
+  // For a Goose runtime, that key is buzz-agent's native key (Delta 5) and must
+  // NOT seed the inherited effort display — mirrors effort_tier_alias(global_tier=true).
+  const defaults = getInheritedAgentDefaults(
+    {
+      env_vars: { BUZZ_AGENT_THINKING_EFFORT: "high" },
+      provider: null,
+      model: null,
+    },
+    undefined,
+    {
+      nativeEffortKey: "GOOSE_THINKING_EFFORT",
+      acceptedEffortValues: ["off", "low", "medium", "high", "max"],
+    },
+  );
+  assert.deepEqual(
+    defaults.effort,
+    { source: null, value: "" },
+    "global legacy key must not seed Goose inherited effort",
+  );
+});
+
+test("global_native_xhigh_normalizes_to_max_for_goose_in_inherited_defaults", () => {
+  // Global config has GOOSE_THINKING_EFFORT=xhigh (an accepted Goose alias).
+  // Must be normalized to canonical "max" before display, consistent with the
+  // Rust display path where xhigh → max via acceptedEffortValues (Delta 1).
+  const defaults = getInheritedAgentDefaults(
+    {
+      env_vars: { GOOSE_THINKING_EFFORT: "xhigh" },
+      provider: null,
+      model: null,
+    },
+    undefined,
+    {
+      nativeEffortKey: "GOOSE_THINKING_EFFORT",
+      acceptedEffortValues: ["off", "low", "medium", "high", "max"],
+      effortAliases: GOOSE_ALIASES,
+    },
+  );
+  assert.deepEqual(
+    defaults.effort,
+    { source: "global", value: "max" },
+    "global native xhigh must normalize to canonical max",
+  );
+});
+
+// ── Global Goose effort: descriptor-driven canonical choices ────────────────
+//
+// Plan v3 IMPORTANT 1: AgentConfigFields at global/onboarding scope for a
+// harness-native runtime must use descriptor metadata for effort options and
+// display, not the Buzz provider/model catalog (Delta 5 coexistence).
+
+// Aliases from GOOSE_EFFORT_NORMALIZATION (runtime_metadata.rs). The catalog
+// serializes these through effortAliases; fixtures must include them so
+// normalizeEffortValue resolves aliases from supplied metadata, not a built-in table.
+const GOOSE_ALIASES = [
+  ["none", "off"],
+  ["disabled", "off"],
+  ["med", "medium"],
+  ["xhigh", "max"],
+];
+
+const GOOSE_GLOBAL_RUNTIME = {
+  id: "goose",
+  thinkingEnvVar: "GOOSE_THINKING_EFFORT",
+  acceptedEffortValues: ["off", "low", "medium", "high", "max"],
+  effortAliases: GOOSE_ALIASES,
+  providerEnvVar: "GOOSE_PROVIDER",
+  modelEnvVar: "GOOSE_MODEL",
+  maxTokensEnvVar: null,
+  contextLimitEnvVar: null,
+  maxRoundsEnvVar: null,
+  command: "goose",
+  defaultArgs: [],
+};
+
+test("global_goose_effort_field_optionSource_is_harnessNative", () => {
+  // At global scope with a Goose runtime, the effort field descriptor must report
+  // optionSource=harnessNative — the signal AgentConfigFields uses to branch to the
+  // metadata-driven canonical control instead of the Buzz provider/model catalog.
+  const model = deriveAgentConfigFieldModel({
+    config: { env_vars: {}, provider: null, model: null },
+    runtime: GOOSE_GLOBAL_RUNTIME,
+    scope: "global",
+  });
+  const effortField = getRenderableEffortField(model);
+  assert.ok(
+    effortField,
+    "effort field must be present for Goose at global scope",
+  );
+  assert.equal(
+    effortField.optionSource,
+    "harnessNative",
+    "Goose global effort must be harnessNative (not legacyProviderModelCatalog or buzzAgentCatalog)",
+  );
+});
+
+test("global_goose_effort_field_value_xhigh_normalized_to_max", () => {
+  // When global config has GOOSE_THINKING_EFFORT=xhigh, the descriptor value must
+  // be normalized to canonical "max" — the global control shows effortField.value.
+  const model = deriveAgentConfigFieldModel({
+    config: {
+      env_vars: { GOOSE_THINKING_EFFORT: "xhigh" },
+      provider: null,
+      model: null,
+    },
+    runtime: GOOSE_GLOBAL_RUNTIME,
+    scope: "global",
+  });
+  const effortField = getRenderableEffortField(model);
+  assert.ok(effortField, "effort field must be present");
+  assert.equal(
+    effortField.value,
+    "max",
+    "xhigh must normalize to canonical max via descriptor",
+  );
+});
+
+test("global_goose_effort_field_invalid_value_resolves_to_null", () => {
+  // A global GOOSE_THINKING_EFFORT=minimal (invalid for Goose) must resolve to
+  // null via the descriptor — the control shows empty/Inherit, not the invalid value.
+  const model = deriveAgentConfigFieldModel({
+    config: {
+      env_vars: { GOOSE_THINKING_EFFORT: "minimal" },
+      provider: null,
+      model: null,
+    },
+    runtime: GOOSE_GLOBAL_RUNTIME,
+    scope: "global",
+  });
+  const effortField = getRenderableEffortField(model);
+  assert.ok(effortField, "effort field must be present");
+  assert.equal(
+    effortField.value,
+    null,
+    "invalid value must resolve to null (control shows Inherit)",
+  );
+});
+
+test("global_goose_effort_field_no_legacy_fallback_at_global_scope", () => {
+  // At global scope, only the native GOOSE_THINKING_EFFORT is considered — not
+  // BUZZ_AGENT_THINKING_EFFORT (Delta 5: that is buzz-agent's own native key).
+  // Even if a global legacy key holds a valid value, the descriptor must report null.
+  const model = deriveAgentConfigFieldModel({
+    config: {
+      env_vars: {
+        BUZZ_AGENT_THINKING_EFFORT: "high", // buzz-agent's own global native key
+      },
+      provider: null,
+      model: null,
+    },
+    runtime: GOOSE_GLOBAL_RUNTIME,
+    scope: "global",
+  });
+  const effortField = getRenderableEffortField(model);
+  assert.ok(effortField, "effort field must be present");
+  assert.equal(
+    effortField.value,
+    null,
+    "global legacy BUZZ_AGENT_THINKING_EFFORT must not be consumed as Goose effort",
+  );
+  assert.equal(
+    effortField.legacyConsumedKey,
+    undefined,
+    "no legacy key must be consumed at global scope",
+  );
+});
+
+// ── Model-coupled mutation guard: harness-native effort survives heal/auto-clear
+//
+// Pins the isHarnessNativeEffort flag that gates heal-on-mount, orphan-clear, and
+// useEffortAutoClear. All three paths skip the native effort key when this is true.
+// Descriptor optionSource=harnessNative is the derivation; acceptedEffortValues≠null
+// is the runtime signal. Tests verify the flag is set for Goose (any value, including
+// aliases and invalid values) and NOT set for buzz-agent (provider/model-gated path).
+
+test("harness_native_xhigh_flag_set_so_model_heal_skips_key", () => {
+  // Global GOOSE_THINKING_EFFORT=xhigh: descriptor has optionSource=harnessNative and
+  // value=max. AgentConfigFields derives isHarnessNativeEffort from optionSource, which
+  // gates the heal-on-mount, orphan-clear, and useEffortAutoClear mutation paths.
+  // When true, all three skip the native key — xhigh survives and displays as max.
+  const model = deriveAgentConfigFieldModel({
+    config: {
+      env_vars: { GOOSE_THINKING_EFFORT: "xhigh" },
+      provider: null,
+      model: null,
+    },
+    runtime: GOOSE_GLOBAL_RUNTIME,
+    scope: "global",
+  });
+  const effortField = getRenderableEffortField(model);
+  assert.ok(effortField, "effort field present");
+  assert.equal(
+    effortField.optionSource,
+    "harnessNative",
+    "xhigh: optionSource=harnessNative gates model-heal skip (isHarnessNativeEffort=true)",
+  );
+  assert.equal(effortField.value, "max", "xhigh normalizes to max for display");
+});
+
+test("harness_native_invalid_minimal_flag_set_so_model_heal_skips_key", () => {
+  // Global GOOSE_THINKING_EFFORT=minimal (invalid for Goose): flag still set,
+  // heal/auto-clear skip the key. Reader shows Inherit (null), spawn skips it.
+  const model = deriveAgentConfigFieldModel({
+    config: {
+      env_vars: { GOOSE_THINKING_EFFORT: "minimal" },
+      provider: null,
+      model: null,
+    },
+    runtime: GOOSE_GLOBAL_RUNTIME,
+    scope: "global",
+  });
+  const effortField = getRenderableEffortField(model);
+  assert.ok(effortField, "effort field present");
+  assert.equal(
+    effortField.optionSource,
+    "harnessNative",
+    "minimal: optionSource=harnessNative gates model-heal skip",
+  );
+  assert.equal(
+    effortField.value,
+    null,
+    "minimal is invalid — control shows Inherit, but key survives",
+  );
+});
+
+test("buzz_agent_effort_optionSource_is_not_harnessNative_auto_clear_active", () => {
+  // buzz-agent uses the provider/model catalog path (optionSource=buzzAgentCatalog).
+  // isHarnessNativeEffort=false, so model-heal, orphan-clear, and useEffortAutoClear
+  // are all active for buzz-agent — behavior unchanged from main.
+  const BUZZ_AGENT_RUNTIME = {
+    id: "buzz-agent",
+    thinkingEnvVar: "BUZZ_AGENT_THINKING_EFFORT",
+    acceptedEffortValues: null, // buzz-agent: no static vocab, provider/model-gated
+    providerEnvVar: "BUZZ_AGENT_PROVIDER",
+    modelEnvVar: "BUZZ_AGENT_MODEL",
+    maxTokensEnvVar: null,
+    contextLimitEnvVar: null,
+    maxRoundsEnvVar: null,
+    command: null,
+    defaultArgs: [],
+  };
+  const model = deriveAgentConfigFieldModel({
+    config: {
+      env_vars: { BUZZ_AGENT_THINKING_EFFORT: "high" },
+      provider: "anthropic",
+      model: "claude-3-5-sonnet",
+    },
+    runtime: BUZZ_AGENT_RUNTIME,
+    scope: "global",
+  });
+  const effortField = getRenderableEffortField(model);
+  assert.ok(effortField, "effort field present for buzz-agent");
+  assert.equal(
+    effortField.optionSource,
+    "buzzAgentCatalog",
+    "buzz-agent effort is not harnessNative — auto-clear path active (behavior unchanged)",
+  );
 });

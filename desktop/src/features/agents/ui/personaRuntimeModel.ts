@@ -175,6 +175,18 @@ export function resolveInheritedRuntimeSubmission(input: {
   envVars: Record<string, string>;
   /** The persona's env vars, layered under the agent's own on transition. */
   personaEnvVars: Record<string, string>;
+  /**
+   * Env-var keys to strip from the persona layer on the inherit-transition.
+   *
+   * Used to prevent harness-native effort keys from materializing into the
+   * record when the user selects Inherit for effort. Effort on a linked
+   * instance is owned by the local record layer; the persona's effort value
+   * is inherited at spawn time without being persisted into the record.
+   *
+   * Pass the runtime's native effort key + `BUZZ_AGENT_THINKING_EFFORT`
+   * when the selected runtime has `acceptedEffortValues`.
+   */
+  excludePersonaEnvKeys?: readonly string[];
 }): {
   provider: string | null;
   model: string | null;
@@ -192,12 +204,19 @@ export function resolveInheritedRuntimeSubmission(input: {
     input.agentWasHarnessPinned &&
     localProvider.length === 0
   ) {
+    const personaEnvVars = input.excludePersonaEnvKeys?.length
+      ? Object.fromEntries(
+          Object.entries(input.personaEnvVars).filter(
+            ([k]) => !input.excludePersonaEnvKeys?.includes(k),
+          ),
+        )
+      : input.personaEnvVars;
     return {
       provider: input.personaProvider.trim() || null,
       // Fill an empty local model from the persona so a provider-backed runtime
       // isn't saved model-less; a deliberate local model still wins.
       model: localModel || input.personaModel?.trim() || null,
-      envVars: { ...input.personaEnvVars, ...input.envVars },
+      envVars: { ...personaEnvVars, ...input.envVars },
     };
   }
   return {

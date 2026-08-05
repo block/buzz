@@ -235,18 +235,21 @@ pub fn validate_user_env_keys(env_vars: &BTreeMap<String, String>) -> Result<(),
 ///
 /// Allowlist (case-insensitive):
 /// - `BUZZ_AGENT_PROVIDER`, `BUZZ_AGENT_MODEL` — agent runtime selection
-/// - `BUZZ_AGENT_THINKING_EFFORT` — non-secret enum (none/minimal/low/medium/high/xhigh/max)
+/// - All known native thinking-effort keys (non-secret enum values) — derived
+///   from runtime declarations via `all_known_effort_keys()` so this list stays
+///   in sync automatically as runtimes are added.
 /// - `DATABRICKS_HOST`, `DATABRICKS_MODEL` — Block non-secret defaults
 pub(crate) fn is_safe_to_reveal(key: &str) -> bool {
+    use super::config_bridge::all_known_effort_keys;
     const SAFE_KEYS: &[&str] = &[
         "BUZZ_AGENT_PROVIDER",
         "BUZZ_AGENT_MODEL",
-        "BUZZ_AGENT_THINKING_EFFORT",
         "DATABRICKS_HOST",
         "DATABRICKS_MODEL",
     ];
     let upper = key.to_ascii_uppercase();
     SAFE_KEYS.iter().any(|safe| upper == *safe)
+        || all_known_effort_keys().any(|effort| upper == effort.to_ascii_uppercase())
 }
 
 /// Per-value byte cap for env values. 32 KiB is generous for credentials,

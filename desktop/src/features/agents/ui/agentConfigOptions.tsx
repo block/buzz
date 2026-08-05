@@ -2,7 +2,6 @@ import type {
   AcpRuntimeCatalogEntry,
   GlobalAgentConfig,
 } from "@/shared/api/types";
-import { BUZZ_AGENT_THINKING_EFFORT } from "./buzzAgentConfig";
 import type { RuntimeFileConfigSubset } from "@/shared/api/tauri";
 // Dialogs import getDefaultPersonaRuntime via this re-export; lib code imports
 // directly from lib/resolvePersonaRuntime.
@@ -204,13 +203,21 @@ export function runtimeSupportsLlmProviderSelection(runtimeId: string) {
   return runtimeId === "buzz-agent" || runtimeId === "goose";
 }
 
-/** Clears values whose meaning or support changes with the selected harness. */
+/** Clears values whose meaning or support changes with the selected harness.
+ *
+ * Used at **global and onboarding scope** — where the Delta-5 global-scope
+ * mutation rule applies: native effort keys from ALL runtimes are preserved
+ * (both BUZZ_AGENT_THINKING_EFFORT and GOOSE_THINKING_EFFORT survive a switch).
+ * Legacy-key deletion and native-key clearing happen only at record/persona
+ * tiers via the effort transition mutation in `selectionOnRuntimeChange`.
+ */
 export function resetConfigForHarnessChange(
   config: GlobalAgentConfig,
   runtimeId: string,
 ): GlobalAgentConfig {
+  // Do NOT delete any effort keys: global scope preserves both runtimes'
+  // native keys and the legacy key (Delta-5 global-scope mutation rule).
   const nextEnvVars = { ...config.env_vars };
-  delete nextEnvVars[BUZZ_AGENT_THINKING_EFFORT];
 
   return {
     ...config,

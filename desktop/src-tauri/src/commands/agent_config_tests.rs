@@ -29,39 +29,7 @@ fn with_no_goose_config<T>(body: impl FnOnce() -> T) -> T {
 }
 
 fn goose_runtime() -> &'static KnownAcpRuntime {
-    &KnownAcpRuntime {
-        id: "goose",
-        label: "Goose",
-        commands: &["goose"],
-        aliases: &[],
-        avatar_url: "",
-        mcp_command: None,
-        mcp_hooks: false,
-        underlying_cli: None,
-        cli_install_commands: &[],
-        cli_install_commands_windows: &[],
-        adapter_install_commands: &[],
-        cli_install_instructions_url: "",
-        adapter_install_instructions_url: "",
-        cli_install_hint: "",
-        adapter_install_hint: "",
-        skill_dir: None,
-        supports_acp_model_switching: false,
-        model_env_var: Some("GOOSE_MODEL"),
-        provider_env_var: Some("GOOSE_PROVIDER"),
-        provider_locked: false,
-        default_env: &[],
-        config_file_path: Some("~/.config/goose/config.yaml"),
-        config_file_format: Some("yaml"),
-        supports_acp_native_config: true,
-        thinking_env_var: Some("GOOSE_THINKING_EFFORT"),
-        max_tokens_env_var: Some("GOOSE_MAX_TOKENS"),
-        context_limit_env_var: Some("GOOSE_CONTEXT_LIMIT"),
-        max_rounds_env_var: None,
-        required_normalized_fields: &["model", "provider"],
-        login_hint: None,
-        auth_probe_args: None,
-    }
+    crate::managed_agents::known_acp_runtime_exact("goose").expect("goose must be in catalog")
 }
 
 fn agent_record() -> ManagedAgentRecord {
@@ -175,13 +143,15 @@ fn linked_stale_record_model_never_outranks_persona_model() {
     record.model = Some("stale-explicit-model".to_string());
     let personas = vec![persona_with_model("persona-model")];
 
-    let surface = resolve_config_surface(
-        record,
-        &personas,
-        Some(goose_runtime()),
-        None,
-        &Default::default(),
-    );
+    let surface = with_no_goose_config(|| {
+        resolve_config_surface(
+            record,
+            &personas,
+            Some(goose_runtime()),
+            None,
+            &Default::default(),
+        )
+    });
 
     let model = surface.normalized.model.as_ref().expect("model resolved");
     assert_eq!(model.value.as_deref(), Some("persona-model"));
@@ -205,7 +175,9 @@ fn linked_blank_definition_model_falls_through_to_global_default() {
         ..Default::default()
     };
 
-    let surface = resolve_config_surface(record, &personas, Some(goose_runtime()), None, &global);
+    let surface = with_no_goose_config(|| {
+        resolve_config_surface(record, &personas, Some(goose_runtime()), None, &global)
+    });
 
     let model = surface.normalized.model.as_ref().expect("model resolved");
     assert_eq!(model.value.as_deref(), Some("global-model"));
@@ -222,13 +194,15 @@ fn definition_less_explicit_record_model_keeps_buzz_explicit_origin() {
     record.model = Some("explicit-model".to_string());
     let personas = vec![persona_with_model("persona-model")];
 
-    let surface = resolve_config_surface(
-        record,
-        &personas,
-        Some(goose_runtime()),
-        None,
-        &Default::default(),
-    );
+    let surface = with_no_goose_config(|| {
+        resolve_config_surface(
+            record,
+            &personas,
+            Some(goose_runtime()),
+            None,
+            &Default::default(),
+        )
+    });
 
     let model = surface.normalized.model.as_ref().expect("model resolved");
     assert_eq!(model.value.as_deref(), Some("explicit-model"));
@@ -249,13 +223,15 @@ fn pending_pick_keeps_explicit_x_and_does_not_surface_live_y() {
     let personas: Vec<AgentDefinition> = vec![];
     let cache = session_cache("model-y", false);
 
-    let surface = resolve_config_surface(
-        record,
-        &personas,
-        Some(goose_runtime()),
-        Some(&cache),
-        &Default::default(),
-    );
+    let surface = with_no_goose_config(|| {
+        resolve_config_surface(
+            record,
+            &personas,
+            Some(goose_runtime()),
+            Some(&cache),
+            &Default::default(),
+        )
+    });
     let model = surface.normalized.model.expect("model resolved");
 
     assert_eq!(model.value.as_deref(), Some("model-x"));
@@ -277,13 +253,15 @@ fn genuine_explicit_live_switch_renders_y_over_x_buzz_explicit_secondary() {
     let personas: Vec<AgentDefinition> = vec![];
     let cache = session_cache("model-y", true);
 
-    let surface = resolve_config_surface(
-        record,
-        &personas,
-        Some(goose_runtime()),
-        Some(&cache),
-        &Default::default(),
-    );
+    let surface = with_no_goose_config(|| {
+        resolve_config_surface(
+            record,
+            &personas,
+            Some(goose_runtime()),
+            Some(&cache),
+            &Default::default(),
+        )
+    });
     let model = surface.normalized.model.expect("model resolved");
 
     assert_eq!(model.value.as_deref(), Some("model-y"));
@@ -340,13 +318,15 @@ fn persona_linked_live_switch_keeps_persona_default_secondary() {
     let personas = vec![persona_with_model("persona-model")];
     let cache = session_cache("model-y", true);
 
-    let surface = resolve_config_surface(
-        record,
-        &personas,
-        Some(goose_runtime()),
-        Some(&cache),
-        &Default::default(),
-    );
+    let surface = with_no_goose_config(|| {
+        resolve_config_surface(
+            record,
+            &personas,
+            Some(goose_runtime()),
+            Some(&cache),
+            &Default::default(),
+        )
+    });
     let model = surface.normalized.model.expect("model resolved");
 
     assert_eq!(model.value.as_deref(), Some("model-y"));
@@ -375,13 +355,15 @@ fn global_default_live_switch_renders_global_model_as_secondary_global_default()
         ..Default::default()
     };
 
-    let surface = resolve_config_surface(
-        record,
-        &personas,
-        Some(goose_runtime()),
-        Some(&cache),
-        &global,
-    );
+    let surface = with_no_goose_config(|| {
+        resolve_config_surface(
+            record,
+            &personas,
+            Some(goose_runtime()),
+            Some(&cache),
+            &global,
+        )
+    });
     let model = surface.normalized.model.expect("model resolved");
 
     // Live model wins as primary.
@@ -624,6 +606,21 @@ fn baked_env_thinking_effort_is_unmasked() {
 }
 
 #[test]
+fn baked_env_goose_thinking_effort_is_unmasked() {
+    // GOOSE_THINKING_EFFORT is a non-secret canonical enum (off/low/medium/high/max) —
+    // must be revealed so the native baked lookup in `bakedEnvHelpers.ts` can read
+    // it as inherited effort for Goose agents (plan v3 pass-3 ★ pin).
+    let entries = baked_env_from_map(&[("GOOSE_THINKING_EFFORT", "high")]);
+    assert_eq!(entries.len(), 1);
+    let effort = entries
+        .iter()
+        .find(|e| e.key == "GOOSE_THINKING_EFFORT")
+        .unwrap();
+    assert_eq!(effort.value, "high");
+    assert!(!effort.masked);
+}
+
+#[test]
 fn baked_env_allowlist_is_case_insensitive() {
     // Known-safe keys — case-insensitive match must allow them.
     assert!(super::is_safe_to_reveal("buzz_agent_provider"));
@@ -632,6 +629,9 @@ fn baked_env_allowlist_is_case_insensitive() {
     assert!(super::is_safe_to_reveal("BUZZ_AGENT_MODEL"));
     assert!(super::is_safe_to_reveal("buzz_agent_thinking_effort"));
     assert!(super::is_safe_to_reveal("BUZZ_AGENT_THINKING_EFFORT"));
+    // Goose native effort key — derived from runtime declarations via all_known_effort_keys().
+    assert!(super::is_safe_to_reveal("goose_thinking_effort"));
+    assert!(super::is_safe_to_reveal("GOOSE_THINKING_EFFORT"));
     assert!(super::is_safe_to_reveal("databricks_host"));
     assert!(super::is_safe_to_reveal("DATABRICKS_HOST"));
     assert!(super::is_safe_to_reveal("databricks_model"));

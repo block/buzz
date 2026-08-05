@@ -2,7 +2,10 @@ import type {
   AcpRuntimeCatalogEntry,
   GlobalAgentConfig,
 } from "@/shared/api/types";
-import { BUZZ_AGENT_THINKING_EFFORT } from "../ui/buzzAgentConfig";
+import {
+  BUZZ_AGENT_THINKING_EFFORT,
+  normalizeEffortValue,
+} from "../ui/buzzAgentConfig";
 
 /**
  * Lifecycle status of the ACP runtime catalog query on a per-agent surface.
@@ -81,6 +84,9 @@ export type AgentConfigFieldDescriptor =
         | { kind: "acpConfigOption"; id: string; category: string };
       render: "control" | "deferredUntilNativeOptionsAvailable";
       value: string | null;
+      /** Set when a legacy key's value is being shown via fallback; callers
+       * should add this key to hidden-keys to suppress the duplicate row. */
+      legacyConsumedKey?: string;
     }
   | {
       kind: "maxOutputTokens" | "contextLimit" | "maxRounds";
@@ -115,6 +121,41 @@ export type AgentConfigFieldModel = {
 
 function valueFromEnv(config: GlobalAgentConfig, key: string) {
   return config.env_vars[key]?.trim() || null;
+}
+
+/**
+ * Single policy source for reading effort from a flat env-var map.
+ *
+ * Native key takes precedence; legacy key is the fallback only at
+ * record/persona tiers (caller must pass `legacyKey` conditionally — pass
+ * `null` at global/onboarding scope to enforce the tier boundary).
+ *
+ * Returns `{ value, legacyConsumed }` where:
+ * - `value`          — the normalized canonical value, or `null` if absent/invalid
+ * - `legacyConsumed` — true iff `value` came from the legacy key
+ *
+ * Used by both `deriveAgentConfigFieldModel` (model layer) and
+ * `HarnessNativeEffortFields` (component layer) so neither duplicates the
+ * native-first / valid-legacy-fallback / normalize logic.
+ */
+export function resolveEffortFromEnv(
+  envVars: Record<string, string>,
+  nativeKey: string,
+  legacyKey: string | null,
+  acceptedValues: readonly string[] | null,
+  effortAliases?: ReadonlyArray<readonly [string, string]> | null,
+): { value: string | null; legacyConsumed: boolean } {
+  const nativeRaw = envVars[nativeKey]?.trim() || null;
+  const legacyRaw = legacyKey ? envVars[legacyKey]?.trim() || null : null;
+  const nativeValue = nativeRaw
+    ? (normalizeEffortValue(nativeRaw, acceptedValues, effortAliases) ?? null)
+    : null;
+  const legacyValue = legacyRaw
+    ? (normalizeEffortValue(legacyRaw, acceptedValues, effortAliases) ?? null)
+    : null;
+  const value = nativeValue ?? legacyValue;
+  const legacyConsumed = !nativeValue && !!legacyValue;
+  return { value, legacyConsumed };
 }
 
 /**
@@ -204,32 +245,49 @@ export function deriveAgentConfigFieldModel({
   });
 
   if (runtime?.thinkingEnvVar) {
+    const nativeKey = runtime.thinkingEnvVar;
+    const isBuzzAgent = runtime.id === "buzz-agent";
+    // Legacy fallback applies only at record/persona tiers (scope "definition" or
+    // "instance") — mirrors spawn's effort_tier_alias(global_tier=true) policy.
+    // At global/onboarding scope, legacy is buzz-agent's native key (Delta 5) and
+    // must never be consumed as Goose effort.
+    const isRecordOrPersonaScope =
+      scope === "definition" || scope === "instance";
+    const legacyKey =
+      !isBuzzAgent && isRecordOrPersonaScope
+        ? BUZZ_AGENT_THINKING_EFFORT
+        : null;
+    const acceptedValues = isBuzzAgent
+      ? null
+      : (runtime.acceptedEffortValues ?? null);
+    const effortAliases = isBuzzAgent ? null : (runtime.effortAliases ?? null);
+    // resolveEffortFromEnv is the single policy source for effort reads —
+    // normalizes, applies native-first / valid-legacy-fallback, and reports
+    // which key was consumed. HarnessNativeEffortFields calls the same fn.
+    const { value: effortValue, legacyConsumed } = resolveEffortFromEnv(
+      config.env_vars,
+      nativeKey,
+      legacyKey,
+      acceptedValues,
+      effortAliases,
+    );
     fields.push({
       kind: "effort",
-      optionSource:
-        runtime.id === "buzz-agent"
-          ? "buzzAgentCatalog"
+      optionSource: isBuzzAgent
+        ? "buzzAgentCatalog"
+        : runtime.acceptedEffortValues
+          ? "harnessNative"
           : "legacyProviderModelCatalog",
       currentPersistence: {
         kind: "envVar",
-        key: BUZZ_AGENT_THINKING_EFFORT,
+        key: nativeKey,
       },
-      targetApplication: { kind: "envVar", key: runtime.thinkingEnvVar },
+      targetApplication: { kind: "envVar", key: nativeKey },
       render: "control",
-      value: valueFromEnv(config, BUZZ_AGENT_THINKING_EFFORT),
-    });
-  } else if (runtime?.id === "claude") {
-    fields.push({
-      kind: "effort",
-      optionSource: "harnessNative",
-      currentPersistence: { kind: "unavailable" },
-      targetApplication: {
-        kind: "acpConfigOption",
-        id: "effort",
-        category: "thought_level",
-      },
-      render: "deferredUntilNativeOptionsAvailable",
-      value: null,
+      value: effortValue,
+      legacyConsumedKey: legacyConsumed
+        ? BUZZ_AGENT_THINKING_EFFORT
+        : undefined,
     });
   } else {
     omissions.push({
@@ -291,9 +349,7 @@ export function getRenderableEffortField(
  * Per-surface consequences (assuming standard descriptor sets):
  * - Global: effort key + numeric keys rendered by the descriptors
  * - Per-agent buzz-agent: effort key + 3 numeric keys
- * - Per-agent Goose: 2 numeric keys only — Goose effort (BUZZ_AGENT_THINKING_EFFORT)
- *   stays a visible generic env row because no effort control renders per-agent
- *   for Goose (effort migration is out of scope)
+ * - Per-agent Goose: effort key (GOOSE_THINKING_EFFORT) + 2 numeric keys
  */
 export function structuredEnvKeys(
   renderedDescriptors: AgentConfigFieldDescriptor[],
@@ -347,4 +403,24 @@ export function numericTuningPlaceholder(
   return inheritedValue
     ? `Inherit (${inheritedValue})`
     : "Inherit (agent default)";
+}
+
+/**
+ * Return all known native thinking-effort env keys from the runtime catalog.
+ *
+ * Derived from `runtime.thinkingEnvVar` declarations rather than a manually
+ * maintained constant — adding a new runtime to the catalog automatically
+ * participates in foreign-key stripping and transition cleanup.
+ *
+ * Use this in place of the static `ALL_KNOWN_EFFORT_KEYS` constant wherever
+ * the runtime catalog is available.
+ */
+export function allKnownEffortKeys(
+  runtimes: readonly Pick<AcpRuntimeCatalogEntry, "thinkingEnvVar">[],
+): string[] {
+  const keys = new Set<string>();
+  for (const rt of runtimes) {
+    if (rt.thinkingEnvVar) keys.add(rt.thinkingEnvVar);
+  }
+  return [...keys];
 }

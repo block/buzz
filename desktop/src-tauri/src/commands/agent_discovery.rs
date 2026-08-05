@@ -45,8 +45,7 @@ pub(crate) fn plan_adapter_install<'c>(
         {
             None
         }
-        // Codex adapter is outdated: uninstall the old package first so npm
-        // doesn't hit EEXIST on the shared `codex-acp` bin-link, then install.
+        // Codex adapter outdated: uninstall old package first (npm refuses to overwrite a bin from another pkg).
         Some(_) => Some(vec![
             "npm uninstall -g @zed-industries/codex-acp",
             "npm install -g @agentclientprotocol/codex-acp",
@@ -133,9 +132,8 @@ pub async fn save_custom_harness(
     std::fs::create_dir_all(&custom_dir)
         .map_err(|e| format!("failed to create custom_harnesses dir: {e}"))?;
 
-    // ── Phase 2+3: backup-swap write + rename (Windows-safe, rollback on failure)
-    // `save_and_warm` holds the persist mutex for the write + registry-warm pair
-    // so concurrent saves never produce a stale registry snapshot (B-6).
+    // Phase 2+3: backup-swap write + rename (Windows-safe, rollback on failure).
+    // `save_and_warm` holds the persist mutex so concurrent saves never produce a stale registry.
     custom_harnesses::save_and_warm(&custom_dir, &definition, rename_old_id.as_deref())?;
 
     // Resolve availability for the returned catalog entry.
@@ -165,6 +163,8 @@ pub async fn save_custom_harness(
         model_env_var: None,
         provider_env_var: None,
         thinking_env_var: None,
+        accepted_effort_values: None,
+        effort_aliases: None,
         max_tokens_env_var: None,
         context_limit_env_var: None,
         max_rounds_env_var: None,

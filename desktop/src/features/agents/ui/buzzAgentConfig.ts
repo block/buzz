@@ -8,6 +8,36 @@
 /** Env var key for the thinking/effort level sent to the LLM. */
 export const BUZZ_AGENT_THINKING_EFFORT = "BUZZ_AGENT_THINKING_EFFORT";
 
+/**
+ * Normalize a raw effort value to its canonical form for a runtime with a
+ * static effort vocabulary (e.g. Goose). Returns `null` when the value is
+ * invalid for the given canonical set.
+ *
+ * Alias resolution uses the runtime-supplied `effortAliases` descriptor
+ * (single source of truth from Rust `EffortNormalization::aliases`).
+ * Absent aliases means no aliases — pass `[]` or `null` for runtimes with
+ * no alias table.
+ *
+ * Pass `null` for `acceptedValues` to skip normalization (buzz-agent path).
+ */
+export function normalizeEffortValue(
+  raw: string,
+  acceptedValues: readonly string[] | null,
+  effortAliases?: ReadonlyArray<readonly [string, string]> | null,
+): string | null {
+  if (!acceptedValues) return raw; // buzz-agent: pass through, no static vocab
+  const lower = raw.toLowerCase();
+  // Canonical direct match after case-fold.
+  if (acceptedValues.includes(lower)) return lower;
+  // Alias resolution: use the descriptor-supplied table; absent means no aliases.
+  const aliasTable: ReadonlyArray<readonly [string, string]> =
+    effortAliases ?? [];
+  for (const [alias, canon] of aliasTable) {
+    if (lower === alias && acceptedValues.includes(canon)) return canon;
+  }
+  return null; // invalid for this harness
+}
+
 /** Env var key for the maximum output token count per turn. */
 export const BUZZ_AGENT_MAX_OUTPUT_TOKENS = "BUZZ_AGENT_MAX_OUTPUT_TOKENS";
 

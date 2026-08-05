@@ -228,3 +228,178 @@ test("auto-model selection clears the model; concrete selection sets it", () => 
   );
   assert.equal(concrete.model, "gpt-5");
 });
+
+// ── selectionOnRuntimeChange: effort-key cleanup ──────────────────────────
+//
+// At record/persona scope, a runtime change must clean up the previous
+// runtime's native effort key AND the legacy key (BUZZ_AGENT_THINKING_EFFORT).
+// The next runtime's native key is also cleared (stale leftover removal).
+// Unrelated env keys are preserved.
+
+test("selectionOnRuntimeChange_goose_to_buzz_clears_goose_native_and_legacy", () => {
+  // Goose→buzz-agent: GOOSE_THINKING_EFFORT (prev native) + BUZZ_AGENT_THINKING_EFFORT
+  // (legacy, also next native) are both cleared. Unrelated keys survive.
+  const current = {
+    ...base,
+    envVars: {
+      GOOSE_THINKING_EFFORT: "medium",
+      BUZZ_AGENT_THINKING_EFFORT: "high",
+      SOME_KEY: "value",
+    },
+  };
+  const next = selectionOnRuntimeChange(current, {
+    previousRuntime: "goose",
+    nextRuntime: "buzz-agent",
+    nextRuntimeCanChooseProvider: false,
+    lockedRuntimeReset: "full",
+    previousRuntimeNativeEffortKey: "GOOSE_THINKING_EFFORT",
+    nextRuntimeNativeEffortKey: "BUZZ_AGENT_THINKING_EFFORT",
+  });
+  assert.equal(
+    next.envVars.GOOSE_THINKING_EFFORT,
+    undefined,
+    "prev native effort key must be cleared",
+  );
+  assert.equal(
+    next.envVars.BUZZ_AGENT_THINKING_EFFORT,
+    undefined,
+    "legacy effort key must be cleared",
+  );
+  assert.equal(
+    next.envVars.SOME_KEY,
+    "value",
+    "unrelated env key must survive",
+  );
+});
+
+test("selectionOnRuntimeChange_buzz_to_goose_clears_goose_native_and_legacy", () => {
+  // buzz-agent→Goose: GOOSE_THINKING_EFFORT (next native) + BUZZ_AGENT_THINKING_EFFORT
+  // (legacy, also prev native) are both cleared. Unrelated keys survive.
+  const current = {
+    ...base,
+    envVars: {
+      GOOSE_THINKING_EFFORT: "low",
+      BUZZ_AGENT_THINKING_EFFORT: "high",
+      OTHER: "keep",
+    },
+  };
+  const next = selectionOnRuntimeChange(current, {
+    previousRuntime: "buzz-agent",
+    nextRuntime: "goose",
+    nextRuntimeCanChooseProvider: true,
+    lockedRuntimeReset: "full",
+    previousRuntimeNativeEffortKey: "BUZZ_AGENT_THINKING_EFFORT",
+    nextRuntimeNativeEffortKey: "GOOSE_THINKING_EFFORT",
+  });
+  assert.equal(
+    next.envVars.GOOSE_THINKING_EFFORT,
+    undefined,
+    "next native effort key must be cleared",
+  );
+  assert.equal(
+    next.envVars.BUZZ_AGENT_THINKING_EFFORT,
+    undefined,
+    "legacy effort key must be cleared",
+  );
+  assert.equal(next.envVars.OTHER, "keep", "unrelated env key must survive");
+});
+
+test("selectionOnRuntimeChange_buzz_to_buzz_preserves_effort_keys", () => {
+  // buzz-agent→buzz-agent: no effort cleanup (native === legacy key,
+  // both are skipped). Effort keys survive.
+  const current = {
+    ...base,
+    envVars: { BUZZ_AGENT_THINKING_EFFORT: "high" },
+  };
+  const next = selectionOnRuntimeChange(current, {
+    previousRuntime: "buzz-agent",
+    nextRuntime: "buzz-agent",
+    nextRuntimeCanChooseProvider: false,
+    lockedRuntimeReset: "full",
+    previousRuntimeNativeEffortKey: "BUZZ_AGENT_THINKING_EFFORT",
+    nextRuntimeNativeEffortKey: "BUZZ_AGENT_THINKING_EFFORT",
+  });
+  assert.equal(
+    next.envVars.BUZZ_AGENT_THINKING_EFFORT,
+    "high",
+    "buzz-agent effort key preserved on same-runtime switch",
+  );
+});
+
+test("selectionOnRuntimeChange_claude_to_goose_clears_both_native_keys_and_legacy", () => {
+  // claude→goose: BOTH CLAUDE_CODE_EFFORT_LEVEL (prev native) AND
+  // GOOSE_THINKING_EFFORT (next native) must be cleared, plus legacy.
+  // Previously only the prev-native branch fired, leaving GOOSE_THINKING_EFFORT stale.
+  const current = {
+    ...base,
+    envVars: {
+      CLAUDE_CODE_EFFORT_LEVEL: "low",
+      GOOSE_THINKING_EFFORT: "max",
+      BUZZ_AGENT_THINKING_EFFORT: "high",
+      UNRELATED: "keep",
+    },
+  };
+  const next = selectionOnRuntimeChange(current, {
+    previousRuntime: "claude",
+    nextRuntime: "goose",
+    nextRuntimeCanChooseProvider: true,
+    lockedRuntimeReset: "full",
+    previousRuntimeNativeEffortKey: "CLAUDE_CODE_EFFORT_LEVEL",
+    nextRuntimeNativeEffortKey: "GOOSE_THINKING_EFFORT",
+  });
+  assert.equal(
+    next.envVars.CLAUDE_CODE_EFFORT_LEVEL,
+    undefined,
+    "source (Claude) native key must be cleared",
+  );
+  assert.equal(
+    next.envVars.GOOSE_THINKING_EFFORT,
+    undefined,
+    "destination (Goose) native key must be cleared (was stale)",
+  );
+  assert.equal(
+    next.envVars.BUZZ_AGENT_THINKING_EFFORT,
+    undefined,
+    "legacy key must be cleared",
+  );
+  assert.equal(next.envVars.UNRELATED, "keep", "unrelated key must survive");
+});
+
+test("selectionOnRuntimeChange_goose_to_claude_clears_both_native_keys_and_legacy", () => {
+  // goose→claude: BOTH GOOSE_THINKING_EFFORT (prev native) AND
+  // CLAUDE_CODE_EFFORT_LEVEL (next native) must be cleared, plus legacy.
+  // Previously only the prev-native branch fired, leaving CLAUDE_CODE_EFFORT_LEVEL stale.
+  const current = {
+    ...base,
+    envVars: {
+      GOOSE_THINKING_EFFORT: "high",
+      CLAUDE_CODE_EFFORT_LEVEL: "low",
+      BUZZ_AGENT_THINKING_EFFORT: "medium",
+      UNRELATED: "keep",
+    },
+  };
+  const next = selectionOnRuntimeChange(current, {
+    previousRuntime: "goose",
+    nextRuntime: "claude",
+    nextRuntimeCanChooseProvider: false,
+    lockedRuntimeReset: "full",
+    previousRuntimeNativeEffortKey: "GOOSE_THINKING_EFFORT",
+    nextRuntimeNativeEffortKey: "CLAUDE_CODE_EFFORT_LEVEL",
+  });
+  assert.equal(
+    next.envVars.GOOSE_THINKING_EFFORT,
+    undefined,
+    "source (Goose) native key must be cleared",
+  );
+  assert.equal(
+    next.envVars.CLAUDE_CODE_EFFORT_LEVEL,
+    undefined,
+    "destination (Claude) native key must be cleared (was stale)",
+  );
+  assert.equal(
+    next.envVars.BUZZ_AGENT_THINKING_EFFORT,
+    undefined,
+    "legacy key must be cleared",
+  );
+  assert.equal(next.envVars.UNRELATED, "keep", "unrelated key must survive");
+});

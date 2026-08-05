@@ -642,6 +642,11 @@ pub struct AcpRuntimeCatalogEntry {
     pub provider_env_var: Option<String>,
     /// Environment variable used to apply thinking effort, when supported.
     pub thinking_env_var: Option<String>,
+    /// Canonical effort values (`off|low|medium|high|max` for Goose; `None` for per-model harnesses).
+    pub accepted_effort_values: Option<Vec<String>>,
+    /// Effort aliases for TS normalization: `(alias, canonical)` pairs from
+    /// `EffortNormalization::aliases`. `None` when runtime has no static vocabulary.
+    pub effort_aliases: Option<Vec<(String, String)>>,
     pub max_tokens_env_var: Option<String>,
     pub context_limit_env_var: Option<String>,
     pub max_rounds_env_var: Option<String>,
@@ -664,12 +669,7 @@ pub struct AcpRuntimeCatalogEntry {
     /// JSON file in `custom_harnesses/`. The UI uses this to decide editability.
     pub source: HarnessSource,
     /// Definition-level environment variables for `source: custom` entries.
-    ///
-    /// Populated from `HarnessDefinition.env` so the edit form can read them
-    /// back and the user doesn't silently lose env vars when saving.  Always
-    /// empty for `builtin` and `preset` entries (those env values come from the
-    /// runtime metadata path, not user-editable JSON).
-    ///
+    /// Populated from `HarnessDefinition.env`; always empty for builtin/preset entries.
     /// Skipped in serialization when empty to keep the catalog payload compact.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub definition_env: BTreeMap<String, String>,

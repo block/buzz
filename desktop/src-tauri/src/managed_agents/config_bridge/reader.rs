@@ -1,4 +1,5 @@
-use crate::managed_agents::discovery::KnownAcpRuntime;
+use crate::managed_agents::config_bridge::effort_tier_alias;
+use crate::managed_agents::discovery::{EffortNormalization, KnownAcpRuntime};
 use crate::managed_agents::types::ManagedAgentRecord;
 
 use super::types::*;
@@ -35,6 +36,7 @@ pub(crate) fn read_config_surface(
     let provider_env_var = runtime_meta.and_then(|m| m.provider_env_var);
     let provider_locked = runtime_meta.is_some_and(|m| m.provider_locked);
     let thinking_env_var = runtime_meta.and_then(|m| m.thinking_env_var);
+    let effort_norm = runtime_meta.and_then(|m| m.effort_normalization);
     let supports_acp_native = runtime_meta.is_some_and(|m| m.supports_acp_native_config);
     let required_fields: &[&str] = runtime_meta
         .map(|m| m.required_normalized_fields)
@@ -49,7 +51,12 @@ pub(crate) fn read_config_surface(
             .or_else(|| find_config_option_value(c, "model"))
     });
     let acp_mode = session_cache.and_then(|c| find_config_option_value(c, "mode"));
-    let acp_effort = session_cache.and_then(|c| find_config_option_value(c, "effort"));
+    // Effort: find by real ACP category `thought_level` (Goose, claude-agent-acp); fall back to
+    // the legacy invented category `effort` for transition compatibility.  Retain the matched
+    // entry's actual config_id for write-back routing.
+    let acp_effort_opt = session_cache.and_then(find_effort_config_option);
+    let acp_effort = acp_effort_opt.as_ref().map(|(v, _)| v.clone());
+    let acp_effort_config_id = acp_effort_opt.map(|(_, id)| id);
 
     let model_overridden = session_cache.is_some_and(|c| c.model_overridden);
 
@@ -79,7 +86,9 @@ pub(crate) fn read_config_surface(
             record,
             &file_config.thinking_effort,
             &acp_effort,
+            acp_effort_config_id.as_deref(),
             thinking_env_var,
+            effort_norm,
             is_pre_spawn,
             session_cache,
             tiers,
@@ -486,37 +495,164 @@ fn build_thinking_field(
     record: &ManagedAgentRecord,
     file_effort: &Option<String>,
     acp_effort: &Option<String>,
+    acp_effort_config_id: Option<&str>,
     thinking_env_var: Option<&str>,
+    effort_norm: Option<&'static EffortNormalization>,
     is_pre_spawn: bool,
-    session_cache: Option<&SessionConfigCache>,
+    _session_cache: Option<&SessionConfigCache>,
     tiers: &InheritedConfigTiers,
 ) -> Option<NormalizedField> {
     // Tier ordering: record env > ACP > persona env > global env > definition env > config file.
-    let [rec_env, pers_env, glob_env, def_env] = thinking_env_var
-        .map(|k| {
-            env_candidates(
-                k,
-                &record.env_vars,
-                &tiers.persona_env,
-                &tiers.global_env,
-                &tiers.definition_env,
-            )
-        })
-        .unwrap_or([None, None, None, None]);
+    //
+    // When the runtime declares an effort normalization contract (e.g. Goose), each of the
+    // record and persona tiers is resolved via `effort_tier_alias`, which applies within-tier
+    // legacy aliasing with normalization: if the native key is absent or invalid, fall back to
+    // BUZZ_AGENT_THINKING_EFFORT when the value normalizes to a canonical form.
+    // Global env uses the same resolver but with `allow_legacy_alias=false` — legacy alias excluded.
+    // Definition env also uses `allow_legacy_alias=false` semantics (no legacy alias there).
 
-    let tiers_list: &[(Option<&str>, ConfigOrigin)] = &[
+    // Resolve per-tier effort values with optional normalization.
+    // Owned values kept in locals to outlive the &str borrows below.
+    let _rec_o: Option<String>;
+    let _per_o: Option<String>;
+    let _glo_o: Option<String>;
+    let _def_o: Option<String>;
+    let _file_o: Option<String>;
+
+    let rec_env: Option<&str>;
+    let pers_env: Option<&str>;
+    let glob_env: Option<&str>;
+    let def_env: Option<&str>;
+    let file_env: Option<&str>;
+
+    if let Some((native, norm)) = thinking_env_var.zip(effort_norm) {
+        let nf = |v: &str| norm.normalize_str(v);
+        _rec_o = effort_tier_alias(&record.env_vars, native, nf, true);
+        _per_o = effort_tier_alias(&tiers.persona_env, native, nf, true);
+        _glo_o = effort_tier_alias(&tiers.global_env, native, nf, false);
+        _def_o = effort_tier_alias(&tiers.definition_env, native, nf, false);
+        // Normalize file effort too for consistent B comparison.
+        _file_o = file_effort.as_deref().and_then(|v| norm.normalize_str(v));
+        rec_env = _rec_o.as_deref();
+        pers_env = _per_o.as_deref();
+        glob_env = _glo_o.as_deref();
+        def_env = _def_o.as_deref();
+        file_env = _file_o.as_deref();
+    } else {
+        _rec_o = None;
+        _per_o = None;
+        _glo_o = None;
+        _def_o = None;
+        _file_o = None;
+        let [re, pe, ge, de] = thinking_env_var
+            .map(|k| {
+                env_candidates(
+                    k,
+                    &record.env_vars,
+                    &tiers.persona_env,
+                    &tiers.global_env,
+                    &tiers.definition_env,
+                )
+            })
+            .unwrap_or([None, None, None, None]);
+        rec_env = re;
+        pers_env = pe;
+        glob_env = ge;
+        def_env = de;
+        file_env = file_effort.as_deref();
+    }
+
+    // Effort same-value collapse (B heuristic): when ACP would be the winner and its value
+    // exactly equals what inheritance already resolves to (after normalization), fall through to
+    // non-ACP resolution so the panel shows the true baseline origin ("Global default") rather
+    // than "Runtime override (this session only)". The live session is almost certainly echoing
+    // what spawn injected.
+    //
+    // Effort-only: model has an explicit `model_overridden` signal; effort has no equivalent,
+    // so we apply the heuristic unconditionally for effort alone (plan v3 Phase 1).
+    let without_acp: &[(Option<&str>, ConfigOrigin)] = &[
         (rec_env, ConfigOrigin::BuzzExplicit),
-        (acp_effort.as_deref(), ConfigOrigin::AcpConfigOption),
         (pers_env, ConfigOrigin::PersonaDefault),
         (glob_env, ConfigOrigin::GlobalDefault),
         (def_env, ConfigOrigin::HarnessDefault),
-        (file_effort.as_deref(), ConfigOrigin::ConfigFile),
+        (file_env, ConfigOrigin::ConfigFile),
     ];
+
+    // Normalize the raw ACP effort value (plan v3 Delta 1: every candidate normalized
+    // before validity, precedence, override tracking, and B equality).
+    // When the runtime declares a normalization contract (`effort_norm`), canonicalize
+    // the live ACP value; if it is an alias (`none`→`off`, `xhigh`→`max`, case-fold)
+    // the normalized form is used for comparison and display. If the ACP value is
+    // invalid for this runtime (e.g. `minimal` or garbage), treat it as absent so
+    // lower tiers win — skip-as-absent applies to the output map, not just winner
+    // selection. The matched `config_id` is preserved for `write_via` regardless.
+    let _acp_norm_o: Option<String>;
+    let acp_effort_normalized: Option<&str> =
+        if let (Some(raw), Some(norm)) = (acp_effort.as_deref(), effort_norm) {
+            match norm.normalize_str(raw) {
+                Some(canonical) => {
+                    _acp_norm_o = Some(canonical.to_string());
+                    _acp_norm_o.as_deref()
+                }
+                None => {
+                    // ACP value is invalid for this runtime — skip as absent.
+                    _acp_norm_o = None;
+                    None
+                }
+            }
+        } else {
+            // No normalization contract (buzz-agent legacy path): pass through raw.
+            _acp_norm_o = None;
+            acp_effort.as_deref()
+        };
+
+    let tiers_list: &[(Option<&str>, ConfigOrigin)];
+    let with_acp_storage;
+    if rec_env.is_none() {
+        if let Some(acp) = acp_effort_normalized {
+            let baseline_value = without_acp
+                .iter()
+                .find(|(v, _)| v.is_some())
+                .and_then(|(v, _)| *v);
+            if baseline_value == Some(acp) {
+                // Equal-value (after normalization): fall through to non-ACP resolution.
+                tiers_list = without_acp;
+            } else {
+                // Genuine divergence: ACP wins between rec_env and pers_env.
+                with_acp_storage = [
+                    (rec_env, ConfigOrigin::BuzzExplicit),
+                    (Some(acp), ConfigOrigin::AcpConfigOption),
+                    (pers_env, ConfigOrigin::PersonaDefault),
+                    (glob_env, ConfigOrigin::GlobalDefault),
+                    (def_env, ConfigOrigin::HarnessDefault),
+                    (file_env, ConfigOrigin::ConfigFile),
+                ];
+                tiers_list = &with_acp_storage;
+            }
+        } else {
+            tiers_list = without_acp;
+        }
+    } else {
+        // rec_env is Some: record-level env always wins over ACP regardless.
+        // Insert normalized ACP (or None if invalid) to preserve tier structure.
+        with_acp_storage = [
+            (rec_env, ConfigOrigin::BuzzExplicit),
+            (acp_effort_normalized, ConfigOrigin::AcpConfigOption),
+            (pers_env, ConfigOrigin::PersonaDefault),
+            (glob_env, ConfigOrigin::GlobalDefault),
+            (def_env, ConfigOrigin::HarnessDefault),
+            (file_env, ConfigOrigin::ConfigFile),
+        ];
+        tiers_list = &with_acp_storage;
+    }
     let (value, origin, overridden_value, overridden_origin) = resolve_with_override(tiers_list)?;
 
-    let write_via = if !is_pre_spawn && has_config_option(session_cache, "effort") {
+    // Write route: use the matched entry's actual config_id (not a hardcoded constant).
+    // `thought_level` category entries advertise `thinking_effort` as their id (Goose);
+    // claude-agent-acp uses its own id. Never hardcode `"effort"`.
+    let write_via = if let (false, Some(config_id)) = (is_pre_spawn, acp_effort_config_id) {
         ConfigWriteMechanism::AcpSetConfigOption {
-            config_id: "effort".to_string(),
+            config_id: config_id.to_string(),
         }
     } else if let Some(env_key) = thinking_env_var {
         ConfigWriteMechanism::RespawnWithEnvVar {
@@ -692,6 +828,37 @@ fn find_model_config_id(cache: Option<&SessionConfigCache>) -> Option<String> {
             .find(|o| o.category.as_deref() == Some("model"))
             .map(|o| o.config_id.clone())
     })
+}
+
+/// Find the live effort ACP option, returning `(current_value, config_id)`.
+///
+/// Searches by ACP category `thought_level` first — the schema constant used by
+/// Goose (`acp/response_builder.rs:286-323`) and claude-agent-acp. Falls back to
+/// the legacy invented category `effort` for transition compatibility with old
+/// test fixtures and adapters that were built before the canonical category name
+/// was established. `thought_level` always wins when both categories are present.
+fn find_effort_config_option(cache: &SessionConfigCache) -> Option<(String, String)> {
+    // Primary: real ACP category emitted by Goose and claude-agent-acp.
+    if let Some(entry) = cache
+        .config_options
+        .iter()
+        .find(|e| e.category.as_deref() == Some("thought_level"))
+    {
+        if let Some(v) = &entry.current_value {
+            return Some((v.clone(), entry.config_id.clone()));
+        }
+    }
+    // Fallback: legacy invented category (transition / test fixtures).
+    if let Some(entry) = cache
+        .config_options
+        .iter()
+        .find(|e| e.category.as_deref() == Some("effort"))
+    {
+        if let Some(v) = &entry.current_value {
+            return Some((v.clone(), entry.config_id.clone()));
+        }
+    }
+    None
 }
 
 fn resolve_tilde(path: &str) -> String {

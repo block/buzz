@@ -62,8 +62,7 @@ type RawFeedItem = {
   created_at: number;
   channel_id: string | null;
   channel_name: string;
-  // Native FeedItemInfo.channel_type is Option<String>: serde emits `null`,
-  // never omits the key.
+  // Native FeedItemInfo.channel_type is Option<String>: serde emits `null`, never omits the key.
   channel_type: string | null;
   tags: string[][];
   category: "mention" | "needs_action" | "activity" | "agent_activity";
@@ -161,7 +160,6 @@ export type RawManagedAgent = {
   auto_restart_on_config_change?: boolean;
   backend: ManagedAgentBackend;
   backend_agent_id: string | null;
-  // Pre-feature fixtures may omit these; mapped to "owner-only"/[] in fromRawManagedAgent.
   respond_to?: ManagedAgent["respondTo"];
   respond_to_allowlist?: string[];
 };
@@ -190,6 +188,8 @@ export type RawAcpRuntimeCatalogEntry = {
   model_env_var?: string | null;
   provider_env_var?: string | null;
   thinking_env_var?: string | null;
+  accepted_effort_values?: string[] | null;
+  effort_aliases?: Array<[string, string]> | null;
   max_tokens_env_var?: string | null;
   context_limit_env_var?: string | null;
   max_rounds_env_var?: string | null;
@@ -749,6 +749,8 @@ export function fromRawAcpRuntimeCatalogEntry(
     modelEnvVar: entry.model_env_var ?? null,
     providerEnvVar: entry.provider_env_var ?? null,
     thinkingEnvVar: entry.thinking_env_var ?? null,
+    acceptedEffortValues: entry.accepted_effort_values ?? null,
+    effortAliases: entry.effort_aliases ?? null,
     maxTokensEnvVar: entry.max_tokens_env_var ?? null,
     contextLimitEnvVar: entry.context_limit_env_var ?? null,
     maxRoundsEnvVar: entry.max_rounds_env_var ?? null,
@@ -761,8 +763,7 @@ export function fromRawAcpRuntimeCatalogEntry(
     authStatus: entry.auth_status,
     loginHint: entry.login_hint ?? null,
     source: entry.source,
-    // Map definition_env (snake_case from Rust) to definitionEnv (camelCase).
-    // Absent when empty (Rust serialization skips empty BTreeMap) — default to {}.
+    // Absent when empty (Rust skips empty BTreeMap) — default to {}.
     definitionEnv: entry.definition_env ?? {},
   };
 }
@@ -1156,8 +1157,7 @@ export async function applyCommunity(
   });
 }
 
-// Validate a candidate repos dir without mutating the filesystem. Rejects
-// with a human-readable reason; resolves for a valid or empty path.
+// Validate a candidate repos dir (rejects with human-readable reason; resolves for a valid or empty path).
 export async function validateReposDir(dir: string): Promise<void> {
   await invokeTauri("validate_repos_dir", { dir });
 }

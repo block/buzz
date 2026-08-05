@@ -154,18 +154,14 @@ export function AgentDefinitionDialog({
   const [behaviorDraft, setBehaviorDraft] = React.useState(
     emptyPersonaBehaviorDraft,
   );
-  // The seed the draft is diffed against at submit: an untouched quad
-  // submits no behavior group, keeping unrelated edits hash-quiet.
+  // Draft seed; untouched quad submits no behavior group (hash-quiet).
   const behaviorSeedRef = React.useRef(emptyPersonaBehaviorDraft);
   // Tracks when the runtime was auto-seeded by the default-runtime effect in
   // edit mode (i.e. the user never explicitly chose a runtime). Used to omit
   // the seeded runtime from the submit payload for builtin definitions whose
   // canonical runtime is null — the sync would revert it anyway.
   const isRuntimeAutoSeededRef = React.useRef(false);
-  // Guards the seeding effect so it fires at most once per dialog-open.
-  // Without this, clearing runtime back to "" via "No preference" would re-
-  // trigger the effect (the `runtime` dep would pass the length guard) and
-  // snap the dropdown back to the default — an edit-mode regression.
+  // Guards seeding effect; fires at most once per open (prevents re-trigger on clear).
   const hasSeededForOpenRef = React.useRef(false);
   const [showAdvancedFields, setShowAdvancedFields] = React.useState(false);
   const [isAvatarUploadPending, setIsAvatarUploadPending] =
@@ -179,7 +175,10 @@ export function AgentDefinitionDialog({
       model: inheritedModelDefault,
     },
     inheritedEnvVars: inheritedEnvVarsForAdvanced,
-  } = useAgentDialogDefaults({ open });
+  } = useAgentDialogDefaults({
+    open,
+    runtime: runtimes.find((r) => r.id === runtime),
+  });
   const defaultRuntime = React.useMemo(
     () => getDefaultPersonaRuntime(runtimes, globalConfig.preferred_runtime),
     [globalConfig.preferred_runtime, runtimes],
@@ -445,13 +444,10 @@ export function AgentDefinitionDialog({
       runtimeFileConfig,
     ],
   );
-  // requiredEnvKeys: the gate already handles baked-, global-, and file-
-  // satisfied keys so no further filtering is needed.
+  // requiredEnvKeys: gate handles baked/global/file-satisfied keys; no extra filtering.
   const { requiredEnvKeys } = localModeGate;
   const localModeSatisfied = localModeGate.satisfied;
-  // Effective provider: agent value → global fallback → file fallback.
-  // Mirrors the chain inside computeLocalModeGate so model-option scoping and
-  // model requiredness are consistent with the readiness gate.
+  // Effective provider: agent value → global fallback → file fallback (mirrors gate chain).
   const fileProvider = runtimeFileConfig?.provider?.trim() ?? "";
   const effectiveProvider =
     trimmedProvider || inheritedProviderDefault.value || fileProvider;
@@ -522,9 +518,7 @@ export function AgentDefinitionDialog({
     isCustomProviderEditing,
     modelFieldVisible,
     open,
-    // Gate provider by runtime: runtimes that don't support LLM provider
-    // selection (codex, claude) must not inherit the global provider — doing
-    // so causes them to discover models from the wrong provider.
+    // Gate provider by runtime: codex/claude must not inherit global provider.
     provider: runtimeSupportsLlmProviderSelection(runtime)
       ? effectiveProvider
       : "",
@@ -683,6 +677,10 @@ export function AgentDefinitionDialog({
           nextRuntime.trim().length > 0 &&
           runtimeSupportsLlmProviderSelection(nextRuntime),
         lockedRuntimeReset: "full",
+        previousRuntimeNativeEffortKey:
+          runtimes.find((r) => r.id === runtime)?.thinkingEnvVar ?? null,
+        nextRuntimeNativeEffortKey:
+          runtimes.find((r) => r.id === nextRuntime)?.thinkingEnvVar ?? null,
       }),
     );
   }

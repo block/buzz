@@ -30,15 +30,18 @@ with a TypeScript lookup table or an id comparison in a component.
    belongs in `deriveAgentConfigFieldModel` (once, with a named reason), never
    in a component. Components ask the field model what exists
    (`hasRenderableAgentConfigField`, `getRenderableEffortField`).
-2. **Effort reads/writes go through the descriptor.** Use the effort
-   descriptor's `currentPersistence` key — never a raw
-   `BUZZ_AGENT_THINKING_EFFORT` literal in UI code. `currentPersistence` is
-   where the value lives *today*; `targetApplication` is how the harness
-   *should* receive it. They intentionally differ until PR 2.7 migrates
-   Goose/Claude — do not "fix" one to match the other without doing the
-   migration work.
+2. **Effort reads/writes go through the native persistence key.** For
+   harness-native runtimes (e.g. Goose), `runtime.thinkingEnvVar` is the
+   single persistence key. Use `resolveEffortFromEnv` for reads (normalizes,
+   applies native-first / valid-legacy-fallback at record/persona tiers) and
+   `applyHarnessNativeEffortChange` for writes. Legacy alias
+   (`BUZZ_AGENT_THINKING_EFFORT`) is consumed only at record and persona
+   tiers; definition and global tiers are native-key-only (plan v3 Delta 2).
+   For global/onboarding scope, pass `legacyEnvKey=null` to
+   `HarnessNativeEffortFields` so the write path never silently deletes the
+   legacy key at a scope where it must not be touched.
 3. **Field absence has a named reason, not a boolean.** Codex effort is
-   `ownedByModelId`; Claude effort is `deferredUntilNativeOptionsAvailable`.
+   `ownedByModelId`; harnesses with no effort knob emit `unsupportedByHarness`.
    New absences get new named reasons in `AgentConfigOmission` /
    `render` — never a `showX` prop.
 4. **The clearing policy is the named types.** `onContextChange:

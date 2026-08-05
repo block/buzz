@@ -264,3 +264,144 @@ test("resolveInheritedRuntimeSubmission agent-local env overrides persona creden
     "agent-local credential must override persona credential on inherit-transition",
   );
 });
+
+// ── Linked Goose instance: effort persistence and inheritance ─────────────────
+//
+// When a linked Goose instance selects Inherit for effort, the record must NOT
+// acquire the persona's effort key — inheritance happens at spawn time. The
+// `excludePersonaEnvKeys` parameter strips harness-native effort keys from the
+// persona layer on the inherit-transition so the record stays override-free.
+
+const GOOSE_EFFORT_KEY = "GOOSE_THINKING_EFFORT";
+const BUZZ_EFFORT_KEY = "BUZZ_AGENT_THINKING_EFFORT";
+// Keys stripped from persona layer for a Goose linked instance.
+const GOOSE_EXCLUDE_EFFORT_KEYS = [GOOSE_EFFORT_KEY, BUZZ_EFFORT_KEY];
+
+test("linked_goose_instance_inherit_does_not_materialize_persona_native_effort", () => {
+  // Persona has GOOSE_THINKING_EFFORT=high. User selects Inherit → local envVars
+  // has no effort key. Without excludePersonaEnvKeys the inherited-transition
+  // would persist GOOSE_THINKING_EFFORT=high into the record.
+  const result = resolveInheritedRuntimeSubmission({
+    inheritHarness: true,
+    agentWasHarnessPinned: true,
+    provider: "",
+    personaProvider: "",
+    model: "",
+    personaModel: null,
+    envVars: {}, // user selected Inherit — no local effort override
+    personaEnvVars: { [GOOSE_EFFORT_KEY]: "high" },
+    excludePersonaEnvKeys: GOOSE_EXCLUDE_EFFORT_KEYS,
+  });
+  assert.equal(
+    Object.hasOwn(result.envVars, GOOSE_EFFORT_KEY),
+    false,
+    "persona native effort key must NOT materialize into record on Inherit",
+  );
+});
+
+test("linked_goose_instance_inherit_does_not_materialize_persona_legacy_effort", () => {
+  // Same as above but persona has the legacy BUZZ_AGENT_THINKING_EFFORT key
+  // (pre-migration persona). Must also be excluded.
+  const result = resolveInheritedRuntimeSubmission({
+    inheritHarness: true,
+    agentWasHarnessPinned: true,
+    provider: "",
+    personaProvider: "",
+    model: "",
+    personaModel: null,
+    envVars: {},
+    personaEnvVars: { [BUZZ_EFFORT_KEY]: "high" },
+    excludePersonaEnvKeys: GOOSE_EXCLUDE_EFFORT_KEYS,
+  });
+  assert.equal(
+    Object.hasOwn(result.envVars, BUZZ_EFFORT_KEY),
+    false,
+    "persona legacy effort key must NOT materialize into record on Inherit",
+  );
+});
+
+test("linked_goose_instance_concrete_effort_override_wins_over_persona", () => {
+  // When the user has a local effort override, it must win over persona — the
+  // exclude list should not strip it (local wins naturally via envVars layering).
+  const result = resolveInheritedRuntimeSubmission({
+    inheritHarness: true,
+    agentWasHarnessPinned: true,
+    provider: "",
+    personaProvider: "",
+    model: "",
+    personaModel: null,
+    envVars: { [GOOSE_EFFORT_KEY]: "medium" }, // user selected a concrete value
+    personaEnvVars: { [GOOSE_EFFORT_KEY]: "high" },
+    excludePersonaEnvKeys: GOOSE_EXCLUDE_EFFORT_KEYS,
+  });
+  assert.equal(
+    result.envVars[GOOSE_EFFORT_KEY],
+    "medium",
+    "local effort override wins over persona",
+  );
+});
+
+test("linked_goose_instance_non_effort_persona_env_still_merged", () => {
+  // excludePersonaEnvKeys must not affect non-effort keys — credentials and
+  // other persona env vars must still be included in the inherit-transition.
+  const result = resolveInheritedRuntimeSubmission({
+    inheritHarness: true,
+    agentWasHarnessPinned: true,
+    provider: "",
+    personaProvider: "",
+    model: "",
+    personaModel: null,
+    envVars: {},
+    personaEnvVars: {
+      [GOOSE_EFFORT_KEY]: "high",
+      SOME_OTHER_KEY: "persona_value",
+    },
+    excludePersonaEnvKeys: GOOSE_EXCLUDE_EFFORT_KEYS,
+  });
+  assert.equal(
+    Object.hasOwn(result.envVars, GOOSE_EFFORT_KEY),
+    false,
+    "effort key excluded from persona",
+  );
+  assert.equal(
+    result.envVars.SOME_OTHER_KEY,
+    "persona_value",
+    "non-effort persona env vars still merged",
+  );
+});
+
+test("linked_goose_instance_submit_payload_contains_no_inherited_effort_on_inherit", () => {
+  // Full scenario: harness-pinned Goose instance. Persona has GOOSE_THINKING_EFFORT=max.
+  // On inherit-transition (user selects Inherit, clears local effort), the submit
+  // payload must have neither native nor legacy effort key.
+  const result = resolveInheritedRuntimeSubmission({
+    inheritHarness: true,
+    agentWasHarnessPinned: true,
+    provider: "",
+    personaProvider: "anthropic",
+    model: "",
+    personaModel: null,
+    envVars: { ANTHROPIC_API_KEY: "sk-agent" }, // credential is local, no effort
+    personaEnvVars: {
+      ANTHROPIC_API_KEY: "sk-persona",
+      [GOOSE_EFFORT_KEY]: "max",
+    },
+    excludePersonaEnvKeys: GOOSE_EXCLUDE_EFFORT_KEYS,
+  });
+  assert.equal(
+    Object.hasOwn(result.envVars, GOOSE_EFFORT_KEY),
+    false,
+    "no native effort key in submit payload on Inherit",
+  );
+  assert.equal(
+    Object.hasOwn(result.envVars, BUZZ_EFFORT_KEY),
+    false,
+    "no legacy effort key in submit payload on Inherit",
+  );
+  // Credential still present (agent's own layer wins over persona).
+  assert.equal(
+    result.envVars.ANTHROPIC_API_KEY,
+    "sk-agent",
+    "agent-local credential preserved",
+  );
+});

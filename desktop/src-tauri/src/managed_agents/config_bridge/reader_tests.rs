@@ -28,39 +28,7 @@ fn with_goose_path_root<T>(value: Option<&str>, body: impl FnOnce() -> T) -> T {
 }
 
 fn test_runtime() -> &'static KnownAcpRuntime {
-    &KnownAcpRuntime {
-        id: "goose",
-        label: "Goose",
-        commands: &["goose"],
-        aliases: &[],
-        avatar_url: "",
-        mcp_command: None,
-        mcp_hooks: false,
-        underlying_cli: None,
-        cli_install_commands: &[],
-        cli_install_commands_windows: &[],
-        adapter_install_commands: &[],
-        cli_install_instructions_url: "",
-        adapter_install_instructions_url: "",
-        cli_install_hint: "",
-        adapter_install_hint: "",
-        skill_dir: None,
-        supports_acp_model_switching: false,
-        model_env_var: Some("GOOSE_MODEL"),
-        provider_env_var: Some("GOOSE_PROVIDER"),
-        provider_locked: false,
-        default_env: &[],
-        config_file_path: Some("~/.config/goose/config.yaml"),
-        config_file_format: Some("yaml"),
-        supports_acp_native_config: true,
-        thinking_env_var: Some("GOOSE_THINKING_EFFORT"),
-        max_tokens_env_var: Some("GOOSE_MAX_TOKENS"),
-        context_limit_env_var: Some("GOOSE_CONTEXT_LIMIT"),
-        max_rounds_env_var: None,
-        required_normalized_fields: &["model", "provider"],
-        login_hint: None,
-        auth_probe_args: None,
-    }
+    crate::managed_agents::known_acp_runtime_exact("goose").expect("goose must be in catalog")
 }
 
 fn test_record() -> ManagedAgentRecord {
@@ -617,39 +585,8 @@ fn extra_env_var_skipped_when_already_in_file_config_extra() {
 // them in the advanced tier.
 
 fn buzz_agent_runtime() -> &'static KnownAcpRuntime {
-    &KnownAcpRuntime {
-        id: "buzz-agent",
-        label: "Buzz Agent",
-        commands: &["buzz-agent"],
-        aliases: &[],
-        avatar_url: "",
-        mcp_command: None,
-        mcp_hooks: false,
-        underlying_cli: None,
-        cli_install_commands: &[],
-        cli_install_commands_windows: &[],
-        adapter_install_commands: &[],
-        cli_install_instructions_url: "",
-        adapter_install_instructions_url: "",
-        cli_install_hint: "",
-        adapter_install_hint: "",
-        skill_dir: None,
-        supports_acp_model_switching: true,
-        model_env_var: Some("BUZZ_AGENT_MODEL"),
-        provider_env_var: Some("BUZZ_AGENT_PROVIDER"),
-        provider_locked: false,
-        default_env: &[],
-        config_file_path: None,
-        config_file_format: None,
-        supports_acp_native_config: false,
-        thinking_env_var: Some("BUZZ_AGENT_THINKING_EFFORT"),
-        max_tokens_env_var: Some("BUZZ_AGENT_MAX_OUTPUT_TOKENS"),
-        context_limit_env_var: Some("BUZZ_AGENT_MAX_CONTEXT_TOKENS"),
-        max_rounds_env_var: Some("BUZZ_AGENT_MAX_ROUNDS"),
-        required_normalized_fields: &["model", "provider"],
-        login_hint: None,
-        auth_probe_args: None,
-    }
+    crate::managed_agents::known_acp_runtime_exact("buzz-agent")
+        .expect("buzz-agent must be in catalog")
 }
 
 #[test]
