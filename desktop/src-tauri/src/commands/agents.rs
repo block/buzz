@@ -510,7 +510,7 @@ async fn deploy_to_provider(
             save_managed_agents(app, &records)?;
             return Err(e.clone());
         }
-    }
+    };
     save_managed_agents(app, &records)?;
     Ok(enrollment_command)
 }
