@@ -505,7 +505,13 @@ impl AcpClient {
                 // Handled by build_codex_config_env; skip here to avoid double-setting.
                 continue;
             }
-            if std::env::var_os(key).is_none() {
+            // BUZZ_RELAY_URL is authoritative: `Config` already resolved it
+            // with CLI-flag-over-parent-env precedence, so the value in
+            // `extra_env` must win over a missing AND a stale parent
+            // BUZZ_RELAY_URL. Without this, a child inheriting a stale parent
+            // env talks to the wrong relay ("404 no community for this host").
+            // All other keys keep operator-wins semantics.
+            if key == "BUZZ_RELAY_URL" || std::env::var_os(key).is_none() {
                 cmd.env(key, value);
             }
         }
@@ -2969,6 +2975,43 @@ mod tests {
             "<unset>",
             "non-Hermes spawns must not receive Hermes defaults"
         );
+    }
+
+    /// The resolved relay URL (threaded in via `extra_env` by `Config`) is
+    /// authoritative for every child spawn: it must win when the parent env
+    /// has no BUZZ_RELAY_URL AND when the parent env carries a stale one.
+    /// Both scenarios run in one test so the process-global env mutation is
+    /// sequenced (matching the BUZZ_AUTH_TAG set_var precedent in lib.rs).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_asserts_resolved_relay_url_over_missing_and_stale_parent_env() {
+        const VAR: &str = "BUZZ_RELAY_URL";
+        const RESOLVED: &str = "wss://relay.example.com";
+        let saved = std::env::var_os(VAR);
+
+        // Scenario 1 — unset parent env: child must see the resolved URL,
+        // not the ws://localhost:3000 default it would otherwise fall back to.
+        std::env::remove_var(VAR);
+        assert_eq!(
+            spawn_named_and_read_child_env("any-agent", VAR, &[(VAR.into(), RESOLVED.into())])
+                .await,
+            RESOLVED,
+            "with no parent {VAR}, the child must receive the resolved relay URL"
+        );
+
+        // Scenario 2 — stale parent env: the resolved URL must still win.
+        std::env::set_var(VAR, "http://localhost:3000");
+        assert_eq!(
+            spawn_named_and_read_child_env("any-agent", VAR, &[(VAR.into(), RESOLVED.into())])
+                .await,
+            RESOLVED,
+            "a stale parent {VAR} must not shadow the resolved relay URL"
+        );
+
+        match saved {
+            Some(v) => std::env::set_var(VAR, v),
+            None => std::env::remove_var(VAR),
+        }
     }
 
     #[tokio::test]
