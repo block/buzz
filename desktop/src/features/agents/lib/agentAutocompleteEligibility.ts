@@ -54,13 +54,24 @@ export function getMentionableAgentPubkeys({
   return pubkeys;
 }
 
-export function isAgentIdentityInManagedList(
-  candidate: { isAgent?: boolean; pubkey: string },
-  managedAgentPubkeys: ReadonlySet<string>,
+/**
+ * First-pass autocomplete gate. Non-agents and channel members always pass;
+ * any other agent must appear in `allowedAgentPubkeys`.
+ *
+ * Callers decide what "allowed" means, and the choice is load-bearing. Mention
+ * autocomplete must pass `getMentionableAgentPubkeys(...)` (local managed ∪
+ * relay agents shared with the viewer) — passing the locally-managed set alone
+ * drops every relay agent before `shouldHideAgentFromMentions` can admit it,
+ * so a viewer who manages no agents locally can mention none of them.
+ */
+export function isAgentAutocompleteEligible(
+  candidate: { isAgent?: boolean; isMember?: boolean; pubkey: string },
+  allowedAgentPubkeys: ReadonlySet<string>,
 ) {
   return (
     candidate.isAgent !== true ||
-    managedAgentPubkeys.has(normalizePubkey(candidate.pubkey))
+    candidate.isMember === true ||
+    allowedAgentPubkeys.has(normalizePubkey(candidate.pubkey))
   );
 }
 

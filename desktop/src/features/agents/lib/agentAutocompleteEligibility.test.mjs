@@ -5,7 +5,7 @@ import {
   coalesceAgentAutocompleteCandidates,
   getMentionableAgentPubkeys,
   getSharedChannelIds,
-  isAgentIdentityInManagedList,
+  isAgentAutocompleteEligible,
   relayAgentIsSharedWithUser,
   shouldHideAgentFromMentions,
 } from "./agentAutocompleteEligibility.ts";
@@ -136,25 +136,32 @@ test("getMentionableAgentPubkeys: keeps managed agents and shared relay agents",
   assert.deepEqual(result, new Set([PUB_A, PUB_B, PUB_C]));
 });
 
-test("isAgentIdentityInManagedList: keeps people and only current managed agent identities", () => {
+test("isAgentAutocompleteEligible: keeps people, channel members, and current managed agent identities", () => {
   const managedAgentPubkeys = new Set([PUB_A]);
 
   assert.equal(
-    isAgentIdentityInManagedList(
+    isAgentAutocompleteEligible(
       { isAgent: false, pubkey: PUB_B },
       managedAgentPubkeys,
     ),
     true,
   );
   assert.equal(
-    isAgentIdentityInManagedList(
+    isAgentAutocompleteEligible(
       { isAgent: true, pubkey: PUB_A.toUpperCase() },
       managedAgentPubkeys,
     ),
     true,
   );
   assert.equal(
-    isAgentIdentityInManagedList(
+    isAgentAutocompleteEligible(
+      { isAgent: true, isMember: true, pubkey: PUB_B },
+      managedAgentPubkeys,
+    ),
+    true,
+  );
+  assert.equal(
+    isAgentAutocompleteEligible(
       { isAgent: true, pubkey: PUB_B },
       managedAgentPubkeys,
     ),
@@ -305,4 +312,81 @@ test("coalesceAgentAutocompleteCandidates: leaves non-agents alone", () => {
   const second = makeAgent({ pubkey: PUB_B, isAgent: false });
 
   assert.deepEqual(coalesce([first, second]), [first, second]);
+});
+
+// ── Composed gate: relay-only agents must survive both checks ──────────────
+//
+// Regression for the case where a viewer who manages no agents locally could
+// never mention an agent. `useMentions` runs `isAgentAutocompleteEligible`
+// before `shouldHideAgentFromMentions`, so that first gate must receive
+// `getMentionableAgentPubkeys(...)` (local managed ∪ relay agents shared with
+// the viewer). The channel-member clause alone does not cover a relay agent
+// that is invocable but not a member of the channel being typed in.
+
+test("relay agent allowlisting the viewer survives the composed mention gate", () => {
+  const managedAgentPubkeys = []; // viewer manages no agents locally
+  const relayAgents = [
+    {
+      pubkey: PUB_C,
+      respondTo: "allowlist",
+      respondToAllowlist: [CURRENT_PUBKEY],
+      channelIds: [],
+    },
+  ];
+  const mentionableAgentPubkeys = getMentionableAgentPubkeys({
+    currentPubkey: CURRENT_PUBKEY,
+    managedAgentPubkeys,
+    relayAgents,
+    sharedChannelIds: new Set(["general"]),
+  });
+  const candidate = { isAgent: true, isMember: false, pubkey: PUB_C };
+
+  assert.equal(
+    isAgentAutocompleteEligible(candidate, mentionableAgentPubkeys),
+    true,
+    "relay agent that allowlists the viewer must pass the first gate",
+  );
+  assert.equal(
+    shouldHideAgentFromMentions({
+      isAgent: true,
+      isMember: false,
+      pubkey: PUB_C,
+      mentionableAgentPubkeys,
+      directoryAgentPubkeys: new Set([PUB_C]),
+    }),
+    false,
+    "an invocable relay agent must not be hidden",
+  );
+
+  // The pre-fix behaviour, pinned so the regression cannot return quietly.
+  assert.equal(
+    isAgentAutocompleteEligible(candidate, new Set(managedAgentPubkeys)),
+    false,
+    "local-only set drops the relay agent — this is why the gate must not use it",
+  );
+});
+
+test("relay agent that excludes the viewer stays hidden", () => {
+  const mentionableAgentPubkeys = getMentionableAgentPubkeys({
+    currentPubkey: CURRENT_PUBKEY,
+    managedAgentPubkeys: [],
+    relayAgents: [
+      {
+        pubkey: PUB_C,
+        respondTo: "allowlist",
+        respondToAllowlist: [OTHER_OWNER_PUBKEY],
+        channelIds: [],
+      },
+    ],
+    sharedChannelIds: new Set(["general"]),
+  });
+
+  assert.equal(
+    isAgentAutocompleteEligible(
+      { isAgent: true, isMember: false, pubkey: PUB_C },
+      mentionableAgentPubkeys,
+    ),
+    false,
+    "widening the gate must not expose agents that exclude the viewer",
+  );
 });
