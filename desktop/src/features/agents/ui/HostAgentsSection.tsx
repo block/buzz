@@ -1,8 +1,15 @@
 import * as React from "react";
 
 import { useRelayAgentsQuery } from "@/features/agents/hooks";
+import { resolveHostLabel } from "@/features/agents/lib/resolveHostLabel";
+import { usePresenceQuery } from "@/features/presence/hooks";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
-import { resolveUserLabel } from "@/features/profile/lib/identity";
+import {
+  DEFAULT_HOVER_PROFILE_STATUS_GEOMETRY,
+  ProfileAvatarWithStatus,
+  scaleProfileAvatarStatusGeometry,
+} from "@/features/profile/ui/ProfileAvatarWithStatus";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import type { RelayAgent } from "@/shared/api/types";
 import type { ProfilePanelOpenOptions } from "@/shared/context/ProfilePanelContext";
 import { Badge } from "@/shared/ui/badge";
@@ -13,9 +20,22 @@ import {
   IDENTITY_CARD_GRID_CLASS,
 } from "./UnifiedAgentsSection";
 
+/** Card avatar size matches AgentIdentityCard / Local agent cards (h-24 w-24). */
+const HOST_AGENT_AVATAR_SIZE = 96;
+
+const HOST_AGENT_STATUS_GEOMETRY = scaleProfileAvatarStatusGeometry(
+  DEFAULT_HOVER_PROFILE_STATUS_GEOMETRY,
+  HOST_AGENT_AVATAR_SIZE,
+);
+
 type HostAgentsSectionProps = {
   /** Local managed agent pubkeys — excluded so we never double-list. */
   managedPubkeys: ReadonlySet<string>;
+  /**
+   * Optional hostPubkey → human environment label (e.g. agentbox).
+   * Environment names are not kind:0 person profiles.
+   */
+  knownHosts?: Readonly<Record<string, string>>;
   onOpenAgentProfile: (
     pubkey: string,
     options?: ProfilePanelOpenOptions,
@@ -26,11 +46,17 @@ type HostAgentsSectionProps = {
  * Read-only section for host-minted / directory agents that carry kind:10100
  * `host` lineage and are not in the Local managed store.
  *
- * Reuses list_relay_agents + users-batch profile hydration (same as DMs).
+ * Hydration reuses native Buzz lanes (same as DMs / profile click-through):
+ * - directory list: list_relay_agents (10100)
+ * - face + person name: users-batch (kind:0)
+ * - live online: presence (kind:20001)
+ * - environment badge: knownHosts / truncated host pubkey — not kind:0
+ *
  * No Local Start — process lives on the host.
  */
 export function HostAgentsSection({
   managedPubkeys,
+  knownHosts,
   onOpenAgentProfile,
 }: HostAgentsSectionProps) {
   const relayAgentsQuery = useRelayAgentsQuery();
@@ -45,14 +71,20 @@ export function HostAgentsSection({
     [managedPubkeys, relayAgentsQuery.data],
   );
 
-  const hostPubkeys = React.useMemo(
-    () => [...new Set(hostAgents.map((agent) => agent.hostPubkey))],
+  const agentPubkeys = React.useMemo(
+    () => hostAgents.map((agent) => agent.pubkey),
     [hostAgents],
   );
-  const hostProfilesQuery = useUsersBatchQuery(hostPubkeys, {
-    enabled: hostPubkeys.length > 0,
+
+  const agentProfilesQuery = useUsersBatchQuery(agentPubkeys, {
+    enabled: agentPubkeys.length > 0,
   });
-  const hostProfiles = hostProfilesQuery.data?.profiles;
+  const agentProfiles = agentProfilesQuery.data?.profiles;
+
+  const presenceQuery = usePresenceQuery(agentPubkeys, {
+    enabled: agentPubkeys.length > 0,
+  });
+  const presenceLookup = presenceQuery.data;
 
   // Nothing to show and not loading → omit section (no empty chrome).
   if (
@@ -99,16 +131,37 @@ export function HostAgentsSection({
           className={`${AGENT_CARD_GRID_COLUMNS_CLASS} grid justify-start gap-3 [@container(max-width:40rem)]:justify-center`}
         >
           {hostAgents.map((agent) => {
-            const hostLabel = resolveUserLabel({
-              pubkey: agent.hostPubkey,
-              profiles: hostProfiles,
+            const pubkeyLower = normalizePubkey(agent.pubkey);
+            const profile = agentProfiles?.[pubkeyLower];
+            const title =
+              profile?.displayName?.trim() || agent.name.trim() || pubkeyLower;
+            const avatarUrl = profile?.avatarUrl ?? null;
+            const presenceStatus = presenceLookup?.[pubkeyLower];
+            const hostLabel = resolveHostLabel({
+              hostPubkey: agent.hostPubkey,
+              knownHosts,
             });
+
             return (
               <AgentIdentityCard
                 key={agent.pubkey}
-                ariaLabel={`${agent.name}, on ${hostLabel}`}
+                ariaLabel={`${title}, on ${hostLabel}`}
+                avatar={
+                  <ProfileAvatarWithStatus
+                    avatarClassName="border-[3px] border-background bg-muted shadow-none"
+                    avatarUrl={avatarUrl}
+                    geometry={HOST_AGENT_STATUS_GEOMETRY}
+                    iconClassName="h-8 w-8"
+                    label={title}
+                    size={HOST_AGENT_AVATAR_SIZE}
+                    status={presenceStatus}
+                    statusTestId={`host-agent-presence-${agent.pubkey}`}
+                    testId={`host-agent-avatar-${agent.pubkey}`}
+                  />
+                }
+                avatarUrl={avatarUrl}
                 dataTestId={`host-agent-${agent.pubkey}`}
-                label={agent.name}
+                label={title}
                 modelLabel={null}
                 onClick={() => {
                   onOpenAgentProfile(agent.pubkey);
