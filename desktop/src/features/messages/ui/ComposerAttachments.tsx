@@ -37,8 +37,29 @@ import { Toggle } from "@/shared/ui/toggle";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { ComposerImageEditor } from "./ComposerImageEditor";
 
-const COMPOSER_MEDIA_HOVER_ACTION_CLASS =
-  "absolute inset-0 z-[1] hidden items-center justify-center rounded-2xl bg-black/35 text-white backdrop-blur-[1px] hover:bg-black/45 group-hover:flex";
+/**
+ * Reveal-on-interaction for the composer's media action buttons.
+ *
+ * These stay invisible until the thumbnail is hovered, but `display: none`
+ * cannot hold focus, which would leave keyboard-only users unable to reach
+ * them at all. Hiding with `opacity-0` instead keeps them in the tab order,
+ * and `pointer-events-none` until hover/focus means a mouse behaves exactly as
+ * it did before — an invisible overlay never swallows a click. Keyboard focus
+ * and Enter are unaffected by `pointer-events`.
+ */
+const COMPOSER_MEDIA_REVEAL_CLASS =
+  "pointer-events-none opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 focus-visible:pointer-events-auto focus-visible:opacity-100";
+
+/** Corner "remove attachment" badge on a composer thumbnail. */
+const COMPOSER_MEDIA_REMOVE_CLASS = cn(
+  "absolute -right-1 -top-1 z-10 flex h-4 w-4 items-center justify-center rounded-full bg-foreground text-background",
+  COMPOSER_MEDIA_REVEAL_CLASS,
+);
+
+const COMPOSER_MEDIA_HOVER_ACTION_CLASS = cn(
+  "absolute inset-0 z-[1] flex items-center justify-center rounded-2xl bg-black/35 text-white backdrop-blur-[1px] hover:bg-black/45",
+  COMPOSER_MEDIA_REVEAL_CLASS,
+);
 
 /** Dashed-border overlay shown when a file is dragged over the composer form. */
 export function DropZoneOverlay({ className }: { className?: string }) {
@@ -496,7 +517,7 @@ const MediaAttachmentItem = React.forwardRef<
             <button
               type="button"
               onClick={() => onRemove(attachment.url)}
-              className="absolute -right-1 -top-1 z-10 hidden h-4 w-4 items-center justify-center rounded-full bg-foreground text-background group-hover:flex"
+              className={COMPOSER_MEDIA_REMOVE_CLASS}
             >
               <X className="h-2.5 w-2.5" />
             </button>
@@ -628,7 +649,7 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
                       <button
                         type="button"
                         onClick={() => onRemove(attachment.url)}
-                        className="absolute -right-1 -top-1 hidden h-4 w-4 items-center justify-center rounded-full bg-foreground text-background group-hover:flex"
+                        className={COMPOSER_MEDIA_REMOVE_CLASS}
                       >
                         <X className="h-2.5 w-2.5" />
                       </button>
@@ -707,7 +728,7 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
                     <TooltipTrigger asChild>
                       <button
                         aria-label="Remove attachment"
-                        className="absolute -right-1 -top-1 z-10 hidden h-4 w-4 items-center justify-center rounded-full bg-foreground text-background group-hover:flex"
+                        className={COMPOSER_MEDIA_REMOVE_CLASS}
                         onClick={() => onRemoveQueued(preview.id)}
                         type="button"
                       >

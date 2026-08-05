@@ -160,9 +160,14 @@ test("sends immediately and keeps upload progress across channels", async ({
   await expect(page.getByTestId("composer-upload-progress")).toHaveCount(0);
   await expect(page.getByTestId("composer-video-spoiler")).toHaveCount(0);
   const queuedSpoiler = page.getByTestId("composer-queued-video-spoiler");
-  await expect(queuedSpoiler).toBeHidden();
+  // Revealed on hover rather than removed from the DOM: the control stays
+  // focusable so keyboard users can reach it, but is transparent and
+  // click-through until the thumbnail is hovered or focused.
+  await expect(queuedSpoiler).toHaveCSS("opacity", "0");
+  await expect(queuedSpoiler).toHaveCSS("pointer-events", "none");
   await page.getByTestId("composer-queued-media-attachment").hover();
   await expect(queuedSpoiler).toBeVisible();
+  await expect(queuedSpoiler).toHaveCSS("opacity", "1");
   await page.getByTestId("send-message").click();
 
   await expect(page.getByTestId("message-composer")).not.toContainText(
@@ -514,4 +519,29 @@ test("forum posts emit a FileCard for generic attachments, not a broken image", 
       ),
     )
     .toContain("download_file");
+});
+
+test("a queued attachment can be removed without a mouse", async ({ page }) => {
+  // Regression: the queued remove badge is revealed on hover, but hiding it
+  // with `display: none` made it unfocusable, leaving keyboard-only users no
+  // way to drop a queued video before sending.
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await chooseLargeVideo(page);
+
+  const queued = page.getByTestId("composer-queued-media-attachment");
+  await expect(queued).toBeVisible();
+
+  const remove = queued.getByRole("button", { name: "Remove attachment" });
+  // Focusable while transparent — this is what `display: none` prevented.
+  await remove.focus();
+  await expect(remove).toBeFocused();
+  // Focus reveals it, so the user can see what they are about to activate.
+  await expect(remove).toHaveCSS("opacity", "1");
+
+  await page.keyboard.press("Enter");
+  await expect(queued).toHaveCount(0);
+  await expect(page.getByTestId("message-composer")).not.toContainText(
+    "large-video.mp4",
+  );
 });
