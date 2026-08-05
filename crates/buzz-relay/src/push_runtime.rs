@@ -269,7 +269,7 @@ fn match_job(
             }
         }
         let Some(class) = class else { continue };
-        let event_deadline = job.event.event.created_at.as_secs() as i64 + EVENT_USEFUL_SECS;
+        let event_deadline = wake_deadline_basis(&job.event) + EVENT_USEFUL_SECS;
         let expires_at = lease.expires_at.min(event_deadline);
         if expires_at <= Utc::now().timestamp() {
             continue;
@@ -285,6 +285,32 @@ fn match_job(
     }
     Ok(wakes)
 }
+
+/// The instant a wake's usefulness window (`EVENT_USEFUL_SECS`) counts from.
+///
+/// Author-controlled `created_at` for ordinary kinds. For NIP-59 gift wraps
+/// (kind 1059) it is relay receipt time: their `created_at` is deliberately
+/// randomized up to two days into the past, and ingest accepts that window
+/// (#4192) — strictly wider than `EVENT_USEFUL_SECS`, so keying on
+/// `created_at` would silently drop the wake for almost every spec-compliant
+/// DM (and hand senders a deliberate no-notification delivery primitive).
+fn wake_deadline_basis(event: &buzz_core::StoredEvent) -> i64 {
+    if buzz_core::kind::event_kind_u32(&event.event) == buzz_core::kind::KIND_GIFT_WRAP {
+        event.received_at.timestamp()
+    } else {
+        event.event.created_at.as_secs() as i64
+    }
+}
+
+// Compile-time pin of the relationship that makes the special case above
+// necessary: ingest's full past-side window admits gift wraps older than the
+// usefulness window. If this ever inverts, `wake_deadline_basis` can
+// collapse to `created_at`.
+const _: () = assert!(
+    crate::handlers::ingest::MAX_TIMESTAMP_DRIFT_SECS
+        + crate::handlers::ingest::GIFT_WRAP_MAX_BACKDATE_SECS
+        > EVENT_USEFUL_SECS
+);
 
 /// Match-time counterpart of REQ's filter-level `#p` authorization gate.
 /// Kind 1059 is globally stored and leaks recipient activity through wake
@@ -613,6 +639,40 @@ mod tests {
             &event,
             &recipient_hex
         ));
+    }
+
+    /// Gift wraps carry NIP-59-randomized timestamps up to two days old —
+    /// accepted by ingest (#4192) but far beyond `EVENT_USEFUL_SECS` — so
+    /// their wake deadline must count from relay receipt, or every backdated
+    /// DM is stored yet never wakes a device.
+    #[test]
+    fn gift_wrap_wake_deadline_counts_from_receipt_not_created_at() {
+        let sender = nostr::Keys::generate();
+        let recipient = nostr::Keys::generate();
+        let now = chrono::Utc::now();
+        let backdated = (now.timestamp() - 2 * 24 * 60 * 60) as u64;
+        let wrap = EventBuilder::new(Kind::GiftWrap, "ciphertext")
+            .tag(Tag::public_key(recipient.public_key()))
+            .custom_created_at(nostr::Timestamp::from(backdated))
+            .sign_with_keys(&sender)
+            .unwrap();
+        let stored = buzz_core::StoredEvent::with_received_at(wrap, now, None, true);
+        assert_eq!(wake_deadline_basis(&stored), now.timestamp());
+        // created_at-based math would have expired this wake long ago.
+        assert!(backdated as i64 + EVENT_USEFUL_SECS <= now.timestamp());
+    }
+
+    #[test]
+    fn ordinary_kind_wake_deadline_counts_from_created_at() {
+        let author = nostr::Keys::generate();
+        let now = chrono::Utc::now();
+        let stamped = (now.timestamp() - 120) as u64;
+        let note = EventBuilder::new(Kind::TextNote, "hi")
+            .custom_created_at(nostr::Timestamp::from(stamped))
+            .sign_with_keys(&author)
+            .unwrap();
+        let stored = buzz_core::StoredEvent::with_received_at(note, now, None, true);
+        assert_eq!(wake_deadline_basis(&stored), stamped as i64);
     }
 
     async fn capture(
