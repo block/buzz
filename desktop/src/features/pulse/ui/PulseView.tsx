@@ -107,6 +107,7 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
           channels: [],
           channelIds: [],
           capabilities: [],
+          channelAddPolicy: null,
           status:
             agent.status === "running" || agent.status === "deployed"
               ? "online"

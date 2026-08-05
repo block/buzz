@@ -207,6 +207,11 @@ pub struct RelayAgentInfo {
     pub respond_to: Option<RespondTo>,
     #[serde(default)]
     pub respond_to_allowlist: Vec<String>,
+    /// The agent's kind:10100 `channel_add_policy` declaration
+    /// (`anyone` | `owner_only` | `nobody`). Relay-enforced on
+    /// third-party adds; surfaced so pickers can mirror that enforcement.
+    #[serde(default)]
+    pub channel_add_policy: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ManagedAgentRecord {

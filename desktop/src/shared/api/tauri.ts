@@ -117,6 +117,7 @@ type RawRelayAgent = {
   status: RelayAgent["status"];
   respond_to?: RelayAgent["respondTo"];
   respond_to_allowlist?: string[];
+  channel_add_policy?: RelayAgent["channelAddPolicy"];
 };
 
 import type { RestartDiffEntry as RawRestartDiffEntry } from "./restartDiff";
@@ -674,7 +675,9 @@ export async function createAuthEvent(input: {
   return JSON.parse(eventJson) as RelayEvent;
 }
 
-function fromRawRelayAgent(agent: RawRelayAgent): RelayAgent {
+// Exported for tests — tauri.test.mjs covers the snake_case wire contract
+// (a silently dropped field here fails closed and hides agents app-wide).
+export function fromRawRelayAgent(agent: RawRelayAgent): RelayAgent {
   return {
     pubkey: agent.pubkey,
     name: agent.name,
@@ -685,6 +688,7 @@ function fromRawRelayAgent(agent: RawRelayAgent): RelayAgent {
     status: agent.status,
     respondTo: agent.respond_to ?? null,
     respondToAllowlist: agent.respond_to_allowlist ?? [],
+    channelAddPolicy: agent.channel_add_policy ?? null,
   };
 }
 

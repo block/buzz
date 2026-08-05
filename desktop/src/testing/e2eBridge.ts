@@ -110,6 +110,7 @@ type MockRelayAgentSeed = {
   capabilities?: string[];
   respondTo?: RawRelayAgent["respond_to"];
   respondToAllowlist?: string[];
+  channelAddPolicy?: RawRelayAgent["channel_add_policy"];
   channelNames?: string[];
   channelIds?: string[];
   status?: PresenceStatus;
@@ -783,6 +784,7 @@ type RawRelayAgent = {
   status: PresenceStatus;
   respond_to?: "owner-only" | "allowlist" | "anyone";
   respond_to_allowlist?: string[];
+  channel_add_policy?: "anyone" | "owner_only" | "nobody";
 };
 
 type RawManagedAgent = {
@@ -2239,6 +2241,7 @@ function resetMockRelayAgents(config?: E2eConfig) {
       status: seed.status ?? "online",
       respond_to: seed.respondTo ?? "owner-only",
       respond_to_allowlist: seed.respondToAllowlist ?? [],
+      channel_add_policy: seed.channelAddPolicy ?? "anyone",
     });
   }
 }
@@ -3235,6 +3238,7 @@ const defaultMockRelayAgents: RawRelayAgent[] = [
     status: "online",
     respond_to: "anyone",
     respond_to_allowlist: [],
+    channel_add_policy: "anyone",
   },
   {
     pubkey: CHARLIE_PUBKEY,
@@ -3246,6 +3250,7 @@ const defaultMockRelayAgents: RawRelayAgent[] = [
     status: "away",
     respond_to: "anyone",
     respond_to_allowlist: [],
+    channel_add_policy: "anyone",
   },
 ];
 let mockRelayAgents: RawRelayAgent[] = defaultMockRelayAgents.map((agent) => ({

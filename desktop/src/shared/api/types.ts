@@ -277,7 +277,11 @@ export type RelayAgent = {
   status: "online" | "away" | "offline";
   respondTo: RespondToMode | null;
   respondToAllowlist: string[];
+  /** kind:10100 `channel_add_policy` — relay-enforced on third-party adds. */
+  channelAddPolicy: ChannelAddPolicy | null;
 };
+
+export type ChannelAddPolicy = "anyone" | "owner_only" | "nobody";
 
 export type ManagedAgentRuntimeLifecycle =
   | "starting"

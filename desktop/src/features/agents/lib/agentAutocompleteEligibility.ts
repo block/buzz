@@ -97,6 +97,67 @@ export function shouldHideAgentFromMentions({
   return directoryAgentPubkeys.has(normalized);
 }
 
+/**
+ * Hide an agent-classified add-search candidate unless the relay would
+ * accept the add.
+ *
+ * The relay enforces the agent's own kind:10100 `channel_add_policy` on
+ * third-party adds (`buzz-relay` `handlers/side_effects.rs`): `owner_only`
+ * requires the actor to be the stored attested owner, `nobody` is refused
+ * for everyone, `anyone` is allowed, and self-adds always pass. The picker
+ * mirrors the relay's *declared* policy; enforcement stays server-side, so
+ * the rare divergence (the relay enforces stored DB state, the client reads
+ * the latest published declaration) surfaces as a visible add error rather
+ * than a silent gap. One deliberate tightening:
+ * agent candidates with no directory entry stay hidden. An undeclared
+ * identity offers no proof it is a live agent anyone intended to be
+ * addable, which preserves the stale-identity suppression the managed-list
+ * gate was introduced for (#2149). Ownership uses the NIP-OA-verified
+ * `ownerPubkey` (the same value the "managed by" surface renders), so
+ * `owner_only` agents remain addable by their verified owner.
+ */
+export function shouldHideAgentFromAddSearch({
+  candidate,
+  currentPubkey,
+  managedAgentPubkeys,
+  relayAgentAddPolicies,
+}: {
+  candidate: {
+    isAgent?: boolean;
+    ownerPubkey?: string | null;
+    pubkey: string;
+  };
+  currentPubkey: string | null | undefined;
+  managedAgentPubkeys: ReadonlySet<string>;
+  relayAgentAddPolicies: ReadonlyMap<string, string | null>;
+}) {
+  if (candidate.isAgent !== true) return false;
+  const pubkey = normalizePubkey(candidate.pubkey);
+  if (managedAgentPubkeys.has(pubkey)) return false;
+  if (!relayAgentAddPolicies.has(pubkey)) return true;
+  switch (relayAgentAddPolicies.get(pubkey)) {
+    case "anyone":
+      return false;
+    case "owner_only": {
+      const ownerPubkey = candidate.ownerPubkey
+        ? normalizePubkey(candidate.ownerPubkey)
+        : null;
+      const normalizedCurrentPubkey = currentPubkey
+        ? normalizePubkey(currentPubkey)
+        : null;
+      return (
+        ownerPubkey === null ||
+        normalizedCurrentPubkey === null ||
+        ownerPubkey !== normalizedCurrentPubkey
+      );
+    }
+    // "nobody", null, or any unknown value → the relay would refuse (or
+    // the declaration is unreadable) — do not offer.
+    default:
+      return true;
+  }
+}
+
 type AgentAutocompleteCandidate = {
   pubkey?: string;
   displayName?: string | null;

@@ -910,7 +910,7 @@ mod tests {
     fn agents_default_sparse_agent_profiles_for_directory_parse() {
         let e = ev(
             10100,
-            r#"{"channel_add_policy":"owner-only","display_name":"Scout"}"#,
+            r#"{"channel_add_policy":"owner_only","display_name":"Scout"}"#,
             vec![],
         );
         let v = agents_from_events(std::slice::from_ref(&e));
@@ -926,6 +926,7 @@ mod tests {
         assert_eq!(parsed[0].capabilities, Vec::<String>::new());
         assert_eq!(parsed[0].status, "offline");
         assert_eq!(parsed[0].respond_to, None);
+        assert_eq!(parsed[0].channel_add_policy.as_deref(), Some("owner_only"));
     }
 
     #[test]
@@ -941,6 +942,7 @@ mod tests {
             parsed[0].respond_to,
             Some(crate::managed_agents::RespondTo::Anyone)
         );
+        assert_eq!(parsed[0].channel_add_policy, None);
     }
 
     #[test]
