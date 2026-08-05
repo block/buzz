@@ -20,6 +20,7 @@ import { SecretRevealDialog } from "./SecretRevealDialog";
 import { TeamDeleteDialog } from "./TeamDeleteDialog";
 import { TeamDialog } from "./TeamDialog";
 import { TeamsSection } from "./TeamsSection";
+import { HostAgentsSection } from "./HostAgentsSection";
 import { UnifiedAgentsSection } from "./UnifiedAgentsSection";
 import { useManagedAgentActions } from "./useManagedAgentActions";
 import { usePersonaActions } from "./usePersonaActions";
@@ -94,6 +95,13 @@ export function AgentsView() {
   const runningAgentCount = agents.managedAgents.filter((agent) =>
     isManagedAgentActive(agent),
   ).length;
+  const managedPubkeys = React.useMemo(
+    () =>
+      new Set(
+        (agents.managedAgents ?? []).map((agent) => agent.pubkey.toLowerCase()),
+      ),
+    [agents.managedAgents],
+  );
   const hasSavedAgentDefaults = Boolean(
     globalConfig.preferred_runtime?.trim() ||
       globalConfig.provider?.trim() ||
@@ -268,6 +276,13 @@ export function AgentsView() {
               onDeletePersona={personas.openDelete}
               onImportSnapshotFile={(fileBytes, fileName) => {
                 void personas.handleImportSnapshotFile(fileBytes, fileName);
+              }}
+            />
+
+            <HostAgentsSection
+              managedPubkeys={managedPubkeys}
+              onOpenAgentProfile={(pubkey, options) => {
+                openProfilePanel?.(pubkey, options);
               }}
             />
 

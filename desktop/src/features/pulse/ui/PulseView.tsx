@@ -113,6 +113,7 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
               : "offline",
           respondTo: agent.respondTo,
           respondToAllowlist: agent.respondToAllowlist,
+          hostPubkey: null,
         });
       }
     }
