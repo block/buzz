@@ -91,6 +91,17 @@ export function useAppNavigation() {
     [commitNavigation],
   );
 
+  const goDocuments = React.useCallback(
+    (behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/documents",
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
+
   const goProjects = React.useCallback(
     (behavior?: NavigationBehavior) =>
       commitNavigation(
@@ -316,6 +327,7 @@ export function useAppNavigation() {
     closeWorkflowDetail,
     goAgents,
     goChannel,
+    goDocuments,
     goForumPost,
     goHome,
     goNewMessage,

@@ -1084,6 +1084,8 @@ declare global {
       ownerPubkey: string;
       kind: number;
     }) => boolean;
+    /** Sets what `pick_vault_folder` returns; `null` models a cancelled dialog. */
+    __BUZZ_E2E_SET_MOCK_VAULT_PICKER__?: (path: string | null) => void;
     __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
       channelName: string;
       content: string;
@@ -2988,6 +2990,107 @@ type MockSaveSubscriptionRow = {
   kinds: string; // JSON-encoded integer array, e.g. "[9,40002]"
 };
 let mockSaveSubscriptions: MockSaveSubscriptionRow[] = [];
+
+// ---------------------------------------------------------------------------
+// Documents vault
+//
+// An in-memory vault keyed by absolute path. The real commands hold the root in
+// Rust state and validate every path against it; the mock keeps the same shape
+// (activate first, then read) so specs exercise the same call ordering.
+// ---------------------------------------------------------------------------
+
+export const MOCK_VAULT_PATH = "/mock/vault";
+
+const DEFAULT_MOCK_VAULT_FILES: ReadonlyArray<readonly [string, string]> = [
+  [
+    `${MOCK_VAULT_PATH}/Welcome.md`,
+    "# Welcome\n\nThis is a mock vault note.\n",
+  ],
+  [
+    `${MOCK_VAULT_PATH}/Notes/Meeting notes.md`,
+    "# Meeting notes\n\n- Ship Documents\n- Then wikilinks\n",
+  ],
+  [
+    `${MOCK_VAULT_PATH}/Notes/Archive/Old note.md`,
+    "# Old note\n\nArchived content.\n",
+  ],
+];
+
+let mockVaultFiles = new Map<string, string>();
+let mockActiveVaultPath: string | null = null;
+/** What `pick_vault_folder` resolves to; `null` models a cancelled dialog. */
+let mockVaultPickerResult: string | null = MOCK_VAULT_PATH;
+
+function resetMockVault() {
+  mockVaultFiles = new Map(DEFAULT_MOCK_VAULT_FILES);
+  mockActiveVaultPath = null;
+  mockVaultPickerResult = MOCK_VAULT_PATH;
+}
+
+function mockVaultName(path: string): string {
+  return path.split("/").filter(Boolean).pop() ?? path;
+}
+
+/** Mirrors the Rust guard: nothing is readable until a vault is activated. */
+function requireMockVault(): string {
+  if (!mockActiveVaultPath) throw new Error("No vault folder is selected.");
+  return mockActiveVaultPath;
+}
+
+type MockVaultTreeEntry = {
+  name: string;
+  path: string;
+  is_directory: boolean;
+  children: MockVaultTreeEntry[] | null;
+};
+
+/** Rebuilds the nested tree the real `list_vault_files` returns. */
+function buildMockVaultTree(): MockVaultTreeEntry[] {
+  const root = mockActiveVaultPath ?? MOCK_VAULT_PATH;
+  const directories = new Map<string, MockVaultTreeEntry[]>([[root, []]]);
+
+  const ensureDirectory = (path: string): MockVaultTreeEntry[] => {
+    const existing = directories.get(path);
+    if (existing) return existing;
+
+    const children: MockVaultTreeEntry[] = [];
+    directories.set(path, children);
+    const parent = path.slice(0, path.lastIndexOf("/"));
+    ensureDirectory(parent).push({
+      children,
+      is_directory: true,
+      name: path.slice(path.lastIndexOf("/") + 1),
+      path,
+    });
+    return children;
+  };
+
+  for (const filePath of [...mockVaultFiles.keys()].sort()) {
+    if (!filePath.startsWith(`${root}/`)) continue;
+    const directory = filePath.slice(0, filePath.lastIndexOf("/"));
+    ensureDirectory(directory).push({
+      children: null,
+      is_directory: false,
+      name: filePath.slice(filePath.lastIndexOf("/") + 1),
+      path: filePath,
+    });
+  }
+
+  // Directories before files, then alphabetical — matching the Rust walker.
+  const sortEntries = (entries: MockVaultTreeEntry[]) => {
+    entries.sort((a, b) => {
+      if (a.is_directory !== b.is_directory) return a.is_directory ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+    for (const entry of entries) {
+      if (entry.children) sortEntries(entry.children);
+    }
+  };
+
+  const tree = directories.get(root) ?? [];
+  sortEntries(tree);
+  return tree;
+}
 
 function resetMockSaveSubscriptions(config: E2eConfig | undefined) {
   mockSaveSubscriptions = (config?.mock?.saveSubscriptions ?? []).map((s) => ({
@@ -9959,6 +10062,7 @@ export function maybeInstallE2eTauriMocks() {
   resetMockUserStatuses();
   resetMockPersonaCatalogEvents(config);
   resetMockSaveSubscriptions(config);
+  resetMockVault();
   resetMockPendingCommunityDeepLinks(config);
   initializeMockHuddle(config.mock?.huddle, config);
   mockWebsocketSendMutexWedged = false;
@@ -12908,9 +13012,55 @@ export function maybeInstallE2eTauriMocks() {
         }
         return null;
       }
+      case "pick_vault_folder":
+        return mockVaultPickerResult;
+      case "set_active_vault": {
+        const { vaultPath } = payload as { vaultPath: string };
+        if (!mockVaultFiles.has(vaultPath) && vaultPath !== MOCK_VAULT_PATH) {
+          throw new Error("That folder does not exist.");
+        }
+        mockActiveVaultPath = vaultPath;
+        return { path: vaultPath, name: mockVaultName(vaultPath) };
+      }
+      case "clear_active_vault":
+        mockActiveVaultPath = null;
+        return null;
+      case "get_active_vault":
+        return mockActiveVaultPath
+          ? {
+              path: mockActiveVaultPath,
+              name: mockVaultName(mockActiveVaultPath),
+            }
+          : null;
+      case "list_vault_files":
+        return requireMockVault() ? buildMockVaultTree() : [];
+      case "read_vault_file": {
+        const { path } = payload as { path: string };
+        requireMockVault();
+        const content = mockVaultFiles.get(path);
+        if (content === undefined)
+          throw new Error("No such file in the vault.");
+        return content;
+      }
+      case "read_vault_files": {
+        const { paths } = payload as { paths: string[] };
+        requireMockVault();
+        return paths.map((path) => ({
+          path,
+          content: mockVaultFiles.get(path) ?? null,
+        }));
+      }
+      case "vault_entry_exists": {
+        const { path } = payload as { path: string };
+        requireMockVault();
+        return mockVaultFiles.has(path);
+      }
       default:
         throw new Error(`Unsupported mocked Tauri command: ${command}`);
     }
+  };
+  window.__BUZZ_E2E_SET_MOCK_VAULT_PICKER__ = (path) => {
+    mockVaultPickerResult = path;
   };
   window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__ = (command, payload) =>
     handleMockCommand(command, payload ?? null);

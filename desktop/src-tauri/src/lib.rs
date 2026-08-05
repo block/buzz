@@ -308,6 +308,7 @@ pub fn run() {
         .manage(BuilderlabLogin::default())
         .manage(commands::pairing::PairingHandle::new())
         .manage(terminal_runtime::TerminalSessions::default())
+        .manage(commands::vault_path::VaultState::default())
         .setup(move |app| {
             let app_handle = app.handle().clone();
             #[cfg(target_os = "macos")]
@@ -645,6 +646,14 @@ pub fn run() {
             get_users_batch,
             get_user_notes,
             get_git_identity,
+            pick_vault_folder,
+            set_active_vault,
+            clear_active_vault,
+            get_active_vault,
+            list_vault_files,
+            read_vault_file,
+            read_vault_files,
+            vault_entry_exists,
             get_project_repo_snapshot,
             get_project_repo_diff,
             get_project_local_repo_diff,

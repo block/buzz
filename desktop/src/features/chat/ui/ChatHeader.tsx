@@ -8,17 +8,25 @@ import {
   Hash,
   House,
   Lock,
+  NotebookText,
   Zap,
 } from "lucide-react";
 import type * as React from "react";
 import { toast } from "sonner";
 
+import type { AppView } from "@/app/AppShell.helpers";
 import type { ChannelType, ChannelVisibility } from "@/shared/api/types";
 import { UpdateIndicator } from "@/features/settings/UpdateIndicator";
 import { cn } from "@/shared/lib/cn";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { Button } from "@/shared/ui/button";
 import { writeTextToClipboard } from "@/shared/lib/clipboard";
+
+/**
+ * Views that render a chat-style header. Every `AppView` except `messages`,
+ * which is a route prefix rather than a header mode.
+ */
+type ChatHeaderMode = Exclude<AppView, "messages">;
 
 type ChatHeaderProps = {
   actions?: React.ReactNode;
@@ -30,7 +38,7 @@ type ChatHeaderProps = {
   channelType?: ChannelType;
   visibility?: ChannelVisibility;
   leadingContent?: React.ReactNode;
-  mode?: "home" | "channel" | "agents" | "workflows" | "pulse" | "projects";
+  mode?: ChatHeaderMode;
   overlaysContent?: boolean;
   statusBadge?: React.ReactNode;
   /** Render the chrome wrapper without an individual backdrop when a parent supplies shared blur. */
@@ -47,7 +55,7 @@ function ChannelIcon({
 }: {
   channelType?: ChannelType;
   visibility?: ChannelVisibility;
-  mode?: "home" | "channel" | "agents" | "workflows" | "pulse" | "projects";
+  mode?: ChatHeaderMode;
 }) {
   if (mode === "home") {
     return <House className={HEADER_ICON_CLASS} />;
@@ -67,6 +75,10 @@ function ChannelIcon({
 
   if (mode === "projects") {
     return <FolderGit2 className={HEADER_ICON_CLASS} />;
+  }
+
+  if (mode === "documents") {
+    return <NotebookText className={HEADER_ICON_CLASS} />;
   }
 
   if (channelType === "dm") {
