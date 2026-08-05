@@ -6,6 +6,7 @@ import {
   uploadMediaBytes,
 } from "@/shared/api/tauri";
 import type { QueuedMediaAttachment } from "./backgroundMediaUploadStore";
+import { applyImetaUpdate, compactImetaSlots } from "./imetaSlots";
 import { isVideoFile, videoMimeForFile } from "./videoFileType";
 
 /**
@@ -245,7 +246,7 @@ export function useMediaUpload({
   );
 
   const pendingImeta = React.useMemo(
-    () => imetaSlots.filter((d): d is BlobDescriptor => d !== null),
+    () => compactImetaSlots(imetaSlots),
     [imetaSlots],
   );
 
@@ -885,12 +886,16 @@ export function useMediaUpload({
       // *current* draft (e.g. agent-snapshot paste), so it must NOT bump.
       if (typeof action !== "function") {
         beginNewDraftEpoch();
+        setImetaSlots(() => {
+          nextSlotRef.current = action.length;
+          return action;
+        });
+        return;
       }
       setImetaSlots((prev) => {
-        const current = prev.filter((d): d is BlobDescriptor => d !== null);
-        const next = typeof action === "function" ? action(current) : action;
-        nextSlotRef.current = next.length;
-        return next;
+        const result = applyImetaUpdate(prev, action);
+        nextSlotRef.current = result.length;
+        return result;
       });
     },
     [beginNewDraftEpoch],
