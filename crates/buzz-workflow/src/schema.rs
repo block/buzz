@@ -97,6 +97,12 @@ pub enum ActionDef {
         /// Optional channel UUID override. Must be a valid UUID string.
         #[serde(default)]
         channel: Option<String>,
+        /// Optional event ID to reply to (supports template variables).
+        ///
+        /// The relay validates that the parent exists in the destination
+        /// channel before emitting the reply.
+        #[serde(default)]
+        reply_to: Option<String>,
     },
     /// Send a direct message to a user.
     SendDm {
@@ -296,6 +302,31 @@ mod tests {
 
         let reparsed: WorkflowDef = serde_json::from_str(&json).expect("json round-trip");
         assert_eq!(reparsed.name, def.name);
+    }
+
+    #[test]
+    fn parse_pr_prompt_with_threaded_reaction_legend() {
+        let yaml = concat!(
+            "name: GitHub PR link intake\n",
+            "trigger:\n  on: message_posted\n",
+            "steps:\n",
+            "  - id: present_pr\n",
+            "    action: send_message\n",
+            "    text: '@ascension [PR #{{trigger.change_request_number}}]({{trigger.change_request_url}}) from {{trigger.author_name}} in [#{{trigger.channel_name}}]({{trigger.message_url}}).'\n",
+            "  - id: show_actions\n",
+            "    action: send_message\n",
+            "    reply_to: '{{steps.present_pr.output.event_id}}'\n",
+            "    text: 'React on the [original PR post]({{trigger.message_url}}) or the prompt above: 🚦 Review · ✅ Approve · ⛔ Block · 🚀 Merge'\n",
+        );
+
+        let (def, _) = parse_yaml(yaml).expect("parse failed");
+        match &def.steps[1].action {
+            ActionDef::SendMessage { reply_to, .. } => assert_eq!(
+                reply_to.as_deref(),
+                Some("{{steps.present_pr.output.event_id}}")
+            ),
+            other => panic!("unexpected action: {other:?}"),
+        }
     }
 
     #[test]
