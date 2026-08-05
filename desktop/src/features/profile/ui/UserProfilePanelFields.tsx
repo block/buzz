@@ -12,6 +12,10 @@ import {
 } from "lucide-react";
 import * as React from "react";
 import { AgentStatusBadge } from "@/features/agents/ui/AgentStatusBadge";
+import {
+  managedAgentRuntimeLabel,
+  runtimeLabel,
+} from "@/features/agents/lib/managedAgentRuntimeLabel";
 import { truncatePubkey } from "@/shared/lib/pubkey";
 import { copyTextToClipboard } from "@/shared/lib/clipboard";
 import { PubKey } from "@/shared/ui/PubKey";
@@ -22,17 +26,6 @@ import type {
   Profile,
   RelayAgent,
 } from "@/shared/api/types";
-
-const RUNTIME_LABELS: Record<string, string> = {
-  goose: "Goose",
-  "claude-code": "Claude Code",
-  "codex-acp": "Codex",
-  aider: "Aider",
-};
-
-function runtimeLabel(command: string): string {
-  return RUNTIME_LABELS[command] ?? command;
-}
 
 export type ProfileField = {
   copyValue?: string;
@@ -297,7 +290,7 @@ export function buildOwnerFields({
   if (managedAgent?.agentCommand) {
     fields.push({
       copyValue: managedAgent.agentCommand,
-      displayValue: runtimeLabel(managedAgent.agentCommand),
+      displayValue: managedAgentRuntimeLabel(managedAgent),
       icon: Terminal,
       label: "Runtime",
       testId: "user-profile-runtime",
