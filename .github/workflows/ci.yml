@@ -774,8 +774,10 @@ jobs:
         # hash-scoped tokens. They were #[ignore]d and selected by no CI job, so
         # the lane never ran; select it here, where MinIO and the seeded
         # 'localhost:3000' community already exist.
+        # --no-fail-fast: without it cargo stops after the first failing binary,
+        # so one broken case hides every later binary's result.
         run: |
-          cargo test -p buzz-test-client --test e2e_media --test e2e_media_extended --test e2e_media_video -- --ignored --nocapture
+          cargo test -p buzz-test-client --no-fail-fast --test e2e_media --test e2e_media_extended --test e2e_media_video -- --ignored --nocapture
         env:
           RELAY_URL: ws://localhost:3000
           RELAY_HTTP_URL: http://localhost:3000
