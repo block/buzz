@@ -778,6 +778,7 @@ test("moves agent actions into an overflow menu in a narrow view", async ({
 test("agent catalog chooser order stays stable when selection changes", async ({
   page,
 }) => {
+  await seedActiveIdentity(page, TEST_IDENTITIES.tyler);
   await installMockBridge(page, {
     personas: [
       {
@@ -805,6 +806,7 @@ test("agent catalog chooser order stays stable when selection changes", async ({
 
 test("catalog detail pane shows the full persona details", async ({ page }) => {
   const personaId = "custom:researcher";
+  await seedActiveIdentity(page, TEST_IDENTITIES.tyler);
   await installMockBridge(page, {
     personas: [
       {
