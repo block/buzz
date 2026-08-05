@@ -278,6 +278,29 @@ fn resolve_effective_agent_env_with_def(
         effective_model.as_deref(),
     );
 
+    // The user's own self-hosted OpenAI-compatible endpoint (llama.cpp, vLLM,
+    // a directly-configured mesh-llm instance, etc. — distinct from the
+    // built-in `relay-mesh` preset above) shares relay-mesh's failure mode:
+    // small local models often finish a turn by writing the answer as prose
+    // instead of calling `send_message`, and unlike cloud providers there is
+    // no reliable way to make them self-correct. Opt this provider into the
+    // same harness delivery fallback, unless a lower layer already set an
+    // explicit value. An empty string counts as unset, matching the emptiness
+    // convention used throughout this module (e.g. `buzz_agent_requirements`).
+    // Scoped to `openai-compat` only: plain `openai` is the real OpenAI cloud
+    // API, which — like other cloud providers — reliably calls tools, so
+    // enabling the fallback there would risk double-posting.
+    if effective_provider.as_deref().map(str::trim) == Some("openai-compat")
+        && env
+            .get("BUZZ_ACP_DELIVER_PLAIN_REPLIES")
+            .is_none_or(|v| v.trim().is_empty())
+    {
+        env.insert(
+            "BUZZ_ACP_DELIVER_PLAIN_REPLIES".to_string(),
+            "true".to_string(),
+        );
+    }
+
     EffectiveAgentEnv {
         env,
         config_file_path: runtime.and_then(|r| r.config_file_path),
@@ -1463,20 +1486,12 @@ mod tests {
 
     // ── resolve_effective_agent_env ─────────────────────────────────────────
 
-    #[test]
-    fn resolve_effective_agent_env_user_env_wins_over_structured_fields() {
-        // A record whose env_vars explicitly set provider/model must win over
-        // any baked defaults. In OSS test builds the baked map is empty, so
-        // this test validates the user-env layer is present in the output.
-        let mut env_vars = BTreeMap::new();
-        env_vars.insert("BUZZ_AGENT_PROVIDER".to_string(), "anthropic".to_string());
-        env_vars.insert(
-            "BUZZ_AGENT_MODEL".to_string(),
-            "claude-opus-4-5".to_string(),
-        );
-
-        // Minimal record: only the fields resolve_effective_agent_env reads.
-        let record = crate::managed_agents::types::ManagedAgentRecord {
+    /// Minimal `ManagedAgentRecord` carrying only the fields
+    /// `resolve_effective_agent_env` reads, with caller-supplied `env_vars`.
+    fn minimal_record(
+        env_vars: BTreeMap<String, String>,
+    ) -> crate::managed_agents::types::ManagedAgentRecord {
+        crate::managed_agents::types::ManagedAgentRecord {
             pubkey: "test-pubkey".to_string(),
             name: "test-agent".to_string(),
             persona_id: None,
@@ -1530,8 +1545,22 @@ mod tests {
             definition_respond_to_allowlist: Vec::new(),
             definition_parallelism: None,
             relay_mesh: None,
-        };
+        }
+    }
 
+    #[test]
+    fn resolve_effective_agent_env_user_env_wins_over_structured_fields() {
+        // A record whose env_vars explicitly set provider/model must win over
+        // any baked defaults. In OSS test builds the baked map is empty, so
+        // this test validates the user-env layer is present in the output.
+        let mut env_vars = BTreeMap::new();
+        env_vars.insert("BUZZ_AGENT_PROVIDER".to_string(), "anthropic".to_string());
+        env_vars.insert(
+            "BUZZ_AGENT_MODEL".to_string(),
+            "claude-opus-4-5".to_string(),
+        );
+
+        let record = minimal_record(env_vars);
         let runtime = known_acp_runtime_exact("buzz-agent");
         let effective = resolve_effective_agent_env(&record, &[], runtime, &Default::default());
 
@@ -1543,6 +1572,86 @@ mod tests {
         assert_eq!(
             effective.env.get("BUZZ_AGENT_MODEL").map(String::as_str),
             Some("claude-opus-4-5")
+        );
+    }
+
+    // ── openai-compat plain-reply delivery default ─────────────────────────
+    //
+    // Self-hosted OpenAI-compatible endpoints (llama.cpp, vLLM, a directly
+    // configured mesh-llm instance — the "Local LLM" case, distinct from the
+    // built-in relay-mesh preset) hit the same silent-drop bug relay-mesh's
+    // fallback exists for: a small local model answers in prose and never
+    // calls `send_message`. These tests lock in that this provider opts into
+    // the fallback by default, that the real OpenAI cloud API does not, and
+    // that an explicit user override always wins.
+
+    #[test]
+    fn openai_compat_provider_opts_into_plain_reply_delivery() {
+        // The normalized provider dropdown persists to `record.provider`
+        // (what `resolve_effective_model_provider` actually reads), not to a
+        // raw `BUZZ_AGENT_PROVIDER` env var — that env var is itself derived
+        // from this typed field by an earlier env layer in real usage.
+        let mut env_vars = BTreeMap::new();
+        env_vars.insert(
+            "OPENAI_COMPAT_BASE_URL".to_string(),
+            "http://llm1.example.ts.net:37073/v1".to_string(),
+        );
+        let mut record = minimal_record(env_vars);
+        record.provider = Some("openai-compat".to_string());
+
+        let runtime = known_acp_runtime_exact("buzz-agent");
+        let effective = resolve_effective_agent_env(&record, &[], runtime, &Default::default());
+
+        assert_eq!(
+            effective
+                .env
+                .get("BUZZ_ACP_DELIVER_PLAIN_REPLIES")
+                .map(String::as_str),
+            Some("true"),
+            "openai-compat should default to delivering plain-text replies"
+        );
+    }
+
+    #[test]
+    fn real_openai_provider_does_not_opt_into_plain_reply_delivery() {
+        // Plain "openai" (the real OpenAI cloud API) must NOT get the
+        // fallback: cloud models reliably call `send_message` themselves, and
+        // enabling it there risks double-posting.
+        let mut record = minimal_record(BTreeMap::new());
+        record.provider = Some("openai".to_string());
+
+        let runtime = known_acp_runtime_exact("buzz-agent");
+        let effective = resolve_effective_agent_env(&record, &[], runtime, &Default::default());
+
+        assert_eq!(
+            effective.env.get("BUZZ_ACP_DELIVER_PLAIN_REPLIES"),
+            None,
+            "real OpenAI cloud provider must not opt into plain-reply delivery"
+        );
+    }
+
+    #[test]
+    fn explicit_deliver_plain_replies_override_is_preserved_for_openai_compat() {
+        // A user (or a lower env layer) that explicitly disabled the fallback
+        // must not be silently overridden back to "true".
+        let mut env_vars = BTreeMap::new();
+        env_vars.insert(
+            "BUZZ_ACP_DELIVER_PLAIN_REPLIES".to_string(),
+            "false".to_string(),
+        );
+        let mut record = minimal_record(env_vars);
+        record.provider = Some("openai-compat".to_string());
+
+        let runtime = known_acp_runtime_exact("buzz-agent");
+        let effective = resolve_effective_agent_env(&record, &[], runtime, &Default::default());
+
+        assert_eq!(
+            effective
+                .env
+                .get("BUZZ_ACP_DELIVER_PLAIN_REPLIES")
+                .map(String::as_str),
+            Some("false"),
+            "explicit user override must survive the openai-compat default"
         );
     }
 
