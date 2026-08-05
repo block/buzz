@@ -18,6 +18,7 @@ import {
 } from "@/app/communityViewTransition";
 import { deriveShellRoute } from "@/app/AppShell.helpers";
 import { ThemeGrainientBackground } from "@/app/ThemeGrainientBackground";
+import { CommunityThemeController } from "@/shared/theme/CommunityThemeController";
 import { useReloadShortcut } from "@/app/useReloadShortcut";
 import { KnownAgentPubkeysProvider } from "@/features/agents/useKnownAgentPubkeys";
 import { huddleWindowChannelId } from "@/features/huddle/lib/huddleWindow";
@@ -547,6 +548,7 @@ function CommunityApp({
   if (appContent === null && (!transaction || isEnteringCurtain)) {
     appContent = communityApplied ? (
       <CommunityQueryProvider key={communityKey}>
+        <CommunityThemeController />
         <AppReady
           isCommunitySwitch={isCommunitySwitch}
           key={communityKey}
