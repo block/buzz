@@ -443,9 +443,9 @@ predicate fail closed rather than leak (Theorem I4).
   at `:84-86` references this obligation as "P3."
 
 P-RESOLVE is the load-bearing *application* assumption for channel-bearing events
-and P-RESOLVE-HOST is its channel-less counterpart — together they fence the
-`h`-tag and claimed-community adversary cannot circumvent. A-RLS-1..5 are the
-load-bearing *backstop*.
+and P-RESOLVE-HOST is its channel-less counterpart — together they form the fence
+that an adversary cannot circumvent by manipulating the `h` tag or claimed
+community. A-RLS-1..5 are the load-bearing *backstop*.
 
 ## Safety Theorems
 
