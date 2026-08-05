@@ -128,6 +128,7 @@ spec:
             - { name: BUZZ_MAX_CONNECTIONS,        value: {{ .Values.relay.maxConnections | quote }} }
             - { name: BUZZ_MAX_CONCURRENT_HANDLERS, value: {{ .Values.relay.maxConcurrentHandlers | quote }} }
             - { name: BUZZ_SEND_BUFFER,            value: {{ .Values.relay.sendBuffer | quote }} }
+            - { name: BUZZ_DRAIN_JITTER_MS,        value: {{ .Values.relay.drainJitterMs | quote }} }
             - { name: BUZZ_REQUIRE_AUTH_TOKEN,     value: {{ .Values.relay.requireAuthToken | quote }} }
             - { name: BUZZ_REQUIRE_RELAY_MEMBERSHIP, value: {{ .Values.relay.requireRelayMembership | quote }} }
             - { name: BUZZ_REQUIRE_MEDIA_GET_AUTH, value: {{ .Values.relay.requireMediaGetAuth | quote }} }

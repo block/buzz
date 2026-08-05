@@ -1189,6 +1189,35 @@ async fn run_periodic_until_cancelled<Tick, TickFuture>(
 /// │         → graceful drain (30s) → exit                   │
 /// └─────────────────────────────────────────────────────────┘
 /// ```
+///
+/// ## Shutdown budget
+///
+/// The full teardown, measured from SIGTERM, is bounded as follows:
+///
+/// 1. `5s` grace. Readiness returns 503 immediately, then the process
+///    sleeps 5 seconds so Kubernetes stops routing new traffic before any
+///    listener closes.
+/// 2. `GRACEFUL_DRAIN_TIMEOUT` (`30s`) hard drain. Started at the end of the
+///    grace, this backstops the whole drain and force-exits the process if
+///    exceeded. It bounds everything after the grace, not the grace itself.
+///
+/// A single WebSocket can therefore stay open, from SIGTERM, for up to:
+///
+/// ```text
+///   5s grace  +  up to 20s jitter  +  up to 5s close-frame ack  =  30s
+///   (fixed)      (MAX_DRAIN_JITTER_MS)  (RESTART_CLOSE_ACK_TIMEOUT)
+/// ```
+///
+/// The 5s grace runs before the 30s hard-drain clock starts, so the jitter
+/// (capped at [`buzz_relay::config::MAX_DRAIN_JITTER_MS`] = 20s) plus the
+/// per-connection close-frame ack wait (`RESTART_CLOSE_ACK_TIMEOUT` = 5s in
+/// `state.rs`) sum to 25s and stay inside the 30s hard drain. Total worst
+/// case from SIGTERM to forced exit is 5s + 30s = 35s. Both fit inside the
+/// chart's `terminationGracePeriodSeconds: 60` (`deploy/charts/buzz/values.yaml`),
+/// which leaves headroom but assumes no `preStop` hook adds further delay.
+/// With jitter off (`BUZZ_DRAIN_JITTER_MS=0`, the default) sockets close
+/// all-at-once right after the grace, so the per-socket delay collapses to
+/// roughly the 5s grace plus the ack wait.
 const GRACEFUL_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 async fn serve(
@@ -1211,6 +1240,33 @@ async fn serve(
     let drain_conn_manager = Arc::clone(&state.conn_manager);
     let drain_jitter_ms = state.config.drain_jitter_ms;
     let tx = shutdown_tx.clone();
+    // TODO(coverage): `serve`'s shutdown wiring has no automated test. The
+    // jittered drain helper (`ConnectionManager::drain_all_jittered`) is
+    // covered in `state.rs`, but coverage of the helper is not coverage of
+    // its use here: the three wiring facts below are currently unguarded, and
+    // mutating any one of them leaves the suite green.
+    //   1. Jitter dispatch: `drain_jitter_ms == 0` must pick `drain_all`, and
+    //      a non-zero value must pick `drain_all_jittered(drain_jitter_ms)`.
+    //      A mutant that inverts this condition ships jitter-off in prod.
+    //   2. The shutdown handle must be awaited before the abort. Dropping the
+    //      `shutdown_handle.await` (both the UDS and TCP-only return paths) is
+    //      the exact shape of the previously shipped detached-timer bug,
+    //      relocated from the helper to the call site: the runtime can exit
+    //      before delayed closes flush, so no client sees a 1012.
+    //   3. `shutdown_tx.send(true)` must reach every listener's
+    //      `with_graceful_shutdown` future, on both the UDS and TCP-only paths.
+    //
+    // A focused test would refactor the drain/dispatch decision and the
+    // listener-shutdown fan-out into a small seam that does not need a bound
+    // socket or a real SIGTERM. One shape: extract the body of this spawned
+    // task into a `run_graceful_shutdown(state, shutdown_tx)` fn parameterised
+    // over a signal future and a clock, inject a fake `ConnectionManager`
+    // (or a trait over `drain_all` / `drain_all_jittered`) that records which
+    // path ran, drive it with `tokio::time` paused, and assert: (a) the right
+    // drain path ran for jitter 0 vs non-zero, (b) the drain future completed
+    // before the abort fired, and (c) each subscribed `watch` receiver
+    // observed `true`. This keeps the test off real ports and off wall-clock
+    // sleeps. Not implemented here. This comment records the plan only.
     let shutdown_handle = tokio::spawn(async move {
         shutdown_signal().await;
         shutdown_flag.store(true, Ordering::Relaxed);
