@@ -826,9 +826,10 @@ test("managed relay agents are visible in channel mentions regardless of relay p
   await expect(dropdown.getByText("agent")).toBeVisible();
 });
 
-test("relay-only agents stay hidden from channel mentions even when allowlisted", async ({
+test("allowlisted foreign channel agents are visible and publish their exact pubkey", async ({
   page,
 }) => {
+  const sameNameOwnerAgent = "abababab".repeat(8);
   await installMockBridge(page, {
     relayAgents: [
       {
@@ -836,6 +837,14 @@ test("relay-only agents stay hidden from channel mentions even when allowlisted"
         name: "quinn",
         respondTo: "allowlist",
         respondToAllowlist: [MOCK_VIEWER_PUBKEY],
+        channelNames: ["general"],
+      },
+      {
+        pubkey: sameNameOwnerAgent,
+        name: "quinn",
+        respondTo: "allowlist",
+        respondToAllowlist: [MOCK_VIEWER_PUBKEY],
+        channelNames: ["general"],
       },
     ],
   });
@@ -846,7 +855,59 @@ test("relay-only agents stay hidden from channel mentions even when allowlisted"
   const input = page.getByTestId("message-input");
   await input.fill("@quinn");
 
-  await expect(autocomplete(page)).toHaveCount(0);
+  const dropdown = autocomplete(page);
+  await expect(dropdown.getByText("quinn", { exact: true })).toHaveCount(2);
+  await expect(dropdown.getByTestId("mention-collision-npub")).toHaveCount(2);
+  await dropdown
+    .getByTestId(`mention-suggestion-${ALLOWLIST_RELAY_AGENT_PUBKEY}`)
+    .click();
+  await page.keyboard.type(" please investigate");
+  await page.getByTestId("send-message").click();
+
+  await expect
+    .poll(async () => {
+      return page.evaluate(() => window.__BUZZ_E2E_SIGNED_EVENTS__?.at(-1));
+    })
+    .toEqual(
+      expect.objectContaining({
+        tags: expect.arrayContaining([["p", ALLOWLIST_RELAY_AGENT_PUBKEY]]),
+      }),
+    );
+  const published = await page.evaluate(() =>
+    window.__BUZZ_E2E_SIGNED_EVENTS__?.at(-1),
+  );
+  expect(published?.tags).not.toContainEqual(["p", sameNameOwnerAgent]);
+});
+
+test("authorized offline agents report a clear error and do not send", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        name: "quinn",
+        respondTo: "allowlist",
+        respondToAllowlist: [MOCK_VIEWER_PUBKEY],
+        channelNames: ["general"],
+        status: "offline",
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const input = page.getByTestId("message-input");
+  await input.fill("@quinn");
+
+  await autocomplete(page).getByText("quinn", { exact: true }).click();
+  await expect(
+    page.getByText("quinn is offline and cannot be invoked."),
+  ).toBeVisible();
+  expect(
+    (await readCommandPayloadLog(page)).filter(
+      (entry) => entry.command === "send_channel_message",
+    ),
+  ).toHaveLength(0);
 });
 
 test("mentioning an in-channel stopped managed agent starts it before sending", async ({

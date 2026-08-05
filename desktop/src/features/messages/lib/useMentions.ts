@@ -179,6 +179,16 @@ export function useMentions(
       ),
     [relayAgentsQuery.data],
   );
+  const relayAgentsByPubkey = React.useMemo(
+    () =>
+      new Map(
+        (relayAgentsQuery.data ?? []).map((agent) => [
+          normalizePubkey(agent.pubkey),
+          agent,
+        ]),
+      ),
+    [relayAgentsQuery.data],
+  );
   const directoryAgentPubkeys = React.useMemo(
     () =>
       new Set(
@@ -291,6 +301,8 @@ export function useMentions(
             : null) ??
           null,
         isManagedAgent: current.isManagedAgent || candidate.isManagedAgent,
+        unavailableReason:
+          current.unavailableReason ?? candidate.unavailableReason ?? null,
       });
     };
     for (const member of members ?? []) {
@@ -303,6 +315,7 @@ export function useMentions(
         relayAgentNamesByPubkey.get(pubkey) ??
         null;
       const profile = profiles?.[pubkey] ?? null;
+      const relayAgent = relayAgentsByPubkey.get(pubkey);
       addCandidate({
         kind: "identity",
         pubkey,
@@ -329,6 +342,10 @@ export function useMentions(
           profile?.displayName?.trim() && profile?.nip05Handle?.trim()
             ? profile.nip05Handle
             : null,
+        unavailableReason:
+          relayAgent?.status === "offline"
+            ? `${agentName ?? "Agent"} is offline and cannot be invoked.`
+            : null,
       });
     }
 
@@ -344,6 +361,11 @@ export function useMentions(
           (activePersonaById.has(pubkey) ? pubkey : undefined),
         ownerPubkey: null,
         isAgent: true,
+        unavailableReason: memberPubkeys.has(pubkey)
+          ? agent.status === "offline"
+            ? `${agent.name} is offline and cannot be invoked.`
+            : null
+          : `${agent.name} is not a member of this channel.`,
       });
     }
 
@@ -428,6 +450,7 @@ export function useMentions(
     personaNameByPubkey,
     profiles,
     relayAgentNamesByPubkey,
+    relayAgentsByPubkey,
     relayAgentsQuery.data,
   ]);
 

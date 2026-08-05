@@ -2240,6 +2240,20 @@ function resetMockRelayAgents(config?: E2eConfig) {
       respond_to: seed.respondTo ?? "owner-only",
       respond_to_allowlist: seed.respondToAllowlist ?? [],
     });
+    for (const channel of channels) {
+      if (channel.members.some((member) => member.pubkey === seed.pubkey)) {
+        continue;
+      }
+      channel.members.push({
+        pubkey: seed.pubkey,
+        role: "bot",
+        is_agent: true,
+        joined_at: new Date().toISOString(),
+        display_name: seed.name,
+      });
+      syncMockChannel(channel);
+      touchMockChannel(channel);
+    }
   }
 }
 
