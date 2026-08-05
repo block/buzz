@@ -43,6 +43,7 @@ enum PairingMode {
 struct PairingTaskContext {
     mode: PairingMode,
     generation: Arc<AtomicU64>,
+    generation_fence: Arc<std::sync::Mutex<()>>,
     task_generation: u64,
 }
 
@@ -50,6 +51,8 @@ struct PairingTaskContext {
 pub struct PairingHandle {
     session: Arc<tokio::sync::Mutex<Option<PairingSession>>>,
     generation: Arc<AtomicU64>,
+    /// Linearizes cancellation/replacement against recovered identity commits.
+    generation_fence: Arc<std::sync::Mutex<()>>,
     /// Serializes session setup so an older start cannot resume after relay
     /// discovery and overwrite a newer session's shared state.
     start_lock: tokio::sync::Mutex<()>,
@@ -67,6 +70,7 @@ impl PairingHandle {
         Self {
             session: Arc::new(tokio::sync::Mutex::new(None)),
             generation: Arc::new(AtomicU64::new(0)),
+            generation_fence: Arc::new(std::sync::Mutex::new(())),
             start_lock: tokio::sync::Mutex::new(()),
             cancel: std::sync::Mutex::new(None),
             outbound_tx: std::sync::Mutex::new(None),
@@ -110,10 +114,8 @@ async fn start_pairing_session(
     mode: PairingMode,
 ) -> Result<String, String> {
     let _start_guard = pairing.start_lock.lock().await;
-    let task_generation = pairing
-        .generation
-        .fetch_add(1, Ordering::SeqCst)
-        .wrapping_add(1);
+    let task_generation =
+        invalidate_pairing_generation(&pairing.generation, &pairing.generation_fence)?;
     if let Some(token) = pairing.cancel.lock().map_err(|e| e.to_string())?.take() {
         token.cancel();
     }
@@ -165,6 +167,7 @@ async fn start_pairing_session(
         PairingTaskContext {
             mode,
             generation: Arc::clone(&pairing.generation),
+            generation_fence: Arc::clone(&pairing.generation_fence),
             task_generation,
         },
         cancel,
@@ -228,7 +231,7 @@ pub async fn cancel_pairing(pairing: State<'_, PairingHandle>) -> Result<(), Str
     // Invalidate the task before waiting for its session lock. Recovery may be
     // blocked on identity persistence after releasing this lock, and must see
     // cancellation before crossing the durable commit boundary.
-    pairing.generation.fetch_add(1, Ordering::SeqCst);
+    invalidate_pairing_generation(&pairing.generation, &pairing.generation_fence)?;
     if let Some(token) = pairing.cancel.lock().map_err(|e| e.to_string())?.take() {
         token.cancel();
     }
@@ -405,6 +408,7 @@ async fn pairing_ws_task_inner(
                                 app,
                                 payload,
                                 &context.generation,
+                                &context.generation_fence,
                                 context.task_generation,
                             )
                             .await;
@@ -459,16 +463,18 @@ async fn import_recovered_identity(
     app: &AppHandle,
     nsec: Zeroizing<String>,
     generation: &Arc<AtomicU64>,
+    generation_fence: &Arc<std::sync::Mutex<()>>,
     task_generation: u64,
 ) -> Result<(), String> {
     let app = app.clone();
     let generation = Arc::clone(generation);
+    let generation_fence = Arc::clone(generation_fence);
     tokio::task::spawn_blocking(move || {
         let keys = nostr::Keys::parse(nsec.trim())
             .map_err(|e| format!("Phone sent an invalid identity: {e}"))?;
         let state = app.state::<AppState>();
         let _mutation_guard = state.identity_mutation.lock().map_err(|e| e.to_string())?;
-        commit_recovery_if_current(&generation, task_generation, || {
+        commit_recovery_if_current(&generation, &generation_fence, task_generation, || {
             let data_dir = app
                 .path()
                 .app_data_dir()
@@ -498,11 +504,21 @@ fn ensure_pairing_task_is_current(
     }
 }
 
+fn invalidate_pairing_generation(
+    generation: &AtomicU64,
+    generation_fence: &std::sync::Mutex<()>,
+) -> Result<u64, String> {
+    let _fence = generation_fence.lock().map_err(|e| e.to_string())?;
+    Ok(generation.fetch_add(1, Ordering::SeqCst).wrapping_add(1))
+}
+
 fn commit_recovery_if_current<T>(
     generation: &AtomicU64,
+    generation_fence: &std::sync::Mutex<()>,
     task_generation: u64,
     commit: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
+    let _fence = generation_fence.lock().map_err(|e| e.to_string())?;
     ensure_pairing_task_is_current(generation, task_generation)?;
     commit()
 }
@@ -776,8 +792,8 @@ mod pairing_generation_tests {
 
     use super::{
         clear_pairing_session_if_current, commit_recovery_if_current,
-        recovery_result_after_completion, validate_recovery_payload_type, PairingHandle,
-        PairingSession, PayloadType,
+        invalidate_pairing_generation, recovery_result_after_completion,
+        validate_recovery_payload_type, PairingHandle, PairingSession, PayloadType,
     };
 
     #[tokio::test]
@@ -811,7 +827,8 @@ mod pairing_generation_tests {
         let generation = AtomicU64::new(2);
         let committed = std::sync::atomic::AtomicBool::new(false);
 
-        let result = commit_recovery_if_current(&generation, 1, || {
+        let generation_fence = std::sync::Mutex::new(());
+        let result = commit_recovery_if_current(&generation, &generation_fence, 1, || {
             committed.store(true, Ordering::SeqCst);
             Ok(())
         });
@@ -824,28 +841,48 @@ mod pairing_generation_tests {
     }
 
     #[test]
-    fn cancelled_recovery_waiting_for_mutation_cannot_commit_identity() {
+    fn invalidation_after_check_waits_for_identity_commit() {
         let generation = Arc::new(AtomicU64::new(7));
-        let mutation = Arc::new(std::sync::Mutex::new(()));
-        let blocker = mutation.lock().expect("lock identity mutation");
-        let (started_tx, started_rx) = std::sync::mpsc::channel();
-        let task_generation = 7;
-        let task_mutation = Arc::clone(&mutation);
-        let task_generation_state = Arc::clone(&generation);
+        let generation_fence = Arc::new(std::sync::Mutex::new(()));
+        let (checked_tx, checked_rx) = std::sync::mpsc::channel();
+        let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+        let committed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let recovery_generation = Arc::clone(&generation);
+        let recovery_fence = Arc::clone(&generation_fence);
+        let recovery_committed = Arc::clone(&committed);
         let recovery = std::thread::spawn(move || {
-            started_tx.send(()).expect("signal recovery started");
-            let _guard = task_mutation.lock().expect("wait for identity mutation");
-            commit_recovery_if_current(&task_generation_state, task_generation, || Ok(()))
+            commit_recovery_if_current(&recovery_generation, &recovery_fence, 7, || {
+                checked_tx.send(()).expect("signal generation checked");
+                finish_rx.recv().expect("release identity commit");
+                recovery_committed.store(true, Ordering::SeqCst);
+                Ok(())
+            })
         });
 
-        started_rx.recv().expect("recovery started");
-        generation.fetch_add(1, Ordering::SeqCst);
-        drop(blocker);
+        checked_rx.recv().expect("generation checked");
+        let invalidation_generation = Arc::clone(&generation);
+        let invalidation_fence = Arc::clone(&generation_fence);
+        let (attempted_tx, attempted_rx) = std::sync::mpsc::channel();
+        let (invalidated_tx, invalidated_rx) = std::sync::mpsc::channel();
+        let invalidation = std::thread::spawn(move || {
+            attempted_tx.send(()).expect("signal invalidation attempt");
+            let next = invalidate_pairing_generation(&invalidation_generation, &invalidation_fence)
+                .expect("invalidate generation");
+            invalidated_tx.send(next).expect("signal invalidated");
+        });
 
-        assert_eq!(
-            recovery.join().expect("recovery task").unwrap_err(),
-            "Pairing session was superseded or cancelled"
-        );
+        attempted_rx.recv().expect("invalidation attempted");
+        assert!(invalidated_rx
+            .recv_timeout(Duration::from_millis(50))
+            .is_err());
+        assert!(!committed.load(Ordering::SeqCst));
+
+        finish_tx.send(()).expect("finish identity commit");
+        recovery.join().expect("recovery task").unwrap();
+        assert!(committed.load(Ordering::SeqCst));
+        assert_eq!(invalidated_rx.recv().expect("invalidation completed"), 8);
+        invalidation.join().expect("invalidation task");
     }
 
     #[test]
