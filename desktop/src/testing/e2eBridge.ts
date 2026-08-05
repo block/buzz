@@ -82,6 +82,7 @@ export type MockManagedAgentSeed = {
   personaId?: string | null;
   /** Harness/runtime id pin; `null` = inherit from persona (native default). */
   runtime?: string | null;
+  workingDirectory?: string | null;
   status?: RawManagedAgent["status"];
   channelNames?: string[];
   channelIds?: string[];
@@ -794,6 +795,7 @@ type RawManagedAgent = {
   /** Record-level harness/runtime pin (`null` when inheriting from the persona). */
   runtime: string | null;
   relay_url: string;
+  working_directory: string | null;
   acp_command: string;
   agent_command: string;
   agent_args: string[];
@@ -1624,6 +1626,7 @@ function cloneManagedAgent(agent: MockManagedAgent): RawManagedAgent {
     persona_id: agent.persona_id,
     runtime: agent.runtime ?? null,
     relay_url: agent.relay_url,
+    working_directory: agent.working_directory ?? null,
     acp_command: agent.acp_command,
     agent_command: agent.agent_command,
     agent_args: [...agent.agent_args],
@@ -2179,6 +2182,7 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     // must mirror the wire shape, not omit the key.
     runtime: seed.runtime ?? null,
     relay_url: DEFAULT_RELAY_WS_URL,
+    working_directory: seed.workingDirectory ?? null,
     acp_command: "buzz-acp",
     agent_command: agentCommand,
     agent_args: agentArgs,
@@ -8286,6 +8290,7 @@ async function handleCreateManagedAgent(
       name: string;
       personaId?: string;
       relayUrl?: string;
+      workingDirectory?: string;
       acpCommand?: string;
       agentCommand?: string;
       agentArgs?: string[];
@@ -8364,6 +8369,7 @@ async function handleCreateManagedAgent(
     // Create never pins a harness id — the record inherits from the persona.
     runtime: null,
     relay_url: args.input.relayUrl ?? DEFAULT_RELAY_WS_URL,
+    working_directory: args.input.workingDirectory ?? null,
     acp_command: args.input.acpCommand ?? "buzz-acp",
     agent_command: agentCommand,
     agent_args: agentArgs,
@@ -8636,6 +8642,7 @@ async function handleUpdateManagedAgent(args: {
     name?: string;
     model?: string | null;
     systemPrompt?: string | null;
+    workingDirectory?: string | null;
     envVars?: Record<string, string>;
     respondTo?: "owner-only" | "allowlist" | "anyone";
     respondToAllowlist?: string[];
@@ -8650,6 +8657,9 @@ async function handleUpdateManagedAgent(args: {
   }
   if (args.input.systemPrompt !== undefined) {
     agent.system_prompt = args.input.systemPrompt;
+  }
+  if (args.input.workingDirectory !== undefined) {
+    agent.working_directory = args.input.workingDirectory;
   }
   if (args.input.envVars !== undefined) {
     agent.env_vars = { ...args.input.envVars };

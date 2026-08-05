@@ -50,6 +50,7 @@ fn managed_agent_record_without_auth_tag_deserializes() {
 
     assert_eq!(record.auth_tag, None);
     assert_eq!(record.avatar_url, None);
+    assert_eq!(record.working_directory, None);
     assert_eq!(record.pubkey, "abcd1234");
 }
 
@@ -62,6 +63,7 @@ fn managed_agent_record_with_auth_tag_round_trips() {
         "private_key_nsec": "nsec1fake",
         "auth_tag": "[\"auth\",\"deadbeef\",\"\",\"cafebabe\"]",
         "relay_url": "wss://localhost:3000",
+        "working_directory": "/tmp/agent-workspace",
         "acp_command": "buzz-acp",
         "agent_command": "goose",
         "agent_args": [],
@@ -89,6 +91,10 @@ fn managed_agent_record_with_auth_tag_round_trips() {
     let record2: ManagedAgentRecord =
         serde_json::from_str(&serialized).expect("round-trip should deserialize");
     assert_eq!(record.auth_tag, record2.auth_tag);
+    assert_eq!(
+        record2.working_directory.as_deref(),
+        Some("/tmp/agent-workspace")
+    );
 }
 
 // ── Inbound author gate tests ────────────────────────────────────────
@@ -247,6 +253,21 @@ fn update_request_provider_tristate_value_means_set() {
         Some(Some("databricks_v2".to_string())),
         "provider value must deserialize to Some(Some(value)) (set)"
     );
+}
+
+#[test]
+fn update_request_working_directory_uses_nullable_patch_semantics() {
+    let absent: super::UpdateManagedAgentRequest =
+        serde_json::from_str(r#"{"pubkey":"abcd1234"}"#).unwrap();
+    assert_eq!(absent.working_directory, None);
+
+    let clear: super::UpdateManagedAgentRequest =
+        serde_json::from_str(r#"{"pubkey":"abcd1234","workingDirectory":null}"#).unwrap();
+    assert_eq!(clear.working_directory, Some(None));
+
+    let set: super::UpdateManagedAgentRequest =
+        serde_json::from_str(r#"{"pubkey":"abcd1234","workingDirectory":"/tmp/agent"}"#).unwrap();
+    assert_eq!(set.working_directory, Some(Some("/tmp/agent".to_string())));
 }
 
 use super::{CreateManagedAgentRequest, RelayMeshConfig};
@@ -707,6 +728,7 @@ fn summary_fixture(
         runtime: None,
         team_id: None,
         relay_url: String::new(),
+        working_directory: None,
         acp_command: "buzz-acp".into(),
         agent_command: "goose".into(),
         agent_command_override: None,

@@ -736,6 +736,11 @@ pub async fn update_managed_agent(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<UpdateManagedAgentResponse, String> {
+    let working_directory_update = match input.working_directory.as_ref() {
+        Some(Some(path)) => Some(Some(crate::managed_agents::normalize_agent_workdir(path)?)),
+        Some(None) => Some(None),
+        None => None,
+    };
     // Phase 1: local save (synchronous, under lock)
     let (summary, sync_params, rollback) = {
         let _store_guard = state
@@ -752,10 +757,8 @@ pub async fn update_managed_agent(
         for pubkey in &exited_pubkeys {
             state.clear_agent_session_caches(pubkey);
         }
-
         let record = find_managed_agent_mut(&mut records, &input.pubkey)?;
         let previous_record = record.clone();
-
         let mut name_changed = false;
         if let Some(name_update) = input.name {
             let trimmed = name_update.trim().to_string();
@@ -781,6 +784,9 @@ pub async fn update_managed_agent(
         // read-time. A name-only edit (relay_url == None) leaves the pin intact.
         if let Some(relay_url) = input.relay_url {
             record.relay_url = relay_url.trim().to_string();
+        }
+        if let Some(value) = working_directory_update {
+            record.working_directory = value;
         }
         if let Some(acp_command) = input.acp_command {
             record.acp_command = acp_command;
@@ -813,7 +819,6 @@ pub async fn update_managed_agent(
             crate::managed_agents::validate_user_env_keys(&env_vars)?;
             record.env_vars = env_vars;
         }
-
         // Native provider/model fields are authoritative. Keep the typed marker
         // derived for new records while retaining legacy typed records for
         // non-native providers.
@@ -828,7 +833,6 @@ pub async fn update_managed_agent(
             record.model = Some(model_ref.clone());
             record.relay_mesh = Some(crate::managed_agents::RelayMeshConfig { model_ref });
         }
-
         // Inbound author gate: merge patch onto current values, then validate
         // the merged state. This lets a single update switch to Allowlist AND
         // supply pubkeys atomically.
@@ -851,16 +855,12 @@ pub async fn update_managed_agent(
         if input.respond_to_allowlist.is_some() {
             record.respond_to_allowlist = prospective_allowlist;
         }
-
         record.updated_at = now_iso();
-
         save_managed_agents(&app, &records)?;
-
         let record = records
             .iter()
             .find(|r| r.pubkey == input.pubkey)
             .ok_or_else(|| format!("agent {} not found", input.pubkey))?;
-
         // Publish the edit to the relay. After-save, inside the lock, before
         // any .await. The retention upsert hashes the opt-IN projection, so an
         // update that touched only runtime/local fields is a no-op publish.

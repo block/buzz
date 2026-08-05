@@ -20,6 +20,7 @@ fn make_definition(slug: &str) -> ManagedAgentRecord {
         auth_tag: None,
         relay_url: String::new(),
         avatar_url: None,
+        working_directory: None,
         acp_command: String::new(),
         agent_command: String::new(),
         agent_command_override: None,

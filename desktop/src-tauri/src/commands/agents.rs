@@ -583,7 +583,11 @@ pub async fn create_managed_agent(
         }
     }
     crate::managed_agents::validate_user_env_keys(&input.env_vars)?;
-
+    let working_directory = input
+        .working_directory
+        .as_deref()
+        .map(crate::managed_agents::normalize_agent_workdir)
+        .transpose()?;
     // Validate & normalize the respond-to allowlist BEFORE any side effects.
     // The harness has its own validator (buzz-acp/src/config.rs) but we want
     // to catch malformed input at the boundary so the agent never tries to
@@ -600,11 +604,9 @@ pub async fn create_managed_agent(
             "respond-to mode 'allowlist' requires at least one pubkey in the allowlist".to_string(),
         );
     }
-
     // Snapshot the workspace owner pubkey for the legacy-record auth_tag
     // fallback. Computed outside the records lock to keep lock ordering simple.
     let owner_hex = workspace_owner_hex(&state)?;
-
     // ── Phase 1: generate keys (sync lock) ────────────────────────────────────
     let (agent_keys, private_key_nsec, pubkey, resolved_relay_url, input) = {
         let _store_guard = state
@@ -616,7 +618,6 @@ pub async fn create_managed_agent(
             .managed_agent_processes
             .lock()
             .map_err(|error| error.to_string())?;
-
         let (sync_changed, exited_pubkeys) =
             sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
         if sync_changed {
@@ -638,7 +639,6 @@ pub async fn create_managed_agent(
             .secret_key()
             .to_bech32()
             .map_err(|error| format!("failed to encode private key: {error}"))?;
-
         // Store the relay override exactly as supplied (trimmed). An explicit
         // value pins the agent; empty stays empty and resolves to the active
         // workspace relay at read-time. Uniform for Local and Provider.
@@ -648,7 +648,6 @@ pub async fn create_managed_agent(
             .map(str::trim)
             .unwrap_or("")
             .to_string();
-
         (keys, private_key_nsec, pubkey, resolved_relay_url, input)
     };
 
@@ -838,6 +837,7 @@ pub async fn create_managed_agent(
             auth_tag: auth_tag.clone(),
             relay_url: resolved_relay_url.clone(),
             avatar_url: resolved_avatar_url.clone(),
+            working_directory: working_directory.clone(),
             acp_command: input
                 .acp_command
                 .as_deref()

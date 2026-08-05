@@ -166,6 +166,7 @@ fn local_agent() -> ManagedAgentRecord {
         auth_tag: Some("localauthtag".to_string()),
         relay_url: "wss://relay.local".to_string(),
         avatar_url: None,
+        working_directory: None,
         acp_command: "buzz-acp".to_string(),
         agent_command: "goose".to_string(),
         agent_command_override: Some("claude".to_string()),

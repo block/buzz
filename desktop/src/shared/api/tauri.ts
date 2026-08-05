@@ -126,6 +126,7 @@ export type RawManagedAgent = {
   runtime?: string | null;
   team_id?: string | null;
   relay_url: string;
+  working_directory?: string | null;
   acp_command: string;
   agent_command: string;
   agent_command_override?: string | null;
@@ -163,19 +164,16 @@ export type RawManagedAgent = {
   respond_to?: ManagedAgent["respondTo"];
   respond_to_allowlist?: string[];
 };
-
 type RawCreateManagedAgentResponse = {
   agent: RawManagedAgent;
   private_key_nsec: string;
   profile_sync_error: string | null;
   spawn_error: string | null;
 };
-
 type RawManagedAgentLog = {
   content: string;
   log_path: string;
 };
-
 export type RawAcpRuntimeCatalogEntry = {
   id: string;
   label: string;
@@ -695,6 +693,7 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     runtime: agent.runtime ?? null,
     teamId: agent.team_id ?? null,
     relayUrl: agent.relay_url,
+    workingDirectory: agent.working_directory ?? null,
     acpCommand: agent.acp_command,
     agentCommand: agent.agent_command,
     agentCommandOverride: agent.agent_command_override ?? null,
@@ -850,6 +849,7 @@ export async function createManagedAgent(input: CreateManagedAgentInput) {
         personaId: input.personaId,
         teamId: input.teamId,
         relayUrl: input.relayUrl,
+        workingDirectory: input.workingDirectory,
         acpCommand: input.acpCommand,
         agentCommand: input.agentCommand,
         harnessOverride: input.harnessOverride ?? false,

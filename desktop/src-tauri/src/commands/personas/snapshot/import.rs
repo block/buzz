@@ -604,6 +604,7 @@ pub async fn confirm_agent_snapshot_import(
             auth_tag: auth_tag.clone(),
             relay_url: String::new(), // resolves to workspace relay at runtime
             avatar_url: effective_avatar.clone(),
+            working_directory: None,
             // Machine-local commands: derive from the runtime catalog at
             // spawn time — never manufacture from snapshot data.
             acp_command: crate::managed_agents::DEFAULT_ACP_COMMAND.to_string(),

@@ -108,7 +108,129 @@ pub fn default_agent_workdir() -> Option<std::path::PathBuf> {
         .clone()
 }
 
+/// Validate and normalize a configured per-agent working directory.
+///
+/// Configured paths are machine-local guardrails, not sandbox boundaries. They
+/// must resolve to an existing absolute directory and may not resolve to a
+/// filesystem root. Canonicalizing before persistence prevents later launches
+/// from interpreting `..` components or a configured symlink differently.
+pub(crate) fn normalize_agent_workdir(path: &str) -> Result<String, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("working directory cannot be empty; clear it to use the default".to_string());
+    }
+    let candidate = std::path::Path::new(trimmed);
+    if !candidate.is_absolute() {
+        return Err("working directory must be an absolute path".to_string());
+    }
+    let canonical = candidate
+        .canonicalize()
+        .map_err(|error| format!("working directory is not accessible: {error}"))?;
+    if !canonical.is_dir() {
+        return Err("working directory must be an existing directory".to_string());
+    }
+    if canonical.parent().is_none() {
+        return Err("working directory cannot be a filesystem root".to_string());
+    }
+    canonical
+        .into_os_string()
+        .into_string()
+        .map_err(|_| "working directory must be valid UTF-8".to_string())
+}
+
+/// Resolve the directory an agent harness will launch from.
+pub(crate) fn effective_agent_workdir(
+    record: &ManagedAgentRecord,
+) -> Result<Option<std::path::PathBuf>, String> {
+    match record.working_directory.as_deref() {
+        Some(path) => normalize_agent_workdir(path)
+            .map(std::path::PathBuf::from)
+            .map(Some),
+        None => Ok(default_agent_workdir()),
+    }
+}
+
+/// Apply the effective per-agent working directory to a child command.
+pub(crate) fn configure_agent_workdir(
+    command: &mut std::process::Command,
+    record: &ManagedAgentRecord,
+) -> Result<Option<std::path::PathBuf>, String> {
+    let working_directory = effective_agent_workdir(record)?;
+    if let Some(path) = &working_directory {
+        command.current_dir(path);
+        tracing::info!(
+            agent_pubkey = %record.pubkey,
+            working_directory = %path.display(),
+            configured = record.working_directory.is_some(),
+            "resolved managed agent working directory"
+        );
+    }
+    Ok(working_directory)
+}
+
 /// Returns `true` if `path` is a real directory (not a symlink).
 fn is_real_dir(path: &std::path::Path) -> bool {
     path.symlink_metadata().map(|m| m.is_dir()).unwrap_or(false)
+}
+
+#[cfg(test)]
+mod workdir_tests {
+    use super::{configure_agent_workdir, normalize_agent_workdir};
+
+    #[test]
+    fn configured_workdir_requires_an_absolute_existing_non_root_directory() {
+        assert!(normalize_agent_workdir("relative/path").is_err());
+        assert!(normalize_agent_workdir("").is_err());
+
+        let current = std::env::current_dir().unwrap();
+        let root = current.ancestors().last().unwrap();
+        assert!(normalize_agent_workdir(&root.to_string_lossy()).is_err());
+
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            normalize_agent_workdir(&dir.path().to_string_lossy()).unwrap(),
+            dir.path().canonicalize().unwrap().to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn configured_workdir_rejects_files_and_missing_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file");
+        std::fs::write(&file, "test").unwrap();
+        assert!(normalize_agent_workdir(&file.to_string_lossy()).is_err());
+        assert!(normalize_agent_workdir(&dir.path().join("missing").to_string_lossy()).is_err());
+    }
+
+    #[test]
+    fn configured_workdir_is_applied_to_the_spawn_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut record: crate::managed_agents::ManagedAgentRecord =
+            serde_json::from_value(serde_json::json!({
+                "pubkey": "aa",
+                "name": "test",
+                "relay_url": "",
+                "working_directory": dir.path(),
+                "acp_command": "buzz-acp",
+                "agent_command": "buzz-agent",
+                "agent_args": [],
+                "mcp_command": "",
+                "turn_timeout_seconds": 0,
+                "parallelism": 1,
+                "system_prompt": null,
+                "start_on_app_launch": false,
+                "runtime_pid": null,
+                "created_at": "now",
+                "updated_at": "now"
+            }))
+            .unwrap();
+        record.working_directory = Some(dir.path().to_string_lossy().into_owned());
+
+        let mut command = std::process::Command::new("unused");
+        configure_agent_workdir(&mut command, &record).unwrap();
+        assert_eq!(
+            command.get_current_dir(),
+            Some(dir.path().canonicalize().unwrap().as_path())
+        );
+    }
 }

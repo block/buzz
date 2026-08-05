@@ -166,6 +166,8 @@ with a TypeScript lookup table or an id comparison in a component.
    expose `respond-to`, `allowlist`, Nostr, or harness jargon in primary UI
    copy.
 
+12. **Per-agent working directories stay machine-local.** The optional managed-agent `workingDirectory` is an instance launch guardrail: Rust validates and canonicalizes an absolute existing non-root directory, persists it only in the local managed-agent store, includes it in spawn drift hashing, and applies it to the `buzz-acp` parent process. Keep it out of Persona/Team snapshots and kind:30177 agent events. UI copy must not call it a sandbox or credential isolation; agents still share the desktop user's home, credentials, filesystem access, environment, and network.
+
 ## The tests that enforce this
 
 - `lib/agentConfigCore.test.mjs` — field model per harness × scope, clearing

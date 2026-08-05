@@ -92,6 +92,9 @@ pub(crate) struct SpawnConfigInputs<'a> {
 /// [`ManagedAgentProcess`]: super::ManagedAgentProcess
 #[derive(Clone, Serialize)]
 pub(crate) struct SpawnConfigSnapshot {
+    /// Optional machine-local launch directory. `None` preserves the shared
+    /// Buzz default used by existing records.
+    pub working_directory: Option<String>,
     /// The ACP harness binary the desktop launches (`buzz-acp`).
     pub acp_command: String,
     /// The effective agent command the harness drives.
@@ -138,6 +141,7 @@ impl SpawnConfigSnapshot {
             provider,
         } = inputs;
         Self {
+            working_directory: record.working_directory.clone(),
             acp_command: record.acp_command.clone(),
             command: descriptor.command.clone(),
             args: descriptor.args.clone(),

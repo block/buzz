@@ -137,6 +137,8 @@ pub struct CreateManagedAgentRequest {
     #[serde(default)]
     pub team_id: Option<String>,
     pub relay_url: Option<String>,
+    /// Optional machine-local ACP harness working directory.
+    pub working_directory: Option<String>,
     pub acp_command: Option<String>,
     pub agent_command: Option<String>,
     /// True when `agent_command` is a runtime command the user deliberately
@@ -222,6 +224,10 @@ pub struct UpdateManagedAgentRequest {
     pub turn_timeout_seconds: Option<u64>,
     #[serde(default)]
     pub relay_url: Option<String>,
+    /// Absent = don't touch. null = restore the shared Buzz nest default.
+    /// A string sets an explicit machine-local ACP harness working directory.
+    #[serde(default, deserialize_with = "crate::util::double_option")]
+    pub working_directory: Option<Option<String>>,
     #[serde(default)]
     pub acp_command: Option<String>,
     #[serde(default)]
