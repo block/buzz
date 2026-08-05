@@ -100,6 +100,19 @@ pub(crate) fn classify_probe_output(stderr_bytes: &[u8], exit_success: bool) -> 
 mod tests {
     use super::{ProbeOutcome, CONFIG_PARSE_SIGNALS};
 
+    #[cfg(windows)]
+    #[test]
+    fn login_probe_executes_windows_cmd_shim() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let script_path = temp.path().join("fake-codex.cmd");
+        std::fs::write(&script_path, "@exit /b 0\r\n").expect("write cmd shim");
+
+        assert_eq!(
+            super::login_probe(&script_path, &["fake-codex", "login", "status"], None,),
+            ProbeOutcome::LoggedIn
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn login_probe_uses_augmented_path_for_env_shebang_interpreter() {
