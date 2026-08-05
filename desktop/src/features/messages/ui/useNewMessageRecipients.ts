@@ -7,9 +7,7 @@ import {
 import {
   coalesceAgentAutocompleteCandidates,
   getMentionableAgentPubkeys,
-  getSharedChannelIds,
 } from "@/features/agents/lib/agentAutocompleteEligibility";
-import { useChannelsQuery } from "@/features/channels/hooks";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import {
   useFlattenedUserSearchResults,
@@ -88,7 +86,6 @@ export function useNewMessageRecipients({
   const identityQuery = useIdentityQuery();
   const managedAgentsQuery = useManagedAgentsQuery({ enabled: active });
   const relayAgentsQuery = useRelayAgentsQuery({ enabled: active });
-  const channelsQuery = useChannelsQuery({ enabled: active });
   const userSearchQuery = useInfiniteUserSearchQuery(deferredSearchQuery, {
     allowEmpty: true,
     enabled:
@@ -97,6 +94,15 @@ export function useNewMessageRecipients({
   });
   const userSearchResults = useFlattenedUserSearchResults(userSearchQuery.data);
   const isArchivedDiscovery = useIsArchivedPredicate();
+  const relayAgentPubkeys = React.useMemo(
+    () =>
+      new Set(
+        (relayAgentsQuery.data ?? []).map((agent) =>
+          normalizePubkey(agent.pubkey),
+        ),
+      ),
+    [relayAgentsQuery.data],
+  );
 
   const searchResults = React.useMemo(() => {
     const candidatesByPubkey = new Map<string, NewMessageRecipientCandidate>();
@@ -110,12 +116,12 @@ export function useNewMessageRecipients({
       ? normalizePubkey(currentPubkey)
       : null;
     const eligibleAgentPubkeys = getMentionableAgentPubkeys({
+      currentChannelId: null,
       currentPubkey,
       managedAgentPubkeys: (managedAgentsQuery.data ?? []).map(
         (agent) => agent.pubkey,
       ),
       relayAgents: relayAgentsQuery.data,
-      sharedChannelIds: getSharedChannelIds(channelsQuery.data),
     });
 
     const addCandidate = (
@@ -123,19 +129,20 @@ export function useNewMessageRecipients({
       options: { includeSelected?: boolean } = {},
     ) => {
       const pubkey = normalizePubkey(candidate.pubkey);
+      const isAgent = candidate.isAgent || relayAgentPubkeys.has(pubkey);
 
       if (
         pubkey === currentPubkeyNormalized ||
         (!options.includeSelected && selectedPubkeys.has(pubkey)) ||
         isArchivedDiscovery(pubkey) ||
-        (candidate.isAgent && !eligibleAgentPubkeys.has(pubkey))
+        (isAgent && !eligibleAgentPubkeys.has(pubkey))
       ) {
         return;
       }
 
       const current = candidatesByPubkey.get(pubkey);
       if (!current) {
-        candidatesByPubkey.set(pubkey, { ...candidate, pubkey });
+        candidatesByPubkey.set(pubkey, { ...candidate, pubkey, isAgent });
         return;
       }
 
@@ -153,7 +160,7 @@ export function useNewMessageRecipients({
               : (currentName ?? candidateName),
         nip05Handle: current.nip05Handle ?? candidate.nip05Handle ?? null,
         ownerPubkey: current.ownerPubkey ?? candidate.ownerPubkey ?? null,
-        isAgent: current.isAgent || candidate.isAgent,
+        isAgent: current.isAgent || isAgent,
         isManagedAgent: current.isManagedAgent || candidate.isManagedAgent,
         isMember: current.isMember || candidate.isMember,
         personaId: current.personaId ?? candidate.personaId,
@@ -216,11 +223,11 @@ export function useNewMessageRecipients({
       query: deferredSearchQuery,
     });
   }, [
-    channelsQuery.data,
     currentPubkey,
     deferredSearchQuery,
     isArchivedDiscovery,
     managedAgentsQuery.data,
+    relayAgentPubkeys,
     relayAgentsQuery.data,
     selectedPubkeys,
     userSearchResults,
@@ -229,8 +236,7 @@ export function useNewMessageRecipients({
   const isDirectoryLoading =
     userSearchQuery.isLoading ||
     managedAgentsQuery.isLoading ||
-    relayAgentsQuery.isLoading ||
-    channelsQuery.isLoading;
+    relayAgentsQuery.isLoading;
   React.useEffect(() => {
     if (isDirectoryLoading) {
       return;
