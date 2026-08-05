@@ -67,6 +67,8 @@ HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib.sh"
 
 NAME="${1:?usage: buzz-stream.sh <session-name|-> <channel-uuid> [poll-seconds]}"
+# addressed (default) | all | mentions — see worth_waking() in the filter.
+WAKE="${BUZZ_WAKE:-addressed}"
 CH="${2:?usage: buzz-stream.sh <session-name|-> <channel-uuid> [poll-seconds]}"
 SLEEP="${3:-5}"
 
@@ -216,6 +218,44 @@ import json, os, sys
 me = os.environ["ME"]
 path = os.environ["SEEN"]
 mode = os.environ.get("MODE", "array")
+wake = os.environ.get("WAKE", "addressed")
+myname = os.environ.get("MYNAME", "").lower()
+
+# Which messages are worth a model turn.
+#
+# Every wake costs an inference in every listening session, so an ambient
+# channel scales badly in peers: three sessions turn one STATUS into two turns
+# with nothing to answer. buzz-acp defaults to mention-only for this reason.
+#
+# Mention-only is too strict here, because the protocol has messages that are
+# nobody's to answer and everybody's to know — a CLAIM is how a peer learns not
+# to touch a path. So split by audience, which the verbs already encode:
+#
+#   addressed to me   ASK/ANSWER naming me, or a p-tag mention  -> wake
+#   shared state      CLAIM RELEASE BLOCKED                     -> wake
+#   informational     HELLO DONE STATUS from someone else       -> log only
+#
+# Nothing is dropped. Everything still lands in the log, so `buzz-msg.sh read`
+# and the next catch-up show the whole conversation. The only judgement here is
+# whether it is worth interrupting for.
+SHARED = ("CLAIM", "RELEASE", "BLOCKED")
+DIRECTED = ("ASK", "ANSWER")
+
+
+def worth_waking(m, body):
+    if wake == "all":
+        return True
+    tags = m.get("tags") or []
+    if any(t and t[0] == "p" and len(t) > 1 and t[1] == me for t in tags):
+        return True                       # explicitly mentioned
+    if wake == "mentions":
+        return False
+    head = body[:120].upper()
+    if head.startswith(SHARED):
+        return True                       # affects paths I may be editing
+    if head.startswith(DIRECTED) and myname and myname in body[:200].lower():
+        return True                       # named in an ASK or ANSWER
+    return False
 
 with open(path) as fh:
     seen = set(fh.read().split())
@@ -244,6 +284,8 @@ def emit(m):
         return
     who = m.get("pubkey", "")[:8]
     body = " ".join(m.get("content", "").split())[:400]
+    if not worth_waking(m, body):
+        return                       # in the log, not worth an inference
     print("[buzz] %s: %s" % (who, body), flush=True)
 
 
@@ -279,7 +321,8 @@ PY
 # run_filter MODE — one short-lived filter appending to the log. Line-buffered
 # through the append so a tail sees each notification as it is written.
 run_filter() {
-  ME="$BUZZ_PUBKEY" SEEN="$SEEN" MODE="$1" python3 -u -c "$FILTER" >> "$LOG"
+  ME="$BUZZ_PUBKEY" SEEN="$SEEN" MODE="$1" WAKE="$WAKE" MYNAME="$NAME" \
+    python3 -u -c "$FILTER" >> "$LOG"
 }
 
 # say <text> — a connection-state note, through the same filter so the wording

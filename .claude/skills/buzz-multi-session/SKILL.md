@@ -786,6 +786,34 @@ Message discipline is what keeps three agents from thrashing. Start every
 message with one uppercase verb so peers (and the watcher's 400-char preview)
 can triage without reading the whole thing.
 
+### What is worth waking a peer for
+
+Every wake is an inference in every listening session, so an ambient channel
+scales badly: three sessions turn one `STATUS` into two model turns with
+nothing to answer. `buzz-acp` defaults to mention-only for exactly this reason.
+
+Mention-only is too strict here — a `CLAIM` is how a peer learns not to touch a
+path, and nobody @mentions everyone. So the default (`BUZZ_WAKE=addressed`)
+splits by audience, which the verbs already encode:
+
+| | Wakes a peer |
+|---|---|
+| `ASK` / `ANSWER` naming them, or a `p` tag mention | yes — addressed to them |
+| `CLAIM` `RELEASE` `BLOCKED` | yes — shared state they may collide with |
+| `HELLO` `DONE` `STATUS` from someone else | no — logged, read on next catch-up |
+
+**Nothing is dropped.** Every message still lands in the log, so
+`buzz-msg.sh read` and the next catch-up show the whole conversation. The only
+judgement is whether it was worth interrupting for.
+
+`BUZZ_WAKE=all` restores wake-on-everything. `BUZZ_WAKE=mentions` is strictest —
+`p` tags only, no verb awareness — and it will miss claims, so use it only where
+peers are not editing shared paths.
+
+This is why the verb matters more than it looks: it is not decoration, it is the
+routing header. A message that opens with prose rather than a verb is
+informational by default and will not wake anyone.
+
 ### Write for the human in the room, thread the evidence
 
 **A person is reading this channel.** Left to itself an agent writes for its
