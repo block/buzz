@@ -26,6 +26,8 @@ const READ_CHUNK: usize = 16 * 1024;
 pub struct SharedState {
     pub cwd: PathBuf,
     pub shim: Shim,
+    pub secret_service: String,
+    pub secret_account: String,
     pub session_dir: TempDir,
     pub bootstrap_instructions: String,
     /// The shell resolved at construction: `Ok((path, display_name))` when a shell
@@ -37,7 +39,12 @@ pub struct SharedState {
 }
 
 impl SharedState {
-    pub fn new(cwd: PathBuf, shim: Shim) -> std::io::Result<Self> {
+    pub fn new(
+        cwd: PathBuf,
+        shim: Shim,
+        secret_service: String,
+        secret_account: String,
+    ) -> std::io::Result<Self> {
         let session_dir = tempfile::Builder::new()
             .prefix("buzz-dev-mcp-session-")
             .tempdir()?;
@@ -54,6 +61,8 @@ impl SharedState {
         Ok(Self {
             cwd,
             shim,
+            secret_service,
+            secret_account,
             session_dir,
             bootstrap_instructions,
             resolved_shell,
@@ -74,12 +83,11 @@ impl SharedState {
 
 fn build_bootstrap(cwd: &Path, shell_hint: &str) -> String {
     let stack = detect_stack(cwd);
-    let buzz_hint =
-        if std::env::var("BUZZ_RELAY_URL").is_ok() && std::env::var("BUZZ_PRIVATE_KEY").is_ok() {
-            "\nBuzz relay configured. Run `buzz --help` to see available commands.\n"
-        } else {
-            ""
-        };
+    let buzz_hint = if std::env::var("BUZZ_RELAY_URL").is_ok() {
+        "\nBuzz relay configured. Run `buzz --help` to see available commands.\n"
+    } else {
+        ""
+    };
     format!(
         "Working directory: {}\n\
          Detected stack: {}\n\
@@ -167,8 +175,8 @@ pub async fn run(
     cmd.arg(shell_arg).arg(&p.command);
     cmd.current_dir(&workdir);
     cmd.env("PATH", &state.shim.path_env);
-    // NOSTR_PRIVATE_KEY is already removed from this process's env (shim.rs).
-    // BUZZ_PRIVATE_KEY is intentionally inherited — the buzz CLI needs it.
+    // Git receives only non-secret daz-secrets coordinates. Helpers and the
+    // Buzz CLI resolve the identity directly from the provider when needed.
     for (k, v) in &state.shim.git_env {
         cmd.env(k, v);
     }
@@ -989,8 +997,14 @@ mod tests {
     use tempfile::tempdir;
 
     fn make_state(cwd: &std::path::Path) -> SharedState {
-        let shim = Shim::install().expect("shim install");
-        SharedState::new(cwd.to_path_buf(), shim).expect("state new")
+        let shim = Shim::install_without_identity().expect("shim install");
+        SharedState::new(
+            cwd.to_path_buf(),
+            shim,
+            "buzz-test".into(),
+            "identity".into(),
+        )
+        .expect("state new")
     }
 
     /// Pull the JSON body out of a CallToolResult so tests can assert on fields.
@@ -1273,8 +1287,14 @@ mod windows_resolver_tests {
         touch(&fake_pwsh);
         env::set_var("BUZZ_SHELL", &fake_pwsh);
 
-        let shim = crate::shim::Shim::install().expect("shim");
-        let state = SharedState::new(dir.path().to_path_buf(), shim).expect("state");
+        let shim = crate::shim::Shim::install_without_identity().expect("shim");
+        let state = SharedState::new(
+            dir.path().to_path_buf(),
+            shim,
+            "buzz-test".into(),
+            "identity".into(),
+        )
+        .expect("state");
 
         env::remove_var("BUZZ_SHELL");
 

@@ -15,7 +15,7 @@ use crate::secret_store::{KeyringProbe, SecretStore};
 
 /// Keyring key name for an agent's nsec, namespaced from the human identity
 /// key (`"identity"`) which shares the service.
-fn agent_keyring_name(pubkey: &str) -> String {
+pub(crate) fn agent_keyring_name(pubkey: &str) -> String {
     format!("agent:{pubkey}")
 }
 
@@ -262,7 +262,7 @@ fn load_agent_store(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, String> 
 pub fn load_managed_agents(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, String> {
     let mut records = load_agent_store(app)?;
     records.retain(|record| !record.pubkey.is_empty());
-    hydrate_keys(&mut records);
+    hydrate_keys(&mut records)?;
     Ok(records)
 }
 
@@ -302,11 +302,10 @@ pub(crate) fn backup_invalid_store(path: &Path) {
 ///   writes clean JSON and plaintext stops lingering on disk; if still
 ///   unreachable, leave it inline. This makes the strip deterministic on the
 ///   next reachable boot rather than waiting for a non-deterministic save.
-fn hydrate_keys(records: &mut [ManagedAgentRecord]) {
-    let Some(store) = agent_secret_store() else {
-        return;
-    };
-    hydrate_keys_with(store, records);
+fn hydrate_keys(records: &mut [ManagedAgentRecord]) -> Result<(), String> {
+    let store =
+        agent_secret_store().ok_or_else(|| "secret-provider support is disabled".to_string())?;
+    hydrate_keys_with(store, records)
 }
 
 /// Testable core of [`hydrate_keys`], generic over the [`KeyStore`] seam.
@@ -317,7 +316,10 @@ fn hydrate_keys(records: &mut [ManagedAgentRecord]) {
 /// to spawn an agent whose key could not be read (see the empty-key bail in
 /// `spawn_agent_child`). Empty here never means "fine" — it means "no usable
 /// key this boot."
-fn hydrate_keys_with(store: &impl KeyStore, records: &mut [ManagedAgentRecord]) {
+fn hydrate_keys_with(
+    store: &impl KeyStore,
+    records: &mut [ManagedAgentRecord],
+) -> Result<(), String> {
     for record in records.iter_mut() {
         // A key-less definition (no pubkey yet — unified agent model) has no
         // keyring entry by construction; keys are minted on first start.
@@ -337,11 +339,10 @@ fn hydrate_keys_with(store: &impl KeyStore, records: &mut [ManagedAgentRecord]) 
                 // unreadable this boot. Leave it empty so the spawn path
                 // refuses rather than launching with no identity.
                 Err(e) => {
-                    eprintln!(
-                        "buzz-desktop: agent {} key unavailable — keyring read failed ({e}); \
-                         agent will be refused until the keyring is reachable",
+                    return Err(format!(
+                        "agent {} key unavailable from secret provider: {e}",
                         record.pubkey
-                    );
+                    ));
                 }
             }
         } else {
@@ -350,9 +351,15 @@ fn hydrate_keys_with(store: &impl KeyStore, records: &mut [ManagedAgentRecord]) 
             // returned record must carry the key for readers. The next save
             // then strips it from JSON. Outcome is intentionally ignored:
             // on failure the key simply stays inline until a later boot.
-            let _ = migrate_inline_key(store, record);
+            if migrate_inline_key(store, record) == KeyMigration::KeptInline {
+                return Err(format!(
+                    "failed to migrate legacy inline key for agent {}",
+                    record.pubkey
+                ));
+            }
         }
     }
+    Ok(())
 }
 
 /// Save the keyed agent *instances*, preserving the key-less definitions that
@@ -376,7 +383,7 @@ pub fn save_managed_agents(app: &AppHandle, records: &[ManagedAgentRecord]) -> R
     // Persist each key to the keyring; on success blank the inline copy so it
     // is skipped from JSON (`skip_serializing_if = "String::is_empty"`). If the
     // keyring is unreachable, the key stays inline.
-    persist_agent_keys(&mut sorted);
+    persist_agent_keys(&mut sorted)?;
 
     write_agent_store(app, definitions, sorted)
 }
@@ -421,26 +428,35 @@ fn write_agent_store(
 /// on success. Keys that cannot be persisted (keyring unreachable) stay inline
 /// in the JSON. Mutates `records` (a save-local clone) — the caller's in-memory
 /// records keep their keys.
-fn persist_agent_keys(records: &mut [ManagedAgentRecord]) {
-    let Some(store) = agent_secret_store() else {
-        // No keyring backend: keys stay inline.
-        return;
-    };
-    persist_agent_keys_with(store, records);
+fn persist_agent_keys(records: &mut [ManagedAgentRecord]) -> Result<(), String> {
+    let store =
+        agent_secret_store().ok_or_else(|| "secret-provider support is disabled".to_string())?;
+    persist_agent_keys_with(store, records)
 }
 
 /// Testable core of [`persist_agent_keys`], generic over the [`KeyStore`] seam.
-fn persist_agent_keys_with(store: &impl KeyStore, records: &mut [ManagedAgentRecord]) {
+fn persist_agent_keys_with(
+    store: &impl KeyStore,
+    records: &mut [ManagedAgentRecord],
+) -> Result<(), String> {
     for record in records.iter_mut() {
         // Only a verified keyring entry lets us drop the inline copy. Both
         // other outcomes keep the key inline: `KeptInline` (keyring
         // unreachable) so it is not lost, and `Nothing` (empty key) because
         // there is no verified entry to claim. This is a save-local clone, so
         // callers keep their keys regardless.
-        if migrate_inline_key(store, record) == KeyMigration::Persisted {
-            record.private_key_nsec.clear();
+        match migrate_inline_key(store, record) {
+            KeyMigration::Persisted => record.private_key_nsec.clear(),
+            KeyMigration::Nothing => {}
+            KeyMigration::KeptInline => {
+                return Err(format!(
+                    "failed to persist agent {} key in secret provider",
+                    record.pubkey
+                ));
+            }
         }
     }
+    Ok(())
 }
 
 /// One-time migration of agent keys from the production keyring service

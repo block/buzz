@@ -73,24 +73,27 @@ accidental corruption or single-row edits, but an attacker with database write
 access can recompute the entire chain after editing. The audit log is designed
 for SOX-grade compliance and eDiscovery.
 
-### Desktop Secret Storage — OS Keyring
+### Desktop Secret Storage — Process-Isolated Provider
 
-The Buzz desktop app stores nsec private keys in the operating system keyring
-rather than in plaintext files: macOS Keychain, Windows Credential Manager, or
-the Linux Secret Service (`gnome-keyring` / `kwallet` via D-Bus). This covers
-both the human identity key and every managed-agent key.
+Buzz stores human and managed-agent nsec keys through the public `daz-secrets`
+provider protocol. The desktop process never calls macOS Keychain, Windows
+Credential Manager, or Linux Secret Service directly, so rebuilds and signing
+identity changes cannot trigger credential prompts. Secret bytes travel over
+anonymous child-process pipes and are never placed in command arguments or the
+process environment.
 
-On first launch after upgrading, existing plaintext keys are migrated into the
-keyring: the key is imported, read back to verify the round-trip, and only then
-is the plaintext deleted. Migration runs only when the keyring is reachable —
-if the backend is unavailable that session, the app keeps reading from the
-plaintext file and does **not** migrate, so a transient outage cannot resurrect
-a rotated key from a leftover file.
+The provider is selected by the current OS account's owner-only
+`~/.config/daz-secrets/provider.toml`. A private encrypted provider can remain
+machine-local while the Buzz and `daz-secrets` client code stays public. Other
+installations may select a conforming provider, including an optional OS-keyring
+adapter. Provider errors fail closed; Buzz does not create a plaintext or
+environment-variable fallback.
 
-When no keyring backend is available (headless Linux with no Secret Service, for
-example), keys fall back to a `0o600` owner-only file. The `BUZZ_PRIVATE_KEY`
-environment variable, when set, always takes precedence over both stores — this
-is how harnessed agents and CI receive their identity.
+On first launch after upgrading, an existing legacy `identity.key` is written
+to the provider, read back for an exact round-trip verification, and only then
+deleted. Platform-keyring entries are migrated separately by the one-time
+operator tool, because touching those entries from a rebuilt app could itself
+display authentication UI.
 
 ### Input Validation
 

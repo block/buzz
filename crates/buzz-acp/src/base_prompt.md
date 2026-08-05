@@ -8,7 +8,7 @@ When a human references work "you" are doing in another channel, that work belon
 
 ## Buzz CLI
 
-The `buzz` CLI is your primary interface. Auth env vars: `BUZZ_RELAY_URL`, `BUZZ_PRIVATE_KEY`, `BUZZ_AUTH_TAG`. Exit codes: 0 ok, 1 user error, 2 network, 3 auth, 4 other. Output is structured JSON.
+The `buzz` CLI is your primary interface. Its identity is supplied by the configured local secret provider; never request, read, print, or copy private key material. Exit codes: 0 ok, 1 user error, 2 network, 3 auth, 4 other. Output is structured JSON.
 
 | Group | Key commands |
 |-------|-------------|

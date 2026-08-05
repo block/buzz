@@ -20,21 +20,22 @@ cargo install --path crates/git-credential-nostr
 git config --global credential.helper nostr
 git config --global credential.useHttpPath true
 
-# 2. Store your nsec in a key file (must be 0600).
-mkdir -p ~/.nostr
-echo "nsec1..." > ~/.nostr/key && chmod 600 ~/.nostr/key
-git config --global nostr.keyfile ~/.nostr/key
+# 2. Store your nsec through the interactive daz-secrets CLI.
+daz-secrets set buzz-desktop identity
+git config --global nostr.secretService buzz-desktop
+git config --global nostr.secretAccount identity
 ```
 
 That's it. Use git normally — `git clone`, `git push`, `git fetch`.
 
 ## CI / CD
 
-Set `$NOSTR_PRIVATE_KEY` instead of a key file. The env var takes precedence
-over `nostr.keyfile` and avoids touching the filesystem:
+Install an unattended daz-secrets provider for the CI account, then configure
+only the nonsecret provider coordinates:
 
 ```bash
-export NOSTR_PRIVATE_KEY=nsec1...
+git config nostr.secretService ci-build
+git config nostr.secretAccount relay-identity
 git clone https://relay.example.com/git/owner/repo.git
 ```
 
@@ -42,8 +43,8 @@ git clone https://relay.example.com/git/owner/repo.git
 
 When a Buzz git server returns `HTTP 401` with a
 `WWW-Authenticate: Nostr realm="...", method="GET"` header, git calls this
-helper with the request details on stdin. The helper loads your Nostr private
-key, builds a [NIP-98](https://github.com/nostr-protocol/nips/blob/master/98.md)
+helper with the request details on stdin. The helper reads your Nostr private
+key directly from daz-secrets, builds a [NIP-98](https://github.com/nostr-protocol/nips/blob/master/98.md)
 kind-27235 event signed over the request URL and method, base64-encodes it, and
 writes it back to stdout. Git then retries the request with
 `Authorization: Nostr <token>`, which the server verifies by checking the event
@@ -61,8 +62,7 @@ git ──stdin──▶ git-credential-nostr ──stdout──▶ git
 
 | Error | Cause | Fix |
 |-------|-------|-----|
-| `no nostr key configured` | Neither `$NOSTR_PRIVATE_KEY` nor `nostr.keyfile` is set | Follow the Setup steps above |
-| `insecure permissions` | Key file is readable by group/others | `chmod 600 ~/.nostr/key` |
+| `nostr identity is unavailable from daz-secrets` | The configured provider item is absent or unavailable | Verify the provider and `nostr.secretService` / `nostr.secretAccount` |
 | `method hint` | Server's `WWW-Authenticate` header is missing `method="..."` | Upgrade the Buzz server |
 | `useHttpPath` | `credential.useHttpPath` is not set | `git config --global credential.useHttpPath true` |
 | Empty output / no auth | git version is older than 2.46 | Upgrade git |

@@ -44,6 +44,7 @@ repository = "https://github.com/block/sprout"
 # Runtime
 tokio       = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "signal", "process"] }
 tokio-util  = { version = "0.7", features = ["rt", "codec"] }
+daz-secrets = { git = "https://github.com/darrenoakey/daz-secrets", rev = "ef01d96a2fa8d661a6a2ad7dace77fce0f2f60aa" }
 
 # HTTP + WebSocket
 axum        = { version = "0.8", features = ["ws", "macros"] }

@@ -1,6 +1,7 @@
 export { TerminalBootstrap } from "@/features/terminal/TerminalBootstrap";
 import * as React from "react";
 
+import { ChannelManagementSheet } from "@/features/channels/ui/ChannelManagementSheet";
 import type { Channel } from "@/shared/api/types";
 import type { CreateChannelInput } from "@/features/sidebar/lib/useCreateChannelForm";
 import { useDeferredModalOpen } from "@/shared/ui/deferredModalOpen";
@@ -8,11 +9,6 @@ import { useDeferredModalOpen } from "@/shared/ui/deferredModalOpen";
 const ChannelBrowserDialog = React.lazy(async () => {
   const module = await import("@/features/channels/ui/ChannelBrowserDialog");
   return { default: module.ChannelBrowserDialog };
-});
-
-const ChannelManagementSheet = React.lazy(async () => {
-  const module = await import("@/features/channels/ui/ChannelManagementSheet");
-  return { default: module.ChannelManagementSheet };
 });
 
 export type BrowseDialogType = "stream" | "forum" | null;

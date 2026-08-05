@@ -101,17 +101,18 @@ pub fn reset_rate_limit_gate() {
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
 
     // The gate is a process-wide static shared by every test in this binary,
     // so all gate tests serialize on one async lock to keep armed expiries
     // from bleeding between parallel test threads.
-    pub(crate) static TEST_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    pub(crate) static TEST_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[tokio::test(start_paused = true)]
     async fn wait_returns_immediately_when_gate_is_inactive() {
-        let _serial = TEST_SERIAL.lock().await;
+        let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         reset_rate_limit_gate();
         let start = Instant::now();
         wait_for_rate_limit().await;
@@ -124,7 +125,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn hintless_429_arms_the_ten_second_default() {
-        let _serial = TEST_SERIAL.lock().await;
+        let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         reset_rate_limit_gate();
         activate_rate_limit(None);
         let start = Instant::now();
@@ -135,7 +136,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn shorter_hint_never_shrinks_an_active_window() {
-        let _serial = TEST_SERIAL.lock().await;
+        let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         reset_rate_limit_gate();
         activate_rate_limit(Some(8));
         activate_rate_limit(Some(1));
@@ -151,7 +152,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn concurrent_429_extends_the_window_for_parked_waiters() {
-        let _serial = TEST_SERIAL.lock().await;
+        let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         reset_rate_limit_gate();
         activate_rate_limit(Some(2));
         let start = Instant::now();
@@ -174,7 +175,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn hint_zero_uses_default() {
-        let _serial = TEST_SERIAL.lock().await;
+        let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         reset_rate_limit_gate();
         activate_rate_limit(Some(0));
         let start = Instant::now();
@@ -189,7 +190,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn hint_at_max_is_honoured() {
-        let _serial = TEST_SERIAL.lock().await;
+        let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         reset_rate_limit_gate();
         activate_rate_limit(Some(MAX_HINT_SECONDS));
         let start = Instant::now();
@@ -204,7 +205,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn oversize_hint_is_clamped_to_max() {
-        let _serial = TEST_SERIAL.lock().await;
+        let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         reset_rate_limit_gate();
         // An oversize hint (including u64::MAX) must clamp rather than panic.
         activate_rate_limit(Some(u64::MAX));
@@ -222,7 +223,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn workspace_change_clears_armed_gate() {
-        let _serial = TEST_SERIAL.lock().await;
+        let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         reset_rate_limit_gate();
         activate_rate_limit(Some(60));
         // Switch workspace — gate for community A must not stall community B.
@@ -238,7 +239,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn community_a_gate_does_not_block_community_b() {
-        let _serial = TEST_SERIAL.lock().await;
+        let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         reset_rate_limit_gate();
         // Community A gets a 429 with a 30s window.
         activate_rate_limit(Some(30));
@@ -264,7 +265,7 @@ mod tests {
     async fn gate_armed_by_one_path_withholds_another_path() {
         use std::io::{Read, Write};
 
-        let _serial = TEST_SERIAL.lock().await;
+        let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         reset_rate_limit_gate();
 
         // The loopback server answers every request with 200 [].
@@ -326,7 +327,7 @@ mod tests {
     /// is the same bound as if the workspace had not changed.
     #[tokio::test(start_paused = true)]
     async fn parked_waiter_does_not_wake_early_after_workspace_reset() {
-        let _serial = TEST_SERIAL.lock().await;
+        let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         reset_rate_limit_gate();
 
         // Arm a 5s gate for community A.
@@ -375,7 +376,7 @@ mod tests {
         use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
         use serde::Deserialize;
 
-        let _serial = TEST_SERIAL.lock().await;
+        let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         reset_rate_limit_gate();
 
         // Arm the gate for 1s (real time — NIP-98 uses SystemTime, not Tokio clock).
@@ -435,7 +436,7 @@ mod tests {
     async fn http_429_withholds_next_relay_command_until_expiry_then_resumes() {
         use std::io::{Read, Write};
 
-        let _serial = TEST_SERIAL.lock().await;
+        let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         reset_rate_limit_gate();
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

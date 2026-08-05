@@ -164,10 +164,10 @@ check existing reply handlers for the pattern.
 
 ## Agent CLI (`buzz-cli`)
 
-`buzz` is the agent-first CLI. Auth env vars
-(`BUZZ_RELAY_URL`, `BUZZ_PRIVATE_KEY`, `BUZZ_AUTH_TAG`) are auto-injected
-by the ACP harness into managed agent subprocesses. In development, set
-`BUZZ_PRIVATE_KEY` and `BUZZ_RELAY_URL` in your environment manually.
+`buzz` is the agent-first CLI. Identity bytes come directly from the configured
+`daz-secrets` provider and must never be placed in env, argv, or files. Managed
+agents receive only the non-secret provider service/account coordinates. The
+relay URL and public owner-attestation metadata are supplied separately.
 
 ### Building the CLI
 

@@ -78,12 +78,15 @@ mod auto_connect_default_relay_tests {
 
 #[tauri::command]
 pub fn is_shared_identity() -> bool {
-    std::env::var("BUZZ_SHARE_IDENTITY")
+    let enabled = std::env::var("BUZZ_SHARE_IDENTITY")
         .map(|v| v == "1")
-        .unwrap_or(false)
-        && std::env::var("BUZZ_PRIVATE_KEY")
+        .unwrap_or(false);
+    enabled
+        && crate::secret_store::SecretStore::shared(crate::app_state::keyring_service())
+            .load("identity")
             .ok()
-            .and_then(|k| Keys::parse(k.trim()).ok())
+            .flatten()
+            .and_then(|key| Keys::parse(key.trim()).ok())
             .is_some()
 }
 
@@ -530,14 +533,14 @@ pub async fn persist_current_identity(
 /// restart is safe — the sentinel persists and the wipe completes on the next
 /// open.
 ///
-/// Not available in shared-identity mode (`BUZZ_SHARE_IDENTITY=1`): the key
-/// comes from an env var, not the keychain, so wiping would have no effect and
-/// would be confusing.
+/// Not available in shared-identity mode (`BUZZ_SHARE_IDENTITY=1`): the same
+/// provider namespace may be in use by sibling worktrees, so wiping it would
+/// break those sessions.
 #[tauri::command]
 pub async fn sign_out(app: tauri::AppHandle) -> Result<(), String> {
     if is_shared_identity() {
         return Err(
-            "Sign out isn't available while BUZZ_SHARE_IDENTITY provides your identity. Unset BUZZ_SHARE_IDENTITY and BUZZ_PRIVATE_KEY, then relaunch to sign out."
+            "Sign out isn't available while BUZZ_SHARE_IDENTITY shares this provider identity. Disable shared-identity mode, then relaunch to sign out."
                 .to_string(),
         );
     }

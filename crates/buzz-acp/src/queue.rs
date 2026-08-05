@@ -310,25 +310,21 @@ impl EventQueue {
                     .keys()
                     .find(|id| !self.in_flight_channels.contains(id))
                     .copied();
-                match cancelled_id {
-                    Some(id) => {
-                        // Move cancelled events into the regular events slot.
-                        // No new events to merge — re-dispatch the original batch.
-                        let cancelled = self.cancelled_batches.remove(&id).unwrap_or_default();
-                        let cancel_reason = self.cancel_reasons.remove(&id);
-                        self.in_flight_channels.insert(id);
-                        self.in_flight_deadlines
-                            .insert(id, now + self.in_flight_deadline);
-                        self.in_flight_batch_sizes.insert(id, cancelled.len());
-                        return Some(FlushBatch {
-                            channel_id: id,
-                            events: cancelled,
-                            cancelled_events: vec![],
-                            cancel_reason,
-                        });
-                    }
-                    None => return None,
-                }
+                let id = cancelled_id?;
+                // Move cancelled events into the regular events slot.
+                // No new events to merge — re-dispatch the original batch.
+                let cancelled = self.cancelled_batches.remove(&id).unwrap_or_default();
+                let cancel_reason = self.cancel_reasons.remove(&id);
+                self.in_flight_channels.insert(id);
+                self.in_flight_deadlines
+                    .insert(id, now + self.in_flight_deadline);
+                self.in_flight_batch_sizes.insert(id, cancelled.len());
+                return Some(FlushBatch {
+                    channel_id: id,
+                    events: cancelled,
+                    cancelled_events: vec![],
+                    cancel_reason,
+                });
             }
         };
 
@@ -944,10 +940,8 @@ pub fn extract_slash_command(content: &str, known_names: &[&str]) -> Option<Stri
                         .unwrap_or(after_at.len());
                     (len > 0).then_some(len)
                 });
-            match name_len {
-                Some(len) => rest = after_at[len..].trim_start(),
-                None => return None, // bare '@' — not a mention
-            }
+            let len = name_len?; // bare '@' is not a mention
+            rest = after_at[len..].trim_start();
         } else {
             break;
         }

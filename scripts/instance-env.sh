@@ -5,7 +5,6 @@
 #   BUZZ_RELAY_PORT, BUZZ_RELAY_URL
 #   BUZZ_INSTANCE_SLUG, BUZZ_WORKTREE_LABEL, VITE_DEV_BRANCH (worktrees only)
 #   BUZZ_TAURI_CONFIG
-#   BUZZ_PRIVATE_KEY (worktrees only, when BUZZ_SHARE_IDENTITY=1)
 
 WORKTREE_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 
@@ -42,43 +41,9 @@ if git rev-parse --is-inside-work-tree &>/dev/null; then
         export BUZZ_WORKTREE_LABEL="${BRANCH_NAME##*/}"
         export BUZZ_INSTANCE_SLUG=$(echo "$BRANCH_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | sed 's/^-//' | sed 's/-$//')
 
-        # BUZZ_SHARE_IDENTITY=1: reuse the main dev checkout's Nostr key so
-        # worktrees skip onboarding and share the same identity. The per-worktree
-        # identifier is kept so concurrent instances don't collide on
-        # tauri-plugin-single-instance or the app data directory.
-        if [[ "${BUZZ_SHARE_IDENTITY:-0}" == "1" ]]; then
-            KEYRING_SERVICE="buzz-desktop-dev"
-            KEYRING_BLOB=""
-            case "$(uname -s)" in
-                Darwin)
-                    if command -v security &>/dev/null; then
-                        KEYRING_BLOB="$(security find-generic-password -s "$KEYRING_SERVICE" -a secrets -w 2>/dev/null || true)"
-                    fi
-                    ;;
-                Linux)
-                    if command -v secret-tool &>/dev/null; then
-                        KEYRING_BLOB="$(secret-tool lookup service "$KEYRING_SERVICE" username secrets target default 2>/dev/null || true)"
-                    fi
-                    ;;
-            esac
-
-            KEYRING_IDENTITY="$(printf '%s' "$KEYRING_BLOB" | python3 -c 'import json, sys; value = json.load(sys.stdin).get("identity", ""); print(value if isinstance(value, str) else "")' 2>/dev/null || true)"
-            CANONICAL_KEY="$HOME/Library/Application Support/xyz.block.buzz.app.dev/identity.key"
-            LEGACY_CANONICAL_KEY="$HOME/Library/Application Support/xyz.block.sprout.app.dev/identity.key"
-
-            SHARED_IDENTITY="$KEYRING_IDENTITY"
-            if [[ -z "$SHARED_IDENTITY" && -f "$CANONICAL_KEY" ]]; then
-                SHARED_IDENTITY="$(cat "$CANONICAL_KEY")"
-            elif [[ -z "$SHARED_IDENTITY" && -f "$LEGACY_CANONICAL_KEY" ]]; then
-                SHARED_IDENTITY="$(cat "$LEGACY_CANONICAL_KEY")"
-            fi
-
-            if [[ -n "$SHARED_IDENTITY" ]]; then
-                export BUZZ_PRIVATE_KEY="$SHARED_IDENTITY"
-            else
-                echo "⚠ BUZZ_SHARE_IDENTITY=1 but no identity found in keyring service $KEYRING_SERVICE, at $CANONICAL_KEY, or at $LEGACY_CANONICAL_KEY — run Buzz from repo root first" >&2
-            fi
-        fi
+        # Worktrees use the same noninteractive secret-provider namespace as
+        # the main dev checkout. Secret material is never copied into the
+        # process environment or read from a platform keyring here.
 
         ICON_DIR="$WORKTREE_ROOT/desktop/src-tauri/target/dev-icons"
         mkdir -p "$ICON_DIR"

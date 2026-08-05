@@ -113,18 +113,24 @@ export function resolve(specifier, context, nextResolve) {
     context.parentURL?.startsWith("file:")
   ) {
     const parentPath = fileURLToPath(context.parentURL);
-    const resolved = resolveSourcePath(
-      path.resolve(path.dirname(parentPath), specifier),
-    );
-    if (resolved) {
-      return nextResolve(toFileSpecifier(resolved), context);
+    // Synchronous hooks also participate in CommonJS resolution. Restrict the
+    // bundler-style extension lookup to Buzz source files so a dependency's
+    // `require("./cjs/foo.js")` remains a native CommonJS path rather than
+    // being rewritten into an ESM file URL.
+    if (parentPath.startsWith(`${srcRoot}${path.sep}`)) {
+      const resolved = resolveSourcePath(
+        path.resolve(path.dirname(parentPath), specifier),
+      );
+      if (resolved) {
+        return nextResolve(toFileSpecifier(resolved), context);
+      }
     }
     return nextResolve(specifier, context);
   }
   return nextResolve(specifier, context);
 }
 
-export async function load(url, context, nextLoad) {
+export function load(url, context, nextLoad) {
   if (url.startsWith(ASSET_URL_PREFIX)) {
     return {
       format: "module",

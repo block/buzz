@@ -1,5 +1,5 @@
-/// Service name for the desktop OS keyring. Debug builds default to a distinct
-/// service, while standalone worktree launches may request a scoped dev service.
+/// Namespace for the configured secret provider. Debug builds default to a
+/// distinct namespace, while standalone worktrees may request a scoped one.
 fn dev_keyring_service(configured: Option<String>) -> String {
     configured
         .filter(|service| service.starts_with("buzz-desktop-dev."))

@@ -284,7 +284,7 @@ export function MachineOnboardingFlow({
                   {keyImportStage === "backup-password"
                     ? "Enter your backup password to unlock your key and restore your identity."
                     : identityLost
-                      ? "Your identity is no longer in the system keyring. Re-import your nsec to restore it."
+                      ? "Your identity is no longer in the local secret provider. Re-import your nsec to restore it."
                       : "If you already have a Buzz account, enter your private key below to get started."}
                 </p>
               </motion.div>

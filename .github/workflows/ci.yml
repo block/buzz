@@ -127,6 +127,25 @@ jobs:
         uses: taiki-e/install-action@0fd46367812ee04360509b4169d9f659d6892bb2 # v2.79.15
         with:
           tool: cargo-nextest@0.9.136
+      - name: Install daz-secrets conformance provider
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          repository: darrenoakey/daz-secrets
+          ref: ef01d96a2fa8d661a6a2ad7dace77fce0f2f60aa
+          path: .ci/daz-secrets
+      - name: Configure isolated test credential provider
+        run: |
+          mkdir -p "$HOME/.config/daz-secrets" "$RUNNER_TEMP/daz-secrets"
+          go build -trimpath -o "$RUNNER_TEMP/daz-secrets/buzz-ci-provider" \
+            ./.ci/daz-secrets/cmd/daz-secrets-conformance-provider
+          chmod 0755 "$RUNNER_TEMP/daz-secrets/buzz-ci-provider"
+          printf '%s\n' \
+            'version = 1' \
+            "provider_path = \"$RUNNER_TEMP/daz-secrets/buzz-ci-provider\"" \
+            'provider_id = "buzz-ci-provider"' \
+            'timeout_ms = 2000' \
+            > "$HOME/.config/daz-secrets/provider.toml"
+          chmod 0600 "$HOME/.config/daz-secrets/provider.toml"
       - name: Unit tests
         run: just test-unit
 
