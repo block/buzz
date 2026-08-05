@@ -5259,6 +5259,61 @@ mod observer_publish_queue_tests {
         fifo + coalescer
     }
 
+    /// The walker above is itself an instrument, and every cap test asks it
+    /// only for `<= CAP` — a blinded walker (missing an arm, or returning 0)
+    /// would satisfy all of them while hiding exactly the 2x overshoot it was
+    /// added to catch (Sami round 5, M17-M20). Pin it two-sided: it must SEE
+    /// the double retention, and it must agree with the accumulator EXACTLY
+    /// while both stores are non-empty — neither may drift.
+    #[test]
+    fn walked_retained_bytes_agrees_with_the_accumulator_exactly() {
+        fn chunk(seq: u64, message_id: &str, text: &str) -> observer::ObserverEvent {
+            let mut e = event(seq, "acp_read", Some("chan-a"));
+            e.payload = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "session-1",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "messageId": message_id,
+                        "content": { "type": "text", "text": text },
+                    },
+                },
+            });
+            e
+        }
+
+        let text = "w".repeat(7_000);
+        let mut queue = ObserverPublishQueue::default();
+        // One pending chunk: its text lives in the serialized skeleton AND
+        // the extracted copy, so a walker blind to either arm reads short.
+        queue.ingest(chunk(1, "message-a", &text));
+        assert!(
+            walked_retained_bytes(&queue) >= 2 * text.len(),
+            "the walker must SEE the first chunk's text twice \
+             (skeleton + extracted copy), got {}",
+            walked_retained_bytes(&queue)
+        );
+
+        // Populate BOTH stores: the non-chunk event flushes message-a into
+        // the FIFO and queues itself; fresh pending keys (plus a same-key
+        // append) rebuild the coalescer side.
+        queue.ingest(event(2, "tool_call", Some("chan-a")));
+        queue.ingest(chunk(3, "message-b", &text));
+        queue.ingest(chunk(4, "message-b", &text));
+        queue.ingest(chunk(5, "message-c", &text));
+        assert!(
+            !queue.events.is_empty() && !queue.coalescer.pending.is_empty(),
+            "both arms must be non-empty for the agreement check to bind"
+        );
+        assert_eq!(
+            queue.total_pending_bytes(),
+            walked_retained_bytes(&queue),
+            "accumulator and entry-walk must agree exactly: neither may drift"
+        );
+    }
+
     /// Two or more pending events for one channel ship as a single batch
     /// envelope whose payload carries every inner event in arrival order.
     #[test]

@@ -1841,6 +1841,103 @@ describe("community-switch save / restore", () => {
     );
   });
 
+  it("snapshot turns are isolated — a turn started after save must not leak into the snapshot", () => {
+    // Save with one live turn on c1.
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({ seq: 1, turnId: "t1", channelId: "c1" }),
+    ]);
+    saveActiveAgentTurnsForCommunity("ws-a");
+
+    // Keep working AFTER the save: a new turn on c2 mutates the same inner
+    // per-agent turns map the snapshot cloned. If save aliased that inner
+    // map instead of deep-cloning it, t2 leaks into the snapshot.
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({ seq: 2, turnId: "t2", channelId: "c2" }),
+    ]);
+
+    resetActiveAgentTurnsStore();
+    restoreActiveAgentTurnsForCommunity("ws-a");
+
+    const channels = channelIdsOf(getActiveTurnsForAgent(AGENT));
+    assert.ok(channels.has("c1"), "the saved turn must restore");
+    assert.ok(
+      !channels.has("c2"),
+      "a turn started after the save must NOT appear in the restored snapshot",
+    );
+  });
+
+  it("snapshot tombstones are isolated — a terminal recorded after save must not block a legitimate post-restore resurrection", () => {
+    // Complete t1 on c1 before saving: the snapshot legitimately carries its
+    // tombstone (terminal at 00:00:10).
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({
+        seq: 1,
+        turnId: "t1",
+        channelId: "c1",
+        timestamp: "2024-01-01T00:00:00Z",
+      }),
+      makeEvent({
+        seq: 2,
+        kind: "turn_completed",
+        turnId: "t1",
+        channelId: "c1",
+        timestamp: "2024-01-01T00:00:10Z",
+      }),
+    ]);
+    saveActiveAgentTurnsForCommunity("ws-a");
+
+    // AFTER the save, t2 on c2 starts and completes (terminal at 00:00:30).
+    // That records a tombstone in the same inner per-agent tombstone map the
+    // snapshot cloned — if save aliased it, t2's tombstone leaks in.
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({
+        seq: 3,
+        turnId: "t2",
+        channelId: "c2",
+        timestamp: "2024-01-01T00:00:20Z",
+      }),
+      makeEvent({
+        seq: 4,
+        kind: "turn_completed",
+        turnId: "t2",
+        channelId: "c2",
+        timestamp: "2024-01-01T00:00:30Z",
+      }),
+    ]);
+
+    resetActiveAgentTurnsStore();
+    restoreActiveAgentTurnsForCommunity("ws-a");
+
+    // Recovered liveness frames: t1's is strictly newer than its (snapshot)
+    // terminal so it revives either way — the control. t2 has NO tombstone
+    // in a properly isolated snapshot, so its frame (00:00:25, before its
+    // live-store terminal at 00:00:30) must also revive; a leaked tombstone
+    // wrongly blocks exactly this legitimate resurrection.
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({
+        seq: 5,
+        kind: "turn_liveness",
+        turnId: "t1",
+        channelId: "c1",
+        timestamp: "2024-01-01T00:00:15Z",
+      }),
+      makeEvent({
+        seq: 6,
+        kind: "turn_liveness",
+        turnId: "t2",
+        channelId: "c2",
+        timestamp: "2024-01-01T00:00:25Z",
+      }),
+    ]);
+    const channels = channelIdsOf(getActiveTurnsForAgent(AGENT));
+    assert.ok(channels.has("c1"), "control: t1 revives past its own terminal");
+    assert.ok(
+      channels.has("c2"),
+      "a tombstone recorded after the save must NOT leak into the snapshot " +
+        "and block a legitimate resurrection",
+    );
+  });
+
   it("terminal tombstones are preserved — a stale liveness cannot resurrect a completed turn", () => {
     // Complete a turn before saving.
     syncAgentTurnsFromEvents(AGENT, [
