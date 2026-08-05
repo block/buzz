@@ -26,7 +26,14 @@ export const obsidianSyntaxKey = new PluginKey("documentsObsidianSyntax");
 export type ObsidianSyntaxStorage = {
   /** Headings in document order, refreshed on every doc change. */
   headings: OutlineHeading[];
-  /** Called when a `#tag` is clicked. */
+  /**
+   * Called when a `#tag` is clicked.
+   *
+   * Nothing supplies this yet — a tag click has nowhere to lead until the vault
+   * gains a search, which v1 deliberately leaves out. It stays as the seam that
+   * search will plug into; the click handler already falls through when it is
+   * null, and the CSS does not advertise tags as clickable in the meantime.
+   */
   onTagClick: ((tag: string) => void) | null;
   /** Notified whenever `headings` changes, so React can re-render. */
   onHeadingsChange: ((headings: OutlineHeading[]) => void) | null;

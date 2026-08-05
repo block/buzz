@@ -42,13 +42,15 @@
   opacity: 0.6;
 }
 
+/**
+ * Tags are highlighted but deliberately *not* styled as clickable: there is no
+ * vault search for a click to lead to yet, and a pointer cursor promising an
+ * action that never happens is worse than plain coloured text. The extension
+ * keeps an `onTagClick` seam for when search lands — restore the cursor and
+ * hover underline at the same time.
+ */
 .documents-editor .obsidian-tag {
   color: var(--color-primary);
-  cursor: pointer;
-}
-
-.documents-editor .obsidian-tag:hover {
-  text-decoration: underline;
 }
 
 /**

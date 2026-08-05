@@ -52,6 +52,29 @@ function normalizeBulletMarkers(text: string): string {
     .join("\n");
 }
 
+/** Two or more trailing spaces: a markdown hard break, and therefore content. */
+const HARD_BREAK_SUFFIX = / {2,}$/;
+
+/**
+ * Drops a lone trailing space from each line.
+ *
+ * One trailing space is invisible, means nothing to any markdown renderer, and
+ * is left behind constantly by ordinary typing. The serializer drops it, so
+ * comparing bytes flagged whole files over a single character — this was the
+ * only difference in one real 64-line note.
+ *
+ * Two or more trailing spaces are a hard break and stay untouched, so a file
+ * that uses them keeps failing the guard until the editor can represent them.
+ */
+function stripLoneTrailingSpace(text: string): string {
+  return text
+    .split("\n")
+    .map((line) =>
+      HARD_BREAK_SUFFIX.test(line) ? line : line.replace(/ $/, ""),
+    )
+    .join("\n");
+}
+
 /** A blockquote line, capturing its `>` prefix and the content after it. */
 const QUOTE_LINE = /^( {0,3}>\s?)(.*)$/;
 
@@ -142,23 +165,173 @@ function joinSoftWrappedLines(text: string): string {
   return joined.join("\n");
 }
 
-/**
- * A GFM table delimiter row, e.g. `| :--- | ---: |`.
- *
- * The serializer emits a canonical three-dash form, so a hand-aligned source
- * row differs only in dash count — which carries no meaning. Alignment colons
- * do, and are preserved.
- */
-const TABLE_DELIMITER_ROW = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
+/** A list item at any of the three markers CommonMark allows. */
+const LIST_ITEM = /^ {0,3}(?:[-*+]|\d+[.)])\s/;
+/** Any blockquote line, callout or not. */
+const QUOTE_START = /^ {0,3}>/;
+/** An opening or closing code fence. */
+const FENCE = /^\s*(?:`{3,}|~{3,})/;
 
-function normalizeTableDelimiters(text: string): string {
+/**
+ * Removes blank lines that only separate one block from the next.
+ *
+ * Writing a list or a paragraph directly under its heading, with no blank
+ * line, is an extremely common habit — it is how every daily-note template in
+ * the vault I measured is written. CommonMark parses it identically either way
+ * and the serializer always emits the blank line, so byte comparison failed on
+ * 250+ files over invisible vertical whitespace. Runs of several blank lines
+ * collapse to one for the same reason.
+ *
+ * Two exceptions keep meaning intact:
+ *
+ *  - Between two list items, a blank line makes the list *loose*, which really
+ *    does render differently (each item gains a `<p>`).
+ *  - Between two blockquotes, a blank line is the only thing keeping them from
+ *    merging into one quote.
+ *
+ * In both cases the blank lines are preserved, so a change there still fails
+ * the guard. Fenced code is skipped entirely — blank lines are content there.
+ */
+function normalizeBlockSeparation(text: string): string {
+  const lines = text.split("\n");
+  const out: string[] = [];
+  let inFence = false;
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (FENCE.test(line)) {
+      inFence = !inFence;
+      out.push(line);
+      continue;
+    }
+    if (inFence || line.trim() !== "") {
+      out.push(line);
+      continue;
+    }
+
+    // A run of blank lines. Collapse it, then decide whether one survives.
+    let end = i;
+    while (end < lines.length && lines[end].trim() === "") end += 1;
+    i = end - 1;
+
+    const previous = out.at(-1);
+    const next = lines[end];
+    // Blank lines at either end of the document separate nothing.
+    if (previous === undefined || next === undefined) continue;
+
+    const betweenBlocks = BLOCK_START.test(previous) || BLOCK_START.test(next);
+    const sameFamily =
+      (LIST_ITEM.test(previous) && LIST_ITEM.test(next)) ||
+      (QUOTE_START.test(previous) && QUOTE_START.test(next));
+
+    // Between two paragraphs a blank line is the only thing keeping them
+    // apart, so it always survives — collapsed to one, since a longer run is
+    // just vertical whitespace.
+    if (!betweenBlocks || sameFamily) out.push("");
+  }
+
+  return out.join("\n");
+}
+
+/** A thematic break in any of its three spellings, e.g. `***`, `- - -`, `___`. */
+const THEMATIC_BREAK = /^ {0,3}(?:(?:\*\s*){3,}|(?:-\s*){3,}|(?:_\s*){3,})$/;
+
+/**
+ * Canonicalises every thematic break to `---`.
+ *
+ * `***`, `___` and `---` are the same horizontal rule; the serializer emits
+ * `---`. This was the second-largest source of failures in the measured vault,
+ * behind block separation.
+ */
+function normalizeThematicBreaks(text: string): string {
   return text
     .split("\n")
-    .map((line) =>
-      TABLE_DELIMITER_ROW.test(line)
-        ? line.replace(/-{2,}/g, "---").replace(/\s+/g, " ").trim()
-        : line,
-    )
+    .map((line) => (THEMATIC_BREAK.test(line) ? "---" : line))
+    .join("\n");
+}
+
+/** Any pipe-delimited table row, header, delimiter or body. */
+const TABLE_ROW = /^ {0,3}\|.*\|\s*$/;
+/** A GFM table delimiter row, e.g. `| :--- | ---: |`. */
+const TABLE_DELIMITER_ROW = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
+
+/**
+ * Reduces every table row to `|cell|cell|` with cells trimmed.
+ *
+ * Column padding is how humans keep a table readable in source form, and dash
+ * counts in the delimiter row are pure alignment; the serializer discards both
+ * for a canonical `| --- |`. Neither is visible once rendered. Alignment colons
+ * are content and survive, because they are part of the cell text being
+ * trimmed rather than the padding around it.
+ */
+function normalizeTableRows(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => {
+      if (!TABLE_ROW.test(line)) return line;
+      const canonical = TABLE_DELIMITER_ROW.test(line)
+        ? line.replace(/-{2,}/g, "---")
+        : line;
+      return canonical
+        .trim()
+        .split("|")
+        .map((cell) => cell.trim())
+        .join("|");
+    })
+    .join("\n");
+}
+
+/**
+ * Rewrites `_em_` as `*em*` and `__strong__` as `**strong**`.
+ *
+ * CommonMark treats the two spellings as identical and the serializer emits
+ * the asterisk form. This was the single largest remaining cause of failures
+ * in the measured vault.
+ *
+ * The lookarounds implement CommonMark's intraword rule: an underscore only
+ * delimits emphasis when it does not sit between two word characters. Without
+ * them `_Generated by weekly_report.py_` pairs its first two underscores and
+ * normalizes to something the parser never produces. `snake_case_name` is left
+ * alone entirely, which is the same reason.
+ *
+ * Emphasis the editor *drops* still fails the guard, since the markers then
+ * survive on one side only.
+ */
+const INTRAWORD_UNDERSCORE = /(?<=\w)_(?=\w)/;
+
+function normalizeEmphasisMarkers(text: string): string {
+  return text
+    .replace(/(?<!\w)__([^\n]+?)__(?!\w)/g, "**$1**")
+    .replace(
+      new RegExp(
+        `(?<!\\w)_((?:[^_\\n]|${INTRAWORD_UNDERSCORE.source})+)_(?!\\w)`,
+        "g",
+      ),
+      "*$1*",
+    );
+}
+
+/**
+ * Collapses runs of spaces *inside* a line to one.
+ *
+ * Every markdown renderer collapses them, so two spaces between words are
+ * invisible; the serializer emits one. Leading indentation is untouched (it is
+ * structural) and so is trailing whitespace, which `stripLoneTrailingSpace`
+ * has already classified as either nothing or a hard break.
+ *
+ * Fenced code is skipped, where run length really is content.
+ */
+function collapseInnerSpaces(text: string): string {
+  let inFence = false;
+  return text
+    .split("\n")
+    .map((line) => {
+      if (FENCE.test(line)) {
+        inFence = !inFence;
+        return line;
+      }
+      return inFence ? line : line.replace(/(\S) {2,}(?=\S)/g, "$1 ");
+    })
     .join("\n");
 }
 
@@ -171,17 +344,39 @@ function normalizeTableDelimiters(text: string): string {
  *    the guard useless.
  *  - A trailing newline. Serializers routinely add or drop the final one.
  *  - Soft-wrapped paragraph lines, per `joinSoftWrappedLines`.
- *  - Table delimiter dash counts, per `normalizeTableDelimiters`.
  *  - Soft-wrapped prose inside non-callout blockquotes.
  *  - `*` and `+` bullet markers, which mean the same as `-`.
+ *  - A single trailing space, per `stripLoneTrailingSpace`.
+ *  - Blank lines that only separate blocks, per `normalizeBlockSeparation`.
+ *  - `***` and `___` thematic breaks, which mean the same as `---`.
+ *  - Table column padding and delimiter dash counts, per `normalizeTableRows`.
+ *  - `_em_` versus `*em*`, per `normalizeEmphasisMarkers`.
+ *  - Runs of spaces inside a line, per `collapseInnerSpaces`.
  *
- * Everything else — dropped links, escaped HTML, destroyed tables, merged
- * callouts, renormalized list markers — still counts as lossy.
+ * The property they share: **a reader cannot see any of them.** Differences a
+ * reader *would* see — dropped links, escaped HTML, destroyed tables, merged
+ * callouts, tight versus loose lists, two-space hard breaks — still count as
+ * lossy and still send the file to source mode.
+ *
+ * Each entry is also a promise that saving may rewrite the file that way, which
+ * shows up in `git diff` even though nothing rendered changed. That is the
+ * deliberate trade: byte-exact comparison left live preview usable on 4% of a
+ * real 470-note vault, which is indistinguishable from not shipping it.
  */
 function normalizeForComparison(text: string): string {
-  const base = text.replace(/\r\n/g, "\n").replace(/\n+$/, "");
-  return normalizeTableDelimiters(
-    normalizeBulletMarkers(joinSoftWrappedQuotes(joinSoftWrappedLines(base))),
+  const base = collapseInnerSpaces(
+    stripLoneTrailingSpace(text.replace(/\r\n/g, "\n").replace(/\n+$/, "")),
+  );
+  return normalizeEmphasisMarkers(
+    normalizeTableRows(
+      normalizeBulletMarkers(
+        joinSoftWrappedQuotes(
+          joinSoftWrappedLines(
+            normalizeBlockSeparation(normalizeThematicBreaks(base)),
+          ),
+        ),
+      ),
+    ),
   );
 }
 

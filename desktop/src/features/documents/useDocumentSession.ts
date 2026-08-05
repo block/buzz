@@ -355,9 +355,21 @@ export function useDocumentSession(vaultRoot: string | null) {
     };
   }, [clearTimer, invalidateTree, reloadFile, vaultRoot]);
 
-  // Cancel pending autosave timers on unmount. `saveAllDirty` is the caller's
-  // job before navigating away; leaving timers armed would fire against an
-  // unmounted component.
+  // Read through a ref so the unmount effect below can stay `[]`-scoped and
+  // still call the current implementation.
+  const saveAllDirtyRef = React.useRef(saveAllDirty);
+  saveAllDirtyRef.current = saveAllDirty;
+
+  // On unmount, cancel the pending timers and then flush what they were going
+  // to write. Leaving the timers armed would fire against an unmounted
+  // component; cancelling them *without* flushing would silently drop the last
+  // edit whenever the user leaves Documents inside the 2s debounce window,
+  // which is precisely the data loss this module exists to prevent.
+  //
+  // The writes are deliberately not awaited — a cleanup function cannot be
+  // async. They are already in flight at the Tauri boundary by the time React
+  // finishes tearing down, and `saveTab`'s `setState` is a harmless no-op once
+  // unmounted.
   React.useEffect(() => {
     const timers = timersRef.current;
     return () => {
@@ -365,6 +377,7 @@ export function useDocumentSession(vaultRoot: string | null) {
         window.clearTimeout(timer);
       }
       timers.clear();
+      void saveAllDirtyRef.current();
     };
   }, []);
 

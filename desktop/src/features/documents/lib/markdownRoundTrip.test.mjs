@@ -58,6 +58,12 @@ const MUST_BE_STABLE = [
   ["ordered list", "1. first\n2. second"],
   ["task list", "- [ ] todo\n- [x] done"],
   ["blockquote", "> quoted text"],
+  // These two pin the exceptions in `normalizeBlockSeparation`. A blank line
+  // between same-family blocks is content -- it makes a list loose, and it is
+  // the only thing keeping two quotes from merging. Both survive the editor
+  // intact, so collapsing them as "block separation" would hide a real change.
+  ["loose list", "- one\n\n- two"],
+  ["adjacent blockquotes", "> first\n\n> second"],
   ["link", "See [the docs](https://example.com)."],
   ["thematic break", "before\n\n---\n\nafter"],
   ["gfm table", "| a | b |\n| --- | --- |\n| 1 | 2 |"],
@@ -67,6 +73,22 @@ const MUST_BE_STABLE = [
   ],
   ["multiple paragraphs", "one\n\ntwo\n\nthree"],
   ["strikethrough", "~~gone~~"],
+  // Differences a reader cannot see. Each of these was measured against a real
+  // 470-note vault; together they took the pass rate from 4% to 63%. They are
+  // tolerated by `normalizeForComparison`, not by the editor -- saving still
+  // rewrites them into canonical form, which is the accepted trade.
+  ["underscore emphasis", "_emphasis_"],
+  ["underscore strong", "__strong__"],
+  ["intraword underscores", "_See weekly_report.py for details._"],
+  ["snake_case left alone", "Call load_user_profile() first."],
+  ["single trailing space", "A line with one trailing space. "],
+  ["list directly under a heading", "## Today\n- one\n- two"],
+  ["paragraph directly under a heading", "## Today\nSome prose."],
+  ["several blank lines between paragraphs", "one\n\n\n\ntwo"],
+  ["star thematic break", "before\n\n***\n\nafter"],
+  ["underscore thematic break", "before\n\n___\n\nafter"],
+  ["unpadded table", "|a|b|\n|---|---|\n|1|2|"],
+  ["double spaces inside a line", "Two  spaces  between  words."],
   ["wikilink", "A [[Note Title]] reference."],
   ["wikilink with alias", "See [[Note|the note]]."],
   ["embed", "![[Some Note]]"],
@@ -91,7 +113,6 @@ const MUST_BE_DETECTED_LOSSY = [
   ["footnote", "Text[^1]\n\n[^1]: note"],
   ["raw html", "<div>raw</div>"],
   ["setext heading", "Title\n====="],
-  ["underscore emphasis", "_emphasis_"],
   ["four-space nesting", "- a\n    - b"],
   ["two-space hard break", "line one  \nline two"],
   ["repeated ordered marker", "1. a\n1. b"],

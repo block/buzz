@@ -199,3 +199,123 @@ test("normalizing markers does not hide a lost list item", () => {
     false,
   );
 });
+
+test("a lone trailing space is cosmetic, two are a hard break", () => {
+  // One trailing space is invisible to every renderer, and was the *only*
+  // difference in a real 64-line note. Two are an explicit line break.
+  assert.equal(
+    isRoundTripStable(
+      "Uploads with blurhash. ",
+      () => "Uploads with blurhash.",
+    ),
+    true,
+  );
+  assert.equal(
+    isRoundTripStable("line one  \nline two", () => "line one\nline two"),
+    false,
+  );
+});
+
+test("blank lines separating different blocks are cosmetic", () => {
+  // Writing a list or prose straight under its heading is how every daily-note
+  // template in the measured vault is written; the serializer adds the blank.
+  assert.equal(
+    isRoundTripStable("## Today\n- one", () => "## Today\n\n- one"),
+    true,
+  );
+  assert.equal(
+    isRoundTripStable("## Today\nSome prose.", () => "## Today\n\nSome prose."),
+    true,
+  );
+  // Several blank lines are just vertical whitespace.
+  assert.equal(
+    isRoundTripStable("one\n\n\n\ntwo", () => "one\n\ntwo"),
+    true,
+  );
+});
+
+test("blank lines that carry meaning are NOT collapsed", () => {
+  // Between two paragraphs, the blank line is the only separator.
+  assert.equal(
+    isRoundTripStable("para one\n\npara two", () => "para one\npara two"),
+    false,
+  );
+  // Between list items it makes the list loose, which renders differently.
+  assert.equal(
+    isRoundTripStable("- one\n\n- two", () => "- one\n- two"),
+    false,
+  );
+  // Between blockquotes it is the only thing preventing a merge.
+  assert.equal(
+    isRoundTripStable("> first\n\n> second", () => "> first\n> second"),
+    false,
+  );
+});
+
+test("thematic break spelling is cosmetic", () => {
+  for (const source of ["***", "___", "- - -"]) {
+    assert.equal(
+      isRoundTripStable(
+        `before\n\n${source}\n\nafter`,
+        () => "before\n\n---\n\nafter",
+      ),
+      true,
+      source,
+    );
+  }
+});
+
+test("underscore emphasis is cosmetic, and respects the intraword rule", () => {
+  assert.equal(
+    isRoundTripStable("_emphasis_", () => "*emphasis*"),
+    true,
+  );
+  assert.equal(
+    isRoundTripStable("__strong__", () => "**strong**"),
+    true,
+  );
+  // The underscore inside `weekly_report` is intraword, so it cannot close the
+  // emphasis opened at the start of the line. Pairing it there would normalize
+  // to something the parser never produces.
+  assert.equal(
+    isRoundTripStable(
+      "_See weekly_report.py for details._",
+      () => "*See weekly_report.py for details.*",
+    ),
+    true,
+  );
+  // Identifiers are left completely alone.
+  assert.equal(
+    isRoundTripStable("Call load_user_profile() now.", (body) => body),
+    true,
+  );
+});
+
+test("emphasis normalization does not hide dropped emphasis", () => {
+  assert.equal(
+    isRoundTripStable("_emphasis_", () => "emphasis"),
+    false,
+  );
+});
+
+test("table column padding is cosmetic", () => {
+  assert.equal(
+    isRoundTripStable(
+      "|a|b|\n|---|---|\n|1|2|",
+      () => "| a | b |\n| --- | --- |\n| 1 | 2 |",
+    ),
+    true,
+  );
+});
+
+test("runs of spaces inside a line are cosmetic, except in code", () => {
+  assert.equal(
+    isRoundTripStable("Two  spaces  here.", () => "Two spaces here."),
+    true,
+  );
+  // Inside a fence, run length is content — alignment and indentation matter.
+  assert.equal(
+    isRoundTripStable("```\ncol1    col2\n```", () => "```\ncol1 col2\n```"),
+    false,
+  );
+});
