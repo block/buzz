@@ -2077,3 +2077,183 @@ test("buildTranscript session/new bare systemPrompt field takes precedence over 
     "_meta.systemPrompt.append must not appear when bare field is present",
   );
 });
+
+test("pre-resolution frames inherit sessions only within their thread conversation", () => {
+  const channelId = "11111111-1111-1111-1111-111111111111";
+  const rootA = "a".repeat(64);
+  const rootB = "b".repeat(64);
+  const event = (seq, kind, threadRoot, turnId, sessionId, payload = {}) => ({
+    seq,
+    timestamp: `2026-07-28T00:00:0${seq}Z`,
+    kind,
+    agentIndex: 0,
+    channelId,
+    threadRoot,
+    sessionId,
+    turnId,
+    payload,
+  });
+  const items = buildTranscript([
+    event(1, "session_resolved", rootA, "turn-a-1", "sess-A", {
+      sessionId: "sess-A",
+      isNewSession: true,
+    }),
+    // B has not resolved yet. It must not inherit A's latest session.
+    event(2, "turn_started", rootB, "turn-b-1", null),
+    event(3, "session_resolved", rootB, "turn-b-1", "sess-B", {
+      sessionId: "sess-B",
+      isNewSession: true,
+    }),
+    // A's next pre-resolution frame must still inherit A, not the later B.
+    event(4, "turn_started", rootA, "turn-a-2", null),
+  ]);
+
+  const bStart = items.find(
+    (item) => item.acpSource === "turn_started" && item.turnId === "turn-b-1",
+  );
+  const aStart = items.find(
+    (item) => item.acpSource === "turn_started" && item.turnId === "turn-a-2",
+  );
+  assert.equal(bStart?.sessionId, null);
+  assert.equal(bStart?.threadRoot, rootB);
+  assert.equal(aStart?.sessionId, "sess-A");
+  assert.equal(aStart?.threadRoot, rootA);
+});
+
+test("equal adapter-local message and tool IDs stay isolated across threads", () => {
+  const rootA = "a".repeat(64);
+  const rootB = "b".repeat(64);
+  const inThread = (threadRoot, sessionId, turnId) => ({
+    threadRoot,
+    sessionId,
+    turnId,
+  });
+  const events = [
+    assistantChunk(
+      1,
+      "message-1",
+      "answer A",
+      inThread(rootA, "sess-A", "turn-A"),
+    ),
+    sessionUpdate(
+      2,
+      {
+        sessionUpdate: "tool_call",
+        toolCallId: "tool-1",
+        status: "executing",
+        title: "shell A",
+        kind: "shell",
+      },
+      inThread(rootA, "sess-A", "turn-A"),
+    ),
+    assistantChunk(
+      3,
+      "message-1",
+      "answer B",
+      inThread(rootB, "sess-B", "turn-B"),
+    ),
+    sessionUpdate(
+      4,
+      {
+        sessionUpdate: "tool_call",
+        toolCallId: "tool-1",
+        status: "executing",
+        title: "shell B",
+        kind: "shell",
+      },
+      inThread(rootB, "sess-B", "turn-B"),
+    ),
+  ];
+
+  const items = buildTranscript(events);
+  const messages = items.filter((item) => item.type === "message");
+  const tools = items.filter((item) => item.type === "tool");
+  assert.equal(messages.length, 2);
+  assert.deepEqual(
+    messages.map((item) => [item.threadRoot, item.text]),
+    [
+      [rootA, "answer A"],
+      [rootB, "answer B"],
+    ],
+  );
+  assert.equal(new Set(messages.map((item) => item.id)).size, 2);
+  assert.equal(tools.length, 2);
+  assert.deepEqual(
+    tools.map((item) => [item.threadRoot, item.title]),
+    [
+      [rootA, "shell A"],
+      [rootB, "shell B"],
+    ],
+  );
+  assert.equal(new Set(tools.map((item) => item.id)).size, 2);
+});
+
+test("interleaved lifecycle frames do not seal another thread's streamed message", () => {
+  const rootA = "a".repeat(64);
+  const rootB = "b".repeat(64);
+  const scopeA = {
+    threadRoot: rootA,
+    sessionId: "sess-A",
+    turnId: "turn-A",
+  };
+  const events = [
+    assistantChunk(1, "message-1", "hel", scopeA),
+    {
+      ...baseEvent,
+      seq: 2,
+      timestamp: "2026-07-28T00:00:02Z",
+      kind: "turn_started",
+      threadRoot: rootB,
+      sessionId: "sess-B",
+      turnId: "turn-B",
+      payload: { source: "channel" },
+    },
+    assistantChunk(3, "message-1", "lo", scopeA),
+  ];
+
+  const messages = buildTranscript(events).filter(
+    (item) => item.type === "message",
+  );
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].threadRoot, rootA);
+  assert.equal(messages[0].text, "hello");
+});
+
+test("equal permission request IDs correlate within their thread conversation", () => {
+  const rootA = "a".repeat(64);
+  const rootB = "b".repeat(64);
+  const inThread = (event, threadRoot, sessionId, turnId) => ({
+    ...event,
+    threadRoot,
+    sessionId,
+    turnId,
+  });
+  const events = [
+    inThread(makePermissionRequest(1, 1, "turn-A"), rootA, "sess-A", "turn-A"),
+    inThread(makePermissionRequest(2, 1, "turn-B"), rootB, "sess-B", "turn-B"),
+    inThread(
+      makePermissionResponse(3, 1, "selected", "allow_once"),
+      rootA,
+      "sess-A",
+      "turn-A",
+    ),
+    inThread(
+      makePermissionResponse(4, 1, "selected", "reject_once"),
+      rootB,
+      "sess-B",
+      "turn-B",
+    ),
+  ];
+
+  const permissions = buildTranscript(events).filter(
+    (item) => item.type === "lifecycle" && item.renderClass === "permission",
+  );
+  assert.equal(permissions.length, 2);
+  assert.deepEqual(
+    permissions.map((item) => [item.threadRoot, item.outcome]),
+    [
+      [rootA, "Approved (allow_once)"],
+      [rootB, "Denied (reject_once)"],
+    ],
+  );
+});

@@ -19,7 +19,6 @@
 //!
 //! `AcpClient` is NOT Clone — ownership moves out on claim and back on return.
 
-use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -41,6 +40,7 @@ use crate::queue::{
     PromptProfile, PromptProfileLookup, ThreadTags,
 };
 use crate::relay::{ChannelInfo, RestClient};
+use crate::scope::ConversationScope;
 
 /// Window within which agent activity before a hard-cap death qualifies
 /// the turn as "recently active" (eligible for requeue instead of dead-letter).
@@ -52,7 +52,8 @@ const RECENT_ACTIVITY_WINDOW: Duration = Duration::from_secs(60);
 /// Metadata stored per in-flight task for panic recovery.
 pub struct TaskMeta {
     pub agent_index: usize,
-    pub channel_id: Option<Uuid>,
+    /// Conversation scope of the in-flight prompt. `None` for heartbeats.
+    pub scope: Option<ConversationScope>,
     /// Identifies terminal events when the task panics before returning a result.
     pub turn_id: String,
     /// Clone of batch for Queue mode panic recovery.
@@ -72,6 +73,7 @@ pub struct TaskMeta {
 /// Agent-level model capabilities. Populated on first session creation.
 /// The catalog is the same across all sessions for a given agent process.
 /// Fields are read by the desktop's `get_agent_models` Tauri command (Phase 3).
+#[derive(Clone, Debug)]
 #[allow(dead_code)] // Scaffolding for desktop integration — fields read via serde.
 pub struct AgentModelCapabilities {
     /// Stable: configOptions with category "model" from session/new.
@@ -80,38 +82,43 @@ pub struct AgentModelCapabilities {
     pub available_models_raw: Option<serde_json::Value>,
 }
 
-/// Per-channel session IDs and turn counters.
+/// Per-conversation session IDs and turn counters.
+///
+/// Keyed by [`ConversationScope`]: unthreaded channel traffic and DMs use the
+/// channel-level scope; thread replies in regular channels get their own
+/// scope (and therefore their own session, turn counter, and cached prompt
+/// sections).
 ///
 /// Separated from `OwnedAgent` so the state machine is testable without
 /// spawning a real agent subprocess.
 #[derive(Default)]
 pub struct SessionState {
-    /// channel_id → session_id
-    pub sessions: HashMap<Uuid, String>,
+    /// conversation scope → session_id
+    pub sessions: HashMap<ConversationScope, String>,
     pub heartbeat_session: Option<String>,
-    /// Per-channel turn counters for proactive session rotation.
+    /// Per-conversation turn counters for proactive session rotation.
     /// Incremented on each successful prompt; reset when the session is rotated.
-    pub turn_counts: HashMap<Uuid, u32>,
+    pub turn_counts: HashMap<ConversationScope, u32>,
     /// Turn counter for the heartbeat session.
     pub heartbeat_turn_count: u32,
-    /// channel_id → rendered NIP-AE core prompt section, populated once at
-    /// session creation per Tyler's spec (no mid-session refresh).
-    pub core_sections: HashMap<Uuid, String>,
-    /// channel_id → rendered `[Channel Canvas]` metadata section.
+    /// conversation scope → rendered NIP-AE core prompt section, populated
+    /// once at session creation per Tyler's spec (no mid-session refresh).
+    pub core_sections: HashMap<ConversationScope, String>,
+    /// conversation scope → rendered `[Channel Canvas]` metadata section.
     ///
     /// Populated once before session creation (same lifecycle as `core_sections`).
     /// Absent when the channel has no canvas, the canvas content is blank, or the
     /// fetch fails — all fail open. Cleared on session invalidation alongside
     /// `core_sections` so the next session picks up any canvas change.
-    pub canvas_sections: HashMap<Uuid, String>,
+    pub canvas_sections: HashMap<ConversationScope, String>,
 }
 
 impl SessionState {
     /// Invalidate the session (and turn counter) for a specific prompt source.
     pub fn invalidate(&mut self, source: &PromptSource) {
         match source {
-            PromptSource::Channel(cid) => {
-                self.invalidate_channel(cid);
+            PromptSource::Conversation(scope) => {
+                self.invalidate_scope(scope);
             }
             PromptSource::Heartbeat => {
                 self.heartbeat_session = None;
@@ -120,13 +127,30 @@ impl SessionState {
         }
     }
 
-    /// Invalidate a single channel's session and turn counter.
-    /// Returns `true` if the channel had an active session.
+    /// Invalidate a single conversation's session and turn counter.
+    /// Returns `true` if the conversation had an active session.
+    pub fn invalidate_scope(&mut self, scope: &ConversationScope) -> bool {
+        self.turn_counts.remove(scope);
+        self.core_sections.remove(scope);
+        self.canvas_sections.remove(scope);
+        self.sessions.remove(scope).is_some()
+    }
+
+    /// Invalidate every conversation under `channel_id` — the channel-level
+    /// conversation and all of its thread conversations. Returns `true` if at
+    /// least one active session was removed.
+    ///
+    /// Used for channel-wide teardown (membership removal); scope-targeted
+    /// rotation goes through [`invalidate_scope`](Self::invalidate_scope).
     pub fn invalidate_channel(&mut self, channel_id: &Uuid) -> bool {
-        self.turn_counts.remove(channel_id);
-        self.core_sections.remove(channel_id);
-        self.canvas_sections.remove(channel_id);
-        self.sessions.remove(channel_id).is_some()
+        self.turn_counts.retain(|s, _| s.channel_id != *channel_id);
+        self.core_sections
+            .retain(|s, _| s.channel_id != *channel_id);
+        self.canvas_sections
+            .retain(|s, _| s.channel_id != *channel_id);
+        let before = self.sessions.len();
+        self.sessions.retain(|s, _| s.channel_id != *channel_id);
+        self.sessions.len() != before
     }
 
     /// Invalidate all sessions and turn counters (e.g. after agent exit).
@@ -140,11 +164,11 @@ impl SessionState {
     }
 
     #[cfg(test)]
-    fn has_channel_state(&self, channel_id: &Uuid) -> bool {
-        self.sessions.contains_key(channel_id)
-            || self.turn_counts.contains_key(channel_id)
-            || self.core_sections.contains_key(channel_id)
-            || self.canvas_sections.contains_key(channel_id)
+    fn has_scope_state(&self, scope: &ConversationScope) -> bool {
+        self.sessions.contains_key(scope)
+            || self.turn_counts.contains_key(scope)
+            || self.core_sections.contains_key(scope)
+            || self.canvas_sections.contains_key(scope)
     }
 }
 
@@ -155,12 +179,20 @@ pub struct OwnedAgent {
     pub state: SessionState,
     /// Model catalog from first session/new. None until first session created.
     pub model_capabilities: Option<AgentModelCapabilities>,
-    /// Desired model ID (from `Config.model`). Applied after every `session_new_full()`.
+    /// Configured/default model for this process. This is immutable for the
+    /// lifetime of the agent and is the fallback whenever a claimed channel
+    /// has no runtime override.
+    pub baseline_model: Option<String>,
+    /// Effective model for the currently claimed conversation (or heartbeat).
+    /// Re-resolved from the channel override or [`baseline_model`](Self::baseline_model)
+    /// on every claim before a session can be created.
     pub desired_model: Option<String>,
-    /// Whether `desired_model` was set by a live `SwitchModel` control signal
-    /// (as opposed to being derived from config/persona at spawn). Used by the
-    /// desktop reader to distinguish a genuine runtime override from a stale
-    /// session whose persona model was edited. Reset on spawn/restart.
+    /// Generation of the channel override in [`desired_model`](Self::desired_model).
+    /// `None` means the configured baseline is effective.
+    pub desired_model_generation: Option<u64>,
+    /// Whether the effective model came from a live channel override rather
+    /// than the configured baseline. Reset whenever the agent becomes idle or
+    /// is claimed for a channel without an override.
     pub model_overridden: bool,
     /// Normalized agent name from initialize (`agentInfo.name`/`serverInfo.name`).
     pub agent_name: String,
@@ -216,6 +248,294 @@ impl OwnedAgent {
             self.goose_system_prompt_supported,
         )
     }
+
+    fn use_baseline_model(&mut self) {
+        self.desired_model.clone_from(&self.baseline_model);
+        self.desired_model_generation = None;
+        self.model_overridden = false;
+    }
+
+    fn use_channel_model(&mut self, desired_model: Option<&ChannelDesiredModel>) {
+        match desired_model {
+            Some(desired) => {
+                self.desired_model = Some(desired.model_id.clone());
+                self.desired_model_generation = Some(desired.generation);
+                self.model_overridden = true;
+            }
+            None => self.use_baseline_model(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChannelDesiredModel {
+    model_id: String,
+    generation: u64,
+}
+
+#[derive(Debug, Clone)]
+struct PendingModelControl {
+    model_id: String,
+    generation: u64,
+    request_id: Option<String>,
+}
+
+#[derive(Default)]
+struct ChannelModelControlState {
+    catalog: Option<AgentModelCapabilities>,
+    desired_models: HashMap<Uuid, ChannelDesiredModel>,
+    /// Latest state transition for each channel, including a baseline
+    /// tombstone created when a once-supported override fails against a fresh
+    /// session catalog. Pool slots reconcile this generation even when no
+    /// desired model remains, so sessions opened under the failed override
+    /// cannot survive on another holder.
+    channel_generations: HashMap<Uuid, u64>,
+    pending_controls: HashMap<Uuid, PendingModelControl>,
+    next_generation: u64,
+}
+
+/// Process-lifetime authority for channel model controls.
+///
+/// This state deliberately lives outside [`AgentPool`]. Agents move out of the
+/// pool while turns run, and a lazy startup replaces the placeholder pool
+/// wholesale. Keeping the catalog, desired models, and pending generations in
+/// one shared coordinator makes both lifecycle transitions lossless.
+#[derive(Clone, Default)]
+pub struct ChannelModelControls {
+    inner: Arc<Mutex<ChannelModelControlState>>,
+}
+
+/// One authoritative result for a model-control request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelControlResult {
+    pub channel_id: Uuid,
+    pub model_id: String,
+    pub generation: u64,
+    pub request_id: Option<String>,
+    pub status: &'static str,
+}
+
+/// Resolution of a newly received model-control request.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ModelControlDecision {
+    /// The cached catalog accepts the model. The desired state is live.
+    Accepted {
+        generation: u64,
+        superseded: Vec<ModelControlResult>,
+    },
+    /// The cached catalog rejects the model. Desired state is unchanged.
+    Unsupported {
+        generation: u64,
+        superseded: Vec<ModelControlResult>,
+    },
+    /// No session has exposed a catalog yet. The request is retained until
+    /// the first `session/new`; at most one unresolved request is kept per
+    /// channel, and any older request is resolved as `superseded`.
+    PendingCatalog {
+        generation: u64,
+        superseded: Vec<ModelControlResult>,
+    },
+}
+
+impl ModelControlDecision {
+    pub fn generation(&self) -> u64 {
+        match self {
+            Self::Accepted { generation, .. }
+            | Self::Unsupported { generation, .. }
+            | Self::PendingCatalog { generation, .. } => *generation,
+        }
+    }
+
+    pub fn superseded(&self) -> &[ModelControlResult] {
+        match self {
+            Self::Accepted { superseded, .. }
+            | Self::Unsupported { superseded, .. }
+            | Self::PendingCatalog { superseded, .. } => superseded,
+        }
+    }
+}
+
+impl ChannelModelControls {
+    fn lock(&self) -> std::sync::MutexGuard<'_, ChannelModelControlState> {
+        match self.inner.lock() {
+            Ok(state) => state,
+            Err(poisoned) => {
+                tracing::warn!(target: "pool::model", "channel model control lock poisoned");
+                poisoned.into_inner()
+            }
+        }
+    }
+
+    fn next_generation(state: &mut ChannelModelControlState) -> u64 {
+        let mut generation = state.next_generation.wrapping_add(1);
+        if generation == 0 {
+            generation = 1;
+        }
+        state.next_generation = generation;
+        generation
+    }
+
+    /// Record a channel model request against the process-wide catalog.
+    pub fn request(
+        &self,
+        channel_id: Uuid,
+        model_id: &str,
+        request_id: Option<&str>,
+    ) -> ModelControlDecision {
+        let mut state = self.lock();
+        let generation = Self::next_generation(&mut state);
+        let superseded = state
+            .pending_controls
+            .remove(&channel_id)
+            .map(|pending| ModelControlResult {
+                channel_id,
+                model_id: pending.model_id,
+                generation: pending.generation,
+                request_id: pending.request_id,
+                status: "superseded",
+            })
+            .into_iter()
+            .collect();
+
+        let Some(catalog) = state.catalog.as_ref() else {
+            state.pending_controls.insert(
+                channel_id,
+                PendingModelControl {
+                    model_id: model_id.to_string(),
+                    generation,
+                    request_id: request_id.map(ToOwned::to_owned),
+                },
+            );
+            return ModelControlDecision::PendingCatalog {
+                generation,
+                superseded,
+            };
+        };
+
+        if !model_in_catalog(
+            &catalog.config_options_raw,
+            catalog.available_models_raw.as_ref(),
+            model_id,
+        ) {
+            return ModelControlDecision::Unsupported {
+                generation,
+                superseded,
+            };
+        }
+
+        state.desired_models.insert(
+            channel_id,
+            ChannelDesiredModel {
+                model_id: model_id.to_string(),
+                generation,
+            },
+        );
+        state.channel_generations.insert(channel_id, generation);
+        ModelControlDecision::Accepted {
+            generation,
+            superseded,
+        }
+    }
+
+    /// Cache the first authoritative session catalog and resolve every lazy
+    /// pre-wake request exactly once.
+    pub fn register_catalog(
+        &self,
+        capabilities: AgentModelCapabilities,
+    ) -> Vec<ModelControlResult> {
+        let mut state = self.lock();
+        if state.catalog.is_some() {
+            return Vec::new();
+        }
+        state.catalog = Some(capabilities);
+        let pending = std::mem::take(&mut state.pending_controls);
+        let Some(catalog) = state.catalog.clone() else {
+            return Vec::new();
+        };
+
+        let mut results: Vec<ModelControlResult> = pending
+            .into_iter()
+            .map(|(channel_id, pending)| {
+                let supported = model_in_catalog(
+                    &catalog.config_options_raw,
+                    catalog.available_models_raw.as_ref(),
+                    &pending.model_id,
+                );
+                if supported {
+                    state.desired_models.insert(
+                        channel_id,
+                        ChannelDesiredModel {
+                            model_id: pending.model_id.clone(),
+                            generation: pending.generation,
+                        },
+                    );
+                    state
+                        .channel_generations
+                        .insert(channel_id, pending.generation);
+                }
+                ModelControlResult {
+                    channel_id,
+                    model_id: pending.model_id,
+                    generation: pending.generation,
+                    request_id: pending.request_id,
+                    status: if supported {
+                        "sent"
+                    } else {
+                        "unsupported_model"
+                    },
+                }
+            })
+            .collect();
+        results.sort_by_key(|result| result.generation);
+        results
+    }
+
+    fn desired_model(&self, channel_id: Uuid) -> Option<ChannelDesiredModel> {
+        self.lock().desired_models.get(&channel_id).cloned()
+    }
+
+    fn channel_generations(&self) -> Vec<(Uuid, u64)> {
+        self.lock()
+            .channel_generations
+            .iter()
+            .map(|(channel_id, generation)| (*channel_id, *generation))
+            .collect()
+    }
+
+    /// Clear a failed override only if the failed session was applying the
+    /// channel's current generation. A superseded session must never erase a
+    /// newer control. The returned tombstone generation makes every other
+    /// holder invalidate any session it may already have opened under the
+    /// failed override.
+    fn clear_if_current(&self, channel_id: Uuid, generation: u64) -> Option<u64> {
+        let mut state = self.lock();
+        if state
+            .desired_models
+            .get(&channel_id)
+            .is_some_and(|desired| desired.generation == generation)
+        {
+            state.desired_models.remove(&channel_id);
+            let tombstone_generation = Self::next_generation(&mut state);
+            state
+                .channel_generations
+                .insert(channel_id, tombstone_generation);
+            Some(tombstone_generation)
+        } else {
+            None
+        }
+    }
+
+    fn remove_channel(&self, channel_id: Uuid) {
+        let mut state = self.lock();
+        state.desired_models.remove(&channel_id);
+        state.channel_generations.remove(&channel_id);
+        state.pending_controls.remove(&channel_id);
+    }
+
+    #[cfg(test)]
+    fn pending_len(&self) -> usize {
+        self.lock().pending_controls.len()
+    }
 }
 
 /// Pool of agents with take-and-return ownership semantics.
@@ -229,6 +549,59 @@ pub struct AgentPool {
     result_rx: mpsc::UnboundedReceiver<PromptResult>,
     pub join_set: JoinSet<()>,
     task_map: HashMap<tokio::task::Id, TaskMeta>,
+    /// Stable conversation → agent-slot ownership. A scope's ACP session
+    /// history lives inside exactly one agent process, so once a scope is
+    /// dispatched to a slot, later turns for that scope must go back to the
+    /// SAME slot — even if that means waiting while it is checked out on
+    /// other work. Without this, a busy owner would let `try_claim` hand the
+    /// scope to another idle agent, silently forking the conversation into a
+    /// second divergent session.
+    ///
+    /// Lifecycle: recorded on claim; released when the owning agent returns
+    /// without a live session for the scope (rotation, invalidation, failed
+    /// create), when the scope/channel is explicitly invalidated, or when the
+    /// owning slot dies (respawn/panic — the process and its sessions are
+    /// gone, so re-owning elsewhere creates a fresh history, not a fork).
+    scope_owners: HashMap<ConversationScope, usize>,
+    /// Shared process-lifetime model authority. This survives checked-out
+    /// agents and lazy placeholder-pool replacement.
+    model_controls: ChannelModelControls,
+    /// Last channel-model generation reconciled into each agent slot. A
+    /// switched channel may have cached sessions inside a checked-out agent;
+    /// comparing generations when it returns guarantees those stale sessions
+    /// are invalidated before the slot is reused.
+    slot_channel_model_generations: HashMap<(usize, Uuid), u64>,
+    /// Channel invalidations deferred for slots that were checked out when
+    /// membership was removed. This is slot-local rather than a global
+    /// "removed channel" flag because the channel may be rejoined before an
+    /// old holder returns; that old process must still discard its pre-removal
+    /// sessions without invalidating sessions created after the rejoin on
+    /// other slots.
+    pending_channel_invalidations: HashMap<usize, HashSet<Uuid>>,
+    /// Conversation rotations deferred for a checked-out owning slot. A
+    /// `!rotate` may target a scope whose owner is busy on another scope, or
+    /// whose current task has already consumed its one-shot control signal.
+    /// Ownership can be released immediately so future work starts fresh, but
+    /// the old holder must still discard its historical session on return.
+    pending_scope_invalidations: HashMap<usize, HashSet<ConversationScope>>,
+    /// Checked-out task slots whose current source batch was explicitly
+    /// invalidated. Channel removal marks every active task under the channel;
+    /// a late `!rotate` marks only the task running that exact scope. Keeping
+    /// this per task slot lets a rapid channel rejoin accept fresh work without
+    /// reviving an old batch.
+    discard_result_batches: HashSet<usize>,
+}
+
+/// Outcome of [`AgentPool::try_claim`] for a conversation-scoped claim.
+pub enum ClaimOutcome {
+    /// An agent was claimed for the conversation (ownership recorded).
+    Claimed(Box<OwnedAgent>),
+    /// The conversation's owning agent is checked out on other work. The
+    /// caller must leave the conversation queued and retry after the owner
+    /// returns — claiming a different agent would fork the session history.
+    OwnerBusy,
+    /// No idle agent is available at all.
+    NoIdleAgent,
 }
 
 /// Result returned by a completed prompt task.
@@ -242,10 +615,11 @@ pub struct PromptResult {
     pub batch: Option<FlushBatch>,
 }
 
-/// Whether the prompt came from a channel event or a heartbeat.
+/// Whether the prompt came from a conversation (channel or thread) event or a
+/// heartbeat.
 #[derive(Debug)]
 pub enum PromptSource {
-    Channel(Uuid),
+    Conversation(ConversationScope),
     Heartbeat,
 }
 
@@ -259,11 +633,11 @@ fn apply_completed_before_control_signal(
     control_signal: &ControlSignal,
 ) {
     // Rotate and SwitchModel both invalidate so the next turn creates a fresh
-    // session. For SwitchModel the caller has already set `desired_model`, so
-    // the fresh session applies the new model on its next creation.
+    // session. A SwitchModel re-resolves the shared desired generation during
+    // that new session's creation.
     if matches!(
         control_signal,
-        ControlSignal::Rotate | ControlSignal::SwitchModel(_)
+        ControlSignal::Rotate | ControlSignal::SwitchModel { .. }
     ) {
         state.invalidate(source);
     }
@@ -271,8 +645,6 @@ fn apply_completed_before_control_signal(
 
 /// Control signal for an in-flight channel turn.
 ///
-/// Not `Copy`: `SwitchModel` carries an owned `String`. Callers must clone when
-/// a value is needed after a move, or match by reference.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ControlSignal {
     /// Stop the current turn and drop its triggering batch.
@@ -289,12 +661,11 @@ pub enum ControlSignal {
     /// Stop the current turn and drop its triggering batch. The session is
     /// invalidated just like cancel; the next turn creates a fresh session.
     Rotate,
-    /// Switch the agent's model, then requeue the triggering batch so it
-    /// re-runs on a fresh session under the new model. The model lands by
-    /// setting `OwnedAgent::desired_model` before invalidation; the requeued
-    /// turn re-creates the session and re-applies `desired_model`. Runtime-only
-    /// — never persisted, gone on restart/respawn.
-    SwitchModel(String),
+    /// Requeue the triggering batch so it re-runs on a fresh session under
+    /// the process-lifetime desired-model generation. The task never carries
+    /// or writes model state itself; it re-resolves the coordinator after
+    /// `session/new`, preventing a stale signal from overwriting a newer pick.
+    SwitchModel { generation: u64 },
 }
 
 /// Goose-native non-cancelling steer request, sent from the main loop to an
@@ -493,21 +864,39 @@ impl ChannelInfoResolver {
         }
     }
 
-    pub async fn resolve(&self, channel_id: Uuid) -> Option<PromptChannelInfo> {
-        if let Some(info) = self
+    /// Return cached metadata without performing relay I/O.
+    ///
+    /// Event scope derivation uses this after startup discovery or the
+    /// dynamic-subscription metadata gate has populated the resolver.
+    pub(crate) fn cached(&self, channel_id: Uuid) -> Option<PromptChannelInfo> {
+        let cache = self
             .cache
             .read()
-            .ok()
-            .and_then(|cache| cache.get(&channel_id).cloned())
-        {
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache.get(&channel_id).cloned()
+    }
+
+    pub async fn resolve(&self, channel_id: Uuid) -> Option<PromptChannelInfo> {
+        if let Some(info) = self.cached(channel_id) {
             return Some(info);
         }
 
         let info = fetch_channel_info(channel_id, &self.rest_client).await?;
-        if let Ok(mut cache) = self.cache.write() {
-            cache.insert(channel_id, info.clone());
-        }
+        let mut cache = self
+            .cache
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache.entry(channel_id).or_insert_with(|| info.clone());
         Some(info)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn insert_for_test(&self, channel_id: Uuid, info: PromptChannelInfo) {
+        let mut cache = self
+            .cache
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache.insert(channel_id, info);
     }
 }
 
@@ -564,6 +953,8 @@ pub struct PromptContext {
     /// the desktop keys per (agent, relay) pair, e.g. `session_config_captured`,
     /// mirroring the `managed_agent_runtime_lifecycle` frames.
     pub relay_url: String,
+    /// Process-lifetime channel model authority shared with the agent pool.
+    pub model_controls: ChannelModelControls,
 }
 
 impl AgentPool {
@@ -573,7 +964,27 @@ impl AgentPool {
     /// index into `self.agents`. Use this instead of `new()` when the startup
     /// loop skips failed agents — `new()` would pack agents densely and break
     /// the index invariant.
+    #[cfg(test)]
     pub fn from_slots(slots: Vec<Option<OwnedAgent>>) -> Self {
+        Self::from_slots_with_model_controls(slots, ChannelModelControls::default())
+    }
+
+    /// Create a pool backed by an existing process-lifetime model authority.
+    ///
+    /// The main harness uses this for both the lazy placeholder and the
+    /// awakened pool. Tests that do not exercise lifecycle replacement can use
+    /// [`from_slots`](Self::from_slots).
+    pub fn from_slots_with_model_controls(
+        slots: Vec<Option<OwnedAgent>>,
+        model_controls: ChannelModelControls,
+    ) -> Self {
+        for capabilities in slots
+            .iter()
+            .flatten()
+            .filter_map(|agent| agent.model_capabilities.clone())
+        {
+            let _ = model_controls.register_catalog(capabilities);
+        }
         let (result_tx, result_rx) = mpsc::unbounded_channel();
         Self {
             agents: slots,
@@ -581,35 +992,134 @@ impl AgentPool {
             result_rx,
             join_set: JoinSet::new(),
             task_map: HashMap::new(),
+            scope_owners: HashMap::new(),
+            model_controls,
+            slot_channel_model_generations: HashMap::new(),
+            pending_channel_invalidations: HashMap::new(),
+            pending_scope_invalidations: HashMap::new(),
+            discard_result_batches: HashSet::new(),
         }
     }
 
-    /// Try to claim an idle agent for the given channel (or heartbeat if `None`).
-    ///
-    /// Pass 1: prefer an agent that already has a session for `channel_id`.
-    /// Pass 2: any idle agent.
-    ///
-    /// Returns `None` if all agents are checked out.
-    pub fn try_claim(&mut self, channel_id: Option<Uuid>) -> Option<OwnedAgent> {
-        // Pass 1: prefer agent with existing session for this channel.
-        if let Some(cid) = channel_id {
-            let idx = self.agents.iter().position(|slot| {
-                slot.as_ref()
-                    .map(|a| a.state.sessions.contains_key(&cid))
-                    .unwrap_or(false)
-            });
-            if let Some(i) = idx {
-                return self.agents[i].take();
+    /// Apply channel removals that occurred while `agent` was checked out.
+    fn reconcile_pending_channel_invalidations(&mut self, agent: &mut OwnedAgent) {
+        let Some(channel_ids) = self.pending_channel_invalidations.remove(&agent.index) else {
+            return;
+        };
+        for channel_id in channel_ids {
+            agent.state.invalidate_channel(&channel_id);
+        }
+    }
+
+    /// Apply conversation rotations that occurred while `agent` was checked
+    /// out, without disturbing sibling scopes.
+    fn reconcile_pending_scope_invalidations(&mut self, agent: &mut OwnedAgent) {
+        let Some(scopes) = self.pending_scope_invalidations.remove(&agent.index) else {
+            return;
+        };
+        for scope in scopes {
+            agent.state.invalidate_scope(&scope);
+        }
+    }
+
+    /// Reconcile channel-model switches that occurred while `agent` was
+    /// checked out. Generations include baseline tombstones created when a
+    /// fresh session rejects the cached override, so sessions under a failed
+    /// model are invalidated across every holder. Unrelated channels remain
+    /// intact.
+    fn reconcile_channel_model_generations(&mut self, agent: &mut OwnedAgent) {
+        for (channel_id, generation) in self.model_controls.channel_generations() {
+            let key = (agent.index, channel_id);
+            if self.slot_channel_model_generations.get(&key).copied() != Some(generation) {
+                agent.state.invalidate_channel(&channel_id);
+                self.slot_channel_model_generations.insert(key, generation);
             }
         }
+    }
 
-        // Pass 2: first idle agent.
+    /// Drop ownership entries whose sessions were removed while reconciling
+    /// an idle/returning slot.
+    fn release_missing_ownerships(&mut self, agent: &OwnedAgent) {
+        let idx = agent.index;
+        self.scope_owners
+            .retain(|scope, owner| *owner != idx || agent.state.sessions.contains_key(scope));
+    }
+
+    /// Whether the given slot is currently checked out on an in-flight task.
+    fn slot_checked_out(&self, index: usize) -> bool {
+        self.task_map.values().any(|m| m.agent_index == index)
+    }
+
+    /// Try to claim an agent for the given conversation.
+    ///
+    /// Ownership is stable: if `scope` was previously dispatched to a slot,
+    /// only that slot may serve it again while its session history is alive.
+    ///
+    /// - Owner idle → claim the owner.
+    /// - Owner checked out on other work → [`ClaimOutcome::OwnerBusy`]; the
+    ///   caller must keep the scope queued until the owner returns.
+    /// - Owner slot dead (neither idle nor checked out — process died and its
+    ///   sessions with it) → re-own on any idle agent.
+    /// - Unowned scope → any idle agent, prefering one that already holds a
+    ///   session for the scope (covers ownership rebuilt from state after
+    ///   explicit map cleanup).
+    ///
+    /// On every claim, the effective model is resolved afresh: the target
+    /// channel override when present, otherwise the agent's configured
+    /// baseline. Pending switch generations are reconciled first so sessions
+    /// cached inside an agent that was checked out during a switch cannot be
+    /// reused under the old model.
+    pub fn try_claim_for_scope(&mut self, scope: ConversationScope) -> ClaimOutcome {
+        let claim_idx = match self.scope_owners.get(&scope).copied() {
+            Some(owner) if self.agents.get(owner).is_some_and(|s| s.is_some()) => Some(owner),
+            Some(owner) if self.slot_checked_out(owner) => return ClaimOutcome::OwnerBusy,
+            _ => {
+                // Unowned, or owner slot is dead: prefer an idle agent that
+                // already holds a session for this scope, else any idle agent.
+                self.agents
+                    .iter()
+                    .position(|slot| {
+                        slot.as_ref()
+                            .is_some_and(|a| a.state.sessions.contains_key(&scope))
+                    })
+                    .or_else(|| self.agents.iter().position(|slot| slot.is_some()))
+            }
+        };
+        let Some(idx) = claim_idx else {
+            return ClaimOutcome::NoIdleAgent;
+        };
+        let Some(mut agent) = self.agents[idx].take() else {
+            return ClaimOutcome::NoIdleAgent;
+        };
+        self.reconcile_pending_channel_invalidations(&mut agent);
+        self.reconcile_pending_scope_invalidations(&mut agent);
+        self.reconcile_channel_model_generations(&mut agent);
+        self.release_missing_ownerships(&agent);
+        self.scope_owners.insert(scope, idx);
+        let channel_model = self.model_controls.desired_model(scope.channel_id);
+        agent.use_channel_model(channel_model.as_ref());
+        ClaimOutcome::Claimed(Box::new(agent))
+    }
+
+    /// Claim any idle agent for a heartbeat (no conversation ownership).
+    pub fn try_claim_for_heartbeat(&mut self) -> Option<OwnedAgent> {
         let idx = self.agents.iter().position(|slot| slot.is_some());
-        idx.map(|i| self.agents[i].take().unwrap())
+        let mut agent = idx.and_then(|i| self.agents[i].take())?;
+        self.reconcile_pending_channel_invalidations(&mut agent);
+        self.reconcile_pending_scope_invalidations(&mut agent);
+        self.reconcile_channel_model_generations(&mut agent);
+        self.release_missing_ownerships(&agent);
+        agent.use_baseline_model();
+        Some(agent)
     }
 
     /// Return an agent to its slot after a task completes.
-    pub fn return_agent(&mut self, agent: OwnedAgent) {
+    ///
+    /// Ownership cleanup happens here: any scope owned by this slot whose
+    /// session no longer exists on the agent (rotated, invalidated, or never
+    /// created) is released, so the next event for that scope may be served
+    /// by any agent — there is no history left to protect.
+    pub fn return_agent(&mut self, mut agent: OwnedAgent) {
         let idx = agent.index;
         if self.agents[idx].is_some() {
             // This is a bug: two tasks returned the same agent index. Log it
@@ -621,7 +1131,29 @@ impl AgentPool {
                 "BUG: return_agent called for slot {idx} which is already occupied — overwriting"
             );
         }
+        self.reconcile_pending_channel_invalidations(&mut agent);
+        self.reconcile_pending_scope_invalidations(&mut agent);
+        self.reconcile_channel_model_generations(&mut agent);
+        self.release_missing_ownerships(&agent);
+        // An idle agent is not associated with any channel. Reset the
+        // ephemeral effective selection so no caller can mistake the last
+        // claimed channel's override for agent-global state.
+        agent.use_baseline_model();
         self.agents[idx] = Some(agent);
+    }
+
+    /// Release every conversation ownership held by `index`.
+    ///
+    /// Called when the slot's agent process is being replaced (respawn after
+    /// exit/timeout/transport error, or panic recovery) — its sessions died
+    /// with the process, so waiting scopes must be free to re-own elsewhere.
+    pub fn release_agent_ownerships(&mut self, index: usize) {
+        self.scope_owners.retain(|_, owner| *owner != index);
+    }
+
+    /// Consume the invalidation marker for an agent's completed task.
+    pub(crate) fn take_discard_result_batch(&mut self, index: usize) -> bool {
+        self.discard_result_batches.remove(&index)
     }
 
     /// Whether any agent is currently idle (sitting in its slot).
@@ -629,12 +1161,12 @@ impl AgentPool {
         self.agents.iter().any(|slot| slot.is_some())
     }
 
-    /// Whether any idle agent already has a session for `channel_id`.
+    /// Whether any idle agent already has a session for `scope`.
     /// Used to compute `affinity_hit` before calling `try_claim`.
-    pub fn has_session_for(&self, channel_id: Uuid) -> bool {
+    pub fn has_session_for(&self, scope: ConversationScope) -> bool {
         self.agents.iter().any(|slot| {
             slot.as_ref()
-                .map(|a| a.state.sessions.contains_key(&channel_id))
+                .map(|a| a.state.sessions.contains_key(&scope))
                 .unwrap_or(false)
         })
     }
@@ -657,7 +1189,7 @@ impl AgentPool {
     }
 
     /// Try to send a goose-native steer request to the in-flight task for
-    /// `channel_id`.
+    /// `scope`.
     ///
     /// Returns `Ok(())` if the request was accepted by the read loop's
     /// receiver (capacity-1 mpsc; one slot is the single in-flight steer
@@ -674,19 +1206,19 @@ impl AgentPool {
     /// watcher, to close the result-vs-ack race.
     ///
     /// Returns `Err(SteerError::PromptCompleted)` if no task is in flight
-    /// for `channel_id` (the prompt completed between the mode-gate check
-    /// and this call, or the channel was never in flight). This is
+    /// for `scope` (the prompt completed between the mode-gate check
+    /// and this call, or the conversation was never in flight). This is
     /// semantically a soft no-op — the caller should release any withheld
     /// event and let normal dispatch handle delivery.
     pub fn send_steer(
         &mut self,
-        channel_id: Uuid,
+        scope: ConversationScope,
         request: SteerRequest,
     ) -> Result<(), SteerError> {
         let meta = self
             .task_map
             .values_mut()
-            .find(|m| m.channel_id == Some(channel_id))
+            .find(|m| m.scope == Some(scope))
             .ok_or(SteerError::PromptCompleted)?;
         let tx = meta
             .steer_tx
@@ -731,73 +1263,185 @@ impl AgentPool {
         &mut self.agents
     }
 
-    /// Remove the session for `channel_id` from all idle agents.
+    /// Remove every session under `channel_id` (channel-level and thread
+    /// conversations alike) from all agents.
     ///
-    /// Called when the agent is removed from a channel — stale sessions
-    /// should not be reused. Checked-out agents (in-flight) are not
-    /// modified; their sessions will fail naturally on the next prompt
-    /// if the relay rejects the request.
+    /// Called when the agent is removed from a channel — stale sessions must
+    /// not be reused. Idle agents are invalidated immediately. Checked-out
+    /// slots are recorded in `pending_channel_invalidations` and reconciled
+    /// when their process returns, even if the channel has already been
+    /// rejoined by then.
     ///
-    /// Returns the number of sessions invalidated.
+    /// Returns the number of agents that had at least one session invalidated.
     pub fn invalidate_channel_sessions(&mut self, channel_id: Uuid) -> usize {
         let mut count = 0;
-        for slot in &mut self.agents {
+        let checked_out: HashSet<usize> = self
+            .task_map
+            .values()
+            .map(|meta| meta.agent_index)
+            .collect();
+        self.discard_result_batches.extend(
+            self.task_map
+                .values()
+                .filter(|meta| {
+                    meta.scope
+                        .is_some_and(|scope| scope.channel_id == channel_id)
+                })
+                .map(|meta| meta.agent_index),
+        );
+        for (index, slot) in self.agents.iter_mut().enumerate() {
             if let Some(agent) = slot.as_mut() {
                 if agent.state.invalidate_channel(&channel_id) {
                     count += 1;
                 }
+            } else if checked_out.contains(&index) {
+                self.pending_channel_invalidations
+                    .entry(index)
+                    .or_default()
+                    .insert(channel_id);
             }
         }
+        // Explicit channel-wide invalidation ends every conversation under
+        // the channel: release ownerships so future traffic (e.g. after a
+        // re-add) can be served by any agent, and drop the channel's
+        // desired-model override.
+        self.scope_owners
+            .retain(|scope, _| scope.channel_id != channel_id);
+        self.model_controls.remove_channel(channel_id);
+        self.slot_channel_model_generations
+            .retain(|(_, channel), _| *channel != channel_id);
         count
     }
 
-    /// Idle-path model switch: set `desired_model` on the idle agent for
-    /// `channel_id` and invalidate its session so the next turn re-creates the
-    /// session under the new model.
+    /// Remove the session for a single conversation `scope` from all agents,
+    /// leaving sibling conversations in the same channel untouched.
     ///
-    /// Pre-cancel guard: the desired model is validated against the agent's
-    /// cached catalog *before* the session is invalidated, so an unsupported
-    /// pick is rejected without disturbing the existing session.
+    /// Used by the idle `!rotate` path so rotating one thread (or the
+    /// channel-level conversation) never destroys unrelated thread sessions.
     ///
-    /// Returns [`IdleSwitchResult`] describing what happened. The model does not
-    /// take effect — and the panel does not reflect it — until the agent next
-    /// runs a turn (no live session exists to re-emit `session_config_captured`
-    /// from an idle agent). This lag is intentional: faking the emit would
-    /// surface an override the session has not actually applied.
-    pub fn switch_idle_agent_model(
+    /// Idle holders are invalidated immediately. If the sticky owner is
+    /// checked out, its invalidation is deferred until return; ownership is
+    /// still released now so the next queued turn starts a fresh session.
+    ///
+    /// Returns the number of idle sessions invalidated immediately.
+    pub fn invalidate_scope_sessions(&mut self, scope: ConversationScope) -> usize {
+        let mut count = 0;
+        let owner = self.scope_owners.get(&scope).copied();
+        for slot in &mut self.agents {
+            if let Some(agent) = slot.as_mut() {
+                if agent.state.invalidate_scope(&scope) {
+                    count += 1;
+                }
+            }
+        }
+        if let Some(owner) = owner {
+            if self.slot_checked_out(owner) {
+                self.pending_scope_invalidations
+                    .entry(owner)
+                    .or_default()
+                    .insert(scope);
+                if self
+                    .task_map
+                    .values()
+                    .any(|meta| meta.agent_index == owner && meta.scope == Some(scope))
+                {
+                    // The task's control one-shot may already be consumed.
+                    // Rotation still owns the final word on batch fate: its
+                    // triggering request must not be re-prompted.
+                    self.discard_result_batches.insert(owner);
+                }
+            }
+        }
+        // The conversation's history is gone — release ownership so the next
+        // event may be served by any agent with a fresh session.
+        self.scope_owners.remove(&scope);
+        count
+    }
+
+    /// Channel-level model switch (desktop `switch_model` control frame).
+    ///
+    /// Desktop model selection is **channel-level desired state**: a
+    /// channel's conversations (channel-level + threads) may be spread across
+    /// several agents, idle and active, so a single-agent switch would leave
+    /// stale sessions behind. This method:
+    ///
+    /// 1. Validates `model_id` against the first cached catalog (all slots
+    ///    run the same agent binary, so one catalog answers for all). No
+    ///    catalog cached anywhere → defer validation to apply time, as
+    ///    before.
+    /// 2. Records the desired model for the channel, so any agent that later
+    ///    claims a conversation under it inherits the model at claim time
+    ///    (see [`try_claim_for_scope`](Self::try_claim_for_scope)).
+    /// 3. Invalidates sessions under the channel on **every idle holder** and
+    ///    stamps its slot with this switch generation. Checked-out holders are
+    ///    reconciled when they return, including sessions for sibling scopes
+    ///    that were not themselves in flight.
+    ///
+    /// Active (checked-out) conversations are NOT handled here — the caller
+    /// signals each in-flight task under the channel with
+    /// `ControlSignal::SwitchModel`, which invalidates and requeues the turn.
+    ///
+    /// Returns [`IdleSwitchResult`] describing what happened. The model does
+    /// not take effect — and the panel does not reflect it — until an agent
+    /// next runs a turn in the channel (no live session exists to re-emit
+    /// `session_config_captured` from an idle agent). This lag is
+    /// intentional: faking the emit would surface an override the session
+    /// has not actually applied.
+    pub fn set_channel_desired_model(
         &mut self,
         channel_id: Uuid,
         model_id: &str,
-    ) -> IdleSwitchResult {
-        let Some(agent) = self
-            .agents
-            .iter_mut()
-            .flatten()
-            .find(|a| a.state.sessions.contains_key(&channel_id))
-        else {
-            return IdleSwitchResult::NoIdleAgent;
-        };
-
-        // Pre-cancel guard against the cached catalog. None = catalog not yet
-        // populated (no session ever created); defer validation to apply time.
-        if let Some(caps) = agent.model_capabilities.as_ref() {
-            if !model_in_catalog(
-                &caps.config_options_raw,
-                caps.available_models_raw.as_ref(),
-                model_id,
-            ) {
-                return IdleSwitchResult::UnsupportedModel;
-            }
+        request_id: Option<&str>,
+    ) -> (ModelControlDecision, IdleSwitchResult) {
+        let decision = self
+            .model_controls
+            .request(channel_id, model_id, request_id);
+        if matches!(decision, ModelControlDecision::Unsupported { .. }) {
+            return (decision, IdleSwitchResult::UnsupportedModel);
         }
+        if matches!(decision, ModelControlDecision::PendingCatalog { .. }) {
+            return (decision, IdleSwitchResult::PendingCatalog);
+        }
+        let generation = decision.generation();
 
-        agent.desired_model = Some(model_id.to_string());
-        agent.model_overridden = true;
-        agent.state.invalidate_channel(&channel_id);
-        IdleSwitchResult::Switched
+        let mut applied = 0;
+        let mut reconciled_idle_slots = HashSet::new();
+        for agent in self.agents.iter_mut().flatten() {
+            reconciled_idle_slots.insert(agent.index);
+            if agent.state.invalidate_channel(&channel_id) {
+                applied += 1;
+            }
+            self.slot_channel_model_generations
+                .insert((agent.index, channel_id), generation);
+        }
+        // Invalidation destroys the history that required sticky ownership.
+        // Release ownership only for idle slots reconciled above; checked-out
+        // holders retain ownership until their sessions are invalidated on
+        // return (or by their active SwitchModel signal).
+        self.scope_owners.retain(|scope, owner| {
+            scope.channel_id != channel_id || !reconciled_idle_slots.contains(owner)
+        });
+        let idle_result = if applied > 0 {
+            IdleSwitchResult::Switched
+        } else {
+            IdleSwitchResult::NoIdleAgent
+        };
+        (decision, idle_result)
+    }
+
+    #[cfg(test)]
+    pub fn model_controls(&self) -> ChannelModelControls {
+        self.model_controls.clone()
+    }
+
+    /// Test-only visibility into conversation ownership.
+    #[cfg(test)]
+    pub fn scope_owner(&self, scope: &ConversationScope) -> Option<usize> {
+        self.scope_owners.get(scope).copied()
     }
 }
 
-/// Outcome of [`AgentPool::switch_idle_agent_model`].
+/// Outcome of [`AgentPool::set_channel_desired_model`].
 #[derive(Debug, PartialEq, Eq)]
 pub enum IdleSwitchResult {
     /// `desired_model` set and the channel session invalidated.
@@ -805,6 +1449,9 @@ pub enum IdleSwitchResult {
     /// Desired model is not in the agent's cached catalog — pick rejected,
     /// session untouched.
     UnsupportedModel,
+    /// No ACP session has returned a model catalog yet. No sessions or turns
+    /// were disturbed; resolution is deferred until the first catalog.
+    PendingCatalog,
     /// No idle agent available (all checked out / none spawned).
     NoIdleAgent,
 }
@@ -888,7 +1535,7 @@ async fn create_session_and_apply_model(
     agent_core: Option<&str>,
     agent_canvas: Option<&str>,
     channel_name: Option<&str>,
-    channel_id: Option<Uuid>,
+    conversation_scope: Option<ConversationScope>,
     channel_type: Option<&str>,
 ) -> Result<String, AcpError> {
     // Build base_prompt + system_prompt + agent core + canvas metadata into a
@@ -909,13 +1556,15 @@ async fn create_session_and_apply_model(
         agent_canvas,
     );
 
-    let session_title = ctx
-        .session_title
-        .as_deref()
-        .map(|agent_name| compose_session_title(agent_name, channel_name));
+    let session_title = ctx.session_title.as_deref().map(|agent_name| {
+        let thread_root = conversation_scope
+            .and_then(|scope| scope.thread_root)
+            .map(|root| root.to_hex());
+        compose_session_title(agent_name, channel_name, thread_root.as_deref())
+    });
     let mcp_servers = mcp_servers_with_git_origin(
         &ctx.mcp_servers,
-        channel_id,
+        conversation_scope.map(|scope| scope.channel_id),
         channel_type,
         ctx.session_title.as_deref(),
     );
@@ -955,18 +1604,55 @@ async fn create_session_and_apply_model(
         }
     }
 
-    // Populate model capabilities on first session creation.
+    // Publish the first session catalog to the process-lifetime coordinator.
+    // This resolves lazy pre-wake controls once, even though the placeholder
+    // pool has already been replaced and this agent is checked out.
+    let capabilities = AgentModelCapabilities {
+        config_options_raw: extract_model_config_options(&resp.raw),
+        available_models_raw: extract_model_state(&resp.raw),
+    };
     if agent.model_capabilities.is_none() {
-        agent.model_capabilities = Some(AgentModelCapabilities {
-            config_options_raw: extract_model_config_options(&resp.raw),
-            available_models_raw: extract_model_state(&resp.raw),
-        });
+        agent.model_capabilities = Some(capabilities.clone());
+    }
+    for result in ctx.model_controls.register_catalog(capabilities) {
+        if let Some(observer) = agent.acp.observer_handle() {
+            observer.emit(
+                "control_result",
+                agent.acp.observer_agent_index(),
+                &observer::ObserverContext {
+                    channel_id: Some(result.channel_id.to_string()),
+                    thread_root: None,
+                    session_id: None,
+                    turn_id: None,
+                    started_at: None,
+                },
+                serde_json::json!({
+                    "type": "switch_model",
+                    "status": result.status,
+                    "channelId": result.channel_id,
+                    "modelId": result.model_id,
+                    "generation": result.generation,
+                    "requestId": result.request_id,
+                }),
+            );
+        }
+    }
+
+    // A control can arrive while session/new is in flight. Resolve the latest
+    // channel generation only after the response, immediately before apply.
+    // Heartbeats deliberately remain on the configured baseline.
+    if let Some(scope) = conversation_scope {
+        let desired = ctx.model_controls.desired_model(scope.channel_id);
+        agent.use_channel_model(desired.as_ref());
+    } else {
+        agent.use_baseline_model();
     }
 
     // Apply desired_model if set, matching against the fresh session/new response.
     // Track whether the switch succeeded so session_config_captured reflects
     // the post-switch state (not the pre-switch desired state).
-    let switch_succeeded = if let Some(ref desired) = agent.desired_model {
+    let desired_to_apply = agent.desired_model.clone();
+    let switch_succeeded = if let Some(desired) = desired_to_apply.as_deref() {
         match resolve_model_switch_method(&resp.raw, desired) {
             Some(method) => {
                 apply_model_switch(&mut agent.acp, &resp.session_id, desired, &method).await?;
@@ -977,18 +1663,20 @@ async fn create_session_and_apply_model(
                     target: "pool::model",
                     "desired model {desired} not found in agent's available models — proceeding with agent default"
                 );
-                // Surface the miss so the desktop ModelPicker can reject a live
-                // pick rather than silently no-op. On the busy path the turn has
-                // already been cancelled+requeued by the time we get here, so the
-                // turn restarts on the unchanged model and the user is told no.
-                agent.acp.observe(
-                    "control_result",
-                    serde_json::json!({
-                        "type": "switch_model",
-                        "status": "unsupported_model",
-                        "modelId": desired,
-                    }),
-                );
+                if let (Some(scope), Some(generation)) =
+                    (conversation_scope, agent.desired_model_generation)
+                {
+                    // Catalog validation should make this unreachable unless
+                    // an agent changes its catalog between sessions. Never let
+                    // that stale failure erase a newer concurrent generation.
+                    if ctx
+                        .model_controls
+                        .clear_if_current(scope.channel_id, generation)
+                        .is_some()
+                    {
+                        agent.use_baseline_model();
+                    }
+                }
                 false
             }
         }
@@ -1396,22 +2084,25 @@ pub async fn run_prompt_task(
     control_rx: Option<tokio::sync::oneshot::Receiver<ControlSignal>>,
     turn_id: String,
 ) {
-    // Is this a channel prompt or a heartbeat?
+    // Is this a conversation prompt or a heartbeat?
     let source = match &batch {
-        Some(b) => PromptSource::Channel(b.channel_id),
+        Some(b) => PromptSource::Conversation(b.scope),
         None => PromptSource::Heartbeat,
     };
-    let observer_channel_id = match &source {
-        PromptSource::Channel(channel_id) => Some(*channel_id),
+    let observer_scope = match &source {
+        PromptSource::Conversation(scope) => Some(*scope),
         PromptSource::Heartbeat => None,
     };
+    let observer_channel_id = observer_scope.map(|scope| scope.channel_id);
     let turn_started_at = chrono::Utc::now().to_rfc3339();
-    agent.acp.set_observer_context(observer::context_for_turn(
-        observer_channel_id,
-        None,
-        turn_id.clone(),
-        turn_started_at.clone(),
-    ));
+    agent
+        .acp
+        .set_observer_context(observer::context_for_scope_turn(
+            observer_scope,
+            None,
+            turn_id.clone(),
+            turn_started_at.clone(),
+        ));
     let triggering_event_ids: Vec<String> = batch
         .as_ref()
         .map(|b| b.events.iter().map(|be| be.event.id.to_hex()).collect())
@@ -1420,7 +2111,7 @@ pub async fn run_prompt_task(
         "turn_started",
         serde_json::json!({
             "source": match &source {
-                PromptSource::Channel(_) => "channel",
+                PromptSource::Conversation(_) => "channel",
                 PromptSource::Heartbeat => "heartbeat",
             },
             "triggeringEventIds": triggering_event_ids,
@@ -1434,7 +2125,7 @@ pub async fn run_prompt_task(
     let _turn_guard = TurnCompletionGuard::new(
         agent.acp.observer_handle(),
         agent.acp.observer_agent_index(),
-        observer_channel_id,
+        observer_scope,
         turn_id.clone(),
     );
 
@@ -1454,8 +2145,8 @@ pub async fn run_prompt_task(
     let liveness = run_turn_liveness(
         agent.acp.observer_handle(),
         agent.acp.observer_agent_index(),
-        observer::context_for_turn(
-            observer_channel_id,
+        observer::context_for_scope_turn(
+            observer_scope,
             None,
             turn_id.clone(),
             turn_started_at.clone(),
@@ -1483,8 +2174,9 @@ pub async fn run_prompt_task(
     // we do it here and cache the rendered section in `state.core_sections`.
     //
     // Core is keyed by (agent_keys, owner) — both fixed for the process — so
-    // it is identical across channels; the per-channel cache just avoids a
-    // re-fetch on each new session and is cleared on session invalidation.
+    // it is identical across conversations; the per-conversation cache just
+    // avoids a re-fetch on each new session and is cleared on session
+    // invalidation.
     //
     // Failure modes (all fail open — no crash, no block):
     //   * no owner configured → skip (no NIP-AE namespace exists)
@@ -1501,11 +2193,11 @@ pub async fn run_prompt_task(
     //
     // Operator opt-out: `--no-memory` / `BUZZ_ACP_NO_MEMORY` skips the fetch.
     if ctx.memory_enabled {
-        if let (PromptSource::Channel(cid), Some(owner_pk)) =
+        if let (PromptSource::Conversation(scope), Some(owner_pk)) =
             (&source, ctx.agent_owner_pubkey.as_ref())
         {
-            let is_new_channel_session = !agent.state.sessions.contains_key(cid);
-            if is_new_channel_session && !agent.state.core_sections.contains_key(cid) {
+            let is_new_session = !agent.state.sessions.contains_key(scope);
+            if is_new_session && !agent.state.core_sections.contains_key(scope) {
                 // Bounded — we'd rather start the session with no core hint
                 // than block session creation on a stalled relay.
                 const CORE_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
@@ -1519,7 +2211,7 @@ pub async fn run_prompt_task(
                     Err(_) => {
                         tracing::warn!(
                             target: "engram::core",
-                            channel = %cid,
+                            scope = %scope,
                             timeout_ms = CORE_FETCH_TIMEOUT.as_millis() as u64,
                             "core fetch timed out — emitting no section"
                         );
@@ -1529,11 +2221,11 @@ pub async fn run_prompt_task(
                 if let Some(rendered) = section {
                     tracing::info!(
                         target: "engram::core",
-                        channel = %cid,
+                        scope = %scope,
                         section_len = rendered.len(),
                         "injected NIP-AE core section into system prompt"
                     );
-                    agent.state.core_sections.insert(*cid, rendered);
+                    agent.state.core_sections.insert(*scope, rendered);
                 }
             }
         }
@@ -1551,51 +2243,52 @@ pub async fn run_prompt_task(
     // commit it to `canvas_sections` only after session creation succeeds. This
     // prevents a stale revision A surviving a failed create and being re-used by
     // the next attempt after the canvas was cleared.
-    let mut pending_canvas: Option<(Uuid, String)> = None;
+    let mut pending_canvas: Option<(ConversationScope, String)> = None;
     // Channel name for the session title, from the same single resolve the
     // canvas DM check uses — see `resolve_new_session_channel_context`.
     let mut title_channel: Option<String> = None;
     let mut origin_channel_type: Option<String> = None;
-    if let PromptSource::Channel(cid) = &source {
-        let is_new_channel_session = !agent.state.sessions.contains_key(cid);
-        let needs_canvas = is_new_channel_session && !agent.state.canvas_sections.contains_key(cid);
-        if is_new_channel_session {
+    if let PromptSource::Conversation(scope) = &source {
+        let is_new_session = !agent.state.sessions.contains_key(scope);
+        let needs_canvas = is_new_session && !agent.state.canvas_sections.contains_key(scope);
+        if is_new_session {
+            let cid = scope.channel_id;
             let (is_dm, resolved_channel, resolved_channel_type) =
-                resolve_new_session_channel_context(&ctx.channel_info, *cid).await;
+                resolve_new_session_channel_context(&ctx.channel_info, cid).await;
             title_channel = resolved_channel;
             origin_channel_type = resolved_channel_type;
             // A confirmed DM never receives a canvas section; an undeterminable
             // channel type fails closed as a DM for the same reason.
             if needs_canvas && !is_dm {
-                if let Some(section) = fetch_canvas_section(*cid, &ctx.rest_client).await {
-                    pending_canvas = Some((*cid, section));
+                if let Some(section) = fetch_canvas_section(cid, &ctx.rest_client).await {
+                    pending_canvas = Some((*scope, section));
                 }
             }
         }
     }
 
     // The core section to fold into the system prompt for this turn's session.
-    // Channel-scoped; heartbeats carry no owner core.
+    // Conversation-scoped; heartbeats carry no owner core.
     let agent_core: Option<String> = match &source {
-        PromptSource::Channel(cid) => agent.state.core_sections.get(cid).cloned(),
+        PromptSource::Conversation(scope) => agent.state.core_sections.get(scope).cloned(),
         PromptSource::Heartbeat => None,
     };
 
-    // The canvas metadata section — channel-scoped, absent for heartbeats/DMs.
+    // The canvas metadata section — conversation-scoped, absent for heartbeats/DMs.
     // Prefer the committed cache; fall back to pending (for new sessions being created now).
     let agent_canvas: Option<String> = match &source {
-        PromptSource::Channel(cid) => agent
+        PromptSource::Conversation(scope) => agent
             .state
             .canvas_sections
-            .get(cid)
+            .get(scope)
             .cloned()
             .or_else(|| pending_canvas.as_ref().map(|(_, s)| s.clone())),
         PromptSource::Heartbeat => None,
     };
 
     let (session_id, is_new_session) = match &source {
-        PromptSource::Channel(cid) => {
-            if let Some(sid) = agent.state.sessions.get(cid) {
+        PromptSource::Conversation(scope) => {
+            if let Some(sid) = agent.state.sessions.get(scope) {
                 (sid.clone(), false)
             } else {
                 // The title is channel-qualified (`Agent · #channel`) so one
@@ -1608,7 +2301,7 @@ pub async fn run_prompt_task(
                     agent_core.as_deref(),
                     agent_canvas.as_deref(),
                     title_channel.as_deref(),
-                    Some(*cid),
+                    Some(*scope),
                     origin_channel_type.as_deref(),
                 )
                 .await
@@ -1616,12 +2309,12 @@ pub async fn run_prompt_task(
                     Ok(sid) => {
                         tracing::info!(
                             target: "pool::session",
-                            "created session {sid} for channel {cid}"
+                            "created session {sid} for conversation {scope}"
                         );
-                        agent.state.sessions.insert(*cid, sid.clone());
+                        agent.state.sessions.insert(*scope, sid.clone());
                         // Commit canvas only after session creation succeeds (I3).
-                        if let Some((pending_cid, section)) = pending_canvas.take() {
-                            agent.state.canvas_sections.insert(pending_cid, section);
+                        if let Some((pending_scope, section)) = pending_canvas.take() {
+                            agent.state.canvas_sections.insert(pending_scope, section);
                         }
                         (sid, true)
                     }
@@ -1696,12 +2389,14 @@ pub async fn run_prompt_task(
             }
         }
     };
-    agent.acp.set_observer_context(observer::context_for_turn(
-        observer_channel_id,
-        Some(session_id.clone()),
-        turn_id.clone(),
-        turn_started_at,
-    ));
+    agent
+        .acp
+        .set_observer_context(observer::context_for_scope_turn(
+            observer_scope,
+            Some(session_id.clone()),
+            turn_id.clone(),
+            turn_started_at,
+        ));
     // Backfill liveness's shared session ID so ticks after this point carry
     // it too, matching every other observer frame for this turn.
     liveness_guard.set_session_id(session_id.clone());
@@ -1714,11 +2409,12 @@ pub async fn run_prompt_task(
     );
 
     if is_new_session {
-        if let (PromptSource::Channel(cid), Some(ref initial_msg)) = (&source, &ctx.initial_message)
+        if let (PromptSource::Conversation(scope), Some(ref initial_msg)) =
+            (&source, &ctx.initial_message)
         {
             tracing::info!(
                 target: "pool::session",
-                "sending initial_message to session {session_id} for channel {cid}"
+                "sending initial_message to session {session_id} for conversation {scope}"
             );
             // For agents with systemPrompt support (protocol_version >= 2),
             // base_prompt is delivered via the system role in session/new.
@@ -1758,7 +2454,7 @@ pub async fn run_prompt_task(
                 Ok(stop_reason) => {
                     tracing::info!(
                         target: "pool::session",
-                        "initial_message complete for channel {cid}: {stop_reason:?}"
+                        "initial_message complete for conversation {scope}: {stop_reason:?}"
                     );
                 }
                 Err(AcpError::AgentExited) => {
@@ -1776,7 +2472,7 @@ pub async fn run_prompt_task(
                 Err(AcpError::IdleTimeout(_)) => {
                     tracing::warn!(
                         target: "pool::session",
-                        "initial_message idle timeout ({}s) for channel {cid} — cancelling",
+                        "initial_message idle timeout ({}s) for conversation {scope} — cancelling",
                         ctx.idle_timeout.as_secs()
                     );
                     match agent
@@ -1821,7 +2517,7 @@ pub async fn run_prompt_task(
                     let recently_active = silence < RECENT_ACTIVITY_WINDOW;
                     tracing::error!(
                         target: "pool::session",
-                        "hard timeout ({}s cap, silence {silence:?}, recently_active={recently_active}) during initial_message for channel {cid} — agent process is unrecoverable",
+                        "hard timeout ({}s cap, silence {silence:?}, recently_active={recently_active}) during initial_message for conversation {scope} — agent process is unrecoverable",
                         ctx.max_turn_duration.as_secs()
                     );
                     agent.state.invalidate_all();
@@ -1838,7 +2534,7 @@ pub async fn run_prompt_task(
                 Err(e) => {
                     tracing::error!(
                         target: "pool::session",
-                        "initial_message failed for channel {cid}: {e} — invalidating session"
+                        "initial_message failed for conversation {scope}: {e} — invalidating session"
                     );
                     agent.state.invalidate(&source);
                     send_prompt_result(
@@ -1877,7 +2573,7 @@ pub async fn run_prompt_task(
     } else if let Some(ref b) = batch {
         // Build prompt from batch with context enrichment.
         // Try startup cache first; lazy-fetch via REST for dynamic channels.
-        let channel_info = ctx.channel_info.resolve(b.channel_id).await;
+        let channel_info = ctx.channel_info.resolve(b.channel_id()).await;
 
         let conversation_context = if ctx.context_message_limit > 0 {
             fetch_conversation_context(b, &channel_info, &ctx).await
@@ -1898,7 +2594,7 @@ pub async fn run_prompt_task(
         if let Some(ref cmd) = slash_command {
             tracing::info!(
                 target: "pool::prompt",
-                channel = %b.channel_id,
+                channel = %b.scope,
                 command = %cmd,
                 "slash-command pass-through"
             );
@@ -1996,14 +2692,6 @@ pub async fn run_prompt_task(
                 ) => result,
                 mode = rx => {
                     let control_signal = mode.unwrap_or(ControlSignal::Cancel);
-                    // Land the model switch before any cancel/requeue work: setting
-                    // `desired_model` here means the fresh session created by the
-                    // requeued turn (busy) or the next turn (already-completed)
-                    // applies the new model. Runtime-only — never persisted.
-                    if let ControlSignal::SwitchModel(ref model_id) = control_signal {
-                        agent.desired_model = Some(model_id.clone());
-                        agent.model_overridden = true;
-                    }
                     // Control signal received. Guard against Race 1: the turn may
                     // have completed naturally just as cancel fired.
                     if agent.acp.has_in_flight_prompt() {
@@ -2093,7 +2781,7 @@ pub async fn run_prompt_task(
                         // MUST send a PromptResult or the main loop deadlocks.
                         if matches!(
                             control_signal,
-                            ControlSignal::Rotate | ControlSignal::SwitchModel(_)
+                            ControlSignal::Rotate | ControlSignal::SwitchModel { .. }
                         ) {
                             tracing::debug!(
                                 target: "pool::prompt",
@@ -2148,8 +2836,8 @@ pub async fn run_prompt_task(
                 let limit = ctx.max_turns_per_session;
                 if limit > 0 {
                     match &source {
-                        PromptSource::Channel(cid) => {
-                            let count = agent.state.turn_counts.entry(*cid).or_insert(0);
+                        PromptSource::Conversation(scope) => {
+                            let count = agent.state.turn_counts.entry(*scope).or_insert(0);
                             *count += 1;
                             *count >= limit
                         }
@@ -2374,6 +3062,33 @@ where
     }
     tokio::time::sleep(CONTEXT_FETCH_RETRY_DELAY).await;
     f().await
+}
+
+/// Resolve and cache metadata for a dynamically joined channel.
+///
+/// Called by the membership-add resolver before opening event delivery, so a
+/// channel joined after startup gains correct DM/thread scoping on its first
+/// event. Returns `true` once metadata is cached; callers retry failures while
+/// the membership remains pending.
+pub(crate) async fn refresh_channel_info(ctx: &PromptContext, channel_id: Uuid) -> bool {
+    match ctx.channel_info.resolve(channel_id).await {
+        Some(info) => {
+            tracing::info!(
+                channel_id = %channel_id,
+                channel_type = %info.channel_type,
+                "cached metadata for dynamically joined channel"
+            );
+            true
+        }
+        None => {
+            tracing::warn!(
+                channel_id = %channel_id,
+                "could not resolve metadata for dynamically joined channel — \
+                 subscription remains closed until retry succeeds"
+            );
+            false
+        }
+    }
 }
 
 /// Lazy-fetch channel metadata for a channel not in the startup discovery cache.
@@ -2640,29 +3355,119 @@ pub(crate) fn render_canvas_section(event_id: &str, timestamp: &str, channel_uui
 /// - The REST fetch fails or times out (graceful degradation)
 /// - `context_message_limit` is 0
 ///
-/// For batches with multiple events, thread context is fetched for the **last**
-/// reply event only (most recent = most likely to need a response).
+/// The typed batch scope is authoritative for non-DM threads. DM sessions stay
+/// channel-scoped, so a DM reply falls back to the last event's NIP-10 root to
+/// preserve the existing reply-hydration behavior without changing session
+/// ownership.
+fn context_thread_root(batch: &FlushBatch, is_dm: bool) -> Option<nostr::EventId> {
+    batch.scope.thread_root.or_else(|| {
+        if is_dm {
+            batch
+                .events
+                .last()
+                .and_then(|event| buzz_core::thread::parse_nip10_thread(&event.event))
+                .map(|thread| thread.root_event_id)
+        } else {
+            None
+        }
+    })
+}
+
+fn context_excluded_event_ids(batch: &FlushBatch) -> HashSet<nostr::EventId> {
+    batch
+        .events
+        .iter()
+        .chain(batch.cancelled_events.iter())
+        .map(|event| event.event.id)
+        .collect()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ThreadContextType {
+    Stream,
+    Forum,
+    Dm,
+}
+
+impl ThreadContextType {
+    fn from_channel_info(channel_info: Option<&PromptChannelInfo>) -> Self {
+        match channel_info.map(|info| info.channel_type.as_str()) {
+            Some("forum") => Self::Forum,
+            Some("dm") => Self::Dm,
+            _ => Self::Stream,
+        }
+    }
+
+    fn root_kinds(self) -> Vec<nostr::Kind> {
+        match self {
+            Self::Stream | Self::Dm => vec![
+                nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16),
+                nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE_V2 as u16),
+            ],
+            Self::Forum => {
+                vec![nostr::Kind::Custom(buzz_core::kind::KIND_FORUM_POST as u16)]
+            }
+        }
+    }
+
+    fn reply_kinds(self) -> Vec<nostr::Kind> {
+        match self {
+            Self::Stream | Self::Dm => vec![
+                nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16),
+                nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE_V2 as u16),
+            ],
+            Self::Forum => {
+                vec![nostr::Kind::Custom(
+                    buzz_core::kind::KIND_FORUM_COMMENT as u16,
+                )]
+            }
+        }
+    }
+
+    fn allows_root(self, kind: nostr::Kind) -> bool {
+        let kind = kind.as_u16() as u32;
+        match self {
+            Self::Stream | Self::Dm => matches!(
+                kind,
+                buzz_core::kind::KIND_STREAM_MESSAGE | buzz_core::kind::KIND_STREAM_MESSAGE_V2
+            ),
+            Self::Forum => kind == buzz_core::kind::KIND_FORUM_POST,
+        }
+    }
+
+    fn allows_reply(self, kind: nostr::Kind) -> bool {
+        let kind = kind.as_u16() as u32;
+        match self {
+            Self::Stream | Self::Dm => matches!(
+                kind,
+                buzz_core::kind::KIND_STREAM_MESSAGE | buzz_core::kind::KIND_STREAM_MESSAGE_V2
+            ),
+            Self::Forum => kind == buzz_core::kind::KIND_FORUM_COMMENT,
+        }
+    }
+}
+
 async fn fetch_conversation_context(
     batch: &FlushBatch,
     channel_info: &Option<PromptChannelInfo>,
     ctx: &PromptContext,
 ) -> Option<ConversationContext> {
     let limit = ctx.context_message_limit;
-    let is_dm = channel_info
-        .as_ref()
-        .map(|ci| ci.channel_type == "dm")
-        .unwrap_or(false);
+    let context_type = ThreadContextType::from_channel_info(channel_info.as_ref());
+    let is_dm = context_type == ThreadContextType::Dm;
 
-    // Check thread tags on the last event first — this applies to both
-    // channels and DMs. A DM reply needs thread context (not channel history)
-    // because /api/channels/{id}/messages excludes thread replies.
-    let last_event = batch.events.last()?;
-    let tags = crate::queue::parse_thread_tags(&last_event.event);
-    if let Some(root_id) = tags.root_event_id {
+    // A non-DM thread's typed scope is the single source of truth: queueing,
+    // session ownership, and hydrated context must all use the same canonical
+    // root. DMs are intentionally channel-scoped, so their reply context uses
+    // the last event's NIP-10 root without changing session ownership.
+    let excluded_event_ids = context_excluded_event_ids(batch);
+    if let Some(root_id) = context_thread_root(batch, is_dm) {
         return fetch_thread_context(
-            batch.channel_id,
-            &root_id,
+            batch.channel_id(),
+            root_id,
             limit,
+            &excluded_event_ids,
+            context_type,
             ctx.agent_keys.public_key(),
             &ctx.rest_client,
         )
@@ -2671,7 +3476,13 @@ async fn fetch_conversation_context(
 
     // DM non-reply: fetch recent conversation history.
     if is_dm {
-        return fetch_dm_context(batch.channel_id, limit, &ctx.rest_client).await;
+        return fetch_dm_context(
+            batch.channel_id(),
+            limit,
+            &excluded_event_ids,
+            &ctx.rest_client,
+        )
+        .await;
     }
 
     None
@@ -2840,27 +3651,40 @@ async fn fetch_prompt_profile_lookup(
 /// otherwise push it out.
 async fn fetch_thread_context(
     channel_id: Uuid,
-    root_event_id: &str,
+    root_event_id: nostr::EventId,
     limit: u32,
+    excluded_event_ids: &HashSet<nostr::EventId>,
+    context_type: ThreadContextType,
     agent_pubkey: nostr::PublicKey,
     rest: &RestClient,
 ) -> Option<ConversationContext> {
     fetch_thread_context_with(
-        channel_id,
-        root_event_id,
-        limit,
-        agent_pubkey,
+        ThreadContextFetchRequest {
+            channel_id,
+            root_event_id,
+            limit,
+            excluded_event_ids,
+            context_type,
+            agent_pubkey,
+        },
         |filters| async move { rest.query(&filters).await },
         |filters| async move { rest.count(&filters).await },
     )
     .await
 }
 
-async fn fetch_thread_context_with<Query, QueryFut, Count, CountFut>(
+#[derive(Clone, Copy)]
+struct ThreadContextFetchRequest<'a> {
     channel_id: Uuid,
-    root_event_id: &str,
+    root_event_id: nostr::EventId,
     limit: u32,
+    excluded_event_ids: &'a HashSet<nostr::EventId>,
+    context_type: ThreadContextType,
     agent_pubkey: nostr::PublicKey,
+}
+
+async fn fetch_thread_context_with<Query, QueryFut, Count, CountFut>(
+    request: ThreadContextFetchRequest<'_>,
     query: Query,
     count: Count,
 ) -> Option<ConversationContext>
@@ -2872,34 +3696,49 @@ where
 {
     use nostr::{Alphabet, SingleLetterTag};
 
-    // Defense-in-depth: validate hex event ID.
-    if root_event_id.is_empty()
-        || root_event_id.len() != 64
-        || !root_event_id.chars().all(|c| c.is_ascii_hexdigit())
-    {
-        tracing::warn!(
-            channel_id = %channel_id,
-            "invalid root_event_id (expected 64 hex chars) — skipping thread context fetch"
-        );
-        return None;
-    }
+    let ThreadContextFetchRequest {
+        channel_id,
+        root_event_id,
+        limit,
+        excluded_event_ids,
+        context_type,
+        agent_pubkey,
+    } = request;
 
     let e_tag = SingleLetterTag::lowercase(Alphabet::E);
     let h_tag = SingleLetterTag::lowercase(Alphabet::H);
     let ch_str = channel_id.to_string();
+    let root_hex = root_event_id.to_hex();
+    // Fetch one validated sentinel beyond the display limit, plus enough room
+    // for every current/cancelled source ID that the relay may return. This
+    // preserves the requested historical window after exclusions and lets the
+    // parser retain its truncation signal.
+    let query_limit = (limit as usize)
+        .saturating_add(excluded_event_ids.len())
+        .saturating_add(1);
 
     // Three filters: (1) root event by ID, (2) recent replies with #e=root +
     // #h=channel plus a sentinel, and (3) the agent's newest reply for pinning.
-    let root_filter = nostr::Filter::new().id(nostr::EventId::from_hex(root_event_id).ok()?);
+    // All filters are channel- and kind-scoped. The response is still treated
+    // as untrusted below: every signed event is re-checked against these
+    // constraints because a compromised/misbehaving relay can ignore filters.
+    let root_filter = nostr::Filter::new()
+        .id(root_event_id)
+        .kinds(context_type.root_kinds())
+        .custom_tags(h_tag, [ch_str.as_str()]);
     let replies_filter = nostr::Filter::new()
-        .kinds([
-            nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16),
-            nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE_V2 as u16),
-        ])
-        .custom_tags(e_tag, [root_event_id])
+        .kinds(context_type.reply_kinds())
+        .custom_tags(e_tag, [root_hex.as_str()])
         .custom_tags(h_tag, [ch_str.as_str()])
-        .limit(limit.saturating_add(1) as usize);
-    let agent_reply_filter = replies_filter.clone().author(agent_pubkey).limit(1);
+        .limit(query_limit);
+    // The newest agent-authored event may be one of the current/cancelled
+    // source IDs excluded below. Fetch enough author-filtered candidates to
+    // retain the preceding valid agent reply in that case.
+    let agent_query_limit = excluded_event_ids.len().saturating_add(1);
+    let agent_reply_filter = replies_filter
+        .clone()
+        .author(agent_pubkey)
+        .limit(agent_query_limit);
 
     let context = fetch_with_retry(|| async {
         match timeout(
@@ -2912,13 +3751,19 @@ where
         )
         .await
         {
-            Ok(Ok(json)) => {
-                parse_nostr_thread_response_with_meta(json, root_event_id, limit, &agent_pubkey)
-            }
+            Ok(Ok(json)) => parse_nostr_thread_response_with_meta(
+                json,
+                channel_id,
+                root_event_id,
+                limit,
+                excluded_event_ids,
+                context_type,
+                &agent_pubkey,
+            ),
             Ok(Err(e)) => {
                 tracing::warn!(
                     channel_id = %channel_id,
-                    root = root_event_id,
+                    root = %root_event_id,
                     "thread context fetch failed: {e} — will retry"
                 );
                 None
@@ -2926,7 +3771,7 @@ where
             Err(_) => {
                 tracing::warn!(
                     channel_id = %channel_id,
-                    root = root_event_id,
+                    root = %root_event_id,
                     "thread context fetch timed out — will retry"
                 );
                 None
@@ -3008,19 +3853,23 @@ where
 async fn fetch_dm_context(
     channel_id: Uuid,
     limit: u32,
+    excluded_event_ids: &HashSet<nostr::EventId>,
     rest: &RestClient,
 ) -> Option<ConversationContext> {
     use nostr::{Alphabet, SingleLetterTag};
 
     let h_tag = SingleLetterTag::lowercase(Alphabet::H);
     let ch_str = channel_id.to_string();
+    let query_limit = (limit as usize)
+        .saturating_add(excluded_event_ids.len())
+        .saturating_add(1);
     let filter = nostr::Filter::new()
         .kinds([
             nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16),
             nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE_V2 as u16),
         ])
         .custom_tags(h_tag, [ch_str.as_str()])
-        .limit(limit as usize);
+        .limit(query_limit);
 
     fetch_with_retry(|| async {
         match timeout(
@@ -3029,7 +3878,7 @@ async fn fetch_dm_context(
         )
         .await
         {
-            Ok(Ok(json)) => parse_nostr_dm_response(json, limit),
+            Ok(Ok(json)) => parse_nostr_dm_response(json, channel_id, limit, excluded_event_ids),
             Ok(Err(e)) => {
                 tracing::warn!(
                     channel_id = %channel_id,
@@ -3125,6 +3974,7 @@ fn parse_dm_response(json: serde_json::Value, limit: u32) -> Option<Conversation
 /// Extract a `ContextMessage` from a JSON message object.
 ///
 /// Works with both thread reply objects and channel message objects.
+#[cfg(test)]
 fn json_to_context_message(obj: &serde_json::Value) -> Option<ContextMessage> {
     let content = obj.get("content").and_then(|v| v.as_str())?;
     let pubkey = obj
@@ -3152,22 +4002,68 @@ fn json_to_context_message(obj: &serde_json::Value) -> Option<ContextMessage> {
     })
 }
 
-/// Parse a Nostr query response (array of events) into thread context.
+fn context_event_channel(event: &nostr::Event) -> Option<Uuid> {
+    event.tags.iter().find_map(|tag| {
+        let parts = tag.as_slice();
+        (parts.first().map(String::as_str) == Some("h"))
+            .then(|| parts.get(1)?.parse::<Uuid>().ok())
+            .flatten()
+    })
+}
+
+fn verified_context_event(raw: &serde_json::Value, channel_id: Uuid) -> Option<nostr::Event> {
+    let event = serde_json::from_value::<nostr::Event>(raw.clone()).ok()?;
+    event.verify().ok()?;
+    (context_event_channel(&event) == Some(channel_id)).then_some(event)
+}
+
+fn context_message_from_event(event: &nostr::Event) -> ContextMessage {
+    let timestamp = chrono::DateTime::from_timestamp(event.created_at.as_secs() as i64, 0)
+        .map(|value| value.to_rfc3339())
+        .unwrap_or_else(|| event.created_at.as_secs().to_string());
+    ContextMessage {
+        pubkey: event.pubkey.to_hex(),
+        timestamp,
+        content: event.content.clone(),
+    }
+}
+
+fn is_dm_context_kind(kind: nostr::Kind) -> bool {
+    matches!(
+        kind.as_u16() as u32,
+        buzz_core::kind::KIND_STREAM_MESSAGE | buzz_core::kind::KIND_STREAM_MESSAGE_V2
+    )
+}
+
+/// Parse an untrusted Nostr query response into thread context.
 ///
-/// Separates the root event (matching `root_event_id`) from replies, keeps the
-/// newest `limit` replies returned by the sentinel query, then sorts the
-/// displayed window chronologically for the prompt. If the agent's newest reply
-/// is outside that window, keep it instead of the oldest displayed reply so the
-/// next prompt always includes the agent's most recent prior turn.
+/// Every event must have a valid signature and ID, resolve to the requested
+/// channel under the relay's first-valid-`h` rule, use an allowed message kind,
+/// and either be the exact root or carry a canonical NIP-10 reference to that
+/// root. Mention-only `e` tags cannot admit a cross-root event. The newest
+/// `limit` validated replies are displayed chronologically; if the agent's
+/// newest validated reply falls outside that window, it replaces the oldest
+/// displayed reply so the next prompt retains the agent's prior turn.
 #[cfg(test)]
 fn parse_nostr_thread_response(
     json: serde_json::Value,
-    root_event_id: &str,
+    channel_id: Uuid,
+    root_event_id: nostr::EventId,
     limit: u32,
+    excluded_event_ids: &HashSet<nostr::EventId>,
+    context_type: ThreadContextType,
     agent_pubkey: &nostr::PublicKey,
 ) -> Option<ConversationContext> {
-    parse_nostr_thread_response_with_meta(json, root_event_id, limit, agent_pubkey)
-        .map(|parsed| parsed.context)
+    parse_nostr_thread_response_with_meta(
+        json,
+        channel_id,
+        root_event_id,
+        limit,
+        excluded_event_ids,
+        context_type,
+        agent_pubkey,
+    )
+    .map(|parsed| parsed.context)
 }
 
 struct ParsedThreadContext {
@@ -3177,31 +4073,51 @@ struct ParsedThreadContext {
 
 fn parse_nostr_thread_response_with_meta(
     json: serde_json::Value,
-    root_event_id: &str,
+    channel_id: Uuid,
+    root_event_id: nostr::EventId,
     limit: u32,
+    excluded_event_ids: &HashSet<nostr::EventId>,
+    context_type: ThreadContextType,
     agent_pubkey: &nostr::PublicKey,
 ) -> Option<ParsedThreadContext> {
     let events = json.as_array()?;
-    let agent_pubkey_hex = agent_pubkey.to_hex();
     let mut root_msg = None;
-    let mut reply_msgs = Vec::new();
-    let mut seen_reply_ids = HashSet::new();
+    let mut reply_msgs: Vec<(u64, String, bool, ContextMessage)> = Vec::new();
+    let mut seen = HashSet::new();
 
-    for ev in events {
-        let ev_id = ev.get("id").and_then(|v| v.as_str()).unwrap_or("");
-        if let Some(msg) = json_to_context_message(ev) {
-            if ev_id == root_event_id {
-                root_msg = Some(msg);
-            } else if seen_reply_ids.insert(ev_id.to_string()) {
-                let is_agent = msg.pubkey.eq_ignore_ascii_case(&agent_pubkey_hex);
-                reply_msgs.push((
-                    ev_id.to_string(),
-                    ev.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
-                    is_agent,
-                    msg,
-                ));
-            }
+    for raw in events {
+        let Some(event) = verified_context_event(raw, channel_id) else {
+            continue;
+        };
+        if excluded_event_ids.contains(&event.id) || !seen.insert(event.id) {
+            continue;
         }
+        if event.id == root_event_id {
+            // A canonical root cannot itself point into another thread. Relay
+            // ancestry validation enforces the same shape for accepted
+            // replies; repeat it here because query responses are untrusted.
+            if context_type.allows_root(event.kind)
+                && buzz_core::thread::parse_nip10_thread(&event).is_none()
+            {
+                root_msg = Some(context_message_from_event(&event));
+            }
+            continue;
+        }
+        if !context_type.allows_reply(event.kind) {
+            continue;
+        }
+        let Some(thread) = buzz_core::thread::parse_nip10_thread(&event) else {
+            continue;
+        };
+        if thread.root_event_id != root_event_id {
+            continue;
+        }
+        reply_msgs.push((
+            event.created_at.as_secs(),
+            event.id.to_hex(),
+            event.pubkey == *agent_pubkey,
+            context_message_from_event(&event),
+        ));
     }
 
     let root_present = root_msg.is_some();
@@ -3209,31 +4125,29 @@ fn parse_nostr_thread_response_with_meta(
     let newest_agent_reply = reply_msgs
         .iter()
         .filter(|(_, _, is_agent, _)| *is_agent)
-        .max_by_key(|(_, ts, _, _)| *ts)
+        .max_by(|left, right| (left.0, &left.1).cmp(&(right.0, &right.1)))
         .cloned();
 
+    // Select the newest validated reply window deterministically, independent
+    // of the relay's response ordering, then render oldest-first.
+    reply_msgs.sort_by(|left, right| (left.0, &left.1).cmp(&(right.0, &right.1)));
     let truncated = reply_msgs.len() > limit as usize;
     if truncated {
-        // The relay returns limited REQ results newest-first. Sort explicitly so
-        // the sentinel we drop is the oldest reply in the fetched window, not an
-        // arbitrary last element if the HTTP bridge ever changes iteration order.
-        reply_msgs.sort_by_key(|(_, ts, _, _)| Reverse(*ts));
-        reply_msgs.truncate(limit as usize);
+        let keep_from = reply_msgs.len().saturating_sub(limit as usize);
+        reply_msgs.drain(..keep_from);
     }
 
     if let Some(agent_reply) = newest_agent_reply {
         let agent_reply_already_displayed =
-            reply_msgs.iter().any(|(id, _, _, _)| *id == agent_reply.0);
+            reply_msgs.iter().any(|(_, id, _, _)| *id == agent_reply.1);
         if !agent_reply_already_displayed {
-            reply_msgs.sort_by_key(|(_, ts, _, _)| *ts);
             if let Some(oldest) = reply_msgs.first_mut() {
                 *oldest = agent_reply;
             }
         }
     }
 
-    // Sort displayed replies chronologically.
-    reply_msgs.sort_by_key(|(_, ts, _, _)| *ts);
+    reply_msgs.sort_by(|left, right| (left.0, &left.1).cmp(&(right.0, &right.1)));
 
     let mut messages = Vec::new();
     if let Some(root) = root_msg {
@@ -3244,7 +4158,6 @@ fn parse_nostr_thread_response_with_meta(
     if messages.is_empty() {
         return None;
     }
-
     let total = if truncated {
         fetched_total // all distinct fetched replies plus the root are proven visible history
     } else {
@@ -3261,34 +4174,47 @@ fn parse_nostr_thread_response_with_meta(
     })
 }
 
-/// Parse a Nostr query response (array of events) into DM context.
-///
-/// Events arrive in relay order (newest first); reversed to chronological.
-fn parse_nostr_dm_response(json: serde_json::Value, limit: u32) -> Option<ConversationContext> {
+/// Parse an untrusted Nostr query response into channel-scoped DM context.
+fn parse_nostr_dm_response(
+    json: serde_json::Value,
+    channel_id: Uuid,
+    limit: u32,
+    excluded_event_ids: &HashSet<nostr::EventId>,
+) -> Option<ConversationContext> {
     let events = json.as_array()?;
-
-    let mut messages: Vec<(u64, ContextMessage)> = events
+    let mut seen = HashSet::new();
+    let mut messages: Vec<(u64, String, ContextMessage)> = events
         .iter()
-        .filter_map(|ev| {
-            let ts = ev.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0);
-            json_to_context_message(ev).map(|msg| (ts, msg))
+        .filter_map(|raw| verified_context_event(raw, channel_id))
+        .filter(|event| {
+            is_dm_context_kind(event.kind)
+                && !excluded_event_ids.contains(&event.id)
+                && seen.insert(event.id)
+        })
+        .map(|event| {
+            (
+                event.created_at.as_secs(),
+                event.id.to_hex(),
+                context_message_from_event(&event),
+            )
         })
         .collect();
 
-    // Sort chronologically (oldest first).
-    messages.sort_by_key(|(ts, _)| *ts);
-
-    let messages: Vec<ContextMessage> = messages.into_iter().map(|(_, msg)| msg).collect();
-    let truncated = messages.len() >= limit as usize;
-    let total = if truncated {
-        messages.len() + 1
-    } else {
-        messages.len()
-    };
+    messages.sort_by(|left, right| (left.0, &left.1).cmp(&(right.0, &right.1)));
+    let truncated = messages.len() > limit as usize;
+    if truncated {
+        let keep_from = messages.len().saturating_sub(limit as usize);
+        messages.drain(..keep_from);
+    }
+    let messages: Vec<ContextMessage> = messages
+        .into_iter()
+        .map(|(_, _, message)| message)
+        .collect();
 
     if messages.is_empty() {
         return None;
     }
+    let total = messages.len() + usize::from(truncated);
 
     Some(ConversationContext::Dm {
         messages,
@@ -3319,7 +4245,7 @@ fn requeue_cancelled_batch(
 ) -> Option<FlushBatch> {
     let reason = match signal {
         ControlSignal::Steer => CancelReason::Steer,
-        ControlSignal::Interrupt | ControlSignal::SwitchModel(_) => CancelReason::Interrupt,
+        ControlSignal::Interrupt | ControlSignal::SwitchModel { .. } => CancelReason::Interrupt,
         // Cancel/Rotate discard the batch — no merged re-prompt.
         ControlSignal::Cancel | ControlSignal::Rotate => return None,
     };
@@ -3388,7 +4314,7 @@ fn classify_control_cancel_failure(
 /// Shared by the turn-start and turn-stop lines so a log can be read as pairs.
 fn prompt_label(source: &PromptSource) -> String {
     match source {
-        PromptSource::Channel(cid) => format!("channel {cid}"),
+        PromptSource::Conversation(scope) => format!("conversation {scope}"),
         PromptSource::Heartbeat => "heartbeat".to_string(),
     }
 }
@@ -3603,7 +4529,7 @@ impl Drop for LivenessGuard {
 struct TurnCompletionGuard {
     observer: Option<observer::ObserverHandle>,
     agent_index: Option<usize>,
-    channel_id: Option<uuid::Uuid>,
+    scope: Option<ConversationScope>,
     turn_id: String,
 }
 
@@ -3611,13 +4537,13 @@ impl TurnCompletionGuard {
     fn new(
         observer: Option<observer::ObserverHandle>,
         agent_index: Option<usize>,
-        channel_id: Option<uuid::Uuid>,
+        scope: Option<ConversationScope>,
         turn_id: String,
     ) -> Self {
         Self {
             observer,
             agent_index,
-            channel_id,
+            scope,
             turn_id,
         }
     }
@@ -3626,7 +4552,7 @@ impl TurnCompletionGuard {
 impl Drop for TurnCompletionGuard {
     fn drop(&mut self) {
         if let Some(observer) = self.observer.take() {
-            let context = observer::context_for(self.channel_id, None, Some(self.turn_id.clone()));
+            let context = observer::context_for_scope(self.scope, None, Some(self.turn_id.clone()));
             observer.emit(
                 "turn_completed",
                 self.agent_index,
@@ -4039,6 +4965,18 @@ mod tests {
         }
     }
 
+    fn model_capabilities(models: &[&str]) -> AgentModelCapabilities {
+        AgentModelCapabilities {
+            config_options_raw: Vec::new(),
+            available_models_raw: Some(json!({
+                "availableModels": models
+                    .iter()
+                    .map(|model_id| json!({"modelId": model_id}))
+                    .collect::<Vec<_>>()
+            })),
+        }
+    }
+
     #[test]
     fn public_session_forwards_channel_origin_to_mcp() {
         let channel_id = Uuid::new_v4();
@@ -4072,6 +5010,199 @@ mod tests {
             .env
             .iter()
             .any(|entry| entry.name == "BUZZ_GIT_ORIGIN_CHANNEL_ID"));
+    }
+
+    #[test]
+    fn model_control_generations_resolve_once_and_never_erase_a_newer_override() {
+        let controls = ChannelModelControls::default();
+        let channel_id = Uuid::new_v4();
+
+        let first = controls.request(channel_id, "model-a", Some("request-a"));
+        assert!(matches!(
+            first,
+            ModelControlDecision::PendingCatalog {
+                generation: 1,
+                ref superseded
+            } if superseded.is_empty()
+        ));
+        let second = controls.request(channel_id, "model-b", Some("request-b"));
+        assert!(matches!(
+            second,
+            ModelControlDecision::PendingCatalog {
+                generation: 2,
+                ref superseded
+            } if superseded == &[ModelControlResult {
+                channel_id,
+                model_id: "model-a".to_string(),
+                generation: 1,
+                request_id: Some("request-a".to_string()),
+                status: "superseded",
+            }]
+        ));
+        assert_eq!(
+            controls.pending_len(),
+            1,
+            "pending state is channel-bounded"
+        );
+
+        let resolved = controls.register_catalog(model_capabilities(&["model-a", "model-b"]));
+        assert_eq!(
+            resolved,
+            vec![ModelControlResult {
+                channel_id,
+                model_id: "model-b".to_string(),
+                generation: 2,
+                request_id: Some("request-b".to_string()),
+                status: "sent",
+            }]
+        );
+        assert!(
+            controls
+                .register_catalog(model_capabilities(&["model-a", "model-b"]))
+                .is_empty(),
+            "catalog replay must not duplicate a control result"
+        );
+        assert_eq!(
+            controls.desired_model(channel_id),
+            Some(ChannelDesiredModel {
+                model_id: "model-b".to_string(),
+                generation: 2,
+            })
+        );
+
+        assert!(
+            controls.clear_if_current(channel_id, 1).is_none(),
+            "a stale generation must not clear the current override"
+        );
+        assert_eq!(
+            controls
+                .desired_model(channel_id)
+                .map(|desired| desired.model_id),
+            Some("model-b".to_string())
+        );
+        assert_eq!(
+            controls.clear_if_current(channel_id, 2),
+            Some(3),
+            "clearing the current override publishes a baseline tombstone"
+        );
+        assert_eq!(controls.desired_model(channel_id), None);
+        assert_eq!(
+            controls.channel_generations(),
+            vec![(channel_id, 3)],
+            "other holders must reconcile the cleared override"
+        );
+    }
+
+    #[test]
+    fn lazy_placeholder_replacement_preserves_pre_wake_model_control() {
+        let controls = ChannelModelControls::default();
+        let channel_id = Uuid::new_v4();
+        let placeholder = AgentPool::from_slots_with_model_controls(vec![None], controls.clone());
+
+        assert!(matches!(
+            placeholder
+                .model_controls()
+                .request(channel_id, "model-b", Some("lazy-request"),),
+            ModelControlDecision::PendingCatalog { generation: 1, .. }
+        ));
+        drop(placeholder);
+
+        let ready = AgentPool::from_slots_with_model_controls(vec![None], controls.clone());
+        assert_eq!(
+            controls.register_catalog(model_capabilities(&["model-b"])),
+            vec![ModelControlResult {
+                channel_id,
+                model_id: "model-b".to_string(),
+                generation: 1,
+                request_id: Some("lazy-request".to_string()),
+                status: "sent",
+            }]
+        );
+        assert_eq!(
+            ready.model_controls().desired_model(channel_id),
+            Some(ChannelDesiredModel {
+                model_id: "model-b".to_string(),
+                generation: 1,
+            }),
+            "the awakened pool must see state accepted by the placeholder"
+        );
+    }
+
+    #[tokio::test]
+    async fn clearing_current_override_invalidates_every_holder_via_tombstone() {
+        async fn inert_agent(index: usize) -> OwnedAgent {
+            OwnedAgent {
+                index,
+                acp: AcpClient::spawn(
+                    "bash",
+                    &["-c".to_string(), "sleep 10".to_string()],
+                    &[],
+                    false,
+                )
+                .await
+                .expect("spawn inert ACP process"),
+                state: SessionState::default(),
+                model_capabilities: None,
+                baseline_model: Some("baseline".to_string()),
+                desired_model: Some("baseline".to_string()),
+                desired_model_generation: None,
+                model_overridden: false,
+                agent_name: "test".to_string(),
+                goose_system_prompt_supported: None,
+                protocol_version: 2,
+            }
+        }
+
+        let controls = ChannelModelControls::default();
+        let channel_id = Uuid::new_v4();
+        let scope_a = ConversationScope::thread(
+            channel_id,
+            nostr::EventId::from_hex(&"a".repeat(64)).expect("root A"),
+        );
+        let scope_b = ConversationScope::thread(
+            channel_id,
+            nostr::EventId::from_hex(&"b".repeat(64)).expect("root B"),
+        );
+        assert!(controls
+            .register_catalog(model_capabilities(&["model-a"]))
+            .is_empty());
+        assert!(matches!(
+            controls.request(channel_id, "model-a", None),
+            ModelControlDecision::Accepted { generation: 1, .. }
+        ));
+
+        let mut agent_a = inert_agent(0).await;
+        agent_a.state.sessions.insert(scope_a, "session-a".into());
+        let mut agent_b = inert_agent(1).await;
+        agent_b.state.sessions.insert(scope_b, "session-b".into());
+        let mut pool = AgentPool::from_slots_with_model_controls(
+            vec![Some(agent_a), Some(agent_b)],
+            controls.clone(),
+        );
+
+        assert_eq!(controls.clear_if_current(channel_id, 1), Some(2));
+
+        let claimed_a = match pool.try_claim_for_scope(scope_a) {
+            ClaimOutcome::Claimed(agent) => *agent,
+            _ => panic!("holder A must be claimable"),
+        };
+        assert!(
+            !claimed_a.state.sessions.contains_key(&scope_a),
+            "holder A must discard its session opened under the failed override"
+        );
+        assert_eq!(claimed_a.desired_model.as_deref(), Some("baseline"));
+        pool.return_agent(claimed_a);
+
+        let claimed_b = match pool.try_claim_for_scope(scope_b) {
+            ClaimOutcome::Claimed(agent) => *agent,
+            _ => panic!("holder B must be claimable"),
+        };
+        assert!(
+            !claimed_b.state.sessions.contains_key(&scope_b),
+            "holder B must independently reconcile the baseline tombstone"
+        );
+        assert_eq!(claimed_b.desired_model.as_deref(), Some("baseline"));
+        pool.return_agent(claimed_b);
     }
 
     // These pin the initial_message dispatch path (run_prompt_task, ~line 855):
@@ -4531,37 +5662,41 @@ mod tests {
     #[test]
     fn test_parse_nostr_thread_response_marks_query_window_truncated() {
         let agent = Keys::generate();
-        let root_id = "1111111111111111111111111111111111111111111111111111111111111111";
-        let agent_hex = agent.public_key().to_hex();
-        let json = json!([
-            {
-                "id": root_id,
-                "pubkey": "rootpub",
-                "content": "root",
-                "created_at": 1000
-            },
-            {
-                "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "pubkey": agent_hex,
-                "content": "newest agent reply",
-                "created_at": 4000
-            },
-            {
-                "id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                "pubkey": "humanpub",
-                "content": "middle reply",
-                "created_at": 3000
-            },
-            {
-                "id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-                "pubkey": "oldpub",
-                "content": "sentinel omitted reply",
-                "created_at": 2000
-            }
-        ]);
+        let channel_id = Uuid::new_v4();
+        let root = signed_context_event(9, channel_id, "root", 1000, vec![]);
+        let newest = signed_context_event_with_keys(
+            9,
+            channel_id,
+            "newest agent reply",
+            4000,
+            direct_reply_tags(root.id),
+            &agent,
+        );
+        let middle = signed_context_event(
+            9,
+            channel_id,
+            "middle reply",
+            3000,
+            direct_reply_tags(root.id),
+        );
+        let sentinel = signed_context_event(
+            9,
+            channel_id,
+            "sentinel omitted reply",
+            2000,
+            direct_reply_tags(root.id),
+        );
 
-        let ctx = parse_nostr_thread_response(json, root_id, 2, &agent.public_key())
-            .expect("should parse");
+        let ctx = parse_nostr_thread_response(
+            context_json(&[&root, &newest, &middle, &sentinel]),
+            channel_id,
+            root.id,
+            2,
+            &HashSet::new(),
+            ThreadContextType::Stream,
+            &agent.public_key(),
+        )
+        .expect("should parse");
         match ctx {
             ConversationContext::Thread {
                 messages,
@@ -4585,24 +5720,20 @@ mod tests {
     #[test]
     fn test_parse_nostr_thread_response_not_truncated_below_limit() {
         let agent = Keys::generate();
-        let root_id = "1111111111111111111111111111111111111111111111111111111111111111";
-        let json = json!([
-            {
-                "id": root_id,
-                "pubkey": "rootpub",
-                "content": "root",
-                "created_at": 1000
-            },
-            {
-                "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "pubkey": "replypub",
-                "content": "reply",
-                "created_at": 2000
-            }
-        ]);
+        let channel_id = Uuid::new_v4();
+        let root = signed_context_event(9, channel_id, "root", 1000, vec![]);
+        let reply = signed_context_event(9, channel_id, "reply", 2000, direct_reply_tags(root.id));
 
-        let ctx = parse_nostr_thread_response(json, root_id, 2, &agent.public_key())
-            .expect("should parse");
+        let ctx = parse_nostr_thread_response(
+            context_json(&[&root, &reply]),
+            channel_id,
+            root.id,
+            2,
+            &HashSet::new(),
+            ThreadContextType::Stream,
+            &agent.public_key(),
+        )
+        .expect("should parse");
         match ctx {
             ConversationContext::Thread {
                 messages,
@@ -4620,43 +5751,48 @@ mod tests {
     #[test]
     fn test_parse_nostr_thread_response_keeps_agent_reply_outside_recent_window() {
         let agent = Keys::generate();
-        let root_id = "1111111111111111111111111111111111111111111111111111111111111111";
-        let agent_hex = agent.public_key().to_hex();
-        let json = json!([
-            {
-                "id": root_id,
-                "pubkey": "rootpub",
-                "content": "root",
-                "created_at": 1000
-            },
-            {
-                "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "pubkey": "humanpub",
-                "content": "newer human reply",
-                "created_at": 5000
-            },
-            {
-                "id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                "pubkey": "humanpub",
-                "content": "middle human reply",
-                "created_at": 4000
-            },
-            {
-                "id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-                "pubkey": "humanpub",
-                "content": "oldest displayed reply without agent pin",
-                "created_at": 3000
-            },
-            {
-                "id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-                "pubkey": agent_hex,
-                "content": "agent reply outside recent window",
-                "created_at": 2000
-            }
-        ]);
+        let channel_id = Uuid::new_v4();
+        let root = signed_context_event(9, channel_id, "root", 1000, vec![]);
+        let newer = signed_context_event(
+            9,
+            channel_id,
+            "newer human reply",
+            5000,
+            direct_reply_tags(root.id),
+        );
+        let middle = signed_context_event(
+            9,
+            channel_id,
+            "middle human reply",
+            4000,
+            direct_reply_tags(root.id),
+        );
+        let oldest = signed_context_event(
+            9,
+            channel_id,
+            "oldest displayed reply without agent pin",
+            3000,
+            direct_reply_tags(root.id),
+        );
+        let agent_reply = signed_context_event_with_keys(
+            9,
+            channel_id,
+            "agent reply outside recent window",
+            2000,
+            direct_reply_tags(root.id),
+            &agent,
+        );
 
-        let ctx = parse_nostr_thread_response(json, root_id, 2, &agent.public_key())
-            .expect("should parse");
+        let ctx = parse_nostr_thread_response(
+            context_json(&[&root, &newer, &middle, &oldest, &agent_reply]),
+            channel_id,
+            root.id,
+            2,
+            &HashSet::new(),
+            ThreadContextType::Stream,
+            &agent.public_key(),
+        )
+        .expect("should parse");
         match ctx {
             ConversationContext::Thread { messages, .. } => {
                 assert_eq!(messages.len(), 3); // root + 2 displayed replies
@@ -4681,38 +5817,34 @@ mod tests {
     #[tokio::test]
     async fn test_fetch_thread_context_uses_exact_count_when_above_sentinel_minimum() {
         let agent = Keys::generate();
-        let root_id = "1111111111111111111111111111111111111111111111111111111111111111";
         let channel_id = Uuid::new_v4();
         let agent_pubkey = agent.public_key();
-        let json = json!([
-            thread_event(root_id, "rootpub", "root", 1000),
-            thread_event(
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "humanpub",
-                "newest reply",
-                4000
-            ),
-            thread_event(
-                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                "humanpub",
-                "middle reply",
-                3000
-            ),
-            thread_event(
-                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-                "humanpub",
-                "sentinel reply",
-                2000
-            )
+        let (root_id, json) = stream_thread_fixture(
+            channel_id,
+            &agent,
+            true,
+            &[
+                ("newest reply", 4000, false),
+                ("middle reply", 3000, false),
+                ("sentinel reply", 2000, false),
+            ],
+        );
+        let excluded = HashSet::from([
+            signed_context_event(9, channel_id, "current", 5000, vec![]).id,
+            signed_context_event(9, channel_id, "cancelled", 4500, vec![]).id,
         ]);
 
         let ctx = fetch_thread_context_with(
-            channel_id,
-            root_id,
-            2,
-            agent_pubkey,
+            ThreadContextFetchRequest {
+                channel_id,
+                root_event_id: root_id,
+                limit: 2,
+                excluded_event_ids: &excluded,
+                context_type: ThreadContextType::Stream,
+                agent_pubkey,
+            },
             move |filters| {
-                assert_thread_query_filters(&filters, channel_id, root_id, agent_pubkey, 3);
+                assert_thread_query_filters(&filters, channel_id, root_id, agent_pubkey, 5, 3);
                 std::future::ready(Ok(json.clone()))
             },
             move |filters| {
@@ -4740,34 +5872,28 @@ mod tests {
     #[tokio::test]
     async fn test_fetch_thread_context_does_not_add_missing_root_to_exact_count() {
         let agent = Keys::generate();
-        let root_id = "1111111111111111111111111111111111111111111111111111111111111111";
         let channel_id = Uuid::new_v4();
-        let json = json!([
-            thread_event(
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "humanpub",
-                "newest reply",
-                4000
-            ),
-            thread_event(
-                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                "humanpub",
-                "middle reply",
-                3000
-            ),
-            thread_event(
-                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-                "humanpub",
-                "sentinel reply",
-                2000
-            )
-        ]);
+        let (root_id, json) = stream_thread_fixture(
+            channel_id,
+            &agent,
+            false,
+            &[
+                ("newest reply", 4000, false),
+                ("middle reply", 3000, false),
+                ("sentinel reply", 2000, false),
+            ],
+        );
+        let excluded = HashSet::new();
 
         let ctx = fetch_thread_context_with(
-            channel_id,
-            root_id,
-            2,
-            agent.public_key(),
+            ThreadContextFetchRequest {
+                channel_id,
+                root_event_id: root_id,
+                limit: 2,
+                excluded_event_ids: &excluded,
+                context_type: ThreadContextType::Stream,
+                agent_pubkey: agent.public_key(),
+            },
             move |_filters| std::future::ready(Ok(json.clone())),
             |_filters| std::future::ready(Ok(json!({ "count": 6 }))),
         )
@@ -4791,35 +5917,28 @@ mod tests {
     #[tokio::test]
     async fn test_fetch_thread_context_clamps_count_below_sentinel_minimum() {
         let agent = Keys::generate();
-        let root_id = "1111111111111111111111111111111111111111111111111111111111111111";
         let channel_id = Uuid::new_v4();
-        let json = json!([
-            thread_event(root_id, "rootpub", "root", 1000),
-            thread_event(
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "humanpub",
-                "newest reply",
-                4000
-            ),
-            thread_event(
-                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                "humanpub",
-                "middle reply",
-                3000
-            ),
-            thread_event(
-                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-                "humanpub",
-                "sentinel reply",
-                2000
-            )
-        ]);
+        let (root_id, json) = stream_thread_fixture(
+            channel_id,
+            &agent,
+            true,
+            &[
+                ("newest reply", 4000, false),
+                ("middle reply", 3000, false),
+                ("sentinel reply", 2000, false),
+            ],
+        );
+        let excluded = HashSet::new();
 
         let ctx = fetch_thread_context_with(
-            channel_id,
-            root_id,
-            2,
-            agent.public_key(),
+            ThreadContextFetchRequest {
+                channel_id,
+                root_event_id: root_id,
+                limit: 2,
+                excluded_event_ids: &excluded,
+                context_type: ThreadContextType::Stream,
+                agent_pubkey: agent.public_key(),
+            },
             move |_filters| std::future::ready(Ok(json.clone())),
             |_filters| std::future::ready(Ok(json!({ "count": 1 }))),
         )
@@ -4843,35 +5962,28 @@ mod tests {
     #[tokio::test]
     async fn test_fetch_thread_context_preserves_sentinel_minimum_when_count_fails() {
         let agent = Keys::generate();
-        let root_id = "1111111111111111111111111111111111111111111111111111111111111111";
         let channel_id = Uuid::new_v4();
-        let json = json!([
-            thread_event(root_id, "rootpub", "root", 1000),
-            thread_event(
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "humanpub",
-                "newest reply",
-                4000
-            ),
-            thread_event(
-                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                "humanpub",
-                "middle reply",
-                3000
-            ),
-            thread_event(
-                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-                "humanpub",
-                "sentinel reply",
-                2000
-            )
-        ]);
+        let (root_id, json) = stream_thread_fixture(
+            channel_id,
+            &agent,
+            true,
+            &[
+                ("newest reply", 4000, false),
+                ("middle reply", 3000, false),
+                ("sentinel reply", 2000, false),
+            ],
+        );
+        let excluded = HashSet::new();
 
         let ctx = fetch_thread_context_with(
-            channel_id,
-            root_id,
-            2,
-            agent.public_key(),
+            ThreadContextFetchRequest {
+                channel_id,
+                root_event_id: root_id,
+                limit: 2,
+                excluded_event_ids: &excluded,
+                context_type: ThreadContextType::Stream,
+                agent_pubkey: agent.public_key(),
+            },
             move |_filters| std::future::ready(Ok(json.clone())),
             |_filters| std::future::ready(Err(crate::relay::RelayError::Http("boom".into()))),
         )
@@ -4895,44 +6007,44 @@ mod tests {
     #[tokio::test]
     async fn test_fetch_thread_context_deduplicates_and_pins_agent_reply() {
         let agent = Keys::generate();
-        let agent_hex = agent.public_key().to_hex();
-        let root_id = "1111111111111111111111111111111111111111111111111111111111111111";
         let channel_id = Uuid::new_v4();
-        let json = json!([
-            thread_event(root_id, "rootpub", "root", 1000),
-            thread_event(
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "humanpub",
-                "newer human reply",
-                5000
-            ),
-            thread_event(
-                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                "humanpub",
-                "middle human reply",
-                4000
-            ),
-            thread_event(
-                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-                &agent_hex,
-                "agent reply outside recent window",
-                2000
-            ),
-            // Same event as the separately fetched author-filtered result; the
-            // parser should deduplicate it before pinning.
-            thread_event(
-                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-                &agent_hex,
-                "agent reply outside recent window",
-                2000
-            )
-        ]);
+        let root = signed_context_event(9, channel_id, "root", 1000, vec![]);
+        let newer = signed_context_event(
+            9,
+            channel_id,
+            "newer human reply",
+            5000,
+            direct_reply_tags(root.id),
+        );
+        let middle = signed_context_event(
+            9,
+            channel_id,
+            "middle human reply",
+            4000,
+            direct_reply_tags(root.id),
+        );
+        let agent_reply = signed_context_event_with_keys(
+            9,
+            channel_id,
+            "agent reply outside recent window",
+            2000,
+            direct_reply_tags(root.id),
+            &agent,
+        );
+        // The final duplicate models the same event arriving from both the
+        // recent-window and separately author-filtered relay queries.
+        let json = context_json(&[&root, &newer, &middle, &agent_reply, &agent_reply]);
+        let excluded = HashSet::new();
 
         let ctx = fetch_thread_context_with(
-            channel_id,
-            root_id,
-            2,
-            agent.public_key(),
+            ThreadContextFetchRequest {
+                channel_id,
+                root_event_id: root.id,
+                limit: 2,
+                excluded_event_ids: &excluded,
+                context_type: ThreadContextType::Stream,
+                agent_pubkey: agent.public_key(),
+            },
             move |_filters| std::future::ready(Ok(json.clone())),
             |_filters| std::future::ready(Ok(json!({ "count": 3 }))),
         )
@@ -4968,44 +6080,97 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_fetch_thread_context_uses_distinct_fetched_replies_as_minimum() {
+    async fn test_fetch_thread_context_pins_previous_agent_reply_when_newest_is_excluded() {
         let agent = Keys::generate();
-        let agent_hex = agent.public_key().to_hex();
-        let root_id = "1111111111111111111111111111111111111111111111111111111111111111";
         let channel_id = Uuid::new_v4();
-        let json = json!([
-            thread_event(root_id, "rootpub", "root", 1000),
-            thread_event(
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "humanpub",
-                "newest human reply",
-                5000
-            ),
-            thread_event(
-                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                "humanpub",
-                "middle human reply",
-                4000
-            ),
-            thread_event(
-                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-                "humanpub",
-                "sentinel human reply",
-                3000
-            ),
-            thread_event(
-                "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-                &agent_hex,
-                "older distinct agent reply",
-                2000
-            )
+        let root = signed_context_event(9, channel_id, "root", 1000, vec![]);
+        let current_agent_reply = signed_context_event_with_keys(
+            9,
+            channel_id,
+            "current excluded agent reply",
+            5000,
+            direct_reply_tags(root.id),
+            &agent,
+        );
+        let newer_human_reply = signed_context_event(
+            9,
+            channel_id,
+            "newer human reply",
+            4000,
+            direct_reply_tags(root.id),
+        );
+        let previous_agent_reply = signed_context_event_with_keys(
+            9,
+            channel_id,
+            "previous agent reply",
+            2000,
+            direct_reply_tags(root.id),
+            &agent,
+        );
+        let json = context_json(&[
+            &root,
+            &current_agent_reply,
+            &newer_human_reply,
+            &previous_agent_reply,
         ]);
+        let excluded = HashSet::from([current_agent_reply.id]);
+        let agent_pubkey = agent.public_key();
 
         let ctx = fetch_thread_context_with(
+            ThreadContextFetchRequest {
+                channel_id,
+                root_event_id: root.id,
+                limit: 1,
+                excluded_event_ids: &excluded,
+                context_type: ThreadContextType::Stream,
+                agent_pubkey,
+            },
+            move |filters| {
+                assert_thread_query_filters(&filters, channel_id, root.id, agent_pubkey, 3, 2);
+                std::future::ready(Ok(json.clone()))
+            },
+            |_filters| std::future::ready(Ok(json!({ "count": 3 }))),
+        )
+        .await
+        .expect("thread context");
+
+        let ConversationContext::Thread { messages, .. } = ctx else {
+            panic!("expected Thread context");
+        };
+        assert!(messages
+            .iter()
+            .any(|message| message.content == "previous agent reply"));
+        assert!(messages
+            .iter()
+            .all(|message| message.content != "current excluded agent reply"));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_thread_context_uses_distinct_fetched_replies_as_minimum() {
+        let agent = Keys::generate();
+        let channel_id = Uuid::new_v4();
+        let (root_id, json) = stream_thread_fixture(
             channel_id,
-            root_id,
-            2,
-            agent.public_key(),
+            &agent,
+            true,
+            &[
+                ("newest human reply", 5000, false),
+                ("middle human reply", 4000, false),
+                ("sentinel human reply", 3000, false),
+                ("older distinct agent reply", 2000, true),
+            ],
+        );
+        let excluded = HashSet::new();
+
+        let ctx = fetch_thread_context_with(
+            ThreadContextFetchRequest {
+                channel_id,
+                root_event_id: root_id,
+                limit: 2,
+                excluded_event_ids: &excluded,
+                context_type: ThreadContextType::Stream,
+                agent_pubkey: agent.public_key(),
+            },
             move |_filters| std::future::ready(Ok(json.clone())),
             |_filters| std::future::ready(Err(crate::relay::RelayError::Http("boom".into()))),
         )
@@ -5044,9 +6209,10 @@ mod tests {
     fn assert_thread_query_filters(
         filters: &[nostr::Filter],
         channel_id: Uuid,
-        root_id: &str,
+        root_id: nostr::EventId,
         agent_pubkey: nostr::PublicKey,
         reply_limit: u64,
+        agent_limit: u64,
     ) {
         assert_eq!(
             filters.len(),
@@ -5055,43 +6221,75 @@ mod tests {
         );
 
         let root = serde_json::to_value(&filters[0]).expect("serialize root filter");
-        assert_eq!(root.get("ids"), Some(&json!([root_id])));
+        assert_eq!(root.get("ids"), Some(&json!([root_id.to_hex()])));
+        assert_eq!(root.get("kinds"), Some(&json!([9, 40002])));
+        assert_eq!(root.get("#h"), Some(&json!([channel_id.to_string()])));
         assert!(root.get("limit").is_none());
 
         let replies = serde_json::to_value(&filters[1]).expect("serialize replies filter");
         assert_eq!(replies.get("kinds"), Some(&json!([9, 40002])));
-        assert_eq!(replies.get("#e"), Some(&json!([root_id])));
+        assert_eq!(replies.get("#e"), Some(&json!([root_id.to_hex()])));
         assert_eq!(replies.get("#h"), Some(&json!([channel_id.to_string()])));
         assert_eq!(replies.get("limit"), Some(&json!(reply_limit)));
         assert!(replies.get("authors").is_none());
 
         let agent = serde_json::to_value(&filters[2]).expect("serialize agent filter");
         assert_eq!(agent.get("kinds"), Some(&json!([9, 40002])));
-        assert_eq!(agent.get("#e"), Some(&json!([root_id])));
+        assert_eq!(agent.get("#e"), Some(&json!([root_id.to_hex()])));
         assert_eq!(agent.get("#h"), Some(&json!([channel_id.to_string()])));
         assert_eq!(agent.get("authors"), Some(&json!([agent_pubkey.to_hex()])));
-        assert_eq!(agent.get("limit"), Some(&json!(1)));
+        assert_eq!(agent.get("limit"), Some(&json!(agent_limit)));
     }
 
-    fn assert_thread_count_filter(filters: &[nostr::Filter], channel_id: Uuid, root_id: &str) {
+    fn assert_thread_count_filter(
+        filters: &[nostr::Filter],
+        channel_id: Uuid,
+        root_id: nostr::EventId,
+    ) {
         assert_eq!(filters.len(), 1, "count should query only matching replies");
 
         let count = serde_json::to_value(&filters[0]).expect("serialize count filter");
         assert_eq!(count.get("kinds"), Some(&json!([9, 40002])));
-        assert_eq!(count.get("#e"), Some(&json!([root_id])));
+        assert_eq!(count.get("#e"), Some(&json!([root_id.to_hex()])));
         assert_eq!(count.get("#h"), Some(&json!([channel_id.to_string()])));
         assert_eq!(count.get("limit"), Some(&json!(0)));
         assert!(count.get("ids").is_none());
         assert!(count.get("authors").is_none());
     }
 
-    fn thread_event(id: &str, pubkey: &str, content: &str, created_at: u64) -> serde_json::Value {
-        json!({
-            "id": id,
-            "pubkey": pubkey,
-            "content": content,
-            "created_at": created_at
-        })
+    fn stream_thread_fixture(
+        channel_id: Uuid,
+        agent: &Keys,
+        include_root: bool,
+        replies: &[(&str, u64, bool)],
+    ) -> (nostr::EventId, serde_json::Value) {
+        let root = signed_context_event(9, channel_id, "root", 1000, vec![]);
+        let mut events = Vec::new();
+        if include_root {
+            events.push(serde_json::to_value(&root).expect("serialize root"));
+        }
+        events.extend(replies.iter().map(|(content, created_at, is_agent)| {
+            let event = if *is_agent {
+                signed_context_event_with_keys(
+                    9,
+                    channel_id,
+                    content,
+                    *created_at,
+                    direct_reply_tags(root.id),
+                    agent,
+                )
+            } else {
+                signed_context_event(
+                    9,
+                    channel_id,
+                    content,
+                    *created_at,
+                    direct_reply_tags(root.id),
+                )
+            };
+            serde_json::to_value(event).expect("serialize reply")
+        }));
+        (root.id, serde_json::Value::Array(events))
     }
 
     #[test]
@@ -5124,6 +6322,382 @@ mod tests {
         assert!(json_to_context_message(&obj).is_none());
     }
 
+    fn signed_context_event(
+        kind: u16,
+        channel_id: Uuid,
+        content: &str,
+        created_at: u64,
+        extra_tags: Vec<Vec<String>>,
+    ) -> nostr::Event {
+        signed_context_event_with_keys(
+            kind,
+            channel_id,
+            content,
+            created_at,
+            extra_tags,
+            &Keys::generate(),
+        )
+    }
+
+    fn signed_context_event_with_keys(
+        kind: u16,
+        channel_id: Uuid,
+        content: &str,
+        created_at: u64,
+        extra_tags: Vec<Vec<String>>,
+        keys: &Keys,
+    ) -> nostr::Event {
+        let mut tags =
+            vec![Tag::parse(["h", channel_id.to_string().as_str()]).expect("channel tag")];
+        tags.extend(
+            extra_tags
+                .into_iter()
+                .map(|parts| Tag::parse(parts).expect("test tag")),
+        );
+        EventBuilder::new(Kind::Custom(kind), content)
+            .tags(tags)
+            .custom_created_at(Timestamp::from(created_at))
+            .sign_with_keys(keys)
+            .expect("sign context event")
+    }
+
+    fn direct_reply_tags(root: nostr::EventId) -> Vec<Vec<String>> {
+        vec![vec![
+            "e".to_string(),
+            root.to_hex(),
+            String::new(),
+            "reply".to_string(),
+        ]]
+    }
+
+    fn nested_reply_tags(root: nostr::EventId, parent: nostr::EventId) -> Vec<Vec<String>> {
+        vec![
+            vec![
+                "e".to_string(),
+                root.to_hex(),
+                String::new(),
+                "root".to_string(),
+            ],
+            vec![
+                "e".to_string(),
+                parent.to_hex(),
+                String::new(),
+                "reply".to_string(),
+            ],
+        ]
+    }
+
+    fn context_json(events: &[&nostr::Event]) -> serde_json::Value {
+        serde_json::Value::Array(
+            events
+                .iter()
+                .map(|event| serde_json::to_value(event).expect("serialize event"))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn nostr_thread_context_rejects_cross_root_channel_shape_and_source_duplicates() {
+        let agent = Keys::generate();
+        let channel_id = Uuid::new_v4();
+        let wrong_channel = Uuid::new_v4();
+        let root_a = signed_context_event(9, channel_id, "root-a", 10, vec![]);
+        let root_b = signed_context_event(9, channel_id, "root-b", 11, vec![]);
+        let history =
+            signed_context_event(9, channel_id, "history-a", 20, direct_reply_tags(root_a.id));
+        let trigger = signed_context_event(
+            9,
+            channel_id,
+            "current-trigger",
+            30,
+            nested_reply_tags(root_a.id, history.id),
+        );
+        let cancelled = signed_context_event(
+            9,
+            channel_id,
+            "cancelled-trigger",
+            25,
+            nested_reply_tags(root_a.id, history.id),
+        );
+
+        // This event matches a marker-agnostic #e=root-a query through its
+        // mention tag, but its canonical thread is root B.
+        let mut cross_root_tags = direct_reply_tags(root_b.id);
+        cross_root_tags.push(vec![
+            "e".to_string(),
+            root_a.id.to_hex(),
+            String::new(),
+            "mention".to_string(),
+        ]);
+        let cross_root = signed_context_event(9, channel_id, "cross-root", 21, cross_root_tags);
+        let wrong_channel_reply = signed_context_event(
+            9,
+            wrong_channel,
+            "wrong-channel",
+            22,
+            direct_reply_tags(root_a.id),
+        );
+        let malformed_shape = signed_context_event(
+            9,
+            channel_id,
+            "root-only-is-not-a-reply",
+            23,
+            vec![vec![
+                "e".to_string(),
+                root_a.id.to_hex(),
+                String::new(),
+                "root".to_string(),
+            ]],
+        );
+        let wrong_kind = signed_context_event(
+            buzz_core::kind::KIND_REACTION as u16,
+            channel_id,
+            "wrong-kind",
+            24,
+            direct_reply_tags(root_a.id),
+        );
+        let mut tampered = serde_json::to_value(&history).expect("serialize history");
+        tampered["content"] = serde_json::Value::String("tampered".to_string());
+
+        let mut values = context_json(&[
+            &root_a,
+            &history,
+            &history,
+            &trigger,
+            &cancelled,
+            &cross_root,
+            &wrong_channel_reply,
+            &malformed_shape,
+            &wrong_kind,
+        ])
+        .as_array()
+        .expect("array")
+        .clone();
+        values.push(tampered);
+        let excluded = HashSet::from([trigger.id, cancelled.id]);
+
+        let context = parse_nostr_thread_response(
+            serde_json::Value::Array(values),
+            channel_id,
+            root_a.id,
+            12,
+            &excluded,
+            ThreadContextType::Stream,
+            &agent.public_key(),
+        )
+        .expect("root and one valid historical reply remain");
+        let ConversationContext::Thread {
+            messages,
+            total,
+            truncated,
+        } = context
+        else {
+            panic!("expected thread context");
+        };
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            ["root-a", "history-a"]
+        );
+        assert_eq!(total, 2);
+        assert!(!truncated);
+        assert!(
+            parse_nostr_thread_response(
+                context_json(&[&cross_root]),
+                channel_id,
+                cross_root.id,
+                12,
+                &HashSet::new(),
+                ThreadContextType::Stream,
+                &agent.public_key(),
+            )
+            .is_none(),
+            "an exact-ID lookup cannot promote a reply in another canonical thread to a root"
+        );
+    }
+
+    #[test]
+    fn forum_root_and_comment_context_use_canonical_shapes_without_repeating_trigger() {
+        let channel_id = Uuid::new_v4();
+        let keys = Keys::generate();
+        let post = buzz_sdk::build_forum_post(channel_id, "forum post", &[], &[])
+            .expect("build forum post")
+            .custom_created_at(Timestamp::from(10))
+            .sign_with_keys(&keys)
+            .expect("sign forum post");
+        let history = buzz_sdk::build_forum_comment(
+            channel_id,
+            "older comment",
+            &buzz_sdk::ThreadRef {
+                root_event_id: post.id,
+                parent_event_id: post.id,
+            },
+            &[],
+            &[],
+        )
+        .expect("build forum comment")
+        .custom_created_at(Timestamp::from(20))
+        .sign_with_keys(&keys)
+        .expect("sign forum comment");
+        let trigger = buzz_sdk::build_forum_comment(
+            channel_id,
+            "current comment",
+            &buzz_sdk::ThreadRef {
+                root_event_id: post.id,
+                parent_event_id: history.id,
+            },
+            &[],
+            &[],
+        )
+        .expect("build nested forum comment")
+        .custom_created_at(Timestamp::from(30))
+        .sign_with_keys(&keys)
+        .expect("sign nested forum comment");
+        let wrong_type = signed_context_event(
+            buzz_core::kind::KIND_STREAM_MESSAGE as u16,
+            channel_id,
+            "stream message cannot enter forum context",
+            25,
+            direct_reply_tags(post.id),
+        );
+
+        let comment_context = parse_nostr_thread_response(
+            context_json(&[&post, &history, &wrong_type, &trigger]),
+            channel_id,
+            post.id,
+            12,
+            &HashSet::from([trigger.id]),
+            ThreadContextType::Forum,
+            &keys.public_key(),
+        )
+        .expect("forum history");
+        let ConversationContext::Thread { messages, .. } = comment_context else {
+            panic!("expected thread context");
+        };
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            ["forum post", "older comment"]
+        );
+
+        assert!(
+            parse_nostr_thread_response(
+                context_json(&[&post]),
+                channel_id,
+                post.id,
+                12,
+                &HashSet::from([post.id]),
+                ThreadContextType::Forum,
+                &keys.public_key(),
+            )
+            .is_none(),
+            "a forum-root trigger must not repeat itself as hydrated context"
+        );
+    }
+
+    #[test]
+    fn dm_reply_context_is_validated_and_current_reply_is_excluded() {
+        let agent = Keys::generate();
+        let channel_id = Uuid::new_v4();
+        let root = signed_context_event(9, channel_id, "dm root", 10, vec![]);
+        let history =
+            signed_context_event(9, channel_id, "dm history", 20, direct_reply_tags(root.id));
+        let trigger = signed_context_event(
+            9,
+            channel_id,
+            "dm current",
+            30,
+            nested_reply_tags(root.id, history.id),
+        );
+        let forum_root = signed_context_event(
+            buzz_core::kind::KIND_FORUM_POST as u16,
+            channel_id,
+            "not a DM root",
+            11,
+            vec![],
+        );
+        let forum_comment = signed_context_event(
+            buzz_core::kind::KIND_FORUM_COMMENT as u16,
+            channel_id,
+            "not a DM reply",
+            21,
+            direct_reply_tags(root.id),
+        );
+
+        let context = parse_nostr_thread_response(
+            context_json(&[&trigger, &forum_comment, &history, &root]),
+            channel_id,
+            root.id,
+            12,
+            &HashSet::from([trigger.id]),
+            ThreadContextType::Dm,
+            &agent.public_key(),
+        )
+        .expect("validated DM reply history");
+        let ConversationContext::Thread { messages, .. } = context else {
+            panic!("expected thread context");
+        };
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            ["dm root", "dm history"]
+        );
+        assert!(
+            parse_nostr_thread_response(
+                context_json(&[&forum_root]),
+                channel_id,
+                forum_root.id,
+                12,
+                &HashSet::new(),
+                ThreadContextType::Dm,
+                &agent.public_key(),
+            )
+            .is_none(),
+            "DM hydration must reject a forum root even when the relay returns it by exact ID"
+        );
+    }
+
+    #[test]
+    fn dm_context_preserves_chronological_limit_after_batch_exclusions() {
+        let channel_id = Uuid::new_v4();
+        let oldest = signed_context_event(9, channel_id, "oldest", 10, vec![]);
+        let kept_a = signed_context_event(9, channel_id, "kept-a", 20, vec![]);
+        let kept_b = signed_context_event(40002, channel_id, "kept-b", 30, vec![]);
+        let cancelled = signed_context_event(9, channel_id, "cancelled", 40, vec![]);
+        let trigger = signed_context_event(9, channel_id, "trigger", 50, vec![]);
+
+        let context = parse_nostr_dm_response(
+            context_json(&[&trigger, &cancelled, &kept_b, &kept_a, &oldest]),
+            channel_id,
+            2,
+            &HashSet::from([trigger.id, cancelled.id]),
+        )
+        .expect("DM history");
+        let ConversationContext::Dm {
+            messages,
+            total,
+            truncated,
+        } = context
+        else {
+            panic!("expected DM context");
+        };
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            ["kept-a", "kept-b"]
+        );
+        assert!(truncated);
+        assert_eq!(total, 3);
+    }
+
     #[test]
     fn test_collect_prompt_pubkeys_includes_authors_mentions_and_context() {
         let keys = Keys::generate();
@@ -5138,7 +6712,7 @@ mod tests {
             .unwrap();
         let author_hex = event.pubkey.to_hex();
         let batch = FlushBatch {
-            channel_id: Uuid::new_v4(),
+            scope: ConversationScope::channel(Uuid::new_v4()),
             events: vec![crate::queue::BatchEvent {
                 event,
                 prompt_tag: "@mention".into(),
@@ -5264,9 +6838,9 @@ mod tests {
         assert_eq!(pct_encode(" "), "%20");
     }
 
-    fn make_state() -> (SessionState, Uuid, Uuid) {
-        let ch_a = Uuid::new_v4();
-        let ch_b = Uuid::new_v4();
+    fn make_state() -> (SessionState, ConversationScope, ConversationScope) {
+        let ch_a = ConversationScope::channel(Uuid::new_v4());
+        let ch_b = ConversationScope::channel(Uuid::new_v4());
         let mut s = SessionState::default();
         s.sessions.insert(ch_a, "sess-a".into());
         s.sessions.insert(ch_b, "sess-b".into());
@@ -5285,14 +6859,14 @@ mod tests {
 
         apply_completed_before_control_signal(
             &mut s,
-            &PromptSource::Channel(ch_a),
+            &PromptSource::Conversation(ch_a),
             &ControlSignal::Rotate,
         );
 
         assert!(!s.sessions.contains_key(&ch_a));
         assert!(!s.turn_counts.contains_key(&ch_a));
         assert!(!s.core_sections.contains_key(&ch_a));
-        assert!(!s.has_channel_state(&ch_a));
+        assert!(!s.has_scope_state(&ch_a));
         assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
         assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
         assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
@@ -5306,7 +6880,7 @@ mod tests {
 
         apply_completed_before_control_signal(
             &mut s,
-            &PromptSource::Channel(ch_a),
+            &PromptSource::Conversation(ch_a),
             &ControlSignal::Cancel,
         );
 
@@ -5319,12 +6893,12 @@ mod tests {
     #[test]
     fn test_invalidate_channel_clears_session_and_turn_count() {
         let (mut s, ch_a, ch_b) = make_state();
-        s.invalidate(&PromptSource::Channel(ch_a));
+        s.invalidate(&PromptSource::Conversation(ch_a));
 
         assert!(!s.sessions.contains_key(&ch_a));
         assert!(!s.turn_counts.contains_key(&ch_a));
         assert!(!s.core_sections.contains_key(&ch_a));
-        assert!(!s.has_channel_state(&ch_a));
+        assert!(!s.has_scope_state(&ch_a));
         // ch_b untouched
         assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
         assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
@@ -5364,8 +6938,8 @@ mod tests {
     #[test]
     fn test_invalidate_nonexistent_channel_is_noop() {
         let (mut s, ch_a, ch_b) = make_state();
-        let ghost = Uuid::new_v4();
-        s.invalidate(&PromptSource::Channel(ghost));
+        let ghost = ConversationScope::channel(Uuid::new_v4());
+        s.invalidate(&PromptSource::Conversation(ghost));
 
         // Everything still intact.
         assert_eq!(s.sessions.len(), 2);
@@ -5386,13 +6960,13 @@ mod tests {
     }
 
     #[test]
-    fn test_invalidate_channel_returns_true_when_session_existed() {
+    fn test_invalidate_scope_returns_true_when_session_existed() {
         let (mut s, ch_a, ch_b) = make_state();
-        assert!(s.invalidate_channel(&ch_a));
+        assert!(s.invalidate_scope(&ch_a));
         assert!(!s.sessions.contains_key(&ch_a));
         assert!(!s.turn_counts.contains_key(&ch_a));
         assert!(!s.core_sections.contains_key(&ch_a));
-        assert!(!s.has_channel_state(&ch_a));
+        assert!(!s.has_scope_state(&ch_a));
         // ch_b untouched
         assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
         assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
@@ -5403,10 +6977,10 @@ mod tests {
     }
 
     #[test]
-    fn test_invalidate_channel_returns_false_when_no_session() {
+    fn test_invalidate_scope_returns_false_when_no_session() {
         let (mut s, _ch_a, _ch_b) = make_state();
-        let ghost = Uuid::new_v4();
-        assert!(!s.invalidate_channel(&ghost));
+        let ghost = ConversationScope::channel(Uuid::new_v4());
+        assert!(!s.invalidate_scope(&ghost));
         // Nothing changed.
         assert_eq!(s.sessions.len(), 2);
         assert_eq!(s.turn_counts.len(), 2);
@@ -5417,14 +6991,14 @@ mod tests {
         // Simulates handle_prompt_result: channels removed while agent
         // was checked out should have both sessions and turn_counts stripped.
         let (mut s, ch_a, ch_b) = make_state();
-        let removed = vec![ch_a];
+        let removed = vec![ch_a.channel_id];
         for ch in &removed {
             s.invalidate_channel(ch);
         }
         assert!(!s.sessions.contains_key(&ch_a));
         assert!(!s.turn_counts.contains_key(&ch_a));
         assert!(!s.core_sections.contains_key(&ch_a));
-        assert!(!s.has_channel_state(&ch_a));
+        assert!(!s.has_scope_state(&ch_a));
         assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
         assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
         assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
@@ -5440,11 +7014,11 @@ mod tests {
         // re-creates a fresh session that re-applies the new desired_model.
         apply_completed_before_control_signal(
             &mut s,
-            &PromptSource::Channel(ch_a),
-            &ControlSignal::SwitchModel("gpt-5".into()),
+            &PromptSource::Conversation(ch_a),
+            &ControlSignal::SwitchModel { generation: 1 },
         );
 
-        assert!(!s.has_channel_state(&ch_a));
+        assert!(!s.has_scope_state(&ch_a));
         // ch_b untouched — the switch is channel-scoped.
         assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
         assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
@@ -5458,13 +7032,13 @@ mod tests {
     // `unwrap_or(CancelReason::Steer)` at the requeue site and preserve a
     // batch that should have been discarded.
 
-    fn one_event_batch(channel_id: Uuid) -> FlushBatch {
+    fn one_event_batch(scope: ConversationScope) -> FlushBatch {
         let keys = Keys::generate();
         let event = EventBuilder::new(Kind::Custom(9), "test")
             .sign_with_keys(&keys)
             .unwrap();
         FlushBatch {
-            channel_id,
+            scope,
             events: vec![crate::queue::BatchEvent {
                 event,
                 prompt_tag: "test".into(),
@@ -5481,7 +7055,7 @@ mod tests {
             (ControlSignal::Steer, Some(CancelReason::Steer)),
             (ControlSignal::Interrupt, Some(CancelReason::Interrupt)),
             (
-                ControlSignal::SwitchModel("gpt-5".into()),
+                ControlSignal::SwitchModel { generation: 1 },
                 Some(CancelReason::Interrupt),
             ),
             (ControlSignal::Cancel, None),
@@ -5491,8 +7065,7 @@ mod tests {
         ctx.dedup_mode = DedupMode::Queue;
 
         for (signal, expected_reason) in cases {
-            let channel_id = Uuid::new_v4();
-            let batch = one_event_batch(channel_id);
+            let batch = one_event_batch(ConversationScope::channel(Uuid::new_v4()));
             let result = requeue_cancelled_batch(&ctx, signal.clone(), Some(batch));
             match expected_reason {
                 Some(reason) => {
@@ -5597,7 +7170,7 @@ mod tests {
             Case {
                 name: "CancelDrainTimeout + SwitchModel preserves batch with Interrupt reason",
                 error: || AcpError::CancelDrainTimeout(CONTROL_CANCEL_GRACE),
-                signal: ControlSignal::SwitchModel("gpt-5".to_string()),
+                signal: ControlSignal::SwitchModel { generation: 1 },
                 expected_outcome: "CancelDrainTimeout",
                 batch_preserved: true,
                 expected_reason: Some(CancelReason::Interrupt),
@@ -5644,8 +7217,7 @@ mod tests {
         ];
 
         for case in cases {
-            let channel_id = Uuid::new_v4();
-            let batch = one_event_batch(channel_id);
+            let batch = one_event_batch(ConversationScope::channel(Uuid::new_v4()));
             let failure = classify_control_cancel_failure(
                 &ctx,
                 (case.error)(),
@@ -6013,7 +7585,9 @@ mod tests {
             acp,
             state: SessionState::default(),
             model_capabilities: None,
+            baseline_model: None,
             desired_model: None,
+            desired_model_generation: None,
             model_overridden: false,
             agent_name: "unknown".into(),
             goose_system_prompt_supported: None,
@@ -6071,7 +7645,9 @@ mod tests {
             acp,
             state: SessionState::default(),
             model_capabilities: None,
+            baseline_model: None,
             desired_model: None,
+            desired_model_generation: None,
             model_overridden: false,
             agent_name: "unknown".into(),
             goose_system_prompt_supported: None,
@@ -6542,6 +8118,7 @@ mod tests {
             memory_enabled: false,
             harness_name: "goose".to_string(),
             relay_url: "ws://127.0.0.1:3000".to_string(),
+            model_controls: ChannelModelControls::default(),
         }
     }
 
@@ -6591,14 +8168,14 @@ mod tests {
     // ── canvas_sections cache invalidation ───────────────────────────────────
 
     #[test]
-    fn test_invalidate_channel_clears_canvas_section() {
-        let ch = Uuid::new_v4();
+    fn test_invalidate_scope_clears_canvas_section() {
+        let ch = ConversationScope::channel(Uuid::new_v4());
         let mut s = SessionState::default();
         s.sessions.insert(ch, "sess".into());
         s.canvas_sections
             .insert(ch, "[Channel Canvas]\nrev abc".into());
 
-        s.invalidate_channel(&ch);
+        s.invalidate_scope(&ch);
 
         assert!(!s.canvas_sections.contains_key(&ch));
         assert!(!s.sessions.contains_key(&ch));
@@ -6606,8 +8183,8 @@ mod tests {
 
     #[test]
     fn test_invalidate_all_clears_canvas_sections() {
-        let ch_a = Uuid::new_v4();
-        let ch_b = Uuid::new_v4();
+        let ch_a = ConversationScope::channel(Uuid::new_v4());
+        let ch_b = ConversationScope::channel(Uuid::new_v4());
         let mut s = SessionState::default();
         s.canvas_sections.insert(ch_a, "canvas-a".into());
         s.canvas_sections.insert(ch_b, "canvas-b".into());
@@ -6621,26 +8198,26 @@ mod tests {
 
     #[test]
     fn test_invalidate_channel_leaves_other_channels_canvas_intact() {
-        let ch_a = Uuid::new_v4();
-        let ch_b = Uuid::new_v4();
+        let ch_a = ConversationScope::channel(Uuid::new_v4());
+        let ch_b = ConversationScope::channel(Uuid::new_v4());
         let mut s = SessionState::default();
         s.sessions.insert(ch_a, "sess-a".into());
         s.sessions.insert(ch_b, "sess-b".into());
         s.canvas_sections.insert(ch_a, "canvas-a".into());
         s.canvas_sections.insert(ch_b, "canvas-b".into());
 
-        s.invalidate_channel(&ch_a);
+        s.invalidate_channel(&ch_a.channel_id);
 
         assert!(!s.canvas_sections.contains_key(&ch_a));
         assert_eq!(s.canvas_sections.get(&ch_b).unwrap(), "canvas-b");
     }
 
     #[test]
-    fn test_has_channel_state_true_when_only_canvas_section_present() {
-        let ch = Uuid::new_v4();
+    fn test_has_scope_state_true_when_only_canvas_section_present() {
+        let ch = ConversationScope::channel(Uuid::new_v4());
         let mut s = SessionState::default();
         s.canvas_sections.insert(ch, "canvas".into());
-        assert!(s.has_channel_state(&ch));
+        assert!(s.has_scope_state(&ch));
     }
 
     // ── canvas_section_from_query_response ───────────────────────────────────
@@ -6994,5 +8571,182 @@ mod tests {
             "one fetch_channel_info sequence (initial attempt + single retry)"
         );
         server.abort();
+    }
+}
+
+#[cfg(test)]
+mod thread_scope_session_tests {
+    use super::*;
+    use crate::scope::ConversationScope;
+    use nostr::EventId;
+    use uuid::Uuid;
+
+    fn thread_scope(channel_id: Uuid, root_byte: char) -> ConversationScope {
+        let root = EventId::from_hex(&root_byte.to_string().repeat(64)).expect("valid hex");
+        ConversationScope::thread(channel_id, root)
+    }
+
+    fn context_batch(scope: ConversationScope, tagged_root: Option<char>) -> FlushBatch {
+        let tags = tagged_root
+            .map(|root| {
+                nostr::Tag::parse(&[
+                    "e".to_string(),
+                    root.to_string().repeat(64),
+                    String::new(),
+                    "reply".to_string(),
+                ])
+                .expect("reply tag")
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "context")
+            .tags(tags)
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign context event");
+        FlushBatch {
+            scope,
+            events: vec![crate::queue::BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        }
+    }
+
+    /// Hydration must follow the same canonical root that keys the queue and
+    /// session. DM replies are the exception: their session remains channel
+    /// scoped while their last event's root still selects reply context.
+    #[test]
+    fn context_hydration_uses_typed_root_and_preserves_dm_reply_context() {
+        let channel_id = Uuid::new_v4();
+        let typed_scope = thread_scope(channel_id, 'a');
+
+        let conflicting_tag = context_batch(typed_scope, Some('b'));
+        assert_eq!(
+            context_thread_root(&conflicting_tag, false).map(|root| root.to_hex()),
+            Some("a".repeat(64)),
+            "an event tag may not redirect context away from the typed session root"
+        );
+
+        let forum_root_without_reply_tags = context_batch(typed_scope, None);
+        assert_eq!(
+            context_thread_root(&forum_root_without_reply_tags, false).map(|root| root.to_hex()),
+            Some("a".repeat(64)),
+            "a forum root hydrates by its typed own-event scope"
+        );
+
+        let dm_reply = context_batch(ConversationScope::channel(channel_id), Some('b'));
+        assert_eq!(
+            context_thread_root(&dm_reply, true).map(|root| root.to_hex()),
+            Some("b".repeat(64)),
+            "DM replies preserve thread-context hydration"
+        );
+        assert_eq!(
+            context_thread_root(&dm_reply, false),
+            None,
+            "an ordinary channel-scoped message must not import a tagged root"
+        );
+    }
+
+    /// Two threads in one channel — and the channel-level conversation — hold
+    /// distinct session entries; replies in one thread reuse that thread's
+    /// session key.
+    #[test]
+    fn threads_and_channel_hold_distinct_sessions() {
+        let ch = Uuid::new_v4();
+        let thread_a = thread_scope(ch, 'a');
+        let thread_b = thread_scope(ch, 'b');
+        let channel = ConversationScope::channel(ch);
+
+        let mut s = SessionState::default();
+        s.sessions.insert(thread_a, "sess-thread-a".into());
+        s.sessions.insert(thread_b, "sess-thread-b".into());
+        s.sessions.insert(channel, "sess-channel".into());
+
+        // A reply in thread A resolves to thread A's session (reuse), not the
+        // channel session and not thread B's.
+        assert_eq!(s.sessions.get(&thread_a).unwrap(), "sess-thread-a");
+        assert_eq!(s.sessions.get(&thread_b).unwrap(), "sess-thread-b");
+        assert_eq!(s.sessions.get(&channel).unwrap(), "sess-channel");
+        assert_eq!(s.sessions.len(), 3);
+    }
+
+    /// Rotating one thread's scope leaves the sibling thread and the
+    /// channel-level conversation untouched.
+    #[test]
+    fn invalidate_scope_targets_only_that_thread() {
+        let ch = Uuid::new_v4();
+        let thread_a = thread_scope(ch, 'a');
+        let thread_b = thread_scope(ch, 'b');
+        let channel = ConversationScope::channel(ch);
+
+        let mut s = SessionState::default();
+        for (scope, sid) in [(thread_a, "a"), (thread_b, "b"), (channel, "c")] {
+            s.sessions.insert(scope, sid.into());
+            s.turn_counts.insert(scope, 2);
+            s.core_sections.insert(scope, "core".into());
+            s.canvas_sections.insert(scope, "canvas".into());
+        }
+
+        assert!(s.invalidate_scope(&thread_a));
+
+        assert!(!s.sessions.contains_key(&thread_a));
+        assert!(!s.turn_counts.contains_key(&thread_a));
+        assert!(!s.core_sections.contains_key(&thread_a));
+        assert!(!s.canvas_sections.contains_key(&thread_a));
+        assert_eq!(s.sessions.get(&thread_b).unwrap(), "b");
+        assert_eq!(s.sessions.get(&channel).unwrap(), "c");
+        assert_eq!(*s.turn_counts.get(&thread_b).unwrap(), 2);
+    }
+
+    /// Channel removal invalidates every conversation scope under that
+    /// channel — channel-level and all threads — and nothing else.
+    #[test]
+    fn invalidate_channel_sweeps_channel_and_thread_scopes() {
+        let ch = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let thread_a = thread_scope(ch, 'a');
+        let thread_b = thread_scope(ch, 'b');
+        let channel = ConversationScope::channel(ch);
+        let other_scope = ConversationScope::channel(other);
+        let other_thread = thread_scope(other, 'e');
+
+        let mut s = SessionState::default();
+        for scope in [thread_a, thread_b, channel, other_scope, other_thread] {
+            s.sessions.insert(scope, "sess".into());
+            s.turn_counts.insert(scope, 1);
+            s.core_sections.insert(scope, "core".into());
+            s.canvas_sections.insert(scope, "canvas".into());
+        }
+
+        assert!(s.invalidate_channel(&ch));
+
+        for scope in [thread_a, thread_b, channel] {
+            assert!(!s.has_scope_state(&scope), "{scope} must be swept");
+        }
+        for scope in [other_scope, other_thread] {
+            assert!(s.has_scope_state(&scope), "{scope} must survive");
+        }
+        // Idempotent: nothing left to remove.
+        assert!(!s.invalidate_channel(&ch));
+    }
+
+    /// Proactive rotation counters are per-conversation: turns in one thread
+    /// must not advance the rotation clock of siblings.
+    #[test]
+    fn turn_counts_are_per_conversation() {
+        let ch = Uuid::new_v4();
+        let thread_a = thread_scope(ch, 'a');
+        let channel = ConversationScope::channel(ch);
+
+        let mut s = SessionState::default();
+        *s.turn_counts.entry(thread_a).or_insert(0) += 1;
+        *s.turn_counts.entry(thread_a).or_insert(0) += 1;
+        *s.turn_counts.entry(channel).or_insert(0) += 1;
+
+        assert_eq!(*s.turn_counts.get(&thread_a).unwrap(), 2);
+        assert_eq!(*s.turn_counts.get(&channel).unwrap(), 1);
     }
 }

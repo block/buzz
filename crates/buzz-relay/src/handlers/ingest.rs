@@ -589,36 +589,10 @@ pub(crate) async fn resolve_nip10_thread_meta(
     channel_id: Uuid,
     state: &AppState,
 ) -> Result<Option<ThreadMetadataOwned>, String> {
-    let mut root_hex: Option<String> = None;
-    let mut reply_hex: Option<String> = None;
-
-    for tag in event.tags.iter() {
-        let parts = tag.as_slice();
-        if parts.len() >= 4 && parts[0] == "e" {
-            let hex_val = &parts[1];
-            let marker = &parts[3];
-            if hex_val.len() == 64 && hex_val.chars().all(|c| c.is_ascii_hexdigit()) {
-                match marker.as_str() {
-                    "root" => root_hex = Some(hex_val.to_string()),
-                    "reply" => reply_hex = Some(hex_val.to_string()),
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    if root_hex.is_none() && reply_hex.is_none() {
+    let Some(thread) = buzz_core::thread::parse_nip10_thread(event) else {
         return Ok(None);
-    }
-
-    let (root_hex, parent_hex) = match (root_hex, reply_hex) {
-        (Some(r), Some(p)) => (r, p),
-        (None, Some(p)) => (p.clone(), p),
-        (Some(_), None) | (None, None) => return Ok(None),
     };
-
-    let parent_bytes =
-        hex::decode(&parent_hex).map_err(|_| "invalid parent event ID hex".to_string())?;
+    let parent_bytes = thread.parent_event_id.as_bytes().to_vec();
 
     let (parent_event_result, parent_meta_result) = tokio::join!(
         state.db.get_event_by_id(community_id, &parent_bytes),
@@ -643,8 +617,7 @@ pub(crate) async fn resolve_nip10_thread_meta(
         chrono::DateTime::from_timestamp(parent_event.event.created_at.as_secs() as i64, 0)
             .unwrap_or_else(Utc::now);
 
-    let client_root_bytes =
-        hex::decode(&root_hex).map_err(|_| "invalid root event ID hex".to_string())?;
+    let client_root_bytes = thread.root_event_id.as_bytes().to_vec();
 
     let parent_meta =
         parent_meta_result.map_err(|e| format!("db error looking up thread metadata: {e}"))?;
@@ -672,28 +645,8 @@ pub(crate) async fn resolve_nip10_thread_meta(
             (effective_root, root_ts, depth)
         }
         None => {
-            let parent_root = parent_event
-                .event
-                .tags
-                .iter()
-                .find_map(|t| {
-                    let parts = t.as_slice();
-                    if parts.len() >= 4 && parts[0] == "e" && parts[3] == "root" {
-                        hex::decode(&parts[1]).ok().filter(|b| b.len() == 32)
-                    } else {
-                        None
-                    }
-                })
-                .or_else(|| {
-                    parent_event.event.tags.iter().find_map(|t| {
-                        let parts = t.as_slice();
-                        if parts.len() >= 4 && parts[0] == "e" && parts[3] == "reply" {
-                            hex::decode(&parts[1]).ok().filter(|b| b.len() == 32)
-                        } else {
-                            None
-                        }
-                    })
-                })
+            let parent_root = buzz_core::thread::parse_nip10_thread(&parent_event.event)
+                .map(|thread| thread.root_event_id.as_bytes().to_vec())
                 .unwrap_or_else(|| parent_bytes.clone());
 
             if client_root_bytes != parent_root {

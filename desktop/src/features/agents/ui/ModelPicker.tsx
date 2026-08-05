@@ -113,16 +113,27 @@ export function ModelPicker({
   // from every channel before resolving success.
   const sendLiveSwitch = React.useCallback(
     (modelId: string) => {
-      const channelIds = activeTurns.map((turn) => turn.channelId);
+      // Model state is channel-wide even when several thread turns are live in
+      // that channel. Send one control per channel, not one per turn.
+      const channelIds = [
+        ...new Set(activeTurns.map((turn) => turn.channelId)),
+      ];
+      const requestId = crypto.randomUUID();
       return awaitLiveSwitchOutcome({
         channelCount: channelIds.length,
         modelId,
+        requestId,
         subscribe: (listener) =>
           subscribeControlResults(agent.pubkey, listener),
         sendSwitches: async () => {
           await Promise.all(
             channelIds.map((channelId) =>
-              switchManagedAgentModel(agent.pubkey, channelId, modelId),
+              switchManagedAgentModel(
+                agent.pubkey,
+                channelId,
+                modelId,
+                requestId,
+              ),
             ),
           );
         },

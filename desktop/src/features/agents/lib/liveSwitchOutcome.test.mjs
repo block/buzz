@@ -4,6 +4,7 @@ import test from "node:test";
 import { awaitLiveSwitchOutcome } from "./liveSwitchOutcome.ts";
 
 const MODEL = "goose-claude-fable-5";
+const REQUEST = "request-current";
 
 function frame(status, overrides = {}) {
   return { type: "switch_model", status, modelId: MODEL, ...overrides };
@@ -28,6 +29,7 @@ function harness(channelCount) {
   const outcome = awaitLiveSwitchOutcome({
     channelCount,
     modelId: MODEL,
+    requestId: REQUEST,
     subscribe: (fn) => {
       listener = fn;
       return () => {
@@ -128,6 +130,38 @@ test("awaitLiveSwitchOutcome ignores frames for a different model or control typ
   assert.equal(await h.outcome, "ok");
 });
 
+test("awaitLiveSwitchOutcome ignores stale, superseded, and duplicate channel results", async () => {
+  const h = harness(2);
+  let settled = false;
+  void h.outcome.then(() => {
+    settled = true;
+  });
+
+  h.push(
+    frame("superseded", {
+      channelId: "channel-a",
+      requestId: REQUEST,
+    }),
+  );
+  h.push(
+    frame("unsupported_model", {
+      channelId: "channel-a",
+      requestId: "request-stale",
+    }),
+  );
+  h.push(frame("sent", { channelId: "channel-a", requestId: REQUEST }));
+  h.push(frame("sent", { channelId: "channel-a", requestId: REQUEST }));
+  await Promise.resolve();
+  assert.equal(
+    settled,
+    false,
+    "one channel cannot satisfy two acknowledgements",
+  );
+
+  h.push(frame("sent", { channelId: "channel-b", requestId: REQUEST }));
+  assert.equal(await h.outcome, "ok");
+});
+
 test("awaitLiveSwitchOutcome resolves ok via the timeout fallback when the harness never replies", async () => {
   const h = harness(2);
   h.fireTimeout();
@@ -151,4 +185,32 @@ test("awaitLiveSwitchOutcome with zero channels resolves ok at the timeout (no a
   const h = harness(0);
   h.fireTimeout();
   assert.equal(await h.outcome, "ok");
+});
+
+test("awaitLiveSwitchOutcome cleans up when a channel control send fails", async () => {
+  let listener = null;
+  let unsubscribeCalls = 0;
+  let cancelTimeoutCalls = 0;
+  const sendError = new Error("relay send failed");
+  const outcome = awaitLiveSwitchOutcome({
+    channelCount: 1,
+    modelId: MODEL,
+    requestId: REQUEST,
+    subscribe: (fn) => {
+      listener = fn;
+      return () => {
+        unsubscribeCalls += 1;
+        listener = null;
+      };
+    },
+    sendSwitches: () => Promise.reject(sendError),
+    scheduleTimeout: () => () => {
+      cancelTimeoutCalls += 1;
+    },
+  });
+
+  await assert.rejects(outcome, sendError);
+  assert.equal(unsubscribeCalls, 1);
+  assert.equal(cancelTimeoutCalls, 1);
+  assert.equal(listener, null);
 });

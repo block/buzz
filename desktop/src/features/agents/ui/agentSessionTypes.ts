@@ -6,6 +6,8 @@ export type ObserverEvent = {
   kind: string;
   agentIndex: number | null;
   channelId: string | null;
+  /** Canonical thread root. Absent on legacy, unthreaded, and DM frames. */
+  threadRoot?: string | null;
   sessionId: string | null;
   turnId: string | null;
   startedAt?: string | null;
@@ -66,6 +68,7 @@ export type TranscriptItemIdentity = {
   turnId?: string | null;
   sessionId?: string | null;
   channelId?: string | null;
+  threadRoot?: string | null;
 };
 
 export type TranscriptItem =

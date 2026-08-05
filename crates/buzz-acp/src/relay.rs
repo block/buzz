@@ -153,6 +153,8 @@ pub(crate) fn channel_type_from_tags(tags: &[serde_json::Value]) -> String {
         "dm".to_string()
     } else if declared_type == Some("private") || is_private {
         "private".to_string()
+    } else if declared_type == Some("forum") {
+        "forum".to_string()
     } else {
         "stream".to_string()
     }
@@ -4109,6 +4111,14 @@ mod tests {
         let meta = serde_json::json!([meta_event(channel, "dm", &["t", "dm"])]);
         let map = merge_discovered_channels(vec![channel], &meta);
         assert_eq!(map[&channel].channel_type, "dm");
+    }
+
+    #[test]
+    fn merge_discovered_channels_preserves_declared_forum_type() {
+        let channel = Uuid::new_v4();
+        let meta = serde_json::json!([meta_event(channel, "forum", &["t", "forum"])]);
+        let map = merge_discovered_channels(vec![channel], &meta);
+        assert_eq!(map[&channel].channel_type, "forum");
     }
 
     #[test]
