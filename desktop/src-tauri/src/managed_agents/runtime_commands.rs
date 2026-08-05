@@ -138,7 +138,18 @@ pub fn put_managed_agent_runtime_lifecycle(
 }
 
 #[tauri::command]
-pub fn list_managed_agent_runtimes(
+pub async fn list_managed_agent_runtimes(
+    app: AppHandle,
+) -> Result<Vec<ManagedAgentRuntimeStatus>, String> {
+    // Runtime status is polled frequently by the desktop. The implementation
+    // reads agent configuration, inspects child processes, and may update the
+    // managed-agent store, so keep that blocking work off Tauri's IPC thread.
+    tauri::async_runtime::spawn_blocking(move || list_managed_agent_runtimes_blocking(app))
+        .await
+        .map_err(|error| format!("managed runtime status worker failed: {error}"))?
+}
+
+fn list_managed_agent_runtimes_blocking(
     app: AppHandle,
 ) -> Result<Vec<ManagedAgentRuntimeStatus>, String> {
     // This command is polled whenever the members sidebar opens and refetched
