@@ -1,12 +1,15 @@
-//! Provider-neutral authorization interfaces available before runtime installation.
+//! Provider-neutral runtime authorization seams.
 
-/// Fail-closed ephemeral-authority interfaces installed by the session slice.
-pub mod ephemeral;
-/// Fail-closed transaction interfaces installed by the finalization slice.
+pub(crate) mod ephemeral;
+/// Transaction-owned protected mutation execution and idempotency.
 pub mod executor;
-/// Activation and enrollment types consumed by protected transports.
+/// Exact-domain provider selection and authorization finalization.
 pub mod finalization;
-/// Fail-closed restore-witness interfaces installed by the invalidation slice.
+/// Durable provider-neutral invalidation, reconciliation, and use fences.
+pub mod invalidation;
+/// Disabled-by-default production runtime construction.
+pub mod production;
+/// Independent high-water protection against stale PostgreSQL restoration.
 pub mod restore;
 /// Protected transport authorization and lease fencing.
 pub mod transport;

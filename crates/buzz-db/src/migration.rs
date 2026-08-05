@@ -566,7 +566,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 39);
+        assert_eq!(migrations.len(), 42);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1006,6 +1006,64 @@ mod tests {
                 projection.contains(required),
                 "migration 0030 is missing {required}"
             );
+        }
+
+        assert_eq!(migrations[35].version, 36);
+        let protected_domain_marker = migrations[35].sql.as_str();
+        assert!(protected_domain_marker.contains("CREATE TABLE authorization_invalidation_domains"));
+
+        assert_eq!(migrations[39].version, 40);
+        let invalidation = migrations[39].sql.as_str();
+        assert!(invalidation.contains("CREATE TABLE authorization_invalidation_receipts"));
+        assert!(invalidation.contains("CREATE TABLE authorization_invalidation_floors"));
+
+        assert_eq!(migrations[40].version, 41);
+        let operation_receipts = migrations[40].sql.as_str();
+        assert!(operation_receipts.contains("CREATE TABLE authorization_operation_receipts"));
+        assert!(operation_receipts.contains("request_fingerprint"));
+        assert!(operation_receipts.contains("result_payload"));
+        assert!(operation_receipts.contains("authorization_operation_expiry_guard"));
+
+        assert_eq!(migrations[41].version, 42);
+        let authority_epochs = migrations[41].sql.as_str();
+        assert!(authority_epochs.contains("CREATE TABLE authorization_authority_epochs"));
+        assert!(authority_epochs.contains("CREATE TABLE client_status_revisions"));
+        assert!(authority_epochs.contains("advance_authorization_authority_epoch"));
+        assert!(authority_epochs.contains("IF TG_OP = 'DELETE'"));
+        assert!(authority_epochs.contains("domain_id := OLD.community_id"));
+        assert!(authority_epochs.contains("domain_id := NEW.community_id"));
+        assert!(authority_epochs.contains("pg_trigger_depth() > 1"));
+        assert!(authority_epochs.contains("ON DELETE CASCADE"));
+        let function_position = authority_epochs
+            .find("CREATE FUNCTION advance_authorization_authority_epoch")
+            .expect("authority epoch function exists");
+        for git_policy_trigger in [
+            "git_policy_insert_authority_epoch",
+            "git_policy_update_authority_epoch",
+            "git_policy_delete_authority_epoch",
+        ] {
+            let trigger_position = authority_epochs
+                .find(git_policy_trigger)
+                .expect("git policy authority trigger exists");
+            assert!(function_position < trigger_position);
+        }
+        for protected_table in [
+            "identity_bindings",
+            "identity_principals",
+            "identity_revoked_keys",
+            "identity_retired_pairs",
+            "relay_members",
+            "channel_members",
+            "community_bans",
+            "channels",
+            "users",
+            "authorization_invalidation_domains",
+            "git_repo_publications",
+            "media_publications",
+            "protected_object_authority",
+            "audio_session_admissions",
+        ] {
+            assert!(authority_epochs.contains(protected_table));
         }
     }
 
@@ -2662,5 +2720,97 @@ mod tests {
             search_expression.contains("ELSE NULL::tsvector"),
             "fresh installs must default non-allowlisted kinds to NULL: {search_expression}"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn authority_triggers_preserve_off_and_deny_unwitnessed_protected_teardown() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        run_migrations(&pool).await.expect("apply all migrations");
+
+        let community_id = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind(format!(
+                "authority-trigger-{}.example",
+                community_id.simple()
+            ))
+            .execute(&pool)
+            .await
+            .expect("insert legacy community");
+        sqlx::query(
+            "INSERT INTO relay_members (community_id, pubkey, role) VALUES ($1, $2, 'member')",
+        )
+        .bind(community_id)
+        .bind("11".repeat(32))
+        .execute(&pool)
+        .await
+        .expect("legacy membership remains writable");
+        let legacy_domains: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM authorization_invalidation_domains WHERE community_id=$1",
+        )
+        .bind(community_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read legacy authorization rows");
+        assert_eq!(legacy_domains, 0, "Off must not acquire protected state");
+
+        sqlx::query("INSERT INTO authorization_invalidation_domains (community_id) VALUES ($1)")
+            .bind(community_id)
+            .execute(&pool)
+            .await
+            .expect("initialize protected domain");
+        sqlx::query(
+            "INSERT INTO relay_members (community_id, pubkey, role) VALUES ($1, $2, 'member')",
+        )
+        .bind(community_id)
+        .bind("22".repeat(32))
+        .execute(&pool)
+        .await
+        .expect("protected membership mutation");
+        let generation: i64 = sqlx::query_scalar(
+            "SELECT generation FROM authorization_invalidation_domains WHERE community_id=$1",
+        )
+        .bind(community_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read protected generation");
+        assert_eq!(generation, 1, "one mutation advances generation once");
+
+        sqlx::query("DELETE FROM relay_members WHERE community_id=$1")
+            .bind(community_id)
+            .execute(&pool)
+            .await
+            .expect("delete ordinary community-owned rows first");
+        assert!(sqlx::query("DELETE FROM communities WHERE id=$1")
+            .bind(community_id)
+            .execute(&pool)
+            .await
+            .is_err());
+        let retained: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM authorization_authority_epochs WHERE community_id=$1",
+        )
+        .bind(community_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read retained authority state");
+        assert_eq!(retained, 1, "denied teardown retains the monotonic floor");
+
+        assert!(sqlx::query(
+            "DELETE FROM authorization_invalidation_domains WHERE community_id=$1"
+        )
+        .bind(community_id)
+        .execute(&pool)
+        .await
+        .is_err());
+        let marker: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM authorization_invalidation_domains WHERE community_id=$1",
+        )
+        .bind(community_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read retained activation marker");
+        assert_eq!(marker, 1, "protected activation is a one-way cutover");
     }
 }

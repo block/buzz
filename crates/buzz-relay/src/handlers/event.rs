@@ -31,6 +31,35 @@ fn reject(reason: &'static str) {
     reject_with_transport("ws", reason);
 }
 
+fn seal_ephemeral_authority(
+    state: &AppState,
+    authority: &crate::authorization_runtime::transport::ProtectedAuthorization,
+    event: &Event,
+) -> Result<Option<String>, crate::authorization_runtime::ephemeral::EphemeralAuthorityError> {
+    authority
+        .is_enforcing()
+        .then(|| crate::authorization_runtime::ephemeral::seal(state, authority, event))
+        .transpose()
+}
+
+async fn publish_ephemeral_event(
+    state: &AppState,
+    tenant: &TenantContext,
+    topic: EventTopic,
+    event: &Event,
+    authority: Option<&str>,
+) -> Result<i64, buzz_pubsub::PubSubError> {
+    match authority {
+        Some(authority) => {
+            state
+                .pubsub
+                .publish_event_with_authority(tenant, topic, event, authority)
+                .await
+        }
+        None => state.pubsub.publish_event(tenant, topic, event).await,
+    }
+}
+
 /// Bound the `kind` label to prevent cardinality explosion from arbitrary Nostr kinds.
 pub(crate) fn bounded_kind_label(kind: u32) -> String {
     match kind {
@@ -73,23 +102,70 @@ where
     frames
 }
 
+/// A live fan-out target that retains exact authority until socket drain.
+pub struct ProtectedFanoutRecipient {
+    conn_id: crate::subscription::ConnId,
+    sub_id: crate::subscription::SubId,
+    authority: Option<Arc<dyn crate::connection::QueuedOutboundReleaseFence>>,
+}
+
+impl std::fmt::Debug for ProtectedFanoutRecipient {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProtectedFanoutRecipient")
+            .field("conn_id", &self.conn_id)
+            .field("sub_id", &self.sub_id)
+            .field("guarded", &self.authority.is_some())
+            .finish()
+    }
+}
+
+impl PartialEq<(crate::subscription::ConnId, crate::subscription::SubId)>
+    for ProtectedFanoutRecipient
+{
+    fn eq(&self, other: &(crate::subscription::ConnId, crate::subscription::SubId)) -> bool {
+        self.conn_id == other.0 && self.sub_id == other.1
+    }
+}
+
 fn send_fanout_frames<'a, I>(
     state: &AppState,
     recipients: I,
     frames: &HashMap<&'a str, Arc<Bytes>>,
+    sender_authority: Option<&Arc<dyn crate::connection::QueuedOutboundReleaseFence>>,
 ) -> u32
 where
-    I: IntoIterator<Item = (crate::subscription::ConnId, &'a str)>,
+    I: IntoIterator<Item = &'a ProtectedFanoutRecipient>,
 {
     let mut drop_count = 0u32;
-    for (conn_id, sub_id) in recipients {
+    for recipient in recipients {
         let frame = frames
-            .get(sub_id)
+            .get(recipient.sub_id.as_str())
             .expect("fan-out frame cache covers every recipient subscription id");
-        if !state
-            .conn_manager
-            .send_to_text_bytes(conn_id, Arc::clone(frame))
-        {
+        let sent = match (&recipient.authority, sender_authority) {
+            (Some(recipient_authority), Some(sender_authority)) => {
+                state.conn_manager.send_to_text_bytes_guarded_pair(
+                    recipient.conn_id,
+                    Arc::clone(frame),
+                    Arc::clone(sender_authority),
+                    Arc::clone(recipient_authority),
+                )
+            }
+            (Some(authority), None) => state.conn_manager.send_to_text_bytes_guarded(
+                recipient.conn_id,
+                Arc::clone(frame),
+                Arc::clone(authority),
+            ),
+            (None, Some(sender_authority)) => state.conn_manager.send_to_text_bytes_guarded(
+                recipient.conn_id,
+                Arc::clone(frame),
+                Arc::clone(sender_authority),
+            ),
+            (None, None) => state
+                .conn_manager
+                .send_to_text_bytes(recipient.conn_id, Arc::clone(frame)),
+        };
+        if !sent {
             drop_count += 1;
         }
     }
@@ -118,7 +194,7 @@ pub async fn filter_fanout_by_access(
     stored_event: &StoredEvent,
     matches: Vec<(crate::subscription::ConnId, crate::subscription::SubId)>,
     threaded: Option<&crate::state::ThreadedChannelVisibility>,
-) -> Vec<(crate::subscription::ConnId, crate::subscription::SubId)> {
+) -> Vec<ProtectedFanoutRecipient> {
     // First enforce the receiver-side tenant label. Subscription indexes are
     // community-scoped, but stale/injected matches and future fan-out helpers
     // must still fail closed at the send chokepoint: a connection bound to
@@ -175,7 +251,7 @@ pub async fn filter_fanout_by_access(
     };
 
     let Some(channel_id) = stored_event.channel_id else {
-        return matches;
+        return filter_fanout_by_protected_authorization(state, community_id, None, matches).await;
     };
     // Fence 3 (§4.8 phase-2): the threaded value is used only when it was
     // resolved under exactly this (community_id, channel_id); anything else
@@ -192,7 +268,15 @@ pub async fn filter_fanout_by_access(
         }
     };
     match visibility {
-        Ok(v) if v != "private" => return matches,
+        Ok(v) if v != "private" => {
+            return filter_fanout_by_protected_authorization(
+                state,
+                community_id,
+                Some(channel_id),
+                matches,
+            )
+            .await;
+        }
         Ok(_) => {}
         Err(e) => {
             // Fail closed: if we cannot determine visibility, do not leak a
@@ -216,6 +300,89 @@ pub async fn filter_fanout_by_access(
             Err(e) => {
                 warn!(%channel_id, "fan-out access filter: membership lookup failed: {e}");
             }
+        }
+    }
+    filter_fanout_by_protected_authorization(state, community_id, Some(channel_id), allowed).await
+}
+
+async fn filter_fanout_by_protected_authorization(
+    state: &AppState,
+    community_id: CommunityId,
+    channel_id: Option<uuid::Uuid>,
+    matches: Vec<(crate::subscription::ConnId, crate::subscription::SubId)>,
+) -> Vec<ProtectedFanoutRecipient> {
+    if state.protected_transport().is_none() {
+        return matches
+            .into_iter()
+            .map(|(conn_id, sub_id)| {
+                let authority = match channel_id {
+                    Some(channel_id) => state.conn_manager.pubkey_for_conn(conn_id).map(|actor| {
+                        crate::connection::queued_channel_read_authority(
+                            state.db.clone(),
+                            community_id,
+                            channel_id,
+                            actor.to_vec(),
+                            None,
+                        )
+                    }),
+                    None => None,
+                };
+                ProtectedFanoutRecipient {
+                    conn_id,
+                    sub_id,
+                    authority,
+                }
+            })
+            .collect();
+    }
+    let mut allowed = Vec::with_capacity(matches.len());
+    for (conn_id, sub_id) in matches {
+        let Some(proof) = state.conn_manager.authority_for_conn(conn_id) else {
+            continue;
+        };
+        if proof.authorization_domain() != community_id {
+            state.conn_manager.cancel_connection(conn_id);
+            continue;
+        }
+        let Some(cancellation) = state.conn_manager.cancellation_for_conn(conn_id) else {
+            continue;
+        };
+        match crate::authorization_runtime::transport::authorize_session_if_configured(
+            state,
+            proof,
+            state.conn_manager.federated_assertion_for_conn(conn_id),
+            buzz_auth::AuthorizationCapability::CommunityRead,
+            uuid::Uuid::new_v4(),
+            "ws_fanout",
+            conn_id,
+            cancellation,
+        )
+        .await
+        {
+            Ok(authority) if authority.revalidate().is_ok() => {
+                let authority = Arc::new(authority);
+                let release = match channel_id {
+                    Some(channel_id) => {
+                        let Some(actor) = state.conn_manager.pubkey_for_conn(conn_id) else {
+                            continue;
+                        };
+                        crate::connection::queued_channel_read_authority(
+                            state.db.clone(),
+                            community_id,
+                            channel_id,
+                            actor.to_vec(),
+                            Some(authority),
+                        )
+                    }
+                    None => crate::connection::queued_local_authority(authority),
+                };
+                allowed.push(ProtectedFanoutRecipient {
+                    conn_id,
+                    sub_id,
+                    authority: Some(release),
+                });
+            }
+            Ok(_) | Err(_) => state.conn_manager.cancel_connection(conn_id),
         }
     }
     allowed
@@ -243,6 +410,17 @@ pub(crate) async fn fan_out_event_to_local_subscribers(
     community_id: CommunityId,
     stored: &StoredEvent,
 ) {
+    fan_out_event_to_local_subscribers_with_authority(state, community_id, stored, None).await;
+}
+
+async fn fan_out_event_to_local_subscribers_with_authority(
+    state: &AppState,
+    community_id: CommunityId,
+    stored: &StoredEvent,
+    sender_authority: Option<&Arc<crate::authorization_runtime::transport::ProtectedAuthorization>>,
+) {
+    let sender_authority = sender_authority
+        .map(|authority| crate::connection::queued_local_authority(Arc::clone(authority)));
     let matches = state.sub_registry.fan_out_scoped(community_id, stored);
     let matches = filter_fanout_by_access(state, community_id, stored, matches, None).await;
     metrics::histogram!("buzz_fanout_recipients").record(matches.len() as f64);
@@ -258,16 +436,10 @@ pub(crate) async fn fan_out_event_to_local_subscribers(
         }
     };
     let frames = fanout_frame_cache(
-        matches.iter().map(|(_, sub_id)| sub_id.as_str()),
+        matches.iter().map(|recipient| recipient.sub_id.as_str()),
         &event_json,
     );
-    let drop_count = send_fanout_frames(
-        state,
-        matches
-            .iter()
-            .map(|(conn_id, sub_id)| (*conn_id, sub_id.as_str())),
-        &frames,
-    );
+    let drop_count = send_fanout_frames(state, matches.iter(), &frames, sender_authority.as_ref());
     if drop_count > 0 {
         tracing::warn!(
             event_id = %stored.event.id.to_hex(),
@@ -280,16 +452,50 @@ pub(crate) async fn fan_out_event_to_local_subscribers(
 /// Fan out one event received from Redis pub/sub to this relay's local subscribers.
 #[tracing::instrument(skip_all)]
 pub async fn fan_out_pubsub_event(state: &Arc<AppState>, channel_event: buzz_pubsub::ChannelEvent) {
+    let buzz_pubsub::ChannelEvent {
+        community_id,
+        topic,
+        event,
+        authority,
+    } = channel_event;
     // The Redis topic carries the tenant-local routing scope explicitly:
     // `Channel(id)` for a per-channel event, `Global` for a channel-less one.
     // Convert back to the `Option<Uuid>` channel id `fan_out()` indexes on —
     // `Global` selects the global subscriber index.
-    let channel_id = match channel_event.topic {
+    let channel_id = match topic {
         buzz_pubsub::EventTopic::Channel(id) => Some(id),
         buzz_pubsub::EventTopic::Global => None,
     };
-    let community_id = channel_event.community_id;
-    let stored = StoredEvent::new(channel_event.event, channel_id);
+    let protected_ephemeral =
+        is_ephemeral(event_kind_u32(&event)) || event_kind_u32(&event) == KIND_AGENT_OBSERVER_FRAME;
+    let sender_authority = match authority {
+        Some(authority) if protected_ephemeral => {
+            match crate::authorization_runtime::ephemeral::verify(
+                state,
+                community_id,
+                &event,
+                &authority,
+            )
+            .await
+            {
+                Ok(authority) => Some(authority),
+                Err(error) => {
+                    warn!(%error, "multi-node ephemeral sender authority denied");
+                    return;
+                }
+            }
+        }
+        Some(_) => {
+            warn!("multi-node persistent event carried unexpected sender authority");
+            return;
+        }
+        None if protected_ephemeral && state.is_protected_enforcing(community_id) => {
+            warn!("multi-node Enforce ephemeral event omitted sender authority");
+            return;
+        }
+        None => None,
+    };
+    let stored = StoredEvent::new(event, channel_id);
 
     // Skip events that were already fanned out in-process (local echo). The
     // dedup key is `(community_id, event_id)` — a same-id event arriving for a
@@ -318,16 +524,10 @@ pub async fn fan_out_pubsub_event(state: &Arc<AppState>, channel_event: buzz_pub
         }
     };
     let frames = fanout_frame_cache(
-        matches.iter().map(|(_, sub_id)| sub_id.as_str()),
+        matches.iter().map(|recipient| recipient.sub_id.as_str()),
         &event_json,
     );
-    let drop_count = send_fanout_frames(
-        state,
-        matches
-            .iter()
-            .map(|(conn_id, sub_id)| (*conn_id, sub_id.as_str())),
-        &frames,
-    );
+    let drop_count = send_fanout_frames(state, matches.iter(), &frames, sender_authority.as_ref());
     if drop_count > 0 {
         tracing::warn!(
             event_id = %stored.event.id.to_hex(),
@@ -355,15 +555,17 @@ pub(crate) async fn dispatch_persistent_event(
     threaded_visibility: Option<crate::state::ThreadedChannelVisibility>,
 ) -> usize {
     let event_id_hex = stored_event.event.id.to_hex();
-    enqueue_event_created_audit(
-        tenant,
-        state,
-        stored_event,
-        kind_u32,
-        actor_pubkey_hex,
-        &event_id_hex,
-    )
-    .await;
+    if legacy_audit_delivery_allowed(state, tenant.community()) {
+        enqueue_event_created_audit(
+            tenant,
+            state,
+            stored_event,
+            kind_u32,
+            actor_pubkey_hex,
+            &event_id_hex,
+        )
+        .await;
+    }
 
     let tenant = tenant.clone();
     let state = Arc::clone(state);
@@ -476,21 +678,20 @@ async fn dispatch_persistent_event_inner(
     // frames only after applying it to the already access-filtered recipient set.
     let recipients: Vec<_> = matches
         .iter()
-        .filter_map(|(target_conn_id, sub_id)| {
-            if let Some(ref owner_hex) = private_event_owner {
-                let is_owner = state
+        .filter(|recipient| {
+            private_event_owner.as_ref().is_none_or(|owner_hex| {
+                state
                     .conn_manager
-                    .pubkey_for(*target_conn_id)
-                    .is_some_and(|pk| hex::encode(pk) == *owner_hex);
-                if !is_owner {
-                    return None;
-                }
-            }
-            Some((*target_conn_id, sub_id.as_str()))
+                    .pubkey_for(recipient.conn_id)
+                    .is_some_and(|pk| hex::encode(pk) == *owner_hex)
+            })
         })
         .collect();
-    let frames = fanout_frame_cache(recipients.iter().map(|(_, sub_id)| *sub_id), &event_json);
-    let drop_count = send_fanout_frames(state, recipients, &frames);
+    let frames = fanout_frame_cache(
+        recipients.iter().map(|recipient| recipient.sub_id.as_str()),
+        &event_json,
+    );
+    let drop_count = send_fanout_frames(state, recipients, &frames, None);
     if drop_count > 0 {
         tracing::warn!(
             event_id = %event_id_hex,
@@ -505,7 +706,7 @@ async fn dispatch_persistent_event_inner(
     // out-of-band index to feed. The old Typesense `index_event` worker and its
     // `search_index_tx` mpsc are gone with the Typesense backend.
 
-    if enqueue_audit {
+    if enqueue_audit && legacy_audit_delivery_allowed(state, tenant.community()) {
         enqueue_event_created_audit(
             tenant,
             state,
@@ -525,7 +726,15 @@ async fn dispatch_persistent_event_inner(
             .iter()
             .any(|t| t.as_slice().first().map(|s| s.as_str()) == Some("buzz:workflow"));
 
-    if !buzz_core::kind::is_workflow_execution_kind(kind_u32)
+    let workflow_effect_allowed = crate::protected_surface::require_effect_permit(
+        state
+            .protected_transport()
+            .and_then(|runtime| runtime.mode_for_domain(tenant.community())),
+        crate::protected_surface::EffectSurfaceId::WorkflowBackgroundExecution,
+    )
+    .is_ok();
+    if workflow_effect_allowed
+        && !buzz_core::kind::is_workflow_execution_kind(kind_u32)
         && !buzz_core::kind::is_command_kind(kind_u32)
         && !is_relay_workflow_msg
         && kind_u32 != KIND_GIFT_WRAP
@@ -533,24 +742,24 @@ async fn dispatch_persistent_event_inner(
         let workflow_engine = Arc::clone(&state.workflow_engine);
         let workflow_event = stored_event.clone();
         let trigger_kind = kind_u32.to_string();
-        let workflow_community_host = tenant.host().to_owned();
         // The event was stored under `tenant.community()`; `StoredEvent` does
         // not carry the community, so pass it explicitly. The same channel UUID
         // can exist in another community — scoping the workflow lookup to this
         // community keeps a colliding channel id in B from triggering A's
         // workflows.
         let workflow_community = tenant.community();
+        let workflow_community_label = crate::metrics::community_label(workflow_community);
         tokio::spawn(async move {
             if let Err(e) = workflow_engine
                 .on_event(workflow_community, &workflow_event)
                 .await
             {
-                tracing::error!(event_id = ?workflow_event.event.id, "Workflow trigger failed: {e}");
+                tracing::error!("Workflow trigger failed: {e}");
             } else {
                 metrics::counter!(
                     "buzz_workflow_runs_total",
                     "trigger" => trigger_kind,
-                    "community" => workflow_community_host
+                    "community" => workflow_community_label
                 )
                 .increment(1);
             }
@@ -558,6 +767,16 @@ async fn dispatch_persistent_event_inner(
     }
 
     matches.len()
+}
+
+fn legacy_audit_delivery_allowed(state: &AppState, community_id: CommunityId) -> bool {
+    crate::protected_surface::require_effect_permit(
+        state
+            .protected_transport()
+            .and_then(|runtime| runtime.mode_for_domain(community_id)),
+        crate::protected_surface::EffectSurfaceId::LegacyAuditDelivery,
+    )
+    .is_ok()
 }
 
 async fn enqueue_event_created_audit(
@@ -622,12 +841,9 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
     // 20000..=29999 (client-controlled ephemeral range). Crossing kind ×
     // community would produce up to millions of series. Keep kind fleet-wide.
     metrics::counter!("buzz_events_received_total", "kind" => kind_str).increment(1);
-    // Per-community volume counter: community-only, no kind tag.
-    // Use this for per-community throughput graphs; the fleet counter above
-    // for per-kind breakdowns.
     metrics::counter!(
         "buzz_community_events_received_total",
-        "community" => conn.tenant.host().to_owned()
+        "community" => crate::metrics::community_label(conn.tenant.community())
     )
     .increment(1);
 
@@ -678,6 +894,39 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         return;
     }
 
+    let verified_proof = state.conn_manager.authority_for_conn(conn_id);
+    let protected_result = match verified_proof.as_ref() {
+        Some(proof) => {
+            crate::authorization_runtime::transport::authorize_session_if_configured(
+                &state,
+                Arc::clone(proof),
+                state.conn_manager.federated_assertion_for_conn(conn_id),
+                crate::protected_surface::event_ingest_capability(kind_u32),
+                uuid::Uuid::new_v4(),
+                "ws_event",
+                conn_id,
+                conn.cancel.clone(),
+            )
+            .await
+        }
+        None => crate::authorization_runtime::transport::authorize_unwired_if_configured(
+            &state,
+            conn.tenant.community(),
+        ),
+    };
+    let protected = match protected_result {
+        Ok(authority) => Arc::new(authority),
+        Err(error) => {
+            warn!(conn_id = %conn_id, error = %error, "protected EVENT authorization denied");
+            conn.send(RelayMessage::ok(
+                &event_id_hex,
+                false,
+                "auth-required: protected authorization denied",
+            ));
+            conn.cancel.cancel();
+            return;
+        }
+    };
     if kind_u32 == KIND_AGENT_OBSERVER_FRAME {
         if !scopes.is_empty() && !scopes.contains(&buzz_auth::Scope::MessagesWrite) {
             reject("scope");
@@ -688,7 +937,19 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
             ));
             return;
         }
-        handle_agent_observer_event(event, conn_id, &event_id_hex, conn, state).await;
+        if protected.revalidate().is_err() {
+            conn.cancel.cancel();
+            return;
+        }
+        handle_agent_observer_event(
+            event,
+            conn_id,
+            &event_id_hex,
+            conn,
+            state,
+            Arc::clone(&protected),
+        )
+        .await;
         return;
     }
 
@@ -706,14 +967,18 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
             ));
             return;
         }
+        if protected.revalidate().is_err() {
+            conn.cancel.cancel();
+            return;
+        }
         handle_ephemeral_event(
             event,
-            conn_id,
             &event_id_hex,
             pubkey_bytes,
             auth_pubkey,
             conn,
             state,
+            Arc::clone(&protected),
         )
         .await;
         return;
@@ -722,8 +987,8 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
     let ingest_auth = IngestAuth::Nip42 {
         pubkey: auth_pubkey,
         owner_pubkey,
-        verified_proof: None,
-        verified_assertion: None,
+        verified_proof,
+        verified_assertion: state.conn_manager.federated_assertion_for_conn(conn_id),
         scopes,
         channel_ids,
         conn_id,
@@ -765,13 +1030,14 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
 /// Handle ephemeral events (kind 20000–29999) — WS-only, never stored.
 async fn handle_ephemeral_event(
     event: Event,
-    conn_id: uuid::Uuid,
     event_id_hex: &str,
     pubkey_bytes: Vec<u8>,
     auth_pubkey: nostr::PublicKey,
     conn: Arc<ConnectionState>,
     state: Arc<AppState>,
+    authority: Arc<crate::authorization_runtime::transport::ProtectedAuthorization>,
 ) {
+    let conn_id = conn.conn_id;
     let event_clone = event.clone();
     let verify_result = tokio::task::spawn_blocking(move || verify_event(&event_clone)).await;
 
@@ -794,6 +1060,14 @@ async fn handle_ephemeral_event(
             return;
         }
     }
+    let redis_authority = match seal_ephemeral_authority(&state, &authority, &event) {
+        Ok(authority) => authority,
+        Err(error) => {
+            warn!(conn_id = %conn_id, %error, "ephemeral sender authority could not be sealed");
+            conn.cancel.cancel();
+            return;
+        }
+    };
 
     // Special handling for presence events (kind:20001).
     if event_kind_u32(&event) == KIND_PRESENCE_UPDATE {
@@ -814,16 +1088,49 @@ async fn handle_ephemeral_event(
             raw
         };
 
-        if status == "offline" {
+        if authority.revalidate().is_err() {
+            conn.cancel.cancel();
+            return;
+        }
+        let stored_status = match redis_authority.as_ref() {
+            Some(token) => match crate::authorization_runtime::ephemeral::encode_presence(
+                status.clone(),
+                event.id.to_bytes(),
+                token.clone(),
+            ) {
+                Ok(value) => value,
+                Err(_) => {
+                    conn.cancel.cancel();
+                    return;
+                }
+            },
+            None => status.clone(),
+        };
+        let presence_result = if status == "offline" {
+            state
+                .pubsub
+                .clear_presence(&conn.tenant, &auth_pubkey)
+                .await
+        } else {
+            state
+                .pubsub
+                .set_presence(&conn.tenant, &auth_pubkey, &stored_status)
+                .await
+        };
+        if authority.revalidate().is_err() {
+            // Cleanup is opportunistic. Protected values retain their sealed
+            // authority and are revalidated before every read or emission, so
+            // a failed DEL cannot make stale presence visible.
             let _ = state
                 .pubsub
                 .clear_presence(&conn.tenant, &auth_pubkey)
                 .await;
-        } else {
-            let _ = state
-                .pubsub
-                .set_presence(&conn.tenant, &auth_pubkey, &status)
-                .await;
+            conn.cancel.cancel();
+            return;
+        }
+        if presence_result.is_err() && authority.is_enforcing() {
+            conn.cancel.cancel();
+            return;
         }
 
         // Presence is a channel-less ephemeral event. After updating Redis
@@ -845,20 +1152,78 @@ async fn handle_ephemeral_event(
             conn.send(RelayMessage::ok(event_id_hex, false, &msg));
             return;
         }
+        if authority.revalidate().is_err() {
+            conn.cancel.cancel();
+            return;
+        }
+
+        // In Enforce, retain database locks on the channel and the actor's
+        // active membership through the authoritative Redis publication. A
+        // concurrent removal or open-to-private transition therefore orders
+        // entirely before this publication (which then denies) or after it.
+        // Off/Shadow/VerifyOnly keep the legacy preflight behavior.
+        let channel_authority_guard = if authority.is_enforcing() {
+            let mut transaction = match state.db.begin_transaction().await {
+                Ok(transaction) => transaction,
+                Err(error) => {
+                    warn!(%error, %ch_id, "ephemeral channel authority transaction failed");
+                    conn.cancel.cancel();
+                    return;
+                }
+            };
+            if let Err(error) = buzz_db::channel::require_channel_write_authority_tx(
+                &mut transaction,
+                conn.tenant.community(),
+                ch_id,
+                &pubkey_bytes,
+            )
+            .await
+            {
+                conn.send(RelayMessage::ok(
+                    event_id_hex,
+                    false,
+                    "restricted: channel authority changed before publication",
+                ));
+                warn!(%error, %ch_id, "ephemeral channel authority denied");
+                return;
+            }
+            Some(transaction)
+        } else {
+            None
+        };
 
         // Mark as local before Redis publish to prevent double-delivery when
         // the event comes back through the Redis subscriber loop.
         state.mark_local_event(conn.tenant.community(), &event.id);
 
-        if let Err(e) = state
-            .pubsub
-            .publish_event(&conn.tenant, EventTopic::Channel(ch_id), &event)
-            .await
+        let publish_failed = if let Err(e) = publish_ephemeral_event(
+            &state,
+            &conn.tenant,
+            EventTopic::Channel(ch_id),
+            &event,
+            redis_authority.as_deref(),
+        )
+        .await
         {
             state
                 .local_event_ids
                 .invalidate(&(conn.tenant.community(), event.id.to_bytes()));
             warn!(conn_id = %conn_id, event_id = %event_id_hex, "Ephemeral publish failed: {e}");
+            true
+        } else {
+            false
+        };
+        if authority.revalidate().is_err() {
+            state
+                .local_event_ids
+                .invalidate(&(conn.tenant.community(), event.id.to_bytes()));
+            conn.cancel.cancel();
+            return;
+        }
+        drop(channel_authority_guard);
+        if publish_failed && authority.is_enforcing() {
+            conn.cancel.cancel();
+            return;
         }
 
         // Direct fan-out to local WS subscribers, through the guarded send path
@@ -866,7 +1231,21 @@ async fn handle_ephemeral_event(
         // receive this private-channel ephemeral event.
         // Pass the channel_id so fan_out() uses the channel-kind index.
         let stored_event = StoredEvent::new(event.clone(), Some(ch_id));
-        fan_out_event_to_local_subscribers(&state, conn.tenant.community(), &stored_event).await;
+        if authority.revalidate().is_err() {
+            conn.cancel.cancel();
+            return;
+        }
+        fan_out_event_to_local_subscribers_with_authority(
+            &state,
+            conn.tenant.community(),
+            &stored_event,
+            Some(&authority),
+        )
+        .await;
+        if authority.revalidate().is_err() {
+            conn.cancel.cancel();
+            return;
+        }
     } else {
         // Channel-less ephemeral events (e.g., NIP-AB pairing kind:24134).
         //
@@ -876,17 +1255,39 @@ async fn handle_ephemeral_event(
         // The nil UUID is ONLY a Redis routing key — it never reaches the DB.
         // On the receiving end (main.rs subscriber loop), `is_nil()` is checked
         // and converted back to `None` so `fan_out()` uses the global index.
+        if authority.revalidate().is_err() {
+            conn.cancel.cancel();
+            return;
+        }
         state.mark_local_event(conn.tenant.community(), &event.id);
 
-        if let Err(e) = state
-            .pubsub
-            .publish_event(&conn.tenant, EventTopic::Global, &event)
-            .await
+        let publish_failed = if let Err(e) = publish_ephemeral_event(
+            &state,
+            &conn.tenant,
+            EventTopic::Global,
+            &event,
+            redis_authority.as_deref(),
+        )
+        .await
         {
             state
                 .local_event_ids
                 .invalidate(&(conn.tenant.community(), event.id.to_bytes()));
             warn!(conn_id = %conn_id, event_id = %event_id_hex, "Ephemeral global publish failed: {e}");
+            true
+        } else {
+            false
+        };
+        if authority.revalidate().is_err() {
+            state
+                .local_event_ids
+                .invalidate(&(conn.tenant.community(), event.id.to_bytes()));
+            conn.cancel.cancel();
+            return;
+        }
+        if publish_failed && authority.is_enforcing() {
+            conn.cancel.cancel();
+            return;
         }
 
         // Direct fan-out to local WS subscribers through the guarded send path.
@@ -894,9 +1295,27 @@ async fn handle_ephemeral_event(
         // filter_fanout_by_access no-ops for channel-less events except the
         // author-only-kind gate.
         let stored_event = StoredEvent::new(event.clone(), None);
-        fan_out_event_to_local_subscribers(&state, conn.tenant.community(), &stored_event).await;
+        if authority.revalidate().is_err() {
+            conn.cancel.cancel();
+            return;
+        }
+        fan_out_event_to_local_subscribers_with_authority(
+            &state,
+            conn.tenant.community(),
+            &stored_event,
+            Some(&authority),
+        )
+        .await;
+        if authority.revalidate().is_err() {
+            conn.cancel.cancel();
+            return;
+        }
     }
 
+    if authority.revalidate().is_err() {
+        conn.cancel.cancel();
+        return;
+    }
     conn.send(RelayMessage::ok(event_id_hex, true, ""));
 }
 
@@ -950,6 +1369,7 @@ async fn handle_agent_observer_event(
     event_id_hex: &str,
     conn: Arc<ConnectionState>,
     state: Arc<AppState>,
+    authority: Arc<crate::authorization_runtime::transport::ProtectedAuthorization>,
 ) {
     let event_clone = event.clone();
     let verify_result = tokio::task::spawn_blocking(move || verify_event(&event_clone)).await;
@@ -972,6 +1392,14 @@ async fn handle_agent_observer_event(
             return;
         }
     }
+    let redis_authority = match seal_ephemeral_authority(&state, &authority, &event) {
+        Ok(authority) => authority,
+        Err(error) => {
+            warn!(conn_id = %conn_id, %error, "observer sender authority could not be sealed");
+            conn.cancel.cancel();
+            return;
+        }
+    };
 
     // Freshness check: reject observer frames with stale/future timestamps
     let now = chrono::Utc::now().timestamp();
@@ -1054,6 +1482,10 @@ async fn handle_agent_observer_event(
         ));
         return;
     }
+    if authority.revalidate().is_err() {
+        conn.cancel.cancel();
+        return;
+    }
 
     // Rate limit telemetry frames only (100/sec per agent).
     // Control frames (owner → agent) bypass the limiter — they are rare and must not
@@ -1070,27 +1502,60 @@ async fn handle_agent_observer_event(
         }
     }
 
+    if authority.revalidate().is_err() {
+        conn.cancel.cancel();
+        return;
+    }
     state.mark_local_event(conn.tenant.community(), &event.id);
-    if let Err(e) = state
-        .pubsub
-        .publish_event(&conn.tenant, EventTopic::Global, &event)
-        .await
+    let publish_failed = if let Err(e) = publish_ephemeral_event(
+        &state,
+        &conn.tenant,
+        EventTopic::Global,
+        &event,
+        redis_authority.as_deref(),
+    )
+    .await
     {
         state
             .local_event_ids
             .invalidate(&(conn.tenant.community(), event.id.to_bytes()));
         warn!(conn_id = %conn_id, event_id = %event_id_hex, "Agent observer publish failed: {e}");
+        true
+    } else {
+        false
+    };
+    if authority.revalidate().is_err() {
+        state
+            .local_event_ids
+            .invalidate(&(conn.tenant.community(), event.id.to_bytes()));
+        conn.cancel.cancel();
+        return;
+    }
+    if publish_failed && authority.is_enforcing() {
+        conn.cancel.cancel();
+        return;
     }
 
     let stored_event = StoredEvent::new(event.clone(), None);
     debug!(
-        event_id = %event_id_hex,
-        agent = %route.agent.to_hex(),
-        owner = %route.owner.to_hex(),
         direction = ?route.direction,
         "Agent observer fan-out"
     );
-    fan_out_event_to_local_subscribers(&state, conn.tenant.community(), &stored_event).await;
+    if authority.revalidate().is_err() {
+        conn.cancel.cancel();
+        return;
+    }
+    fan_out_event_to_local_subscribers_with_authority(
+        &state,
+        conn.tenant.community(),
+        &stored_event,
+        Some(&authority),
+    )
+    .await;
+    if authority.revalidate().is_err() {
+        conn.cancel.cancel();
+        return;
+    }
 
     conn.send(RelayMessage::ok(event_id_hex, true, ""));
 }
@@ -1390,7 +1855,7 @@ mod tests {
             conn_id: Uuid::new_v4(),
             tenant: buzz_core::TenantContext::resolved(community_b, "b.example"),
             remote_addr: "127.0.0.1:1234".parse().expect("socket addr"),
-            corporate_identity_jwt: None,
+            corporate_identity_assertion: None,
             auth_state: RwLock::new(crate::connection::AuthState::Authenticated(
                 buzz_auth::ConnectionAuthContext {
                     pubkey: agent.public_key(),
@@ -1414,11 +1879,12 @@ mod tests {
             &event.id.to_hex(),
             conn,
             state,
+            Arc::new(crate::authorization_runtime::transport::ProtectedAuthorization::Legacy),
         )
         .await;
 
         let axum::extract::ws::Message::Text(text) =
-            send_rx.try_recv().expect("observer rejection sent")
+            send_rx.try_recv().expect("observer rejection sent").message
         else {
             panic!("expected text relay message");
         };
@@ -1456,7 +1922,7 @@ mod tests {
             sub_id: &str,
             filter: Filter,
             pubkey: Option<Vec<u8>>,
-        ) -> (Uuid, mpsc::Receiver<Message>) {
+        ) -> (Uuid, mpsc::Receiver<crate::connection::OutboundData>) {
             let conn_id = Uuid::new_v4();
             let (tx, rx) = mpsc::channel(10);
             let (ctrl_tx, _ctrl_rx) = mpsc::channel(10);
@@ -1482,7 +1948,7 @@ mod tests {
         fn register_presence_sub(
             state: &AppState,
             sub_id: &str,
-        ) -> (Uuid, mpsc::Receiver<Message>) {
+        ) -> (Uuid, mpsc::Receiver<crate::connection::OutboundData>) {
             register_global_sub(
                 state,
                 sub_id,
@@ -1495,7 +1961,7 @@ mod tests {
             state: &AppState,
             sub_id: &str,
             target: &Keys,
-        ) -> (Uuid, mpsc::Receiver<Message>) {
+        ) -> (Uuid, mpsc::Receiver<crate::connection::OutboundData>) {
             register_global_sub(
                 state,
                 sub_id,
@@ -1544,11 +2010,13 @@ mod tests {
                     community_id: buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
                     topic: EventTopic::Global,
                     event,
+                    authority: None,
                 },
             )
             .await;
 
-            let delivered = event_from_ws_message(rx.try_recv().expect("presence delivered"));
+            let delivered =
+                event_from_ws_message(rx.try_recv().expect("presence delivered").message);
             assert_eq!(delivered.id, event_id);
             assert!(rx.try_recv().is_err(), "presence is delivered once");
         }
@@ -1567,6 +2035,7 @@ mod tests {
                     community_id: community,
                     topic: EventTopic::Global,
                     event,
+                    authority: None,
                 },
             )
             .await;
@@ -1609,13 +2078,15 @@ mod tests {
                     community_id: community_b,
                     topic: EventTopic::Global,
                     event,
+                    authority: None,
                 },
             )
             .await;
 
             let delivered = event_from_ws_message(
                 rx.try_recv()
-                    .expect("B's same-id event must be delivered — A's local mark is B-irrelevant"),
+                    .expect("B's same-id event must be delivered — A's local mark is B-irrelevant")
+                    .message,
             );
             assert_eq!(delivered.id, event_id);
         }
@@ -1638,6 +2109,7 @@ mod tests {
                     community_id: buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
                     topic: EventTopic::Global,
                     event,
+                    authority: None,
                 },
             )
             .await;
@@ -1645,7 +2117,8 @@ mod tests {
             let delivered = event_from_ws_message(
                 target_rx
                     .try_recv()
-                    .expect("target receives membership notification"),
+                    .expect("target receives membership notification")
+                    .message,
             );
             assert_eq!(delivered.id, event_id);
             assert!(
@@ -1733,7 +2206,7 @@ mod tests {
                     .await
                     .expect("presence reached second relay")
                     .expect("receiver connection still open");
-            let delivered = event_from_ws_message(delivered);
+            let delivered = event_from_ws_message(delivered.message);
             assert_eq!(delivered.id, event_id);
             assert!(
                 tokio::time::timeout(std::time::Duration::from_millis(100), receiver_rx.recv())

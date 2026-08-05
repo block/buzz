@@ -7,7 +7,7 @@
 //! lowercase hex strings.
 
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Row as _};
+use sqlx::{PgPool, Postgres, Row as _, Transaction};
 
 use crate::error::Result;
 use crate::identity_binding::{BindIdentityResult, IdentityBindingConflict, IdentityBindingInput};
@@ -93,6 +93,35 @@ pub async fn get_relay_member(
     .map_err(crate::error::DbError::from)
 }
 
+/// Return and share-lock a relay member inside a caller-owned authorization
+/// transaction so a role decision remains stable through commit.
+pub async fn get_relay_member_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    pubkey: &str,
+) -> Result<Option<RelayMember>> {
+    let row = sqlx::query(
+        "SELECT pubkey, role, added_by, created_at, updated_at \
+         FROM relay_members WHERE community_id = $1 AND pubkey = $2 FOR SHARE",
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .fetch_optional(&mut **transaction)
+    .await?;
+
+    row.map(|r| -> std::result::Result<RelayMember, sqlx::Error> {
+        Ok(RelayMember {
+            pubkey: r.try_get("pubkey")?,
+            role: r.try_get("role")?,
+            added_by: r.try_get("added_by")?,
+            created_at: r.try_get("created_at")?,
+            updated_at: r.try_get("updated_at")?,
+        })
+    })
+    .transpose()
+    .map_err(crate::error::DbError::from)
+}
+
 /// Returns all relay members of `community` ordered by `created_at` ascending.
 pub async fn list_relay_members(pool: &PgPool, community: CommunityId) -> Result<Vec<RelayMember>> {
     let rows = sqlx::query(
@@ -138,6 +167,27 @@ pub async fn add_relay_member(
     .bind(role)
     .bind(added_by)
     .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Transaction-owned relay member insertion.
+pub async fn add_relay_member_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    pubkey: &str,
+    role: &str,
+    added_by: Option<&str>,
+) -> Result<bool> {
+    let result = sqlx::query(
+        "INSERT INTO relay_members (community_id, pubkey, role, added_by) \
+         VALUES ($1, $2, $3, $4) ON CONFLICT (community_id, pubkey) DO NOTHING",
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .bind(role)
+    .bind(added_by)
+    .execute(&mut **transaction)
     .await?;
     Ok(result.rows_affected() > 0)
 }
@@ -319,6 +369,35 @@ pub async fn remove_relay_member(
     }
 }
 
+/// Transaction-owned relay member removal with owner protection.
+pub async fn remove_relay_member_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    pubkey: &str,
+) -> Result<RemoveResult> {
+    let result = sqlx::query(
+        "DELETE FROM relay_members \
+         WHERE community_id = $1 AND pubkey = $2 AND role <> 'owner'",
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .execute(&mut **transaction)
+    .await?;
+    if result.rows_affected() > 0 {
+        return Ok(RemoveResult::Removed);
+    }
+    let exists = sqlx::query("SELECT 1 FROM relay_members WHERE community_id = $1 AND pubkey = $2")
+        .bind(community.as_uuid())
+        .bind(pubkey)
+        .fetch_optional(&mut **transaction)
+        .await?;
+    Ok(if exists.is_some() {
+        RemoveResult::IsOwner
+    } else {
+        RemoveResult::NotFound
+    })
+}
+
 /// Removes a relay member only if their current role matches `expected_role`.
 ///
 /// The delete and the role check are collapsed into a single
@@ -375,6 +454,38 @@ pub async fn remove_relay_member_if_role(
     }
 }
 
+/// Transaction-owned role-conditional relay member removal.
+pub async fn remove_relay_member_if_role_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    pubkey: &str,
+    expected_role: &str,
+) -> Result<RemoveResult> {
+    let result = sqlx::query(
+        "DELETE FROM relay_members WHERE community_id = $1 AND pubkey = $2 AND role = $3",
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .bind(expected_role)
+    .execute(&mut **transaction)
+    .await?;
+    if result.rows_affected() > 0 {
+        return Ok(RemoveResult::Removed);
+    }
+    let role = sqlx::query_scalar::<_, String>(
+        "SELECT role FROM relay_members WHERE community_id = $1 AND pubkey = $2 FOR SHARE",
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    Ok(match role.as_deref() {
+        None => RemoveResult::NotFound,
+        Some("owner") => RemoveResult::IsOwner,
+        Some(_) => RemoveResult::RoleMismatch,
+    })
+}
+
 /// Updates the role of an existing relay member in `community`. Returns `true`
 /// if updated.
 pub async fn update_relay_member_role(
@@ -391,6 +502,25 @@ pub async fn update_relay_member_role(
     .bind(community.as_uuid())
     .bind(pubkey)
     .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Transaction-owned role update with owner protection.
+pub async fn update_relay_member_role_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    pubkey: &str,
+    new_role: &str,
+) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE relay_members SET role = $1, updated_at = now() \
+         WHERE community_id = $2 AND pubkey = $3 AND role <> 'owner'",
+    )
+    .bind(new_role)
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .execute(&mut **transaction)
     .await?;
     Ok(result.rows_affected() > 0)
 }

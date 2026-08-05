@@ -526,6 +526,16 @@ pub async fn dispatch_action(
 ) -> Result<StepResult, WorkflowError> {
     use ActionDef::*;
 
+    // This is the final common boundary for every action, including effects
+    // that do not use the relay ActionSink. A delayed run must therefore pass
+    // the embedding relay's current mutation gate again immediately before
+    // SendMessage, AddReaction, CallWebhook, or any future action dispatch.
+    if matches!(action, CallWebhook { .. }) {
+        engine.require_outbound_webhook(community_id)?;
+    } else {
+        engine.require_mutation(community_id)?;
+    }
+
     match action {
         SendMessage { text, channel } => {
             // Look up workflow metadata for destination validation and
@@ -983,6 +993,10 @@ pub async fn execute_run(
     })?;
 
     engine
+        .require_mutation(community_id)
+        .map_err(|error| (error, crate::error::PartialProgress::default()))?;
+
+    engine
         .db
         .update_workflow_run(
             community_id,
@@ -1031,6 +1045,10 @@ pub async fn execute_from_step(
             crate::error::PartialProgress::default(),
         )
     })?;
+
+    engine
+        .require_mutation(community_id)
+        .map_err(|error| (error, crate::error::PartialProgress::default()))?;
 
     // Mark run as Running now that we have a permit (resume from approval).
     // Preserve the existing execution trace from pre-approval steps.

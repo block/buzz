@@ -23,8 +23,17 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
+use crate::authorization_runtime::executor::{
+    begin_authorized_enrollment, begin_authorized_operation, AuthorizedEnrollmentStart,
+    AuthorizedOperationStart, ProtectedOperationId,
+};
+use crate::authorization_runtime::finalization::AuthorizationMode;
+use crate::authorization_runtime::transport::authorize_enrollment_if_configured;
+use crate::authorization_runtime::transport::authorize_if_configured;
 use crate::handlers::side_effects::{publish_nip43_member_added, publish_nip43_membership_list};
+use buzz_auth::AuthorizationCapability;
 use buzz_core::invite::{
     hash_v2_code, validate_v2_code, DEFAULT_INVITE_TTL_SECS, MAX_INVITE_TTL_SECS, MAX_INVITE_USES,
     MIN_INVITE_TTL_SECS, V2_PREFIX,
@@ -106,6 +115,16 @@ pub struct AcceptPolicyRequest {
     /// Minimum-age assertion, required only when configured by the operator.
     #[serde(default)]
     pub age_confirmed: bool,
+}
+
+fn stable_correlation_from_proof(proof: &buzz_auth::VerifiedNostrProof) -> uuid::Uuid {
+    let fingerprint = proof.operation_binding().fingerprint();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&fingerprint[..16]);
+    if bytes == [0; 16] {
+        bytes[15] = 1;
+    }
+    uuid::Uuid::from_bytes(bytes)
 }
 
 /// Public join policy shared by every client-side join surface.
@@ -236,7 +255,9 @@ async fn authenticate(
     (
         buzz_core::TenantContext,
         nostr::PublicKey,
-        crate::corporate_identity::CorporateIdentityProof,
+        Option<crate::corporate_identity::CorporateIdentityProof>,
+        Arc<buzz_auth::VerifiedNostrProof>,
+        Option<Arc<buzz_auth::VerifiedFederatedAssertion>>,
     ),
     (StatusCode, Json<Value>),
 > {
@@ -254,15 +275,27 @@ async fn authenticate(
         })?;
 
     let url = bridge::nip98_expected_url(&state.config.relay_url, &tenant, path);
-    let (pubkey, event_id_bytes) = bridge::verify_bridge_auth_with_options(
+    let (pubkey, event_id_bytes, verified_proof) = bridge::verify_protected_bridge_auth(
         headers,
         "POST",
         &url,
         Some(body),
         true, // invites always require NIP-98; no X-Pubkey dev fallback
         true, // POST bodies must be covered by a payload tag
+        tenant.community(),
     )?;
-    bridge::check_nip98_replay(state, &tenant, event_id_bytes).await?;
+    let authorization_mode = state
+        .protected_transport()
+        .and_then(|runtime| runtime.mode_for_domain(tenant.community()));
+    if authorization_mode == Some(AuthorizationMode::DenyProtected) {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "protected authorization denied",
+        ));
+    }
+    if authorization_mode != Some(AuthorizationMode::Enforce) {
+        bridge::check_nip98_replay(state, &tenant, event_id_bytes).await?;
+    }
 
     let identity_assertion = crate::corporate_identity::identity_assertion_from_headers(
         state,
@@ -273,7 +306,9 @@ async fn authenticate(
     let auth_tag = headers
         .get("x-auth-tag")
         .and_then(|value| value.to_str().ok());
-    let identity_proof = crate::corporate_identity::verify_corporate_identity(
+    let identity_lane =
+        crate::authorization_runtime::transport::legacy_identity_lane(state, tenant.community());
+    let identity_proof = match crate::corporate_identity::verify_corporate_identity(
         state,
         tenant.community(),
         pubkey,
@@ -281,9 +316,53 @@ async fn authenticate(
         auth_tag,
     )
     .await
-    .map_err(|error| error.into_api_error())?;
+    {
+        Ok(proof) => Some(proof),
+        Err(error)
+            if identity_lane
+                == crate::authorization_runtime::transport::LegacyIdentityLane::ObserveOnly =>
+        {
+            tracing::warn!(error = ?error, "observational invite identity verification unavailable");
+            None
+        }
+        Err(error) => return Err(error.into_api_error()),
+    };
 
-    Ok((tenant, pubkey, identity_proof))
+    let verified_proof = bridge::retain_bridge_proof(verified_proof, auth_tag)?
+        .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "NIP-98 evidence required"))?;
+
+    let enrollment_assertion = if state
+        .protected_transport()
+        .and_then(|runtime| runtime.mode_for_domain(tenant.community()))
+        == Some(AuthorizationMode::Enforce)
+    {
+        let now = state
+            .corporate_identity
+            .as_ref()
+            .ok_or_else(|| api_error(StatusCode::FORBIDDEN, "relay identity verification failed"))?
+            .authorization_now()
+            .map_err(|error| error.into_api_error())?;
+        crate::corporate_identity::verified_assertion_for_proof(
+            identity_proof.as_ref().ok_or_else(|| {
+                api_error(StatusCode::FORBIDDEN, "relay identity verification failed")
+            })?,
+            tenant.community(),
+            buzz_auth::AuthTransport::HttpBridge,
+            now,
+        )
+        .map_err(|error| error.into_api_error())?
+        .map(Arc::new)
+    } else {
+        None
+    };
+
+    Ok((
+        tenant,
+        pubkey,
+        identity_proof,
+        verified_proof,
+        enrollment_assertion,
+    ))
 }
 
 async fn record_atomic_identity_rejection(
@@ -316,7 +395,7 @@ pub async fn mint_invite(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let (tenant, pubkey, identity_proof) =
+    let (tenant, pubkey, identity_proof, verified_proof, verified_assertion) =
         authenticate(&state, &headers, "/api/invites", &body).await?;
 
     // Authz mirrors kind:9030 (add member): owner or admin only.
@@ -346,24 +425,33 @@ pub async fn mint_invite(
     };
 
     let (ttl, max_uses) = validate_mint_request(&request)?;
-    crate::corporate_identity::finalize_corporate_identity(
+    let protected_authority = authorize_if_configured(
         &state,
-        tenant.community(),
-        pubkey,
-        identity_proof,
+        Arc::clone(&verified_proof),
+        verified_assertion,
+        AuthorizationCapability::InviteMint,
+        stable_correlation_from_proof(&verified_proof),
+        "invite.mint",
     )
     .await
-    .map_err(|error| error.into_api_error())?;
-
-    // Mint a v2 opaque, database-backed invite.
-    let invite = state
-        .db
-        .mint_relay_invite(tenant.community(), &sender_hex, ttl, max_uses)
-        .await
-        .map_err(|error| match error {
-            buzz_db::DbError::InvalidData(message) => api_error(StatusCode::BAD_REQUEST, &message),
-            error => internal_error(&format!("invite mint: {error}")),
-        })?;
+    .map_err(|error| {
+        tracing::warn!(error = %error, "invite mint: protected authorization denied");
+        api_error(StatusCode::FORBIDDEN, "protected authorization denied")
+    })?;
+    if crate::authorization_runtime::transport::legacy_identity_lane(&state, tenant.community())
+        == crate::authorization_runtime::transport::LegacyIdentityLane::Legacy
+    {
+        if let Some(identity_proof) = identity_proof {
+            crate::corporate_identity::finalize_corporate_identity(
+                &state,
+                tenant.community(),
+                pubkey,
+                identity_proof,
+            )
+            .await
+            .map_err(|error| error.into_api_error())?;
+        }
+    }
 
     // Same TLS-posture logic as nip98_expected_url: wss deployments get an
     // https landing page URL, ws dev/test deployments get http.
@@ -373,25 +461,90 @@ pub async fn mint_invite(
         "http"
     };
 
-    tracing::info!(
-        community = %tenant.community(),
-        minted_by = %sender_hex,
-        invite_id = %invite.invite_id,
-        expires_at = %invite.expires_at,
-        max_uses = ?invite.max_uses,
-        "relay invite minted"
-    );
+    let build_response = |invite: buzz_db::relay_invite::MintedInvite| {
+        tracing::info!(
+            community = %tenant.community(),
+            minted_by = %sender_hex,
+            invite_id = %invite.invite_id,
+            expires_at = %invite.expires_at,
+            max_uses = ?invite.max_uses,
+            "relay invite minted"
+        );
+        serde_json::json!({
+            "code": invite.code,
+            "expires_at": invite.expires_at.timestamp() as u64,
+            "max_uses": invite.max_uses,
+            "uses_remaining": invite.uses_remaining,
+            "url": format!("{scheme}://{}/invite/{}", tenant.host(), invite.code),
+        })
+    };
 
-    // expires_at as unix seconds for the response contract.
-    let expires_at_unix = invite.expires_at.timestamp() as u64;
+    if protected_authority.is_enforcing() {
+        let operation_id = ProtectedOperationId::derive(
+            tenant.community(),
+            "invite.mint.v1",
+            &verified_proof.operation_binding().fingerprint(),
+        )
+        .map_err(|error| internal_error(&format!("invite mint: {error}")))?;
+        let mut digest = Sha256::new();
+        digest.update(b"buzz-invite-mint-v1");
+        digest.update(ttl.to_be_bytes());
+        digest.update(max_uses.unwrap_or_default().to_be_bytes());
+        let permit = protected_authority
+            .seal_postgres_mutation(operation_id, "invite.mint.v1", digest.finalize().into())
+            .map_err(|error| {
+                tracing::warn!(error = %error, "invite mint: protected authorization denied");
+                api_error(StatusCode::FORBIDDEN, "protected authorization denied")
+            })?
+            .ok_or_else(|| api_error(StatusCode::FORBIDDEN, "protected authorization denied"))?;
+        let response = match begin_authorized_operation(&state, permit)
+            .await
+            .map_err(|error| internal_error(&format!("invite mint: {error}")))?
+        {
+            AuthorizedOperationStart::Replay(payload) => serde_json::from_slice(&payload)
+                .map_err(|error| internal_error(&format!("invite mint replay: {error}")))?,
+            AuthorizedOperationStart::Execute(mut operation) => {
+                buzz_db::relay_invite::validate_relay_invite_minter_tx(
+                    operation.transaction(),
+                    tenant.community(),
+                    &sender_hex,
+                )
+                .await
+                .map_err(|error| {
+                    tracing::warn!(error = %error, "invite mint authority changed before commit");
+                    api_error(StatusCode::FORBIDDEN, "protected authorization denied")
+                })?;
+                let invite = buzz_db::relay_invite::mint_relay_invite_tx(
+                    operation.transaction(),
+                    tenant.community(),
+                    &sender_hex,
+                    ttl,
+                    max_uses,
+                )
+                .await
+                .map_err(|error| internal_error(&format!("invite mint: {error}")))?;
+                let response = build_response(invite);
+                let payload = serde_json::to_vec(&response)
+                    .map_err(|error| internal_error(&format!("invite mint: {error}")))?;
+                operation
+                    .commit(&payload)
+                    .await
+                    .map_err(|error| internal_error(&format!("invite mint: {error}")))?;
+                response
+            }
+        };
+        return Ok(Json(response));
+    }
 
-    Ok(Json(serde_json::json!({
-        "code": invite.code,
-        "expires_at": expires_at_unix,
-        "max_uses": invite.max_uses,
-        "uses_remaining": invite.uses_remaining,
-        "url": format!("{scheme}://{}/invite/{}", tenant.host(), invite.code),
-    })))
+    let invite = state
+        .db
+        .mint_relay_invite(tenant.community(), &sender_hex, ttl, max_uses)
+        .await
+        .map_err(|error| match error {
+            buzz_db::DbError::InvalidData(message) => api_error(StatusCode::BAD_REQUEST, &message),
+            error => internal_error(&format!("invite mint: {error}")),
+        })?;
+    Ok(Json(build_response(invite)))
 }
 
 /// Claim an invite code — `POST /api/invites/claim`, NIP-98 signed by the
@@ -405,8 +558,19 @@ pub async fn claim_invite(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let (tenant, pubkey, identity_proof) =
+    let (tenant, pubkey, identity_proof, verified_proof, enrollment_assertion) =
         authenticate(&state, &headers, "/api/invites/claim", &body).await?;
+
+    let authorization_mode = state
+        .protected_transport()
+        .and_then(|runtime| runtime.mode_for_domain(tenant.community()));
+    if authorization_mode == Some(AuthorizationMode::DenyProtected) {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "protected authorization denied",
+        ));
+    }
+    let enforcing = authorization_mode == Some(AuthorizationMode::Enforce);
 
     if claim_rate_limited(&state, tenant.community(), &pubkey) {
         return Err(api_error(
@@ -420,7 +584,10 @@ pub async fn claim_invite(
     // Invite admission must be coupled to the identity being admitted. A
     // delegated owner proof can become stale between verification and the
     // invite transaction, so bootstrap claims require the joiner's direct JWT.
-    if crate::corporate_identity::proof_is_delegated(&identity_proof) {
+    if identity_proof
+        .as_ref()
+        .is_some_and(crate::corporate_identity::proof_is_delegated)
+    {
         return Err(api_error(
             StatusCode::FORBIDDEN,
             "direct relay identity required for invite claim",
@@ -429,6 +596,13 @@ pub async fn claim_invite(
 
     let claimer_hex = pubkey.to_hex();
     let key = invite_token::derive_invite_key(&state.relay_keypair);
+
+    if enforcing && !request.code.starts_with(V2_PREFIX) {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "invite_unavailable",
+        ));
+    }
 
     // --- v2 database-backed path ---
     //
@@ -450,8 +624,141 @@ pub async fn claim_invite(
         }
 
         let token_hash = hash_v2_code(&request.code);
-        let identity_binding =
-            crate::corporate_identity::binding_input_for_proof(&identity_proof, &pubkey);
+        if enforcing {
+            let assertion = enrollment_assertion.ok_or_else(|| {
+                api_error(StatusCode::FORBIDDEN, "relay identity verification failed")
+            })?;
+            let enrollment = authorize_enrollment_if_configured(
+                &state,
+                Arc::clone(&verified_proof),
+                assertion,
+                stable_correlation_from_proof(&verified_proof),
+            )
+            .await
+            .map_err(|error| {
+                tracing::warn!(error = %error, "invite claim: protected enrollment denied");
+                api_error(StatusCode::FORBIDDEN, "protected authorization denied")
+            })?;
+            let mut stable_key = Vec::with_capacity(64);
+            stable_key.extend_from_slice(&token_hash);
+            stable_key.extend_from_slice(pubkey.as_bytes());
+            let operation_id =
+                ProtectedOperationId::derive(tenant.community(), "invite.claim.v1", &stable_key)
+                    .map_err(|error| internal_error(&format!("invite claim: {error}")))?;
+            let mut digest = Sha256::new();
+            digest.update(b"buzz-invite-claim-v1");
+            digest.update(token_hash);
+            digest.update(pubkey.as_bytes());
+            if let Some(policy) = &state.config.join_policy {
+                digest.update(policy.version.as_bytes());
+            }
+            let request_fingerprint: [u8; 32] = digest.finalize().into();
+            let permit = enrollment
+                .seal_postgres_enrollment(operation_id, "invite.claim.v1", request_fingerprint)
+                .map_err(|error| {
+                    tracing::warn!(error = %error, "invite claim: protected enrollment stale");
+                    api_error(StatusCode::FORBIDDEN, "protected authorization denied")
+                })?
+                .ok_or_else(|| {
+                    api_error(StatusCode::FORBIDDEN, "protected authorization denied")
+                })?;
+            let response = match begin_authorized_enrollment(&state, permit)
+                .await
+                .map_err(|error| internal_error(&format!("invite claim: {error}")))?
+            {
+                AuthorizedEnrollmentStart::Replay(payload) => serde_json::from_slice(&payload)
+                    .map_err(|error| internal_error(&format!("invite claim replay: {error}")))?,
+                AuthorizedEnrollmentStart::Execute(mut operation) => {
+                    let issuer = operation.issuer().to_owned();
+                    let subject = operation.subject().to_owned();
+                    let actor = *operation.actor_pubkey();
+                    let identity = buzz_db::identity_binding::IdentityBindingInput {
+                        issuer: &issuer,
+                        uid: &subject,
+                        pubkey: &actor,
+                        display_name: None,
+                        source: buzz_db::identity_binding::SOURCE_JWT_NPUB,
+                    };
+                    let outcome = buzz_db::relay_invite::claim_relay_invite_with_identity_tx(
+                        operation.transaction(),
+                        tenant.community(),
+                        &token_hash,
+                        &claimer_hex,
+                        state
+                            .config
+                            .join_policy
+                            .as_ref()
+                            .map(|policy| policy.version.as_str()),
+                        Some(&identity),
+                    )
+                    .await
+                    .map_err(|error| internal_error(&format!("invite claim: {error}")))?;
+                    let response = match outcome {
+                        buzz_db::relay_invite::ClaimOutcome::Joined { .. } => serde_json::json!({
+                            "status": "joined",
+                            "community_id": tenant.community().to_string(),
+                            "host": tenant.host(),
+                            "role": "member",
+                        }),
+                        buzz_db::relay_invite::ClaimOutcome::AlreadyMember { .. } => {
+                            serde_json::json!({
+                                "status": "already_member",
+                                "community_id": tenant.community().to_string(),
+                                "host": tenant.host(),
+                                "role": "member",
+                            })
+                        }
+                        buzz_db::relay_invite::ClaimOutcome::Expired => {
+                            return Err(api_error(StatusCode::FORBIDDEN, "invite_expired"));
+                        }
+                        buzz_db::relay_invite::ClaimOutcome::Exhausted => {
+                            return Err(api_error(StatusCode::FORBIDDEN, "invite_exhausted"));
+                        }
+                        buzz_db::relay_invite::ClaimOutcome::Invalid => {
+                            return Err(api_error(StatusCode::FORBIDDEN, "invite_invalid"));
+                        }
+                        buzz_db::relay_invite::ClaimOutcome::IdentityConflict(_) => {
+                            return Err(api_error(
+                                StatusCode::FORBIDDEN,
+                                "relay identity binding conflict",
+                            ));
+                        }
+                        buzz_db::relay_invite::ClaimOutcome::IdentityRevoked => {
+                            return Err(api_error(
+                                StatusCode::FORBIDDEN,
+                                "relay identity binding revoked",
+                            ));
+                        }
+                        buzz_db::relay_invite::ClaimOutcome::IdentityBindingRequired => {
+                            return Err(api_error(
+                                StatusCode::FORBIDDEN,
+                                "relay identity binding required",
+                            ));
+                        }
+                    };
+                    let payload = serde_json::to_vec(&response)
+                        .map_err(|error| internal_error(&format!("invite claim: {error}")))?;
+                    operation
+                        .commit(&payload)
+                        .await
+                        .map_err(|error| internal_error(&format!("invite claim: {error}")))?;
+                    response
+                }
+            };
+            return Ok(Json(response));
+        }
+        let legacy_identity = crate::authorization_runtime::transport::legacy_identity_lane(
+            &state,
+            tenant.community(),
+        )
+            == crate::authorization_runtime::transport::LegacyIdentityLane::Legacy;
+        let identity_binding = if legacy_identity {
+            identity_proof.as_ref().and_then(|proof| {
+                crate::corporate_identity::binding_input_for_proof(proof, &pubkey)
+            })
+        } else {
+            None
+        };
         let outcome = state
             .db
             .claim_relay_invite_with_identity(
@@ -472,15 +779,19 @@ pub async fn claim_invite(
             buzz_db::relay_invite::ClaimOutcome::Joined {
                 identity_binding, ..
             } => {
-                crate::corporate_identity::finalize_atomic_corporate_identity_result(
-                    &state,
-                    tenant.community(),
-                    pubkey,
-                    identity_proof,
-                    identity_binding,
-                )
-                .await
-                .map_err(|error| error.into_api_error())?;
+                if legacy_identity {
+                    if let Some(identity_proof) = identity_proof {
+                        crate::corporate_identity::finalize_atomic_corporate_identity_result(
+                            &state,
+                            tenant.community(),
+                            pubkey,
+                            identity_proof,
+                            identity_binding,
+                        )
+                        .await
+                        .map_err(|error| error.into_api_error())?;
+                    }
+                }
                 tracing::info!(
                     community = %tenant.community(),
                     member = %claimer_hex,
@@ -505,15 +816,19 @@ pub async fn claim_invite(
             buzz_db::relay_invite::ClaimOutcome::AlreadyMember {
                 identity_binding, ..
             } => {
-                crate::corporate_identity::finalize_atomic_corporate_identity_result(
-                    &state,
-                    tenant.community(),
-                    pubkey,
-                    identity_proof,
-                    identity_binding,
-                )
-                .await
-                .map_err(|error| error.into_api_error())?;
+                if legacy_identity {
+                    if let Some(identity_proof) = identity_proof {
+                        crate::corporate_identity::finalize_atomic_corporate_identity_result(
+                            &state,
+                            tenant.community(),
+                            pubkey,
+                            identity_proof,
+                            identity_binding,
+                        )
+                        .await
+                        .map_err(|error| error.into_api_error())?;
+                    }
+                }
                 Ok(Json(serde_json::json!({
                     "status": "already_member",
                     "community_id": tenant.community().to_string(),
@@ -531,6 +846,9 @@ pub async fn claim_invite(
                 Err(api_error(StatusCode::FORBIDDEN, "invite_invalid"))
             }
             buzz_db::relay_invite::ClaimOutcome::IdentityConflict(conflict) => {
+                let Some(identity_proof) = identity_proof else {
+                    return Err(api_error(StatusCode::FORBIDDEN, "invite_invalid"));
+                };
                 Err(record_atomic_identity_rejection(
                     &state,
                     tenant.community(),
@@ -541,6 +859,9 @@ pub async fn claim_invite(
                 .await)
             }
             buzz_db::relay_invite::ClaimOutcome::IdentityRevoked => {
+                let Some(identity_proof) = identity_proof else {
+                    return Err(api_error(StatusCode::FORBIDDEN, "invite_invalid"));
+                };
                 Err(record_atomic_identity_rejection(
                     &state,
                     tenant.community(),
@@ -551,6 +872,9 @@ pub async fn claim_invite(
                 .await)
             }
             buzz_db::relay_invite::ClaimOutcome::IdentityBindingRequired => {
+                let Some(identity_proof) = identity_proof else {
+                    return Err(api_error(StatusCode::FORBIDDEN, "invite_invalid"));
+                };
                 Err(record_atomic_identity_rejection(
                     &state,
                     tenant.community(),
@@ -584,8 +908,16 @@ pub async fn claim_invite(
             .map_err(|_| api_error(StatusCode::FORBIDDEN, "join_policy_required"))?;
     }
 
-    let identity_binding =
-        crate::corporate_identity::binding_input_for_proof(&identity_proof, &pubkey);
+    let legacy_identity =
+        crate::authorization_runtime::transport::legacy_identity_lane(&state, tenant.community())
+            == crate::authorization_runtime::transport::LegacyIdentityLane::Legacy;
+    let identity_binding = if legacy_identity {
+        identity_proof
+            .as_ref()
+            .and_then(|proof| crate::corporate_identity::binding_input_for_proof(proof, &pubkey))
+    } else {
+        None
+    };
     let claim_outcome = state
         .db
         .claim_relay_membership_with_identity(
@@ -607,6 +939,9 @@ pub async fn claim_invite(
             identity_binding,
         } => (inserted, identity_binding),
         buzz_db::relay_members::MembershipClaimOutcome::IdentityConflict(conflict) => {
+            let Some(identity_proof) = identity_proof else {
+                return Err(api_error(StatusCode::FORBIDDEN, "invite_invalid"));
+            };
             return Err(record_atomic_identity_rejection(
                 &state,
                 tenant.community(),
@@ -617,6 +952,9 @@ pub async fn claim_invite(
             .await);
         }
         buzz_db::relay_members::MembershipClaimOutcome::IdentityRevoked => {
+            let Some(identity_proof) = identity_proof else {
+                return Err(api_error(StatusCode::FORBIDDEN, "invite_invalid"));
+            };
             return Err(record_atomic_identity_rejection(
                 &state,
                 tenant.community(),
@@ -627,6 +965,9 @@ pub async fn claim_invite(
             .await);
         }
         buzz_db::relay_members::MembershipClaimOutcome::IdentityBindingRequired => {
+            let Some(identity_proof) = identity_proof else {
+                return Err(api_error(StatusCode::FORBIDDEN, "invite_invalid"));
+            };
             return Err(record_atomic_identity_rejection(
                 &state,
                 tenant.community(),
@@ -637,15 +978,19 @@ pub async fn claim_invite(
             .await);
         }
     };
-    crate::corporate_identity::finalize_atomic_corporate_identity_result(
-        &state,
-        tenant.community(),
-        pubkey,
-        identity_proof,
-        identity_binding,
-    )
-    .await
-    .map_err(|error| error.into_api_error())?;
+    if legacy_identity {
+        if let Some(identity_proof) = identity_proof {
+            crate::corporate_identity::finalize_atomic_corporate_identity_result(
+                &state,
+                tenant.community(),
+                pubkey,
+                identity_proof,
+                identity_binding,
+            )
+            .await
+            .map_err(|error| error.into_api_error())?;
+        }
+    }
 
     if was_inserted {
         tracing::info!(

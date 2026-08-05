@@ -6,10 +6,17 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use nostr::JsonUtil;
+use serde::Deserialize;
 use tokio::sync::{broadcast, mpsc, Mutex};
 
 use crate::topic::EventTopicKey;
 use crate::ChannelEvent;
+
+#[derive(Deserialize)]
+struct PublishedEventEnvelope {
+    event: nostr::Event,
+    authority: String,
+}
 
 /// Initial reconnect backoff (1 second).
 const BACKOFF_INITIAL_SECS: u64 = 1;
@@ -145,18 +152,22 @@ async fn connect_and_subscribe(
                     }
                 };
 
-                let event = match nostr::Event::from_json(&payload) {
-                    Ok(e) => e,
-                    Err(e) => {
-                        tracing::warn!("Failed to deserialize event from pub/sub: {e}");
-                        continue;
-                    }
+                let (event, authority) = match serde_json::from_str::<PublishedEventEnvelope>(&payload) {
+                    Ok(envelope) => (envelope.event, Some(envelope.authority)),
+                    Err(_) => match nostr::Event::from_json(&payload) {
+                        Ok(event) => (event, None),
+                        Err(e) => {
+                            tracing::warn!("Failed to deserialize event from pub/sub: {e}");
+                            continue;
+                        }
+                    },
                 };
 
                 let channel_event = ChannelEvent {
                     community_id: topic_key.community_id,
                     topic: topic_key.topic,
                     event,
+                    authority,
                 };
 
                 if let Err(_e) = broadcast_tx.send(channel_event) {

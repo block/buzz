@@ -7,7 +7,7 @@
 
 use buzz_core::CommunityId;
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Row as _};
+use sqlx::{PgPool, Postgres, Row as _, Transaction};
 
 use crate::error::Result;
 
@@ -76,6 +76,36 @@ pub async fn archive(
     Ok(result.rows_affected() > 0)
 }
 
+/// Transaction-owned identity archive mutation.
+#[allow(clippy::too_many_arguments)]
+pub async fn archive_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    pubkey: &str,
+    consent_path: &str,
+    actor: &str,
+    reason: Option<&str>,
+    replaced_by: Option<&str>,
+    request_event_id: &str,
+) -> Result<bool> {
+    let result = sqlx::query(
+        "INSERT INTO archived_identities \
+         (community_id, pubkey, consent_path, actor, reason, replaced_by, request_event_id) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7) \
+         ON CONFLICT (community_id, pubkey) DO NOTHING",
+    )
+    .bind(community_id.as_uuid())
+    .bind(pubkey)
+    .bind(consent_path)
+    .bind(actor)
+    .bind(reason)
+    .bind(replaced_by)
+    .bind(request_event_id)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
 /// Unarchives an identity from `community_id`.
 ///
 /// Returns `true` if a row was deleted, `false` if the identity was not archived
@@ -88,6 +118,21 @@ pub async fn unarchive(pool: &PgPool, community_id: CommunityId, pubkey: &str) -
             .execute(pool)
             .await?;
 
+    Ok(result.rows_affected() > 0)
+}
+
+/// Transaction-owned identity unarchive mutation.
+pub async fn unarchive_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    pubkey: &str,
+) -> Result<bool> {
+    let result =
+        sqlx::query("DELETE FROM archived_identities WHERE community_id = $1 AND pubkey = $2")
+            .bind(community_id.as_uuid())
+            .bind(pubkey)
+            .execute(&mut **transaction)
+            .await?;
     Ok(result.rows_affected() > 0)
 }
 

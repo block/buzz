@@ -4,6 +4,7 @@ use crate::error::Result;
 use buzz_core::CommunityId;
 use sqlx::PgPool;
 use sqlx::Row;
+use sqlx::{Postgres, Transaction};
 
 /// A user's profile fields.
 #[derive(Debug, Clone)]
@@ -52,6 +53,63 @@ pub async fn ensure_user(pool: &PgPool, community_id: CommunityId, pubkey: &[u8]
     .execute(pool)
     .await?;
     Ok(result.rows_affected() == 1)
+}
+
+/// Ensure a user row exists inside a caller-owned transaction.
+pub async fn ensure_user_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    pubkey: &[u8],
+) -> Result<bool> {
+    let result = sqlx::query(
+        "INSERT INTO users (community_id, pubkey) VALUES ($1, $2) \
+         ON CONFLICT (community_id, pubkey) DO NOTHING",
+    )
+    .bind(community_id.as_uuid())
+    .bind(pubkey)
+    .execute(&mut **tx)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Apply absolute kind:0 profile state inside a caller-owned transaction.
+/// A contested NIP-05 handle leaves the prior handle unchanged while updating
+/// the remaining fields, matching the legacy compatibility behavior.
+#[allow(clippy::too_many_arguments)]
+pub async fn replace_user_profile_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    pubkey: &[u8],
+    display_name: &str,
+    avatar_url: &str,
+    about: &str,
+    nip05_handle: &str,
+) -> Result<()> {
+    let contested: bool = !nip05_handle.is_empty()
+        && sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM users WHERE community_id = $1 \
+             AND LOWER(nip05_handle) = LOWER($2) AND pubkey <> $3)",
+        )
+        .bind(community_id.as_uuid())
+        .bind(nip05_handle)
+        .bind(pubkey)
+        .fetch_one(&mut **tx)
+        .await?;
+    sqlx::query(
+        "UPDATE users SET display_name = NULLIF($1, ''), avatar_url = NULLIF($2, ''), \
+         about = NULLIF($3, ''), nip05_handle = CASE WHEN $4 THEN nip05_handle \
+         ELSE NULLIF($5, '') END WHERE community_id = $6 AND pubkey = $7",
+    )
+    .bind(display_name)
+    .bind(avatar_url)
+    .bind(about)
+    .bind(contested)
+    .bind(nip05_handle)
+    .bind(community_id.as_uuid())
+    .bind(pubkey)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 /// Get a single user record by pubkey.
@@ -368,6 +426,26 @@ pub async fn is_agent_owner(
     Ok(row.unwrap_or(false))
 }
 
+/// Share-lock and validate an agent-owner relationship inside a caller-owned
+/// authorization transaction.
+pub async fn is_agent_owner_tx(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    community_id: CommunityId,
+    target_pubkey: &[u8],
+    actor_pubkey: &[u8],
+) -> Result<bool> {
+    let owner = sqlx::query_scalar::<_, Vec<u8>>(
+        "SELECT agent_owner_pubkey FROM users \
+         WHERE community_id = $1 AND pubkey = $2 AND agent_owner_pubkey IS NOT NULL \
+         FOR SHARE",
+    )
+    .bind(community_id.as_uuid())
+    .bind(target_pubkey)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    Ok(owner.is_some_and(|owner| owner == actor_pubkey))
+}
+
 /// Set the channel_add_policy for a user.
 /// Returns an error if the pubkey is not found (rows_affected == 0).
 /// Returns an error if `policy` is not one of the valid ENUM values.
@@ -389,6 +467,35 @@ pub async fn set_channel_add_policy(
     .bind(community_id.as_uuid())
     .bind(pubkey)
     .execute(pool)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(crate::error::DbError::NotFound(
+            "pubkey not found in users table".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Set a channel-add policy inside a caller-owned transaction.
+pub async fn set_channel_add_policy_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    pubkey: &[u8],
+    policy: &str,
+) -> Result<()> {
+    if !matches!(policy, "anyone" | "owner_only" | "nobody") {
+        return Err(crate::error::DbError::InvalidData(format!(
+            "invalid channel_add_policy: {policy}"
+        )));
+    }
+    let result = sqlx::query(
+        "UPDATE users SET channel_add_policy = $1::channel_add_policy \
+         WHERE community_id = $2 AND pubkey = $3",
+    )
+    .bind(policy)
+    .bind(community_id.as_uuid())
+    .bind(pubkey)
+    .execute(&mut **tx)
     .await?;
     if result.rows_affected() == 0 {
         return Err(crate::error::DbError::NotFound(

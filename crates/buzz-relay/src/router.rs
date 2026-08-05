@@ -206,16 +206,20 @@ async fn enforce_corporate_identity_route_inventory(
     request: Request<Body>,
     next: Next,
 ) -> axum::response::Response {
-    enforce_route_inventory_for_requirement(state.config.corporate_identity.require, request, next)
-        .await
+    enforce_route_inventory_for_requirement(
+        state.config.corporate_identity.require || state.protected_transport().is_some(),
+        request,
+        next,
+    )
+    .await
 }
 
 async fn enforce_route_inventory_for_requirement(
-    corporate_identity_required: bool,
+    protected_inventory_required: bool,
     request: Request<Body>,
     next: Next,
 ) -> axum::response::Response {
-    if !corporate_identity_required {
+    if !protected_inventory_required {
         return next.run(request).await;
     }
     let matched_path = request.extensions().get::<MatchedPath>();
@@ -240,11 +244,11 @@ async fn enforce_route_inventory_for_requirement(
     tracing::error!(
         method = %request.method(),
         matched_path = matched_path.map(|path| path.as_str()).unwrap_or("<missing>"),
-        "rejecting route missing corporate identity policy classification"
+        "rejecting route missing protected-surface policy classification"
     );
     (
         StatusCode::SERVICE_UNAVAILABLE,
-        "route unavailable: identity policy is not configured",
+        "route unavailable: protected-surface policy is not configured",
     )
         .into_response()
 }
@@ -374,15 +378,21 @@ async fn nip11_or_ws_handler(
                 .into_response();
         }
     };
-    let corporate_identity_jwt = match crate::corporate_identity::identity_jwt_from_headers(
-        &headers,
-        &state.config.corporate_identity,
-    ) {
-        Ok(jwt) => jwt,
-        Err(_) => {
-            return (StatusCode::UNAUTHORIZED, "invalid identity assertion").into_response();
-        }
-    };
+    let corporate_identity_assertion =
+        match crate::corporate_identity::identity_assertion_from_headers(
+            &state,
+            tenant.community(),
+            &headers,
+        ) {
+            Ok(assertion) => assertion,
+            Err(error) => {
+                return (
+                    error.status_code(),
+                    format!("restricted: {}", error.public_message()),
+                )
+                    .into_response()
+            }
+        };
 
     let max_frame_bytes = state.config.max_frame_bytes;
     match WebSocketUpgrade::from_request(req, &state).await {
@@ -398,7 +408,7 @@ async fn nip11_or_ws_handler(
             }
             limit_relay_websocket(ws, max_frame_bytes)
                 .on_upgrade(move |socket| {
-                    handle_connection(socket, state, addr, tenant, corporate_identity_jwt)
+                    handle_connection(socket, state, addr, tenant, corporate_identity_assertion)
                 })
                 .into_response()
         }

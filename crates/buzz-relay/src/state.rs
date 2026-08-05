@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use buzz_audit::AuditService;
-use buzz_auth::{AuthService, Nip98ReplayGuard};
+use buzz_auth::{AuthService, Nip98ReplayGuard, VerifiedFederatedAssertion, VerifiedNostrProof};
 use buzz_core::tenant::TenantContext;
 use buzz_core::CommunityId;
 use buzz_db::Db;
@@ -32,6 +32,7 @@ use deadpool_redis;
 use crate::audio::AudioRoomManager;
 use crate::config::Config;
 use crate::connection::ConnectionSubscriptions;
+use crate::connection::OutboundData;
 use crate::corporate_identity::CorporateIdentityService;
 use crate::subscription::SubscriptionRegistry;
 
@@ -41,7 +42,7 @@ type ScopedRateLimiter = DashMap<ScopedPubkeyKey, SlidingWindowCounter>;
 
 /// Per-connection entry in the connection manager.
 struct ConnEntry {
-    tx: mpsc::Sender<WsMessage>,
+    tx: mpsc::Sender<OutboundData>,
     /// Control-frame sender, drained ahead of data and before cancel wins in
     /// the send loop. Used to deliver a ban-disconnect frame that must reach
     /// the client before the socket is closed (see [`ConnectionManager::disconnect_pubkey`]).
@@ -55,7 +56,55 @@ struct ConnEntry {
     backpressure_count: Arc<AtomicU8>,
     subscriptions: ConnectionSubscriptions,
     authenticated_pubkey: Arc<std::sync::RwLock<Option<Vec<u8>>>>,
+    authenticated_owner_pubkey: Arc<std::sync::RwLock<Option<Vec<u8>>>>,
+    /// Sealed NIP-42 proof retained for every protected operation on this
+    /// connection. Legacy test registrations may intentionally leave it empty.
+    verified_nostr_proof: Arc<std::sync::RwLock<Option<Arc<VerifiedNostrProof>>>>,
+    /// Current direct federated evidence sealed during authentication.
+    verified_federated_assertion: Arc<std::sync::RwLock<Option<Arc<VerifiedFederatedAssertion>>>>,
+    /// The enforcing authority and its hard-expiry task share one lock so
+    /// concurrent operations can only tighten, never extend, the session.
+    protected_session: Arc<std::sync::Mutex<ProtectedSessionState>>,
     grace_limit: u8,
+}
+
+struct ProtectedSessionExpiryTask {
+    deadline: u64,
+    cancel: CancellationToken,
+}
+
+#[derive(Default)]
+struct ProtectedSessionState {
+    /// Retaining this value keeps its invalidation observer registered until
+    /// tighter authority replaces it or the connection is removed.
+    authority: Option<Arc<crate::authorization_runtime::transport::ProtectedAuthorization>>,
+    expiry: Option<ProtectedSessionExpiryTask>,
+}
+
+fn should_replace_protected_session_deadline(current: Option<u64>, candidate: u64) -> bool {
+    current.is_none_or(|current| candidate < current)
+}
+
+fn protected_session_wake_at_from_samples(
+    deadline: u64,
+    monotonic_anchor: tokio::time::Instant,
+    wall_now: std::time::Duration,
+    coarse_delay: std::time::Duration,
+) -> Option<tokio::time::Instant> {
+    let wall_remaining = std::time::Duration::from_secs(deadline).checked_sub(wall_now)?;
+    let conservative_coarse = coarse_delay.saturating_sub(std::time::Duration::from_secs(1));
+    monotonic_anchor.checked_add(wall_remaining.min(conservative_coarse))
+}
+
+fn protected_session_wake_at(
+    deadline: u64,
+    monotonic_anchor: tokio::time::Instant,
+    coarse_delay: std::time::Duration,
+) -> Option<tokio::time::Instant> {
+    let wall_now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    protected_session_wake_at_from_samples(deadline, monotonic_anchor, wall_now, coarse_delay)
 }
 
 /// Community-scoped lifecycle registry shared by every long-lived socket type.
@@ -206,7 +255,7 @@ impl ConnectionManager {
     pub fn register(
         &self,
         conn_id: Uuid,
-        tx: mpsc::Sender<WsMessage>,
+        tx: mpsc::Sender<OutboundData>,
         ctrl_tx: mpsc::Sender<WsMessage>,
         cancel: CancellationToken,
         community_id: CommunityId,
@@ -226,6 +275,12 @@ impl ConnectionManager {
                 backpressure_count,
                 subscriptions,
                 authenticated_pubkey: Arc::new(std::sync::RwLock::new(None)),
+                authenticated_owner_pubkey: Arc::new(std::sync::RwLock::new(None)),
+                verified_nostr_proof: Arc::new(std::sync::RwLock::new(None)),
+                verified_federated_assertion: Arc::new(std::sync::RwLock::new(None)),
+                protected_session: Arc::new(
+                    std::sync::Mutex::new(ProtectedSessionState::default()),
+                ),
                 grace_limit,
             },
         );
@@ -241,7 +296,64 @@ impl ConnectionManager {
 
     /// Removes a connection from the registry.
     pub fn deregister(&self, conn_id: Uuid) {
-        self.connections.remove(&conn_id);
+        if let Some((_, entry)) = self.connections.remove(&conn_id) {
+            Self::clear_protected_session(&entry);
+        }
+    }
+
+    fn clear_protected_session(entry: &ConnEntry) {
+        if let Ok(mut session) = entry.protected_session.lock() {
+            if let Some(task) = session.expiry.take() {
+                task.cancel.cancel();
+            }
+            session.authority = None;
+        } else {
+            entry.cancel.cancel();
+        }
+    }
+
+    /// Atomically retain only authority with an earlier hard deadline.
+    ///
+    /// The comparison, task replacement, and authority replacement must stay
+    /// in this critical section: WebSocket handlers for one connection run
+    /// concurrently and a split read/install would permit lease extension.
+    fn retain_earlier_protected_session(
+        entry: &ConnEntry,
+        deadline: u64,
+        wake_at: tokio::time::Instant,
+        authority: Option<Arc<crate::authorization_runtime::transport::ProtectedAuthorization>>,
+        after_read_hook: Option<&dyn Fn()>,
+    ) -> bool {
+        if let Ok(mut session) = entry.protected_session.lock() {
+            let current = session.expiry.as_ref().map(|task| task.deadline);
+            if let Some(hook) = after_read_hook {
+                hook();
+            }
+            if !should_replace_protected_session_deadline(current, deadline) {
+                return false;
+            }
+            if let Some(previous) = session.expiry.take() {
+                previous.cancel.cancel();
+            }
+            let expiry_task = CancellationToken::new();
+            let expiry_cancel = expiry_task.clone();
+            let connection_cancel = entry.cancel.clone();
+            tokio::spawn(async move {
+                tokio::select! {
+                    _ = expiry_cancel.cancelled() => {}
+                    _ = tokio::time::sleep_until(wake_at) => connection_cancel.cancel(),
+                }
+            });
+            session.expiry = Some(ProtectedSessionExpiryTask {
+                deadline,
+                cancel: expiry_task,
+            });
+            session.authority = authority;
+            true
+        } else {
+            entry.cancel.cancel();
+            false
+        }
     }
 
     /// Record the authenticated pubkey for a connection after NIP-42 succeeds.
@@ -249,6 +361,81 @@ impl ConnectionManager {
         if let Some(entry) = self.connections.get(&conn_id) {
             if let Ok(mut slot) = entry.authenticated_pubkey.write() {
                 *slot = Some(pubkey_bytes);
+            }
+            if let Ok(mut slot) = entry.authenticated_owner_pubkey.write() {
+                *slot = None;
+            }
+            if let Ok(mut slot) = entry.verified_nostr_proof.write() {
+                *slot = None;
+            }
+            if let Ok(mut slot) = entry.verified_federated_assertion.write() {
+                *slot = None;
+            }
+            Self::clear_protected_session(&entry);
+        }
+    }
+
+    /// Record sealed connection evidence and derive actor/owner indexes from it.
+    pub fn set_authenticated_authority(
+        &self,
+        conn_id: Uuid,
+        proof: Arc<VerifiedNostrProof>,
+        assertion: Option<Arc<VerifiedFederatedAssertion>>,
+    ) {
+        if let Some(entry) = self.connections.get(&conn_id) {
+            if let Ok(mut slot) = entry.authenticated_pubkey.write() {
+                *slot = Some(proof.actor_pubkey().to_bytes().to_vec());
+            }
+            if let Ok(mut slot) = entry.authenticated_owner_pubkey.write() {
+                *slot = proof
+                    .verified_delegation()
+                    .map(|delegation| delegation.owner_pubkey().to_bytes().to_vec());
+            }
+            if let Ok(mut slot) = entry.verified_nostr_proof.write() {
+                *slot = Some(proof);
+            }
+            if let Ok(mut slot) = entry.verified_federated_assertion.write() {
+                *slot = assertion;
+            }
+            Self::clear_protected_session(&entry);
+        }
+    }
+
+    /// Retain the latest enforcing authority for an established connection.
+    /// Legacy and observational results clear any older authority without
+    /// creating a new invalidation registration.
+    pub fn retain_protected_session_authority(
+        &self,
+        conn_id: Uuid,
+        authority: &crate::authorization_runtime::transport::ProtectedAuthorization,
+    ) {
+        if let Some(entry) = self.connections.get(&conn_id) {
+            if authority.is_enforcing() {
+                let candidate = authority.expires_at().unwrap_or_default();
+                // Anchor monotonic time before consulting the injected
+                // whole-second authorization clock. Time spent sampling or
+                // installing the task must consume authority, never extend it.
+                let monotonic_anchor = tokio::time::Instant::now();
+                match authority.expiry_delay() {
+                    Ok(Some(delay)) => {
+                        if let Some(wake_at) =
+                            protected_session_wake_at(candidate, monotonic_anchor, delay)
+                        {
+                            Self::retain_earlier_protected_session(
+                                &entry,
+                                candidate,
+                                wake_at,
+                                Some(Arc::new(authority.clone())),
+                                None,
+                            );
+                        } else {
+                            entry.cancel.cancel();
+                        }
+                    }
+                    Ok(None) | Err(_) => entry.cancel.cancel(),
+                }
+            } else {
+                Self::clear_protected_session(&entry);
             }
         }
     }
@@ -288,6 +475,37 @@ impl ConnectionManager {
         self.connections
             .get(&conn_id)
             .and_then(|entry| entry.authenticated_pubkey.read().ok()?.clone())
+    }
+
+    /// Return the sealed verifier evidence recorded for a connection.
+    pub fn authority_for_conn(&self, conn_id: Uuid) -> Option<Arc<VerifiedNostrProof>> {
+        self.connections
+            .get(&conn_id)
+            .and_then(|entry| entry.verified_nostr_proof.read().ok()?.clone())
+    }
+
+    /// Return current direct federated evidence recorded for a connection.
+    pub fn federated_assertion_for_conn(
+        &self,
+        conn_id: Uuid,
+    ) -> Option<Arc<VerifiedFederatedAssertion>> {
+        self.connections
+            .get(&conn_id)
+            .and_then(|entry| entry.verified_federated_assertion.read().ok()?.clone())
+    }
+
+    /// Return the server-owned cancellation token for a live connection.
+    pub fn cancellation_for_conn(&self, conn_id: Uuid) -> Option<CancellationToken> {
+        self.connections
+            .get(&conn_id)
+            .map(|entry| entry.cancel.clone())
+    }
+
+    /// Cancel one connection after protected session authority expires.
+    pub fn cancel_connection(&self, conn_id: Uuid) {
+        if let Some(entry) = self.connections.get(&conn_id) {
+            entry.cancel.cancel();
+        }
     }
 
     /// Disconnect every live connection authenticated as `pubkey` **in
@@ -429,25 +647,13 @@ impl ConnectionManager {
             .and_then(|entry| entry.authenticated_pubkey.read().ok()?.clone())
     }
 
-    /// Compatibility seam for retaining protected session authority.
-    ///
-    /// No protected runtime is installable in this lower review unit, so the
-    /// session-conformance slice replaces this no-op with expiry and
-    /// invalidation retention before production installation becomes possible.
-    pub fn retain_protected_session_authority(
-        &self,
-        _conn_id: Uuid,
-        _authority: &crate::authorization_runtime::transport::ProtectedAuthorization,
-    ) {
-    }
-
     /// Sends a text message to the given connection.
     ///
     /// Returns `false` if the connection is gone or the buffer is full.
     /// On sustained backpressure (>grace_limit consecutive full buffers),
     /// cancels the connection. Transient stalls get a warning only.
     pub fn send_to(&self, conn_id: Uuid, msg: String) -> bool {
-        self.try_send_ws_message(conn_id, WsMessage::Text(msg.into()))
+        self.try_send_outbound(conn_id, OutboundData::plain(WsMessage::Text(msg.into())))
     }
 
     /// Sends an already-serialized UTF-8 text payload to the given connection.
@@ -457,10 +663,73 @@ impl ConnectionManager {
     pub fn send_to_text_bytes(&self, conn_id: Uuid, msg: Arc<Bytes>) -> bool {
         let text = WsUtf8Bytes::try_from(Bytes::clone(msg.as_ref()))
             .expect("relay fan-out frames are serialized UTF-8 JSON");
-        self.try_send_ws_message(conn_id, WsMessage::Text(text))
+        self.try_send_outbound(conn_id, OutboundData::plain(WsMessage::Text(text)))
     }
 
-    fn try_send_ws_message(&self, conn_id: Uuid, msg: WsMessage) -> bool {
+    /// Queue protected text and retain its exact authority until socket drain.
+    pub fn send_to_text_bytes_protected(
+        &self,
+        conn_id: Uuid,
+        msg: Arc<Bytes>,
+        authority: Arc<crate::authorization_runtime::transport::ProtectedAuthorization>,
+    ) -> bool {
+        let text = WsUtf8Bytes::try_from(Bytes::clone(msg.as_ref()))
+            .expect("relay fan-out frames are serialized UTF-8 JSON");
+        self.try_send_outbound(
+            conn_id,
+            OutboundData::protected(WsMessage::Text(text), authority),
+        )
+    }
+
+    /// Queue output guarded by both the emitting operation and the recipient's
+    /// current read authority until socket drain.
+    pub fn send_to_text_bytes_protected_pair(
+        &self,
+        conn_id: Uuid,
+        msg: Arc<Bytes>,
+        sender: Arc<crate::authorization_runtime::transport::ProtectedAuthorization>,
+        recipient: Arc<crate::authorization_runtime::transport::ProtectedAuthorization>,
+    ) -> bool {
+        let text = WsUtf8Bytes::try_from(Bytes::clone(msg.as_ref()))
+            .expect("relay fan-out frames are serialized UTF-8 JSON");
+        self.try_send_outbound(
+            conn_id,
+            OutboundData::protected_pair(WsMessage::Text(text), sender, recipient),
+        )
+    }
+
+    /// Queue output behind an arbitrary asynchronous sender fence.
+    pub(crate) fn send_to_text_bytes_guarded(
+        &self,
+        conn_id: Uuid,
+        msg: Arc<Bytes>,
+        authority: Arc<dyn crate::connection::QueuedOutboundReleaseFence>,
+    ) -> bool {
+        let text = WsUtf8Bytes::try_from(Bytes::clone(msg.as_ref()))
+            .expect("relay fan-out frames are serialized UTF-8 JSON");
+        self.try_send_outbound(
+            conn_id,
+            OutboundData::guarded(WsMessage::Text(text), authority),
+        )
+    }
+
+    /// Queue output behind a remote sender fence and local recipient fence.
+    pub(crate) fn send_to_text_bytes_guarded_pair(
+        &self,
+        conn_id: Uuid,
+        msg: Arc<Bytes>,
+        sender: Arc<dyn crate::connection::QueuedOutboundReleaseFence>,
+        recipient: Arc<dyn crate::connection::QueuedOutboundReleaseFence>,
+    ) -> bool {
+        let text = WsUtf8Bytes::try_from(Bytes::clone(msg.as_ref()))
+            .expect("relay fan-out frames are serialized UTF-8 JSON");
+        self.try_send_outbound(
+            conn_id,
+            OutboundData::guarded_pair(WsMessage::Text(text), sender, recipient),
+        )
+    }
+
+    fn try_send_outbound(&self, conn_id: Uuid, msg: OutboundData) -> bool {
         if let Some(entry) = self.connections.get(&conn_id) {
             let conn = entry.value();
             match conn.tx.try_send(msg) {
@@ -640,19 +909,24 @@ pub struct AppState {
     /// byte-identically to a relay without the mesh. Access via
     /// [`AppState::mesh`].
     pub mesh: Arc<std::sync::OnceLock<crate::mesh_boot::MeshHandle>>,
-    /// Optional exact-domain protected transport, unset by this review unit.
+    /// Optional exact-domain protected-transport runtime.
+    ///
+    /// Unset preserves legacy behavior. Once installed it is immutable for the
+    /// process lifetime so request data cannot switch provider policy.
     pub protected_transport: Arc<
         std::sync::OnceLock<
             Arc<crate::authorization_runtime::transport::ProtectedTransportRuntime>,
         >,
     >,
-    /// Deployment-owned assertion provenance, unset by the stock binary.
+    /// Deployment-verified ingress provenance for direct identity assertions.
+    ///
+    /// Unset by the stock binary. Header presence alone is never trusted.
     pub identity_assertion_provenance: Arc<
         std::sync::OnceLock<
             Arc<dyn crate::corporate_identity::IdentityAssertionProvenanceVerifier>,
         >,
     >,
-    /// Independent restore witness, unavailable until its owning slice.
+    /// Independent version witness installed with protected authorization.
     pub restore_protection: Arc<
         std::sync::OnceLock<Arc<crate::authorization_runtime::restore::RestoreProtectionRuntime>>,
     >,
@@ -851,14 +1125,22 @@ impl AppState {
         self.mesh.get()
     }
 
-    /// Current protected transport, if a later composition root installed it.
+    /// Install immutable protected-transport policy exactly once.
+    pub fn install_protected_transport(
+        &self,
+        runtime: Arc<crate::authorization_runtime::transport::ProtectedTransportRuntime>,
+    ) -> Result<(), Arc<crate::authorization_runtime::transport::ProtectedTransportRuntime>> {
+        self.protected_transport.set(runtime)
+    }
+
+    /// Current protected-transport runtime, if configured.
     pub fn protected_transport(
         &self,
     ) -> Option<&Arc<crate::authorization_runtime::transport::ProtectedTransportRuntime>> {
         self.protected_transport.get()
     }
 
-    /// Install immutable deployment-owned assertion provenance.
+    /// Install the immutable deployment-owned ingress provenance adapter.
     pub fn install_identity_assertion_provenance(
         &self,
         verifier: Arc<dyn crate::corporate_identity::IdentityAssertionProvenanceVerifier>,
@@ -866,21 +1148,42 @@ impl AppState {
         self.identity_assertion_provenance.set(verifier)
     }
 
-    /// Return deployment-owned assertion provenance, if installed.
+    /// Return the installed ingress provenance adapter, if any.
     pub fn identity_assertion_provenance(
         &self,
     ) -> Option<&Arc<dyn crate::corporate_identity::IdentityAssertionProvenanceVerifier>> {
         self.identity_assertion_provenance.get()
     }
 
-    /// Current independent restore witness, if installed by its owning slice.
+    /// Install the restore-independent version witness exactly once.
+    pub fn install_restore_protection(
+        &self,
+        runtime: Arc<crate::authorization_runtime::restore::RestoreProtectionRuntime>,
+    ) -> Result<(), Arc<crate::authorization_runtime::restore::RestoreProtectionRuntime>> {
+        self.restore_protection.set(runtime)
+    }
+
+    /// Current restore-independent version witness, if protected mode exists.
     pub fn restore_protection(
         &self,
     ) -> Option<&Arc<crate::authorization_runtime::restore::RestoreProtectionRuntime>> {
         self.restore_protection.get()
     }
 
-    /// Whether an exact domain is in authoritative protected enforcement.
+    /// Database UUIDs for exact domains where autonomous effects must not run.
+    pub fn enforcing_protected_domain_ids(&self) -> Vec<uuid::Uuid> {
+        self.protected_transport()
+            .map(|runtime| {
+                runtime
+                    .enforcing_domains()
+                    .into_iter()
+                    .map(|domain| *domain.as_uuid())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Whether one exact server-resolved domain is in authoritative Enforce.
     pub fn is_protected_enforcing(&self, domain: CommunityId) -> bool {
         self.protected_transport()
             .and_then(|runtime| runtime.mode_for_domain(domain))
@@ -1304,7 +1607,7 @@ mod tests {
     ) -> (
         ConnectionManager,
         Uuid,
-        mpsc::Receiver<WsMessage>,
+        mpsc::Receiver<OutboundData>,
         mpsc::Receiver<WsMessage>,
         CancellationToken,
         Arc<AtomicU8>,
@@ -1326,6 +1629,228 @@ mod tests {
             3,
         );
         (mgr, conn_id, rx, ctrl_rx, cancel, bp)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn protected_session_deadline_is_conservative_and_anchor_bound() {
+        let anchor = tokio::time::Instant::now();
+        let wake_at = protected_session_wake_at_from_samples(
+            102,
+            anchor,
+            std::time::Duration::from_millis(100_900),
+            std::time::Duration::from_secs(2),
+        )
+        .expect("future deadline");
+        assert_eq!(
+            wake_at.duration_since(anchor),
+            std::time::Duration::from_secs(1),
+            "whole-second authority is shortened conservatively instead of rounded late"
+        );
+
+        // Simulate work between authority-clock sampling and task install. The
+        // absolute monotonic wake stays tied to the earlier anchor.
+        tokio::time::advance(std::time::Duration::from_millis(750)).await;
+        let (mgr, conn_id, _rx, _ctrl_rx, cancel, _bp) = setup_conn(8);
+        let entry = mgr
+            .connections
+            .get(&conn_id)
+            .expect("registered connection");
+        ConnectionManager::retain_earlier_protected_session(&entry, 102, wake_at, None, None);
+        drop(entry);
+
+        tokio::time::advance(std::time::Duration::from_millis(249)).await;
+        tokio::task::yield_now().await;
+        assert!(!cancel.is_cancelled());
+        tokio::time::advance(std::time::Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert!(cancel.is_cancelled());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn protected_session_expiry_never_extends_and_disconnect_cleans_task() {
+        let (mgr, conn_id, _rx, _ctrl_rx, cancel, _bp) = setup_conn(8);
+        {
+            let entry = mgr
+                .connections
+                .get(&conn_id)
+                .expect("registered connection");
+            ConnectionManager::retain_earlier_protected_session(
+                &entry,
+                10,
+                tokio::time::Instant::now() + std::time::Duration::from_secs(10),
+                None,
+                None,
+            );
+        }
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(9)).await;
+        assert!(!cancel.is_cancelled());
+
+        assert!(!should_replace_protected_session_deadline(Some(10), 20));
+        assert!(!should_replace_protected_session_deadline(Some(10), 10));
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            cancel.is_cancelled(),
+            "ordinary traffic cannot extend the first hard session deadline"
+        );
+
+        let (mgr, conn_id, _rx, _ctrl_rx, cancel, _bp) = setup_conn(8);
+        {
+            let entry = mgr
+                .connections
+                .get(&conn_id)
+                .expect("registered connection");
+            ConnectionManager::retain_earlier_protected_session(
+                &entry,
+                20,
+                tokio::time::Instant::now() + std::time::Duration::from_secs(20),
+                None,
+                None,
+            );
+        }
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(5)).await;
+        assert!(should_replace_protected_session_deadline(Some(20), 10));
+        {
+            let entry = mgr
+                .connections
+                .get(&conn_id)
+                .expect("registered connection");
+            ConnectionManager::retain_earlier_protected_session(
+                &entry,
+                10,
+                tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+                None,
+                None,
+            );
+        }
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(5)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            cancel.is_cancelled(),
+            "a shorter authority tightens the hard deadline"
+        );
+
+        let (mgr, conn_id, _rx, _ctrl_rx, cancel, _bp) = setup_conn(8);
+        {
+            let entry = mgr
+                .connections
+                .get(&conn_id)
+                .expect("registered connection");
+            ConnectionManager::retain_earlier_protected_session(
+                &entry,
+                5,
+                tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+                None,
+                None,
+            );
+        }
+        tokio::task::yield_now().await;
+        mgr.deregister(conn_id);
+        tokio::time::advance(std::time::Duration::from_secs(5)).await;
+        assert!(
+            !cancel.is_cancelled(),
+            "disconnect removes the obsolete expiry task"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_protected_operations_cannot_replace_an_earlier_deadline() {
+        let (mgr, conn_id, _rx, _ctrl_rx, _cancel, _bp) = setup_conn(8);
+        let mgr = Arc::new(mgr);
+        let entry = mgr
+            .connections
+            .get(&conn_id)
+            .expect("registered connection");
+        let protected_session = Arc::clone(&entry.protected_session);
+        drop(entry);
+
+        let runtime = tokio::runtime::Handle::current();
+        let short_authority =
+            Arc::new(crate::authorization_runtime::transport::ProtectedAuthorization::Legacy);
+        let long_authority =
+            Arc::new(crate::authorization_runtime::transport::ProtectedAuthorization::Legacy);
+        let (short_locked, wait_for_short_lock) = std::sync::mpsc::channel();
+        let (release_short, wait_for_release) = std::sync::mpsc::channel();
+        let short_manager = Arc::clone(&mgr);
+        let retained_short_authority = Arc::clone(&short_authority);
+        let short_runtime = runtime.clone();
+        let short = std::thread::spawn(move || {
+            let _runtime = short_runtime.enter();
+            let entry = short_manager
+                .connections
+                .get(&conn_id)
+                .expect("registered connection");
+            let hook = || {
+                short_locked.send(()).expect("test still waiting");
+                wait_for_release.recv().expect("test releases first lock");
+            };
+            ConnectionManager::retain_earlier_protected_session(
+                &entry,
+                10,
+                tokio::time::Instant::now() + std::time::Duration::from_secs(10),
+                Some(retained_short_authority),
+                Some(&hook),
+            );
+        });
+        wait_for_short_lock
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("short contender holds the comparison/install lock");
+
+        let (long_attempting, wait_for_long_attempt) = std::sync::mpsc::channel();
+        let (long_read, wait_for_long_read) = std::sync::mpsc::channel();
+        let long_manager = Arc::clone(&mgr);
+        let long_runtime = runtime.clone();
+        let long = std::thread::spawn(move || {
+            let _runtime = long_runtime.enter();
+            long_attempting.send(()).expect("test still waiting");
+            let entry = long_manager
+                .connections
+                .get(&conn_id)
+                .expect("registered connection");
+            let hook = || {
+                long_read.send(()).expect("test still waiting");
+            };
+            ConnectionManager::retain_earlier_protected_session(
+                &entry,
+                20,
+                tokio::time::Instant::now() + std::time::Duration::from_secs(20),
+                Some(long_authority),
+                Some(&hook),
+            );
+        });
+        wait_for_long_attempt
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("long contender reached the atomic helper");
+        assert!(
+            matches!(
+                wait_for_long_read.recv_timeout(std::time::Duration::from_millis(50)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ),
+            "a second contender cannot read the deadline before the first install completes"
+        );
+        release_short.send(()).expect("short contender is waiting");
+        short.join().expect("short retention thread");
+        wait_for_long_read
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("long contender reads only after the short install");
+        long.join().expect("long retention thread");
+
+        let session = protected_session.lock().expect("protected session lock");
+        assert_eq!(
+            session.expiry.as_ref().map(|task| task.deadline),
+            Some(10),
+            "the minimum concurrent deadline is retained regardless of completion order"
+        );
+        assert!(
+            session
+                .authority
+                .as_ref()
+                .is_some_and(|authority| Arc::ptr_eq(authority, &short_authority)),
+            "the retained authority belongs to the minimum-deadline contender"
+        );
     }
 
     async fn test_state() -> Arc<AppState> {
@@ -1430,7 +1955,7 @@ mod tests {
                 "test.local".to_string(),
             ),
             remote_addr: "127.0.0.1:1234".parse().unwrap(),
-            corporate_identity_jwt: None,
+            corporate_identity_assertion: None,
             auth_state: RwLock::new(AuthState::Failed),
             subscriptions: Arc::new(Mutex::new(HashMap::new())),
             send_tx: tx.clone(),

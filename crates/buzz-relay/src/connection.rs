@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use axum::extract::ws::{Message as WsMessage, WebSocket};
 use futures_util::{Sink, SinkExt, StreamExt};
 use tokio::sync::{mpsc, Mutex, RwLock};
@@ -23,10 +24,133 @@ use crate::protocol::{ClientMessage, RelayMessage};
 use crate::state::{run_registered_community_connection, AppState};
 use buzz_pubsub::EventTopic;
 
-/// Fail-closed release check evaluated at the response boundary.
+/// Fail-closed release check evaluated at the socket acceptance boundary.
 pub(crate) trait OutboundReleaseFence: Send + Sync {
-    /// Return true only while the retained authority is still current.
     fn release(&self) -> bool;
+}
+
+/// Potentially asynchronous release fence retained until socket drain.
+#[async_trait]
+pub(crate) trait QueuedOutboundReleaseFence: Send + Sync {
+    async fn release(&self) -> bool;
+}
+
+struct SyncQueuedReleaseFence {
+    authority: Arc<dyn OutboundReleaseFence>,
+}
+
+#[async_trait]
+impl QueuedOutboundReleaseFence for SyncQueuedReleaseFence {
+    async fn release(&self) -> bool {
+        self.authority.release()
+    }
+}
+
+pub(crate) fn queued_local_authority(
+    authority: Arc<crate::authorization_runtime::transport::ProtectedAuthorization>,
+) -> Arc<dyn QueuedOutboundReleaseFence> {
+    Arc::new(SyncQueuedReleaseFence { authority })
+}
+
+#[async_trait]
+trait ChannelReadAuthoritySource: Send + Sync {
+    async fn channel_set_read_authorized(
+        &self,
+        community_id: buzz_core::tenant::CommunityId,
+        channel_ids: &[Uuid],
+        actor: &[u8],
+    ) -> bool;
+}
+
+#[async_trait]
+impl ChannelReadAuthoritySource for buzz_db::Db {
+    async fn channel_set_read_authorized(
+        &self,
+        community_id: buzz_core::tenant::CommunityId,
+        channel_ids: &[Uuid],
+        actor: &[u8],
+    ) -> bool {
+        buzz_db::Db::channel_set_read_authorized(self, community_id, channel_ids, actor)
+            .await
+            .unwrap_or(false)
+    }
+}
+
+struct ChannelReadReleaseFence {
+    source: Arc<dyn ChannelReadAuthoritySource>,
+    community_id: buzz_core::tenant::CommunityId,
+    channel_ids: Vec<Uuid>,
+    actor: Vec<u8>,
+    protected: Option<Arc<crate::authorization_runtime::transport::ProtectedAuthorization>>,
+}
+
+#[async_trait]
+impl QueuedOutboundReleaseFence for ChannelReadReleaseFence {
+    async fn release(&self) -> bool {
+        if self
+            .protected
+            .as_ref()
+            .is_some_and(|authority| authority.revalidate().is_err())
+        {
+            return false;
+        }
+        if !self
+            .source
+            .channel_set_read_authorized(self.community_id, &self.channel_ids, &self.actor)
+            .await
+        {
+            return false;
+        }
+        self.protected
+            .as_ref()
+            .is_none_or(|authority| authority.revalidate().is_ok())
+    }
+}
+
+/// Retain uncached channel access, plus optional protected identity authority,
+/// until the socket writer accepts the queued frame.
+pub(crate) fn queued_channel_read_authority(
+    db: buzz_db::Db,
+    community_id: buzz_core::tenant::CommunityId,
+    channel_id: Uuid,
+    actor: Vec<u8>,
+    protected: Option<Arc<crate::authorization_runtime::transport::ProtectedAuthorization>>,
+) -> Arc<dyn QueuedOutboundReleaseFence> {
+    queued_channel_set_read_authority(db, community_id, vec![channel_id], actor, protected)
+}
+
+/// Retain uncached access to every channel that can contribute to one
+/// aggregate response until the response is released.
+pub(crate) fn queued_channel_set_read_authority(
+    db: buzz_db::Db,
+    community_id: buzz_core::tenant::CommunityId,
+    mut channel_ids: Vec<Uuid>,
+    actor: Vec<u8>,
+    protected: Option<Arc<crate::authorization_runtime::transport::ProtectedAuthorization>>,
+) -> Arc<dyn QueuedOutboundReleaseFence> {
+    channel_ids.sort_unstable();
+    channel_ids.dedup();
+    Arc::new(ChannelReadReleaseFence {
+        source: Arc::new(db),
+        community_id,
+        channel_ids,
+        actor,
+        protected,
+    })
+}
+
+/// Evaluate the aggregate read fence synchronously with an HTTP response
+/// release. WebSocket callers retain the same fence in their outbound queue.
+pub(crate) async fn release_channel_set_read_authority(
+    db: buzz_db::Db,
+    community_id: buzz_core::tenant::CommunityId,
+    channel_ids: Vec<Uuid>,
+    actor: Vec<u8>,
+    protected: Option<Arc<crate::authorization_runtime::transport::ProtectedAuthorization>>,
+) -> bool {
+    queued_channel_set_read_authority(db, community_id, channel_ids, actor, protected)
+        .release()
+        .await
 }
 
 impl OutboundReleaseFence for crate::authorization_runtime::transport::ProtectedAuthorization {
@@ -35,31 +159,92 @@ impl OutboundReleaseFence for crate::authorization_runtime::transport::Protected
     }
 }
 
-/// Revalidate aggregate channel and protected authority immediately before an
-/// HTTP response is released.
-pub(crate) async fn release_channel_set_read_authority(
-    db: buzz_db::Db,
-    community_id: buzz_core::tenant::CommunityId,
-    channel_ids: Vec<Uuid>,
-    actor: Vec<u8>,
-    protected: Option<Arc<crate::authorization_runtime::transport::ProtectedAuthorization>>,
-) -> bool {
-    if protected
-        .as_ref()
-        .is_some_and(|authority| authority.revalidate().is_err())
-    {
-        return false;
+struct CombinedReleaseFence {
+    sender: Arc<dyn QueuedOutboundReleaseFence>,
+    recipient: Arc<dyn QueuedOutboundReleaseFence>,
+}
+
+#[async_trait]
+impl QueuedOutboundReleaseFence for CombinedReleaseFence {
+    async fn release(&self) -> bool {
+        self.sender.release().await
+            && self.recipient.release().await
+            && self.sender.release().await
+            && self.recipient.release().await
     }
-    if !db
-        .channel_set_read_authorized(community_id, &channel_ids, &actor)
-        .await
-        .unwrap_or(false)
-    {
-        return false;
+}
+
+/// One queued data frame with optional authority retained until socket drain.
+pub struct OutboundData {
+    pub(crate) message: WsMessage,
+    authority: Option<Arc<dyn QueuedOutboundReleaseFence>>,
+}
+
+impl OutboundData {
+    pub(crate) fn plain(message: WsMessage) -> Self {
+        Self {
+            message,
+            authority: None,
+        }
     }
-    protected
-        .as_ref()
-        .is_none_or(|authority| authority.revalidate().is_ok())
+
+    pub(crate) fn protected(
+        message: WsMessage,
+        authority: Arc<crate::authorization_runtime::transport::ProtectedAuthorization>,
+    ) -> Self {
+        Self {
+            message,
+            authority: Some(queued_local_authority(authority)),
+        }
+    }
+
+    pub(crate) fn protected_pair(
+        message: WsMessage,
+        sender: Arc<crate::authorization_runtime::transport::ProtectedAuthorization>,
+        recipient: Arc<crate::authorization_runtime::transport::ProtectedAuthorization>,
+    ) -> Self {
+        Self {
+            message,
+            authority: Some(Arc::new(CombinedReleaseFence {
+                sender: queued_local_authority(sender),
+                recipient: queued_local_authority(recipient),
+            })),
+        }
+    }
+
+    pub(crate) fn guarded(
+        message: WsMessage,
+        authority: Arc<dyn QueuedOutboundReleaseFence>,
+    ) -> Self {
+        Self {
+            message,
+            authority: Some(authority),
+        }
+    }
+
+    pub(crate) fn guarded_pair(
+        message: WsMessage,
+        sender: Arc<dyn QueuedOutboundReleaseFence>,
+        recipient: Arc<dyn QueuedOutboundReleaseFence>,
+    ) -> Self {
+        Self {
+            message,
+            authority: Some(Arc::new(CombinedReleaseFence { sender, recipient })),
+        }
+    }
+
+    #[cfg(test)]
+    fn guarded_for_test(message: WsMessage, authority: Arc<dyn OutboundReleaseFence>) -> Self {
+        Self::guarded(message, Arc::new(SyncQueuedReleaseFence { authority }))
+    }
+
+    async fn release(self) -> Option<WsMessage> {
+        match self.authority {
+            Some(authority) if authority.release().await => Some(self.message),
+            Some(_) => None,
+            None => Some(self.message),
+        }
+    }
 }
 
 /// Maximum time a new socket may hold a connection slot without completing NIP-42 auth.
@@ -98,14 +283,14 @@ pub struct ConnectionState {
     pub tenant: TenantContext,
     /// Remote socket address of the client.
     pub remote_addr: SocketAddr,
-    /// Optional corporate identity JWT captured from the WebSocket upgrade request.
-    pub corporate_identity_jwt: Option<String>,
+    /// Optional direct identity assertion captured with verified provenance.
+    pub corporate_identity_assertion: Option<crate::corporate_identity::IdentityAssertionInput>,
     /// Current NIP-42 authentication state.
     pub auth_state: RwLock<AuthState>,
     /// Active subscriptions keyed by subscription ID.
     pub subscriptions: ConnectionSubscriptions,
     /// Sender for outbound data messages (EVENT, NOTICE, OK, etc.).
-    pub send_tx: mpsc::Sender<WsMessage>,
+    pub send_tx: mpsc::Sender<OutboundData>,
     /// Sender for outbound control frames (Pong, Close).
     /// Separate channel with priority drain — if this channel fills too,
     /// the connection is closed (writer is completely stalled).
@@ -127,7 +312,43 @@ impl ConnectionState {
     /// `grace_limit` occurrences log a warning; sustained backpressure
     /// cancels the connection to prevent unbounded memory growth.
     pub fn send(&self, msg: String) -> bool {
-        match self.send_tx.try_send(WsMessage::Text(msg.into())) {
+        self.send_data(OutboundData::plain(WsMessage::Text(msg.into())))
+    }
+
+    /// Queue a terminal text frame on the priority control channel.
+    ///
+    /// Callers may cancel immediately after this returns: the send loop drains
+    /// control frames before emitting the WebSocket close frame.
+    pub(crate) fn send_terminal(&self, msg: String) -> bool {
+        self.ctrl_tx.try_send(WsMessage::Text(msg.into())).is_ok()
+    }
+
+    /// Queue protected output while retaining its guard through socket drain.
+    pub fn send_protected(
+        &self,
+        msg: String,
+        authority: Arc<crate::authorization_runtime::transport::ProtectedAuthorization>,
+    ) -> bool {
+        self.send_data(OutboundData::protected(
+            WsMessage::Text(msg.into()),
+            authority,
+        ))
+    }
+
+    /// Queue output behind an arbitrary asynchronous release fence.
+    pub(crate) fn send_guarded(
+        &self,
+        msg: String,
+        authority: Arc<dyn QueuedOutboundReleaseFence>,
+    ) -> bool {
+        self.send_data(OutboundData::guarded(
+            WsMessage::Text(msg.into()),
+            authority,
+        ))
+    }
+
+    fn send_data(&self, msg: OutboundData) -> bool {
+        match self.send_tx.try_send(msg) {
             Ok(_) => {
                 // Successful send resets the grace counter.
                 self.backpressure_count.store(0, Ordering::Relaxed);
@@ -161,7 +382,7 @@ pub async fn handle_connection(
     state: Arc<AppState>,
     addr: SocketAddr,
     tenant: TenantContext,
-    corporate_identity_jwt: Option<String>,
+    corporate_identity_assertion: Option<crate::corporate_identity::IdentityAssertionInput>,
 ) {
     let conn_id = Uuid::new_v4();
     let cancel = CancellationToken::new();
@@ -183,7 +404,7 @@ pub async fn handle_connection(
                 tenant,
                 conn_id,
                 cancel,
-                corporate_identity_jwt,
+                corporate_identity_assertion,
             )
         },
     )
@@ -197,7 +418,7 @@ async fn handle_active_connection(
     tenant: TenantContext,
     conn_id: Uuid,
     cancel: CancellationToken,
-    corporate_identity_jwt: Option<String>,
+    corporate_identity_assertion: Option<crate::corporate_identity::IdentityAssertionInput>,
 ) {
     let permit = match state.conn_semaphore.clone().try_acquire_owned() {
         Ok(p) => p,
@@ -209,7 +430,7 @@ async fn handle_active_connection(
 
     let challenge = generate_challenge();
 
-    let (tx, rx) = mpsc::channel::<WsMessage>(state.config.send_buffer_size);
+    let (tx, rx) = mpsc::channel::<OutboundData>(state.config.send_buffer_size);
     // Control channel for Pong/Close — small capacity, guaranteed delivery
     // even when the data buffer is full.
     let (ctrl_tx, ctrl_rx) = mpsc::channel::<WsMessage>(8);
@@ -221,7 +442,7 @@ async fn handle_active_connection(
         conn_id,
         tenant,
         remote_addr: addr,
-        corporate_identity_jwt,
+        corporate_identity_assertion,
         auth_state: RwLock::new(AuthState::Pending {
             challenge: challenge.clone(),
         }),
@@ -236,13 +457,13 @@ async fn handle_active_connection(
     info!(conn_id = %conn_id, addr = %addr, "WebSocket connection established");
     metrics::counter!(
         "buzz_ws_connections_total",
-        "community" => conn.tenant.host().to_owned()
+        "community" => crate::metrics::community_label(conn.tenant.community())
     )
     .increment(1);
 
     let challenge_msg = RelayMessage::auth_challenge(&challenge);
     if tx
-        .send(WsMessage::Text(challenge_msg.into()))
+        .send(OutboundData::plain(WsMessage::Text(challenge_msg.into())))
         .await
         .is_err()
     {
@@ -349,7 +570,7 @@ async fn handle_active_connection(
 /// treat a full control channel as terminal (Bug 7 fix).
 async fn send_loop(
     ws_send: futures_util::stream::SplitSink<WebSocket, WsMessage>,
-    data_rx: mpsc::Receiver<WsMessage>,
+    data_rx: mpsc::Receiver<OutboundData>,
     ctrl_rx: mpsc::Receiver<WsMessage>,
     cancel: CancellationToken,
 ) {
@@ -358,7 +579,7 @@ async fn send_loop(
 
 async fn send_loop_inner<S>(
     mut ws_send: S,
-    mut data_rx: mpsc::Receiver<WsMessage>,
+    mut data_rx: mpsc::Receiver<OutboundData>,
     mut ctrl_rx: mpsc::Receiver<WsMessage>,
     cancel: CancellationToken,
 ) where
@@ -396,16 +617,30 @@ async fn send_loop_inner<S>(
                     break;
                 }
             }
-            Some(msg) = data_rx.recv() => {
+            Some(queued) = data_rx.recv() => {
                 let mut batched = 1usize;
-                if ws_send.feed(msg).await.is_err() {
+                if !sink_ready_before_cancellation(&mut ws_send, &cancel).await {
+                    break;
+                }
+                let Some(msg) = queued.release().await else {
+                    cancel.cancel();
+                    break;
+                };
+                if std::pin::Pin::new(&mut ws_send).start_send(msg).is_err() {
                     break;
                 }
 
                 while batched < MAX_WS_SEND_BATCH {
                     match data_rx.try_recv() {
                         Ok(next) => {
-                            if ws_send.feed(next).await.is_err() {
+                            if !sink_ready_before_cancellation(&mut ws_send, &cancel).await {
+                                return;
+                            }
+                            let Some(next) = next.release().await else {
+                                cancel.cancel();
+                                return;
+                            };
+                            if std::pin::Pin::new(&mut ws_send).start_send(next).is_err() {
                                 return;
                             }
                             batched += 1;
@@ -420,6 +655,19 @@ async fn send_loop_inner<S>(
                 }
                 metrics::histogram!("buzz_ws_send_batch_size").record(batched as f64);
             }
+        }
+    }
+}
+
+async fn sink_ready_before_cancellation<S>(ws_send: &mut S, cancel: &CancellationToken) -> bool
+where
+    S: Sink<WsMessage> + Unpin,
+{
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => false,
+        result = std::future::poll_fn(|cx| std::pin::Pin::new(&mut *ws_send).poll_ready(cx)) => {
+            result.is_ok()
         }
     }
 }
@@ -742,6 +990,7 @@ fn topic_for_subscription(channel_id: Option<Uuid>) -> EventTopic {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
     use std::sync::{Arc, Mutex};
 
     #[derive(Debug, Default)]
@@ -816,6 +1065,106 @@ mod tests {
         }
     }
 
+    struct ScriptedFence(AtomicBool);
+
+    impl OutboundReleaseFence for ScriptedFence {
+        fn release(&self) -> bool {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+
+    struct CountingQueuedFence(AtomicUsize);
+
+    #[async_trait]
+    impl QueuedOutboundReleaseFence for CountingQueuedFence {
+        async fn release(&self) -> bool {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn combined_release_rechecks_both_sides_after_async_boundaries() {
+        let sender = Arc::new(CountingQueuedFence(AtomicUsize::new(0)));
+        let recipient = Arc::new(CountingQueuedFence(AtomicUsize::new(0)));
+        let fence = CombinedReleaseFence {
+            sender: sender.clone(),
+            recipient: recipient.clone(),
+        };
+
+        assert!(fence.release().await);
+        assert_eq!(sender.0.load(Ordering::SeqCst), 2);
+        assert_eq!(recipient.0.load(Ordering::SeqCst), 2);
+    }
+
+    struct ScriptedChannelAuthority {
+        allowed: AtomicBool,
+        checked: Mutex<Vec<Uuid>>,
+    }
+
+    #[async_trait]
+    impl ChannelReadAuthoritySource for ScriptedChannelAuthority {
+        async fn channel_set_read_authorized(
+            &self,
+            _community_id: buzz_core::tenant::CommunityId,
+            channel_ids: &[Uuid],
+            _actor: &[u8],
+        ) -> bool {
+            self.checked
+                .lock()
+                .expect("scripted channel checks poisoned")
+                .extend_from_slice(channel_ids);
+            self.allowed.load(Ordering::SeqCst)
+        }
+    }
+
+    struct ReadinessBarrierSink {
+        ready: Arc<AtomicBool>,
+        polled: Arc<tokio::sync::Notify>,
+        waker: Arc<Mutex<Option<std::task::Waker>>>,
+        state: Arc<Mutex<MockSinkState>>,
+    }
+
+    impl Sink<WsMessage> for ReadinessBarrierSink {
+        type Error = std::io::Error;
+
+        fn poll_ready(
+            self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            if self.ready.load(Ordering::SeqCst) {
+                std::task::Poll::Ready(Ok(()))
+            } else {
+                *self.waker.lock().expect("barrier waker poisoned") = Some(cx.waker().clone());
+                self.polled.notify_one();
+                std::task::Poll::Pending
+            }
+        }
+
+        fn start_send(self: std::pin::Pin<&mut Self>, item: WsMessage) -> Result<(), Self::Error> {
+            self.state
+                .lock()
+                .expect("barrier sink poisoned")
+                .messages
+                .push(item);
+            Ok(())
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            self.poll_flush(cx)
+        }
+    }
+
     fn text_payloads(messages: &[WsMessage]) -> Vec<String> {
         messages
             .iter()
@@ -845,7 +1194,9 @@ mod tests {
         let (_ctrl_tx, ctrl_rx) = mpsc::channel(1);
         for i in 0..5 {
             data_tx
-                .send(WsMessage::Text(format!("data-{i}").into()))
+                .send(OutboundData::plain(WsMessage::Text(
+                    format!("data-{i}").into(),
+                )))
                 .await
                 .expect("queue data frame");
         }
@@ -862,11 +1213,207 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn protected_frame_revalidates_after_sink_readiness() {
+        let ready = Arc::new(AtomicBool::new(false));
+        let polled = Arc::new(tokio::sync::Notify::new());
+        let waker = Arc::new(Mutex::new(None));
+        let state = Arc::new(Mutex::new(MockSinkState::default()));
+        let sink = ReadinessBarrierSink {
+            ready: Arc::clone(&ready),
+            polled: Arc::clone(&polled),
+            waker: Arc::clone(&waker),
+            state: Arc::clone(&state),
+        };
+        let fence = Arc::new(ScriptedFence(AtomicBool::new(true)));
+        let (data_tx, data_rx) = mpsc::channel(1);
+        let (_ctrl_tx, ctrl_rx) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        data_tx
+            .send(OutboundData::guarded_for_test(
+                WsMessage::Text("protected".into()),
+                fence.clone(),
+            ))
+            .await
+            .expect("queue protected frame");
+        drop(data_tx);
+
+        let task = tokio::spawn(send_loop_inner(sink, data_rx, ctrl_rx, cancel.clone()));
+        polled.notified().await;
+        fence.0.store(false, Ordering::SeqCst);
+        ready.store(true, Ordering::SeqCst);
+        waker
+            .lock()
+            .expect("barrier waker poisoned")
+            .take()
+            .expect("poll_ready registered a waker")
+            .wake();
+        task.await.expect("send loop joins");
+
+        assert!(cancel.is_cancelled());
+        assert!(
+            state
+                .lock()
+                .expect("barrier sink poisoned")
+                .messages
+                .is_empty(),
+            "authority loss while readiness is pending must prevent start_send"
+        );
+    }
+
+    #[tokio::test]
+    async fn count_release_rechecks_every_contributing_channel() {
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        let source = Arc::new(ScriptedChannelAuthority {
+            allowed: AtomicBool::new(true),
+            checked: Mutex::new(Vec::new()),
+        });
+        let fence = ChannelReadReleaseFence {
+            source: source.clone(),
+            community_id: buzz_core::tenant::CommunityId::from_uuid(Uuid::new_v4()),
+            channel_ids: vec![first, second],
+            actor: vec![7; 32],
+            protected: None,
+        };
+
+        assert!(fence.release().await);
+        assert_eq!(
+            *source
+                .checked
+                .lock()
+                .expect("scripted channel checks poisoned"),
+            vec![first, second]
+        );
+    }
+
+    #[tokio::test]
+    async fn net_http_004_count_release_denies_authority_loss_after_fetch() {
+        let source = Arc::new(ScriptedChannelAuthority {
+            allowed: AtomicBool::new(true),
+            checked: Mutex::new(Vec::new()),
+        });
+        let fence = ChannelReadReleaseFence {
+            source: source.clone(),
+            community_id: buzz_core::tenant::CommunityId::from_uuid(Uuid::new_v4()),
+            channel_ids: vec![Uuid::new_v4()],
+            actor: vec![9; 32],
+            protected: None,
+        };
+
+        // The query has completed. A membership removal or an open-to-private
+        // transition now makes the authoritative DB check return false.
+        source.allowed.store(false, Ordering::SeqCst);
+        assert!(!fence.release().await);
+    }
+
+    /// NET-WS-009: a COUNT queued while access is valid must not become
+    /// visible if membership or channel visibility changes while the socket
+    /// is waiting for sink readiness.
+    #[tokio::test]
+    async fn net_ws_009_count_release_denies_authority_loss_before_socket_acceptance() {
+        let ready = Arc::new(AtomicBool::new(false));
+        let polled = Arc::new(tokio::sync::Notify::new());
+        let waker = Arc::new(Mutex::new(None));
+        let state = Arc::new(Mutex::new(MockSinkState::default()));
+        let sink = ReadinessBarrierSink {
+            ready: Arc::clone(&ready),
+            polled: Arc::clone(&polled),
+            waker: Arc::clone(&waker),
+            state: Arc::clone(&state),
+        };
+        let source = Arc::new(ScriptedChannelAuthority {
+            allowed: AtomicBool::new(true),
+            checked: Mutex::new(Vec::new()),
+        });
+        let release = Arc::new(ChannelReadReleaseFence {
+            source: source.clone(),
+            community_id: buzz_core::tenant::CommunityId::from_uuid(Uuid::new_v4()),
+            channel_ids: vec![Uuid::new_v4()],
+            actor: vec![10; 32],
+            protected: None,
+        });
+        let (data_tx, data_rx) = mpsc::channel(1);
+        let (_ctrl_tx, ctrl_rx) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        data_tx
+            .send(OutboundData::guarded(
+                WsMessage::Text(RelayMessage::count("count-race", 1).into()),
+                release,
+            ))
+            .await
+            .expect("queue protected COUNT");
+        drop(data_tx);
+
+        let task = tokio::spawn(send_loop_inner(sink, data_rx, ctrl_rx, cancel.clone()));
+        polled.notified().await;
+        source.allowed.store(false, Ordering::SeqCst);
+        ready.store(true, Ordering::SeqCst);
+        waker
+            .lock()
+            .expect("barrier waker poisoned")
+            .take()
+            .expect("poll_ready registered a waker")
+            .wake();
+        task.await.expect("send loop joins");
+
+        assert!(cancel.is_cancelled());
+        assert!(
+            state
+                .lock()
+                .expect("barrier sink poisoned")
+                .messages
+                .is_empty(),
+            "COUNT must not reach start_send after its channel authority is lost"
+        );
+    }
+
+    /// O4-EXP-SESSION-001: session expiry wins over a COUNT that has been
+    /// computed and queued but has not yet crossed the socket boundary.
+    #[tokio::test(start_paused = true)]
+    async fn o4_exp_session_001_count_is_suppressed_when_deadline_precedes_emission() {
+        let ready = Arc::new(AtomicBool::new(false));
+        let polled = Arc::new(tokio::sync::Notify::new());
+        let waker = Arc::new(Mutex::new(None));
+        let state = Arc::new(Mutex::new(MockSinkState::default()));
+        let sink = ReadinessBarrierSink {
+            ready: Arc::clone(&ready),
+            polled: Arc::clone(&polled),
+            waker: Arc::clone(&waker),
+            state: Arc::clone(&state),
+        };
+        let (data_tx, data_rx) = mpsc::channel(1);
+        let (_ctrl_tx, ctrl_rx) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        data_tx
+            .send(OutboundData::plain(WsMessage::Text(
+                RelayMessage::count("expiry-race", 1).into(),
+            )))
+            .await
+            .expect("queue COUNT before expiry");
+        drop(data_tx);
+
+        let task = tokio::spawn(send_loop_inner(sink, data_rx, ctrl_rx, cancel.clone()));
+        polled.notified().await;
+        tokio::time::advance(Duration::from_millis(500)).await;
+        cancel.cancel();
+        task.await.expect("send loop joins");
+
+        assert!(cancel.is_cancelled());
+        let messages = &state.lock().expect("barrier sink poisoned").messages;
+        assert!(
+            messages
+                .iter()
+                .all(|message| !matches!(message, WsMessage::Text(_))),
+            "expired session must not emit its queued COUNT"
+        );
+    }
+
+    #[tokio::test]
     async fn send_loop_batch_one_preserves_single_frame_flush_behavior() {
         let (data_tx, data_rx) = mpsc::channel(1);
         let (_ctrl_tx, ctrl_rx) = mpsc::channel(1);
         data_tx
-            .send(WsMessage::Text("single".into()))
+            .send(OutboundData::plain(WsMessage::Text("single".into())))
             .await
             .expect("queue data frame");
 
@@ -883,11 +1430,11 @@ mod tests {
         let (data_tx, data_rx) = mpsc::channel(MAX_WS_SEND_BATCH);
         let (ctrl_tx, ctrl_rx) = mpsc::channel(1);
         data_tx
-            .send(WsMessage::Text("data-0".into()))
+            .send(OutboundData::plain(WsMessage::Text("data-0".into())))
             .await
             .expect("queue data frame");
         data_tx
-            .send(WsMessage::Text("data-1".into()))
+            .send(OutboundData::plain(WsMessage::Text("data-1".into())))
             .await
             .expect("queue data frame");
         ctrl_tx
@@ -943,5 +1490,36 @@ mod tests {
             matches!(state.messages[1], WsMessage::Close(_)),
             "Close is sent only after the reason frame is flushed"
         );
+    }
+
+    #[tokio::test]
+    async fn protected_count_denial_is_visible_before_terminal_close() {
+        let (_data_tx, data_rx) = mpsc::channel(1);
+        let (ctrl_tx, ctrl_rx) = mpsc::channel(1);
+        ctrl_tx
+            .send(WsMessage::Text(
+                RelayMessage::closed(
+                    "deny-count",
+                    "auth-required: protected authorization denied",
+                )
+                .into(),
+            ))
+            .await
+            .expect("queue protected COUNT denial");
+
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let (sink, state) = MockSink::new(None);
+        send_loop_inner(sink, data_rx, ctrl_rx, cancel).await;
+
+        let state = state.lock().expect("mock sink poisoned");
+        assert_eq!(state.messages.len(), 2);
+        assert!(matches!(
+            &state.messages[0],
+            WsMessage::Text(text)
+                if text.as_str().contains("deny-count")
+                    && text.as_str().contains("protected authorization denied")
+        ));
+        assert!(matches!(state.messages[1], WsMessage::Close(_)));
     }
 }

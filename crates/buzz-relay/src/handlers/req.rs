@@ -24,6 +24,25 @@ use crate::state::AppState;
 
 const MAX_SUBSCRIPTIONS: usize = 1024;
 
+fn historical_event_release_fence(
+    state: &AppState,
+    conn: &ConnectionState,
+    channel_id: Option<uuid::Uuid>,
+    actor: &[u8],
+    protected: Arc<crate::authorization_runtime::transport::ProtectedAuthorization>,
+) -> Arc<dyn crate::connection::QueuedOutboundReleaseFence> {
+    match channel_id {
+        Some(channel_id) => crate::connection::queued_channel_read_authority(
+            state.db.clone(),
+            conn.tenant.community(),
+            channel_id,
+            actor.to_vec(),
+            Some(protected),
+        ),
+        None => crate::connection::queued_local_authority(protected),
+    }
+}
+
 /// Maximum `query_events` calls in flight per multi-filter REQ / bridge query.
 ///
 /// NIP-01 gives each filter its own DB query (OR semantics — see the comment at
@@ -85,6 +104,38 @@ pub async fn handle_req(
         }
     };
 
+    let protected_result = match state.conn_manager.authority_for_conn(conn_id) {
+        Some(proof) => {
+            crate::authorization_runtime::transport::authorize_session_if_configured(
+                &state,
+                proof,
+                state.conn_manager.federated_assertion_for_conn(conn_id),
+                buzz_auth::AuthorizationCapability::CommunityRead,
+                uuid::Uuid::new_v4(),
+                "ws_req",
+                conn_id,
+                conn.cancel.clone(),
+            )
+            .await
+        }
+        None => crate::authorization_runtime::transport::authorize_unwired_if_configured(
+            &state,
+            conn.tenant.community(),
+        ),
+    };
+    let protected = Arc::new(match protected_result {
+        Ok(authority) => authority,
+        Err(error) => {
+            warn!(conn_id = %conn_id, error = %error, "protected REQ authorization denied");
+            conn.send(RelayMessage::closed(
+                &sub_id,
+                "auth-required: protected authorization denied",
+            ));
+            conn.cancel.cancel();
+            return;
+        }
+    });
+
     let mut accessible_channels = if filters_are_nip43_membership_only(&filters) {
         metrics::counter!("buzz_req_global_access_resolution_skips_total", "kind" => "13534")
             .increment(1);
@@ -97,7 +148,10 @@ pub async fn handle_req(
             Ok(ids) => ids,
             Err(e) => {
                 warn!(conn_id = %conn_id, "Failed to get accessible channels: {e}");
-                conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+                conn.send_protected(
+                    RelayMessage::closed(&sub_id, "error: database error"),
+                    Arc::clone(&protected),
+                );
                 return;
             }
         }
@@ -151,7 +205,10 @@ pub async fn handle_req(
                 }
                 Err(e) => {
                     warn!(conn_id = %conn_id, "Channel membership confirmation failed: {e}");
-                    conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+                    conn.send_protected(
+                        RelayMessage::closed(&sub_id, "error: database error"),
+                        Arc::clone(&protected),
+                    );
                     return;
                 }
             }
@@ -162,10 +219,10 @@ pub async fn handle_req(
             token_allows,
             db_is_member,
         ) {
-            conn.send(RelayMessage::closed(
-                &sub_id,
-                "restricted: not a channel member",
-            ));
+            conn.send_protected(
+                RelayMessage::closed(&sub_id, "restricted: not a channel member"),
+                Arc::clone(&protected),
+            );
             return;
         }
     }
@@ -226,8 +283,18 @@ pub async fn handle_req(
             &conn,
             &state,
             trace_state.as_ref(),
+            &protected,
         )
         .await;
+        return;
+    }
+
+    if protected.revalidate().is_err() {
+        conn.send(RelayMessage::closed(
+            &sub_id,
+            "auth-required: protected authorization expired",
+        ));
+        conn.cancel.cancel();
         return;
     }
 
@@ -323,7 +390,7 @@ pub async fn handle_req(
             Ok(evs) => evs,
             Err(e) => {
                 warn!(conn_id = %conn_id, sub_id = %sub_id, "Historical query failed: {e}");
-                conn.send(RelayMessage::eose(&sub_id));
+                conn.send_protected(RelayMessage::eose(&sub_id), Arc::clone(&protected));
                 return;
             }
         };
@@ -400,7 +467,22 @@ pub async fn handle_req(
             }
 
             let msg = RelayMessage::event(&sub_id, &stored.event);
-            if !conn.send(msg) {
+            if protected.revalidate().is_err() {
+                conn.send(RelayMessage::closed(
+                    &sub_id,
+                    "auth-required: protected authorization expired",
+                ));
+                conn.cancel.cancel();
+                return;
+            }
+            let release = historical_event_release_fence(
+                &state,
+                &conn,
+                stored.channel_id,
+                &pubkey_bytes,
+                Arc::clone(&protected),
+            );
+            if !conn.send_guarded(msg, release) {
                 return;
             }
             total_sent += 1;
@@ -410,7 +492,11 @@ pub async fn handle_req(
         }
     }
 
-    conn.send(RelayMessage::eose(&sub_id));
+    if protected.revalidate().is_ok() {
+        conn.send_protected(RelayMessage::eose(&sub_id), Arc::clone(&protected));
+    } else {
+        conn.cancel.cancel();
+    }
 
     debug!(
         conn_id = %conn_id,
@@ -532,6 +618,7 @@ async fn handle_search_req(
     conn: &ConnectionState,
     state: &AppState,
     trace_state: Option<&crate::conformance::AbstractState>,
+    protected: &Arc<crate::authorization_runtime::transport::ProtectedAuthorization>,
 ) {
     // The community-wide channel scope (no #h tag on the filter). `None` means
     // "no accessible channels and no global access" → EOSE, exactly as the
@@ -540,7 +627,7 @@ async fn handle_search_req(
         match build_search_channel_scope_filter(accessible_channels, include_global) {
             Some(scope) => scope,
             None => {
-                conn.send(RelayMessage::eose(sub_id));
+                conn.send_protected(RelayMessage::eose(sub_id), Arc::clone(protected));
                 return;
             }
         };
@@ -730,7 +817,18 @@ async fn handle_search_req(
                     if !seen_ids.insert(stored.event.id) {
                         continue;
                     }
-                    if !conn.send(RelayMessage::event(sub_id, &stored.event)) {
+                    if protected.revalidate().is_err() {
+                        conn.cancel.cancel();
+                        return;
+                    }
+                    let release = historical_event_release_fence(
+                        state,
+                        conn,
+                        stored.channel_id,
+                        reader_pubkey_bytes,
+                        Arc::clone(protected),
+                    );
+                    if !conn.send_guarded(RelayMessage::event(sub_id, &stored.event), release) {
                         return;
                     }
                     emitted += 1;
@@ -743,7 +841,11 @@ async fn handle_search_req(
         }
     }
 
-    conn.send(RelayMessage::eose(sub_id));
+    if protected.revalidate().is_ok() {
+        conn.send_protected(RelayMessage::eose(sub_id), Arc::clone(protected));
+    } else {
+        conn.cancel.cancel();
+    }
 }
 
 /// Convert a single NIP-01 filter into an [`EventQuery`] for the database.

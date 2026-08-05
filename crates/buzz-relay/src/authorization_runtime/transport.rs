@@ -33,8 +33,8 @@ pub enum LegacyIdentityLane {
     /// immutable. This lane can never enroll, reactivate, strengthen, update,
     /// or retire a binding.
     ObserveOnly,
-    /// Enforce: the protected resolver owns admission/finalization and legacy
-    /// projection must not run.
+    /// Enforce or DenyProtected: the protected runtime owns the surface and
+    /// legacy projection must not run.
     ProtectedEnforce,
 }
 
@@ -57,7 +57,9 @@ pub const fn legacy_identity_lane_for_mode(mode: Option<AuthorizationMode>) -> L
         Some(AuthorizationMode::Shadow) | Some(AuthorizationMode::VerifyOnly) => {
             LegacyIdentityLane::ObserveOnly
         }
-        Some(AuthorizationMode::Enforce) => LegacyIdentityLane::ProtectedEnforce,
+        Some(AuthorizationMode::Enforce | AuthorizationMode::DenyProtected) => {
+            LegacyIdentityLane::ProtectedEnforce
+        }
     }
 }
 
@@ -534,7 +536,7 @@ impl ProtectedTransportRuntime {
     pub fn enforcing_domains(&self) -> Vec<CommunityId> {
         self.domains
             .iter()
-            .filter_map(|(domain, mode)| (*mode == AuthorizationMode::Enforce).then_some(*domain))
+            .filter_map(|(domain, mode)| mode.protects_surfaces().then_some(*domain))
             .collect()
     }
 
@@ -557,6 +559,7 @@ impl ProtectedTransportRuntime {
                 let _ = self.resolver.observe(request).await;
                 Ok(ProtectedAuthorization::Legacy)
             }
+            AuthorizationMode::DenyProtected => deny_protected_request(request),
             AuthorizationMode::Enforce => {
                 let resolution = self
                     .resolver
@@ -599,6 +602,7 @@ impl ProtectedTransportRuntime {
                 .await
                 .map(Some)
                 .map_err(ProtectedTransportError::Resolution),
+            Some(AuthorizationMode::DenyProtected) => Err(ProtectedTransportError::DenyProtected),
             None | Some(AuthorizationMode::Off | AuthorizationMode::Shadow) => Ok(None),
         }
     }
@@ -615,6 +619,7 @@ impl ProtectedTransportRuntime {
             AuthorizationMode::Off | AuthorizationMode::Shadow | AuthorizationMode::VerifyOnly => {
                 Ok(ProtectedEnrollmentAuthorization::Legacy)
             }
+            AuthorizationMode::DenyProtected => Err(ProtectedTransportError::DenyProtected),
             AuthorizationMode::Enforce => {
                 if request.capability() != AuthorizationCapability::InviteClaim
                     || request.enrollment_assertion().is_none()
@@ -763,7 +768,17 @@ fn authorize_unwired_for_mode(
         | Some(AuthorizationMode::Shadow)
         | Some(AuthorizationMode::VerifyOnly) => Ok(ProtectedAuthorization::Legacy),
         Some(AuthorizationMode::Enforce) => Err(ProtectedTransportError::MissingVerifiedProof),
+        Some(AuthorizationMode::DenyProtected) => Err(ProtectedTransportError::DenyProtected),
     }
+}
+
+fn deny_protected_request(
+    request: &ProtectedOperationRequest,
+) -> Result<ProtectedAuthorization, ProtectedTransportError> {
+    if let Some(cancellation) = request.cancellation() {
+        cancellation.cancel();
+    }
+    Err(ProtectedTransportError::DenyProtected)
 }
 
 impl fmt::Debug for ProtectedTransportRuntime {
@@ -820,12 +835,10 @@ pub struct ProtectedEnrollmentAuthority {
 }
 
 impl ProtectedEnrollmentAuthority {
-    #[allow(dead_code)]
     pub(super) const fn disposition(&self) -> &EnrollmentDisposition {
         &self.disposition
     }
 
-    #[allow(dead_code)]
     pub(super) fn observer(&self) -> &dyn LeaseCurrentStateObserver {
         self.observer.as_ref()
     }
@@ -923,7 +936,6 @@ impl ProtectedAuthorization {
     /// Seal opaque sender authority for one ephemeral event delivered across
     /// the trusted relay Redis plane. The resulting claim still requires a
     /// relay signature and writer-database revalidation on the receiving pod.
-    #[allow(dead_code)]
     pub(crate) fn seal_ephemeral_delivery(
         &self,
         event_id: [u8; 32],
@@ -986,12 +998,10 @@ pub struct ProtectedOperationAuthority {
 }
 
 impl ProtectedOperationAuthority {
-    #[allow(dead_code)]
     pub(super) fn context(&self) -> &AuthContext {
         &self.context
     }
 
-    #[allow(dead_code)]
     pub(super) fn observer(&self) -> &dyn LeaseCurrentStateObserver {
         self.observer.as_ref()
     }
@@ -1100,6 +1110,9 @@ pub enum ProtectedTransportError {
     /// An enforcing surface did not retain sealed verifier evidence.
     #[error("protected authorization requires verified transport evidence")]
     MissingVerifiedProof,
+    /// The exact domain is in the explicit fail-safe protected-denial mode.
+    #[error("protected authorization is unavailable in deny-protected mode")]
+    DenyProtected,
     /// Resolver denied or could not evaluate current policy.
     #[error(transparent)]
     Resolution(#[from] ProtectedResolutionError),

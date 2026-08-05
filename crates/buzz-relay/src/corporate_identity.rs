@@ -44,9 +44,7 @@ const JWKS_MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const JWT_CLOCK_SKEW_LEEWAY_SECS: u64 = 60;
 const IDENTITY_ASSERTION_MAX_TTL_SECS: u64 = 60 * 60;
 const IDENTITY_SESSION_REVALIDATION_INTERVAL: Duration = Duration::from_secs(30);
-#[allow(dead_code)]
 const PUBLIC_PROJECTION_RECONCILIATION_INTERVAL: Duration = Duration::from_secs(1);
-#[allow(dead_code)]
 const PUBLIC_PROJECTION_STARTUP_LIMIT: usize = 4096;
 
 #[derive(Debug, Clone)]
@@ -873,15 +871,6 @@ impl IdentityAssertionInput {
     pub fn jwt(&self) -> &str {
         &self.jwt
     }
-
-    /// Preserve the inherited JWT-only WebSocket lane before the production
-    /// route slice installs deployment-verified provenance.
-    pub(crate) fn legacy_jwt(jwt: String) -> Self {
-        Self {
-            jwt,
-            assertion_transport: None,
-        }
-    }
 }
 
 impl fmt::Debug for IdentityAssertionInput {
@@ -1300,7 +1289,6 @@ fn identity_assertion_matches(
         }
 }
 
-#[allow(dead_code)]
 fn identity_assertion_has_base_shape(
     event: &Event,
     relay_author: PublicKey,
@@ -1409,7 +1397,6 @@ fn identity_assertion_expiration(display_name: Option<&str>, jwt_expires_at: u64
 }
 
 /// Internal O4 reconciliation failure. This carries no identity or token data.
-#[allow(dead_code)]
 #[derive(Debug, Error)]
 pub(crate) enum PublicProjectionReconciliationError {
     /// Durable projection state was unavailable or inconsistent.
@@ -1435,7 +1422,6 @@ pub(crate) enum PublicProjectionReconciliationError {
     Incomplete,
 }
 
-#[allow(dead_code)]
 async fn reconcile_one_public_projection(
     state: &AppState,
     domains: &[CommunityId],
@@ -1580,7 +1566,6 @@ async fn reconcile_one_public_projection(
 }
 
 /// Drain every materialized retirement before protected routes become reachable.
-#[allow(dead_code)]
 pub(crate) async fn reconcile_public_projection_retirements_startup(
     state: &AppState,
     domains: &[CommunityId],
@@ -1603,7 +1588,6 @@ pub(crate) async fn reconcile_public_projection_retirements_startup(
 }
 
 /// Continuously discover committed lifecycle rows and retry withdrawal/delivery.
-#[allow(dead_code)]
 pub(crate) async fn run_public_projection_retirement_reconciliation(
     state: Arc<AppState>,
     domains: Vec<CommunityId>,

@@ -36,7 +36,7 @@ pub fn is_side_effect_kind(kind: u32) -> bool {
     matches!(kind, 0 | 5 | 9000..=9022 | KIND_GIT_REPO_ANNOUNCEMENT | KIND_AGENT_PROFILE | 41001..=41003 | 40099)
 }
 
-async fn evict_live_channel_subscriptions(
+pub(crate) async fn evict_live_channel_subscriptions(
     tenant: &TenantContext,
     state: &Arc<AppState>,
     channel_id: Uuid,
@@ -78,7 +78,6 @@ async fn disable_departed_member_workflows(
         Ok(n) => {
             tracing::info!(
                 channel = %channel_id,
-                owner = %hex::encode(target_pubkey),
                 disabled = n,
                 "Disabled departed member's workflows"
             );
@@ -89,7 +88,6 @@ async fn disable_departed_member_workflows(
         Err(e) => {
             warn!(
                 channel = %channel_id,
-                owner = %hex::encode(target_pubkey),
                 error = %e,
                 "Failed to disable departed member's workflows — per-fire authority gate still denies"
             );
@@ -1179,7 +1177,7 @@ async fn handle_agent_profile(
     {
         metrics::counter!(
             "buzz_users_created_total",
-            "community" => tenant.host().to_owned()
+            "community" => crate::metrics::community_label(tenant.community())
         )
         .increment(1);
     }
@@ -1188,7 +1186,7 @@ async fn handle_agent_profile(
         .set_channel_add_policy(tenant.community(), &pubkey_bytes, policy)
         .await?;
 
-    info!(pubkey = %hex::encode(&pubkey_bytes), policy, "kind:10100 channel_add_policy updated");
+    info!(policy, "kind:10100 channel_add_policy updated");
     Ok(())
 }
 
@@ -1237,7 +1235,7 @@ async fn handle_kind0_profile(
     {
         metrics::counter!(
             "buzz_users_created_total",
-            "community" => tenant.host().to_owned()
+            "community" => crate::metrics::community_label(tenant.community())
         )
         .increment(1);
     }
@@ -1261,8 +1259,7 @@ async fn handle_kind0_profile(
     if let Err(ref e) = result {
         let msg = format!("{e}");
         if msg.contains("duplicate key value") || msg.contains("23505") {
-            warn!(pubkey = %hex::encode(&pubkey_bytes),
-                "kind:0 NIP-05 handle contested, syncing profile without it");
+            warn!("kind:0 NIP-05 handle contested, syncing profile without it");
             state
                 .db
                 .update_user_profile(
@@ -1279,7 +1276,7 @@ async fn handle_kind0_profile(
         }
     }
 
-    info!(pubkey = %hex::encode(&pubkey_bytes), "kind:0 profile synced to users table");
+    info!("kind:0 profile synced to users table");
     Ok(())
 }
 
@@ -1807,7 +1804,7 @@ async fn handle_create_group(
                     .await?;
                 metrics::counter!(
                     "buzz_channels_created_total",
-                    "community" => tenant.host().to_owned(),
+                    "community" => crate::metrics::community_label(tenant.community()),
                     "type" => channel_type.to_string()
                 )
                 .increment(1);
@@ -1829,7 +1826,7 @@ async fn handle_create_group(
             .await?;
         metrics::counter!(
             "buzz_channels_created_total",
-            "community" => tenant.host().to_owned(),
+            "community" => crate::metrics::community_label(tenant.community()),
             "type" => channel_type.to_string()
         )
         .increment(1);
@@ -2520,6 +2517,17 @@ async fn handle_git_repo_announcement(
     event: &Event,
     state: &Arc<AppState>,
 ) -> anyhow::Result<()> {
+    // Enforce announcements reserve their name and replace the NIP-33 event in
+    // the authorization-owned PostgreSQL transaction. PostgreSQL starts them
+    // unpublished; the first authorized push publishes the immutable manifest.
+    // Running the legacy pointer path here would be an unfenced dual write.
+    if state.is_protected_enforcing(tenant.community()) {
+        return Ok(());
+    }
+    // The ingest caller holds the legacy visibility transaction across event
+    // persistence and this pointer write. Acquiring a second guard here can
+    // exhaust the pool when announcements are processed concurrently.
+    crate::api::git::migration::require_legacy_sentinel_absent(state, tenant).await?;
     // Extract repo identifier from d tag (required for NIP-33 parameterized replaceable events).
     let repo_id =
         extract_tag_value(event, "d").ok_or_else(|| anyhow::anyhow!("kind:30617 missing d tag"))?;
@@ -2664,10 +2672,8 @@ async fn handle_git_repo_announcement(
             "failed to ensure manifest pointer: {pointer_err}"
         ));
     }
-
     info!(
         repo_id = %repo_id,
-        owner = %owner_hex,
         reserved = reserved_by_this_attempt,
         "kind:30617 repo announced (name reserved, manifest pointer ensured)"
     );
@@ -2691,7 +2697,6 @@ async fn handle_git_repo_announcement(
             // "repo now exists" event, but clone/push still works.
             warn!(
                 repo_id = %repo_id,
-                owner = %owner_hex,
                 error = %e,
                 "failed to emit initial kind:30618 ref state (non-fatal)"
             );
@@ -2885,6 +2890,9 @@ pub async fn reconcile_nip43_membership_snapshots(state: &Arc<AppState>) -> anyh
 
     for community in communities {
         let community_id = buzz_core::CommunityId::from_uuid(community.id);
+        if state.is_protected_enforcing(community_id) {
+            continue;
+        }
         let host = community.host;
         let result = async {
             if !state
@@ -3056,6 +3064,10 @@ pub async fn reconcile_channel_events(
     state: &Arc<AppState>,
 ) -> anyhow::Result<()> {
     use buzz_db::event::EventQuery;
+
+    if state.is_protected_enforcing(tenant.community()) {
+        return Ok(());
+    }
 
     let channels = state.db.list_channels(tenant.community(), None).await?;
     if channels.is_empty() {

@@ -185,7 +185,6 @@ impl ResolvedFederatedPolicy {
     pub(crate) const fn from_authoritative_resolution(stamp: FederatedPolicyStamp) -> Self {
         Self { stamp }
     }
-
     #[cfg(test)]
     pub(crate) fn not_required(authorization_domain: CommunityId) -> Self {
         Self::from_authoritative_resolution(
@@ -735,7 +734,7 @@ impl VersionedBindingRef {
     }
 
     /// Stable reason proven by the authoritative binding lifecycle result.
-    pub(super) const fn authorization_reason(&self) -> AuthorizationReason {
+    pub(crate) const fn authorization_reason(&self) -> AuthorizationReason {
         self.resolution_reason
     }
 }

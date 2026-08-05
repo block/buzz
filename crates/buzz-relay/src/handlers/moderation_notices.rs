@@ -112,7 +112,7 @@ pub async fn send_moderation_notice(
     if was_created {
         metrics::counter!(
             "buzz_channels_created_total",
-            "community" => tenant.host().to_owned(),
+            "community" => crate::metrics::community_label(tenant.community()),
             "type" => "dm"
         )
         .increment(1);

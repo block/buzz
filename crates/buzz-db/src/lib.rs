@@ -17,6 +17,10 @@ pub mod api_token;
 pub mod archived_identities;
 /// Transaction-owned admission records for protected audio sessions.
 pub mod audio_admission;
+/// Durable provider-neutral invalidation selectors and generation floors.
+pub mod authorization_invalidation;
+/// Durable authorization version and operation-receipt state.
+pub mod authorization_version;
 /// Channel and membership persistence.
 pub mod channel;
 /// Direct message channel persistence.
@@ -177,6 +181,43 @@ pub async fn insert_mentions(
     qb.push(" ON CONFLICT DO NOTHING");
 
     qb.build().execute(pool).await?;
+    Ok(())
+}
+
+/// Insert mention projections on the caller-owned protected transaction.
+pub async fn insert_mentions_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    community_id: CommunityId,
+    event: &nostr::Event,
+    channel_id: Option<Uuid>,
+) -> Result<()> {
+    let created_at_secs = event.created_at.as_secs() as i64;
+    let created_at = DateTime::from_timestamp(created_at_secs, 0)
+        .ok_or(DbError::InvalidTimestamp(created_at_secs))?;
+    for pubkey in event.tags.iter().filter_map(|tag| {
+        let parts = tag.as_slice();
+        (parts.len() >= 2
+            && parts[0] == "p"
+            && parts[1].len() == 64
+            && parts[1]
+                .chars()
+                .all(|character| character.is_ascii_hexdigit()))
+        .then(|| parts[1].to_ascii_lowercase())
+    }) {
+        sqlx::query(
+            "INSERT INTO event_mentions \
+             (community_id, pubkey_hex, event_id, event_created_at, channel_id, event_kind) \
+             VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
+        )
+        .bind(community_id.as_uuid())
+        .bind(pubkey)
+        .bind(event.id.as_bytes().as_slice())
+        .bind(created_at)
+        .bind(channel_id)
+        .bind(event.kind.as_u16() as i32)
+        .execute(&mut **tx)
+        .await?;
+    }
     Ok(())
 }
 
@@ -2475,15 +2516,6 @@ impl Db {
         channel::channel_set_read_authorized(&self.pool, community_id, channel_ids, pubkey).await
     }
 
-    /// Fail closed before the invalidation slice owns durable operation receipts.
-    pub async fn authorization_operation_receipt_fingerprint(
-        &self,
-        _community_id: CommunityId,
-        _operation_id: Uuid,
-    ) -> Result<Option<[u8; 32]>> {
-        Ok(None)
-    }
-
     /// Archive ephemeral channels whose TTL deadline has passed.
     pub async fn reap_expired_ephemeral_channels(
         &self,
@@ -4605,6 +4637,16 @@ impl Db {
         owner_pubkey: &str,
     ) -> Result<i64> {
         git_repo::count_repos_for_owner(&self.pool, community, owner_pubkey).await
+    }
+
+    /// Return a reservation's immutable protected publication origin.
+    pub async fn repo_publication_origin(
+        &self,
+        community_id: CommunityId,
+        repo_id: &str,
+        owner_pubkey: &str,
+    ) -> Result<Option<String>> {
+        git_repo::repo_publication_origin(&self.pool, community_id, repo_id, owner_pubkey).await
     }
 
     /// Release a git repo name reservation held by `owner_pubkey` (rollback).

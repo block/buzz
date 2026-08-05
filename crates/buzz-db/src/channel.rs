@@ -184,6 +184,36 @@ pub async fn create_channel_with_id(
     created_by: &[u8],
     ttl_seconds: Option<i32>,
 ) -> Result<(ChannelRecord, bool)> {
+    let mut tx = pool.begin().await?;
+    let result = create_channel_with_id_tx(
+        &mut tx,
+        community_id,
+        channel_id,
+        name,
+        channel_type,
+        visibility,
+        description,
+        created_by,
+        ttl_seconds,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+/// Transaction-aware variant of [`create_channel_with_id`].
+#[allow(clippy::too_many_arguments)]
+pub async fn create_channel_with_id_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    name: &str,
+    channel_type: ChannelType,
+    visibility: ChannelVisibility,
+    description: Option<&str>,
+    created_by: &[u8],
+    ttl_seconds: Option<i32>,
+) -> Result<(ChannelRecord, bool)> {
     if created_by.len() != 32 {
         return Err(DbError::InvalidData(format!(
             "pubkey must be 32 bytes, got {}",
@@ -202,8 +232,6 @@ pub async fn create_channel_with_id(
         return Err(DbError::InvalidData("channel name is required".into()));
     }
 
-    let mut tx = pool.begin().await?;
-
     let rows_affected = sqlx::query(
         r#"
         INSERT INTO channels (id, community_id, name, channel_type, visibility, description, created_by, ttl_seconds, ttl_deadline)
@@ -220,7 +248,7 @@ pub async fn create_channel_with_id(
     .bind(description)
     .bind(created_by)
     .bind(ttl_seconds)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?
     .rows_affected();
 
@@ -242,7 +270,7 @@ pub async fn create_channel_with_id(
         .bind(channel_id)
         .bind(created_by)
         .bind(created_by)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     }
 
@@ -260,11 +288,10 @@ pub async fn create_channel_with_id(
     )
     .bind(community_id.as_uuid())
     .bind(channel_id)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await?;
 
     let record = row_to_channel_record(row)?;
-    tx.commit().await?;
     Ok((record, was_created))
 }
 
@@ -386,14 +413,7 @@ pub async fn add_member(
     role: MemberRole,
     invited_by: Option<&[u8]>,
 ) -> Result<MemberRecord> {
-    validate_member_pubkey(pubkey)?;
-
     let mut tx = pool.begin().await?;
-
-    // First statement: serialize the whole role-check / owner-count / upsert
-    // sequence against concurrent membership writes on this channel.
-    acquire_channel_membership_lock(&mut tx, community_id, channel_id).await?;
-
     let record = add_member_tx(&mut tx, community_id, channel_id, pubkey, role, invited_by).await?;
     tx.commit().await?;
     Ok(record)
@@ -418,7 +438,7 @@ pub enum ChannelAdmissionOutcome {
     IdentityBindingRequired,
 }
 
-/// Add a channel member and optional corporate identity binding in one transaction.
+/// Add a channel member and optional relay-verified identity binding atomically.
 pub async fn add_member_with_identity(
     pool: &PgPool,
     community_id: CommunityId,
@@ -436,11 +456,11 @@ pub async fn add_member_with_identity(
     }
 
     let mut tx = pool.begin().await?;
-    // Keep this first: every channel membership writer shares this lock order.
     acquire_channel_membership_lock(&mut tx, community_id, channel_id).await?;
-
     let member =
-        match add_member_tx(&mut tx, community_id, channel_id, pubkey, role, invited_by).await {
+        match add_member_after_lock_tx(&mut tx, community_id, channel_id, pubkey, role, invited_by)
+            .await
+        {
             Ok(member) => member,
             Err(error) => {
                 tx.rollback().await?;
@@ -491,7 +511,24 @@ fn validate_member_pubkey(pubkey: &[u8]) -> Result<()> {
     Ok(())
 }
 
-async fn add_member_tx(
+/// Transaction-aware variant of [`add_member`].
+///
+/// This function owns the channel membership lock. Callers that already hold
+/// it use the private after-lock helper so the lock order remains exact.
+pub async fn add_member_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    pubkey: &[u8],
+    role: MemberRole,
+    invited_by: Option<&[u8]>,
+) -> Result<MemberRecord> {
+    validate_member_pubkey(pubkey)?;
+    acquire_channel_membership_lock(tx, community_id, channel_id).await?;
+    add_member_after_lock_tx(tx, community_id, channel_id, pubkey, role, invited_by).await
+}
+
+async fn add_member_after_lock_tx(
     tx: &mut Transaction<'_, Postgres>,
     community_id: CommunityId,
     channel_id: Uuid,
@@ -647,12 +684,9 @@ async fn add_member_tx(
 /// actor could commit after their role was read and this removal would proceed on
 /// a stale elevated role.
 ///
-/// The `is_agent_owner` lookup deliberately runs *before* the transaction opens:
-/// it borrows a second connection from `pool`, and issuing it while holding the
-/// lock could deadlock against ourselves on a small pool. That is safe because
-/// `agent_owner_pubkey` is immutable — [`crate::user::set_agent_owner`] only
-/// updates it when it `IS NULL` (first-mint-wins), so its value cannot change
-/// under us and needs no serialization.
+/// The immutable agent-owner relationship is read on the caller-owned
+/// transaction connection so this operation also composes with a sealed
+/// authorization transaction without borrowing a second pool connection.
 pub async fn remove_member(
     pool: &PgPool,
     community_id: CommunityId,
@@ -660,26 +694,44 @@ pub async fn remove_member(
     pubkey: &[u8],
     actor_pubkey: &[u8],
 ) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    remove_member_tx(&mut tx, community_id, channel_id, pubkey, actor_pubkey).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Transaction-aware variant of [`remove_member`].
+pub async fn remove_member_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    pubkey: &[u8],
+    actor_pubkey: &[u8],
+) -> Result<()> {
     let is_self_remove = pubkey == actor_pubkey;
 
-    // Immutable, and must not be queried while holding the lock (second pool
-    // connection). Resolved up front so every *mutable* authorization read can
-    // sit behind the serialization point below.
     let actor_is_agent_owner = if is_self_remove {
         false
     } else {
-        crate::user::is_agent_owner(pool, community_id, pubkey, actor_pubkey).await?
+        sqlx::query_scalar::<_, bool>(
+            "SELECT agent_owner_pubkey = $3 FROM users \
+             WHERE community_id = $1 AND pubkey = $2 AND agent_owner_pubkey IS NOT NULL",
+        )
+        .bind(community_id.as_uuid())
+        .bind(pubkey)
+        .bind(actor_pubkey)
+        .fetch_optional(&mut **tx)
+        .await?
+        .unwrap_or(false)
     };
-
-    let mut tx = pool.begin().await?;
 
     // First statement: serialize the actor-role check, the last-owner count and
     // the UPDATE against concurrent membership writes on this channel (same key
     // as `add_member`).
-    acquire_channel_membership_lock(&mut tx, community_id, channel_id).await?;
+    acquire_channel_membership_lock(tx, community_id, channel_id).await?;
 
     if !is_self_remove {
-        let actor_role_str = get_active_role_tx(&mut tx, community_id, channel_id, actor_pubkey)
+        let actor_role_str = get_active_role_tx(tx, community_id, channel_id, actor_pubkey)
             .await?
             .ok_or_else(|| DbError::AccessDenied("actor is not an active member".to_string()))?;
         let actor_role: MemberRole = actor_role_str.parse().map_err(|_| {
@@ -695,7 +747,7 @@ pub async fn remove_member(
     // Defense-in-depth: prevent removing the last owner regardless of caller.
     // Callers (REST handlers, NIP-29 handlers) also check this, but the DB
     // layer enforces it as the final safety net.
-    let target_role = get_active_role_tx(&mut tx, community_id, channel_id, pubkey).await?;
+    let target_role = get_active_role_tx(tx, community_id, channel_id, pubkey).await?;
     if target_role.as_deref() == Some("owner") {
         let row = sqlx::query(
             "SELECT COUNT(*) as cnt FROM channel_members \
@@ -703,7 +755,7 @@ pub async fn remove_member(
         )
         .bind(community_id.as_uuid())
         .bind(channel_id)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
         let owner_count: i64 = row.try_get("cnt")?;
         if owner_count <= 1 {
@@ -724,14 +776,13 @@ pub async fn remove_member(
     .bind(community_id.as_uuid())
     .bind(channel_id)
     .bind(pubkey)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
 
     if result.rows_affected() == 0 {
         return Err(DbError::MemberNotFound(channel_id));
     }
 
-    tx.commit().await?;
     Ok(())
 }
 
@@ -871,6 +922,84 @@ pub async fn get_accessible_channel_ids(
             Ok(id)
         })
         .collect()
+}
+
+/// Revalidate one actor's current read access to a channel in one database
+/// statement. Open channels are readable by any authenticated relay actor;
+/// private channels require an active membership. Deleted channels deny.
+///
+/// This intentionally bypasses application caches. Callers use it at an
+/// outbound release boundary after asynchronous fetch or queueing work.
+pub async fn channel_read_authorized(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    actor: &[u8],
+) -> Result<bool> {
+    let allowed = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT c.visibility::text <> 'private'
+            OR EXISTS (
+                SELECT 1
+                FROM channel_members cm
+                WHERE cm.community_id = c.community_id
+                  AND cm.channel_id = c.id
+                  AND cm.pubkey = $3
+                  AND cm.removed_at IS NULL
+            )
+        FROM channels c
+        WHERE c.community_id = $1
+          AND c.id = $2
+          AND c.deleted_at IS NULL
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .bind(actor)
+    .fetch_optional(pool)
+    .await?;
+    Ok(allowed.unwrap_or(false))
+}
+
+/// Revalidate uncached read access to an entire channel set in one database
+/// statement. Aggregate disclosures use this at their final release boundary
+/// so authority for an earlier channel cannot go stale while later channels
+/// are checked one at a time.
+pub async fn channel_set_read_authorized(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_ids: &[Uuid],
+    actor: &[u8],
+) -> Result<bool> {
+    if channel_ids.is_empty() {
+        return Ok(true);
+    }
+    let allowed = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT COUNT(DISTINCT c.id) = cardinality($2::uuid[])
+        FROM channels c
+        WHERE c.community_id = $1
+          AND c.id = ANY($2::uuid[])
+          AND c.deleted_at IS NULL
+          AND (
+              c.visibility::text <> 'private'
+              OR EXISTS (
+                  SELECT 1
+                  FROM channel_members cm
+                  WHERE cm.community_id = c.community_id
+                    AND cm.channel_id = c.id
+                    AND cm.pubkey = $3
+                    AND cm.removed_at IS NULL
+              )
+          )
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_ids)
+    .bind(actor)
+    .fetch_one(pool)
+    .await?;
+    Ok(allowed)
 }
 
 /// Lists channels in a community, optionally filtered by visibility string.
@@ -1251,6 +1380,486 @@ pub struct ChannelUpdate {
     pub ttl_seconds: Option<Option<i32>>,
 }
 
+/// Transaction-owned NIP-29 channel mutation selected by the relay after
+/// protocol-shape validation. Authorization is rechecked from locked rows in
+/// [`apply_nip29_mutation_tx`].
+pub enum Nip29Mutation {
+    /// Create a channel and bootstrap the actor as its owner.
+    Create {
+        /// Stable client- or event-derived channel identifier.
+        channel_id: Uuid,
+        /// Canonical display name.
+        name: String,
+        /// Channel type.
+        channel_type: ChannelType,
+        /// Initial visibility.
+        visibility: ChannelVisibility,
+        /// Optional description.
+        description: Option<String>,
+        /// Optional ephemeral lifetime.
+        ttl_seconds: Option<i32>,
+    },
+    /// Add a member or change an active member's role.
+    PutUser {
+        /// Channel identifier.
+        channel_id: Uuid,
+        /// Target member key.
+        target: Vec<u8>,
+        /// Explicit role, or preserve/default when absent.
+        role: Option<MemberRole>,
+    },
+    /// Remove a member.
+    RemoveUser {
+        /// Channel identifier.
+        channel_id: Uuid,
+        /// Target member key.
+        target: Vec<u8>,
+    },
+    /// Atomically edit channel metadata.
+    EditMetadata {
+        /// Channel identifier.
+        channel_id: Uuid,
+        /// Durable metadata columns.
+        updates: ChannelUpdate,
+        /// Optional topic replacement.
+        topic: Option<String>,
+        /// Optional purpose replacement.
+        purpose: Option<String>,
+        /// Optional archive transition.
+        archived: Option<bool>,
+    },
+    /// Soft-delete a group and its relay-authored discovery rows.
+    DeleteGroup {
+        /// Channel identifier.
+        channel_id: Uuid,
+        /// Relay key used to scope discovery cleanup.
+        relay_pubkey: Vec<u8>,
+    },
+    /// Join an open channel without changing an existing role.
+    Join {
+        /// Channel identifier.
+        channel_id: Uuid,
+    },
+    /// Leave a channel without implicit membership creation.
+    Leave {
+        /// Channel identifier.
+        channel_id: Uuid,
+    },
+}
+
+/// Durable result of a transaction-owned NIP-29 projection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Nip29MutationOutcome {
+    /// Affected channel.
+    pub channel_id: Uuid,
+    /// Whether protected business state changed.
+    pub changed: bool,
+    /// Whether membership visibility changed and caches must be invalidated.
+    pub membership_changed: bool,
+    /// Whether channel visibility or lifecycle caches must be invalidated.
+    pub channel_changed: bool,
+}
+
+async fn actor_owns_active_owner_agent_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    actor: &[u8],
+) -> Result<bool> {
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS( \
+           SELECT 1 FROM channel_members cm \
+           JOIN users u ON u.community_id = cm.community_id AND u.pubkey = cm.pubkey \
+           WHERE cm.community_id = $1 AND cm.channel_id = $2 \
+             AND cm.role = 'owner' AND cm.removed_at IS NULL \
+             AND u.agent_owner_pubkey = $3 \
+         )",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .bind(actor)
+    .fetch_one(&mut **tx)
+    .await?)
+}
+
+async fn update_channel_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    mut updates: ChannelUpdate,
+) -> Result<()> {
+    if let Some(name) = updates.name.as_mut() {
+        *name = buzz_core::channel::canonical_channel_name(name).to_owned();
+        if name.is_empty() {
+            return Err(DbError::InvalidData("channel name is required".into()));
+        }
+    }
+    if updates.name.is_none()
+        && updates.description.is_none()
+        && updates.visibility.is_none()
+        && updates.ttl_seconds.is_none()
+    {
+        return Ok(());
+    }
+    if updates.ttl_seconds.is_some() {
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!(
+                "buzz_channel_ttl:{}:{}",
+                community_id.as_uuid(),
+                channel_id
+            ))
+            .execute(&mut **tx)
+            .await?;
+    }
+    let result = sqlx::query(
+        "UPDATE channels SET \
+           name = COALESCE($1, name), \
+           description = COALESCE($2, description), \
+           visibility = COALESCE($3::channel_visibility, visibility), \
+           ttl_seconds = CASE WHEN $4 THEN $5 ELSE ttl_seconds END, \
+           ttl_deadline = CASE WHEN $4 THEN CASE WHEN $5 IS NULL THEN NULL \
+             ELSE NOW() + ($5 || ' seconds')::interval END ELSE ttl_deadline END, \
+           updated_at = NOW() \
+         WHERE community_id = $6 AND id = $7 AND deleted_at IS NULL",
+    )
+    .bind(updates.name)
+    .bind(updates.description)
+    .bind(updates.visibility)
+    .bind(updates.ttl_seconds.is_some())
+    .bind(updates.ttl_seconds.flatten())
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .execute(&mut **tx)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(DbError::ChannelNotFound(channel_id));
+    }
+    Ok(())
+}
+
+/// Apply one NIP-29 durable projection on the same transaction that owns the
+/// sealed authorization permit and event receipt.
+pub async fn apply_nip29_mutation_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    actor: &[u8],
+    mutation: Nip29Mutation,
+) -> Result<Nip29MutationOutcome> {
+    if actor.len() != 32 {
+        return Err(DbError::InvalidData("actor pubkey must be 32 bytes".into()));
+    }
+    match mutation {
+        Nip29Mutation::Create {
+            channel_id,
+            name,
+            channel_type,
+            visibility,
+            description,
+            ttl_seconds,
+        } => {
+            let (_, changed) = create_channel_with_id_tx(
+                tx,
+                community_id,
+                channel_id,
+                &name,
+                channel_type,
+                visibility,
+                description.as_deref(),
+                actor,
+                ttl_seconds,
+            )
+            .await?;
+            if !changed {
+                return Err(DbError::InvalidData("channel already exists".into()));
+            }
+            Ok(Nip29MutationOutcome {
+                channel_id,
+                changed,
+                membership_changed: changed,
+                channel_changed: changed,
+            })
+        }
+        Nip29Mutation::PutUser {
+            channel_id,
+            target,
+            role,
+        } => {
+            acquire_channel_membership_lock(tx, community_id, channel_id).await?;
+            let channel = get_channel_tx(tx, community_id, channel_id).await?;
+            let existing = get_active_role_tx(tx, community_id, channel_id, &target).await?;
+            let effective_role = match (role, existing.as_deref()) {
+                (Some(role), _) => role,
+                (None, Some(role)) => role.parse().map_err(|_| {
+                    DbError::InvalidData(format!("invalid role in database: {role}"))
+                })?,
+                (None, None) => MemberRole::Member,
+            };
+            if target != actor {
+                // Establish a row-level serialization point even when the
+                // target has never published a profile. Without this insert,
+                // `FOR SHARE` below cannot lock a missing row and a concurrent
+                // first profile could commit a restrictive policy before this
+                // membership transaction commits.
+                crate::user::ensure_user_tx(tx, community_id, &target).await?;
+                let policy = sqlx::query(
+                    "SELECT channel_add_policy::text AS policy, agent_owner_pubkey \
+                     FROM users WHERE community_id = $1 AND pubkey = $2 \
+                     FOR SHARE",
+                )
+                .bind(community_id.as_uuid())
+                .bind(&target)
+                .fetch_optional(&mut **tx)
+                .await?;
+                if let Some(policy) = policy {
+                    let value: String = policy.try_get("policy")?;
+                    let owner: Option<Vec<u8>> = policy.try_get("agent_owner_pubkey")?;
+                    match value.as_str() {
+                        "owner_only" if owner.as_deref() != Some(actor) => {
+                            return Err(DbError::AccessDenied(
+                                "only the agent owner may add this member".into(),
+                            ));
+                        }
+                        "nobody" => {
+                            return Err(DbError::AccessDenied(
+                                "this member has disabled external channel additions".into(),
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let before = existing;
+            // The lock is reentrant for this transaction; `add_member_tx`
+            // retains the complete role and last-owner checks.
+            add_member_tx(
+                tx,
+                community_id,
+                channel_id,
+                &target,
+                effective_role,
+                Some(actor),
+            )
+            .await?;
+            let changed = before.as_deref() != Some(effective_role.as_str());
+            Ok(Nip29MutationOutcome {
+                channel_id,
+                changed,
+                membership_changed: changed,
+                channel_changed: channel.visibility == "open" && before.is_none(),
+            })
+        }
+        Nip29Mutation::RemoveUser { channel_id, target } => {
+            acquire_channel_membership_lock(tx, community_id, channel_id).await?;
+            get_channel_tx(tx, community_id, channel_id).await?;
+            if target != actor
+                && get_active_role_tx(tx, community_id, channel_id, actor)
+                    .await?
+                    .is_none()
+            {
+                return Err(DbError::AccessDenied(
+                    "actor is not an active member".into(),
+                ));
+            }
+            remove_member_tx(tx, community_id, channel_id, &target, actor).await?;
+            Ok(Nip29MutationOutcome {
+                channel_id,
+                changed: true,
+                membership_changed: true,
+                channel_changed: true,
+            })
+        }
+        Nip29Mutation::EditMetadata {
+            channel_id,
+            updates,
+            topic,
+            purpose,
+            archived,
+        } => {
+            acquire_channel_membership_lock(tx, community_id, channel_id).await?;
+            sqlx::query("SELECT 1 FROM channels WHERE community_id = $1 AND id = $2 FOR UPDATE")
+                .bind(community_id.as_uuid())
+                .bind(channel_id)
+                .fetch_optional(&mut **tx)
+                .await?
+                .ok_or(DbError::ChannelNotFound(channel_id))?;
+            let privileged = updates.name.is_some()
+                || updates.description.is_some()
+                || updates.visibility.is_some()
+                || updates.ttl_seconds.is_some()
+                || archived.is_some();
+            let role = get_active_role_tx(tx, community_id, channel_id, actor).await?;
+            if privileged {
+                let elevated = role
+                    .as_deref()
+                    .and_then(|role| role.parse::<MemberRole>().ok())
+                    .is_some_and(|role| role.is_elevated());
+                if !elevated
+                    && !actor_owns_active_owner_agent_tx(tx, community_id, channel_id, actor)
+                        .await?
+                {
+                    return Err(DbError::AccessDenied(
+                        "actor is not authorized to edit channel metadata".into(),
+                    ));
+                }
+            } else if (topic.is_some() || purpose.is_some()) && role.is_none() {
+                return Err(DbError::AccessDenied(
+                    "actor is not an active member".into(),
+                ));
+            }
+            update_channel_tx(tx, community_id, channel_id, updates).await?;
+            if let Some(topic) = topic {
+                sqlx::query(
+                    "UPDATE channels SET topic = $1, topic_set_by = $2, topic_set_at = NOW() \
+                     WHERE community_id = $3 AND id = $4 AND deleted_at IS NULL",
+                )
+                .bind(topic)
+                .bind(actor)
+                .bind(community_id.as_uuid())
+                .bind(channel_id)
+                .execute(&mut **tx)
+                .await?;
+            }
+            if let Some(purpose) = purpose {
+                sqlx::query(
+                    "UPDATE channels SET purpose = $1, purpose_set_by = $2, purpose_set_at = NOW() \
+                     WHERE community_id = $3 AND id = $4 AND deleted_at IS NULL",
+                )
+                .bind(purpose)
+                .bind(actor)
+                .bind(community_id.as_uuid())
+                .bind(channel_id)
+                .execute(&mut **tx)
+                .await?;
+            }
+            if let Some(archived) = archived {
+                let result = if archived {
+                    sqlx::query(
+                        "UPDATE channels SET archived_at = NOW() WHERE community_id = $1 \
+                         AND id = $2 AND deleted_at IS NULL AND archived_at IS NULL",
+                    )
+                    .bind(community_id.as_uuid())
+                    .bind(channel_id)
+                    .execute(&mut **tx)
+                    .await?
+                } else {
+                    sqlx::query(
+                        "UPDATE channels SET archived_at = NULL, ttl_deadline = CASE \
+                         WHEN ttl_seconds IS NOT NULL THEN NOW() + (ttl_seconds || ' seconds')::interval \
+                         ELSE ttl_deadline END WHERE community_id = $1 AND id = $2 \
+                         AND deleted_at IS NULL AND archived_at IS NOT NULL",
+                    )
+                    .bind(community_id.as_uuid())
+                    .bind(channel_id)
+                    .execute(&mut **tx)
+                    .await?
+                };
+                if result.rows_affected() == 0 {
+                    return Err(DbError::AccessDenied(
+                        "channel archive state did not permit the transition".into(),
+                    ));
+                }
+            }
+            Ok(Nip29MutationOutcome {
+                channel_id,
+                changed: true,
+                membership_changed: false,
+                channel_changed: true,
+            })
+        }
+        Nip29Mutation::DeleteGroup {
+            channel_id,
+            relay_pubkey,
+        } => {
+            acquire_channel_membership_lock(tx, community_id, channel_id).await?;
+            sqlx::query("SELECT 1 FROM channels WHERE community_id = $1 AND id = $2 FOR UPDATE")
+                .bind(community_id.as_uuid())
+                .bind(channel_id)
+                .fetch_optional(&mut **tx)
+                .await?
+                .ok_or(DbError::ChannelNotFound(channel_id))?;
+            let owner = get_active_role_tx(tx, community_id, channel_id, actor)
+                .await?
+                .as_deref()
+                == Some("owner");
+            if !owner
+                && !actor_owns_active_owner_agent_tx(tx, community_id, channel_id, actor).await?
+            {
+                return Err(DbError::AccessDenied(
+                    "only an owner may delete a group".into(),
+                ));
+            }
+            let changed = sqlx::query(
+                "UPDATE channels SET deleted_at = NOW() WHERE community_id = $1 \
+                 AND id = $2 AND deleted_at IS NULL",
+            )
+            .bind(community_id.as_uuid())
+            .bind(channel_id)
+            .execute(&mut **tx)
+            .await?
+            .rows_affected()
+                > 0;
+            sqlx::query(
+                "UPDATE events SET deleted_at = NOW() WHERE community_id = $1 \
+                 AND channel_id = $2 AND pubkey = $3 AND deleted_at IS NULL \
+                 AND kind IN (39000, 39001, 39002)",
+            )
+            .bind(community_id.as_uuid())
+            .bind(channel_id)
+            .bind(relay_pubkey)
+            .execute(&mut **tx)
+            .await?;
+            Ok(Nip29MutationOutcome {
+                channel_id,
+                changed,
+                membership_changed: changed,
+                channel_changed: changed,
+            })
+        }
+        Nip29Mutation::Join { channel_id } => {
+            acquire_channel_membership_lock(tx, community_id, channel_id).await?;
+            let channel = get_channel_tx(tx, community_id, channel_id).await?;
+            if channel.visibility != "open" {
+                return Err(DbError::AccessDenied("channel is private".into()));
+            }
+            if get_active_role_tx(tx, community_id, channel_id, actor)
+                .await?
+                .is_some()
+            {
+                return Ok(Nip29MutationOutcome {
+                    channel_id,
+                    changed: false,
+                    membership_changed: false,
+                    channel_changed: false,
+                });
+            }
+            add_member_tx(
+                tx,
+                community_id,
+                channel_id,
+                actor,
+                MemberRole::Member,
+                None,
+            )
+            .await?;
+            Ok(Nip29MutationOutcome {
+                channel_id,
+                changed: true,
+                membership_changed: true,
+                channel_changed: true,
+            })
+        }
+        Nip29Mutation::Leave { channel_id } => {
+            remove_member_tx(tx, community_id, channel_id, actor, actor).await?;
+            Ok(Nip29MutationOutcome {
+                channel_id,
+                changed: true,
+                membership_changed: true,
+                channel_changed: true,
+            })
+        }
+    }
+}
+
 /// Updates channel metadata dynamically.
 ///
 /// At least one field must be provided; returns `InvalidData` otherwise.
@@ -1588,6 +2197,10 @@ pub async fn get_member_role(
 }
 
 /// Get the active role on the caller's transaction snapshot.
+///
+/// Permission decisions that combine an event-owned binding with membership
+/// use this together with [`crate::event::query_events_tx`] after selecting a
+/// repeatable-read transaction, so both facts come from one database snapshot.
 pub async fn get_member_role_tx(
     transaction: &mut Transaction<'_, Postgres>,
     community_id: CommunityId,
@@ -1607,75 +2220,44 @@ pub async fn get_member_role_tx(
     Ok(row.map(|r| r.try_get("role")).transpose()?)
 }
 
-/// Revalidate uncached access to one stored channel at a release boundary.
-pub async fn channel_read_authorized(
-    pool: &PgPool,
+/// Lock and revalidate the ordinary member-or-open channel write predicate in
+/// the caller's authorization transaction.
+pub async fn require_channel_write_authority_tx(
+    transaction: &mut Transaction<'_, Postgres>,
     community_id: CommunityId,
     channel_id: Uuid,
     actor: &[u8],
-) -> Result<bool> {
-    let allowed = sqlx::query_scalar::<_, bool>(
-        r#"
-        SELECT c.visibility::text <> 'private'
-            OR EXISTS (
-                SELECT 1
-                FROM channel_members cm
-                WHERE cm.community_id = c.community_id
-                  AND cm.channel_id = c.id
-                  AND cm.pubkey = $3
-                  AND cm.removed_at IS NULL
-            )
-        FROM channels c
-        WHERE c.community_id = $1
-          AND c.id = $2
-          AND c.deleted_at IS NULL
-        "#,
+) -> Result<()> {
+    let row = sqlx::query(
+        "SELECT visibility::text AS visibility, archived_at FROM channels \
+         WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL FOR SHARE",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(DbError::ChannelNotFound(channel_id))?;
+    let archived_at: Option<DateTime<Utc>> = row.try_get("archived_at")?;
+    if archived_at.is_some() {
+        return Err(DbError::AccessDenied("channel is archived".into()));
+    }
+    let role: Option<String> = sqlx::query_scalar(
+        "SELECT role::text FROM channel_members \
+         WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3 \
+           AND removed_at IS NULL FOR SHARE",
     )
     .bind(community_id.as_uuid())
     .bind(channel_id)
     .bind(actor)
-    .fetch_optional(pool)
+    .fetch_optional(&mut **transaction)
     .await?;
-    Ok(allowed.unwrap_or(false))
-}
-
-/// Revalidate uncached read access to an entire channel set in one database
-/// statement.
-pub async fn channel_set_read_authorized(
-    pool: &PgPool,
-    community_id: CommunityId,
-    channel_ids: &[Uuid],
-    actor: &[u8],
-) -> Result<bool> {
-    if channel_ids.is_empty() {
-        return Ok(true);
+    let visibility: String = row.try_get("visibility")?;
+    if role.is_none() && visibility != "open" {
+        return Err(DbError::AccessDenied(
+            "actor is not a channel member".into(),
+        ));
     }
-    let allowed = sqlx::query_scalar::<_, bool>(
-        r#"
-        SELECT COUNT(DISTINCT c.id) = cardinality($2::uuid[])
-        FROM channels c
-        WHERE c.community_id = $1
-          AND c.id = ANY($2::uuid[])
-          AND c.deleted_at IS NULL
-          AND (
-              c.visibility::text <> 'private'
-              OR EXISTS (
-                  SELECT 1
-                  FROM channel_members cm
-                  WHERE cm.community_id = c.community_id
-                    AND cm.channel_id = c.id
-                    AND cm.pubkey = $3
-                    AND cm.removed_at IS NULL
-              )
-          )
-        "#,
-    )
-    .bind(community_id.as_uuid())
-    .bind(channel_ids)
-    .bind(actor)
-    .fetch_one(pool)
-    .await?;
-    Ok(allowed)
+    Ok(())
 }
 
 /// Archive ephemeral channels whose TTL deadline has passed.
@@ -1684,10 +2266,22 @@ pub async fn channel_set_read_authorized(
 /// `archived_at IS NULL` guard prevents double-archiving even if called
 /// concurrently from multiple relay pods.
 pub async fn reap_expired_ephemeral_channels(pool: &PgPool) -> Result<Vec<ReapedEphemeralChannel>> {
+    reap_expired_ephemeral_channels_excluding(pool, &[]).await
+}
+
+/// Archive expired ephemeral channels except exact protected domains.
+///
+/// The exclusion predicate is part of the `UPDATE`, so an Enforce row cannot
+/// be claimed and mutated between an application-side mode check and commit.
+pub async fn reap_expired_ephemeral_channels_excluding(
+    pool: &PgPool,
+    excluded_communities: &[Uuid],
+) -> Result<Vec<ReapedEphemeralChannel>> {
     let rows = sqlx::query(
         "UPDATE channels AS ch SET archived_at = NOW() \
          FROM communities AS c \
          WHERE ch.community_id = c.id \
+           AND NOT (ch.community_id = ANY($1::uuid[])) \
            AND ch.ttl_seconds IS NOT NULL \
            AND ch.ttl_deadline < NOW() \
            AND ch.archived_at IS NULL \
@@ -1695,6 +2289,7 @@ pub async fn reap_expired_ephemeral_channels(pool: &PgPool) -> Result<Vec<Reaped
            AND c.archived_at IS NULL \
          RETURNING ch.community_id, c.host, ch.id",
     )
+    .bind(excluded_communities)
     .fetch_all(pool)
     .await?;
 
@@ -1715,14 +2310,18 @@ pub async fn reap_expired_ephemeral_channels(pool: &PgPool) -> Result<Vec<Reaped
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::user::{ensure_user, set_agent_owner};
+    use crate::user::{
+        ensure_user, ensure_user_tx, set_agent_owner, set_channel_add_policy,
+        set_channel_add_policy_tx,
+    };
     use nostr::Keys;
 
     const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
 
     async fn setup_pool() -> PgPool {
-        let database_url =
-            std::env::var("BUZZ_TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.to_string());
+        let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| TEST_DB_URL.to_owned());
         PgPool::connect(&database_url)
             .await
             .expect("connect to test DB")
@@ -1805,15 +2404,6 @@ mod tests {
         }
     }
 
-    async fn trusted_assertion_count(pool: &PgPool, community: CommunityId) -> i64 {
-        sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE community_id = $1 AND kind = $2")
-            .bind(community.as_uuid())
-            .bind(buzz_core::kind::KIND_USER_TRUSTED_ASSERTION as i32)
-            .fetch_one(pool)
-            .await
-            .expect("trusted assertion count")
-    }
-
     async fn active_membership_count(
         pool: &PgPool,
         community: CommunityId,
@@ -1840,7 +2430,6 @@ mod tests {
         let community_id = make_test_community(&pool).await;
         let community = CommunityId::from_uuid(community_id);
         let owner = random_pubkey();
-        let non_member_inviter = random_pubkey();
         let joiner = random_pubkey();
         let channel = create_test_channel(
             &pool,
@@ -1862,7 +2451,7 @@ mod tests {
             channel.id,
             &joiner,
             MemberRole::Member,
-            Some(&non_member_inviter),
+            Some(&random_pubkey()),
             Some(&identity),
         )
         .await
@@ -1880,7 +2469,6 @@ mod tests {
             .expect("binding lookup")
             .is_none()
         );
-        assert_eq!(trusted_assertion_count(&pool, community).await, 0);
     }
 
     #[tokio::test]
@@ -1942,7 +2530,6 @@ mod tests {
             active_membership_count(&pool, community, channel.id, &joiner).await,
             0
         );
-        assert_eq!(trusted_assertion_count(&pool, community).await, 0);
     }
 
     #[tokio::test]
@@ -1984,15 +2571,6 @@ mod tests {
             active_membership_count(&pool, community, channel.id, &joiner).await,
             0
         );
-        assert!(
-            crate::identity_binding::get_active_identity_binding_by_pubkey(
-                &pool, community, &joiner,
-            )
-            .await
-            .expect("binding lookup")
-            .is_none()
-        );
-        assert_eq!(trusted_assertion_count(&pool, community).await, 0);
     }
 
     #[tokio::test]
@@ -2086,88 +2664,6 @@ mod tests {
         .await
         .expect("binding count");
         assert_eq!(binding_count, 1);
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn existing_member_and_non_corporate_paths_remain_idempotent() {
-        let pool = setup_pool().await;
-        let community_id = make_test_community(&pool).await;
-        let community = CommunityId::from_uuid(community_id);
-        let owner = random_pubkey();
-        let existing_member = random_pubkey();
-        let non_corporate_joiner = random_pubkey();
-        let channel = create_test_channel(
-            &pool,
-            community_id,
-            "unchanged-admission-paths",
-            ChannelType::Stream,
-            ChannelVisibility::Private,
-            None,
-            &owner,
-            Some(3600),
-        )
-        .await
-        .expect("create private huddle");
-
-        add_member(
-            &pool,
-            community,
-            channel.id,
-            &existing_member,
-            MemberRole::Member,
-            Some(&owner),
-        )
-        .await
-        .expect("existing member add");
-        add_member(
-            &pool,
-            community,
-            channel.id,
-            &existing_member,
-            MemberRole::Member,
-            Some(&owner),
-        )
-        .await
-        .expect("existing member retry");
-        assert_eq!(
-            active_membership_count(&pool, community, channel.id, &existing_member).await,
-            1
-        );
-
-        let outcome = add_member_with_identity(
-            &pool,
-            community,
-            channel.id,
-            &non_corporate_joiner,
-            MemberRole::Member,
-            Some(&owner),
-            None,
-        )
-        .await
-        .expect("non-corporate admission");
-        assert!(matches!(
-            outcome,
-            ChannelAdmissionOutcome::Joined {
-                identity_binding: None,
-                ..
-            }
-        ));
-        assert_eq!(
-            active_membership_count(&pool, community, channel.id, &non_corporate_joiner).await,
-            1
-        );
-        assert!(
-            crate::identity_binding::get_active_identity_binding_by_pubkey(
-                &pool,
-                community,
-                &non_corporate_joiner,
-            )
-            .await
-            .expect("binding lookup")
-            .is_none()
-        );
-        assert_eq!(trusted_assertion_count(&pool, community).await, 0);
     }
 
     async fn insert_channel_with_id(
@@ -2449,6 +2945,14 @@ mod tests {
         .execute(&pool)
         .await
         .expect("expire channel");
+
+        let excluded = reap_expired_ephemeral_channels_excluding(&pool, &[community_id])
+            .await
+            .expect("run excluded reaper");
+        assert!(
+            !excluded.iter().any(|row| row.channel_id == channel.id),
+            "an excluded protected domain must remain untouched"
+        );
 
         let reaped = reap_expired_ephemeral_channels(&pool)
             .await
@@ -3251,5 +3755,454 @@ mod tests {
             .await
             .expect("read role after restore");
         assert_eq!(restored.as_deref(), Some("owner"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn nip29_create_is_owned_by_the_callers_transaction() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let actor = random_pubkey();
+        let channel_id = Uuid::new_v4();
+        let mut tx = pool.begin().await.expect("begin caller transaction");
+        let outcome = apply_nip29_mutation_tx(
+            &mut tx,
+            community,
+            &actor,
+            Nip29Mutation::Create {
+                channel_id,
+                name: "sealed-channel".into(),
+                channel_type: ChannelType::Stream,
+                visibility: ChannelVisibility::Private,
+                description: None,
+                ttl_seconds: None,
+            },
+        )
+        .await
+        .expect("create projection");
+        assert!(outcome.changed);
+        tx.rollback().await.expect("authorization rollback");
+
+        assert!(matches!(
+            get_channel(&pool, community, channel_id).await,
+            Err(DbError::ChannelNotFound(_))
+        ));
+        let membership_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM channel_members WHERE community_id = $1 AND channel_id = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(channel_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count rolled-back members");
+        assert_eq!(membership_count, 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn nip29_join_retry_is_idempotent_and_never_changes_an_existing_role() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let owner = random_pubkey();
+        let member = random_pubkey();
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "sealed-join",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &owner,
+            None,
+        )
+        .await
+        .expect("create channel");
+
+        let mut tx = pool.begin().await.expect("begin first join");
+        let first = apply_nip29_mutation_tx(
+            &mut tx,
+            community,
+            &member,
+            Nip29Mutation::Join {
+                channel_id: channel.id,
+            },
+        )
+        .await
+        .expect("first join");
+        assert!(first.changed);
+        tx.commit().await.expect("commit first join");
+
+        let mut retry = pool.begin().await.expect("begin retry");
+        let repeated = apply_nip29_mutation_tx(
+            &mut retry,
+            community,
+            &member,
+            Nip29Mutation::Join {
+                channel_id: channel.id,
+            },
+        )
+        .await
+        .expect("retry join");
+        assert!(!repeated.changed);
+        retry.commit().await.expect("commit retry");
+
+        let members = get_members(&pool, community, channel.id)
+            .await
+            .expect("members");
+        assert_eq!(
+            members
+                .iter()
+                .filter(|entry| entry.pubkey == member)
+                .count(),
+            1
+        );
+        assert_eq!(
+            members
+                .iter()
+                .find(|entry| entry.pubkey == owner)
+                .map(|entry| entry.role.as_str()),
+            Some("owner")
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn nip29_put_user_serializes_with_target_policy_updates() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let actor = random_pubkey();
+        let target = random_pubkey();
+        ensure_user(&pool, community, &actor)
+            .await
+            .expect("ensure actor");
+        ensure_user(&pool, community, &target)
+            .await
+            .expect("ensure target");
+        set_channel_add_policy(&pool, community, &target, "anyone")
+            .await
+            .expect("allow external additions");
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "sealed-target-policy-race",
+            ChannelType::Stream,
+            ChannelVisibility::Private,
+            None,
+            &actor,
+            None,
+        )
+        .await
+        .expect("create channel");
+
+        let mut operation = pool.begin().await.expect("begin protected put-user");
+        apply_nip29_mutation_tx(
+            &mut operation,
+            community,
+            &actor,
+            Nip29Mutation::PutUser {
+                channel_id: channel.id,
+                target: target.clone(),
+                role: Some(MemberRole::Member),
+            },
+        )
+        .await
+        .expect("authorize and stage target membership");
+
+        let update_pool = pool.clone();
+        let update_target = target.clone();
+        let mut policy_update = tokio::spawn(async move {
+            set_channel_add_policy(&update_pool, community, &update_target, "nobody").await
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(750), &mut policy_update)
+                .await
+                .is_err(),
+            "target policy update must wait for the transaction that authorized the addition"
+        );
+
+        operation
+            .commit()
+            .await
+            .expect("commit authorized addition before policy update");
+        tokio::time::timeout(std::time::Duration::from_secs(10), policy_update)
+            .await
+            .expect("policy update proceeds after authorization transaction")
+            .expect("policy update task")
+            .expect("policy update succeeds");
+        assert!(
+            is_member(&pool, community, channel.id, &target)
+                .await
+                .expect("membership after serialized commit"),
+            "the authorization transaction won the serialization order"
+        );
+
+        let denied_target = random_pubkey();
+        ensure_user(&pool, community, &denied_target)
+            .await
+            .expect("ensure denied target");
+        set_channel_add_policy(&pool, community, &denied_target, "nobody")
+            .await
+            .expect("deny external additions first");
+        let mut denied = pool.begin().await.expect("begin denied put-user");
+        let result = apply_nip29_mutation_tx(
+            &mut denied,
+            community,
+            &actor,
+            Nip29Mutation::PutUser {
+                channel_id: channel.id,
+                target: denied_target.clone(),
+                role: Some(MemberRole::Member),
+            },
+        )
+        .await;
+        assert!(matches!(result, Err(DbError::AccessDenied(_))));
+        denied.rollback().await.expect("rollback denied put-user");
+        assert!(
+            !is_member(&pool, community, channel.id, &denied_target)
+                .await
+                .expect("denied target membership"),
+            "a policy update that commits first must deny without membership"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn nip29_put_user_serializes_with_first_target_profile() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let actor = random_pubkey();
+        ensure_user(&pool, community, &actor)
+            .await
+            .expect("ensure actor");
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "sealed-first-profile-race",
+            ChannelType::Stream,
+            ChannelVisibility::Private,
+            None,
+            &actor,
+            None,
+        )
+        .await
+        .expect("create channel");
+
+        // PutUser wins: its create-or-conflict establishes the target row and
+        // retains that row through membership commit. The first restrictive
+        // profile must wait and therefore takes effect only afterward.
+        let target = random_pubkey();
+        let mut operation = pool.begin().await.expect("begin protected put-user");
+        apply_nip29_mutation_tx(
+            &mut operation,
+            community,
+            &actor,
+            Nip29Mutation::PutUser {
+                channel_id: channel.id,
+                target: target.clone(),
+                role: Some(MemberRole::Member),
+            },
+        )
+        .await
+        .expect("stage absent target membership");
+
+        let update_pool = pool.clone();
+        let update_target = target.clone();
+        let mut first_profile = tokio::spawn(async move {
+            let mut profile_tx = update_pool.begin().await.expect("begin first profile");
+            ensure_user_tx(&mut profile_tx, community, &update_target)
+                .await
+                .expect("create or observe target");
+            set_channel_add_policy_tx(&mut profile_tx, community, &update_target, "nobody")
+                .await
+                .expect("set first profile policy");
+            profile_tx.commit().await.expect("commit first profile")
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(750), &mut first_profile)
+                .await
+                .is_err(),
+            "first target profile must wait for the earlier PutUser transaction"
+        );
+        operation.commit().await.expect("commit absent-target add");
+        tokio::time::timeout(std::time::Duration::from_secs(10), first_profile)
+            .await
+            .expect("first profile proceeds after membership commit")
+            .expect("first profile task");
+        assert!(is_member(&pool, community, channel.id, &target)
+            .await
+            .expect("membership after PutUser-first order"));
+
+        // Profile wins: hold its newly inserted `nobody` row open. PutUser must
+        // wait at create-or-conflict, then re-read the committed restriction
+        // and deny before adding membership.
+        let denied_target = random_pubkey();
+        let mut profile_tx = pool.begin().await.expect("begin winning profile");
+        ensure_user_tx(&mut profile_tx, community, &denied_target)
+            .await
+            .expect("stage first target profile");
+        set_channel_add_policy_tx(&mut profile_tx, community, &denied_target, "nobody")
+            .await
+            .expect("stage restrictive policy");
+
+        let put_pool = pool.clone();
+        let put_actor = actor.clone();
+        let put_target = denied_target.clone();
+        let channel_id = channel.id;
+        let mut put_user = tokio::spawn(async move {
+            let mut put_tx = put_pool.begin().await.expect("begin waiting put-user");
+            let result = apply_nip29_mutation_tx(
+                &mut put_tx,
+                community,
+                &put_actor,
+                Nip29Mutation::PutUser {
+                    channel_id,
+                    target: put_target,
+                    role: Some(MemberRole::Member),
+                },
+            )
+            .await;
+            match result {
+                Ok(outcome) => {
+                    put_tx.commit().await.expect("commit unexpected add");
+                    Ok(outcome)
+                }
+                Err(error) => {
+                    put_tx.rollback().await.expect("rollback denied add");
+                    Err(error)
+                }
+            }
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(750), &mut put_user)
+                .await
+                .is_err(),
+            "PutUser must wait for the earlier first-profile transaction"
+        );
+        profile_tx
+            .commit()
+            .await
+            .expect("commit restrictive profile");
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), put_user)
+            .await
+            .expect("PutUser proceeds after first profile commit")
+            .expect("PutUser task");
+        assert!(matches!(result, Err(DbError::AccessDenied(_))));
+        assert!(
+            !is_member(&pool, community, channel.id, &denied_target)
+                .await
+                .expect("membership after profile-first order"),
+            "a restrictive first profile must deny without membership"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn member_removed_after_precheck_before_commit_denies_event() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let owner = random_pubkey();
+        let member = random_pubkey();
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "sealed-write-race",
+            ChannelType::Stream,
+            ChannelVisibility::Private,
+            None,
+            &owner,
+            None,
+        )
+        .await
+        .expect("create channel");
+        sqlx::query(
+            "INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by) \
+             VALUES ($1, $2, $3, 'member', $4)",
+        )
+        .bind(community_id)
+        .bind(channel.id)
+        .bind(&member)
+        .bind(&owner)
+        .execute(&pool)
+        .await
+        .expect("add member");
+
+        let mut preflight = pool.begin().await.expect("begin preflight");
+        require_channel_write_authority_tx(&mut preflight, community, channel.id, &member)
+            .await
+            .expect("member passes preflight");
+        preflight.rollback().await.expect("release preflight locks");
+
+        sqlx::query(
+            "UPDATE channel_members SET removed_at = NOW() \
+             WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3",
+        )
+        .bind(community_id)
+        .bind(channel.id)
+        .bind(&member)
+        .execute(&pool)
+        .await
+        .expect("remove member between boundaries");
+
+        let mut operation = pool.begin().await.expect("begin operation");
+        let result =
+            require_channel_write_authority_tx(&mut operation, community, channel.id, &member)
+                .await;
+        assert!(matches!(result, Err(DbError::AccessDenied(_))));
+        operation
+            .rollback()
+            .await
+            .expect("rollback denied operation");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn open_to_private_after_precheck_denies_nonmember() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let owner = random_pubkey();
+        let nonmember = random_pubkey();
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "sealed-visibility-race",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &owner,
+            None,
+        )
+        .await
+        .expect("create channel");
+
+        let mut preflight = pool.begin().await.expect("begin preflight");
+        require_channel_write_authority_tx(&mut preflight, community, channel.id, &nonmember)
+            .await
+            .expect("open channel passes preflight");
+        preflight.rollback().await.expect("release preflight locks");
+
+        sqlx::query(
+            "UPDATE channels SET visibility = 'private'::channel_visibility \
+             WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community_id)
+        .bind(channel.id)
+        .execute(&pool)
+        .await
+        .expect("make channel private between boundaries");
+
+        let mut operation = pool.begin().await.expect("begin operation");
+        let result =
+            require_channel_write_authority_tx(&mut operation, community, channel.id, &nonmember)
+                .await;
+        assert!(matches!(result, Err(DbError::AccessDenied(_))));
+        operation
+            .rollback()
+            .await
+            .expect("rollback denied operation");
     }
 }

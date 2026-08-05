@@ -25,6 +25,8 @@ pub mod context;
 pub mod error;
 /// Trusted-workspace adapter for sealed verifier and binding evidence.
 pub mod evidence_adapter;
+/// Federated provider-evidence finalization.
+pub mod finalization;
 /// Bounded, versioned authorization leases.
 pub mod lease;
 /// NIP-42 challenge–response authentication.
@@ -51,7 +53,8 @@ pub use context::{
     ExistingBindingResolutionSink, FederatedAuthorityAdapter, FederatedAuthorization,
     FederatedIdentityRequirement, FederatedPrincipal, NostrAuthority,
     ProviderEvidenceValidationError, ResolvedFederatedPolicy, VerifiedFederatedAssertion,
-    VerifiedKeyAttestation, VerifiedNostrProof, VerifiedOwnerAdmission, VerifiedProviderEvidence,
+    VerifiedKeyAttestation, VerifiedNostrProof, VerifiedOperationBinding,
+    VerifiedOperationBindingKind, VerifiedOwnerAdmission, VerifiedProviderEvidence,
     VerifiedTransportDelegation, VersionedBindingRef,
 };
 pub use error::AuthError;
@@ -59,17 +62,7 @@ pub use evidence_adapter::{
     ActiveBindingResolution, EvidenceAdapterError, VerifiedDelegationOutput,
     VerifiedEvidenceAdapter,
 };
-
-/// Opaque display-only result used by the protected-transport interface.
-///
-/// The finalization slice replaces this compatibility type with the complete
-/// current-binding disposition. It intentionally has no public constructor so
-/// this earlier review unit cannot mint verification status or authority.
-#[must_use]
-#[derive(PartialEq, Eq)]
-pub struct VerificationOnlyDisposition {
-    _private: (),
-}
+pub use finalization::{AuthorizationFinalizer, FinalizationError, VerificationOnlyDisposition};
 pub use lease::{
     AccessLeasePolicy, ApplicationLeaseLimit, AuthorizationClock, AuthorizationClockError,
     AuthorizationClockSkew, AuthorizationLease, AuthorizationLeaseValidator,
@@ -86,14 +79,14 @@ pub use nip98_replay::{
     MAX_REPLAY_TTL_SECS,
 };
 pub use provider::{
-    AuthorizationAuthority, AuthorizationCapability,
+    resolve_authorization, AuthorizationAuthority, AuthorizationCapability,
     AuthorizationClock as ProviderAuthorizationClock, AuthorizationDenial,
     AuthorizationDenialReason, AuthorizationOutcome, AuthorizationProfileId, AuthorizationProvider,
     AuthorizationProviderFuture, AuthorizationRequest, AuthorizationRuntime, CapabilitySet,
-    CapabilitySnapshot, DecisionSource, PolicyVersion, ProviderAllow, ProviderAllowReason,
-    ProviderAuthorizationError, ProviderContractError, ProviderDecision, ProviderTimeout,
-    ProviderUnavailable, ProviderUnavailableReason, RetryAfter, MAX_PROVIDER_FRESHNESS_SECONDS,
-    MAX_PROVIDER_TIMEOUT,
+    CapabilitySnapshot, DecisionSource, OwnerAdmissionError, PolicyVersion, ProviderAllow,
+    ProviderAllowReason, ProviderAuthorizationError, ProviderContractError, ProviderDecision,
+    ProviderTimeout, ProviderUnavailable, ProviderUnavailableReason, RetryAfter,
+    MAX_PROVIDER_FRESHNESS_SECONDS, MAX_PROVIDER_TIMEOUT,
 };
 pub use rate_limit::{
     ip_rate_limit_key, rate_limit_key, LimitType, RateLimitConfig, RateLimitResult, RateLimiter,

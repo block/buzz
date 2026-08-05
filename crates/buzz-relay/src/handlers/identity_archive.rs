@@ -138,6 +138,61 @@ pub async fn handle_identity_archive_event(
     Ok(())
 }
 
+/// Validate and apply an identity archive request inside the caller's protected
+/// authorization transaction. The request event is persisted by the caller in
+/// that same transaction; relay-signed deltas remain unavailable background
+/// effects in Enforce.
+pub async fn handle_identity_archive_event_tx(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    event: &Event,
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<bool, String> {
+    let kind = event.kind.as_u16() as u32;
+    let actor_hex = event.pubkey.to_hex();
+    if kind != KIND_IA_ARCHIVE_REQUEST && kind != KIND_IA_UNARCHIVE_REQUEST {
+        return Err(format!("unexpected identity archive kind: {kind}"));
+    }
+    enforce_freshness(event)?;
+    require_single_protected_tag(event)?;
+    let target_hex = extract_single_p_tag_hex(event)
+        .ok_or_else(|| "missing or invalid p tag".to_string())?
+        .to_ascii_lowercase();
+    let replaced_by = extract_optional_replaced_by(event, &target_hex)?;
+    if kind == KIND_IA_UNARCHIVE_REQUEST && replaced_by.is_some() {
+        return Err("replaced-by is not valid on unarchive requests".into());
+    }
+    let reason = extract_tag_value(event, "reason");
+    let consent_path = determine_consent_path_tx(
+        tenant.community(),
+        state,
+        event,
+        &target_hex,
+        &actor_hex,
+        transaction,
+    )
+    .await?;
+    let request_event_id = event.id.to_hex();
+    if kind == KIND_IA_ARCHIVE_REQUEST {
+        buzz_db::archived_identities::archive_tx(
+            transaction,
+            tenant.community(),
+            &target_hex,
+            consent_path.as_str(),
+            &actor_hex,
+            reason.as_deref(),
+            replaced_by.as_deref(),
+            &request_event_id,
+        )
+        .await
+        .map_err(|error| format!("database error: {error}"))
+    } else {
+        buzz_db::archived_identities::unarchive_tx(transaction, tenant.community(), &target_hex)
+            .await
+            .map_err(|error| format!("database error: {error}"))
+    }
+}
+
 fn enforce_freshness(event: &Event) -> Result<(), String> {
     let event_ts = event.created_at.as_secs() as i64;
     let now = std::time::SystemTime::now()
@@ -250,6 +305,40 @@ async fn determine_consent_path(
     Ok(ConsentPath::Owner)
 }
 
+async fn determine_consent_path_tx(
+    community_id: CommunityId,
+    state: &Arc<AppState>,
+    event: &Event,
+    target_hex: &str,
+    actor_hex: &str,
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<ConsentPath, String> {
+    if actor_hex == target_hex {
+        return Ok(ConsentPath::SelfSigned);
+    }
+    let actor_member =
+        buzz_db::relay_members::get_relay_member_tx(transaction, community_id, actor_hex)
+            .await
+            .map_err(|error| format!("database error: {error}"))?;
+    let actor_role = actor_member
+        .as_ref()
+        .map(|member| member.role.as_str())
+        .unwrap_or("");
+    if actor_role == "owner" || actor_role == "admin" {
+        return Ok(ConsentPath::Admin);
+    }
+    verify_owner_consent_tx(
+        community_id,
+        state,
+        event,
+        target_hex,
+        actor_hex,
+        transaction,
+    )
+    .await?;
+    Ok(ConsentPath::Owner)
+}
+
 async fn verify_owner_consent(
     community_id: CommunityId,
     state: &Arc<AppState>,
@@ -294,6 +383,76 @@ async fn verify_owner_consent(
         return Err("live kind:0 no longer attests to request signer".to_string());
     }
 
+    Ok(())
+}
+
+async fn verify_owner_consent_tx(
+    community_id: CommunityId,
+    _state: &Arc<AppState>,
+    event: &Event,
+    target_hex: &str,
+    actor_hex: &str,
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(), String> {
+    let request_auth = extract_single_auth_tag_json(event)?;
+    let request_owner = verify_auth_tag_owner(&request_auth, target_hex)
+        .map_err(|error| format!("invalid request auth tag: {error}"))?;
+    if request_owner != actor_hex {
+        return Err("request auth owner must equal request signer".into());
+    }
+    enforce_request_auth_time_bounds(&request_auth, event.created_at.as_secs())?;
+
+    let target_pubkey = PublicKey::from_hex(target_hex)
+        .map_err(|error| format!("invalid target pubkey: {error}"))?;
+    let target_author = target_pubkey.to_bytes().to_vec();
+
+    // The user-row share lock is also taken by the Enforce profile projection.
+    // It serializes archive consent against a concurrent kind:0 replacement so
+    // the profile read below remains the consent state through commit.
+    let target_exists = sqlx::query_scalar::<_, i32>(
+        "SELECT 1 FROM users \
+         WHERE community_id = $1 AND pubkey = $2 FOR SHARE",
+    )
+    .bind(community_id.as_uuid())
+    .bind(&target_author)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(|error| format!("database error: {error}"))?
+    .is_some();
+    if !target_exists {
+        return Err("target has no live user profile".into());
+    }
+
+    let profile = buzz_db::event::query_events_tx(
+        transaction,
+        &EventQuery {
+            kinds: Some(vec![KIND_PROFILE as i32]),
+            authors: Some(vec![target_author]),
+            limit: Some(1),
+            global_only: true,
+            ..EventQuery::for_community(community_id)
+        },
+    )
+    .await
+    .map_err(|error| format!("database error: {error}"))?
+    .into_iter()
+    .next()
+    .ok_or_else(|| "target has no live kind:0 profile".to_string())?;
+    if !buzz_db::event::lock_live_event_tx(transaction, community_id, profile.event.id.as_bytes())
+        .await
+        .map_err(|error| format!("database error: {error}"))?
+    {
+        return Err("live kind:0 changed during authorization".into());
+    }
+    if profile.event.pubkey.to_hex() != target_hex {
+        return Err("live kind:0 author did not match target".into());
+    }
+    let live_auth = extract_single_auth_tag_json(&profile.event)?;
+    let live_owner = verify_auth_tag_owner(&live_auth, target_hex)
+        .map_err(|error| format!("invalid live kind:0 auth tag: {error}"))?;
+    if live_owner != actor_hex {
+        return Err("live kind:0 no longer attests to request signer".into());
+    }
     Ok(())
 }
 

@@ -33,11 +33,13 @@
 pub mod action_sink;
 pub mod error;
 pub mod executor;
+pub mod mutation_gate;
 pub mod schema;
 
 pub use action_sink::{ActionSink, ActionSinkError};
 pub use error::{PartialProgress, WorkflowError};
 pub use executor::ExecutionResult;
+pub use mutation_gate::MutationGate;
 pub use schema::{ActionDef, Step, TriggerDef, WorkflowDef};
 
 use std::collections::HashMap;
@@ -87,6 +89,9 @@ pub struct WorkflowEngine {
     /// Action sink for executing side-effects (SendMessage, etc.).
     /// Late-initialized via [`set_action_sink`] after `AppState` construction.
     pub(crate) action_sink: OnceLock<Arc<dyn ActionSink>>,
+    /// Provider-neutral gate evaluated before every mutation or external effect.
+    /// Late-initialized by the embedding relay after `AppState` construction.
+    pub(crate) mutation_gate: OnceLock<Arc<dyn MutationGate>>,
     /// Short-TTL cache for the per-event enabled-workflow lookup, keyed
     /// `(community_id, channel_id)`. Most channels have no workflows, so this
     /// removes one SELECT from nearly every ingested event.
@@ -115,6 +120,7 @@ impl WorkflowEngine {
             run_semaphore,
             last_fired: DashMap::new(),
             action_sink: OnceLock::new(),
+            mutation_gate: OnceLock::new(),
             workflow_cache: moka::sync::Cache::builder()
                 .max_capacity(10_000)
                 .time_to_live(std::time::Duration::from_secs(10))
@@ -180,6 +186,38 @@ impl WorkflowEngine {
         }
     }
 
+    /// Set the workflow mutation gate. Called once by an embedding relay.
+    ///
+    /// # Panics
+    /// Panics if called more than once.
+    pub fn set_mutation_gate(&self, gate: Arc<dyn MutationGate>) {
+        if self.mutation_gate.set(gate).is_err() {
+            panic!("mutation_gate already initialized");
+        }
+    }
+
+    /// Require current authority before a workflow mutation or external effect.
+    ///
+    /// A standalone engine with no installed gate preserves legacy behavior.
+    /// Once an embedding relay installs a gate, every engine-owned mutation
+    /// door calls this method before touching durable or external state.
+    pub(crate) fn require_mutation(&self, community_id: CommunityId) -> Result<(), WorkflowError> {
+        mutation_gate::require_configured_mutation(
+            self.mutation_gate.get().map(AsRef::as_ref),
+            community_id,
+        )
+    }
+
+    pub(crate) fn require_outbound_webhook(
+        &self,
+        community_id: CommunityId,
+    ) -> Result<(), WorkflowError> {
+        mutation_gate::require_configured_outbound_webhook(
+            self.mutation_gate.get().map(AsRef::as_ref),
+            community_id,
+        )
+    }
+
     /// Get the action sink reference.
     ///
     /// Returns `Err(WorkflowError)` if the sink has not been initialized via
@@ -217,6 +255,13 @@ impl WorkflowEngine {
         result: Result<ExecutionResult, (WorkflowError, PartialProgress)>,
         existing_trace: Option<Vec<serde_json::Value>>,
     ) {
+        if let Err(error) = self.require_mutation(community_id) {
+            tracing::warn!(
+                run_id = %run_id,
+                "Skipping workflow finalization because mutation authority is unavailable: {error}"
+            );
+            return;
+        }
         let prefix = existing_trace.unwrap_or_default();
 
         match result {
@@ -391,6 +436,14 @@ impl WorkflowEngine {
                 tracing::warn!(
                     workflow_id = %workflow.id,
                     "Skipping workflow — owner authority check failed: {e}"
+                );
+                continue;
+            }
+
+            if let Err(error) = self.require_mutation(community_id) {
+                tracing::warn!(
+                    workflow_id = %workflow.id,
+                    "Skipping workflow because mutation authority is unavailable: {error}"
                 );
                 continue;
             }
@@ -604,6 +657,14 @@ impl WorkflowEngine {
                     tracing::warn!(
                         workflow_id = %workflow.id,
                         "Cron tick: skipping workflow — owner authority check failed: {e}"
+                    );
+                    continue;
+                }
+
+                if let Err(error) = self.require_mutation(community_id) {
+                    tracing::warn!(
+                        workflow_id = %workflow.id,
+                        "Cron tick: skipping workflow because mutation authority is unavailable: {error}"
                     );
                     continue;
                 }

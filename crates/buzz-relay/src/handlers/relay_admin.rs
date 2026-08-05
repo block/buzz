@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use nostr::Event;
+use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
 use buzz_core::kind::{
@@ -207,6 +208,218 @@ pub(super) async fn handle_relay_admin_event(
         .map_err(RelayAdminError::Rejected)
 }
 
+/// Execute a relay-admin command inside the common protected authorization
+/// transaction. Relay-signed roster announcements are deliberately not
+/// emitted here: they are derived background effects and Enforce denies those
+/// until they have their own authoritative model.
+pub(super) async fn handle_relay_admin_event_enforced(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    event: &Event,
+    protected: &crate::authorization_runtime::transport::ProtectedAuthorization,
+) -> Result<(), RelayAdminError> {
+    enforce_freshness(event).map_err(RelayAdminError::Rejected)?;
+    let operation_id = crate::authorization_runtime::executor::ProtectedOperationId::derive(
+        tenant.community(),
+        "relay.admin.v1",
+        event.id.as_bytes(),
+    )
+    .map_err(|error| RelayAdminError::Internal(error.to_string()))?;
+    let mut request = Sha256::new();
+    request.update(b"buzz-relay-admin-request-v1");
+    request.update(event.id.as_bytes());
+    request.update((event.kind.as_u16() as u32).to_be_bytes());
+    let permit = protected
+        .seal_postgres_mutation(operation_id, "relay.admin.v1", request.finalize().into())
+        .map_err(|_| RelayAdminError::Rejected("protected authorization denied".into()))?
+        .ok_or_else(|| RelayAdminError::Rejected("protected authorization denied".into()))?;
+    match crate::authorization_runtime::executor::begin_authorized_operation(state, permit)
+        .await
+        .map_err(|error| RelayAdminError::Internal(error.to_string()))?
+    {
+        crate::authorization_runtime::executor::AuthorizedOperationStart::Replay(payload) => {
+            if payload.as_slice() != b"applied" {
+                return Err(RelayAdminError::Internal(
+                    "protected relay-admin receipt is invalid".into(),
+                ));
+            }
+        }
+        crate::authorization_runtime::executor::AuthorizedOperationStart::Execute(
+            mut operation,
+        ) => {
+            let restriction = buzz_db::moderation::restriction_state_tx(
+                operation.transaction(),
+                tenant.community(),
+                &event.pubkey.to_bytes(),
+            )
+            .await
+            .map_err(|error| RelayAdminError::Internal(error.to_string()))?;
+            admits_relay_admin_command(&restriction)?;
+            execute_relay_admin_command_tx(tenant, event, operation.transaction())
+                .await
+                .map_err(RelayAdminError::Rejected)?;
+            operation
+                .commit(b"applied")
+                .await
+                .map_err(|error| RelayAdminError::Internal(error.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
+fn enforce_freshness(event: &Event) -> Result<(), String> {
+    let event_ts = event.created_at.as_secs() as i64;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0);
+    if (event_ts - now).abs() > 120 {
+        return Err(format!(
+            "event timestamp out of range: created_at={event_ts}, now={now}, delta={}s (max ±120s)",
+            event_ts - now
+        ));
+    }
+    Ok(())
+}
+
+async fn execute_relay_admin_command_tx(
+    tenant: &TenantContext,
+    event: &Event,
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(), String> {
+    let kind = event.kind.as_u16() as u32;
+    let sender_hex = event.pubkey.to_hex();
+    let sender_member =
+        buzz_db::relay_members::get_relay_member_tx(transaction, tenant.community(), &sender_hex)
+            .await
+            .map_err(|error| format!("database error: {error}"))?;
+    let sender_role = sender_member
+        .as_ref()
+        .map(|member| member.role.as_str())
+        .unwrap_or("");
+
+    if kind == RELAY_ADMIN_SET_WORKSPACE_PROFILE {
+        if sender_role != "admin" && sender_role != "owner" {
+            return Err("actor not authorized: must be admin or owner".into());
+        }
+        let icon = extract_tag_value(event, "icon").unwrap_or_default();
+        validate_workspace_icon(&icon)?;
+        let updated = sqlx::query("UPDATE communities SET icon = $2 WHERE id = $1")
+            .bind(tenant.community().as_uuid())
+            .bind((!icon.is_empty()).then_some(icon.as_str()))
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| format!("failed to store workspace icon: {error}"))?;
+        if updated.rows_affected() != 1 {
+            return Err("community not found".into());
+        }
+        return Ok(());
+    }
+
+    let target_hex = extract_p_tag_hex(event)
+        .ok_or_else(|| "missing or invalid p tag".to_string())?
+        .to_ascii_lowercase();
+    match kind {
+        RELAY_ADMIN_ADD_MEMBER => {
+            if sender_role != "admin" && sender_role != "owner" {
+                return Err("actor not authorized: must be admin or owner".into());
+            }
+            let role = extract_tag_value(event, "role").unwrap_or_else(|| "member".into());
+            if role == "owner" {
+                return Err("invalid role: use kind:9032 to promote to owner".into());
+            }
+            if role == "admin" && sender_role != "owner" {
+                return Err("actor not authorized: only owner can grant admin role".into());
+            }
+            if role != "admin" && role != "member" {
+                return Err(format!("invalid role: {role}"));
+            }
+            buzz_db::relay_members::add_relay_member_tx(
+                transaction,
+                tenant.community(),
+                &target_hex,
+                &role,
+                Some(&sender_hex),
+            )
+            .await
+            .map_err(|error| format!("database error: {error}"))?;
+        }
+        RELAY_ADMIN_REMOVE_MEMBER => {
+            if sender_role != "admin" && sender_role != "owner" {
+                return Err("actor not authorized: must be admin or owner".into());
+            }
+            if target_hex == sender_hex {
+                return Err("cannot remove yourself".into());
+            }
+            let result = if sender_role == "admin" {
+                buzz_db::relay_members::remove_relay_member_if_role_tx(
+                    transaction,
+                    tenant.community(),
+                    &target_hex,
+                    "member",
+                )
+                .await
+            } else {
+                buzz_db::relay_members::remove_relay_member_tx(
+                    transaction,
+                    tenant.community(),
+                    &target_hex,
+                )
+                .await
+            }
+            .map_err(|error| format!("database error: {error}"))?;
+            match result {
+                RemoveResult::Removed => {}
+                RemoveResult::IsOwner => return Err("cannot remove the relay owner".into()),
+                RemoveResult::NotFound => return Err(format!("member not found: {target_hex}")),
+                RemoveResult::RoleMismatch => {
+                    return Err("actor not authorized: admins can only remove members".into())
+                }
+            }
+        }
+        RELAY_ADMIN_CHANGE_ROLE => {
+            if sender_role != "owner" {
+                return Err("actor not authorized: must be owner".into());
+            }
+            if target_hex == sender_hex {
+                return Err("cannot change your own role".into());
+            }
+            let new_role =
+                extract_tag_value(event, "role").ok_or_else(|| "missing role tag".to_string())?;
+            if new_role == "owner" {
+                return Err("cannot set role to owner".into());
+            }
+            if new_role != "admin" && new_role != "member" {
+                return Err(format!("invalid role: {new_role}"));
+            }
+            if !buzz_db::relay_members::update_relay_member_role_tx(
+                transaction,
+                tenant.community(),
+                &target_hex,
+                &new_role,
+            )
+            .await
+            .map_err(|error| format!("database error: {error}"))?
+            {
+                let exists = buzz_db::relay_members::get_relay_member_tx(
+                    transaction,
+                    tenant.community(),
+                    &target_hex,
+                )
+                .await
+                .map_err(|error| format!("database error: {error}"))?;
+                return Err(if exists.is_some() {
+                    "cannot change the relay owner's role".into()
+                } else {
+                    format!("member not found: {target_hex}")
+                });
+            }
+        }
+        other => return Err(format!("unexpected relay admin kind: {other}")),
+    }
+    Ok(())
+}
+
 /// Execute an already-admitted relay admin command.
 ///
 /// The handler:
@@ -231,19 +444,7 @@ async fn execute_relay_admin_command(
     // This mirrors the NIP-42 auth event freshness check and prevents replay
     // of captured admin commands. The window is intentionally tight — admin
     // events should be freshly signed.
-    {
-        let event_ts = event.created_at.as_secs() as i64;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        if (event_ts - now).abs() > 120 {
-            return Err(format!(
-                "event timestamp out of range: created_at={event_ts}, now={now}, delta={}s (max ±120s)",
-                event_ts - now
-            ));
-        }
-    }
+    enforce_freshness(event)?;
 
     let sender_member = state
         .db

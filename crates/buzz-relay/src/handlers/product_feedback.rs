@@ -5,6 +5,7 @@ use std::sync::Arc;
 use buzz_core::tenant::TenantContext;
 use buzz_db::product_feedback::NewProductFeedback;
 use nostr::Event;
+use sha2::{Digest, Sha256};
 
 use crate::state::AppState;
 
@@ -18,6 +19,101 @@ pub async fn handle(
     event: &Event,
     state: &Arc<AppState>,
 ) -> Result<(), String> {
+    let (category, tags, event_created_at) = validate(tenant, event, state).await?;
+    state
+        .db
+        .insert_product_feedback(
+            tenant.community(),
+            NewProductFeedback {
+                event_id: event.id.as_bytes(),
+                submitter_pubkey: &event.pubkey.to_bytes(),
+                category,
+                body: &event.content,
+                tags: &tags,
+                event_created_at,
+            },
+        )
+        .await
+        .map_err(|e| format!("error: database error inserting product feedback: {e}"))?;
+
+    Ok(())
+}
+
+/// Validate and persist feedback at the transaction-owned protected commit
+/// boundary. A retry observes the original receipt and never writes twice.
+pub async fn handle_enforced(
+    tenant: &TenantContext,
+    event: &Event,
+    state: &Arc<AppState>,
+    protected: &crate::authorization_runtime::transport::ProtectedAuthorization,
+) -> Result<(), String> {
+    let (category, tags, event_created_at) = validate(tenant, event, state).await?;
+    let operation_id = crate::authorization_runtime::executor::ProtectedOperationId::derive(
+        tenant.community(),
+        "product.feedback.v1",
+        event.id.as_bytes(),
+    )
+    .map_err(|error| format!("error: {error}"))?;
+    let mut request = Sha256::new();
+    request.update(b"buzz-product-feedback-request-v1");
+    request.update(event.id.as_bytes());
+    let permit = protected
+        .seal_postgres_mutation(
+            operation_id,
+            "product.feedback.v1",
+            request.finalize().into(),
+        )
+        .map_err(|_| "restricted: protected authorization denied".to_string())?
+        .ok_or_else(|| "restricted: protected authorization denied".to_string())?;
+    match crate::authorization_runtime::executor::begin_authorized_operation(state, permit)
+        .await
+        .map_err(|error| format!("restricted: {error}"))?
+    {
+        crate::authorization_runtime::executor::AuthorizedOperationStart::Replay(payload) => {
+            if payload.as_slice() != b"accepted" {
+                return Err("error: protected feedback receipt is invalid".to_string());
+            }
+        }
+        crate::authorization_runtime::executor::AuthorizedOperationStart::Execute(
+            mut operation,
+        ) => {
+            buzz_db::product_feedback::insert_tx(
+                operation.transaction(),
+                tenant.community(),
+                NewProductFeedback {
+                    event_id: event.id.as_bytes(),
+                    submitter_pubkey: &event.pubkey.to_bytes(),
+                    category,
+                    body: &event.content,
+                    tags: &tags,
+                    event_created_at,
+                },
+            )
+            .await
+            .map_err(|error| {
+                format!("error: database error inserting product feedback: {error}")
+            })?;
+            operation
+                .commit(b"accepted")
+                .await
+                .map_err(|error| format!("restricted: {error}"))?;
+        }
+    }
+    Ok(())
+}
+
+async fn validate<'a>(
+    tenant: &TenantContext,
+    event: &'a Event,
+    state: &Arc<AppState>,
+) -> Result<
+    (
+        Option<&'a str>,
+        serde_json::Value,
+        chrono::DateTime<chrono::Utc>,
+    ),
+    String,
+> {
     let category = parse_category(event)?;
     validate_body(&event.content)?;
     let imeta_tags = event
@@ -38,23 +134,7 @@ pub async fn handle(
         chrono::DateTime::from_timestamp(event.created_at.as_secs() as i64, 0)
             .ok_or_else(|| "invalid: feedback timestamp is out of range".to_string())?;
 
-    state
-        .db
-        .insert_product_feedback(
-            tenant.community(),
-            NewProductFeedback {
-                event_id: event.id.as_bytes(),
-                submitter_pubkey: &event.pubkey.to_bytes(),
-                category,
-                body: &event.content,
-                tags: &tags,
-                event_created_at,
-            },
-        )
-        .await
-        .map_err(|e| format!("error: database error inserting product feedback: {e}"))?;
-
-    Ok(())
+    Ok((category, tags, event_created_at))
 }
 
 fn serialize_tags(event: &Event) -> Result<serde_json::Value, String> {

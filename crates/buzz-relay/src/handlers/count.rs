@@ -50,6 +50,40 @@ pub async fn handle_count(
         }
     };
 
+    let protected_result = match state.conn_manager.authority_for_conn(conn.conn_id) {
+        Some(proof) => {
+            crate::authorization_runtime::transport::authorize_session_if_configured(
+                &state,
+                proof,
+                state
+                    .conn_manager
+                    .federated_assertion_for_conn(conn.conn_id),
+                buzz_auth::AuthorizationCapability::CommunityRead,
+                uuid::Uuid::new_v4(),
+                "ws_count",
+                conn.conn_id,
+                conn.cancel.clone(),
+            )
+            .await
+        }
+        None => crate::authorization_runtime::transport::authorize_unwired_if_configured(
+            &state,
+            conn.tenant.community(),
+        ),
+    };
+    let protected = Arc::new(match protected_result {
+        Ok(authority) => authority,
+        Err(error) => {
+            warn!(error = %error, "protected COUNT authorization denied");
+            conn.send_terminal(RelayMessage::closed(
+                &sub_id,
+                "auth-required: protected authorization denied",
+            ));
+            conn.cancel.cancel();
+            return;
+        }
+    });
+
     // P-gated kinds (gift wraps, member notifications, observer frames) require
     // the caller's own pubkey in the #p tag — same enforcement as WS REQ handler.
     let authed_pubkey_hex = hex::encode(&pubkey_bytes);
@@ -83,7 +117,10 @@ pub async fn handle_count(
         Ok(ids) => ids,
         Err(e) => {
             warn!(sub_id = %sub_id, "Failed to get accessible channels: {e}");
-            conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+            conn.send_protected(
+                RelayMessage::closed(&sub_id, "error: database error"),
+                Arc::clone(&protected),
+            );
             return;
         }
     };
@@ -98,6 +135,7 @@ pub async fn handle_count(
 
     // For each filter, count matching events with channel access enforcement.
     let mut total: u64 = 0;
+    let mut release_channels = std::collections::BTreeSet::new();
     for filter in &filters {
         // Determine if this filter can match author-only kinds — if so, the
         // fast-path count_events() cannot be used because it doesn't do
@@ -134,7 +172,10 @@ pub async fn handle_count(
                     Ok(member) => Some(member),
                     Err(e) => {
                         warn!(sub_id = %sub_id, "Channel membership confirmation failed: {e}");
-                        conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+                        conn.send_protected(
+                            RelayMessage::closed(&sub_id, "error: database error"),
+                            Arc::clone(&protected),
+                        );
                         return;
                     }
                 }
@@ -149,6 +190,7 @@ pub async fn handle_count(
             ) {
                 continue; // Skip filters targeting inaccessible channels.
             }
+            release_channels.insert(ch_id);
             // Channel is accessible — count with pushability check.
             let mut query = super::req::build_event_query_from_filter(
                 filter,
@@ -176,7 +218,10 @@ pub async fn handle_count(
                 match state.db.count_events_routed("count_req", &query).await {
                     Ok(n) => total += n as u64,
                     Err(e) => {
-                        conn.send(RelayMessage::closed(&sub_id, &format!("error: {e}")));
+                        conn.send_protected(
+                            RelayMessage::closed(&sub_id, &format!("error: {e}")),
+                            Arc::clone(&protected),
+                        );
                         return;
                     }
                 }
@@ -192,10 +237,13 @@ pub async fn handle_count(
                     Ok(stored_events) => {
                         if super::req::count_fallback_exceeded(stored_events.len()) {
                             metrics::counter!("buzz_count_fallback_rejections_total").increment(1);
-                            conn.send(RelayMessage::closed(
-                                &sub_id,
-                                "restricted: count filter requires narrower constraints",
-                            ));
+                            conn.send_protected(
+                                RelayMessage::closed(
+                                    &sub_id,
+                                    "restricted: count filter requires narrower constraints",
+                                ),
+                                Arc::clone(&protected),
+                            );
                             return;
                         }
                         for se in stored_events {
@@ -210,7 +258,10 @@ pub async fn handle_count(
                         }
                     }
                     Err(e) => {
-                        conn.send(RelayMessage::closed(&sub_id, &format!("error: {e}")));
+                        conn.send_protected(
+                            RelayMessage::closed(&sub_id, &format!("error: {e}")),
+                            Arc::clone(&protected),
+                        );
                         return;
                     }
                 }
@@ -222,6 +273,7 @@ pub async fn handle_count(
             // If the filter has generic tags beyond what SQL can push down
             // (#h, #p single, #d single, #e), we must fall back to
             // query + post-filter to avoid overcounting.
+            release_channels.extend(accessible_channels.iter().copied());
             let mut query = super::req::build_event_query_from_filter(
                 filter,
                 &pubkey_bytes,
@@ -250,7 +302,10 @@ pub async fn handle_count(
                 match state.db.count_events_routed("count_req", &query).await {
                     Ok(n) => total += n as u64,
                     Err(e) => {
-                        conn.send(RelayMessage::closed(&sub_id, &format!("error: {e}")));
+                        conn.send_protected(
+                            RelayMessage::closed(&sub_id, &format!("error: {e}")),
+                            Arc::clone(&protected),
+                        );
                         return;
                     }
                 }
@@ -265,10 +320,13 @@ pub async fn handle_count(
                     Ok(stored_events) => {
                         if super::req::count_fallback_exceeded(stored_events.len()) {
                             metrics::counter!("buzz_count_fallback_rejections_total").increment(1);
-                            conn.send(RelayMessage::closed(
-                                &sub_id,
-                                "restricted: count filter requires narrower constraints",
-                            ));
+                            conn.send_protected(
+                                RelayMessage::closed(
+                                    &sub_id,
+                                    "restricted: count filter requires narrower constraints",
+                                ),
+                                Arc::clone(&protected),
+                            );
                             return;
                         }
                         for se in stored_events {
@@ -283,12 +341,24 @@ pub async fn handle_count(
                         }
                     }
                     Err(e) => {
-                        conn.send(RelayMessage::closed(&sub_id, &format!("error: {e}")));
+                        conn.send_protected(
+                            RelayMessage::closed(&sub_id, &format!("error: {e}")),
+                            Arc::clone(&protected),
+                        );
                         return;
                     }
                 }
             }
         }
     }
-    conn.send(RelayMessage::count(&sub_id, total));
+    let release = crate::connection::queued_channel_set_read_authority(
+        state.db.clone(),
+        conn.tenant.community(),
+        release_channels.into_iter().collect(),
+        pubkey_bytes,
+        Some(protected),
+    );
+    if !conn.send_guarded(RelayMessage::count(&sub_id, total), release) {
+        conn.cancel.cancel();
+    }
 }

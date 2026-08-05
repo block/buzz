@@ -65,6 +65,7 @@ use buzz_core::kind::{
 use buzz_core::tenant::TenantContext;
 use chrono::{DateTime, TimeZone, Utc};
 use nostr::Event;
+use sha2::{Digest, Sha256};
 use tracing::info;
 use uuid::Uuid;
 
@@ -130,6 +131,495 @@ pub async fn handle_moderation_command(
             "unexpected moderation command kind: {other}"
         ))),
     }
+}
+
+/// Execute a moderation command in the protected PostgreSQL authorization
+/// transaction. Durable moderation state, audit state, and the idempotency
+/// receipt commit together; notices and disconnects are derived delivery after
+/// that authoritative commit.
+pub async fn handle_moderation_command_enforced(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    event: &Event,
+    authority: &crate::authorization_runtime::transport::ProtectedAuthorization,
+) -> Result<(), String> {
+    let actor = event.pubkey.to_bytes().to_vec();
+    validate_command_admission(tenant, state, event, &actor).await?;
+    let command = ProtectedModerationCommand::parse(event)?;
+    command.authorize(tenant, state, &actor).await?;
+
+    let operation_id = crate::authorization_runtime::executor::ProtectedOperationId::derive(
+        tenant.community(),
+        "moderation.command.v1",
+        event.id.as_bytes(),
+    )
+    .map_err(|execution_error| error(execution_error.to_string()))?;
+    let mut request = Sha256::new();
+    request.update(b"buzz-moderation-command-request-v1");
+    request.update(event.id.as_bytes());
+    request.update((event.kind.as_u16() as u32).to_be_bytes());
+    let permit = authority
+        .seal_postgres_mutation(
+            operation_id,
+            "moderation.command.v1",
+            request.finalize().into(),
+        )
+        .map_err(|_| "restricted: protected authorization denied".to_string())?
+        .ok_or_else(|| "restricted: protected authorization denied".to_string())?;
+
+    let post_commit =
+        match crate::authorization_runtime::executor::begin_authorized_operation(state, permit)
+            .await
+            .map_err(|execution_error| format!("restricted: {execution_error}"))?
+        {
+            crate::authorization_runtime::executor::AuthorizedOperationStart::Replay(payload) => {
+                if payload.as_slice() != b"moderated" {
+                    return Err(error("protected moderation receipt is invalid"));
+                }
+                None
+            }
+            crate::authorization_runtime::executor::AuthorizedOperationStart::Execute(
+                mut operation,
+            ) => {
+                command
+                    .authorize_tx(operation.transaction(), tenant, &actor)
+                    .await?;
+                let post_commit = command
+                    .execute(operation.transaction(), tenant, &actor)
+                    .await?;
+                operation
+                    .commit(b"moderated")
+                    .await
+                    .map_err(|execution_error| format!("restricted: {execution_error}"))?;
+                Some(post_commit)
+            }
+        };
+
+    if let Some(post_commit) = post_commit {
+        post_commit.deliver_enforced(tenant, state, event).await;
+    }
+    Ok(())
+}
+
+async fn validate_command_admission(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    event: &Event,
+    actor: &[u8],
+) -> Result<(), String> {
+    let restriction = state
+        .db
+        .moderation_restriction_state(tenant.community(), actor)
+        .await
+        .map_err(|e| error(format!("database error checking restriction state: {e}")))?;
+    ensure_actor_not_banned(&restriction)?;
+    let event_ts = event.created_at.as_secs() as i64;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0);
+    if (event_ts - now).abs() > MAX_COMMAND_SKEW_SECS {
+        return Err(invalid(format!(
+            "event timestamp out of range: created_at={event_ts}, now={now}, delta={}s (max ±{MAX_COMMAND_SKEW_SECS}s)",
+            event_ts - now
+        )));
+    }
+    Ok(())
+}
+
+enum ProtectedModerationCommand {
+    Ban {
+        target: Vec<u8>,
+        expires_at: Option<DateTime<Utc>>,
+        reason: Option<String>,
+    },
+    Unban {
+        target: Vec<u8>,
+    },
+    Timeout {
+        target: Vec<u8>,
+        muted_until: DateTime<Utc>,
+        reason: Option<String>,
+    },
+    Untimeout {
+        target: Vec<u8>,
+    },
+    Resolve {
+        report_event_id: Vec<u8>,
+        status: String,
+        action: String,
+        reason: Option<String>,
+    },
+}
+
+impl ProtectedModerationCommand {
+    fn parse(event: &Event) -> Result<Self, String> {
+        match event.kind.as_u16() as u32 {
+            KIND_MODERATION_BAN => Ok(Self::Ban {
+                target: extract_p_tag_bytes(event)
+                    .ok_or_else(|| invalid("missing or invalid p tag"))?,
+                expires_at: extract_expiration(event)?,
+                reason: extract_tag_value(event, "reason"),
+            }),
+            KIND_MODERATION_UNBAN => Ok(Self::Unban {
+                target: extract_p_tag_bytes(event)
+                    .ok_or_else(|| invalid("missing or invalid p tag"))?,
+            }),
+            KIND_MODERATION_TIMEOUT => Ok(Self::Timeout {
+                target: extract_p_tag_bytes(event)
+                    .ok_or_else(|| invalid("missing or invalid p tag"))?,
+                muted_until: extract_expiration(event)?
+                    .ok_or_else(|| invalid("timeout requires an expiration tag"))?,
+                reason: extract_tag_value(event, "reason"),
+            }),
+            KIND_MODERATION_UNTIMEOUT => Ok(Self::Untimeout {
+                target: extract_p_tag_bytes(event)
+                    .ok_or_else(|| invalid("missing or invalid p tag"))?,
+            }),
+            KIND_MODERATION_RESOLVE_REPORT => {
+                let report_event_id = extract_report_tag(event).ok_or_else(|| {
+                    invalid("missing or invalid report tag (expect 64-hex event id)")
+                })?;
+                let status = extract_tag_value(event, "status")
+                    .ok_or_else(|| invalid("missing status tag"))?;
+                let action = extract_tag_value(event, "action")
+                    .ok_or_else(|| invalid("missing action tag"))?;
+                validate_resolution(&status, &action)?;
+                Ok(Self::Resolve {
+                    report_event_id,
+                    status,
+                    action,
+                    reason: extract_tag_value(event, "reason"),
+                })
+            }
+            other => Err(invalid(format!(
+                "unexpected moderation command kind: {other}"
+            ))),
+        }
+    }
+
+    async fn authorize(
+        &self,
+        tenant: &TenantContext,
+        state: &Arc<AppState>,
+        actor: &[u8],
+    ) -> Result<(), String> {
+        let (target, action) = match self {
+            Self::Ban { target, .. } => (ModerationTarget::Pubkey(target), ModerationAction::Ban),
+            Self::Unban { target } => (ModerationTarget::Pubkey(target), ModerationAction::Unban),
+            Self::Timeout { target, .. } => {
+                (ModerationTarget::Pubkey(target), ModerationAction::Timeout)
+            }
+            Self::Untimeout { target } => (
+                ModerationTarget::Pubkey(target),
+                ModerationAction::Untimeout,
+            ),
+            Self::Resolve {
+                report_event_id, ..
+            } => (
+                ModerationTarget::Event(report_event_id),
+                ModerationAction::ResolveReport,
+            ),
+        };
+        authorize_moderation_action(tenant, state, actor, None, target, action)
+            .await
+            .map(|_| ())
+            .map_err(authz_denial)
+    }
+
+    async fn authorize_tx(
+        &self,
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        tenant: &TenantContext,
+        actor: &[u8],
+    ) -> Result<(), String> {
+        let (target, action) = match self {
+            Self::Ban { target, .. } => (ModerationTarget::Pubkey(target), ModerationAction::Ban),
+            Self::Unban { target } => (ModerationTarget::Pubkey(target), ModerationAction::Unban),
+            Self::Timeout { target, .. } => {
+                (ModerationTarget::Pubkey(target), ModerationAction::Timeout)
+            }
+            Self::Untimeout { target } => (
+                ModerationTarget::Pubkey(target),
+                ModerationAction::Untimeout,
+            ),
+            Self::Resolve {
+                report_event_id, ..
+            } => (
+                ModerationTarget::Event(report_event_id),
+                ModerationAction::ResolveReport,
+            ),
+        };
+        super::moderation_authz::authorize_moderation_action_tx(
+            transaction,
+            tenant,
+            actor,
+            None,
+            target,
+            action,
+        )
+        .await
+        .map(|_| ())
+        .map_err(authz_denial)
+    }
+
+    async fn execute(
+        &self,
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        tenant: &TenantContext,
+        actor: &[u8],
+    ) -> Result<ModerationPostCommit, String> {
+        let community = tenant.community();
+        match self {
+            Self::Ban {
+                target,
+                expires_at,
+                reason,
+            } => {
+                buzz_db::moderation::ban_member_tx(
+                    transaction,
+                    community,
+                    target,
+                    actor,
+                    reason.as_deref(),
+                    *expires_at,
+                )
+                .await
+                .map_err(moderation_db_error)?;
+                insert_audit_tx(
+                    transaction,
+                    community,
+                    actor,
+                    "ban",
+                    Some(target),
+                    None,
+                    reason.as_deref(),
+                )
+                .await?;
+                Ok(ModerationPostCommit::Ban {
+                    target: target.clone(),
+                })
+            }
+            Self::Unban { target } => {
+                if !buzz_db::moderation::unban_member_tx(transaction, community, target, actor)
+                    .await
+                    .map_err(moderation_db_error)?
+                {
+                    return Err(invalid("member is not banned"));
+                }
+                insert_audit_tx(
+                    transaction,
+                    community,
+                    actor,
+                    "unban",
+                    Some(target),
+                    None,
+                    None,
+                )
+                .await?;
+                Ok(ModerationPostCommit::None)
+            }
+            Self::Timeout {
+                target,
+                muted_until,
+                reason,
+            } => {
+                buzz_db::moderation::timeout_member_tx(
+                    transaction,
+                    community,
+                    target,
+                    actor,
+                    *muted_until,
+                    reason.as_deref(),
+                )
+                .await
+                .map_err(moderation_db_error)?;
+                insert_audit_tx(
+                    transaction,
+                    community,
+                    actor,
+                    "timeout",
+                    Some(target),
+                    None,
+                    reason.as_deref(),
+                )
+                .await?;
+                Ok(ModerationPostCommit::None)
+            }
+            Self::Untimeout { target } => {
+                if !buzz_db::moderation::untimeout_member_tx(transaction, community, target, actor)
+                    .await
+                    .map_err(moderation_db_error)?
+                {
+                    return Err(invalid("member is not timed out"));
+                }
+                insert_audit_tx(
+                    transaction,
+                    community,
+                    actor,
+                    "untimeout",
+                    Some(target),
+                    None,
+                    None,
+                )
+                .await?;
+                Ok(ModerationPostCommit::None)
+            }
+            Self::Resolve {
+                report_event_id,
+                status,
+                action,
+                reason,
+            } => {
+                let report = buzz_db::moderation::get_report_by_event_tx(
+                    transaction,
+                    community,
+                    report_event_id,
+                )
+                .await
+                .map_err(moderation_db_error)?
+                .ok_or_else(|| invalid("report not found in this community"))?;
+                if report.status != "open" {
+                    return Err(invalid(
+                        "report is not open (already resolved or dismissed)",
+                    ));
+                }
+                let (target_pubkey, target_event_id) = match &report.target {
+                    buzz_db::moderation::ReportTarget::Pubkey(pubkey) => {
+                        (Some(pubkey.as_slice()), None)
+                    }
+                    buzz_db::moderation::ReportTarget::Event(event_id) => {
+                        (None, Some(event_id.as_slice()))
+                    }
+                    buzz_db::moderation::ReportTarget::Blob(_) => (None, None),
+                };
+                let action_id = insert_audit_tx(
+                    transaction,
+                    community,
+                    actor,
+                    resolution_audit_action(action),
+                    target_pubkey,
+                    target_event_id,
+                    reason.as_deref(),
+                )
+                .await?;
+                if !buzz_db::moderation::resolve_report_tx(
+                    transaction,
+                    community,
+                    report.id,
+                    status,
+                    actor,
+                    Some(action_id),
+                )
+                .await
+                .map_err(moderation_db_error)?
+                {
+                    return Err(invalid(
+                        "report is not open (already resolved or dismissed)",
+                    ));
+                }
+                Ok(ModerationPostCommit::Resolve {
+                    report_id: report.id,
+                    status: status.clone(),
+                    action: action.clone(),
+                })
+            }
+        }
+    }
+}
+
+enum ModerationPostCommit {
+    None,
+    Ban {
+        target: Vec<u8>,
+    },
+    Resolve {
+        report_id: Uuid,
+        status: String,
+        action: String,
+    },
+}
+
+impl ModerationPostCommit {
+    /// Apply only effects that are safe after the transaction-owned Enforce
+    /// commit. Relay-signed notice delivery is intentionally unavailable here:
+    /// it can create or unhide a DM and persist helper events, so treating it as
+    /// derived delivery would reopen an unfenced protected mutation path.
+    async fn deliver_enforced(self, tenant: &TenantContext, state: &Arc<AppState>, event: &Event) {
+        match self {
+            Self::None => {}
+            Self::Ban { target } => {
+                state.disconnect_pubkey_clusterwide(
+                    tenant,
+                    &target,
+                    &event.id.to_hex(),
+                    "blocked: you are banned from this community",
+                );
+            }
+            Self::Resolve {
+                report_id,
+                status,
+                action,
+            } => {
+                info!(%report_id, %status, %action, "report resolved");
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn insert_audit_tx(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    community: buzz_core::CommunityId,
+    actor: &[u8],
+    action: &str,
+    target_pubkey: Option<&[u8]>,
+    target_event_id: Option<&[u8]>,
+    public_reason: Option<&str>,
+) -> Result<Uuid, String> {
+    buzz_db::moderation::insert_action_tx(
+        transaction,
+        community,
+        NewAction {
+            actor_pubkey: actor,
+            action,
+            target_pubkey,
+            target_event_id,
+            channel_id: None,
+            reason_code: None,
+            public_reason,
+            private_reason: None,
+            matched_principal: None,
+        },
+    )
+    .await
+    .map_err(|database_error| error(format!("failed to write audit row: {database_error}")))
+}
+
+fn moderation_db_error(database_error: buzz_db::DbError) -> String {
+    error(format!("database error: {database_error}"))
+}
+
+fn validate_resolution(status: &str, action: &str) -> Result<(), String> {
+    if status != "resolved" && status != "dismissed" {
+        return Err(invalid(format!(
+            "invalid status: {status} (expect resolved|dismissed)"
+        )));
+    }
+    if !matches!(
+        action,
+        "delete" | "kick" | "ban" | "timeout" | "dismiss" | "escalate"
+    ) {
+        return Err(invalid(format!(
+            "invalid action: {action} (expect delete|kick|ban|timeout|dismiss|escalate)"
+        )));
+    }
+    if (action == "dismiss") != (status == "dismissed") {
+        return Err(invalid(
+            "action `dismiss` pairs only with status `dismissed`",
+        ));
+    }
+    Ok(())
 }
 
 fn ensure_actor_not_banned(

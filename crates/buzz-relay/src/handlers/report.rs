@@ -22,6 +22,7 @@ use std::sync::Arc;
 use buzz_core::tenant::TenantContext;
 use buzz_db::moderation::{NewReport, ReportTarget};
 use nostr::Event;
+use sha2::{Digest, Sha256};
 
 use crate::state::AppState;
 
@@ -46,6 +47,100 @@ pub async fn handle_report_event(
     event: &Event,
     state: &Arc<AppState>,
 ) -> Result<(), String> {
+    let prepared = prepare_report(tenant, event, state).await?;
+
+    state
+        .db
+        .insert_moderation_report(
+            tenant.community(),
+            prepared.as_new_report(event.id.as_bytes()),
+        )
+        .await
+        .map_err(|e| format!("error: database error inserting report: {e}"))?;
+
+    Ok(())
+}
+
+/// Persist a protected report and its authorization receipt atomically.
+pub async fn handle_report_event_enforced(
+    tenant: &TenantContext,
+    event: &Event,
+    state: &Arc<AppState>,
+    authority: &crate::authorization_runtime::transport::ProtectedAuthorization,
+) -> Result<(), String> {
+    let prepared = prepare_report(tenant, event, state).await?;
+    let operation_id = crate::authorization_runtime::executor::ProtectedOperationId::derive(
+        tenant.community(),
+        "moderation.report.v1",
+        event.id.as_bytes(),
+    )
+    .map_err(|error| format!("error: {error}"))?;
+    let mut request = Sha256::new();
+    request.update(b"buzz-moderation-report-request-v1");
+    request.update(event.id.as_bytes());
+    let permit = authority
+        .seal_postgres_mutation(
+            operation_id,
+            "moderation.report.v1",
+            request.finalize().into(),
+        )
+        .map_err(|_| "restricted: protected authorization denied".to_string())?
+        .ok_or_else(|| "restricted: protected authorization denied".to_string())?;
+
+    match crate::authorization_runtime::executor::begin_authorized_operation(state, permit)
+        .await
+        .map_err(|error| format!("restricted: {error}"))?
+    {
+        crate::authorization_runtime::executor::AuthorizedOperationStart::Replay(payload) => {
+            if payload.as_slice() != b"reported" {
+                return Err("error: protected report receipt is invalid".to_string());
+            }
+        }
+        crate::authorization_runtime::executor::AuthorizedOperationStart::Execute(
+            mut operation,
+        ) => {
+            buzz_db::moderation::insert_report_tx(
+                operation.transaction(),
+                tenant.community(),
+                prepared.as_new_report(event.id.as_bytes()),
+            )
+            .await
+            .map_err(|error| format!("error: database error inserting report: {error}"))?;
+            operation
+                .commit(b"reported")
+                .await
+                .map_err(|error| format!("restricted: {error}"))?;
+        }
+    }
+    Ok(())
+}
+
+struct PreparedReport {
+    reporter_pubkey: Vec<u8>,
+    target: ReportTarget,
+    channel_id: Option<uuid::Uuid>,
+    report_type: String,
+    note: Option<String>,
+}
+
+impl PreparedReport {
+    fn as_new_report<'a>(&'a self, report_event_id: &'a [u8]) -> NewReport<'a> {
+        NewReport {
+            report_event_id,
+            reporter_pubkey: &self.reporter_pubkey,
+            target: self.target.clone(),
+            channel_id: self.channel_id,
+            report_type: &self.report_type,
+            note: self.note.as_deref(),
+        }
+    }
+}
+
+async fn prepare_report(
+    tenant: &TenantContext,
+    event: &Event,
+    state: &Arc<AppState>,
+) -> Result<PreparedReport, String> {
     let parsed = parse_report(event)?;
     let reporter_pubkey = event.pubkey.to_bytes();
 
@@ -61,36 +156,35 @@ pub async fn handle_report_event(
         }
         ParsedReportTarget::Blob { sha256, .. } => {
             let sha_hex = hex::encode(&sha256);
-            // Known Phase-1 limitation: the media sidecar API does not expose a
-            // cheap typed not-found vs transient-storage distinction here, so
-            // all lookup failures surface as a missing blob to the reporter.
-            state
-                .media_storage
-                .get_sidecar(tenant, &sha_hex)
-                .await
-                .map_err(|_| "invalid: report target blob not found".to_string())?;
+            if state.is_protected_enforcing(tenant.community()) {
+                state
+                    .db
+                    .media_publication(tenant.community(), &sha_hex)
+                    .await
+                    .map_err(|error| {
+                        format!("error: database error resolving report target: {error}")
+                    })?
+                    .ok_or_else(|| "invalid: report target blob not found".to_string())?;
+            } else {
+                // Legacy modes preserve sidecar-authoritative resolution.
+                state
+                    .media_storage
+                    .get_sidecar(tenant, &sha_hex)
+                    .await
+                    .map_err(|_| "invalid: report target blob not found".to_string())?;
+            }
             (ReportTarget::Blob(sha256), None)
         }
         ParsedReportTarget::Pubkey { pubkey } => (ReportTarget::Pubkey(pubkey), None),
     };
 
-    state
-        .db
-        .insert_moderation_report(
-            tenant.community(),
-            NewReport {
-                report_event_id: event.id.as_bytes(),
-                reporter_pubkey: &reporter_pubkey,
-                target,
-                channel_id,
-                report_type: parsed.report_type,
-                note: report_note(event),
-            },
-        )
-        .await
-        .map_err(|e| format!("error: database error inserting report: {e}"))?;
-
-    Ok(())
+    Ok(PreparedReport {
+        reporter_pubkey: reporter_pubkey.to_vec(),
+        target,
+        channel_id,
+        report_type: parsed.report_type.to_owned(),
+        note: report_note(event).map(ToOwned::to_owned),
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

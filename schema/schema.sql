@@ -604,6 +604,89 @@ CREATE INDEX idx_identity_lifecycle_operations_principal
 CREATE INDEX idx_identity_lifecycle_operations_key
     ON identity_lifecycle_operations (community_id, pubkey, created_at);
 
+-- ── Authorization invalidation authority ──────────────────────────────────────
+-- Generations and selector floors are durable authority. Cross-node pub/sub
+-- carries only a hint that consumers should reconcile from these tables.
+
+CREATE TABLE authorization_invalidation_domains (
+    community_id UUID NOT NULL REFERENCES communities(id),
+    generation   BIGINT NOT NULL DEFAULT 0 CHECK (generation >= 0),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (community_id)
+);
+
+CREATE TABLE authorization_invalidation_receipts (
+    community_id        UUID NOT NULL REFERENCES communities(id),
+    event_id            UUID NOT NULL,
+    generation          BIGINT NOT NULL CHECK (generation > 0),
+    request_fingerprint BYTEA NOT NULL CHECK (length(request_fingerprint) = 32),
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (community_id, event_id),
+    UNIQUE (community_id, generation)
+);
+
+CREATE TABLE authorization_invalidation_floors (
+    community_id          UUID NOT NULL REFERENCES communities(id),
+    selector_kind         TEXT NOT NULL CHECK (selector_kind IN (
+        'principal_fingerprint',
+        'nostr_key',
+        'binding',
+        'session',
+        'domain',
+        'policy_version',
+        'delegated_owner'
+    )),
+    selector_fingerprint  BYTEA NOT NULL CHECK (length(selector_fingerprint) = 32),
+    generation            BIGINT NOT NULL CHECK (generation > 0),
+    sticky_deny           BOOLEAN NOT NULL DEFAULT FALSE,
+    binding_version_floor BIGINT CHECK (binding_version_floor > 0),
+    updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (community_id, selector_kind, selector_fingerprint),
+    FOREIGN KEY (community_id, generation)
+        REFERENCES authorization_invalidation_receipts (community_id, generation),
+    CHECK ((selector_kind = 'binding') = (binding_version_floor IS NOT NULL))
+);
+
+CREATE INDEX idx_authorization_invalidation_floors_generation
+    ON authorization_invalidation_floors (community_id, generation);
+
+-- Transaction-owned protected-operation idempotency. This is commit protocol
+-- state, not an authorization decision or operator audit log.
+CREATE TABLE authorization_operation_receipts (
+    community_id        UUID NOT NULL REFERENCES communities(id),
+    operation_id        UUID NOT NULL,
+    operation_kind      TEXT NOT NULL CHECK (
+        length(operation_kind) > 0 AND length(operation_kind) <= 128
+    ),
+    request_fingerprint BYTEA NOT NULL CHECK (length(request_fingerprint) = 32),
+    result_version      SMALLINT NOT NULL DEFAULT 1 CHECK (result_version > 0),
+    result_payload      BYTEA NOT NULL CHECK (octet_length(result_payload) <= 65536),
+    lease_expires_at    TIMESTAMPTZ NOT NULL,
+    committed_at        TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (community_id, operation_id)
+);
+
+CREATE INDEX idx_authorization_operation_receipts_committed_at
+    ON authorization_operation_receipts (community_id, committed_at);
+
+CREATE FUNCTION authorization_operation_expiry_guard() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.lease_expires_at <= clock_timestamp() THEN
+        RAISE EXCEPTION 'protected operation authorization expired before commit'
+            USING ERRCODE = 'check_violation';
+    END IF;
+    RETURN NULL;
+END
+$$;
+
+CREATE CONSTRAINT TRIGGER authorization_operation_expiry
+    AFTER INSERT OR UPDATE OF lease_expires_at
+    ON authorization_operation_receipts
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW
+    EXECUTE FUNCTION authorization_operation_expiry_guard();
+
 -- ── Events (partitioned by month on created_at) ──────────────────────────────
 -- Conformance: "Channel-less global events and DMs". `community_id` leads the
 -- PK and every hot-path index. Partition stays BY RANGE (created_at) — the

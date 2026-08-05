@@ -91,6 +91,28 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
         Ok(mut auth_ctx) => {
             let pubkey = auth_ctx.pubkey;
 
+            if state
+                .protected_transport()
+                .and_then(|runtime| runtime.mode_for_domain(conn.tenant.community()))
+                == Some(
+                    crate::authorization_runtime::finalization::AuthorizationMode::DenyProtected,
+                )
+            {
+                metrics::counter!(
+                    "buzz_auth_failures_total",
+                    "reason" => "deny_protected"
+                )
+                .increment(1);
+                *conn.auth_state.write().await = AuthState::Failed;
+                conn.send(RelayMessage::ok(
+                    &event_id_hex,
+                    false,
+                    "auth-required: protected authorization unavailable",
+                ));
+                conn.cancel.cancel();
+                return;
+            }
+
             // Community ban gate (NIP-42 seam). Runs immediately after auth
             // verification succeeds and before the allowlist and relay-membership
             // gates, per COMMUNITY_MODERATION_PLAN.md §0 decision 4 and the
@@ -183,14 +205,11 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 }
             }
 
-            let identity_assertion = conn.corporate_identity_jwt.as_ref().map(|jwt| {
-                crate::corporate_identity::IdentityAssertionInput::legacy_jwt(jwt.clone())
-            });
             let identity_proof = match crate::corporate_identity::verify_corporate_identity(
                 &state,
                 conn.tenant.community(),
                 pubkey,
-                identity_assertion.as_ref(),
+                conn.corporate_identity_assertion.as_ref(),
                 auth_tag_json.as_deref(),
             )
             .await

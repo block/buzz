@@ -21,6 +21,8 @@
 //! Pool connections handle all other commands.
 //! Lagged receivers get `RecvError::Lagged`.
 
+/// Provider-neutral durable authorization invalidation hints.
+pub mod authorization_invalidation;
 /// Cross-pod cache-key invalidation over Redis pub/sub.
 pub mod cache_invalidation;
 /// Cross-pod connection-control commands over Redis pub/sub.
@@ -51,6 +53,10 @@ use buzz_core::TenantContext;
 use nostr::PublicKey;
 use tokio::sync::{broadcast, mpsc, Mutex};
 
+use crate::authorization_invalidation::{
+    authorization_invalidation_channel, AuthorizationInvalidationHint,
+    ScopedAuthorizationInvalidationHint,
+};
 use crate::cache_invalidation::{
     cache_invalidation_channel, CacheInvalidation, ScopedCacheInvalidation,
 };
@@ -66,6 +72,8 @@ pub struct ChannelEvent {
     pub topic: EventTopic,
     /// The Nostr event payload.
     pub event: nostr::Event,
+    /// Opaque relay-authenticated authority retained for protected ephemeral delivery.
+    pub authority: Option<String>,
 }
 
 /// Configuration for the pub/sub subsystem.
@@ -109,6 +117,7 @@ pub struct PubSubManager {
     subscription_rx: Mutex<Option<mpsc::Receiver<subscriber::SubscriptionCommand>>>,
     broadcast_tx: broadcast::Sender<ChannelEvent>,
     cache_invalidation_tx: broadcast::Sender<ScopedCacheInvalidation>,
+    authorization_invalidation_tx: broadcast::Sender<ScopedAuthorizationInvalidationHint>,
     conn_control_tx: broadcast::Sender<ScopedConnControl>,
 }
 
@@ -125,6 +134,7 @@ impl PubSubManager {
     ) -> Result<Self, PubSubError> {
         let (broadcast_tx, _) = broadcast::channel(4096);
         let (cache_invalidation_tx, _) = broadcast::channel(4096);
+        let (authorization_invalidation_tx, _) = broadcast::channel(4096);
         let (conn_control_tx, _) = broadcast::channel(4096);
         let (subscription_tx, subscription_rx) = mpsc::channel(4096);
 
@@ -137,6 +147,7 @@ impl PubSubManager {
             subscription_rx: Mutex::new(Some(subscription_rx)),
             broadcast_tx,
             cache_invalidation_tx,
+            authorization_invalidation_tx,
             conn_control_tx,
         })
     }
@@ -166,6 +177,15 @@ impl PubSubManager {
         cache_invalidation::run_cache_invalidation_subscriber(
             self.redis_url.clone(),
             self.cache_invalidation_tx.clone(),
+        )
+        .await;
+    }
+
+    /// Starts the authorization-invalidation hint subscriber with reconnects.
+    pub async fn run_authorization_invalidation_subscriber(self: Arc<Self>) {
+        authorization_invalidation::run_authorization_invalidation_subscriber(
+            self.redis_url.clone(),
+            self.authorization_invalidation_tx.clone(),
         )
         .await;
     }
@@ -260,6 +280,13 @@ impl PubSubManager {
         self.cache_invalidation_tx.subscribe()
     }
 
+    /// Returns a receiver for durable authorization-generation hints.
+    pub fn subscribe_authorization_invalidations(
+        &self,
+    ) -> broadcast::Receiver<ScopedAuthorizationInvalidationHint> {
+        self.authorization_invalidation_tx.subscribe()
+    }
+
     /// Returns a new broadcast receiver for cross-pod connection-control commands.
     pub fn subscribe_conn_control(&self) -> broadcast::Receiver<ScopedConnControl> {
         self.conn_control_tx.subscribe()
@@ -280,6 +307,22 @@ impl PubSubManager {
             .arg(cache_invalidation_channel(ctx))
             .arg(&payload)
             .query_async(&mut conn)
+            .await?;
+        Ok(subscriber_count)
+    }
+
+    /// Publish a provider-neutral hint after a durable invalidation commit.
+    pub async fn publish_authorization_invalidation(
+        &self,
+        community_id: buzz_core::CommunityId,
+        hint: AuthorizationInvalidationHint,
+    ) -> Result<i64, PubSubError> {
+        let mut connection = self.pool.get().await?;
+        let payload = serde_json::to_string(&hint)?;
+        let subscriber_count: i64 = redis::cmd("PUBLISH")
+            .arg(authorization_invalidation_channel(community_id))
+            .arg(payload)
+            .query_async(&mut connection)
             .await?;
         Ok(subscriber_count)
     }
@@ -326,6 +369,17 @@ impl PubSubManager {
         event: &nostr::Event,
     ) -> Result<i64, PubSubError> {
         publisher::publish_event(&self.pool, ctx, topic, event).await
+    }
+
+    /// Publish an event with an opaque relay-owned authority envelope.
+    pub async fn publish_event_with_authority(
+        &self,
+        ctx: &TenantContext,
+        topic: EventTopic,
+        event: &nostr::Event,
+        authority: &str,
+    ) -> Result<i64, PubSubError> {
+        publisher::publish_event_with_authority(&self.pool, ctx, topic, event, authority).await
     }
 
     /// Set presence with 180s TTL. Call on connect and every 60s heartbeat.

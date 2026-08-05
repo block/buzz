@@ -15,10 +15,10 @@ use crate::context::{
     authority::{resolve_direct_binding, resolve_existing_binding},
     resolve_current_federated_policy, AdmissionExpiry, AssertionTransport, AuthContext,
     AuthContextError, AuthContextInput, AuthMethod, AuthTransport, AuthoritativeBindingResolution,
-    AuthoritativeFederatedResolution, AuthorityAdapterError, BindingVersion,
+    AuthoritativeFederatedResolution, AuthorityAdapterError, AuthorizationReason, BindingVersion,
     CapabilityFinalizationSeal, FederatedAuthorityAdapter, FederatedPolicyStamp,
     FederatedPrincipal, ResolvedFederatedPolicy, VerifiedFederatedAssertion, VerifiedNostrProof,
-    VerifiedOwnerAdmission,
+    VerifiedOwnerAdmission, VersionedBindingRef,
 };
 
 const MAX_OPAQUE_ID_BYTES: usize = 256;
@@ -68,6 +68,11 @@ impl fmt::Debug for AuthorizationCapability {
 pub struct CapabilitySet(Vec<AuthorizationCapability>);
 
 impl CapabilitySet {
+    /// Build the exact one-capability request used by on-demand authorization.
+    pub fn single(capability: AuthorizationCapability) -> Self {
+        Self(vec![capability])
+    }
+
     /// Build a non-empty set, sorting and removing duplicate capabilities.
     pub fn new(
         mut capabilities: Vec<AuthorizationCapability>,
@@ -128,6 +133,11 @@ impl AuthorizationProfileId {
             return Err(ProviderContractError::ProfileIdTooLong);
         }
         Ok(Self(value))
+    }
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn new(value: impl Into<String>) -> Result<Self, ProviderContractError> {
+        Self::from_server_configuration(value)
     }
     /// Exact profile identifier for provider routing.
     pub fn as_str(&self) -> &str {
@@ -359,6 +369,90 @@ impl AuthorizationRequest {
         let Some(delegation) = proof.verified_delegation() else {
             return Err(ProviderContractError::DelegationRequired);
         };
+        if !delegation.capability().is_transport_wide() {
+            return Err(ProviderContractError::UnsupportedDelegationScope);
+        }
+        if delegation.owner_pubkey() != owner.bound_pubkey() {
+            return Err(ProviderContractError::DelegatedOwnerMismatch);
+        }
+        if delegation
+            .expires_at()
+            .is_some_and(|bound| bound.is_expired_at(now_unix_seconds))
+        {
+            return Err(ProviderContractError::DelegationExpired);
+        }
+        if owner
+            .expires_at()
+            .is_some_and(|bound| bound.is_expired_at(now_unix_seconds))
+        {
+            return Err(ProviderContractError::BindingExpired);
+        }
+        let evidence_valid_from = federated_policy.stamp().effective_from();
+        let mut evidence_valid_until = federated_policy.stamp().effective_until();
+        if let Some(delegation) = delegation.expires_at() {
+            evidence_valid_until = evidence_valid_until.min(delegation.unix_seconds());
+        }
+        if let Some(binding) = owner.expires_at() {
+            evidence_valid_until = evidence_valid_until.min(binding.unix_seconds());
+        }
+        Ok(Self {
+            authorization_domain: proof.authorization_domain(),
+            transport: proof.authorized_transport(),
+            actor_pubkey: proof.actor_pubkey(),
+            proof_method: proof.proof_method(),
+            authority: AuthorizationAuthority::Delegated {
+                owner_pubkey: owner.bound_pubkey(),
+                binding_id: owner.binding_id(),
+                binding_version: owner.binding_version(),
+            },
+            principal: owner.principal().clone(),
+            key_attested: false,
+            assertion_transport: None,
+            assertion_not_before: None,
+            assertion_expires_at: None,
+            federated_policy: federated_policy.into_stamp(),
+            requested_capabilities,
+            correlation_id,
+            decision_source: DecisionSource::DelegatedOwnerBinding,
+            evidence_valid_from,
+            evidence_valid_until,
+        })
+    }
+
+    /// Build a delegated request from a sealed active binding-store record.
+    ///
+    /// The evidence adapter can create this record only from typed current
+    /// storage output. Enrolled-in-request bindings are rejected so delegated
+    /// authorization retains O3's existing-active requirement.
+    pub fn delegated_from_active_binding(
+        proof: &VerifiedNostrProof,
+        owner: &VersionedBindingRef,
+        federated_policy: ResolvedFederatedPolicy,
+        requested_capabilities: CapabilitySet,
+        correlation_id: Uuid,
+        now_unix_seconds: u64,
+    ) -> Result<Self, ProviderContractError> {
+        if correlation_id.is_nil() {
+            return Err(ProviderContractError::InvalidCorrelationId);
+        }
+        validate_federated_policy(
+            &federated_policy,
+            proof.authorization_domain(),
+            correlation_id,
+            now_unix_seconds,
+        )?;
+        if proof.authorization_domain() != owner.authorization_domain() {
+            return Err(ProviderContractError::AuthorizationDomainMismatch);
+        }
+        if owner.authorization_reason() != AuthorizationReason::ExistingBinding {
+            return Err(ProviderContractError::DelegatedBindingNotExistingActive);
+        }
+        let Some(delegation) = proof.verified_delegation() else {
+            return Err(ProviderContractError::DelegationRequired);
+        };
+        if !delegation.capability().is_transport_wide() {
+            return Err(ProviderContractError::UnsupportedDelegationScope);
+        }
         if delegation.owner_pubkey() != owner.bound_pubkey() {
             return Err(ProviderContractError::DelegatedOwnerMismatch);
         }
@@ -1138,7 +1232,6 @@ impl CapabilitySnapshot {
     pub const fn reason(&self) -> ProviderAllowReason {
         self.reason
     }
-
     /// Consume a direct capability decision and finalize authoritative context.
     ///
     /// The current enrollment policy is reread after provider I/O, then the
@@ -1368,6 +1461,38 @@ impl CapabilitySnapshot {
         }
         Ok(())
     }
+
+    /// Derive current delegated-owner admission for one exact active binding.
+    pub fn verified_owner_admission(
+        &self,
+        owner: &VersionedBindingRef,
+    ) -> Result<VerifiedOwnerAdmission, OwnerAdmissionError> {
+        if self.decision_source != DecisionSource::DelegatedOwnerBinding {
+            return Err(OwnerAdmissionError::NotDelegatedSnapshot);
+        }
+        if self.authorization_domain != owner.authorization_domain() {
+            return Err(OwnerAdmissionError::AuthorizationDomainMismatch);
+        }
+        if self.owner_pubkey != Some(owner.bound_pubkey()) {
+            return Err(OwnerAdmissionError::OwnerKeyMismatch);
+        }
+        if self.principal != *owner.principal() {
+            return Err(OwnerAdmissionError::PrincipalMismatch);
+        }
+        if self.binding_id != Some(owner.binding_id()) {
+            return Err(OwnerAdmissionError::BindingIdMismatch);
+        }
+        if self.binding_version != Some(owner.binding_version()) {
+            return Err(OwnerAdmissionError::BindingVersionMismatch);
+        }
+        let fresh_until = AdmissionExpiry::new(self.fresh_until)
+            .map_err(|_| OwnerAdmissionError::InvalidFreshnessBound)?;
+        Ok(VerifiedOwnerAdmission::from_capability_snapshot(
+            self.authorization_domain,
+            self.principal.clone(),
+            fresh_until,
+        ))
+    }
 }
 
 fn finalization_time<E>(
@@ -1440,6 +1565,48 @@ where
     }
 }
 
+/// Failure to derive delegated-owner admission from a capability snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum OwnerAdmissionError {
+    /// The snapshot does not represent delegated owner authority.
+    #[error("capability snapshot does not carry delegated owner authority")]
+    NotDelegatedSnapshot,
+    /// The snapshot and owner binding belong to different domains.
+    #[error("capability snapshot and owner binding domains do not match")]
+    AuthorizationDomainMismatch,
+    /// The snapshot and owner binding identify different owner keys.
+    #[error("capability snapshot and owner binding keys do not match")]
+    OwnerKeyMismatch,
+    /// The snapshot and owner binding identify different principals.
+    #[error("capability snapshot and owner binding principals do not match")]
+    PrincipalMismatch,
+    /// The snapshot and owner binding carry different binding identifiers.
+    #[error("capability snapshot and owner binding identifiers do not match")]
+    BindingIdMismatch,
+    /// The snapshot and owner binding carry different binding generations.
+    #[error("capability snapshot and owner binding versions do not match")]
+    BindingVersionMismatch,
+    /// The snapshot's admission freshness bound is absent or invalid.
+    #[error("capability snapshot has an invalid admission freshness bound")]
+    InvalidFreshnessBound,
+}
+
+impl OwnerAdmissionError {
+    /// Stable provider-neutral diagnostic code for the admission failure.
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::NotDelegatedSnapshot => "authorization_owner_admission_001",
+            Self::AuthorizationDomainMismatch => "authorization_owner_admission_002",
+            Self::OwnerKeyMismatch => "authorization_owner_admission_003",
+            Self::PrincipalMismatch => "authorization_owner_admission_004",
+            Self::BindingIdMismatch => "authorization_owner_admission_005",
+            Self::BindingVersionMismatch => "authorization_owner_admission_006",
+            Self::InvalidFreshnessBound => "authorization_owner_admission_007",
+        }
+    }
+}
+
 impl fmt::Debug for CapabilitySnapshot {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -1501,7 +1668,7 @@ impl fmt::Debug for AuthorizationOutcome {
 /// completes, an allowed decision is checked against exactly one fresh sample.
 /// Provider freshness and all effective evidence bounds use that same value;
 /// callers must not precompute and pass a decision-start timestamp.
-async fn resolve_authorization(
+pub async fn resolve_authorization(
     provider: &dyn AuthorizationProvider,
     request: &AuthorizationRequest,
     clock: &dyn AuthorizationClock,
@@ -1721,6 +1888,9 @@ pub enum ProviderContractError {
     /// A capability snapshot was presented to a different configured runtime.
     #[error("provider capability snapshot does not belong to this authorization runtime")]
     AuthorizationRuntimeMismatch,
+    /// A narrower operation-bound delegation reached a transport-wide request path.
+    #[error("delegation scope is not valid for transport-wide authorization")]
+    UnsupportedDelegationScope,
 }
 
 impl ProviderContractError {
@@ -1761,6 +1931,7 @@ impl ProviderContractError {
             Self::CapabilityBindingChanged => "authorization_provider_contract_032",
             Self::FederatedPolicyChanged => "authorization_provider_contract_033",
             Self::AuthorizationRuntimeMismatch => "authorization_provider_contract_034",
+            Self::UnsupportedDelegationScope => "authorization_provider_contract_035",
         }
     }
 }

@@ -25,6 +25,7 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
+use buzz_core::CommunityId;
 use buzz_media::{BucketSnapshot, SweepError};
 
 /// Sweep knobs, read once at boot. See `PLANS/S3_STORAGE_METRICS_PLAN.md` F7.
@@ -107,9 +108,9 @@ struct SweepAttempt {
 /// renamed, or scope-excluded) are zeroed rather than left at their last
 /// nonzero value until the recorder's idle-eviction kicks in.
 ///
-/// Carries the resolved host label (not the UUID) so a rename can still zero
-/// the old series, and distinguishes bytes vs. objects because they are
-/// separate Prometheus series.
+/// Carries a stable runtime pseudonym rather than a host or UUID, and
+/// distinguishes bytes vs. objects because they are separate Prometheus
+/// series.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum StorageEmittedKey {
     Bytes(String),
@@ -119,12 +120,12 @@ pub(crate) enum StorageEmittedKey {
 impl StorageEmittedKey {
     fn set(&self, value: f64) {
         match self {
-            Self::Bytes(host) => {
-                metrics::gauge!("buzz_community_storage_bytes", "community" => host.clone())
+            Self::Bytes(label) => {
+                metrics::gauge!("buzz_community_storage_bytes", "community" => label.clone())
                     .set(value);
             }
-            Self::Objects(host) => {
-                metrics::gauge!("buzz_community_storage_objects", "community" => host.clone())
+            Self::Objects(label) => {
+                metrics::gauge!("buzz_community_storage_objects", "community" => label.clone())
                     .set(value);
             }
         }
@@ -263,15 +264,15 @@ pub async fn maybe_spawn_sweep<Fut>(
 /// never from the spawned sweep task itself, so a sweep that completes after
 /// this pod loses leadership parks its snapshot without ever publishing it.
 ///
-/// `host_map` resolves a community UUID to its label string for per-
-/// community series; `allows` gates those series the same way
+/// `host_map` proves that a community UUID still resolves to a live tenant;
+/// the emitted label is an opaque runtime pseudonym. `allows` gates those series the same way
 /// `EmissionScope` gates the DB-derived ones. A bound community UUID absent
 /// from `host_map` is "unmapped" (sidecar references a community with no DB
 /// row) and rolls into `buzz_storage_unmapped_community_bytes` instead of a
 /// per-community series.
 ///
 /// Per-community series whose community disappears from the current snapshot
-/// (unmapped, host rename, or scope exclusion) are explicitly zeroed — the
+/// (unmapped or scope exclusion) are explicitly zeroed — the
 /// same pattern as `emit_in_memory_usage_metrics`. Without this, a series
 /// would linger at its last nonzero value until the recorder's idle eviction
 /// fires (≥3 ticks), producing a transient double-count against the
@@ -326,19 +327,20 @@ pub async fn emit_storage_metrics(
     let mut current = HashSet::new();
     let mut unmapped_bytes = 0u64;
     for (community_id, storage) in &snapshot.per_community {
-        let Some(host) = host_map.get(community_id) else {
+        if !host_map.contains_key(community_id) {
             unmapped_bytes += storage.bytes;
             continue;
-        };
+        }
         if !allows(community_id) {
             continue;
         }
-        metrics::gauge!("buzz_community_storage_bytes", "community" => host.clone())
+        let label = crate::metrics::community_label(CommunityId::from_uuid(*community_id));
+        metrics::gauge!("buzz_community_storage_bytes", "community" => label.clone())
             .set(storage.bytes as f64);
-        metrics::gauge!("buzz_community_storage_objects", "community" => host.clone())
+        metrics::gauge!("buzz_community_storage_objects", "community" => label.clone())
             .set(storage.objects as f64);
-        current.insert(StorageEmittedKey::Bytes(host.clone()));
-        current.insert(StorageEmittedKey::Objects(host.clone()));
+        current.insert(StorageEmittedKey::Bytes(label.clone()));
+        current.insert(StorageEmittedKey::Objects(label));
     }
     metrics::gauge!("buzz_storage_unmapped_community_bytes").set(unmapped_bytes as f64);
 
@@ -982,6 +984,9 @@ mod tests {
         });
 
         let recorder = DebuggingRecorder::new();
+        let label_a = crate::metrics::community_label(CommunityId::from_uuid(community_a));
+        let label_b = crate::metrics::community_label(CommunityId::from_uuid(community_b));
+        let label_c = crate::metrics::community_label(CommunityId::from_uuid(community_c));
 
         // --- Emission 1: all three communities visible ---
         let mut host_map_1 = HashMap::new();
@@ -994,18 +999,12 @@ mod tests {
         {
             let labeled = labeled_community_gauges(&recorder);
             assert_eq!(
-                labeled.get(&(
-                    "buzz_community_storage_bytes".to_string(),
-                    "host.a".to_string()
-                )),
+                labeled.get(&("buzz_community_storage_bytes".to_string(), label_a.clone())),
                 Some(&10.0),
                 "emission 1: host.a bytes should be 10"
             );
             assert_eq!(
-                labeled.get(&(
-                    "buzz_community_storage_bytes".to_string(),
-                    "host.old".to_string()
-                )),
+                labeled.get(&("buzz_community_storage_bytes".to_string(), label_b.clone())),
                 Some(&20.0),
                 "emission 1: host.old bytes should be 20"
             );
@@ -1033,56 +1032,36 @@ mod tests {
 
         let labeled = labeled_community_gauges(&recorder);
 
-        // (a) community_a disappeared — old host.a series must be zeroed
+        // (a) community_a disappeared — its pseudonymous series is zeroed.
         assert_eq!(
-            labeled.get(&(
-                "buzz_community_storage_bytes".to_string(),
-                "host.a".to_string()
-            )),
+            labeled.get(&("buzz_community_storage_bytes".to_string(), label_a.clone())),
             Some(&0.0),
             "(a) disappeared community: host.a bytes must be zeroed"
         );
         assert_eq!(
             labeled.get(&(
                 "buzz_community_storage_objects".to_string(),
-                "host.a".to_string()
+                label_a.clone()
             )),
             Some(&0.0),
             "(a) disappeared community: host.a objects must be zeroed"
         );
 
-        // (b) community_b renamed host.old → host.new — old series must be zeroed
+        // (b) a host rename retains the same non-host label and value.
         assert_eq!(
-            labeled.get(&(
-                "buzz_community_storage_bytes".to_string(),
-                "host.old".to_string()
-            )),
-            Some(&0.0),
-            "(b) host rename: host.old bytes must be zeroed"
-        );
-        assert_eq!(
-            labeled.get(&(
-                "buzz_community_storage_bytes".to_string(),
-                "host.new".to_string()
-            )),
+            labeled.get(&("buzz_community_storage_bytes".to_string(), label_b.clone())),
             Some(&20.0),
-            "(b) host rename: host.new bytes must be 20"
+            "(b) host rename must not expose or churn a tenant-host label"
         );
 
         // (c) community_c scope-excluded — host.c series must be zeroed
         assert_eq!(
-            labeled.get(&(
-                "buzz_community_storage_bytes".to_string(),
-                "host.c".to_string()
-            )),
+            labeled.get(&("buzz_community_storage_bytes".to_string(), label_c.clone())),
             Some(&0.0),
             "(c) scope removal: host.c bytes must be zeroed"
         );
         assert_eq!(
-            labeled.get(&(
-                "buzz_community_storage_objects".to_string(),
-                "host.c".to_string()
-            )),
+            labeled.get(&("buzz_community_storage_objects".to_string(), label_c)),
             Some(&0.0),
             "(c) scope removal: host.c objects must be zeroed"
         );

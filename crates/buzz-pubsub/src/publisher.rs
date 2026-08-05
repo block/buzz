@@ -3,6 +3,7 @@
 use buzz_core::TenantContext;
 use deadpool_redis::Pool;
 use nostr::JsonUtil;
+use serde::Serialize;
 use uuid::Uuid;
 
 use crate::error::PubSubError;
@@ -28,6 +29,31 @@ pub async fn publish_event(
     let mut conn = pool.get().await?;
     let key = crate::topic::EventTopicKey::from_context(ctx, topic).redis_channel();
     let payload = event.as_json();
+    let subscriber_count: i64 = redis::cmd("PUBLISH")
+        .arg(&key)
+        .arg(&payload)
+        .query_async(&mut conn)
+        .await?;
+    Ok(subscriber_count)
+}
+
+#[derive(Serialize)]
+struct PublishedEventEnvelope<'a> {
+    event: &'a nostr::Event,
+    authority: &'a str,
+}
+
+/// Publish one event with opaque relay-owned authority metadata.
+pub async fn publish_event_with_authority(
+    pool: &Pool,
+    ctx: &TenantContext,
+    topic: EventTopic,
+    event: &nostr::Event,
+    authority: &str,
+) -> Result<i64, PubSubError> {
+    let mut conn = pool.get().await?;
+    let key = crate::topic::EventTopicKey::from_context(ctx, topic).redis_channel();
+    let payload = serde_json::to_string(&PublishedEventEnvelope { event, authority })?;
     let subscriber_count: i64 = redis::cmd("PUBLISH")
         .arg(&key)
         .arg(&payload)

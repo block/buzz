@@ -38,30 +38,42 @@ pub async fn handle_command(
     state: &Arc<AppState>,
     event: Event,
     auth: IngestAuth,
+    protected: &crate::authorization_runtime::transport::ProtectedAuthorization,
 ) -> Result<IngestResult, IngestError> {
     // Ensure the authenticated user exists in the users table (foreign key requirement).
     // The old REST handlers did this via extract_auth_context; command executor must do it explicitly.
     let pubkey_bytes = auth.pubkey().to_bytes().to_vec();
-    match state
-        .db
-        .ensure_user(tenant.community(), &pubkey_bytes)
-        .await
-    {
-        Ok(true) => {
-            metrics::counter!(
-                "buzz_users_created_total",
-                "community" => tenant.host().to_owned()
-            )
-            .increment(1);
-        }
-        Ok(false) => {}
-        Err(e) => {
-            tracing::warn!("command_executor: ensure_user failed: {e}");
+    if !protected.is_enforcing() {
+        match state
+            .db
+            .ensure_user(tenant.community(), &pubkey_bytes)
+            .await
+        {
+            Ok(true) => {
+                metrics::counter!(
+                    "buzz_users_created_total",
+                    "community" => crate::metrics::community_label(tenant.community())
+                )
+                .increment(1);
+            }
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!("command_executor: ensure_user failed: {e}");
+            }
         }
     }
 
     let kind = event.kind.as_u16() as u32;
     match kind {
+        KIND_DM_OPEN if protected.is_enforcing() => {
+            handle_dm_open_enforced(tenant, state, &event, &auth, protected).await
+        }
+        KIND_DM_ADD_MEMBER if protected.is_enforcing() => {
+            handle_dm_add_member_enforced(tenant, state, &event, &auth, protected).await
+        }
+        KIND_DM_HIDE if protected.is_enforcing() => {
+            handle_dm_hide_enforced(tenant, state, &event, &auth, protected).await
+        }
         KIND_DM_OPEN => handle_dm_open(tenant, state, &event, &auth).await,
         KIND_DM_ADD_MEMBER => handle_dm_add_member(tenant, state, &event, &auth).await,
         KIND_DM_HIDE => handle_dm_hide(tenant, state, &event, &auth).await,
@@ -307,6 +319,237 @@ fn compute_definition_hash(json_str: &str) -> Vec<u8> {
     Sha256::digest(json_str.as_bytes()).to_vec()
 }
 
+async fn begin_protected_command(
+    state: &AppState,
+    tenant: &TenantContext,
+    event: &Event,
+    protected: &crate::authorization_runtime::transport::ProtectedAuthorization,
+) -> Result<crate::authorization_runtime::executor::AuthorizedOperationStart, IngestError> {
+    let operation_id = crate::authorization_runtime::executor::ProtectedOperationId::derive(
+        tenant.community(),
+        "event.command.v1",
+        event.id.as_bytes(),
+    )
+    .map_err(|error| IngestError::Internal(format!("error: {error}")))?;
+    let mut request = Sha256::new();
+    request.update(b"buzz-event-command-request-v1");
+    request.update(event.id.as_bytes());
+    request.update((event.kind.as_u16() as u32).to_be_bytes());
+    let permit = protected
+        .seal_postgres_mutation(operation_id, "event.command.v1", request.finalize().into())
+        .map_err(|_| IngestError::AuthFailed("restricted: protected authorization denied".into()))?
+        .ok_or_else(|| {
+            IngestError::AuthFailed("restricted: protected authorization denied".into())
+        })?;
+    crate::authorization_runtime::executor::begin_authorized_operation(state, permit)
+        .await
+        .map_err(|error| IngestError::AuthFailed(format!("restricted: {error}")))
+}
+
+fn replayed_command_result(event: &Event, payload: Vec<u8>) -> Result<IngestResult, IngestError> {
+    let message = String::from_utf8(payload)
+        .map_err(|_| IngestError::Internal("error: protected command receipt is invalid".into()))?;
+    Ok(IngestResult {
+        event_id: event.id.to_hex(),
+        accepted: true,
+        message,
+    })
+}
+
+async fn persist_command_event_tx(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant: &TenantContext,
+    event: &Event,
+) -> Result<(), IngestError> {
+    buzz_db::event::insert_event_with_thread_metadata_tx(
+        transaction,
+        tenant.community(),
+        event,
+        extract_channel_id(event),
+        None,
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| IngestError::Internal(format!("error: persist command: {error}")))
+}
+
+async fn handle_dm_open_enforced(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    event: &Event,
+    auth: &IngestAuth,
+    protected: &crate::authorization_runtime::transport::ProtectedAuthorization,
+) -> Result<IngestResult, IngestError> {
+    let actor = auth.pubkey().to_bytes().to_vec();
+    let tags = extract_p_tags(event);
+    if tags.is_empty() || tags.len() > 8 {
+        return Err(IngestError::Rejected(
+            "invalid: DM requires 1-8 other participants".into(),
+        ));
+    }
+    let mut participants = vec![actor.clone()];
+    for tag in tags {
+        let pubkey = decode_pubkey(&tag)?;
+        if !participants.contains(&pubkey) {
+            participants.push(pubkey);
+        }
+    }
+    match begin_protected_command(state, tenant, event, protected).await? {
+        crate::authorization_runtime::executor::AuthorizedOperationStart::Replay(payload) => {
+            replayed_command_result(event, payload)
+        }
+        crate::authorization_runtime::executor::AuthorizedOperationStart::Execute(
+            mut operation,
+        ) => {
+            for participant in &participants {
+                buzz_db::user::ensure_user_tx(
+                    operation.transaction(),
+                    tenant.community(),
+                    participant,
+                )
+                .await
+                .map_err(|error| {
+                    IngestError::Internal(format!("error: ensure DM participant: {error}"))
+                })?;
+            }
+            persist_command_event_tx(operation.transaction(), tenant, event).await?;
+            let refs = participants.iter().map(Vec::as_slice).collect::<Vec<_>>();
+            let (channel, created) =
+                buzz_db::dm::open_dm_tx(operation.transaction(), tenant.community(), &refs, &actor)
+                    .await
+                    .map_err(|error| IngestError::Internal(format!("error: open DM: {error}")))?;
+            let message = format!(
+                "response:{}",
+                serde_json::json!({
+                    "channel_id": channel.id.to_string(),
+                    "created": created,
+                })
+            );
+            operation
+                .commit(message.as_bytes())
+                .await
+                .map_err(|error| IngestError::AuthFailed(format!("restricted: {error}")))?;
+            for participant in &participants {
+                state.invalidate_membership(tenant, channel.id, participant);
+            }
+            Ok(IngestResult {
+                event_id: event.id.to_hex(),
+                accepted: true,
+                message,
+            })
+        }
+    }
+}
+
+async fn handle_dm_add_member_enforced(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    event: &Event,
+    auth: &IngestAuth,
+    protected: &crate::authorization_runtime::transport::ProtectedAuthorization,
+) -> Result<IngestResult, IngestError> {
+    let actor = auth.pubkey().to_bytes().to_vec();
+    let channel_id = extract_h_tag(event)
+        .and_then(|value| Uuid::parse_str(&value).ok())
+        .ok_or_else(|| IngestError::Rejected("invalid: missing or malformed h tag".into()))?;
+    let additions = extract_p_tags(event)
+        .into_iter()
+        .map(|value| decode_pubkey(&value))
+        .collect::<Result<Vec<_>, _>>()?;
+    if additions.is_empty() {
+        return Err(IngestError::Rejected(
+            "invalid: at least one participant is required".into(),
+        ));
+    }
+    match begin_protected_command(state, tenant, event, protected).await? {
+        crate::authorization_runtime::executor::AuthorizedOperationStart::Replay(payload) => {
+            replayed_command_result(event, payload)
+        }
+        crate::authorization_runtime::executor::AuthorizedOperationStart::Execute(
+            mut operation,
+        ) => {
+            for participant in additions.iter().chain(std::iter::once(&actor)) {
+                buzz_db::user::ensure_user_tx(
+                    operation.transaction(),
+                    tenant.community(),
+                    participant,
+                )
+                .await
+                .map_err(|error| {
+                    IngestError::Internal(format!("error: ensure DM participant: {error}"))
+                })?;
+            }
+            persist_command_event_tx(operation.transaction(), tenant, event).await?;
+            let (channel, _created, participants) = buzz_db::dm::expand_dm_tx(
+                operation.transaction(),
+                tenant.community(),
+                channel_id,
+                &additions,
+                &actor,
+            )
+            .await
+            .map_err(|error| IngestError::Rejected(format!("invalid: {error}")))?;
+            let message = format!(
+                "response:{}",
+                serde_json::json!({"channel_id": channel.id.to_string()})
+            );
+            operation
+                .commit(message.as_bytes())
+                .await
+                .map_err(|error| IngestError::AuthFailed(format!("restricted: {error}")))?;
+            for participant in participants {
+                state.invalidate_membership(tenant, channel.id, &participant);
+            }
+            Ok(IngestResult {
+                event_id: event.id.to_hex(),
+                accepted: true,
+                message,
+            })
+        }
+    }
+}
+
+async fn handle_dm_hide_enforced(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    event: &Event,
+    auth: &IngestAuth,
+    protected: &crate::authorization_runtime::transport::ProtectedAuthorization,
+) -> Result<IngestResult, IngestError> {
+    let actor = auth.pubkey().to_bytes().to_vec();
+    let channel_id = extract_h_tag(event)
+        .and_then(|value| Uuid::parse_str(&value).ok())
+        .ok_or_else(|| IngestError::Rejected("invalid: missing or malformed h tag".into()))?;
+    match begin_protected_command(state, tenant, event, protected).await? {
+        crate::authorization_runtime::executor::AuthorizedOperationStart::Replay(payload) => {
+            replayed_command_result(event, payload)
+        }
+        crate::authorization_runtime::executor::AuthorizedOperationStart::Execute(
+            mut operation,
+        ) => {
+            persist_command_event_tx(operation.transaction(), tenant, event).await?;
+            buzz_db::dm::hide_dm_tx(
+                operation.transaction(),
+                tenant.community(),
+                channel_id,
+                &actor,
+            )
+            .await
+            .map_err(|error| IngestError::Rejected(format!("invalid: {error}")))?;
+            let message = "{}".to_string();
+            operation
+                .commit(message.as_bytes())
+                .await
+                .map_err(|error| IngestError::AuthFailed(format!("restricted: {error}")))?;
+            Ok(IngestResult {
+                event_id: event.id.to_hex(),
+                accepted: true,
+                message,
+            })
+        }
+    }
+}
+
 async fn handle_dm_open(
     tenant: &TenantContext,
     state: &Arc<AppState>,
@@ -374,7 +617,7 @@ async fn handle_dm_open(
     if was_created {
         metrics::counter!(
             "buzz_channels_created_total",
-            "community" => tenant.host().to_owned(),
+            "community" => crate::metrics::community_label(tenant.community()),
             "type" => "dm"
         )
         .increment(1);
@@ -535,7 +778,7 @@ async fn handle_dm_add_member(
     if was_created {
         metrics::counter!(
             "buzz_channels_created_total",
-            "community" => tenant.host().to_owned(),
+            "community" => crate::metrics::community_label(tenant.community()),
             "type" => "dm"
         )
         .increment(1);

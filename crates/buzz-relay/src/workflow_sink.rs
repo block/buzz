@@ -19,6 +19,73 @@ use uuid::Uuid;
 use crate::handlers::event::dispatch_persistent_event;
 use crate::state::AppState;
 
+/// Relay-owned provider-neutral workflow mutation gate.
+///
+/// The weak application-state reference avoids a cycle through
+/// `AppState -> WorkflowEngine -> MutationGate -> AppState`.
+pub struct RelayWorkflowMutationGate {
+    state: Weak<AppState>,
+}
+
+impl RelayWorkflowMutationGate {
+    /// Create a gate backed by the relay's immutable protected-domain policy.
+    pub fn new(state: &Arc<AppState>) -> Self {
+        Self {
+            state: Arc::downgrade(state),
+        }
+    }
+}
+
+impl buzz_workflow::MutationGate for RelayWorkflowMutationGate {
+    fn require_mutation(
+        &self,
+        community_id: CommunityId,
+    ) -> Result<(), buzz_workflow::WorkflowError> {
+        let state = self.state.upgrade().ok_or_else(|| {
+            buzz_workflow::WorkflowError::Unauthorized(
+                "protected workflow mutation unavailable".into(),
+            )
+        })?;
+        let mode = state
+            .protected_transport()
+            .and_then(|runtime| runtime.mode_for_domain(community_id));
+        crate::protected_surface::require_effect_permit(
+            mode,
+            crate::protected_surface::EffectSurfaceId::WorkflowBackgroundExecution,
+        )
+        .map(|_| ())
+        .map_err(|_| {
+            buzz_workflow::WorkflowError::Unauthorized(
+                "protected workflow mutation unavailable".into(),
+            )
+        })
+    }
+
+    fn require_outbound_webhook(
+        &self,
+        community_id: CommunityId,
+    ) -> Result<(), buzz_workflow::WorkflowError> {
+        let state = self.state.upgrade().ok_or_else(|| {
+            buzz_workflow::WorkflowError::Unauthorized(
+                "protected outbound webhook unavailable".into(),
+            )
+        })?;
+        let mode = state
+            .protected_transport()
+            .and_then(|runtime| runtime.mode_for_domain(community_id));
+        crate::protected_surface::require_effect_permit(
+            mode,
+            crate::protected_surface::EffectSurfaceId::OutboundWebhook,
+        )
+        .map(|_| ())
+        .map_err(|_| {
+            buzz_workflow::WorkflowError::Unauthorized(
+                "protected outbound webhook unavailable".into(),
+            )
+        })
+    }
+}
+
 /// Resolves `@Name` mentions in workflow message text to the pubkeys of the
 /// channel members they name, so the emitted kind:9 carries the `p` tags that
 /// ACP agent-wake (`event_mentions_agent`) is gated on.
@@ -187,6 +254,17 @@ impl ActionSink for RelayActionSink {
                 .state
                 .upgrade()
                 .ok_or_else(|| ActionSinkError::Database("relay is shutting down".into()))?;
+
+            // A delayed action may outlive the authority that started its run.
+            // With no transaction-owning workflow executor, Enforce must stop
+            // before tenant lookup, event construction, persistence, or fanout.
+            crate::authorization_runtime::transport::require_unwired_atomic_mutation_if_configured(
+                &state,
+                community_id,
+            )
+            .map_err(|_| {
+                ActionSinkError::Database("protected workflow mutation unavailable".into())
+            })?;
 
             // The run carries its owning community (`community_id`); the
             // relay-signed kind:9 message belongs to *that* community, never the
@@ -567,9 +645,40 @@ mod integration_tests {
     //! Postgres-gated like the other DB-backed relay tests. Run with:
     //!   `cargo test -p buzz-relay --lib workflow_sink -- --ignored`
     use super::*;
+    use async_trait::async_trait;
+    use buzz_auth::{AuthorizationClock, AuthorizationClockError, AuthorizationTime};
     use buzz_core::channel::{ChannelType, ChannelVisibility, MemberRole};
     use buzz_db::CreateCommunityWithOwnerResult;
     use std::sync::Arc;
+
+    struct UnavailableResolver;
+
+    #[async_trait]
+    impl crate::authorization_runtime::transport::ProtectedAuthorizationResolver
+        for UnavailableResolver
+    {
+        async fn resolve(
+            &self,
+            _request: &crate::authorization_runtime::transport::ProtectedOperationRequest,
+        ) -> Result<
+            crate::authorization_runtime::transport::ProtectedResolution,
+            crate::authorization_runtime::transport::ProtectedResolutionError,
+        > {
+            Err(
+                crate::authorization_runtime::transport::ProtectedResolutionError::new(
+                    "synthetic_unavailable",
+                ),
+            )
+        }
+    }
+
+    struct FixedClock;
+
+    impl AuthorizationClock for FixedClock {
+        fn now(&self) -> Result<AuthorizationTime, AuthorizationClockError> {
+            Ok(AuthorizationTime::from_unix_seconds(100))
+        }
+    }
 
     /// Real-PG state mirroring `handlers::event::tests::test_state_with_redis_url`.
     async fn test_state() -> Arc<AppState> {
@@ -607,6 +716,75 @@ mod integration_tests {
             media_storage,
         );
         Arc::new(state)
+    }
+
+    #[tokio::test]
+    async fn workflow_action_enforce_without_executor_persists_no_event() {
+        let state = test_state().await;
+        let community = CommunityId::from_uuid(Uuid::from_u128(0xF10));
+        let runtime = crate::authorization_runtime::transport::ProtectedTransportRuntime::new(
+            [
+                crate::authorization_runtime::transport::DomainTransportPolicy::from_server_configuration(
+                    community,
+                    crate::authorization_runtime::finalization::AuthorizationMode::Enforce,
+                ),
+            ],
+            Arc::new(UnavailableResolver),
+            Arc::new(FixedClock),
+        )
+        .expect("synthetic protected runtime");
+        state
+            .install_protected_transport(Arc::new(runtime))
+            .expect("install protected runtime once");
+        state
+            .workflow_engine
+            .set_mutation_gate(Arc::new(RelayWorkflowMutationGate::new(&state)));
+
+        let trigger = buzz_workflow::executor::TriggerContext {
+            message_id: "synthetic-event".into(),
+            ..Default::default()
+        };
+        for action in [
+            buzz_workflow::ActionDef::AddReaction {
+                emoji: "check".into(),
+            },
+            buzz_workflow::ActionDef::CallWebhook {
+                url: "https://example.invalid/hook".into(),
+                method: None,
+                headers: None,
+                body: None,
+            },
+        ] {
+            let error = buzz_workflow::executor::dispatch_action(
+                "blocked",
+                &action,
+                &state.workflow_engine,
+                community,
+                Uuid::from_u128(2),
+                &trigger,
+            )
+            .await
+            .expect_err("direct workflow effects must stop at the central gate");
+            assert!(matches!(
+                error,
+                buzz_workflow::WorkflowError::Unauthorized(_)
+            ));
+        }
+
+        let error = RelayActionSink::new(&state)
+            .send_message(
+                community,
+                &Uuid::from_u128(1).to_string(),
+                "must not persist",
+                &nostr::Keys::generate().public_key().to_hex(),
+            )
+            .await
+            .expect_err("Enforce without an executor must fail before persistence");
+
+        assert_eq!(
+            error.to_string(),
+            "database error: protected workflow mutation unavailable"
+        );
     }
 
     #[tokio::test]

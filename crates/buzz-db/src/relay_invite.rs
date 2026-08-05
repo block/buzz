@@ -22,7 +22,8 @@ use buzz_core::invite::{
     V2_SECRET_LEN,
 };
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Row as _};
+use sqlx::{PgPool, Postgres, Row as _, Transaction};
+use uuid::Uuid;
 
 use crate::error::Result;
 use crate::identity_binding::{BindIdentityResult, IdentityBindingConflict, IdentityBindingInput};
@@ -114,6 +115,21 @@ pub async fn mint_relay_invite(
     ttl_secs: u64,
     max_uses: Option<i32>,
 ) -> Result<MintedInvite> {
+    let mut transaction = pool.begin().await?;
+    let invite =
+        mint_relay_invite_tx(&mut transaction, community, created_by, ttl_secs, max_uses).await?;
+    transaction.commit().await?;
+    Ok(invite)
+}
+
+/// Mint an invite inside a caller-owned authorization transaction.
+pub async fn mint_relay_invite_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    created_by: &str,
+    ttl_secs: u64,
+    max_uses: Option<i32>,
+) -> Result<MintedInvite> {
     validate_mint_inputs(ttl_secs, max_uses)?;
 
     // Generate 32 random bytes and encode as base64url — this is the secret.
@@ -133,7 +149,7 @@ pub async fn mint_relay_invite(
     .bind(max_uses)
     .bind(expires_at)
     .bind(created_by)
-    .fetch_one(pool)
+    .fetch_one(&mut **transaction)
     .await?;
 
     let invite_id: uuid::Uuid = row.try_get("id")?;
@@ -145,6 +161,32 @@ pub async fn mint_relay_invite(
         uses_remaining: max_uses,
         invite_id,
     })
+}
+
+/// Lock and validate the relay role that may mint an invite.
+///
+/// Enforcing callers invoke this inside the same transaction that writes the
+/// invite and its authorization receipt. Legacy callers retain their existing
+/// authorization flow.
+pub async fn validate_relay_invite_minter_tx(
+    transaction: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    created_by: &str,
+) -> Result<()> {
+    let role: Option<String> = sqlx::query_scalar(
+        "SELECT role FROM relay_members \
+         WHERE community_id = $1 AND pubkey = $2 FOR SHARE",
+    )
+    .bind(community.as_uuid())
+    .bind(created_by)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    if !matches!(role.as_deref(), Some("owner" | "admin")) {
+        return Err(crate::error::DbError::InvalidData(
+            "invite mint authority changed before commit".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn log_claim_outcome(
@@ -174,17 +216,28 @@ const RETENTION_SWEEP_BATCH_SIZE: i64 = 1_000;
 /// expiry index makes old rows drain first without turning cleanup into an
 /// unbounded transaction.
 pub async fn reap_expired_relay_invites(pool: &PgPool, cutoff: DateTime<Utc>) -> Result<u64> {
+    reap_expired_relay_invites_excluding(pool, cutoff, &[]).await
+}
+
+/// Delete expired invites outside exact protected Enforce domains.
+pub async fn reap_expired_relay_invites_excluding(
+    pool: &PgPool,
+    cutoff: DateTime<Utc>,
+    excluded_communities: &[Uuid],
+) -> Result<u64> {
     let result = sqlx::query(
         "DELETE FROM relay_invites \
          WHERE (community_id, id) IN (\
              SELECT community_id, id FROM relay_invites \
              WHERE expires_at < $1 \
+               AND NOT (community_id = ANY($3::uuid[])) \
              ORDER BY expires_at \
              LIMIT $2\
          )",
     )
     .bind(cutoff)
     .bind(RETENTION_SWEEP_BATCH_SIZE)
+    .bind(excluded_communities)
     .execute(pool)
     .await?;
 
@@ -218,10 +271,40 @@ pub async fn claim_relay_invite_with_identity(
     policy_version: Option<&str>,
     identity: Option<&IdentityBindingInput<'_>>,
 ) -> Result<ClaimOutcome> {
+    let mut transaction = pool.begin().await?;
+    let outcome = claim_relay_invite_with_identity_tx(
+        &mut transaction,
+        community,
+        token_hash,
+        claimer_pubkey,
+        policy_version,
+        identity,
+    )
+    .await?;
+    if matches!(
+        outcome,
+        ClaimOutcome::Joined { .. } | ClaimOutcome::AlreadyMember { .. }
+    ) {
+        transaction.commit().await?;
+    } else {
+        transaction.rollback().await?;
+    }
+    Ok(outcome)
+}
+
+/// Stage invite consumption, binding, membership, and policy evidence inside
+/// a caller-owned authorization transaction.
+pub async fn claim_relay_invite_with_identity_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    token_hash: &[u8; 32],
+    claimer_pubkey: &str,
+    policy_version: Option<&str>,
+    identity: Option<&IdentityBindingInput<'_>>,
+) -> Result<ClaimOutcome> {
     crate::identity_binding::validate_membership_identity_key(claimer_pubkey, identity)?;
-    let mut tx = pool.begin().await?;
     sqlx::query("SET LOCAL lock_timeout = '3s'")
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
     // 2. SELECT FOR UPDATE — lock the invite row for the duration of this txn.
@@ -233,12 +316,11 @@ pub async fn claim_relay_invite_with_identity(
     )
     .bind(community.as_uuid())
     .bind(token_hash)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await?;
 
     // 3. No matching invite.
     let Some(invite) = row else {
-        tx.rollback().await?;
         log_claim_outcome(community, None, "invalid", None, None);
         return Ok(ClaimOutcome::Invalid);
     };
@@ -252,7 +334,6 @@ pub async fn claim_relay_invite_with_identity(
     // not authorize fresh policy-acceptance evidence, even for an existing
     // member; exhausted-but-live invites remain valid for idempotent retries.
     if expires_at <= Utc::now() {
-        tx.rollback().await?;
         log_claim_outcome(
             community,
             Some(invite_id),
@@ -264,12 +345,10 @@ pub async fn claim_relay_invite_with_identity(
     }
 
     let identity_binding = if let Some(identity) = identity {
-        match crate::identity_binding::bind_or_validate_identity_tx(&mut tx, community, identity)
-            .await?
+        match crate::identity_binding::bind_or_validate_identity_tx(tx, community, identity).await?
         {
             binding @ (BindIdentityResult::Created | BindIdentityResult::Matched) => Some(binding),
             BindIdentityResult::Conflict(conflict) => {
-                tx.rollback().await?;
                 log_claim_outcome(
                     community,
                     Some(invite_id),
@@ -280,7 +359,6 @@ pub async fn claim_relay_invite_with_identity(
                 return Ok(ClaimOutcome::IdentityConflict(conflict));
             }
             BindIdentityResult::Revoked => {
-                tx.rollback().await?;
                 log_claim_outcome(
                     community,
                     Some(invite_id),
@@ -291,7 +369,6 @@ pub async fn claim_relay_invite_with_identity(
                 return Ok(ClaimOutcome::IdentityRevoked);
             }
             BindIdentityResult::BindingRequired => {
-                tx.rollback().await?;
                 log_claim_outcome(
                     community,
                     Some(invite_id),
@@ -313,7 +390,7 @@ pub async fn claim_relay_invite_with_identity(
         sqlx::query("SELECT 1 FROM relay_members WHERE community_id = $1 AND pubkey = $2")
             .bind(community.as_uuid())
             .bind(claimer_pubkey)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await?;
 
     if existing.is_some() {
@@ -326,10 +403,9 @@ pub async fn claim_relay_invite_with_identity(
             .bind(community.as_uuid())
             .bind(claimer_pubkey)
             .bind(version)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         }
-        tx.commit().await?;
         log_claim_outcome(
             community,
             Some(invite_id),
@@ -347,7 +423,6 @@ pub async fn claim_relay_invite_with_identity(
     // 7. Capacity check.
     if let Some(mu) = max_uses {
         if use_count >= mu {
-            tx.rollback().await?;
             log_claim_outcome(
                 community,
                 Some(invite_id),
@@ -369,7 +444,7 @@ pub async fn claim_relay_invite_with_identity(
     )
     .bind(community.as_uuid())
     .bind(claimer_pubkey)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?
     .rows_affected()
         > 0;
@@ -384,12 +459,11 @@ pub async fn claim_relay_invite_with_identity(
         .bind(community.as_uuid())
         .bind(claimer_pubkey)
         .bind(version)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     }
 
     if !inserted {
-        tx.commit().await?;
         log_claim_outcome(
             community,
             Some(invite_id),
@@ -410,11 +484,8 @@ pub async fn claim_relay_invite_with_identity(
         .bind(new_use_count)
         .bind(community.as_uuid())
         .bind(invite_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-
-    // 11. Commit.
-    tx.commit().await?;
 
     let new_uses_remaining = max_uses.map(|mu| mu - new_use_count);
 
@@ -803,6 +874,12 @@ mod tests {
             .await
             .expect("age old invite");
 
+        assert_eq!(
+            reap_expired_relay_invites_excluding(&pool, cutoff, &[*community.as_uuid()])
+                .await
+                .expect("exclude protected invites"),
+            0
+        );
         assert_eq!(
             reap_expired_relay_invites(&pool, cutoff)
                 .await

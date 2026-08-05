@@ -24,21 +24,23 @@ use buzz_core::kind::{
     KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT, KIND_MEMBER_ADDED_NOTIFICATION,
     KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT,
     KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST,
-    KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT, KIND_NIP29_DELETE_GROUP,
-    KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST, KIND_NIP29_LEAVE_REQUEST,
-    KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER, KIND_NIP43_LEAVE_REQUEST,
-    KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST, KIND_PRESENCE_UPDATE,
-    KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_PROJECT, KIND_REACTION, KIND_READ_STATE, KIND_REPORT,
-    KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF,
-    KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED,
-    KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEAM_CATALOG, KIND_TEXT_NOTE,
-    KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER,
-    RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+    KIND_NIP29_CREATE_GROUP, KIND_NIP29_CREATE_INVITE, KIND_NIP29_DELETE_EVENT,
+    KIND_NIP29_DELETE_GROUP, KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST,
+    KIND_NIP29_LEAVE_REQUEST, KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER,
+    KIND_NIP43_LEAVE_REQUEST, KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST,
+    KIND_PRESENCE_UPDATE, KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_PROJECT, KIND_REACTION,
+    KIND_READ_STATE, KIND_REPORT, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED,
+    KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED,
+    KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM,
+    KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+    RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
+    RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
 use buzz_core::CommunityId;
 use nostr::Event;
+use sha2::{Digest, Sha256};
 
 use crate::state::AppState;
 
@@ -67,9 +69,9 @@ pub enum IngestAuth {
         pubkey: nostr::PublicKey,
         /// Verified delegated owner, when present.
         owner_pubkey: Option<nostr::PublicKey>,
-        /// Sealed NIP-42 proof, when retained by a later route installer.
+        /// Sealed NIP-42 proof retained from connection authentication.
         verified_proof: Option<Arc<buzz_auth::VerifiedNostrProof>>,
-        /// Current direct federated evidence, when retained by a later route.
+        /// Current direct federated evidence retained from authentication.
         verified_assertion: Option<Arc<buzz_auth::VerifiedFederatedAssertion>>,
         /// Permission scopes granted to this connection.
         scopes: Vec<Scope>,
@@ -84,7 +86,7 @@ pub enum IngestAuth {
         pubkey: nostr::PublicKey,
         /// Verified delegated owner, when present.
         owner_pubkey: Option<nostr::PublicKey>,
-        /// Sealed NIP-98 proof retained from this request.
+        /// Sealed NIP-98 proof retained from this exact HTTP request.
         verified_proof: Option<Arc<buzz_auth::VerifiedNostrProof>>,
         /// Current direct federated evidence retained from this request.
         verified_assertion: Option<Arc<buzz_auth::VerifiedFederatedAssertion>>,
@@ -296,7 +298,10 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         | KIND_FORUM_POST
         | KIND_FORUM_VOTE
         | KIND_FORUM_COMMENT => Ok(Scope::MessagesWrite),
-        KIND_NIP29_PUT_USER | KIND_NIP29_REMOVE_USER | KIND_NIP29_DELETE_GROUP => {
+        KIND_NIP29_PUT_USER
+        | KIND_NIP29_REMOVE_USER
+        | KIND_NIP29_DELETE_GROUP
+        | KIND_NIP29_CREATE_INVITE => {
             Ok(Scope::AdminChannels)
         }
         // NIP-43: relay membership admin commands (9030–9032) + Buzz
@@ -535,6 +540,7 @@ pub(crate) fn requires_h_channel_scope(kind: u32) -> bool {
             | KIND_NIP29_EDIT_METADATA
             | KIND_NIP29_DELETE_EVENT
             | KIND_NIP29_DELETE_GROUP
+            | KIND_NIP29_CREATE_INVITE
             | KIND_NIP29_LEAVE_REQUEST
             // Huddle lifecycle events + guidelines
             | KIND_HUDDLE_STARTED
@@ -582,6 +588,18 @@ pub(crate) async fn check_channel_membership(
     } else {
         Err("restricted: not a channel member".to_string())
     }
+}
+
+fn uses_generic_channel_write_authority(kind: u32) -> bool {
+    !matches!(
+        kind,
+        KIND_NIP29_JOIN_REQUEST
+            | KIND_NIP29_CREATE_GROUP
+            | KIND_STREAM_MESSAGE_EDIT
+            | KIND_NIP29_EDIT_METADATA
+            | KIND_NIP29_DELETE_EVENT
+            | KIND_NIP29_DELETE_GROUP
+    )
 }
 
 fn check_token_channel_access(auth: &IngestAuth, channel_id: Uuid) -> Result<(), String> {
@@ -898,6 +916,64 @@ async fn validate_edit_ownership(
         if !is_owner {
             return Err("must be event author to edit".to_string());
         }
+    }
+    Ok(())
+}
+
+/// Repeat stream-edit target, membership, and agent-owner validation while the
+/// common protected operation transaction owns all relevant database locks.
+async fn validate_edit_ownership_tx(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    community_id: CommunityId,
+    event: &Event,
+    state: &AppState,
+) -> Result<(), String> {
+    let target_hex = event
+        .tags
+        .iter()
+        .find_map(|tag| {
+            (tag.kind().to_string() == "e")
+                .then(|| tag.content())
+                .flatten()
+        })
+        .filter(|value| {
+            value.len() == 64 && value.chars().all(|character| character.is_ascii_hexdigit())
+        })
+        .ok_or_else(|| "missing e tag for edit target".to_string())?;
+    let target_bytes =
+        hex::decode(target_hex).map_err(|_| "invalid target event ID".to_string())?;
+    let target_event = buzz_db::event::get_event_by_id_tx(transaction, community_id, &target_bytes)
+        .await
+        .map_err(|error| format!("db error: {error}"))?
+        .ok_or_else(|| "edit target event not found".to_string())?;
+
+    let edit_channel_id = extract_channel_id(event);
+    match (edit_channel_id, target_event.channel_id) {
+        (Some(edit_channel), Some(target_channel)) if edit_channel != target_channel => {
+            return Err("target event belongs to a different channel".to_string());
+        }
+        (Some(_), None) => return Err("target event has no channel".to_string()),
+        _ => {}
+    }
+
+    let author = effective_message_author(&target_event.event, &state.relay_keypair.public_key());
+    let actor = event.pubkey.to_bytes().to_vec();
+    if author == actor {
+        if let Some(channel_id) = target_event.channel_id {
+            buzz_db::channel::require_channel_write_authority_tx(
+                transaction,
+                community_id,
+                channel_id,
+                &actor,
+            )
+            .await
+            .map_err(|error| format!("restricted: channel authority changed: {error}"))?;
+        }
+    } else if !buzz_db::user::is_agent_owner_tx(transaction, community_id, &author, &actor)
+        .await
+        .map_err(|error| format!("db error checking agent ownership: {error}"))?
+    {
+        return Err("must be event author to edit".to_string());
     }
     Ok(())
 }
@@ -1948,18 +2024,135 @@ async fn ingest_event_inner(
         )));
     }
 
+    let protected_result = match auth.verified_proof() {
+        Some(proof) => {
+            crate::authorization_runtime::transport::authorize_if_configured(
+                state,
+                Arc::clone(proof),
+                auth.verified_assertion().cloned(),
+                crate::protected_surface::event_ingest_capability(kind_u32),
+                stable_event_correlation(&event),
+                "event_ingest",
+            )
+            .await
+        }
+        None => crate::authorization_runtime::transport::authorize_unwired_if_configured(
+            state,
+            tenant.community(),
+        ),
+    };
+    let protected = protected_result.map_err(|error| {
+        IngestError::AuthFailed(format!(
+            "restricted: protected authorization denied: {error}"
+        ))
+    })?;
+    if protected.is_enforcing()
+        && crate::protected_surface::event_mutation_disposition(kind_u32)
+            != crate::protected_surface::EventMutationDisposition::TransactionalPersistence
+    {
+        return Err(IngestError::AuthFailed(
+            "restricted: protected event mutation unavailable".into(),
+        ));
+    }
+    let mut non_enforcing_postgresql_git = false;
+    let legacy_git_policy_guard = if kind_u32 == KIND_GIT_REPO_ANNOUNCEMENT
+        && !protected.is_enforcing()
+    {
+        let object_authority = state
+            .db
+            .protected_object_authority(
+                tenant.community(),
+                buzz_db::protected_visibility::ProtectedObjectSurface::Git,
+            )
+            .await
+            .map_err(|error| IngestError::Internal(format!("error: {error}")))?;
+        let repo_id = protected_git_repo_id(&event)?;
+        let owner = hex::encode(event.pubkey.to_bytes());
+        match object_authority.state {
+            buzz_db::protected_visibility::ProtectedObjectAuthorityState::Legacy => {
+                if state
+                    .db
+                    .repo_publication_origin(tenant.community(), &repo_id, &owner)
+                    .await
+                    .map_err(|error| IngestError::Internal(format!("error: {error}")))?
+                    .as_deref()
+                    == Some("protected_unpublished")
+                {
+                    return Err(IngestError::AuthFailed(
+                        "restricted: protected Git reservation cannot enter the legacy lane".into(),
+                    ));
+                }
+                let guard = state
+                    .db
+                    .begin_legacy_visibility_write(
+                        tenant.community(),
+                        buzz_db::protected_visibility::ProtectedObjectSurface::Git,
+                    )
+                    .await
+                    .map_err(|error| {
+                        IngestError::AuthFailed(format!(
+                            "restricted: legacy Git policy is fenced: {error}"
+                        ))
+                    })?;
+                crate::api::git::migration::require_legacy_sentinel_absent(state, tenant)
+                    .await
+                    .map_err(|error| {
+                        IngestError::AuthFailed(format!(
+                            "restricted: legacy Git policy is permanently fenced: {error}"
+                        ))
+                    })?;
+                Some(guard)
+            }
+            buzz_db::protected_visibility::ProtectedObjectAuthorityState::PostgreSql => {
+                crate::api::git::migration::require_reconciled_authority(state, tenant)
+                    .await
+                    .map_err(|error| {
+                        IngestError::AuthFailed(format!(
+                            "restricted: PostgreSQL Git policy is unavailable: {error}"
+                        ))
+                    })?;
+                non_enforcing_postgresql_git = true;
+                None
+            }
+            buzz_db::protected_visibility::ProtectedObjectAuthorityState::Importing => {
+                return Err(IngestError::AuthFailed(
+                    "restricted: Git policy migration is incomplete".into(),
+                ));
+            }
+        }
+    } else {
+        None
+    };
+
     // Command kinds are routed AFTER signature verification, timestamp check,
     // pubkey/auth match, and scope validation — never before.
     if buzz_core::kind::is_command_kind(kind_u32) {
-        return super::command_executor::handle_command(tenant, state, event, auth).await;
+        protected.revalidate().map_err(|error| {
+            IngestError::AuthFailed(format!(
+                "restricted: protected authorization expired: {error}"
+            ))
+        })?;
+        return super::command_executor::handle_command(tenant, state, event, auth, &protected)
+            .await;
     }
 
     // Product feedback is sidecarred directly into its private deployment table.
     // It never enters ordinary event storage or subscription fan-out.
     if kind_u32 == KIND_PRODUCT_FEEDBACK {
-        super::product_feedback::handle(tenant, &event, state)
-            .await
-            .map_err(IngestError::Rejected)?;
+        protected.revalidate().map_err(|error| {
+            IngestError::AuthFailed(format!(
+                "restricted: protected authorization expired: {error}"
+            ))
+        })?;
+        if protected.is_enforcing() {
+            super::product_feedback::handle_enforced(tenant, &event, state, &protected)
+                .await
+                .map_err(IngestError::Rejected)?;
+        } else {
+            super::product_feedback::handle(tenant, &event, state)
+                .await
+                .map_err(IngestError::Rejected)?;
+        }
         // Feedback is a host-resolved, channel-less write. Although its row is
         // private to operator tooling rather than ordinary event reads, this is
         // the matching modeled success action at the ingest isolation seam.
@@ -1978,9 +2171,20 @@ async fn ingest_event_inner(
     // report; that is tolerated because reports are non-actioning signals and
     // remain visible only to moderators.
     if kind_u32 == KIND_REPORT {
-        super::report::handle_report_event(tenant, &event, state)
-            .await
-            .map_err(IngestError::Rejected)?;
+        protected.revalidate().map_err(|error| {
+            IngestError::AuthFailed(format!(
+                "restricted: protected authorization expired: {error}"
+            ))
+        })?;
+        if protected.is_enforcing() {
+            super::report::handle_report_event_enforced(tenant, &event, state, &protected)
+                .await
+                .map_err(IngestError::Rejected)?;
+        } else {
+            super::report::handle_report_event(tenant, &event, state)
+                .await
+                .map_err(IngestError::Rejected)?;
+        }
         return Ok(IngestResult {
             event_id: event_id_hex,
             accepted: true,
@@ -1996,9 +2200,22 @@ async fn ingest_event_inner(
     // The handler independently checks the durable ban state before executing
     // any command, which also covers NIP-98 and missed live disconnects.
     if buzz_core::kind::is_moderation_command_kind(kind_u32) {
-        super::moderation_commands::handle_moderation_command(tenant, state, &event)
+        protected.revalidate().map_err(|error| {
+            IngestError::AuthFailed(format!(
+                "restricted: protected authorization expired: {error}"
+            ))
+        })?;
+        if protected.is_enforcing() {
+            super::moderation_commands::handle_moderation_command_enforced(
+                tenant, state, &event, &protected,
+            )
             .await
             .map_err(IngestError::Rejected)?;
+        } else {
+            super::moderation_commands::handle_moderation_command(tenant, state, &event)
+                .await
+                .map_err(IngestError::Rejected)?;
+        }
         return Ok(IngestResult {
             event_id: event_id_hex,
             accepted: true,
@@ -2169,7 +2386,7 @@ async fn ingest_event_inner(
     // row is missing (global event, kind:9007 pre-create) this is `None` and
     // fan-out performs its own fresh fail-closed lookup — `None` is never
     // "assume open" (fence 1).
-    let threaded_visibility = match (channel_id, &channel_row) {
+    let mut threaded_visibility = match (channel_id, &channel_row) {
         (Some(ch_id), Some(row)) => state
             .channel_visibility_cached(tenant.community(), ch_id, Some(row))
             .await
@@ -2189,13 +2406,7 @@ async fn ingest_event_inner(
         // member/open gate here lets the owning human act on private agent channels
         // without being a member (OQ1 decision; see validate_edit_ownership /
         // validate_admin_event for per-kind enforcement).
-        let skip_membership = kind_u32 == KIND_NIP29_JOIN_REQUEST
-            || kind_u32 == KIND_NIP29_CREATE_GROUP
-            || kind_u32 == KIND_STREAM_MESSAGE_EDIT
-            || kind_u32 == KIND_NIP29_EDIT_METADATA
-            || kind_u32 == KIND_NIP29_DELETE_EVENT
-            || kind_u32 == KIND_NIP29_DELETE_GROUP;
-        if !skip_membership {
+        if uses_generic_channel_write_authority(kind_u32) {
             // Spec AuthCheck (line 794): emit the verdict at the actual
             // call site. claimed_community comes from the event's h tag
             // (recorded separately to bite M2 / M8 — claim or A-host
@@ -2231,9 +2442,22 @@ async fn ingest_event_inner(
     // gate above exempts relay-admin kinds so timed-out admins keep their
     // administrative capability, which leaves bans to the handler.
     if is_relay_admin_kind(event.kind.as_u16() as u32) {
-        crate::handlers::relay_admin::handle_relay_admin_event(tenant, state, &event)
+        protected.revalidate().map_err(|error| {
+            IngestError::AuthFailed(format!(
+                "restricted: protected authorization expired: {error}"
+            ))
+        })?;
+        if protected.is_enforcing() {
+            crate::handlers::relay_admin::handle_relay_admin_event_enforced(
+                tenant, state, &event, &protected,
+            )
             .await
             .map_err(map_relay_admin_error)?;
+        } else {
+            crate::handlers::relay_admin::handle_relay_admin_event(tenant, state, &event)
+                .await
+                .map_err(map_relay_admin_error)?;
+        }
         return Ok(IngestResult {
             event_id: event_id_hex,
             accepted: true,
@@ -2278,11 +2502,69 @@ async fn ingest_event_inner(
         let sender_hex = event.pubkey.to_hex();
 
         // remove_relay_member handles both the NotFound and IsOwner cases atomically.
-        let remove_result = state
-            .db
-            .remove_relay_member(tenant.community(), &sender_hex)
-            .await
-            .map_err(|e| IngestError::Internal(format!("database error: {e}")))?;
+        protected.revalidate().map_err(|error| {
+            IngestError::AuthFailed(format!(
+                "restricted: protected authorization expired: {error}"
+            ))
+        })?;
+        let remove_result = if protected.is_enforcing() {
+            let operation_id =
+                crate::authorization_runtime::executor::ProtectedOperationId::derive(
+                    tenant.community(),
+                    "relay.leave.v1",
+                    event.id.as_bytes(),
+                )
+                .map_err(|error| IngestError::Internal(format!("error: {error}")))?;
+            let mut request = Sha256::new();
+            request.update(b"buzz-relay-leave-request-v1");
+            request.update(event.id.as_bytes());
+            let permit = protected
+                .seal_postgres_mutation(operation_id, "relay.leave.v1", request.finalize().into())
+                .map_err(|_| {
+                    IngestError::AuthFailed("restricted: protected authorization denied".into())
+                })?
+                .ok_or_else(|| {
+                    IngestError::AuthFailed("restricted: protected authorization denied".into())
+                })?;
+            match crate::authorization_runtime::executor::begin_authorized_operation(state, permit)
+                .await
+                .map_err(|error| IngestError::AuthFailed(format!("restricted: {error}")))?
+            {
+                crate::authorization_runtime::executor::AuthorizedOperationStart::Replay(
+                    payload,
+                ) => {
+                    if payload.as_slice() != b"left" {
+                        return Err(IngestError::Internal(
+                            "error: protected relay-leave receipt is invalid".into(),
+                        ));
+                    }
+                    buzz_db::relay_members::RemoveResult::Removed
+                }
+                crate::authorization_runtime::executor::AuthorizedOperationStart::Execute(
+                    mut operation,
+                ) => {
+                    let result = buzz_db::relay_members::remove_relay_member_tx(
+                        operation.transaction(),
+                        tenant.community(),
+                        &sender_hex,
+                    )
+                    .await
+                    .map_err(|error| IngestError::Internal(format!("database error: {error}")))?;
+                    if result == buzz_db::relay_members::RemoveResult::Removed {
+                        operation.commit(b"left").await.map_err(|error| {
+                            IngestError::AuthFailed(format!("restricted: {error}"))
+                        })?;
+                    }
+                    result
+                }
+            }
+        } else {
+            state
+                .db
+                .remove_relay_member(tenant.community(), &sender_hex)
+                .await
+                .map_err(|e| IngestError::Internal(format!("database error: {e}")))?
+        };
 
         match remove_result {
             buzz_db::relay_members::RemoveResult::Removed => {}
@@ -2305,20 +2587,27 @@ async fn ingest_event_inner(
             }
         }
 
-        // Publish NIP-43 announcements — fire-and-forget.
-        if let Err(e) =
-            crate::handlers::side_effects::publish_nip43_member_removed(tenant, state, &sender_hex)
-                .await
-        {
-            warn!(error = %e, "failed to publish NIP-43 member removed event");
-        }
-        if let Err(e) =
-            crate::handlers::side_effects::publish_nip43_membership_list(tenant, state).await
-        {
-            warn!(error = %e, "failed to publish NIP-43 membership list");
+        // Relay-signed announcements are derived background effects. Preserve
+        // them in legacy modes, but keep them unavailable before execution in
+        // Enforce until they have an authoritative delivery model.
+        if !protected.is_enforcing() {
+            if let Err(e) = crate::handlers::side_effects::publish_nip43_member_removed(
+                tenant,
+                state,
+                &sender_hex,
+            )
+            .await
+            {
+                warn!(error = %e, "failed to publish NIP-43 member removed event");
+            }
+            if let Err(e) =
+                crate::handlers::side_effects::publish_nip43_membership_list(tenant, state).await
+            {
+                warn!(error = %e, "failed to publish NIP-43 membership list");
+            }
         }
 
-        info!(pubkey = %sender_hex, "relay member left via NIP-43 leave request");
+        info!("relay member left via NIP-43 leave request");
 
         return Ok(IngestResult {
             event_id: event_id_hex,
@@ -2338,9 +2627,16 @@ async fn ingest_event_inner(
     // NIP-43 admin commands above — the request itself falls through to normal
     // storage so the delta's `["e", request_id]` audit reference resolves.
     if is_identity_archive_request_kind(kind_u32) {
-        crate::handlers::identity_archive::handle_identity_archive_event(tenant, state, &event)
-            .await
-            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+        protected.revalidate().map_err(|error| {
+            IngestError::AuthFailed(format!(
+                "restricted: protected authorization expired: {error}"
+            ))
+        })?;
+        if !protected.is_enforcing() {
+            crate::handlers::identity_archive::handle_identity_archive_event(tenant, state, &event)
+                .await
+                .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+        }
     }
 
     if kind_u32 == KIND_DELETION {
@@ -2519,50 +2815,57 @@ async fn ingest_event_inner(
                 IngestError::Rejected(format!("invalid channel_type: {channel_type_str}"))
             })?;
 
-        if let Some(client_uuid) = channel_id {
-            let name = create_name.unwrap_or_default();
-            let name = buzz_core::channel::canonical_channel_name(&name);
+        if !protected.is_enforcing() {
+            if let Some(client_uuid) = channel_id {
+                let name = create_name.unwrap_or_default();
+                let name = buzz_core::channel::canonical_channel_name(&name);
 
-            let description = event.tags.iter().find_map(|t| {
-                if t.kind().to_string() == "about" {
-                    t.content().map(|s| s.to_string())
-                } else {
-                    None
-                }
-            });
-
-            let ttl_seconds = super::resolve_ttl(&event, state.config.ephemeral_ttl_override);
-
-            let actor_bytes = event.pubkey.to_bytes().to_vec();
-            let (_, was_created) = state
-                .db
-                .create_channel_with_id(
-                    tenant.community(),
-                    client_uuid,
-                    name,
-                    channel_type,
-                    visibility,
-                    description.as_deref(),
-                    &actor_bytes,
-                    ttl_seconds,
-                )
-                .await
-                .map_err(|e| IngestError::Internal(format!("error: {e}")))?;
-
-            if !was_created {
-                return Ok(IngestResult {
-                    event_id: event_id_hex,
-                    accepted: false,
-                    message: "duplicate: channel already exists".into(),
+                let description = event.tags.iter().find_map(|t| {
+                    if t.kind().to_string() == "about" {
+                        t.content().map(|s| s.to_string())
+                    } else {
+                        None
+                    }
                 });
+
+                let ttl_seconds = super::resolve_ttl(&event, state.config.ephemeral_ttl_override);
+
+                let actor_bytes = event.pubkey.to_bytes().to_vec();
+                protected.revalidate().map_err(|error| {
+                    IngestError::AuthFailed(format!(
+                        "restricted: protected authorization expired: {error}"
+                    ))
+                })?;
+                let (_, was_created) = state
+                    .db
+                    .create_channel_with_id(
+                        tenant.community(),
+                        client_uuid,
+                        name,
+                        channel_type,
+                        visibility,
+                        description.as_deref(),
+                        &actor_bytes,
+                        ttl_seconds,
+                    )
+                    .await
+                    .map_err(|e| IngestError::Internal(format!("error: {e}")))?;
+
+                if !was_created {
+                    return Ok(IngestResult {
+                        event_id: event_id_hex,
+                        accepted: false,
+                        message: "duplicate: channel already exists".into(),
+                    });
+                }
+                pre_created_channel = Some(client_uuid);
+                metrics::counter!(
+                    "buzz_channels_created_total",
+                    "community" => crate::metrics::community_label(tenant.community()),
+                    "type" => channel_type.to_string()
+                )
+                .increment(1);
             }
-            pre_created_channel = Some(client_uuid);
-            metrics::counter!(
-                "buzz_channels_created_total",
-                "community" => tenant.host().to_owned(),
-                "type" => channel_type.to_string()
-            )
-            .increment(1);
         }
     }
 
@@ -2589,6 +2892,11 @@ async fn ingest_event_inner(
     }
 
     if kind_u32 == super::push_lease::KIND_PUSH_LEASE {
+        protected.revalidate().map_err(|error| {
+            IngestError::AuthFailed(format!(
+                "restricted: protected authorization expired: {error}"
+            ))
+        })?;
         let outcome = super::push_lease::accept(tenant, state, &event, now)
             .await
             .map_err(map_push_accept_error)?;
@@ -2728,20 +3036,116 @@ async fn ingest_event_inner(
         // the event in the same transaction. Ordering is load-bearing: active
         // duplicate reactions must return before storing a duplicate kind:7 event.
         let thread_params = thread_meta.as_ref().map(|m| m.as_params());
-        let (stored_event, was_inserted) = match state
-            .db
-            .insert_reaction_event_with_thread_metadata(
-                tenant.community(),
-                &event,
-                channel_id,
-                thread_params,
-                &target_id,
-                &actor_bytes,
-                emoji,
-            )
-            .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
-        {
+        protected.revalidate().map_err(|error| {
+            IngestError::AuthFailed(format!(
+                "restricted: protected authorization expired: {error}"
+            ))
+        })?;
+        let outcome = if protected.is_enforcing() {
+            let operation_id =
+                crate::authorization_runtime::executor::ProtectedOperationId::derive(
+                    tenant.community(),
+                    "event.reaction.v1",
+                    event.id.as_bytes(),
+                )
+                .map_err(|error| IngestError::Internal(format!("error: {error}")))?;
+            let mut request = Sha256::new();
+            request.update(b"buzz-event-reaction-request-v1");
+            request.update(event.id.as_bytes());
+            request.update(&target_id);
+            request.update(&actor_bytes);
+            request.update(emoji.as_bytes());
+            let permit = protected
+                .seal_postgres_mutation(
+                    operation_id,
+                    "event.reaction.v1",
+                    request.finalize().into(),
+                )
+                .map_err(|_| {
+                    IngestError::AuthFailed("restricted: protected authorization denied".into())
+                })?
+                .ok_or_else(|| {
+                    IngestError::AuthFailed("restricted: protected authorization denied".into())
+                })?;
+            match crate::authorization_runtime::executor::begin_authorized_operation(state, permit)
+                .await
+                .map_err(|error| IngestError::AuthFailed(format!("restricted: {error}")))?
+            {
+                crate::authorization_runtime::executor::AuthorizedOperationStart::Replay(
+                    payload,
+                ) => {
+                    let message = match payload.as_slice() {
+                        b"inserted" => String::new(),
+                        b"duplicate" => "duplicate: reaction already exists".to_owned(),
+                        _ => {
+                            return Err(IngestError::Internal(
+                                "error: protected reaction receipt is invalid".into(),
+                            ));
+                        }
+                    };
+                    return Ok(IngestResult {
+                        event_id: event_id_hex,
+                        accepted: payload.as_slice() == b"inserted",
+                        message,
+                    });
+                }
+                crate::authorization_runtime::executor::AuthorizedOperationStart::Execute(
+                    mut operation,
+                ) => {
+                    if let Some(channel_id) = channel_id {
+                        buzz_db::channel::require_channel_write_authority_tx(
+                            operation.transaction(),
+                            tenant.community(),
+                            channel_id,
+                            &pubkey_bytes,
+                        )
+                        .await
+                        .map_err(map_nip29_projection_error)?;
+                    }
+                    let outcome = buzz_db::event::insert_reaction_event_with_thread_metadata_tx(
+                        operation.transaction(),
+                        tenant.community(),
+                        &event,
+                        channel_id,
+                        thread_params,
+                        &target_id,
+                        &actor_bytes,
+                        emoji,
+                    )
+                    .await
+                    .map_err(|e| IngestError::Internal(format!("error: {e}")))?;
+                    let receipt: &[u8] = match &outcome {
+                        buzz_db::ReactionEventInsertOutcome::Inserted { .. } => b"inserted",
+                        buzz_db::ReactionEventInsertOutcome::Duplicate => b"duplicate",
+                        buzz_db::ReactionEventInsertOutcome::TargetMissing => {
+                            return Err(IngestError::Rejected(
+                                "invalid: reaction target event not found".into(),
+                            ));
+                        }
+                    };
+                    operation
+                        .commit(receipt)
+                        .await
+                        .map_err(|error| IngestError::AuthFailed(format!("restricted: {error}")))?;
+                    outcome
+                }
+            }
+        } else {
+            state
+                .db
+                .insert_reaction_event_with_thread_metadata(
+                    tenant.community(),
+                    &event,
+                    channel_id,
+                    thread_params,
+                    &target_id,
+                    &actor_bytes,
+                    emoji,
+                )
+                .await
+                .map_err(|e| IngestError::Internal(format!("error: {e}")))?
+        };
+        let (stored_event, was_inserted) = match outcome {
             buzz_db::ReactionEventInsertOutcome::TargetMissing => {
                 return Err(IngestError::Rejected(
                     "invalid: reaction target event not found".into(),
@@ -2799,7 +3203,253 @@ async fn ingest_event_inner(
         });
     }
 
-    let (stored_event, was_inserted) = if buzz_core::kind::is_replaceable(kind_u32) {
+    protected.revalidate().map_err(|error| {
+        IngestError::AuthFailed(format!(
+            "restricted: protected authorization expired: {error}"
+        ))
+    })?;
+    let mut enforced_nip29_outcome = None;
+    let (stored_event, was_inserted) = if protected.is_enforcing() {
+        let thread_params = thread_meta.as_ref().map(|metadata| metadata.as_params());
+        let mut stable = Sha256::new();
+        stable.update(b"buzz-event-ingest-operation-v1");
+        stable.update(tenant.community().as_uuid().as_bytes());
+        stable.update(event.id.as_bytes());
+        let stable: [u8; 32] = stable.finalize().into();
+        let operation_id = crate::authorization_runtime::executor::ProtectedOperationId::derive(
+            tenant.community(),
+            "event.ingest.v1",
+            &stable,
+        )
+        .map_err(|error| IngestError::Internal(format!("error: {error}")))?;
+        let mut request = Sha256::new();
+        request.update(b"buzz-event-ingest-request-v1");
+        request.update(event.id.as_bytes());
+        request.update(kind_u32.to_be_bytes());
+        if let Some(channel_id) = channel_id {
+            request.update(channel_id.as_bytes());
+        }
+        let permit = protected
+            .seal_postgres_mutation(operation_id, "event.ingest.v1", request.finalize().into())
+            .map_err(|_| {
+                IngestError::AuthFailed("restricted: protected authorization denied".into())
+            })?
+            .ok_or_else(|| {
+                IngestError::AuthFailed("restricted: protected authorization denied".into())
+            })?;
+        match crate::authorization_runtime::executor::begin_authorized_operation(state, permit)
+            .await
+            .map_err(|error| IngestError::AuthFailed(format!("restricted: {error}")))?
+        {
+            crate::authorization_runtime::executor::AuthorizedOperationStart::Replay(payload) => {
+                let was_inserted = match payload.as_slice() {
+                    b"inserted" => true,
+                    b"duplicate" => false,
+                    _ => {
+                        return Err(IngestError::Internal(
+                            "error: protected event receipt is invalid".into(),
+                        ));
+                    }
+                };
+                let message = if was_inserted {
+                    String::new()
+                } else {
+                    "duplicate:".to_owned()
+                };
+                let action = match (channel_id, was_inserted) {
+                    (Some(channel), true) => TraceAction::WriteInsert {
+                        msg_id: msg_id_label(event.id.as_bytes()),
+                        channel: channel_label(channel),
+                        claimed_community: claimed_community_from_event(&event),
+                    },
+                    (Some(channel), false) => TraceAction::WriteDuplicate {
+                        msg_id: msg_id_label(event.id.as_bytes()),
+                        channel: channel_label(channel),
+                        claimed_community: claimed_community_from_event(&event),
+                    },
+                    (None, _) => TraceAction::WriteInsertGlobal {
+                        msg_id: msg_id_label(event.id.as_bytes()),
+                        claimed_community: claimed_community_from_event(&event),
+                    },
+                };
+                emit(tracer, action, state_for_request(tenant, auth.pubkey()));
+                if let Some(outcome) = replay_nip29_outcome(kind_u32, channel_id, &event) {
+                    apply_enforced_nip29_postcommit(tenant, state, kind_u32, &event, outcome).await;
+                }
+                return Ok(IngestResult {
+                    event_id: event_id_hex,
+                    accepted: true,
+                    message,
+                });
+            }
+            crate::authorization_runtime::executor::AuthorizedOperationStart::Execute(
+                mut operation,
+            ) => {
+                if is_identity_archive_request_kind(kind_u32) {
+                    crate::handlers::identity_archive::handle_identity_archive_event_tx(
+                        tenant,
+                        state,
+                        &event,
+                        operation.transaction(),
+                    )
+                    .await
+                    .map_err(|error| IngestError::Rejected(format!("invalid: {error}")))?;
+                }
+                if kind_u32 == KIND_STREAM_MESSAGE_EDIT {
+                    validate_edit_ownership_tx(
+                        operation.transaction(),
+                        tenant.community(),
+                        &event,
+                        state,
+                    )
+                    .await
+                    .map_err(|error| IngestError::Rejected(format!("invalid: {error}")))?;
+                }
+                if let Some(channel_id) =
+                    channel_id.filter(|_| uses_generic_channel_write_authority(kind_u32))
+                {
+                    buzz_db::channel::require_channel_write_authority_tx(
+                        operation.transaction(),
+                        tenant.community(),
+                        channel_id,
+                        &pubkey_bytes,
+                    )
+                    .await
+                    .map_err(map_nip29_projection_error)?;
+                }
+                let result = if kind_u32 == KIND_GIT_REPO_ANNOUNCEMENT {
+                    let repo_id = protected_git_repo_id(&event)?;
+                    buzz_db::git_repo::replace_protected_announcement_tx(
+                        operation.transaction(),
+                        tenant.community(),
+                        &event,
+                        &repo_id,
+                        i64::from(state.config.git_max_repos_per_pubkey),
+                    )
+                    .await
+                } else if buzz_core::kind::is_replaceable(kind_u32) {
+                    buzz_db::event::replace_addressable_event_tx(
+                        operation.transaction(),
+                        tenant.community(),
+                        &event,
+                        channel_id,
+                    )
+                    .await
+                } else if is_parameterized_replaceable(kind_u32) {
+                    let d_tag = buzz_db::event::extract_d_tag(&event).unwrap_or_default();
+                    if d_tag.len() > buzz_db::event::D_TAG_MAX_LEN {
+                        return Err(IngestError::Rejected(format!(
+                            "invalid: d tag too long ({} bytes, max {})",
+                            d_tag.len(),
+                            buzz_db::event::D_TAG_MAX_LEN,
+                        )));
+                    }
+                    buzz_db::event::replace_parameterized_event_tx(
+                        operation.transaction(),
+                        tenant.community(),
+                        &event,
+                        &d_tag,
+                        channel_id,
+                    )
+                    .await
+                } else {
+                    buzz_db::event::insert_event_with_thread_metadata_tx(
+                        operation.transaction(),
+                        tenant.community(),
+                        &event,
+                        channel_id,
+                        thread_params,
+                    )
+                    .await
+                }
+                .map_err(|error| IngestError::Internal(format!("error: {error}")))?;
+                if result.1 {
+                    buzz_db::insert_mentions_tx(
+                        operation.transaction(),
+                        tenant.community(),
+                        &event,
+                        channel_id,
+                    )
+                    .await
+                    .map_err(|error| IngestError::Internal(format!("error: {error}")))?;
+                }
+                if result.1 && matches!(kind_u32, KIND_PROFILE | KIND_AGENT_PROFILE) {
+                    apply_profile_projection_tx(operation.transaction(), tenant, kind_u32, &event)
+                        .await?;
+                }
+                if result.1 && kind_u32 == KIND_DELETION {
+                    let actor = effective_message_author(&event, &state.relay_keypair.public_key());
+                    buzz_db::event::apply_standard_deletion_tx(
+                        operation.transaction(),
+                        tenant.community(),
+                        &event,
+                        &actor,
+                        state.relay_keypair.public_key().as_bytes(),
+                    )
+                    .await
+                    .map_err(map_nip29_projection_error)?;
+                }
+                if result.1 && kind_u32 == KIND_NIP29_DELETE_EVENT {
+                    buzz_db::event::apply_nip29_delete_event_tx(
+                        operation.transaction(),
+                        tenant.community(),
+                        &event,
+                        event.pubkey.to_bytes().as_slice(),
+                        state.relay_keypair.public_key().as_bytes(),
+                        channel_id.ok_or_else(|| {
+                            IngestError::Rejected(
+                                "invalid: channel deletion requires an h tag".into(),
+                            )
+                        })?,
+                    )
+                    .await
+                    .map_err(map_nip29_projection_error)?;
+                } else if result.1 {
+                    if let Some(mutation) =
+                        protected_nip29_mutation(kind_u32, channel_id, &event, state)?
+                    {
+                        enforced_nip29_outcome = Some(
+                            buzz_db::channel::apply_nip29_mutation_tx(
+                                operation.transaction(),
+                                tenant.community(),
+                                event.pubkey.to_bytes().as_slice(),
+                                mutation,
+                            )
+                            .await
+                            .map_err(map_nip29_projection_error)?,
+                        );
+                    }
+                }
+                let receipt: &[u8] = if result.1 { b"inserted" } else { b"duplicate" };
+                operation
+                    .commit(receipt)
+                    .await
+                    .map_err(|error| IngestError::AuthFailed(format!("restricted: {error}")))?;
+                result
+            }
+        }
+    } else if non_enforcing_postgresql_git {
+        let repo_id = protected_git_repo_id(&event)?;
+        let mut transaction = state
+            .db
+            .begin_transaction()
+            .await
+            .map_err(|error| IngestError::Internal(format!("error: {error}")))?;
+        let result = buzz_db::git_repo::replace_protected_announcement_tx(
+            &mut transaction,
+            tenant.community(),
+            &event,
+            &repo_id,
+            i64::from(state.config.git_max_repos_per_pubkey),
+        )
+        .await
+        .map_err(map_nip29_projection_error)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| IngestError::Internal(format!("error: {error}")))?;
+        result
+    } else if buzz_core::kind::is_replaceable(kind_u32) {
         // NIP-16 replaceable event — atomic replace with stale-write protection.
         // channel_id is None for global kinds (0, 1, 3) due to step 5b above.
         state
@@ -2866,7 +3516,10 @@ async fn ingest_event_inner(
         });
     }
 
-    if crate::handlers::side_effects::is_side_effect_kind(kind_u32) {
+    if !protected.is_enforcing()
+        && !non_enforcing_postgresql_git
+        && crate::handlers::side_effects::is_side_effect_kind(kind_u32)
+    {
         if let Err(e) =
             crate::handlers::side_effects::handle_side_effects(tenant, kind_u32, &event, state)
                 .await
@@ -2879,19 +3532,34 @@ async fn ingest_event_inner(
             error!(event_id = %event_id_hex, kind = kind_u32, "Side effect failed: {e}");
         }
     }
+    if let Some(guard) = legacy_git_policy_guard {
+        guard
+            .commit()
+            .await
+            .map_err(|error| IngestError::AuthFailed(format!("restricted: {error}")))?;
+    }
+
+    if let Some(outcome) = enforced_nip29_outcome {
+        apply_enforced_nip29_postcommit(tenant, state, kind_u32, &event, outcome).await;
+        if outcome.channel_changed {
+            threaded_visibility = None;
+        }
+    }
 
     // A freshly inserted reply changed its thread's counters (updated in the
     // same transaction as the insert) — push a fresh relay-signed 39005 so
     // subscribed clients can update badge counts without refetching the head
     // window. Page responses recompute summaries independently, so this is
     // fan-out-only and best-effort.
-    if let Some(meta) = &thread_meta {
-        crate::handlers::side_effects::emit_live_thread_summary(
-            tenant,
-            state,
-            meta.channel_id,
-            meta.root_event_id.clone(),
-        );
+    if !protected.is_enforcing() {
+        if let Some(meta) = &thread_meta {
+            crate::handlers::side_effects::emit_live_thread_summary(
+                tenant,
+                state,
+                meta.channel_id,
+                meta.root_event_id.clone(),
+            );
+        }
     }
 
     let pubkey_hex = auth.pubkey().to_hex();
@@ -2941,6 +3609,318 @@ async fn ingest_event_inner(
         accepted: true,
         message: String::new(),
     })
+}
+
+fn stable_event_correlation(event: &Event) -> Uuid {
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&event.id.as_bytes()[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
+}
+
+fn replay_nip29_outcome(
+    kind: u32,
+    channel_id: Option<Uuid>,
+    event: &Event,
+) -> Option<buzz_db::channel::Nip29MutationOutcome> {
+    let (channel_id, membership_changed, channel_changed) = match kind {
+        KIND_NIP29_CREATE_GROUP => (
+            channel_id.unwrap_or_else(|| stable_event_correlation(event)),
+            true,
+            true,
+        ),
+        KIND_NIP29_PUT_USER
+        | KIND_NIP29_REMOVE_USER
+        | KIND_NIP29_JOIN_REQUEST
+        | KIND_NIP29_LEAVE_REQUEST => (channel_id?, true, true),
+        KIND_NIP29_EDIT_METADATA | KIND_NIP29_DELETE_GROUP => (channel_id?, false, true),
+        _ => return None,
+    };
+    Some(buzz_db::channel::Nip29MutationOutcome {
+        channel_id,
+        changed: true,
+        membership_changed,
+        channel_changed,
+    })
+}
+
+async fn apply_enforced_nip29_postcommit(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    kind: u32,
+    event: &Event,
+    outcome: buzz_db::channel::Nip29MutationOutcome,
+) {
+    if outcome.membership_changed {
+        let member = match kind {
+            KIND_NIP29_PUT_USER | KIND_NIP29_REMOVE_USER => extract_p_tag_bytes(event).ok(),
+            KIND_NIP29_CREATE_GROUP | KIND_NIP29_JOIN_REQUEST | KIND_NIP29_LEAVE_REQUEST => {
+                Some(event.pubkey.to_bytes().to_vec())
+            }
+            _ => None,
+        };
+        if let Some(member) = member {
+            state.invalidate_membership(tenant, outcome.channel_id, &member);
+            if matches!(kind, KIND_NIP29_REMOVE_USER | KIND_NIP29_LEAVE_REQUEST) {
+                crate::handlers::side_effects::evict_live_channel_subscriptions(
+                    tenant,
+                    state,
+                    outcome.channel_id,
+                    &member,
+                )
+                .await;
+            }
+        }
+        state.invalidate_all_accessible_channels(tenant);
+    }
+    if outcome.channel_changed {
+        state.invalidate_channel_visibility(tenant, outcome.channel_id);
+        if kind == KIND_NIP29_DELETE_GROUP {
+            state.invalidate_channel_deleted(tenant);
+            crate::handlers::side_effects::evict_all_channel_subscriptions(
+                tenant,
+                state,
+                outcome.channel_id,
+            )
+            .await;
+        }
+    }
+}
+
+async fn apply_profile_projection_tx(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant: &TenantContext,
+    kind: u32,
+    event: &Event,
+) -> Result<(), IngestError> {
+    let content: serde_json::Value = serde_json::from_str(&event.content)
+        .map_err(|error| IngestError::Rejected(format!("invalid: profile content: {error}")))?;
+    let pubkey = event.pubkey.to_bytes();
+    buzz_db::user::ensure_user_tx(transaction, tenant.community(), pubkey.as_slice())
+        .await
+        .map_err(|error| IngestError::Internal(format!("error: {error}")))?;
+    if kind == KIND_AGENT_PROFILE {
+        let policy = content
+            .get("channel_add_policy")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                IngestError::Rejected("invalid: agent profile missing channel_add_policy".into())
+            })?;
+        buzz_db::user::set_channel_add_policy_tx(
+            transaction,
+            tenant.community(),
+            pubkey.as_slice(),
+            policy,
+        )
+        .await
+        .map_err(|error| IngestError::Rejected(format!("invalid: {error}")))?;
+        return Ok(());
+    }
+    let display_name = content
+        .get("display_name")
+        .or_else(|| content.get("name"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let avatar_url = content
+        .get("picture")
+        .or_else(|| content.get("image"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let about = content
+        .get("about")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let nip05 = content
+        .get("nip05")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| crate::api::nip05::canonicalize_nip05(value, tenant.host()).ok())
+        .unwrap_or_default();
+    buzz_db::user::replace_user_profile_tx(
+        transaction,
+        tenant.community(),
+        pubkey.as_slice(),
+        display_name,
+        avatar_url,
+        about,
+        &nip05,
+    )
+    .await
+    .map_err(|error| IngestError::Internal(format!("error: {error}")))
+}
+
+fn protected_nip29_mutation(
+    kind: u32,
+    channel_id: Option<Uuid>,
+    event: &Event,
+    state: &Arc<AppState>,
+) -> Result<Option<buzz_db::channel::Nip29Mutation>, IngestError> {
+    use buzz_db::channel::{
+        ChannelType, ChannelUpdate, ChannelVisibility, MemberRole, Nip29Mutation,
+    };
+
+    let tag = |name: &str| {
+        event.tags.iter().find_map(|tag| {
+            let parts = tag.as_slice();
+            (parts.first().map(String::as_str) == Some(name))
+                .then(|| parts.get(1).cloned())
+                .flatten()
+        })
+    };
+    let required_channel =
+        || channel_id.ok_or_else(|| IngestError::Rejected("invalid: missing h tag".into()));
+    let mutation = match kind {
+        KIND_NIP29_CREATE_GROUP => {
+            let name = tag("name")
+                .ok_or_else(|| IngestError::Rejected("invalid: channel name is required".into()))?;
+            let channel_type = tag("channel_type")
+                .unwrap_or_else(|| "stream".into())
+                .parse::<ChannelType>()
+                .map_err(|_| IngestError::Rejected("invalid: channel type".into()))?;
+            let visibility = tag("visibility")
+                .unwrap_or_else(|| "open".into())
+                .parse::<ChannelVisibility>()
+                .map_err(|_| IngestError::Rejected("invalid: channel visibility".into()))?;
+            Nip29Mutation::Create {
+                channel_id: channel_id.unwrap_or_else(|| stable_event_correlation(event)),
+                name,
+                channel_type,
+                visibility,
+                description: tag("about"),
+                ttl_seconds: super::resolve_ttl(event, state.config.ephemeral_ttl_override),
+            }
+        }
+        KIND_NIP29_PUT_USER => {
+            let target = extract_p_tag_bytes(event)?;
+            let role = tag("role")
+                .map(|role| {
+                    role.parse::<MemberRole>()
+                        .map_err(|_| IngestError::Rejected("invalid: member role".into()))
+                })
+                .transpose()?;
+            Nip29Mutation::PutUser {
+                channel_id: required_channel()?,
+                target,
+                role,
+            }
+        }
+        KIND_NIP29_REMOVE_USER => Nip29Mutation::RemoveUser {
+            channel_id: required_channel()?,
+            target: extract_p_tag_bytes(event)?,
+        },
+        KIND_NIP29_EDIT_METADATA => {
+            let ttl_value = event.tags.iter().find_map(|tag| {
+                let parts = tag.as_slice();
+                (parts.first().map(String::as_str) == Some("ttl")).then(|| parts.get(1).cloned())
+            });
+            let ttl_seconds = match ttl_value {
+                None => None,
+                Some(None) => {
+                    return Err(IngestError::Rejected(
+                        "invalid: channel ttl must have a value".into(),
+                    ));
+                }
+                Some(Some(value)) if value.is_empty() => Some(None),
+                Some(Some(value)) => {
+                    Some(Some(value.parse::<i32>().map_err(|_| {
+                        IngestError::Rejected("invalid: channel ttl".into())
+                    })?))
+                }
+            };
+            let archived = tag("archived")
+                .map(|value| match value.as_str() {
+                    "true" => Ok(true),
+                    "false" => Ok(false),
+                    _ => Err(IngestError::Rejected("invalid: archive state".into())),
+                })
+                .transpose()?;
+            Nip29Mutation::EditMetadata {
+                channel_id: required_channel()?,
+                updates: ChannelUpdate {
+                    name: tag("name"),
+                    description: tag("about"),
+                    visibility: tag("visibility"),
+                    ttl_seconds,
+                },
+                topic: tag("topic"),
+                purpose: tag("purpose"),
+                archived,
+            }
+        }
+        KIND_NIP29_DELETE_GROUP => Nip29Mutation::DeleteGroup {
+            channel_id: required_channel()?,
+            relay_pubkey: state.relay_keypair.public_key().to_bytes().to_vec(),
+        },
+        KIND_NIP29_JOIN_REQUEST => Nip29Mutation::Join {
+            channel_id: required_channel()?,
+        },
+        KIND_NIP29_LEAVE_REQUEST => Nip29Mutation::Leave {
+            channel_id: required_channel()?,
+        },
+        _ => return Ok(None),
+    };
+    Ok(Some(mutation))
+}
+
+fn extract_p_tag_bytes(event: &Event) -> Result<Vec<u8>, IngestError> {
+    let value = event
+        .tags
+        .iter()
+        .find_map(|tag| {
+            let parts = tag.as_slice();
+            (parts.first().map(String::as_str) == Some("p"))
+                .then(|| parts.get(1).map(String::as_str))
+                .flatten()
+        })
+        .ok_or_else(|| IngestError::Rejected("invalid: missing p tag".into()))?;
+    let bytes =
+        hex::decode(value).map_err(|_| IngestError::Rejected("invalid: malformed p tag".into()))?;
+    if bytes.len() != 32 {
+        return Err(IngestError::Rejected("invalid: malformed p tag".into()));
+    }
+    Ok(bytes)
+}
+
+fn map_nip29_projection_error(error: buzz_db::DbError) -> IngestError {
+    match error {
+        buzz_db::DbError::AccessDenied(message)
+        | buzz_db::DbError::InvalidData(message)
+        | buzz_db::DbError::NotFound(message) => {
+            IngestError::Rejected(format!("invalid: {message}"))
+        }
+        buzz_db::DbError::ChannelNotFound(_) | buzz_db::DbError::MemberNotFound(_) => {
+            IngestError::Rejected("invalid: channel state changed".into())
+        }
+        other => IngestError::Internal(format!("error: {other}")),
+    }
+}
+
+fn protected_git_repo_id(event: &Event) -> Result<String, IngestError> {
+    let repo_id = event
+        .tags
+        .iter()
+        .find_map(|tag| {
+            let parts = tag.as_slice();
+            (parts.first().map(String::as_str) == Some("d"))
+                .then(|| parts.get(1).map(String::as_str))
+                .flatten()
+        })
+        .ok_or_else(|| {
+            IngestError::Rejected("invalid: repository announcement missing d tag".into())
+        })?;
+    if repo_id.is_empty()
+        || repo_id.len() > 64
+        || repo_id.starts_with('.')
+        || repo_id.contains("..")
+        || !repo_id.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
+        })
+    {
+        return Err(IngestError::Rejected(
+            "invalid: repository identifier is not portable".into(),
+        ));
+    }
+    Ok(repo_id.to_owned())
 }
 
 #[cfg(test)]
@@ -3114,6 +4094,25 @@ mod tests {
     fn create_group_does_not_require_h_tag() {
         // kind:9007 creates the channel — h-tag is optional (client-chosen UUID)
         assert!(!requires_h_channel_scope(KIND_NIP29_CREATE_GROUP));
+    }
+
+    #[test]
+    fn protected_nip29_receipt_replay_restores_the_required_cache_fences() {
+        let event = make_dummy_event();
+        let created = replay_nip29_outcome(KIND_NIP29_CREATE_GROUP, None, &event)
+            .expect("create-group receipts need replay fences");
+        assert_eq!(created.channel_id, stable_event_correlation(&event));
+        assert!(created.membership_changed);
+        assert!(created.channel_changed);
+
+        let channel_id = Uuid::new_v4();
+        let removed = replay_nip29_outcome(KIND_NIP29_REMOVE_USER, Some(channel_id), &event)
+            .expect("remove-user receipts need replay fences");
+        assert_eq!(removed.channel_id, channel_id);
+        assert!(removed.membership_changed);
+        assert!(removed.channel_changed);
+
+        assert!(replay_nip29_outcome(KIND_TEXT_NOTE, Some(channel_id), &event).is_none());
     }
 
     #[test]
