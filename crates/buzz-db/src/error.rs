@@ -48,6 +48,10 @@ pub enum DbError {
     /// A stored timestamp value could not be interpreted.
     #[error("invalid timestamp: {0}")]
     InvalidTimestamp(i64),
+
+    /// The process does not hold the current database writer epoch/lease.
+    #[error("writer fence denied: {0}")]
+    WriterFence(String),
 }
 
 /// Convenience alias for `Result<T, DbError>`.

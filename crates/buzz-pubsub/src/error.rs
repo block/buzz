@@ -26,6 +26,10 @@ pub enum PubSubError {
     /// A Redis channel key could not be parsed as a valid channel ID.
     #[error("Invalid channel key: {0}")]
     InvalidChannelKey(String),
+
+    /// The process lost its writer epoch before an external effect.
+    #[error("Writer fence denied: {0}")]
+    WriterFence(String),
 }
 
 impl From<tokio::sync::broadcast::error::RecvError> for PubSubError {

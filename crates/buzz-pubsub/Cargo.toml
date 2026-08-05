@@ -8,6 +8,7 @@ repository.workspace = true
 description = "Redis pub/sub fan-out, presence, and typing indicators for Buzz"
 
 [dependencies]
+async-trait = "0.1"
 buzz-core = { workspace = true }
 buzz-auth = { workspace = true }
 redis = { workspace = true }

@@ -43,8 +43,10 @@ pub mod topic;
 /// Typing indicator tracking in Redis.
 pub use error::PubSubError;
 
+use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::RwLock;
 use std::time::Duration;
 
 use buzz_core::TenantContext;
@@ -56,6 +58,35 @@ use crate::cache_invalidation::{
 };
 use crate::conn_control::{conn_control_channel, ConnControl, ScopedConnControl};
 pub use crate::topic::{channel_key, global_key, EventTopic, EventTopicKey};
+
+/// A transaction-backed permit for one external Redis effect.
+///
+/// Implementations must keep the writer-fence transaction open until the
+/// Redis command returns, then commit it. Dropping the permit rolls it back.
+#[async_trait]
+pub trait PublishPermit: Send {
+    /// Commit the permit after the external command has returned.
+    async fn commit(self: Box<Self>) -> std::result::Result<(), String>;
+}
+
+/// Authorizes an external Redis effect against the current writer epoch.
+#[async_trait]
+pub trait PublishGuard: Send + Sync {
+    /// Begin an effect permit while the process still owns the current lease.
+    async fn begin_effect(
+        &self,
+        effect_key: &str,
+    ) -> std::result::Result<Box<dyn PublishPermit>, String>;
+}
+
+struct NoopPublishPermit;
+
+#[async_trait]
+impl PublishPermit for NoopPublishPermit {
+    async fn commit(self: Box<Self>) -> std::result::Result<(), String> {
+        Ok(())
+    }
+}
 
 /// A Nostr event received on a scoped Redis event topic, broadcast to local subscribers.
 #[derive(Debug, Clone)]
@@ -110,6 +141,7 @@ pub struct PubSubManager {
     broadcast_tx: broadcast::Sender<ChannelEvent>,
     cache_invalidation_tx: broadcast::Sender<ScopedCacheInvalidation>,
     conn_control_tx: broadcast::Sender<ScopedConnControl>,
+    publish_guard: Arc<RwLock<Option<Arc<dyn PublishGuard>>>>,
 }
 
 impl PubSubManager {
@@ -138,7 +170,36 @@ impl PubSubManager {
             broadcast_tx,
             cache_invalidation_tx,
             conn_control_tx,
+            publish_guard: Arc::new(RwLock::new(None)),
         })
+    }
+
+    /// Install the process-wide guard used before Redis writes and publishes.
+    pub fn set_publish_guard(&self, guard: Arc<dyn PublishGuard>) {
+        if let Ok(mut slot) = self.publish_guard.write() {
+            *slot = Some(guard);
+        } else {
+            tracing::error!("publish guard lock poisoned; external effects will fail closed");
+        }
+    }
+
+    async fn begin_external_effect(
+        &self,
+        effect_key: &str,
+    ) -> Result<Box<dyn PublishPermit>, PubSubError> {
+        let guard = self
+            .publish_guard
+            .read()
+            .map_err(|_| PubSubError::WriterFence("publish guard lock poisoned".into()))?
+            .clone();
+        if let Some(guard) = guard {
+            guard
+                .begin_effect(effect_key)
+                .await
+                .map_err(PubSubError::WriterFence)
+        } else {
+            Ok(Box::new(NoopPublishPermit))
+        }
     }
 
     /// Starts the pub/sub fan-out loop with automatic reconnection.
@@ -274,13 +335,18 @@ impl PubSubManager {
         ctx: &TenantContext,
         invalidation: &CacheInvalidation,
     ) -> Result<i64, PubSubError> {
+        let channel = cache_invalidation_channel(ctx);
+        let effect = self
+            .begin_external_effect(&format!("redis:cache:{channel}"))
+            .await?;
         let mut conn = self.pool.get().await?;
         let payload = serde_json::to_string(invalidation)?;
         let subscriber_count: i64 = redis::cmd("PUBLISH")
-            .arg(cache_invalidation_channel(ctx))
+            .arg(channel)
             .arg(&payload)
             .query_async(&mut conn)
             .await?;
+        effect.commit().await.map_err(PubSubError::WriterFence)?;
         Ok(subscriber_count)
     }
 
@@ -294,13 +360,18 @@ impl PubSubManager {
         ctx: &TenantContext,
         command: &ConnControl,
     ) -> Result<i64, PubSubError> {
+        let channel = conn_control_channel(ctx);
+        let effect = self
+            .begin_external_effect(&format!("redis:conn-control:{channel}"))
+            .await?;
         let mut conn = self.pool.get().await?;
         let payload = serde_json::to_string(command)?;
         let subscriber_count: i64 = redis::cmd("PUBLISH")
-            .arg(conn_control_channel(ctx))
+            .arg(channel)
             .arg(&payload)
             .query_async(&mut conn)
             .await?;
+        effect.commit().await.map_err(PubSubError::WriterFence)?;
         Ok(subscriber_count)
     }
 
@@ -325,7 +396,16 @@ impl PubSubManager {
         topic: EventTopic,
         event: &nostr::Event,
     ) -> Result<i64, PubSubError> {
-        publisher::publish_event(&self.pool, ctx, topic, event).await
+        let channel = EventTopicKey::from_context(ctx, topic).redis_channel();
+        // The Nostr event id is the stable Redis-side idempotency key. A retry
+        // after a permit/connection failure must not invent a second identity.
+        let effect = self
+            .begin_external_effect(&format!("redis:event:{channel}:{}", event.id))
+            .await?;
+        let result = publisher::publish_event(&self.pool, ctx, topic, event).await;
+        let subscriber_count = result?;
+        effect.commit().await.map_err(PubSubError::WriterFence)?;
+        Ok(subscriber_count)
     }
 
     /// Set presence with 180s TTL. Call on connect and every 60s heartbeat.
@@ -335,7 +415,15 @@ impl PubSubManager {
         pubkey: &PublicKey,
         status: &str,
     ) -> Result<(), PubSubError> {
-        presence::set_presence(&self.pool, ctx, pubkey, status).await
+        let effect = self
+            .begin_external_effect(&format!(
+                "redis:presence:set:{}:{}",
+                ctx.community(),
+                pubkey.to_hex()
+            ))
+            .await?;
+        presence::set_presence(&self.pool, ctx, pubkey, status).await?;
+        effect.commit().await.map_err(PubSubError::WriterFence)
     }
 
     /// Remove presence for `pubkey`. Call on clean disconnect.
@@ -344,7 +432,15 @@ impl PubSubManager {
         ctx: &TenantContext,
         pubkey: &PublicKey,
     ) -> Result<(), PubSubError> {
-        presence::clear_presence(&self.pool, ctx, pubkey).await
+        let effect = self
+            .begin_external_effect(&format!(
+                "redis:presence:clear:{}:{}",
+                ctx.community(),
+                pubkey.to_hex()
+            ))
+            .await?;
+        presence::clear_presence(&self.pool, ctx, pubkey).await?;
+        effect.commit().await.map_err(PubSubError::WriterFence)
     }
 
     /// Returns the current presence status for `pubkey`, or `None` if not set.

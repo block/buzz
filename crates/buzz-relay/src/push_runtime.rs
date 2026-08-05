@@ -429,7 +429,26 @@ async fn deliver_one(
             return;
         }
     };
+    // Hold the database fence row lock across the HTTP effect. Epoch takeover
+    // takes the incompatible row lock, so it cannot linearize before this
+    // request returns. The outbox UUID is the stable gateway idempotency key;
+    // any retry after a permit commit failure reuses the same request id.
+    let effect = match state
+        .db
+        .begin_writer_fence_effect(&format!("push:wake:{}", outcome.id))
+        .await
+    {
+        Ok(effect) => effect,
+        Err(error) => {
+            warn!(wake=%outcome.id, "push writer-fence effect denied: {error}");
+            return;
+        }
+    };
     let response = send_gateway_request(http, url, body, auth).await;
+    if let Err(error) = effect.commit().await {
+        warn!(wake=%outcome.id, "push writer-fence effect commit failed: {error}");
+        return;
+    }
     match response {
         Ok(r) if r.status().is_success() => match r.json::<DeliveryResponse>().await {
             Ok(DeliveryResponse::Accepted) => {

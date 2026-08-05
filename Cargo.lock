@@ -1127,6 +1127,7 @@ dependencies = [
 name = "buzz-pubsub"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "buzz-auth",
  "buzz-core",
  "chrono",

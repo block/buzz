@@ -67,7 +67,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // Health endpoints
         .route("/health", get(health_handler))
         .route("/_liveness", get(liveness_handler))
-        .route("/_readiness", get(readiness_handler))
         // Nostr HTTP bridge (NIP-98 auth)
         .route("/events", post(api::bridge::submit_event))
         .route("/query", post(api::bridge::query_events))
@@ -363,7 +362,7 @@ async fn liveness_handler() -> impl IntoResponse {
     (StatusCode::OK, "ok")
 }
 
-/// Readiness probe — checks shutdown flag, Postgres, and Redis connectivity.
+/// Readiness probe — checks shutdown, Postgres, Redis, and the writer fence.
 async fn readiness_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     use std::time::Duration;
 
@@ -376,22 +375,29 @@ async fn readiness_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
     }
 
     let check = async {
-        let (pg_ok, redis_ok) = tokio::join!(state.db.ping(), async {
-            state.redis_pool.get().await.is_ok()
-        },);
-        (pg_ok, redis_ok)
+        let (pg_ok, redis_ok, fence_result) = tokio::join!(
+            state.db.ping(),
+            async { state.redis_pool.get().await.is_ok() },
+            state.db.assert_writer_fence(),
+        );
+        (pg_ok, redis_ok, fence_result.is_ok())
     };
 
-    let (pg_ok, redis_ok) = tokio::time::timeout(Duration::from_secs(2), check)
+    let (pg_ok, redis_ok, writer_fence_ok) = tokio::time::timeout(Duration::from_secs(2), check)
         .await
-        .unwrap_or((false, false));
+        .unwrap_or((false, false, false));
 
-    if pg_ok && redis_ok {
+    if pg_ok && redis_ok && writer_fence_ok {
         (StatusCode::OK, Json(json!({"status": "ready"}))).into_response()
     } else {
         (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"status": "not_ready", "postgres": pg_ok, "redis": redis_ok})),
+            Json(json!({
+                "status": "not_ready",
+                "postgres": pg_ok,
+                "redis": redis_ok,
+                "writer_fence": writer_fence_ok,
+            })),
         )
             .into_response()
     }

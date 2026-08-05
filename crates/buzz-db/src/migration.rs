@@ -6,6 +6,9 @@
 
 use sqlx::PgPool;
 
+#[cfg(test)]
+use std::time::Duration;
+
 use crate::Result;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
@@ -348,6 +351,8 @@ mod tests {
             "push_gateway_delivery_request_replays",
             "product_feedback",
             "replica_heartbeat",
+            "buzz_writer_fence",
+            "buzz_writer_fence_config",
         ] {
             if normalized[insert_pos..].contains(&format!("'{value}'")) {
                 globals.insert(value.to_owned());
@@ -561,7 +566,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 26);
+        assert_eq!(migrations.len(), 29);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -919,6 +924,48 @@ mod tests {
         assert!(heartbeat.contains("epoch"));
         assert!(heartbeat.contains("INSERT INTO replica_heartbeat (id) VALUES (1)"));
         assert!(heartbeat.contains("_operator_global_tables"));
+
+        // Writer epoch/lease fence: the control plane is deployment-global,
+        // while ENABLE ALWAYS triggers cover every current durable table and
+        // the partitioned events parent.
+        assert_eq!(migrations[26].version, 27);
+        let writer_fence = migrations[26].sql.as_str();
+        assert!(writer_fence.contains("CREATE TABLE buzz_writer_fence"));
+        assert!(writer_fence.contains("CREATE TABLE buzz_writer_fence_config"));
+        assert!(writer_fence.contains("buzz_writer_fence_config"));
+        assert!(writer_fence.contains("buzz_writer_fence_acquire"));
+        assert!(writer_fence.contains("buzz_writer_fence_renew"));
+        assert!(writer_fence.contains("buzz_writer_fence_state"));
+        assert!(writer_fence.contains("buzz_writer_fence_check"));
+        assert!(writer_fence.contains("buzz_writer_fence_guard"));
+        assert!(!writer_fence.contains("current_setting('buzz.writer_fence_required'"));
+        assert!(writer_fence.contains("REVOKE ALL ON buzz_writer_fence FROM PUBLIC"));
+        assert!(writer_fence.contains("REVOKE ALL ON FUNCTION buzz_writer_fence_acquire"));
+        assert!(writer_fence.contains("REVOKE ALL ON FUNCTION buzz_writer_fence_guard"));
+        assert!(writer_fence.contains("ENABLE ALWAYS TRIGGER"));
+        assert!(writer_fence.contains("_sqlx_migrations"));
+
+        // The additive writer-fence hardening migration re-checks the epoch at
+        // COMMIT and serializes external effects with epoch takeover.
+        assert_eq!(migrations[27].version, 28);
+        let writer_fence_commit = migrations[27].sql.as_str();
+        assert!(writer_fence_commit.contains("buzz_writer_fence_effect_check"));
+        assert!(writer_fence_commit.contains("buzz_writer_fence_commit_guard"));
+        assert!(writer_fence_commit.contains("CREATE CONSTRAINT TRIGGER buzz_writer_fence_commit"));
+        assert!(writer_fence_commit.contains("DEFERRABLE INITIALLY DEFERRED"));
+        assert!(writer_fence_commit.contains("buzz_writer_fence_begin_effect"));
+
+        assert_eq!(migrations[28].version, 29);
+        let writer_fence_reconciliation = migrations[28].sql.as_str();
+        assert!(writer_fence_reconciliation.contains(
+            "SET LOCAL buzz.writer_fence_required = 'off'"
+        ));
+        assert!(writer_fence_reconciliation.contains("buzz_writer_fence_config"));
+        assert!(writer_fence_reconciliation.contains("_operator_global_tables"));
+        assert!(writer_fence_reconciliation.contains(
+            "CREATE OR REPLACE FUNCTION buzz_writer_fence_guard"
+        ));
+        assert!(writer_fence_commit.contains("FOR SHARE"));
     }
 
     #[test]
@@ -1085,6 +1132,231 @@ mod tests {
             .expect("create public schema");
     }
 
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn writer_fence_required_cannot_be_disabled_by_session_setting() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        run_migrations(&pool)
+            .await
+            .expect("apply migrations through writer fence");
+
+        for is_local in [false, true] {
+            let mut transaction = pool
+                .begin()
+                .await
+                .expect("begin writer-fence test transaction");
+            sqlx::query(
+                "UPDATE public.buzz_writer_fence_config
+                 SET required = TRUE, updated_at = clock_timestamp()
+                 WHERE singleton",
+            )
+            .execute(&mut *transaction)
+            .await
+            .expect("enable server-side writer-fence requirement");
+            sqlx::query("SELECT set_config('buzz.writer_fence_required', 'off', $1)")
+                .bind(is_local)
+                .execute(&mut *transaction)
+                .await
+                .expect("set the legacy session override to off");
+
+            let community_id = uuid::Uuid::new_v4();
+            let error = sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                .bind(community_id)
+                .bind(format!("writer-fence-session-override-{is_local}.example"))
+                .execute(&mut *transaction)
+                .await
+                .expect_err("session GUC must not disable the server-side requirement");
+
+            assert!(
+                error.to_string().contains("writer fence denied"),
+                "unexpected writer-fence error for is_local={is_local}: {error}"
+            );
+            transaction
+                .rollback()
+                .await
+                .expect("rollback writer-fence test transaction");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn writer_fence_rejects_a_long_transaction_after_epoch_takeover() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        run_migrations(&pool)
+            .await
+            .expect("apply migrations through writer fence");
+        sqlx::query(
+            "UPDATE public.buzz_writer_fence_config
+             SET required = TRUE, updated_at = clock_timestamp()
+             WHERE singleton",
+        )
+        .execute(&pool)
+        .await
+        .expect("enable server-side writer-fence requirement");
+
+        let first_epoch: i64 = sqlx::query_scalar(
+            "SELECT epoch
+             FROM public.buzz_writer_fence_acquire('writer-fence-long-tx', 'old-writer', 5)",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("acquire first epoch");
+
+        let mut transaction = pool.begin().await.expect("begin old writer transaction");
+        for (name, value) in [
+            ("buzz.writer_fence_resource", "writer-fence-long-tx"),
+            ("buzz.writer_fence_epoch", &first_epoch.to_string()),
+            ("buzz.writer_fence_holder", "old-writer"),
+        ] {
+            sqlx::query("SELECT set_config($1, $2, false)")
+                .bind(name)
+                .bind(value)
+                .execute(&mut *transaction)
+                .await
+                .expect("stamp old writer session");
+        }
+        let community_id = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind("writer-fence-long-tx.example")
+            .execute(&mut *transaction)
+            .await
+            .expect("live epoch permits the initial write");
+
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        let takeover_epoch: i64 = sqlx::query_scalar(
+            "SELECT epoch
+             FROM public.buzz_writer_fence_acquire('writer-fence-long-tx', 'new-writer', 30)",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("expired lease can be replaced");
+        assert_eq!(takeover_epoch, first_epoch + 1);
+
+        let error = transaction
+            .commit()
+            .await
+            .expect_err("old writer must fail at commit after takeover");
+        assert!(
+            error.to_string().contains("writer fence denied"),
+            "unexpected commit error: {error}"
+        );
+        let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM communities WHERE id = $1")
+            .bind(community_id)
+            .fetch_one(&pool)
+            .await
+            .expect("verify rejected transaction");
+        assert_eq!(rows, 0, "stale transaction must roll back its writes");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn writer_fence_effect_permit_serializes_epoch_takeover() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        run_migrations(&pool)
+            .await
+            .expect("apply migrations through writer fence");
+        sqlx::query(
+            "UPDATE public.buzz_writer_fence_config
+             SET required = TRUE, updated_at = clock_timestamp()
+             WHERE singleton",
+        )
+        .execute(&pool)
+        .await
+        .expect("enable server-side writer-fence requirement");
+
+        let first_epoch: i64 = sqlx::query_scalar(
+            "SELECT epoch
+             FROM public.buzz_writer_fence_acquire('writer-fence-effect', 'old-writer', 5)",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("acquire first epoch");
+        let mut effect_transaction = pool.begin().await.expect("begin effect transaction");
+        let permitted: bool = sqlx::query_scalar(
+            "SELECT public.buzz_writer_fence_begin_effect(
+                 'writer-fence-effect', $1, 'old-writer', 'redis:event:test')",
+        )
+        .bind(first_epoch)
+        .fetch_one(&mut *effect_transaction)
+        .await
+        .expect("begin fenced external effect");
+        assert!(permitted);
+
+        // Let the old lease expire while the external-effect permit still
+        // holds the shared fence-row lock. The takeover must then wait for
+        // this permit, rather than fail early on the still-active lease.
+        tokio::time::sleep(Duration::from_secs(6)).await;
+
+        let mut takeover = Box::pin(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT epoch
+             FROM public.buzz_writer_fence_acquire('writer-fence-effect', 'new-writer', 30)",
+            )
+            .fetch_one(&pool),
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), &mut takeover)
+                .await
+                .is_err(),
+            "epoch takeover must wait while an external effect holds the fence"
+        );
+
+        effect_transaction
+            .commit()
+            .await
+            .expect("commit external effect permit");
+        let takeover_epoch = tokio::time::timeout(Duration::from_secs(5), &mut takeover)
+            .await
+            .expect("takeover resumes after effect commit")
+            .expect("takeover query succeeds");
+        assert_eq!(takeover_epoch, first_epoch + 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn server_required_rejects_an_unfenced_process_before_readiness_or_effects() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        run_migrations(&pool)
+            .await
+            .expect("apply migrations through writer fence");
+        let db = crate::Db::from_pool(pool.clone());
+
+        assert!(
+            db.assert_writer_fence().await.is_ok(),
+            "local development remains compatible while required=false"
+        );
+
+        sqlx::query(
+            "UPDATE public.buzz_writer_fence_config
+             SET required = TRUE, updated_at = clock_timestamp()
+             WHERE singleton",
+        )
+        .execute(&pool)
+        .await
+        .expect("enable server-side writer-fence requirement");
+
+        let readiness_error = db
+            .assert_writer_fence()
+            .await
+            .expect_err("unfenced process must not become ready");
+        assert!(readiness_error
+            .to_string()
+            .contains("server requires a writer lease"));
+
+        let effect_error = match db.begin_writer_fence_effect("redis:test:unfenced").await {
+            Ok(_) => panic!("unfenced process must not start an external effect"),
+            Err(error) => error,
+        };
+        assert!(effect_error
+            .to_string()
+            .contains("server requires a writer lease"));
+    }
+
     async fn applied_versions(pool: &PgPool) -> Vec<i64> {
         sqlx::query_scalar::<_, i64>(
             "SELECT version FROM _sqlx_migrations WHERE success ORDER BY version",
@@ -1161,7 +1433,7 @@ mod tests {
         run_migrations(&pool)
             .await
             .expect("retry succeeds after operator repair");
-        assert_eq!(applied_versions(&pool).await.last().copied(), Some(26));
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(27));
     }
 
     #[tokio::test]

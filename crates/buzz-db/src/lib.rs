@@ -53,9 +53,12 @@ pub mod usage;
 pub mod user;
 /// Workflow, run, and approval persistence.
 pub mod workflow;
+/// Database-backed epoch/lease fencing for relay writers.
+pub mod writer_fence;
 
 pub use error::{DbError, Result};
 pub use event::{EventQuery, ReactionEventInsertOutcome, DEFAULT_MAX_PAGE_LIMIT};
+pub use writer_fence::WriterFenceConfig;
 
 use chrono::{DateTime, Utc};
 use sqlx::postgres::{PgConnection, PgPoolOptions};
@@ -209,6 +212,9 @@ pub struct Db {
     /// not yet probed (or the probe hit a transient error and will retry).
     /// Shared across `Db` clones.
     pub(crate) reader_aurora_identity: std::sync::Arc<std::sync::OnceLock<bool>>,
+    /// Optional database-backed writer lease. Disabled for tests and local
+    /// development unless explicitly required by configuration.
+    pub(crate) writer_fence: Option<std::sync::Arc<writer_fence::WriterFence>>,
 }
 
 /// The session that served (or will serve) a routed read, so follow-up
@@ -527,6 +533,8 @@ pub struct DbConfig {
     /// than the staleness gate never routes anyway, so a larger budget
     /// would only misrepresent the config.
     pub replica_read_max_age_ms: u64,
+    /// Database-backed writer epoch/lease configuration.
+    pub writer_fence: writer_fence::WriterFenceConfig,
 }
 
 impl Default for DbConfig {
@@ -544,6 +552,7 @@ impl Default for DbConfig {
             max_lifetime_secs: 1800,
             idle_timeout_secs: 600,
             replica_read_max_age_ms: 0,
+            writer_fence: writer_fence::WriterFenceConfig::default(),
         }
     }
 }
@@ -649,7 +658,23 @@ impl Db {
     /// `buzz.created_at_floor` GUC — this is what makes the replica fence
     /// proof hold for every insert path that goes through this pool.
     pub async fn new(config: &DbConfig) -> Result<Self> {
-        let pool = Self::connect_pool(config, &config.database_url, true).await?;
+        let lease = if config.writer_fence.required {
+            Some(
+                writer_fence::WriterFenceLease::acquire(&config.database_url, &config.writer_fence)
+                    .await?,
+            )
+        } else {
+            None
+        };
+        let writer_session = lease.as_ref().map(writer_fence::WriterFenceLease::session);
+        let pool = Self::connect_pool(config, &config.database_url, true, writer_session).await?;
+        let writer_fence = lease.map(|lease| {
+            std::sync::Arc::clone(&writer_fence::WriterFence::start(
+                pool.clone(),
+                lease,
+                &config.writer_fence,
+            ))
+        });
         let read_max_connections = config
             .read_max_connections
             .unwrap_or(config.max_connections);
@@ -666,6 +691,7 @@ impl Db {
             fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
             replica_read_max_age,
             reader_aurora_identity: std::sync::Arc::new(std::sync::OnceLock::new()),
+            writer_fence,
         })
     }
 
@@ -675,21 +701,32 @@ impl Db {
     /// every connection, arming the deferred commit-time trigger from
     /// migration 0021. Writer pools must arm it; replica pools are read-only
     /// so the trigger never fires there.
-    async fn connect_pool(config: &DbConfig, url: &str, arm_floor_guard: bool) -> Result<PgPool> {
+    async fn connect_pool(
+        config: &DbConfig,
+        url: &str,
+        arm_floor_guard: bool,
+        writer_session: Option<writer_fence::WriterFenceSession>,
+    ) -> Result<PgPool> {
         let mut options = PgPoolOptions::new()
             .max_connections(config.max_connections)
             .min_connections(config.min_connections)
             .acquire_timeout(Duration::from_secs(config.acquire_timeout_secs))
             .max_lifetime(Duration::from_secs(config.max_lifetime_secs))
             .idle_timeout(Duration::from_secs(config.idle_timeout_secs));
-        if arm_floor_guard {
-            options = options.after_connect(|conn, _meta| {
+        if arm_floor_guard || writer_session.is_some() {
+            options = options.after_connect(move |conn, _meta| {
+                let writer_session = writer_session.clone();
                 Box::pin(async move {
-                    // `SET` cannot take bind parameters; `set_config` can.
-                    sqlx::query("SELECT set_config('buzz.created_at_floor', $1, false)")
-                        .bind(replica_fence::CREATED_AT_FLOOR_SECS.to_string())
-                        .execute(conn)
-                        .await?;
+                    if arm_floor_guard {
+                        // `SET` cannot take bind parameters; `set_config` can.
+                        sqlx::query("SELECT set_config('buzz.created_at_floor', $1, false)")
+                            .bind(replica_fence::CREATED_AT_FLOOR_SECS.to_string())
+                            .execute(&mut *conn)
+                            .await?;
+                    }
+                    if let Some(writer_session) = writer_session {
+                        writer_session.apply(&mut *conn).await?;
+                    }
                     Ok(())
                 })
             });
@@ -781,6 +818,7 @@ impl Db {
             fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
             replica_read_max_age: None,
             reader_aurora_identity: std::sync::Arc::new(std::sync::OnceLock::new()),
+            writer_fence: None,
         }
     }
 
@@ -800,6 +838,7 @@ impl Db {
             fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
             replica_read_max_age: None,
             reader_aurora_identity: std::sync::Arc::new(std::sync::OnceLock::new()),
+            writer_fence: None,
         }
     }
 
@@ -1016,6 +1055,89 @@ impl Db {
     /// Returns `true` if the database is reachable (used by readiness probes).
     pub async fn ping(&self) -> bool {
         sqlx::query("SELECT 1").execute(&self.pool).await.is_ok()
+    }
+
+    /// Clone the fenced writer pool for a service that must perform durable
+    /// writes outside the `Db` methods (for example, the audit service).
+    ///
+    /// The returned `PgPool` shares the same `after_connect` session setup, so
+    /// writer-fence GUCs and the created-at floor remain armed on every
+    /// connection checkout.
+    pub fn writer_pool(&self) -> PgPool {
+        self.pool.clone()
+    }
+
+    /// Revalidate this process's writer epoch before an external effect.
+    ///
+    /// Durable mutations are additionally protected by the migration-installed
+    /// database triggers. This explicit check closes the post-commit/effect
+    /// window for Redis and other external side effects.
+    pub async fn assert_writer_fence(&self) -> Result<()> {
+        if let Some(fence) = &self.writer_fence {
+            fence.assert_current().await?;
+        } else if self.server_writer_fence_required().await? {
+            return Err(DbError::WriterFence(
+                "server requires a writer lease but this process is not fenced".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Begin an external effect with a transaction-held writer-fence permit.
+    ///
+    /// The permit must remain alive until the Redis or HTTP operation returns.
+    /// When writer fencing is disabled (tests and local development), it is a
+    /// no-op permit so callers keep one code path and one idempotency contract.
+    pub async fn begin_writer_fence_effect(
+        &self,
+        effect_key: &str,
+    ) -> Result<writer_fence::WriterFenceEffect> {
+        match &self.writer_fence {
+            Some(fence) => fence.begin_effect(effect_key).await,
+            None if self.server_writer_fence_required().await? => Err(DbError::WriterFence(
+                "server requires a writer lease but this process is not fenced".to_string(),
+            )),
+            None => Ok(writer_fence::WriterFenceEffect::disabled()),
+        }
+    }
+
+    /// Read the server-side enforcement bit when this process did not acquire
+    /// a local lease. This keeps a misconfigured process unready and prevents
+    /// it from performing Redis/HTTP effects when PostgreSQL has already
+    /// required fencing. A pre-0027 database has no config table and remains
+    /// compatible with local development and migration bootstrap.
+    async fn server_writer_fence_required(&self) -> Result<bool> {
+        let installed: bool =
+            sqlx::query_scalar("SELECT to_regclass('public.buzz_writer_fence_config') IS NOT NULL")
+                .fetch_one(&self.pool)
+                .await?;
+        if !installed {
+            return Ok(false);
+        }
+        sqlx::query_scalar(
+            "SELECT COALESCE(
+                 (SELECT required
+                    FROM public.buzz_writer_fence_config
+                   WHERE singleton),
+                 TRUE
+             )",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Whether this `Db` instance acquired a live writer lease.
+    pub fn writer_fence_enabled(&self) -> bool {
+        self.writer_fence.is_some()
+    }
+
+    /// Return the current sanitized writer-fence state, when enabled.
+    pub async fn writer_fence_state(&self) -> Result<Option<writer_fence::WriterFenceState>> {
+        match &self.writer_fence {
+            Some(fence) => fence.sanitized_state().await.map(Some),
+            None => Ok(None),
+        }
     }
 
     /// Returns pool utilisation stats for metrics emission.

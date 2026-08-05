@@ -13,7 +13,7 @@ use uuid::Uuid;
 use buzz_audit::AuditService;
 use buzz_auth::AuthService;
 use buzz_core::CommunityId;
-use buzz_db::{Db, DbConfig};
+use buzz_db::{Db, DbConfig, WriterFenceConfig};
 use buzz_pubsub::PubSubManager;
 use buzz_search::SearchService;
 
@@ -163,12 +163,29 @@ async fn main() -> anyhow::Result<()> {
         "Prometheus metrics exporter started"
     );
 
+    let writer_fence = WriterFenceConfig::from_env()
+        .map_err(|error| anyhow::anyhow!("writer-fence configuration error: {error}"))?;
+    let migrate_only =
+        buzz_auto_migrate_enabled(std::env::var("BUZZ_MIGRATE_ONLY").ok().as_deref());
+    if migrate_only && writer_fence.required {
+        return Err(anyhow::anyhow!(
+            "BUZZ_MIGRATE_ONLY requires BUZZ_WRITER_FENCE_REQUIRED=false so migration 0027 can be installed before the first lease"
+        ));
+    }
+    info!(
+        required = writer_fence.required,
+        resource = %writer_fence.resource,
+        lease_seconds = writer_fence.lease_seconds,
+        renew_interval_seconds = writer_fence.renew_interval_seconds,
+        "Writer fence configuration loaded"
+    );
     let db_config = DbConfig {
         database_url: config.database_url.clone(),
         read_database_url: config.read_database_url.clone(),
         replica_read_max_age_ms: config.replica_read_max_age_ms,
         max_connections: config.db_pool_size,
         read_max_connections: config.db_read_pool_size,
+        writer_fence,
         ..DbConfig::default()
     };
     let db = Db::new(&db_config).await.map_err(|e| {
@@ -193,7 +210,16 @@ async fn main() -> anyhow::Result<()> {
             anyhow::anyhow!("Database migration failed: {e}")
         })?;
         info!("Database migrations complete");
+        if migrate_only {
+            info!("BUZZ_MIGRATE_ONLY=true; exiting before serving traffic");
+            return Ok(());
+        }
     } else {
+        if migrate_only {
+            return Err(anyhow::anyhow!(
+                "BUZZ_MIGRATE_ONLY=true requires BUZZ_AUTO_MIGRATE=true"
+            ));
+        }
         info!("Skipping database migrations because BUZZ_AUTO_MIGRATE is not enabled");
     }
 
@@ -347,14 +373,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let audit = if config.audit_enabled {
-        let audit_pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(5)
-            .min_connections(1)
-            .connect(&config.database_url)
-            .await
-            .map_err(|e| anyhow::anyhow!("Audit DB connection failed: {e}"))?;
         info!("Audit service ready");
-        Some(AuditService::new(audit_pool))
+        Some(AuditService::new(db.writer_pool()))
     } else {
         info!("Audit logging disabled by BUZZ_AUDIT_ENABLED");
         None

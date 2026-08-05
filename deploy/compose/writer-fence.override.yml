@@ -1,0 +1,10 @@
+services:
+  relay:
+    image: jt-buzz-writer-fence:20260804
+    environment:
+      BUZZ_AUTO_MIGRATE: "false"
+      BUZZ_MIGRATE_ONLY: "false"
+      BUZZ_WRITER_FENCE_REQUIRED: "true"
+      BUZZ_WRITER_FENCE_RESOURCE: "buzz-relay"
+      BUZZ_WRITER_FENCE_LEASE_SECONDS: "30"
+      BUZZ_WRITER_FENCE_RENEW_INTERVAL_SECONDS: "10"

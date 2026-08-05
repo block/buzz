@@ -38,6 +38,42 @@ pub(crate) type ScopedPubkeyKey = (CommunityId, [u8; 32]);
 type SlidingWindowCounter = (u32, Instant);
 type ScopedRateLimiter = DashMap<ScopedPubkeyKey, SlidingWindowCounter>;
 
+struct DbWriterFencePublishGuard {
+    db: Db,
+}
+
+struct DbWriterFencePublishPermit {
+    effect: Option<buzz_db::writer_fence::WriterFenceEffect>,
+}
+
+#[async_trait::async_trait]
+impl buzz_pubsub::PublishPermit for DbWriterFencePublishPermit {
+    async fn commit(mut self: Box<Self>) -> std::result::Result<(), String> {
+        let effect = self
+            .effect
+            .take()
+            .ok_or_else(|| "writer-fence effect permit already consumed".to_string())?;
+        effect.commit().await.map_err(|error| error.to_string())
+    }
+}
+
+#[async_trait::async_trait]
+impl buzz_pubsub::PublishGuard for DbWriterFencePublishGuard {
+    async fn begin_effect(
+        &self,
+        effect_key: &str,
+    ) -> std::result::Result<Box<dyn buzz_pubsub::PublishPermit>, String> {
+        let effect = self
+            .db
+            .begin_writer_fence_effect(effect_key)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(Box::new(DbWriterFencePublishPermit {
+            effect: Some(effect),
+        }))
+    }
+}
+
 /// Per-connection entry in the connection manager.
 struct ConnEntry {
     tx: mpsc::Sender<WsMessage>,
@@ -651,6 +687,7 @@ impl AppState {
         let search_arc = Arc::new(search);
 
         let audit_arc = audit.into().map(Arc::new);
+        pubsub.set_publish_guard(Arc::new(DbWriterFencePublishGuard { db: db.clone() }));
         let (audit_tx, mut audit_rx) = mpsc::channel::<buzz_audit::NewAuditEntry>(1000);
         let audit_for_worker = audit_arc.clone();
         let audit_cancel = CancellationToken::new();
@@ -812,6 +849,12 @@ impl AppState {
     /// must no-op to today's behavior. Set once by `main.rs` after boot.
     pub fn mesh(&self) -> Option<&crate::mesh_boot::MeshHandle> {
         self.mesh.get()
+    }
+
+    /// Revalidate the writer lease before an external effect that does not go
+    /// through the central Redis publisher.
+    pub async fn assert_writer_fence(&self) -> Result<(), buzz_db::DbError> {
+        self.db.assert_writer_fence().await
     }
 
     /// Record an event ID as locally-published for dedup, scoped to the
