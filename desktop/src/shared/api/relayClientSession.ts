@@ -219,7 +219,6 @@ export class RelayClient {
   async fetchEvents(filters: RelaySubscriptionFilters): Promise<RelayEvent[]> {
     return this.fetchHistory(filters);
   }
-
   async fetchFirstEvent(
     filter: RelaySubscriptionFilter,
   ): Promise<RelayEvent | null> {
