@@ -1025,6 +1025,18 @@ async fn create_session_and_apply_model(
 /// with the agent's default model. This is intentionally non-fatal: a stale
 /// response from a timed-out request is safely ignored by `read_until_response`
 /// (non-matching JSON-RPC IDs are skipped).
+/// The JSON-RPC method a given switch actually sends.
+///
+/// Kept next to the dispatch it mirrors, and separate from `method_label`:
+/// that one is prose for humans, this one names a wire method in an error a
+/// caller may act on. Naming the wrong method is worse than naming none.
+fn rpc_method_for(method: &ModelSwitchMethod) -> &'static str {
+    match method {
+        ModelSwitchMethod::ConfigOption { .. } => "session/set_config_option",
+        ModelSwitchMethod::SetModel { .. } => "session/set_model",
+    }
+}
+
 async fn apply_model_switch(
     acp: &mut AcpClient,
     session_id: &str,
@@ -1037,13 +1049,7 @@ async fn apply_model_switch(
         }
         ModelSwitchMethod::SetModel { .. } => "set_model".to_string(),
     };
-    // The RPC this switch actually sends, for the outer-timeout error below.
-    // `method_label` above is prose for humans; naming the wrong method in an
-    // error would be worse than naming none.
-    let rpc_method = match method {
-        ModelSwitchMethod::ConfigOption { .. } => "session/set_config_option",
-        ModelSwitchMethod::SetModel { .. } => "session/set_model",
-    };
+    let rpc_method = rpc_method_for(method);
 
     let result = tokio::time::timeout(MODEL_SWITCH_TIMEOUT, async {
         match method {
@@ -4001,6 +4007,28 @@ mod tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
+
+    /// `apply_model_switch` serves BOTH variants but hardcoded
+    /// `session/set_model` in its outer-timeout error, so a ConfigOption
+    /// switch that blew the budget reported an RPC it never sent. The
+    /// dispatch and the error text have to agree for every variant, and only
+    /// a test keeps them agreeing as variants are added.
+    #[test]
+    fn rpc_method_matches_the_request_each_variant_sends() {
+        assert_eq!(
+            rpc_method_for(&ModelSwitchMethod::ConfigOption {
+                config_id: "model".to_string(),
+                option_value: "sonnet".to_string(),
+            }),
+            "session/set_config_option"
+        );
+        assert_eq!(
+            rpc_method_for(&ModelSwitchMethod::SetModel {
+                model_id: "sonnet".to_string(),
+            }),
+            "session/set_model"
+        );
+    }
 
     // These pin the initial_message dispatch path (run_prompt_task, ~line 855):
     // a legacy agent WITH a base_prompt must get [Base] prepended to the user
