@@ -2,6 +2,11 @@ import 'package:flutter/foundation.dart';
 
 const Object _sentinel = Object();
 
+/// Shown when a private-channel add is refused, so a missing Invite action
+/// reads as a rule rather than a bug.
+const privateChannelAddDeniedMessage =
+    'Only channel owners and admins can add people to a private channel.';
+
 @immutable
 class Channel {
   final String id;
@@ -77,6 +82,17 @@ class Channel {
   bool get isForum => channelType == 'forum';
   bool get isDm => channelType == 'dm';
   bool get isPrivate => visibility == 'private';
+
+  /// Whether [selfRole] may add *another* identity here, mirroring the relay's
+  /// kind:9000 authority (`validate_admin_event` + `add_member`): DMs never,
+  /// open channels always, private channels owners/admins only. An unknown
+  /// visibility fails closed — the relay is the authority.
+  bool canAddMembers(String? selfRole) {
+    if (isDm) return false;
+    if (visibility == 'open') return true;
+    return selfRole == 'owner' || selfRole == 'admin';
+  }
+
   bool get isArchived => archivedAt != null;
 
   String displayLabel({String? currentPubkey}) {

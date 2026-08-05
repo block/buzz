@@ -3217,6 +3217,18 @@ mod tests {
     }
 
     #[test]
+    fn private_managed_agent_kind_remains_rejected_until_atomic_ingest_exists() {
+        assert!(
+            required_scope_for_kind(
+                buzz_core::kind::KIND_PRIVATE_MANAGED_AGENT,
+                &make_dummy_event(),
+            )
+            .is_err(),
+            "kind 30179 must not enter generic EVENT ingest before privacy and aggregate CAS deploy"
+        );
+    }
+
+    #[test]
     fn ephemeral_kinds_not_in_scope_allowlist() {
         assert!(required_scope_for_kind(KIND_PRESENCE_UPDATE, &make_dummy_event()).is_err());
     }

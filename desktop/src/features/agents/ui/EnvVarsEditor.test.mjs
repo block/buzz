@@ -24,8 +24,15 @@ import {
   toRecord,
   skipKeysEqual,
   isRequiredKeyMissing,
+  buildRecord as buildRecordUtil,
 } from "./EnvVarsEditor.tsx";
 import { getBakedProviderInheritLabel } from "./bakedEnvHelpers.ts";
+import {
+  deriveNumericDescriptors,
+  structuredEnvKeys,
+  filterBakedGenericRows,
+  numericTuningPlaceholder,
+} from "../lib/agentConfigCore.ts";
 
 // ── Invariant 1: toRows excludes skip keys ─────────────────────────────────
 
@@ -521,5 +528,400 @@ test("getBakedProviderInheritLabel_empty_options_falls_back_to_raw_id", () => {
     label,
     "databricks_v2 (inherited from build)",
     "empty options table must fall back to raw id",
+  );
+});
+
+// ── keyAnnotations — annotation lookup invariants ─────────────────────────────
+//
+// `keyAnnotations` is a pass-through prop: the renderer does `keyAnnotations?.[key]`.
+// The invariant worth pinning is that the prop contract is respected at the
+// data level — an annotation for one key does NOT bleed into another key.
+// (Rendering itself is trivially conditional; no logic to extract.)
+
+test("keyAnnotations_present_key_has_annotation", () => {
+  const annotations = {
+    OPENAI_API_KEY: "Used for minting agent trading cards",
+  };
+  assert.equal(
+    annotations.OPENAI_API_KEY,
+    "Used for minting agent trading cards",
+  );
+});
+
+test("keyAnnotations_absent_key_is_undefined", () => {
+  const annotations = {
+    OPENAI_API_KEY: "Used for minting agent trading cards",
+  };
+  assert.equal(annotations.ANTHROPIC_API_KEY, undefined);
+});
+
+test("keyAnnotations_empty_map_has_no_annotations", () => {
+  const annotations = {};
+  assert.equal(annotations.OPENAI_API_KEY, undefined);
+});
+
+test("keyAnnotations_only_matching_key_gets_annotation", () => {
+  // Verifies the per-key lookup is not accidentally global.
+  const annotations = { OPENAI_API_KEY: "card minting" };
+  const keys = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "FOO"];
+  const results = keys.map((k) => annotations[k] ?? null);
+  assert.deepEqual(results, ["card minting", null, null]);
+});
+
+// ── keyAnnotations render — annotation appears only on matching row ─────────
+//
+// renderToStaticMarkup exercises the real JSX path:
+//   {keyAnnotations?.[row.key] ? <p ...>{annotation}</p> : null}
+// This confirms the prop is plumbed through to the DOM correctly and that
+// annotation text is scoped to its matching row.
+
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { EnvVarsEditor } from "./EnvVarsEditor.tsx";
+
+test("keyAnnotations_annotation_present_only_on_matching_row", () => {
+  const annotations = {
+    OPENAI_API_KEY: "Used for minting agent trading cards",
+  };
+  const html = renderToStaticMarkup(
+    React.createElement(EnvVarsEditor, {
+      disabled: false,
+      fileSatisfiedKeys: [],
+      hiddenKeys: [],
+      keyAnnotations: annotations,
+      onChange: () => {},
+      requiredKeys: [],
+      value: { OPENAI_API_KEY: "sk-placeholder", ANTHROPIC_API_KEY: "sk-ant" },
+    }),
+  );
+  assert.ok(
+    html.includes("Used for minting agent trading cards"),
+    "annotation must appear in rendered output for OPENAI_API_KEY row",
+  );
+  // The annotation must not bleed to other rows — check that it appears only once.
+  const count = (html.match(/Used for minting agent trading cards/g) ?? [])
+    .length;
+  assert.equal(count, 1, "annotation must appear exactly once");
+});
+
+test("keyAnnotations_annotation_absent_for_non_matching_rows", () => {
+  const annotations = {
+    OPENAI_API_KEY: "Used for minting agent trading cards",
+  };
+  const html = renderToStaticMarkup(
+    React.createElement(EnvVarsEditor, {
+      disabled: false,
+      fileSatisfiedKeys: [],
+      hiddenKeys: [],
+      keyAnnotations: annotations,
+      onChange: () => {},
+      requiredKeys: [],
+      value: { ANTHROPIC_API_KEY: "sk-ant", MY_VAR: "foo" },
+    }),
+  );
+  assert.ok(
+    !html.includes("Used for minting agent trading cards"),
+    "annotation must not appear when its key is not in the env map",
+  );
+});
+
+// ── buildRecord with hiddenKeys: structured-field preservation ────────────
+//
+// These tests exercise the exported buildRecord(nextRows, value, requiredKeys,
+// hiddenKeys) using the real implementation. hiddenKeys are structured-field
+// env vars (e.g. BUZZ_AGENT_MAX_ROUNDS) that are owned by first-class controls
+// outside the editor — they must survive onChange cycles even though they
+// never appear as generic rows.
+//
+// Four scenarios from rev 4:
+//   1. Edit an unrelated generic row → hidden (tuning) key is unchanged.
+//   2. Runtime switch then generic edit: after switching to a new runtime,
+//      the new runtime's hidden keys survive; old runtime keys appear as
+//      generic rows and survive via toRecord, not hidden-key preservation.
+//   3. Baked numeric key excluded via real descriptor/helper path: uses the
+//      production deriveAgentConfigFieldModel + structuredEnvKeys helpers to
+//      derive the hidden set, then verifies toRows excludes the numeric key.
+//   4. Clearing a structured override → placeholder returns: after the user
+//      clears a structured field (key absent from value), buildRecord must
+//      not reintroduce it, leaving the structured field free to show the
+//      Inherit placeholder.
+
+test("buildRecord_hidden_tuning_key_unchanged_when_generic_row_edited", () => {
+  // Structured field set BUZZ_AGENT_MAX_ROUNDS to "50"; it lives in value
+  // as a hiddenKey. User then edits a generic env var via the row editor.
+  // The tuning key must survive the buildRecord emit cycle unchanged.
+  const value = { BUZZ_AGENT_MAX_ROUNDS: "50", MY_VAR: "old" };
+  const nextRows = [{ id: "r1", key: "MY_VAR", value: "new" }];
+  const record = buildRecordUtil(
+    nextRows,
+    value,
+    [],
+    ["BUZZ_AGENT_MAX_ROUNDS"],
+  );
+
+  assert.equal(
+    record.BUZZ_AGENT_MAX_ROUNDS,
+    "50",
+    "hidden tuning key must survive when an unrelated generic row is edited",
+  );
+  assert.equal(record.MY_VAR, "new", "generic row edit applied");
+});
+
+test("buildRecord_runtime_switch_new_hiddenKeys_then_generic_edit", () => {
+  // Scenario 2: runtime switch then generic edit.
+  //
+  // Before switch: agent is buzz-agent with BUZZ_AGENT_MAX_ROUNDS = "50" stored
+  // in value (set via the numeric tuning control). After switching to Goose,
+  // the buzz-agent key is no longer hidden — it becomes a visible generic row.
+  // The test verifies:
+  //   (a) After the switch, the old buzz-agent key appears as a generic row
+  //       (toRows with the new Goose hidden set projects it).
+  //   (b) After a generic-row edit, buildRecord preserves BOTH the old-runtime
+  //       key (now a generic row) and the new-runtime hidden key.
+  //   (c) An unset new-runtime hidden key is not introduced.
+
+  // Derive both descriptor sets from real runtime objects.
+  const buzzAgentRuntime = {
+    id: "buzz-agent",
+    label: "Buzz Agent",
+    avatarUrl: "",
+    availability: "available",
+    command: "buzz-agent",
+    binaryPath: "buzz-agent",
+    defaultArgs: [],
+    mcpCommand: null,
+    modelEnvVar: "BUZZ_AGENT_MODEL",
+    providerEnvVar: "BUZZ_AGENT_PROVIDER",
+    thinkingEnvVar: "BUZZ_AGENT_THINKING_EFFORT",
+    maxTokensEnvVar: "BUZZ_AGENT_MAX_OUTPUT_TOKENS",
+    contextLimitEnvVar: "BUZZ_AGENT_CONTEXT_LIMIT",
+    maxRoundsEnvVar: "BUZZ_AGENT_MAX_ROUNDS",
+    installHint: "",
+    installInstructionsUrl: "",
+    canAutoInstall: false,
+    underlyingCliPath: null,
+    nodeRequired: false,
+    authStatus: { status: "not_applicable" },
+    loginHint: null,
+  };
+  const gooseRuntime = {
+    id: "goose",
+    label: "Goose",
+    avatarUrl: "",
+    availability: "available",
+    command: "goose",
+    binaryPath: "goose",
+    defaultArgs: ["acp"],
+    mcpCommand: null,
+    modelEnvVar: null,
+    providerEnvVar: null,
+    thinkingEnvVar: null,
+    maxTokensEnvVar: "GOOSE_MAX_TOKENS",
+    contextLimitEnvVar: "GOOSE_CONTEXT_LIMIT",
+    maxRoundsEnvVar: null,
+    installHint: "",
+    installInstructionsUrl: "",
+    canAutoInstall: true,
+    underlyingCliPath: null,
+    nodeRequired: false,
+    authStatus: { status: "not_applicable" },
+    loginHint: null,
+  };
+
+  const buzzDescriptors = deriveNumericDescriptors(buzzAgentRuntime);
+  const gooseDescriptors = deriveNumericDescriptors(gooseRuntime);
+  const buzzHiddenKeys = structuredEnvKeys(buzzDescriptors);
+  const gooseHiddenKeys = structuredEnvKeys(gooseDescriptors);
+
+  // Sanity-check that BUZZ_AGENT_MAX_ROUNDS is hidden under buzz-agent but not
+  // under Goose — that contrast is what makes it become a generic row.
+  assert.ok(
+    buzzHiddenKeys.includes("BUZZ_AGENT_MAX_ROUNDS"),
+    "BUZZ_AGENT_MAX_ROUNDS must be hidden under buzz-agent descriptors",
+  );
+  assert.equal(
+    gooseHiddenKeys.includes("BUZZ_AGENT_MAX_ROUNDS"),
+    false,
+    "BUZZ_AGENT_MAX_ROUNDS must not be hidden under Goose descriptors",
+  );
+
+  // Pre-switch value: buzz-agent max-rounds was set, GOOSE_MAX_TOKENS was
+  // already set (e.g. user configured it before switching back), plus a
+  // generic user var. GOOSE_MAX_TOKENS is a hidden key under the Goose
+  // descriptor set, so it must survive buildRecord() via hiddenKeys.
+  const valueBeforeSwitch = {
+    BUZZ_AGENT_MAX_ROUNDS: "50",
+    GOOSE_MAX_TOKENS: "16384",
+    USER_VAR: "original",
+  };
+
+  // After the switch to Goose, toRows is reproj with the new (Goose) hidden
+  // set. BUZZ_AGENT_MAX_ROUNDS is no longer hidden → appears as a generic row.
+  // GOOSE_MAX_TOKENS IS hidden under Goose → must not appear in generic rows.
+  const rowsAfterSwitch = toRows(valueBeforeSwitch, new Set(gooseHiddenKeys));
+  assert.ok(
+    rowsAfterSwitch.some((r) => r.key === "BUZZ_AGENT_MAX_ROUNDS"),
+    "old-runtime key must become a generic row after the switch",
+  );
+  assert.equal(
+    rowsAfterSwitch.some((r) => r.key === "GOOSE_MAX_TOKENS"),
+    false,
+    "new-runtime hidden key must not appear as a generic row after the switch",
+  );
+
+  // User edits the generic USER_VAR row.
+  const editedRows = rowsAfterSwitch.map((r) =>
+    r.key === "USER_VAR" ? { ...r, value: "updated" } : r,
+  );
+
+  // buildRecord: old-runtime key survives via toRecord (it's now a generic
+  // row); new-runtime Goose hidden key survives via hiddenKeys (carried
+  // through from value). An unset Goose key must not be introduced.
+  const record = buildRecordUtil(
+    editedRows,
+    valueBeforeSwitch,
+    [],
+    gooseHiddenKeys,
+  );
+
+  assert.equal(
+    record.BUZZ_AGENT_MAX_ROUNDS,
+    "50",
+    "old-runtime key must survive as a generic row value after switch",
+  );
+  assert.equal(
+    record.GOOSE_MAX_TOKENS,
+    "16384",
+    "new-runtime hidden key must survive buildRecord via hiddenKeys",
+  );
+  assert.equal(record.USER_VAR, "updated", "generic row edit applied");
+  assert.equal(
+    "GOOSE_CONTEXT_LIMIT" in record,
+    false,
+    "unset new-runtime hidden key must not be introduced",
+  );
+});
+
+test("filterBakedGenericRows_numeric_baked_key_excluded_and_placeholder_shown", () => {
+  // Scenario 3: baked numeric key excluded via the real production helper.
+  //
+  // The global baked env contains BUZZ_AGENT_MAX_OUTPUT_TOKENS = "4096"
+  // (the baked value shipped with the agent). The production
+  // filterBakedGenericRows path must exclude this key from the generic
+  // baked-row display so it isn't editable twice, while the structured
+  // numeric input shows the inherited placeholder via numericTuningPlaceholder.
+  const buzzAgentRuntime = {
+    id: "buzz-agent",
+    label: "Buzz Agent",
+    avatarUrl: "",
+    availability: "available",
+    command: "buzz-agent",
+    binaryPath: "buzz-agent",
+    defaultArgs: [],
+    mcpCommand: null,
+    modelEnvVar: "BUZZ_AGENT_MODEL",
+    providerEnvVar: "BUZZ_AGENT_PROVIDER",
+    thinkingEnvVar: "BUZZ_AGENT_THINKING_EFFORT",
+    maxTokensEnvVar: "BUZZ_AGENT_MAX_OUTPUT_TOKENS",
+    contextLimitEnvVar: null,
+    maxRoundsEnvVar: null,
+    installHint: "",
+    installInstructionsUrl: "",
+    canAutoInstall: false,
+    underlyingCliPath: null,
+    nodeRequired: false,
+    authStatus: { status: "not_applicable" },
+    loginHint: null,
+  };
+
+  const numericDescriptors = deriveNumericDescriptors(buzzAgentRuntime);
+  const numericStructuredKeys = structuredEnvKeys(numericDescriptors);
+
+  assert.ok(
+    numericStructuredKeys.includes("BUZZ_AGENT_MAX_OUTPUT_TOKENS"),
+    "numeric key must appear in structured keys via production helpers",
+  );
+
+  // Simulate the baked env: BUZZ_AGENT_MAX_OUTPUT_TOKENS is baked, plus a
+  // non-structured baked var.
+  const bakedEnv = [
+    { key: "BUZZ_AGENT_MAX_OUTPUT_TOKENS", value: "4096" },
+    { key: "SOME_OTHER_BAKED_VAR", value: "hello" },
+  ];
+
+  // filterBakedGenericRows must exclude the numeric key.
+  const genericRows = filterBakedGenericRows(bakedEnv, numericStructuredKeys);
+
+  assert.equal(
+    genericRows.some((r) => r.key === "BUZZ_AGENT_MAX_OUTPUT_TOKENS"),
+    false,
+    "baked numeric key must be excluded from generic baked rows",
+  );
+  assert.ok(
+    genericRows.some((r) => r.key === "SOME_OTHER_BAKED_VAR"),
+    "non-structured baked var must remain in generic rows",
+  );
+
+  // The structured numeric input shows the inherited placeholder for the
+  // baked value via numericTuningPlaceholder.
+  const bakedValue = "4096";
+  assert.equal(
+    numericTuningPlaceholder(bakedValue),
+    "Inherit (4096)",
+    "structured placeholder must reflect the baked value",
+  );
+  assert.equal(
+    numericTuningPlaceholder(undefined),
+    "Inherit (agent default)",
+    "structured placeholder without baked value shows agent-default text",
+  );
+});
+
+test("buildRecord_clearing_structured_field_allows_placeholder_to_return", () => {
+  // Scenario 4: clearing a structured override → placeholder returns.
+  //
+  // Step 1: value has BUZZ_AGENT_MAX_ROUNDS = "50" (user set it via the
+  //         structured field). BUZZ_AGENT_MAX_ROUNDS is in hiddenKeys.
+  // Step 2: user clears the structured field → onEnvVarChange(key, "")
+  //         removes the key from value (value no longer contains it).
+  // Step 3: after the clear, buildRecord must not reintroduce the key.
+  // Step 4: with the key absent from value, numericTuningPlaceholder over
+  //         the (now-empty) inheritedEnvVars shows "Inherit (agent default)"
+  //         — the numeric field's empty-state placeholder.
+
+  // After the clear, value no longer contains BUZZ_AGENT_MAX_ROUNDS.
+  const valueAfterClear = { MY_VAR: "foo" };
+  const nextRows = [{ id: "r1", key: "MY_VAR", value: "updated" }];
+
+  const record = buildRecordUtil(
+    nextRows,
+    valueAfterClear,
+    [],
+    ["BUZZ_AGENT_MAX_ROUNDS"],
+  );
+
+  assert.equal(
+    "BUZZ_AGENT_MAX_ROUNDS" in record,
+    false,
+    "cleared structured key must not be reintroduced by buildRecord",
+  );
+  assert.equal(record.MY_VAR, "updated");
+
+  // With the key cleared, the inherited value is also absent (not set
+  // globally). numericTuningPlaceholder returns the agent-default text —
+  // the placeholder that renders in the structured input.
+  const inheritedAfterClear = undefined;
+  assert.equal(
+    numericTuningPlaceholder(inheritedAfterClear),
+    "Inherit (agent default)",
+    "numeric input must show Inherit (agent default) after clear when no global override",
+  );
+
+  // If a global override IS set, the placeholder shows that value instead.
+  const inheritedGlobal = "25";
+  assert.equal(
+    numericTuningPlaceholder(inheritedGlobal),
+    "Inherit (25)",
+    "numeric input must show Inherit (<global value>) when a global override exists",
   );
 });

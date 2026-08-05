@@ -13,13 +13,41 @@ use crate::mcp::McpRegistry;
 use crate::mcp::ResultBudget;
 
 use crate::types::{
-    AgentError, ContentBlock, HistoryItem, ProviderStop, StopReason, ToolCall, ToolResult,
-    ToolResultContent, TurnTotalState,
+    AgentError, ContentBlock, HistoryItem, ProviderStop, SessionUsageBaseline, StopReason,
+    ToolCall, ToolResult, ToolResultContent, TurnTotalState,
 };
 use crate::wire::{self, WireSender};
 
 const ERROR_REFLECTION_SUFFIX: &str =
     "\n\n[Reflect] Before retrying, identify the cause and change your approach.";
+
+const UNSUPPORTED_IMAGE_TOOL_MESSAGE: &str = "The current model does not support image input. The image was removed from conversation history so this turn can continue. Use a text-based inspection tool or ask the user for a textual description instead.";
+
+/// Remove image blocks that the provider has explicitly rejected while keeping
+/// their surrounding tool result (and therefore the tool-call/result pairing)
+/// intact. Returns the number of images removed; zero means the provider error
+/// cannot be safely recovered by mutating history.
+fn replace_unsupported_images(history: &mut [HistoryItem]) -> usize {
+    let mut replaced = 0;
+    for item in history {
+        let HistoryItem::ToolResult(result) = item else {
+            continue;
+        };
+        let before = result.content.len();
+        result
+            .content
+            .retain(|content| !matches!(content, ToolResultContent::Image { .. }));
+        let removed = before - result.content.len();
+        if removed > 0 {
+            replaced += removed;
+            result.is_error = true;
+            result.content.push(ToolResultContent::Text(
+                UNSUPPORTED_IMAGE_TOOL_MESSAGE.to_string(),
+            ));
+        }
+    }
+    replaced
+}
 
 /// Maximum reply reminders emitted per prompt when `require_reply` is on.
 ///
@@ -150,9 +178,40 @@ pub struct RunCtx<'a> {
     /// Reset to `Unseen` at turn start in `run()`. Callers must not derive a
     /// total by summing input+output — that is the UI display approximation only.
     pub turn_total_state: &'a mut TurnTotalState,
+    /// Session-cumulative counters as they stood when this turn began. Added to
+    /// the `turn_*` accumulators above to report a cumulative figure mid-turn;
+    /// the session's own copy is only advanced once, after the turn returns.
+    pub usage_baseline: SessionUsageBaseline,
 }
 
 impl RunCtx<'_> {
+    /// Send a session-cumulative `usage_update` reflecting everything observed
+    /// up to and including the most recent LLM response.
+    ///
+    /// The figure is the turn-start baseline plus this turn's running
+    /// accumulators, which is exactly what `session/prompt` will fold into the
+    /// session once the turn returns — so a mid-turn notification and the
+    /// end-of-turn one agree, and a turn that never returns has still reported
+    /// everything but its final in-flight request.
+    async fn emit_usage_update(&self) {
+        let base = self.usage_baseline;
+        let payload = wire::usage_update_payload(
+            base.input_tokens
+                .saturating_add(self.turn_input_tokens.unwrap_or(0)),
+            base.output_tokens
+                .saturating_add(self.turn_output_tokens.unwrap_or(0)),
+            base.cached_input_tokens
+                .saturating_add(self.turn_cached_input_tokens.unwrap_or(0)),
+            base.total_state.merge_session(*self.turn_total_state),
+            self.effective_model,
+        );
+        wire::send(
+            self.wire,
+            wire::goose_session_update(self.session_id, payload),
+        )
+        .await;
+    }
+
     pub async fn run(&mut self, prompt: Vec<ContentBlock>) -> Result<StopReason, AgentError> {
         let user_text = prompt_to_text(prompt)?;
         if user_text.len() > MAX_PROMPT_BYTES {
@@ -170,6 +229,14 @@ impl RunCtx<'_> {
         *self.turn_output_tokens = None;
         *self.turn_cached_input_tokens = None;
         *self.turn_total_state = TurnTotalState::Unseen;
+        // Per-turn handoff-attempt counter. Scoped here (not persisted in the
+        // session) so `BUZZ_AGENT_MAX_HANDOFFS` bounds compactions per
+        // `session/prompt` turn rather than per session lifetime. A
+        // long-lived session legitimately needs unbounded handoffs across
+        // prompts; the cap only exists to stop runaway within a single turn.
+        // The session-cumulative `handoff_count` (used in log lines) is not
+        // reset: it reflects total compactions since session start.
+        let mut handoff_attempts: usize = 0;
 
         let mut round = 0u32;
         // Per-prompt `_Stop` objection count. Bounded per prompt (not per
@@ -196,7 +263,7 @@ impl RunCtx<'_> {
             // its next request — the turn continues, it is not restarted. Drain
             // non-blocking; an empty queue is the common case.
             self.drain_steers();
-            match self.maybe_handoff().await {
+            match self.maybe_handoff(&mut handoff_attempts).await {
                 HandoffOutcome::Cancelled => return Ok(StopReason::Cancelled),
                 // Context was just reset — the prior request's token count no
                 // longer describes the (now much smaller) history. Clear both
@@ -218,10 +285,10 @@ impl RunCtx<'_> {
                 tools.push(builtin::load_skill_def());
             }
             round = round.saturating_add(1);
-            let response = tokio::select! {
+            let response_result = tokio::select! {
                 biased;
                 _ = self.cancel.changed() => return Ok(StopReason::Cancelled),
-                r = self.llm.complete(self.cfg, self.system_prompt, self.history, &tools, self.effective_model) => r?,
+                r = self.llm.complete(self.cfg, self.system_prompt, self.history, &tools, self.effective_model) => r,
                 _ = async {
                     // Keepalive ticker: emit a lightweight session update every 30s
                     // while waiting on the LLM provider. This resets the ACP harness
@@ -243,6 +310,22 @@ impl RunCtx<'_> {
                         .await;
                     }
                 } => unreachable!(),
+            };
+            let response = match response_result {
+                Ok(response) => response,
+                Err(AgentError::UnsupportedImageInput(detail)) => {
+                    let removed = replace_unsupported_images(self.history);
+                    if removed == 0 {
+                        return Err(AgentError::UnsupportedImageInput(detail));
+                    }
+                    tracing::warn!(
+                        model = self.effective_model,
+                        removed_images = removed,
+                        "provider rejected image input; removed images from history and continuing turn"
+                    );
+                    continue;
+                }
+                Err(error) => return Err(error),
             };
 
             // Record provider-reported input usage so the next loop iteration's
@@ -299,6 +382,23 @@ impl RunCtx<'_> {
             // this gate rather than representing absent categories as zero.
             if response.input_tokens.is_some() || response.output_tokens.is_some() {
                 *self.turn_total_state = self.turn_total_state.fold(response.total_tokens);
+                // Report what the turn has burned SO FAR, before running the
+                // next round. A turn is many provider round-trips over many
+                // minutes, and until this point the only report was the one
+                // `session/prompt` sends after the turn returns — so a turn
+                // that was cancelled, timed out, or whose process was killed
+                // reported nothing at all, and its tokens (already billed)
+                // existed only in this stack frame. Reporting per round bounds
+                // the loss to the single request in flight.
+                //
+                // Emitting more than one `usage_update` per turn is expected by
+                // the consumer: buzz-acp's UsageTracker advances its committed
+                // baseline only when the turn's metric is published, so every
+                // notification within a turn measures from the same frozen
+                // baseline and the last one seen is the turn's true total.
+                // goose behaves the same way, which is why the tracker was
+                // written to tolerate it.
+                self.emit_usage_update().await;
             }
 
             if !response.reasoning.is_empty() {
@@ -1025,6 +1125,47 @@ mod tests {
         );
         let total_after: usize = history.iter().map(HistoryItem::estimated_bytes).sum();
         assert!(total_after <= max_bytes);
+    }
+
+    #[test]
+    fn unsupported_images_become_recoverable_tool_errors() {
+        let mut history = vec![
+            HistoryItem::Assistant {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    provider_id: "call-image".into(),
+                    name: "dev__view_image".into(),
+                    arguments: json!({ "source": "spec.png" }),
+                    provider_extra: Default::default(),
+                }],
+                reasoning_details: None,
+            },
+            HistoryItem::ToolResult(ToolResult {
+                provider_id: "call-image".into(),
+                content: vec![
+                    ToolResultContent::Text("10x10 image from spec.png".into()),
+                    ToolResultContent::Image {
+                        data: "aW1n".into(),
+                        mime_type: "image/png".into(),
+                    },
+                ],
+                is_error: false,
+            }),
+        ];
+
+        assert_eq!(replace_unsupported_images(&mut history), 1);
+        let HistoryItem::ToolResult(result) = &history[1] else {
+            panic!("tool result must stay paired with the assistant tool call");
+        };
+        assert_eq!(result.provider_id, "call-image");
+        assert!(result.is_error);
+        assert!(result
+            .content
+            .iter()
+            .all(|content| !matches!(content, ToolResultContent::Image { .. })));
+        assert!(result.text().contains("does not support image input"));
+        assert!(result.text().contains("10x10 image from spec.png"));
+        assert_eq!(replace_unsupported_images(&mut history), 0);
     }
 
     #[test]

@@ -1706,6 +1706,11 @@ fn is_retryable_transport_error(e: &reqwest::Error) -> bool {
     e.is_timeout() || e.is_connect() || e.is_request()
 }
 
+fn is_unsupported_image_input_error(body: &str) -> bool {
+    body.to_ascii_lowercase()
+        .contains("no endpoints found that support image input")
+}
+
 /// Build the terminal `AgentError::Llm` for a `post()` exit that has given up
 /// retrying — persistent retryable status, transport failure, or a body-read
 /// break. `detail` carries the specific cause (status/body, or the transport
@@ -1864,9 +1869,14 @@ where
         // upstream capacity — no retry was attempted, so cumulative duration
         // would be misleading.
         if status == 404 {
+            let error_body = read_error_body(resp).await;
+            if is_unsupported_image_input_error(&error_body) {
+                return Err(PostError::Agent(AgentError::UnsupportedImageInput(
+                    error_body,
+                )));
+            }
             return Err(PostError::Agent(AgentError::LlmModelNotFound(format!(
-                "{status}: {}",
-                read_error_body(resp).await
+                "{status}: {error_body}"
             ))));
         }
         if !status.is_success() {
@@ -1910,6 +1920,22 @@ where
     unreachable!("loop always returns on its final iteration (attempt + 1 == MAX_RETRIES)");
 }
 
+pub(crate) fn databricks_pkce_config(host: &str) -> PkceOAuthConfig {
+    PkceOAuthConfig {
+        discovery_url: format!(
+            "{}/oidc/.well-known/oauth-authorization-server",
+            host.trim_end_matches('/')
+        ),
+        client_id: DATABRICKS_CLIENT_ID.into(),
+        scopes: DATABRICKS_OAUTH_SCOPES
+            .iter()
+            .map(|scope| (*scope).into())
+            .collect(),
+        cache_namespace: "databricks".into(),
+        cache_dir_override: None,
+    }
+}
+
 /// Build the `TokenSource` for the configured provider.
 ///
 /// - `Provider::Anthropic`: a static source seeded from `cfg.api_key`. It's
@@ -1929,21 +1955,9 @@ pub(crate) fn build_token_source(cfg: &Config) -> Result<Arc<dyn TokenSource>, A
             if !cfg.api_key.is_empty() {
                 return Ok(Arc::new(StaticTokenSource::new(cfg.api_key.clone())));
             }
-            let discovery_url = format!(
-                "{}/oidc/.well-known/oauth-authorization-server",
-                cfg.base_url.trim_end_matches('/')
-            );
-            let pkce = PkceOAuthConfig {
-                discovery_url,
-                client_id: DATABRICKS_CLIENT_ID.into(),
-                scopes: DATABRICKS_OAUTH_SCOPES
-                    .iter()
-                    .map(|s| (*s).into())
-                    .collect(),
-                cache_namespace: "databricks".into(),
-                cache_dir_override: None,
-            };
-            Ok(PkceOAuthTokenSource::new(pkce)?)
+            Ok(PkceOAuthTokenSource::new(databricks_pkce_config(
+                &cfg.base_url,
+            ))?)
         }
     }
 }
@@ -2113,6 +2127,9 @@ async fn openrouter_post(
             // about the model, and reporting a parameter problem as
             // `LlmModelNotFound` (or vice versa) sends the user to the wrong fix.
             let error_body = read_error_body(resp).await;
+            if is_unsupported_image_input_error(&error_body) {
+                return Err(AgentError::UnsupportedImageInput(error_body));
+            }
             if error_body.contains("No endpoints found that can handle the requested parameters") {
                 return Err(openrouter_parameter_routing_error(&error_body));
             }
@@ -6210,6 +6227,34 @@ mod tests {
             attempts.load(std::sync::atomic::Ordering::SeqCst),
             1,
             "404 must not be retried"
+        );
+    }
+
+    /// A provider's explicit image-capability rejection is a recoverable typed
+    /// error, not a missing model. The agent loop uses this signal to remove the
+    /// image from history before retrying the next LLM round.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn openrouter_post_404_unsupported_image_is_typed_and_not_retried() {
+        let (url, _captured, attempts) = spawn_openrouter_stub(vec![CannedResponse::new(
+            404,
+            r#"{"error":{"message":"No endpoints found that support image input"}}"#,
+        )])
+        .await;
+        let http = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let err = openrouter_post(&http, &format!("{url}/x"), &json!({}), "key")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, AgentError::UnsupportedImageInput(s) if s.contains("support image input")),
+            "image rejection must reach the history-recovery path: got {err:?}"
+        );
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a deterministic capability rejection must not be retried"
         );
     }
 

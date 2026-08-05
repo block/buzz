@@ -308,6 +308,30 @@ impl TurnTotalState {
     }
 }
 
+/// The session-cumulative usage counters as of the START of a turn.
+///
+/// Copied out of the session under the lock when a turn begins and handed to
+/// `RunCtx` by value, so the run loop can emit a cumulative `usage_update`
+/// after every LLM round without reaching back into `App.sessions` (which it
+/// holds no handle to, and which is locked by the turn's own bookkeeping at
+/// both ends).
+///
+/// This exists so that usage is durable *during* a turn rather than only after
+/// it. The counters a turn accrues live in the prompt task's stack frame until
+/// the turn returns; a process killed mid-turn takes them with it and the
+/// tokens are billed by the provider but recorded nowhere. That is not
+/// hypothetical — it silently under-reported a long-horizon benchmark's cost by
+/// several-fold, because every phase of a `continue_until_timeout` run is
+/// terminated mid-turn by design.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SessionUsageBaseline {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    /// The cache-served subset of `input_tokens`, not an addition to it.
+    pub cached_input_tokens: u64,
+    pub total_state: TurnTotalState,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum StopReason {
     EndTurn,
@@ -364,6 +388,10 @@ pub enum AgentError {
     Llm(String),
     LlmAuth(String),
     LlmModelNotFound(String),
+    /// The provider explicitly rejected image content for the selected model.
+    /// Kept distinct so the agent loop can remove the unsupported image from
+    /// replayed history and give the model a recoverable tool error.
+    UnsupportedImageInput(String),
     Mcp(String),
     Cancelled,
 }
@@ -375,6 +403,7 @@ impl std::fmt::Display for AgentError {
             Self::Llm(s) => write!(f, "llm: {s}"),
             Self::LlmAuth(s) => write!(f, "llm auth: {s}"),
             Self::LlmModelNotFound(s) => write!(f, "llm model not found: {s}"),
+            Self::UnsupportedImageInput(s) => write!(f, "llm image input unsupported: {s}"),
             Self::Mcp(s) => write!(f, "mcp: {s}"),
             Self::Cancelled => write!(f, "cancelled"),
         }

@@ -2281,3 +2281,446 @@ fn reply_guard_rejects_unparseable_toggle() {
         "expected the offending key in the error, got: {stderr}"
     );
 }
+
+// ─── Tests: per-turn handoff cap semantics ───────────────────────────────────
+
+/// A session that has already performed N handoffs in previous turns must still
+/// compact on subsequent turns — the per-session lifetime kill switch is gone.
+///
+/// Mechanism: the gate fires at the start of each round, comparing
+/// `last_request_input_tokens` (stored by the previous response) against the
+/// token threshold. So:
+/// - Turn 1 complete() returns usage=950 (> threshold=900). Turn ends; usage stored.
+/// - Turn 2 round 0: 950 >= 900 → handoff. post-handoff complete() returns usage=950.
+///   Session `handoff_count` is now 1; `turn_handoff_count` was just reset to 0 at
+///   turn start and is now 1.
+/// - Turn 3 round 0: `turn_handoff_count` resets to 0; session count is 1 but
+///   the gate uses `turn_handoff_count` → cap not reached → handoff fires again.
+///
+/// Without the fix (`handoff_count` compared against cap, never reset):
+///   session count after turn 2 = 1 >= max_handoffs=1 → gate permanently blocked
+///   for all subsequent turns → history grows until provider wall.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn handoff_cap_resets_per_turn_not_per_session() {
+    // LLM call sequence:
+    //  req 1: turn 1 complete()           → usage=950 (over threshold)
+    //  req 2: turn 2 pre-flight summarize → summary text
+    //  req 3: turn 2 complete()           → usage=950 (re-arms gate for turn 3)
+    //  req 4: turn 3 pre-flight summarize → summary text  ← cap reset proves this fires
+    //  req 5: turn 3 complete()           → done
+    let llm = spawn_capturing_llm(vec![
+        openai_text_with_usage("ack-t1", 950), // turn 1: stores high usage
+        openai_text("summary-t2"),             // turn 2: pre-flight summarize
+        openai_text_with_usage("done-t2", 950), // turn 2: post-handoff, re-arms gate
+        openai_text("summary-t3"),             // turn 3: pre-flight summarize (cap reset)
+        openai_text_with_usage("done-t3", 10), // turn 3: post-handoff complete
+    ])
+    .await;
+
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[
+            ("BUZZ_AGENT_MAX_CONTEXT_TOKENS", "1000"),
+            ("BUZZ_AGENT_MAX_OUTPUT_TOKENS", "100"),
+            // Cap of 1 per turn. Before the fix this permanently disables the
+            // gate once session handoff_count reaches 1.
+            ("BUZZ_AGENT_MAX_HANDOFFS", "1"),
+            (
+                "BUZZ_AGENT_MAX_HISTORY_BYTES",
+                &(16 * 1024 * 1024).to_string(),
+            ),
+        ],
+    )
+    .await;
+    let sid = init_session(&mut h, json!([])).await;
+
+    // Turn 1: no prior usage; preflight skips (byte-fallback not triggered by
+    // tiny prompt). complete() stores usage=950.
+    let p1 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"turn 1"}]}),
+        )
+        .await;
+    let _ = h.recv_until(|v| v["id"] == json!(p1)).await;
+    assert_eq!(
+        llm.captured.lock().await.len(),
+        1,
+        "turn 1 must produce exactly 1 LLM request"
+    );
+
+    // Turn 2: 950 >= threshold=900 → handoff fires. Session handoff_count: 1.
+    let p2 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"turn 2"}]}),
+        )
+        .await;
+    let _ = h.recv_until(|v| v["id"] == json!(p2)).await;
+    assert_eq!(
+        llm.captured.lock().await.len(),
+        3,
+        "turn 2 must produce 2 LLM requests (summarize + complete), 3 total"
+    );
+    let stderr = h.stderr_text();
+    assert!(
+        stderr.contains("handoff #1"),
+        "expected first handoff log after turn 2; got: {stderr}"
+    );
+
+    // Turn 3: turn_handoff_count resets to 0 → gate fires again despite
+    // session handoff_count=1 == cap=1.
+    let p3 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"turn 3"}]}),
+        )
+        .await;
+    let _ = h.recv_until(|v| v["id"] == json!(p3)).await;
+    assert_eq!(
+        llm.captured.lock().await.len(),
+        5,
+        "turn 3 must also produce 2 LLM requests (per-turn cap reset → handoff fires again), \
+         5 total"
+    );
+    let stderr = h.stderr_text();
+    assert!(
+        stderr.contains("handoff #2"),
+        "expected second handoff log after turn 3 (cap reset); got: {stderr}"
+    );
+
+    h.shutdown().await;
+}
+
+/// Within a single turn, the per-turn cap still bounds the number of handoffs.
+/// A turn that exceeds `max_handoffs` compaction attempts must emit a WARN and
+/// fall back to truncation — it must NOT compact indefinitely.
+///
+/// Mechanism: with cap=1 and a multi-round turn (tool call in round 1 → round 2),
+/// the pre-flight handoff fires at the start of round 1 (usage from a *previous*
+/// turn is high). After the compaction, the post-handoff complete() in round 1
+/// returns a tool call, causing a second round. Round 2's preflight sees that
+/// turn_handoff_count=1 == max_handoffs=1, so it refuses and emits WARN.
+///
+/// A steer is injected while the run is active to prove that the steer path
+/// does NOT reset `handoff_attempts` — the cap must still fire on round 1 with
+/// no second summarize call.
+///
+/// This test requires a fake MCP server to produce a tool-call round.
+/// It drives via `fake-mcp` — the same binary used in other multi-round tests.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn handoff_cap_binds_within_a_single_turn() {
+    // LLM call sequence in turn 2 (turn 1 seeds the usage):
+    //  req 1: turn 1 complete()            → usage=950 (over threshold=900)
+    //  req 2: turn 2 round 0 summarize()   → summary (handoff_attempts: 0→1)
+    //  req 3: turn 2 round 0 complete()    → tool_call + usage=950 (re-arms gate)
+    //         [fake-mcp tool executes; steer queued while run is active]
+    //  req 4: turn 2 round 1 preflight     → 950 >= 900 AND attempts=1 >= max=1
+    //                                         → WARN, skip (cap exhausted for this turn)
+    //  req 5: turn 2 round 1 complete()    → end_turn (steer text folded into messages)
+    let fake_mcp = env!("CARGO_BIN_EXE_fake-mcp");
+    // Build a tool-call response that also carries usage so the gate re-arms
+    // on round 1's preflight (without usage, last_request_input_tokens is None
+    // after the handoff clears it, and the byte-fallback won't fire on tiny history).
+    let tool_call_with_usage = {
+        let mut v = openai_tool_call("tc-1", "test_tool", json!({}));
+        v["usage"] = json!({
+            "prompt_tokens": 950u64,
+            "completion_tokens": 5,
+            "total_tokens": 955,
+        });
+        v
+    };
+    let llm = spawn_capturing_llm(vec![
+        openai_text_with_usage("seed", 950), // turn 1: seed high usage
+        openai_text("handoff-summary"),      // turn 2 round 0: summarize
+        tool_call_with_usage,                // turn 2 round 0: tool call + usage (re-arms)
+        openai_text_with_usage("end_turn_text", 10), // turn 2 round 1: final answer
+    ])
+    .await;
+
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[
+            ("BUZZ_AGENT_MAX_CONTEXT_TOKENS", "1000"),
+            ("BUZZ_AGENT_MAX_OUTPUT_TOKENS", "100"),
+            ("BUZZ_AGENT_MAX_HANDOFFS", "1"),
+            (
+                "BUZZ_AGENT_MAX_HISTORY_BYTES",
+                &(16 * 1024 * 1024).to_string(),
+            ),
+        ],
+    )
+    .await;
+
+    // Init with the fake MCP server so test_tool is available.
+    h.send(
+        "initialize",
+        json!({"protocolVersion":1,"clientCapabilities":{}}),
+    )
+    .await;
+    let _ = h.recv().await;
+    h.send(
+        "session/new",
+        json!({
+            "cwd": "/tmp",
+            "mcpServers": [{
+                "name": "cap_test",
+                "command": fake_mcp,
+                "args": [],
+                "env": [{ "name": "FAKE_MCP_TOOL_COUNT", "value": "1" }],
+            }],
+        }),
+    )
+    .await;
+    let r = h
+        .recv_until(|v| v.get("result").is_some() || v.get("error").is_some())
+        .await;
+    let sid = r["result"]["sessionId"].as_str().unwrap().to_owned();
+
+    // Turn 1: seed high usage.
+    let p1 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"seed"}]}),
+        )
+        .await;
+    let _ = h.recv_until(|v| v["id"] == json!(p1)).await;
+
+    // Turn 2: triggers a handoff at round 0, then a tool call, then round 1
+    // where the cap is already exhausted.  A steer is injected while the run
+    // is active to prove mid-turn steers cannot reset `handoff_attempts`.
+    let p2 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"do work"}]}),
+        )
+        .await;
+
+    // Drain until the final response, approving tool-permission requests,
+    // capturing the activeRunId once it is broadcast, sending one steer,
+    // and verifying that it is accepted in the live run.
+    let mut run_id: Option<String> = None;
+    let mut steer_id: i64 = -1;
+    let mut steer_accepted = false;
+    loop {
+        let v = h.recv().await;
+
+        // Capture the run id from the first session/update that carries it,
+        // then immediately queue a steer.  This must happen before round 1 so
+        // the steer text is present but the cap check still fires — proving
+        // the counter is not reset by the steer path.
+        if run_id.is_none() {
+            if let Some(rid) = v["params"]["update"]["_meta"]["goose"]["activeRunId"].as_str() {
+                run_id = Some(rid.to_owned());
+                steer_id = h
+                    .send(
+                        "_goose/unstable/session/steer",
+                        json!({
+                            "sessionId": sid,
+                            "expectedRunId": rid,
+                            "prompt": [{"type":"text","text":"STEER-CANARY: also consider the edge case"}],
+                        }),
+                    )
+                    .await;
+            }
+        }
+
+        // Steer response: assert it was accepted in the live run.
+        if steer_id >= 0 && v["id"] == json!(steer_id) {
+            assert!(
+                v.get("result").is_some(),
+                "steer must be accepted while the run is active; got: {v}"
+            );
+            assert_eq!(
+                v["result"]["runId"].as_str(),
+                run_id.as_deref(),
+                "steer must reference the live run id"
+            );
+            steer_accepted = true;
+            continue;
+        }
+
+        if v.get("method") == Some(&json!("session/request_permission")) {
+            let id = v["id"].clone();
+            h.write(json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": { "outcome": { "outcome": "selected", "optionId": "allow" } },
+            }))
+            .await;
+            continue;
+        }
+        if v["id"] == json!(p2) {
+            assert!(
+                v.get("result").is_some(),
+                "turn 2 must succeed even when cap blocks round-1 handoff; got: {v}"
+            );
+            break;
+        }
+    }
+
+    assert!(
+        steer_accepted,
+        "steer was never accepted during turn 2; the steer arm is missing coverage"
+    );
+
+    // 4 LLM requests: seed + summarize + tool-call-with-usage + final-complete.
+    let count = llm.captured.lock().await.len();
+    assert_eq!(
+        count, 4,
+        "expected 4 LLM requests (seed + summarize + tool-call + final); got {count}"
+    );
+
+    let stderr = h.stderr_text();
+    assert!(
+        stderr.contains("handoff cap reached"),
+        "expected cap-reached WARN in stderr; got: {stderr}"
+    );
+    assert!(
+        stderr.contains("reason=\"preflight\""),
+        "expected reason=\"preflight\" field in cap WARN; got: {stderr}"
+    );
+    assert!(
+        stderr.contains("handoff_attempts="),
+        "expected handoff_attempts field in cap WARN; got: {stderr}"
+    );
+    assert!(
+        stderr.contains("max_handoffs="),
+        "expected max_handoffs field in cap WARN; got: {stderr}"
+    );
+
+    h.shutdown().await;
+}
+
+/// A failing `summarize()` call must still consume one slot from the per-turn
+/// handoff-attempt budget. Before the fix, `handoff_count` was incremented only
+/// on a successful compaction; a flaky summarizer could be retried indefinitely
+/// within a turn. The fix moves the increment to before `summarize()`.
+///
+/// Proof: with `max_handoffs=1` and a multi-round turn:
+/// - Round 0 preflight: threshold met, attempts: 0→1, summarize() fails → Skipped.
+/// - Round 1 preflight: attempts=1 >= cap=1 → WARN (cap hit despite no successful
+///   compaction). Without the pre-summarize increment, attempts would still be 0
+///   here and a second summarize() would be attempted — the bug.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_summarize_burns_handoff_attempt_budget() {
+    // We need the summarize() call to fail. The summarize path uses the same
+    // fake LLM server; we queue an HTTP error body for the summarize request.
+    // But our spawn_capturing_llm always returns 200, so we use a non-OpenAI-
+    // shaped response that the agent will treat as an error (missing `choices`).
+    //
+    // LLM call sequence:
+    //  req 1: turn 1 complete()           → usage=950 (seeds the gate)
+    //  req 2: turn 2 round 0 summarize()  → malformed response (treated as error)
+    //                                       handoff_attempts incremented to 1 BEFORE this
+    //  req 3: turn 2 round 0 complete()   → tool_call + usage=950 (re-arms gate)
+    //  req 4: turn 2 round 1 preflight    → cap reached: WARN (attempts=1 >= max=1)
+    //  req 5: turn 2 round 1 complete()   → end_turn
+    let fake_mcp = env!("CARGO_BIN_EXE_fake-mcp");
+    let bad_summary_response = json!({ "error": "upstream unavailable" }); // no `choices`
+    let tool_call_with_usage = {
+        let mut v = openai_tool_call("tc-2", "test_tool", json!({}));
+        v["usage"] = json!({
+            "prompt_tokens": 950u64,
+            "completion_tokens": 5,
+            "total_tokens": 955,
+        });
+        v
+    };
+    let llm = spawn_capturing_llm(vec![
+        openai_text_with_usage("seed", 950), // turn 1: seed usage
+        bad_summary_response,                // turn 2 round 0: summarize fails
+        tool_call_with_usage,                // turn 2 round 0: complete → tool call
+        openai_text_with_usage("done", 10),  // turn 2 round 1: final answer
+    ])
+    .await;
+
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[
+            ("BUZZ_AGENT_MAX_CONTEXT_TOKENS", "1000"),
+            ("BUZZ_AGENT_MAX_OUTPUT_TOKENS", "100"),
+            ("BUZZ_AGENT_MAX_HANDOFFS", "1"),
+            (
+                "BUZZ_AGENT_MAX_HISTORY_BYTES",
+                &(16 * 1024 * 1024).to_string(),
+            ),
+        ],
+    )
+    .await;
+
+    h.send(
+        "initialize",
+        json!({"protocolVersion":1,"clientCapabilities":{}}),
+    )
+    .await;
+    let _ = h.recv().await;
+    h.send(
+        "session/new",
+        json!({
+            "cwd": "/tmp",
+            "mcpServers": [{
+                "name": "budget_test",
+                "command": fake_mcp,
+                "args": [],
+                "env": [{ "name": "FAKE_MCP_TOOL_COUNT", "value": "1" }],
+            }],
+        }),
+    )
+    .await;
+    let r = h
+        .recv_until(|v| v.get("result").is_some() || v.get("error").is_some())
+        .await;
+    let sid = r["result"]["sessionId"].as_str().unwrap().to_owned();
+
+    // Turn 1: seed high usage.
+    let p1 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"seed"}]}),
+        )
+        .await;
+    let _ = h.recv_until(|v| v["id"] == json!(p1)).await;
+
+    // Turn 2: round 0 summarize fails, but attempts was already incremented.
+    // Round 1 preflight must see cap hit and emit WARN.
+    let p2 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"work"}]}),
+        )
+        .await;
+
+    loop {
+        let v = h.recv().await;
+        if v.get("method") == Some(&json!("session/request_permission")) {
+            let id = v["id"].clone();
+            h.write(json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": { "outcome": { "outcome": "selected", "optionId": "allow" } },
+            }))
+            .await;
+            continue;
+        }
+        if v["id"] == json!(p2) {
+            assert!(v.get("result").is_some(), "turn 2 must succeed; got: {v}");
+            break;
+        }
+    }
+
+    let stderr = h.stderr_text();
+    // Round 0: the failed summarize should warn about the failure.
+    assert!(
+        stderr.contains("handoff failed") || stderr.contains("handoff returned empty"),
+        "expected summarize-failure WARN; got: {stderr}"
+    );
+    // Round 1: cap must be hit (attempts=1 from the failed attempt).
+    assert!(
+        stderr.contains("handoff cap reached"),
+        "expected cap-reached WARN after failed summarize burned the attempt; got: {stderr}"
+    );
+
+    h.shutdown().await;
+}
