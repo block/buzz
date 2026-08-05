@@ -109,10 +109,11 @@ export type TabChord = "close" | "new" | "next" | "previous";
  * Ctrl+Shift for exactly this reason) — see the report for why that is scoped
  * out rather than solved here.
  *
- * ⌘W is matched even though macOS currently resolves it as the File > Close
- * Window key equivalent before the webview sees any key event: the accelerator
- * has to be released natively for this arm to ever run, and matching it now
- * means the frontend needs no further change when it is.
+ * ⌘W only reaches this matcher because the File > Close Window key
+ * equivalent is released natively while the terminal owns the keyboard:
+ * macOS resolves an enabled menu accelerator before the webview sees any key
+ * event, so `TerminalSubstrate` disables the item for exactly the ownership
+ * span in which this arm may run (see `closeWindowMenuEnabledFor`).
  */
 export function matchTabChord(
   event: {
@@ -135,6 +136,18 @@ export function matchTabChord(
   if (event.code === "KeyT") return "new";
   if (event.code === "KeyW") return "close";
   return null;
+}
+
+/**
+ * Whether the native File > Close Window (⌘W) item should be enabled for the
+ * given keyboard owner.
+ *
+ * While the terminal owns input the item is disabled so the ⌘W key
+ * equivalent falls through to `matchTabChord`'s close arm instead of hiding
+ * the window; a disabled menu item does not consume its key equivalent.
+ */
+export function closeWindowMenuEnabledFor(owner: "buzz" | "terminal"): boolean {
+  return owner !== "terminal";
 }
 
 /**

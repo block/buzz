@@ -3,10 +3,12 @@ import { ChevronRight, Maximize2, Minimize2, Plus, X } from "lucide-react";
 
 import { useTheme } from "@/shared/theme/ThemeProvider";
 import { cn } from "@/shared/lib/cn";
+import { setCloseWindowMenuEnabled } from "@/shared/lib/closeWindowMenu";
 import { isMacPlatform } from "@/shared/lib/platform";
 import {
   INITIAL_HANDOFF_STATE,
   accumulateScrollLines,
+  closeWindowMenuEnabledFor,
   encodePaste,
   encodeTerminalKey,
   matchTabChord,
@@ -127,6 +129,18 @@ export function TerminalSubstrate({
     [activeSessionId, frame, sessionFrames],
   );
   const [owner, setOwner] = React.useState<"buzz" | "terminal">("buzz");
+  // Release or reclaim the native ⌘W accelerator to match keyboard
+  // ownership; the unmount arm re-enables so a closed terminal never leaves
+  // File > Close Window disabled.
+  React.useEffect(() => {
+    void setCloseWindowMenuEnabled(closeWindowMenuEnabledFor(owner));
+  }, [owner]);
+  React.useEffect(
+    () => () => {
+      void setCloseWindowMenuEnabled(true);
+    },
+    [],
+  );
   const [viewport, setViewport] = React.useState({ columns: 1, rows: 1 });
   const [welcomeVisible, setWelcomeVisible] = React.useState(false);
   const [cursorPainted, setCursorPainted] = React.useState(true);

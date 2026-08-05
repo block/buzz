@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   INITIAL_HANDOFF_STATE,
   accumulateScrollLines,
+  closeWindowMenuEnabledFor,
   encodePaste,
   encodeTerminalKey,
   matchTabChord,
@@ -164,6 +165,11 @@ test("tab chords match the platform's primary modifier only", () => {
     matchTabChord(chord({ metaKey: true, shiftKey: true }), true),
     null,
   );
+});
+
+test("Close Window stays enabled exactly while Buzz owns the keyboard", () => {
+  assert.equal(closeWindowMenuEnabledFor("buzz"), true);
+  assert.equal(closeWindowMenuEnabledFor("terminal"), false);
 });
 
 test("tab stepping wraps and skips tabs whose select button is disabled", () => {

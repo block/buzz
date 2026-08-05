@@ -625,6 +625,7 @@ pub fn run() {
             unarchive_builderlab_community,
             transfer_builderlab_community,
             title_bar_double_click,
+            app_menu::set_close_window_menu_enabled,
             get_identity,
             get_nsec,
             generate_backup_passphrase,

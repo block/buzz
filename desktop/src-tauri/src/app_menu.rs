@@ -5,42 +5,111 @@
 //! `close_window` item in both the File and Window submenus, and muda gives
 //! that item a Cmd+W key equivalent bound to `performClose:`.
 //!
-//! Two consequences, both wrong for Buzz:
+//! An earlier revision of this module removed both `close_window` items,
+//! because macOS resolves a menu key equivalent before the webview receives
+//! any key event, so Buzz Term could never bind Cmd+W to "close this
+//! terminal tab" while the accelerator was claimed here. That cure traded a
+//! terminal-local conflict for an app-wide regression: Cmd+W is the standard
+//! macOS chord for "close the focused window", and with the item gone it did
+//! nothing anywhere else in the app. For a tray-resident app "close" means
+//! hide-to-tray (the `CloseRequested` interception in `lib.rs`), exactly the
+//! Cmd+W behavior of other tray-resident chat apps.
 //!
-//! 1. `CloseRequested` on the main window is intercepted in `lib.rs` and turned
-//!    into hide-to-tray, so Cmd+W never closed a window -- it hid the whole
-//!    app. That is already redundant with Cmd+H (Hide), which stays.
-//! 2. macOS resolves a menu key equivalent before the webview receives any key
-//!    event, so Buzz Term could never bind Cmd+W to "close this terminal tab"
-//!    while the accelerator was claimed here.
-//!
-//! So this module builds the standard menu minus both `close_window` items.
-//! Everything else matches `Menu::default()` deliberately: the goal is to drop
-//! one item, not to design a menu.
-//!
-//! If hide-on-Cmd+W is ever wanted back in Buzz mode, the revisit path is to
-//! restore the item and disable it while the terminal owns input (a disabled
-//! item does not consume its key equivalent) -- at the cost of an owner->Rust
-//! IPC hop this approach does not need.
+//! So the menu now restores File > Close Window as a *custom* item
+//! (predefined items cannot be toggled after creation) and Buzz Term
+//! disables it for exactly as long as it owns the keyboard, via the
+//! `set_close_window_menu_enabled` command: a disabled menu item does not
+//! consume its key equivalent, so Cmd+W falls through to the webview and the
+//! terminal's close-tab chord (`matchTabChord` in `terminalState.ts`) runs.
+//! Everything else still mirrors `Menu::default()` deliberately; the Window
+//! submenu's duplicate close item is not restored because File is the
+//! chord's canonical home.
 
 #[cfg(target_os = "macos")]
 use tauri::menu::{
-    AboutMetadata, Menu, PredefinedMenuItem, Submenu, HELP_SUBMENU_ID, WINDOW_SUBMENU_ID,
+    AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu, HELP_SUBMENU_ID, WINDOW_SUBMENU_ID,
 };
 #[cfg(target_os = "macos")]
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use tauri::{Builder, Runtime};
+
+/// Menu id for File > Close Window.
+#[cfg(target_os = "macos")]
+const CLOSE_WINDOW_ID: &str = "close-window";
+
+/// Handle to the File > Close Window item, managed so
+/// `set_close_window_menu_enabled` can toggle it after the menu is built.
+#[cfg(target_os = "macos")]
+struct CloseWindowMenuItem<R: Runtime>(MenuItem<R>);
 
 /// Installs Buzz's menu, replacing the `Menu::default()` Tauri would otherwise
 /// auto-install. A no-op off macOS, where that default is never created and
 /// the Cmd+W accelerator does not exist.
 pub fn install<R: Runtime>(builder: Builder<R>) -> Builder<R> {
     #[cfg(target_os = "macos")]
-    let builder = builder.menu(build);
+    let builder = builder.menu(build).on_menu_event(|app, event| {
+        if event.id().as_ref() == CLOSE_WINDOW_ID {
+            close_focused_window(app);
+        }
+    });
     builder
 }
 
-/// Mirrors `Menu::default()` with every `close_window` item omitted.
+/// Closes the focused window, falling back to the main window.
+///
+/// `close()` goes through `CloseRequested`, so the main window takes the
+/// hide-to-tray path in `lib.rs` and huddle windows keep their
+/// drawer-restore behavior — the same outcome as clicking the native close
+/// button.
+#[cfg(target_os = "macos")]
+fn close_focused_window<R: Runtime>(app: &AppHandle<R>) {
+    let windows = app.webview_windows();
+    let target = windows
+        .values()
+        .find(|window| window.is_focused().unwrap_or(false))
+        .or_else(|| windows.get("main"));
+    let Some(window) = target else {
+        return;
+    };
+    if let Err(error) = window.close() {
+        eprintln!("buzz-desktop: failed to close window from menu: {error}");
+    }
+}
+
+/// Enables or disables File > Close Window (Cmd+W).
+///
+/// Buzz Term claims Cmd+W to close terminal tabs while it owns the keyboard.
+/// macOS resolves menu key equivalents before the webview sees any key
+/// event, so the item must be disabled for the chord to reach the terminal
+/// at all — a disabled item does not consume its key equivalent. A no-op off
+/// macOS, where this menu is never installed.
+#[tauri::command]
+pub fn set_close_window_menu_enabled<R: Runtime>(
+    app: AppHandle<R>,
+    enabled: bool,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let Some(item) = app.try_state::<CloseWindowMenuItem<R>>() else {
+            return Ok(());
+        };
+        let item = item.0.clone();
+        app.run_on_main_thread(move || {
+            if let Err(error) = item.set_enabled(enabled) {
+                eprintln!("buzz-desktop: failed to set Close Window enabled={enabled}: {error}");
+            }
+        })
+        .map_err(|error| error.to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, enabled);
+        Ok(())
+    }
+}
+
+/// Mirrors `Menu::default()` with File > Close Window as a toggleable custom
+/// item and the Window submenu's duplicate close item omitted.
 ///
 /// The Window and Help submenus keep Tauri's well-known ids: `init_app_menu`
 /// looks them up by id to call `set_as_windows_menu_for_nsapp` and
@@ -57,6 +126,15 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         authors: config.bundle.publisher.clone().map(|p| vec![p]),
         ..Default::default()
     };
+
+    let close_window = MenuItem::with_id(
+        app,
+        CLOSE_WINDOW_ID,
+        "Close Window",
+        true,
+        Some("CmdOrCtrl+W"),
+    )?;
+    app.manage(CloseWindowMenuItem(close_window.clone()));
 
     Menu::with_items(
         app,
@@ -76,8 +154,10 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
                     &PredefinedMenuItem::quit(app, None)?,
                 ],
             )?,
-            // `Menu::default()`'s File submenu holds exactly one item on macOS
-            // -- close_window -- so dropping that item drops the submenu too.
+            // `Menu::default()`'s File submenu holds exactly one item on
+            // macOS -- close_window -- restored here as the custom item so
+            // Buzz Term can release the accelerator while it owns Cmd+W.
+            &Submenu::with_items(app, "File", true, &[&close_window])?,
             &Submenu::with_items(
                 app,
                 "Edit",
