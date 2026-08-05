@@ -75,6 +75,20 @@ CREATE TABLE IF NOT EXISTS archive_migrations (
     name       TEXT PRIMARY KEY,
     applied_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS causal_ledger_entries (
+    identity_pubkey TEXT NOT NULL,
+    sequence        INTEGER NOT NULL,
+    experiment_id   TEXT NOT NULL,
+    previous_hash   TEXT NOT NULL,
+    hash            TEXT NOT NULL,
+    entry_json      TEXT NOT NULL,
+    recorded_at     INTEGER NOT NULL,
+    PRIMARY KEY (identity_pubkey, sequence),
+    UNIQUE (identity_pubkey, experiment_id)
+);
+CREATE INDEX IF NOT EXISTS idx_causal_ledger_experiment
+    ON causal_ledger_entries (identity_pubkey, experiment_id);
 ";
 
 // ── Open / init ─────────────────────────────────────────────────────────────

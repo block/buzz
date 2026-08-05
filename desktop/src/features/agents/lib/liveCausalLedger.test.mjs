@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { LiveCausalLedger } from "./liveCausalLedger.ts";
+import {
+  browserLedgerPersistence,
+  LiveCausalLedger,
+} from "./liveCausalLedger.ts";
 
 function memoryStorage() {
   const values = new Map();
@@ -26,7 +29,10 @@ function observer(seq, kind, payload = {}) {
 
 test("automatically closes a live session into an owner-local candidate", async () => {
   const storage = memoryStorage();
-  const ledger = new LiveCausalLedger("OWNER", storage);
+  const ledger = new LiveCausalLedger(
+    "OWNER",
+    browserLedgerPersistence("OWNER", storage),
+  );
   await ledger.ingest(
     "agent",
     observer(1, "task_captured", {
@@ -53,10 +59,16 @@ test("automatically closes a live session into an owner-local candidate", async 
 
 test("restores the candidate after restart and does not duplicate terminal replay", async () => {
   const storage = memoryStorage();
-  const first = new LiveCausalLedger("owner", storage);
+  const first = new LiveCausalLedger(
+    "owner",
+    browserLedgerPersistence("owner", storage),
+  );
   await first.ingest("agent", observer(1, "turn_completed"));
 
-  const restarted = new LiveCausalLedger("owner", storage);
+  const restarted = new LiveCausalLedger(
+    "owner",
+    browserLedgerPersistence("owner", storage),
+  );
   await restarted.ingest("agent", observer(1, "turn_completed"));
   assert.equal((await restarted.entries()).length, 1);
 });

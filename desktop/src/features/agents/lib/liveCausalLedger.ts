@@ -5,7 +5,31 @@ import {
   type CausalExperiment,
 } from "./causalLedger";
 
-type JournalStorage = Pick<Storage, "getItem" | "setItem">;
+export type CausalLedgerPersistence = {
+  loadJournal(): Promise<string>;
+  appendEntry(entry: import("./causalLedger").LedgerEntry): Promise<void>;
+};
+
+export function browserLedgerPersistence(
+  owner: string,
+  storage: Pick<Storage, "getItem" | "setItem">,
+): CausalLedgerPersistence {
+  const storageKey = `buzz-causal-ledger.v1:${owner.toLowerCase()}`;
+  return {
+    async loadJournal() {
+      return storage.getItem(storageKey) ?? "";
+    },
+    async appendEntry(entry) {
+      const existing = storage.getItem(storageKey);
+      storage.setItem(
+        storageKey,
+        existing
+          ? `${existing}\n${JSON.stringify(entry)}`
+          : JSON.stringify(entry),
+      );
+    },
+  };
+}
 
 function payload(event: ObserverEvent): Record<string, unknown> {
   return event.payload && typeof event.payload === "object"
@@ -22,16 +46,16 @@ function eventId(event: ObserverEvent): string {
 }
 
 export class LiveCausalLedger {
-  readonly #storage: JournalStorage;
+  readonly #persistence: CausalLedgerPersistence;
   readonly #owner: string;
   readonly #sessions = new Map<string, ObserverEvent[]>();
   #ledger = new CausalLedger();
   #ready: Promise<void>;
   #writes: Promise<void> = Promise.resolve();
 
-  constructor(owner: string, storage: JournalStorage) {
+  constructor(owner: string, persistence: CausalLedgerPersistence) {
     this.#owner = owner.toLowerCase();
-    this.#storage = storage;
+    this.#persistence = persistence;
     this.#ready = this.#restore();
   }
 
@@ -40,7 +64,7 @@ export class LiveCausalLedger {
   }
 
   async #restore() {
-    const journal = this.#storage.getItem(this.storageKey);
+    const journal = await this.#persistence.loadJournal();
     if (journal) this.#ledger = await CausalLedger.fromJournal(journal);
   }
 
@@ -64,10 +88,10 @@ export class LiveCausalLedger {
         this.#sessions.delete(key);
         return;
       }
-      await this.#ledger.append(
+      const entry = await this.#ledger.append(
         this.#candidate(experimentId, event.sessionId, event.turnId, session),
       );
-      this.#storage.setItem(this.storageKey, this.#ledger.toJournal());
+      await this.#persistence.appendEntry(entry);
       this.#sessions.delete(key);
     });
     return this.#writes;
