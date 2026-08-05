@@ -54,13 +54,26 @@ export function getMentionableAgentPubkeys({
   return pubkeys;
 }
 
+const EMPTY_PUBKEY_SET: ReadonlySet<string> = new Set();
+
 export function isAgentIdentityInManagedList(
   candidate: { isAgent?: boolean; pubkey: string },
   managedAgentPubkeys: ReadonlySet<string>,
+  // The managed list is only authoritative for the CURRENT user's concrete
+  // agent identities (stale-duplicate suppression, #2149). A cross-owned
+  // agent that is invocable by the current user — respond_to "anyone" in a
+  // shared channel, or an allowlist naming us — must stay mentionable, or
+  // the downstream invocability check is unreachable (#3125). Callers that
+  // gate mention candidates pass `mentionableAgentPubkeys`; callers that
+  // genuinely want managed-only (e.g. add-member search) omit it.
+  invocableAgentPubkeys: ReadonlySet<string> = EMPTY_PUBKEY_SET,
 ) {
+  if (candidate.isAgent !== true) {
+    return true;
+  }
+  const normalized = normalizePubkey(candidate.pubkey);
   return (
-    candidate.isAgent !== true ||
-    managedAgentPubkeys.has(normalizePubkey(candidate.pubkey))
+    managedAgentPubkeys.has(normalized) || invocableAgentPubkeys.has(normalized)
   );
 }
 
