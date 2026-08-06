@@ -14,13 +14,13 @@ import {
 import {
   advanceWatermark,
   readWatermark,
+  runBootstrap,
+  type BootstrapResult,
   type FetchResult,
 } from "./sidebarSyncWatermark";
 
 /** Result returned by `bootstrap()` — the hook acts on this without publishing. */
-export type BootstrapResult =
-  | { action: "apply-remote"; data: RemoteMutes }
-  | { action: "hold" };
+export type { BootstrapResult };
 
 const D_TAG = "channel-mutes";
 const BLOB_TYPE = "channel-mutes";
@@ -233,17 +233,17 @@ export class ChannelMuteSyncManager {
    * the raw head before decrypt on every outcome, and — if genuine first-time
    * sync is detected — **performs the seed-publish itself**.
    */
-  async bootstrap(localStore: ChannelMuteStore): Promise<BootstrapResult> {
-    const result = await this.fetchRemoteMutes();
-    if (result.status === "found") {
-      return { action: "apply-remote", data: result.data };
-    }
-    if (result.status === "absent" && this.lastRemoteCreatedAt === 0) {
-      if (Object.keys(localStore.channels).length > 0) {
-        this.publishMutes(localStore);
-      }
-    }
-    return { action: "hold" };
+  async bootstrap(
+    localStore: ChannelMuteStore,
+  ): Promise<BootstrapResult<RemoteMutes>> {
+    const fetchResult = await this.fetchRemoteMutes();
+    return runBootstrap({
+      fetchResult,
+      lastHead: this.lastRemoteCreatedAt,
+      localStore,
+      isLocalNonEmpty: (s) => Object.keys(s.channels).length > 0,
+      publishFn: (s) => this.publishMutes(s),
+    });
   }
 
   destroy(): void {

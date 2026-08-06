@@ -53,7 +53,7 @@ test("destroy: cancels pending publish without flushing to the relay", () => {
   };
 
   try {
-    const manager = new ChannelSectionSyncManager("pk-test");
+    const manager = new ChannelSectionSyncManager("pk-test", "wss://r.test");
     const store = makeStore({
       sections: [{ id: "s1", name: "Work", order: 0 }],
     });
@@ -127,7 +127,7 @@ test("destroy: aborts in-flight doPublish after fetchOwnBlobBeforePublish resolv
   };
 
   try {
-    const manager = new ChannelSectionSyncManager("pk-race");
+    const manager = new ChannelSectionSyncManager("pk-race", "wss://r.test");
     const store = makeStore({
       sections: [{ id: "s1", name: "Work", order: 0 }],
     });
@@ -167,7 +167,7 @@ test("destroy: aborts in-flight doPublish after fetchOwnBlobBeforePublish resolv
 });
 
 test("destroy: is safe to call with no pending publish", () => {
-  const manager = new ChannelSectionSyncManager("pk-no-pending");
+  const manager = new ChannelSectionSyncManager("pk-no-pending", "wss://r.test");
   // Should not throw even with nothing queued.
   assert.doesNotThrow(() => manager.destroy());
 });
@@ -189,7 +189,7 @@ test("destroy: cancelPendingPublish clears pendingStore", () => {
   };
 
   try {
-    const manager = new ChannelSectionSyncManager("pk-pending-null");
+    const manager = new ChannelSectionSyncManager("pk-pending-null", "wss://r.test");
     const store = makeStore({
       sections: [{ id: "s1", name: "Test", order: 0 }],
     });
@@ -296,6 +296,11 @@ test("revert-fix: fetch failed (error) does not trigger seed-publish via bootstr
       "hold",
       "bootstrap must return hold on failed fetch",
     );
+    assert.equal(
+      manager.getPendingStore(),
+      null,
+      "pendingStore must be null after failed fetch — no seed was queued",
+    );
     assert.equal(publishCalls.length, 0, "no publish after failed fetch");
   } finally {
     restore();
@@ -374,6 +379,11 @@ test("revert-fix: absent fetch with prior watermark blocks seed-publish via boot
       result.action,
       "hold",
       "bootstrap must return hold when watermark > 0",
+    );
+    assert.equal(
+      manager.getPendingStore(),
+      null,
+      "pendingStore must be null when watermark > 0 — no seed was queued",
     );
     assert.equal(
       publishCalls.length,
@@ -556,6 +566,47 @@ test("revert-fix: sections LWW — newer decryptable pre-publish event selected 
     assert.ok(
       managerA.getPersistedWatermark() >= 200,
       "pre-publish event created_at=200 must advance the watermark (LWW comparison uses headBeforeFetch not current head)",
+    );
+  } finally {
+    restore();
+    mock.reset();
+  }
+});
+
+// 7. live-sub: undecryptable event on live path records head before decrypt
+// Mutation test: removing recordRemoteHead before decrypt in the live callback
+// leaves watermark at 0 after a live event.
+test("revert-fix: undecryptable live event advances watermark before decrypt attempt", async () => {
+  let liveCallback = null;
+  mock.method(relayClient, "subscribeLive", (_filter, onEvent) => {
+    liveCallback = onEvent;
+    return Promise.resolve(async () => {});
+  });
+
+  const fw = makeFakeWindow();
+  const restore = installFakeWindow(fw);
+  try {
+    const manager = new ChannelSectionSyncManager("pk-live", RELAY);
+    assert.equal(manager.getPersistedWatermark(), 0, "watermark starts at 0");
+
+    // Start the live subscription.
+    await manager.subscribeToSections(() => {});
+    assert.ok(liveCallback !== null, "subscribeLive must have captured the callback");
+
+    // Deliver an undecryptable event via the live callback.
+    liveCallback({
+      pubkey: "pk-live",
+      content: "!bad-cipher!",
+      created_at: 1700005555,
+      id: "live-evt-1",
+    });
+
+    // Drain microtasks so the async decryptAndParse resolves.
+    await new Promise((r) => setTimeout(r, 0));
+
+    assert.ok(
+      manager.getPersistedWatermark() >= 1700005555,
+      "live undecryptable event must advance the watermark before decrypt is attempted",
     );
   } finally {
     restore();

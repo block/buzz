@@ -32,7 +32,7 @@ function withFreshStorage(fn) {
   }
 }
 
-const { readWatermark, advanceWatermark } = await import(
+const { readWatermark, advanceWatermark, runBootstrap } = await import(
   "./sidebarSyncWatermark.ts"
 );
 
@@ -154,4 +154,91 @@ test("relay-A watermark is preserved after relay-B session", () => {
       "relay A head must not be clobbered by relay B activity",
     );
   });
+});
+
+// ── runBootstrap policy ───────────────────────────────────────────────────────
+//
+// The shared policy is tested once here so that a mutation to any one branch
+// cannot hide behind per-surface duplication.
+
+function makeBootstrapArgs({ fetchResult, lastHead, localNonEmpty }) {
+  let publishCount = 0;
+  return {
+    args: {
+      fetchResult,
+      lastHead,
+      localStore: { items: localNonEmpty ? ["x"] : [] },
+      isLocalNonEmpty: (s) => s.items.length > 0,
+      publishFn: (_s) => {
+        publishCount++;
+      },
+    },
+    publishCount: () => publishCount,
+  };
+}
+
+// Guard: fetch failed → hold, zero publishes.
+// Mutation: removing the failed branch causes a seed on first-sync case.
+test("runBootstrap: fetch failed returns hold and never calls publishFn", () => {
+  const { args, publishCount } = makeBootstrapArgs({
+    fetchResult: { status: "failed" },
+    lastHead: 0,
+    localNonEmpty: true,
+  });
+  const result = runBootstrap(args);
+  assert.equal(result.action, "hold");
+  assert.equal(publishCount(), 0, "publishFn must not be called on failed fetch");
+});
+
+// Guard: fetch absent + prior head > 0 → hold, zero publishes (stale-dev-build case).
+// Mutation: setting lastHead to 0 causes a seed.
+test("runBootstrap: fetch absent with prior head returns hold and never calls publishFn", () => {
+  const { args, publishCount } = makeBootstrapArgs({
+    fetchResult: { status: "absent" },
+    lastHead: 1700000000,
+    localNonEmpty: true,
+  });
+  const result = runBootstrap(args);
+  assert.equal(result.action, "hold");
+  assert.equal(publishCount(), 0, "publishFn must not be called when prior head exists");
+});
+
+// Guard: fetch absent + head 0 + local non-empty → publishFn called exactly once, hold returned.
+// Mutation: removing the absent+head-0 seed call leaves publishCount at 0.
+test("runBootstrap: first-sync (absent + zero head + non-empty local) calls publishFn and returns hold", () => {
+  const { args, publishCount } = makeBootstrapArgs({
+    fetchResult: { status: "absent" },
+    lastHead: 0,
+    localNonEmpty: true,
+  });
+  const result = runBootstrap(args);
+  assert.equal(result.action, "hold");
+  assert.equal(publishCount(), 1, "publishFn must be called exactly once on first-sync");
+});
+
+// Guard: fetch absent + head 0 + empty local → no publish, hold returned.
+test("runBootstrap: first-sync with empty local store does not call publishFn", () => {
+  const { args, publishCount } = makeBootstrapArgs({
+    fetchResult: { status: "absent" },
+    lastHead: 0,
+    localNonEmpty: false,
+  });
+  const result = runBootstrap(args);
+  assert.equal(result.action, "hold");
+  assert.equal(publishCount(), 0, "empty local store must not trigger seed");
+});
+
+// Guard: fetch found → apply-remote returned, no publish.
+// Mutation: removing the found branch drops the remote data.
+test("runBootstrap: fetch found returns apply-remote with data and never calls publishFn", () => {
+  const remoteData = { store: { version: 1, items: [] }, createdAt: 100, eventId: "e1" };
+  const { args, publishCount } = makeBootstrapArgs({
+    fetchResult: { status: "found", data: remoteData, createdAt: 100, eventId: "e1" },
+    lastHead: 0,
+    localNonEmpty: true,
+  });
+  const result = runBootstrap(args);
+  assert.equal(result.action, "apply-remote");
+  assert.deepEqual(result.data, remoteData);
+  assert.equal(publishCount(), 0, "publishFn must not be called when remote was found");
 });

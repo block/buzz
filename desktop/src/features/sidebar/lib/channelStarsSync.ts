@@ -14,13 +14,13 @@ import {
 import {
   advanceWatermark,
   readWatermark,
+  runBootstrap,
+  type BootstrapResult,
   type FetchResult,
 } from "./sidebarSyncWatermark";
 
 /** Result returned by `bootstrap()` — the hook acts on this without publishing. */
-export type BootstrapResult =
-  | { action: "apply-remote"; data: RemoteStars }
-  | { action: "hold" };
+export type { BootstrapResult };
 
 const D_TAG = "channel-stars";
 const BLOB_TYPE = "channel-stars";
@@ -233,17 +233,17 @@ export class ChannelStarSyncManager {
    * the raw head before decrypt on every outcome, and — if genuine first-time
    * sync is detected — **performs the seed-publish itself**.
    */
-  async bootstrap(localStore: ChannelStarStore): Promise<BootstrapResult> {
-    const result = await this.fetchRemoteStars();
-    if (result.status === "found") {
-      return { action: "apply-remote", data: result.data };
-    }
-    if (result.status === "absent" && this.lastRemoteCreatedAt === 0) {
-      if (Object.keys(localStore.channels).length > 0) {
-        this.publishStars(localStore);
-      }
-    }
-    return { action: "hold" };
+  async bootstrap(
+    localStore: ChannelStarStore,
+  ): Promise<BootstrapResult<RemoteStars>> {
+    const fetchResult = await this.fetchRemoteStars();
+    return runBootstrap({
+      fetchResult,
+      lastHead: this.lastRemoteCreatedAt,
+      localStore,
+      isLocalNonEmpty: (s) => Object.keys(s.channels).length > 0,
+      publishFn: (s) => this.publishStars(s),
+    });
   }
 
   destroy(): void {

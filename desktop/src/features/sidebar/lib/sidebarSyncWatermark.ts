@@ -19,6 +19,8 @@
  * two ways never produces two different keys.
  */
 
+import { normalizeRelayUrl } from "@/features/profile/lib/selfProfileStorage";
+
 const PREFIX = "buzz-sync-watermark.v1";
 
 /**
@@ -38,17 +40,12 @@ export type FetchResult<T> =
   | { status: "absent" }
   | { status: "failed"; createdAt?: number };
 
-/** Normalise a relay URL the same way all relay-scoped keys do. */
-function normalizeRelay(relayUrl: string): string {
-  return relayUrl.trim().replace(/\/+$/, "").toLowerCase();
-}
-
 function watermarkKey(
   pubkey: string,
   blobType: string,
   relayUrl: string,
 ): string {
-  return `${PREFIX}:${blobType}:${pubkey}:${encodeURIComponent(normalizeRelay(relayUrl))}`;
+  return `${PREFIX}:${blobType}:${pubkey}:${encodeURIComponent(normalizeRelayUrl(relayUrl))}`;
 }
 
 /** Read the persisted watermark (0 when absent or on read error). */
@@ -91,4 +88,48 @@ export function advanceWatermark(
     // seed-publish within this session; the watermark is belt-and-suspenders
     // across sessions.
   }
+}
+
+/** Result returned by `bootstrap()` — the hook acts on this without publishing. */
+export type BootstrapResult<T> =
+  | { action: "apply-remote"; data: T }
+  | { action: "hold" };
+
+/**
+ * Shared boot policy for all four sidebar-preference sync managers.
+ *
+ * Each manager calls this from its `bootstrap()` method, supplying its
+ * surface-specific fetch, publish, and local-store accessors.  The full
+ * decision lives here once so that a mutation to any one surface cannot
+ * escape via a per-manager copy.
+ *
+ * Policy:
+ *   - `found`                           → return `apply-remote`; hook applies data.
+ *   - `failed`                          → hold; seed-publish blocked (error or unreadable event).
+ *   - `absent` + `lastHead > 0`         → hold; relay blob seen before, absence may be transient.
+ *   - `absent` + `lastHead === 0` + non-empty local → call `publishFn(local)`; return `hold`.
+ *   - `absent` + `lastHead === 0` + empty local     → hold; nothing to seed.
+ */
+export function runBootstrap<TRemote, TLocal>({
+  fetchResult,
+  lastHead,
+  localStore,
+  isLocalNonEmpty,
+  publishFn,
+}: {
+  fetchResult: FetchResult<TRemote>;
+  lastHead: number;
+  localStore: TLocal;
+  isLocalNonEmpty: (store: TLocal) => boolean;
+  publishFn: (store: TLocal) => void;
+}): BootstrapResult<TRemote> {
+  if (fetchResult.status === "found") {
+    return { action: "apply-remote", data: fetchResult.data };
+  }
+  if (fetchResult.status === "absent" && lastHead === 0) {
+    if (isLocalNonEmpty(localStore)) {
+      publishFn(localStore);
+    }
+  }
+  return { action: "hold" };
 }

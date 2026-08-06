@@ -13,13 +13,13 @@ import {
 import {
   advanceWatermark,
   readWatermark,
+  runBootstrap,
+  type BootstrapResult,
   type FetchResult,
 } from "./sidebarSyncWatermark";
 
 /** Result returned by `bootstrap()` — the hook acts on this without publishing. */
-export type BootstrapResult =
-  | { action: "apply-remote"; data: RemoteSortPrefs }
-  | { action: "hold" };
+export type { BootstrapResult };
 
 const D_TAG = "channel-sort";
 const BLOB_TYPE = "channel-sort";
@@ -247,17 +247,17 @@ export class ChannelSortSyncManager {
    * the raw head before decrypt on every outcome, and — if genuine first-time
    * sync is detected — **performs the seed-publish itself**.
    */
-  async bootstrap(localStore: ChannelSortStore): Promise<BootstrapResult> {
-    const result = await this.fetchRemoteSortPrefs();
-    if (result.status === "found") {
-      return { action: "apply-remote", data: result.data };
-    }
-    if (result.status === "absent" && this.lastRemoteCreatedAt === 0) {
-      if (Object.keys(localStore.groups).length > 0) {
-        this.publishSortPrefs(localStore);
-      }
-    }
-    return { action: "hold" };
+  async bootstrap(
+    localStore: ChannelSortStore,
+  ): Promise<BootstrapResult<RemoteSortPrefs>> {
+    const fetchResult = await this.fetchRemoteSortPrefs();
+    return runBootstrap({
+      fetchResult,
+      lastHead: this.lastRemoteCreatedAt,
+      localStore,
+      isLocalNonEmpty: (s) => Object.keys(s.groups).length > 0,
+      publishFn: (s) => this.publishSortPrefs(s),
+    });
   }
 
   destroy(): void {

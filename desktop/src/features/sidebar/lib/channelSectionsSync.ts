@@ -14,13 +14,13 @@ import {
 import {
   advanceWatermark,
   readWatermark,
+  runBootstrap,
+  type BootstrapResult,
   type FetchResult,
 } from "./sidebarSyncWatermark";
 
 /** Result returned by `bootstrap()` — the hook acts on this without publishing. */
-export type BootstrapResult =
-  | { action: "apply-remote"; data: RemoteSections }
-  | { action: "hold" };
+export type { BootstrapResult };
 
 const D_TAG = "channel-sections";
 const BLOB_TYPE = "channel-sections";
@@ -270,19 +270,17 @@ export class ChannelSectionSyncManager {
    * Returns `apply-remote` with the found data so the hook can apply it to
    * React state, or `hold` when there is nothing for the hook to do.
    */
-  async bootstrap(localStore: ChannelSectionStore): Promise<BootstrapResult> {
-    const result = await this.fetchRemoteSections();
-    if (result.status === "found") {
-      return { action: "apply-remote", data: result.data };
-    }
-    if (result.status === "absent" && this.lastRemoteCreatedAt === 0) {
-      // Genuine first-time sync: seed the relay from local state.
-      if (localStore.sections.length > 0) {
-        this.publishSections(localStore);
-      }
-    }
-    // failed, or absent+watermark>0 (stale-dev-build case): hold.
-    return { action: "hold" };
+  async bootstrap(
+    localStore: ChannelSectionStore,
+  ): Promise<BootstrapResult<RemoteSections>> {
+    const fetchResult = await this.fetchRemoteSections();
+    return runBootstrap({
+      fetchResult,
+      lastHead: this.lastRemoteCreatedAt,
+      localStore,
+      isLocalNonEmpty: (s) => s.sections.length > 0,
+      publishFn: (s) => this.publishSections(s),
+    });
   }
 
   destroy(): void {
