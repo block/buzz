@@ -504,8 +504,16 @@ export function AgentsView() {
             void personas.handleImportSnapshotFile(fileBytes, fileName);
           }}
           onOpenChange={personas.setIsCatalogDialogOpen}
-          onSelectPersona={(persona, active) => {
-            void personas.handleSetActive(persona, active, "catalog");
+          onSelectPersona={async (persona, active) => {
+            const addedPersona = await personas.handleSetActive(
+              persona,
+              active,
+              "catalog",
+            );
+            if (!active || !addedPersona) return;
+
+            personas.setIsCatalogDialogOpen(false);
+            openPersonaProfilePanel?.(addedPersona);
           }}
           open={personas.isCatalogDialogOpen}
           personas={personas.catalogPersonas}
