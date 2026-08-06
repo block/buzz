@@ -109,15 +109,6 @@ export function AddTeamToChannelDialog({
     onOpenChange(next);
   }
 
-  React.useEffect(() => {
-    if (!open) {
-      return;
-    }
-    if (!channelId && channels.length > 0) {
-      setChannelId(channels[0].id);
-    }
-  }, [channelId, channels, open]);
-
   const selectedChannel =
     channels.find((channel) => channel.id === channelId) ?? null;
 

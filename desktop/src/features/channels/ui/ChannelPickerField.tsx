@@ -20,6 +20,11 @@ type ChannelPickerFieldProps = {
  * that listed every community channel in one dropdown — communities with
  * many channels made that unusable. Fuzzy-matches with the channel
  * browser's scorer and keeps the caller's (members-first) ordering.
+ *
+ * Selection semantics: this field owns keeping `value` consistent with the
+ * visible list. It selects the first visible channel when `value` is empty
+ * or filtered out, and clears `value` when the query matches nothing — so
+ * a hidden channel can never remain the submit target.
  */
 export function ChannelPickerField({
   channels,
@@ -39,10 +44,15 @@ export function ChannelPickerField({
 
   // Keep the selection visible: when the query filters out the selected
   // channel, move it to the best match — the `<select>` this replaces
-  // could never hold an invisible selection. Once the selection is in the
-  // list, keep its row scrolled into view for keyboard navigation.
+  // could never hold an invisible selection. When nothing matches, clear
+  // the selection so the parent form cannot submit to a hidden channel.
+  // Once the selection is in the list, keep its row scrolled into view
+  // for keyboard navigation.
   React.useEffect(() => {
     if (visibleChannels.length === 0) {
+      if (value !== "") {
+        onChange("");
+      }
       return;
     }
     if (!visibleChannels.some((channel) => channel.id === value)) {
@@ -74,13 +84,22 @@ export function ChannelPickerField({
   }
 
   const listId = `${inputId}-listbox`;
+  const optionId = (channelId: string) => `${inputId}-option-${channelId}`;
+  const selectedIsVisible = visibleChannels.some(
+    (channel) => channel.id === value,
+  );
 
   return (
     <div className="space-y-1.5">
       <div className="relative">
         <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground/55" />
         <input
+          aria-activedescendant={
+            selectedIsVisible ? optionId(value) : undefined
+          }
+          aria-autocomplete="list"
           aria-controls={listId}
+          aria-expanded={true}
           autoCapitalize="none"
           autoCorrect="off"
           className="flex h-9 w-full rounded-md border border-input bg-background py-2 pl-9 pr-3 text-sm shadow-xs placeholder:text-muted-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
@@ -97,6 +116,7 @@ export function ChannelPickerField({
             }
           }}
           placeholder="Search channels"
+          role="combobox"
           spellCheck={false}
           type="text"
           value={query}
@@ -127,9 +147,11 @@ export function ChannelPickerField({
                     : "flex w-full items-center gap-2 px-3 py-2 text-left transition-colors duration-150 ease-out hover:bg-muted/40 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
                 }
                 disabled={disabled}
+                id={optionId(channel.id)}
                 key={channel.id}
                 onClick={() => onChange(channel.id)}
                 role="option"
+                tabIndex={-1}
                 type="button"
               >
                 <span className="min-w-0 flex-1 truncate text-sm">
