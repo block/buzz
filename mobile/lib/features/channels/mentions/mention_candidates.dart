@@ -87,12 +87,16 @@ List<MentionCandidate> buildMentionCandidates({
     }
   }
 
+  final currentLower = currentPubkey?.toLowerCase();
   for (final agent in relayAgents) {
     final pk = agent.pubkey;
     if (seen.contains(pk)) continue;
-    if (!sharedAgentPubkeys.contains(pk)) continue;
-    seen.add(pk);
     final profile = userCache[pk];
+    final ownerPubkey = ownerByAgentPubkey[pk] ?? profile?.ownerPubkey;
+    final ownedByCurrentUser =
+        currentLower != null && ownerPubkey?.toLowerCase() == currentLower;
+    if (!ownedByCurrentUser && !sharedAgentPubkeys.contains(pk)) continue;
+    seen.add(pk);
     candidates.add(
       MentionCandidate(
         pubkey: pk,
@@ -103,12 +107,11 @@ List<MentionCandidate> buildMentionCandidates({
         avatarUrl: profile?.avatarUrl,
         isAgent: true,
         isMember: false,
-        ownerPubkey: ownerByAgentPubkey[pk] ?? profile?.ownerPubkey,
+        ownerPubkey: ownerPubkey,
       ),
     );
   }
 
-  final currentLower = currentPubkey?.toLowerCase();
   for (final profile in searchResults) {
     final pk = profile.pubkey.toLowerCase();
     if (seen.contains(pk)) continue;

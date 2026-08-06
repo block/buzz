@@ -117,6 +117,49 @@ void main() {
       expect(candidates.map((c) => c.pubkey), contains(userPubkey));
     });
 
+    test('empty mentions include owner-only directory agents', () {
+      final candidates = buildMentionCandidates(
+        members: [member(userPubkey)],
+        relayAgents: [
+          AgentDirectoryEntry(
+            pubkey: agentPubkey,
+            displayName: 'Owned agent',
+            respondTo: 'anyone',
+            channelIds: const [],
+          ),
+        ],
+        sharedChannelIds: const {},
+        userCache: const {},
+        ownerByAgentPubkey: {agentPubkey: userPubkey},
+        currentPubkey: userPubkey,
+      );
+
+      expect(candidates.map((c) => c.pubkey), [userPubkey, agentPubkey]);
+      expect(candidates.last.isAgent, isTrue);
+      expect(candidates.last.isMember, isFalse);
+      expect(candidates.last.ownerPubkey, userPubkey);
+    });
+
+    test('owner-only directory agents stay hidden from other users', () {
+      final candidates = buildMentionCandidates(
+        members: [member(userPubkey)],
+        relayAgents: [
+          AgentDirectoryEntry(
+            pubkey: agentPubkey,
+            displayName: 'Someone else agent',
+            respondTo: 'anyone',
+            channelIds: const [],
+          ),
+        ],
+        sharedChannelIds: const {},
+        userCache: const {},
+        ownerByAgentPubkey: {agentPubkey: ownerPubkey},
+        currentPubkey: userPubkey,
+      );
+
+      expect(candidates.map((c) => c.pubkey), [userPubkey]);
+    });
+
     test('excludes non-shared agents and deduplicates member agents', () {
       final candidates = buildMentionCandidates(
         members: [member(agentPubkey, role: 'bot')],
