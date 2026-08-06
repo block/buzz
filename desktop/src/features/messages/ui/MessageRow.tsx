@@ -36,6 +36,8 @@ import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext"
 import { parseImetaTags } from "@/shared/ui/markdown/parseImeta";
 import { useMessageEmoji } from "@/features/messages/lib/useMessageEmoji";
 import { parseWaveMessageContent } from "@/features/messages/lib/waveMessage";
+import { ArtilleryMatchAttachment } from "@/features/games/artillery/ArtilleryMatchAttachment";
+import { parseArtilleryDurableEvent } from "@/features/games/artillery/durableProtocol";
 import { resolveSnapshotSharedBy } from "@/features/messages/lib/snapshotSharedBy";
 import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 import { Markdown } from "@/shared/ui/markdown";
@@ -342,6 +344,26 @@ export const MessageRow = React.memo(
           );
         default:
           {
+            const artilleryEvent = parseArtilleryDurableEvent(message.body);
+            if (artilleryEvent?.event === "match_started" && channelId) {
+              return (
+                <>
+                  <Markdown
+                    channelNames={channelNames}
+                    className="max-w-full text-sm"
+                    content={message.body}
+                    customEmoji={customEmoji}
+                    mentionNames={mentionNames}
+                    mentionPubkeysByName={mentionPubkeysByName}
+                  />
+                  <ArtilleryMatchAttachment
+                    channelId={channelId}
+                    event={artilleryEvent}
+                    rootEventId={message.id}
+                  />
+                </>
+              );
+            }
             const waveMessage = parseWaveMessageContent(message.body);
             if (waveMessage) {
               return (

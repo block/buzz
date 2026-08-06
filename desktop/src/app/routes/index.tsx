@@ -11,17 +11,45 @@ import {
 import { useIdentityQuery } from "@/shared/api/hooks";
 
 type HomeRouteSearch = {
+  artilleryChannel?: string;
+  artilleryMatch?: string;
+  artilleryRoot?: string;
   item?: string;
+  lab?: string;
   profile?: string;
   profileTab?: string;
   profileView?: string;
 };
 
+const ArtilleryGameLab = React.lazy(async () => {
+  const module = await import("@/features/games/artillery/ArtilleryGameLab");
+  return { default: module.ArtilleryGameLab };
+});
+
 function validateHomeSearch(search: Record<string, unknown>): HomeRouteSearch {
   return {
+    artilleryChannel:
+      typeof search.artilleryChannel === "string" &&
+      search.artilleryChannel.length > 0
+        ? search.artilleryChannel
+        : undefined,
+    artilleryMatch:
+      typeof search.artilleryMatch === "string" &&
+      search.artilleryMatch.length > 0
+        ? search.artilleryMatch
+        : undefined,
+    artilleryRoot:
+      typeof search.artilleryRoot === "string" &&
+      search.artilleryRoot.length > 0
+        ? search.artilleryRoot
+        : undefined,
     item:
       typeof search.item === "string" && search.item.length > 0
         ? search.item
+        : undefined,
+    lab:
+      typeof search.lab === "string" && search.lab.length > 0
+        ? search.lab
         : undefined,
     profile:
       typeof search.profile === "string" && search.profile.length > 0
@@ -44,6 +72,7 @@ export const Route = createFileRoute("/")({
 });
 
 function HomeRouteComponent() {
+  const search = Route.useSearch();
   const { goChannel } = useAppNavigation();
   const channelsQuery = useChannelsQuery();
   const identityQuery = useIdentityQuery();
@@ -90,7 +119,23 @@ function HomeRouteComponent() {
     openPendingWelcomeChannel(availableChannelIds);
   }, [availableChannelIds, openPendingWelcomeChannel]);
 
-  return (
+  return search.lab === "artillery" ? (
+    <React.Suspense fallback={null}>
+      <ArtilleryGameLab
+        durableMatch={
+          search.artilleryChannel &&
+          search.artilleryMatch &&
+          search.artilleryRoot
+            ? {
+                channelId: search.artilleryChannel,
+                matchId: search.artilleryMatch,
+                rootEventId: search.artilleryRoot,
+              }
+            : null
+        }
+      />
+    </React.Suspense>
+  ) : (
     <HomeScreen
       availableChannelIds={availableChannelIds}
       currentPubkey={identityQuery.data?.pubkey}

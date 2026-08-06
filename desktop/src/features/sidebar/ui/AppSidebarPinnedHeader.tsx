@@ -1,4 +1,4 @@
-import { Activity, Bot, FolderGit2, Inbox, Zap } from "lucide-react";
+import { Activity, Bot, FolderGit2, Gamepad2, Inbox, Zap } from "lucide-react";
 
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import { FeatureGate } from "@/shared/features";
@@ -124,6 +124,23 @@ export function AppSidebarPrimaryMenu({
             </SidebarMenuBadge>
           ) : null}
         </SidebarMenuItem>
+        {import.meta.env.DEV ? (
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              data-testid="open-artillery-lab"
+              onClick={() => {
+                window.location.hash = "/?lab=artillery";
+              }}
+              tooltip="Open artillery lab"
+              type="button"
+            >
+              <Gamepad2 className="h-4 w-4 opacity-80" />
+              <SidebarMenuLabel className="opacity-80">
+                Artillery lab
+              </SidebarMenuLabel>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        ) : null}
         <FeatureGate feature="pulse">
           <SidebarMenuItem>
             <SidebarMenuButton

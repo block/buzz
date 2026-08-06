@@ -67,6 +67,7 @@
     "jdenticon": "^3.3.0",
     "lucide-react": "^1.0.0",
     "motion": "^12.38.0",
+    "phaser": "4.2.1",
     "qrcode": "^1.5.4",
     "qrcode.react": "^4.2.0",
     "react": "^19.1.0",
