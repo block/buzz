@@ -54,7 +54,7 @@ type UnifiedAgentsSectionProps = {
 
 const AGENT_CARD_COLUMN_CLASS = "w-full";
 export const AGENT_CARD_GRID_COLUMNS_CLASS =
-  "grid-cols-[repeat(auto-fill,minmax(min(160px,100%),1fr))]";
+  "grid-cols-[repeat(auto-fill,minmax(min(160px,100%),1fr))] [@container(min-width:48rem)]:grid-cols-[repeat(auto-fill,minmax(200px,1fr))]";
 export const IDENTITY_CARD_GRID_CLASS = `${AGENT_CARD_COLUMN_CLASS} ${AGENT_CARD_GRID_COLUMNS_CLASS} grid gap-3`;
 
 export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
