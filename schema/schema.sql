@@ -401,6 +401,13 @@ CREATE TABLE workflow_runs (
 
 CREATE INDEX idx_workflow_runs_workflow ON workflow_runs (community_id, workflow_id);
 CREATE INDEX idx_workflow_runs_status ON workflow_runs (community_id, status);
+CREATE UNIQUE INDEX uq_workflow_runs_reply_parent
+    ON workflow_runs (
+        community_id,
+        workflow_id,
+        ((trigger_context ->> 'reply_to_message_id'))
+    )
+    WHERE NULLIF(trigger_context ->> 'reply_to_message_id', '') IS NOT NULL;
 
 -- ── Workflow approvals ────────────────────────────────────────────────────────
 -- token-hash lookup scoped: approval token grants cannot act on another
