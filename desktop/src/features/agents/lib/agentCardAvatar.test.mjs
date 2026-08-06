@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { resolveAgentCardAvatarUrl } from "./agentCardAvatar.ts";
+import {
+  isAgentCardAvatarLoading,
+  resolveAgentCardAvatarUrl,
+} from "./agentCardAvatar.ts";
 
 test("running agent card prefers the pubkey profile avatar", () => {
   assert.equal(
@@ -22,4 +25,13 @@ test("running agent card falls back to the definition avatar", () => {
 
 test("running agent card ignores blank avatar values", () => {
   assert.equal(resolveAgentCardAvatarUrl("  ", ""), null);
+});
+
+test("linked agent actions wait for the authoritative profile avatar", () => {
+  assert.equal(isAgentCardAvatarLoading(true, true), true);
+  assert.equal(isAgentCardAvatarLoading(true, false), false);
+});
+
+test("unlinked persona actions do not wait for a profile", () => {
+  assert.equal(isAgentCardAvatarLoading(false, true), false);
 });

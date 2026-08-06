@@ -15,3 +15,15 @@ export function resolveAgentCardAvatarUrl(
   }
   return null;
 }
+
+/**
+ * A linked agent's profile is authoritative even when the definition already
+ * supplies a fallback. Avatar-dependent actions must wait for that profile
+ * query so they cannot snapshot the fallback before the profile resolves.
+ */
+export function isAgentCardAvatarLoading(
+  hasLinkedAgent: boolean,
+  isProfilePending: boolean,
+): boolean {
+  return hasLinkedAgent && isProfilePending;
+}

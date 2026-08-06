@@ -1,7 +1,10 @@
 import * as React from "react";
 import { AlertTriangle, ChevronDown, ChevronRight } from "lucide-react";
 
-import { resolveAgentCardAvatarUrl } from "@/features/agents/lib/agentCardAvatar";
+import {
+  isAgentCardAvatarLoading,
+  resolveAgentCardAvatarUrl,
+} from "@/features/agents/lib/agentCardAvatar";
 import { resolveAgentCardModelLabel } from "@/features/agents/lib/agentCardModelLabel";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
@@ -289,7 +292,7 @@ function AgentPersonaCard({
     <AgentIdentityCard
       actions={actions?.(
         avatarUrl,
-        Boolean(agent && !persona.avatarUrl && profileQuery.isPending),
+        isAgentCardAvatarLoading(Boolean(agent), profileQuery.isPending),
       )}
       ariaLabel={`${title} agent profile`}
       avatar={
