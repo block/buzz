@@ -39,10 +39,21 @@ per-pair reservation rejects a duplicate start during the unlocked phase. A
 shutdown, concurrent record edit, receipt-write failure, or store-save failure
 wins the race and the unregistered child is terminated and reaped after every
 runtime lock has been released. No external process may be spawned while a
-runtime-management lock is held. On Windows, live children are owned by Job
-Objects; after a desktop restart, recovered process trees are enumerated and
-terminated through Win32 APIs directly. The recovery path does not launch
-`taskkill` or any other helper executable.
+runtime-management lock is held. On Windows, each runtime receipt records the
+process creation time captured from the spawned child handle. Live children
+are owned by Job Objects; after a desktop restart, recovered process trees are
+enumerated through Win32 APIs, opened, and creation-time checked immediately
+before termination. Handles remain open throughout bounded descendant sweeps
+so PIDs cannot be recycled underneath teardown. An absent, inaccessible, or
+mismatched identity fails closed without terminating that PID. The recovery
+path does not launch `taskkill` or any other helper executable.
+
+Windows readiness probes use a separate containment boundary from managed
+runtimes: each probe is spawned suspended, assigned to a fresh kill-on-close
+Job Object, and only then resumed. Assignment failure kills and reaps the still
+suspended child. Timeout and completion cleanup terminate the job, wait for its
+active-process count to reach zero, stop output readers, and reap the direct
+child, preventing probe descendants from escaping the timeout.
 
 Unexpected local listener exits use three bounded recovery attempts after 5
 seconds, 30 seconds, and 2 minutes. Recovery is suppressed while an agent has
