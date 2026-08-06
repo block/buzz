@@ -23,7 +23,7 @@ class MessageLongPressInkWell extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MessageLongPressRegion(
+    return _MessageLongPressRegion(
       onLongPress: onLongPress,
       child: InkWell(
         onTap: onTap,
@@ -40,12 +40,11 @@ class MessageLongPressInkWell extends StatelessWidget {
 /// Links, media, reactions, and other nested controls keep their normal tap
 /// gestures. Moving far enough to scroll cancels the timer; recognizing the
 /// hold cancels the pointer so a descendant tap cannot fire on release.
-class MessageLongPressRegion extends HookWidget {
+class _MessageLongPressRegion extends HookWidget {
   final ValueChanged<Rect> onLongPress;
   final Widget child;
 
-  const MessageLongPressRegion({
-    super.key,
+  const _MessageLongPressRegion({
     required this.onLongPress,
     required this.child,
   });
