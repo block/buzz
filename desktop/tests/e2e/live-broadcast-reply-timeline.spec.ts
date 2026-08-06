@@ -123,12 +123,20 @@ test("a live broadcast depth-1 reply enters the authoritative channel window sto
   await waitForMockLiveSubscription(page, CHANNEL);
 
   // LIVE broadcast depth-1 reply: parent is the root, carries ["broadcast","1"].
-  await emit(page, {
+  const broadcastReply = await emit(page, {
     content: "broadcast to the channel",
     parentEventId: root.id,
     createdAt: now + 1,
     extraTags: [["broadcast", "1"]],
   });
+
+  expect(broadcastReply.kind).toBe(9);
+  expect(broadcastReply.tags).toEqual(
+    expect.arrayContaining([
+      ["e", root.id, "", "reply"],
+      ["broadcast", "1"],
+    ]),
+  );
 
   // CONTROL — an ordinary (non-broadcast) depth-1 reply: NOT a window row, MUST
   // stay out of the overlay.
