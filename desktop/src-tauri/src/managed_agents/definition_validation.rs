@@ -60,7 +60,14 @@ pub(crate) fn validate_managed_agent_definition_text(
     validate_agent_definition_text(name, executable_prompt)
 }
 
-fn validate_visible_text(
+/// Reject control and default-ignorable characters in human-reviewed text.
+///
+/// The shared executable-definition invariant: a recipient reviews a visible
+/// string, then it is delivered verbatim to an ACP harness. Invisible,
+/// default-ignorable, and bidi-override characters make what executes differ
+/// from what was reviewed, so they are refused rather than silently stripped.
+/// `allow_layout_controls` permits `\n`/`\t` for multiline fields.
+pub(crate) fn validate_visible_text(
     value: &str,
     label: &str,
     allow_layout_controls: bool,

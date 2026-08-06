@@ -240,6 +240,8 @@ mod tests {
             instructions: None,
             persona_ids: vec![],
             is_builtin: false,
+            shared: false,
+            catalog_source: None,
             source_dir: None,
             is_symlink: false,
             symlink_target: None,
@@ -307,6 +309,7 @@ mod tests {
             source_team_persona_slug: Some("SENTINEL_SLUG".to_string()), // MUST NOT appear
             definition_respond_to: None,
             catalog_source: None,
+            team_catalog_source: None,
             definition_respond_to_allowlist: vec![],
             definition_parallelism: None,
             relay_mesh: None,
