@@ -114,7 +114,30 @@ List<MentionCandidate> buildMentionCandidates({
 
   for (final profile in searchResults) {
     final pk = profile.pubkey.toLowerCase();
-    if (seen.contains(pk)) continue;
+    final existingIndex = candidates.indexWhere(
+      (candidate) => candidate.pubkey == pk,
+    );
+    if (existingIndex != -1) {
+      final existing = candidates[existingIndex];
+      if (existing.isAgent && !existing.isMember) {
+        candidates[existingIndex] = MentionCandidate(
+          pubkey: pk,
+          displayName: profile.displayName?.trim().isNotEmpty == true
+              ? profile.displayName!.trim()
+              : existing.displayName,
+          secondaryLabel: profile.nip05Handle ?? existing.secondaryLabel,
+          avatarUrl: profile.avatarUrl ?? existing.avatarUrl,
+          isAgent: true,
+          isMember: false,
+          role: existing.role,
+          ownerPubkey:
+              ownerByAgentPubkey[pk] ??
+              profile.ownerPubkey ??
+              existing.ownerPubkey,
+        );
+      }
+      continue;
+    }
     final ownerPubkey = ownerByAgentPubkey[pk] ?? profile.ownerPubkey;
     final isAgent = ownerPubkey != null || directoryPubkeys.contains(pk);
     if (isAgent) {

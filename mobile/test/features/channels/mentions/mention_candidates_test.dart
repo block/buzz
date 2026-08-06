@@ -124,20 +124,52 @@ void main() {
           AgentDirectoryEntry(
             pubkey: agentPubkey,
             displayName: 'Owned agent',
-            respondTo: 'anyone',
+            respondTo: 'owner-only',
             channelIds: const [],
           ),
         ],
         sharedChannelIds: const {},
         userCache: const {},
-        ownerByAgentPubkey: {agentPubkey: userPubkey},
+        ownerByAgentPubkey: {agentPubkey: userPubkey.toUpperCase()},
         currentPubkey: userPubkey,
       );
 
       expect(candidates.map((c) => c.pubkey), [userPubkey, agentPubkey]);
       expect(candidates.last.isAgent, isTrue);
       expect(candidates.last.isMember, isFalse);
-      expect(candidates.last.ownerPubkey, userPubkey);
+      expect(candidates.last.ownerPubkey, userPubkey.toUpperCase());
+    });
+
+    test('search metadata enriches owner-only directory agents', () {
+      final candidates = buildMentionCandidates(
+        members: const [],
+        relayAgents: [
+          AgentDirectoryEntry(
+            pubkey: agentPubkey,
+            displayName: 'Directory name',
+            respondTo: 'owner-only',
+            channelIds: const [],
+          ),
+        ],
+        sharedChannelIds: const {},
+        userCache: const {},
+        ownerByAgentPubkey: {agentPubkey: userPubkey},
+        searchResults: [
+          UserProfile(
+            pubkey: agentPubkey,
+            displayName: 'Search result name',
+            nip05Handle: 'agent@example.com',
+            ownerPubkey: userPubkey,
+          ),
+        ],
+        currentPubkey: userPubkey,
+      );
+
+      expect(candidates, hasLength(1));
+      expect(candidates.single.displayName, 'Search result name');
+      expect(candidates.single.secondaryLabel, 'agent@example.com');
+      expect(candidates.single.isAgent, isTrue);
+      expect(candidates.single.isMember, isFalse);
     });
 
     test('owner-only directory agents stay hidden from other users', () {
@@ -147,7 +179,7 @@ void main() {
           AgentDirectoryEntry(
             pubkey: agentPubkey,
             displayName: 'Someone else agent',
-            respondTo: 'anyone',
+            respondTo: 'owner-only',
             channelIds: const [],
           ),
         ],
