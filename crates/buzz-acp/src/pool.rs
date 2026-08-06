@@ -183,7 +183,7 @@ pub(crate) fn supports_http_mcp(initialize_result: &serde_json::Value) -> bool {
         .unwrap_or(false)
 }
 
-fn validate_mcp_transport_capabilities(
+pub(crate) fn validate_mcp_transport_capabilities(
     http_mcp_supported: bool,
     runtime_name: &str,
     servers: &[McpServer],

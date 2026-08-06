@@ -2061,9 +2061,12 @@ async fn tokio_main() -> Result<()> {
                 let env = config.persona_env_vars.clone();
                 let has_codex = config.has_generated_codex_config;
                 let observer = observer.clone();
+                let mcp_servers = ctx.mcp_servers.clone();
                 let guard = RespawnGuard::new(idx, respawn_tx.clone());
                 respawn_tasks.spawn(async move {
-                    let result = spawn_and_init(&cmd, &args, &env, has_codex, idx, observer).await;
+                    let result =
+                        spawn_and_init(&cmd, &args, &env, has_codex, idx, observer, &mcp_servers)
+                            .await;
                     guard.send(result);
                 });
             }
@@ -3842,12 +3845,13 @@ fn recover_panicked_agent(
     let args = config.agent_args.clone();
     let env = config.persona_env_vars.clone();
     let has_codex = config.has_generated_codex_config;
+    let mcp_servers = build_mcp_servers(config);
     let guard = RespawnGuard::new(i, respawn_tx.clone());
     respawn_tasks.spawn(async move {
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
-        let result = spawn_and_init(&cmd, &args, &env, has_codex, i, observer).await;
+        let result = spawn_and_init(&cmd, &args, &env, has_codex, i, observer, &mcp_servers).await;
         guard.send(result);
     });
 }
@@ -4036,6 +4040,7 @@ fn spawn_respawn_task(
     let args = config.agent_args.clone();
     let env = config.persona_env_vars.clone();
     let has_codex = config.has_generated_codex_config;
+    let mcp_servers = build_mcp_servers(config);
     let guard = RespawnGuard::new(index, respawn_tx.clone());
     respawn_tasks.spawn(async move {
         // Shutdown old agent (reap child, prevent zombie).
@@ -4047,7 +4052,8 @@ fn spawn_respawn_task(
             tokio::time::sleep(delay).await;
         }
 
-        let result = spawn_and_init(&cmd, &args, &env, has_codex, index, observer).await;
+        let result =
+            spawn_and_init(&cmd, &args, &env, has_codex, index, observer, &mcp_servers).await;
         guard.send(result);
     });
 
@@ -4093,6 +4099,7 @@ struct PoolStartup {
     has_generated_codex_config: bool,
     model: Option<String>,
     observer: Option<observer::ObserverHandle>,
+    mcp_servers: Vec<McpServer>,
 }
 
 impl PoolStartup {
@@ -4105,6 +4112,7 @@ impl PoolStartup {
             has_generated_codex_config: config.has_generated_codex_config,
             model: config.model.clone(),
             observer,
+            mcp_servers: build_mcp_servers(config),
         }
     }
 }
@@ -4142,17 +4150,27 @@ async fn initialize_agent_pool(
                 };
                 match initialize_result {
                     Ok(Ok(init_result)) => {
-                        tracing::info!(agent = i, "agent initialized: {init_result}");
                         let protocol_version =
                             init_result["protocolVersion"].as_u64().unwrap_or(1) as u32;
+                        let agent_name = normalized_agent_name(&init_result);
+                        let http_mcp_supported = pool::supports_http_mcp(&init_result);
+                        if let Err(error) = pool::validate_mcp_transport_capabilities(
+                            http_mcp_supported,
+                            &agent_name,
+                            &startup.mcp_servers,
+                        ) {
+                            tracing::error!(
+                                agent = i,
+                                "agent capability validation failed: {error}"
+                            );
+                            acp.shutdown().await;
+                            agent_slots.push(None);
+                            continue;
+                        }
+                        tracing::info!(agent = i, "agent initialized: {init_result}");
                         tracing::info!(
                             agent = i,
-                            name = init_result
-                                .get("agentInfo")
-                                .or_else(|| init_result.get("serverInfo"))
-                                .and_then(|info| info.get("name"))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("unknown"),
+                            name = agent_name,
                             steering_supported = acp.steering_supported(),
                             "agent initialized"
                         );
@@ -4163,8 +4181,6 @@ async fn initialize_agent_pool(
                                 "initializeResult": init_result,
                             }),
                         );
-                        let agent_name = normalized_agent_name(&init_result);
-                        let http_mcp_supported = pool::supports_http_mcp(&init_result);
                         agent_slots.push(Some(OwnedAgent {
                             index: i,
                             acp,
@@ -4226,6 +4242,7 @@ async fn spawn_and_init(
     has_generated_codex_config: bool,
     agent_index: usize,
     observer: Option<observer::ObserverHandle>,
+    mcp_servers: &[McpServer],
 ) -> Result<(AcpClient, u32, String, bool)> {
     let mut acp = AcpClient::spawn(command, args, extra_env, has_generated_codex_config)
         .await
@@ -4234,8 +4251,20 @@ async fn spawn_and_init(
 
     match acp.initialize().await {
         Ok(init_result) => {
-            tracing::info!("agent initialized: {init_result}");
             let protocol_version = init_result["protocolVersion"].as_u64().unwrap_or(1) as u32;
+            let agent_name = normalized_agent_name(&init_result);
+            let http_mcp_supported = pool::supports_http_mcp(&init_result);
+            if let Err(error) = pool::validate_mcp_transport_capabilities(
+                http_mcp_supported,
+                &agent_name,
+                mcp_servers,
+            ) {
+                acp.shutdown().await;
+                return Err(anyhow::anyhow!(
+                    "agent capability validation failed: {error}"
+                ));
+            }
+            tracing::info!("agent initialized: {init_result}");
             acp.observe(
                 "agent_initialized",
                 serde_json::json!({
@@ -4243,8 +4272,6 @@ async fn spawn_and_init(
                     "initializeResult": init_result,
                 }),
             );
-            let agent_name = normalized_agent_name(&init_result);
-            let http_mcp_supported = pool::supports_http_mcp(&init_result);
             Ok((acp, protocol_version, agent_name, http_mcp_supported))
         }
         Err(e) => {
@@ -4254,6 +4281,100 @@ async fn spawn_and_init(
             acp.shutdown().await;
             Err(anyhow::anyhow!("agent initialize failed: {e}"))
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod mcp_capability_startup_tests {
+    use super::*;
+
+    fn http_server() -> McpServer {
+        McpServer::Http(McpServerHttp {
+            transport: HttpTransport::Http,
+            name: "analytics-read".into(),
+            url: "https://mcp.example.test/mcp".into(),
+            headers: Vec::new(),
+        })
+    }
+
+    fn adapter_script(http_supported: bool) -> Vec<String> {
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "result": {
+                "protocolVersion": 2,
+                "agentInfo": {"name": "fake-adapter"},
+                "agentCapabilities": {
+                    "mcpCapabilities": {"http": http_supported}
+                }
+            }
+        })
+        .to_string();
+        vec![
+            "-c".into(),
+            format!("read _request; printf '%s\\n' '{response}'; sleep 1"),
+        ]
+    }
+
+    #[tokio::test]
+    async fn respawn_rejects_http_incapable_adapter_during_initialize() {
+        let error = match spawn_and_init(
+            "/bin/sh",
+            &adapter_script(false),
+            &[],
+            false,
+            0,
+            None,
+            &[http_server()],
+        )
+        .await
+        {
+            Ok((mut acp, ..)) => {
+                acp.shutdown().await;
+                panic!("HTTP-incapable adapter returned a live respawn slot");
+            }
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("capability validation failed"));
+    }
+
+    #[tokio::test]
+    async fn initial_and_wakeup_pool_reject_http_incapable_adapter_before_ready() {
+        let startup = PoolStartup {
+            agents: 1,
+            command: "/bin/sh".into(),
+            args: adapter_script(false),
+            extra_env: Vec::new(),
+            has_generated_codex_config: false,
+            model: None,
+            observer: None,
+            mcp_servers: vec![http_server()],
+        };
+        let error = match initialize_agent_pool(&startup, None).await {
+            Ok(mut pool) => {
+                shutdown_agent_pool(&mut pool).await;
+                panic!("an incompatible pool became ready");
+            }
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("all 1 agents failed to start"));
+    }
+
+    #[tokio::test]
+    async fn respawn_accepts_http_capable_adapter() {
+        let (mut acp, _, _, supported) = spawn_and_init(
+            "/bin/sh",
+            &adapter_script(true),
+            &[],
+            false,
+            0,
+            None,
+            &[http_server()],
+        )
+        .await
+        .expect("HTTP-capable adapter should return a live slot");
+        assert!(supported);
+        acp.shutdown().await;
     }
 }
 
@@ -6659,15 +6780,9 @@ mod build_mcp_servers_tests {
         config.configured_mcp_servers = vec![config::ConfiguredMcpServer::Http {
             name: "hosted-context".into(),
             url: "https://mcp.example.test/mcp".into(),
-            url_env_file: None,
-            url_env_name: None,
             headers: vec![config::McpHttpHeaderConfig {
                 name: "Authorization".into(),
                 value: "Bearer opaque-token".into(),
-                value_file: None,
-                env_file: None,
-                env_name: None,
-                value_prefix: String::new(),
             }],
         }];
 

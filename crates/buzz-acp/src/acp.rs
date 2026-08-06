@@ -24,6 +24,32 @@ use crate::usage::{TurnUsage, UsageTracker};
 const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
 
 const REDACTED_MCP_VALUE: &str = "[REDACTED]";
+/// Substring redaction is a fallback for adapter echoes outside the structured
+/// `mcpServers` object. Very short values create destructive false positives
+/// in ordinary diagnostics, so they are protected structurally only.
+const MIN_SENSITIVE_PATTERN_BYTES: usize = 12;
+const COMMON_MCP_VALUES: [&str; 13] = [
+    "true",
+    "false",
+    "null",
+    "none",
+    "default",
+    "prod",
+    "production",
+    "dev",
+    "development",
+    "test",
+    "staging",
+    "local",
+    "localhost",
+];
+
+fn safe_sensitive_pattern(value: &str) -> bool {
+    value.len() >= MIN_SENSITIVE_PATTERN_BYTES
+        && !COMMON_MCP_VALUES
+            .iter()
+            .any(|common| value.eq_ignore_ascii_case(common))
+}
 
 /// An MCP server configuration passed to `session/new`.
 ///
@@ -303,6 +329,15 @@ fn redact_wire_value(
                                             REDACTED_MCP_VALUE.to_string(),
                                         );
                                     }
+                                }
+                                if server.get("type").and_then(serde_json::Value::as_str)
+                                    == Some("http")
+                                    && server.contains_key("url")
+                                {
+                                    server.insert(
+                                        "url".to_string(),
+                                        serde_json::Value::String(REDACTED_MCP_VALUE.to_string()),
+                                    );
                                 }
                             }
                         }
@@ -805,7 +840,7 @@ impl AcpClient {
         for value in servers
             .iter()
             .flat_map(McpServer::sensitive_values)
-            .filter(|value| !value.is_empty())
+            .filter(|value| safe_sensitive_pattern(value))
         {
             if !self
                 .sensitive_mcp_env_values
@@ -2550,7 +2585,7 @@ mod tests {
         let mut patterns = values
             .iter()
             .map(String::as_str)
-            .filter(|value| !value.is_empty())
+            .filter(|value| safe_sensitive_pattern(value))
             .collect::<Vec<_>>();
         patterns.sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
         patterns.dedup();
@@ -2973,13 +3008,26 @@ mod tests {
             .as_str()
             .expect("redacted error message");
         assert!(!message.contains(longer));
-        assert!(!message.contains(shorter));
         assert_eq!(message, REDACTED_MCP_VALUE);
         assert_eq!(redacted["ordinary"], source["ordinary"]);
         assert_eq!(
             source, original_source,
             "the protocol value must stay unchanged"
         );
+    }
+
+    #[test]
+    fn short_or_common_mcp_values_do_not_redact_unrelated_diagnostics() {
+        let values = ["1", "/", "true", "prod", "production", "localhost", "token"]
+            .map(str::to_string)
+            .to_vec();
+        let matcher = sensitive_matcher(&values);
+        assert!(matcher.is_none());
+
+        let diagnostic = serde_json::json!({
+            "message": "production retry 1/true on localhost used token accounting"
+        });
+        assert_eq!(redact_wire_value(&diagnostic, matcher.as_ref()), diagnostic);
     }
 
     #[test]
@@ -4350,6 +4398,77 @@ mod tests {
             }
             client.shutdown().await;
         }
+    }
+
+    #[tokio::test]
+    async fn session_new_sends_exact_mixed_legacy_stdio_and_http_payload() {
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":2,"agentCapabilities":{"mcpCapabilities":{"http":true}}}}'
+            read -t 2 REQ
+            echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_mixed","_receivedRequest":'"$REQ"'}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        let initialize = client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+        assert_eq!(
+            initialize.pointer("/agentCapabilities/mcpCapabilities/http"),
+            Some(&serde_json::Value::Bool(true))
+        );
+
+        let servers = vec![
+            McpServer::Stdio(McpServerStdio {
+                name: "buzz-tools-mcp".into(),
+                command: "/opt/buzz-tools-mcp/server.py".into(),
+                args: vec![],
+                env: vec![EnvVar {
+                    name: "BUZZ_RELAY_URL".into(),
+                    value: "wss://relay.example.test".into(),
+                }],
+            }),
+            McpServer::Http(McpServerHttp {
+                transport: HttpTransport::Http,
+                name: "analytics-read".into(),
+                url: "https://mcp.example.test/mcp".into(),
+                headers: vec![EnvVar {
+                    name: "Authorization".into(),
+                    value: "Bearer opaque-token".into(),
+                }],
+            }),
+        ];
+        let response = client
+            .session_new_full("/tmp", servers, None, None)
+            .await
+            .expect("mixed session/new should succeed");
+
+        let received = &response.raw["_receivedRequest"]["params"]["mcpServers"];
+        assert_eq!(
+            received,
+            &serde_json::json!([
+                {
+                    "name": "buzz-tools-mcp",
+                    "command": "/opt/buzz-tools-mcp/server.py",
+                    "args": [],
+                    "env": [{
+                        "name": "BUZZ_RELAY_URL",
+                        "value": "wss://relay.example.test"
+                    }]
+                },
+                {
+                    "type": "http",
+                    "name": "analytics-read",
+                    "url": "https://mcp.example.test/mcp",
+                    "headers": [{
+                        "name": "Authorization",
+                        "value": "Bearer opaque-token"
+                    }]
+                }
+            ])
+        );
+        client.shutdown().await;
     }
 
     #[tokio::test]
