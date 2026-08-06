@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::time::SystemTime;
 
 use nostr::PublicKey;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 
 use buzz_core_pkg::engram::{self, extract_refs, select_head, validate_and_decrypt, Body};
@@ -30,6 +30,40 @@ use buzz_core_pkg::kind::KIND_AGENT_ENGRAM;
 
 use crate::commands::identity_archive::{extract_oa_owner, fetch_kind0};
 use crate::{app_state::AppState, managed_agents::load_managed_agents, relay::query_relay};
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewMemoryProposalInput {
+    agent_pubkey: String,
+    proposal_slug: String,
+    proposal_event_id: String,
+    proposal_body: String,
+    decision: String,
+    edited_content: Option<String>,
+    previous_value: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MemoryProposalDocument {
+    schema: u8,
+    status: String,
+    kind: String,
+    scope: String,
+    target_slug: String,
+    content: String,
+    reason: String,
+    source_event_ids: Vec<String>,
+    evidence_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    confidence: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    previous_value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reviewed_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_event_id: Option<String>,
+}
 
 /// Hard cap on engrams returned per (agent, owner) pair. Matches the CLI
 /// `mem ls` reference. If the relay returns this many we set
@@ -272,6 +306,118 @@ pub async fn get_agent_memory(
         truncated,
         fetched_at,
     })
+}
+
+/// Review a proposed memory and publish the decision as a new encrypted
+/// engram version. Approval also publishes the edited target value. Undo
+/// restores the captured previous value (or writes a tombstone when the
+/// target did not previously exist). Writes are deliberately limited to
+/// locally managed agents because signing requires the agent's secret key.
+#[tauri::command]
+pub async fn review_agent_memory_proposal(
+    input: ReviewMemoryProposalInput,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let mut proposal: MemoryProposalDocument = serde_json::from_str(&input.proposal_body)
+        .map_err(|e| format!("invalid proposal body: {e}"))?;
+    if proposal.schema != 1
+        || !input.proposal_slug.starts_with("mem/proposals/")
+        || proposal.target_slug.starts_with("mem/proposals/")
+        || !proposal.target_slug.starts_with("mem/")
+        || input.proposal_event_id.len() != 64
+    {
+        return Err("invalid memory proposal".into());
+    }
+    match input.decision.as_str() {
+        "approve" if proposal.status == "proposed" => {}
+        "reject" if proposal.status == "proposed" => {}
+        "undo" if proposal.status == "approved" => {}
+        _ => return Err("proposal is not in a reviewable state".into()),
+    }
+
+    let records = load_managed_agents(&app)?;
+    let record = records
+        .iter()
+        .find(|record| record.pubkey.eq_ignore_ascii_case(&input.agent_pubkey))
+        .ok_or_else(|| "memory proposals can only be reviewed for a locally managed agent".to_string())?;
+    let agent_keys = nostr::Keys::parse(record.private_key_nsec.trim())
+        .map_err(|_| "managed agent signing key is unavailable".to_string())?;
+    if !agent_keys.public_key().to_hex().eq_ignore_ascii_case(&input.agent_pubkey) {
+        return Err("managed agent signing key does not match the proposal agent".into());
+    }
+    let (owner_pubkey, now) = {
+        let keys = state.keys.lock().map_err(|e| e.to_string())?;
+        (keys.public_key(), nostr::Timestamp::now().as_secs())
+    };
+
+    let publish_body = |body: Body| -> Result<nostr::Event, String> {
+        buzz_core_pkg::engram::build_event(&agent_keys, &owner_pubkey, &body, now)
+            .map_err(|e| e.to_string())
+    };
+
+    if input.decision == "approve" {
+        let value = input.edited_content.unwrap_or_else(|| proposal.content.clone());
+        if value.trim().is_empty() {
+            return Err("approved memory cannot be empty".into());
+        }
+        proposal.content = value.clone();
+        proposal.previous_value = input.previous_value;
+        let event = publish_body(Body::Memory {
+            slug: proposal.target_slug.clone(),
+            value: Some(value),
+        })?;
+        crate::relay::submit_signed_event_with_keys(
+            &event,
+            &state,
+            &agent_keys,
+            record.auth_tag.as_deref(),
+        )
+        .await?;
+        proposal.target_event_id = Some(event.id.to_hex());
+        proposal.status = "approved".into();
+    } else if input.decision == "undo" {
+        let previous = input.previous_value.or(proposal.previous_value.clone());
+        let event = publish_body(Body::Memory {
+            slug: proposal.target_slug.clone(),
+            value: previous,
+        })?;
+        crate::relay::submit_signed_event_with_keys(
+            &event,
+            &state,
+            &agent_keys,
+            record.auth_tag.as_deref(),
+        )
+        .await?;
+        proposal.target_event_id = Some(event.id.to_hex());
+        proposal.status = "undone".into();
+    } else {
+        proposal.status = "rejected".into();
+    }
+    proposal.reviewed_at = Some(now);
+
+    // Use the next second so a review is guaranteed to supersede the exact
+    // proposal version the owner saw, even on relays using timestamp-first
+    // replaceable-event head selection.
+    let proposal_json = serde_json::to_string(&proposal).map_err(|e| e.to_string())?;
+    let proposal_event = buzz_core_pkg::engram::build_event(
+        &agent_keys,
+        &owner_pubkey,
+        &Body::Memory {
+            slug: input.proposal_slug,
+            value: Some(proposal_json),
+        },
+        now.saturating_add(1),
+    )
+    .map_err(|e| e.to_string())?;
+    crate::relay::submit_signed_event_with_keys(
+        &proposal_event,
+        &state,
+        &agent_keys,
+        record.auth_tag.as_deref(),
+    )
+    .await?;
+    Ok(())
 }
 
 #[cfg(test)]

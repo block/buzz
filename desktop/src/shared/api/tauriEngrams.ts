@@ -52,3 +52,19 @@ export async function getAgentMemory(
     agentPubkey,
   });
 }
+
+export type ReviewMemoryProposalInput = {
+  agentPubkey: string;
+  proposalSlug: string;
+  proposalEventId: string;
+  proposalBody: string;
+  decision: "approve" | "reject" | "undo";
+  editedContent?: string;
+  previousValue?: string | null;
+};
+
+export async function reviewMemoryProposal(
+  input: ReviewMemoryProposalInput,
+): Promise<void> {
+  await invokeTauri("review_agent_memory_proposal", { input });
+}
