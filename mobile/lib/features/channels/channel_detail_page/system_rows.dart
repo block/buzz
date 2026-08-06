@@ -1,6 +1,6 @@
 part of '../channel_detail_page.dart';
 
-class _SystemMessageRow extends ConsumerWidget {
+class _SystemMessageRow extends HookConsumerWidget {
   final TimelineMessage message;
   final List<TimelineMessage>? groupedMessages;
   final String channelId;
@@ -21,6 +21,7 @@ class _SystemMessageRow extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final spotlightKey = useMemoized(() => GlobalKey());
     final systemEvent = message.systemEvent;
     if (systemEvent == null) return const SizedBox.shrink();
 
@@ -77,25 +78,43 @@ class _SystemMessageRow extends ConsumerWidget {
       }
     }
 
+    void openReactionPopover(Rect anchorRect) {
+      final spotlightRenderObject = spotlightKey.currentContext
+          ?.findRenderObject();
+      final spotlightRect =
+          spotlightRenderObject is RenderBox && spotlightRenderObject.hasSize
+          ? spotlightRenderObject.localToGlobal(Offset.zero) &
+                spotlightRenderObject.size
+          : anchorRect;
+      showMessageActions(
+        context: context,
+        ref: ref,
+        message: message,
+        channelId: channelId,
+        canManageMessage: false,
+        allMessages: null,
+        currentPubkey: currentPubkey,
+        isMember: isMember,
+        isArchived: isArchived,
+        anchorRect: spotlightRect,
+        popoverSpotlightPadding: EdgeInsets.fromLTRB(
+          Grid.xxs,
+          Grid.xxs,
+          Grid.xxs,
+          reactions.isEmpty ? Grid.xxs : Grid.quarter,
+        ),
+      );
+    }
+
     return Material(
       color: Colors.transparent,
       borderRadius: BorderRadius.circular(Radii.md),
       clipBehavior: Clip.antiAlias,
-      child: InkWell(
+      child: MessageLongPressInkWell(
         key: ValueKey('system-message-row-${message.id}'),
+        onLongPress: openReactionPopover,
         borderRadius: BorderRadius.circular(Radii.md),
         highlightColor: context.colors.primary.withValues(alpha: 0.1),
-        onLongPress: () => showMessageActions(
-          context: context,
-          ref: ref,
-          message: message,
-          channelId: channelId,
-          canManageMessage: false,
-          allMessages: null,
-          currentPubkey: currentPubkey,
-          isMember: isMember,
-          isArchived: isArchived,
-        ),
         child: Padding(
           padding: EdgeInsets.only(
             top: usesMessageStyleLayout ? Grid.xs : Grid.xxs,
@@ -104,43 +123,47 @@ class _SystemMessageRow extends ConsumerWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              if (groupedMembership != null)
-                _MembershipSystemMessageContent(
-                  event: groupedMembership,
-                  createdAt: message.createdAt,
-                  resolveLabel: resolveLabel,
-                  userCache: userCache,
-                )
-              else if (messageStyleActor != null &&
-                  messageStyleActor.isNotEmpty &&
-                  messageStyleAction != null)
-                _MessageStyleSystemMessageContent(
-                  displayPubkey: messageStyleActor,
-                  createdAt: message.createdAt,
-                  resolveLabel: resolveLabel,
-                  userCache: userCache,
-                  actionSpans: [TextSpan(text: messageStyleAction)],
-                )
-              else
-                Row(
-                  children: [
-                    _systemEventAvatar(context, systemEvent, userCache),
-                    const SizedBox(width: Grid.xxs),
-                    Expanded(
-                      child: Text(
-                        systemEvent.describe(resolveLabel),
-                        style: systemMessageBodyTextStyle.copyWith(
-                          color: context.colors.onSurfaceVariant,
-                        ),
+              KeyedSubtree(
+                key: spotlightKey,
+                child: groupedMembership != null
+                    ? _MembershipSystemMessageContent(
+                        event: groupedMembership,
+                        createdAt: message.createdAt,
+                        resolveLabel: resolveLabel,
+                        userCache: userCache,
+                      )
+                    : messageStyleActor != null &&
+                          messageStyleActor.isNotEmpty &&
+                          messageStyleAction != null
+                    ? _MessageStyleSystemMessageContent(
+                        displayPubkey: messageStyleActor,
+                        createdAt: message.createdAt,
+                        resolveLabel: resolveLabel,
+                        userCache: userCache,
+                        actionSpans: [TextSpan(text: messageStyleAction)],
+                      )
+                    : Row(
+                        children: [
+                          _systemEventAvatar(context, systemEvent, userCache),
+                          const SizedBox(width: Grid.xxs),
+                          Expanded(
+                            child: Text(
+                              systemEvent.describe(resolveLabel),
+                              style: systemMessageBodyTextStyle.copyWith(
+                                color: context.colors.onSurfaceVariant,
+                              ),
+                            ),
+                          ),
+                          _messageTimestamp(
+                            context,
+                            message.createdAt,
+                            key: ValueKey(
+                              'system-message-timestamp-${message.id}',
+                            ),
+                          ),
+                        ],
                       ),
-                    ),
-                    _messageTimestamp(
-                      context,
-                      message.createdAt,
-                      key: ValueKey('system-message-timestamp-${message.id}'),
-                    ),
-                  ],
-                ),
+              ),
               if (reactions.isNotEmpty)
                 Padding(
                   padding: EdgeInsets.only(
