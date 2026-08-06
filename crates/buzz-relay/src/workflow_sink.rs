@@ -362,6 +362,121 @@ impl ActionSink for RelayActionSink {
             Ok(event_id_hex)
         })
     }
+
+    fn emit_approval_request(
+        &self,
+        community_id: CommunityId,
+        channel_id: &str,
+        req: buzz_workflow::ApprovalRequest<'_>,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
+        let channel_id = channel_id.to_owned();
+        let token = req.token.to_owned();
+        let token_hash_hex = req.token_hash_hex.to_owned();
+        let step_id = req.step_id.to_owned();
+        let approver_spec = req.approver_spec.to_owned();
+        let message = req.message.to_owned();
+        let run_id = req.run_id;
+        let workflow_id = req.workflow_id;
+        let expires_at = req.expires_at;
+
+        Box::pin(async move {
+            let state = self
+                .state
+                .upgrade()
+                .ok_or_else(|| ActionSinkError::Database("relay is shutting down".into()))?;
+
+            let host = state
+                .db
+                .lookup_community_host(community_id)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?
+                .ok_or_else(|| {
+                    ActionSinkError::Database(format!(
+                        "workflow run community {community_id} is not mapped to a host"
+                    ))
+                })?;
+            let tenant = buzz_core::tenant::TenantContext::resolved(community_id, host);
+
+            let channel_uuid = Uuid::parse_str(&channel_id)
+                .map_err(|e| ActionSinkError::InvalidInput(format!("invalid UUID: {e}")))?;
+            let channel_id_canonical = channel_uuid.to_string();
+
+            // `d` carries the hashed token because that is what an inbound
+            // kind:46030/46031 grant quotes; `token` carries the raw value the
+            // approver needs for `buzz workflows approve --token`.
+            let mut tags = vec![
+                Tag::parse(["d", &token_hash_hex])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("d tag: {e}")))?,
+                Tag::parse(["token", &token])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("token tag: {e}")))?,
+                Tag::parse(["h", &channel_id_canonical])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("h tag: {e}")))?,
+                Tag::parse(["run", &run_id.to_string()])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("run tag: {e}")))?,
+                Tag::parse(["workflow", &workflow_id.to_string()])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?,
+                Tag::parse(["step", &step_id])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("step tag: {e}")))?,
+                Tag::parse(["expires_at", &expires_at.timestamp().to_string()])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("expires tag: {e}")))?,
+                // Never re-enter the trigger path from an approval request.
+                Tag::parse(["buzz:workflow", "true"])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?,
+            ];
+
+            // A pubkey spec gets a `p` tag so the designated approver is
+            // notified (and any agent watching wakes). `any` gets none —
+            // there is nobody specific to address.
+            if approver_spec != "any" {
+                tags.push(
+                    Tag::parse(["p", &approver_spec])
+                        .map_err(|e| ActionSinkError::EventBuild(format!("approver p tag: {e}")))?,
+                );
+            }
+
+            let kind_u32 = buzz_core::kind::KIND_WORKFLOW_APPROVAL_REQUESTED;
+            let event = EventBuilder::new(Kind::from(kind_u32 as u16), &message)
+                .tags(tags)
+                .sign_with_keys(&state.relay_keypair)
+                .map_err(|e| ActionSinkError::EventBuild(format!("signing: {e}")))?;
+
+            let event_id_hex = event.id.to_hex();
+
+            info!(
+                event_id = %event_id_hex,
+                channel_id = %channel_id_canonical,
+                run_id = %run_id,
+                step = %step_id,
+                "Workflow approval gate: emitting kind {kind_u32} request"
+            );
+
+            let (stored_event, was_inserted) = state
+                .db
+                .insert_event_with_thread_metadata(
+                    tenant.community(),
+                    &event,
+                    Some(channel_uuid),
+                    None,
+                )
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+
+            if was_inserted {
+                let relay_pubkey_hex = state.relay_keypair.public_key().to_hex();
+                let _ = dispatch_persistent_event(
+                    &tenant,
+                    &state,
+                    &stored_event,
+                    kind_u32,
+                    &relay_pubkey_hex,
+                    None,
+                )
+                .await;
+            }
+
+            Ok(event_id_hex)
+        })
+    }
 }
 
 #[cfg(test)]

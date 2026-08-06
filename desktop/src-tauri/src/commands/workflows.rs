@@ -117,30 +117,24 @@ pub async fn get_workflow(
         .ok_or_else(|| "workflow not found".to_string())
 }
 
+/// Run history for a workflow, newest first.
+///
+/// Reads `GET /workflows/{id}/runs` (NIP-98 + channel membership). Runs are DB
+/// rows rather than Nostr events, so there is no filter that could fetch them
+/// over `/query`. The relay returns exactly the `RawWorkflowRun` field set, so
+/// the frontend's `raw.map(fromRawWorkflowRun)` stays safe — the response is
+/// always a bare array, never a `{ runs: [...] }` wrapper.
 #[tauri::command]
 pub async fn get_workflow_runs(
     workflow_id: String,
     limit: Option<u32>,
-    _state: State<'_, AppState>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<Value>, String> {
-    // TODO(workflow-runs): Run reconstruction is a clearly-scoped follow-up.
-    // The authoritative run record the frontend's `WorkflowRun` shape needs
-    // (status / current_step / execution_trace / error_message) lives in the
-    // relay DB and is not exposed to the desktop client as a single queryable
-    // record. If the relay starts emitting lifecycle events (46001–46007, …),
-    // folding that stream into `WorkflowRun` would be another viable design.
-    // The important bit for this command is that raw lifecycle events are not
-    // the `RawWorkflowRun` contract.
-    //
-    // Until then we return a bare empty array — NOT a raw-event wrapper. The
-    // frontend wrapper (`getWorkflowRuns`) does `raw.map(fromRawWorkflowRun)`,
-    // so it must receive an array; the wrapped `{ runs: [...] }` shape would
-    // make `.map()` throw and crash the detail panel (the same TypeError class
-    // as the original page bug). Raw lifecycle events also don't carry the
-    // `id`/`workflow_id`/`status`/… fields `RawWorkflowRun` expects, so an
-    // empty list is the honest, safe placeholder.
-    let _ = (workflow_id, limit);
-    Ok(Vec::new())
+    let path = match limit {
+        Some(n) => format!("/workflows/{workflow_id}/runs?limit={n}"),
+        None => format!("/workflows/{workflow_id}/runs"),
+    };
+    crate::relay::get_relay_json::<Vec<Value>>(&state, &path).await
 }
 
 // ── Writes ───────────────────────────────────────────────────────────────────
@@ -250,19 +244,23 @@ pub async fn trigger_workflow(
 
 // ── Approvals ────────────────────────────────────────────────────────────────
 
+/// Approval gates for one run.
+///
+/// The `token` field returned here is the **hashed** token, hex-encoded — the
+/// exact value a kind:46030/46031 grant carries in its `d` tag. The desktop
+/// therefore never handles the raw bearer token; it passes this straight
+/// through to [`grant_approval`] / [`deny_approval`].
 #[tauri::command]
 pub async fn get_run_approvals(
     workflow_id: String,
     run_id: String,
-    _state: State<'_, AppState>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<Value>, String> {
-    // TODO(workflow-runs): Like runs (see `get_workflow_runs`), reconstructing
-    // approvals into the frontend's `WorkflowApproval` shape from lifecycle
-    // events (46010/46011/46012) is a clearly-scoped follow-up tracked under
-    // TODO(workflow-runs). Return a bare empty array so the frontend's
-    // `getRunApprovals` (`raw.map(fromRawApproval)`) is safe.
-    let _ = (workflow_id, run_id);
-    Ok(Vec::new())
+    crate::relay::get_relay_json::<Vec<Value>>(
+        &state,
+        &format!("/workflows/{workflow_id}/runs/{run_id}/approvals"),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -273,7 +271,7 @@ pub async fn grant_approval(
 ) -> Result<Value, String> {
     let builder = events::build_approval_grant(&token, note.as_deref())?;
     let result = submit_event(builder, &state).await?;
-    Ok(serde_json::json!({ "event_id": result.event_id }))
+    Ok(approval_action_response(&token, "granted", &result.message))
 }
 
 #[tauri::command]
@@ -284,7 +282,46 @@ pub async fn deny_approval(
 ) -> Result<Value, String> {
     let builder = events::build_approval_deny(&token, note.as_deref())?;
     let result = submit_event(builder, &state).await?;
-    Ok(serde_json::json!({ "event_id": result.event_id }))
+    Ok(approval_action_response(&token, "denied", &result.message))
+}
+
+/// Build the `RawApprovalActionResponse` the frontend converts with
+/// `fromRawApprovalResponse` — `{ token, status, run_id, workflow_id }`.
+///
+/// Previously this returned `{ event_id }`, so every field the frontend read
+/// was `undefined` and the approval card rendered an action that appeared to
+/// succeed while carrying no run reference. The relay's OK message contains
+/// `response:{"status":..,"run_id":..,"workflow_id":..}`; `token` is echoed
+/// from the caller because the relay never returns it.
+///
+/// `fallback_status` is used only when the relay's message cannot be parsed
+/// (e.g. the duplicate-event short-circuit, which carries no JSON body); the
+/// ids then stay empty strings rather than being invented.
+pub(crate) fn approval_action_response(token: &str, fallback_status: &str, message: &str) -> Value {
+    let parsed = parse_command_response::<Value>(message).ok();
+    let field = |key: &str| -> String {
+        parsed
+            .as_ref()
+            .and_then(|v| v.get(key))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let status = {
+        let s = field("status");
+        if s.is_empty() {
+            fallback_status.to_string()
+        } else {
+            s
+        }
+    };
+
+    serde_json::json!({
+        "token": token,
+        "status": status,
+        "run_id": field("run_id"),
+        "workflow_id": field("workflow_id"),
+    })
 }
 
 // ── Helpers (pure, unit-tested in workflows_tests.rs) ─────────────────────────

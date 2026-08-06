@@ -309,6 +309,25 @@ pub async fn query_relay(
     query_relay_at(state, &relay_api_base_url_with_override(state), filters).await
 }
 
+/// NIP-98 authenticated `GET` against a relay REST path, returning parsed JSON.
+/// `path` includes its query string because the relay verifies the full NIP-98
+/// `u` value. Workflow DB rows cannot be fetched with a Nostr `/query` filter.
+pub async fn get_relay_json<T: serde::de::DeserializeOwned>(
+    state: &AppState,
+    path: &str,
+) -> Result<T, String> {
+    crate::relay_admission::wait_for_rate_limit().await;
+    let url = format!("{}{}", relay_api_base_url_with_override(state), path);
+    let auth = build_nip98_auth_header(&Method::GET, &url, &[], state)?;
+
+    let response = state.http_client.get(&url).header("Authorization", auth).send().await
+        .map_err(|e| classify_request_error(&e))?;
+    if !response.status().is_success() {
+        return Err(relay_error_message(response).await);
+    }
+    parse_json_response(response).await
+}
+
 /// Like [`query_relay`] but targets an explicit HTTP API base URL instead of
 /// the workspace override. Used when a query must hit a specific relay (e.g.
 /// reconciling an agent's profile on the relay where it was published).

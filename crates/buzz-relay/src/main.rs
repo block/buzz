@@ -625,6 +625,33 @@ async fn main() -> anyhow::Result<()> {
     let wf_cron = Arc::clone(&workflow_engine);
     tokio::spawn(async move { wf_cron.run().await });
 
+    // Approval resumption recovery. `handle_approval_grant` commits the
+    // decision and then spawns resumption; a crash in that gap leaves a run
+    // parked in `waiting_approval` against an already-`granted` approval, which
+    // nothing else would ever pick up. This sweep is derived purely from
+    // committed state, so it does not depend on any task surviving the crash.
+    //
+    // Idempotent by construction: `resume_workflow_after_approval` refuses any
+    // run not in `waiting_approval`, so a resumption already in flight, or one
+    // that has already finished, is a no-op here. That is also what stops a
+    // granted run being executed twice.
+    {
+        let recovery_state = Arc::clone(&state);
+        let interval_secs: u64 = std::env::var("BUZZ_APPROVAL_RECOVERY_INTERVAL_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(60);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
+                buzz_relay::handlers::command_executor::recover_granted_waiting_runs(
+                    &recovery_state,
+                )
+                .await;
+            }
+        });
+    }
+
     // Ephemeral channel reaper — archives channels whose TTL deadline has passed.
     // Runs every 60s, matching the workflow cron loop pattern. The SQL UPDATE
     // uses `archived_at IS NULL` as a guard, so concurrent runs from multiple

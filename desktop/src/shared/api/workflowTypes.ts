@@ -60,7 +60,14 @@ export type WorkflowApproval = {
   approverSpec: string;
   status: WorkflowApprovalStatus;
   approverPubkey: string | null;
+  /** The approver's own comment, travelling back with the decision. */
   note: string | null;
+  /**
+   * The exact prompt the approver is being asked to approve. `null` for gates
+   * created before the relay recorded it — render that as "not recorded", never
+   * as an empty package, or an unreviewable gate looks like a reviewed one.
+   */
+  requestMessage: string | null;
   expiresAt: string;
   createdAt: number;
 };

@@ -26,6 +26,30 @@ export function WorkflowApprovalCard({ approval }: WorkflowApprovalCardProps) {
       data-testid="workflow-approval-card"
     >
       <p className="mb-2 text-sm font-medium">Approval Required</p>
+
+      {/*
+        The exact package being approved. Approving from a card that shows only
+        approver and expiry is approving blind, which for a gate that authorises
+        an external send defeats the point of the gate. Read-only and
+        pre-wrapped so the reviewed text is byte-for-byte what was submitted.
+      */}
+      {approval.requestMessage ? (
+        <pre
+          className="mb-2 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md border bg-background/60 p-2 text-xs font-mono"
+          data-testid="workflow-approval-request-message"
+        >
+          {approval.requestMessage}
+        </pre>
+      ) : (
+        <p
+          className="mb-2 rounded-md border border-red-500/40 bg-red-500/10 p-2 text-xs text-red-700"
+          data-testid="workflow-approval-request-missing"
+        >
+          No request package was recorded for this gate, so there is nothing to
+          review. Approval is disabled. Deny it and re-run the workflow.
+        </p>
+      )}
+
       <p className="mb-2 text-xs text-muted-foreground">
         Approver: {approval.approverSpec}
       </p>
@@ -44,7 +68,9 @@ export function WorkflowApprovalCard({ approval }: WorkflowApprovalCardProps) {
       <div className="flex gap-2">
         <Button
           className="flex-1 bg-green-600 text-white hover:bg-green-700"
-          disabled={approvalMutation.isPending}
+          // Deny stays available with no package; approve does not. You cannot
+          // consent to something you were never shown.
+          disabled={approvalMutation.isPending || !approval.requestMessage}
           onClick={() =>
             approvalMutation.mutate({
               token: approval.token,
