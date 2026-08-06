@@ -1,7 +1,7 @@
 import 'dart:async';
 
 import 'package:buzz/shared/widgets/bee_refresh_indicator.dart';
-import 'package:buzz/shared/widgets/tappable_flapping_bee.dart';
+import 'package:buzz/shared/widgets/flapping_bee.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';

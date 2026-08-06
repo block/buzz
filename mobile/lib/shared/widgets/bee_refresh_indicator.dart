@@ -7,7 +7,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../theme/theme.dart';
-import 'tappable_flapping_bee.dart';
+import 'flapping_bee.dart';
 
 /// Replaces the standard pull-to-refresh spinner with Buzz's loading bee.
 ///
@@ -15,7 +15,16 @@ import 'tappable_flapping_bee.dart';
 /// semantics. This widget maps those states into the elastic pull, retained
 /// loading gap, and bee animation.
 class BeeRefreshIndicator extends HookConsumerWidget {
+  /// Called when the user completes a pull, to load fresh data.
+  ///
+  /// The bee keeps flapping until this future settles, so it should complete
+  /// only once the refresh is done.
   final Future<void> Function() onRefresh;
+
+  /// The scrollable this indicator wraps.
+  ///
+  /// It must scroll vertically; the indicator reads its scroll notifications
+  /// to couple the bee to the user's finger.
   final Widget child;
 
   /// The vertical offset of the scrollable's top edge, such as a pinned header.
