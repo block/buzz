@@ -10,8 +10,10 @@ import {
 } from "@/features/profile/lib/identity";
 import type { ProjectRepoCommit, ProjectRepoDiff } from "@/shared/api/types";
 import { CopyCommitHashButton } from "./ProjectCommitCopyButton";
+import { PROJECT_DETAIL_PANEL_CLASS } from "./projectPanelStyles";
 import { ProfileIdentityButton } from "./ProjectProfileIdentity";
 import { ProjectDiffFilesPanel } from "./ProjectPullRequestFilesChangedPanel";
+import { ProjectOriginReference } from "./ProjectOriginReference";
 import { ProjectRichContent } from "./ProjectRichContent";
 
 function commitDateLabel(timestamp: number) {
@@ -33,6 +35,8 @@ export function ProjectCommitDetailPanel({
   diff,
   diffError,
   diffLoading,
+  originAgentName,
+  originChannelId,
   profiles,
   viewerGitIdentity,
 }: {
@@ -43,6 +47,8 @@ export function ProjectCommitDetailPanel({
   diff: ProjectRepoDiff | null | undefined;
   diffError: unknown;
   diffLoading: boolean;
+  originAgentName?: string | null;
+  originChannelId?: string | null;
   profiles?: UserProfileLookup;
   viewerGitIdentity?: ViewerGitIdentity | null;
 }) {
@@ -56,10 +62,17 @@ export function ProjectCommitDetailPanel({
 
   return (
     <div className="space-y-3">
-      <header className="space-y-2 rounded-xl border border-border/60 bg-card p-4">
-        <p className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+      <header
+        className={`space-y-2 p-4 ${PROJECT_DETAIL_PANEL_CLASS}`}
+        data-project-detail-panel
+      >
+        <p className="flex flex-wrap items-center gap-1.5 text-xs font-medium text-muted-foreground">
           <GitCommitHorizontal className="h-3.5 w-3.5" />
           Commit from {authorLabel}
+          <ProjectOriginReference
+            agentName={originAgentName}
+            channelId={originChannelId}
+          />
         </p>
         <div className="flex min-w-0 items-start gap-3">
           <ProfileIdentityButton

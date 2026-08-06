@@ -16,19 +16,22 @@ import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
+import '../../shared/custom_emoji/custom_emoji_render.dart';
+import '../../shared/emoji/native_emoji_glyph.dart';
 import '../../shared/widgets/sheet_divider.dart';
+import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/reminders/remind_me_later_sheet.dart';
 import '../../shared/reminders/reminder_service.dart';
 import 'channel_management_provider.dart';
 import 'emoji_picker.dart';
-import 'read_state/message_read_state.dart';
-import 'read_state/read_state_format.dart';
-import 'read_state/read_state_provider.dart';
+import 'reaction_row.dart';
+import 'recent_emoji_provider.dart';
+import '../../shared/read_state/message_read_state.dart';
+import '../../shared/read_state/read_state_format.dart';
+import '../../shared/read_state/read_state_provider.dart';
 import 'thread_detail_page.dart';
 import 'thread_follows/thread_follows_provider.dart';
 import 'timeline_message.dart';
-
-const quickEmojis = ['\u{1F44D}', '\u{2764}\u{FE0F}', '\u{1F602}', '\u{1F389}'];
 
 /// Preview length for reminder targets — matches desktop's
 /// `msg.body.slice(0, 100)`.
@@ -45,128 +48,104 @@ void showMessageActions({
   bool isMember = false,
   bool isArchived = false,
 }) {
-  showModalBottomSheet<void>(
+  showBuzzModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
     showDragHandle: true,
+    showCloseButton: false,
     builder: (sheetContext) => SafeArea(
-      child: ConstrainedBox(
-        constraints: BoxConstraints(
-          maxHeight: MediaQuery.sizeOf(sheetContext).height * 0.7,
-        ),
-        child: SingleChildScrollView(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(
-              Grid.gutter,
-              0,
-              Grid.gutter,
-              Grid.xs,
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                // Quick emoji row
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                  children: [
-                    for (final emoji in quickEmojis)
-                      _QuickReactionCircle(
-                        onTap: () {
-                          Navigator.of(sheetContext).pop();
-                          ref
-                              .read(channelActionsProvider)
-                              .addReaction(message.id, emoji);
-                        },
-                        child: Text(
-                          emoji,
-                          style: const TextStyle(fontSize: 24),
-                        ),
-                      ),
-                    _QuickReactionCircle(
-                      onTap: () {
-                        Navigator.of(sheetContext).pop();
-                        showEmojiPicker(
-                          context: context,
-                          onSelect: (emoji) {
-                            ref
-                                .read(channelActionsProvider)
-                                .addReaction(message.id, emoji);
-                          },
-                        );
-                      },
-                      child: Icon(
-                        LucideIcons.plus,
-                        size: 24,
-                        color: sheetContext.colors.onSurfaceVariant,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: Grid.xs),
-                if (!message.isSystem) ...[
-                  // Fast actions: respond now, hand off context, defer.
-                  _FastActionsRow(
+      child: IconTheme.merge(
+        data: const IconThemeData(size: 22),
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.sizeOf(sheetContext).height * 0.7,
+          ),
+          child: SingleChildScrollView(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(
+                Grid.gutter,
+                0,
+                Grid.gutter,
+                Grid.xs,
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _QuickReactionRow(
                     message: message,
-                    channelId: channelId,
-                    allMessages: allMessages,
-                    currentPubkey: currentPubkey,
-                    isMember: isMember,
-                    isArchived: isArchived,
+                    sheetContext: sheetContext,
                     pageContext: context,
+                    pageRef: ref,
                   ),
                   const SizedBox(height: Grid.xs),
-                  // Triage: come back to this message later.
-                  _MarkReadUnreadTile(message: message, channelId: channelId),
-                  _FollowThreadTile(message: message),
-                  const SheetDivider(),
-                  // Export: take the content out of the conversation.
-                  ListTile(
-                    leading: const Icon(LucideIcons.copy),
-                    title: const Text('Copy text'),
-                    onTap: () {
-                      Navigator.of(sheetContext).pop();
-                      // Copy to clipboard
-                      final data = ClipboardData(text: message.content);
-                      Clipboard.setData(data);
-                    },
-                  ),
-                ],
-                if (canManageMessage) ...[
-                  if (!message.isSystem) const SheetDivider(),
-                  ListTile(
-                    leading: const Icon(LucideIcons.pencil),
-                    title: const Text('Edit message'),
-                    onTap: () {
-                      Navigator.of(sheetContext).pop();
-                      _showEditSheet(
-                        context: context,
-                        ref: ref,
-                        message: message,
-                        channelId: channelId,
-                      );
-                    },
-                  ),
-                  ListTile(
-                    leading: Icon(
-                      LucideIcons.trash2,
-                      color: sheetContext.colors.error,
+                  if (!message.isSystem) ...[
+                    // Fast actions: respond now, hand off context, defer.
+                    _FastActionsRow(
+                      message: message,
+                      channelId: channelId,
+                      allMessages: allMessages,
+                      currentPubkey: currentPubkey,
+                      isMember: isMember,
+                      isArchived: isArchived,
+                      pageContext: context,
                     ),
-                    title: Text(
-                      'Delete message',
-                      style: TextStyle(color: sheetContext.colors.error),
+                    const SizedBox(height: Grid.xs),
+                    // Triage: come back to this message later.
+                    _MarkReadUnreadTile(message: message, channelId: channelId),
+                    _FollowThreadTile(message: message),
+                    const SheetDivider(),
+                    // Export: take the content out of the conversation.
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: const Icon(LucideIcons.copy),
+                      title: const Text('Copy text'),
+                      onTap: () {
+                        Navigator.of(sheetContext).pop();
+                        // Copy to clipboard
+                        final data = ClipboardData(text: message.content);
+                        Clipboard.setData(data);
+                      },
                     ),
-                    onTap: () {
-                      Navigator.of(sheetContext).pop();
-                      _confirmDelete(
-                        context: context,
-                        ref: ref,
-                        channelId: channelId,
-                        messageId: message.id,
-                      );
-                    },
-                  ),
+                  ],
+                  if (canManageMessage) ...[
+                    if (!message.isSystem) const SheetDivider(),
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: const Icon(LucideIcons.pencil),
+                      title: const Text('Edit message'),
+                      onTap: () {
+                        Navigator.of(sheetContext).pop();
+                        _showEditSheet(
+                          context: context,
+                          ref: ref,
+                          message: message,
+                          channelId: channelId,
+                        );
+                      },
+                    ),
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: Icon(
+                        LucideIcons.trash2,
+                        color: sheetContext.colors.error,
+                      ),
+                      title: Text(
+                        'Delete message',
+                        style: TextStyle(color: sheetContext.colors.error),
+                      ),
+                      onTap: () {
+                        Navigator.of(sheetContext).pop();
+                        _confirmDelete(
+                          context: context,
+                          ref: ref,
+                          channelId: channelId,
+                          messageId: message.id,
+                        );
+                      },
+                    ),
+                  ],
                 ],
-              ],
+              ),
             ),
           ),
         ),
@@ -185,78 +164,91 @@ void showImageActions({
   required bool canManageMessage,
   VoidCallback? onDeleted,
 }) {
-  showModalBottomSheet<void>(
+  showBuzzModalBottomSheet<void>(
     context: context,
+    isScrollControlled: true,
     showDragHandle: true,
     builder: (sheetContext) => SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(
-          Grid.gutter,
-          0,
-          Grid.gutter,
-          Grid.xs,
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: const Icon(LucideIcons.download),
-              title: const Text('Save image'),
-              onTap: () {
-                Navigator.of(sheetContext).pop();
-                unawaited(_saveImage(context, ref, imageUrl));
-              },
-            ),
-            ListTile(
-              leading: const Icon(LucideIcons.share2),
-              title: const Text('Share image'),
-              onTap: () {
-                final renderBox = context.findRenderObject() as RenderBox?;
-                final shareOrigin = renderBox == null
-                    ? null
-                    : renderBox.localToGlobal(Offset.zero) & renderBox.size;
-                Navigator.of(sheetContext).pop();
-                unawaited(
-                  _shareImage(context, ref, imageUrl, shareOrigin: shareOrigin),
-                );
-              },
-            ),
-            ListTile(
-              leading: const Icon(LucideIcons.link2),
-              title: const Text('Copy image link'),
-              onTap: () {
-                Navigator.of(sheetContext).pop();
-                copyToClipboard(
-                  context,
-                  imageUrl,
-                  message: 'Image link copied',
-                );
-              },
-            ),
-            if (canManageMessage) ...[
-              const SheetDivider(),
+      child: IconTheme.merge(
+        data: const IconThemeData(size: 22),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(
+            Grid.gutter,
+            0,
+            Grid.gutter,
+            Grid.xs,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
               ListTile(
-                leading: Icon(
-                  LucideIcons.trash2,
-                  color: sheetContext.colors.error,
-                ),
-                title: Text(
-                  'Delete message',
-                  style: TextStyle(color: sheetContext.colors.error),
-                ),
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(LucideIcons.download),
+                title: const Text('Save image'),
                 onTap: () {
                   Navigator.of(sheetContext).pop();
-                  _confirmDelete(
-                    context: context,
-                    ref: ref,
-                    channelId: channelId,
-                    messageId: message.id,
-                    onDeleted: onDeleted,
+                  unawaited(_saveImage(context, ref, imageUrl));
+                },
+              ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(LucideIcons.share2),
+                title: const Text('Share image'),
+                onTap: () {
+                  final renderBox = context.findRenderObject() as RenderBox?;
+                  final shareOrigin = renderBox == null
+                      ? null
+                      : renderBox.localToGlobal(Offset.zero) & renderBox.size;
+                  Navigator.of(sheetContext).pop();
+                  unawaited(
+                    _shareImage(
+                      context,
+                      ref,
+                      imageUrl,
+                      shareOrigin: shareOrigin,
+                    ),
                   );
                 },
               ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(LucideIcons.link2),
+                title: const Text('Copy image link'),
+                onTap: () {
+                  Navigator.of(sheetContext).pop();
+                  copyToClipboard(
+                    context,
+                    imageUrl,
+                    message: 'Image link copied',
+                  );
+                },
+              ),
+              if (canManageMessage) ...[
+                const SheetDivider(),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(
+                    LucideIcons.trash2,
+                    color: sheetContext.colors.error,
+                  ),
+                  title: Text(
+                    'Delete message',
+                    style: TextStyle(color: sheetContext.colors.error),
+                  ),
+                  onTap: () {
+                    Navigator.of(sheetContext).pop();
+                    _confirmDelete(
+                      context: context,
+                      ref: ref,
+                      channelId: channelId,
+                      messageId: message.id,
+                      onDeleted: onDeleted,
+                    );
+                  },
+                ),
+              ],
             ],
-          ],
+          ),
         ),
       ),
     ),
@@ -416,6 +408,7 @@ class _MarkReadUnreadTile extends ConsumerWidget {
     );
 
     return ListTile(
+      contentPadding: EdgeInsets.zero,
       leading: Icon(unread ? LucideIcons.mailCheck : LucideIcons.mailOpen),
       title: Text(unread ? 'Mark read' : 'Mark unread'),
       onTap: () {
@@ -457,6 +450,7 @@ class _FollowThreadTile extends ConsumerWidget {
     final following = follows.isFollowing(rootId);
 
     return ListTile(
+      contentPadding: EdgeInsets.zero,
       leading: Icon(following ? LucideIcons.bellOff : LucideIcons.bellRing),
       title: Text(following ? 'Unfollow thread' : 'Follow thread'),
       onTap: () {
@@ -562,8 +556,12 @@ class _FastActionsRow extends ConsumerWidget {
     ];
 
     return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-      children: tiles,
+      children: [
+        for (var index = 0; index < tiles.length; index++) ...[
+          Expanded(child: tiles[index]),
+          if (index < tiles.length - 1) const SizedBox(width: Grid.twelve),
+        ],
+      ],
     );
   }
 }
@@ -582,30 +580,37 @@ class _FastActionTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
-      onTap: onTap,
+      onTap: () {
+        unawaited(HapticFeedback.lightImpact());
+        onTap();
+      },
       behavior: HitTestBehavior.opaque,
       child: Column(
         mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // Pill-shaped icon container with the caption below the fill,
-          // matching the emoji circles' fill and tap treatment.
+          // The full-width tiles deliberately contrast with the compact emoji
+          // reactions immediately above them.
           Container(
-            width: 76,
-            height: 56,
-            alignment: Alignment.center,
+            height: 68 + (Grid.xxs * 2),
             decoration: BoxDecoration(
               color: context.colors.surfaceContainerHighest,
               borderRadius: BorderRadius.circular(Radii.dialog),
             ),
-            child: Icon(icon, size: 24, color: context.colors.onSurface),
-          ),
-          const SizedBox(height: Grid.xxs),
-          Text(
-            label,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: context.textTheme.labelMedium?.copyWith(
-              color: context.colors.onSurface,
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(icon, size: 22, color: context.colors.onSurface),
+                const SizedBox(height: Grid.xxs),
+                Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: context.textTheme.labelMedium?.copyWith(
+                    color: context.colors.onSurface,
+                  ),
+                ),
+              ],
             ),
           ),
         ],
@@ -614,21 +619,166 @@ class _FastActionTile extends StatelessWidget {
   }
 }
 
+/// The row of one-tap reactions at the top of the action sheet, plus the "+"
+/// tile that opens the full picker.
+///
+/// The emoji shown are the user's own frequently-used set (desktop's
+/// `useQuickReactionEmojis` behaviour), topped up with [defaultQuickEmojis] so
+/// the row is full on a fresh install.
+class _QuickReactionRow extends ConsumerWidget {
+  final TimelineMessage message;
+
+  /// The sheet's context, popped before the reaction fires.
+  final BuildContext sheetContext;
+
+  /// The long-pressed message's page context — survives the sheet pop, so the
+  /// picker opened from "+" isn't torn down with the sheet.
+  final BuildContext pageContext;
+
+  /// The long-pressed message's page ref. The picker callback outlives this
+  /// bottom sheet, so it must not read through the sheet's disposed ref.
+  final WidgetRef pageRef;
+
+  const _QuickReactionRow({
+    required this.message,
+    required this.sheetContext,
+    required this.pageContext,
+    required this.pageRef,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final customEmoji = ref.watch(customEmojiListProvider);
+    final emoji = quickReactionEmoji(
+      ref.watch(recentEmojiProvider),
+      customShortcodes: {
+        for (final entry in customEmoji) entry.shortcode.toLowerCase(),
+      },
+    );
+    final customByShortcode = {
+      for (final entry in customEmoji) entry.shortcode.toLowerCase(): entry,
+    };
+
+    void react(String value) {
+      // The generic picker is also used for composing and statuses. Record
+      // recency here, at the reaction call site, so only reactions drive the
+      // quick-reaction row.
+      pageRef.read(recentEmojiProvider.notifier).record(value);
+      // The sheet is on its way out, so the burst can't come from this tile —
+      // hand it to the pill that's about to appear in the timeline.
+      armReactionBurst(pageRef, message, value);
+      pageRef.read(channelActionsProvider).addReaction(message.id, value);
+    }
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        const desiredCircleSize = 52.0;
+        const minimumCircleSize = 44.0;
+        final itemCount = emoji.length + 1;
+        final gapCount = itemCount - 1;
+        final circleSize =
+            ((constraints.maxWidth - (Grid.twelve * gapCount)) / itemCount)
+                .clamp(minimumCircleSize, desiredCircleSize)
+                .toDouble();
+        final gap =
+            ((constraints.maxWidth - (circleSize * itemCount)) / gapCount)
+                .clamp(0.0, Grid.twelve)
+                .toDouble();
+        final circles = <Widget>[
+          for (final value in emoji)
+            _QuickReactionCircle(
+              key: ValueKey('quick-reaction-$value'),
+              size: circleSize,
+              onTap: () {
+                Navigator.of(sheetContext).pop();
+                react(value);
+              },
+              child: _QuickReactionGlyph(
+                value: value,
+                customByShortcode: customByShortcode,
+              ),
+            ),
+          _QuickReactionCircle(
+            key: const ValueKey('quick-reaction-more'),
+            size: circleSize,
+            onTap: () {
+              Navigator.of(sheetContext).pop();
+              showEmojiPicker(context: pageContext, onSelect: react);
+            },
+            child: Icon(
+              LucideIcons.plus,
+              size: 24,
+              color: context.colors.onSurfaceVariant,
+            ),
+          ),
+        ];
+
+        return Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            for (var index = 0; index < circles.length; index++) ...[
+              circles[index],
+              if (index < circles.length - 1) SizedBox(width: gap),
+            ],
+          ],
+        );
+      },
+    );
+  }
+}
+
+/// Renders a quick-reaction value: a Unicode glyph as text, a `:shortcode:` as
+/// its custom-emoji image.
+class _QuickReactionGlyph extends StatelessWidget {
+  final String value;
+  final Map<String, CustomEmoji> customByShortcode;
+
+  const _QuickReactionGlyph({
+    required this.value,
+    required this.customByShortcode,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (value.startsWith(':') && value.endsWith(':')) {
+      final shortcode = value.substring(1, value.length - 1).toLowerCase();
+      final custom = customByShortcode[shortcode];
+      if (custom != null) {
+        return CustomEmojiImage(
+          shortcode: custom.shortcode,
+          url: custom.url,
+          size: 24,
+        );
+      }
+    }
+    return NativeEmojiGlyph(emoji: value, size: 24);
+  }
+}
+
 /// Circular filled tap target shared by the quick-reaction emojis and the
 /// "+" emoji-picker tile — one treatment, one place to change it.
 class _QuickReactionCircle extends StatelessWidget {
   final VoidCallback onTap;
   final Widget child;
+  final double size;
 
-  const _QuickReactionCircle({required this.onTap, required this.child});
+  const _QuickReactionCircle({
+    super.key,
+    required this.onTap,
+    required this.child,
+    required this.size,
+  });
 
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
-      onTap: onTap,
+      onTap: () {
+        unawaited(HapticFeedback.lightImpact());
+        onTap();
+      },
       child: Container(
-        width: 52,
-        height: 52,
+        width: size,
+        height: size,
         alignment: Alignment.center,
         decoration: BoxDecoration(
           color: context.colors.surfaceContainerHighest,
@@ -647,7 +797,7 @@ void _showEditSheet({
   required String channelId,
 }) {
   final controller = TextEditingController(text: message.content);
-  showModalBottomSheet<void>(
+  showBuzzModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
     showDragHandle: true,
@@ -714,7 +864,7 @@ void _confirmDelete({
   required String messageId,
   VoidCallback? onDeleted,
 }) {
-  showDialog<void>(
+  showBuzzDialog<void>(
     context: context,
     builder: (dialogContext) => AlertDialog(
       title: const Text('Delete message'),

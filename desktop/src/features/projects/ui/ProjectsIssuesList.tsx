@@ -4,6 +4,7 @@ import type {
   Project,
   ProjectIssue,
   ProjectIssueListItem,
+  Repository,
 } from "@/features/projects/hooks";
 import { relativeTime } from "@/features/projects/lib/projectsViewHelpers";
 import type { ProjectWorkItemSection } from "@/features/projects/projectWorkItems";
@@ -11,10 +12,10 @@ import {
   resolveUserLabel,
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
-import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { Button } from "@/shared/ui/button";
 import { Card } from "@/shared/ui/card";
 import { DropdownMenuItem } from "@/shared/ui/dropdown-menu";
+import { ProjectAuthorIdentity } from "./ProjectAuthorIdentity";
 import { ProjectEventTypeIcon } from "./ProjectEventTypeIcon";
 import { ProjectListRowMenu } from "./ProjectListRowMenu";
 import { ProjectsWorkItemsLoadNotice } from "./ProjectsWorkItemsLoadNotice";
@@ -34,7 +35,11 @@ type ProjectsIssuesListProps = {
   failedSections: ProjectWorkItemSection[];
   isLoading: boolean;
   isRetrying: boolean;
-  onOpen: (project: Project, issue: ProjectIssue) => void;
+  onOpen: (
+    project: Project,
+    repository: Repository,
+    issue: ProjectIssue,
+  ) => void;
   onRetry: () => void;
   profiles?: UserProfileLookup;
   issues: ProjectIssueListItem[];
@@ -49,11 +54,13 @@ function nextStepLabel(status: ProjectIssue["status"]) {
 }
 
 function IssueHeader({
+  authorTestId,
   includeDate = true,
   issue,
   profiles,
   project,
 }: {
+  authorTestId?: string;
   includeDate?: boolean;
   issue: ProjectIssue;
   profiles?: UserProfileLookup;
@@ -70,14 +77,12 @@ function IssueHeader({
         {project.name}
         {includeDate ? ` · created ${relativeTime(issue.createdAt)}` : null} ·
         by{" "}
-        <UserProfilePopover pubkey={issue.author} triggerElement="span">
-          <button
-            className="relative z-10 rounded-sm hover:underline focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
-            type="button"
-          >
-            {authorLabel}
-          </button>
-        </UserProfilePopover>
+        <ProjectAuthorIdentity
+          label={authorLabel}
+          profiles={profiles}
+          pubkey={issue.author}
+          testId={authorTestId}
+        />
         {includeDate ? (
           ` · ${issue.status}`
         ) : (
@@ -103,7 +108,10 @@ function IssueGridCard({
   project: Project;
 }) {
   return (
-    <Card className="group relative flex min-h-40 flex-col overflow-hidden border-border/60 bg-card p-4 shadow-none transition-colors duration-150 hover:bg-muted/20">
+    <Card
+      className="group relative flex min-h-40 flex-col overflow-hidden border-border/60 bg-transparent p-4 shadow-none transition-colors duration-150 hover:bg-muted/20"
+      data-projects-grid-card
+    >
       <button
         className="absolute inset-0"
         onClick={() => onOpen(project, issue)}
@@ -179,6 +187,7 @@ function IssueListRow({
       <div className={PROJECT_LIST_ROW_CONTENT_CLASS}>
         <ProjectEventTypeIcon className="h-5 w-5" kind="issue" />
         <IssueHeader
+          authorTestId="projects-issue-author"
           includeDate={false}
           issue={issue}
           profiles={profiles}
@@ -262,11 +271,13 @@ export function ProjectsIssuesList({
       <div className="space-y-3">
         {loadNotice}
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {issues.map(({ project, issue }) => (
+          {issues.map(({ project, issue, repository }) => (
             <IssueGridCard
               issue={issue}
-              key={issue.id}
-              onOpen={onOpen}
+              key={`${repository.id}:${issue.id}`}
+              onOpen={(selectedProject, selectedIssue) =>
+                onOpen(selectedProject, repository, selectedIssue)
+              }
               profiles={profiles}
               project={project}
             />
@@ -279,12 +290,17 @@ export function ProjectsIssuesList({
   return (
     <div className="space-y-3">
       {loadNotice}
-      <div className={PROJECT_LIST_CONTAINER_CLASS}>
-        {issues.map(({ project, issue }) => (
+      <div
+        className={PROJECT_LIST_CONTAINER_CLASS}
+        data-testid="projects-list-container"
+      >
+        {issues.map(({ project, issue, repository }) => (
           <IssueListRow
             issue={issue}
-            key={issue.id}
-            onOpen={onOpen}
+            key={`${repository.id}:${issue.id}`}
+            onOpen={(selectedProject, selectedIssue) =>
+              onOpen(selectedProject, repository, selectedIssue)
+            }
             profiles={profiles}
             project={project}
           />

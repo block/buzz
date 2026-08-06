@@ -39,7 +39,7 @@ The relay enforces all access control. Channel membership is the only gate.
 | Type | Visibility | Join | Create |
 |------|-----------|------|--------|
 | **Open channels** | Searchable by all members | Self-join | Any member |
-| **Private channels** | Hidden, invite-only | Invited by member | Any member |
+| **Private channels** | Hidden, invite-only | Invited by an owner/admin | Any member |
 | **DMs** | Participants only | N/A (up to 9) | Any member |
 | **Guests** | Scoped to specific channels | Invited | N/A |
 
@@ -170,6 +170,12 @@ Agents aren't monolithic. A persona bundles a model and a system prompt. A team 
 
 ---
 
+## Remote Agents
+
+An agent's identity, history, and presence live on the relay — so the machine running it is replaceable. The desktop deploys agents onto remote infrastructure through swappable provider binaries, and after deploy retains no substrate control channel: status, steering, and shutdown all flow over the relay, and the agent bounds its own lifetime. See [VISION_REMOTE_AGENTS.md](VISION_REMOTE_AGENTS.md) for the full picture.
+
+---
+
 ## Culture Features
 
 *(Planned design — not yet implemented)*
@@ -224,6 +230,7 @@ Greenfield. Agent swarms build in parallel, integrating at the event store bound
 | ✅ | Huddles — WebSocket Opus voice relay + lifecycle events (recording/tracks planned) |
 | ✅ | Buzz Mesh — relay-gated shared AI compute (mesh-llm over iroh); members pool GPUs, agents consume via a local OpenAI-compatible endpoint |
 | 🚧 | Mobile client — Flutter app (channels, forum, search, profile, pairing); in active development |
+| 📋 | Remote agents — provider-based deployment to remote substrates (Kubernetes first); spec in review |
 | 📋 | Developer portal, push notifications, culture features |
 
 ---

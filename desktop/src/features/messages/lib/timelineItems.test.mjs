@@ -48,6 +48,15 @@ function memberJoinedEntry({ createdAt, id, target }) {
   return memberAddedEntry({ actor: target, createdAt, id, target });
 }
 
+function memberLeftEntry({ createdAt, id, target }) {
+  return entry({
+    id,
+    createdAt,
+    kind: KIND_SYSTEM_MESSAGE,
+    body: JSON.stringify({ type: "member_left", actor: target }),
+  });
+}
+
 function kinds(items) {
   return items.map((item) => item.kind);
 }
@@ -103,12 +112,12 @@ test("buildTimelineItems: system messages flatten to a 'system' item", () => {
   assert.deepEqual(kinds(items), ["day-divider", "message", "system"]);
 });
 
-test("buildTimelineItems: member additions by one actor group within five minutes", () => {
+test("buildTimelineItems: contiguous member additions by one actor group", () => {
   const start = dayAt(2026, 6, 14);
   const entries = [
     memberAddedEntry({ id: "a", target: "target-a", createdAt: start }),
     memberAddedEntry({ id: "b", target: "target-b", createdAt: start + 60 }),
-    memberAddedEntry({ id: "c", target: "target-c", createdAt: start + 300 }),
+    memberAddedEntry({ id: "c", target: "target-c", createdAt: start + 3_600 }),
   ];
 
   const { items } = buildTimelineItems(entries, null);
@@ -121,7 +130,7 @@ test("buildTimelineItems: member additions by one actor group within five minute
   assert.equal(group?.key, "c");
 });
 
-test("buildTimelineItems: self-joins group across different members within five minutes", () => {
+test("buildTimelineItems: contiguous self-joins group across different members", () => {
   const start = dayAt(2026, 6, 14);
   const entries = [
     memberJoinedEntry({ id: "a", target: "target-a", createdAt: start }),
@@ -133,7 +142,7 @@ test("buildTimelineItems: self-joins group across different members within five 
     memberJoinedEntry({
       id: "c",
       target: "target-c",
-      createdAt: start + 300,
+      createdAt: start + 3_600,
     }),
   ];
 
@@ -149,9 +158,9 @@ test("buildTimelineItems: self-joins group across different members within five 
 test("buildTimelineItems: prepending membership history preserves the loaded suffix", () => {
   const start = dayAt(2026, 6, 14);
   const loaded = [
-    memberAddedEntry({ id: "b", target: "target-b", createdAt: start + 240 }),
-    memberAddedEntry({ id: "c", target: "target-c", createdAt: start + 360 }),
-    entry({ id: "message", createdAt: start + 600 }),
+    memberAddedEntry({ id: "b", target: "target-b", createdAt: start + 3_500 }),
+    memberAddedEntry({ id: "c", target: "target-c", createdAt: start + 3_601 }),
+    entry({ id: "message", createdAt: start + 3_700 }),
   ];
   const prepended = [
     memberAddedEntry({ id: "a", target: "target-a", createdAt: start }),
@@ -164,23 +173,28 @@ test("buildTimelineItems: prepending membership history preserves the loaded suf
   const prependedKeys = prependedItems.slice(1).map((item) => item.key);
 
   assert.deepEqual(loadedKeys, ["c", "message"]);
-  assert.deepEqual(prependedKeys, ["a", "c", "message"]);
+  assert.deepEqual(prependedKeys, ["c", "message"]);
   assert.deepEqual(prependedKeys.slice(-loadedKeys.length), loadedKeys);
 });
 
-test("buildTimelineItems: member-add window is fixed from the newest addition", () => {
+test("buildTimelineItems: contiguous member additions extend a group outside one hour", () => {
   const start = dayAt(2026, 6, 14);
   const entries = [
     memberAddedEntry({ id: "a", target: "target-a", createdAt: start }),
-    memberAddedEntry({ id: "b", target: "target-b", createdAt: start + 240 }),
-    memberAddedEntry({ id: "c", target: "target-c", createdAt: start + 301 }),
+    memberAddedEntry({ id: "b", target: "target-b", createdAt: start + 3_599 }),
+    memberAddedEntry({ id: "c", target: "target-c", createdAt: start + 3_601 }),
   ];
 
   const { items } = buildTimelineItems(entries, null);
-  assert.deepEqual(kinds(items), ["day-divider", "system", "system-group"]);
+  assert.deepEqual(kinds(items), ["day-divider", "system-group"]);
+  const group = items.find((item) => item.kind === "system-group");
+  assert.deepEqual(
+    group?.entries.map((groupEntry) => groupEntry.message.id),
+    ["a", "b", "c"],
+  );
 });
 
-test("buildTimelineItems: actor changes and intervening rows break member-add groups", () => {
+test("buildTimelineItems: incompatible arrivals remain separate", () => {
   const start = dayAt(2026, 6, 14);
   const entries = [
     memberAddedEntry({ id: "a", target: "target-a", createdAt: start }),
@@ -216,6 +230,22 @@ test("buildTimelineItems: actor changes and intervening rows break member-add gr
   ]);
 });
 
+test("buildTimelineItems: a member joining then leaving is one lifecycle group", () => {
+  const start = dayAt(2026, 6, 14);
+  const entries = [
+    memberJoinedEntry({ id: "joined", target: "member-a", createdAt: start }),
+    memberLeftEntry({ id: "left", target: "member-a", createdAt: start + 90 }),
+  ];
+
+  const { items } = buildTimelineItems(entries, null);
+  assert.deepEqual(kinds(items), ["day-divider", "system-group"]);
+  const group = items.find((item) => item.kind === "system-group");
+  assert.deepEqual(
+    group?.entries.map((groupEntry) => groupEntry.message.id),
+    ["joined", "left"],
+  );
+});
+
 test("buildTimelineItems: consecutive same-author messages within the window are grouped", () => {
   const entries = [
     entry({ id: "a", pubkey: "author-a", createdAt: dayAt(2026, 6, 14) }),
@@ -242,6 +272,36 @@ test("buildTimelineItems: consecutive same-author messages within the window are
   assert.deepEqual(
     messageItems.map((item) => item.isFollowedByContinuation),
     [true, false, false],
+  );
+});
+
+test("buildTimelineItems: pending messages remain standalone until acknowledged", () => {
+  const entries = [
+    entry({ id: "a", pubkey: "author-a", createdAt: dayAt(2026, 6, 14) }),
+    entry({
+      id: "b",
+      pubkey: "author-a",
+      createdAt: dayAt(2026, 6, 14, 12, 2),
+      pending: true,
+    }),
+    entry({
+      id: "c",
+      pubkey: "author-a",
+      createdAt: dayAt(2026, 6, 14, 12, 3),
+    }),
+  ];
+
+  const messageItems = buildTimelineItems(entries, null).items.filter(
+    (item) => item.kind === "message",
+  );
+
+  assert.deepEqual(
+    messageItems.map((item) => item.isContinuation),
+    [false, false, false],
+  );
+  assert.deepEqual(
+    messageItems.map((item) => item.isFollowedByContinuation),
+    [false, false, false],
   );
 });
 

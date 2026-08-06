@@ -28,9 +28,9 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import {
-  type Project,
   type ProjectPullRequest,
   type ProjectPullRequestCommentAnchor,
+  type Repository as Project,
   useCreateProjectPullRequestCommentMutation,
 } from "@/features/projects/hooks";
 import { canReviewProjectPullRequest } from "@/features/projects/pullRequestReviews";
@@ -39,6 +39,7 @@ import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { cn } from "@/shared/lib/cn";
 import type { ProjectRepoDiff, ProjectRepoDiffFile } from "@/shared/api/types";
+import { PROJECT_DETAIL_PANEL_CLASS } from "./projectPanelStyles";
 import { ProjectPullRequestInlineCommentThread } from "./ProjectPullRequestInlineComments";
 
 function fileName(path: string) {
@@ -772,9 +773,7 @@ export function ProjectDiffFilesPanel({
   inlineComments?: InlineCommentControls;
   subjectLabel: string;
 }) {
-  const outerBorderClass = embedded
-    ? ""
-    : "rounded-xl border border-border/60 bg-card";
+  const outerBorderClass = embedded ? "" : PROJECT_DETAIL_PANEL_CLASS;
   const [query, setQuery] = React.useState("");
   const [selectedPath, setSelectedPath] = React.useState<string | null>(null);
   const files = diff?.files ?? [];
@@ -818,6 +817,7 @@ export function ProjectDiffFilesPanel({
     return (
       <div
         className={cn("p-4 text-sm text-muted-foreground", outerBorderClass)}
+        data-project-detail-panel={embedded ? undefined : true}
       >
         Loading changed files…
       </div>
@@ -832,6 +832,7 @@ export function ProjectDiffFilesPanel({
           "space-y-1 p-4 text-sm text-muted-foreground",
           outerBorderClass,
         )}
+        data-project-detail-panel={embedded ? undefined : true}
       >
         <p>Could not load changed files for this {subjectLabel}.</p>
         {message ? (
@@ -850,6 +851,7 @@ export function ProjectDiffFilesPanel({
           "p-6 text-center text-sm text-muted-foreground",
           outerBorderClass,
         )}
+        data-project-detail-panel={embedded ? undefined : true}
       >
         No changed files are available for this {subjectLabel} yet.
       </div>
@@ -862,6 +864,7 @@ export function ProjectDiffFilesPanel({
         "grid min-h-0 overflow-hidden lg:grid-cols-[17rem_minmax(0,1fr)]",
         outerBorderClass,
       )}
+      data-project-detail-panel={embedded ? undefined : true}
     >
       <aside className="border-border/50 border-b bg-background/30 lg:border-r lg:border-b-0">
         <div className="space-y-3 p-3">

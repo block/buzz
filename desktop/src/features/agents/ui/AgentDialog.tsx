@@ -6,6 +6,11 @@ import type {
   ManagedAgent,
   UpdatePersonaInput,
 } from "@/shared/api/types";
+import {
+  runLocationForBackend,
+  runLocationForRunOn,
+} from "../lib/agentAccessWarning";
+import { AgentRunLocationProvider } from "./AgentRunLocationContext";
 import type { BackendIntent } from "../lib/instanceInputForDefinition";
 import type { AgentCreateIntent } from "./agentCreateIntent";
 import type { EditAgentFocusTarget } from "@/features/agents/openEditAgentEvent";
@@ -29,7 +34,7 @@ type AgentDialogCreateProps = {
   definitionError: Error | null;
   isDefinitionPending: boolean;
   runtimes: AcpRuntimeCatalogEntry[];
-  runtimesLoading: boolean;
+  runtimeCatalogStatus: "loading" | "ready" | "error";
   onSubmitDefinition: (
     input: CreatePersonaInput | UpdatePersonaInput,
     intent: AgentCreateIntent,
@@ -63,7 +68,7 @@ type AgentDialogDefinitionEditProps = {
   error: Error | null;
   isPending: boolean;
   runtimes: AcpRuntimeCatalogEntry[];
-  runtimesLoading?: boolean;
+  runtimeCatalogStatus?: "loading" | "ready" | "error";
   onOpenChange: (open: boolean) => void;
   onSubmit: (
     input: CreatePersonaInput | UpdatePersonaInput,
@@ -89,17 +94,25 @@ type AgentDialogProps =
 export function AgentDialog(props: AgentDialogProps) {
   if (props.mode === "instance-edit") {
     return (
-      <AgentInstanceEditDialog
-        agent={props.agent}
-        onEditLinkedPersona={props.onEditLinkedPersona}
-        onOpenChange={props.onOpenChange}
-        onUpdated={props.onUpdated}
-        open={props.open}
-        initialFocus={props.initialFocus}
-      />
+      // A running instance knows its own backend, so the respond-to warning can
+      // name the machine it will actually run on.
+      <AgentRunLocationProvider
+        runLocation={runLocationForBackend(props.agent.backend)}
+      >
+        <AgentInstanceEditDialog
+          agent={props.agent}
+          onEditLinkedPersona={props.onEditLinkedPersona}
+          onOpenChange={props.onOpenChange}
+          onUpdated={props.onUpdated}
+          open={props.open}
+          initialFocus={props.initialFocus}
+        />
+      </AgentRunLocationProvider>
     );
   }
   if (props.mode === "definition-edit") {
+    // A definition has no instance and no run draft, so the run location stays
+    // unknown and the warning uses its local-wording fallback.
     const { mode: _mode, ...definitionProps } = props;
     return <AgentDefinitionDialog {...definitionProps} />;
   }
@@ -112,7 +125,7 @@ function AgentCreateDialogRouter({
   definitionError,
   isDefinitionPending,
   runtimes,
-  runtimesLoading,
+  runtimeCatalogStatus,
   onSubmitDefinition,
 }: AgentDialogCreateProps) {
   const [runDraft, setRunDraft] = React.useState(emptyWhereToRunDraft);
@@ -124,35 +137,39 @@ function AgentCreateDialogRouter({
   const copy = createPersonaDialogState();
 
   return (
-    <AgentDefinitionDialog
-      createRunSection={
-        <WhereToRunSection
-          draft={runDraft}
-          isPending={isDefinitionPending}
-          onDraftChange={setRunDraft}
-        />
-      }
-      createSubmitBlocked={!canSubmitWhereToRun(runDraft)}
-      description={copy.description}
-      error={definitionError}
-      initialValues={initialValues}
-      isPending={isDefinitionPending}
-      onOpenChange={onOpenChange}
-      onSubmit={async (input) => {
-        const submitted = await onSubmitDefinition(
-          input,
-          "definition_start",
-          resolveBackendIntent(runDraft),
-        );
-        if (submitted) {
-          onOpenChange(false);
+    // The create flow is the one surface that knows where the agent will run,
+    // because it owns the "Run on" draft.
+    <AgentRunLocationProvider runLocation={runLocationForRunOn(runDraft.runOn)}>
+      <AgentDefinitionDialog
+        createRunSection={
+          <WhereToRunSection
+            draft={runDraft}
+            isPending={isDefinitionPending}
+            onDraftChange={setRunDraft}
+          />
         }
-      }}
-      open
-      runtimes={runtimes}
-      runtimesLoading={runtimesLoading}
-      submitLabel={copy.submitLabel}
-      title={copy.title}
-    />
+        createSubmitBlocked={!canSubmitWhereToRun(runDraft)}
+        description={copy.description}
+        error={definitionError}
+        initialValues={initialValues}
+        isPending={isDefinitionPending}
+        onOpenChange={onOpenChange}
+        onSubmit={async (input) => {
+          const submitted = await onSubmitDefinition(
+            input,
+            "definition_start",
+            resolveBackendIntent(runDraft),
+          );
+          if (submitted) {
+            onOpenChange(false);
+          }
+        }}
+        open
+        runtimes={runtimes}
+        runtimeCatalogStatus={runtimeCatalogStatus}
+        submitLabel={copy.submitLabel}
+        title={copy.title}
+      />
+    </AgentRunLocationProvider>
   );
 }

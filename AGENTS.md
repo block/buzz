@@ -13,14 +13,14 @@ Buzz spans five repos. This one (`block/buzz`) is the OSS source for the relay, 
 | Repo | Purpose |
 |------|---------|
 | [block/buzz](https://github.com/block/buzz) | OSS source — relay, desktop app, mobile app, CLI, agent harness |
-| [squareup/sprout-releases](https://github.com/squareup/sprout-releases) | Buildkite pipeline producing Block-signed macOS + iOS builds with `-block` version suffix |
+| [squareup/buzz-releases](https://github.com/squareup/buzz-releases) | Buildkite pipelines producing Block-signed macOS + iOS builds with `-block` desktop version suffix |
 | [squareup/sprout-oss](https://github.com/squareup/sprout-oss) | CI pipeline building the relay Docker image and pushing to internal ECR |
 | [squareup/block-coder-tf-stacks](https://github.com/squareup/block-coder-tf-stacks) | Terraform + ArgoCD deploying the relay to the staging Kubernetes cluster |
 | [squareup/sprout-backend-blox](https://github.com/squareup/sprout-backend-blox) | Desktop backend provider script connecting Blox workstation agents to the relay |
 
 ```
 block/buzz (source)
-  ├─► sprout-releases    (desktop + mobile builds → Artifactory, GitHub, Mobile Releases)
+  ├─► buzz-releases      (desktop + mobile builds → Artifactory, GitHub, Mobile Releases)
   ├─► sprout-oss         (relay Docker image → ECR)
   │     └─► block-coder-tf-stacks  (Helm chart → ArgoCD → staging cluster)
   └─── sprout-backend-blox         (Blox compute provider for Desktop agent launch)
@@ -145,6 +145,10 @@ first, then implement handling in the relay.
 
 **Channel scoping**: Channels use `h` tags (NIP-29 group tag), not `e` tags.
 Filters and queries must scope to `h` tags when operating within a channel.
+This applies to events *inside* a channel. Addressable events that describe a
+channel carry its id in their `d` tag instead: kind:39000 (metadata),
+kind:39001, kind:39002 (membership). `get_channels` resolves a user's channels
+from the `d` tag of their kind:39002 events, not from `h`.
 
 **Agent-facing operations go in `buzz-cli`**: New agent-facing features belong in `buzz-cli` — add a subcommand there first, then wire the REST/WebSocket call in `client.rs`. `buzz-dev-mcp` (shell + file tools for `buzz-agent`) is separate.
 
@@ -503,6 +507,7 @@ reconnects preserve pending avatar verification work):
 - `resetRenderScopedReactionHydration()` — reaction hydration cache
 - `clearSearchHitEventCache()` — search result event cache
 - `clearMarkdownNodeCache()` — markdown parse-node cache
+- `resetLinkPreviewTitleCache()` — link preview title cache (Buzz entity titles come from relay events)
 
 **If you add a new module-level cache, Map, or class instance that holds
 community-scoped data, you must add its reset to `resetCommunityState()`.**

@@ -49,6 +49,44 @@ async function restartMockWebsockets(page: import("@playwright/test").Page) {
   expect(restarted).toBeGreaterThan(0);
 }
 
+async function setMockWebsocketUnavailable(
+  page: import("@playwright/test").Page,
+  unavailable: boolean,
+) {
+  await page.evaluate((value) => {
+    const setUnavailable = window.__BUZZ_E2E_SET_MOCK_WEBSOCKET_UNAVAILABLE__;
+    if (!setUnavailable) {
+      throw new Error("E2E websocket availability seam is not installed.");
+    }
+    setUnavailable(value);
+  }, unavailable);
+}
+
+async function activateRelayRateLimit(
+  page: import("@playwright/test").Page,
+  seconds: number,
+) {
+  await page.evaluate((duration) => {
+    const activate = window.__BUZZ_E2E_ACTIVATE_RELAY_RATE_LIMIT__;
+    if (!activate) {
+      throw new Error("E2E relay rate-limit seam is not installed.");
+    }
+    activate(duration);
+  }, seconds);
+}
+
+async function getMockWebsocketConnectAttempts(
+  page: import("@playwright/test").Page,
+) {
+  return page.evaluate(() => {
+    const getAttempts = window.__BUZZ_E2E_GET_WEBSOCKET_CONNECT_ATTEMPTS__;
+    if (!getAttempts) {
+      throw new Error("E2E websocket attempt seam is not installed.");
+    }
+    return getAttempts();
+  });
+}
+
 async function emitMockMessages(
   page: import("@playwright/test").Page,
   messages: Array<{ content: string; createdAt: number }>,
@@ -73,9 +111,32 @@ async function emitMockMessages(
   }, messages);
 }
 
+async function queueAuthResponses(
+  page: import("@playwright/test").Page,
+  responses: Array<{ success: boolean; message: string }>,
+) {
+  await page.evaluate((queued) => {
+    const queue = window.__BUZZ_E2E_QUEUE_AUTH_RESPONSES__;
+    if (!queue) throw new Error("E2E AUTH response seam is not installed.");
+    queue(queued);
+  }, responses);
+}
+
+async function closeLiveSubscriptions(
+  page: import("@playwright/test").Page,
+  reason: string,
+) {
+  const closed = await page.evaluate((message) => {
+    const close = window.__BUZZ_E2E_CLOSE_LIVE_SUBSCRIPTIONS__;
+    if (!close) throw new Error("E2E live CLOSED seam is not installed.");
+    return close(message);
+  }, reason);
+  expect(closed).toBeGreaterThan(0);
+}
+
 async function driveConnectionDegraded(
   page: import("@playwright/test").Page,
-  state: "reconnecting" | "stalled" | "disconnected",
+  state: "connected" | "reconnecting" | "stalled" | "disconnected",
 ) {
   await page.evaluate((s) => {
     const setter = (
@@ -119,6 +180,77 @@ test("failed initial relay dial retries automatically", async ({ page }) => {
     )
     .toBe("connected");
   await expect(page.getByTestId("channel-general")).toBeVisible();
+});
+
+test("routine traffic cannot bypass outage backoff and recovery stays automatic", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await expect(page.getByTestId("channel-general")).toBeVisible();
+
+  await setMockWebsocketUnavailable(page, true);
+  await disconnectMockWebsockets(page);
+
+  // Exercise the production query path throughout the outage. Before the
+  // coordinator fix, each rejected query called ensureConnected(), cancelled
+  // the scheduled timer, and dialed immediately. The fixed session keeps these
+  // callers behind its single jittered exponential-backoff attempt.
+  await page.evaluate(async () => {
+    const deadline = Date.now() + 4_200;
+    while (Date.now() < deadline) {
+      await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+        queryKey: ["channels"],
+      });
+      await new Promise((resolve) => window.setTimeout(resolve, 100));
+    }
+  });
+
+  const attempts = await getMockWebsocketConnectAttempts(page);
+  expect(attempts.length).toBeGreaterThanOrEqual(2);
+  expect(attempts.length).toBeLessThanOrEqual(3);
+  for (let index = 1; index < attempts.length; index += 1) {
+    expect(attempts[index] - attempts[index - 1]).toBeGreaterThanOrEqual(700);
+  }
+
+  await setMockWebsocketUnavailable(page, false);
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() => window.__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?.()),
+      { timeout: 10_000 },
+    )
+    .toBe("connected");
+
+  const afterRecovery = `automatic outage recovery ${Date.now()}`;
+  await emitMockMessages(page, [
+    { content: afterRecovery, createdAt: Math.floor(Date.now() / 1_000) },
+  ]);
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("message-timeline")).toContainText(
+    afterRecovery,
+  );
+});
+
+test("authenticated reconnect reports connected while replay is rate-limited", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await expect(page.getByTestId("channel-general")).toBeVisible();
+
+  await activateRelayRateLimit(page, 5);
+  await disconnectMockWebsockets(page);
+
+  // Replay remains intentionally blocked behind admission control, but socket
+  // open + successful AUTH is already a healthy connection. The UI must not
+  // claim the relay is unreachable for the rest of the gate window.
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() => window.__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?.()),
+      { timeout: 3_000 },
+    )
+    .toBe("connected");
+  await expect(page.getByTestId("sidebar-relay-unreachable")).toHaveCount(0);
 });
 
 test("service restart close resets accumulated backoff", async ({ page }) => {
@@ -211,6 +343,198 @@ test("profile popover does not show relay reconnect controls", async ({
     timeout: 10_000,
   });
   await expect(page.getByTestId("profile-popover-reconnect")).toHaveCount(0);
+});
+
+test("resume event short-circuits accumulated reconnect backoff", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await expect(page.getByTestId("channel-general")).toBeVisible();
+
+  await setMockWebsocketUnavailable(page, true);
+  await disconnectMockWebsockets(page);
+  await expect
+    .poll(() => getMockWebsocketConnectAttempts(page), { timeout: 10_000 })
+    .toHaveLength(3);
+
+  await setMockWebsocketUnavailable(page, false);
+  const resumedAt = Date.now();
+  await page.evaluate(() => window.dispatchEvent(new Event("online")));
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() => window.__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?.()),
+      {
+        timeout: 2_000,
+      },
+    )
+    .toBe("connected");
+  expect(Date.now() - resumedAt).toBeLessThan(2_000);
+});
+
+test("resume events during repeated AUTH rejection cannot defeat the terminal cap", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  // Three consecutive rejections must latch terminal even when resume
+  // events interleave with the handshakes: resume attempts bypass backoff
+  // but must preserve the AUTH rejection streak (review finding on
+  // PR #4737 — preconnect()'s streak reset previously made the cap
+  // unreachable under focus/online bursts).
+  //
+  // Queue MORE rejections than the cap: superseded connection attempts
+  // (resume racing the backoff timer) consume queue entries on handshakes
+  // whose frames the client drops as stale, exactly like a real relay that
+  // rejects every attempt. A queue of exactly 3 can be silently eaten and
+  // a default-success AUTH would then reset the streak.
+  await queueAuthResponses(
+    page,
+    Array.from({ length: 12 }, () => ({
+      success: false,
+      message: "auth-required: verification failed",
+    })),
+  );
+  await disconnectMockWebsockets(page);
+
+  // Fire resume events while the rejection sequence plays out. Repeated
+  // dispatch (post-rate-limit spacing is irrelevant here: each poll tick
+  // dispatches both events) guarantees at least one lands between
+  // handshakes.
+  await expect
+    .poll(
+      async () => {
+        await page.evaluate(() => {
+          window.dispatchEvent(new Event("online"));
+          window.dispatchEvent(new Event("focus"));
+        });
+        return page.evaluate(() =>
+          window.__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?.(),
+        );
+      },
+      { intervals: [500], timeout: 20_000 },
+    )
+    .toBe("disconnected");
+
+  // Terminal is user-owned: further resume events must not revive the
+  // session.
+  await page.evaluate(() => {
+    window.dispatchEvent(new Event("online"));
+    window.dispatchEvent(new Event("focus"));
+  });
+  await page.waitForTimeout(1_000);
+  expect(
+    await page.evaluate(() =>
+      window.__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?.(),
+    ),
+  ).toBe("disconnected");
+});
+
+test("sub-2s degraded flap invalidates relay queries on recovery", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await expect(page.getByTestId("channel-general")).toBeVisible();
+
+  await page.evaluate(() => {
+    const queryClient = window.__BUZZ_E2E_QUERY_CLIENT__ as
+      | {
+          invalidateQueries: (...args: unknown[]) => unknown;
+          __rawHealInvalidations?: number;
+        }
+      | undefined;
+    if (!queryClient)
+      throw new Error("E2E query client seam is not installed.");
+    const original = queryClient.invalidateQueries.bind(queryClient);
+    queryClient.__rawHealInvalidations = 0;
+    queryClient.invalidateQueries = (...args: unknown[]) => {
+      queryClient.__rawHealInvalidations =
+        (queryClient.__rawHealInvalidations ?? 0) + 1;
+      return original(...args);
+    };
+  });
+
+  await driveConnectionDegraded(page, "reconnecting");
+  await page.waitForTimeout(100);
+  await driveConnectionDegraded(page, "connected");
+
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (
+            window.__BUZZ_E2E_QUERY_CLIENT__ as unknown as {
+              __rawHealInvalidations?: number;
+            }
+          )?.__rawHealInvalidations ?? 0,
+      ),
+    )
+    .toBeGreaterThan(0);
+});
+
+test("transient AUTH rejection reconnects and restores live traffic", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  await queueAuthResponses(page, [
+    { success: false, message: "auth-required: verification failed" },
+    { success: true, message: "" },
+  ]);
+  await disconnectMockWebsockets(page);
+
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() => window.__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?.()),
+      {
+        timeout: 10_000,
+      },
+    )
+    .toBe("connected");
+
+  const recovered = `live after transient AUTH rejection ${Date.now()}`;
+  await emitMockMessages(page, [
+    { content: recovered, createdAt: Math.floor(Date.now() / 1_000) },
+  ]);
+  await expect(page.getByTestId("message-timeline")).toContainText(recovered);
+
+  const sent = `send after transient AUTH rejection ${Date.now()}`;
+  await page.getByTestId("message-input").fill(sent);
+  await page.getByTestId("send-message").click();
+  await expect(page.getByTestId("message-timeline")).toContainText(sent);
+});
+
+test("auth-required CLOSED restores the active live subscription", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  await closeLiveSubscriptions(page, "auth-required: not authenticated");
+
+  const recovered = `live after auth-required CLOSED ${Date.now()}`;
+  await expect
+    .poll(
+      async () => {
+        await emitMockMessages(page, [
+          { content: recovered, createdAt: Math.floor(Date.now() / 1_000) },
+        ]);
+        return page
+          .getByTestId("message-timeline")
+          .evaluate(
+            (element, content) => (element.textContent ?? "").includes(content),
+            recovered,
+          );
+      },
+      { intervals: [1_100], timeout: 5_000 },
+    )
+    .toBe(true);
 });
 
 test("reconnect backfills more missed channel messages than the live subscription limit", async ({

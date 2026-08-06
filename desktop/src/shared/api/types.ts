@@ -103,25 +103,7 @@ export type AddChannelMembersResult = {
   }>;
 };
 
-export type Identity = {
-  pubkey: string;
-  displayName: string;
-  /** True when the app booted in "identity lost" recovery mode — the OS
-   *  keyring was empty despite a prior successful migration. The frontend
-   *  should route to nsec re-import instead of normal onboarding.
-   *  Mutually exclusive with `locked`. */
-  lost?: boolean;
-  /** True when the app booted with an ephemeral key because the OS keyring
-   *  holding the real identity is UNREACHABLE (e.g. GNOME Keyring / KWallet
-   *  locked). The real key still exists; no in-app recovery is possible —
-   *  the user must unlock the keyring externally and relaunch.
-   *  Mutually exclusive with `lost`. */
-  locked?: boolean;
-  /** True when the boot-time Phase 2 reset attempted a wipe but verification
-   *  failed. Identity resolution was skipped; the sentinel is preserved so
-   *  the next relaunch retries the wipe automatically. */
-  resetFailed?: boolean;
-};
+export type { Identity, IdentityStorage } from "./identityTypes";
 
 export type Profile = {
   pubkey: string;
@@ -322,6 +304,8 @@ export type ManagedAgentBackend =
   | { type: "local" }
   | { type: "provider"; id: string; config: Record<string, unknown> };
 
+import type { RestartDiffEntry } from "./restartDiff";
+export type { JsonValue, RestartChange, RestartDiffEntry } from "./restartDiff";
 export type ManagedAgent = {
   pubkey: string;
   name: string;
@@ -375,6 +359,8 @@ export type ManagedAgent = {
    * Always `false` for stopped agents.
    */
   needsRestart: boolean;
+  /** Non-empty iff `needsRestart` is true. Empty when Rust omits the field. */
+  restartDiff: RestartDiffEntry[];
   /** Per-agent env vars. Layered on top of persona envVars. */
   envVars: Record<string, string>;
   status: "running" | "stopped" | "deployed" | "not_deployed";
@@ -400,11 +386,7 @@ export type ManagedAgent = {
   respondToAllowlist: string[];
 };
 
-/**
- * Inbound author gate mode. Mirrors `buzz-acp`'s `--respond-to` CLI flag.
- * `"nobody"` is supported by the harness but not surfaced through this API —
- * it's a heartbeat-only mode without a meaningful GUI use case.
- */
+/** Inbound author gate mode. Mirrors buzz-acp's --respond-to CLI flag. */
 export type RespondToMode = "owner-only" | "allowlist" | "anyone";
 
 export type BackendProviderCandidate = {
@@ -535,6 +517,9 @@ export type AcpRuntimeCatalogEntry = {
   providerEnvVar: string | null;
   /** Environment variable used to apply thinking effort, when supported. */
   thinkingEnvVar: string | null;
+  maxTokensEnvVar: string | null;
+  contextLimitEnvVar: string | null;
+  maxRoundsEnvVar: string | null;
   installHint: string;
   installInstructionsUrl: string;
   canAutoInstall: boolean;
@@ -547,21 +532,16 @@ export type AcpRuntimeCatalogEntry = {
   authStatus: AuthStatus;
   /** Hint for completing authentication; null when not applicable or already logged in. */
   loginHint: string | null;
-  /**
-   * Whether this entry is compiled into the app ("builtin"), a bundled preset
-   * ("preset" — PATH-probed, not editable/deletable), or loaded from a user
-   * JSON file in `custom_harnesses/` ("custom"). Controls editability in the
-   * UI — only "custom" entries can be edited or deleted.
-   */
+  /** "builtin" (compiled in), "preset" (PATH-probed, not editable), or "custom" (user JSON). Controls UI editability. */
   source: "builtin" | "preset" | "custom";
   /**
-   * Definition-level environment variables for `source: custom` entries.
-   *
-   * Populated by the backend from `HarnessDefinition.env` so the edit form can
-   * read them back without losing existing env vars on save. Always absent/empty
-   * for `builtin` and `preset` entries.
+   * Definition-level env vars for `source: custom` entries. Populated from
+   * `HarnessDefinition.env` so saves don't erase existing vars. Absent for
+   * builtin/preset entries.
    */
   definitionEnv?: Record<string, string>;
+  /** Spawn-time parallelism cap; absent for uncapped harnesses. */
+  maxParallelism?: number;
 };
 
 /** An AcpRuntimeCatalogEntry that is confirmed available — command and binaryPath are non-null. */
@@ -571,22 +551,10 @@ export type AcpRuntime = AcpRuntimeCatalogEntry & {
   binaryPath: string;
 };
 
-export type InstallStepResult = {
-  step: string;
-  command: string;
-  success: boolean;
-  stdout: string;
-  stderr: string;
-  exitCode: number | null;
-  hint?: string;
-};
-
-export type InstallRuntimeResult = {
-  success: boolean;
-  steps: InstallStepResult[];
-  restartedCount: number;
-  failedRestartCount: number;
-};
+export type {
+  InstallRuntimeResult,
+  InstallStepResult,
+} from "./installTypes";
 
 export type AcpAuthMethod = {
   id: string;
@@ -632,7 +600,6 @@ export type AgentModelInfo = {
 };
 
 // ── Config bridge types ──────────────────────────────────────────────────────
-
 export type ConfigOrigin =
   | "buzzExplicit"
   | "acpNativeRead"
@@ -642,7 +609,8 @@ export type ConfigOrigin =
   | "personaDefault"
   | "globalDefault"
   | "runtimeOverride"
-  | "harnessConstraint";
+  | "harnessConstraint"
+  | "harnessDefault";
 
 export type ConfigWriteMechanism =
   | { type: "respawnWithEnvVar"; envKey: string }

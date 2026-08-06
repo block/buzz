@@ -350,6 +350,30 @@ pub async fn get_thread_replies(
     limit: u32,
     cursor: Option<&[u8]>,
 ) -> Result<Vec<ThreadReply>> {
+    let mut conn = pool.acquire().await?;
+    get_thread_replies_on(
+        &mut conn,
+        community_id,
+        root_event_id,
+        depth_limit,
+        limit,
+        cursor,
+    )
+    .await
+}
+
+/// [`get_thread_replies`] on a specific session — the replica-routing path
+/// runs the page on the exact reader connection whose heartbeat observation
+/// proved coverage (the proof is connection-local; a different pooled
+/// session may sit at a different replay position).
+pub(crate) async fn get_thread_replies_on(
+    conn: &mut sqlx::PgConnection,
+    community_id: CommunityId,
+    root_event_id: &[u8],
+    depth_limit: Option<u32>,
+    limit: u32,
+    cursor: Option<&[u8]>,
+) -> Result<Vec<ThreadReply>> {
     // Decode cursor bytes -> keyset (timestamp, optional event_id) for the
     // WHERE condition. Layout: 8-byte BE i64 seconds, then the raw event_id.
     // An 8-byte-only cursor is legacy timestamp-only paging (no tiebreak).
@@ -445,7 +469,7 @@ pub async fn get_thread_replies(
     }
     q = q.bind(limit as i32);
 
-    let rows = q.fetch_all(pool).await?;
+    let rows = q.fetch_all(&mut *conn).await?;
 
     let mut replies = Vec::with_capacity(rows.len());
     for row in rows {
@@ -650,7 +674,7 @@ pub async fn get_channel_window(
     // The +1 probe row is the server-internal has_more evidence.
     q = q.bind(limit as i64 + 1);
 
-    let mut db_rows = q.fetch_all(pool).await?;
+    let mut db_rows = q.fetch_all(&mut *conn).await?;
 
     let has_more = db_rows.len() > limit as usize;
     db_rows.truncate(limit as usize);
@@ -735,7 +759,7 @@ pub async fn get_channel_window(
         )
         .bind(community_id.as_uuid())
         .bind(&roots)
-        .fetch_all(pool)
+        .fetch_all(&mut *conn)
         .await?;
 
         let mut by_root: std::collections::HashMap<Vec<u8>, Vec<Vec<u8>>> =

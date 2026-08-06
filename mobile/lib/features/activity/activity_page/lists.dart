@@ -3,10 +3,15 @@ part of '../activity_page.dart';
 /// Reminders surface for the Reminders filter — due/pending NIP-ER
 /// reminders that deep-link to their target message.
 class _RemindersList extends ConsumerWidget {
+  final ScrollController scrollController;
   final void Function(Reminder reminder) onOpen;
   final Future<void> Function() onRefresh;
 
-  const _RemindersList({required this.onOpen, required this.onRefresh});
+  const _RemindersList({
+    required this.scrollController,
+    required this.onOpen,
+    required this.onRefresh,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -36,7 +41,8 @@ class _RemindersList extends ConsumerWidget {
     return RefreshIndicator(
       onRefresh: onRefresh,
       child: ListView.builder(
-        padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
+        controller: scrollController,
+        padding: _activityScrollPadding(context),
         itemCount: reminders.length,
         itemBuilder: (context, index) {
           final reminder = reminders[index];
@@ -73,6 +79,7 @@ class _RemindersList extends ConsumerWidget {
 /// text that reopens the target composer.
 class _DraftsList extends StatelessWidget {
   final List<ComposeDraft> drafts;
+  final ScrollController scrollController;
   final Map<String, Channel> channelById;
   final String? myPubkey;
   final void Function(ComposeDraft draft) onOpen;
@@ -80,6 +87,7 @@ class _DraftsList extends StatelessWidget {
 
   const _DraftsList({
     required this.drafts,
+    required this.scrollController,
     required this.channelById,
     required this.myPubkey,
     required this.onOpen,
@@ -97,7 +105,8 @@ class _DraftsList extends StatelessWidget {
     }
 
     return ListView.builder(
-      padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
+      controller: scrollController,
+      padding: _activityScrollPadding(context),
       itemCount: drafts.length,
       itemBuilder: (context, index) {
         final draft = drafts[index];

@@ -20,18 +20,22 @@ import {
 import {
   playNotificationSound,
   resolveSlotSound,
+  shouldPlayNotificationSound,
 } from "@/features/notifications/lib/sound";
 import type { Channel, RelayEvent } from "@/shared/api/types";
 
 export function useAppShellDesktopNotifications({
   channels,
+  enabled,
   goChannel,
   goHome,
   notificationSettings,
   openSearchHit,
   pubkey,
+  silentChannelIds,
 }: {
   channels: Channel[];
+  enabled: boolean;
   goChannel: (channelId: string) => Promise<unknown>;
   goHome: () => Promise<unknown>;
   notificationSettings: NotificationSettings;
@@ -39,9 +43,11 @@ export function useAppShellDesktopNotifications({
     hit: import("@/shared/api/types").SearchHit,
   ) => Promise<unknown>;
   pubkey?: string;
+  silentChannelIds?: ReadonlySet<string>;
 }) {
   const handleChannelNotification = React.useEffectEvent(
     (_channelId: string, event: RelayEvent) => {
+      if (!enabled) return;
       if (!shouldBounceForChannelNotification(event.tags)) return;
       if (!notificationSettings.desktopEnabled) return;
       void requestDockBounce();
@@ -50,6 +56,7 @@ export function useAppShellDesktopNotifications({
 
   const handleDmNotification = React.useEffectEvent(
     (event: RelayEvent, channel: Channel) => {
+      if (!enabled) return;
       if (
         !notificationSettings.desktopEnabled ||
         !notificationSettings.slotAlertsEnabled.dm
@@ -76,7 +83,9 @@ export function useAppShellDesktopNotifications({
         },
       }).then((didSend) => {
         if (!didSend) return;
-        playNotificationSound(resolveSlotSound(notificationSettings, "dm"));
+        if (shouldPlayNotificationSound(channel.id, silentChannelIds)) {
+          playNotificationSound(resolveSlotSound(notificationSettings, "dm"));
+        }
         void requestDockBounce();
       });
     },
@@ -84,6 +93,7 @@ export function useAppShellDesktopNotifications({
 
   const handleThreadReplyDesktopNotification = React.useEffectEvent(
     (channelId: string, event: RelayEvent) => {
+      if (!enabled) return;
       if (
         !notificationSettings.desktopEnabled ||
         !notificationSettings.slotAlertsEnabled.thread_reply
@@ -121,9 +131,11 @@ export function useAppShellDesktopNotifications({
         },
       }).then((didSend) => {
         if (!didSend) return;
-        playNotificationSound(
-          resolveSlotSound(notificationSettings, "thread_reply"),
-        );
+        if (shouldPlayNotificationSound(channelId, silentChannelIds)) {
+          playNotificationSound(
+            resolveSlotSound(notificationSettings, "thread_reply"),
+          );
+        }
         void requestDockBounce();
       });
     },
@@ -151,6 +163,7 @@ export function useAppShellDesktopNotifications({
   );
 
   React.useEffect(() => {
+    if (!enabled) return;
     let isCancelled = false;
     let cleanup = () => {};
 
@@ -173,7 +186,7 @@ export function useAppShellDesktopNotifications({
       isCancelled = true;
       cleanup();
     };
-  }, []);
+  }, [enabled]);
 
   return {
     handleChannelNotification,

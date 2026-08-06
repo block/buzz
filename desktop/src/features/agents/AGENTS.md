@@ -19,6 +19,18 @@ never maintains a rival copy of this table. Setup guidance follows the same
 rule: `requires_external_cli` is derived from `KnownAcpRuntime` and projected
 to the UI rather than inferred from a runtime ID in a component.
 
+**Second metadata source: command-keyed execution policy.**
+`harness_max_parallelism` (`managed_agents/parallelism.rs`) maps the harness's
+static command string to a spawn-time cap (`OPENCLAW_MAX_PARALLELISM = 5` for
+OpenClaw). This cap is not a `KnownAcpRuntime` field because it applies to
+preset harnesses (like OpenClaw) that are not in the builtin catalog. It is
+projected onto `AcpRuntimeCatalogEntry.max_parallelism` by all four
+catalog-producing constructors (builtin discovery, preset catalog, custom
+discovery, custom-save response) using the **static definition command**, not
+the resolved `entry.command` (which may be `null` for unavailable entries).
+The frontend reads `maxParallelism` from the catalog entry and never keeps a
+separate constant.
+
 If you need a new capability fact (a new env key, a native option, a "supports
 X" flag): add it to `KnownAcpRuntime` first, expose it on
 `AcpRuntimeCatalogEntry`, then project it through the core. Do not shortcut
@@ -67,11 +79,17 @@ with a TypeScript lookup table or an id comparison in a component.
 7. **Onboarding setup detects readiness; it does not select defaults.** The
    setup page derives visible and ready harnesses from the runtime catalog and
    only offers install or sign-in actions. The following defaults page is the
-   sole onboarding surface that chooses and persists `preferred_runtime`, and
-   its Finish gate consumes the shared renderer's `onValidityChange` signal —
-   a harness selection alone does not complete onboarding when the harness
+   sole onboarding surface that chooses `preferred_runtime`. Its complete draft
+   lives in machine-onboarding session state, so Back performs no write and
+   restores even incomplete edits when the user returns. Skip abandons that
+   draft and advances with zero config writes. Next is the only persistence
+   boundary: it consumes the shared renderer's `onValidityChange` signal,
+   disables editing while awaiting `set_global_agent_config`, advances only on
+   success, and leaves the draft in place with a retryable inline error on
+   failure. A harness selection alone does not enable Next when the harness
    requires provider/model/credential config (e.g. buzz-agent with no
-   provider). Baked build env and runtime-file config satisfy the gate.
+   provider). Baked build env and runtime-file config satisfy the gate. Drafts
+   intentionally do not survive an app restart.
    `onboarding-agent-defaults.spec.ts` is the acceptance gate for anything
    touching this flow or the shared renderer.
 8. **Omit the Model control only after a confirmed successful empty
@@ -114,6 +132,42 @@ with a TypeScript lookup table or an id comparison in a component.
     published or removed. A queued update must stay visibly queued, and the
     catalog itself must render only relay-confirmed publications — never an
     optimistic local persona.
+11. **Shared agent access names the consequence where it is selected.** The
+   shared respond-to field shows a persistent warning whenever `anyone` **or**
+   `allowlist` is selected — both hand the host's access to someone other than
+   the owner, so both disclose it and only the audience phrase differs. This
+   covers persona-backed create and edit surfaces. Keep that disclosure in
+   the shared field instead of adding surface-specific flags. It renders
+   directly below the selector for `anyone` but *after* the people picker for
+   `allowlist`, so it never sits between the user and the selection they came
+   to make. The copy leads with the audience ("Anyone can use this agent to
+   access…") so it reads as a warning rather than an explanation, and stays one
+   sentence — don't split the mechanism into a second sentence. Both the machine
+   and the stakes it names come from `lib/agentAccessWarning.ts`, keyed on an
+   optional `runLocation`: instance surfaces resolve it from
+   `ManagedAgent.backend` via `runLocationForBackend`, and the create flow from
+   `WhereToRunDraft.runOn` via `runLocationForRunOn`. `AgentDialog` is the one
+   place that resolves it for dialog surfaces and publishes it through
+   `ui/AgentRunLocationContext.tsx`; the field reads that context and lets an
+   explicit `runLocation` prop win. Do **not** thread the value as a prop
+   through `AgentDefinitionDialog` / `AgentInstanceEditDialog` — both are
+   already over the 1000-line ceiling, and neither uses the value itself.
+   Surfaces rendered outside `AgentDialog` (e.g. `EditRespondToDialog`) pass the
+   prop directly. Local names "your
+   computer, including files, accounts, and connected tools"; remote names "the
+   server it runs on, including any accounts and tools available there" —
+   deliberately *not* the owner's files, which aren't theirs to describe on a
+   host they don't own. **An unknown location falls back to the local wording —
+   never hedge with "computer or server".** A remote host requires an
+   installed `buzz-backend-*` provider, and without one `WhereToRunSection`
+   never renders, so "server" would name a concept the owner has never been
+   shown; when it *is* remote they picked that host from the selector
+   themselves. Never synthesize a run location a surface doesn't have. Don't
+   expose `respond-to`, `allowlist`, Nostr, or harness jargon in primary UI
+   copy. **The owner-only-access build capability is backend-independent.** When
+   `getAgentAccessOwnerOnly()` is true, every managed agent's access control is
+   locked to owner-only, including provider-backed agents. A provider backend
+   does not prove remote execution and must never create a policy carve-out.
 
 ## The tests that enforce this
 
@@ -128,9 +182,16 @@ with a TypeScript lookup table or an id comparison in a component.
   `isCacheableDiscoveryResponse`, `deriveModelDiscoveryPending`,
   `isSuccessfulEmptyDiscovery`. If the "reopen to retry" copy becomes inert
   again, these tests will catch it.
+- `ui/respondToFieldContract.test.mjs` — plain-language mode labels, the
+  persistent warning contract for shared agent access, and its two render
+  positions (after the people picker for `allowlist`).
+- `lib/agentAccessWarning.test.mjs` — every mode × run-location copy variant
+  plus both resolvers, including unknown-reads-as-local and
+  blank-`runOn`-is-not-a-provider.
 - `desktop/tests/e2e/onboarding-agent-defaults.spec.ts` — onboarding behavior
-  acceptance coverage for readiness, failure states, defaults, navigation,
-  successful-empty vs failed optional-model discovery, and persistence races.
+  acceptance coverage for readiness, failure states, defaults, session-draft
+  restoration, zero-write Skip, Next save failure/retry, navigation, and
+  successful-empty vs failed optional-model discovery.
 - Rust: `runtime_metadata_env_vars` tests pin spawn-time key application.
 - Rust: persona sharing/retention tests pin relay+owner scoping, durable
   enqueue errors, relay rejection/unavailability, and accepted publication.

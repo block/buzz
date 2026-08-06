@@ -46,7 +46,7 @@ export function SelectedRecipientChip({
   user: UserSearchResult;
 }) {
   return (
-    <div className="inline-flex h-7 max-w-56 items-center gap-1.5 rounded-full bg-muted px-1.5 pr-2.5 text-sm transition-colors hover:bg-muted/80">
+    <div className="inline-flex h-7 max-w-56 items-center gap-1.5 rounded-full bg-muted px-1 pr-2.5 text-sm transition-colors hover:bg-muted/80">
       <button
         aria-label={`Remove ${label}`}
         className={cn(

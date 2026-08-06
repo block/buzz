@@ -1,11 +1,14 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/physics.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:http/http.dart' as http;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:video_player/video_player.dart';
 
 import '../../shared/relay/relay.dart';
@@ -17,6 +20,8 @@ export 'media_viewer_hero.dart';
 
 part 'media_viewer_page/image_controls.dart';
 part 'media_viewer_page/route_transition.dart';
+part 'media_viewer_page/video_controls.dart';
+part 'media_viewer_page/video_viewer.dart';
 
 const _imageViewerPushDuration = Duration(milliseconds: 260);
 const _imageViewerPopDuration = Duration(milliseconds: 170);
@@ -139,6 +144,7 @@ void openVideoViewer(
   BuildContext context, {
   required String videoUrl,
   String? posterUrl,
+  VoidCallback? onReply,
 }) {
   Navigator.of(context).push(
     PageRouteBuilder<void>(
@@ -149,7 +155,11 @@ void openVideoViewer(
           ? Duration.zero
           : _imageViewerPopDuration,
       pageBuilder: (context, animation, secondaryAnimation) =>
-          MediaVideoViewerPage(videoUrl: videoUrl, posterUrl: posterUrl),
+          MediaVideoViewerPage(
+            videoUrl: videoUrl,
+            posterUrl: posterUrl,
+            onReply: onReply,
+          ),
       transitionsBuilder: (context, animation, secondaryAnimation, child) =>
           _MediaViewerRouteTransition(animation: animation, child: child),
     ),
@@ -650,212 +660,6 @@ class MediaImageViewerPage extends HookConsumerWidget {
           ],
         ),
       ),
-    );
-  }
-}
-
-// StatefulWidget retained: owns a VideoPlayerController with async init and
-// disposal — kept imperative deliberately (allowed exception).
-class MediaVideoViewerPage extends StatefulWidget {
-  final String videoUrl;
-  final String? posterUrl;
-
-  const MediaVideoViewerPage({
-    super.key,
-    required this.videoUrl,
-    this.posterUrl,
-  });
-
-  @override
-  State<MediaVideoViewerPage> createState() => _MediaVideoViewerPageState();
-}
-
-class _MediaVideoViewerPageState extends State<MediaVideoViewerPage> {
-  late final VideoPlayerController _controller;
-  late final Future<void> _initializeFuture;
-  String? _error;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = VideoPlayerController.networkUrl(
-      Uri.parse(widget.videoUrl),
-      httpHeaders: mediaGetHeadersForContext(context, widget.videoUrl),
-    );
-    _initializeFuture = _controller
-        .initialize()
-        .then((_) async {
-          await _controller.play();
-          if (mounted) {
-            setState(() {});
-          }
-        })
-        .catchError((Object error) {
-          if (mounted) {
-            setState(() {
-              _error = error.toString();
-            });
-          }
-        });
-  }
-
-  @override
-  void dispose() {
-    unawaited(_controller.dispose());
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      key: const ValueKey('message-media-video-viewer'),
-      backgroundColor: Colors.black,
-      body: Stack(
-        children: [
-          Positioned.fill(
-            child: SafeArea(
-              child: Center(
-                child: FutureBuilder<void>(
-                  future: _initializeFuture,
-                  builder: (context, snapshot) {
-                    if (_error != null || snapshot.hasError) {
-                      return const _MediaLoadFailure(
-                        message: 'Failed to load video',
-                        icon: LucideIcons.videoOff,
-                      );
-                    }
-
-                    if (!_controller.value.isInitialized) {
-                      return _VideoLoadingPoster(posterUrl: widget.posterUrl);
-                    }
-
-                    return Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        AspectRatio(
-                          aspectRatio: _controller.value.aspectRatio,
-                          child: VideoPlayer(_controller),
-                        ),
-                        const SizedBox(height: Grid.sm),
-                        _VideoTransportBar(controller: _controller),
-                      ],
-                    );
-                  },
-                ),
-              ),
-            ),
-          ),
-          PositionedDirectional(
-            top: Grid.sm,
-            end: Grid.sm,
-            child: SafeArea(
-              child: DecoratedBox(
-                decoration: const BoxDecoration(
-                  color: Color.fromRGBO(0, 0, 0, 0.56),
-                  shape: BoxShape.circle,
-                ),
-                child: IconButton(
-                  key: const ValueKey('message-media-video-viewer-close'),
-                  onPressed: () => Navigator.of(context).maybePop(),
-                  tooltip: 'Close video viewer',
-                  icon: const Icon(LucideIcons.x, color: Colors.white),
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _VideoLoadingPoster extends StatelessWidget {
-  final String? posterUrl;
-
-  const _VideoLoadingPoster({required this.posterUrl});
-
-  @override
-  Widget build(BuildContext context) {
-    return AspectRatio(
-      aspectRatio: 16 / 9,
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          if (posterUrl != null)
-            MediaImage(
-              url: posterUrl!,
-              fit: BoxFit.cover,
-              errorBuilder: (_, _, _) => _videoPlaceholder(context),
-            )
-          else
-            _videoPlaceholder(context),
-          const ColoredBox(color: Color.fromRGBO(0, 0, 0, 0.24)),
-          const Center(
-            child: BuzzLoadingIndicator(
-              size: 44,
-              color: Colors.white,
-              semanticLabel: 'Loading video',
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _videoPlaceholder(BuildContext context) {
-    return ColoredBox(
-      color: context.colors.surfaceContainerHighest,
-      child: Icon(
-        LucideIcons.video,
-        size: 40,
-        color: context.colors.onSurfaceVariant,
-      ),
-    );
-  }
-}
-
-class _VideoTransportBar extends HookWidget {
-  final VideoPlayerController controller;
-
-  const _VideoTransportBar({required this.controller});
-
-  @override
-  Widget build(BuildContext context) {
-    useListenable(controller);
-    final value = controller.value;
-    final durationMs = value.duration.inMilliseconds;
-    final positionMs = value.position.inMilliseconds.clamp(0, durationMs);
-
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        IconButton(
-          onPressed: () {
-            if (value.isPlaying) {
-              controller.pause();
-            } else {
-              controller.play();
-            }
-          },
-          tooltip: value.isPlaying ? 'Pause video' : 'Play video',
-          icon: Icon(
-            value.isPlaying ? LucideIcons.pause : LucideIcons.play,
-            color: Colors.white,
-          ),
-        ),
-        SizedBox(
-          width: 220,
-          child: Slider(
-            value: durationMs == 0 ? 0 : positionMs.toDouble(),
-            min: 0,
-            max: durationMs == 0 ? 1 : durationMs.toDouble(),
-            onChanged: durationMs == 0
-                ? null
-                : (next) =>
-                      controller.seekTo(Duration(milliseconds: next.round())),
-          ),
-        ),
-      ],
     );
   }
 }

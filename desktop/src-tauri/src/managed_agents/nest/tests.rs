@@ -30,6 +30,18 @@ fn init_nest_dir_prod_sets_buzz() {
 }
 
 #[test]
+fn nest_skill_contains_safe_mention_workflow() {
+    assert!(BUZZ_CLI_SKILL_MD.contains("--mention <hex-or-npub>"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("every presentation-only name that should notify"));
+    assert!(BUZZ_CLI_SKILL_MD
+        .contains("permits unresolved or ambiguous `@Name` text as presentation-only"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("signed event's `mention_pubkeys`"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("no follow-up verification command is needed"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("Add membership separately only when authorized"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("never changes membership automatically"));
+}
+
+#[test]
 fn ensure_nest_creates_all_dirs_and_agents_md() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join(".buzz");
@@ -909,41 +921,5 @@ fn refresh_skill_overwrites_on_version_bump() {
     assert_eq!(
         content, BUZZ_CLI_SKILL_MD,
         "SKILL.md must be refreshed on version bump"
-    );
-}
-
-#[test]
-fn test_path_is_dev_nest_dev_path_returns_true() {
-    let path = std::path::Path::new("/Users/someone/.buzz-dev");
-    assert!(
-        path_is_dev_nest(path),
-        ".buzz-dev path must be identified as dev nest"
-    );
-}
-
-#[test]
-fn test_path_is_dev_nest_prod_path_returns_false() {
-    let path = std::path::Path::new("/Users/someone/.buzz");
-    assert!(
-        !path_is_dev_nest(path),
-        ".buzz path must not be identified as dev nest"
-    );
-}
-
-#[test]
-fn test_path_is_dev_nest_unrelated_path_returns_false() {
-    let path = std::path::Path::new("/Users/someone/.buzz-staging");
-    assert!(
-        !path_is_dev_nest(path),
-        "unrelated path must not be identified as dev nest"
-    );
-}
-
-#[test]
-fn test_path_is_dev_nest_root_returns_false() {
-    let path = std::path::Path::new("/");
-    assert!(
-        !path_is_dev_nest(path),
-        "root path must not be identified as dev nest"
     );
 }

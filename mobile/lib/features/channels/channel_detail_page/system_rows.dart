@@ -27,12 +27,18 @@ class _SystemMessageRow extends ConsumerWidget {
     final userCache = ref.watch(userCacheProvider);
     final sourceMessages = groupedMessages ?? [message];
     final groupedMembership = _membershipDisplayEvent(sourceMessages);
-    final channelCreator = systemEvent.type == SystemEventType.channelCreated
-        ? systemEvent.actorPubkey?.trim()
-        : null;
+    final messageStyleAction = switch (systemEvent.type) {
+      SystemEventType.channelCreated => 'created this channel',
+      SystemEventType.huddleStarted => 'started a huddle',
+      SystemEventType.huddleEnded => 'ended the huddle',
+      _ => null,
+    };
+    final messageStyleActor = messageStyleAction == null
+        ? null
+        : systemEvent.actorPubkey?.trim();
     final usesMessageStyleLayout =
         groupedMembership != null ||
-        (channelCreator != null && channelCreator.isNotEmpty);
+        (messageStyleActor != null && messageStyleActor.isNotEmpty);
 
     String resolveLabel(String? pubkey) {
       if (pubkey == null) return 'Someone';
@@ -91,7 +97,10 @@ class _SystemMessageRow extends ConsumerWidget {
           isArchived: isArchived,
         ),
         child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
+          padding: EdgeInsets.only(
+            top: usesMessageStyleLayout ? Grid.xs : Grid.xxs,
+            bottom: usesMessageStyleLayout ? 0 : Grid.xxs,
+          ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -102,13 +111,15 @@ class _SystemMessageRow extends ConsumerWidget {
                   resolveLabel: resolveLabel,
                   userCache: userCache,
                 )
-              else if (channelCreator != null && channelCreator.isNotEmpty)
+              else if (messageStyleActor != null &&
+                  messageStyleActor.isNotEmpty &&
+                  messageStyleAction != null)
                 _MessageStyleSystemMessageContent(
-                  displayPubkey: channelCreator,
+                  displayPubkey: messageStyleActor,
                   createdAt: message.createdAt,
                   resolveLabel: resolveLabel,
                   userCache: userCache,
-                  actionSpans: const [TextSpan(text: 'created this channel')],
+                  actionSpans: [TextSpan(text: messageStyleAction)],
                 )
               else
                 Row(
@@ -140,6 +151,7 @@ class _SystemMessageRow extends ConsumerWidget {
                             : Grid.xxs),
                   ),
                   child: ReactionRow(
+                    messageId: message.id,
                     reactions: reactions,
                     onToggle: groupedMessages == null
                         ? (emoji) => toggleReaction(ref, message, emoji)
@@ -278,7 +290,12 @@ class _MembershipSystemMessageContent extends StatelessWidget {
       TextSpan(
         text: event.isSelfJoin
             ? 'joined the channel'
-            : 'was added by ${resolveLabel(event.actorPubkey)}',
+            // No "was": the name renders on the line above via
+            // MessageAuthorMeta, so this reads as a status line rather than a
+            // sentence continuing across the metadata row. Matches desktop's
+            // SystemMessageRow. `SystemEvent.describe` keeps "was added by"
+            // because it builds subject and predicate into one string.
+            : 'added by ${resolveLabel(event.actorPubkey)}',
       ),
       if (additionalTargets.isNotEmpty)
         TextSpan(text: event.isSelfJoin ? ' along with ' : ', along with '),
@@ -327,10 +344,14 @@ class _MessageStyleSystemMessageContent extends StatelessWidget {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _UserAvatar(
-          profile: userCache[displayPubkey.toLowerCase()],
-          pubkey: displayPubkey,
-          size: messageAvatarSize,
+        GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () => showUserProfileSheet(context, displayPubkey),
+          child: _UserAvatar(
+            profile: userCache[displayPubkey.toLowerCase()],
+            pubkey: displayPubkey,
+            size: messageAvatarSize,
+          ),
         ),
         const SizedBox(width: messageAvatarContentGap),
         Expanded(
@@ -435,12 +456,23 @@ Widget _systemEventAvatar(
       height: 20,
       child: Stack(
         children: [
-          SmallAvatar(pubkey: event.actorPubkey!, userCache: userCache),
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () => showUserProfileSheet(context, event.actorPubkey!),
+            child: SmallAvatar(
+              pubkey: event.actorPubkey!,
+              userCache: userCache,
+            ),
+          ),
           Positioned(
             left: 12,
-            child: SmallAvatar(
-              pubkey: event.targetPubkey!,
-              userCache: userCache,
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => showUserProfileSheet(context, event.targetPubkey!),
+              child: SmallAvatar(
+                pubkey: event.targetPubkey!,
+                userCache: userCache,
+              ),
             ),
           ),
         ],
@@ -449,7 +481,11 @@ Widget _systemEventAvatar(
   }
 
   if (event.actorPubkey != null) {
-    return SmallAvatar(pubkey: event.actorPubkey!, userCache: userCache);
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => showUserProfileSheet(context, event.actorPubkey!),
+      child: SmallAvatar(pubkey: event.actorPubkey!, userCache: userCache),
+    );
   }
 
   // Fallback: generic icon when no actor is available.

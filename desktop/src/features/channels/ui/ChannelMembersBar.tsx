@@ -11,9 +11,15 @@ import {
   useManagedAgentsQuery,
   useRelayAgentsQuery,
 } from "@/features/agents/hooks";
+import { mergeChannelKnownAgentPubkeys } from "@/features/agents/knownAgentPubkeys";
 import { requestOpenCreateAgent } from "@/features/agents/openCreateAgentEvent";
 import { useChannelMembersQuery } from "@/features/channels/hooks";
+import {
+  getDmHuddleMemberPubkeys,
+  hasOtherDmParticipant,
+} from "@/features/channels/lib/dmHuddleMembers";
 import { canStartHuddleInChannel } from "@/features/channels/lib/huddleAvailability";
+import { useUsersBatchQuery } from "@/features/profile/hooks";
 import type { Channel } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
@@ -64,6 +70,41 @@ export function ChannelMembersBar({
   const managedAgentsQuery = useManagedAgentsQuery();
   const relayAgentsQuery = useRelayAgentsQuery();
   const members = membersQuery.data ?? [];
+  const dmProfilesQuery = useUsersBatchQuery(
+    channel.channelType === "dm" ? channel.participantPubkeys : [],
+    { enabled: channel.channelType === "dm" },
+  );
+  const huddleAgentPubkeys = React.useMemo(() => {
+    const pubkeys = new Set(
+      mergeChannelKnownAgentPubkeys(
+        membersQuery.data,
+        managedAgentsQuery.data,
+        relayAgentsQuery.data,
+      ),
+    );
+    for (const [pubkey, profile] of Object.entries(
+      dmProfilesQuery.data?.profiles ?? {},
+    )) {
+      if (profile.isAgent) pubkeys.add(normalizePubkey(pubkey));
+    }
+    return pubkeys;
+  }, [
+    dmProfilesQuery.data?.profiles,
+    managedAgentsQuery.data,
+    membersQuery.data,
+    relayAgentsQuery.data,
+  ]);
+  const huddleMemberPubkeys = React.useMemo(
+    () => getDmHuddleMemberPubkeys(channel, huddleAgentPubkeys, currentPubkey),
+    [channel, currentPubkey, huddleAgentPubkeys],
+  );
+  const huddleMemberPubkeysPending =
+    hasOtherDmParticipant(channel, currentPubkey) &&
+    (membersQuery.isPending ||
+      managedAgentsQuery.isPending ||
+      relayAgentsQuery.isPending ||
+      dmProfilesQuery.isPending ||
+      dmProfilesQuery.isPlaceholderData);
   const memberCount = membersQuery.data?.length ?? channel.memberCount;
   const providers = React.useMemo(
     () =>
@@ -117,15 +158,15 @@ export function ChannelMembersBar({
         try {
           await startHuddle(
             channel.id,
-            [],
+            [...huddleMemberPubkeys],
             buildHuddleChannelName({
               channel,
               currentPubkey,
               members,
             }),
           );
-          // Refetch channels so the new ephemeral channel appears in the sidebar immediately
-          // (default poll interval is 60s — too slow for huddle UX).
+          // Keep the channel cache current so the ephemeral transcript is
+          // available immediately if the huddle returns to the in-app drawer.
           void queryClient.invalidateQueries({ queryKey: ["channels"] });
         } catch (e) {
           console.error("Failed to start huddle:", e);
@@ -133,7 +174,9 @@ export function ChannelMembersBar({
         }
       }}
       renderMode={variant === "compact" ? "menu-item" : "button"}
-      startDisabled={!canStartHuddle || isStartingHuddle}
+      startDisabled={
+        !canStartHuddle || isStartingHuddle || huddleMemberPubkeysPending
+      }
     />
   );
 

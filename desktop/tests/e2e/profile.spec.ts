@@ -1021,7 +1021,7 @@ test("declared owner sees runtime tab for a remote relay agent", async ({
     "Goose",
   );
   await expect(panel.getByTestId("user-profile-respond-to")).toContainText(
-    "anyone",
+    "Anyone",
   );
 
   // Declared ownership grants read visibility only; local-management write UI
@@ -1139,6 +1139,13 @@ test("renders settings in the app shell with a back button", async ({
   await expect(page.getByTestId("settings-back-to-app")).toBeVisible();
   await expect(page.getByPlaceholder("Search everything")).toHaveCount(0);
   await expect(page.getByText("Personal", { exact: true })).toBeVisible();
+  const personalGroup = page
+    .getByTestId("settings-nav-channel-templates")
+    .locator("xpath=ancestor::*[@data-sidebar='group']");
+  await expect(personalGroup).toContainText("Personal");
+  await expect(
+    page.getByTestId("settings-nav-channel-templates"),
+  ).toContainText("Channel templates");
   await expect(page.getByTestId("settings-nav-profile")).toHaveAttribute(
     "aria-pressed",
     "true",

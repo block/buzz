@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
+import '../../shared/widgets/modal_presentation.dart';
 import '../channels/message_content.dart';
 import '../profile/user_cache_provider.dart';
 import '../profile/user_profile_sheet.dart';
@@ -15,7 +18,7 @@ import 'forum_models.dart';
 ///
 /// Long-press opens an action sheet (copy, delete) matching the stream
 /// message pattern from channel_detail_page.dart.
-class ForumPostCard extends ConsumerWidget {
+class ForumPostCard extends HookConsumerWidget {
   final ForumPost post;
   final String? currentPubkey;
   final VoidCallback onTap;
@@ -31,15 +34,56 @@ class ForumPostCard extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final mentionPubkeys = useMemoized(
+      () =>
+          post.mentionPubkeys.map((pubkey) => pubkey.toLowerCase()).toSet()
+            ..remove(post.pubkey.toLowerCase()),
+      [post],
+    );
+    final mentionPubkeysKey = (mentionPubkeys.toList()..sort()).join('\u0000');
+
+    useEffect(() {
+      if (mentionPubkeys.isNotEmpty) {
+        ref.read(userCacheProvider.notifier).preload(mentionPubkeys.toList());
+      }
+      return null;
+    }, [mentionPubkeysKey]);
+
     final pk = post.pubkey.toLowerCase();
     final profile =
         ref.watch(userCacheProvider.select((cache) => cache[pk])) ??
         ref.read(userCacheProvider.notifier).get(pk);
     final displayName = profile?.label ?? _shortPubkey(post.pubkey);
-    final mentionNames = ref.watch(
+    final profileMentionNames = ref.watch(
       userCacheProvider.select(
         (cache) => _buildMentionNames(post.mentionPubkeys, cache),
       ),
+    );
+    final profileOwnedMentionPubkeys = ref.watch(
+      userCacheProvider.select(
+        (cache) =>
+            (post.mentionPubkeys
+                    .where(
+                      (pubkey) =>
+                          cache[pubkey.toLowerCase()]?.ownerPubkey != null,
+                    )
+                    .map((pubkey) => pubkey.toLowerCase())
+                    .toList()
+                  ..sort())
+                .join('\u0000'),
+      ),
+    );
+    final agentMentionPubkeys = agentPubkeysWithProfileOwners(
+      knownAgentPubkeys: ref.watch(agentMentionPubkeysProvider(post.channelId)),
+      profileOwnedAgentPubkeys: profileOwnedMentionPubkeys.isEmpty
+          ? const <String>[]
+          : profileOwnedMentionPubkeys.split('\u0000'),
+    );
+    final mentionNames = mentionNamesWithDirectoryLabels(
+      mentionPubkeys: post.mentionPubkeys,
+      profileMentionNames: profileMentionNames,
+      directoryDisplayNames: ref.watch(agentDirectoryDisplayNamesProvider),
+      agentMentionPubkeys: agentMentionPubkeys,
     );
     final preview = post.content.length > 200
         ? '${post.content.substring(0, 200)}...'
@@ -128,6 +172,7 @@ class ForumPostCard extends ConsumerWidget {
                   child: MessageContent(
                     content: preview,
                     mentionNames: mentionNames,
+                    agentMentionPubkeys: agentMentionPubkeys,
                     tags: post.tags,
                     baseStyle: messageBodyTextStyle.copyWith(
                       color: context.colors.onSurface,
@@ -186,44 +231,47 @@ class ForumPostCard extends ConsumerWidget {
         currentPubkey != null &&
         post.pubkey.toLowerCase() == currentPubkey!.toLowerCase();
 
-    showModalBottomSheet<void>(
+    showBuzzModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
       builder: (sheetContext) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(
-            Grid.gutter,
-            0,
-            Grid.gutter,
-            Grid.xs,
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              ListTile(
-                leading: const Icon(LucideIcons.copy),
-                title: const Text('Copy text'),
-                onTap: () {
-                  Navigator.of(sheetContext).pop();
-                  Clipboard.setData(ClipboardData(text: post.content));
-                },
-              ),
-              if (isOwn && onDelete != null)
+        child: IconTheme.merge(
+          data: const IconThemeData(size: 22),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(
+              Grid.gutter,
+              0,
+              Grid.gutter,
+              Grid.xs,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
                 ListTile(
-                  leading: Icon(
-                    LucideIcons.trash2,
-                    color: sheetContext.colors.error,
-                  ),
-                  title: Text(
-                    'Delete post',
-                    style: TextStyle(color: sheetContext.colors.error),
-                  ),
+                  leading: const Icon(LucideIcons.copy),
+                  title: const Text('Copy text'),
                   onTap: () {
                     Navigator.of(sheetContext).pop();
-                    _confirmDelete(context);
+                    Clipboard.setData(ClipboardData(text: post.content));
                   },
                 ),
-            ],
+                if (isOwn && onDelete != null)
+                  ListTile(
+                    leading: Icon(
+                      LucideIcons.trash2,
+                      color: sheetContext.colors.error,
+                    ),
+                    title: Text(
+                      'Delete post',
+                      style: TextStyle(color: sheetContext.colors.error),
+                    ),
+                    onTap: () {
+                      Navigator.of(sheetContext).pop();
+                      _confirmDelete(context);
+                    },
+                  ),
+              ],
+            ),
           ),
         ),
       ),
@@ -231,7 +279,7 @@ class ForumPostCard extends ConsumerWidget {
   }
 
   void _confirmDelete(BuildContext context) {
-    showDialog<void>(
+    showBuzzDialog<void>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: const Text('Delete post'),
