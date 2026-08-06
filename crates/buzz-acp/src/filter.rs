@@ -371,6 +371,25 @@ pub async fn match_event(
     rules: &[SubscriptionRule],
     agent_pubkey_hex: &str,
 ) -> Option<MatchedRule> {
+    // Recipient isolation is independent of a rule's `require_mention` setting.
+    // Owner-direct rules deliberately allow untagged owner messages, but must
+    // never receive an event explicitly addressed to a different agent.
+    // A message addressed to multiple agents is valid for each addressed agent.
+    let mut has_recipients = false;
+    let mut addresses_agent = false;
+    for tag in event.tags.iter() {
+        let values = tag.as_slice();
+        if values.first().map(|kind| kind.as_str()) == Some("p") {
+            has_recipients = true;
+            if values.get(1).map(|pubkey| pubkey.as_str()) == Some(agent_pubkey_hex) {
+                addresses_agent = true;
+            }
+        }
+    }
+    if has_recipients && !addresses_agent {
+        return None;
+    }
+
     let filter_ctx = FilterContext::from_event(event, channel_id);
 
     for (index, rule) in rules.iter().enumerate() {
@@ -480,6 +499,17 @@ mod tests {
         let p_tag = Tag::parse(["p", p_hex]).expect("tag parse");
         EventBuilder::new(Kind::Custom(kind as u16), content)
             .tags([p_tag])
+            .sign_with_keys(&keys)
+            .unwrap()
+    }
+
+    fn make_event_with_p_tags(kind: u32, content: &str, p_hexes: &[&str]) -> nostr::Event {
+        let keys = Keys::generate();
+        let tags = p_hexes
+            .iter()
+            .map(|p_hex| Tag::parse(["p", *p_hex]).expect("tag parse"));
+        EventBuilder::new(Kind::Custom(kind as u16), content)
+            .tags(tags)
             .sign_with_keys(&keys)
             .unwrap()
     }
@@ -661,6 +691,68 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(matched.prompt_tag, "mentioned");
+    }
+
+    #[tokio::test]
+    async fn test_match_event_rejects_foreign_recipient_before_owner_direct_rule() {
+        let agent_pubkey = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        let foreign_pubkey = "feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface";
+        let event = make_event_with_p_tag(9, "for another agent", foreign_pubkey);
+        let rules = vec![make_rule(
+            "owner-direct",
+            ChannelScope::All("all".into()),
+            vec![9],
+            false,
+            None,
+            None,
+        )];
+
+        assert!(match_event(&event, any_channel(), &rules, agent_pubkey)
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn test_match_event_accepts_self_and_foreign_recipients() {
+        let agent_pubkey = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        let foreign_pubkey = "feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface";
+        let event = make_event_with_p_tags(9, "for both agents", &[foreign_pubkey, agent_pubkey]);
+        let rules = vec![make_rule(
+            "owner-direct",
+            ChannelScope::All("all".into()),
+            vec![9],
+            false,
+            None,
+            Some("owner-direct"),
+        )];
+
+        let matched = match_event(&event, any_channel(), &rules, agent_pubkey)
+            .await
+            .expect("self-addressed event must remain eligible");
+        assert_eq!(matched.prompt_tag, "owner-direct");
+    }
+
+    #[tokio::test]
+    async fn test_match_event_accepts_untagged_owner_direct_event() {
+        let event = make_event(9, "untagged owner-direct event");
+        let rules = vec![make_rule(
+            "owner-direct",
+            ChannelScope::All("all".into()),
+            vec![9],
+            false,
+            None,
+            Some("owner-direct"),
+        )];
+
+        let matched = match_event(
+            &event,
+            any_channel(),
+            &rules,
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        )
+        .await
+        .expect("untagged owner-direct event must remain eligible");
+        assert_eq!(matched.prompt_tag, "owner-direct");
     }
 
     #[tokio::test]
