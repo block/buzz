@@ -79,28 +79,6 @@ fn runtime_list_single_flight() -> &'static Arc<RuntimeListSingleFlight> {
     SINGLE_FLIGHT.get_or_init(|| Arc::new(RuntimeListSingleFlight::default()))
 }
 
-fn status_for(
-    app: &AppHandle,
-    record: &super::ManagedAgentRecord,
-    key: &ManagedAgentRuntimeKey,
-    runtime: Option<&ManagedAgentPairRuntime>,
-    requested_relay_url: Option<String>,
-) -> ManagedAgentRuntimeStatus {
-    let personas = load_personas(app).unwrap_or_default();
-    let global = load_global_agent_config(app).unwrap_or_default();
-    status_for_with(
-        app,
-        record,
-        key,
-        runtime,
-        requested_relay_url,
-        StatusInputs {
-            personas: &personas,
-            global: &global,
-        },
-    )
-}
-
 /// Preloaded per-call-site inputs for [`status_for_with`], so multi-row
 /// callers (list, reconcile) hit disk once instead of once per row.
 struct StatusInputs<'a> {
@@ -117,10 +95,25 @@ fn status_for_with(
     inputs: StatusInputs<'_>,
 ) -> ManagedAgentRuntimeStatus {
     let StatusInputs { personas, global } = inputs;
+    let local_setup = local_setup_for(record, StatusInputs { personas, global });
+    status_for_with_local_setup(app, key, runtime, requested_relay_url, local_setup)
+}
+
+fn local_setup_for(record: &super::ManagedAgentRecord, inputs: StatusInputs<'_>) -> bool {
+    let StatusInputs { personas, global } = inputs;
     let command = record_agent_command(record, personas);
     let metadata = super::known_acp_runtime(&command);
     let effective = resolve_effective_agent_env(record, personas, metadata, global);
-    let local_setup = matches!(agent_readiness(&effective), AgentReadiness::Ready);
+    matches!(agent_readiness(&effective), AgentReadiness::Ready)
+}
+
+fn status_for_with_local_setup(
+    app: &AppHandle,
+    key: &ManagedAgentRuntimeKey,
+    runtime: Option<&ManagedAgentPairRuntime>,
+    requested_relay_url: Option<String>,
+    local_setup: bool,
+) -> ManagedAgentRuntimeStatus {
     ManagedAgentRuntimeStatus {
         pubkey: key.pubkey.clone(),
         relay_url: key.relay_url.clone(),
@@ -176,6 +169,15 @@ pub fn put_managed_agent_runtime_lifecycle(
         .iter()
         .find(|record| record.pubkey.eq_ignore_ascii_case(&key.pubkey))
         .ok_or_else(|| format!("agent {} not found", key.pubkey))?;
+    let personas = load_personas(&app).unwrap_or_default();
+    let global = load_global_agent_config(&app).unwrap_or_default();
+    let local_setup = local_setup_for(
+        record,
+        StatusInputs {
+            personas: &personas,
+            global: &global,
+        },
+    );
     let mut runtimes = state
         .managed_agent_processes
         .lock()
@@ -196,7 +198,7 @@ pub fn put_managed_agent_runtime_lifecycle(
     }
     runtime.lifecycle = payload.lifecycle;
     runtime.error = payload.error;
-    let status = status_for(&app, record, &key, Some(runtime), None);
+    let status = status_for_with_local_setup(&app, &key, Some(runtime), None, local_setup);
     emit_status(&app, &status);
     Ok(status)
 }
@@ -458,6 +460,23 @@ fn start_pair(
     expected_updated_at: Option<&str>,
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
+    let personas = load_personas(&app).unwrap_or_default();
+    let global = load_global_agent_config(&app).unwrap_or_default();
+    let readiness_records = load_managed_agents(&app)?;
+    let readiness_record = readiness_records
+        .iter()
+        .find(|record| record.pubkey.eq_ignore_ascii_case(&pubkey))
+        .ok_or_else(|| format!("agent {pubkey} not found"))?;
+    let readiness_updated_at = readiness_record.updated_at.clone();
+    // Authentication readiness may launch a CLI. Resolve it before runtime
+    // locks, then fence the result against the record generation below.
+    let local_setup = local_setup_for(
+        readiness_record,
+        StatusInputs {
+            personas: &personas,
+            global: &global,
+        },
+    );
     let state = app.state::<AppState>();
     let _transition = state
         .managed_agent_runtime_transition
@@ -472,6 +491,9 @@ fn start_pair(
         .map_err(|e| e.to_string())?;
     let mut records = load_managed_agents(&app)?;
     let record = find_managed_agent_mut(&mut records, &pubkey)?;
+    if record.updated_at != readiness_updated_at {
+        return Err("managed agent changed while readiness was in flight".into());
+    }
     if record.backend != BackendKind::Local {
         return Err("managed runtime pairs require a local agent".into());
     }
@@ -487,8 +509,13 @@ fn start_pair(
         .get_mut(&key)
         .is_some_and(|runtime| runtime.child.try_wait().ok().flatten().is_none())
     {
-        let status = status_for(&app, record, &key, runtimes.get(&key), None);
-        return Ok(status);
+        return Ok(status_for_with_local_setup(
+            &app,
+            &key,
+            runtimes.get(&key),
+            None,
+            local_setup,
+        ));
     }
     runtimes.remove(&key);
     terminate_untracked_pair_runtime(&app, &key)?;
@@ -517,7 +544,7 @@ fn start_pair(
     record.last_stopped_at = None;
     record.last_error = None;
     runtimes.insert(key.clone(), ManagedAgentPairRuntime::starting(process));
-    let status = status_for(&app, record, &key, runtimes.get(&key), None);
+    let status = status_for_with_local_setup(&app, &key, runtimes.get(&key), None, local_setup);
     drop(runtimes);
     save_managed_agents(&app, &records)?;
     emit_status(&app, &status);
@@ -530,6 +557,21 @@ pub fn stop_managed_agent_runtime(
     relay_url: String,
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
+    let personas = load_personas(&app).unwrap_or_default();
+    let global = load_global_agent_config(&app).unwrap_or_default();
+    let readiness_records = load_managed_agents(&app)?;
+    let readiness_record = readiness_records
+        .iter()
+        .find(|record| record.pubkey.eq_ignore_ascii_case(&pubkey))
+        .ok_or_else(|| format!("agent {pubkey} not found"))?;
+    let readiness_updated_at = readiness_record.updated_at.clone();
+    let local_setup = local_setup_for(
+        readiness_record,
+        StatusInputs {
+            personas: &personas,
+            global: &global,
+        },
+    );
     let state = app.state::<AppState>();
     let _transition = state
         .managed_agent_runtime_transition
@@ -541,6 +583,9 @@ pub fn stop_managed_agent_runtime(
         .map_err(|e| e.to_string())?;
     let mut records = load_managed_agents(&app)?;
     let record = find_managed_agent_mut(&mut records, &pubkey)?;
+    if record.updated_at != readiness_updated_at {
+        return Err("managed agent changed while readiness was in flight".into());
+    }
     let key = ManagedAgentRuntimeKey::new(pubkey, &relay_url)?;
     let mut runtimes = state
         .managed_agent_processes
@@ -584,7 +629,7 @@ pub fn stop_managed_agent_runtime(
     record.runtime_pid = None;
     record.updated_at = crate::util::now_iso();
     record.last_stopped_at = Some(record.updated_at.clone());
-    let status = status_for(&app, record, &key, None, None);
+    let status = status_for_with_local_setup(&app, &key, None, None, local_setup);
     drop(runtimes);
     save_managed_agents(&app, &records)?;
     emit_status(&app, &status);
