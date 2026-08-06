@@ -1,0 +1,1 @@
+{"ok":false,"error":"provider_config.image \"ghcr.io/block/buzz-sprig:latest\" is not digest-pinned: a tag is a mutable pointer, and this object runs with the agent's private key. Use name@sha256:<64 hex chars>"}

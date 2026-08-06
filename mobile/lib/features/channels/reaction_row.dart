@@ -5,9 +5,11 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
+import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/custom_emoji/custom_emoji_render.dart';
 import '../../shared/emoji/emoji_burst.dart';
 import '../../shared/emoji/emoji_data_provider.dart';
+import '../../shared/emoji/native_emoji_glyph.dart';
 import '../../shared/emoji/positive_emoji.dart';
 import '../profile/user_cache_provider.dart';
 import '../profile/user_profile.dart';
@@ -303,7 +305,7 @@ class _ReactionEmoji extends StatelessWidget {
   Widget build(BuildContext context) {
     final emojiUrl = reaction.emojiUrl;
     if (emojiUrl == null || emojiUrl.isEmpty) {
-      return Text(reaction.emoji, style: TextStyle(fontSize: size));
+      return NativeEmojiGlyph(emoji: reaction.emoji, size: size);
     }
     final shortcode = reaction.emoji.substring(1, reaction.emoji.length - 1);
     return CustomEmojiImage(shortcode: shortcode, url: emojiUrl, size: size);
@@ -315,7 +317,7 @@ void showReactionDetailSheet({
   required List<TimelineReaction> reactions,
   required String initialEmoji,
 }) {
-  showModalBottomSheet<void>(
+  showBuzzModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
     showDragHandle: true,

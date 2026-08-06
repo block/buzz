@@ -110,6 +110,8 @@ export function eventToProjectIssue(
     author: issue.pubkey,
     createdAt: issue.created_at,
     repoAddress: getTag(issue, "a") ?? null,
+    channelId: getTag(issue, "h") ?? null,
+    originAgentName: getTag(issue, "buzz-origin-agent") ?? null,
     labels: getAllTags(issue, "t"),
     recipients: getAllTags(issue, "p"),
     status: statusFromEvent(issue, latestStatus),
@@ -132,6 +134,17 @@ export function projectIssueEventsToIssues(
   return [...issueEvents]
     .map((issue) => eventToProjectIssue(issue, statusEvents, commentEvents))
     .sort((left, right) => right.updatedAt - left.updatedAt);
+}
+
+/** Keep consecutive comments ordered across whole-second Nostr timestamps. */
+export function nextProjectIssueCommentCreatedAt(issue, now, author) {
+  const normalizedAuthor = author.toLowerCase();
+  return Math.max(
+    now,
+    ...issue.comments
+      .filter((comment) => comment.author.toLowerCase() === normalizedAuthor)
+      .map((comment) => comment.createdAt + 1),
+  );
 }
 
 export function buildGitIssueTags({

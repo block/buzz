@@ -276,14 +276,16 @@ function TemplateRow({
   );
 }
 
-function TemplateFormDialog({
+export function TemplateFormDialog({
   template,
   open,
   onOpenChange,
+  onCreated,
 }: {
   template: ChannelTemplate | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  onCreated?: (template: ChannelTemplate) => void;
 }) {
   const isEditing = template !== null;
   const createMutation = useCreateChannelTemplateMutation();
@@ -388,8 +390,9 @@ function TemplateFormDialog({
       };
 
       createMutation.mutate(input, {
-        onSuccess: () => {
+        onSuccess: (created) => {
           toast.success(`Created "${trimmedName}"`);
+          onCreated?.(created);
           onOpenChange(false);
         },
         onError: (error) => {

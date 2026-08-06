@@ -150,11 +150,24 @@ fn reserved_keys_include_respond_to_gate() {
     // Respond-to mode + allowlist control who the agent answers.
     // Overriding via env_vars would let the running agent answer
     // anyone even when the UI/record says owner-only.
-    for key in ["BUZZ_ACP_RESPOND_TO", "BUZZ_ACP_RESPOND_TO_ALLOWLIST"] {
+    for key in [
+        "BUZZ_ACP_RESPOND_TO",
+        "BUZZ_ACP_RESPOND_TO_ALLOWLIST",
+        "BUZZ_ACP_ALLOWED_RESPOND_TO",
+    ] {
         assert!(is_reserved_env_key(key), "{key} should be reserved");
         let agent = map(&[(key, "anyone")]);
         let merged = merged_user_env(&BTreeMap::new(), &agent);
         assert!(merged.is_empty(), "{key} should be stripped");
+    }
+}
+
+#[test]
+fn reserved_keys_include_remote_lifetime_policy() {
+    for key in ["BUZZ_ACP_EXIT_AFTER_INACTIVITY", "BUZZ_ACP_NO_PRESENCE"] {
+        assert!(is_reserved_env_key(key), "{key} should be reserved");
+        let agent = map(&[(key, "0")]);
+        assert!(merged_user_env(&BTreeMap::new(), &agent).is_empty());
     }
 }
 

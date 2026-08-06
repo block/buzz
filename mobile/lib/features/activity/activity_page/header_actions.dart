@@ -11,6 +11,59 @@ const _filterLabels = <InboxFilter, String>{
   InboxFilter.drafts: 'Drafts',
 };
 
+class _ActivityActionsPill extends StatelessWidget {
+  final InboxFilter filter;
+  final int dueReminderCount;
+  final int draftCount;
+  final bool unreadOnly;
+  final int unreadCount;
+  final ValueChanged<InboxFilter> onFilterChanged;
+  final ValueChanged<bool> onUnreadOnlyChanged;
+  final VoidCallback onMarkAllRead;
+
+  const _ActivityActionsPill({
+    required this.filter,
+    required this.dueReminderCount,
+    required this.draftCount,
+    required this.unreadOnly,
+    required this.unreadCount,
+    required this.onFilterChanged,
+    required this.onUnreadOnlyChanged,
+    required this.onMarkAllRead,
+  });
+
+  @override
+  Widget build(BuildContext context) => ClipRRect(
+    borderRadius: BorderRadius.circular(Radii.full),
+    child: DecoratedBox(
+      decoration: BoxDecoration(
+        color: context.colors.primaryContainer,
+        borderRadius: BorderRadius.circular(Radii.full),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: Grid.quarter),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _FilterMenuButton(
+              filter: filter,
+              dueReminderCount: dueReminderCount,
+              draftCount: draftCount,
+              onChanged: onFilterChanged,
+            ),
+            _InboxOptionsButton(
+              unreadOnly: unreadOnly,
+              unreadCount: unreadCount,
+              onUnreadOnlyChanged: onUnreadOnlyChanged,
+              onMarkAllRead: onMarkAllRead,
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
 /// Compact filter dropdown replacing the old chip rail — mirrors desktop's
 /// inbox filter menu (`FILTER_OPTIONS`).
 class _FilterMenuButton extends StatelessWidget {
@@ -39,15 +92,6 @@ class _FilterMenuButton extends StatelessWidget {
             alignment: AnchoredPopoverAlignment.start,
             offset: const Offset(0, Grid.half),
             menuPadding: const EdgeInsets.symmetric(vertical: Grid.half),
-            color: context.colors.surface.withValues(alpha: 0.98),
-            elevation: 8,
-            shadowColor: context.colors.shadow.withValues(alpha: 0.18),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(Radii.card),
-              side: BorderSide(
-                color: context.colors.outlineVariant.withValues(alpha: 0.45),
-              ),
-            ),
             surfaceKey: const ValueKey('activity-filter-popover'),
             items: [
               for (final entry in _filterLabels.entries)
@@ -100,6 +144,7 @@ class _FilterMenuButton extends StatelessWidget {
                 Text(
                   _filterLabels[filter]!,
                   style: context.textTheme.labelLarge?.copyWith(
+                    color: navigationPrimaryForeground(context),
                     fontWeight: FontWeight.w600,
                   ),
                 ),
@@ -107,7 +152,7 @@ class _FilterMenuButton extends StatelessWidget {
                 Icon(
                   LucideIcons.chevronDown,
                   size: 16,
-                  color: context.colors.onSurfaceVariant,
+                  color: navigationPrimaryForeground(context),
                 ),
                 if (dueReminderCount > 0 || draftCount > 0) ...[
                   const SizedBox(width: Grid.quarter),
@@ -142,7 +187,7 @@ class _CountBadge extends StatelessWidget {
         vertical: Grid.quarter,
       ),
       decoration: BoxDecoration(
-        color: context.colors.primary,
+        color: navigationPrimaryForeground(context),
         borderRadius: BorderRadius.circular(Grid.xxs),
       ),
       child: Text(
@@ -177,19 +222,18 @@ class _InboxOptionsButton extends StatelessWidget {
       builder: (buttonContext) => IconButton(
         key: const ValueKey('activity-options-menu'),
         tooltip: 'Activity options',
+        color: navigationPrimaryForeground(context),
+        padding: const EdgeInsets.symmetric(horizontal: Grid.xxs),
+        constraints: const BoxConstraints.tightFor(
+          width: Grid.xl,
+          height: Grid.xl,
+        ),
         icon: const Icon(LucideIcons.ellipsis, size: 20),
         onPressed: () async {
           final selected = await showAnchoredPopover<String>(
             context: buttonContext,
             width: 216,
             alignment: AnchoredPopoverAlignment.end,
-            color: context.colors.surface,
-            elevation: 4,
-            shadowColor: context.colors.shadow.withValues(alpha: 0.18),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(Radii.md),
-              side: BorderSide(color: context.colors.outline),
-            ),
             surfaceKey: const ValueKey('activity-options-popover'),
             items: [
               PopupMenuItem(

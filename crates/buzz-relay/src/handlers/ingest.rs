@@ -49,6 +49,55 @@ use crate::conformance::{
     state_for_request, EmitGuard, TraceAction, Verdict,
 };
 
+fn validate_custom_emoji_tags(event: &Event) -> Result<(), IngestError> {
+    for tag in event.tags.iter() {
+        let parts = tag.as_slice();
+        if parts.first().map(String::as_str) != Some("emoji") {
+            continue;
+        }
+        let shortcode = parts.get(1).ok_or_else(|| {
+            IngestError::Rejected("invalid: emoji tag must include a shortcode".into())
+        })?;
+        buzz_sdk::normalize_custom_emoji_shortcode(shortcode)
+            .map_err(|err| IngestError::Rejected(format!("invalid: {err}")))?;
+    }
+    Ok(())
+}
+
+fn validate_reaction_emoji(event: &Event, emoji: &str) -> Result<(), IngestError> {
+    let emoji_char_count = emoji.chars().count();
+    if emoji_char_count <= 64 {
+        return Ok(());
+    }
+
+    let Some(shortcode) = emoji
+        .strip_prefix(':')
+        .and_then(|value| value.strip_suffix(':'))
+    else {
+        return Err(IngestError::Rejected(format!(
+            "invalid: reaction emoji exceeds 64 characters (got {emoji_char_count})"
+        )));
+    };
+    let normalized = buzz_sdk::normalize_custom_emoji_shortcode(shortcode)
+        .map_err(|err| IngestError::Rejected(format!("invalid: {err}")))?;
+    if shortcode != normalized {
+        return Err(IngestError::Rejected(
+            "invalid: long custom emoji reaction shortcode must be canonical lowercase".into(),
+        ));
+    }
+    let has_matching_tag = event.tags.iter().any(|tag| {
+        let parts = tag.as_slice();
+        parts.first().map(String::as_str) == Some("emoji")
+            && parts.get(1).is_some_and(|value| value == shortcode)
+    });
+    if !has_matching_tag || emoji_char_count > buzz_sdk::MAX_CUSTOM_EMOJI_REACTION_LEN {
+        return Err(IngestError::Rejected(format!(
+            "invalid: reaction emoji exceeds 64 characters (got {emoji_char_count})"
+        )));
+    }
+    Ok(())
+}
+
 /// How the HTTP caller authenticated (for [`IngestAuth::Http`]).
 #[derive(Debug, Clone)]
 pub enum HttpAuthMethod {
@@ -2634,6 +2683,10 @@ async fn ingest_event_inner(
         ));
     }
 
+    if kind_u32 == KIND_EMOJI_SET || kind_u32 == KIND_EMOJI_LIST {
+        validate_custom_emoji_tags(&event)?;
+    }
+
     // Resolve the target reference, then use one DB transaction to upsert the
     // reaction row (dedup via ON CONFLICT) with reaction_event_id already set and
     // store the kind:7 event. This replaces the post-storage side-effect handler.
@@ -2672,17 +2725,7 @@ async fn ingest_event_inner(
             &event.content
         };
 
-        // Mirror the SDK's 64-character emoji limit server-side so raw clients
-        // cannot bypass it. Uses chars().count() (not byte len) to match the
-        // SDK's check_emoji_len, which also counts Unicode characters.
-        const MAX_REACTION_EMOJI_CHARS: usize = 64;
-        let emoji_char_count = emoji.chars().count();
-        if emoji_char_count > MAX_REACTION_EMOJI_CHARS {
-            return Err(IngestError::Rejected(format!(
-                "invalid: reaction emoji exceeds {} characters (got {})",
-                MAX_REACTION_EMOJI_CHARS, emoji_char_count
-            )));
-        }
+        validate_reaction_emoji(&event, emoji)?;
 
         // Atomically upsert the reaction row with this kind:7 event id, then store
         // the event in the same transaction. Ordering is load-bearing: active
@@ -2915,6 +2958,84 @@ mod tests {
         KIND_STREAM_MESSAGE_DIFF, KIND_TEAM, KIND_USER_STATUS,
     };
     use nostr::{EventBuilder, Kind};
+
+    #[test]
+    fn reaction_validation_accepts_wrapped_max_shortcode() {
+        let shortcode = "a".repeat(buzz_sdk::MAX_CUSTOM_EMOJI_SHORTCODE_LEN);
+        let event = EventBuilder::new(Kind::Custom(KIND_REACTION as u16), format!(":{shortcode}:"))
+            .tags([
+                nostr::Tag::parse(["emoji", &shortcode, "https://example.com/max.png"])
+                    .expect("emoji tag"),
+            ])
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign reaction");
+
+        assert!(validate_reaction_emoji(&event, &event.content).is_ok());
+    }
+
+    #[test]
+    fn reaction_validation_rejects_mixed_case_max_shortcode() {
+        let shortcode = "Ab".repeat(buzz_sdk::MAX_CUSTOM_EMOJI_SHORTCODE_LEN / 2);
+        let event = EventBuilder::new(Kind::Custom(KIND_REACTION as u16), format!(":{shortcode}:"))
+            .tags([
+                nostr::Tag::parse(["emoji", &shortcode, "https://example.com/max.png"])
+                    .expect("emoji tag"),
+            ])
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign reaction");
+
+        assert!(matches!(
+            validate_reaction_emoji(&event, &event.content),
+            Err(IngestError::Rejected(_))
+        ));
+    }
+
+    #[test]
+    fn reaction_validation_rejects_case_mismatched_tag() {
+        let shortcode = "a".repeat(buzz_sdk::MAX_CUSTOM_EMOJI_SHORTCODE_LEN);
+        let uppercase_shortcode = shortcode.to_uppercase();
+        let event = EventBuilder::new(Kind::Custom(KIND_REACTION as u16), format!(":{shortcode}:"))
+            .tags([nostr::Tag::parse([
+                "emoji",
+                &uppercase_shortcode,
+                "https://example.com/max.png",
+            ])
+            .expect("emoji tag")])
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign reaction");
+
+        assert!(matches!(
+            validate_reaction_emoji(&event, &event.content),
+            Err(IngestError::Rejected(_))
+        ));
+    }
+
+    #[test]
+    fn emoji_set_validation_enforces_shortcode_boundary() {
+        let max_shortcode = "a".repeat(buzz_sdk::MAX_CUSTOM_EMOJI_SHORTCODE_LEN);
+        let valid_event = EventBuilder::new(Kind::Custom(KIND_EMOJI_SET as u16), "")
+            .tags([
+                nostr::Tag::parse(["emoji", &max_shortcode, "https://example.com/max.png"])
+                    .expect("emoji tag"),
+            ])
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign valid emoji set");
+        assert!(validate_custom_emoji_tags(&valid_event).is_ok());
+
+        let shortcode = "a".repeat(buzz_sdk::MAX_CUSTOM_EMOJI_SHORTCODE_LEN + 1);
+        let event = EventBuilder::new(Kind::Custom(KIND_EMOJI_SET as u16), "")
+            .tags([
+                nostr::Tag::parse(["emoji", &shortcode, "https://example.com/long.png"])
+                    .expect("emoji tag"),
+            ])
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign emoji set");
+
+        assert!(matches!(
+            validate_custom_emoji_tags(&event),
+            Err(IngestError::Rejected(message)) if message.contains("exceeds 64 bytes")
+        ));
+    }
 
     /// A banned relay admin must be refused with the same wire prefix and
     /// transport status as every other durable-restriction refusal:
@@ -3214,6 +3335,18 @@ mod tests {
                 "kind {kind} is both global-only and channel-scoped"
             );
         }
+    }
+
+    #[test]
+    fn private_managed_agent_kind_remains_rejected_until_atomic_ingest_exists() {
+        assert!(
+            required_scope_for_kind(
+                buzz_core::kind::KIND_PRIVATE_MANAGED_AGENT,
+                &make_dummy_event(),
+            )
+            .is_err(),
+            "kind 30179 must not enter generic EVENT ingest before privacy and aggregate CAS deploy"
+        );
     }
 
     #[test]
