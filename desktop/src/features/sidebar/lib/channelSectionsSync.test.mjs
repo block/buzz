@@ -192,7 +192,13 @@ test("revert-fix: absent fetch with zero watermark seeds via bootstrap (first-sy
 test("revert-fix: sections LWW — newer decryptable pre-publish event selected after undecryptable head recorded", async () => {
   // Boot fetch: undecryptable event, created_at=100 → head recorded to 100.
   // Pre-publish fetch: decryptable event, created_at=200 → should win (200 > 100).
+  // Mutation: if headBeforeFetch is dropped and this.lastRemoteCreatedAt used instead,
+  // the comparison becomes 200 > 200 = false → local wins instead of remote → wrong content encrypted.
+  const REMOTE_SECTION_ID = "remote-section-from-relay";
+  const LOCAL_SECTION_ID = "local-section-from-app";
+  let capturedEncryptPlaintext = null;
   let callCount = 0;
+
   mock.method(relayClient, "fetchEvents", () => {
     callCount++;
     return Promise.resolve([
@@ -206,23 +212,71 @@ test("revert-fix: sections LWW — newer decryptable pre-publish event selected 
   });
   mock.method(relayClient, "publishEvent", () => Promise.resolve());
 
-  // The key invariant: after seeing event@100, a pre-publish event@200 must
-  // still be accepted. Breaks if the watermark advance happened before the
-  // comparison (200 > 200 → false instead of 200 > 100 → true).
   const fw = makeFakeWindow();
   const restore = installFakeWindow(fw);
+
+  // Intercept Tauri invokes so decryptAndParse, nip44EncryptToSelf, and signRelayEvent work in Node.
+  const origTauri = globalThis.window?.__TAURI_INTERNALS__;
+  if (typeof globalThis.window === "undefined") globalThis.window = {};
+  globalThis.window.__TAURI_INTERNALS__ = {
+    invoke: (cmd, args) => {
+      if (cmd === "nip44_decrypt_from_self") {
+        // "bad-cipher" fails; "good-cipher" returns a valid sections payload.
+        if (args?.ciphertext === "bad-cipher") return Promise.reject(new Error("decrypt failed"));
+        const remotePayload = JSON.stringify({
+          version: 1,
+          sections: [{ id: REMOTE_SECTION_ID, name: "Remote", order: 0 }],
+          assignments: {},
+        });
+        return Promise.resolve(remotePayload);
+      }
+      if (cmd === "nip44_encrypt_to_self") {
+        capturedEncryptPlaintext = args?.plaintext ?? null;
+        return Promise.resolve("encrypted-ciphertext");
+      }
+      if (cmd === "sign_event") {
+        return Promise.resolve(JSON.stringify({
+          id: "signed-event-id",
+          pubkey: "pk-lww",
+          content: "encrypted-ciphertext",
+          created_at: args?.createdAt ?? 999,
+          kind: args?.kind ?? 0,
+          tags: args?.tags ?? [],
+          sig: "fake-sig",
+        }));
+      }
+      return Promise.reject(new Error(`unmocked tauri: ${cmd}`));
+    },
+  };
+
   try {
-    const managerA = new ChannelSectionSyncManager("pk-lww", RELAY);
-    await managerA.fetchRemoteSections();
-    assert.ok(managerA.getPersistedWatermark() >= 100, "head must be recorded from boot event");
-    managerA.publishSections(makeSectionsStore([{ id: "s1", name: "A", order: 0 }]));
+    const manager = new ChannelSectionSyncManager("pk-lww", RELAY);
+    // Boot fetch: sees event@100 (bad-cipher), records head to 100. Remote = null.
+    await manager.fetchRemoteSections();
+    assert.ok(manager.getPersistedWatermark() >= 100, "head must be recorded from boot event");
+
+    // Queue a publish with local sections — triggers doPublish → fetchOwnBlobBeforePublish (callCount=2).
+    const localStore = makeSectionsStore([{ id: LOCAL_SECTION_ID, name: "Local", order: 0 }]);
+    manager.publishSections(localStore);
     fw._fireTimer();
-    await new Promise((r) => setTimeout(r, 10));
+    await new Promise((r) => setTimeout(r, 20));
+
+    // If headBeforeFetch is correctly snapshotted: remote.createdAt(200) > headBeforeFetch(100) → true
+    //   → fetchOwnBlobBeforePublish returns remote.store → nip44_encrypt_to_self gets remote sections.
+    // If NOT snapshotted (mutation): 200 > this.lastRemoteCreatedAt(200) → false
+    //   → returns local store → nip44_encrypt_to_self gets local sections.
+    assert.ok(capturedEncryptPlaintext !== null, "nip44EncryptToSelf must have been called");
+    const encrypted = JSON.parse(capturedEncryptPlaintext);
     assert.ok(
-      managerA.getPersistedWatermark() >= 200,
-      "pre-publish event created_at=200 must advance the watermark (LWW comparison uses headBeforeFetch not current head)",
+      Array.isArray(encrypted.sections) && encrypted.sections.some((s) => s.id === REMOTE_SECTION_ID),
+      `remote sections must win LWW merge — got: ${capturedEncryptPlaintext}`,
     );
   } finally {
+    if (origTauri !== undefined) {
+      globalThis.window.__TAURI_INTERNALS__ = origTauri;
+    } else {
+      delete globalThis.window.__TAURI_INTERNALS__;
+    }
     restore();
     mock.reset();
   }
