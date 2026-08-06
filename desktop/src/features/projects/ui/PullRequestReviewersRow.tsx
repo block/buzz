@@ -3,7 +3,10 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
-import type { Project, ProjectPullRequest } from "@/features/projects/hooks";
+import type {
+  ProjectPullRequest,
+  Repository as Project,
+} from "@/features/projects/hooks";
 import { useRequestProjectPullRequestReviewMutation } from "@/features/projects/pullRequestReviews";
 import { useUserSearchQuery } from "@/features/profile/hooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";

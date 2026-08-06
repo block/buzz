@@ -17,6 +17,7 @@ import {
   saveCommunities,
 } from "./communityStorage";
 import { removeSelfProfileCachesForRelay } from "@/features/profile/lib/selfProfileStorage";
+import { removeUserLabelCacheForRelay } from "@/features/profile/lib/userLabelStorage";
 import { removeChannelSnapshotForRelay } from "@/features/channels/channelSnapshot";
 import { removeMessageSnapshotsForRelay } from "@/features/messages/lib/messageSnapshot";
 import { clearSavedCommunitySnapshot } from "@/features/agents/activeAgentTurnsStore";
@@ -112,6 +113,23 @@ export function applyCommunitiesOrder(
   return reordered;
 }
 
+export type CommunityRemovalResult = {
+  communities: Community[];
+  activeId: string | null;
+};
+
+export function resolveCommunityRemoval(
+  communities: Community[],
+  activeId: string | null,
+  id: string,
+): CommunityRemovalResult {
+  const next = communities.filter((community) => community.id !== id);
+  return {
+    communities: next,
+    activeId: activeId === id ? (next[0]?.id ?? null) : activeId,
+  };
+}
+
 export type UseCommunitiesReturn = {
   communities: Community[];
   activeCommunity: Community | null;
@@ -205,39 +223,39 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
 
   const removeCommunity = useCallback(
     (id: string) => {
-      // GC self-profile caches for the removed community's relay. Mirror the
-      // updater guard (length > 1) so we only GC when removal will actually
-      // proceed. Runs outside the updater — updaters can execute twice under
+      const removed = communitiesRef.current.find(
+        (community) => community.id === id,
+      );
+      if (!removed) return;
+
+      // Relay membership is revoked by the caller before this local cleanup.
+      // Keep side effects outside the updater — updaters can execute twice under
       // React StrictMode.
-      if (communities.length > 1) {
-        const removed = communities.find((w) => w.id === id);
-        if (removed) {
-          removeSelfProfileCachesForRelay(removed.relayUrl);
-          removeChannelSnapshotForRelay(removed.relayUrl);
-          removeMessageSnapshotsForRelay(removed.relayUrl);
-          clearSavedCommunitySnapshot(id);
-          removeCommunityDestination(id);
-        }
-      }
+      removeSelfProfileCachesForRelay(removed.relayUrl);
+      removeUserLabelCacheForRelay(removed.relayUrl);
+      removeChannelSnapshotForRelay(removed.relayUrl);
+      removeMessageSnapshotsForRelay(removed.relayUrl);
+      clearSavedCommunitySnapshot(id);
+      removeCommunityDestination(id);
 
       setCommunitiesState((prev) => {
-        // Never allow removing the last community
-        if (prev.length <= 1) {
-          return prev;
-        }
-        const next = prev.filter((w) => w.id !== id);
-        saveCommunities(next);
+        const result = resolveCommunityRemoval(prev, activeId, id);
+        if (result.communities.length === 0) {
+          clearCommunityStorage();
+          setActiveId(null);
+        } else {
+          saveCommunities(result.communities);
 
-        // If removing the active community, switch to first remaining
-        if (activeId === id && next.length > 0) {
-          saveActiveCommunityId(next[0].id);
-          setActiveId(next[0].id);
+          if (result.activeId !== activeId && result.activeId) {
+            saveActiveCommunityId(result.activeId);
+            setActiveId(result.activeId);
+          }
         }
 
-        return next;
+        return result.communities;
       });
     },
-    [activeId, communities],
+    [activeId],
   );
 
   const switchCommunity = useCallback(

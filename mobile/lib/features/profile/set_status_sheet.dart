@@ -9,6 +9,7 @@ import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/custom_emoji/custom_emoji_render.dart';
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/modal_presentation.dart';
 import '../channels/emoji_picker.dart';
 import 'user_status.dart';
 import 'user_status_provider.dart';
@@ -21,7 +22,7 @@ const _emojiGlyphSize = 32.0;
 const _saveButtonHeight = 52.0;
 
 void showSetStatusSheet(BuildContext context, {UserStatus? currentStatus}) {
-  showModalBottomSheet<void>(
+  showBuzzModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
     showDragHandle: true,

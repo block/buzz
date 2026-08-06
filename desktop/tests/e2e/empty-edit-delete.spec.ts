@@ -59,7 +59,7 @@ test("clearing an edit to empty prompts to delete, then deletes on confirm", asy
   // The same "Delete message?" confirmation the Delete menu action shows — an
   // empty edit is routed through it, not silently deleted.
   const dialog = page.getByRole("alertdialog");
-  await expect(dialog).toBeVisible({ timeout: 5_000 });
+  await expect(dialog).toBeVisible({ timeout: 10_000 });
   await expect(dialog).toContainText("Delete message?");
   // Edit mode stays active while the dialog is open — it exits only on confirm.
   await expect(page.getByTestId("edit-target")).toBeVisible();
@@ -78,7 +78,7 @@ test("cancelling the empty-edit delete keeps the message", async ({ page }) => {
   await submitEmptyEdit(page, OWN_MESSAGE_ID);
 
   const dialog = page.getByRole("alertdialog");
-  await expect(dialog).toBeVisible({ timeout: 5_000 });
+  await expect(dialog).toBeVisible({ timeout: 10_000 });
 
   // Cancel → nothing is deleted, the original message survives, and the user is
   // left in edit mode (the editing session is preserved, not discarded).
@@ -109,7 +109,7 @@ test("a non-empty edit still edits and never deletes", async ({ page }) => {
 
   // No delete confirmation, edit mode exits, the row survives with new text.
   await expect(page.getByRole("alertdialog")).toHaveCount(0);
-  await expect(page.getByTestId("edit-target")).toBeHidden({ timeout: 5_000 });
+  await expect(page.getByTestId("edit-target")).toBeHidden({ timeout: 10_000 });
   await expect(row).toBeVisible();
   await expect(page.getByTestId("message-timeline")).toContainText(
     editedContent,

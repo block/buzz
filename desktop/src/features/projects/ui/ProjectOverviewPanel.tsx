@@ -9,11 +9,11 @@ import type * as React from "react";
 
 import { cn } from "@/shared/lib/cn";
 import type {
-  Project,
   ProjectPullRequest,
   ProjectRepoContributor,
   ProjectRepoFile,
   ProjectRepoSnapshot,
+  Repository as Project,
 } from "@/features/projects/hooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import {
@@ -21,6 +21,7 @@ import {
   languageForPath,
   topLanguagesFromCounts,
 } from "@/features/projects/lib/projectLanguages";
+import type { ProjectRepoUnavailableReason } from "@/features/projects/lib/projectRepoAvailability";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { PROJECT_DETAIL_PANEL_CLASS } from "./projectPanelStyles";
@@ -29,7 +30,10 @@ import type { RepoSourceHeaderControls } from "./ProjectRepositorySource";
 
 type ProjectOverviewPanelProps = {
   contributors: ProjectRepoContributor[];
+  externalHost?: string;
+  externalUrl?: string | null;
   files: ProjectRepoFile[];
+  gitDataState: GitDataState;
   project: Project;
   onViewContributors: () => void;
   profiles?: UserProfileLookup;
@@ -38,11 +42,10 @@ type ProjectOverviewPanelProps = {
   snapshot: ProjectRepoSnapshot | null | undefined;
   /** Branch picker + remote/local toggle for the readme header. */
   sourceControls?: RepoSourceHeaderControls;
+  unavailableReason?: ProjectRepoUnavailableReason;
 };
 
-function shortHash(hash: string | undefined) {
-  return hash ? hash.slice(0, 7) : "None";
-}
+export type GitDataState = "checking" | "available" | "empty" | "unavailable";
 
 function topLanguages(files: ProjectRepoFile[]) {
   const counts: Record<string, number> = {};
@@ -139,7 +142,10 @@ export function OverviewRailSection({
 
 export function ProjectOverviewPanel({
   contributors,
+  externalHost,
+  externalUrl,
   files,
+  gitDataState,
   onViewContributors,
   project,
   profiles,
@@ -147,91 +153,115 @@ export function ProjectOverviewPanel({
   readmeFile,
   snapshot,
   sourceControls,
+  unavailableReason,
 }: ProjectOverviewPanelProps) {
   const languages = topLanguages(files);
   const people = projectPeople(project);
   const latestCommit = snapshot?.latestCommit ?? null;
+  const gitDataAvailable = gitDataState === "available";
+  const unavailableSplash = gitDataState === "unavailable";
 
   return (
     <div
-      className={`grid xl:grid-cols-[minmax(0,1fr)_18rem] ${PROJECT_DETAIL_PANEL_CLASS}`}
+      className={cn(
+        "grid",
+        PROJECT_DETAIL_PANEL_CLASS,
+        !unavailableSplash && "xl:grid-cols-[minmax(0,1fr)_18rem]",
+      )}
       data-project-detail-panel
     >
       <div className="min-w-0">
         {/* ReadmePanel renders its own "no README" fallback while keeping
             the branch + source controls reachable. */}
-        <ReadmePanel file={readmeFile} sourceControls={sourceControls} />
+        <ReadmePanel
+          externalHost={externalHost}
+          externalUrl={externalUrl}
+          file={readmeFile}
+          gitDataState={gitDataState}
+          sourceControls={sourceControls}
+          unavailableReason={unavailableReason}
+        />
       </div>
-      <aside className="space-y-6 border-t border-border/60 p-4 xl:border-l xl:border-t-0">
-        <OverviewRailSection title="People">
-          <div className="flex items-center justify-between gap-3">
-            <PeopleAvatars people={people} profiles={profiles} />
-            <button
-              className="shrink-0 rounded-md text-xs font-medium text-primary hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-              onClick={onViewContributors}
-              type="button"
-            >
-              View all
-            </button>
-          </div>
-        </OverviewRailSection>
-        <OverviewRailSection title="Top Languages">
-          {languages.length > 0 ? (
-            <LanguageChips languages={languages} />
-          ) : (
-            <p className="text-sm text-muted-foreground">
-              No language data is available yet.
-            </p>
-          )}
-        </OverviewRailSection>
-        <OverviewRailSection title="Repository">
-          <dl className="space-y-2 text-sm">
+      {!unavailableSplash ? (
+        <aside className="space-y-6 border-t border-border/60 p-4 xl:border-l xl:border-t-0">
+          <OverviewRailSection title="People">
             <div className="flex items-center justify-between gap-3">
-              <dt className="flex items-center gap-1.5 text-muted-foreground">
-                <GitBranch className="h-3.5 w-3.5" />
-                Branch
-              </dt>
-              <dd className="font-medium text-foreground">
-                {project.defaultBranch}
-              </dd>
+              <PeopleAvatars people={people} profiles={profiles} />
+              <button
+                className="shrink-0 rounded-md text-xs font-medium text-primary hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                onClick={onViewContributors}
+                type="button"
+              >
+                View all
+              </button>
             </div>
-            <div className="flex items-center justify-between gap-3">
-              <dt className="flex items-center gap-1.5 text-muted-foreground">
-                <GitCommitHorizontal className="h-3.5 w-3.5" />
-                Latest
-              </dt>
-              <dd className="font-mono text-xs text-foreground">
-                {shortHash(latestCommit?.hash)}
-              </dd>
-            </div>
-            <div className="flex items-center justify-between gap-3">
-              <dt className="flex items-center gap-1.5 text-muted-foreground">
-                <FileCode2 className="h-3.5 w-3.5" />
-                Files
-              </dt>
-              <dd className="font-medium text-foreground">{files.length}</dd>
-            </div>
-            <div className="flex items-center justify-between gap-3">
-              <dt className="flex items-center gap-1.5 text-muted-foreground">
-                <Users className="h-3.5 w-3.5" />
-                Contributors
-              </dt>
-              <dd className="font-medium text-foreground">
-                {contributors.length}
-              </dd>
-            </div>
-            <div className="flex items-center justify-between gap-3">
-              <dt className="flex items-center gap-1.5 text-muted-foreground">
-                <GitPullRequest className="h-3.5 w-3.5" />
-                Pull Requests
-              </dt>
-              <dd className="font-medium text-foreground">
-                {pullRequests.length}
-              </dd>
-            </div>
-          </dl>
-        </OverviewRailSection>
-      </aside>
+          </OverviewRailSection>
+          <OverviewRailSection title="Top Languages">
+            {languages.length > 0 ? (
+              <LanguageChips languages={languages} />
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                No language data is available yet.
+              </p>
+            )}
+          </OverviewRailSection>
+          <OverviewRailSection title="Buzz Activity">
+            <dl className="space-y-2 text-sm">
+              <div className="flex items-center justify-between gap-3">
+                <dt className="flex items-center gap-1.5 text-muted-foreground">
+                  <GitPullRequest className="h-3.5 w-3.5" />
+                  Pull Requests
+                </dt>
+                <dd className="font-medium text-foreground">
+                  {pullRequests.length}
+                </dd>
+              </div>
+            </dl>
+          </OverviewRailSection>
+          <OverviewRailSection title="Git">
+            <dl className="space-y-2 text-sm">
+              <div className="flex items-center justify-between gap-3">
+                <dt className="flex items-center gap-1.5 text-muted-foreground">
+                  <GitBranch className="h-3.5 w-3.5" />
+                  Branch
+                </dt>
+                <dd className="font-medium text-foreground">
+                  {project.defaultBranch}
+                </dd>
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <dt className="flex items-center gap-1.5 text-muted-foreground">
+                  <GitCommitHorizontal className="h-3.5 w-3.5" />
+                  Latest
+                </dt>
+                <dd className="font-mono text-xs text-foreground">
+                  {gitDataAvailable && latestCommit
+                    ? latestCommit.hash.slice(0, 7)
+                    : "—"}
+                </dd>
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <dt className="flex items-center gap-1.5 text-muted-foreground">
+                  <FileCode2 className="h-3.5 w-3.5" />
+                  Files
+                </dt>
+                <dd className="font-medium text-foreground">
+                  {gitDataAvailable ? files.length : "—"}
+                </dd>
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <dt className="flex items-center gap-1.5 text-muted-foreground">
+                  <Users className="h-3.5 w-3.5" />
+                  Contributors
+                </dt>
+                <dd className="font-medium text-foreground">
+                  {gitDataAvailable ? contributors.length : "—"}
+                </dd>
+              </div>
+            </dl>
+          </OverviewRailSection>
+        </aside>
+      ) : null}
     </div>
   );
 }
