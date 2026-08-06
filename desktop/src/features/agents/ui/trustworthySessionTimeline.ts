@@ -397,7 +397,7 @@ export function buildTrustworthySessionTimeline(
 
 export function explainSession(
   observerEvents: readonly ObserverEvent[],
-  findings: readonly NumbatFinding[],
+  findings: readonly CausalFinding[],
 ): SessionExplanation | null {
   const scopedEvents = latestTurnEvents(observerEvents);
   const scopedTurnId = scopedEvents.find((event) => event.turnId)?.turnId;

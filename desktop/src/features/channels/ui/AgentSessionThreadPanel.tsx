@@ -132,7 +132,7 @@ export function AgentSessionThreadPanel({
   );
   const activeSessionId = React.useMemo(
     () =>
-      combinedHeaderEvents.findLast((event) => Boolean(event.sessionId))
+      [...combinedHeaderEvents].reverse().find((event) => event.sessionId)
         ?.sessionId ?? null,
     [combinedHeaderEvents],
   );
@@ -500,10 +500,7 @@ export function AgentSessionThreadPanel({
       >
         <div ref={topSentinelRef} aria-hidden className="h-px" />
         <div ref={contentRef}>
-          <CausalSessionTimeline
-            events={combinedHeaderEvents}
-            findings={[]}
-          />
+          <CausalSessionTimeline events={combinedHeaderEvents} findings={[]} />
           <CausalCandidateCard
             agentPubkey={agent.pubkey}
             channelId={sessionChannelId}
