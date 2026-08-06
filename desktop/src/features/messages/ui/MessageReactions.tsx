@@ -20,7 +20,8 @@ const REACTION_PILL_BASE_CLASSES =
   "inline-flex h-7 items-center rounded-full border text-xs font-medium leading-none transition-colors";
 const REACTION_CUSTOM_GLYPH_CLASSES = "h-3.5 w-3.5";
 const REACTION_NATIVE_GLYPH_CLASSES = "h-3 w-3 text-xs";
-const REACTION_TEXT_GLYPH_CLASSES = "max-w-32 shrink-0 truncate text-xs";
+const REACTION_TEXT_GLYPH_CLASSES =
+  "max-w-32 shrink-0 justify-start truncate text-left text-xs";
 const REACTION_COUNT_CLASSES = "text-muted-foreground";
 const REACTION_NATIVE_COUNT_CLASSES =
   "text-muted-foreground translate-y-[0.5px]";

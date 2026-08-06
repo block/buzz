@@ -245,6 +245,7 @@ test("literal fallback reactions do not overlap their counts", async ({
   const longGlyph = longPill.locator("span[title]");
   await expectFallbackPill(page, LONG_LITERAL_REACTION, LONG_LITERAL_REACTION);
   await expect(longGlyph).toHaveCSS("max-width", "128px");
+  await expect(longGlyph).toHaveCSS("text-align", "left");
   await expect
     .poll(() =>
       longGlyph.evaluate(
