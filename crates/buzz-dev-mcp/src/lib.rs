@@ -2,7 +2,7 @@
 #![cfg_attr(windows, deny(unsafe_code))]
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{CallToolResult, ServerCapabilities, ServerInfo},
+    model::{CallToolResult, Content, ServerCapabilities, ServerInfo},
     tool, tool_handler, tool_router,
     transport::stdio,
     ErrorData, ServerHandler, ServiceExt,
@@ -10,6 +10,7 @@ use rmcp::{
 use std::path::Path;
 use std::sync::Arc;
 
+mod http_endpoints;
 mod paths;
 mod read_file;
 mod rg;
@@ -24,16 +25,47 @@ mod view_image;
 struct DevMcp {
     state: Arc<shell::SharedState>,
     todos: Arc<todo::TodoState>,
+    /// Operator-configured read-only HTTP endpoints (`http_get`); None when
+    /// BUZZ_DEV_MCP_HTTP_MANIFEST is unset or failed to load.
+    http: Option<Arc<http_endpoints::Manifest>>,
+    /// Full server instructions: workspace bootstrap plus, when configured,
+    /// the http_get endpoint catalogue (built at startup — tool descriptions
+    /// are static macro literals, instructions are not).
+    instructions: String,
     tool_router: ToolRouter<DevMcp>,
 }
 
 #[tool_router]
 impl DevMcp {
-    fn new(state: Arc<shell::SharedState>) -> Self {
+    fn new(
+        state: Arc<shell::SharedState>,
+        http: Option<Arc<http_endpoints::Manifest>>,
+        instructions: String,
+    ) -> Self {
         Self {
             state,
             todos: Arc::new(todo::TodoState::new()),
+            http,
+            instructions,
             tool_router: Self::tool_router(),
+        }
+    }
+
+    #[tool(
+        name = "http_get",
+        description = "Fetch one of the operator-configured read-only HTTP endpoints (GET only). The available endpoint names, their path_params and query params are listed in the server instructions under 'http_get endpoints'. Unavailable unless the operator set BUZZ_DEV_MCP_HTTP_MANIFEST."
+    )]
+    async fn http_get(
+        &self,
+        Parameters(p): Parameters<http_endpoints::HttpGetParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match &self.http {
+            Some(manifest) => http_endpoints::run(manifest, p).await,
+            None => Ok(CallToolResult::error(vec![Content::text(
+                "http_get is not configured on this server (BUZZ_DEV_MCP_HTTP_MANIFEST unset \
+                 or failed to load — see server instructions)"
+                    .to_string(),
+            )])),
         }
     }
 
@@ -131,7 +163,7 @@ impl ServerHandler for DevMcp {
                 "buzz-dev-mcp",
                 env!("CARGO_PKG_VERSION"),
             ))
-            .with_instructions(self.state.bootstrap_instructions.clone())
+            .with_instructions(self.instructions.clone())
     }
 }
 
@@ -180,7 +212,30 @@ async fn async_main(cmd: String) -> Result<(), Box<dyn std::error::Error>> {
     let shim = shim::Shim::install()?;
     let state = Arc::new(shell::SharedState::new(cwd, shim)?);
 
-    let service = DevMcp::new(state).serve(stdio()).await?;
+    // Operator-configured read-only HTTP endpoints. A manifest that is SET
+    // but broken must be loud: silently dropping it would be indistinguishable
+    // from "never configured", so the failure is put where the agent (and any
+    // human reading its transcript) will see it — the instructions.
+    let mut instructions = state.bootstrap_instructions.clone();
+    let http = match http_endpoints::load_from_env() {
+        Ok(Some(manifest)) => {
+            instructions.push_str(&http_endpoints::instructions_section(&manifest));
+            Some(Arc::new(manifest))
+        }
+        Ok(None) => None,
+        Err(e) => {
+            tracing::error!("http_get manifest failed to load: {e}");
+            instructions.push_str(&format!(
+                "\n\n## http_get endpoints\nCONFIGURED BUT FAILED TO LOAD: {e} — \
+                 http_get is disabled; tell the operator.\n"
+            ));
+            None
+        }
+    };
+
+    let service = DevMcp::new(state, http, instructions)
+        .serve(stdio())
+        .await?;
     service.waiting().await?;
     Ok(())
 }
