@@ -13,14 +13,12 @@ type Props = {
   agentPubkey: string;
   channelId: string;
   sessionId: string;
-  refreshKey?: number;
 };
 
 export function ShepherdEvidencePanel({
   agentPubkey,
   channelId,
   sessionId,
-  refreshKey = 0,
 }: Props) {
   const [records, setRecords] = React.useState<StoredShepherdEvidence[]>([]);
 
@@ -32,7 +30,7 @@ export function ShepherdEvidencePanel({
     return () => {
       active = false;
     };
-  }, [agentPubkey, channelId, sessionId, refreshKey]);
+  }, [agentPubkey, channelId, sessionId]);
 
   if (records.length === 0) return null;
 
@@ -60,9 +58,7 @@ export function ShepherdEvidencePanel({
       toast.success(result.message || `Shepherd run ${action} completed.`);
     } catch (error) {
       toast.error(
-        error instanceof Error
-          ? error.message
-          : `Shepherd ${action} failed.`,
+        error instanceof Error ? error.message : `Shepherd ${action} failed.`,
       );
     }
   }
@@ -81,7 +77,10 @@ export function ShepherdEvidencePanel({
       </p>
       {records.map((record) => (
         <div className="mt-3 border-t pt-3" key={record.sourceRunRef}>
-          <p className="truncate text-xs font-medium" title={record.sourceRunRef}>
+          <p
+            className="truncate text-xs font-medium"
+            title={record.sourceRunRef}
+          >
             Run {record.sourceRunRef} · {record.evidence.totalEffects} effects
           </p>
           <p className="mt-1 text-xs text-muted-foreground">

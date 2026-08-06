@@ -545,10 +545,10 @@ export function AgentSessionThreadPanel({
         <div ref={contentRef}>
           {sessionChannelId && latestSessionId ? (
             <ShepherdEvidencePanel
+              key={shepherdRefreshKey}
               agentPubkey={agent.pubkey}
               channelId={sessionChannelId}
               sessionId={latestSessionId}
-              refreshKey={shepherdRefreshKey}
             />
           ) : null}
           <ManagedAgentSessionPanel
