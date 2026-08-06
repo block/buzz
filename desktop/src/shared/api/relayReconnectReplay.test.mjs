@@ -802,10 +802,12 @@ test("exhausted backfill pins the floor: next replay still requests the original
 });
 
 test("in-flight stale abort keeps the pinned floor for the superseding connection", async () => {
-  // Race from re-review of b70a6716d: connection A's paging aborts because it
-  // was superseded while a history REQ was in flight. That abort must NOT be
-  // treated as completion — the same subscription object carries the pinned
-  // floor that connection B's replay still needs.
+  // Race from re-review of b70a6716d/c493d378b: production supersession bumps
+  // the connection GENERATION while the same subscription key and object
+  // survive in the map. The identity guard alone stays true, so only the
+  // combined guard (outer isActive && identity) aborts the stale pass. That
+  // abort must NOT count as completion — the pinned floor belongs to the
+  // superseding connection's replay.
   resetGate(0);
   const filter = buildChannelFilter("channel-1", 50);
   const subscription = {
@@ -816,29 +818,35 @@ test("in-flight stale abort keeps the pinned floor for the superseding connectio
   };
   const subscriptions = new Map([["live-1", subscription]]);
 
+  let generationActive = true;
   let historyCalls = 0;
   await replayLiveSubscriptions({
     subscriptions,
     now: 2000,
     sendRaw: async () => {},
+    isActive: () => generationActive,
     requestHistory: async () => {
       historyCalls++;
-      // Connection A is superseded while the REQ is in flight: the sub is
-      // re-registered by connection B under a new subId. The object stays
-      // alive; only A's map entry disappears.
-      subscriptions.delete("live-1");
-      subscriptions.set("live-1b", subscription);
+      // Connection A is superseded while the REQ is in flight: the generation
+      // advances, but the subscription keeps its key AND object identity —
+      // exactly what production supersession does.
+      generationActive = false;
       // A full page would otherwise continue paging — the post-await
-      // isActive() check must abort instead.
+      // combined guard must abort instead.
       return eventRange("full", 1001, 500);
     },
   });
 
-  assert.equal(historyCalls, 1, "stale connection must stop paging");
+  assert.equal(historyCalls, 1, "stale generation must stop paging");
+  assert.equal(
+    subscriptions.get("live-1"),
+    subscription,
+    "precondition: key and object survive supersession untouched",
+  );
   assert.equal(
     subscription.pendingReplaySince,
     995,
-    "a stale abort must not clear the floor the new connection needs",
+    "a stale-generation abort must not clear the floor the new connection needs",
   );
 });
 

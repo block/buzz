@@ -290,7 +290,14 @@ export async function replayLiveSubscriptions({
             subscription,
             since: replaySince,
             until: now,
-            isActive: () => subscriptions.get(subId) === subscription,
+            // Both guards are required. The identity check catches the sub
+            // being torn down/replaced; the outer isActive() catches
+            // connection supersession, which bumps the generation while the
+            // SAME subscription key and object survive in the map — identity
+            // alone stays true and a stale pass could complete and clear the
+            // floor the superseding connection needs.
+            isActive: () =>
+              isActive() && subscriptions.get(subId) === subscription,
             requestHistory,
           });
           // A stale-connection abort is NOT completion: the superseding
