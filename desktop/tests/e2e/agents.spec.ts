@@ -280,6 +280,43 @@ test("catalog empty state remains available after reopening", async ({
   );
 });
 
+test("owner-attested external agents appear without local lifecycle controls", async ({
+  page,
+}) => {
+  const externalPubkey = "7".repeat(64);
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey: externalPubkey,
+        name: "relay fallback",
+        status: "online",
+      },
+    ],
+    searchProfiles: [
+      {
+        pubkey: externalPubkey,
+        displayName: "External Pi",
+        isAgent: true,
+        ownerPubkey: "deadbeef".repeat(8),
+      },
+    ],
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+
+  const card = page.getByTestId(`external-agent-${externalPubkey}`);
+  await expect(card).toBeVisible();
+  await expect(card).toContainText("External Pi");
+  await expect(card).toContainText("Externally managed");
+  await expect(card.getByLabel("Start External Pi")).toHaveCount(0);
+  await expect(page.getByTestId(`managed-agent-${externalPubkey}`)).toHaveCount(
+    0,
+  );
+
+  await card.getByRole("button", { name: "External Pi agent profile" }).click();
+  await expect(page.getByTestId("user-profile-panel")).toBeVisible();
+});
+
 test("built-in persona edits persist", async ({ page }) => {
   await installMockBridge(page, {
     activePersonaIds: ["builtin:fizz"],
