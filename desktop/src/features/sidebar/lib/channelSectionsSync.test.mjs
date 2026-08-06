@@ -67,11 +67,7 @@ function makeSectionsStore(sections = []) {
 const RELAY = "wss://r.test";
 const RELAY_KEY = encodeURIComponent(RELAY);
 
-// ─── Tauri mock helper ─────────────────────────────────────────────────────────
-// Intercepts nip44_decrypt_from_self, nip44_encrypt_to_self, and sign_event so
-// the LWW-baseline test can exercise the full doPublish path in Node.
-// `goodCipherPayload`: JSON string returned for any non-"bad-cipher" ciphertext.
-// Returns `{ restore, capturedPlaintext }`.
+// Tauri mock: intercepts nip44_decrypt_from_self/encrypt_to_self/sign_event for LWW-baseline tests.
 function installTauriMock(goodCipherPayload) {
   const orig = globalThis.window?.__TAURI_INTERNALS__;
   if (typeof globalThis.window === "undefined") globalThis.window = {};
@@ -83,10 +79,7 @@ function installTauriMock(goodCipherPayload) {
         return Promise.resolve(goodCipherPayload);
       }
       if (cmd === "nip44_encrypt_to_self") { captured = args?.plaintext ?? null; return Promise.resolve("ct"); }
-      if (cmd === "sign_event") {
-        return Promise.resolve(JSON.stringify({ id: "eid", pubkey: "pk-lww", content: "ct",
-          created_at: args?.createdAt ?? 0, kind: args?.kind ?? 0, tags: args?.tags ?? [], sig: "s" }));
-      }
+      if (cmd === "sign_event") return Promise.resolve(JSON.stringify({ id: "eid", pubkey: "pk-lww", content: "ct", created_at: args?.createdAt ?? 0, kind: args?.kind ?? 0, tags: args?.tags ?? [], sig: "s" }));
       return Promise.reject(new Error(`unmocked: ${cmd}`));
     },
   };

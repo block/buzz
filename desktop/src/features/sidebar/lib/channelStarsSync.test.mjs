@@ -174,10 +174,7 @@ test("revert-fix: relay-A watermark does not suppress first-sync seed on relay-B
   mock.method(relayClient, "fetchEvents", () => Promise.resolve([]));
   mock.method(relayClient, "publishEvent", () => Promise.resolve());
   const fw = makeFakeWindow();
-  fw.localStorage.setItem(
-    `buzz-sync-watermark.v1:channel-stars:pk-iso:${encodeURIComponent(relayA)}`,
-    "1700000100",
-  );
+  fw.localStorage.setItem(`buzz-sync-watermark.v1:channel-stars:pk-iso:${encodeURIComponent(relayA)}`, "1700000100");
   const restore = installFakeWindow(fw);
   try {
     const managerB = new ChannelStarSyncManager("pk-iso", relayB);
