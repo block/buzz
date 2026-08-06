@@ -66,6 +66,16 @@ struct ProbeCacheKey {
     effective_environment: Vec<(&'static str, Option<OsString>)>,
 }
 
+impl ProbeCacheKey {
+    fn same_probe_identity(&self, other: &Self) -> bool {
+        self.runtime == other.runtime
+            && self.binary_path == other.binary_path
+            && self.args == other.args
+            && self.effective_path == other.effective_path
+            && self.effective_environment == other.effective_environment
+    }
+}
+
 #[derive(Debug)]
 struct ProbeFlight {
     result: Mutex<Option<ProbeOutcome>>,
@@ -131,7 +141,14 @@ impl LoginProbeCache {
                 .entries
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            entries.retain(|candidate, _| candidate.generation == key.generation);
+            // Invalidation expires completed values immediately, but an
+            // already-running identical command remains the authoritative
+            // flight until it settles. Clearing it here would allow the same
+            // probe key to run twice during a configuration refresh.
+            entries.retain(|candidate, entry| {
+                candidate.generation == key.generation
+                    || matches!(entry, ProbeCacheEntry::InFlight(_))
+            });
             let cached = entries.get(&key).and_then(|entry| match entry {
                 ProbeCacheEntry::Complete {
                     completed_at,
@@ -149,8 +166,15 @@ impl LoginProbeCache {
             });
             if let Some(outcome) = cached {
                 ProbeDecision::Cached(outcome)
-            } else if let Some(ProbeCacheEntry::InFlight(flight)) = entries.get(&key) {
-                ProbeDecision::Wait(Arc::clone(flight))
+            } else if let Some(flight) = entries.iter().find_map(|(candidate, entry)| {
+                if candidate.same_probe_identity(&key) {
+                    if let ProbeCacheEntry::InFlight(flight) = entry {
+                        return Some(Arc::clone(flight));
+                    }
+                }
+                None
+            }) {
+                ProbeDecision::Wait(flight)
             } else {
                 entries.remove(&key);
                 let flight = Arc::new(ProbeFlight {
@@ -189,6 +213,14 @@ impl LoginProbeCache {
                             outcome: outcome.clone(),
                         },
                     );
+                } else if matches!(
+                    entries.get(&key),
+                    Some(ProbeCacheEntry::InFlight(current)) if Arc::ptr_eq(current, &flight)
+                ) {
+                    // The result belongs to the pre-invalidation generation.
+                    // Wake its waiters but do not leave a stale flight/value
+                    // behind; the next call recomputes against current config.
+                    entries.remove(&key);
                 }
                 outcome
             }
@@ -200,7 +232,7 @@ impl LoginProbeCache {
         self.entries
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .clear();
+            .retain(|_, entry| matches!(entry, ProbeCacheEntry::InFlight(_)));
     }
 }
 
@@ -588,6 +620,59 @@ mod tests {
             ProbeOutcome::LoggedIn
         );
         assert_eq!(calls.get(), 3);
+    }
+
+    #[test]
+    fn invalidation_does_not_duplicate_an_identical_in_flight_probe() {
+        use std::sync::{atomic::AtomicUsize, mpsc, Arc};
+
+        let cache = Arc::new(LoginProbeCache::default());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+
+        let first = {
+            let cache = Arc::clone(&cache);
+            let calls = Arc::clone(&calls);
+            std::thread::spawn(move || {
+                cache.probe(cache_key("codex"), std::time::Instant::now, || {
+                    calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    started_tx.send(()).expect("announce probe start");
+                    release_rx.recv().expect("release probe");
+                    ProbeOutcome::LoggedIn
+                })
+            })
+        };
+        started_rx.recv().expect("first probe started");
+        cache.invalidate();
+
+        let second = {
+            let cache = Arc::clone(&cache);
+            let calls = Arc::clone(&calls);
+            std::thread::spawn(move || {
+                cache.probe(cache_key("codex"), std::time::Instant::now, || {
+                    calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    ProbeOutcome::LoggedOut
+                })
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        release_tx.send(()).expect("release first probe");
+        assert_eq!(first.join().expect("first caller"), ProbeOutcome::LoggedIn);
+        assert_eq!(
+            second.join().expect("second caller"),
+            ProbeOutcome::LoggedIn
+        );
+
+        assert_eq!(
+            cache.probe(cache_key("codex"), std::time::Instant::now, || {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                ProbeOutcome::LoggedOut
+            }),
+            ProbeOutcome::LoggedOut
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[test]
