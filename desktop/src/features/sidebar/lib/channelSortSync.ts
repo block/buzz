@@ -16,6 +16,11 @@ import {
   type FetchResult,
 } from "./sidebarSyncWatermark";
 
+/** Result returned by `bootstrap()` — the hook acts on this without publishing. */
+export type BootstrapResult =
+  | { action: "apply-remote"; data: RemoteSortPrefs }
+  | { action: "hold" };
+
 const D_TAG = "channel-sort";
 const BLOB_TYPE = "channel-sort";
 const DEBOUNCE_MS = 2_000;
@@ -50,14 +55,14 @@ async function decryptAndParse(
  */
 export class ChannelSortSyncManager {
   private pubkey: string;
-  private relayUrl: string | undefined;
+  private relayUrl: string;
   private debounceTimer: number | null = null;
   private lastRemoteCreatedAt: number;
   private pendingStore: ChannelSortStore | null = null;
   private lastPublishedStore: ChannelSortStore | null = null;
   private destroyed = false;
 
-  constructor(pubkey: string, relayUrl?: string) {
+  constructor(pubkey: string, relayUrl: string) {
     this.pubkey = pubkey;
     this.relayUrl = relayUrl;
     this.lastRemoteCreatedAt = readWatermark(pubkey, BLOB_TYPE, relayUrl);
@@ -135,11 +140,16 @@ export class ChannelSortSyncManager {
         limit: 1,
       });
       if (events.length === 0 || events[0].pubkey !== this.pubkey) return store;
-      const remote = await decryptAndParse(events[0]);
+      const event = events[0];
+      // Snapshot the comparison baseline BEFORE recording the raw head so the
+      // whole-blob LWW comparison uses the pre-fetch watermark, not the one
+      // advanced by this event.
+      const headBeforeFetch = this.lastRemoteCreatedAt;
+      this.recordRemoteHead(event.created_at);
+      const remote = await decryptAndParse(event);
       if (!remote) return store;
       // Sort prefs use whole-blob LWW: take whichever is newer
-      if (remote.createdAt > this.lastRemoteCreatedAt) {
-        this.recordRemoteHead(remote.createdAt);
+      if (remote.createdAt > headBeforeFetch) {
         return remote.store;
       }
       return store;
@@ -219,6 +229,9 @@ export class ChannelSortSyncManager {
       },
       (event: RelayEvent) => {
         if (event.pubkey !== this.pubkey) return;
+        // Record the raw head before decrypt so an undecryptable live event
+        // still advances the watermark and blocks future seed-publish.
+        this.recordRemoteHead(event.created_at);
         void decryptAndParse(event).then((result) => {
           if (result) {
             this.recordRemoteHead(result.createdAt);
@@ -227,6 +240,24 @@ export class ChannelSortSyncManager {
         });
       },
     );
+  }
+
+  /**
+   * Bootstrap the manager on first mount.  Fetches the remote blob, records
+   * the raw head before decrypt on every outcome, and — if genuine first-time
+   * sync is detected — **performs the seed-publish itself**.
+   */
+  async bootstrap(localStore: ChannelSortStore): Promise<BootstrapResult> {
+    const result = await this.fetchRemoteSortPrefs();
+    if (result.status === "found") {
+      return { action: "apply-remote", data: result.data };
+    }
+    if (result.status === "absent" && this.lastRemoteCreatedAt === 0) {
+      if (Object.keys(localStore.groups).length > 0) {
+        this.publishSortPrefs(localStore);
+      }
+    }
+    return { action: "hold" };
   }
 
   destroy(): void {

@@ -103,22 +103,13 @@ export function useChannelSortPreference(
   React.useEffect(() => {
     if (!pubkey) return;
     let cancelled = false;
-    void managerRef.current?.fetchRemoteSortPrefs().then((result) => {
+    const local = readChannelSortStore(pubkey, relayUrl);
+    void managerRef.current?.bootstrap(local).then((result) => {
       if (cancelled) return;
-      if (result.status === "found") {
+      if (result.action === "apply-remote") {
         setStore(applyRemote(result.data));
-      } else if (result.status === "absent") {
-        const seedAllowed =
-          managerRef.current !== null &&
-          managerRef.current.getPersistedWatermark() === 0;
-        if (seedAllowed) {
-          const local = readChannelSortStore(pubkey, relayUrl);
-          if (Object.keys(local.groups).length > 0) {
-            managerRef.current?.publishSortPrefs(local);
-          }
-        }
       }
-      // status === "failed": do nothing.
+      // "hold": seed already performed by bootstrap (if first-sync), or blocked.
     });
     return () => {
       cancelled = true;

@@ -4,6 +4,12 @@ import test, { mock } from "node:test";
 import { relayClient } from "@/shared/api/relayClient";
 import { ChannelMuteSyncManager } from "./channelMutesSync.ts";
 
+// Relay URL used in all tests. Watermark key format:
+//   buzz-sync-watermark.v1:channel-mutes:<pubkey>:<encodeURIComponent(normalizeRelay(url))>
+// normalizeRelay: trim + lowercase + strip trailing slash.
+const RELAY = "wss://r.test";
+const RELAY_KEY = encodeURIComponent(RELAY); // "wss%3A%2F%2Fr.test"
+
 function makeStore(channels = {}) {
   return { version: 1, channels };
 }
@@ -55,6 +61,9 @@ function installFakeWindow(fw) {
 
 // ─── destroy() must cancel pending publish, not flush ─────────────────────────
 
+// Regression guard for the community-switch cross-relay publish vector:
+// mute a channel in relay A → destroy() called (relayUrl dep change) →
+// no publish should fire.
 test("destroy: cancels pending publish without flushing to the relay", () => {
   const publishCalls = [];
   mock.method(relayClient, "fetchEvents", () => Promise.resolve([]));
@@ -65,7 +74,7 @@ test("destroy: cancels pending publish without flushing to the relay", () => {
   const fw = makeFakeWindow();
   const restore = installFakeWindow(fw);
   try {
-    const manager = new ChannelMuteSyncManager("pk-test");
+    const manager = new ChannelMuteSyncManager("pk-test", RELAY);
     const store = makeStore({ ch1: { muted: true, updatedAt: 100 } });
     manager.publishMutes(store);
     manager.destroy();
@@ -92,7 +101,7 @@ test("destroy: aborts in-flight doPublish after fetchOwnBlobBeforePublish resolv
   const fw = makeFakeWindow();
   const restore = installFakeWindow(fw);
   try {
-    const manager = new ChannelMuteSyncManager("pk-race");
+    const manager = new ChannelMuteSyncManager("pk-race", RELAY);
     const store = makeStore({ ch1: { muted: true, updatedAt: 100 } });
     manager.publishMutes(store);
     fw._fireTimer();
@@ -110,17 +119,22 @@ test("destroy: is safe to call with no pending publish", () => {
   const fw = makeFakeWindow();
   const restore = installFakeWindow(fw);
   try {
-    const manager = new ChannelMuteSyncManager("pk-no-pending");
+    const manager = new ChannelMuteSyncManager("pk-no-pending", RELAY);
     assert.doesNotThrow(() => manager.destroy());
   } finally {
     restore();
   }
 });
 
-// ─── Boot seed-publish guard (the revert-fix regression suite) ────────────────
+// ─── Boot seed-publish guard (the revert-fix regression suite) ─────────────────
+//
+// All tests below drive the production bootstrap() path so that a regression
+// in that code — not just a hook wiring change — causes a test failure.
+// Mutation-sensitivity note: each guard is named in the comment before the test.
 
-// 1. fetch failed → zero publish calls
-test("revert-fix: fetch failed (error) does not trigger seed-publish", async () => {
+// 1. fetch failed (error/timeout) + local non-empty → zero publish calls
+// Mutation: removing the `failed` guard causes bootstrap to call publishMutes → pendingStore set.
+test("revert-fix: fetch failed (error) does not trigger seed-publish via bootstrap", async () => {
   const publishCalls = [];
   mock.method(relayClient, "fetchEvents", () =>
     Promise.reject(new Error("relay timeout")),
@@ -132,9 +146,19 @@ test("revert-fix: fetch failed (error) does not trigger seed-publish", async () 
   const fw = makeFakeWindow();
   const restore = installFakeWindow(fw);
   try {
-    const manager = new ChannelMuteSyncManager("pk-fail");
-    const result = await manager.fetchRemoteMutes();
-    assert.equal(result.status, "failed");
+    const manager = new ChannelMuteSyncManager("pk-fail", RELAY);
+    const local = makeStore({ ch1: { muted: true, updatedAt: 1 } });
+    const result = await manager.bootstrap(local);
+    assert.equal(
+      result.action,
+      "hold",
+      "bootstrap must return hold on failed fetch",
+    );
+    assert.equal(
+      manager.getPendingMuteStore(),
+      null,
+      "no pending publish after failed fetch",
+    );
     assert.equal(publishCalls.length, 0);
   } finally {
     restore();
@@ -142,30 +166,49 @@ test("revert-fix: fetch failed (error) does not trigger seed-publish", async () 
   }
 });
 
-// 1b. undecryptable event → failed + head recorded
-test("revert-fix: undecryptable event yields failed with createdAt and advances watermark", async () => {
+// 1b. undecryptable event → failed + head recorded (all observation paths)
+// Mutation: removing recordRemoteHead before decrypt leaves watermark at 0.
+test("revert-fix: undecryptable event records head and blocks seed-publish via bootstrap", async () => {
+  const publishCalls = [];
   mock.method(relayClient, "fetchEvents", () =>
     Promise.resolve([
       { pubkey: "pk-dc", content: "!bad!", created_at: 1700000099, id: "e1" },
     ]),
   );
-  mock.method(relayClient, "publishEvent", () => Promise.resolve());
+  mock.method(relayClient, "publishEvent", (...args) => {
+    publishCalls.push(args);
+    return Promise.resolve();
+  });
   const fw = makeFakeWindow();
   const restore = installFakeWindow(fw);
   try {
-    const manager = new ChannelMuteSyncManager("pk-dc");
-    const result = await manager.fetchRemoteMutes();
-    assert.equal(result.status, "failed");
-    assert.equal(result.createdAt, 1700000099);
-    assert.ok(manager.getPersistedWatermark() > 0);
+    const manager = new ChannelMuteSyncManager("pk-dc", RELAY);
+    const local = makeStore({ ch1: { muted: true, updatedAt: 1 } });
+    const result = await manager.bootstrap(local);
+    assert.equal(
+      result.action,
+      "hold",
+      "undecryptable event must yield hold from bootstrap",
+    );
+    assert.ok(
+      manager.getPersistedWatermark() >= 1700000099,
+      "watermark must be recorded from the unreadable event",
+    );
+    assert.equal(
+      manager.getPendingMuteStore(),
+      null,
+      "no pending publish after undecryptable event",
+    );
+    assert.equal(publishCalls.length, 0);
   } finally {
     restore();
     mock.reset();
   }
 });
 
-// 2. absent + persisted head > 0 → no seed-publish
-test("revert-fix: absent fetch with prior watermark blocks seed-publish", async () => {
+// 2. fetch absent + persisted head > 0 → zero publish calls (the dev-build stale-copy case)
+// Mutation: setting watermark to 0 in localStorage causes bootstrap to seed.
+test("revert-fix: absent fetch with prior watermark blocks seed-publish via bootstrap", async () => {
   const publishCalls = [];
   mock.method(relayClient, "fetchEvents", () => Promise.resolve([]));
   mock.method(relayClient, "publishEvent", (...args) => {
@@ -173,21 +216,30 @@ test("revert-fix: absent fetch with prior watermark blocks seed-publish", async 
     return Promise.resolve();
   });
   const fw = makeFakeWindow();
+  // Pre-seed a watermark with the relay-scoped key (simulates a prior session).
   fw.localStorage.setItem(
-    "buzz-sync-watermark.v1:channel-mutes:pk-stale",
+    `buzz-sync-watermark.v1:channel-mutes:pk-stale:${RELAY_KEY}`,
     "1700000000",
   );
   const restore = installFakeWindow(fw);
   try {
-    const manager = new ChannelMuteSyncManager("pk-stale");
-    assert.ok(manager.getPersistedWatermark() > 0);
-    const result = await manager.fetchRemoteMutes();
-    assert.equal(result.status, "absent");
-    if (result.status === "absent" && manager.getPersistedWatermark() === 0) {
-      manager.publishMutes(makeStore({ ch1: { muted: true, updatedAt: 1 } }));
-      fw._fireTimer();
-      await new Promise((r) => setTimeout(r, 0));
-    }
+    const manager = new ChannelMuteSyncManager("pk-stale", RELAY);
+    assert.ok(
+      manager.getPersistedWatermark() > 0,
+      "manager must read relay-scoped watermark from localStorage at construction",
+    );
+    const local = makeStore({ ch1: { muted: true, updatedAt: 1 } });
+    const result = await manager.bootstrap(local);
+    assert.equal(
+      result.action,
+      "hold",
+      "bootstrap must return hold when watermark > 0",
+    );
+    assert.equal(
+      manager.getPendingMuteStore(),
+      null,
+      "watermark > 0 must block seed-publish even on absent fetch",
+    );
     assert.equal(publishCalls.length, 0);
   } finally {
     restore();
@@ -195,20 +247,31 @@ test("revert-fix: absent fetch with prior watermark blocks seed-publish", async 
   }
 });
 
-// 3. absent + head 0 → seed allowed
-test("revert-fix: absent fetch with zero watermark allows seed-publish", async () => {
+// 3. fetch absent + head 0 + local non-empty → seed-publish fires (first-sync preserved)
+// Mutation: removing the absent+head-0 seed call leaves pendingStore null.
+test("revert-fix: absent fetch with zero watermark seeds via bootstrap (first-sync preserved)", async () => {
   mock.method(relayClient, "fetchEvents", () => Promise.resolve([]));
   mock.method(relayClient, "publishEvent", () => Promise.resolve());
   const fw = makeFakeWindow();
   const restore = installFakeWindow(fw);
   try {
-    const manager = new ChannelMuteSyncManager("pk-fresh");
-    assert.equal(manager.getPersistedWatermark(), 0);
-    const result = await manager.fetchRemoteMutes();
-    assert.equal(result.status, "absent");
+    const manager = new ChannelMuteSyncManager("pk-fresh", RELAY);
+    assert.equal(
+      manager.getPersistedWatermark(),
+      0,
+      "watermark must start at 0",
+    );
+    const local = makeStore({ ch1: { muted: true, updatedAt: 1 } });
+    const result = await manager.bootstrap(local);
+    assert.equal(
+      result.action,
+      "hold",
+      "bootstrap returns hold (seed is async)",
+    );
+    // bootstrap must have queued a publish via publishMutes — pendingStore is set immediately.
     assert.ok(
-      result.status === "absent" && manager.getPersistedWatermark() === 0,
-      "seed condition must hold for a fresh manager",
+      manager.getPendingMuteStore() !== null,
+      "bootstrap must queue a seed-publish when absent + watermark == 0 + local non-empty",
     );
   } finally {
     restore();
@@ -216,19 +279,25 @@ test("revert-fix: absent fetch with zero watermark allows seed-publish", async (
   }
 });
 
-// 4. decrypt failure records head
-test("revert-fix: decrypt failure records head and blocks future seed", async () => {
+// 4. decrypt failure records head and blocks future seed (via bootstrap)
+// Covers the full path: boot fetch sees undecryptable event → head recorded → still holds.
+test("revert-fix: decrypt failure records head and blocks any future seed-publish", async () => {
   const publishCalls = [];
-  mock.method(relayClient, "fetchEvents", () =>
-    Promise.resolve([
-      {
-        pubkey: "pk-nd",
-        content: "!!invalid!!",
-        created_at: 1700000777,
-        id: "evt-nd",
-      },
-    ]),
-  );
+  let callCount = 0;
+  mock.method(relayClient, "fetchEvents", () => {
+    callCount++;
+    if (callCount === 1) {
+      return Promise.resolve([
+        {
+          pubkey: "pk-nodecrypt",
+          content: "!!invalid-base64!!",
+          created_at: 1700000777,
+          id: "evt-nodecrypt",
+        },
+      ]);
+    }
+    return Promise.resolve([]);
+  });
   mock.method(relayClient, "publishEvent", (...args) => {
     publishCalls.push(args);
     return Promise.resolve();
@@ -236,11 +305,23 @@ test("revert-fix: decrypt failure records head and blocks future seed", async ()
   const fw = makeFakeWindow();
   const restore = installFakeWindow(fw);
   try {
-    const manager = new ChannelMuteSyncManager("pk-nd");
-    const result = await manager.fetchRemoteMutes();
-    assert.equal(result.status, "failed");
-    assert.equal(result.createdAt, 1700000777);
-    assert.ok(manager.getPersistedWatermark() >= 1700000777);
+    const manager = new ChannelMuteSyncManager("pk-nodecrypt", RELAY);
+    const local = makeStore({ ch1: { muted: true, updatedAt: 1 } });
+    const result = await manager.bootstrap(local);
+    assert.equal(
+      result.action,
+      "hold",
+      "failed fetch must return hold from bootstrap",
+    );
+    assert.ok(
+      manager.getPersistedWatermark() >= 1700000777,
+      "watermark must be advanced to event.created_at",
+    );
+    assert.equal(
+      manager.getPendingMuteStore(),
+      null,
+      "no pending publish after decrypt failure",
+    );
     assert.equal(publishCalls.length, 0);
   } finally {
     restore();
@@ -248,7 +329,8 @@ test("revert-fix: decrypt failure records head and blocks future seed", async ()
   }
 });
 
-// 5. watermark round-trips across manager instances
+// 5. watermark round-trips across manager instances (simulated restart)
+// Mutation: removing localStorage write in advanceWatermark leaves managerB at 0.
 test("revert-fix: watermark persists across manager instances (simulated restart)", async () => {
   mock.method(relayClient, "fetchEvents", () =>
     Promise.resolve([
@@ -263,12 +345,56 @@ test("revert-fix: watermark persists across manager instances (simulated restart
   const fw = makeFakeWindow();
   const restore = installFakeWindow(fw);
   try {
-    const managerA = new ChannelMuteSyncManager("pk-restart");
+    // Session A: manager sees an event → watermark written to localStorage.
+    const managerA = new ChannelMuteSyncManager("pk-restart", RELAY);
     await managerA.fetchRemoteMutes();
-    assert.ok(managerA.getPersistedWatermark() >= 1700001234);
+    assert.ok(
+      managerA.getPersistedWatermark() >= 1700001234,
+      "session A watermark must be set",
+    );
     mock.restoreAll();
-    const managerB = new ChannelMuteSyncManager("pk-restart");
-    assert.ok(managerB.getPersistedWatermark() >= 1700001234);
+    // Session B: new manager instance reads the same localStorage.
+    const managerB = new ChannelMuteSyncManager("pk-restart", RELAY);
+    assert.ok(
+      managerB.getPersistedWatermark() >= 1700001234,
+      "session B must inherit watermark from localStorage without another fetch",
+    );
+  } finally {
+    restore();
+    mock.reset();
+  }
+});
+
+// 6. relay-A / relay-B watermark isolation
+// Mutation: using pubkey-only key (no relay) makes relay A's head suppress relay B's first-sync.
+test("revert-fix: relay-A watermark does not suppress first-sync seed on relay-B", async () => {
+  const relayA = "wss://a.relay.test";
+  const relayB = "wss://b.relay.test";
+  mock.method(relayClient, "fetchEvents", () => Promise.resolve([]));
+  mock.method(relayClient, "publishEvent", () => Promise.resolve());
+  const fw = makeFakeWindow();
+  // Simulate relay A having a prior head.
+  fw.localStorage.setItem(
+    `buzz-sync-watermark.v1:channel-mutes:pk-iso:${encodeURIComponent(relayA)}`,
+    "1700000100",
+  );
+  const restore = installFakeWindow(fw);
+  try {
+    // Manager on relay B must start with watermark 0 despite relay A having one.
+    const managerB = new ChannelMuteSyncManager("pk-iso", relayB);
+    assert.equal(
+      managerB.getPersistedWatermark(),
+      0,
+      "relay B watermark must be independent of relay A head",
+    );
+    // And first-sync seed on relay B should be allowed.
+    const local = makeStore({ ch1: { muted: true, updatedAt: 1 } });
+    const result = await managerB.bootstrap(local);
+    assert.equal(result.action, "hold");
+    assert.ok(
+      managerB.getPendingMuteStore() !== null,
+      "first-sync seed on relay B must not be blocked by relay A watermark",
+    );
   } finally {
     restore();
     mock.reset();

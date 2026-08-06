@@ -105,30 +105,14 @@ export function useChannelSections(
   React.useEffect(() => {
     if (!pubkey) return;
     let cancelled = false;
-    void managerRef.current?.fetchRemoteSections().then((result) => {
+    const local = readChannelSectionsStore(pubkey, relayUrl);
+    void managerRef.current?.bootstrap(local).then((result) => {
       if (cancelled) return;
-      if (result.status === "found") {
+      if (result.action === "apply-remote") {
         setStore(applyRemote(result.data));
-      } else if (result.status === "absent") {
-        // Genuine first-time sync: only seed-publish when the persisted
-        // watermark is 0 — if it is > 0 this relay has had a blob before and
-        // the empty response is transient (auth-race, reconnect, etc.).
-        const seedAllowed =
-          managerRef.current !== null &&
-          // The manager hydrates lastRemoteCreatedAt from localStorage in its
-          // constructor, so reading getPendingStore() would be wrong here — we
-          // need the watermark the manager was initialised with.  We expose it
-          // via a dedicated accessor to avoid coupling to internals.
-          managerRef.current.getPersistedWatermark() === 0;
-        if (seedAllowed) {
-          const local = readChannelSectionsStore(pubkey, relayUrl);
-          if (local.sections.length > 0) {
-            managerRef.current?.publishSections(local);
-          }
-        }
       }
-      // status === "failed": do nothing — a fetch error or unreadable event
-      // must never trigger a seed-publish.
+      // "hold": seed already performed by bootstrap (if first-sync), or
+      // blocked (failed fetch / prior watermark). Hook does nothing.
     });
     return () => {
       cancelled = true;

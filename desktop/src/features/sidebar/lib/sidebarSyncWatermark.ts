@@ -11,6 +11,12 @@
  * Keys live in localStorage alongside the payload blobs.  They are tiny
  * (one integer string per key) and scoped so they never bleed across
  * identities, communities, or blob types.
+ *
+ * `relayUrl` is always required — a pubkey-only fallback is not safe because
+ * a head seen on relay A would suppress legitimate first-time seeding on
+ * relay B.  The URL is normalised (trimmed, trailing slash stripped,
+ * lower-cased) before being embedded in the key so the same relay written
+ * two ways never produces two different keys.
  */
 
 const PREFIX = "buzz-sync-watermark.v1";
@@ -32,20 +38,24 @@ export type FetchResult<T> =
   | { status: "absent" }
   | { status: "failed"; createdAt?: number };
 
+/** Normalise a relay URL the same way all relay-scoped keys do. */
+function normalizeRelay(relayUrl: string): string {
+  return relayUrl.trim().replace(/\/+$/, "").toLowerCase();
+}
+
 function watermarkKey(
   pubkey: string,
   blobType: string,
-  relayUrl?: string,
+  relayUrl: string,
 ): string {
-  if (!relayUrl) return `${PREFIX}:${blobType}:${pubkey}`;
-  return `${PREFIX}:${blobType}:${pubkey}:${encodeURIComponent(relayUrl)}`;
+  return `${PREFIX}:${blobType}:${pubkey}:${encodeURIComponent(normalizeRelay(relayUrl))}`;
 }
 
 /** Read the persisted watermark (0 when absent or on read error). */
 export function readWatermark(
   pubkey: string,
   blobType: string,
-  relayUrl?: string,
+  relayUrl: string,
 ): number {
   try {
     const raw = window.localStorage.getItem(
@@ -61,14 +71,13 @@ export function readWatermark(
 
 /**
  * Persist a new watermark if it is strictly greater than the current value.
- * Returns the value actually stored (may be the old value if `next` is not
- * newer).
+ * Absence or error never lowers the watermark (monotonic).
  */
 export function advanceWatermark(
   pubkey: string,
   blobType: string,
   next: number,
-  relayUrl?: string,
+  relayUrl: string,
 ): void {
   try {
     const current = readWatermark(pubkey, blobType, relayUrl);
