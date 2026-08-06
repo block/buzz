@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
 use crate::app_state::AppState;
-use crate::relay::{relay_api_base_url_with_override, relay_ws_url_with_override};
+use crate::relay::{relay_api_base_url_for_mobile_pairing, relay_ws_url_with_override};
 
 #[derive(Serialize, Clone)]
 struct PairingSasPayload {
@@ -95,7 +95,10 @@ pub async fn start_pairing(
     let pubkey_hex = keys.public_key().to_hex();
 
     let ws_url = relay_ws_url_with_override(&state);
-    let http_url = relay_api_base_url_with_override(&state);
+    // The phone rejects non-HTTPS relay URLs in release builds, so the payload
+    // URL is resolved separately from the desktop's own connection URL (which
+    // stays on the workspace relay and keys the community row).
+    let http_url = relay_api_base_url_for_mobile_pairing(&state)?;
 
     // NIP-43 relays gate connections on membership, so an unpaired peer can't
     // reach the main relay yet — it must go through the /pair sidecar. Open
