@@ -37,9 +37,9 @@ static PROJECT_CONNECTIONS_LOCK: Mutex<()> = Mutex::new(());
 mod approval;
 mod credential_journal;
 mod transactions;
-use approval::{approved_execution_sha256, canonical_connection_command};
 #[cfg(test)]
 use approval::executable_sha256;
+use approval::{approved_execution_sha256, canonical_connection_command};
 use transactions::{commit_delete, commit_update, UpdateTransaction};
 
 pub(super) fn lock_project_connections() -> MutexGuard<'static, ()> {
