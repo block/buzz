@@ -31,6 +31,16 @@ written to anonymous regular files, so a descendant cannot hold pipe EOF open;
 after process-group cleanup, at most 64 KiB from each stream is read and
 retained.
 
+Managed-agent starts, launch restoration, and pair reconciliation use a
+three-phase transition: snapshot and reserve an exact agent/relay pair, release
+all lifecycle/store/process-map mutexes before discovery, readiness, and child
+spawn, then generation-check and register the child under the locks. The
+per-pair reservation rejects a duplicate start during the unlocked phase. A
+shutdown, concurrent record edit, receipt-write failure, or store-save failure
+wins the race and the unregistered child is terminated and reaped after every
+runtime lock has been released. No external process may be spawned while a
+runtime-management lock is held.
+
 Unexpected local listener exits use three bounded recovery attempts after 5
 seconds, 30 seconds, and 2 minutes. Recovery is suppressed while an agent has
 active work. The desktop reports both confirmed recovery and retry exhaustion;

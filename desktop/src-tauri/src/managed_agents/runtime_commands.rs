@@ -8,11 +8,11 @@ use tauri::{AppHandle, Emitter, Manager};
 use super::{
     agent_readiness, append_log_marker, current_instance_id, find_managed_agent_mut,
     load_global_agent_config, load_managed_agents, load_personas, managed_agent_runtime_log_path,
-    process_is_running, record_agent_command, resolve_effective_agent_env, save_managed_agents,
-    spawn_agent_child, terminate_process, terminate_untracked_pair_runtime,
-    write_agent_runtime_receipt, AgentReadiness, BackendKind, ManagedAgentPairRuntime,
-    ManagedAgentRuntimeKey, ManagedAgentRuntimeLifecycle, ManagedAgentRuntimeReceipt,
-    ManagedAgentRuntimeStatus,
+    process_is_running, record_agent_command, reserve_managed_agent_start,
+    resolve_effective_agent_env, save_managed_agents, spawn_agent_child, terminate_process,
+    terminate_untracked_pair_runtime, write_agent_runtime_receipt, AgentReadiness, BackendKind,
+    ManagedAgentPairRuntime, ManagedAgentRuntimeKey, ManagedAgentRuntimeLifecycle,
+    ManagedAgentRuntimeReceipt, ManagedAgentRuntimeStatus,
 };
 use crate::app_state::AppState;
 
@@ -485,78 +485,161 @@ fn start_pair(
             global: &global,
         },
     );
-    let state = app.state::<AppState>();
-    let _transition = state
-        .managed_agent_runtime_transition
-        .lock()
-        .map_err(|e| e.to_string())?;
-    if state.shutdown_started.load(Ordering::Acquire) {
-        return Err("desktop shutdown has started".into());
-    }
-    let _store = state
-        .managed_agents_store_lock
-        .lock()
-        .map_err(|e| e.to_string())?;
-    let mut records = load_managed_agents(&app)?;
-    let record = find_managed_agent_mut(&mut records, &pubkey)?;
-    if record.updated_at != readiness_updated_at {
-        return Err("managed agent changed while readiness was in flight".into());
-    }
-    if record.backend != BackendKind::Local {
-        return Err("managed runtime pairs require a local agent".into());
-    }
-    if expected_updated_at.is_some_and(|expected| record.updated_at != expected) {
-        return Err("managed agent changed while runtime reconciliation was in flight".into());
-    }
     let key = ManagedAgentRuntimeKey::new(pubkey, &relay_url)?;
-    let mut runtimes = state
-        .managed_agent_processes
-        .lock()
-        .map_err(|e| e.to_string())?;
-    if runtimes
-        .get_mut(&key)
-        .is_some_and(|runtime| runtime.child.try_wait().ok().flatten().is_none())
-    {
-        return Ok(status_for_with_local_setup(
-            &app,
-            &key,
-            runtimes.get(&key),
-            None,
-            local_setup,
-        ));
-    }
-    runtimes.remove(&key);
-    terminate_untracked_pair_runtime(&app, &key)?;
-
+    let state = app.state::<AppState>();
     let owner = state
         .keys
         .lock()
         .ok()
         .map(|keys| keys.public_key().to_hex());
-    let mut process = spawn_agent_child(&app, record, &key.relay_url, lazy, owner.as_deref())?;
-    let now = crate::util::now_iso();
-    let receipt = ManagedAgentRuntimeReceipt {
-        key: key.clone(),
-        pid: process.child.id(),
-        desktop_instance_id: current_instance_id(&app),
-        started_at: now.clone(),
+
+    // Phase A: validate and reserve this exact pair while holding locks only
+    // long enough to copy the immutable record snapshot. The reservation, not
+    // a held mutex, prevents a concurrent start from spawning a duplicate.
+    let (record_snapshot, _reservation) = {
+        let _transition = state
+            .managed_agent_runtime_transition
+            .lock()
+            .map_err(|e| e.to_string())?;
+        if state.shutdown_started.load(Ordering::Acquire) {
+            return Err("desktop shutdown has started".into());
+        }
+        let _store = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|e| e.to_string())?;
+        let records = load_managed_agents(&app)?;
+        let record = records
+            .iter()
+            .find(|record| record.pubkey.eq_ignore_ascii_case(&readiness_record.pubkey))
+            .ok_or_else(|| format!("agent {} not found", readiness_record.pubkey))?;
+        if record.updated_at != readiness_updated_at {
+            return Err("managed agent changed while readiness was in flight".into());
+        }
+        if record.backend != BackendKind::Local {
+            return Err("managed runtime pairs require a local agent".into());
+        }
+        if expected_updated_at.is_some_and(|expected| record.updated_at != expected) {
+            return Err("managed agent changed while runtime reconciliation was in flight".into());
+        }
+        let mut runtimes = state
+            .managed_agent_processes
+            .lock()
+            .map_err(|e| e.to_string())?;
+        if runtimes
+            .get_mut(&key)
+            .is_some_and(|runtime| runtime.child.try_wait().ok().flatten().is_none())
+        {
+            return Ok(status_for_with_local_setup(
+                &app,
+                &key,
+                runtimes.get(&key),
+                None,
+                local_setup,
+            ));
+        }
+        runtimes.remove(&key);
+        let reservation = reserve_managed_agent_start(&state, &key)?;
+        (record.clone(), reservation)
     };
-    if let Err(error) = write_agent_runtime_receipt(&app, &receipt) {
+
+    // Phase B: command discovery, readiness, log setup, and both the login
+    // probe and buzz-acp spawn happen with every runtime lock released.
+    terminate_untracked_pair_runtime(&app, &key)?;
+    let spawned = spawn_agent_child(
+        &app,
+        &record_snapshot,
+        &key.relay_url,
+        lazy,
+        owner.as_deref(),
+    )?;
+    let mut spawned = Some(spawned);
+    let mut wrote_receipt = false;
+
+    // Phase C: generation-fence the unlocked result and register it briefly.
+    // Any shutdown, record edit, or competing live runtime wins; the newly
+    // spawned child is then terminated only after these guards are dropped.
+    let registration = (|| -> Result<ManagedAgentRuntimeStatus, String> {
+        let _transition = state
+            .managed_agent_runtime_transition
+            .lock()
+            .map_err(|e| e.to_string())?;
+        if state.shutdown_started.load(Ordering::Acquire) {
+            return Err("desktop shutdown started while managed runtime was spawning".into());
+        }
+        let _store = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|e| e.to_string())?;
+        let mut records = load_managed_agents(&app)?;
+        let record = find_managed_agent_mut(&mut records, &record_snapshot.pubkey)?;
+        if record.updated_at != record_snapshot.updated_at {
+            return Err("managed agent changed while runtime was spawning".into());
+        }
+        if record.backend != BackendKind::Local {
+            return Err("managed runtime pairs require a local agent".into());
+        }
+        if expected_updated_at.is_some_and(|expected| record.updated_at != expected) {
+            return Err("managed agent changed while runtime reconciliation was in flight".into());
+        }
+        let mut runtimes = state
+            .managed_agent_processes
+            .lock()
+            .map_err(|e| e.to_string())?;
+        if runtimes
+            .get_mut(&key)
+            .is_some_and(|runtime| runtime.child.try_wait().ok().flatten().is_none())
+        {
+            return Ok(status_for_with_local_setup(
+                &app,
+                &key,
+                runtimes.get(&key),
+                None,
+                local_setup,
+            ));
+        }
+        runtimes.remove(&key);
+
+        let process = spawned
+            .as_ref()
+            .ok_or_else(|| "managed runtime spawn result was already consumed".to_string())?;
+        let now = crate::util::now_iso();
+        let receipt = ManagedAgentRuntimeReceipt {
+            key: key.clone(),
+            pid: process.child.id(),
+            desktop_instance_id: current_instance_id(&app),
+            started_at: now.clone(),
+        };
+        write_agent_runtime_receipt(&app, &receipt)?;
+        wrote_receipt = true;
+        record.runtime_pid = None;
+        record.updated_at = now.clone();
+        record.last_started_at = Some(now);
+        record.last_stopped_at = None;
+        record.last_error = None;
+        let Some(process) = spawned.take() else {
+            return Err("managed runtime spawn result was already consumed".into());
+        };
+        runtimes.insert(key.clone(), ManagedAgentPairRuntime::starting(process));
+        let status = status_for_with_local_setup(&app, &key, runtimes.get(&key), None, local_setup);
+        if let Err(error) = save_managed_agents(&app, &records) {
+            spawned = runtimes.remove(&key).map(|runtime| runtime.process);
+            return Err(error);
+        }
+        Ok(status)
+    })();
+
+    if let Some(mut process) = spawned {
         let _ = terminate_process(process.child.id());
         let _ = process.child.wait();
-        return Err(error);
+        if wrote_receipt {
+            super::remove_agent_runtime_receipt(&app, &key);
+        }
     }
-    record.runtime_pid = None;
-    record.updated_at = now.clone();
-    record.last_started_at = Some(now);
-    record.last_stopped_at = None;
-    record.last_error = None;
-    runtimes.insert(key.clone(), ManagedAgentPairRuntime::starting(process));
-    let status = status_for_with_local_setup(&app, &key, runtimes.get(&key), None, local_setup);
-    drop(runtimes);
-    save_managed_agents(&app, &records)?;
-    emit_status(&app, &status);
-    Ok(status)
+    if let Ok(status) = &registration {
+        emit_status(&app, status);
+    }
+    registration
 }
 
 #[tauri::command]
@@ -951,6 +1034,34 @@ mod tests {
         assert!(state.managed_agent_processes.try_lock().is_ok());
         release_probe_tx.send(()).expect("release fake readiness");
         assert!(worker.join().expect("snapshot worker"));
+    }
+
+    #[test]
+    fn runtime_start_reservation_spans_unlocked_spawn_without_holding_lifecycle_locks() {
+        use std::sync::{mpsc, Arc};
+
+        let state = Arc::new(crate::app_state::build_app_state());
+        let key = ManagedAgentRuntimeKey::new("aa".repeat(32), "ws://localhost:3000")
+            .expect("valid runtime key");
+        let reservation =
+            reserve_managed_agent_start(&state, &key).expect("first start reserves the pair");
+        let (spawn_started_tx, spawn_started_rx) = mpsc::channel();
+        let (release_spawn_tx, release_spawn_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            spawn_started_tx.send(()).expect("announce fake spawn");
+            release_spawn_rx.recv().expect("release fake spawn");
+        });
+
+        spawn_started_rx.recv().expect("fake spawn started");
+        assert!(state.managed_agent_runtime_transition.try_lock().is_ok());
+        assert!(state.managed_agents_store_lock.try_lock().is_ok());
+        assert!(state.managed_agent_processes.try_lock().is_ok());
+        assert!(reserve_managed_agent_start(&state, &key).is_err());
+
+        release_spawn_tx.send(()).expect("release fake spawn");
+        worker.join().expect("fake spawn worker");
+        drop(reservation);
+        assert!(reserve_managed_agent_start(&state, &key).is_ok());
     }
 
     fn payload(
