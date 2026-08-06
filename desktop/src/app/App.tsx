@@ -706,6 +706,7 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
       <MachineOnboardingFlow
         complete={completeMachineOnboarding}
         continueWithIdentity={machine.continueWithIdentity}
+        continueWithRecoveredIdentity={machine.continueWithRecoveredIdentity}
         identityLost={machine.identityLost}
         initialPage={machineInitialPage}
         navigateAfterComplete={navigateAfterOnboarding}

@@ -179,6 +179,69 @@ void main() {
       expect(scanButton.onPressed, isNull);
       expect(pairingCodeButton.onPressed, isNull);
     });
+
+    testWidgets('recovery entry rejects ordinary nostrpair codes', (
+      tester,
+    ) async {
+      final notifier = _RecordingPairingNotifier();
+      await tester.pumpWidget(
+        WidgetHelpers.testable(
+          overrides: [pairingProvider.overrideWith(() => notifier)],
+          child: const PairingPage(
+            addingCommunity: true,
+            identityRecoveryOnly: true,
+          ),
+        ),
+      );
+
+      await _expandPairingCode(tester);
+      await tester.enterText(find.byType(TextField), 'nostrpair://ordinary');
+      await tester.tap(find.text('Connect'));
+      await tester.pump();
+
+      expect(find.text('Scan a desktop recovery code.'), findsOneWidget);
+      expect(notifier.pairedCodes, isEmpty);
+    });
+
+    testWidgets('recovery entry accepts mode=recover codes', (tester) async {
+      final notifier = _RecordingPairingNotifier();
+      await tester.pumpWidget(
+        WidgetHelpers.testable(
+          overrides: [pairingProvider.overrideWith(() => notifier)],
+          child: const PairingPage(
+            addingCommunity: true,
+            identityRecoveryOnly: true,
+          ),
+        ),
+      );
+
+      await _expandPairingCode(tester);
+      const code = 'nostrpair://desktop?mode=recover';
+      await tester.enterText(find.byType(TextField), code);
+      await tester.tap(find.text('Connect'));
+      await tester.pump();
+
+      expect(notifier.pairedCodes, [code]);
+    });
+
+    testWidgets('recovery SAS warns about permanent desktop access', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            pairingProvider.overrideWith(
+              () => _ConfirmingSasPairingNotifier(sendsIdentityToDesktop: true),
+            ),
+          ],
+          child: MaterialApp(theme: AppTheme.dark(), home: const PairingPage()),
+        ),
+      );
+
+      expect(find.textContaining('full Buzz identity'), findsOneWidget);
+      expect(find.textContaining('permanent access'), findsOneWidget);
+      expect(find.text('Codes Match'), findsOneWidget);
+    });
   });
 }
 
@@ -227,12 +290,37 @@ class _ConnectingPairingNotifier extends Notifier<PairingState>
   void denySas() {}
 }
 
+class _RecordingPairingNotifier extends Notifier<PairingState>
+    implements PairingNotifier {
+  final pairedCodes = <String>[];
+
+  @override
+  PairingState build() => const PairingState();
+
+  @override
+  Future<void> pair(String rawInput) async => pairedCodes.add(rawInput);
+
+  @override
+  void reset() {}
+
+  @override
+  void confirmSas() {}
+
+  @override
+  void denySas() {}
+}
+
 class _ConfirmingSasPairingNotifier extends Notifier<PairingState>
     implements PairingNotifier {
+  _ConfirmingSasPairingNotifier({this.sendsIdentityToDesktop = false});
+
+  final bool sendsIdentityToDesktop;
+
   @override
-  PairingState build() => const PairingState(
+  PairingState build() => PairingState(
     status: PairingStatus.confirmingSas,
     sasCode: '123456',
+    sendsIdentityToDesktop: sendsIdentityToDesktop,
   );
 
   @override
