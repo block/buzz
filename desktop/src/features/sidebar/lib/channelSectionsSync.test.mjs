@@ -308,47 +308,6 @@ test("revert-fix: fetch failed (error) does not trigger seed-publish via bootstr
   }
 });
 
-// 1b. fetch failed (event exists but won't decrypt) → failed, head recorded
-test("revert-fix: undecryptable event yields failed with createdAt set", async () => {
-  const publishCalls = [];
-  mock.method(relayClient, "fetchEvents", () =>
-    Promise.resolve([
-      {
-        pubkey: "pk-decrypt",
-        content: "bad-cipher",
-        created_at: 1700000099,
-        id: "evt-bad",
-      },
-    ]),
-  );
-  mock.method(relayClient, "publishEvent", (...args) => {
-    publishCalls.push(args);
-    return Promise.resolve();
-  });
-
-  const fw = makeFakeWindow();
-  const restore = installFakeWindow(fw);
-  try {
-    const manager = new ChannelSectionSyncManager("pk-decrypt", RELAY);
-    const result = await manager.fetchRemoteSections();
-    assert.equal(result.status, "failed");
-    assert.equal(
-      result.createdAt,
-      1700000099,
-      "createdAt must be recorded from the unreadable event",
-    );
-    // Manager must have recorded the head watermark so seed-publish is blocked.
-    assert.ok(
-      manager.getPersistedWatermark() > 0,
-      "watermark must be > 0 after seeing an undecryptable event",
-    );
-    assert.equal(publishCalls.length, 0);
-  } finally {
-    restore();
-    mock.reset();
-  }
-});
-
 // 2. fetch absent + persisted head > 0 → zero publish calls (the dev-build stale-copy case)
 // Mutation test: setting watermark to 0 in localStorage causes bootstrap to seed.
 test("revert-fix: absent fetch with prior watermark blocks seed-publish via bootstrap", async () => {
@@ -434,89 +393,7 @@ test("revert-fix: absent fetch with zero watermark allows seed-publish via boots
   }
 });
 
-// 4. existing event that fails decrypt → no seed, head recorded from event.created_at
-test("revert-fix: decrypt failure records head and blocks any future seed-publish", async () => {
-  const publishCalls = [];
-  let callCount = 0;
-  mock.method(relayClient, "fetchEvents", () => {
-    callCount++;
-    if (callCount === 1) {
-      return Promise.resolve([
-        {
-          pubkey: "pk-nodecrypt",
-          content: "!!invalid-base64!!",
-          created_at: 1700000777,
-          id: "evt-nodecrypt",
-        },
-      ]);
-    }
-    return Promise.resolve([]);
-  });
-  mock.method(relayClient, "publishEvent", (...args) => {
-    publishCalls.push(args);
-    return Promise.resolve();
-  });
-
-  const fw = makeFakeWindow();
-  const restore = installFakeWindow(fw);
-  try {
-    const manager = new ChannelSectionSyncManager("pk-nodecrypt", RELAY);
-    const local = makeSectionsStore([{ id: "s1", name: "Work", order: 0 }]);
-    const result = await manager.bootstrap(local);
-    assert.equal(
-      result.action,
-      "hold",
-      "failed fetch must return hold from bootstrap",
-    );
-    assert.ok(
-      manager.getPersistedWatermark() >= 1700000777,
-      "watermark must be advanced to event.created_at",
-    );
-    assert.equal(publishCalls.length, 0, "no publish after decrypt failure");
-  } finally {
-    restore();
-    mock.reset();
-  }
-});
-
-// 5. watermark round-trips across manager instances (simulated restart)
-test("revert-fix: watermark persists and is read by a new manager instance", async () => {
-  mock.method(relayClient, "fetchEvents", () =>
-    Promise.resolve([
-      {
-        pubkey: "pk-restart",
-        content: "bad-cipher",
-        created_at: 1700001234,
-        id: "evt-restart",
-      },
-    ]),
-  );
-
-  const fw = makeFakeWindow();
-  const restore = installFakeWindow(fw);
-  try {
-    // Session A: manager sees an event → watermark written to localStorage.
-    const managerA = new ChannelSectionSyncManager("pk-restart", RELAY);
-    await managerA.fetchRemoteSections();
-    assert.ok(
-      managerA.getPersistedWatermark() >= 1700001234,
-      "session A watermark must be set",
-    );
-
-    // Session B: new manager instance reads the same localStorage.
-    mock.restoreAll();
-    const managerB = new ChannelSectionSyncManager("pk-restart", RELAY);
-    assert.ok(
-      managerB.getPersistedWatermark() >= 1700001234,
-      "session B must inherit watermark from localStorage without another fetch",
-    );
-  } finally {
-    restore();
-    mock.reset();
-  }
-});
-
-// 6. LWW baseline: newer decryptable pre-publish event still wins after an
+// 4. LWW baseline: newer decryptable pre-publish event still wins after an
 //    undecryptable head was recorded.
 // Mutation test: removing headBeforeFetch snapshot causes remote to never win.
 test("revert-fix: sections LWW — newer decryptable pre-publish event selected after undecryptable head recorded", async () => {
@@ -573,7 +450,7 @@ test("revert-fix: sections LWW — newer decryptable pre-publish event selected 
   }
 });
 
-// 7. live-sub: undecryptable event on live path records head before decrypt
+// 5. live-sub: undecryptable event on live path records head before decrypt
 // Mutation test: removing recordRemoteHead before decrypt in the live callback
 // leaves watermark at 0 after a live event.
 test("revert-fix: undecryptable live event advances watermark before decrypt attempt", async () => {

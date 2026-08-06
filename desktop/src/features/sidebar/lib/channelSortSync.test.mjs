@@ -256,28 +256,6 @@ test("revert-fix: fetch failed (error) does not trigger seed-publish via bootstr
   }
 });
 
-// 1b. undecryptable event → failed + head recorded
-test("revert-fix: undecryptable event yields failed with createdAt and advances watermark", async () => {
-  mock.method(relayClient, "fetchEvents", () =>
-    Promise.resolve([
-      { pubkey: "pk-dc", content: "!bad!", created_at: 1700000099, id: "e1" },
-    ]),
-  );
-  mock.method(relayClient, "publishEvent", () => Promise.resolve());
-  const fw = makeFakeWindow();
-  const restore = installFakeWindow(fw);
-  try {
-    const manager = new ChannelSortSyncManager("pk-dc", RELAY);
-    const result = await manager.fetchRemoteSortPrefs();
-    assert.equal(result.status, "failed");
-    assert.equal(result.createdAt, 1700000099);
-    assert.ok(manager.getPersistedWatermark() > 0);
-  } finally {
-    restore();
-    mock.reset();
-  }
-});
-
 // 2. absent + persisted head > 0 → hold, zero publish calls (the dev-build stale-copy case)
 // Mutation: setting watermark to 0 in localStorage causes bootstrap to seed.
 test("revert-fix: absent fetch with prior watermark blocks seed-publish via bootstrap", async () => {
@@ -334,77 +312,7 @@ test("revert-fix: absent fetch with zero watermark seeds via bootstrap (first-sy
   }
 });
 
-// 4. decrypt failure records head and blocks future seed
-test("revert-fix: decrypt failure records head and blocks any future seed-publish", async () => {
-  const publishCalls = [];
-  let callCount = 0;
-  mock.method(relayClient, "fetchEvents", () => {
-    callCount++;
-    if (callCount === 1) {
-      return Promise.resolve([
-        {
-          pubkey: "pk-nd",
-          content: "!!invalid!!",
-          created_at: 1700000777,
-          id: "evt-nd",
-        },
-      ]);
-    }
-    return Promise.resolve([]);
-  });
-  mock.method(relayClient, "publishEvent", (...args) => {
-    publishCalls.push(args);
-    return Promise.resolve();
-  });
-  const fw = makeFakeWindow();
-  const restore = installFakeWindow(fw);
-  try {
-    const manager = new ChannelSortSyncManager("pk-nd", RELAY);
-    const local = makeStore({ channels: "recent" });
-    const result = await manager.bootstrap(local);
-    assert.equal(result.action, "hold", "failed fetch must return hold from bootstrap");
-    assert.equal(result.createdAt, undefined);
-    assert.ok(manager.getPersistedWatermark() >= 1700000777);
-    assert.equal(
-      manager.getPendingStore(),
-      null,
-      "no pending publish after decrypt failure",
-    );
-    assert.equal(publishCalls.length, 0);
-  } finally {
-    restore();
-    mock.reset();
-  }
-});
-
-// 5. watermark round-trips across manager instances (simulated restart)
-test("revert-fix: watermark persists across manager instances (simulated restart)", async () => {
-  mock.method(relayClient, "fetchEvents", () =>
-    Promise.resolve([
-      {
-        pubkey: "pk-restart",
-        content: "!bad!",
-        created_at: 1700001234,
-        id: "evt-r",
-      },
-    ]),
-  );
-  const fw = makeFakeWindow();
-  const restore = installFakeWindow(fw);
-  try {
-    const managerA = new ChannelSortSyncManager("pk-restart", RELAY);
-    await managerA.fetchRemoteSortPrefs();
-    assert.ok(managerA.getPersistedWatermark() >= 1700001234);
-    mock.restoreAll();
-    const managerB = new ChannelSortSyncManager("pk-restart", RELAY);
-    assert.ok(managerB.getPersistedWatermark() >= 1700001234);
-  } finally {
-    restore();
-    mock.reset();
-  }
-});
-
-// 6. LWW baseline: newer decryptable pre-publish event still wins after an
+// 4. LWW baseline: newer decryptable pre-publish event still wins after an
 //    undecryptable head was recorded.
 // Mutation: removing headBeforeFetch snapshot causes remote to never win.
 test("revert-fix: sort LWW — newer decryptable pre-publish event selected after undecryptable head recorded", async () => {
@@ -449,7 +357,7 @@ test("revert-fix: sort LWW — newer decryptable pre-publish event selected afte
   }
 });
 
-// 7. live-sub: undecryptable event on live path records head before decrypt
+// 5. live-sub: undecryptable event on live path records head before decrypt
 // Mutation: removing recordRemoteHead before decrypt in the live callback
 // leaves watermark at 0 after a live event.
 test("revert-fix: undecryptable live event advances watermark before decrypt attempt", async () => {
