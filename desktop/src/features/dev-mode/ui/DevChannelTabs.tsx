@@ -1,7 +1,7 @@
 import * as React from "react";
 
 import { parseSubChannelName } from "@/features/dev-mode/lib/subChannels";
-import { DevWavyText } from "@/features/dev-mode/ui/DevWavyText";
+import { DevSpotlightText } from "@/features/dev-mode/ui/DevSpotlightText";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 
@@ -64,7 +64,7 @@ export function DevChannelTabs({
         type="button"
       >
         <span className={cn("whitespace-nowrap", isUnread && "font-semibold")}>
-          {isWorking ? <DevWavyText text={label} /> : label}
+          {isWorking ? <DevSpotlightText text={label} /> : label}
         </span>
         {isUnread ? (
           <span

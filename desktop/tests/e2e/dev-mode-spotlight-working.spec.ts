@@ -3,7 +3,7 @@ import { expect, test } from "@playwright/test";
 import { installMockBridge } from "../helpers/bridge";
 
 // While an agent has an active turn in a channel, dev mode renders that
-// channel's name as per-character wavy text — in the tab strip and in the
+// channel's name with a spotlight sweep — in the tab strip and in the
 // channel navigator — and reverts to plain text when the turn ends.
 
 // alice — agent member of #general in the mock bridge.
@@ -34,7 +34,7 @@ function seedTurnEvent(
       window.__BUZZ_E2E_SEED_ACTIVE_TURNS__?.({
         agentPubkey: pubkey,
         channelId,
-        turnId: "turn-wavy-1",
+        turnId: "turn-spotlight-1",
         kind: eventKind,
       });
     },
@@ -42,27 +42,29 @@ function seedTurnEvent(
   );
 }
 
-test("channel names wave while an agent turn is active", async ({ page }) => {
+test("channel names spotlight while an agent turn is active", async ({
+  page,
+}) => {
   await openDevModeGeneral(page);
 
   // Idle — plain labels everywhere.
-  await expect(page.getByTestId("dev-mode-wavy-text")).toHaveCount(0);
+  await expect(page.getByTestId("dev-mode-spotlight-text")).toHaveCount(0);
 
   await seedTurnEvent(page, "turn_started");
 
   const tab = page.getByTestId("dev-mode-channel-tab").first();
-  const wavyTab = tab.getByTestId("dev-mode-wavy-text");
-  await expect(wavyTab).toBeVisible();
-  await expect(wavyTab).toHaveText("main");
-  // Per-character spans carry the animation; the label text is unchanged.
-  await expect(wavyTab.locator(".dev-wavy-char")).toHaveCount(4);
+  const spotlightTab = tab.getByTestId("dev-mode-spotlight-text");
+  await expect(spotlightTab).toBeVisible();
+  await expect(spotlightTab).toHaveText("main");
+  // The sweep class carries the animated mask; the label text is unchanged.
+  await expect(spotlightTab).toHaveClass(/dev-spotlight-text/);
 
-  const navigatorWavy = page
+  const navigatorSpotlight = page
     .getByTestId("dev-mode-channel-navigator")
-    .getByTestId("dev-mode-wavy-text");
-  await expect(navigatorWavy).toHaveText("general");
+    .getByTestId("dev-mode-spotlight-text");
+  await expect(navigatorSpotlight).toHaveText("general");
 
   await seedTurnEvent(page, "turn_completed");
-  await expect(page.getByTestId("dev-mode-wavy-text")).toHaveCount(0);
+  await expect(page.getByTestId("dev-mode-spotlight-text")).toHaveCount(0);
   await expect(tab).toHaveText("main");
 });

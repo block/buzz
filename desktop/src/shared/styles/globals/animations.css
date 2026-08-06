@@ -917,26 +917,47 @@
   }
 }
 
-/* Dev mode: per-character wave on channel names while an agent is working.
-   inline-block is load-bearing — transforms are ignored on inline spans. */
-.dev-wavy-char {
+/*
+ * Dev mode: spotlight sweep on channel names while an agent is working. The
+ * text is dimmed by a mask except for a full-brightness band that sweeps
+ * back and forth. Masking (instead of a background-clip gradient) preserves
+ * the label's inherited color.
+ */
+.dev-spotlight-text {
   display: inline-block;
-  animation: dev-wavy-char 1200ms ease-in-out infinite;
+  -webkit-mask-image: linear-gradient(
+    90deg,
+    rgb(0 0 0 / 0.4) 35%,
+    #000 50%,
+    rgb(0 0 0 / 0.4) 65%
+  );
+  mask-image: linear-gradient(
+    90deg,
+    rgb(0 0 0 / 0.4) 35%,
+    #000 50%,
+    rgb(0 0 0 / 0.4) 65%
+  );
+  -webkit-mask-size: 200% 100%;
+  mask-size: 200% 100%;
+  animation: dev-spotlight-text 1200ms ease-in-out infinite alternate;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .dev-wavy-char {
+  .dev-spotlight-text {
     animation: none;
+    -webkit-mask-image: none;
+    mask-image: none;
   }
 }
 
-@keyframes dev-wavy-char {
-  0%,
-  100% {
-    transform: translateY(0);
+@keyframes dev-spotlight-text {
+  from {
+    -webkit-mask-position: 0% 0;
+    mask-position: 0% 0;
   }
 
-  50% {
-    transform: translateY(-0.14em);
+  to {
+    -webkit-mask-position: 100% 0;
+    mask-position: 100% 0;
   }
 }
