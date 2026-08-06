@@ -145,9 +145,7 @@ and remote MCP servers:
       "headers": [
         {
           "name": "Authorization",
-          "env_file": "/run/secrets/hosted-context.env",
-          "env_name": "MCP_TOKEN",
-          "value_prefix": "Bearer "
+          "value": "Bearer replace-me"
         }
       ]
     }
@@ -163,9 +161,10 @@ before writing this document.
 The JSON is strict. The only top-level fields are `version` and `servers`.
 Each server has a `name` and tagged `transport`. A `stdio` entry contains
 `command`, `args`, and `env`; an `http` entry contains a URL and optional
-headers. URLs and header values can be literal, loaded from protected files,
-or selected by name from protected environment files. Public endpoints require
-HTTPS; plain HTTP is limited to literal private IP addresses. Server names must
+headers. URLs and header values are final resolved values; Project or deployment
+code must resolve any secret selectors before writing the protected handoff.
+HTTP is allowed only on a literal loopback address and must be credential-free;
+all other endpoints require HTTPS. Server names must
 be unique, contain 1 to 128 ASCII bytes using only letters, digits, `_`, or `-`,
 and cannot contain `__`.
 Names are checked across both structured entries and the legacy server.
@@ -189,6 +188,22 @@ the `buzz` CLI. Some adapters may propagate inherited variables to MCP child
 processes. Per-server `env` entries are explicit configuration, not a process
 isolation boundary. Use a separate account, container, or credential-brokered
 service when the MCP process must not inherit adapter credentials.
+
+MCP transport capability and tool authorization are separate gates. Before an
+unattended launch, the Project or deployment resolver must pre-authorize the
+resolved servers and tools in the selected adapter's protected, agent-specific
+configuration. Do not restore a global permission bypass. An adapter that
+advertises HTTP support can still deny every tool call under a non-interactive
+`dontAsk` policy; ACP currently exposes no portable initialize-time proof of
+those adapter-local approvals, so the launcher must fail closed when it cannot
+establish them.
+
+Release acceptance for a mixed configuration must exercise the real adapter,
+not only configuration parsing: create a session containing the legacy Buzz
+stdio companion and at least one structured HTTP server, call one harmless tool
+from each transport, then publish the result through the companion's constrained
+`send` tool. Tool listing, model completion, or a fake-adapter payload capture
+alone does not prove end-to-end composition or outbound publishing.
 
 If the JSON contains secrets, keep it outside Git and restrict the file to its
 owner. On Unix:

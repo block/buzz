@@ -5,7 +5,6 @@
 //! a successful launch producing a document that the harness cannot parse.
 
 use std::collections::{BTreeMap, HashSet};
-use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -97,21 +96,12 @@ impl McpLaunchConfigDocument {
                 command, args, env, ..
             } = server
             else {
-                let ConfiguredMcpServer::Http {
-                    url,
-                    url_env_file,
-                    url_env_name,
-                    headers,
-                    ..
-                } = server
-                else {
+                let ConfiguredMcpServer::Http { url, headers, .. } = server else {
                     continue;
                 };
-                if url_env_file.is_some() != url_env_name.is_some()
-                    || usize::from(!url.is_empty()) + usize::from(url_env_file.is_some()) != 1
-                {
+                if url.is_empty() {
                     return Err(McpConfigError::Invalid(format!(
-                        "remote MCP server '{name}' requires exactly one complete URL source"
+                        "remote MCP server '{name}' requires a resolved URL"
                     )));
                 }
                 if headers.len() > MCP_SERVER_MAX_ENV {
@@ -123,11 +113,8 @@ impl McpLaunchConfigDocument {
                 for header in headers {
                     if header.name.trim().is_empty()
                         || header.name.contains(['\r', '\n', '\0'])
-                        || header.env_file.is_some() != header.env_name.is_some()
-                        || usize::from(!header.value.is_empty())
-                            + usize::from(header.value_file.is_some())
-                            + usize::from(header.env_file.is_some())
-                            != 1
+                        || header.value.is_empty()
+                        || header.value.contains(['\r', '\n', '\0'])
                     {
                         return Err(McpConfigError::Invalid(format!(
                             "remote MCP server '{name}' has an invalid header configuration"
@@ -206,9 +193,9 @@ impl McpLaunchConfigDocument {
 
 /// One MCP server loaded from the structured MCP configuration.
 ///
-/// The transport tag is part of version 1 even though the first version
-/// supports only stdio. Additional transports extend this ordered list instead
-/// of introducing another configuration surface.
+/// Version 1 includes both stdio and Streamable HTTP so its meaning is fixed
+/// before either transport ships. Additional transports require a new schema
+/// version rather than changing an already-published version in place.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "transport", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ConfiguredMcpServer {
@@ -228,16 +215,9 @@ pub enum ConfiguredMcpServer {
     Http {
         /// Stable ACP identifier for this server.
         name: String,
-        /// Literal URL. Exactly one of this and the `url_env_*` pair is required.
-        #[serde(default)]
+        /// Resolved URL supplied by the trusted launch resolver.
         url: String,
-        /// Protected environment file containing the URL.
-        #[serde(default)]
-        url_env_file: Option<PathBuf>,
-        /// Variable name to read from `url_env_file`.
-        #[serde(default)]
-        url_env_name: Option<String>,
-        /// Headers sent to the remote server.
+        /// Resolved headers supplied by the trusted launch resolver.
         #[serde(default)]
         headers: Vec<McpHttpHeaderConfig>,
     },
@@ -258,21 +238,8 @@ impl ConfiguredMcpServer {
 pub struct McpHttpHeaderConfig {
     /// HTTP header name.
     pub name: String,
-    /// Literal header value.
-    #[serde(default)]
+    /// Final resolved header value.
     pub value: String,
-    /// File containing the entire header value.
-    #[serde(default)]
-    pub value_file: Option<PathBuf>,
-    /// Protected environment file containing a named value.
-    #[serde(default)]
-    pub env_file: Option<PathBuf>,
-    /// Variable selected from `env_file`.
-    #[serde(default)]
-    pub env_name: Option<String>,
-    /// Public prefix prepended after resolving the configured value.
-    #[serde(default)]
-    pub value_prefix: String,
 }
 
 impl std::fmt::Debug for McpHttpHeaderConfig {
@@ -281,10 +248,6 @@ impl std::fmt::Debug for McpHttpHeaderConfig {
             .debug_struct("McpHttpHeaderConfig")
             .field("name", &self.name)
             .field("value", &"[REDACTED]")
-            .field("value_file", &self.value_file)
-            .field("env_file", &self.env_file)
-            .field("env_name", &self.env_name)
-            .field("value_prefix", &self.value_prefix)
             .finish()
     }
 }
@@ -316,18 +279,10 @@ impl std::fmt::Debug for ConfiguredMcpServer {
                 .field("arg_count", &args.len())
                 .field("env", &RedactedMcpEnv(env))
                 .finish(),
-            Self::Http {
-                name,
-                url: _,
-                url_env_file,
-                url_env_name,
-                headers,
-            } => formatter
+            Self::Http { name, headers, .. } => formatter
                 .debug_struct("Http")
                 .field("name", name)
                 .field("url", &"[REDACTED]")
-                .field("url_env_file", url_env_file)
-                .field("url_env_name", url_env_name)
                 .field("headers", headers)
                 .finish(),
         }
@@ -481,15 +436,9 @@ mod tests {
         let document = McpLaunchConfigDocument::new(vec![ConfiguredMcpServer::Http {
             name: "hosted-context".to_string(),
             url: "https://mcp.example.test/mcp".to_string(),
-            url_env_file: None,
-            url_env_name: None,
             headers: vec![McpHttpHeaderConfig {
                 name: "Authorization".to_string(),
                 value: "Bearer secret".to_string(),
-                value_file: None,
-                env_file: None,
-                env_name: None,
-                value_prefix: String::new(),
             }],
         }]);
 
@@ -499,6 +448,37 @@ mod tests {
             document.servers
         );
         assert!(!format!("{document:?}").contains("Bearer secret"));
+    }
+
+    #[test]
+    fn http_transport_requires_resolved_control_free_values() {
+        for server in [
+            ConfiguredMcpServer::Http {
+                name: "missing-url".to_string(),
+                url: String::new(),
+                headers: Vec::new(),
+            },
+            ConfiguredMcpServer::Http {
+                name: "empty-header".to_string(),
+                url: "https://mcp.example.test/mcp".to_string(),
+                headers: vec![McpHttpHeaderConfig {
+                    name: "Authorization".to_string(),
+                    value: String::new(),
+                }],
+            },
+            ConfiguredMcpServer::Http {
+                name: "injected-header".to_string(),
+                url: "https://mcp.example.test/mcp".to_string(),
+                headers: vec![McpHttpHeaderConfig {
+                    name: "Authorization".to_string(),
+                    value: "Bearer safe\r\nInjected: true".to_string(),
+                }],
+            },
+        ] {
+            assert!(McpLaunchConfigDocument::new(vec![server])
+                .validate()
+                .is_err());
+        }
     }
 
     #[test]
