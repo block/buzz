@@ -226,6 +226,7 @@ test.describe("global agent config screenshots", () => {
     await page
       .getByTestId("global-agent-default-harness-option-claude")
       .click();
+    await waitForAnimations(page);
     await expect(page.getByTestId("global-agent-model")).toHaveText(
       /Default model/,
     );
@@ -979,5 +980,45 @@ test.describe("global agent config screenshots", () => {
     await dialog.screenshot({
       path: `${SHOTS}/11-edit-runtime-less-provider-required-save-blocked.png`,
     });
+  });
+
+  // Will's exact stuck path: databricks_v2 global provider + saved global
+  // OPENAI_API_KEY.  The cue must be visible without opening Advanced; once
+  // Advanced is opened the annotation must appear on the matching row.
+  test("card-mint-key-cue-visible-and-annotation-in-advanced", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      globalAgentConfig: {
+        provider: "databricks_v2",
+        model: null,
+        preferred_runtime: "buzz-agent",
+        env_vars: { OPENAI_API_KEY: "sk-placeholder" },
+      },
+    });
+
+    await openAiDefaultsSettings(page);
+
+    const card = page.getByTestId("settings-global-agent-config");
+
+    // The cue must be visible without the user opening Advanced.
+    await expect(card.getByTestId("card-mint-key-cue")).toBeVisible();
+    await expect(card.getByTestId("card-mint-key-cue")).toContainText(
+      "OPENAI_API_KEY",
+    );
+    await expect(card.getByTestId("card-mint-key-cue")).toContainText(
+      "Advanced → Environment variables",
+    );
+
+    // Advanced is collapsed at this point.
+    const advancedToggle = card.getByTestId("global-agent-advanced-toggle");
+    await expect(advancedToggle).toHaveAttribute("aria-expanded", "false");
+
+    // Open Advanced — the OPENAI_API_KEY row's annotation must be visible.
+    await advancedToggle.click();
+    await expect(advancedToggle).toHaveAttribute("aria-expanded", "true");
+    await expect(
+      card.getByText("Used for minting agent trading cards"),
+    ).toBeVisible();
   });
 });

@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
@@ -11,6 +12,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:video_player/video_player.dart';
 
 import '../../shared/clipboard_utils.dart';
 import '../../shared/relay/relay.dart';
@@ -25,6 +27,7 @@ import 'media_viewer_page.dart';
 import 'message_media.dart';
 
 part 'message_content/media_carousel.dart';
+part 'message_content/video_preview.dart';
 
 const _messageMediaMaxInlineWidth = 320.0;
 const _messageMediaMaxImageHeight = 240.0;
@@ -105,6 +108,9 @@ class MessageContent extends HookConsumerWidget {
 
   final TextStyle? baseStyle;
 
+  /// Alignment applied to rendered markdown text.
+  final TextAlign? textAlign;
+
   final int? maxLines;
 
   /// Render a body that is nothing but emoji at [kEmojiOnlyFontSize], the way
@@ -134,6 +140,7 @@ class MessageContent extends HookConsumerWidget {
     this.onMediaReply,
     this.onMediaMore,
     this.baseStyle,
+    this.textAlign,
     this.maxLines,
     this.scaleEmojiOnly = false,
     this.mediaCarouselLeadingOverflow = 0,
@@ -266,6 +273,7 @@ class MessageContent extends HookConsumerWidget {
             _buildLink(context, ref, linkText, url, linkStyle, style),
         imageBuilder: (context, imageUrl) =>
             _buildMedia(context, imageUrl, imetaByUrl[imageUrl]),
+        textAlign: textAlign,
         maxLines: maxLines,
         inlineComponents: [
           _MentionMd(
@@ -306,7 +314,11 @@ class MessageContent extends HookConsumerWidget {
   Widget _buildMedia(BuildContext context, String imageUrl, ImetaEntry? imeta) {
     final mediaKind = classifyMediaUrl(imageUrl, imeta: imeta);
     if (mediaKind == MessageMediaKind.video) {
-      return _MessageVideoPreview(url: imageUrl, imeta: imeta);
+      return _MessageVideoPreview(
+        url: imageUrl,
+        imeta: imeta,
+        onReply: onMediaReply,
+      );
     }
     return _MessageImagePreview(
       url: imageUrl,
@@ -441,82 +453,6 @@ class _MessageImagePreview extends HookConsumerWidget {
                   label: 'Image unavailable',
                 ),
               ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _MessageVideoPreview extends StatelessWidget {
-  final String url;
-  final ImetaEntry? imeta;
-
-  const _MessageVideoPreview({required this.url, required this.imeta});
-
-  @override
-  Widget build(BuildContext context) {
-    final rawAspectRatio = imeta?.aspectRatio ?? (16 / 9);
-    final aspectRatio = rawAspectRatio.clamp(0.75, 1.91);
-    final posterUrl = imeta?.posterUrl;
-
-    return Padding(
-      padding: const EdgeInsets.only(top: Grid.half),
-      child: GestureDetector(
-        onTap: () =>
-            openVideoViewer(context, videoUrl: url, posterUrl: posterUrl),
-        child: _MessageMediaPreviewFrame(
-          previewKey: ValueKey('message-media-video-preview:$url'),
-          backgroundColor: Colors.black,
-          child: AspectRatio(
-            aspectRatio: aspectRatio.toDouble(),
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                if (posterUrl != null)
-                  MediaImage(
-                    url: posterUrl,
-                    fit: BoxFit.cover,
-                    errorBuilder: (_, _, _) => const _MediaPreviewFallback(
-                      icon: LucideIcons.video,
-                      label: 'Video preview unavailable',
-                    ),
-                  )
-                else
-                  const _MediaPreviewFallback(
-                    icon: LucideIcons.video,
-                    label: 'Video attachment',
-                  ),
-                const ColoredBox(color: Color.fromRGBO(0, 0, 0, 0.28)),
-                Center(
-                  child: Container(
-                    width: 52,
-                    height: 52,
-                    decoration: const BoxDecoration(
-                      color: Color.fromRGBO(0, 0, 0, 0.6),
-                      shape: BoxShape.circle,
-                    ),
-                    child: const Icon(
-                      LucideIcons.play,
-                      color: Colors.white,
-                      size: 24,
-                    ),
-                  ),
-                ),
-                Positioned(
-                  left: Grid.xxs,
-                  right: Grid.xxs,
-                  bottom: Grid.xxs,
-                  child: Text(
-                    'Video',
-                    style: context.textTheme.labelSmall?.copyWith(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-              ],
             ),
           ),
         ),

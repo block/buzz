@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:buzz/features/activity/activity_page.dart';
 import 'package:buzz/features/activity/activity_provider.dart';
 import 'package:buzz/features/activity/feed_item.dart';
@@ -9,15 +10,18 @@ import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_detail_page.dart';
 import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
-import 'package:buzz/features/channels/read_state/read_state_provider.dart';
+import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/features/profile/user_cache_provider.dart';
 import 'package:buzz/features/profile/user_profile.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/widgets/anchored_popover_menu.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/avatar_image.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
@@ -111,6 +115,8 @@ void main() {
     Map<String, int> readContexts = const {},
     List<Channel>? channels,
     TextScaler? textScaler,
+    EdgeInsets mediaPadding = EdgeInsets.zero,
+    ValueListenable<int>? tabReselection,
   }) async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -133,13 +139,13 @@ void main() {
       ],
       child: MaterialApp(
         theme: AppTheme.light(),
-        builder: textScaler == null
-            ? null
-            : (context, child) => MediaQuery(
-                data: MediaQuery.of(context).copyWith(textScaler: textScaler),
-                child: child!,
-              ),
-        home: const ActivityPage(),
+        builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(
+            context,
+          ).copyWith(textScaler: textScaler, padding: mediaPadding),
+          child: child!,
+        ),
+        home: ActivityPage(tabReselection: tabReselection),
       ),
     );
   }
@@ -177,21 +183,99 @@ void main() {
     await tester.pumpWidget(await buildTestable());
     await tester.pumpAndSettle();
 
-    final appBar = tester.widget<FrostedAppBar>(find.byType(FrostedAppBar));
+    final appBar = tester.widget<FrostedAppBar>(
+      find.byType(FrostedAppBar).last,
+    );
     expect(appBar.automaticallyImplyLeading, isFalse);
+    expect(appBar.gradient, isNull);
+    expect(appBar.frosted, isTrue);
+    expect(appBar.showBottomDivider, isTrue);
+    expect(appBar.bottomHeight, Grid.xxs);
     expect(find.byTooltip('Back'), findsNothing);
   });
 
-  testWidgets('keeps bottom clearance for the floating tab bar', (
+  testWidgets('sizes the Activity app bar for its custom title style', (
     tester,
   ) async {
-    await tester.pumpWidget(await buildTestable());
+    await tester.pumpWidget(
+      await buildTestable(textScaler: const TextScaler.linear(2)),
+    );
     await tester.pumpAndSettle();
 
-    final safeAreas = tester.widgetList<SafeArea>(find.byType(SafeArea));
-    expect(safeAreas, hasLength(1));
-    expect(safeAreas.single.top, isFalse);
-    expect(safeAreas.single.bottom, isTrue);
+    final appBar = tester.widget<FrostedAppBar>(
+      find.byType(FrostedAppBar).last,
+    );
+    final titleStyle = appBar.titleStyle!;
+    expect(titleStyle.fontSize, 22);
+    expect(
+      tester.getSize(find.byType(ClipRect).last).height,
+      closeTo(
+        frostedAppBarHeight(
+          tester.element(find.byType(FrostedAppBar).last),
+          titleStyle: titleStyle,
+          bottomHeight: Grid.xxs,
+        ),
+        0.01,
+      ),
+    );
+  });
+
+  testWidgets('keeps footer clearance inside the scrollable content', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      await buildTestable(mediaPadding: const EdgeInsets.only(bottom: 88)),
+    );
+    await tester.pumpAndSettle();
+
+    final safeArea = tester.widget<SafeArea>(
+      find.byKey(const ValueKey('activity-content-safe-area')),
+    );
+    expect(safeArea.top, isFalse);
+    expect(safeArea.bottom, isFalse);
+
+    final padding = tester.widget<SliverPadding>(
+      find.descendant(
+        of: find.byType(CustomScrollView),
+        matching: find.byType(SliverPadding),
+      ),
+    );
+    expect(padding.padding, const EdgeInsets.fromLTRB(0, Grid.xxs, 0, 96));
+  });
+
+  testWidgets('scrolls Activity to the top when its tab is selected again', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(320, 180);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final tabReselection = ValueNotifier(0);
+    addTearDown(tabReselection.dispose);
+    await tester.pumpWidget(
+      await buildTestable(tabReselection: tabReselection),
+    );
+    await tester.pumpAndSettle();
+
+    final scrollable = tester.state<ScrollableState>(
+      find
+          .descendant(
+            of: find.byType(CustomScrollView),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+    );
+    expect(scrollable.position.maxScrollExtent, greaterThan(0));
+    scrollable.position.jumpTo(scrollable.position.maxScrollExtent);
+    tabReselection.value++;
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 130));
+
+    expect(
+      scrollable.position.pixels,
+      lessThan(scrollable.position.maxScrollExtent),
+    );
+    await tester.pumpAndSettle();
+    expect(scrollable.position.pixels, scrollable.position.minScrollExtent);
   });
 
   testWidgets('shows error view with retry button', (tester) async {
@@ -253,7 +337,13 @@ void main() {
 
     final material = tester.widget<Material>(surface);
     final shape = material.shape! as RoundedRectangleBorder;
-    expect(shape.borderRadius, BorderRadius.circular(Radii.card));
+    expect(shape.borderRadius, BorderRadius.circular(Radii.popover));
+    expect(shape.side.color, Colors.black.withValues(alpha: 0.04));
+    expect(material.elevation, appPopoverElevation);
+    expect(
+      material.shadowColor,
+      appPopoverShadowColor(tester.element(surface)),
+    );
     expect(material.surfaceTintColor, Colors.transparent);
     expect(material.clipBehavior, Clip.antiAlias);
 
@@ -269,13 +359,23 @@ void main() {
 
     await tester.tap(find.descendant(of: surface, matching: find.text('All')));
     await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('activity-options-menu')));
+    final optionsTrigger = find.byKey(const ValueKey('activity-options-menu'));
+    expect(
+      tester.getSize(optionsTrigger),
+      const Size(Grid.xl, Grid.xl),
+      reason: 'Activity options must retain a 48dp touch target.',
+    );
+    await tester.tap(optionsTrigger);
     await tester.pump();
 
     final optionsSurface = find.byKey(
       const ValueKey('activity-options-popover'),
     );
+    final optionsMaterial = tester.widget<Material>(optionsSurface);
+    final optionsShape = optionsMaterial.shape! as RoundedRectangleBorder;
     expect(tester.getSize(optionsSurface).width, 216);
+    expect(optionsShape.borderRadius, BorderRadius.circular(Radii.popover));
+    expect(optionsMaterial.elevation, appPopoverElevation);
     expect(
       tester
           .widget<ScaleTransition>(
@@ -583,10 +683,155 @@ void main() {
 
     await tester.longPress(find.byKey(const ValueKey('inbox-row-m1')));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Mark unread'));
+    await tester.tap(
+      find.descendant(
+        of: find.byType(BottomSheet),
+        matching: find.text('Mark unread'),
+      ),
+    );
     await tester.pumpAndSettle();
 
     expect(find.byKey(const ValueKey('inbox-unread-dot-m1')), findsOneWidget);
+  });
+
+  testWidgets('swiping an inbox row reveals and runs its row actions', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      await buildTestable(
+        readContexts: {'ch1': now, 'ch2': now, 'thread:root1': now},
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final row = find.byKey(const ValueKey('inbox-row-m1'));
+    final originalLeft = tester.getTopLeft(row).dx;
+    await tester.drag(row, const Offset(-200, 0));
+    await tester.pumpAndSettle();
+
+    expect(tester.getTopLeft(row).dx, lessThan(originalLeft));
+    expect(find.byKey(const ValueKey('inbox-swipe-read-m1')), findsOneWidget);
+    expect(find.byKey(const ValueKey('inbox-swipe-open-m1')), findsNothing);
+    expect(
+      find.byKey(const ValueKey('inbox-swipe-background-m1')),
+      findsOneWidget,
+    );
+    expect(
+      tester
+          .getSize(find.byKey(const ValueKey('inbox-swipe-background-m1')))
+          .height,
+      tester.getSize(row).height,
+    );
+    final markUnreadAction = find.byKey(const ValueKey('inbox-swipe-read-m1'));
+    final markUnreadMaterial = tester.widget<Material>(
+      find.descendant(of: markUnreadAction, matching: find.byType(Material)),
+    );
+    expect(markUnreadMaterial.color, tester.element(row).colors.primary);
+    expect(markUnreadMaterial.borderRadius, BorderRadius.circular(Radii.full));
+
+    await tester.tap(find.byKey(const ValueKey('inbox-swipe-read-m1')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('inbox-unread-dot-m1')), findsOneWidget);
+
+    await tester.drag(row, const Offset(-200, 0));
+    await tester.pumpAndSettle();
+    final markReadAction = find.byKey(const ValueKey('inbox-swipe-read-m1'));
+    final markReadMaterial = tester.widget<Material>(
+      find.descendant(of: markReadAction, matching: find.byType(Material)),
+    );
+    expect(markReadMaterial.color, tester.element(row).appColors.success);
+    expect(markReadMaterial.color, isNot(markUnreadMaterial.color));
+  });
+
+  testWidgets('swipe action reveals its label with one threshold haptic', (
+    tester,
+  ) async {
+    final hapticCalls = <MethodCall>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+          if (call.method == 'HapticFeedback.vibrate') {
+            hapticCalls.add(call);
+          }
+          return null;
+        });
+    addTearDown(
+      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, null),
+    );
+
+    await tester.pumpWidget(
+      await buildTestable(
+        readContexts: {'ch1': now, 'ch2': now, 'thread:root1': now},
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final row = find.byKey(const ValueKey('inbox-row-m1'));
+    final gesture = await tester.startGesture(tester.getCenter(row));
+    for (var step = 1; step <= 7; step++) {
+      await gesture.moveBy(
+        const Offset(-10, 0),
+        timeStamp: Duration(milliseconds: step * 50),
+      );
+      await tester.pump();
+    }
+
+    final action = find.byKey(const ValueKey('inbox-swipe-read-m1'));
+    expect(action, findsOneWidget);
+    expect(
+      find.descendant(of: action, matching: find.byIcon(LucideIcons.mail)),
+      findsOneWidget,
+    );
+    expect(find.text('Mark unread'), findsNothing);
+    expect(hapticCalls, isEmpty);
+
+    for (var step = 8; step <= 10; step++) {
+      await gesture.moveBy(
+        const Offset(-10, 0),
+        timeStamp: Duration(milliseconds: step * 50),
+      );
+      await tester.pump();
+    }
+    expect(find.text('Mark unread'), findsOneWidget);
+    expect(hapticCalls, hasLength(1));
+    expect(hapticCalls.single.arguments, 'HapticFeedbackType.selectionClick');
+
+    await gesture.moveBy(
+      const Offset(20, 0),
+      timeStamp: const Duration(milliseconds: 550),
+    );
+    await tester.pump();
+    await gesture.moveBy(
+      const Offset(-20, 0),
+      timeStamp: const Duration(milliseconds: 600),
+    );
+    await tester.pump();
+    expect(hapticCalls, hasLength(1));
+
+    await gesture.up();
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('commits the inbox read-state action past the swipe threshold', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      await buildTestable(
+        readContexts: {'ch1': now, 'ch2': now, 'thread:root1': now},
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final row = find.byKey(const ValueKey('inbox-row-m1'));
+    await tester.drag(row, const Offset(-500, 0));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('inbox-unread-dot-m1')), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('inbox-swipe-background-m1')),
+      findsNothing,
+    );
   });
 
   testWidgets('falls back to short pubkey when user not cached', (

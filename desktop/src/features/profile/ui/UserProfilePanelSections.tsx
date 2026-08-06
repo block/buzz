@@ -1,23 +1,16 @@
 import * as React from "react";
-import type { LucideIcon } from "lucide-react";
 import {
   ArrowUpRight,
   ChevronDown,
   ChevronUp,
   CircleAlert,
-  MessageSquare,
-  Pencil,
-  Play,
-  RefreshCw,
-  Square,
-  UserMinus,
   UserPlus,
 } from "lucide-react";
-import { toast } from "sonner";
 
 import { MemorySection } from "@/features/agent-memory/ui/MemorySection";
 import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
 import { getManagedAgentPrimaryActionLabel } from "@/features/agents/lib/managedAgentControlActions";
+import { RestartDiffBadge } from "@/features/agents/ui/RestartDiffBadge";
 import { ManagedAgentLogPanel } from "@/features/agents/ui/ManagedAgentLogPanel";
 import { AgentConfigPanel } from "@/features/agents/ui/AgentConfigPanel";
 import { getPresenceLabel } from "@/features/presence/lib/presence";
@@ -44,19 +37,20 @@ import {
   STATUS_DOT_MASK_CURVE,
 } from "@/features/profile/ui/MaskedAvatarBadgeFrame";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
+import {
+  ProfilePersonaPrimaryActions,
+  ProfilePrimaryActions,
+} from "@/features/profile/ui/UserProfilePrimaryActions";
 import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import { BotIdenticon } from "@/features/messages/ui/BotIdenticon";
 import type { ManagedAgent, RelayAgent } from "@/shared/api/types";
-import { Spinner } from "@/shared/ui/spinner";
 import type {
   ProfileChannelLink,
   ProfilePanelTab,
 } from "@/features/profile/ui/UserProfilePanelUtils";
-import { useFeatureEnabled } from "@/shared/features";
 import { cn } from "@/shared/lib/cn";
 import { Alert, AlertDescription, AlertTitle } from "@/shared/ui/alert";
 import { Badge } from "@/shared/ui/badge";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 export { AgentInstructionsFocusedView } from "@/features/profile/ui/UserProfilePanelAgentDetails";
 
@@ -105,6 +99,8 @@ export type ProfileSummaryViewProps = {
   onOpenInstructions: () => void;
   onTabChange: (tab: ProfilePanelTab, options?: { replace?: boolean }) => void;
   onOpenDm?: (pubkeys: string[]) => Promise<void> | void;
+  /** Mint an agent trading card. Present only for owner-managed personas. */
+  onCreateCard?: () => void;
   presenceStatus: "online" | "away" | "offline" | undefined;
   profile: ReturnType<typeof useUserProfileQuery>["data"];
   pubkey: string | null;
@@ -218,6 +214,7 @@ export function ProfileSummaryView({
   onOpenInstructions,
   onTabChange,
   onOpenDm,
+  onCreateCard,
   presenceStatus,
   profile,
   pubkey,
@@ -349,6 +346,7 @@ export function ProfileSummaryView({
         <ProfilePersonaPrimaryActions
           canEditAgent={canEditAgent}
           disabled={isAgentActionPending}
+          onCreateCard={onCreateCard}
           onEditAgent={handleEditAgent}
           onStartAgent={handleInstantiateAgent}
         />
@@ -356,6 +354,7 @@ export function ProfileSummaryView({
         <ProfilePrimaryActions
           canEditAgent={canEditAgent}
           followMutation={followMutation}
+          onCreateCard={onCreateCard}
           onEditAgent={handleEditAgent}
           agentActionDisabled={isAgentActionPending}
           agentActionLabel={
@@ -385,6 +384,18 @@ export function ProfileSummaryView({
           onMessage={onOpenDm ? handleMessage : undefined}
           pubkey={pubkey}
           unfollowMutation={unfollowMutation}
+        />
+      ) : null}
+
+      {/* Tab-independent restart badge — visible on every tab so the user
+          sees it on a plain Info-tab open, not only on the Runtime tab.
+          Fixes the side-panel badge inconsistency (info-tab default = badge invisible
+          before this change). */}
+      {managedAgent?.needsRestart ? (
+        <RestartDiffBadge
+          autoRestartEnabled={managedAgent.autoRestartOnConfigChange}
+          className="self-center"
+          restartDiff={managedAgent.restartDiff}
         />
       ) : null}
 
@@ -422,6 +433,7 @@ export function ProfileSummaryView({
                 diagnosticsFields={diagnosticsFields}
                 diagnosticsSummary={diagnosticsTrailing}
                 needsRestart={managedAgent?.needsRestart ?? false}
+                restartDiff={managedAgent?.restartDiff ?? []}
                 onOpenDiagnostics={onOpenDiagnostics}
                 onOpenInstructions={onOpenInstructions}
                 runtimeConfigurationFields={runtimeConfigurationFields}
@@ -626,181 +638,6 @@ function ProfileHeroDescription({ about }: { about: string }) {
         </button>
       ) : null}
     </div>
-  );
-}
-
-// ── Primary actions ──────────────────────────────────────────────────────────
-
-function ProfilePrimaryActions({
-  agentActionDisabled,
-  agentActionLabel,
-  agentActionLive,
-  canEditAgent,
-  followMutation,
-  isFollowing,
-  messagePending,
-  onAgentPrimaryAction,
-  onAgentRestart,
-  onEditAgent,
-  onMessage,
-  pubkey,
-  unfollowMutation,
-}: {
-  agentActionDisabled?: boolean;
-  agentActionLabel?: string;
-  agentActionLive?: boolean;
-  canEditAgent: boolean;
-  followMutation: ReturnType<typeof useFollowMutation>;
-  isFollowing: boolean;
-  messagePending?: boolean;
-  onAgentPrimaryAction?: () => void;
-  onAgentRestart?: () => void;
-  onEditAgent: () => void;
-  onMessage?: () => void;
-  pubkey: string;
-  unfollowMutation: ReturnType<typeof useUnfollowMutation>;
-}) {
-  const showFollowAction = useFeatureEnabled("pulse");
-  const followToggleMutation = isFollowing ? unfollowMutation : followMutation;
-
-  const handleFollowClick = () => {
-    followToggleMutation.mutate(pubkey, {
-      onError: (error) =>
-        toast.error(
-          `${isFollowing ? "Unfollow" : "Follow"} failed: ${error.message}`,
-        ),
-    });
-  };
-
-  return (
-    <div className="flex items-center justify-center gap-8">
-      {showFollowAction ? (
-        <ProfileQuickAction
-          active={isFollowing}
-          disabled={followToggleMutation.isPending}
-          icon={isFollowing ? UserMinus : UserPlus}
-          label={isFollowing ? "Unfollow" : "Follow"}
-          onClick={handleFollowClick}
-        />
-      ) : null}
-      {onMessage ? (
-        <ProfileQuickAction
-          disabled={messagePending}
-          icon={MessageSquare}
-          isLoading={messagePending}
-          label="Message"
-          onClick={onMessage}
-          testId="user-profile-message"
-        />
-      ) : null}
-      {canEditAgent ? (
-        <ProfileQuickAction
-          icon={Pencil}
-          label="Edit"
-          onClick={onEditAgent}
-          testId="user-profile-edit-agent"
-        />
-      ) : null}
-      {onAgentPrimaryAction && agentActionLabel ? (
-        <ProfileQuickAction
-          active={agentActionLive}
-          disabled={agentActionDisabled}
-          icon={agentActionLive ? Square : Play}
-          label={agentActionLabel}
-          onClick={onAgentPrimaryAction}
-          testId="user-profile-agent-primary-action"
-        />
-      ) : null}
-      {onAgentRestart ? (
-        <ProfileQuickAction
-          disabled={agentActionDisabled}
-          icon={RefreshCw}
-          label="Restart"
-          onClick={onAgentRestart}
-          testId="user-profile-agent-restart"
-        />
-      ) : null}
-    </div>
-  );
-}
-
-function ProfilePersonaPrimaryActions({
-  canEditAgent,
-  disabled,
-  onEditAgent,
-  onStartAgent,
-}: {
-  canEditAgent: boolean;
-  disabled: boolean;
-  onEditAgent: () => void;
-  onStartAgent: () => void;
-}) {
-  return (
-    <div className="flex items-center justify-center gap-8">
-      <ProfileQuickAction
-        disabled={disabled}
-        icon={Play}
-        label="Start agent"
-        onClick={onStartAgent}
-        testId="user-profile-start-agent"
-      />
-      {canEditAgent ? (
-        <ProfileQuickAction
-          disabled={disabled}
-          icon={Pencil}
-          label="Edit"
-          onClick={onEditAgent}
-          testId="user-profile-edit-agent"
-        />
-      ) : null}
-    </div>
-  );
-}
-
-function ProfileQuickAction({
-  active,
-  disabled,
-  icon: Icon,
-  isLoading,
-  label,
-  onClick,
-  testId,
-}: {
-  active?: boolean;
-  disabled?: boolean;
-  icon: LucideIcon;
-  isLoading?: boolean;
-  label: string;
-  onClick: () => void;
-  testId?: string;
-}) {
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <button
-          aria-label={label}
-          className={cn(
-            "flex h-12 w-12 items-center justify-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-50",
-            active
-              ? "bg-foreground text-background hover:bg-foreground/90"
-              : "bg-muted/60 text-foreground hover:bg-muted/80",
-          )}
-          data-testid={testId}
-          disabled={disabled}
-          onClick={onClick}
-          type="button"
-        >
-          {isLoading ? (
-            <Spinner aria-hidden="true" className="h-4 w-4 border-2" />
-          ) : (
-            <Icon className="h-4 w-4" />
-          )}
-        </button>
-      </TooltipTrigger>
-      <TooltipContent align="center" side="top">
-        {label}
-      </TooltipContent>
-    </Tooltip>
   );
 }
 
