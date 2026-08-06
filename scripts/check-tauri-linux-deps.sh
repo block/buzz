@@ -19,8 +19,8 @@ remediate() {
         echo
         echo "  sudo apt-get install -y --no-install-recommends \\"
         echo "    build-essential curl file libasound2-dev libayatana-appindicator3-dev \\"
-        echo "    libgtk-3-dev librsvg2-dev libssl-dev libwebkit2gtk-4.1-dev libxdo-dev \\"
-        echo "    patchelf wget"
+        echo "    libgtk-3-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libssl-dev \\"
+        echo "    libsoup-3.0-dev libwebkit2gtk-4.1-dev libxdo-dev patchelf pkg-config wget"
         echo
         echo "Other distributions ship these under different names — see"
         echo "CONTRIBUTING.md, \"Linux: Tauri system libraries\", and"

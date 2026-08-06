@@ -50,8 +50,27 @@ fi
 out=$(expect_fail "missing pkg-config" env BUZZ_TEST_PLATFORM=Linux PATH="$mock_bin" "$guard")
 grep -F "pkg-config" <<<"$out" >/dev/null
 grep -F "apt-get install" <<<"$out" >/dev/null
-grep -F "libwebkit2gtk-4.1-dev" <<<"$out" >/dev/null
 grep -F "CONTRIBUTING.md" <<<"$out" >/dev/null
+
+# Check the package tokens inside the printed apt command, rather than merely
+# accepting a mention elsewhere in the diagnostic (for example, the missing
+# command error itself).
+install_command=$(sed -n '/^[[:space:]]*sudo apt-get install /,/^[[:space:]]*$/p' <<<"$out")
+if [[ -z "$install_command" ]]; then
+    echo "expected a non-empty apt install command in the remediation" >&2
+    exit 1
+fi
+for package in \
+    pkg-config \
+    libjavascriptcoregtk-4.1-dev \
+    libsoup-3.0-dev \
+    libwebkit2gtk-4.1-dev; do
+    if ! grep -F " $package" <<<"$install_command" >/dev/null; then
+        echo "expected apt install command to contain package '$package':" >&2
+        printf '%s\n' "$install_command" >&2
+        exit 1
+    fi
+done
 
 # 3. Linux with pkg-config but one missing module fails and names the module.
 cat > "$mock_bin/pkg-config" <<'MOCK'
