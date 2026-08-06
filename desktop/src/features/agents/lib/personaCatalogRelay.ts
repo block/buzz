@@ -1,4 +1,9 @@
-import { relayClient } from "@/shared/api/relayClient";
+import {
+  fetchCatalogEvents,
+  safeCatalogAvatarUrl,
+  sharedCatalogHeads,
+  type CatalogShareLevel,
+} from "@/features/agents/lib/catalogRelay";
 import type {
   AgentPersona,
   CatalogSourceCoordinate,
@@ -7,7 +12,7 @@ import type {
 } from "@/shared/api/types";
 import { KIND_PERSONA } from "@/shared/constants/kinds";
 
-export type CatalogPersonaShareLevel = "not-shared" | "none";
+export type CatalogPersonaShareLevel = CatalogShareLevel;
 
 type CatalogAgentProjection = {
   displayName: string;
@@ -44,84 +49,6 @@ function isObject(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function extractTag(event: RelayEvent, name: string): string | null {
-  const matches = event.tags.filter(
-    (tag) => tag.length >= 2 && tag[0] === name && typeof tag[1] === "string",
-  );
-  return matches.length === 1 ? (matches[0]?.[1] ?? null) : null;
-}
-
-export function personaEventIsShared(event: RelayEvent): boolean {
-  const sharedTags = event.tags.filter((tag) => tag[0] === "shared");
-  return (
-    sharedTags.length === 1 &&
-    sharedTags[0]?.length === 2 &&
-    sharedTags[0]?.[1] === "true"
-  );
-}
-
-function isSafeHttpUrl(value: unknown): value is string {
-  if (
-    typeof value !== "string" ||
-    value.length === 0 ||
-    value.length > 2_048 ||
-    /[\s()]/u.test(value)
-  ) {
-    return false;
-  }
-  try {
-    const parsed = new URL(value);
-    return parsed.protocol === "https:" || parsed.protocol === "http:";
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Emoji avatars are the one `data:` avatar a catalog entry keeps.
- *
- * They persist as inline, percent-encoded SVG (`emojiAvatarDataUrl` in
- * `ProfileAvatarEditor.utils.ts`), so they are self-contained and render on
- * any member's machine — unlike a bundled runtime-default avatar, whose local
- * asset path means nothing to another install. The accepted shape is exactly
- * that prefix: the trailing comma is what rejects `;base64` payloads, and
- * every other `data:` MIME stays rejected. Catalog avatars render through
- * `<img src>` (`ProfileAvatar` → `AvatarImage`), where SVG script never
- * executes, so bounding the length is the remaining concern — 8 KiB is an
- * order of magnitude above the ~700 characters an emoji avatar encodes to.
- */
-const INLINE_SVG_AVATAR_PREFIX = "data:image/svg+xml,";
-const MAX_INLINE_SVG_AVATAR_LENGTH = 8_192;
-
-/**
- * Shared persona heads can carry an uploaded avatar as an inline raster. Keep
- * those self-contained images renderable without accepting arbitrary `data:`
- * URLs: only the raster MIME types browsers decode in `<img>`, strict base64
- * shape, and a bound no larger than the relay's event-content ceiling.
- */
-const MAX_INLINE_RASTER_AVATAR_LENGTH = 256 * 1_024;
-const INLINE_RASTER_AVATAR_RE =
-  /^data:image\/(?:png|jpeg|gif|webp);base64,([A-Za-z0-9+/]+={0,2})$/u;
-
-function isInlineSvgAvatar(value: unknown): value is string {
-  return (
-    typeof value === "string" &&
-    value.startsWith(INLINE_SVG_AVATAR_PREFIX) &&
-    value.length <= MAX_INLINE_SVG_AVATAR_LENGTH
-  );
-}
-
-function isInlineRasterAvatar(value: unknown): value is string {
-  if (
-    typeof value !== "string" ||
-    value.length > MAX_INLINE_RASTER_AVATAR_LENGTH
-  ) {
-    return false;
-  }
-  const match = INLINE_RASTER_AVATAR_RE.exec(value);
-  return match !== null && (match[1]?.length ?? 0) % 4 === 0;
-}
-
 function optionalString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
@@ -141,12 +68,7 @@ function parsePersonaContent(event: RelayEvent): CatalogAgentProjection | null {
     return null;
   }
 
-  const avatarUrl =
-    isSafeHttpUrl(parsed.avatar_url) ||
-    isInlineSvgAvatar(parsed.avatar_url) ||
-    isInlineRasterAvatar(parsed.avatar_url)
-      ? parsed.avatar_url
-      : null;
+  const avatarUrl = safeCatalogAvatarUrl(parsed.avatar_url);
   const namePool = Array.isArray(parsed.name_pool)
     ? parsed.name_pool.filter(
         (candidate): candidate is string => typeof candidate === "string",
@@ -181,41 +103,25 @@ function parsePersonaContent(event: RelayEvent): CatalogAgentProjection | null {
 }
 
 /**
- * Collapse relay results to the canonical NIP-33 head for each persona
- * coordinate, then keep only exact `["shared", "true"]` heads.
+ * Project the shared kind:30175 heads onto persona publications.
  *
- * The relay normally returns one replaceable head. The client-side collapse is
- * defense in depth for older relays and fixtures, and deliberately claims the
- * coordinate before parsing so an invalid or unshared newest head cannot
- * resurrect an older shared definition.
+ * A head whose content does not parse is dropped, not retried against an older
+ * event: [`sharedCatalogHeads`] already claimed the coordinate, so falling
+ * back would resurrect a superseded definition.
  */
 export function catalogPublicationsFromEvents(
   events: readonly RelayEvent[],
 ): PersonaCatalogPublication[] {
-  const sorted = [...events].sort(
-    (left, right) =>
-      right.created_at - left.created_at || left.id.localeCompare(right.id),
-  );
-  const seenCoordinates = new Set<string>();
   const publications: PersonaCatalogPublication[] = [];
 
-  for (const event of sorted) {
-    if (event.kind !== KIND_PERSONA) continue;
-    const sourcePersonaId = extractTag(event, "d");
-    if (!sourcePersonaId) continue;
-    const ownerPubkey = event.pubkey.toLowerCase();
-    const coordinate = `${ownerPubkey}:${sourcePersonaId}`;
-    if (seenCoordinates.has(coordinate)) continue;
-    seenCoordinates.add(coordinate);
-
-    if (!personaEventIsShared(event)) continue;
-    const agent = parsePersonaContent(event);
+  for (const head of sharedCatalogHeads(events, KIND_PERSONA)) {
+    const agent = parsePersonaContent(head.event);
     if (!agent) continue;
     publications.push({
-      eventId: event.id,
-      ownerPubkey,
-      sourcePersonaId,
-      createdAt: event.created_at,
+      eventId: head.event.id,
+      ownerPubkey: head.ownerPubkey,
+      sourcePersonaId: head.dTag,
+      createdAt: head.event.created_at,
       agent,
     });
   }
@@ -223,64 +129,11 @@ export function catalogPublicationsFromEvents(
   return publications;
 }
 
-/**
- * Events per catalog page.
- *
- * Kept well under the relay's 1,000-row `query_events` clamp so a page that
- * comes back full is a reliable "there may be more" signal rather than a
- * silently truncated result.
- */
-const CATALOG_PAGE_SIZE = 500;
-
-/**
- * Hard bound on pages walked, so a relay that keeps returning full pages can
- * never spin this forever.
- */
-const MAX_CATALOG_PAGES = 40;
-
-/**
- * Read every shared persona event, page by page.
- *
- * A single `limit`-capped fetch silently truncates once a community publishes
- * more agents than the relay's clamp, and the entries that fall off are simply
- * undiscoverable. Paging walks backwards through `created_at` using the only
- * cursor a WS `REQ` filter carries — `until` — which the relay treats as
- * *inclusive*, so consecutive pages overlap on tied timestamps. Two things
- * follow, and both are load-bearing:
- *
- * - dedupe by event id, because the boundary events repeat; and
- * - stop when a page contributes nothing new, because a page whose events all
- *   share one `created_at` would otherwise be requested forever.
- */
+/** Read every shared persona event, page by page. */
 export async function fetchPersonaCatalogPublications(): Promise<
   PersonaCatalogPublication[]
 > {
-  const byId = new Map<string, RelayEvent>();
-  let until: number | undefined;
-
-  for (let page = 0; page < MAX_CATALOG_PAGES; page += 1) {
-    const events = await relayClient.fetchEvents({
-      kinds: [KIND_PERSONA],
-      limit: CATALOG_PAGE_SIZE,
-      ...(until === undefined ? {} : { until }),
-    });
-
-    const sizeBefore = byId.size;
-    let oldestCreatedAt = Number.POSITIVE_INFINITY;
-    for (const event of events) {
-      byId.set(event.id, event);
-      oldestCreatedAt = Math.min(oldestCreatedAt, event.created_at);
-    }
-
-    // A short page is the end of the catalog; a page of only-repeats means the
-    // cursor cannot advance past a run of tied timestamps.
-    if (events.length < CATALOG_PAGE_SIZE || byId.size === sizeBefore) {
-      break;
-    }
-    until = oldestCreatedAt;
-  }
-
-  return catalogPublicationsFromEvents([...byId.values()]);
+  return catalogPublicationsFromEvents(await fetchCatalogEvents(KIND_PERSONA));
 }
 
 function publicationToPersona(

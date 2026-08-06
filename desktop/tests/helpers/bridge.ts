@@ -249,6 +249,10 @@ type MockBridgeOptions = {
   /** Outcomes for successive explicit persona share publications. */
   personaSharePublicationStatuses?: Array<"published" | "queued">;
   teams?: MockTeamSeed[];
+  /** Community team-catalog (kind:30178) heads returned by relay queries. */
+  teamCatalogEvents?: RelayEvent[];
+  /** Outcomes for successive explicit team share publications. */
+  teamSharePublicationStatuses?: Array<"published" | "queued">;
   relayAgents?: MockRelayAgentSeed[];
   /** Delay both managed and relay agent directory reads. */
   agentListDelayMs?: number;

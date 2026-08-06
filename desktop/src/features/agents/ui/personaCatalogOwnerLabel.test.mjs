@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { resolveCatalogOwnerLabel } from "./PersonaCatalogDialog.tsx";
+import { resolveCatalogOwnerLabel } from "./catalogOwnerLabel.ts";
 
 // ── null / undefined summary ──────────────────────────────────────────────────
 

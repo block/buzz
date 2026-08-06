@@ -792,39 +792,13 @@ export type UpdatePersonaInput = {
 };
 
 // ── Team types ────────────────────────────────────────────────────────────────
-export type AgentTeam = {
-  id: string;
-  name: string;
-  description: string | null;
-  instructions: string | null;
-  personaIds: string[];
-  isBuiltin: boolean;
-  /** Absolute path to the team's backing directory (if directory-backed). */
-  sourceDir: string | null;
-  /** Whether sourceDir is a symlink to an external directory. */
-  isSymlink: boolean;
-  /** Resolved symlink target path (for display). Only set when isSymlink is true. */
-  symlinkTarget: string | null;
-  /** Version from the team's plugin.json manifest. */
-  version: string | null;
-  createdAt: string;
-  updatedAt: string;
-};
+export type {
+  AgentTeam,
+  CreateTeamInput,
+  TeamCatalogSourceCoordinate,
+  UpdateTeamInput,
+} from "./teamTypes";
 
-export type CreateTeamInput = {
-  name: string;
-  description?: string;
-  instructions?: string;
-  personaIds: string[];
-};
-
-export type UpdateTeamInput = {
-  id: string;
-  name: string;
-  description?: string;
-  instructions?: string;
-  personaIds: string[];
-};
 // ── Channel Template types ─────────────────────────────────────────────────────
 
 export type TemplateBackend =

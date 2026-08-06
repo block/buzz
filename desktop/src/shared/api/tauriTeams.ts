@@ -2,8 +2,15 @@ import { invokeTauri } from "@/shared/api/tauri";
 import type {
   AgentTeam,
   CreateTeamInput,
+  TeamCatalogSourceCoordinate,
   UpdateTeamInput,
 } from "@/shared/api/types";
+
+/** Wire shape of `TeamCatalogSource` — snake_case, like its parent record. */
+type RawTeamCatalogSource = {
+  owner_pubkey: string;
+  team_d_tag: string;
+};
 
 type RawTeam = {
   id: string;
@@ -12,6 +19,8 @@ type RawTeam = {
   instructions?: string | null;
   persona_ids: string[];
   is_builtin?: boolean;
+  shared?: boolean;
+  catalog_source?: RawTeamCatalogSource | null;
   source_dir?: string | null;
   is_symlink?: boolean;
   symlink_target?: string | null;
@@ -19,6 +28,14 @@ type RawTeam = {
   created_at: string;
   updated_at: string;
 };
+
+function fromRawCatalogSource(
+  source: RawTeamCatalogSource | null | undefined,
+): TeamCatalogSourceCoordinate | null {
+  return source
+    ? { ownerPubkey: source.owner_pubkey, teamDTag: source.team_d_tag }
+    : null;
+}
 
 function fromRawTeam(team: RawTeam): AgentTeam {
   return {
@@ -28,6 +45,8 @@ function fromRawTeam(team: RawTeam): AgentTeam {
     instructions: team.instructions ?? null,
     personaIds: team.persona_ids,
     isBuiltin: team.is_builtin ?? false,
+    shared: team.shared ?? false,
+    catalogSource: fromRawCatalogSource(team.catalog_source),
     sourceDir: team.source_dir ?? null,
     isSymlink: team.is_symlink ?? false,
     symlinkTarget: team.symlink_target ?? null,
@@ -72,6 +91,74 @@ export async function deleteTeam(id: string): Promise<void> {
   await invokeTauri("delete_team", { id });
 }
 
+// ── Team catalog commands ────────────────────────────────────────────────────
+
+export type TeamSharePublicationResult = {
+  team: AgentTeam;
+  /** `queued` means the head is durably enqueued but the relay has not yet
+   *  accepted it, so catalog visibility lags the toggle. */
+  publicationStatus: "published" | "queued";
+  relayMessage: string | null;
+};
+
+type RawTeamSharePublicationResult = {
+  team: RawTeam;
+  publicationStatus: "published" | "queued";
+  relayMessage?: string;
+};
+
+/** Publish this team's catalog head, or replace it with an untagged one. */
+export async function setTeamShared(
+  id: string,
+  shared: boolean,
+): Promise<TeamSharePublicationResult> {
+  const raw = await invokeTauri<RawTeamSharePublicationResult>(
+    "set_team_shared",
+    { id, shared },
+  );
+  return {
+    team: fromRawTeam(raw.team),
+    publicationStatus: raw.publicationStatus,
+    relayMessage: raw.relayMessage ?? null,
+  };
+}
+
+export type AddTeamFromCatalogResult = {
+  team: AgentTeam;
+  /** True when the team was already added and nothing was written. */
+  alreadyPresent: boolean;
+};
+
+type RawAddTeamFromCatalogResult = {
+  team: RawTeam;
+  alreadyPresent: boolean;
+};
+
+/**
+ * Copy a published team into the local stores.
+ *
+ * Only the coordinate crosses the boundary — never the projection the UI is
+ * displaying. The backend re-fetches the current head at
+ * `30178:<owner>:<d-tag>` and rejects the add if it is not `eventId` or has
+ * stopped being shared, so a catalog entry that moved or was retracted while
+ * the dialog sat open cannot be copied.
+ */
+export async function addTeamFromCatalog(
+  source: TeamCatalogSourceCoordinate & { eventId: string },
+): Promise<AddTeamFromCatalogResult> {
+  const raw = await invokeTauri<RawAddTeamFromCatalogResult>(
+    "add_team_from_catalog",
+    {
+      input: {
+        ownerPubkey: source.ownerPubkey,
+        teamDTag: source.teamDTag,
+        eventId: source.eventId,
+      },
+    },
+  );
+  return { team: fromRawTeam(raw.team), alreadyPresent: raw.alreadyPresent };
+}
+
 // ── Team snapshot types ─────────────────────────────────────────────────────
 
 export type SnapshotFormat = "json" | "png";
@@ -113,27 +200,10 @@ export type TeamSnapshotImportMemberResult = {
   profileSyncError: string | null;
 };
 
-/** Wire shape of the nested `TeamRecord` — Rust has no `rename_all` so fields
- *  arrive in snake_case, matching the existing `RawTeam` convention. */
-type RawTeamRecord = {
-  id: string;
-  name: string;
-  description: string | null;
-  persona_ids: string[];
-  instructions: string | null;
-  is_builtin: boolean;
-  source_dir: string | null;
-  is_symlink: boolean;
-  symlink_target: string | null;
-  version: string | null;
-  created_at: string;
-  updated_at: string;
-};
-
 /** Raw wire shape of the import result — outer struct is camelCase,
  *  but the nested `team` field is snake_case (no `rename_all` on TeamRecord). */
 type RawTeamSnapshotImportResult = {
-  team: RawTeamRecord;
+  team: RawTeam;
   personaIds: string[];
   members: TeamSnapshotImportMemberResult[];
 };

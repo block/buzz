@@ -10,7 +10,20 @@ import {
   useTeamsQuery,
   useUpdateTeamMutation,
 } from "@/features/agents/hooks";
+import type { CatalogShareLevel } from "@/features/agents/lib/catalogRelay";
+import {
+  catalogTeamsFromPublications,
+  type CatalogTeam,
+} from "@/features/agents/lib/teamCatalogRelay";
+import {
+  useAddTeamFromCatalogMutation,
+  useSetTeamCatalogSharedMutation,
+  useTeamCatalogLiveUpdates,
+  useTeamCatalogQuery,
+} from "@/features/agents/lib/useTeamCatalogRelay";
+import { useCommunities } from "@/features/communities/useCommunities";
 import type { CreateChannelManagedAgentsResult } from "@/features/agents/channelAgents";
+import { useIdentityQuery } from "@/shared/api/hooks";
 import { deletePersona } from "@/shared/api/tauriPersonas";
 import {
   confirmTeamSnapshotImport,
@@ -28,6 +41,7 @@ import type {
   UpdateTeamInput,
 } from "@/shared/api/types";
 import { deriveImportToast } from "./teamSnapshotImport.lib";
+import { teamShareNotice } from "./teamLibraryCopy";
 
 type TeamDialogState = {
   description: string;
@@ -51,7 +65,14 @@ export function useTeamActions(
   refetch: RefetchCallbacks,
 ) {
   const queryClient = useQueryClient();
+  const { activeCommunity } = useCommunities();
+  const identityQuery = useIdentityQuery();
+  const communityId = activeCommunity?.id ?? null;
   const teamsQuery = useTeamsQuery();
+  const catalogQuery = useTeamCatalogQuery(communityId);
+  useTeamCatalogLiveUpdates(communityId);
+  const setCatalogSharedMutation = useSetTeamCatalogSharedMutation(communityId);
+  const addTeamFromCatalogMutation = useAddTeamFromCatalogMutation();
   const createTeamMutation = useCreateTeamMutation();
   const updateTeamMutation = useUpdateTeamMutation();
   const deleteTeamMutation = useDeleteTeamMutation();
@@ -103,6 +124,16 @@ export function useTeamActions(
   });
 
   const teams = teamsQuery.data ?? [];
+  const publications = catalogQuery.data ?? [];
+  const catalogTeams = React.useMemo(
+    () =>
+      catalogTeamsFromPublications(
+        publications,
+        teams,
+        identityQuery.data?.pubkey,
+      ),
+    [identityQuery.data?.pubkey, publications, teams],
+  );
 
   async function handleTeamSubmit(input: CreateTeamInput | UpdateTeamInput) {
     actions.setActionNoticeMessage(null);
@@ -233,6 +264,78 @@ export function useTeamActions(
     setTeamToShare(team);
   }
 
+  function getTeamCatalogShareLevel(team: AgentTeam): CatalogShareLevel {
+    return team.shared ? "none" : "not-shared";
+  }
+
+  async function setTeamCatalogShareLevel(
+    team: AgentTeam,
+    shareLevel: CatalogShareLevel,
+  ): Promise<void> {
+    if (team.isBuiltin) return;
+
+    actions.setActionNoticeMessage(null);
+    actions.setActionErrorMessage(null);
+    const shared = shareLevel !== "not-shared";
+    try {
+      const result = await setCatalogSharedMutation.mutateAsync({
+        id: team.id,
+        shared,
+      });
+      // The open dialog holds its own copy of the team, so re-point it at the
+      // returned record — otherwise the toggle snaps back to its old value.
+      setTeamToShare((current) =>
+        current?.id === result.team.id ? result.team : current,
+      );
+      if (result.relayMessage) {
+        console.warn(
+          `[setTeamShared] relay publication queued: ${result.relayMessage}`,
+        );
+      }
+      actions.setActionNoticeMessage(
+        teamShareNotice(team.name, shared, result.publicationStatus),
+      );
+    } catch (error) {
+      actions.setActionErrorMessage(
+        error instanceof Error
+          ? error.message
+          : `Failed to ${shared ? "share" : "unshare"} team.`,
+      );
+    }
+  }
+
+  /**
+   * Add a published team.
+   *
+   * Only the coordinate is sent; the backend re-verifies the head, so an entry
+   * retracted or republished while the dialog sat open fails loudly here
+   * rather than copying a stale projection.
+   */
+  async function handleAddTeamFromCatalog(
+    team: CatalogTeam,
+    onSuccess?: () => void,
+  ): Promise<void> {
+    actions.setActionNoticeMessage(null);
+    actions.setActionErrorMessage(null);
+    try {
+      const result = await addTeamFromCatalogMutation.mutateAsync({
+        ownerPubkey: team.ownerPubkey,
+        teamDTag: team.teamDTag,
+        eventId: team.eventId,
+      });
+      actions.setActionNoticeMessage(
+        result.alreadyPresent
+          ? `${result.team.name} is already in your teams.`
+          : `Added ${result.team.name} to your teams.`,
+      );
+      onSuccess?.();
+    } catch (error) {
+      actions.setActionErrorMessage(
+        error instanceof Error ? error.message : "Failed to add team.",
+      );
+    }
+  }
+
   function handleExportTeamSnapshot(
     team: AgentTeam,
     memoryLevel: SnapshotMemoryLevel,
@@ -317,6 +420,10 @@ export function useTeamActions(
   return {
     teams,
     teamsQuery,
+    catalogQuery,
+    catalogTeams,
+    isAddingFromCatalog: addTeamFromCatalogMutation.isPending,
+    isCatalogSharePending: setCatalogSharedMutation.isPending,
     createTeamMutation,
     updateTeamMutation,
     deleteTeamMutation,
@@ -344,6 +451,9 @@ export function useTeamActions(
     openEditDialog,
     openExportSnapshot,
     openShare,
+    getTeamCatalogShareLevel,
+    setTeamCatalogShareLevel,
+    handleAddTeamFromCatalog,
     handleExportTeamSnapshot,
     handleImportTeamSnapshotFile,
     handleConfirmTeamSnapshotImport,

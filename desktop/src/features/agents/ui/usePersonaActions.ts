@@ -115,7 +115,6 @@ export function usePersonaActions() {
     React.useState<AgentSnapshotImportResult | null>(null);
   const [snapshotImportConfirmError, setSnapshotImportConfirmError] =
     React.useState<string | null>(null);
-  const [isCatalogDialogOpen, setIsCatalogDialogOpen] = React.useState(false);
   const [personaNoticeMessage, setPersonaNoticeMessage] = React.useState<
     string | null
   >(null);
@@ -435,12 +434,6 @@ export function usePersonaActions() {
     setPersonaDialogState(duplicatePersonaDialogState(persona));
   }
 
-  function openCatalog() {
-    clearFeedback("catalog");
-    void catalogQuery.refetch();
-    setIsCatalogDialogOpen(true);
-  }
-
   function openDelete(persona: AgentPersona) {
     clearFeedback("library");
     setPersonaToDelete(persona);
@@ -581,8 +574,6 @@ export function usePersonaActions() {
     setPersonaToDelete,
     personaToShare,
     setPersonaToShare,
-    isCatalogDialogOpen,
-    setIsCatalogDialogOpen,
     personaNoticeMessage,
     personaErrorMessage,
     personaFeedbackSurface,
@@ -593,7 +584,6 @@ export function usePersonaActions() {
     prepareCreate,
     openEdit,
     openDuplicate,
-    openCatalog,
     openDelete,
     openShare,
     personaToExportSnapshot,

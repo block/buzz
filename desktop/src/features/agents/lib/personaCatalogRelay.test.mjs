@@ -7,7 +7,6 @@ import {
   catalogPersonasFromPublications,
   catalogPublicationsFromEvents,
   fetchPersonaCatalogPublications,
-  personaEventIsShared,
 } from "./personaCatalogRelay.ts";
 
 const ALICE = "a".repeat(64);
@@ -119,10 +118,6 @@ test("an invalid canonical head does not resurrect an older shared persona", () 
 });
 
 test("only an exact shared true tag opts a persona into discovery", () => {
-  assert.equal(
-    personaEventIsShared(personaEvent({ createdAt: 1, id: "exact-shared" })),
-    true,
-  );
   for (const [index, sharedTag] of [
     ["shared"],
     ["shared", "false"],
@@ -134,7 +129,6 @@ test("only an exact shared true tag opts a persona into discovery", () => {
       shared: false,
       sharedTag,
     });
-    assert.equal(personaEventIsShared(event), false);
     assert.deepEqual(catalogPublicationsFromEvents([event]), []);
   }
   const duplicate = personaEvent({
@@ -142,7 +136,7 @@ test("only an exact shared true tag opts a persona into discovery", () => {
     id: "duplicate",
   });
   duplicate.tags.push(["shared", "true"]);
-  assert.equal(personaEventIsShared(duplicate), false);
+  assert.deepEqual(catalogPublicationsFromEvents([duplicate]), []);
 });
 
 test("catalog avatars keep bounded http URLs and drop unsafe schemes", () => {
