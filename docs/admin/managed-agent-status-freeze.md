@@ -21,11 +21,15 @@ runtime-management locks were held.
 Runtime status polling is completion-based and single-flight in both the UI and
 backend. The backend snapshots runtime generations under its locks, releases
 them before any readiness process starts, then revalidates exited generations
-before persisting their delayed state. Login probes are cached by effective command and relevant
-environment, invalidated on successful configuration writes, limited to one
-active probe per effective key while different keys remain independent, and
-killed and reaped after five seconds. Output is drained continuously while
-at most 64 KiB is retained.
+before persisting their delayed state. Lifecycle status paths also resolve
+readiness before taking runtime locks and reject a result if the managed-agent
+record generation changes in flight. Login probes are cached by effective
+command and relevant environment, invalidated on successful configuration
+writes, limited to one active probe per effective key while different keys
+remain independent, and killed and reaped after five seconds. Probe output is
+written to anonymous regular files, so a descendant cannot hold pipe EOF open;
+after process-group cleanup, at most 64 KiB from each stream is read and
+retained.
 
 Unexpected local listener exits use three bounded recovery attempts after 5
 seconds, 30 seconds, and 2 minutes. Recovery is suppressed while an agent has
