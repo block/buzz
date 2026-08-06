@@ -443,6 +443,8 @@ fn no_sentinel_reaches_the_owning_process_debug_output() {
         adapter_availability: None,
         start_nonce: "test-nonce".to_string(),
         #[cfg(windows)]
+        process_identity: 0,
+        #[cfg(windows)]
         job: None,
     };
     let rendered = format!("{process:?}");

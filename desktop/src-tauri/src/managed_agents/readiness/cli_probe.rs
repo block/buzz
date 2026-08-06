@@ -56,6 +56,88 @@ const LOGIN_PROBE_CACHE_TTL: Duration = Duration::from_secs(45);
 const CONFIG_ERROR_CACHE_TTL: Duration = Duration::from_secs(5);
 const MAX_PROBE_OUTPUT_BYTES: usize = 64 * 1024;
 
+trait ProbeTreeGuard {
+    fn terminate_and_wait(&mut self) -> Result<(), String>;
+}
+
+#[cfg(unix)]
+struct NativeProbeTreeGuard {
+    process_group: i32,
+}
+
+#[cfg(unix)]
+impl ProbeTreeGuard for NativeProbeTreeGuard {
+    fn terminate_and_wait(&mut self) -> Result<(), String> {
+        use nix::{
+            errno::Errno,
+            sys::signal::{killpg, Signal},
+            unistd::Pid,
+        };
+
+        match killpg(Pid::from_raw(self.process_group), Signal::SIGKILL) {
+            Ok(()) | Err(Errno::ESRCH) => Ok(()),
+            Err(error) => Err(format!(
+                "failed to terminate readiness probe process group {}: {error}",
+                self.process_group
+            )),
+        }
+    }
+}
+
+#[cfg(windows)]
+struct NativeProbeTreeGuard {
+    job: crate::managed_agents::JobHandle,
+}
+
+#[cfg(windows)]
+impl ProbeTreeGuard for NativeProbeTreeGuard {
+    fn terminate_and_wait(&mut self) -> Result<(), String> {
+        self.job.terminate_and_wait(Duration::from_secs(1))
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+struct NativeProbeTreeGuard;
+
+#[cfg(not(any(unix, windows)))]
+impl ProbeTreeGuard for NativeProbeTreeGuard {
+    fn terminate_and_wait(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+fn spawn_contained_probe(
+    command: &mut std::process::Command,
+) -> Result<(std::process::Child, NativeProbeTreeGuard), String> {
+    #[cfg(windows)]
+    {
+        let (child, job) = crate::managed_agents::spawn_probe_in_job(command)?;
+        return Ok((child, NativeProbeTreeGuard { job }));
+    }
+    #[cfg(not(windows))]
+    {
+        let child = command
+            .spawn()
+            .map_err(|error| format!("failed to spawn readiness probe: {error}"))?;
+        #[cfg(unix)]
+        let guard = NativeProbeTreeGuard {
+            process_group: child.id() as i32,
+        };
+        #[cfg(not(any(unix, windows)))]
+        let guard = NativeProbeTreeGuard;
+        Ok((child, guard))
+    }
+}
+
+fn terminate_contained_probe(
+    child: &mut std::process::Child,
+    guard: &mut impl ProbeTreeGuard,
+) -> Result<(), String> {
+    let tree_result = guard.terminate_and_wait();
+    let _ = child.kill();
+    tree_result
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ProbeCacheKey {
     generation: u64,
@@ -328,39 +410,61 @@ fn run_login_probe(
         command.process_group(0);
     }
 
-    let Ok(mut child) = command.spawn() else {
-        return ProbeOutcome::LoggedOut;
+    let (mut child, mut tree_guard) = match spawn_contained_probe(&mut command) {
+        Ok(contained) => contained,
+        Err(error) => {
+            eprintln!("buzz-desktop: readiness probe containment failed: {error}");
+            return ProbeOutcome::LoggedOut;
+        }
     };
     let started_at = Instant::now();
-    let (status, timed_out) = loop {
+    let (status, timed_out, mut containment_ok) = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break (Some(status), false),
+            Ok(Some(status)) => break (Some(status), false, true),
             Ok(None) if started_at.elapsed() < timeout => {
                 std::thread::sleep(Duration::from_millis(20));
             }
             Ok(None) => {
-                kill_probe_process_tree(&mut child);
-                break (child.wait().ok(), true);
+                let containment_ok =
+                    cleanup_contained_probe(&mut child, &mut tree_guard, "after timeout");
+                break (child.wait().ok(), true, containment_ok);
             }
             Err(_) => {
-                kill_probe_process_tree(&mut child);
+                let containment_ok =
+                    cleanup_contained_probe(&mut child, &mut tree_guard, "after wait failure");
                 let _ = child.wait();
-                break (None, false);
+                break (None, false, containment_ok);
             }
         }
     };
     // The direct child may have exited after forking a helper that inherited
     // its output descriptors. Terminate that probe-only process group before
     // returning so no authentication helper survives a completed probe.
-    kill_probe_process_tree(&mut child);
+    containment_ok &= cleanup_contained_probe(&mut child, &mut tree_guard, "after completion");
     let _stdout = read_bounded_output(&mut stdout);
     let stderr = read_bounded_output(&mut stderr);
-    if timed_out {
+    if !containment_ok {
+        ProbeOutcome::LoggedOut
+    } else if timed_out {
         ProbeOutcome::TimedOut
     } else if let Some(status) = status {
         classify_probe_output(&stderr, status.success())
     } else {
         ProbeOutcome::LoggedOut
+    }
+}
+
+fn cleanup_contained_probe(
+    child: &mut std::process::Child,
+    guard: &mut impl ProbeTreeGuard,
+    context: &str,
+) -> bool {
+    match terminate_contained_probe(child, guard) {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("buzz-desktop: readiness probe cleanup failed {context}: {error}");
+            false
+        }
     }
 }
 
@@ -373,18 +477,6 @@ fn read_bounded_output(file: &mut std::fs::File) -> Vec<u8> {
         .take(MAX_PROBE_OUTPUT_BYTES as u64)
         .read_to_end(&mut retained);
     retained
-}
-
-fn kill_probe_process_tree(child: &mut std::process::Child) {
-    #[cfg(unix)]
-    {
-        use nix::{
-            sys::signal::{killpg, Signal},
-            unistd::Pid,
-        };
-        let _ = killpg(Pid::from_raw(child.id() as i32), Signal::SIGKILL);
-    }
-    let _ = child.kill();
 }
 
 /// Classify collected probe output into a `ProbeOutcome`.
@@ -412,8 +504,52 @@ pub(crate) fn classify_probe_output(stderr_bytes: &[u8], exit_success: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::{
-        LoginProbeCache, ProbeCacheKey, ProbeOutcome, CONFIG_PARSE_SIGNALS, LOGIN_PROBE_CACHE_TTL,
+        LoginProbeCache, ProbeCacheKey, ProbeOutcome, ProbeTreeGuard, CONFIG_PARSE_SIGNALS,
+        LOGIN_PROBE_CACHE_TTL,
     };
+
+    struct FakeProbeTreeGuard<'a> {
+        descendants_alive: &'a std::cell::Cell<usize>,
+        terminate_calls: &'a std::cell::Cell<usize>,
+    }
+
+    impl ProbeTreeGuard for FakeProbeTreeGuard<'_> {
+        fn terminate_and_wait(&mut self) -> Result<(), String> {
+            self.terminate_calls.set(self.terminate_calls.get() + 1);
+            self.descendants_alive.set(0);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn readiness_timeout_tree_guard_confirms_no_probe_descendants_remain() {
+        let descendants_alive = std::cell::Cell::new(3);
+        let terminate_calls = std::cell::Cell::new(0);
+        let mut guard = FakeProbeTreeGuard {
+            descendants_alive: &descendants_alive,
+            terminate_calls: &terminate_calls,
+        };
+        guard
+            .terminate_and_wait()
+            .expect("terminate fake probe job");
+        assert_eq!(descendants_alive.get(), 0);
+        assert_eq!(terminate_calls.get(), 1);
+    }
+
+    #[test]
+    fn windows_readiness_probe_is_suspended_until_job_assignment() {
+        let lifecycle_source = include_str!("../process_lifecycle.rs");
+        let probe_source = include_str!("cli_probe.rs");
+        let managed_node_source = include_str!("../../commands/agent_discovery/managed_node.rs");
+        assert!(lifecycle_source.contains("CREATE_SUSPENDED"));
+        assert!(lifecycle_source.contains("AssignProcessToJobObject"));
+        assert!(lifecycle_source.contains("ResumeThread"));
+        assert!(lifecycle_source.contains("QueryInformationJobObject"));
+        assert!(probe_source.contains("spawn_contained_probe"));
+        assert!(probe_source.contains("terminate_contained_probe"));
+        assert!(managed_node_source.contains("spawn_probe_in_job"));
+        assert!(managed_node_source.contains("terminate_and_wait"));
+    }
 
     fn cache_key(runtime: &str) -> ProbeCacheKey {
         ProbeCacheKey {

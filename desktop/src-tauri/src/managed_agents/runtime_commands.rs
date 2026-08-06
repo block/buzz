@@ -8,8 +8,8 @@ use tauri::{AppHandle, Emitter, Manager};
 use super::{
     agent_readiness, append_log_marker, current_instance_id, find_managed_agent_mut,
     load_global_agent_config, load_managed_agents, load_personas, managed_agent_runtime_log_path,
-    process_is_running, record_agent_command, reserve_managed_agent_start,
-    resolve_effective_agent_env, save_managed_agents, spawn_agent_child, terminate_process,
+    managed_process_identity, record_agent_command, reserve_managed_agent_start,
+    resolve_effective_agent_env, save_managed_agents, spawn_agent_child, terminate_managed_process,
     terminate_untracked_pair_runtime, write_agent_runtime_receipt, AgentReadiness, BackendKind,
     ManagedAgentPairRuntime, ManagedAgentRuntimeKey, ManagedAgentRuntimeLifecycle,
     ManagedAgentRuntimeReceipt, ManagedAgentRuntimeStatus,
@@ -325,6 +325,28 @@ fn collect_runtime_process_snapshots(
     Ok((store_generation, snapshots))
 }
 
+fn ensure_store_generation_unchanged(
+    expected: u64,
+    current: u64,
+    context: &str,
+) -> Result<(), String> {
+    if current == expected {
+        Ok(())
+    } else {
+        Err(format!("managed-agent store changed {context}"))
+    }
+}
+
+fn runtime_generation_matches(
+    expected_nonce: &str,
+    expected_pid: u32,
+    live_nonce: &str,
+    live_pid: u32,
+    live_exited: bool,
+) -> bool {
+    expected_nonce == live_nonce && expected_pid == live_pid && live_exited
+}
+
 fn persist_exited_runtime_snapshots(
     app: &AppHandle,
     state: &AppState,
@@ -350,9 +372,11 @@ fn persist_exited_runtime_snapshots(
         .managed_agents_store_lock
         .lock()
         .map_err(|error| error.to_string())?;
-    if super::managed_agent_store_generation() != store_generation {
-        return Err("managed-agent store changed while status probes were in flight".into());
-    }
+    ensure_store_generation_unchanged(
+        store_generation,
+        super::managed_agent_store_generation(),
+        "while status probes were in flight",
+    )?;
     let mut runtimes = state
         .managed_agent_processes
         .lock()
@@ -360,9 +384,16 @@ fn persist_exited_runtime_snapshots(
     for snapshot in &exited {
         let process = &snapshot.process;
         let unchanged = runtimes.get_mut(&process.key).is_some_and(|runtime| {
-            runtime.start_nonce == process.start_nonce
-                && runtime.child.id() == process.tracked_pid
-                && !matches!(runtime.child.try_wait(), Ok(None))
+            let live_nonce = runtime.start_nonce.clone();
+            let live_pid = runtime.child.id();
+            let live_exited = !matches!(runtime.child.try_wait(), Ok(None));
+            runtime_generation_matches(
+                &process.start_nonce,
+                process.tracked_pid,
+                &live_nonce,
+                live_pid,
+                live_exited,
+            )
         });
         if !unchanged {
             return Err("managed runtime changed while status probes were in flight".into());
@@ -402,9 +433,11 @@ fn list_managed_agent_runtimes_blocking(
     let personas = load_personas(&app).unwrap_or_default();
     let global = load_global_agent_config(&app).unwrap_or_default();
     let mut records = load_managed_agents(&app)?;
-    if super::managed_agent_store_generation() != store_generation {
-        return Err("managed-agent store changed during status snapshot".into());
-    }
+    ensure_store_generation_unchanged(
+        store_generation,
+        super::managed_agent_store_generation(),
+        "during status snapshot",
+    )?;
     let snapshots: Vec<_> = process_snapshots
         .into_iter()
         .filter_map(|process| {
@@ -607,6 +640,7 @@ fn start_pair(
         let receipt = ManagedAgentRuntimeReceipt {
             key: key.clone(),
             pid: process.child.id(),
+            process_identity: managed_process_identity(process),
             desktop_instance_id: current_instance_id(&app),
             started_at: now.clone(),
         };
@@ -630,7 +664,7 @@ fn start_pair(
     })();
 
     if let Some(mut process) = spawned {
-        let _ = terminate_process(process.child.id());
+        let _ = terminate_managed_process(&mut process);
         let _ = process.child.wait();
         if wrote_receipt {
             super::remove_agent_runtime_receipt(&app, &key);
@@ -683,12 +717,8 @@ pub fn stop_managed_agent_runtime(
         .lock()
         .map_err(|e| e.to_string())?;
     if let Some(mut runtime) = runtimes.remove(&key) {
-        let stop_result = if process_is_running(runtime.child.id()) {
-            terminate_process(runtime.child.id())
-        } else {
-            Ok(())
-        }
-        .and_then(|()| runtime.child.wait().map_err(|e| e.to_string()));
+        let stop_result = terminate_managed_process(&mut runtime.process)
+            .and_then(|()| runtime.child.wait().map_err(|e| e.to_string()));
         match stop_result {
             Ok(status) => {
                 record.last_exit_code = status.code();
@@ -923,6 +953,71 @@ pub async fn reconcile_managed_agent_runtimes(
 mod tests {
     use super::*;
 
+    #[test]
+    fn stale_runtime_discovery_is_rejected_after_store_generation_changes() {
+        use std::sync::{
+            atomic::{AtomicU64, Ordering},
+            Arc, Barrier,
+        };
+
+        let generation = Arc::new(AtomicU64::new(41));
+        let discovery_started = Arc::new(Barrier::new(2));
+        let allow_persist = Arc::new(Barrier::new(2));
+        let worker = std::thread::spawn({
+            let generation = Arc::clone(&generation);
+            let discovery_started = Arc::clone(&discovery_started);
+            let allow_persist = Arc::clone(&allow_persist);
+            move || {
+                let captured = generation.load(Ordering::SeqCst);
+                discovery_started.wait();
+                allow_persist.wait();
+                ensure_store_generation_unchanged(
+                    captured,
+                    generation.load(Ordering::SeqCst),
+                    "while a delayed runtime result was in flight",
+                )
+            }
+        });
+        discovery_started.wait();
+        generation.store(42, Ordering::SeqCst);
+        allow_persist.wait();
+        let result = worker.join().expect("delayed discovery worker");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("managed-agent store changed"));
+    }
+
+    #[test]
+    fn stale_runtime_discovery_is_rejected_after_process_generation_changes() {
+        assert!(runtime_generation_matches(
+            "generation-a",
+            100,
+            "generation-a",
+            100,
+            true
+        ));
+        assert!(!runtime_generation_matches(
+            "generation-a",
+            100,
+            "generation-b",
+            100,
+            true
+        ));
+        assert!(!runtime_generation_matches(
+            "generation-a",
+            100,
+            "generation-a",
+            101,
+            true
+        ));
+        assert!(!runtime_generation_matches(
+            "generation-a",
+            100,
+            "generation-a",
+            100,
+            false
+        ));
+    }
+
     #[tokio::test]
     async fn runtime_list_single_flight_shares_hundreds_of_callers() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1067,8 +1162,8 @@ mod tests {
     #[test]
     fn windows_recovery_teardown_never_launches_an_external_helper() {
         let source = include_str!("process_lifecycle.rs");
-        assert!(!source.contains("std::process::Command"));
         assert!(!source.contains("Command::new"));
+        assert!(!source.to_ascii_lowercase().contains("taskkill"));
     }
 
     #[test]

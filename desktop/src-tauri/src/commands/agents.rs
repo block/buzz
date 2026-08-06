@@ -520,6 +520,7 @@ pub(super) async fn start_local_agent_with_preflight(
         let receipt = crate::managed_agents::ManagedAgentRuntimeReceipt {
             key: key.clone(),
             pid: process.child.id(),
+            process_identity: crate::managed_agents::managed_process_identity(process),
             desktop_instance_id: current_instance_id(app),
             started_at: record
                 .last_started_at
@@ -550,7 +551,7 @@ pub(super) async fn start_local_agent_with_preflight(
     })();
 
     if let Some(mut process) = staged_process {
-        let _ = crate::managed_agents::terminate_process(process.child.id());
+        let _ = crate::managed_agents::terminate_managed_process(&mut process);
         let _ = process.child.wait();
         if wrote_receipt {
             crate::managed_agents::remove_agent_runtime_receipt(app, &key);

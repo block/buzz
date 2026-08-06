@@ -80,8 +80,15 @@ use process::{
     terminate_runtime_receipt_with, valid_agent_runtime_receipt_with,
 };
 pub(crate) use process::{
-    current_instance_id, process_belongs_to_us, process_has_buzz_marker, process_is_running,
-    terminate_process, terminate_untracked_pair_runtime, valid_agent_runtime_receipt,
+    current_instance_id, managed_process_identity, process_belongs_to_us, process_has_buzz_marker,
+    process_is_running, terminate_managed_process, terminate_process,
+    terminate_untracked_pair_runtime, valid_agent_runtime_receipt,
+};
+#[cfg(windows)]
+pub(crate) use process::{
+    next_verified_windows_descendants, terminate_if_windows_identity_matches,
+    terminate_process_with_identity, WindowsIdentityObservation, WindowsProcessIdentity,
+    WindowsProcessSnapshotEntry,
 };
 
 mod orphan_sweep;
@@ -970,7 +977,7 @@ pub fn spawn_agent_child(
     // Windows: assign the harness to a Job Object so its whole tree dies with
     // the handle. The Unix process-group equivalent is set above.
     #[cfg(windows)]
-    return Ok(super::process_lifecycle::finish_spawn(
+    return super::process_lifecycle::finish_spawn(
         child,
         log_path,
         spawn_config,
@@ -978,7 +985,7 @@ pub fn spawn_agent_child(
         spawned_adapter_availability,
         start_nonce,
         &record.name,
-    ));
+    );
     #[cfg(not(windows))]
     Ok(crate::managed_agents::ManagedAgentProcess {
         child,

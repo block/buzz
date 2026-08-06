@@ -400,6 +400,7 @@ pub async fn restore_managed_agents_on_launch(
                 let receipt = super::ManagedAgentRuntimeReceipt {
                     key: key.clone(),
                     pid: process.child.id(),
+                    process_identity: super::managed_process_identity(&process),
                     desktop_instance_id: super::current_instance_id(app),
                     started_at: now.clone(),
                 };
@@ -479,7 +480,7 @@ pub async fn restore_managed_agents_on_launch(
     drop(restore_transition);
 
     for (key, mut process, wrote_receipt) in discarded_processes {
-        let _ = super::terminate_process(process.child.id());
+        let _ = super::terminate_managed_process(&mut process);
         let _ = process.child.wait();
         if wrote_receipt {
             super::remove_agent_runtime_receipt(app, &key);

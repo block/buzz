@@ -904,6 +904,7 @@ fn receipt_fixture(
     crate::managed_agents::ManagedAgentRuntimeReceipt {
         key,
         pid: std::process::id(),
+        process_identity: None,
         desktop_instance_id: "test-instance".into(),
         started_at: "now".into(),
     }
@@ -1281,6 +1282,8 @@ fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRun
         setup_mode: false,
         adapter_availability: None,
         start_nonce: "test-nonce".to_string(),
+        #[cfg(windows)]
+        process_identity: 0,
         #[cfg(windows)]
         job: None,
     };
