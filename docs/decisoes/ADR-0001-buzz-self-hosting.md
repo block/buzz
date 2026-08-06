@@ -22,6 +22,11 @@ Secrets serão entregues por Vaultwarden → AWS SSM → ExternalSecrets. O rela
 PostgreSQL, Redis e storage não serão expostos diretamente à Internet; apenas o
 Ingress HTTPS/WSS será público.
 
+O bucket `buzz-staging-media` usa bloqueio integral de acesso público,
+`BucketOwnerEnforced`, SSE-S3, versionamento e expiração de versões não atuais
+após 30 dias. Credenciais S3 dedicadas serão criadas apenas depois de o
+Vaultwarden estar disponível e sincronizadas pelo fluxo Vaultwarden → SSM.
+
 ## Consequências
 
 - A operação ganha isolamento entre o Buzz e os serviços existentes.
@@ -29,4 +34,6 @@ Ingress HTTPS/WSS será público.
 - PostgreSQL e Redis dedicados aumentam consumo e responsabilidade de backup.
 - A primeira instalação será limitada até serem validados agentes, workflows,
   webhooks, huddles e migrations.
+- O versionamento do bucket permite recuperação operacional, mas exige política
+  de retenção para limitar custo de versões antigas.
 - GitHub Issue #1 substitui temporariamente o Jira como tracker operacional.
