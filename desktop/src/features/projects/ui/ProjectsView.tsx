@@ -831,7 +831,7 @@ export function ProjectsView() {
       />
       {/* Create button pinned to the pane's top-right corner: it never
           scrolls with the page, it just stays put. */}
-      <div className="absolute right-4 top-5 z-40 sm:top-6">{createMenu}</div>
+      <div className="absolute right-4 top-4 z-40">{createMenu}</div>
       <CreateProjectDialog
         isCreating={createProjectMutation.isPending}
         onCreate={async (input) => {
