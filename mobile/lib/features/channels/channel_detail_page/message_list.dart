@@ -238,7 +238,7 @@ class _MessageList extends HookConsumerWidget {
         // A dock or keyboard resize is a layout correction, not a navigation
         // action. Keeping it instant avoids restarting a smooth scroll for
         // every position report while the viewport settles.
-        itemScrollController.jumpTo(index: 0, alignment: latestAlignment());
+        itemScrollController.jumpTo(index: 0);
       });
     }
 
