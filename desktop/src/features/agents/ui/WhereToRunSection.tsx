@@ -5,7 +5,11 @@ import { useBackendProvidersQuery } from "@/features/agents/hooks";
 import { probeBackendProvider } from "@/shared/api/tauri";
 
 import { ProviderConfigFields } from "./ProviderConfigFields";
-import { emptyWhereToRunDraft, type WhereToRunDraft } from "./whereToRunIntent";
+import {
+  applyProbeResult,
+  emptyWhereToRunDraft,
+  type WhereToRunDraft,
+} from "./whereToRunIntent";
 
 /** Optional remote-backend selector. Buzz shared compute is an LLM provider, not a run destination. */
 export function WhereToRunSection({
@@ -26,32 +30,37 @@ export function WhereToRunSection({
     [backendProviders, draft.runOn],
   );
 
+  // Latest-state seam for probe resolution: an Effect Event always sees the
+  // draft as it is *now*. Without this, the probe promise closes over the
+  // draft from probe start, and anything typed while the probe was in flight
+  // gets thrown away when it resolves (a second, subtler Typewriter Eraser).
+  const applyProbe = React.useEffectEvent(
+    (result: Awaited<ReturnType<typeof probeBackendProvider>>) => {
+      onDraftChange(applyProbeResult(draft, result));
+    },
+  );
+
+  // Probe once per provider *selection*, keyed on the provider's stable
+  // path — never on the draft. Depending on the draft made every keystroke
+  // refire the probe, and each resolution reset providerConfig to schema
+  // defaults, which erased what the user was typing (the Typewriter Eraser)
+  // and spawned the provider binary in a loop for as long as the dialog was
+  // open. Keying on the path (not the provider object) also keeps a
+  // providers-query refresh from reprobing an unchanged selection.
+  const selectedBinaryPath = isProviderMode
+    ? (selectedBackendProvider?.binaryPath ?? null)
+    : null;
   React.useEffect(() => {
-    if (!isProviderMode || !selectedBackendProvider) {
+    if (!selectedBinaryPath) {
       setProbeError(null);
       return;
     }
     let cancelled = false;
     setProbeError(null);
-    void probeBackendProvider(selectedBackendProvider.binaryPath)
+    void probeBackendProvider(selectedBinaryPath)
       .then((result) => {
         if (cancelled) return;
-        const defaults: Record<string, string> = {};
-        const properties =
-          (result.config_schema as Record<string, unknown> | undefined)
-            ?.properties ?? {};
-        for (const [key, property] of Object.entries(properties) as [
-          string,
-          Record<string, unknown>,
-        ][]) {
-          if (property.default != null)
-            defaults[key] = String(property.default);
-        }
-        onDraftChange({
-          ...draft,
-          probedProvider: result,
-          providerConfig: defaults,
-        });
+        applyProbe(result);
       })
       .catch((error: unknown) => {
         if (!cancelled) {
@@ -61,7 +70,7 @@ export function WhereToRunSection({
     return () => {
       cancelled = true;
     };
-  }, [draft, isProviderMode, onDraftChange, selectedBackendProvider]);
+  }, [selectedBinaryPath]);
 
   if (backendProviders.length === 0) return null;
 

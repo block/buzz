@@ -1,11 +1,6 @@
 import * as React from "react";
 
-import {
-  AlertTriangle,
-  ChevronDown,
-  ChevronRight,
-  RefreshCw,
-} from "lucide-react";
+import { AlertTriangle, ChevronDown, ChevronRight } from "lucide-react";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
@@ -27,6 +22,7 @@ import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastE
 import { ManagedAgentLogPanel } from "./ManagedAgentLogPanel";
 import { PubKey } from "@/shared/ui/PubKey";
 import { SubsectionLabel } from "@/shared/ui/PageHeader";
+import { RestartDiffBadge } from "./RestartDiffBadge";
 
 export function ManagedAgentRow({
   agent,
@@ -100,7 +96,7 @@ export function ManagedAgentRow({
         "overflow-hidden transition-colors",
         isLogSelected ? "bg-primary/5" : "hover:bg-muted/20",
       )}
-      data-testid={`managed-agent-${agent.pubkey}`}
+      data-testid={`managed-agent-row-${agent.pubkey}`}
     >
       <div className="flex items-start gap-3 px-4 py-3">
         {isLocal ? (
@@ -158,7 +154,16 @@ export function ManagedAgentRow({
           </div>
         )}
 
+        {/* B4: restart badge is a sibling of the expansion button — never
+            inside it. TooltipTrigger renders as a <span> (non-interactive),
+            so no nested interactive elements are introduced here. */}
         <div className="flex shrink-0 items-start gap-2 lg:pt-0.5">
+          {agent.needsRestart ? (
+            <RestartDiffBadge
+              autoRestartEnabled={agent.autoRestartOnConfigChange}
+              restartDiff={agent.restartDiff}
+            />
+          ) : null}
           <Button
             onClick={() => onOpenProfile(agent.pubkey)}
             size="sm"
@@ -242,11 +247,6 @@ function AgentSummary({
               <Badge className="gap-1" variant="warning">
                 <AlertTriangle className="h-3 w-3" />
                 Configuration missing
-              </Badge>
-            ) : agent.needsRestart ? (
-              <Badge className="gap-1" variant="warning">
-                <RefreshCw className="h-3 w-3" />
-                Restart required
               </Badge>
             ) : null}
             {agent.personaOutOfDate ? (

@@ -1,10 +1,11 @@
 part of '../channels_page.dart';
 
+const _sectionMenuItemPadding = EdgeInsets.fromLTRB(Grid.xs, 0, Grid.twelve, 0);
+
 class _CustomChannelSection extends StatelessWidget {
   final ChannelSection section;
   final List<Channel> channels;
   final Set<String> unreadChannelIds;
-  final Map<String, int> unreadChannelCounts;
   final Set<String> mutedChannelIds;
   final String? currentPubkey;
   final bool expanded;
@@ -16,6 +17,8 @@ class _CustomChannelSection extends StatelessWidget {
   final VoidCallback onDelete;
   final VoidCallback onMoveUp;
   final VoidCallback onMoveDown;
+  final ChannelSortMode sortMode;
+  final ValueChanged<ChannelSortMode> onSortModeChange;
   final Future<void> Function(Channel channel) onSelectChannel;
   final void Function(Channel channel) onMarkChannelRead;
 
@@ -23,7 +26,6 @@ class _CustomChannelSection extends StatelessWidget {
     required this.section,
     required this.channels,
     required this.unreadChannelIds,
-    required this.unreadChannelCounts,
     required this.mutedChannelIds,
     required this.currentPubkey,
     required this.expanded,
@@ -35,6 +37,8 @@ class _CustomChannelSection extends StatelessWidget {
     required this.onDelete,
     required this.onMoveUp,
     required this.onMoveDown,
+    required this.sortMode,
+    required this.onSortModeChange,
     required this.onSelectChannel,
     required this.onMarkChannelRead,
   });
@@ -55,6 +59,8 @@ class _CustomChannelSection extends StatelessWidget {
           onDelete: onDelete,
           onMoveUp: onMoveUp,
           onMoveDown: onMoveDown,
+          sortMode: sortMode,
+          onSortModeChange: onSortModeChange,
         ),
         _AnimatedSectionBody(
           expanded: expanded,
@@ -64,7 +70,6 @@ class _CustomChannelSection extends StatelessWidget {
               for (final channel in channels)
                 _ChannelTile(
                   channel: channel,
-                  unreadCount: unreadChannelCounts[channel.id],
                   isUnread: unreadChannelIds.contains(channel.id),
                   isMuted: mutedChannelIds.contains(channel.id),
                   currentPubkey: currentPubkey,
@@ -72,6 +77,7 @@ class _CustomChannelSection extends StatelessWidget {
                   onMarkRead: () => onMarkChannelRead(channel),
                   sectionId: section.id,
                 ),
+              const SizedBox(height: _kExpandedSectionTrailingPadding),
             ],
           ),
         ),
@@ -90,6 +96,8 @@ class _CustomSectionHeader extends ConsumerWidget {
   final VoidCallback onDelete;
   final VoidCallback onMoveUp;
   final VoidCallback onMoveDown;
+  final ChannelSortMode sortMode;
+  final ValueChanged<ChannelSortMode> onSortModeChange;
 
   const _CustomSectionHeader({
     required this.section,
@@ -101,11 +109,13 @@ class _CustomSectionHeader extends ConsumerWidget {
     required this.onDelete,
     required this.onMoveUp,
     required this.onMoveDown,
+    required this.sortMode,
+    required this.onSortModeChange,
   });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final sectionColor = context.colors.primary;
+    final sectionColor = navigationSectionForeground(context);
     final icon = section.icon;
     final customEmoji = icon == null
         ? null
@@ -117,9 +127,9 @@ class _CustomSectionHeader extends ConsumerWidget {
       child: Padding(
         padding: const EdgeInsets.fromLTRB(
           Grid.gutter,
-          Grid.twelve,
+          _kSectionHeaderVerticalPadding,
           Grid.gutter,
-          _kChannelRowVerticalPadding,
+          _kSectionHeaderVerticalPadding,
         ),
         child: Row(
           children: [
@@ -178,32 +188,43 @@ class _CustomSectionHeader extends ConsumerWidget {
                     context: buttonContext,
                     width: 216,
                     alignment: AnchoredPopoverAlignment.end,
-                    color: context.colors.surface,
-                    elevation: 4,
-                    shadowColor: context.colors.shadow.withValues(alpha: 0.18),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(Radii.md),
-                      side: BorderSide(color: context.colors.outline),
-                    ),
                     surfaceKey: ValueKey('section-popover-${section.id}'),
                     items: [
                       const PopupMenuItem(
                         value: 'rename',
-                        child: Text('Rename'),
+                        padding: _sectionMenuItemPadding,
+                        child: _SectionMenuItemContent(
+                          icon: LucideIcons.pencil,
+                          label: 'Rename section',
+                        ),
                       ),
                       PopupMenuItem(
                         value: 'move_up',
                         enabled: !isFirst,
-                        child: const Text('Move Up'),
+                        padding: _sectionMenuItemPadding,
+                        child: const _SectionMenuItemContent(
+                          icon: LucideIcons.arrowUp,
+                          label: 'Move up',
+                        ),
                       ),
                       PopupMenuItem(
                         value: 'move_down',
                         enabled: !isLast,
-                        child: const Text('Move Down'),
+                        padding: _sectionMenuItemPadding,
+                        child: const _SectionMenuItemContent(
+                          icon: LucideIcons.arrowDown,
+                          label: 'Move down',
+                        ),
                       ),
-                      const PopupMenuItem(
+                      ..._sortMenuItems(sortMode),
+                      PopupMenuItem(
                         value: 'delete',
-                        child: Text('Delete'),
+                        padding: _sectionMenuItemPadding,
+                        child: _SectionMenuItemContent(
+                          icon: LucideIcons.trash2,
+                          label: 'Delete section',
+                          color: context.colors.error,
+                        ),
                       ),
                     ],
                   );
@@ -214,6 +235,10 @@ class _CustomSectionHeader extends ConsumerWidget {
                       onMoveUp();
                     case 'move_down':
                       onMoveDown();
+                    case _kSortRecentMenuValue:
+                      onSortModeChange(ChannelSortMode.recent);
+                    case _kSortAlphaMenuValue:
+                      onSortModeChange(ChannelSortMode.alpha);
                     case 'delete':
                       onDelete();
                   }
@@ -225,6 +250,36 @@ class _CustomSectionHeader extends ConsumerWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+class _SectionMenuItemContent extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final Color? color;
+
+  const _SectionMenuItemContent({
+    required this.icon,
+    required this.label,
+    this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Icon(icon, size: 16, color: color),
+        const SizedBox(width: Grid.xxs),
+        Flexible(
+          child: Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: color == null ? null : TextStyle(color: color),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -278,6 +333,43 @@ class _SectionNameDialog extends HookWidget {
   }
 }
 
+const _kSortRecentMenuValue = 'sort_recent';
+const _kSortAlphaMenuValue = 'sort_alpha';
+
+PopupMenuItem<String> _sortMenuItem({
+  required String value,
+  required String label,
+  required bool selected,
+}) => PopupMenuItem(
+  value: value,
+  child: Row(
+    children: [
+      Expanded(child: Text(label)),
+      if (selected)
+        const Icon(LucideIcons.check, key: ValueKey('sort-selected-check'))
+      else
+        const SizedBox(width: 24),
+    ],
+  ),
+);
+
+List<PopupMenuEntry<String>> _sortMenuItems(
+  ChannelSortMode current, {
+  bool showDivider = true,
+}) => [
+  if (showDivider) const PopupMenuDivider(),
+  _sortMenuItem(
+    value: _kSortRecentMenuValue,
+    label: 'Sort: Recent',
+    selected: current == ChannelSortMode.recent,
+  ),
+  _sortMenuItem(
+    value: _kSortAlphaMenuValue,
+    label: 'Sort: A–Z',
+    selected: current == ChannelSortMode.alpha,
+  ),
+];
+
 class _ChannelSection extends StatelessWidget {
   final String title;
   final IconData icon;
@@ -286,10 +378,11 @@ class _ChannelSection extends StatelessWidget {
   final List<Channel> channels;
   final bool showTopDivider;
   final Set<String> unreadChannelIds;
-  final Map<String, int> unreadChannelCounts;
   final Set<String> mutedChannelIds;
   final String? currentPubkey;
   final String emptyLabel;
+  final ChannelSortMode? sortMode;
+  final ValueChanged<ChannelSortMode>? onSortModeChange;
   final Future<void> Function(Channel channel) onSelectChannel;
 
   const _ChannelSection({
@@ -300,10 +393,11 @@ class _ChannelSection extends StatelessWidget {
     required this.channels,
     required this.showTopDivider,
     required this.unreadChannelIds,
-    required this.unreadChannelCounts,
     required this.mutedChannelIds,
     required this.currentPubkey,
     required this.emptyLabel,
+    this.sortMode,
+    this.onSortModeChange,
     required this.onSelectChannel,
   });
 
@@ -318,6 +412,8 @@ class _ChannelSection extends StatelessWidget {
           icon: icon,
           expanded: expanded,
           onToggle: onToggle,
+          sortMode: sortMode,
+          onSortModeChange: onSortModeChange,
         ),
         _AnimatedSectionBody(
           expanded: expanded,
@@ -343,7 +439,6 @@ class _ChannelSection extends StatelessWidget {
                 for (final channel in channels)
                   _ChannelTile(
                     channel: channel,
-                    unreadCount: unreadChannelCounts[channel.id],
                     isUnread: unreadChannelIds.contains(channel.id),
                     isMuted: mutedChannelIds.contains(channel.id),
                     currentPubkey: currentPubkey,
@@ -351,6 +446,7 @@ class _ChannelSection extends StatelessWidget {
                     onMarkRead: null,
                     sectionId: null,
                   ),
+              const SizedBox(height: _kExpandedSectionTrailingPadding),
             ],
           ),
         ),
@@ -401,7 +497,7 @@ class _SectionDivider extends StatelessWidget {
         thickness: 1,
         indent: _kChannelSectionInset,
         endIndent: _kChannelSectionInset,
-        color: context.colors.outlineVariant.withValues(alpha: 0.72),
+        color: context.colors.primary.withValues(alpha: 0.15),
       ),
     );
   }
@@ -412,17 +508,21 @@ class _SectionHeader extends StatelessWidget {
   final IconData icon;
   final bool expanded;
   final VoidCallback onToggle;
+  final ChannelSortMode? sortMode;
+  final ValueChanged<ChannelSortMode>? onSortModeChange;
 
   const _SectionHeader({
     required this.label,
     required this.icon,
     required this.expanded,
     required this.onToggle,
+    this.sortMode,
+    this.onSortModeChange,
   });
 
   @override
   Widget build(BuildContext context) {
-    final sectionColor = context.colors.primary;
+    final sectionColor = navigationSectionForeground(context);
 
     return GestureDetector(
       onTap: onToggle,
@@ -430,9 +530,9 @@ class _SectionHeader extends StatelessWidget {
       child: Padding(
         padding: const EdgeInsets.fromLTRB(
           Grid.gutter,
-          Grid.twelve,
+          _kSectionHeaderVerticalPadding,
           Grid.gutter,
-          _kChannelRowVerticalPadding,
+          _kSectionHeaderVerticalPadding,
         ),
         child: Row(
           children: [
@@ -452,6 +552,44 @@ class _SectionHeader extends StatelessWidget {
               ),
             ),
             const Spacer(),
+            if (sortMode case final mode?) ...[
+              Builder(
+                builder: (buttonContext) => IconButton(
+                  key: ValueKey('sort-menu-$label'),
+                  tooltip: '$label options',
+                  visualDensity: VisualDensity.compact,
+                  icon: Icon(
+                    LucideIcons.ellipsisVertical,
+                    size: _kChannelIconSize,
+                    color: sectionColor,
+                  ),
+                  onPressed: () async {
+                    final value = await showAnchoredPopover<String>(
+                      context: buttonContext,
+                      width: 216,
+                      alignment: AnchoredPopoverAlignment.end,
+                      color: context.colors.surface,
+                      elevation: 4,
+                      shadowColor: context.colors.shadow.withValues(
+                        alpha: 0.18,
+                      ),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(Radii.md),
+                        side: BorderSide(color: context.colors.outline),
+                      ),
+                      surfaceKey: ValueKey('sort-popover-$label'),
+                      items: _sortMenuItems(mode, showDivider: false),
+                    );
+                    if (value == _kSortRecentMenuValue) {
+                      onSortModeChange?.call(ChannelSortMode.recent);
+                    } else if (value == _kSortAlphaMenuValue) {
+                      onSortModeChange?.call(ChannelSortMode.alpha);
+                    }
+                  },
+                ),
+              ),
+              const SizedBox(width: Grid.quarter),
+            ],
             _SectionChevron(expanded: expanded, color: sectionColor),
           ],
         ),

@@ -85,9 +85,11 @@ Map<String, ImetaEntry> parseImetaTags(List<List<String>> tags) {
 MessageMediaKind? classifyMediaUrl(String url, {ImetaEntry? imeta}) {
   final mimeType = imeta?.mimeType;
   if (mimeType != null) {
-    if (mimeType == 'video/mp4') return MessageMediaKind.video;
+    // An imeta MIME type is authoritative. The native video player chooses
+    // whether the device can decode the specific codec/container; rejecting
+    // every non-MP4 video here prevents it from even trying.
+    if (mimeType.startsWith('video/')) return MessageMediaKind.video;
     if (mimeType.startsWith('image/')) return MessageMediaKind.image;
-    if (mimeType.startsWith('video/')) return null;
   }
 
   final path = (Uri.tryParse(url)?.path ?? url).toLowerCase();

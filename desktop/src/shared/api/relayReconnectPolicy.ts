@@ -70,3 +70,13 @@ export function isServiceRestartClose(message: unknown): boolean {
     data.code === 1012
   );
 }
+
+/** Whether a WS-layer message is the plugin's `Error` frame. */
+export function isWebSocketError(message: unknown): boolean {
+  return (
+    typeof message === "object" &&
+    message !== null &&
+    "type" in message &&
+    message.type === "Error"
+  );
+}

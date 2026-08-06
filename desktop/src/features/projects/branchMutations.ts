@@ -2,7 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import * as React from "react";
 import { toast } from "sonner";
 
-import type { Project } from "@/features/projects/hooks";
+import type { Repository as Project } from "@/features/projects/hooks";
 import {
   createProjectRemoteBranch,
   deleteProjectRemoteBranch,

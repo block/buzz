@@ -105,6 +105,16 @@ relay:
   maxConnections: 10000
   maxConcurrentHandlers: 1024
   sendBuffer: 1000
+  # Graceful-shutdown reconnect jitter. On SIGTERM the relay closes every live
+  # WebSocket with a 1012 Service Restart frame; with a rolling deploy this can
+  # release a whole pod's sockets at once and stampede reconnects into the DB
+  # pool. A positive value (milliseconds) spreads each close over a per-socket
+  # random delay in [1, drainJitterMs], smoothing the reconnect herd. 0 (the
+  # default) closes all sockets at once, preserving the previous behavior.
+  # Values above 20000 are capped to 20000, leaving close-frame delivery
+  # headroom under the relay's 30s hard-drain timeout (itself inside the 60s
+  # terminationGracePeriodSeconds below).
+  drainJitterMs: 0
   requireAuthToken: true
   requireRelayMembership: true
   # Authenticated media reads: relay GET/HEAD /media/* requires Blossom
