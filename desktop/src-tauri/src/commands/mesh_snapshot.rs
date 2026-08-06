@@ -22,15 +22,12 @@ type CmdResult<T> = Result<T, String>;
 /// state. A genuine relay/transport failure still returns `Err`.
 #[tauri::command]
 pub async fn mesh_snapshot(state: State<'_, AppState>) -> CmdResult<mesh_llm::MeshSnapshot> {
-    let events = crate::relay::query_relay(
-        &state,
-        &[
-            mesh_llm::mesh_status_filter(),
-            mesh_llm::relay_membership_filter(),
-        ],
-    )
-    .await
-    .map_err(|error| format!("Shared compute status query failed: {error}"))?;
+    // Reuse discovery's author-scoped, composite-cursor pagination. A direct
+    // two-filter query stops at the status filter's 100-event page size and
+    // silently undercounts larger communities.
+    let events = super::mesh_llm::query_mesh_discovery_events(&state)
+        .await
+        .map_err(|error| format!("Shared compute status query failed: {error}"))?;
 
     // Identify this member's own device so the card can say "including yours".
     // A missing/locked identity is not fatal here — the snapshot is still

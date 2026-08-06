@@ -53,10 +53,18 @@ export default {
           "0%, 100%": { opacity: "1" },
           "50%": { opacity: "0.25" },
         },
+        "mesh-breath": {
+          "0%, 100%": { fill: "hsl(var(--foreground))" },
+          "50%": {
+            fill: "color-mix(in oklab, hsl(var(--foreground)) 25%, hsl(var(--background)))",
+          },
+        },
       },
       animation: {
         // Work in flight right now.
         "mesh-activity": "mesh-dim 1s cubic-bezier(0.4, 0, 0.6, 1) infinite",
+        "mesh-inference":
+          "mesh-breath var(--mesh-breath-duration, 4.8s) ease-in-out infinite",
         // A start or stop in flight. Slower: nothing is wrong, and nothing needs
         // a decision.
         "mesh-progress": "mesh-dim 1.8s cubic-bezier(0.4, 0, 0.6, 1) infinite",

@@ -33,6 +33,7 @@ export default defineConfig({
         "**/add-community-screenshots.spec.ts",
         "**/hosted-communities-settings-screenshots.spec.ts",
         "**/invites-settings-screenshots.spec.ts",
+        "**/mesh-compute-screenshots.spec.ts",
         "**/messaging.spec.ts",
         "**/message-feedback-snapshots.spec.ts",
         "**/custom-emoji.spec.ts",

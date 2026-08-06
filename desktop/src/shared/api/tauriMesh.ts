@@ -156,6 +156,10 @@ export type MeshSnapshotDevice = {
   models: string[];
   state: MeshDeviceState;
   isSelf: boolean;
+  /** Additive Community View fields. Older desktop/runtime pairs omit these. */
+  memberPubkey?: string | null;
+  reportedAt?: number | null;
+  modelSizeGb?: number | null;
 };
 
 /**
@@ -167,11 +171,17 @@ export type MeshSnapshotDevice = {
  */
 export type MeshSnapshot = {
   sharingDeviceCount: number;
+  /** Unique members with at least one ready serving device, when reported. */
+  contributorMemberCount?: number;
   /** `null` when no sharing device reported a figure — render the count only. */
   sharedCapacityGb: number | null;
+  /** Approximate hosted-model footprint when every contributor reports it. */
+  allocatedCapacityGb?: number | null;
   models: string[];
   devices: MeshSnapshotDevice[];
   includesSelf: boolean;
+  observedAt?: number;
+  freshnessSeconds?: number;
   /**
    * Members in the community right now (NIP-43 roster size).
    *

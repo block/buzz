@@ -55,7 +55,11 @@ export function useMeshComputeState() {
   // transition, instead of waiting out the 30s poll.
   const [snapshotNonce, setSnapshotNonce] = React.useState(0);
 
-  const { snapshot, error: snapshotError } = useMeshSnapshot({
+  const {
+    snapshot,
+    error: snapshotError,
+    refresh: refreshSnapshot,
+  } = useMeshSnapshot({
     refreshKey: snapshotNonce,
   });
 
@@ -243,6 +247,7 @@ export function useMeshComputeState() {
     shareSwitchChecked,
     modelToShare,
     setSharing,
+    refreshSnapshot,
     // A transport failure is worth showing; an empty mesh is not an error and
     // is already expressed by the row tone.
     error: actionError ?? snapshotError,

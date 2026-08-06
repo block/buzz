@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 
 use super::discovery::{
     device_name_from_status, endpoint_binding_is_valid, endpoint_id_from_status,
-    latest_membership_list, owner_id_from_status_event, status_is_fresh,
+    latest_membership_list, owner_id_from_status_event, status_is_fresh, STATUS_FRESHNESS_SECS,
 };
 use super::{MeshServeTarget, MESH_STATUS_KIND};
 
@@ -62,6 +62,13 @@ pub struct MeshSnapshotDevice {
     pub state: MeshDeviceState,
     /// Whether this is the local member's own device.
     pub is_self: bool,
+    /// Community member who signed this status note. Safe for profile lookup;
+    /// endpoint tokens, owner signatures, and raw hardware remain excluded.
+    pub member_pubkey: Option<String>,
+    /// Relay event creation time, in Unix seconds.
+    pub reported_at: Option<u64>,
+    /// Approximate hosted-model footprint reported by MeshLLM, when available.
+    pub model_size_gb: Option<f64>,
 }
 
 /// What the community's shared compute looks like right now.
@@ -70,10 +77,15 @@ pub struct MeshSnapshotDevice {
 pub struct MeshSnapshot {
     /// Devices advertising at least one routable model.
     pub sharing_device_count: usize,
+    /// Unique current members with at least one ready serving device.
+    pub contributor_member_count: usize,
     /// Summed shared capacity across sharing devices. `None` when no sharing
     /// device published a figure — the UI then shows a count with no GB, never
     /// a misleading `0 GB`.
     pub shared_capacity_gb: Option<f64>,
+    /// Summed model footprint only when every sharing device reports it.
+    /// `None` preserves mixed-version honesty instead of presenting a partial sum.
+    pub allocated_capacity_gb: Option<f64>,
     /// Distinct models ready to use, deduped across devices.
     pub models: Vec<String>,
     /// Per-device rows, for the topology view. Sharing devices first.
@@ -87,6 +99,10 @@ pub struct MeshSnapshot {
     /// note, so their hardware is unknown by design — they never consented to
     /// disclose it. Ghost nodes in the topology are a count, never GB.
     pub member_count: usize,
+    /// When this projection was evaluated, in Unix seconds.
+    pub observed_at: u64,
+    /// Maximum age of a relay-reported serving status.
+    pub freshness_seconds: u64,
     /// Why the snapshot is empty, when it is. Never a hard error: an empty
     /// mesh is a normal, expected state.
     pub reason: Option<String>,
@@ -95,6 +111,8 @@ pub struct MeshSnapshot {
 impl MeshSnapshot {
     fn empty(reason: impl Into<String>) -> Self {
         Self {
+            observed_at: nostr::Timestamp::now().as_secs(),
+            freshness_seconds: STATUS_FRESHNESS_SECS,
             reason: Some(reason.into()),
             ..Default::default()
         }
@@ -204,6 +222,9 @@ pub fn snapshot_from_events(
                 state: device_state(&content, !models.is_empty()),
                 models,
                 is_self,
+                member_pubkey: Some(event.pubkey.to_hex()),
+                reported_at: Some(event.created_at.as_secs()),
+                model_size_gb: f64_field(&content, "model_size_gb"),
             },
         );
     }
@@ -224,6 +245,11 @@ pub fn snapshot_from_events(
         .filter(|device| device.state == MeshDeviceState::Serving)
         .collect::<Vec<_>>();
     let sharing_device_count = sharing.len();
+    let contributor_member_count = sharing
+        .iter()
+        .filter_map(|device| device.member_pubkey.as_ref())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
     let includes_self = sharing.iter().any(|device| device.is_self);
     // Sum only reported figures; keep `None` when nobody reported one so the
     // UI can drop the number instead of printing `0 GB`.
@@ -231,6 +257,14 @@ pub fn snapshot_from_events(
         .iter()
         .filter_map(|device| device.capacity_gb)
         .fold(None::<f64>, |acc, gb| Some(acc.unwrap_or(0.0) + gb));
+    let allocated_capacity_gb = (!sharing.is_empty()
+        && sharing.iter().all(|device| device.model_size_gb.is_some()))
+    .then(|| {
+        sharing
+            .iter()
+            .filter_map(|device| device.model_size_gb)
+            .sum()
+    });
     let mut models = sharing
         .iter()
         .flat_map(|device| device.models.iter().cloned())
@@ -246,11 +280,15 @@ pub fn snapshot_from_events(
 
     MeshSnapshot {
         member_count: members.len(),
+        contributor_member_count,
         sharing_device_count,
         shared_capacity_gb,
+        allocated_capacity_gb,
         models,
         devices,
         includes_self,
+        observed_at: now,
+        freshness_seconds: STATUS_FRESHNESS_SECS,
         reason,
     }
 }
@@ -265,6 +303,8 @@ mod tests {
         assert_eq!(snapshot.sharing_device_count, 0);
         assert_eq!(snapshot.shared_capacity_gb, None);
         assert!(snapshot.reason.is_some());
+        assert_eq!(snapshot.freshness_seconds, STATUS_FRESHNESS_SECS);
+        assert!(snapshot.observed_at > 0);
     }
 
     #[test]

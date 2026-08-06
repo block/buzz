@@ -7,7 +7,6 @@ import { cn } from "@/shared/lib/cn";
 
 import { useMeshComputeState } from "../hooks/useMeshComputeState";
 import type { MeshRowPulse, MeshRowTone } from "../meshRowModel";
-import { MeshComputePopover } from "./MeshComputePopover";
 
 /**
  * The sidebar Shared Compute row.
@@ -97,49 +96,42 @@ export function SidebarMeshComputeRow({
   const mesh = useMeshComputeState();
   const { row, toggle, pendingAction, shareSwitchChecked, setSharing } = mesh;
 
-  // The row offers joining; the popover owns managing. Once this machine is
-  // sharing there is nothing left to invite, and the popover's labelled switch
-  // is the place to stop — a bare unlabelled switch is a poor control for an
-  // action with consequences.
+  // Clicking the row is navigation: Shared Compute opens the community Compute
+  // view. The trailing switch remains a separate action and does not navigate.
   const showJoinToggle = !toggle.isSharing;
 
   return (
     <SidebarMenuItem>
-      <MeshComputePopover
-        mesh={mesh}
-        onOpenComputeSettings={onOpenComputeSettings}
+      <SidebarMenuButton
+        className={cn(
+          "data-[active=true]:font-normal",
+          // Reserve the trailing slot so the label truncates before it runs
+          // under the switch, rather than colliding with it.
+          showJoinToggle && "pr-11 group-data-[collapsible=icon]:!pr-0",
+        )}
+        data-mesh-tone={row.tone}
+        data-testid="sidebar-mesh-compute-row"
+        onClick={onOpenComputeSettings}
+        tooltip={row.tooltip}
+        type="button"
       >
-        <SidebarMenuButton
-          className={cn(
-            "data-[active=true]:font-normal",
-            // Reserve the trailing slot so the label truncates before it runs
-            // under the switch, rather than colliding with it.
-            showJoinToggle && "pr-11 group-data-[collapsible=icon]:!pr-0",
-          )}
-          data-mesh-tone={row.tone}
-          data-testid="sidebar-mesh-compute-row"
-          tooltip={row.tooltip}
-          type="button"
+        <span
+          aria-hidden
+          className="relative flex h-4 w-4 shrink-0 items-center justify-center"
         >
-          <span
-            aria-hidden
-            className="relative flex h-4 w-4 shrink-0 items-center justify-center"
-          >
-            <Waypoints className="h-4 w-4 opacity-80" />
-            {/*
+          <Waypoints className="h-4 w-4 opacity-80" />
+          {/*
               Icon-collapsed only. The label and the dot beside it are both
               clipped in icon mode, so without this the row would lose its status
               signal entirely at exactly the width where the tooltip is the only
               other affordance.
             */}
-            <span className="absolute -right-1 -bottom-1 hidden rounded-full bg-sidebar p-px group-data-[collapsible=icon]:block">
-              <MeshPulseDot pulse={row.pulse} size="small" tone={row.tone} />
-            </span>
+          <span className="absolute -right-1 -bottom-1 hidden rounded-full bg-sidebar p-px group-data-[collapsible=icon]:block">
+            <MeshPulseDot pulse={row.pulse} size="small" tone={row.tone} />
           </span>
-          <SidebarMenuLabel className="opacity-80">
-            {row.label}
-          </SidebarMenuLabel>
-          {/*
+        </span>
+        <SidebarMenuLabel className="opacity-80">{row.label}</SidebarMenuLabel>
+        {/*
             Right-aligned, the same position and mechanism a channel row uses for
             its unread dot (`UnreadDotBadge className="ml-auto"`). Beside the name
             it competed with the label for one optical line; here it reads as this
@@ -148,20 +140,18 @@ export function SidebarMeshComputeRow({
             When the join switch is present the button carries `pr-11`, so the dot
             lands clear of it rather than underneath.
           */}
-          <span className="ml-auto group-data-[collapsible=icon]:hidden">
-            <MeshPulseDot
-              pulse={row.pulse}
-              testId="mesh-row-dot"
-              tone={row.tone}
-            />
-          </span>
-        </SidebarMenuButton>
-      </MeshComputePopover>
+        <span className="ml-auto group-data-[collapsible=icon]:hidden">
+          <MeshPulseDot
+            pulse={row.pulse}
+            testId="mesh-row-dot"
+            tone={row.tone}
+          />
+        </span>
+      </SidebarMenuButton>
 
       {/*
-        A sibling of the button, never a child: `PopoverTrigger asChild` makes the
-        button itself the trigger, so a switch nested inside would be a button
-        within a button and every toggle would also open the popover.
+        A sibling of the navigation button, never a child: nesting this switch
+        would make toggling sharing navigate away from the current view.
       */}
       {showJoinToggle ? (
         <div className="absolute top-1/2 right-2 -translate-y-1/2 group-data-[collapsible=icon]:hidden">

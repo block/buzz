@@ -68,7 +68,11 @@ const SHARE_COMPUTE_REVEAL_TRANSITION = {
  * group. User-facing copy describes the shared-compute behavior without
  * exposing implementation protocols or raw mesh controls.
  */
-export function MeshComputeSettingsCard() {
+export function MeshComputeSettingsCard({
+  hideHeader = false,
+}: {
+  hideHeader?: boolean;
+} = {}) {
   const shouldReduceMotion = useReducedMotion();
   const { status, error, refresh } = useMeshNodeStatus();
   const [installedModels, setInstalledModels] = React.useState<
@@ -203,10 +207,12 @@ export function MeshComputeSettingsCard() {
 
   return (
     <section className="min-w-0" data-testid="settings-mesh-share-compute">
-      <SettingsSectionHeader
-        title="Share compute"
-        description="Provide compute to your Buzz community. More capacity can increase intelligence and availability of models for agents."
-      />
+      {hideHeader ? null : (
+        <SettingsSectionHeader
+          title="Share compute"
+          description="Provide compute to your Buzz community. More capacity can increase intelligence and availability of models for agents."
+        />
+      )}
 
       {error ? (
         <p className="mb-3 rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">

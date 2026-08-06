@@ -218,7 +218,9 @@ async fn query_mesh_discovery_events_at(
     }
 }
 
-async fn query_mesh_discovery_events(state: &AppState) -> Result<Vec<nostr::Event>, String> {
+pub(super) async fn query_mesh_discovery_events(
+    state: &AppState,
+) -> Result<Vec<nostr::Event>, String> {
     query_mesh_discovery_events_at(state, &relay::relay_ws_url_with_override(state)).await
 }
 

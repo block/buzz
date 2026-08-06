@@ -620,6 +620,99 @@ test("completed users skip the loading gate while profile is still settling", as
   await expectHomeView(page);
 });
 
+test("fresh existing-identity path leads with private-key recovery", async ({
+  page,
+}) => {
+  await installMockBridge(page, undefined, {
+    skipCommunitySeed: true,
+    skipOnboardingSeed: true,
+  });
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Use an existing key" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Enter your private key" }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Paste your private key to sign in to Buzz."),
+  ).toBeVisible();
+  await expect(page.getByTestId("nostr-import-card")).toBeVisible();
+  await expect(page.getByTestId("nostr-import-file-button")).toHaveText(
+    "backup file",
+  );
+  await expect(page.getByTestId("nostr-import-phone-link")).toHaveText(
+    "recover from your phone",
+  );
+  await expect(page.getByTestId("identity-recovery-pairing")).toHaveCount(0);
+
+  await page.getByTestId("nostr-import-file-button").click();
+  const backupDialog = page.getByTestId("backup-recovery-dialog");
+  await expect(backupDialog).toBeVisible();
+  await expect(
+    backupDialog.getByRole("heading", { name: "Restore from a backup file" }),
+  ).toBeVisible();
+  await expect(
+    backupDialog.getByTestId("nostr-import-backup-picker"),
+  ).toBeVisible();
+  const unlockPreview = backupDialog.getByTestId("backup-file-unlock-preview");
+  await expect(unlockPreview).toBeVisible();
+  await expect(unlockPreview.locator("span")).toHaveCount(17);
+  await expect(
+    unlockPreview.getByTestId("backup-file-key-dots").locator("span"),
+  ).toHaveCount(9);
+  await expect(
+    unlockPreview.getByTestId("backup-file-unlock-preview-icon"),
+  ).toBeVisible();
+  await expect(
+    backupDialog.getByTestId("nostr-import-backup-drop"),
+  ).toHaveCount(0);
+  await backupDialog
+    .getByTestId("nostr-import-backup-picker")
+    .evaluate((element) => {
+      const dataTransfer = new DataTransfer();
+      dataTransfer.items.add(
+        new File(["backup"], "identity.ncryptsec", { type: "text/plain" }),
+      );
+      element.dispatchEvent(
+        new DragEvent("dragenter", {
+          bubbles: true,
+          cancelable: true,
+          dataTransfer,
+        }),
+      );
+    });
+  const backupDrop = backupDialog.getByTestId("nostr-import-backup-drop");
+  await expect(backupDrop).toHaveAttribute("data-dragging", "true");
+  await expect(backupDrop).toContainText("Drop your backup file here");
+  const [backupDropBox, backupFileSectionBox] = await Promise.all([
+    backupDrop.boundingBox(),
+    unlockPreview.boundingBox(),
+  ]);
+  expect(backupDropBox?.width).toBeGreaterThan(
+    backupFileSectionBox?.width ?? 0,
+  );
+  await expect(
+    backupDialog.getByTestId("nostr-import-backup-picker"),
+  ).toBeVisible();
+  await backupDrop.evaluate((element) => {
+    element.dispatchEvent(
+      new DragEvent("dragleave", { bubbles: true, cancelable: true }),
+    );
+  });
+  await expect(backupDrop).toHaveCount(0);
+  await expect(page.getByTestId("nostr-import-card")).toBeVisible();
+  await backupDialog.getByRole("button", { name: "Close" }).click();
+
+  await page.getByTestId("nostr-import-phone-link").click();
+  const phoneDialog = page.getByTestId("phone-recovery-dialog");
+  await expect(phoneDialog).toBeVisible();
+  await expect(
+    phoneDialog.getByRole("heading", { name: "Use your Buzz identity" }),
+  ).toBeVisible();
+  await expect(phoneDialog.getByTestId("identity-recovery-qr")).toBeVisible();
+  await expect(page.getByTestId("nostr-import-card")).toBeVisible();
+});
+
 test("first-launch key import continues to machine setup", async ({ page }) => {
   await installMockBridge(page, undefined, {
     skipCommunitySeed: true,
@@ -707,8 +800,10 @@ test("first-launch import accepts an .ncryptsec backup file", async ({
   // exactly the identity.ncryptsec our own save dialog produced. The accept
   // attribute is asserted explicitly because setInputFiles bypasses it — the
   // OS picker is what filters on it in real use.
-  await expect(page.getByTestId("nostr-import-file-button")).toBeVisible();
-  const fileInput = page.getByTestId("nostr-import-file-input");
+  await page.getByTestId("nostr-import-file-button").click();
+  const fileInput = page
+    .getByTestId("backup-recovery-dialog")
+    .getByTestId("nostr-import-file-input");
   await expect(fileInput).toHaveAttribute(
     "accept",
     ".key,.ncryptsec,text/plain",
@@ -719,44 +814,87 @@ test("first-launch import accepts an .ncryptsec backup file", async ({
     mimeType: "text/plain",
     name: "not-a-backup.txt",
   });
-  await expect(page.getByTestId("nostr-import-feedback")).toContainText(
-    /too large to be a key backup/i,
-  );
+  await expect(
+    page
+      .getByTestId("backup-recovery-dialog")
+      .getByTestId("nostr-import-feedback"),
+  ).toContainText(/too large to be a key backup/i);
 
   // Spec-vector blob the mock bridge accepts with the mock passphrase.
   const mockNcryptsec =
     "ncryptsec1qgg9947rlpvqu76pj5ecreduf9jxhselq2nae2kghhvd5g7dgjtcxfqtd67p9m0w57lspw8gsq6yphnm8623nsl8xn9j4jdzz84zm3frztj3z7s35vpzmqf6ksu8r89qk5z2zxfmu5gv8th8wclt0h4p";
+  // File contents advance to the password stage inside the same dialog.
+  const backupDialog = page.getByTestId("backup-recovery-dialog");
+  const backupFileSection = backupDialog.getByTestId(
+    "nostr-import-backup-file-section",
+  );
+  const backupFileSectionHeight = await backupFileSection.evaluate((element) =>
+    Number.parseFloat(getComputedStyle(element).height),
+  );
+  expect(backupFileSectionHeight).toBe(312);
+  const backupPicker = backupDialog.getByTestId("nostr-import-backup-picker");
+  await backupPicker.evaluate((element) => {
+    const dataTransfer = new DataTransfer();
+    dataTransfer.items.add(
+      new File(["backup"], "identity.ncryptsec", { type: "text/plain" }),
+    );
+    element.dispatchEvent(
+      new DragEvent("dragenter", {
+        bubbles: true,
+        cancelable: true,
+        dataTransfer,
+      }),
+    );
+  });
+  const backupDrop = backupDialog.getByTestId("nostr-import-backup-drop");
+  await expect(backupDrop).toBeVisible();
+  await backupDrop.evaluate((element, contents) => {
+    const dataTransfer = new DataTransfer();
+    dataTransfer.items.add(
+      new File([contents], "identity.ncryptsec", { type: "text/plain" }),
+    );
+    element.dispatchEvent(
+      new DragEvent("drop", {
+        bubbles: true,
+        cancelable: true,
+        dataTransfer,
+      }),
+    );
+  }, `${mockNcryptsec}\n`);
+
+  await expect(
+    backupDialog.getByTestId("backup-password-timeline"),
+  ).toBeVisible();
+  const passphraseSection = backupDialog.getByTestId(
+    "nostr-import-passphrase-section",
+  );
+  await expect(passphraseSection).toBeVisible();
+  const passphraseSectionHeight = await passphraseSection.evaluate((element) =>
+    Number.parseFloat(getComputedStyle(element).height),
+  );
+  expect(passphraseSectionHeight).toBe(backupFileSectionHeight);
+  await expect(
+    backupDialog.getByTestId("nostr-import-passphrase"),
+  ).toBeFocused();
+
+  // Back first returns to backup-file selection instead of closing the dialog.
+  await backupDialog.getByRole("button", { name: "Back", exact: true }).click();
+  await expect(
+    backupDialog.getByRole("heading", { name: "Restore from a backup file" }),
+  ).toBeVisible();
+  await expect(
+    backupDialog.getByTestId("nostr-import-backup-picker"),
+  ).toBeVisible();
+
   await fileInput.setInputFiles({
     buffer: Buffer.from(`${mockNcryptsec}\n`),
     mimeType: "text/plain",
     name: "identity.ncryptsec",
   });
-
-  // File contents advance to the same focused password stage as manual input.
-  await expect(
-    page.getByRole("heading", { name: "Unlock your account" }),
-  ).toBeVisible();
-  await expect(page.getByTestId("backup-password-timeline")).toBeVisible();
-  await expect(page.getByTestId("nostr-import-passphrase")).toBeFocused();
-
-  // Back first returns to key/file selection instead of leaving import.
-  await page.getByRole("button", { name: "Back", exact: true }).click();
-  await expect(
-    page.getByRole("heading", { name: "Enter your private key" }),
-  ).toBeVisible();
-  await expect(page.getByTestId("nostr-import-card")).toBeVisible();
-  await expect(page.getByTestId("nostr-import-file-button")).toBeVisible();
-  await expect(page.getByTestId("nostr-import-nsec-input")).toHaveValue("");
-
-  await fileInput.setInputFiles({
-    buffer: Buffer.from(`${mockNcryptsec}\n`),
-    mimeType: "text/plain",
-    name: "identity.ncryptsec",
-  });
-  await page
+  await backupDialog
     .getByTestId("nostr-import-passphrase")
     .fill("mock horse battery staple lake orbit");
-  await page.getByTestId("nostr-import-submit").click();
+  await backupDialog.getByTestId("nostr-import-submit").click();
 
   await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
   await expect(page.getByTestId("machine-onboarding-gate")).toBeVisible();
