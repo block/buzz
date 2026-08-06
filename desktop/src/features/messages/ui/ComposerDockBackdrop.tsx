@@ -5,6 +5,10 @@ type ComposerDockGlassBackdropProps = {
   testId?: string;
 };
 
+/**
+ * Applies the composer dock's shared blur without adding color or layout.
+ * Reuse it for composer-adjacent surfaces that need the same glass treatment.
+ */
 export function ComposerDockGlassBackdrop({
   className,
   testId,
