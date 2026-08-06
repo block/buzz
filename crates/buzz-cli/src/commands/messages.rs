@@ -243,6 +243,31 @@ fn normalize_explicit_mentions(values: &[String]) -> Result<Vec<String>, CliErro
     Ok(normalized)
 }
 
+fn normalize_require_mentions(values: &[String]) -> Result<Vec<String>, CliError> {
+    // A required mention is an assertion, not a mention: it must not count
+    // toward MENTION_CAP (the cap bounds what the event may carry; the
+    // requirement bounds what the caller will accept).
+    let mut normalized = Vec::new();
+    for value in values {
+        let pubkey = PublicKey::parse(value.trim())
+            .map_err(|_| CliError::Usage(format!("invalid --require-mention pubkey: {value}")))?;
+        let hex = pubkey.to_hex();
+        if !normalized.contains(&hex) {
+            normalized.push(hex);
+        }
+    }
+    Ok(normalized)
+}
+
+/// Required mention keys absent from the event's actual p-tags.
+fn required_mention_violations(required: &[String], emitted: &[String]) -> Vec<String> {
+    required
+        .iter()
+        .filter(|pk| !emitted.contains(pk))
+        .cloned()
+        .collect()
+}
+
 fn merge_message_mentions(
     explicit: &[String],
     uri_pubkeys: &[String],
@@ -569,6 +594,7 @@ pub struct SendMessageParams {
     pub broadcast: bool,
     pub files: Vec<String>,
     pub mentions: Vec<String>,
+    pub require_mentions: Vec<String>,
 }
 
 pub async fn cmd_send_message(
@@ -587,6 +613,7 @@ pub async fn cmd_send_message(
     let channel_uuid = parse_uuid(&p.channel_id)?;
 
     let explicit_mentions = normalize_explicit_mentions(&p.mentions)?;
+    let required_mentions = normalize_require_mentions(&p.require_mentions)?;
     let stripped = strip_code_regions(&p.content);
     let uri_pubkeys = extract_nostr_uris(&stripped);
     // Supplying any identity explicitly authorizes unresolved or ambiguous @Name text
@@ -679,6 +706,25 @@ pub async fn cmd_send_message(
 
     let event = client.sign_event(builder)?;
     let emitted_mentions = event_mention_pubkeys(&event);
+
+    // Fail-closed delivery assertion (#5010): every --require-mention key must
+    // be on the signed event's p-tags. Checked BEFORE submit — a send that
+    // would notify nobody must never publish. `accepted:true` + exit 0 is
+    // exactly the success signal this flag exists to distrust: a dropped,
+    // capped, or mis-resolved mention otherwise produces a byte-identical
+    // success response while the intended recipient was never notified.
+    let violations = required_mention_violations(&required_mentions, &emitted_mentions);
+    if !violations.is_empty() {
+        return Err(CliError::Usage(
+            serde_json::json!({
+                "message": "required mention(s) absent from the signed event; refusing to publish (add --mention or fix the content so the key is tagged)",
+                "required_but_missing_pubkeys": violations,
+                "emitted_mention_pubkeys": emitted_mentions,
+            })
+            .to_string(),
+        ));
+    }
+
     let resp = client.submit_event(event).await?;
     let mut output: serde_json::Value = serde_json::from_str(&normalize_write_response(&resp))
         .unwrap_or_else(|_| serde_json::json!({ "response": resp }));
@@ -880,6 +926,7 @@ pub async fn dispatch(
             broadcast,
             files,
             mentions,
+            require_mentions,
         } => {
             cmd_send_message(
                 client,
@@ -891,6 +938,7 @@ pub async fn dispatch(
                     broadcast,
                     files,
                     mentions,
+                    require_mentions,
                 },
             )
             .await
@@ -994,8 +1042,8 @@ pub async fn dispatch(
 mod tests {
     use super::{
         event_mention_pubkeys, find_root_from_tags, match_profiles_by_name, merge_message_mentions,
-        missing_members, normalize_explicit_mentions, parse_member_pubkeys,
-        resolve_names_to_pubkeys,
+        missing_members, normalize_explicit_mentions, normalize_require_mentions,
+        parse_member_pubkeys, required_mention_violations, resolve_names_to_pubkeys,
     };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
@@ -1309,6 +1357,71 @@ mod tests {
             .sign_with_keys(&Keys::generate())
             .unwrap();
         assert_eq!(event_mention_pubkeys(&event), vec![PK_VALID_A]);
+    }
+
+    #[test]
+    fn normalize_require_mentions_parses_hex_and_npub_and_dedups() {
+        use nostr::{PublicKey, ToBech32};
+        let npub = PublicKey::from_hex(PK_VALID_A)
+            .unwrap()
+            .to_bech32()
+            .unwrap()
+            .to_string();
+        let normalized = normalize_require_mentions(&[
+            PK_VALID_A.into(),
+            npub.clone(),
+            PK_VALID_B.into(),
+        ])
+        .unwrap();
+        // Same key supplied as hex and npub dedups to one entry.
+        assert_eq!(normalized, vec![PK_VALID_A, PK_VALID_B]);
+    }
+
+    #[test]
+    fn normalize_require_mentions_rejects_garbage_and_ignores_cap() {
+        let err = normalize_require_mentions(&["not-a-pubkey".into()]).unwrap_err();
+        assert!(err.to_string().contains("--require-mention"));
+
+        // A requirement is an assertion, not a mention: it is not bounded by
+        // MENTION_CAP (the cap limits what an event may carry, not what a
+        // caller may demand of it).
+        let many: Vec<String> = (0..40).map(|i| format!("{i:064x}")).collect();
+        assert!(normalize_require_mentions(&many).is_ok());
+    }
+
+    #[test]
+    fn required_mention_violations_lists_only_absent_keys() {
+        let required = vec![PK_VALID_A.into(), PK_VALID_B.into(), PK_VALID_C.into()];
+        let emitted = vec![PK_VALID_A.into(), PK_VALID_C.into()];
+        assert_eq!(
+            required_mention_violations(&required, &emitted),
+            vec![PK_VALID_B]
+        );
+        assert!(required_mention_violations(&required, &required).is_empty());
+        assert!(required_mention_violations(&[], &emitted).is_empty());
+    }
+
+    #[test]
+    fn required_mention_check_reads_signed_event_p_tags() {
+        use nostr::{EventBuilder, Keys, Tag};
+
+        let required = vec![PK_VALID_A.into()];
+        let tagged = EventBuilder::text_note("with mention")
+            .tags(vec![Tag::parse(["p", PK_VALID_A]).unwrap()])
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        assert!(required_mention_violations(&required, &event_mention_pubkeys(&tagged)).is_empty());
+
+        // A mention that was requested but never made it onto the signed event
+        // (dropped, capped, or mis-resolved upstream) must surface as a
+        // violation — the exact silent-failure case #5010 reports.
+        let untagged = EventBuilder::text_note("mention requested but absent")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        assert_eq!(
+            required_mention_violations(&required, &event_mention_pubkeys(&untagged)),
+            vec![PK_VALID_A]
+        );
     }
 
     // ---- match_profiles_by_name (author resolution for `messages search --author`) ----
