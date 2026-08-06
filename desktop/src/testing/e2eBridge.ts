@@ -12167,6 +12167,8 @@ export function maybeInstallE2eTauriMocks() {
         return handleGetManagedAgentLog(
           payload as Parameters<typeof handleGetManagedAgentLog>[0],
         );
+      case "get_agent_usage_dashboard":
+        return [];
       case "get_agent_models":
         return {
           agentName: "mock-agent",
