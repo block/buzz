@@ -4,7 +4,8 @@
 
 - [x] Fork e remotes configurados
 - [x] Plano e ADR documentados
-- [ ] Pipeline de imagem validado — workflow `31128541447` ainda em execução
+- [x] Pipeline de chart validado (workflow `31128437223`)
+- [ ] Pipeline de imagem própria — workflow `31128599898` ainda em execução
 - [x] PR de bootstrap aberto e mergeado (#2)
 
 ## Phase 2 — Infraestrutura GitOps
@@ -39,4 +40,5 @@
 - o Vaultwarden está inacessível pelo endpoint HTTPS;
 - o containerd do MicroK8s reporta snapshots/mounts ausentes;
 - a identidade Nostr do owner/relay ainda precisa de decisão e armazenamento no Vaultwarden;
-- a imagem multi-arch ainda precisa de digest publicado no GHCR.
+- staging já está fixado no digest público imutável do relay oficial;
+- o digest próprio do fork ainda depende do workflow `31128599898`.
