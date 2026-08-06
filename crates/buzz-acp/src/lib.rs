@@ -1034,6 +1034,57 @@ struct SlotCircuit {
     respawn_in_flight: bool,
 }
 
+/// A heartbeat tick that arrives before a lazy agent pool is ready.
+///
+/// The timer itself must stay non-blocking while the pool initializes, so a
+/// single bit records the deferred tick. Repeated ticks coalesce, queued human
+/// events retain priority, and the deferred heartbeat is consumed only when an
+/// idle agent can actually run it.
+#[derive(Default)]
+struct DeferredHeartbeat {
+    pending: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum HeartbeatTickAction {
+    Dispatch,
+    DeferForPool,
+    Coalesce,
+}
+
+impl DeferredHeartbeat {
+    fn on_tick(&mut self, pool_ready: bool) -> HeartbeatTickAction {
+        if self.pending {
+            HeartbeatTickAction::Coalesce
+        } else if !pool_ready {
+            self.pending = true;
+            HeartbeatTickAction::DeferForPool
+        } else {
+            HeartbeatTickAction::Dispatch
+        }
+    }
+
+    fn needs_pool_wake(&self) -> bool {
+        self.pending
+    }
+
+    fn is_dispatchable(
+        &self,
+        pool_ready: bool,
+        events_pending: bool,
+        heartbeat_in_flight: bool,
+        agent_idle: bool,
+    ) -> bool {
+        self.pending && pool_ready && !events_pending && !heartbeat_in_flight && agent_idle
+    }
+
+    /// Consume the deferred tick from the selected dispatch branch.
+    fn consume(&mut self) {
+        debug_assert!(self.pending);
+        self.pending = false;
+    }
+}
+
 /// Result of [`SlotCircuit::record_crash`].
 enum CrashVerdict {
     /// Respawn is allowed after sleeping for this duration (jittered backoff).
@@ -1668,6 +1719,7 @@ async fn tokio_main() -> Result<()> {
         None
     };
     let mut heartbeat_in_flight = false;
+    let mut deferred_heartbeat = DeferredHeartbeat::default();
 
     let mut presence_heartbeat = if config.presence_enabled {
         let interval = Duration::from_secs(60);
@@ -1809,14 +1861,15 @@ async fn tokio_main() -> Result<()> {
     }
 
     loop {
-        // Whether buffered work is waiting on a lazy pool. Also gates the
+        // Whether buffered work or a heartbeat is waiting on a lazy pool. Also gates the
         // retry-deadline sleep arm below: a `Failed` lifecycle keeps its
         // (possibly past) `retry_at` until the next wake, so sleeping on it
         // unconditionally would complete instantly on every iteration — a
-        // busy spin — whenever the queued work drained after a failed wake.
+        // busy spin — whenever all wake demand drained after a failed wake.
         let mut lazy_wake_work_pending = false;
         if config.lazy_pool && !pool_ready {
-            lazy_wake_work_pending = queue.has_flushable_work();
+            lazy_wake_work_pending =
+                queue.has_flushable_work() || deferred_heartbeat.needs_pool_wake();
             if let Some(attempt) = pool_lifecycle
                 .start_wake_if_due(lazy_wake_work_pending, tokio::time::Instant::now())
             {
@@ -1924,6 +1977,17 @@ async fn tokio_main() -> Result<()> {
             }
         }
 
+        // Keep this as a select guard rather than dispatching eagerly above:
+        // buffered relay events and shutdown must win the biased race. Computing
+        // it after respawn collection also lets a newly returned idle agent make
+        // the deferred heartbeat immediately runnable.
+        let deferred_heartbeat_dispatchable = deferred_heartbeat.is_dispatchable(
+            pool_ready,
+            queue.has_flushable_work(),
+            heartbeat_in_flight,
+            pool.any_idle(),
+        );
+
         // Borrow result_rx and join_set simultaneously via split-borrow helper.
         let pool_event: Option<PoolEvent> = {
             let (result_rx, join_set) = pool.rx_and_join_set();
@@ -1955,10 +2019,10 @@ async fn tokio_main() -> Result<()> {
                 Some((attempt, result)) = wake_rx.recv(), if config.lazy_pool && !pool_ready => {
                     Some(PoolEvent::Wake(attempt, result))
                 }
-                // Gated on pending work: with an empty queue there is nothing
-                // for the retry to dispatch, and a past `retry_at` would
+                // Gated on pending wake demand: without a queued event or
+                // deferred heartbeat there is nothing for the retry to dispatch, and a past `retry_at` would
                 // otherwise complete instantly on every iteration (busy spin).
-                // The next accepted event re-enables the arm.
+                // The next accepted event or heartbeat tick re-enables the arm.
                 _ = async {
                     match pool_lifecycle.retry_at() {
                         Some(retry_at) if lazy_wake_work_pending => {
@@ -2405,6 +2469,16 @@ async fn tokio_main() -> Result<()> {
                     }
                     None
                 }
+                _ = shutdown_rx.changed() => {
+                    tracing::info!("shutting down");
+                    break;
+                }
+                _ = std::future::ready(()), if deferred_heartbeat_dispatchable => {
+                    let _ = result_rx;
+                    deferred_heartbeat.consume();
+                    dispatch_heartbeat(&mut pool, &ctx, &mut heartbeat_in_flight);
+                    None
+                }
                 _ = async {
                     match heartbeat.as_mut() {
                         Some(hb) => hb.tick().await,
@@ -2412,19 +2486,27 @@ async fn tokio_main() -> Result<()> {
                     }
                 } => {
                     let _ = result_rx;
-                    if !pool_ready {
-                        tracing::debug!("heartbeat_skipped_pool_not_ready");
-                    } else if queue.has_flushable_work() {
-                        tracing::debug!("heartbeat_skipped_events");
-                        for (channel_id, thread_tags) in
-                            dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
-                        {
-                            typing_channels.insert(channel_id, thread_tags);
+                    match deferred_heartbeat.on_tick(pool_ready) {
+                        HeartbeatTickAction::DeferForPool => {
+                            tracing::info!("heartbeat_deferred_pool_not_ready");
                         }
-                    } else if pool.any_idle() {
-                        dispatch_heartbeat(&mut pool, &ctx, &mut heartbeat_in_flight);
-                    } else {
-                        tracing::debug!("heartbeat_skipped_busy");
+                        HeartbeatTickAction::Coalesce => {
+                            tracing::debug!("heartbeat_coalesced_deferred_tick");
+                        }
+                        HeartbeatTickAction::Dispatch if queue.has_flushable_work() => {
+                            tracing::debug!("heartbeat_skipped_events");
+                            for (channel_id, thread_tags) in
+                                dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                            {
+                                typing_channels.insert(channel_id, thread_tags);
+                            }
+                        }
+                        HeartbeatTickAction::Dispatch if pool.any_idle() => {
+                            dispatch_heartbeat(&mut pool, &ctx, &mut heartbeat_in_flight);
+                        }
+                        HeartbeatTickAction::Dispatch => {
+                            tracing::debug!("heartbeat_skipped_busy");
+                        }
                     }
                     None
                 }
@@ -2470,10 +2552,6 @@ async fn tokio_main() -> Result<()> {
                         }
                     }
                     None
-                }
-                _ = shutdown_rx.changed() => {
-                    tracing::info!("shutting down");
-                    break;
                 }
             }
         };
@@ -4460,6 +4538,78 @@ mod heartbeat_base_prompt_tests {
         let prompt = "[System: Heartbeat]\nrun feed get";
         let composed = pool::prepend_base_for_legacy(2, Some("you are a helpful agent"), prompt);
         assert_eq!(composed, prompt);
+    }
+}
+
+#[cfg(test)]
+mod deferred_heartbeat_tests {
+    use super::{DeferredHeartbeat, HeartbeatTickAction, PoolLifecycle};
+    use std::time::Duration;
+    use tokio::time::Instant;
+
+    #[test]
+    fn lazy_tick_wakes_pool_then_dispatches_exactly_once() {
+        let mut heartbeat = DeferredHeartbeat::default();
+
+        assert_eq!(heartbeat.on_tick(false), HeartbeatTickAction::DeferForPool);
+        assert!(heartbeat.needs_pool_wake());
+        assert!(!heartbeat.is_dispatchable(false, false, false, true));
+        assert!(!heartbeat.is_dispatchable(true, true, false, true));
+        assert!(
+            heartbeat.needs_pool_wake(),
+            "human work must retain priority"
+        );
+        assert!(heartbeat.is_dispatchable(true, false, false, true));
+        heartbeat.consume();
+        assert!(!heartbeat.needs_pool_wake());
+        assert!(!heartbeat.is_dispatchable(true, false, false, true));
+    }
+
+    #[test]
+    fn lazy_ticks_coalesce_while_pool_is_waking_or_busy() {
+        let mut heartbeat = DeferredHeartbeat::default();
+
+        assert_eq!(heartbeat.on_tick(false), HeartbeatTickAction::DeferForPool);
+        assert_eq!(heartbeat.on_tick(false), HeartbeatTickAction::Coalesce);
+        assert_eq!(heartbeat.on_tick(true), HeartbeatTickAction::Coalesce);
+        assert!(!heartbeat.is_dispatchable(true, false, true, true));
+        assert!(!heartbeat.is_dispatchable(true, false, false, false));
+        assert!(heartbeat.is_dispatchable(true, false, false, true));
+        heartbeat.consume();
+        assert!(!heartbeat.needs_pool_wake());
+    }
+
+    #[test]
+    fn ready_pool_tick_keeps_existing_immediate_path() {
+        let mut heartbeat = DeferredHeartbeat::default();
+
+        assert_eq!(heartbeat.on_tick(true), HeartbeatTickAction::Dispatch);
+        assert!(!heartbeat.needs_pool_wake());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_pool_wake_retries_while_heartbeat_remains_pending() {
+        let mut heartbeat = DeferredHeartbeat::default();
+        let mut lifecycle = PoolLifecycle::<()>::listening();
+        let now = Instant::now();
+
+        assert_eq!(heartbeat.on_tick(false), HeartbeatTickAction::DeferForPool);
+        assert_eq!(
+            lifecycle.start_wake_if_due(heartbeat.needs_pool_wake(), now),
+            Some(1)
+        );
+        lifecycle
+            .complete_wake(1, Err("provider unavailable".into()), now)
+            .unwrap();
+        assert_eq!(
+            lifecycle.start_wake_if_due(heartbeat.needs_pool_wake(), now + Duration::from_secs(4)),
+            None
+        );
+        assert_eq!(
+            lifecycle.start_wake_if_due(heartbeat.needs_pool_wake(), now + Duration::from_secs(5)),
+            Some(2)
+        );
+        assert!(heartbeat.needs_pool_wake());
     }
 }
 
