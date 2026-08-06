@@ -17,6 +17,8 @@ pub mod api_token;
 pub mod archived_identities;
 /// Channel and membership persistence.
 pub mod channel;
+/// NIP-29 discovery-event tags derived from channel rows.
+pub mod channel_discovery;
 /// Direct message channel persistence.
 pub mod dm;
 /// Database error types.
