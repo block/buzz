@@ -9,7 +9,8 @@
  *
  * Covers:
  *  - typing into a defaultless provider field sticks, and the provider is
- *    probed exactly once for the selection (not once per keystroke)
+ *    probed exactly once for the selection (not once per keystroke or
+ *    Advanced disclosure toggle)
  *  - the config form is gated on probe resolution (no half-rendered form),
  *    and defaults prefill exactly once when a slow probe lands
  *  - switching provider → local → provider re-probes and resets cleanly
@@ -131,7 +132,21 @@ test("typing into a defaultless provider field sticks and probes only once", asy
   await contextField.pressSequentially("prod-us-west", { delay: 20 });
   await expect(contextField).toHaveValue("prod-us-west");
 
-  // One selection, one probe — keystrokes must not refire it.
+  // One selection, one probe — keystrokes and Advanced disclosure toggles
+  // must not refire executable provider discovery after it has completed.
+  expect(await probeInvocations(page)).toBe(1);
+  const advanced = dialog.getByRole("button", {
+    name: "Advanced",
+    exact: true,
+  });
+  await advanced.click();
+  await expect(advanced).toHaveAttribute("aria-expanded", "false");
+  await expect(dialog.locator("#agent-run-on")).toHaveCount(0);
+  await advanced.click();
+  await expect(advanced).toHaveAttribute("aria-expanded", "true");
+  await expect(dialog.locator("#provider-cfg-context")).toHaveValue(
+    "prod-us-west",
+  );
   expect(await probeInvocations(page)).toBe(1);
 });
 

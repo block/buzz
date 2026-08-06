@@ -62,7 +62,7 @@ export function WhereToRunSection({
     ? (selectedBackendProvider?.binaryPath ?? null)
     : null;
   React.useEffect(() => {
-    if (!selectedBinaryPath) {
+    if (!selectedBinaryPath || draft.probedProvider) {
       setProbeError(null);
       return;
     }
@@ -81,7 +81,7 @@ export function WhereToRunSection({
     return () => {
       cancelled = true;
     };
-  }, [selectedBinaryPath]);
+  }, [selectedBinaryPath, draft.probedProvider]);
 
   if (backendProviders.length === 0) return null;
 
