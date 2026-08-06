@@ -206,6 +206,12 @@ pub struct AcpClient {
     /// outside of a goose-native turn — the read loop's steer arm is
     /// disabled in that case.
     steer_rx: Option<tokio::sync::mpsc::Receiver<crate::pool::SteerRequest>>,
+    /// Outbound channel to the pool's elicitation servicer, installed per turn
+    /// when the turn has a channel + owner. The read loop's `elicitation/create`
+    /// arm hands each parsed form to the servicer (which publishes a question
+    /// card and awaits the owner's tap) and awaits the ACP response. `None` for
+    /// heartbeats and owner-less turns — the arm then answers `cancel`.
+    elicitation_tx: Option<tokio::sync::mpsc::Sender<crate::pool::ElicitationBridgeRequest>>,
     /// Usage tracker — accumulates cumulative token counts from
     /// `_goose/unstable/session/update` notifications and computes per-turn
     /// deltas. Both goose and buzz-agent emit this notification; goose gates
@@ -395,6 +401,17 @@ fn build_client_capabilities() -> serde_json::Value {
         "auth": {
             "terminal": true
         },
+        // Signal to ACP adapters that Buzz can present form elicitations
+        // (`elicitation/create`, `mode:"form"`). claude-agent-acp gates its
+        // built-in `AskUserQuestion` tool on this: without it, the tool is added
+        // to `disallowedTools` and the model falls back to prose. Buzz handles
+        // the request by publishing a question card to the channel and awaiting
+        // the owner's tap (see the `elicitation/create` arm in the read loop and
+        // the pool's elicitation servicer). Only `form` is advertised — Buzz has
+        // no URL-elicitation surface.
+        "elicitation": {
+            "form": {}
+        },
         // Signal to goose that we handle `_goose/unstable/session/update`
         // notifications. Without this the custom notification is suppressed
         // on goose's side and usage data is never emitted.
@@ -549,6 +566,7 @@ impl AcpClient {
             active_run_id: None,
             steering_supported: false,
             steer_rx: None,
+            elicitation_tx: None,
             goose_usage: UsageTracker::default(),
         })
     }
@@ -911,6 +929,26 @@ impl AcpClient {
     /// Idempotent — safe to call when `steer_rx` is already `None`.
     pub fn clear_steer_rx(&mut self) {
         self.steer_rx = None;
+    }
+
+    /// Install a per-turn elicitation sender for the pool's servicer.
+    ///
+    /// Installed before the prompt for turns that have both a channel and a
+    /// resolved owner; the read loop's `elicitation/create` arm forwards each
+    /// parsed form to it. Idempotent replacement (unlike steer): the sender is
+    /// cheap to overwrite and the servicer task is torn down with the turn.
+    pub fn install_elicitation_tx(
+        &mut self,
+        tx: tokio::sync::mpsc::Sender<crate::pool::ElicitationBridgeRequest>,
+    ) {
+        self.elicitation_tx = Some(tx);
+    }
+
+    /// Clear any installed elicitation sender. Called by `send_prompt_result` on
+    /// every exit path so a heartbeat turn never inherits the previous channel
+    /// turn's servicer. Idempotent.
+    pub fn clear_elicitation_tx(&mut self) {
+        self.elicitation_tx = None;
     }
 
     /// Returns `true` if no steer receiver is currently installed.
@@ -1685,6 +1723,33 @@ impl AcpClient {
                             "session/request_permission" => {
                                 self.handle_permission_request(&msg).await?;
                             }
+                            "elicitation/create" => {
+                                // AskUserQuestion (and other form elicitations)
+                                // arrive here. The servicer publishes a question
+                                // card and blocks until the owner taps — a wait
+                                // that is legitimately long (no timeout), so the
+                                // loop is parked on the await and neither the idle
+                                // nor hard deadline can fire mid-wait. Renew both
+                                // afterwards so a settled wait doesn't trip an
+                                // immediate timeout on the next iteration.
+                                let result = self.service_elicitation(&msg).await;
+                                if let Some(id) = msg.get("id").cloned() {
+                                    let reply = serde_json::json!({
+                                        "jsonrpc": "2.0",
+                                        "id": id,
+                                        "result": result,
+                                    });
+                                    self.write_ndjson(&reply).await?;
+                                }
+                                let renew = Instant::now();
+                                idle_deadline = renew + idle_timeout;
+                                last_activity_at = renew;
+                                let new_hard = renew + max_duration;
+                                if new_hard > hard_deadline {
+                                    hard_deadline = new_hard;
+                                    self.current_hard_deadline = Some(new_hard);
+                                }
+                            }
                             other => {
                                 // If the unknown message has an id, it's a request expecting a reply.
                                 // Silence would cause the agent to hang waiting for a response.
@@ -1869,6 +1934,54 @@ impl AcpClient {
                 );
             }
         }
+    }
+
+    /// Service an inbound `elicitation/create` request via the pool's
+    /// elicitation servicer and return the ACP `CreateElicitationResponse`
+    /// result value.
+    ///
+    /// Answers `{ "action": "cancel" }` — the fail-closed outcome that lets the
+    /// adapter fall back to prose — when there is no servicer installed
+    /// (heartbeat or owner-less turn), the mode is not `form`, the schema is
+    /// missing, the form has no questions, or the servicer drops the request
+    /// (turn cancelled). Only borrows `&self`: the (possibly long) await holds no
+    /// mutable state, so the caller can renew deadlines afterwards.
+    async fn service_elicitation(&self, msg: &serde_json::Value) -> serde_json::Value {
+        let cancel = || serde_json::json!({ "action": "cancel" });
+        let Some(tx) = self.elicitation_tx.clone() else {
+            return cancel();
+        };
+        // Only form-mode elicitations map to question cards.
+        if msg.pointer("/params/mode").and_then(|v| v.as_str()) != Some("form") {
+            return cancel();
+        }
+        let message = msg
+            .pointer("/params/message")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let Some(schema) = msg.pointer("/params/requestedSchema") else {
+            return cancel();
+        };
+        let questions = crate::elicitation::parse_elicitation_form(schema, message);
+        if questions.is_empty() {
+            return cancel();
+        }
+        let elicitation_id = msg.get("id").map(|v| v.to_string()).unwrap_or_default();
+        let tool_call_id = msg
+            .pointer("/params/toolCallId")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let request = crate::pool::ElicitationBridgeRequest {
+            questions,
+            elicitation_id,
+            tool_call_id,
+            reply_tx,
+        };
+        if tx.send(request).await.is_err() {
+            return cancel();
+        }
+        reply_rx.await.unwrap_or_else(|_| cancel())
     }
 
     /// Reject a `session/request_permission` request from the agent.
@@ -2393,6 +2506,19 @@ mod tests {
         assert_eq!(
             response["result"]["outcome"]["optionId"].as_str(),
             Some("rej-x")
+        );
+    }
+
+    #[test]
+    fn advertises_elicitation_form_capability() {
+        // claude-agent-acp gates its built-in AskUserQuestion tool on
+        // `clientCapabilities.elicitation.form`; without it the tool is
+        // disallowed and /interview degrades to prose. This is the switch that
+        // turns question cards on.
+        let caps = build_client_capabilities();
+        assert!(
+            caps["elicitation"]["form"].is_object(),
+            "clientCapabilities.elicitation.form must be advertised; got {caps}"
         );
     }
 

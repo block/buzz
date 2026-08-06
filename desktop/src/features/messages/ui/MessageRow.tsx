@@ -25,6 +25,7 @@ import {
   THREAD_REPLY_LINE_WIDTH_REM,
 } from "@/features/messages/lib/threadTreeLayout";
 import {
+  KIND_ELICITATION_REQUEST,
   KIND_HUDDLE_STARTED,
   KIND_STREAM_MESSAGE_DIFF,
 } from "@/shared/constants/kinds";
@@ -44,6 +45,7 @@ import { MessageActionBar } from "./MessageActionBar";
 import { MessageAgentOwner } from "./MessageAgentOwner";
 import { MessageAuthorText, MessageHeaderRow } from "./MessageHeader";
 import { MessageTimestamp } from "./MessageTimestamp";
+import { QuestionCard } from "./QuestionCard";
 import { WaveMessageAttachment } from "./WaveMessageAttachment";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
@@ -340,6 +342,8 @@ export const MessageRow = React.memo(
               message={message}
             />
           );
+        case KIND_ELICITATION_REQUEST:
+          return <QuestionCard channelId={channelId} message={message} />;
         default:
           {
             const waveMessage = parseWaveMessageContent(message.body);

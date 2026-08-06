@@ -544,6 +544,28 @@ pub const KIND_MEMBER_REMOVED_NOTIFICATION: u32 = 44101;
 /// See `docs/nips/NIP-AM.md`.
 pub const KIND_AGENT_TURN_METRIC: u32 = 44200;
 
+/// An interactive elicitation request — an agent asking the channel a
+/// structured, tappable question (the ACP `elicitation/create` form mode,
+/// which is how Claude Code's `AskUserQuestion` tool surfaces over ACP).
+///
+/// Regular stored channel event authored by the agent, scoped with an `h` tag.
+/// `content` is JSON: `{ message, questions: [{ key, header?, prompt?,
+/// multiSelect, allowCustom, options: [{ label, description? }] }],
+/// toolCallId?, elicitationId }`. A member answers by publishing a
+/// [`KIND_ELICITATION_RESPONSE`] that `#e`-references this event. See
+/// `RESEARCH/ACP_ELICITATION_ASKUSERQUESTION.md` in the Buzz workspace and
+/// the harness bridge in `buzz-acp`.
+pub const KIND_ELICITATION_REQUEST: u32 = 44300;
+
+/// A member's answer to a [`KIND_ELICITATION_REQUEST`].
+///
+/// Regular stored channel event, `h`-scoped, carrying an `e` tag referencing
+/// the request event id. `content` is JSON: `{ action: "accept" | "decline" |
+/// "cancel", answers?: { <question_key>: <label|labels> }, custom?:
+/// { <question_key>: <text> } }`. The `buzz-acp` bridge folds the first
+/// `accept` back into the ACP `CreateElicitationResponse` for the waiting agent.
+pub const KIND_ELICITATION_RESPONSE: u32 = 44301;
+
 // Forum / social (45000–45999)
 // V1 used addressable range (30001–30003) — wrong.
 /// A forum post (thread root).
@@ -725,6 +747,8 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_MEMBER_ADDED_NOTIFICATION,
     KIND_MEMBER_REMOVED_NOTIFICATION,
     KIND_AGENT_TURN_METRIC,
+    KIND_ELICITATION_REQUEST,
+    KIND_ELICITATION_RESPONSE,
     KIND_WORKFLOW_DEF,
     KIND_LONG_FORM,
     KIND_USER_STATUS,
