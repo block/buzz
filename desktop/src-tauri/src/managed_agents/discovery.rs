@@ -178,6 +178,51 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         // Verified: `codex login status` exits 0 when logged in, non-zero otherwise.
         auth_probe_args: Some(&["codex", "login", "status"]),
     },
+    // Promoted from PRESET_HARNESSES so it can carry a `config_file_path`:
+    // `opencode acp` accepts no `--model` flag and reads no model env var, so
+    // its config file is the only tier that can tell Buzz which model it runs.
+    // A preset entry has nowhere to hang that, which left the config panel
+    // blank for every OpenCode agent.
+    KnownAcpRuntime {
+        id: "opencode",
+        label: "OpenCode",
+        commands: &["opencode"],
+        aliases: &[],
+        // Logo is bundled and keyed by id in the frontend (PRESET_LOGOS), so no
+        // remote avatar is fetched for this runtime.
+        avatar_url: "",
+        mcp_command: None,
+        mcp_hooks: false,
+        underlying_cli: None,
+        // Left empty deliberately: OpenCode is not auto-installable from Buzz,
+        // matching the behaviour it had as a preset.
+        cli_install_commands: &[],
+        cli_install_commands_windows: &[],
+        adapter_install_commands: &[],
+        cli_install_instructions_url: "https://opencode.ai/docs",
+        adapter_install_instructions_url: "",
+        cli_install_hint: "Buzz talks to OpenCode through its CLI's ACP mode (opencode acp).",
+        adapter_install_hint: "",
+        skill_dir: None,
+        supports_acp_model_switching: false,
+        // No model/provider env var by design — see the note above the entry.
+        model_env_var: None,
+        provider_env_var: None,
+        provider_locked: false,
+        default_env: &[],
+        config_file_path: Some("~/.config/opencode/opencode.json"),
+        config_file_format: Some("json"),
+        supports_acp_native_config: false,
+        thinking_env_var: None,
+        max_tokens_env_var: None,
+        context_limit_env_var: None,
+        // Model is required for OpenCode to run, but Buzz cannot set it — only
+        // the config file can. Marking it required would raise a readiness gap
+        // with no affordance to close it.
+        required_normalized_fields: &[],
+        login_hint: None,
+        auth_probe_args: None,
+    },
     KnownAcpRuntime {
         id: "buzz-agent",
         label: "Buzz Agent",
@@ -442,7 +487,7 @@ pub fn try_record_agent_command(
 
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
-        "goose" => Some(vec!["acp".to_string()]),
+        "goose" | "opencode" => Some(vec!["acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
