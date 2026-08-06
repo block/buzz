@@ -70,10 +70,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(
-        instance.getString('buzz_color_scheme'),
-        themeGroups().paired.first.name,
-      );
+      expect(instance.getString('buzz_color_scheme'), defaultSchemeName);
     });
 
     testWidgets('light mode lists light themes by their full name', (
