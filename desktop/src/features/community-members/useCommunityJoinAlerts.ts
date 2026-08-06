@@ -16,7 +16,6 @@ import {
   reconcileJoinAlertLedger,
   writeJoinAlertLedger,
   type JoinAlertLedger,
-  EMPTY_JOIN_ALERT_LEDGER,
   JOIN_ALERT_MAX_INDIVIDUAL,
 } from "@/features/community-members/lib/joinAlerts";
 import { sendDesktopNotification } from "@/features/notifications/lib/desktop";
@@ -44,6 +43,50 @@ const KIND_NIP43_MEMBER_ADDED = 8000;
 const MEMBER_REFRESH_DEBOUNCE_MS = 500;
 
 /**
+ * Everything one mounted effect run is allowed to act on.
+ *
+ * The subscription callbacks that deliver snapshots belong to the effect run
+ * that registered them, but `handleSnapshot` is a `useEffectEvent` and so reads
+ * whatever is *currently* rendered. Between the re-render that switches
+ * community and that effect's cleanup, those two disagree — and a snapshot from
+ * the old community would be folded into the new community's ledger under the
+ * new community's storage key.
+ *
+ * Binding the identity, the ledger, and the ordering state into one object
+ * created by the effect run makes that class of bug unrepresentable rather than
+ * patched read-by-read: a callback can only ever reach its own session.
+ */
+type JoinAlertSession = {
+  communityId: string;
+  viewerPubkey: string;
+  ledger: JoinAlertLedger;
+  /**
+   * `created_at` of the newest snapshot already folded in.
+   *
+   * A snapshot older than this is a stale view of the roster — an in-flight
+   * refetch that resolves after a newer live frame — and must not be treated as
+   * current. Without this, an older frame can re-alert a departed key or, worse,
+   * re-assert an authorization a newer frame just revoked.
+   */
+  newestSnapshotAt: number;
+  /**
+   * Latched once a snapshot shows the viewer is no longer owner/admin.
+   *
+   * Fail-closed, and deliberately stronger than the `newestSnapshotAt` fence:
+   * the relay can publish two snapshots within the same second, so an
+   * equal-`created_at` stale frame passes a strictly-older fence. Dropping
+   * equal timestamps instead would discard legitimate same-second joins. The
+   * latch removes the timestamp from the safety argument entirely — once
+   * revocation is observed, this session is done disclosing, whatever order the
+   * remaining frames arrive in.
+   *
+   * Re-promotion is unaffected: nothing invalidates the membership lookup on
+   * promotion, so regaining the panel already requires a reload today.
+   */
+  revoked: boolean;
+};
+
+/**
  * Trailing quiet window for coalescing join alerts ACROSS snapshots.
  *
  * The per-snapshot cap bounds "one snapshot, many keys". It does nothing for
@@ -57,6 +100,29 @@ const MEMBER_REFRESH_DEBOUNCE_MS = 500;
  * folds into the same window rather than flushing behind it.
  */
 const JOIN_ALERT_NOTIFY_WINDOW_MS = 1_500;
+
+/**
+ * Ceiling on how long a batch may be deferred by the trailing window.
+ *
+ * `JOIN_ALERT_NOTIFY_WINDOW_MS` is a pure trailing debounce: every snapshot
+ * re-arms it, so a join cadence faster than the window defers delivery for as
+ * long as the joins keep coming. Measured before this clamp existed: 13 joins at
+ * ~700ms intervals produced zero notifications across 9.1 continuous seconds.
+ *
+ * That is the wrong shape for an alerting feature, and it is worse than mere
+ * lateness — the ledger is persisted per snapshot while delivery waits, so a
+ * quit or community switch mid-drip drops a batch the ledger already recorded as
+ * alerted, and it is never re-announced. Clamping bounds both the silence and
+ * that loss window.
+ *
+ * Sized against both ends rather than picked round: it must exceed the span a
+ * bulk add's intermediate snapshots occupy, or the clamp would split the burst
+ * this window exists to collapse, and it must sit BELOW the measured drip above,
+ * or it would leave the case that motivated it unchanged. A burst's snapshots
+ * arrive within a second or two of each other; the drip ran 9.1s. Five seconds
+ * clears the first by a wide margin and cuts the second roughly in half.
+ */
+const JOIN_ALERT_MAX_DEFERRAL_MS = 5_000;
 
 /**
  * Notify community owners/admins the first time a key appears in their roster.
@@ -93,11 +159,31 @@ export function useCommunityJoinAlerts({ enabled }: { enabled: boolean }) {
     communityId !== null &&
     normalizedViewer.length > 0;
 
-  // Ledger mirror. A ref keeps the subscription callbacks stable: re-subscribing
-  // on every roster change would drop deltas in the gap between REQ and CLOSE.
-  const ledgerRef = React.useRef<JoinAlertLedger>(EMPTY_JOIN_ALERT_LEDGER);
-  const communityNameRef = React.useRef(communityName);
-  communityNameRef.current = communityName;
+  // Session for the current effect run. Callbacks read it through this ref so
+  // they stay stable — re-subscribing on every roster change would drop deltas
+  // in the gap between REQ and CLOSE — but every read is validated against the
+  // session's own bound community, never against ambient render state.
+  const sessionRef = React.useRef<JoinAlertSession | null>(null);
+
+  // Community name is read fresh rather than captured, because a rename does not
+  // re-key the effect and a captured name would go stale. Guarded by id at use
+  // time so it can only ever label its own community.
+  const communityNameRef = React.useRef<{ id: string; name: string } | null>(
+    null,
+  );
+  communityNameRef.current =
+    communityId === null
+      ? null
+      : { id: communityId, name: communityName ?? "" };
+
+  const resolveTitle = React.useCallback((session: JoinAlertSession) => {
+    const named = communityNameRef.current;
+    // Fall back to the generic title rather than a name belonging to a
+    // different community.
+    return joinAlertTitle(
+      named?.id === session.communityId ? named.name : null,
+    );
+  }, []);
 
   // Pending cross-snapshot batch. A burst arrives as several growing rosters,
   // so alerts accumulate here and flush once the roster stops moving.
@@ -109,6 +195,8 @@ export function useCommunityJoinAlerts({ enabled }: { enabled: boolean }) {
   const pendingRef = React.useRef<string[]>([]);
   const pendingEventRef = React.useRef<RelayEvent | null>(null);
   const notifyTimerRef = React.useRef<number | null>(null);
+  // When the batch currently pending first enqueued, for the deferral clamp.
+  const pendingSinceRef = React.useRef<number | null>(null);
 
   // Cancellation token for flushes already past the refs.
   //
@@ -128,6 +216,7 @@ export function useCommunityJoinAlerts({ enabled }: { enabled: boolean }) {
   const clearPending = React.useCallback(() => {
     pendingRef.current = [];
     pendingEventRef.current = null;
+    pendingSinceRef.current = null;
     flushGenerationRef.current += 1;
     if (notifyTimerRef.current !== null) {
       window.clearTimeout(notifyTimerRef.current);
@@ -136,24 +225,29 @@ export function useCommunityJoinAlerts({ enabled }: { enabled: boolean }) {
   }, []);
 
   const flushPending = React.useEffectEvent(async () => {
+    const session = sessionRef.current;
     const alerts = pendingRef.current;
     const event = pendingEventRef.current;
     pendingRef.current = [];
     pendingEventRef.current = null;
-    if (alerts.length === 0 || !event) return;
+    pendingSinceRef.current = null;
+    if (alerts.length === 0 || !event || !session) return;
+    // A session that observed revocation never delivers, even if a batch was
+    // queued before the latch closed.
+    if (session.revoked) return;
 
     // Claim this batch. Checked again at every side-effect boundary below —
     // not merely after the awaits that exist today, so that adding an await
     // later cannot silently reopen the disclosure.
     const generation = flushGenerationRef.current;
-    const cancelled = () => flushGenerationRef.current !== generation;
+    const cancelled = () =>
+      flushGenerationRef.current !== generation ||
+      sessionRef.current !== session ||
+      session.revoked;
 
     // Bind the title to the community these keys were queued under, not to
-    // whatever is active when the send resolves. Cancellation already stops a
-    // flush that outlives its community, but a title read at send time would
-    // mislabel the batch if it ever did not — the referent is a property of
-    // the batch, so it is captured with the batch.
-    const title = joinAlertTitle(communityNameRef.current);
+    // whatever is active when the send resolves.
+    const title = resolveTitle(session);
 
     // Resolve display names so the alert reads "Alice joined" rather than a
     // truncated key; a lookup failure degrades to the key, it does not skip.
@@ -203,11 +297,26 @@ export function useCommunityJoinAlerts({ enabled }: { enabled: boolean }) {
   });
 
   const handleSnapshot = React.useEffectEvent(async (event: RelayEvent) => {
-    if (communityId === null) return;
+    const session = sessionRef.current;
+    if (!session) return;
+    // Already revoked: this session neither alerts nor learns anything further.
+    if (session.revoked) return;
 
     const roster = relayMembersFromEvent(event);
     const rosterPubkeys = roster.map((member) => member.pubkey);
     if (rosterPubkeys.length === 0) return;
+
+    // Drop a stale view of the roster before it can be treated as current.
+    //
+    // An in-flight refetch (kind:8000 accelerator or reconnect) can resolve
+    // AFTER a newer live frame. Processing it would fold a superseded roster in
+    // as authoritative — re-alerting a departed key, and re-asserting an
+    // authorization the newer frame revoked. Strictly older only: two snapshots
+    // can share a second, and dropping equal timestamps would discard real
+    // joins. The revocation latch, not this fence, is what makes the privacy
+    // arm safe at equal timestamps.
+    const snapshotAt = event.created_at;
+    if (snapshotAt < session.newestSnapshotAt) return;
 
     // The roster can change shape without anything being new to us (a removal
     // or a role change), so refresh the panel regardless of alert eligibility.
@@ -228,9 +337,12 @@ export function useCommunityJoinAlerts({ enabled }: { enabled: boolean }) {
     // Fail closed: a snapshot that does not list the viewer at all means they
     // were removed outright.
     const viewerEntry = roster.find(
-      (member) => member.pubkey === normalizedViewer,
+      (member) => member.pubkey === session.viewerPubkey,
     );
     if (viewerEntry?.role !== "owner" && viewerEntry?.role !== "admin") {
+      // Latch, so no later frame — including an older authorized snapshot still
+      // in flight — can re-open disclosure for this session.
+      session.revoked = true;
       // Revocation must also drop anything queued but not yet delivered.
       // Batching across snapshots would otherwise reopen the disclosure Wren
       // found as a *delayed* one: joins accumulated while authorized would
@@ -243,10 +355,17 @@ export function useCommunityJoinAlerts({ enabled }: { enabled: boolean }) {
       return;
     }
 
+    // Fence advances only here: past the roster and authorization checks, on a
+    // frame this session actually accepts as its current view. Advancing it at
+    // the comparison instead would let a frame rejected for some *other* reason
+    // push the fence past a legitimate frame still in flight, dropping a real
+    // snapshot as though it were stale.
+    session.newestSnapshotAt = snapshotAt;
+
     const { alerts, changed, ledger } = reconcileJoinAlertLedger({
-      ledger: ledgerRef.current,
+      ledger: session.ledger,
       rosterPubkeys,
-      viewerPubkey: normalizedViewer,
+      viewerPubkey: session.viewerPubkey,
     });
     if (!changed) return;
 
@@ -254,18 +373,22 @@ export function useCommunityJoinAlerts({ enabled }: { enabled: boolean }) {
     // lose the notification rather than repeat it on every later snapshot.
     //
     // A write that cannot land (quota still exceeded after cache eviction)
-    // leaves the ledger ref alone deliberately. Advancing it would mark these
-    // keys seen in memory while nothing reached storage, so the alert would be
-    // lost until a reload; leaving it means the next snapshot retries the
-    // write and the alert survives to whichever attempt lands. The notify is
+    // leaves the session's ledger alone deliberately. Advancing it would mark
+    // these keys seen in memory while nothing reached storage, so the alert
+    // would be lost until a reload; leaving it means the next snapshot retries
+    // the write and the alert survives to whichever attempt lands. The notify is
     // skipped either way — a false return means nothing was persisted, so
     // notifying here is exactly the "repeat on every later snapshot" this
     // ordering exists to prevent.
-    if (!writeJoinAlertLedger(communityId, normalizedViewer, ledger)) return;
-    ledgerRef.current = ledger;
+    if (
+      !writeJoinAlertLedger(session.communityId, session.viewerPubkey, ledger)
+    ) {
+      return;
+    }
+    session.ledger = ledger;
     if (alerts.length === 0) return;
 
-    // Queue rather than notify. Persistence and the ledger ref advance stay
+    // Queue rather than notify. Persistence and the ledger advance stay
     // synchronous per snapshot (above), so cross-snapshot dedupe still holds
     // and a crash before the flush loses the alert rather than repeating it —
     // the ordering invariant this feature already committed to. Only the
@@ -276,16 +399,35 @@ export function useCommunityJoinAlerts({ enabled }: { enabled: boolean }) {
     if (notifyTimerRef.current !== null) {
       window.clearTimeout(notifyTimerRef.current);
     }
+    const now = Date.now();
+    if (pendingSinceRef.current === null) pendingSinceRef.current = now;
+    // Clamp the trailing window so a sustained drip cannot defer delivery (and
+    // the ledger-already-written loss window) without bound.
+    const deadline = pendingSinceRef.current + JOIN_ALERT_MAX_DEFERRAL_MS;
+    const delay = Math.max(
+      0,
+      Math.min(JOIN_ALERT_NOTIFY_WINDOW_MS, deadline - now),
+    );
     notifyTimerRef.current = window.setTimeout(() => {
       notifyTimerRef.current = null;
       void flushPending();
-    }, JOIN_ALERT_NOTIFY_WINDOW_MS);
+    }, delay);
   });
 
   React.useEffect(() => {
     if (!active || communityId === null) return;
 
-    ledgerRef.current = readJoinAlertLedger(communityId, normalizedViewer);
+    // One session per effect run. Every callback below reaches this community's
+    // ledger and this viewer's role through it and cannot reach any other, so a
+    // switch mid-flight is a cancelled session rather than a mislabeled alert.
+    const session: JoinAlertSession = {
+      communityId,
+      ledger: readJoinAlertLedger(communityId, normalizedViewer),
+      newestSnapshotAt: 0,
+      revoked: false,
+      viewerPubkey: normalizedViewer,
+    };
+    sessionRef.current = session;
 
     let disposed = false;
     const disposers: Array<() => Promise<void>> = [];
@@ -356,6 +498,10 @@ export function useCommunityJoinAlerts({ enabled }: { enabled: boolean }) {
     return () => {
       disposed = true;
       if (refreshTimeout !== null) window.clearTimeout(refreshTimeout);
+      // Retire the session before dropping the batch, so any flush already past
+      // the refs sees `sessionRef.current !== session` and stops. Guarded in
+      // case a later run has already installed its own.
+      if (sessionRef.current === session) sessionRef.current = null;
       // Drop the queued batch too, not just its timer: on a community switch
       // this effect re-keys, and keys accumulated for the old community must
       // not flush against the new one.

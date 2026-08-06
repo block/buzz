@@ -332,6 +332,8 @@ function installRelayStub() {
   let nextSnapshot = null;
   let subscribeCount = 0;
   let unsubscribeCount = 0;
+  /** When set, `fetchFirstEvent` parks here before resolving. */
+  let fetchGate = null;
 
   mock.method(relayClient, "subscribeLive", async (filter, onEvent) => {
     subscribeCount++;
@@ -350,6 +352,7 @@ function installRelayStub() {
 
   mock.method(relayClient, "fetchFirstEvent", async () => {
     fetchFirstEventCalls++;
+    if (fetchGate) await fetchGate;
     return nextSnapshot;
   });
 
@@ -377,6 +380,25 @@ function installRelayStub() {
     /** What a subsequent fetchFirstEvent (refetch) resolves to. */
     setRefetchSnapshot: (event) => {
       nextSnapshot = event;
+    },
+    /**
+     * Hold the snapshot refetch open, the way a slow relay does.
+     *
+     * The stale-frame privacy race is only expressible if a refetch can resolve
+     * AFTER a newer live frame has been processed. Without a gate here, the
+     * refetch resolves inside the same drain that started it and the two frames
+     * can never be interleaved.
+     */
+    deferRefetch: () => {
+      let release = null;
+      fetchGate = new Promise((resolve) => {
+        release = resolve;
+      });
+      return async () => {
+        fetchGate = null;
+        release();
+        await settle();
+      };
     },
     counts: () => ({
       fetchFirstEventCalls,
@@ -1581,6 +1603,466 @@ describe("useCommunityJoinAlerts — mounted subscription behaviour", () => {
       "both alerts name their joiner",
     );
 
+    await unmount();
+  });
+
+  // ── Stale-frame ordering: the fence and the revocation latch ───────────────
+  //
+  // Everything below concerns frames arriving out of order. The demotion arms
+  // above all deliver the revoking snapshot LAST, which is the only ordering a
+  // trailing-window suite naturally produces — and the ordering under which a
+  // hook with no fence and no latch passes every one of them.
+
+  /**
+   * The privacy regression. Red at 0cfe4832, green with the latch.
+   *
+   * A refetch (kind:8000 accelerator or reconnect) is held open while a newer
+   * live frame demotes the viewer. The stale frame then resolves still listing
+   * the viewer as owner AND carrying a new member. At 0cfe4832 the hook
+   * authorized that frame against its own roster, found "owner", and disclosed
+   * the joiner's identity to an admin who had already been demoted — measured as
+   * `notifications=1 bodies=["cccc… joined"]`.
+   *
+   * The latch is what closes it, not the fence: `created_at` ordering alone
+   * cannot, because the relay can emit two snapshots in the same second.
+   */
+  it("never discloses a joiner from a stale frame that outlives a demotion", async () => {
+    const relay = installRelayStub();
+    const { render, unmount } = mountHook({ role: "owner" });
+
+    await render();
+    await settle();
+
+    relay.emitSnapshot(snapshot([VIEWER, ALICE]));
+    await settle();
+    assert.equal(notifications.length, 0, "precondition: seeded silently");
+
+    // A stale authorized frame — still owner, and it carries BOB — is put in
+    // flight and held there.
+    relay.setRefetchSnapshot(
+      snapshot([VIEWER, ALICE, BOB], {
+        id: "snap-stale-authorized",
+        createdAt: 20_000,
+      }),
+    );
+    const releaseRefetch = relay.deferRefetch();
+    relay.emitDelta({
+      id: "delta-1",
+      pubkey: "f".repeat(64),
+      created_at: 20_000,
+      kind: KIND_MEMBER_ADDED,
+      tags: [["p", BOB]],
+      content: "",
+      sig: "s".repeat(128),
+    });
+    await settleAfterRefreshDebounce();
+
+    // Meanwhile the live subscription delivers the demotion. Same second as the
+    // stale frame on purpose: a strictly-older fence does not reject it, so this
+    // arm cannot pass on the fence alone.
+    relay.emitSnapshot(
+      snapshot([VIEWER, ALICE], {
+        id: "snap-demote",
+        createdAt: 20_000,
+        viewerRole: "member",
+      }),
+    );
+    await settle();
+    assert.equal(
+      notifications.length,
+      0,
+      "precondition: the demotion itself discloses nothing",
+    );
+
+    // Now the stale authorized frame lands.
+    await releaseRefetch();
+    await settleAfterNotifyWindow();
+
+    assert.equal(
+      notifications.length,
+      0,
+      "a frame that predates the demotion must not re-open disclosure",
+    );
+    assert.ok(
+      !notifications.some((entry) => entry.body?.includes(BOB.slice(0, 8))),
+      "the demoted viewer must never learn the new member's identity",
+    );
+
+    await unmount();
+  });
+
+  /**
+   * The fence's own arm: a strictly older frame is not treated as current.
+   *
+   * Distinct from the latch above — here the viewer is never demoted, so the
+   * latch never trips and only the `created_at` comparison can reject the frame.
+   * A stale roster that has LOST a member must not cause that member to be
+   * re-alerted when they reappear in the (already-seen) newer roster.
+   */
+  it("ignores a strictly older snapshot rather than treating it as current", async () => {
+    const relay = installRelayStub();
+    const { render, unmount } = mountHook({ role: "owner" });
+
+    await render();
+    await settle();
+
+    relay.emitSnapshot(snapshot([VIEWER, ALICE], { createdAt: 30_000 }));
+    await settle();
+
+    relay.emitSnapshot(
+      snapshot([VIEWER, ALICE, BOB], { id: "snap-new", createdAt: 31_000 }),
+    );
+    await settleAfterNotifyWindow();
+    assert.equal(notifications.length, 1, "precondition: BOB alerted once");
+
+    const ledgerAfterBob = storage.get(
+      joinAlertStorageKey(COMMUNITY_A, VIEWER),
+    );
+
+    // An older frame arrives late, carrying a roster that predates BOB and adds
+    // CAROL. Processing it as current would fold a superseded roster in.
+    relay.emitSnapshot(
+      snapshot([VIEWER, ALICE, CAROL], {
+        id: "snap-older",
+        createdAt: 30_500,
+      }),
+    );
+    await settleAfterNotifyWindow();
+
+    assert.equal(
+      notifications.length,
+      1,
+      "an older frame must not alert from a superseded roster",
+    );
+    assert.equal(
+      storage.get(joinAlertStorageKey(COMMUNITY_A, VIEWER)),
+      ledgerAfterBob,
+      "an older frame must not advance the ledger",
+    );
+
+    await unmount();
+  });
+
+  /**
+   * Eva's constraint: the fence advances only on frames actually accepted.
+   *
+   * If a rejected frame moved newest-seen, a stale frame could push the fence
+   * past a legitimate frame still in flight and that real snapshot would be
+   * dropped as though it were stale. The rejection used here is the empty
+   * roster, and the legitimate frame that follows carries a LOWER `created_at`
+   * than the rejected one.
+   *
+   * Scope, measured rather than assumed. Moving the empty-roster guard to AFTER
+   * the fence advance fails this arm and only this arm (28/29 still pass), so it
+   * is a real and uniquely-targeted guard. But moving the fence advance itself
+   * back up to the comparison — the literal edit Eva's constraint forbids —
+   * SURVIVES the whole suite, and that is not a gap in this test: it is an
+   * equivalent mutant. Only two guards sit between the comparison and the
+   * advance, and each is already immune:
+   *
+   *   - the empty-roster guard returns BEFORE the comparison, so a frame it
+   *     rejects never reaches either position;
+   *   - the authorization guard latches `revoked` on the way out, and a revoked
+   *     session refuses every later frame outright, so whether that frame moved
+   *     the fence first is unobservable.
+   *
+   * The placement is therefore defence in depth against a FUTURE reject-and-
+   * continue path, not a currently-reachable defect. Pinning it here is what
+   * makes the next such guard visible — a new early return added between these
+   * two points would be caught by this arm rather than by a user.
+   */
+  it("does not advance the stale-frame fence on a frame it rejects", async () => {
+    const relay = installRelayStub();
+    const { render, unmount } = mountHook({ role: "owner" });
+
+    await render();
+    await settle();
+
+    relay.emitSnapshot(snapshot([VIEWER, ALICE], { createdAt: 40_000 }));
+    await settle();
+
+    // Rejected frame, far in the future. An empty roster is dropped before the
+    // fence would have anything to say about it.
+    relay.emitSnapshot(snapshot([], { id: "snap-empty", createdAt: 90_000 }));
+    await settle();
+
+    // A legitimate frame, newer than the accepted one but OLDER than the
+    // rejected one. If the rejected frame had advanced the fence, this real
+    // join would be silently discarded.
+    relay.emitSnapshot(
+      snapshot([VIEWER, ALICE, BOB], { id: "snap-real", createdAt: 41_000 }),
+    );
+    await settleAfterNotifyWindow();
+
+    assert.equal(
+      notifications.length,
+      1,
+      "a rejected frame must not fence out a later legitimate one",
+    );
+
+    await unmount();
+  });
+
+  /**
+   * Eva's constraint: the latch trip drops the queued batch before anything
+   * else, exactly as the pre-latch demotion path did.
+   *
+   * The latch is an addition to that path, not a replacement for it, and a latch
+   * that returned early WITHOUT clearing would leave an armed timer holding
+   * authorized-at-queue-time keys that fires after revocation. Asserted by
+   * queueing a batch, tripping the latch mid-window, and then outwaiting the
+   * window: silence can only come from the batch having been dropped.
+   */
+  it("drops the queued batch when the latch trips, not merely afterwards", async () => {
+    const relay = installRelayStub();
+    const { render, unmount } = mountHook({ role: "owner" });
+
+    await render();
+    await settle();
+
+    relay.emitSnapshot(snapshot([VIEWER, ALICE], { createdAt: 50_000 }));
+    await settle();
+
+    // Queue a batch and leave it pending inside the trailing window.
+    relay.emitSnapshot(
+      snapshot([VIEWER, ALICE, BOB], { id: "snap-queue", createdAt: 51_000 }),
+    );
+    await settle();
+    assert.equal(
+      notifications.length,
+      0,
+      "precondition: the batch is queued, not yet delivered",
+    );
+
+    // Trip the latch while that timer is still armed.
+    relay.emitSnapshot(
+      snapshot([VIEWER, ALICE, BOB], {
+        id: "snap-latch",
+        createdAt: 52_000,
+        viewerRole: "member",
+      }),
+    );
+    await settleAfterNotifyWindow();
+
+    assert.equal(
+      notifications.length,
+      0,
+      "a batch queued before revocation must be dropped by the latch trip",
+    );
+
+    await unmount();
+  });
+
+  /**
+   * Known and accepted for v1 (Eva's ruling): a stale DEMOTING frame latches a
+   * viewer who is still a genuine admin, and the latch does not self-clear.
+   *
+   * This is the reverse ordering of the privacy race. The invalidation the latch
+   * fires refetches the membership lookup, which correctly returns admin, so
+   * `active` stays true, the effect deps do not change, and no re-key occurs —
+   * the session stays latched until reload or community switch.
+   *
+   * It is fail-safe (under-notify, never over-disclose) and consistent with the
+   * promotion-on-reload semantics this feature already ships, so it is pinned
+   * here as documented behaviour rather than left to be rediscovered as a bug.
+   * Clearing it would cost a third piece of timing state, which is not worth it
+   * at v1.
+   */
+  it("stays latched after a stale demoting frame, until reload or switch (accepted)", async () => {
+    const relay = installRelayStub();
+    const { render, switchCommunity, unmount } = mountHook({ role: "admin" });
+
+    await render();
+    await settle();
+
+    relay.emitSnapshot(
+      snapshot([VIEWER, ALICE], { createdAt: 60_000, viewerRole: "admin" }),
+    );
+    await settle();
+
+    // A stale frame that does not list the viewer as a manager arrives first.
+    relay.emitSnapshot(
+      snapshot([VIEWER, ALICE], {
+        id: "snap-stale-demote",
+        createdAt: 60_000,
+        viewerRole: "member",
+      }),
+    );
+    await settle();
+
+    // The viewer is in fact still an admin, and later frames say so.
+    relay.emitSnapshot(
+      snapshot([VIEWER, ALICE, BOB], {
+        id: "snap-still-admin",
+        createdAt: 61_000,
+        viewerRole: "admin",
+      }),
+    );
+    await settleAfterNotifyWindow();
+
+    assert.equal(
+      notifications.length,
+      0,
+      "documented: the latch does not self-clear, so alerts stay off for this session",
+    );
+
+    // A community switch re-keys the effect and builds a fresh session, which is
+    // the documented recovery path (alongside reload). Switching away and back
+    // is what a user does; assert the feature is alive again afterwards.
+    await switchCommunity(COMMUNITY_B);
+    await settle();
+    await switchCommunity(COMMUNITY_A);
+    await settle();
+
+    relay.emitSnapshot(
+      snapshot([VIEWER, ALICE, BOB], {
+        id: "snap-after-switch",
+        createdAt: 62_000,
+        viewerRole: "admin",
+      }),
+    );
+    await settle();
+    relay.emitSnapshot(
+      snapshot([VIEWER, ALICE, BOB, CAROL], {
+        id: "snap-after-switch-join",
+        createdAt: 63_000,
+        viewerRole: "admin",
+      }),
+    );
+    await settleAfterNotifyWindow();
+
+    // Two, not one: the latched session suppressed BOB's alert but also never
+    // recorded him in the ledger, so the fresh session sees him as unseen and
+    // announces him alongside CAROL. The accepted cost of the latch is therefore
+    // DELAYED notification, not lost notification — which is what makes
+    // "fail-safe" true rather than merely reassuring.
+    assert.equal(
+      notifications.length,
+      2,
+      "a community switch clears the latch: the feature recovers without a reload",
+    );
+    assert.ok(
+      notifications.some((entry) => entry.body?.includes(BOB.slice(0, 8))),
+      "the join suppressed by the latch is re-announced, not lost",
+    );
+    assert.ok(
+      notifications.some((entry) => entry.body?.includes(CAROL.slice(0, 8))),
+      "and the new join lands too",
+    );
+
+    await unmount();
+  });
+
+  /**
+   * F1: a snapshot in flight across a community switch is folded into the
+   * session that requested it, or into nothing — never into the new
+   * community's ledger.
+   *
+   * `handleSnapshot` is a `useEffectEvent`, so before the session binding it
+   * read whatever community was CURRENTLY rendered. A frame from community A
+   * resolving after a switch to B would be reconciled against B's ledger and
+   * persisted under B's storage key, alerting for A's members under B's name.
+   */
+  it("never folds a snapshot from the previous community into the new one", async () => {
+    const relay = installRelayStub();
+    const { render, switchCommunity, unmount } = mountHook({ role: "owner" });
+
+    await render();
+    await settle();
+
+    relay.emitSnapshot(snapshot([VIEWER, ALICE], { createdAt: 70_000 }));
+    await settle();
+
+    const keyA = joinAlertStorageKey(COMMUNITY_A, VIEWER);
+    const keyB = joinAlertStorageKey(COMMUNITY_B, VIEWER);
+    const ledgerABefore = storage.get(keyA);
+    assert.ok(ledgerABefore, "precondition: community A seeded");
+    assert.equal(storage.get(keyB), undefined, "precondition: B unseeded");
+
+    // Community A's refetch is held open across the switch.
+    relay.setRefetchSnapshot(
+      snapshot([VIEWER, ALICE, BOB], {
+        id: "snap-a-inflight",
+        createdAt: 71_000,
+      }),
+    );
+    const releaseRefetch = relay.deferRefetch();
+    relay.emitReconnect();
+    await settleAfterRefreshDebounce();
+
+    await switchCommunity(COMMUNITY_B);
+    await settle();
+
+    // A's frame now resolves, with B active.
+    await releaseRefetch();
+    await settleAfterNotifyWindow();
+
+    assert.equal(
+      storage.get(keyA),
+      ledgerABefore,
+      "the retired session must not write community A's ledger either",
+    );
+    const ledgerB = storage.get(keyB);
+    if (ledgerB !== undefined) {
+      assert.ok(
+        !ledgerB.includes(BOB),
+        "community A's roster must never reach community B's ledger",
+      );
+    }
+    assert.ok(
+      !notifications.some((entry) => entry.title?.includes("Community B")),
+      "community A's joiners must never be announced under community B",
+    );
+
+    await unmount();
+  });
+
+  /**
+   * F2: the trailing window is a pure debounce, so a join cadence faster than
+   * the window re-arms it indefinitely.
+   *
+   * Measured before the clamp: 13 joins at ~700ms intervals produced ZERO
+   * notifications across 9.1 continuous seconds, with the ledger persisted the
+   * whole time — so a quit mid-drip loses a batch already recorded as alerted.
+   * The clamp bounds that. This arm drips faster than the window for longer
+   * than the ceiling and asserts delivery happens DURING the drip.
+   *
+   * The existing burst arm cannot catch this: it emits its snapshots in a tight
+   * loop inside one drain, so the window never re-arms against wall-clock time
+   * and the starvation is structurally unreachable there.
+   */
+  it("delivers during a sustained drip instead of deferring without bound", async () => {
+    const relay = installRelayStub();
+    const { render, unmount } = mountHook({ role: "owner" });
+
+    await render();
+    await settle();
+
+    relay.emitSnapshot(snapshot([VIEWER], { createdAt: 80_000 }));
+    await settle();
+
+    const roster = [VIEWER];
+    // 1s apart — inside the 1.5s window, so every join re-arms it — for 8s,
+    // which is past the 5s ceiling.
+    for (let i = 0; i < 8; i++) {
+      roster.push(`${i.toString(16).repeat(63)}e`);
+      relay.emitSnapshot(
+        snapshot([...roster], {
+          id: `snap-drip-${i}`,
+          createdAt: 80_001 + i,
+        }),
+      );
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 1_000));
+      });
+    }
+
+    assert.ok(
+      notifications.length > 0,
+      `a sustained drip must not starve delivery; got ${notifications.length} alerts across 8s`,
+    );
+
+    await settleAfterNotifyWindow();
     await unmount();
   });
 });
