@@ -343,6 +343,27 @@ pub struct SteerRequest {
     pub ack_tx: tokio::sync::oneshot::Sender<SteerAck>,
 }
 
+/// A form elicitation (`elicitation/create`) handed from the ACP read loop to
+/// the pool's per-turn elicitation servicer.
+///
+/// The servicer publishes one `KIND_ELICITATION_REQUEST` card per question,
+/// polls for the owner's `KIND_ELICITATION_RESPONSE` answers, folds them into an
+/// ACP `CreateElicitationResponse`, and returns it on `reply_tx`. Dropping
+/// `reply_tx` (the servicer is torn down with the turn) makes the read loop
+/// answer `cancel`.
+pub struct ElicitationBridgeRequest {
+    /// Questions parsed from the request's `requestedSchema`, in asked order.
+    /// The top-level form `message` is already folded into each question's
+    /// prompt during parsing, so it is not carried separately.
+    pub questions: Vec<crate::elicitation::ElicitationQuestion>,
+    /// The JSON-RPC request id, stringified — carried on the card for tracing.
+    pub elicitation_id: String,
+    /// The ACP `toolCallId`, when the adapter supplied one.
+    pub tool_call_id: Option<String>,
+    /// Oneshot for the servicer to return the `CreateElicitationResponse` result.
+    pub reply_tx: tokio::sync::oneshot::Sender<serde_json::Value>,
+}
+
 /// Why a mid-turn steer failed, on either transport
 /// (`_goose/unstable/session/steer` or `_session/steering`).
 ///
@@ -1366,6 +1387,7 @@ fn send_prompt_result(
     batch: Option<FlushBatch>,
 ) {
     agent.acp.clear_steer_rx();
+    agent.acp.clear_elicitation_tx();
     let _ = result_tx.send(PromptResult {
         agent,
         source,
@@ -1967,6 +1989,26 @@ pub async fn run_prompt_task(
         "turn starting for {}",
         prompt_label(&source)
     );
+
+    // Elicitation bridge: for channel turns with a known owner, stand up a
+    // servicer that answers `elicitation/create` forms (AskUserQuestion) by
+    // publishing owner-locked question cards and awaiting the tap. Heartbeats
+    // and owner-less turns get none — the read loop then answers `cancel` and
+    // the model falls back to prose. The guard aborts the task on every exit
+    // path; `send_prompt_result` clears the installed sender.
+    let _elicitation_guard = match (observer_channel_id, ctx.agent_owner_pubkey) {
+        (Some(cid), Some(owner)) => {
+            let (elic_tx, elic_rx) = mpsc::channel::<ElicitationBridgeRequest>(4);
+            agent.acp.install_elicitation_tx(elic_tx);
+            Some(AbortOnDrop(tokio::spawn(run_elicitation_servicer(
+                elic_rx,
+                ctx.clone(),
+                cid,
+                owner,
+            ))))
+        }
+        _ => None,
+    };
 
     // When control_rx is Some (channel tasks), wrap the prompt in select! so
     // the main loop can cancel, interrupt, or rotate it. Heartbeats
@@ -3719,6 +3761,189 @@ pub(crate) fn build_turn_metric_counts(
 /// for this turn) or when `owner_pubkey` is unconfigured (no NIP-AO identity).
 /// Errors are logged at WARN and never surface to the caller — metric
 /// publishing must never fail a turn.
+/// Aborts a spawned task when dropped. Used to tear the elicitation servicer
+/// down on every exit path of `run_prompt_task` — a bare `JoinHandle` drop would
+/// leave the servicer (and any in-flight poll) running after the turn ended.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Per-turn task: answer `elicitation/create` forms by publishing question cards
+/// and awaiting the owner's taps. One task per channel turn, torn down with it.
+async fn run_elicitation_servicer(
+    mut rx: mpsc::Receiver<ElicitationBridgeRequest>,
+    ctx: Arc<PromptContext>,
+    channel_id: uuid::Uuid,
+    owner: nostr::PublicKey,
+) {
+    while let Some(req) = rx.recv().await {
+        let result = service_elicitation_request(&ctx, channel_id, &owner, &req).await;
+        let _ = req.reply_tx.send(result);
+    }
+}
+
+/// Publish one card per question, then poll until the owner has answered every
+/// card, and fold the answers into an ACP `CreateElicitationResponse`.
+///
+/// No timeout: the owner sets the pace and the task is aborted with the turn if
+/// the answer never comes. A publish failure cancels the whole tool call rather
+/// than leaving a partially-answerable form.
+async fn service_elicitation_request(
+    ctx: &PromptContext,
+    channel_id: uuid::Uuid,
+    owner: &nostr::PublicKey,
+    req: &ElicitationBridgeRequest,
+) -> serde_json::Value {
+    use crate::elicitation::CardAnswer;
+
+    let mut cards: Vec<(crate::elicitation::ElicitationQuestion, String)> =
+        Vec::with_capacity(req.questions.len());
+    for question in &req.questions {
+        match publish_question_card(ctx, channel_id, owner, req, question).await {
+            Some(card_id) => cards.push((question.clone(), card_id)),
+            None => {
+                tracing::warn!(
+                    target: "pool::elicitation",
+                    "failed to publish question card — cancelling elicitation {}",
+                    req.elicitation_id
+                );
+                return serde_json::json!({ "action": "cancel" });
+            }
+        }
+    }
+
+    const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1500);
+    let mut answers: std::collections::HashMap<String, CardAnswer> =
+        std::collections::HashMap::new();
+    loop {
+        for (_, card_id) in &cards {
+            if answers.contains_key(card_id) {
+                continue;
+            }
+            if let Some(answer) = fetch_card_answer(ctx, owner, card_id).await {
+                answers.insert(card_id.clone(), answer);
+            }
+        }
+        if answers.len() == cards.len() {
+            break;
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+
+    let items: Vec<(crate::elicitation::ElicitationQuestion, CardAnswer)> = cards
+        .into_iter()
+        .map(|(question, card_id)| {
+            let answer = answers.remove(&card_id).unwrap_or(CardAnswer::Cancel);
+            (question, answer)
+        })
+        .collect();
+    crate::elicitation::build_elicitation_response(&items)
+}
+
+/// Build, sign, and publish a single `KIND_ELICITATION_REQUEST` card, returning
+/// its event id (the correlation key the owner's answer references via `#e`).
+async fn publish_question_card(
+    ctx: &PromptContext,
+    channel_id: uuid::Uuid,
+    owner: &nostr::PublicKey,
+    req: &ElicitationBridgeRequest,
+    question: &crate::elicitation::ElicitationQuestion,
+) -> Option<String> {
+    use nostr::{EventBuilder, Kind, Tag};
+
+    let options: Vec<serde_json::Value> = question
+        .options
+        .iter()
+        .map(|o| serde_json::json!({ "label": o.label, "description": o.description }))
+        .collect();
+    let content = serde_json::json!({
+        "v": 1,
+        "questionKey": question.key,
+        "header": question.header,
+        "prompt": question.prompt,
+        "multiSelect": question.multi_select,
+        "allowCustom": question.allow_custom,
+        "options": options,
+        "elicitationId": req.elicitation_id,
+        "toolCallId": req.tool_call_id,
+    })
+    .to_string();
+
+    let channel_tag = channel_id.to_string();
+    let owner_hex = owner.to_hex();
+    let tags = vec![
+        Tag::parse(["h", &channel_tag]).ok()?,
+        Tag::parse(["p", &owner_hex]).ok()?,
+    ];
+    let event = EventBuilder::new(
+        Kind::Custom(buzz_core::kind::KIND_ELICITATION_REQUEST as u16),
+        content,
+    )
+    .tags(tags)
+    .sign_with_keys(&ctx.agent_keys)
+    .ok()?;
+
+    let card_id = event.id.to_hex();
+    const PUBLISH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    match tokio::time::timeout(PUBLISH_TIMEOUT, ctx.rest_client.submit_event(&event)).await {
+        Ok(Ok(_)) => Some(card_id),
+        Ok(Err(e)) => {
+            tracing::warn!(target: "pool::elicitation", "card publish failed: {e}");
+            None
+        }
+        Err(_) => {
+            tracing::warn!(target: "pool::elicitation", "card publish timed out");
+            None
+        }
+    }
+}
+
+/// Query the relay for an owner-authored answer to a single card. Returns the
+/// parsed answer, or `None` when none has arrived yet.
+async fn fetch_card_answer(
+    ctx: &PromptContext,
+    owner: &nostr::PublicKey,
+    card_id: &str,
+) -> Option<crate::elicitation::CardAnswer> {
+    use nostr::{Filter, Kind};
+
+    let event_id = nostr::EventId::from_hex(card_id).ok()?;
+    let filter = Filter::new()
+        .kind(Kind::Custom(
+            buzz_core::kind::KIND_ELICITATION_RESPONSE as u16,
+        ))
+        .author(*owner)
+        .event(event_id);
+
+    const QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    let value = match tokio::time::timeout(QUERY_TIMEOUT, ctx.rest_client.query(&[filter])).await {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => {
+            tracing::debug!(target: "pool::elicitation", "answer query failed: {e}");
+            return None;
+        }
+        Err(_) => {
+            tracing::debug!(target: "pool::elicitation", "answer query timed out");
+            return None;
+        }
+    };
+
+    // `/query` returns a JSON array of sig-stripped events. Take the first with a
+    // parseable answer content.
+    let events = value.as_array()?;
+    for ev in events {
+        let content = ev.get("content").and_then(|c| c.as_str())?;
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(content) {
+            return Some(crate::elicitation::parse_card_answer(&parsed));
+        }
+    }
+    None
+}
+
 async fn publish_agent_turn_metric(
     ctx: &PromptContext,
     usage: Option<crate::usage::TurnUsage>,
