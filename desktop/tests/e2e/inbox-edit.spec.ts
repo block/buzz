@@ -290,17 +290,19 @@ test("editing an immediate attachment reply preserves its media tags", async ({
   });
   expect(editPayload).toEqual(
     expect.objectContaining({
-      eventId: replyId,
-      mediaTags: [
-        [
-          "imeta",
-          `url ${ATTACHMENT_URL}`,
-          "m application/pdf",
-          `x ${"a".repeat(64)}`,
-          "size 12345",
-          `filename ${ATTACHMENT_FILENAME}`,
+      input: expect.objectContaining({
+        eventId: replyId,
+        mediaTags: [
+          [
+            "imeta",
+            `url ${ATTACHMENT_URL}`,
+            "m application/pdf",
+            `x ${"a".repeat(64)}`,
+            "size 12345",
+            `filename ${ATTACHMENT_FILENAME}`,
+          ],
         ],
-      ],
+      }),
     }),
   );
 
