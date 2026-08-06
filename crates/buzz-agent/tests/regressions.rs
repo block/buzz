@@ -21,6 +21,13 @@ struct CapturingLlm {
 }
 
 async fn spawn_capturing_llm(responses: Vec<Value>) -> CapturingLlm {
+    spawn_capturing_llm_with_status(responses.into_iter().map(|v| (200u16, v)).collect()).await
+}
+
+/// Like `spawn_capturing_llm` but each canned response carries its own HTTP
+/// status, so a test can serve a real provider rejection (e.g. a context-window
+/// 400) instead of only success bodies.
+async fn spawn_capturing_llm_with_status(responses: Vec<(u16, Value)>) -> CapturingLlm {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let queue = Arc::new(Mutex::new(VecDeque::from(responses)));
@@ -66,14 +73,19 @@ async fn spawn_capturing_llm(responses: Vec<Value>) -> CapturingLlm {
                 if let Ok(req) = serde_json::from_slice::<Value>(&buf[header_end..]) {
                     captured.lock().await.push(req);
                 }
-                let body = queue
+                let (status, body) = queue
                     .lock()
                     .await
                     .pop_front()
-                    .unwrap_or_else(|| json!({ "error": "no canned response" }));
+                    .unwrap_or_else(|| (200, json!({ "error": "no canned response" })));
                 let body_s = serde_json::to_string(&body).unwrap();
+                let reason = match status {
+                    200 => "OK",
+                    400 => "Bad Request",
+                    _ => "Error",
+                };
                 let resp = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                     body_s.len(), body_s,
                 );
                 let _ = sock.write_all(resp.as_bytes()).await;
@@ -2280,6 +2292,853 @@ fn reply_guard_rejects_unparseable_toggle() {
         stderr.contains("BUZZ_AGENT_REQUIRE_REPLY"),
         "expected the offending key in the error, got: {stderr}"
     );
+}
+
+/// A prompt large enough that the recovery ladder's halving stays above
+/// `HANDOFF_MIN_PROMPT_BUDGET_BYTES` (4 KiB) for all three rungs.
+///
+/// This is load-bearing, not decoration: with a tiny history the ladder
+/// correctly refuses on the FIRST rung (halving a 49-byte history lands at 24
+/// bytes, far under the floor), so a small fixture cannot exercise recovery at
+/// all — it exercises the floor. `marker` is embedded so the prompt is still
+/// identifiable in a captured request body.
+fn large_prompt(marker: &str) -> String {
+    let mut s = String::with_capacity(64 * 1024 + marker.len());
+    s.push_str(marker);
+    s.push(' ');
+    while s.len() < 64 * 1024 {
+        s.push_str("filler context to make the history realistically large. ");
+    }
+    s
+}
+
+/// OpenAI-compatible context-window rejection body, matching the shape the
+/// provider actually returns on overflow.
+fn openai_context_length_error() -> Value {
+    json!({
+        "error": {
+            "message": "This model's maximum context length is 8192 tokens. \
+                        However, your messages resulted in 20000 tokens.",
+            "type": "invalid_request_error",
+            "code": "context_length_exceeded",
+        }
+    })
+}
+
+/// A 400 that is NOT a context-window overflow — the negative control for the
+/// matcher. Deliberately quotes "tokens" and "model", the words a sloppy
+/// matcher would key on.
+fn openai_ordinary_400() -> Value {
+    json!({
+        "error": {
+            "message": "Invalid value for 'max_tokens': must be an integer for this model",
+            "type": "invalid_request_error",
+            "code": "invalid_value",
+        }
+    })
+}
+
+/// THE BUG. A provider context-window 400 must be recovered from in-loop, not
+/// propagated out of `run()`.
+///
+/// Without the reactive path this is a permanent stick, and the mechanism is
+/// what makes it permanent rather than transient: a failed request reports no
+/// usage, so `last_request_input_tokens` stays frozen at the last SUCCESSFUL
+/// (sub-threshold) reading, `should_handoff()` therefore returns false forever,
+/// and the in-memory session keeps the same oversized history. Every later
+/// prompt in that session fails identically, for the life of the session.
+/// (Restarting the agent clears it — history is not written to disk — which is
+/// why the only workaround today is a restart.)
+///
+/// The sequence here reproduces exactly that state: request 1 succeeds and
+/// reports usage well UNDER the threshold (so the proactive gate is provably
+/// not what fires), request 2 is rejected with a context-window 400. The agent
+/// must force a handoff and retry, so the prompt still ends in a normal
+/// `end_turn` rather than a JSON-RPC error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn context_window_400_recovers_instead_of_sticking() {
+    let llm = spawn_capturing_llm_with_status(vec![
+        // req 1: succeeds, usage 10 tokens — far under any threshold.
+        (200, openai_text_with_usage("ack", 10)),
+        // req 2: the overflow rejection.
+        (400, openai_context_length_error()),
+        // req 3: the forced handoff's summarize() call.
+        (200, openai_text("recovered handoff summary")),
+        // req 4: the retried completion, now on fresh history.
+        (200, openai_text_with_usage("done after recovery", 10)),
+    ])
+    .await;
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[
+            // Large window + large byte budget: neither proactive gate can be
+            // what produces the handoff, so a handoff here is attributable to
+            // the reactive path alone.
+            ("BUZZ_AGENT_MAX_CONTEXT_TOKENS", "200000"),
+            ("BUZZ_AGENT_MAX_OUTPUT_TOKENS", "8192"),
+            (
+                "BUZZ_AGENT_MAX_HISTORY_BYTES",
+                &(16 * 1024 * 1024).to_string(),
+            ),
+            // Cap of 0: proves the forced path bypasses `max_handoffs`. Any
+            // gated handoff is impossible under this setting.
+            ("BUZZ_AGENT_MAX_HANDOFFS", "0"),
+        ],
+    )
+    .await;
+    let sid = init_session(&mut h, json!([])).await;
+
+    let p0 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"first prompt, succeeds"}]}),
+        )
+        .await;
+    let r0 = h.recv_until(|v| v["id"] == json!(p0)).await;
+    assert!(
+        r0["result"].get("stopReason").is_some(),
+        "first prompt should succeed: {r0}"
+    );
+
+    // Second prompt: its first completion is rejected for context overflow.
+    let p1 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text": large_prompt("second-prompt-overflows")}]}),
+        )
+        .await;
+    let r1 = h.recv_until(|v| v["id"] == json!(p1)).await;
+    assert!(
+        r1.get("error").is_none(),
+        "context-window 400 must be recovered in-loop, not returned as an error: {r1} \
+         stderr={}",
+        h.stderr_text()
+    );
+    assert_eq!(
+        r1["result"]["stopReason"],
+        "end_turn",
+        "expected the turn to finish after recovery: {r1} stderr={}",
+        h.stderr_text()
+    );
+    // 4 requests = the rejected one, the summarize, and the retry. 2 would mean
+    // no recovery was attempted.
+    let captured = llm.captured.lock().await.len();
+    assert_eq!(
+        captured,
+        4,
+        "expected reject + summarize + retry (4 reqs total), saw {captured} — stderr={}",
+        h.stderr_text()
+    );
+    let stderr = h.stderr_text();
+    assert!(
+        stderr.contains("provider reported context overflow; forcing handoff"),
+        "expected the forced-handoff log line, got: {stderr}"
+    );
+    h.shutdown().await;
+}
+
+/// A successful recovery must actually send the recovered completion, even when
+/// `max_rounds` is finite. `round` is incremented BEFORE the completion that
+/// gets rejected, so a naive `continue` after recovery re-enters the loop with
+/// the rejected attempt already charged against the cap: with
+/// `BUZZ_AGENT_MAX_ROUNDS=1` the turn would return `max_turn_requests` after
+/// destructively resetting history, having never sent the retry. That silently
+/// converts "recovered" into "history destroyed, question unanswered" — worse
+/// than the error it replaced, because the user gets a stop reason rather than a
+/// failure.
+///
+/// The default `max_rounds` is 0 (unbounded), which is why the rest of the
+/// matrix cannot see this: the cap check at the top of the loop never fires.
+///
+/// `max_rounds=1` is also the tightest possible setting, so it pins the
+/// boundary: exactly one round is authorized, the rejected request must not
+/// consume it, and the retry must be the request that spends it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recovery_retry_is_sent_under_a_finite_round_cap() {
+    let llm = spawn_capturing_llm_with_status(vec![
+        // req 1: the overflow rejection (round 1 charged before it is sent).
+        (400, openai_context_length_error()),
+        // req 2: the forced handoff's summarize() call.
+        (200, openai_text("recovered handoff summary")),
+        // req 3: the retried completion. Under the bug this is never sent.
+        (200, openai_text_with_usage("done after recovery", 10)),
+    ])
+    .await;
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[
+            ("BUZZ_AGENT_MAX_CONTEXT_TOKENS", "200000"),
+            ("BUZZ_AGENT_MAX_OUTPUT_TOKENS", "8192"),
+            (
+                "BUZZ_AGENT_MAX_HISTORY_BYTES",
+                &(16 * 1024 * 1024).to_string(),
+            ),
+            ("BUZZ_AGENT_MAX_HANDOFFS", "0"),
+            // The whole point: a finite cap, at its tightest.
+            ("BUZZ_AGENT_MAX_ROUNDS", "1"),
+        ],
+    )
+    .await;
+    let sid = init_session(&mut h, json!([])).await;
+
+    let p0 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text": large_prompt("overflows-under-finite-cap")}]}),
+        )
+        .await;
+    let r0 = h.recv_until(|v| v["id"] == json!(p0)).await;
+    assert!(
+        r0.get("error").is_none(),
+        "context-window 400 must be recovered in-loop: {r0} stderr={}",
+        h.stderr_text()
+    );
+    // The discriminator. `max_turn_requests` here means recovery ran, history
+    // was reset, and the turn ended without ever asking the model again.
+    assert_eq!(
+        r0["result"]["stopReason"],
+        "end_turn",
+        "a recovered turn must finish by answering, not by hitting the round cap: {r0} \
+         stderr={}",
+        h.stderr_text()
+    );
+    // 3 requests = reject + summarize + retry. 2 would mean the retry was
+    // never sent (the bug); the outcome assertion alone cannot tell those apart
+    // if the stop reason were ever produced some other way.
+    let captured = llm.captured.lock().await.len();
+    assert_eq!(
+        captured,
+        3,
+        "expected reject + summarize + retry (3 reqs), saw {captured} — stderr={}",
+        h.stderr_text()
+    );
+    h.shutdown().await;
+}
+
+/// The finite round cap must still bind for ORDINARY rounds — the recovery
+/// refund must not become a general amnesty. With `max_rounds=1` and no context
+/// overflow anywhere, a model that keeps requesting tool calls gets exactly one
+/// completion and then `max_turn_requests`.
+///
+/// Without this arm, "make the recovered retry possible" is satisfiable by
+/// deleting the cap, and the test above would still pass.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn finite_round_cap_still_binds_without_a_context_overflow() {
+    let llm = spawn_capturing_llm_with_status(vec![
+        // Round 1: a tool call, which would normally drive another round.
+        (
+            200,
+            openai_tool_call("tc1", "dev__shell", json!({"command": "true"})),
+        ),
+        // Never reached: the cap must stop the turn before a second completion.
+        (200, openai_text_with_usage("should not be sent", 10)),
+    ])
+    .await;
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[
+            ("BUZZ_AGENT_MAX_CONTEXT_TOKENS", "200000"),
+            ("BUZZ_AGENT_MAX_ROUNDS", "1"),
+        ],
+    )
+    .await;
+    let sid = init_session(&mut h, json!([])).await;
+
+    let p0 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"drive a tool call"}]}),
+        )
+        .await;
+    let r0 = h.recv_until(|v| v["id"] == json!(p0)).await;
+    assert_eq!(
+        r0["result"]["stopReason"],
+        "max_turn_requests",
+        "an ordinary finite cap must still bind: {r0} stderr={}",
+        h.stderr_text()
+    );
+    let captured = llm.captured.lock().await.len();
+    assert_eq!(
+        captured,
+        1,
+        "exactly one completion is authorized by max_rounds=1, saw {captured} — stderr={}",
+        h.stderr_text()
+    );
+    h.shutdown().await;
+}
+
+/// Prompt-exactly-once across a forced handoff: the live user prompt must be
+/// retained in the fresh history exactly once — not dropped (the model would
+/// answer a question it can no longer see) and not duplicated (a doubled prompt
+/// re-inflates the context we just shrank, and can produce a doubled action).
+///
+/// Asserted on the retry request's own message array, which is the only place
+/// the post-reset history is observable from outside.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forced_handoff_retains_live_prompt_exactly_once() {
+    const MARKER: &str = "unique-live-prompt-marker-7f3a";
+    let llm = spawn_capturing_llm_with_status(vec![
+        (200, openai_text_with_usage("ack", 10)),
+        (400, openai_context_length_error()),
+        (200, openai_text("summary body")),
+        (200, openai_text_with_usage("done", 10)),
+    ])
+    .await;
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[
+            ("BUZZ_AGENT_MAX_CONTEXT_TOKENS", "200000"),
+            (
+                "BUZZ_AGENT_MAX_HISTORY_BYTES",
+                &(16 * 1024 * 1024).to_string(),
+            ),
+            ("BUZZ_AGENT_MAX_HANDOFFS", "0"),
+        ],
+    )
+    .await;
+    let sid = init_session(&mut h, json!([])).await;
+    let p0 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"warmup"}]}),
+        )
+        .await;
+    let _ = h.recv_until(|v| v["id"] == json!(p0)).await;
+    let p1 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text": large_prompt(MARKER)}]}),
+        )
+        .await;
+    let r1 = h.recv_until(|v| v["id"] == json!(p1)).await;
+    assert!(r1.get("error").is_none(), "expected recovery: {r1}");
+
+    let captured = llm.captured.lock().await;
+    let retry = captured
+        .last()
+        .expect("at least one captured request")
+        .clone();
+    drop(captured);
+    let messages = retry["messages"]
+        .as_array()
+        .unwrap_or_else(|| panic!("retry request had no messages array: {retry}"));
+    let occurrences = messages
+        .iter()
+        .filter(|m| {
+            m["content"]
+                .as_str()
+                .map(|s| s.contains(MARKER))
+                .unwrap_or(false)
+        })
+        .count();
+    assert_eq!(
+        occurrences, 1,
+        "live prompt must appear exactly once in post-handoff history, saw {occurrences} in \
+         {messages:#?}"
+    );
+    h.shutdown().await;
+}
+
+/// Negative control at the loop layer: an ordinary 400 must stay terminal.
+///
+/// This is the arm that keeps the recovery narrow. If the matcher were loose,
+/// this request would be classified as recoverable, the agent would spend its
+/// whole recovery budget summarizing, and a clear immediate failure would
+/// become a slow one — with three wasted provider round-trips. Exactly one
+/// request, and the prompt returns an error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ordinary_400_stays_terminal_and_triggers_no_recovery() {
+    let llm = spawn_capturing_llm_with_status(vec![(400, openai_ordinary_400())]).await;
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[
+            ("BUZZ_AGENT_MAX_CONTEXT_TOKENS", "200000"),
+            ("BUZZ_AGENT_MAX_HANDOFFS", "3"),
+        ],
+    )
+    .await;
+    let sid = init_session(&mut h, json!([])).await;
+    let p0 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"hello"}]}),
+        )
+        .await;
+    let r0 = h.recv_until(|v| v["id"] == json!(p0)).await;
+    assert!(
+        r0.get("error").is_some(),
+        "an ordinary 400 must surface as an error, got: {r0}"
+    );
+    let captured = llm.captured.lock().await.len();
+    assert_eq!(
+        captured,
+        1,
+        "an ordinary 400 must not trigger a recovery attempt; saw {captured} requests — \
+         stderr={}",
+        h.stderr_text()
+    );
+    let stderr = h.stderr_text();
+    assert!(
+        !stderr.contains("provider reported context overflow"),
+        "ordinary 400 must not be classified as a context overflow, got: {stderr}"
+    );
+    h.shutdown().await;
+}
+
+/// The recovery budget must be finite: a provider that rejects every request
+/// for context overflow — including the retries — has to surface the error
+/// rather than being rescued forever. `max_rounds` cannot bound this (it
+/// defaults to 0/unbounded), so the per-`run()` recovery budget is the only
+/// thing standing between this case and an infinite loop.
+///
+/// The stub returns a context-400 to EVERY request, so a missing bound shows up
+/// as a hang rather than a wrong answer — hence the explicit timeout, which is
+/// part of the assertion.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn context_recovery_budget_exhaustion_surfaces_the_error() {
+    // Enough canned 400s that the queue is never the thing that stops the loop;
+    // the fallback response is also a 400-shaped body under this helper only if
+    // queued, so keep the queue generously long.
+    let responses: Vec<(u16, Value)> = (0..40)
+        .map(|_| (400, openai_context_length_error()))
+        .collect();
+    let llm = spawn_capturing_llm_with_status(responses).await;
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[
+            ("BUZZ_AGENT_MAX_CONTEXT_TOKENS", "200000"),
+            (
+                "BUZZ_AGENT_MAX_HISTORY_BYTES",
+                &(16 * 1024 * 1024).to_string(),
+            ),
+            ("BUZZ_AGENT_MAX_HANDOFFS", "0"),
+        ],
+    )
+    .await;
+    let sid = init_session(&mut h, json!([])).await;
+    let p0 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text": large_prompt("always-overflows")}]}),
+        )
+        .await;
+    let r0 = tokio::time::timeout(
+        Duration::from_secs(20),
+        h.recv_until(|v| v["id"] == json!(p0)),
+    )
+    .await
+    .expect("recovery must be bounded — prompt never returned, so the rescue loop is unbounded");
+    assert!(
+        r0.get("error").is_some(),
+        "exhausted recovery must surface the provider error, got: {r0}"
+    );
+    let msg = r0["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("context"),
+        "surfaced error should be the provider's own context-window error, got: {msg}"
+    );
+    // Discriminate WHICH bound stopped the loop. Both the budget and the prompt
+    // floor produce a surfaced error, so the assertion above passes either way
+    // — and the floor can fire on the first rung without the budget ever being
+    // consumed, which would make this test silently exercise a different
+    // mechanism than its name claims. Pin the budget explicitly.
+    let stderr = h.stderr_text();
+    assert!(
+        stderr.contains("context recovery budget spent"),
+        "the per-run recovery BUDGET must be what stops the loop here, not the prompt floor; \
+         got: {stderr}"
+    );
+    // Corroboration: every rung actually ran a forced handoff.
+    let rungs = stderr
+        .matches("provider reported context overflow; forcing handoff")
+        .count();
+    assert_eq!(
+        rungs, 3,
+        "expected all 3 recovery rungs to be attempted before giving up, saw {rungs} — \
+         stderr={stderr}"
+    );
+    h.shutdown().await;
+}
+
+/// The prompt-budget floor, observed on its own. A context-window 400 on a
+/// SMALL history must refuse to rescue rather than halve toward zero: the
+/// overflow is then dominated by what a handoff cannot shrink (system prompt,
+/// tool schemas, the live user prompt), so shrinking history further would only
+/// issue smaller doomed requests in place of a clear error.
+///
+/// The outcome — a surfaced error — is identical to budget exhaustion, so this
+/// asserts the discriminating evidence instead: the floor log line, and that
+/// ZERO forced handoffs were attempted. Without the floor the ladder would spend
+/// all three rungs summarizing a 40-byte history, which is the behavior this
+/// arm exists to forbid.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn small_history_context_400_refuses_rescue_at_the_prompt_floor() {
+    let responses: Vec<(u16, Value)> = (0..10)
+        .map(|_| (400, openai_context_length_error()))
+        .collect();
+    let llm = spawn_capturing_llm_with_status(responses).await;
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[
+            ("BUZZ_AGENT_MAX_CONTEXT_TOKENS", "200000"),
+            (
+                "BUZZ_AGENT_MAX_HISTORY_BYTES",
+                &(16 * 1024 * 1024).to_string(),
+            ),
+            ("BUZZ_AGENT_MAX_HANDOFFS", "0"),
+        ],
+    )
+    .await;
+    let sid = init_session(&mut h, json!([])).await;
+    let p0 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"tiny"}]}),
+        )
+        .await;
+    let r0 = tokio::time::timeout(
+        Duration::from_secs(20),
+        h.recv_until(|v| v["id"] == json!(p0)),
+    )
+    .await
+    .expect("must not loop — the floor should stop the rescue immediately");
+    assert!(
+        r0.get("error").is_some(),
+        "a context 400 with no shrinkable history must surface the error, got: {r0}"
+    );
+    let stderr = h.stderr_text();
+    assert!(
+        stderr.contains("below the") && stderr.contains("floor"),
+        "the prompt-budget FLOOR must be what stops this, not the recovery budget; got: {stderr}"
+    );
+    let rungs = stderr
+        .matches("provider reported context overflow; forcing handoff")
+        .count();
+    assert_eq!(
+        rungs, 0,
+        "no rescue should be attempted below the floor, saw {rungs} — stderr={stderr}"
+    );
+    // Exactly one request: the rejected one. No summarize, no retry.
+    let captured = llm.captured.lock().await.len();
+    assert_eq!(
+        captured, 1,
+        "expected no rescue round-trips below the floor, saw {captured} requests"
+    );
+    h.shutdown().await;
+}
+
+/// The recovery ladder must actually SHRINK, not just re-summarize at the size
+/// that was already rejected.
+///
+/// Observed on the summarize request's own body — the only externally visible
+/// consequence of the prompt budget. The rejected completion carried the full
+/// history; the rescue's summarize prompt must be materially smaller. Without
+/// this arm, deleting the halving entirely leaves every other test green: they
+/// assert that a handoff HAPPENED, and a handoff at the rejected size still
+/// happens (it just cannot escape a real overflow, which a stub does not
+/// reproduce).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recovery_shrinks_the_summarize_prompt_below_the_rejected_size() {
+    let llm = spawn_capturing_llm_with_status(vec![
+        (400, openai_context_length_error()),
+        (200, openai_text("summary")),
+        (200, openai_text_with_usage("done", 10)),
+    ])
+    .await;
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[
+            ("BUZZ_AGENT_MAX_CONTEXT_TOKENS", "200000"),
+            (
+                "BUZZ_AGENT_MAX_HISTORY_BYTES",
+                &(16 * 1024 * 1024).to_string(),
+            ),
+            ("BUZZ_AGENT_MAX_HANDOFFS", "0"),
+        ],
+    )
+    .await;
+    let sid = init_session(&mut h, json!([])).await;
+    let p0 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text": large_prompt("shrink-probe")}]}),
+        )
+        .await;
+    let r0 = h.recv_until(|v| v["id"] == json!(p0)).await;
+    assert!(r0.get("error").is_none(), "expected recovery: {r0}");
+
+    let captured = llm.captured.lock().await.clone();
+    assert!(
+        captured.len() >= 2,
+        "expected at least reject + summarize, saw {}",
+        captured.len()
+    );
+    let content_bytes = |req: &Value| -> usize {
+        req["messages"]
+            .as_array()
+            .map(|ms| {
+                ms.iter()
+                    .filter_map(|m| m["content"].as_str())
+                    .map(str::len)
+                    .sum()
+            })
+            .unwrap_or(0)
+    };
+    let rejected = content_bytes(&captured[0]);
+    let summarize = content_bytes(&captured[1]);
+    assert!(
+        rejected > 0 && summarize > 0,
+        "empty measurement is not a result: rejected={rejected} summarize={summarize}"
+    );
+    // Halving from the rejected size lands near 0.5x; 0.75x leaves headroom for
+    // the summarizer's fixed frame while still failing if no shrink happened.
+    assert!(
+        (summarize as f64) < 0.75 * (rejected as f64),
+        "rescue summarize prompt ({summarize} bytes) must be materially smaller than the \
+         rejected request ({rejected} bytes) — the ladder is not shrinking"
+    );
+    h.shutdown().await;
+}
+
+/// The ladder must shrink between RUNGS, not just once on entry.
+///
+/// This arm exists because a mutant that pins `shift` to `1` — deleting the
+/// `attempts` dependence, so every rung rebuilds the same budget — SURVIVED the
+/// whole suite. It had to: `attempts` is 0 on the first rung, so `shift = 1` IS
+/// production there, and every other arm stops at rung 1. The single-rung shrink
+/// arm above cannot see this; only a fixture that forces a SECOND rung can.
+///
+/// The forcing move is the realistic one the ladder was designed for: the
+/// summarize call travels the same provider path, so rung 1's summarize is
+/// itself rejected for context overflow (`Skipped`), and rung 2 must come back
+/// with a materially smaller summarizer prompt.
+///
+/// Budgets: history is ~64 KB, so rung 1 asks for ~32 KB and rung 2 for ~16 KB,
+/// both comfortably above the 4 KiB floor — the floor must not be what
+/// separates them, or this would measure the wrong mechanism.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recovery_shrinks_further_on_each_rung() {
+    let llm = spawn_capturing_llm_with_status(vec![
+        // 1: the completion that overflows.
+        (400, openai_context_length_error()),
+        // 2: rung-1 summarize, rejected the same way -> Skipped -> next rung.
+        (400, openai_context_length_error()),
+        // 3: rung-2 summarize succeeds.
+        (200, openai_text("summary")),
+        // 4: the retried completion.
+        (200, openai_text_with_usage("done", 10)),
+    ])
+    .await;
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[
+            ("BUZZ_AGENT_MAX_CONTEXT_TOKENS", "200000"),
+            (
+                "BUZZ_AGENT_MAX_HISTORY_BYTES",
+                &(16 * 1024 * 1024).to_string(),
+            ),
+            ("BUZZ_AGENT_MAX_HANDOFFS", "0"),
+        ],
+    )
+    .await;
+    let sid = init_session(&mut h, json!([])).await;
+    let p0 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text": large_prompt("rung-shrink-probe")}]}),
+        )
+        .await;
+    let r0 = h.recv_until(|v| v["id"] == json!(p0)).await;
+    assert!(
+        r0.get("error").is_none(),
+        "expected recovery on the second rung: {r0}"
+    );
+
+    // The second rung must actually have been taken — otherwise the byte
+    // comparison below would compare rung 1 against the retry.
+    let stderr = h.stderr_text();
+    assert!(
+        stderr.contains("did not run; shrinking further"),
+        "rung 1 must have been Skipped so rung 2 runs; got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("below the"),
+        "the prompt FLOOR must not be involved in this fixture; got: {stderr}"
+    );
+
+    let captured = llm.captured.lock().await.clone();
+    assert_eq!(
+        captured.len(),
+        4,
+        "expected reject + rung1 summarize + rung2 summarize + retry, saw {}",
+        captured.len()
+    );
+    let content_bytes = |req: &Value| -> usize {
+        req["messages"]
+            .as_array()
+            .map(|ms| {
+                ms.iter()
+                    .filter_map(|m| m["content"].as_str())
+                    .map(str::len)
+                    .sum()
+            })
+            .unwrap_or(0)
+    };
+    let rung1 = content_bytes(&captured[1]);
+    let rung2 = content_bytes(&captured[2]);
+    assert!(
+        rung1 > 0 && rung2 > 0,
+        "empty measurement is not a result: rung1={rung1} rung2={rung2}"
+    );
+    assert!(
+        (rung2 as f64) < 0.75 * (rung1 as f64),
+        "each rung must shrink: rung2 ({rung2} bytes) is not materially smaller than rung1 \
+         ({rung1} bytes) — the budget is not tracking `attempts`"
+    );
+    h.shutdown().await;
+}
+
+/// Gate 5, and the DIRECTION the clearing protects: not a spurious handoff, a
+/// MISSED one. After a reactive reset the stale `last_request_input_tokens`
+/// describes history that no longer exists, and its paired byte baseline
+/// describes the pre-reset (larger) history — so `grown` stays near zero and the
+/// projection collapses to the stale sub-threshold token count. The gate goes
+/// BLIND until history exceeds its pre-reset size.
+///
+/// Constructing the divergence takes three turns, and two of the constraints are
+/// load-bearing — a first attempt with a simpler fixture produced traces
+/// BYTE-IDENTICAL between the fix and its deletion:
+///   * Turn 1 must stay UNDER the gate threshold, or the proactive handoff fires
+///     first and consumes the queue slot the overflow was meant to land in — no
+///     usage is ever recorded, both variants sit at `None`, and the test measures
+///     nothing.
+///   * The post-recovery retry must report NO usage. A usage-bearing response
+///     overwrites both fields with coherent values on the spot, which makes the
+///     clear genuinely redundant and the mutant equivalent. The reachable window
+///     is exactly when the retry omits usage and the stale pair survives.
+/// Turn 3 then carries a large prompt: a cleared baseline falls through to the
+/// byte signal and hands off, while the stale pair projects
+/// `10 + (190KB - 100KB)` = ~90k tokens, under the 180k threshold, and does not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reactive_reset_clears_usage_baseline_so_the_gate_is_not_blind() {
+    // ~100 KB: under the 180 KB byte-fallback threshold, so turn 1 does NOT
+    // trip the proactive gate, but large enough to be the stale `measured_bytes`
+    // that suppresses `grown` later.
+    let mut medium = String::with_capacity(100 * 1024);
+    medium.push_str("turn-one-medium ");
+    while medium.len() < 100 * 1024 {
+        medium.push_str("padding under the byte fallback threshold. ");
+    }
+    // ~190 KB: over the threshold, so a CLEARED baseline must hand off.
+    let mut big = String::with_capacity(190 * 1024);
+    big.push_str("turn-three-large ");
+    while big.len() < 190 * 1024 {
+        big.push_str("padding to exceed the byte fallback threshold. ");
+    }
+
+    let llm = spawn_capturing_llm_with_status(vec![
+        // Turn 1: succeeds, reporting a SMALL usage reading against a ~100 KB
+        // history. This is the pair that goes stale.
+        (200, openai_text_with_usage("ack-medium", 10)),
+        // Turn 2: the overflow.
+        (400, openai_context_length_error()),
+        // Turn 2: the forced handoff's summarize.
+        (200, openai_text("forced summary")),
+        // Turn 2: the retry — NO usage block, so the baseline is not refreshed.
+        (200, openai_text("recovered, no usage reported")),
+        // Turn 3: with a cleared baseline a gated summarize comes first; with a
+        // stale one this slot is the completion instead. Spares so an exhausted
+        // queue is never what ends a turn.
+        (200, openai_text("gated summary")),
+        (200, openai_text_with_usage("done", 10)),
+        (200, openai_text_with_usage("spare-1", 10)),
+        (200, openai_text_with_usage("spare-2", 10)),
+    ])
+    .await;
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[
+            ("BUZZ_AGENT_MAX_CONTEXT_TOKENS", "200000"),
+            ("BUZZ_AGENT_MAX_OUTPUT_TOKENS", "8192"),
+            (
+                "BUZZ_AGENT_MAX_HISTORY_BYTES",
+                &(16 * 1024 * 1024).to_string(),
+            ),
+            // Must permit a GATED handoff — turn 3 observes the proactive gate,
+            // which a cap of 0 would forbid.
+            ("BUZZ_AGENT_MAX_HANDOFFS", "5"),
+        ],
+    )
+    .await;
+    let sid = init_session(&mut h, json!([])).await;
+
+    // Turn 1: under threshold, records the usage pair.
+    let p0 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text": medium}]}),
+        )
+        .await;
+    let r0 = tokio::time::timeout(
+        Duration::from_secs(25),
+        h.recv_until(|v| v["id"] == json!(p0)),
+    )
+    .await
+    .expect("turn 1 must return");
+    assert!(r0.get("error").is_none(), "turn 1 should succeed: {r0}");
+    assert!(
+        !h.stderr_text().contains("handoff #"),
+        "precondition: turn 1 must NOT hand off, or no usage pair is recorded and this test \
+         measures nothing. stderr={}",
+        h.stderr_text()
+    );
+
+    // Turn 2: small prompt, overflow, reactive recovery.
+    let p1 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"small, overflows"}]}),
+        )
+        .await;
+    let r1 = tokio::time::timeout(
+        Duration::from_secs(25),
+        h.recv_until(|v| v["id"] == json!(p1)),
+    )
+    .await
+    .expect("turn 2 must return");
+    assert!(r1.get("error").is_none(), "turn 2 should recover: {r1}");
+    assert!(
+        h.stderr_text()
+            .contains("provider reported context overflow; forcing handoff"),
+        "precondition: the reactive path must have run in turn 2. stderr={}",
+        h.stderr_text()
+    );
+    let handoffs_after_turn2 = h.stderr_text().matches("handoff #").count();
+
+    // Turn 3: large prompt. A cleared baseline sees it via the byte signal and
+    // hands off; a stale pair under-projects and stays blind.
+    let p2 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text": big}]}),
+        )
+        .await;
+    let r2 = tokio::time::timeout(
+        Duration::from_secs(25),
+        h.recv_until(|v| v["id"] == json!(p2)),
+    )
+    .await
+    .expect("turn 3 must return");
+    assert!(r2.get("error").is_none(), "turn 3 should succeed: {r2}");
+    let stderr = h.stderr_text();
+    let handoffs_after_turn3 = stderr.matches("handoff #").count();
+    assert!(
+        handoffs_after_turn3 > handoffs_after_turn2,
+        "turn 3 must produce a GATED handoff ({handoffs_after_turn2} before, \
+         {handoffs_after_turn3} after): the reactive reset must clear the usage baseline, or the \
+         proactive gate under-projects and stays blind to an oversized history. stderr={stderr}"
+    );
+    h.shutdown().await;
 }
 
 // ─── Tests: per-turn handoff cap semantics ───────────────────────────────────

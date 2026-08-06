@@ -6,7 +6,7 @@ use tokio::task::JoinSet;
 
 use crate::builtin;
 use crate::config::{Config, MAX_PROMPT_BYTES, MAX_TOOL_CALLS_PER_TURN, MAX_TOOL_RESULT_BYTES};
-use crate::handoff::HandoffOutcome;
+use crate::handoff::{ContextRecovery, HandoffOutcome};
 use crate::hints::SkillEntry;
 use crate::llm::Llm;
 use crate::mcp::McpRegistry;
@@ -251,6 +251,10 @@ impl RunCtx<'_> {
         // successful publish. See `is_buzz_reply_call`.
         let mut buzz_reply_call_seen = false;
         let mut reply_nags = 0u32;
+        // Per-`run()` reactive context-recovery budget. Per-turn, not
+        // per-session: a fresh prompt deserves a fresh chance to recover, and
+        // `max_rounds` defaults to 0 (unbounded) so it cannot bound this.
+        let mut context_recoveries = 0u32;
         loop {
             if self.cfg.max_rounds > 0 && round >= self.cfg.max_rounds {
                 return Ok(StopReason::MaxTurnRequests);
@@ -325,9 +329,64 @@ impl RunCtx<'_> {
                     );
                     continue;
                 }
+                // Reactive context recovery. A context-window 400 is the only
+                // ground-truth signal that history must shrink, and it arrives
+                // exactly when the proactive gate cannot act: a failed request
+                // reports no usage, so `last_request_input_tokens` stays frozen
+                // at the last SUCCESSFUL (sub-threshold) reading and
+                // `should_handoff()` returns false forever. Without this arm the
+                // error propagates out of `run()`, the in-memory session keeps
+                // the same oversized history, and every later prompt in that
+                // session fails the same way — a stick that persists across
+                // turns for the life of the session. (Restarting the agent DOES
+                // clear it: history lives only in the in-memory session map, so
+                // a restart is the manual workaround, not an exception to it.)
+                //
+                // Retried in-loop rather than returned so the recovered context
+                // continues the turn the user is waiting on.
+                Err(AgentError::LlmContextExceeded(e)) => {
+                    match self
+                        .recover_from_context_overflow(&mut context_recoveries)
+                        .await
+                    {
+                        ContextRecovery::Recovered => {
+                            // Refund the round the rejected request consumed.
+                            // `round` is incremented before `complete()`, so
+                            // without this a finite `max_rounds` is spent by a
+                            // request the provider refused to serve: the loop
+                            // would re-enter, hit the cap at the top, and return
+                            // `MaxTurnRequests` having destroyed history and
+                            // never asked the model again — a worse outcome than
+                            // the error it replaced.
+                            //
+                            // This cannot become an unbounded amnesty: refunds
+                            // happen only on a *successful* recovery, and
+                            // recoveries are independently capped by
+                            // `MAX_CONTEXT_RECOVERIES_PER_RUN`, so at most that
+                            // many rounds can ever be refunded in one turn. An
+                            // ordinary round is never refunded.
+                            round = round.saturating_sub(1);
+                            // Same reset as the proactive path (see
+                            // `HandoffOutcome::Performed` above): the frozen
+                            // token reading describes history that no longer
+                            // exists. Clearing it is what lets the gate work
+                            // again on later rounds.
+                            *self.last_request_input_tokens = None;
+                            *self.last_request_history_bytes = None;
+                            continue;
+                        }
+                        ContextRecovery::Cancelled => return Ok(StopReason::Cancelled),
+                        // No rescue left. Surface the provider's own error
+                        // rather than a synthetic one: it names the model and
+                        // the offending sizes, and a visible failure is the
+                        // point — the alternative is retrying forever.
+                        ContextRecovery::Exhausted => {
+                            return Err(AgentError::LlmContextExceeded(e))
+                        }
+                    }
+                }
                 Err(error) => return Err(error),
             };
-
             // Record provider-reported input usage so the next loop iteration's
             // handoff gate can compare it against the token budget. We capture
             // it together with the history byte size AT THIS MOMENT — which is
@@ -996,6 +1055,66 @@ fn map_stop(p: ProviderStop) -> StopReason {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// `truncate_history` cannot serve as the context-window fallback: it is
+    /// measured in BYTES (`max_history_bytes`, default 16 MiB, a request-body
+    /// limiter) while the thing the fallback must defend is a TOKEN window
+    /// (`max_context_tokens`, default 200k). A history large enough to blow a
+    /// 200k-token window is nowhere near 16 MiB, so at the default budget the
+    /// fallback evicts nothing at all — which is why the `Skipped ->
+    /// truncate_history` path left the agent permanently stuck and the reactive
+    /// ladder had to be built instead.
+    ///
+    /// The negative assertion is paired with a positive control (same helper,
+    /// same fixture, budget set to the window instead) so that "evicted
+    /// nothing" is a real observation about the unit mismatch rather than a
+    /// blind probe that could never evict.
+    #[test]
+    fn truncate_history_is_a_noop_at_context_window_scale() {
+        // ~800 KB of history. At any real bytes/token density (densest real
+        // content is ~1.4 B/tok, typical prose ~3-4) this is >= 200k tokens,
+        // i.e. already over a 200k window.
+        let mut history: Vec<HistoryItem> = Vec::new();
+        for i in 0..400 {
+            history.push(HistoryItem::User(format!("q{i} {}", "x".repeat(1000))));
+            history.push(HistoryItem::Assistant {
+                text: format!("a{i} {}", "y".repeat(1000)),
+                tool_calls: vec![],
+                reasoning_details: None,
+            });
+        }
+        let total: usize = history.iter().map(HistoryItem::estimated_bytes).sum();
+        let pressure: usize = history
+            .iter()
+            .map(HistoryItem::context_pressure_bytes)
+            .sum();
+        assert!(
+            total > 800_000,
+            "fixture must be big enough to exceed a 200k-token window, got {total}"
+        );
+
+        // NEGATIVE: the real configured default budget.
+        let default_budget = 16 * 1024 * 1024;
+        let mut under_default = history.clone();
+        truncate_history(&mut under_default, default_budget);
+        assert_eq!(
+            under_default.len(),
+            history.len(),
+            "16 MiB byte budget evicted nothing from a {total}-byte history \
+             (pressure {pressure}) that already exceeds a 200k-token window"
+        );
+
+        // POSITIVE CONTROL: same helper, same fixture, budget set to the
+        // window instead. If this also evicted nothing the assertion above
+        // would prove nothing about the unit mismatch -- it would just mean
+        // the probe is blind.
+        let mut under_window = history.clone();
+        truncate_history(&mut under_window, 200_000);
+        assert!(
+            under_window.len() < history.len(),
+            "positive control must evict: probe is blind otherwise"
+        );
+    }
 
     /// The shapes the guard must recognize as a publish attempt. Callers apply
     /// the registry checks first; these cover the name suffix and command text.
