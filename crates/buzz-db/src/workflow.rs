@@ -979,6 +979,88 @@ pub async fn create_approval(pool: &PgPool, params: CreateApprovalParams<'_>) ->
     Ok(())
 }
 
+/// Atomically suspend a run and create its pending approval record.
+///
+/// A waiting run without its approval row is unreachable, while an approval
+/// row without a waiting run is actionable garbage. Keep the two writes in the
+/// same transaction so the relay never commits either half of a human gate.
+pub async fn suspend_workflow_run_for_approval(
+    pool: &PgPool,
+    params: CreateApprovalParams<'_>,
+    current_step: i32,
+    trace: &serde_json::Value,
+) -> Result<ApprovalRecord> {
+    let CreateApprovalParams {
+        community_id,
+        token,
+        workflow_id,
+        run_id,
+        step_id,
+        step_index,
+        approver_spec,
+        expires_at,
+    } = params;
+    let token_hash = hash_approval_token(token);
+    let mut tx = pool.begin().await?;
+
+    let updated = sqlx::query(
+        r#"
+        UPDATE workflow_runs
+        SET status = 'waiting_approval',
+            current_step = $1,
+            execution_trace = $2,
+            error_message = NULL
+        WHERE community_id = $3 AND id = $4
+        "#,
+    )
+    .bind(current_step)
+    .bind(trace)
+    .bind(community_id.as_uuid())
+    .bind(run_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+
+    if updated == 0 {
+        return Err(DbError::NotFound(format!("workflow_run {run_id}")));
+    }
+
+    let created_at: DateTime<Utc> = sqlx::query_scalar(
+        r#"
+        INSERT INTO workflow_approvals
+            (community_id, token, workflow_id, run_id, step_id, step_index, approver_spec, status, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8)
+        RETURNING created_at
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(&token_hash)
+    .bind(workflow_id)
+    .bind(run_id)
+    .bind(step_id)
+    .bind(step_index)
+    .bind(approver_spec)
+    .bind(expires_at)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    Ok(ApprovalRecord {
+        token: token_hash,
+        workflow_id,
+        run_id,
+        step_id: step_id.to_owned(),
+        step_index,
+        approver_spec: approver_spec.to_owned(),
+        status: ApprovalStatus::Pending,
+        approver_pubkey: None,
+        note: None,
+        expires_at,
+        created_at,
+    })
+}
+
 /// Fetch an approval record by raw token.
 ///
 /// The token is hashed before the DB lookup so plaintext tokens are never

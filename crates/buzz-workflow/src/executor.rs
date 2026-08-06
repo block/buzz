@@ -451,6 +451,24 @@ pub fn resolve_step_templates(
     }
 }
 
+/// Approval data captured when a workflow pauses at a human gate.
+///
+/// The raw token exists only until the finalizer hashes and persists it. It is
+/// never put in an execution trace or lifecycle event.
+#[derive(Debug)]
+pub struct PendingApproval {
+    /// Raw one-time token that is hashed before persistence.
+    pub(crate) token: String,
+    /// The exact approver policy from the workflow definition.
+    pub(crate) approver_spec: String,
+    /// The step that requested this human gate.
+    pub(crate) step_id: String,
+    /// The human-facing decision request after template resolution.
+    pub(crate) message: String,
+    /// How long the human gate remains actionable.
+    pub(crate) timeout_secs: u64,
+}
+
 /// Result of dispatching a single step action.
 #[derive(Debug)]
 pub enum StepResult {
@@ -458,8 +476,8 @@ pub enum StepResult {
     Completed(JsonValue),
     /// Step requests suspension (approval gate). Execution must pause.
     Suspended {
-        /// Token used to resume or reject this approval gate.
-        approval_token: String,
+        /// Approval state that the finalizer must persist before returning.
+        approval: PendingApproval,
     },
     /// Step was skipped due to `if:` condition being false.
     Skipped,
@@ -653,6 +671,7 @@ pub async fn dispatch_action(
             timeout,
         } => {
             let timeout_str = timeout.as_deref().unwrap_or("24h");
+            let timeout_secs = parse_duration_secs(timeout_str)?;
             info!(
                 run_id = %run_id, step = step_id,
                 "RequestApproval from={from} timeout={timeout_str}: {message}"
@@ -660,11 +679,14 @@ pub async fn dispatch_action(
 
             let token = generate_approval_token(run_id, step_id);
 
-            // TODO (WF-08): create approval record in DB, emit kind:46010.
-            // For now, return Suspended with the token so the caller can persist state.
-
             Ok(StepResult::Suspended {
-                approval_token: token,
+                approval: PendingApproval {
+                    token,
+                    approver_spec: from.to_owned(),
+                    step_id: step_id.to_owned(),
+                    message: message.to_owned(),
+                    timeout_secs,
+                },
             })
         }
 
@@ -942,7 +964,7 @@ async fn add_reaction_impl(message_id: &str, emoji: &str) -> Result<JsonValue, W
 pub struct ExecutionResult {
     /// Set when execution suspended at a `RequestApproval` step.
     /// `None` means the run completed normally.
-    pub approval_token: Option<String>,
+    pub pending_approval: Option<PendingApproval>,
     /// Index of the step that suspended (or the total step count on completion).
     pub step_index: usize,
     /// Accumulated step outputs at the point of suspension or completion.
@@ -959,10 +981,10 @@ pub struct ExecutionResult {
 /// 3. Dispatches the action.
 /// 4. Stores the step output for use by later steps.
 ///
-/// On `RequestApproval`: returns `ExecutionResult` with `approval_token = Some(token)`.
+/// On `RequestApproval`: returns `ExecutionResult` with `pending_approval` set.
 /// Caller must persist the approval record and update the run status.
 ///
-/// Returns `ExecutionResult` with `approval_token = None` on normal completion.
+/// Returns `ExecutionResult` with `pending_approval = None` on normal completion.
 ///
 /// Enforces `engine.config.max_concurrent` via a semaphore — returns
 /// [`WorkflowError::CapacityExceeded`] immediately if all permits are taken.
@@ -1034,7 +1056,7 @@ pub async fn execute_from_step(
 
     // Mark run as Running now that we have a permit (resume from approval).
     // Preserve the existing execution trace from pre-approval steps.
-    let existing_trace = match engine.db.get_workflow_run(community_id, run_id).await {
+    let mut existing_trace = match engine.db.get_workflow_run(community_id, run_id).await {
         Ok(r) => r.execution_trace,
         Err(e) => {
             warn!(
@@ -1044,6 +1066,17 @@ pub async fn execute_from_step(
             serde_json::json!([])
         }
     };
+    if start_index > 0 {
+        if let Some(entry) = existing_trace
+            .as_array_mut()
+            .and_then(|trace| trace.get_mut(start_index - 1))
+        {
+            if entry.get("status").and_then(JsonValue::as_str) == Some("waiting_approval") {
+                entry["status"] = serde_json::json!("completed");
+                entry["output"] = serde_json::json!({"approval": "granted"});
+            }
+        }
+    }
     engine
         .db
         .update_workflow_run(
@@ -1183,15 +1216,17 @@ async fn execute_steps(
                 }));
                 step_outputs.insert(step.id.clone(), output);
             }
-            StepResult::Suspended { approval_token } => {
+            StepResult::Suspended { approval } => {
                 info!(
                     run_id = %run_id, step = %step.id,
                     "Step suspended — awaiting approval (token: <redacted>)"
                 );
-                // Return the token and current state so the caller can persist the
-                // approval record and update the run's execution trace.
+                trace.push(serde_json::json!({
+                    "step_id": step.id,
+                    "status": "waiting_approval",
+                }));
                 return Ok(ExecutionResult {
-                    approval_token: Some(approval_token),
+                    pending_approval: Some(approval),
                     step_index: i,
                     step_outputs,
                     trace,
@@ -1209,7 +1244,7 @@ async fn execute_steps(
 
     info!(run_id = %run_id, "Workflow run completed");
     Ok(ExecutionResult {
-        approval_token: None,
+        pending_approval: None,
         step_index: def.steps.len(),
         step_outputs,
         trace,
