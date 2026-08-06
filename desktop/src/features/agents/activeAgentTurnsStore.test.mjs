@@ -59,30 +59,47 @@ describe("activeAgentTurnsStore", () => {
       assert.ok(channels.has("c1"));
     });
 
-    it("skips events at or below the watermark", () => {
+    it("skips events at or below their channel's watermark", () => {
       syncAgentTurnsFromEvents(AGENT, [
         makeEvent({ seq: 5, turnId: "t1", channelId: "c1" }),
       ]);
-      // Try to process an older event — should be ignored
+      // An older event on the SAME channel is stale — ignored.
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 3, turnId: "t1b", channelId: "c1" }),
+      ]);
+      const turns = getActiveTurnsForAgent(AGENT);
+      assert.equal(turns.length, 1);
+      assert.ok(channelIdsOf(turns).has("c1"));
+    });
+
+    it("processes an older event on a DIFFERENT channel (cross-channel reorder)", () => {
+      // The harness's batching packer may publish channel frames out of
+      // arrival order; each channel gates independently.
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 5, turnId: "t1", channelId: "c1" }),
+      ]);
       syncAgentTurnsFromEvents(AGENT, [
         makeEvent({ seq: 3, turnId: "t2", channelId: "c2" }),
       ]);
       const channels = channelIdsOf(getActiveTurnsForAgent(AGENT));
-      assert.equal(channels.size, 1);
+      assert.equal(channels.size, 2);
       assert.ok(channels.has("c1"));
-      assert.ok(!channels.has("c2"));
+      assert.ok(
+        channels.has("c2"),
+        "a delayed channel's events must not be skipped as stale",
+      );
     });
 
-    it("skips duplicate seq", () => {
+    it("skips duplicate seq on the same channel", () => {
       syncAgentTurnsFromEvents(AGENT, [
         makeEvent({ seq: 1, turnId: "t1", channelId: "c1" }),
       ]);
       syncAgentTurnsFromEvents(AGENT, [
-        makeEvent({ seq: 1, turnId: "t2", channelId: "c2" }),
+        makeEvent({ seq: 1, turnId: "t1-dup", channelId: "c1" }),
       ]);
-      const channels = channelIdsOf(getActiveTurnsForAgent(AGENT));
-      assert.equal(channels.size, 1);
-      assert.ok(channels.has("c1"));
+      const turns = getActiveTurnsForAgent(AGENT);
+      assert.equal(turns.length, 1);
+      assert.ok(channelIdsOf(turns).has("c1"));
     });
   });
 
@@ -630,6 +647,85 @@ describe("activeAgentTurnsStore", () => {
       unsub();
 
       assert.equal(notified, 0, "replayed evictions must not notify listeners");
+    });
+
+    it("cross-channel-delayed null-turnId turn_error evicts only its own channel's turn", () => {
+      // Sami's redteam target for gather-packing: channel frames may publish
+      // out of arrival order, so an OLDER turn_error on channel B can arrive
+      // AFTER newer events on channel A. Its null-turnId fallback must evict
+      // only B's turn — never A's live one — and it must not be skipped as
+      // stale either (B's own watermark hasn't seen it).
+      syncAgentTurnsFromEvents(AGENT, [
+        // Channel A's frame arrives first, carrying the NEWER events.
+        makeEvent({
+          seq: 10,
+          turnId: "t-a",
+          channelId: "c-a",
+          timestamp: "2024-01-01T00:01:00Z",
+        }),
+      ]);
+      syncAgentTurnsFromEvents(AGENT, [
+        // Channel B's frame arrives second with OLDER events, in B's own
+        // FIFO order (the harness preserves within-channel order).
+        makeEvent({
+          seq: 1,
+          turnId: "t-b",
+          channelId: "c-b",
+          timestamp: "2024-01-01T00:00:00Z",
+        }),
+        makeEvent({
+          seq: 2,
+          kind: "turn_error",
+          turnId: null,
+          channelId: "c-b",
+          timestamp: "2024-01-01T00:00:01Z",
+        }),
+      ]);
+
+      const channels = channelIdsOf(getActiveTurnsForAgent(AGENT));
+      assert.ok(
+        channels.has("c-a"),
+        "the delayed channel's eviction must not kill the other channel's live turn",
+      );
+      assert.ok(!channels.has("c-b"), "B's own errored turn must be evicted");
+    });
+
+    it("null-channel events gate against their own per-agent bucket", () => {
+      // A null-channel agent_panic has no channel watermark; it lands in the
+      // dedicated null bucket. Replaying it must be a no-op, and it must not
+      // advance (or be gated by) any real channel's watermark.
+      const panic = makeEvent({
+        seq: 20,
+        kind: "agent_panic",
+        turnId: null,
+        channelId: null,
+        timestamp: "2024-01-01T00:02:00Z",
+      });
+      syncAgentTurnsFromEvents(AGENT, [panic]);
+
+      // An older event on a real channel still processes — the panic's newer
+      // timestamp lives in the null bucket, not the channel's.
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: 1,
+          turnId: "t1",
+          channelId: "c1",
+          timestamp: "2024-01-01T00:00:00Z",
+        }),
+      ]);
+      assert.ok(
+        channelIdsOf(getActiveTurnsForAgent(AGENT)).has("c1"),
+        "a null-channel event must not raise real channels' watermarks",
+      );
+
+      // Replaying the panic is gated by the null bucket: no notification.
+      let notified = 0;
+      const unsub = subscribeActiveAgentTurns(() => {
+        notified++;
+      });
+      syncAgentTurnsFromEvents(AGENT, [panic]);
+      unsub();
+      assert.equal(notified, 0, "replayed null-channel event must be a no-op");
     });
   });
 
@@ -1674,7 +1770,7 @@ describe("community-switch save / restore", () => {
     resetActiveAgentTurnsStore();
     restoreActiveAgentTurnsForCommunity("ws-a");
 
-    // Replaying an event at or below the watermark must be a no-op.
+    // Replaying an event at or below its channel's watermark must be a no-op.
     let notified = 0;
     const unsub = subscribeActiveAgentTurns(() => {
       notified++;
@@ -1682,18 +1778,164 @@ describe("community-switch save / restore", () => {
     syncAgentTurnsFromEvents(AGENT, [
       makeEvent({
         seq: 3,
-        turnId: "t2",
-        channelId: "c2",
+        turnId: "t1-stale",
+        channelId: "c1",
         timestamp: "2024-01-01T00:00:00Z",
       }),
     ]);
     unsub();
 
     assert.equal(notified, 0, "stale event after restore must not notify");
-    const channels = new Set(
-      getActiveTurnsForAgent(AGENT).map((s) => s.channelId),
+    const turns = getActiveTurnsForAgent(AGENT);
+    assert.equal(turns.length, 1, "stale event must not add a turn");
+  });
+
+  it("snapshot watermarks are isolated — live advances after save must not leak into the snapshot", () => {
+    // Save with the channel watermark at seq 5.
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({
+        seq: 5,
+        turnId: "t1",
+        channelId: "c1",
+        timestamp: "2024-01-01T00:00:00Z",
+      }),
+    ]);
+    saveActiveAgentTurnsForCommunity("ws-a");
+
+    // Keep working in the live store AFTER the save: the watermark advances
+    // to seq 10 by mutating the same inner per-agent map the snapshot cloned.
+    // If save aliased instead of deep-cloning, this leaks into the snapshot.
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({
+        seq: 10,
+        turnId: "t10",
+        channelId: "c1",
+        timestamp: "2024-01-01T00:00:20Z",
+      }),
+    ]);
+
+    resetActiveAgentTurnsStore();
+    restoreActiveAgentTurnsForCommunity("ws-a");
+
+    // seq 7 is FRESH relative to the saved watermark (5) and must be
+    // processed — processing notifies listeners (stale events do not, per
+    // the gate). Under save-side aliasing the leaked watermark (10) wrongly
+    // skips it as stale and no notification fires.
+    let notified = 0;
+    const unsub = subscribeActiveAgentTurns(() => {
+      notified++;
+    });
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({
+        seq: 7,
+        turnId: "t7",
+        channelId: "c1",
+        timestamp: "2024-01-01T00:00:10Z",
+      }),
+    ]);
+    unsub();
+    assert.ok(
+      notified > 0,
+      "event fresh vs the SAVED watermark must be processed — a live " +
+        "watermark advancing after save must not leak into the snapshot",
     );
-    assert.ok(!channels.has("c2"), "stale event must not add a turn");
+  });
+
+  it("snapshot turns are isolated — a turn started after save must not leak into the snapshot", () => {
+    // Save with one live turn on c1.
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({ seq: 1, turnId: "t1", channelId: "c1" }),
+    ]);
+    saveActiveAgentTurnsForCommunity("ws-a");
+
+    // Keep working AFTER the save: a new turn on c2 mutates the same inner
+    // per-agent turns map the snapshot cloned. If save aliased that inner
+    // map instead of deep-cloning it, t2 leaks into the snapshot.
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({ seq: 2, turnId: "t2", channelId: "c2" }),
+    ]);
+
+    resetActiveAgentTurnsStore();
+    restoreActiveAgentTurnsForCommunity("ws-a");
+
+    const channels = channelIdsOf(getActiveTurnsForAgent(AGENT));
+    assert.ok(channels.has("c1"), "the saved turn must restore");
+    assert.ok(
+      !channels.has("c2"),
+      "a turn started after the save must NOT appear in the restored snapshot",
+    );
+  });
+
+  it("snapshot tombstones are isolated — a terminal recorded after save must not block a legitimate post-restore resurrection", () => {
+    // Complete t1 on c1 before saving: the snapshot legitimately carries its
+    // tombstone (terminal at 00:00:10).
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({
+        seq: 1,
+        turnId: "t1",
+        channelId: "c1",
+        timestamp: "2024-01-01T00:00:00Z",
+      }),
+      makeEvent({
+        seq: 2,
+        kind: "turn_completed",
+        turnId: "t1",
+        channelId: "c1",
+        timestamp: "2024-01-01T00:00:10Z",
+      }),
+    ]);
+    saveActiveAgentTurnsForCommunity("ws-a");
+
+    // AFTER the save, t2 on c2 starts and completes (terminal at 00:00:30).
+    // That records a tombstone in the same inner per-agent tombstone map the
+    // snapshot cloned — if save aliased it, t2's tombstone leaks in.
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({
+        seq: 3,
+        turnId: "t2",
+        channelId: "c2",
+        timestamp: "2024-01-01T00:00:20Z",
+      }),
+      makeEvent({
+        seq: 4,
+        kind: "turn_completed",
+        turnId: "t2",
+        channelId: "c2",
+        timestamp: "2024-01-01T00:00:30Z",
+      }),
+    ]);
+
+    resetActiveAgentTurnsStore();
+    restoreActiveAgentTurnsForCommunity("ws-a");
+
+    // Recovered liveness frames: t1's is strictly newer than its (snapshot)
+    // terminal so it revives either way — the control. t2 has NO tombstone
+    // in a properly isolated snapshot, so its frame (00:00:25, before its
+    // live-store terminal at 00:00:30) must also revive; a leaked tombstone
+    // wrongly blocks exactly this legitimate resurrection.
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({
+        seq: 5,
+        kind: "turn_liveness",
+        turnId: "t1",
+        channelId: "c1",
+        timestamp: "2024-01-01T00:00:15Z",
+      }),
+      makeEvent({
+        seq: 6,
+        kind: "turn_liveness",
+        turnId: "t2",
+        channelId: "c2",
+        timestamp: "2024-01-01T00:00:25Z",
+      }),
+    ]);
+    const channels = channelIdsOf(getActiveTurnsForAgent(AGENT));
+    assert.ok(channels.has("c1"), "control: t1 revives past its own terminal");
+    assert.ok(
+      channels.has("c2"),
+      "a tombstone recorded after the save must NOT leak into the snapshot " +
+        "and block a legitimate resurrection",
+    );
   });
 
   it("terminal tombstones are preserved — a stale liveness cannot resurrect a completed turn", () => {

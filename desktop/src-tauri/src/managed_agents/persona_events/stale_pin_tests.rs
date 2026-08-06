@@ -99,3 +99,53 @@ fn apply_persona_snapshot_same_harness_path_pin_is_kept() {
         "same-harness path override must NOT be dropped"
     );
 }
+
+// ── Stale-pin drop: builtin pin → loaded custom harness (tier-1→tier-3) ──────
+
+/// Persona→CustomHarness: stale Goose override dropped.
+///
+/// This is the custom-direction regression: before `canonical_harness_command`
+/// the destination lookup (`known_acp_runtime_exact`) only saw the four
+/// tier-1 builtins, so a switch to a loaded custom harness left any stale
+/// builtin pin authoritative.
+///
+/// Tier-3 (loaded custom harness) is reached via `lookup_loaded_harness_by_id`,
+/// which reads the in-process registry — so we must populate it via
+/// `update_loaded_harness_registry` under `registry_test_lock()`.
+#[test]
+fn apply_persona_snapshot_goose_to_custom_harness_drops_stale_goose_pin() {
+    use crate::managed_agents::custom_harnesses::{
+        registry_test_lock, update_loaded_harness_registry, HarnessDefinition,
+    };
+    use std::collections::BTreeMap;
+
+    let _lock = registry_test_lock();
+
+    // Register a custom harness definition so the resolver finds it at tier 3.
+    update_loaded_harness_registry(vec![HarnessDefinition {
+        id: "my-custom-harness".to_string(),
+        label: "My Custom Harness".to_string(),
+        command: "my-custom-bin".to_string(),
+        args: vec![],
+        env: BTreeMap::new(),
+        install_instructions_url: String::new(),
+        install_hint: String::new(),
+    }]);
+
+    let mut record = sample_record();
+    record.agent_command_override = Some("goose".to_string());
+    apply_persona_snapshot(
+        &mut record,
+        &AgentDefinition {
+            runtime: Some("my-custom-harness".to_string()),
+            ..sample_persona()
+        },
+    );
+    assert_eq!(
+        record.agent_command_override, None,
+        "stale goose pin must be dropped when persona switches to a loaded custom harness"
+    );
+
+    // Clean up the registry so parallel tests start from a known state.
+    update_loaded_harness_registry(vec![]);
+}

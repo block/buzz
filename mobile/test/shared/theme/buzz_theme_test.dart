@@ -40,6 +40,24 @@ void main() {
       expect(themeSelectionLabel(buzzDarkThemeName, ThemeMode.system), 'Buzz');
     });
 
+    test('forces neutral rendering without changing the stored accent', () {
+      const storedAccent = '#ef4444';
+
+      expect(
+        effectiveAccentIndex(buzzThemeName, storedAccent),
+        neutralAccentIndex,
+      );
+      expect(
+        effectiveAccentIndex(buzzDarkThemeName, storedAccent),
+        neutralAccentIndex,
+      );
+      expect(
+        effectiveAccentIndex('github-light', storedAccent),
+        accentIndexForWireValue(storedAccent),
+      );
+      expect(storedAccent, '#ef4444');
+    });
+
     test('resolve across brightnesses like any other pair', () {
       final resolved = resolveSchemes(buzzThemeName, ThemeMode.system);
       expect(resolved.forcedMode, isNull);
