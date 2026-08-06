@@ -546,6 +546,197 @@ void main() {
     },
   );
 
+  test(
+    'resume within the grace period probes the socket and keeps it when the '
+    'relay answers',
+    () async {
+      final sockets = <_ProbeRecordingRelaySocket>[];
+      final keychain = nostr.Keys.generate();
+      var now = DateTime(2026, 8, 2, 12);
+      final session = RelaySessionNotifier(
+        now: () => now,
+        socketFactory:
+            ({
+              required wsUrl,
+              required nsec,
+              required onMessage,
+              required onConnected,
+              required onDisconnected,
+            }) {
+              final socket = _ProbeRecordingRelaySocket(
+                wsUrl: wsUrl,
+                nsec: nsec,
+                onMessage: onMessage,
+                onConnected: onConnected,
+                onDisconnected: onDisconnected,
+              );
+              sockets.add(socket);
+              return socket;
+            },
+      );
+      final container = ProviderContainer(
+        overrides: [
+          relaySessionProvider.overrideWith(() => session),
+          relayConfigProvider.overrideWith(
+            () => _FakeRelayConfigNotifier(
+              baseUrl: 'https://relay.example',
+              nsec: keychain.nsec,
+            ),
+          ),
+          authProvider.overrideWith(() => _AuthenticatedAuthNotifier()),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(authProvider.future);
+      final subscription = container.listen(relaySessionProvider, (_, _) {});
+      addTearDown(subscription.close);
+      await Future<void>.delayed(Duration.zero);
+      sockets.single.connectSuccessfully();
+
+      session.onAppPaused();
+      now = now.add(const Duration(seconds: 4));
+      session.onAppResumed();
+      await Future<void>.delayed(Duration.zero);
+
+      // The resume path issued a liveness REQ; answer it with EOSE.
+      final probeReq = sockets.single.sentFrames.lastWhere(
+        (frame) => frame.isNotEmpty && frame.first == 'REQ',
+      );
+      session.debugHandleMessage(['EOSE', probeReq[1]]);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(sockets, hasLength(1));
+      expect(sockets.single.disposeCalls, 0);
+      expect(session.state.status, SessionStatus.connected);
+    },
+  );
+
+  test(
+    'resume within the grace period reconnects when the socket is half-open '
+    '(probe never answered)',
+    () async {
+      final sockets = <_ProbeRecordingRelaySocket>[];
+      final keychain = nostr.Keys.generate();
+      var now = DateTime(2026, 8, 2, 12);
+      final session = RelaySessionNotifier(
+        now: () => now,
+        resumeProbeTimeout: const Duration(milliseconds: 20),
+        socketFactory:
+            ({
+              required wsUrl,
+              required nsec,
+              required onMessage,
+              required onConnected,
+              required onDisconnected,
+            }) {
+              final socket = _ProbeRecordingRelaySocket(
+                wsUrl: wsUrl,
+                nsec: nsec,
+                onMessage: onMessage,
+                onConnected: onConnected,
+                onDisconnected: onDisconnected,
+              );
+              sockets.add(socket);
+              return socket;
+            },
+      );
+      final container = ProviderContainer(
+        overrides: [
+          relaySessionProvider.overrideWith(() => session),
+          relayConfigProvider.overrideWith(
+            () => _FakeRelayConfigNotifier(
+              baseUrl: 'https://relay.example',
+              nsec: keychain.nsec,
+            ),
+          ),
+          authProvider.overrideWith(() => _AuthenticatedAuthNotifier()),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(authProvider.future);
+      final subscription = container.listen(relaySessionProvider, (_, _) {});
+      addTearDown(subscription.close);
+      await Future<void>.delayed(Duration.zero);
+      sockets.single.connectSuccessfully();
+
+      session.onAppPaused();
+      now = now.add(const Duration(seconds: 4));
+      session.onAppResumed();
+
+      // Probe times out against the dead transport, forcing a reconnect.
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+
+      expect(sockets, hasLength(2));
+      expect(sockets.first.disposeCalls, 1);
+      expect(session.state.status, SessionStatus.reconnecting);
+    },
+  );
+
+  test(
+    'stale resume probe cannot reconnect a replacement connection',
+    () async {
+      final sockets = <_ProbeRecordingRelaySocket>[];
+      final keychain = nostr.Keys.generate();
+      var now = DateTime(2026, 8, 2, 12);
+      final session = RelaySessionNotifier(
+        now: () => now,
+        resumeProbeTimeout: const Duration(milliseconds: 20),
+        socketFactory:
+            ({
+              required wsUrl,
+              required nsec,
+              required onMessage,
+              required onConnected,
+              required onDisconnected,
+            }) {
+              final socket = _ProbeRecordingRelaySocket(
+                wsUrl: wsUrl,
+                nsec: nsec,
+                onMessage: onMessage,
+                onConnected: onConnected,
+                onDisconnected: onDisconnected,
+              );
+              sockets.add(socket);
+              return socket;
+            },
+      );
+      final container = ProviderContainer(
+        overrides: [
+          relaySessionProvider.overrideWith(() => session),
+          relayConfigProvider.overrideWith(
+            () => _FakeRelayConfigNotifier(
+              baseUrl: 'https://relay.example',
+              nsec: keychain.nsec,
+            ),
+          ),
+          authProvider.overrideWith(() => _AuthenticatedAuthNotifier()),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(authProvider.future);
+      final subscription = container.listen(relaySessionProvider, (_, _) {});
+      addTearDown(subscription.close);
+      await Future<void>.delayed(Duration.zero);
+      sockets.single.connectSuccessfully();
+
+      session.onAppPaused();
+      now = now.add(const Duration(seconds: 4));
+      session.onAppResumed();
+      await Future<void>.delayed(Duration.zero);
+
+      // Replace the connection before the old probe times out.
+      await session.reconnect();
+      expect(sockets, hasLength(2));
+      sockets.last.connectSuccessfully();
+
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+
+      expect(sockets, hasLength(2));
+      expect(sockets.last.disposeCalls, 0);
+      expect(session.state.status, SessionStatus.connected);
+    },
+  );
+
   test('delivers the same live event to each matching subscription', () async {
     final session = RelaySessionNotifier();
     final firstEvents = <NostrEvent>[];
@@ -1279,6 +1470,23 @@ class _ControlledRelaySocket extends RelaySocket {
   void connectSuccessfully() => _connected();
 
   void disconnectWith(Object? error) => _disconnected(error);
+}
+
+class _ProbeRecordingRelaySocket extends _ControlledRelaySocket {
+  final List<List<dynamic>> sentFrames = [];
+
+  _ProbeRecordingRelaySocket({
+    required super.wsUrl,
+    required super.nsec,
+    required super.onMessage,
+    required super.onConnected,
+    required super.onDisconnected,
+  });
+
+  @override
+  void send(List<dynamic> payload) {
+    sentFrames.add(payload);
+  }
 }
 
 const _channelId = '11111111-1111-4111-8111-111111111111';
