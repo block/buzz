@@ -78,6 +78,64 @@ fn managed_agent_message_builder_rejects_invalid_mentions() {
     .expect_err("invalid mentions should fail");
     assert!(error.contains("pubkey must be a 64-character hex string"));
 }
+
+#[test]
+fn send_mentions_merge_typed_and_explicit_pubkeys_without_duplicate_p_tags() {
+    let robby_pubkey = std::iter::repeat_n('a', 64).collect::<String>();
+    let max_pubkey = std::iter::repeat_n('b', 64).collect::<String>();
+    let members = vec![
+        ("Robby".to_string(), robby_pubkey.clone()),
+        ("Max".to_string(), max_pubkey.clone()),
+    ];
+    let resolved =
+        buzz_core_pkg::mentions::resolve_mention_pubkeys("@Robby and @Max please review", &members);
+    let explicit_robby_pubkey = robby_pubkey.to_ascii_uppercase();
+    let mut mentions = vec![explicit_robby_pubkey.clone()];
+    merge_resolved_mentions(&mut mentions, resolved);
+    assert_eq!(mentions[0], explicit_robby_pubkey);
+    let mention_refs: Vec<&str> = mentions.iter().map(String::as_str).collect();
+
+    let event = events::build_message(
+        uuid::Uuid::new_v4(),
+        "@Robby and @Max please review",
+        None,
+        &mention_refs,
+        &[],
+        &[],
+        &[],
+    )
+    .expect("message should build")
+    .sign_with_keys(&Keys::generate())
+    .expect("message should sign");
+
+    let p_tags: Vec<&str> = event
+        .tags
+        .iter()
+        .filter_map(|tag| {
+            let parts = tag.as_slice();
+            if parts.first().map(String::as_str) == Some("p") {
+                parts.get(1).map(String::as_str)
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(
+        p_tags
+            .iter()
+            .filter(|pubkey| **pubkey == robby_pubkey)
+            .count(),
+        1
+    );
+    assert_eq!(
+        p_tags
+            .iter()
+            .filter(|pubkey| **pubkey == max_pubkey)
+            .count(),
+        1
+    );
+}
+
 #[test]
 fn search_messages_filter_requests_prefix_mode_for_topbar_typeahead() {
     let filter = build_search_messages_filter("  pro  ", 12, Some("channel-1"), None, None, None);
