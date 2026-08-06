@@ -15,6 +15,7 @@ test.beforeEach(async ({ page }) => {
         systemPrompt: "A test agent for the deploy channel picker.",
       },
     ],
+    createManagedAgentDelayMs: 1_000,
     managedAgents: [
       {
         pubkey: TEST_IDENTITIES.alice.pubkey,
@@ -162,12 +163,38 @@ test("search filters the channel list and a no-match query blocks deploy", async
   await waitForAnimations(page);
   await dialog.screenshot({ path: `${OUTDIR}/02-picker-filtered.png` });
 
-  // A query with no matches clears the selection: no hidden channel stays
-  // actionable, so the submit button must disable.
-  await searchInput.fill("no-such-channel");
+  // Change to a no-match query and immediately attempt submission in the same
+  // browser task, without waiting for the empty-state render. The input event
+  // must synchronously clear the selected channel so the native click is a
+  // no-op rather than deploying to the previously visible target.
+  await dialog.evaluate((root) => {
+    const input = root.querySelector<HTMLInputElement>("#team-channel-id");
+    const button = Array.from(root.querySelectorAll("button")).find(
+      (candidate) => candidate.textContent?.startsWith("Deploy "),
+    );
+    const valueSetter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    )?.set;
+    if (!(input instanceof HTMLInputElement) || !button || !valueSetter) {
+      throw new Error("Channel picker controls are unavailable");
+    }
+
+    valueSetter.call(input, "no-such-channel");
+    input.dispatchEvent(
+      new InputEvent("input", {
+        bubbles: true,
+        data: "no-such-channel",
+        inputType: "insertText",
+      }),
+    );
+    button.click();
+  });
+
   await expect(dialog.getByText(/No channels match/)).toBeVisible();
   await expect(searchInput).not.toHaveAttribute("aria-activedescendant", /.+/);
   await expect(deployButton).toBeDisabled();
+  await expect(deployButton).toHaveText("Deploy 1 agent");
 
   await waitForAnimations(page);
   await dialog.screenshot({ path: `${OUTDIR}/03-picker-no-match.png` });

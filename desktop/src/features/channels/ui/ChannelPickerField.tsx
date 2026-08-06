@@ -34,13 +34,28 @@ export function ChannelPickerField({
   value,
 }: ChannelPickerFieldProps) {
   const [query, setQuery] = React.useState("");
-  const deferredQuery = React.useDeferredValue(query);
   const listRef = React.useRef<HTMLDivElement>(null);
 
   const visibleChannels = React.useMemo(
-    () => filterChannelsByQuery(channels, deferredQuery),
-    [channels, deferredQuery],
+    () => filterChannelsByQuery(channels, query),
+    [channels, query],
   );
+
+  function handleQueryChange(nextQuery: string) {
+    const nextVisibleChannels = filterChannelsByQuery(channels, nextQuery);
+    setQuery(nextQuery);
+
+    // Reconcile the parent value in the same input event. Deferring this to
+    // the effect below leaves the previous channel actionable for one render,
+    // so a no-match query could submit a hidden target before the effect runs.
+    if (nextVisibleChannels.length === 0) {
+      if (value !== "") {
+        onChange("");
+      }
+    } else if (!nextVisibleChannels.some((channel) => channel.id === value)) {
+      onChange(nextVisibleChannels[0].id);
+    }
+  }
 
   // Keep the selection visible: when the query filters out the selected
   // channel, move it to the best match — the `<select>` this replaces
@@ -105,7 +120,7 @@ export function ChannelPickerField({
           className="flex h-9 w-full rounded-md border border-input bg-background py-2 pl-9 pr-3 text-sm shadow-xs placeholder:text-muted-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
           disabled={disabled}
           id={inputId}
-          onChange={(event) => setQuery(event.target.value)}
+          onChange={(event) => handleQueryChange(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === "ArrowDown") {
               event.preventDefault();
