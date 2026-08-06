@@ -73,7 +73,7 @@ class _IdentityRow extends StatelessWidget {
 }
 
 void _confirmRemoveCommunity(BuildContext context, WidgetRef ref) {
-  showDialog<void>(
+  showBuzzDialog<void>(
     context: context,
     builder: (ctx) => AlertDialog(
       title: const Text('Remove Community'),

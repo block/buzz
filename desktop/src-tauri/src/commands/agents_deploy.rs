@@ -14,6 +14,20 @@ use crate::{
     relay::relay_ws_url_with_override,
 };
 
+/// Effective projection fields for the deploy payload — all derived from the
+/// resolved descriptor and effective config so that the serialised payload and
+/// the `launch` block are always internally consistent.
+pub(super) struct DeployProjections {
+    pub effective_model: Option<String>,
+    pub effective_provider: Option<String>,
+    pub effective_prompt: Option<String>,
+    /// Effective parallelism derived from the same resolved `descriptor.command`
+    /// as `launch.policy_env["BUZZ_ACP_AGENTS"]`.
+    pub effective_parallelism: u32,
+    /// Access fields projected from the same build policy that gates local starts.
+    pub owner_only_access: bool,
+}
+
 /// Resolve the deploy-specific structured model/provider for a managed agent.
 #[cfg(test)]
 pub(crate) fn resolve_deploy_model_provider(
@@ -60,7 +74,10 @@ pub(super) fn build_launch_block(
     }
     policy_env.insert("BUZZ_ACP_RELAY_OBSERVER".into(), "true".into());
     policy_env.insert("BUZZ_ACP_LAZY_POOL".into(), "true".into());
-    policy_env.insert("BUZZ_ACP_AGENTS".into(), record.parallelism.to_string());
+    policy_env.insert(
+        "BUZZ_ACP_AGENTS".into(),
+        crate::managed_agents::acp_agents_value(&descriptor.command, record.parallelism),
+    );
 
     if let Some(value) = effective_prompt {
         policy_env.insert("BUZZ_ACP_SYSTEM_PROMPT".into(), value.to_string());
@@ -141,15 +158,22 @@ pub(super) fn build_deploy_payload(
         &owner_pubkey,
     );
 
+    let effective_parallelism =
+        crate::managed_agents::effective_parallelism(&descriptor.command, record.parallelism);
+
     Ok(deploy_payload_json(
         record,
         crate::relay::effective_agent_relay_url(
             &record.relay_url,
             &relay_ws_url_with_override(state),
         ),
-        effective.model.value,
-        effective.provider.value,
-        effective.system_prompt.value,
+        DeployProjections {
+            effective_model: effective.model.value,
+            effective_provider: effective.provider.value,
+            effective_prompt: effective.system_prompt.value,
+            effective_parallelism,
+            owner_only_access: crate::managed_agents::owner_only_access_build(),
+        },
         merged_user_env,
         launch,
     ))
@@ -157,15 +181,18 @@ pub(super) fn build_deploy_payload(
 
 /// Pure serialization half of [`build_deploy_payload`]. Legacy top-level fields
 /// remain for display/bookkeeping; providers execute the resolved `launch` block.
+/// `projections.effective_parallelism` is pre-computed from the same resolved
+/// descriptor as `launch.policy_env["BUZZ_ACP_AGENTS"]`. Access is projected from
+/// the same compiled policy that gates local starts.
 pub(super) fn deploy_payload_json(
     record: &ManagedAgentRecord,
     relay_url: String,
-    effective_model: Option<String>,
-    effective_provider: Option<String>,
-    effective_prompt: Option<String>,
+    projections: DeployProjections,
     merged_env: BTreeMap<String, String>,
     launch: serde_json::Value,
 ) -> serde_json::Value {
+    let (respond_to, respond_to_allowlist) =
+        crate::managed_agents::projected_access_with_policy(record, projections.owner_only_access);
     serde_json::json!({
         "name": &record.name,
         "relay_url": relay_url,
@@ -173,15 +200,17 @@ pub(super) fn deploy_payload_json(
         "auth_tag": &record.auth_tag,
         "agent_command": &record.agent_command,
         "agent_args": &record.agent_args,
-        "system_prompt": effective_prompt,
-        "model": effective_model,
-        "provider": effective_provider,
+        "system_prompt": projections.effective_prompt,
+        "model": projections.effective_model,
+        "provider": projections.effective_provider,
         "turn_timeout_seconds": record.turn_timeout_seconds,
         "idle_timeout_seconds": record.idle_timeout_seconds,
         "max_turn_duration_seconds": record.max_turn_duration_seconds,
-        "parallelism": record.parallelism,
-        "respond_to": record.respond_to,
-        "respond_to_allowlist": &record.respond_to_allowlist,
+        // Legacy top-level field: projected from the same resolved descriptor as
+        // launch.policy_env["BUZZ_ACP_AGENTS"] — the two are always consistent.
+        "parallelism": projections.effective_parallelism,
+        "respond_to": respond_to,
+        "respond_to_allowlist": respond_to_allowlist,
         "env_vars": merged_env,
         "launch": launch,
     })
@@ -260,5 +289,190 @@ mod tests {
         assert_eq!(launch["policy_env"]["BUZZ_ACP_MAX_TURN_DURATION"], "23");
         assert_eq!(launch["policy_env"]["BUZZ_ACP_AGENTS"], "4");
         assert_eq!(launch["owner_pubkey"], "owner-hex");
+    }
+
+    /// OpenClaw descriptor: `launch.policy_env["BUZZ_ACP_AGENTS"]` must be "5"
+    /// even when the record's requested parallelism is 10. This is the direct
+    /// `launch.policy_env` seam test — the executable contract for remote providers.
+    #[test]
+    fn launch_block_openclaw_over_cap_policy_env_is_capped() {
+        let mut record = record();
+        record.agent_command = "openclaw".into();
+        record.parallelism = 10; // above the OpenClaw spawn-time cap
+        let descriptor = EffectiveHarnessDescriptor {
+            command: "openclaw".into(),
+            args: vec![],
+            env: BTreeMap::new(),
+        };
+
+        let launch = build_launch_block(&record, &descriptor, &[], None, None, "owner-hex");
+
+        assert_eq!(
+            launch["policy_env"]["BUZZ_ACP_AGENTS"],
+            crate::managed_agents::parallelism::OPENCLAW_MAX_PARALLELISM.to_string(),
+            "launch.policy_env[BUZZ_ACP_AGENTS] must be capped at {} for OpenClaw, not 10",
+            crate::managed_agents::parallelism::OPENCLAW_MAX_PARALLELISM
+        );
+    }
+
+    /// Uncapped harness (goose): `launch.policy_env["BUZZ_ACP_AGENTS"]` passes
+    /// the requested value through unchanged.
+    #[test]
+    fn launch_block_goose_policy_env_is_not_capped() {
+        let mut record = record();
+        record.parallelism = 8;
+        let descriptor = EffectiveHarnessDescriptor {
+            command: "goose".into(),
+            args: vec![],
+            env: BTreeMap::new(),
+        };
+
+        let launch = build_launch_block(&record, &descriptor, &[], None, None, "owner-hex");
+
+        assert_eq!(
+            launch["policy_env"]["BUZZ_ACP_AGENTS"], "8",
+            "goose: policy_env[BUZZ_ACP_AGENTS] must pass through requested value 8"
+        );
+    }
+
+    /// deploy_payload_json: legacy top-level `parallelism` is the effective value
+    /// derived from the descriptor, not `record.agent_command`.
+    ///
+    /// Stale-persona scenario: `record.agent_command` is "goose" (created before
+    /// the user switched the persona to OpenClaw), but the live descriptor resolves
+    /// OpenClaw. Both `launch.policy_env["BUZZ_ACP_AGENTS"]` and the legacy
+    /// top-level `parallelism` must be the effective OpenClaw value (5), not the
+    /// record's stale Goose identity (requested 10).
+    #[test]
+    fn deploy_payload_json_stale_goose_record_live_openclaw_descriptor_both_capped() {
+        let mut record = record();
+        // Stale agent_command from record creation — persona has since switched to OpenClaw.
+        record.agent_command = "goose".into();
+        record.parallelism = 10;
+        // Resolved descriptor reflects the live persona (OpenClaw).
+        let descriptor = EffectiveHarnessDescriptor {
+            command: "openclaw".into(),
+            args: vec![],
+            env: BTreeMap::new(),
+        };
+        let cap = crate::managed_agents::parallelism::OPENCLAW_MAX_PARALLELISM;
+
+        let launch = build_launch_block(&record, &descriptor, &[], None, None, "owner-hex");
+        let effective_parallelism =
+            crate::managed_agents::effective_parallelism(&descriptor.command, record.parallelism);
+        let payload = deploy_payload_json(
+            &record,
+            "wss://relay.example".to_string(),
+            DeployProjections {
+                effective_model: None,
+                effective_provider: None,
+                effective_prompt: None,
+                effective_parallelism,
+                owner_only_access: false,
+            },
+            BTreeMap::new(),
+            launch.clone(),
+        );
+
+        assert_eq!(
+            launch["policy_env"]["BUZZ_ACP_AGENTS"],
+            cap.to_string(),
+            "launch.policy_env[BUZZ_ACP_AGENTS] must be capped at {cap} for live OpenClaw descriptor"
+        );
+        assert_eq!(
+            payload["parallelism"], cap,
+            "legacy top-level parallelism must match launch.policy_env — both must be {cap}"
+        );
+    }
+
+    /// Inverse stale-persona scenario: `record.agent_command` is "openclaw"
+    /// (created before the user switched the persona to Goose), but the live
+    /// descriptor resolves Goose. Both projections must be the uncapped requested
+    /// value (4), not the old OpenClaw cap.
+    #[test]
+    fn deploy_payload_json_stale_openclaw_record_live_goose_descriptor_both_uncapped() {
+        let mut record = record();
+        // Stale agent_command from record creation — persona has since switched to Goose.
+        record.agent_command = "openclaw".into();
+        record.parallelism = 4;
+        // Resolved descriptor reflects the live persona (Goose).
+        let descriptor = EffectiveHarnessDescriptor {
+            command: "goose".into(),
+            args: vec![],
+            env: BTreeMap::new(),
+        };
+
+        let launch = build_launch_block(&record, &descriptor, &[], None, None, "owner-hex");
+        let effective_parallelism =
+            crate::managed_agents::effective_parallelism(&descriptor.command, record.parallelism);
+        let payload = deploy_payload_json(
+            &record,
+            "wss://relay.example".to_string(),
+            DeployProjections {
+                effective_model: None,
+                effective_provider: None,
+                effective_prompt: None,
+                effective_parallelism,
+                owner_only_access: false,
+            },
+            BTreeMap::new(),
+            launch.clone(),
+        );
+
+        assert_eq!(
+            launch["policy_env"]["BUZZ_ACP_AGENTS"],
+            "4",
+            "launch.policy_env[BUZZ_ACP_AGENTS] must pass through requested 4 for live Goose descriptor"
+        );
+        assert_eq!(
+            payload["parallelism"], 4,
+            "legacy top-level parallelism must match launch.policy_env — both must be 4 (uncapped)"
+        );
+    }
+
+    /// Explicit agent_command_override direction: record has an explicit override
+    /// pinning OpenClaw while the persona default is Goose. The override wins
+    /// via the descriptor — both projections must be capped at the OpenClaw limit.
+    #[test]
+    fn deploy_payload_json_explicit_openclaw_override_both_capped() {
+        let mut record = record();
+        // Explicit override: user pinned OpenClaw on this agent.
+        record.agent_command_override = Some("openclaw".into());
+        record.agent_command = "goose".into(); // persona default, overridden
+        record.parallelism = 10;
+        // Descriptor reflects the resolved override (OpenClaw wins).
+        let descriptor = EffectiveHarnessDescriptor {
+            command: "openclaw".into(),
+            args: vec![],
+            env: BTreeMap::new(),
+        };
+        let cap = crate::managed_agents::parallelism::OPENCLAW_MAX_PARALLELISM;
+
+        let launch = build_launch_block(&record, &descriptor, &[], None, None, "owner-hex");
+        let effective_parallelism =
+            crate::managed_agents::effective_parallelism(&descriptor.command, record.parallelism);
+        let payload = deploy_payload_json(
+            &record,
+            "wss://relay.example".to_string(),
+            DeployProjections {
+                effective_model: None,
+                effective_provider: None,
+                effective_prompt: None,
+                effective_parallelism,
+                owner_only_access: false,
+            },
+            BTreeMap::new(),
+            launch.clone(),
+        );
+
+        assert_eq!(
+            launch["policy_env"]["BUZZ_ACP_AGENTS"],
+            cap.to_string(),
+            "launch.policy_env[BUZZ_ACP_AGENTS] must be {cap} for explicit OpenClaw override"
+        );
+        assert_eq!(
+            payload["parallelism"], cap,
+            "legacy top-level parallelism must match launch.policy_env — both must be {cap}"
+        );
     }
 }

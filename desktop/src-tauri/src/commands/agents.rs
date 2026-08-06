@@ -1355,12 +1355,12 @@ pub async fn delete_managed_agent(
 // 2. Harness sees it, exits gracefully, sets presence to "offline"
 // 3. Desktop's existing presence polling sees "offline" — UI updates automatically
 // No backend Tauri command needed. Presence IS the status.
-
 #[path = "agents_deploy.rs"]
 mod deploy;
+pub(super) mod provider_access;
 use deploy::build_deploy_payload;
 #[cfg(test)]
-use deploy::deploy_payload_json;
+use deploy::{deploy_payload_json, DeployProjections};
 #[cfg(test)]
 use deploy::{ensure_remote_provider_supported, resolve_deploy_model_provider};
 

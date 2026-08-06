@@ -32,6 +32,9 @@ enum AnchoredPopoverAlignment {
   /// Aligns the popover's leading edge with the trigger's leading edge.
   start,
 
+  /// Centers the popover horizontally on the trigger.
+  center,
+
   /// Aligns the popover's trailing edge with the trigger's trailing edge.
   end,
 }
@@ -160,6 +163,7 @@ class _AnchoredPopoverRoute<T> extends PopupRoute<T> {
     ).animate(curvedAnimation);
     final transformOrigin = switch (alignment) {
       AnchoredPopoverAlignment.start => Alignment.topLeft,
+      AnchoredPopoverAlignment.center => Alignment.topCenter,
       AnchoredPopoverAlignment.end => Alignment.topRight,
     };
 
@@ -234,6 +238,11 @@ class _AnchoredPopoverLayoutDelegate extends SingleChildLayoutDelegate {
     final anchorBottom = size.height - position.bottom;
     final desiredX = switch (alignment) {
       AnchoredPopoverAlignment.start => position.left + offset.dx,
+      AnchoredPopoverAlignment.center =>
+        position.left +
+            (size.width - position.left - position.right - childSize.width) /
+                2 +
+            offset.dx,
       AnchoredPopoverAlignment.end =>
         size.width - position.right - childSize.width + offset.dx,
     };

@@ -314,6 +314,8 @@ type E2eConfig = {
     applyCommunityDelayMs?: number;
     openDmDelayMs?: number;
     sendMessageDelayMs?: number;
+    /** Hold mock send live echoes until the E2E release seam is invoked. */
+    deferSendMessageLiveEcho?: boolean;
     /** Close the first channel-window live REQ; its retry is accepted. */
     closeChannelLiveSubscriptionOnce?: boolean;
     /** Reject successive kind-9 sends with these messages, then resume. */
@@ -442,6 +444,8 @@ type E2eConfig = {
       model: string | null;
       preferred_runtime?: string | null;
     };
+    /** Explicit owner-only agent-access capability; independent of baked defaults. */
+    ownerOnlyAccessBuild?: boolean;
     /** File-layer config returned by runtime id. */
     runtimeFileConfigs?: Record<string, RuntimeFileConfigSubset | null>;
     /** Baked build env returned by the display and key-name Tauri commands. */
@@ -1058,6 +1062,8 @@ declare global {
       command: string;
       payload: unknown;
     }>;
+    /** Release mock send events that were stored but withheld from live subscribers. */
+    __BUZZ_E2E_RELEASE_SEND_MESSAGE_LIVE_ECHO__?: () => number;
     __BUZZ_E2E_EMIT_MEDIA_UPLOAD_PHASE__?: (input: {
       id: string;
       phase: string;
@@ -2951,6 +2957,10 @@ const mockChannels: MockChannel[] = [
 ];
 
 const mockMessages = new Map<string, RelayEvent[]>();
+const deferredSendMessageLiveEchoes: Array<{
+  channelId: string;
+  event: RelayEvent;
+}> = [];
 const mockUserStatuses: RelayEvent[] = [];
 const mockReminderEvents: RelayEvent[] = [];
 const mockPersonaEvents: RelayEvent[] = [];
@@ -4182,6 +4192,18 @@ function emitMockLiveEvent(channelId: string, event: RelayEvent) {
       }
     }
   }
+}
+
+function emitOrDeferMockSendMessageLiveEcho(
+  channelId: string,
+  event: RelayEvent,
+  config: E2eConfig | undefined,
+) {
+  if (config?.mock?.deferSendMessageLiveEcho) {
+    deferredSendMessageLiveEchoes.push({ channelId, event });
+    return;
+  }
+  emitMockLiveEvent(channelId, event);
 }
 
 function emitMockGlobalEvent(event: RelayEvent) {
@@ -8907,6 +8929,7 @@ async function handleSendChannelMessage(
     mentionPubkeys?: string[];
     mediaTags?: string[][] | null;
     emojiTags?: string[][] | null;
+    mentionTags?: string[][] | null;
   },
   config: E2eConfig | undefined,
 ): Promise<RawSendChannelMessageResponse> {
@@ -8926,8 +8949,10 @@ async function handleSendChannelMessage(
   // relay echoes them back on the stored event too, so mirror that here so the
   // emoji renderer keeps resolving `:shortcode:` after the round-trip.
   const emojiTags = args.emojiTags ?? [];
-  // Both kinds end up on the stored event's tag set, just like the real relay.
-  const extraTags = [...mediaTags, ...emojiTags];
+  // Reference-only mentions are already part of the outbound event. Preserve
+  // them in the mock event too so local echoes match the complete sent tag set.
+  const mentionTags = args.mentionTags ?? [];
+  const extraTags = [...mediaTags, ...emojiTags, ...mentionTags];
   const identity = getIdentity(config);
   if (!identity) {
     const createdAt = Math.floor(Date.now() / 1000);
@@ -8943,7 +8968,7 @@ async function handleSendChannelMessage(
         ...extraTags,
       ]);
       recordMockMessage(args.channelId, event);
-      emitMockLiveEvent(args.channelId, event);
+      emitOrDeferMockSendMessageLiveEcho(args.channelId, event, config);
 
       return {
         event_id: event.id,
@@ -9006,7 +9031,7 @@ async function handleSendChannelMessage(
     };
 
     recordMockMessage(args.channelId, event);
-    emitMockLiveEvent(args.channelId, event);
+    emitOrDeferMockSendMessageLiveEcho(args.channelId, event, config);
 
     return {
       event_id: event.id,
@@ -9117,19 +9142,33 @@ async function handleSendManagedAgentChannelMessage(
 
 /**
  * Mock the `delete_message` Tauri command. Removes the event from the
- * in-memory mock store so the query-cache invalidation in
- * `useDeleteMessageMutation.onSuccess` (which filters by eventId) finds
- * nothing to keep, and the row disappears from the timeline.
+ * in-memory mock store and records the kind:5 structural event used by Inbox
+ * refreshes. Do not emit it live: mock target IDs may fail the production
+ * 64-hex deletion filter, letting a live merge restore the flattened row.
  */
-function handleDeleteMessage(args: {
-  channelId: string;
-  eventId: string;
-}): void {
+function handleDeleteMessage(
+  args: {
+    channelId: string;
+    eventId: string;
+  },
+  config: E2eConfig | undefined,
+): void {
   const history = mockMessages.get(args.channelId);
   if (history) {
     const index = history.findIndex((ev) => ev.id === args.eventId);
     if (index !== -1) history.splice(index, 1);
   }
+
+  const deletion = createMockEvent(
+    KIND_DELETION,
+    "",
+    [
+      ["e", args.eventId],
+      ["h", args.channelId],
+    ],
+    getMockMemberPubkey(config),
+  );
+  recordMockMessage(args.channelId, deletion);
 }
 
 /**
@@ -9690,6 +9729,11 @@ function sendToMockSocket(args: {
   if (type === "EVENT") {
     const event = rest[0] as RelayEvent;
 
+    if (event.kind === 28936) {
+      sendWsText(socket.handler, ["OK", event.id, true, ""]);
+      return;
+    }
+
     if ([9030, 9031, 9032].includes(event.kind)) {
       const accepted = updateMockRelayMembershipFromAdminEvent(event);
       sendWsText(socket.handler, [
@@ -9902,6 +9946,7 @@ export function maybeInstallE2eTauriMocks() {
   mockWebsocketUnavailable = false;
   mockAuthResponses.length = 0;
   relayWebsocketConnectAttemptStarts.length = 0;
+  deferredSendMessageLiveEchoes.length = 0;
   mockGlobalAgentConfig = config.mock?.globalAgentConfig
     ? { ...config.mock.globalAgentConfig }
     : null;
@@ -10193,6 +10238,13 @@ export function maybeInstallE2eTauriMocks() {
   };
   window.__BUZZ_E2E_RESET_WEBSOCKET_CONNECT_ATTEMPTS__ = () => {
     relayWebsocketConnectAttemptStarts.length = 0;
+  };
+  window.__BUZZ_E2E_RELEASE_SEND_MESSAGE_LIVE_ECHO__ = () => {
+    const queued = deferredSendMessageLiveEchoes.splice(0);
+    for (const { channelId, event } of queued) {
+      emitMockLiveEvent(channelId, event);
+    }
+    return queued.length;
   };
   // Tests vary mesh admission and models to exercise provider discovery and
   // the managed-agent start preflight.
@@ -12290,6 +12342,8 @@ export function maybeInstallE2eTauriMocks() {
       }
       case "get_baked_build_env_keys":
         return (config?.mock?.bakedBuildEnv ?? []).map((entry) => entry.key);
+      case "agent_access_owner_only":
+        return config?.mock?.ownerOnlyAccessBuild ?? false;
       case "update_managed_agent":
         return handleUpdateManagedAgent(
           payload as Parameters<typeof handleUpdateManagedAgent>[0],
@@ -12429,6 +12483,7 @@ export function maybeInstallE2eTauriMocks() {
       case "delete_message":
         handleDeleteMessage(
           payload as Parameters<typeof handleDeleteMessage>[0],
+          activeConfig,
         );
         return null;
       case "edit_message":

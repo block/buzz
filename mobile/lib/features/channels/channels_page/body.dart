@@ -7,6 +7,9 @@ class _ChannelsBody extends StatelessWidget {
   final SessionStatus sessionStatus;
   final bool showConnectionSkeleton;
   final String? currentPubkey;
+  final double topSectionHeight;
+  final bool usesPinnedGradient;
+  final ScrollController scrollController;
   final Future<void> Function() onRefresh;
   final Future<void> Function(Channel channel) onSelectChannel;
 
@@ -17,13 +20,16 @@ class _ChannelsBody extends StatelessWidget {
     required this.sessionStatus,
     required this.showConnectionSkeleton,
     required this.currentPubkey,
+    required this.topSectionHeight,
+    required this.usesPinnedGradient,
+    required this.scrollController,
     required this.onRefresh,
     required this.onSelectChannel,
   });
 
   @override
   Widget build(BuildContext context) {
-    final barHeight = frostedAppBarHeight(context);
+    final barHeight = topSectionHeight;
     final loadedChannels = channels;
     final loading =
         showConnectionSkeleton || (loadedChannels == null && !showError);
@@ -38,13 +44,32 @@ class _ChannelsBody extends StatelessWidget {
             edgeOffset: barHeight,
             onRefresh: onRefresh,
             child: CustomScrollView(
+              controller: scrollController,
+              // The transparent gap shows the top section and must not absorb
+              // taps meant for the community or profile controls beneath it.
+              hitTestBehavior: HitTestBehavior.deferToChild,
               slivers: [
                 SliverToBoxAdapter(child: SizedBox(height: barHeight)),
-                _SliverChannelsList(
-                  channels: loadedChannels,
-                  currentPubkey: currentPubkey,
-                  onSelectChannel: onSelectChannel,
-                ),
+                if (usesPinnedGradient)
+                  _SliverChannelsList(
+                    channels: loadedChannels,
+                    currentPubkey: currentPubkey,
+                    onSelectChannel: onSelectChannel,
+                  )
+                else
+                  DecoratedSliver(
+                    decoration: BoxDecoration(
+                      color: context.colors.surface,
+                      borderRadius: const BorderRadius.vertical(
+                        top: Radius.circular(Radii.dialog),
+                      ),
+                    ),
+                    sliver: _SliverChannelsList(
+                      channels: loadedChannels,
+                      currentPubkey: currentPubkey,
+                      onSelectChannel: onSelectChannel,
+                    ),
+                  ),
               ],
             ),
           );
@@ -253,7 +278,7 @@ class _SliverChannelsList extends HookConsumerWidget {
                     userSections.first.id != section.id,
                 onToggle: () => toggleSection(section.id),
                 onRename: () async {
-                  final name = await showDialog<String>(
+                  final name = await showBuzzDialog<String>(
                     context: context,
                     builder: (_) => _SectionNameDialog(
                       title: 'Rename Section',
@@ -268,7 +293,7 @@ class _SliverChannelsList extends HookConsumerWidget {
                   }
                 },
                 onDelete: () async {
-                  final confirmed = await showDialog<bool>(
+                  final confirmed = await showBuzzDialog<bool>(
                     context: context,
                     builder: (_) => AlertDialog(
                       title: Text('Delete "${section.name}"?'),

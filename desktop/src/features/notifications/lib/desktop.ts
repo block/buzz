@@ -8,9 +8,12 @@ import {
 } from "@tauri-apps/plugin-notification";
 import { isLinuxPlatform, isMacPlatform } from "@/shared/lib/platform";
 
-// Backend event emitted when the user clicks a native (Linux) notification.
-// See src-tauri/src/commands/notifications.rs.
+// Backend event emitted when a native Linux notification is clicked or a
+// queued macOS activation becomes available. See src-tauri notification code.
 const NATIVE_NOTIFICATION_ACTIVATED_EVENT = "native-notification-activated";
+const TAKE_PENDING_MACOS_NOTIFICATION_ACTIVATIONS = "take_pending_activations";
+const MACOS_NOTIFICATION_PERMISSION_STATE = "notification_permission_state";
+const REQUEST_MACOS_NOTIFICATION_ACCESS = "request_notification_access";
 
 export type DesktopNotificationPermissionState =
   | NotificationPermission
@@ -120,9 +123,27 @@ function dispatchDesktopNotificationTarget(target: DesktopNotificationTarget) {
   );
 }
 
+function shouldUseMacDevelopmentFallback(error: unknown): boolean {
+  return String(error).includes("not running from an app bundle");
+}
+
 export async function getDesktopNotificationPermissionState(): Promise<DesktopNotificationPermissionState> {
   if (!hasNotificationApi()) {
     return "unsupported";
+  }
+
+  if (isTauri() && isMacPlatform()) {
+    try {
+      return await invoke<NotificationPermission>(
+        MACOS_NOTIFICATION_PERMISSION_STATE,
+      );
+    } catch (error) {
+      // The native API rejects the unbundled executable used by `tauri dev`.
+      // Preserve that development path through the plugin-backed shim.
+      if (!shouldUseMacDevelopmentFallback(error)) {
+        return "default";
+      }
+    }
   }
 
   if (window.Notification.permission !== "default") {
@@ -152,7 +173,18 @@ export async function requestDesktopNotificationAccess(): Promise<DesktopNotific
     return pendingPermissionRequest;
   }
 
-  pendingPermissionRequest = requestPermission().finally(() => {
+  const request =
+    isTauri() && isMacPlatform()
+      ? invoke<NotificationPermission>(REQUEST_MACOS_NOTIFICATION_ACCESS).catch(
+          (error) => {
+            if (shouldUseMacDevelopmentFallback(error)) {
+              return requestPermission();
+            }
+            throw error;
+          },
+        )
+      : requestPermission();
+  pendingPermissionRequest = request.finally(() => {
     pendingPermissionRequest = null;
   });
 
@@ -180,37 +212,72 @@ export async function listenForDesktopNotificationActions(
   let nativeUnlisten: (() => void) | null = null;
 
   if (isTauri()) {
-    try {
-      pluginListener = await onAction((notification) => {
-        const target = parseNotificationTarget(
-          notification.extra?.buzzNotificationTarget,
-        );
-        if (!target) {
-          return;
-        }
+    const usesMacActivationQueue = isMacPlatform();
 
-        dispatchDesktopNotificationTarget(target);
-      });
-    } catch {
-      pluginListener = null;
-    }
-
-    // Clicks on Linux notifications come back via a backend event rather than
-    // the plugin's onAction (whose connection is torn down before it can fire).
-    try {
-      nativeUnlisten = await listen<unknown>(
-        NATIVE_NOTIFICATION_ACTIVATED_EVENT,
-        (event) => {
-          const target = parseNotificationTarget(event.payload);
+    if (!isLinuxPlatform() && !usesMacActivationQueue) {
+      try {
+        pluginListener = await onAction((notification) => {
+          const target = parseNotificationTarget(
+            notification.extra?.buzzNotificationTarget,
+          );
           if (!target) {
             return;
           }
 
           dispatchDesktopNotificationTarget(target);
+        });
+      } catch {
+        pluginListener = null;
+      }
+    }
+
+    // Linux forwards the target as the event payload. macOS queues targets in
+    // Rust first so cold-start clicks survive until this listener is mounted.
+    const dispatchNativeActivations = async (payload?: unknown) => {
+      if (usesMacActivationQueue) {
+        const targets = await invoke<unknown[]>(
+          TAKE_PENDING_MACOS_NOTIFICATION_ACTIVATIONS,
+        );
+        for (const pendingTarget of targets) {
+          const target = parseNotificationTarget(pendingTarget);
+          if (target) {
+            dispatchDesktopNotificationTarget(target);
+          }
+        }
+        return;
+      }
+
+      const target = parseNotificationTarget(payload);
+      if (target) {
+        dispatchDesktopNotificationTarget(target);
+      }
+    };
+
+    try {
+      nativeUnlisten = await listen<unknown>(
+        NATIVE_NOTIFICATION_ACTIVATED_EVENT,
+        (event) => {
+          void dispatchNativeActivations(event.payload).catch((error) => {
+            console.error(
+              "Failed to dispatch native notification activation",
+              error,
+            );
+          });
         },
       );
     } catch {
       nativeUnlisten = null;
+    }
+
+    if (nativeUnlisten && usesMacActivationQueue) {
+      try {
+        await dispatchNativeActivations();
+      } catch (error) {
+        console.error(
+          "Failed to drain pending macOS notification activations",
+          error,
+        );
+      }
     }
   }
 
@@ -293,11 +360,10 @@ export async function sendDesktopNotification(
     return false;
   }
 
-  // On Linux the bundled notification plugin posts via a D-Bus connection that
-  // it drops immediately; GNOME 46+ then dismisses the notification before it
-  // is seen. Route through a backend command that keeps the connection alive.
+  // Linux needs a retained D-Bus connection. macOS needs a native notification
+  // center delegate because the Tauri plugin does not deliver desktop clicks.
   // See src-tauri/src/commands/notifications.rs.
-  if (isTauri() && isLinuxPlatform()) {
+  if (isTauri() && (isLinuxPlatform() || isMacPlatform())) {
     try {
       await invoke("show_native_notification", {
         title: payload.title,
@@ -306,7 +372,12 @@ export async function sendDesktopNotification(
       });
       return true;
     } catch {
-      return false;
+      if (!isMacPlatform()) {
+        return false;
+      }
+      // UNUserNotificationCenter is unavailable to the unbundled executable
+      // used by Tauri dev. Preserve the previous macOS development behavior by
+      // falling through to the notification plugin; packaged apps use native UN.
     }
   }
 

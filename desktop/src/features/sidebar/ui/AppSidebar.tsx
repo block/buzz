@@ -3,6 +3,7 @@ import * as React from "react";
 import { FeatureGate } from "@/shared/features";
 import { SidebarDndContext } from "@/features/sidebar/ui/SidebarDnd";
 
+import type { LeaveCommunityResult } from "@/features/communities/leaveCommunity";
 import type { Community } from "@/features/communities/types";
 import { AddCommunityDialog } from "@/features/communities/ui/AddCommunityDialog";
 import type { AddCommunityPrefillRequest } from "@/features/communities/addCommunityPrefill";
@@ -138,7 +139,7 @@ type AppSidebarProps = {
     id: string,
     updates: Partial<Pick<Community, "name" | "relayUrl" | "token">>,
   ) => void;
-  onRemoveCommunity: (id: string) => void;
+  onRemoveCommunity: (id: string) => Promise<LeaveCommunityResult | undefined>;
   onCreateAgent: () => void;
   onSelectAgents: () => void;
   onSelectProjects: () => void;
