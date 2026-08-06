@@ -136,6 +136,15 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         underlying_cli: None,
     },
     PresetHarness {
+        id: "open-interpreter",
+        label: "Open Interpreter",
+        command: "interpreter",
+        args: &["acp"],
+        install_instructions_url: "https://github.com/openinterpreter/openinterpreter",
+        install_hint: "Buzz talks to Open Interpreter through its native ACP mode (interpreter acp).",
+        underlying_cli: None,
+    },
+    PresetHarness {
         id: "kimi",
         label: "Kimi Code",
         command: "kimi",
@@ -345,6 +354,44 @@ mod tests {
         assert_eq!(entry.default_args, vec!["acp"]);
         assert_eq!(entry.install_instructions_url, "https://docs.devin.ai/cli");
         assert_eq!(entry.source, HarnessSource::Preset);
+    }
+
+    #[test]
+    fn open_interpreter_preset_uses_native_acp_invocation() {
+        let preset = PRESET_HARNESSES
+            .iter()
+            .find(|preset| preset.id == "open-interpreter")
+            .expect("Open Interpreter preset should be present");
+
+        assert_eq!(preset.label, "Open Interpreter");
+        assert_eq!(preset.command, "interpreter");
+        assert_eq!(preset.args, &["acp"]);
+        assert_eq!(preset.underlying_cli, None);
+        assert_eq!(
+            preset.install_instructions_url,
+            "https://github.com/openinterpreter/openinterpreter"
+        );
+
+        let entry = preset_catalog_entry(preset, |command| {
+            (command == "interpreter").then(|| PathBuf::from("/usr/local/bin/interpreter"))
+        });
+        assert_eq!(entry.availability, AcpAvailabilityStatus::Available);
+        assert_eq!(entry.command.as_deref(), Some("interpreter"));
+        assert_eq!(entry.default_args, vec!["acp"]);
+        assert_eq!(
+            entry.binary_path.as_deref(),
+            Some("/usr/local/bin/interpreter")
+        );
+        assert_eq!(entry.auth_status, AuthStatus::NotApplicable);
+        assert_eq!(entry.source, HarnessSource::Preset);
+
+        let missing_entry = preset_catalog_entry(preset, |_| None);
+        assert_eq!(
+            missing_entry.availability,
+            AcpAvailabilityStatus::NotInstalled
+        );
+        assert!(missing_entry.command.is_none());
+        assert_eq!(missing_entry.default_args, vec!["acp"]);
     }
 
     #[test]
