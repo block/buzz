@@ -468,6 +468,11 @@ fn sample_agent_record() -> ManagedAgentRecord {
     .expect("sample record")
 }
 
+#[test]
+fn records_without_parallelism_default_to_one_worker() {
+    assert_eq!(sample_agent_record().parallelism, 1);
+}
+
 // ── AgentDefinition ↔ ManagedAgentRecord fold mapping (Phase 1A) ─────────────────────
 
 fn sample_persona() -> AgentDefinition {
