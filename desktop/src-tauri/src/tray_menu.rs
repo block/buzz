@@ -28,6 +28,7 @@ use tauri::{
 const TRAY_ID: &str = "buzz-tray";
 const OPEN_BUZZ_ID: &str = "tray-open-buzz";
 const NEW_CHANNEL_ID: &str = "tray-new-channel";
+pub(crate) const OPEN_SETTINGS_ID: &str = "open-settings";
 const QUIT_ID: &str = "tray-quit";
 const OPEN_CHANNEL_PREFIX: &str = "tray-open-channel:";
 const OPEN_CHANNEL_ACTIVITY_SEPARATOR: char = '|';
@@ -212,6 +213,7 @@ struct TrayMenuState<R: Runtime> {
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum TrayAction {
     NewChannel,
+    OpenSettings,
     OpenChannel {
         #[serde(rename = "channelId")]
         channel_id: String,
@@ -343,6 +345,13 @@ fn build_menu<R: Runtime>(
     append_separator(app, &menu)?;
     menu.append(&MenuItem::with_id(
         app,
+        OPEN_SETTINGS_ID,
+        "Settings",
+        true,
+        None::<&str>,
+    )?)?;
+    menu.append(&MenuItem::with_id(
+        app,
         QUIT_ID,
         "Quit Buzz",
         true,
@@ -444,12 +453,16 @@ fn apply_activity_presentation<R: Runtime>(
     Ok(())
 }
 
-fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
+pub(crate) fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
     match id {
         OPEN_BUZZ_ID => show_main_window(app),
         NEW_CHANNEL_ID => {
             show_main_window(app);
             queue_tray_action(app, TrayAction::NewChannel);
+        }
+        OPEN_SETTINGS_ID => {
+            show_main_window(app);
+            queue_tray_action(app, TrayAction::OpenSettings);
         }
         QUIT_ID => app.exit(0),
         _ => {
@@ -512,7 +525,7 @@ pub fn take_tray_actions<R: Runtime>(app: AppHandle<R>) -> Result<Vec<TrayAction
 
 fn requeue_actions(queue: &mut TrayActionQueue, mut actions: Vec<TrayAction>) {
     actions.retain(|action| match action {
-        TrayAction::NewChannel => true,
+        TrayAction::NewChannel | TrayAction::OpenSettings => true,
         TrayAction::OpenChannel {
             community_generation,
             ..
@@ -552,7 +565,7 @@ pub fn clear_tray_agent_activity<R: Runtime>(app: AppHandle<R>) -> Result<(), St
     queue.community_generation = queue.community_generation.wrapping_add(1);
     queue
         .pending_actions
-        .retain(|action| matches!(action, TrayAction::NewChannel));
+        .retain(|action| matches!(action, TrayAction::NewChannel | TrayAction::OpenSettings));
     drop(queue);
 
     update_tray_agent_activity(app, Vec::new(), Vec::new())
@@ -634,6 +647,14 @@ mod tests {
     }
 
     #[test]
+    fn open_settings_action_serializes_with_frontend_field_names() {
+        assert_eq!(
+            serde_json::to_value(TrayAction::OpenSettings).expect("tray action should serialize"),
+            serde_json::json!({ "kind": "openSettings" })
+        );
+    }
+
+    #[test]
     fn stale_channel_actions_are_not_requeued_after_community_change() {
         let mut queue = TrayActionQueue {
             community_generation: 2,
@@ -652,14 +673,20 @@ mod tests {
     }
 
     #[test]
-    fn new_channel_actions_survive_community_change() {
+    fn installation_global_actions_survive_community_change() {
         let mut queue = TrayActionQueue {
             community_generation: 2,
             pending_actions: Vec::new(),
         };
 
-        requeue_actions(&mut queue, vec![TrayAction::NewChannel]);
+        requeue_actions(
+            &mut queue,
+            vec![TrayAction::NewChannel, TrayAction::OpenSettings],
+        );
 
-        assert_eq!(queue.pending_actions, vec![TrayAction::NewChannel]);
+        assert_eq!(
+            queue.pending_actions,
+            vec![TrayAction::NewChannel, TrayAction::OpenSettings]
+        );
     }
 }

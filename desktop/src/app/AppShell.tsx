@@ -721,6 +721,7 @@ export function AppShell() {
           channels={channels}
           goChannel={goChannel}
           openCreateChannel={handleOpenCreateChannel}
+          openSettings={handleOpenSettings}
         />
       ) : null}
       <ChannelNavigationProvider channels={channels}>
