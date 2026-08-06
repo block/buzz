@@ -120,8 +120,9 @@ with a TypeScript lookup table or an id comparison in a component.
    available harness can resolve, Create starts in Customize and lets unavailable
    catalog entries be selected only to expose their setup guidance; submission
    remains blocked.
-   Advanced-only required credentials mark the collapsed Advanced toggle
-   without opening it in Global Defaults and Edit, and block incomplete saves.
+   Advanced-only required credentials and incomplete remote **Run on** setup
+   mark the collapsed Advanced toggle without opening it, and block incomplete
+   saves.
    Runtime-file credentials satisfy Global Defaults just as they do Create and
    Edit. In Edit,
    selecting Custom command keeps its required command field beside the harness

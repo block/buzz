@@ -13,6 +13,8 @@
  *    Advanced disclosure toggle)
  *  - the config form is gated on probe resolution (no half-rendered form),
  *    and defaults prefill exactly once when a slow probe lands
+ *  - collapsing Advanced during an incomplete remote setup keeps the submit
+ *    blocker visible through the Required badge
  *  - switching provider → local → provider re-probes and resets cleanly
  *
  * The stale-closure merge on probe resolution (defaults beneath in-flight
@@ -177,6 +179,31 @@ test("config fields render only after a slow probe resolves, with defaults", asy
     "buzz-agents-mock01",
   );
   expect(await probeInvocations(page)).toBe(1);
+});
+
+test("collapsed Advanced marks incomplete remote setup as required", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    backendProviders: [PROVIDER],
+    backendProviderProbeResult: PROBE_RESULT,
+    backendProviderProbeDelayMs: 10_000,
+  });
+  const dialog = await openCreateDialogOnProvider(page);
+  const advanced = dialog.getByRole("button", {
+    name: "Advanced",
+    exact: true,
+  });
+  const submit = dialog.getByTestId("persona-dialog-submit");
+
+  await expect(submit).toBeDisabled();
+  await advanced.click();
+  await expect(advanced).toHaveAttribute("aria-expanded", "false");
+  await expect(dialog.locator("#agent-run-on")).toHaveCount(0);
+  await expect(
+    dialog.getByTestId("persona-advanced-required-badge"),
+  ).toHaveText("Required");
+  await expect(submit).toBeDisabled();
 });
 
 test("provider → local → provider re-probes and resets the config", async ({

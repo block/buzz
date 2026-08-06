@@ -961,7 +961,6 @@ export function AgentDefinitionDialog({
               onSaved={selectSavedHarness}
               open={isAddHarnessOpen}
             />
-
             <div className="space-y-3">
               <button
                 aria-expanded={showAdvancedFields}
@@ -970,7 +969,8 @@ export function AgentDefinitionDialog({
                 type="button"
               >
                 <span>Advanced</span>
-                {localModeGate.missingEnvKeys.some((key) =>
+                {(isCreateMode && createSubmitBlocked) ||
+                localModeGate.missingEnvKeys.some((key) =>
                   advancedRequiredEnvKeys.includes(key),
                 ) ? (
                   <span
