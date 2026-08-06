@@ -592,6 +592,75 @@ fn model_discovery_error_converts_dangling_sentinel_to_sentence() {
 }
 
 // ---------------------------------------------------------------------------
+// Missing ACP adapter
+// ---------------------------------------------------------------------------
+
+use crate::managed_agents::{adapter_missing_error, ADAPTER_MISSING_PREFIX};
+
+/// Parse the JSON payload of an `ADAPTER_MISSING:` sentinel, asserting the
+/// prefix is present.
+fn adapter_missing_payload(error: &str) -> serde_json::Value {
+    let json = error
+        .strip_prefix(ADAPTER_MISSING_PREFIX)
+        .expect("error must carry the ADAPTER_MISSING: sentinel");
+    serde_json::from_str(json).expect("sentinel payload must be valid JSON")
+}
+
+#[test]
+fn adapter_missing_error_carries_claude_install_metadata() {
+    // The reported failure: the buzz-acp harness is bundled but the npm adapter
+    // is absent. Discovery must hand the frontend the runtime's own install
+    // hint, command, and docs link instead of an opaque subprocess error.
+    let error =
+        adapter_missing_error("claude-agent-acp").expect("claude ships an installable ACP adapter");
+    let payload = adapter_missing_payload(&error);
+
+    assert_eq!(payload["runtimeId"], "claude");
+    assert_eq!(payload["runtimeLabel"], "Claude Code");
+    assert_eq!(
+        payload["commands"],
+        serde_json::json!(["npm install -g @agentclientprotocol/claude-agent-acp"])
+    );
+    assert_eq!(
+        payload["url"],
+        "https://github.com/agentclientprotocol/claude-agent-acp"
+    );
+    let hint = payload["hint"].as_str().expect("hint must be a string");
+    assert!(
+        hint.contains("npm install -g @agentclientprotocol/claude-agent-acp"),
+        "hint must name the install command, got: {hint}"
+    );
+}
+
+#[test]
+fn adapter_missing_error_reads_the_runtime_catalog() {
+    // Codex must yield codex's metadata, not claude's — proving the payload is
+    // read from the runtime catalog rather than hardcoded for one runtime.
+    let error = adapter_missing_error("codex-acp").expect("codex ships an installable ACP adapter");
+    let payload = adapter_missing_payload(&error);
+
+    assert_eq!(payload["runtimeId"], "codex");
+    assert_eq!(
+        payload["commands"],
+        serde_json::json!(["npm install -g @agentclientprotocol/codex-acp"])
+    );
+    assert!(payload["url"]
+        .as_str()
+        .expect("url must be a string")
+        .contains("codex-acp"));
+}
+
+#[test]
+fn adapter_missing_error_is_none_without_an_installable_adapter() {
+    // goose and buzz-agent have no adapter to install, and an unknown command
+    // has no catalog entry at all. All three keep the generic discovery
+    // failure — there is no install hint to offer.
+    assert!(adapter_missing_error("goose").is_none());
+    assert!(adapter_missing_error("buzz-agent").is_none());
+    assert!(adapter_missing_error("some-unknown-binary").is_none());
+}
+
+// ---------------------------------------------------------------------------
 // OpenRouter provider
 // ---------------------------------------------------------------------------
 

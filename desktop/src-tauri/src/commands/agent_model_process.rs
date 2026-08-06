@@ -1,8 +1,8 @@
 use std::{collections::BTreeMap, path::PathBuf};
 
 use crate::managed_agents::{
-    build_buzz_agent_provider_defaults, default_agent_workdir, known_acp_runtime,
-    redact_env_values_in, AgentModelsResponse,
+    adapter_missing_error, build_buzz_agent_provider_defaults, default_agent_workdir,
+    known_acp_runtime, redact_env_values_in, resolve_command, AgentModelsResponse,
 };
 
 use super::agent_models::normalize_agent_models;
@@ -14,6 +14,20 @@ pub(super) async fn run_agent_models_command(
     persisted_model: Option<String>,
     merged_env: BTreeMap<String, String>,
 ) -> Result<AgentModelsResponse, String> {
+    // Both callers reach here only after every provider-API path is exhausted,
+    // so discovery now has to spawn the runtime's ACP adapter. That adapter is
+    // installed separately from the bundled harness: when it is absent, fail
+    // with the typed sentinel carrying the runtime's install hint instead of
+    // spawning anyway and surfacing an opaque subprocess error the dialog
+    // cannot distinguish from any other discovery failure. Callers pass the
+    // resolved path when resolution succeeded, so an unresolvable command here
+    // is exactly the missing-adapter case.
+    if resolve_command(&agent_command).is_none() {
+        if let Some(error) = adapter_missing_error(&agent_command) {
+            return Err(error);
+        }
+    }
+
     // Clone the env map for redaction below — `merged_env` is moved
     // into the spawn_blocking closure and we still need the values to
     // scrub any user-supplied secrets that the child surfaces in stderr.

@@ -108,6 +108,20 @@ export function PersonaModelField({
             data-testid="persona-model-discovery-status"
           >
             {modelDiscoveryStatus.message}
+            {modelDiscoveryStatus.link ? (
+              <>
+                {" "}
+                <a
+                  className="underline underline-offset-2"
+                  data-testid="persona-model-discovery-status-link"
+                  href={modelDiscoveryStatus.link.href}
+                  rel="noreferrer"
+                  target="_blank"
+                >
+                  {modelDiscoveryStatus.link.label}
+                </a>
+              </>
+            ) : null}
           </p>
         ) : null}
       </div>

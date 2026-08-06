@@ -111,3 +111,77 @@ test("non-auth -32000 errors do NOT get the sign-in copy", () => {
   assert.doesNotMatch(status?.message ?? "", /sign-in/i);
   assert.match(status?.message ?? "", /Using built-in model options/);
 });
+
+const CLAUDE_ADAPTER_MISSING = `ADAPTER_MISSING:${JSON.stringify({
+  runtimeId: "claude",
+  runtimeLabel: "Claude Code",
+  hint: "Buzz talks to the Claude Code CLI through an ACP adapter. Install it with: npm install -g @agentclientprotocol/claude-agent-acp.",
+  commands: ["npm install -g @agentclientprotocol/claude-agent-acp"],
+  url: "https://github.com/agentclientprotocol/claude-agent-acp",
+})}`;
+
+test("a missing ACP adapter surfaces the runtime's install hint and link", () => {
+  const status = formatModelDiscoveryErrorStatus(
+    new Error(CLAUDE_ADAPTER_MISSING),
+    "anthropic",
+    "Claude Code",
+  );
+
+  assert.equal(status?.tone, "warning");
+  assert.match(
+    status?.message ?? "",
+    /npm install -g @agentclientprotocol\/claude-agent-acp/,
+  );
+  assert.deepEqual(status?.link, {
+    href: "https://github.com/agentclientprotocol/claude-agent-acp",
+    label: "Installation instructions",
+  });
+  // The whole point: never the catch-all.
+  assert.doesNotMatch(status?.message ?? "", /Using built-in model options/);
+});
+
+test("the adapter hint wins over provider-specific branches", () => {
+  // A missing adapter is a local install problem whatever provider the form
+  // selected — including relay-mesh, which otherwise owns its own branch.
+  const status = formatModelDiscoveryErrorStatus(
+    new Error(CLAUDE_ADAPTER_MISSING),
+    "relay-mesh",
+  );
+
+  assert.match(status?.message ?? "", /ACP adapter/);
+  assert.doesNotMatch(status?.message ?? "", /sharing compute/);
+});
+
+test("an adapter payload without a hint synthesizes one from the command", () => {
+  const status = formatModelDiscoveryErrorStatus(
+    new Error(
+      `ADAPTER_MISSING:${JSON.stringify({
+        runtimeId: "codex",
+        runtimeLabel: "Codex",
+        hint: "",
+        commands: ["npm install -g @agentclientprotocol/codex-acp"],
+        url: "",
+      })}`,
+    ),
+    "openai",
+  );
+
+  assert.equal(status?.tone, "warning");
+  assert.match(status?.message ?? "", /Codex needs an ACP adapter/);
+  assert.match(
+    status?.message ?? "",
+    /npm install -g @agentclientprotocol\/codex-acp/,
+  );
+  assert.equal(status?.link, undefined);
+});
+
+test("a malformed adapter sentinel falls back to the catch-all", () => {
+  const status = formatModelDiscoveryErrorStatus(
+    new Error("ADAPTER_MISSING:{not json"),
+    "anthropic",
+  );
+
+  assert.equal(status?.tone, "warning");
+  assert.match(status?.message ?? "", /Using built-in model options/);
+  assert.equal(status?.link, undefined);
+});

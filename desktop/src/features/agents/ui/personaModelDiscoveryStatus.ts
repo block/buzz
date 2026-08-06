@@ -1,7 +1,76 @@
 export type PersonaModelDiscoveryStatus = {
   message: string;
   tone: "muted" | "warning";
+  /** Optional documentation link rendered beneath the message. */
+  link?: { href: string; label: string };
 };
+
+/**
+ * Sentinel prefix emitted by the Tauri model-discovery commands when a
+ * runtime's ACP adapter binary is not installed. Mirrors
+ * `ADAPTER_MISSING_PREFIX` in `managed_agents/discovery.rs`; the JSON payload
+ * carries that runtime's install hint, commands, and documentation URL so this
+ * module renders actionable guidance without a second copy of the catalog.
+ */
+const ADAPTER_MISSING_PREFIX = "ADAPTER_MISSING:";
+
+type AdapterMissingPayload = {
+  runtimeLabel: string;
+  hint: string;
+  commands: string[];
+  url: string;
+};
+
+function parseAdapterMissingPayload(
+  message: string,
+): AdapterMissingPayload | null {
+  const index = message.indexOf(ADAPTER_MISSING_PREFIX);
+  if (index < 0) {
+    return null;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(message.slice(index + ADAPTER_MISSING_PREFIX.length));
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) {
+    return null;
+  }
+
+  const raw = parsed as Record<string, unknown>;
+  const commands = Array.isArray(raw.commands)
+    ? raw.commands.filter((value): value is string => typeof value === "string")
+    : [];
+  return {
+    runtimeLabel:
+      typeof raw.runtimeLabel === "string" ? raw.runtimeLabel : "This agent",
+    hint: typeof raw.hint === "string" ? raw.hint : "",
+    commands,
+    url: typeof raw.url === "string" ? raw.url : "",
+  };
+}
+
+function adapterMissingStatus(
+  payload: AdapterMissingPayload,
+): PersonaModelDiscoveryStatus {
+  // The catalog hint already embeds the install command verbatim, so it is used
+  // as-is. Runtimes that ship commands but no hint get a synthesized sentence.
+  const message =
+    payload.hint.trim() ||
+    (payload.commands.length > 0
+      ? `${payload.runtimeLabel} needs an ACP adapter before models can load. Install it with: ${payload.commands.join(" && ")}.`
+      : `${payload.runtimeLabel} needs an ACP adapter before models can load.`);
+
+  return {
+    message,
+    tone: "warning",
+    ...(payload.url
+      ? { link: { href: payload.url, label: "Installation instructions" } }
+      : {}),
+  };
+}
 
 function errorMessage(error: unknown): string {
   if (error instanceof Error) {
@@ -47,6 +116,13 @@ export function formatModelDiscoveryErrorStatus(
   agentLabel?: string,
 ): PersonaModelDiscoveryStatus | null {
   const message = errorMessage(error);
+
+  // Checked before every provider branch: a missing adapter is a local install
+  // problem, and its remedy is the same whatever provider the form selected.
+  const adapterMissing = parseAdapterMissingPayload(message);
+  if (adapterMissing) {
+    return adapterMissingStatus(adapterMissing);
+  }
 
   if (provider.trim() === "relay-mesh") {
     if (message.includes("waiting for the current member roster")) {
