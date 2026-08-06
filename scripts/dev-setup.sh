@@ -89,11 +89,18 @@ fail_if_local_redis_blocks_compose() {
   if docker ps --format '{{.Names}}' | grep -qx 'buzz-redis'; then
     return
   fi
+  # Probe the port compose actually publishes rather than a hardcoded 6379:
+  # REDIS_URL is configurable, so a remapped host port leaves a local Redis on
+  # 6379 harmless and setup should not abort on it.
+  local redis_port="${REDIS_URL#*://}"
+  redis_port="${redis_port%%/*}"
+  redis_port="${redis_port##*:}"
+  [[ "${redis_port}" =~ ^[0-9]+$ ]] || redis_port=6379
   local redis_pids
-  redis_pids=$(lsof -nP -iTCP:6379 -sTCP:LISTEN 2>/dev/null | awk 'NR > 1 && $1 == "redis-ser" {print $2}' | sort -u | tr '
+  redis_pids=$(lsof -nP -iTCP:"${redis_port}" -sTCP:LISTEN 2>/dev/null | awk 'NR > 1 && $1 == "redis-ser" {print $2}' | sort -u | tr '
 ' ' ' || true)
   if [[ -n "${redis_pids}" ]]; then
-    error "Local Redis is already listening on port 6379 (pid(s): ${redis_pids}). Stop it before running setup: brew services stop redis"
+    error "Local Redis is already listening on port ${redis_port} (pid(s): ${redis_pids}). Stop it before running setup: brew services stop redis"
     exit 1
   fi
 }
