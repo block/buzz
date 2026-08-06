@@ -1628,6 +1628,13 @@ async fn tokio_main() -> Result<()> {
         return setup_mode::run_setup_listener(config, payload).await;
     }
 
+    // Resolve the outbound mention policy once, with harness environment taking
+    // precedence over persona configuration. Store one canonical pair so the
+    // agent child, MCP subprocesses, and harness broker all receive the same
+    // immutable policy value.
+    let top_level_mention_policy =
+        delivery::normalize_top_level_mention_policy(&mut config.persona_env_vars)?;
+
     tracing::info!("buzz-acp starting: {}", config.summary());
 
     let observer = config
@@ -1659,11 +1666,16 @@ async fn tokio_main() -> Result<()> {
             .filter(|value| !value.is_empty())
             .and_then(|value| buzz_sdk::nip_oa::parse_auth_tag(&value).ok())
             .and_then(|tag| serde_json::to_string(tag.as_slice()).ok());
-        match delivery::DeliveryBroker::start(&config.relay_url, config.keys.clone(), auth_tag_json)
-            .and_then(|broker| {
-                let environment = broker.environment()?;
-                Ok((broker, environment))
-            }) {
+        match delivery::DeliveryBroker::start(
+            &config.relay_url,
+            config.keys.clone(),
+            auth_tag_json,
+            top_level_mention_policy.clone(),
+        )
+        .and_then(|broker| {
+            let environment = broker.environment()?;
+            Ok((broker, environment))
+        }) {
             Ok((broker, environment)) => {
                 config.persona_env_vars.extend(environment);
                 tracing::info!("harness delivery broker enabled for Codex message transport");
@@ -4723,10 +4735,12 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
                 buzz_core::delivery_broker::BROKER_DIR_ENV,
                 buzz_core::delivery_broker::BROKER_CAPABILITY_ENV,
                 buzz_core::delivery_broker::BROKER_RESPONSE_PUBKEY_ENV,
+                buzz_core::delivery_broker::TOP_LEVEL_MENTION_PUBKEYS_ENV,
             ] {
                 if let Some((_, value)) = config
                     .persona_env_vars
                     .iter()
+                    .rev()
                     .find(|(name, _)| name == broker_name)
                 {
                     env.push(EnvVar {
@@ -6478,6 +6492,26 @@ mod build_mcp_servers_tests {
             names.contains(&"BUZZ_PRIVATE_KEY"),
             "missing BUZZ_PRIVATE_KEY; got {names:?}"
         );
+    }
+
+    #[test]
+    fn session_new_mcp_server_forwards_top_level_mention_policy_once() {
+        let mut config = test_config();
+        let policy = nostr::Keys::generate().public_key().to_hex();
+        config.persona_env_vars.push((
+            buzz_core::delivery_broker::TOP_LEVEL_MENTION_PUBKEYS_ENV.into(),
+            policy.clone(),
+        ));
+
+        let servers = build_mcp_servers(&config);
+        let values = servers[0]
+            .env
+            .iter()
+            .filter(|entry| entry.name == buzz_core::delivery_broker::TOP_LEVEL_MENTION_PUBKEYS_ENV)
+            .map(|entry| entry.value.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(values, vec![policy.as_str()]);
     }
 
     #[test]

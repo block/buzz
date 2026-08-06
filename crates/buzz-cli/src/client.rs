@@ -8,6 +8,66 @@ use sha2::{Digest, Sha256};
 
 use crate::error::CliError;
 
+fn configured_top_level_mention_policy() -> Result<Option<String>, CliError> {
+    use buzz_core::delivery_broker::TOP_LEVEL_MENTION_PUBKEYS_ENV;
+
+    match std::env::var(TOP_LEVEL_MENTION_PUBKEYS_ENV) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(CliError::Usage(format!(
+            "{TOP_LEVEL_MENTION_PUBKEYS_ENV} is not valid UTF-8"
+        ))),
+    }
+}
+
+async fn enforce_top_level_mention_policy(
+    client: &BuzzClient,
+    event: &nostr::Event,
+    configured: Option<&str>,
+) -> Result<(), CliError> {
+    use buzz_core::delivery_broker::{
+        evaluate_top_level_mention_policy, validate_mention_policy_reply_parent,
+        MentionPolicyDecision, TOP_LEVEL_MENTION_PUBKEYS_ENV,
+    };
+
+    let Some(configured) = configured else {
+        return Ok(());
+    };
+    let decision = evaluate_top_level_mention_policy(event, configured).map_err(|message| {
+        CliError::Usage(format!("{TOP_LEVEL_MENTION_PUBKEYS_ENV}: {message}"))
+    })?;
+    let MentionPolicyDecision::VerifyReply(context) = decision else {
+        return Ok(());
+    };
+
+    let filter = serde_json::json!({
+        "ids": [context.parent_event_id.clone()],
+        "limit": 1
+    });
+    let raw = client.query(&filter).await?;
+    let parents: Vec<nostr::Event> = serde_json::from_str(&raw).map_err(|error| {
+        CliError::Other(format!(
+            "failed to parse mention-policy reply parent: {error}"
+        ))
+    })?;
+    let mut matching = parents
+        .into_iter()
+        .filter(|parent| parent.id.to_hex() == context.parent_event_id);
+    let parent = matching.next().ok_or_else(|| {
+        CliError::Usage(format!(
+            "{TOP_LEVEL_MENTION_PUBKEYS_ENV}: reply parent {} was not found",
+            context.parent_event_id
+        ))
+    })?;
+    if matching.next().is_some() {
+        return Err(CliError::Usage(format!(
+            "{TOP_LEVEL_MENTION_PUBKEYS_ENV}: relay returned duplicate reply parents"
+        )));
+    }
+    validate_mention_policy_reply_parent(&parent, &context)
+        .map_err(|message| CliError::Usage(format!("{TOP_LEVEL_MENTION_PUBKEYS_ENV}: {message}")))
+}
+
 /// Descriptor returned by the relay after a successful upload.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BlobDescriptor {
@@ -542,6 +602,8 @@ pub struct BuzzClient {
     keys: Keys,
     /// Harness-owned transport used only when explicitly injected by buzz-acp.
     delivery_broker: Option<crate::delivery_broker::DeliveryBrokerClient>,
+    /// Optional exact p-tag policy captured once at client construction.
+    top_level_mention_policy: Option<String>,
     /// Short circuit-breaker window after a direct transport failure. This
     /// avoids repeating a DNS/connect retry budget inside one command while
     /// still probing the direct path again after a bounded cooldown.
@@ -569,6 +631,7 @@ impl BuzzClient {
         auth_tag_json: Option<String>,
     ) -> Result<Self, CliError> {
         let delivery_broker = crate::delivery_broker::DeliveryBrokerClient::from_env()?;
+        let top_level_mention_policy = configured_top_level_mention_policy()?;
         let http = reqwest::Client::builder()
             .timeout(env_duration_secs("BUZZ_TIMEOUT_SECS", 30))
             .connect_timeout(env_duration_secs("BUZZ_CONNECT_TIMEOUT_SECS", 15))
@@ -579,6 +642,7 @@ impl BuzzClient {
             relay_url,
             keys,
             delivery_broker,
+            top_level_mention_policy,
             direct_transport_degraded_until: std::sync::Mutex::new(None),
             auth_tag,
             auth_tag_json,
@@ -1095,6 +1159,14 @@ impl BuzzClient {
     /// Content-addressed uploads are exempt: same bytes ⇒ same hash, so outer
     /// re-run is safe regardless of the failure kind.
     async fn submit_stored_event(&self, event: nostr::Event) -> Result<String, CliError> {
+        if buzz_core::delivery_broker::is_mention_policy_message_kind(event.kind.as_u16()) {
+            enforce_top_level_mention_policy(
+                self,
+                &event,
+                self.top_level_mention_policy.as_deref(),
+            )
+            .await?;
+        }
         if buzz_core::delivery_broker::is_brokered_message_kind(event.kind.as_u16()) {
             if let Some(broker) = &self.delivery_broker {
                 if self.direct_transport_is_degraded() {
@@ -1677,7 +1749,7 @@ fn validate_message_receipt(raw: &str, event: &nostr::Event) -> Result<(), CliEr
 #[cfg(test)]
 mod delivery_contract_tests {
     use super::*;
-    use axum::{routing::post, Json, Router};
+    use axum::{body::Bytes, routing::post, Json, Router};
     use buzz_core::delivery_broker::{
         broker_response_digest, BrokerOperation, BrokerRequest, BrokerResponse,
         BrokerResponseEnvelope, BROKER_RESPONSE_ATTESTATION_KIND,
@@ -1767,6 +1839,165 @@ mod delivery_contract_tests {
         assert!(!is_broker_fallback_error(&CliError::Usage(
             "invalid".into()
         )));
+    }
+
+    #[tokio::test]
+    async fn configured_mention_policy_rejects_before_direct_relay_submission() {
+        let event_posts = Arc::new(AtomicUsize::new(0));
+        let observed_posts = event_posts.clone();
+        let app = Router::new()
+            .route(
+                "/events",
+                post(move || {
+                    let observed_posts = observed_posts.clone();
+                    async move {
+                        observed_posts.fetch_add(1, Ordering::SeqCst);
+                        Json(serde_json::json!({"accepted": true}))
+                    }
+                }),
+            )
+            .route("/query", post(|| async { Json(serde_json::json!([])) }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("relay listener");
+        let relay_url = format!("http://{}", listener.local_addr().expect("listener addr"));
+        let relay_server =
+            tokio::spawn(async move { axum::serve(listener, app).await.expect("relay server") });
+
+        let keys = Keys::generate();
+        let wrong_recipient = Keys::generate().public_key();
+        let required_recipient = Keys::generate().public_key();
+        let event = EventBuilder::new(Kind::Custom(9), "wrong recipient")
+            .tags([Tag::public_key(wrong_recipient)])
+            .sign_with_keys(&keys)
+            .expect("signed message");
+        let mut client = BuzzClient::new(relay_url, keys, None, None).expect("client");
+        client.top_level_mention_policy = Some(required_recipient.to_hex());
+
+        let error = client
+            .submit_stored_event(event)
+            .await
+            .expect_err("policy mismatch must fail closed");
+        relay_server.abort();
+
+        assert!(matches!(error, CliError::Usage(_)));
+        assert_eq!(event_posts.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn configured_mention_policy_allows_matching_direct_submission() {
+        let event_posts = Arc::new(AtomicUsize::new(0));
+        let observed_posts = event_posts.clone();
+        let app = Router::new().route(
+            "/events",
+            post(move |body: Bytes| {
+                let observed_posts = observed_posts.clone();
+                async move {
+                    observed_posts.fetch_add(1, Ordering::SeqCst);
+                    let event: nostr::Event =
+                        serde_json::from_slice(&body).expect("submitted event");
+                    Json(serde_json::json!({
+                        "accepted": true,
+                        "event_id": event.id.to_hex(),
+                        "message": "stored"
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("relay listener");
+        let relay_url = format!("http://{}", listener.local_addr().expect("listener addr"));
+        let relay_server =
+            tokio::spawn(async move { axum::serve(listener, app).await.expect("relay server") });
+
+        let keys = Keys::generate();
+        let required_recipient = Keys::generate().public_key();
+        let event = EventBuilder::new(Kind::Custom(9), "matching recipient")
+            .tags([Tag::public_key(required_recipient)])
+            .sign_with_keys(&keys)
+            .expect("signed message");
+        let mut client = BuzzClient::new(relay_url, keys, None, None).expect("client");
+        client.delivery_broker = None;
+        client.top_level_mention_policy = Some(required_recipient.to_hex());
+
+        client
+            .submit_stored_event(event)
+            .await
+            .expect("matching message is submitted");
+        relay_server.abort();
+
+        assert_eq!(event_posts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn configured_mention_policy_verifies_direct_reply_parent() {
+        let event_posts = Arc::new(AtomicUsize::new(0));
+        let query_posts = Arc::new(AtomicUsize::new(0));
+        let observed_events = event_posts.clone();
+        let observed_queries = query_posts.clone();
+        let channel_id = uuid::Uuid::new_v4().to_string();
+        let parent = EventBuilder::new(Kind::Custom(9), "parent")
+            .tags([Tag::parse(["h", &channel_id]).expect("parent channel")])
+            .sign_with_keys(&Keys::generate())
+            .expect("parent event");
+        let returned_parent = parent.clone();
+        let app = Router::new()
+            .route(
+                "/query",
+                post(move || {
+                    let observed_queries = observed_queries.clone();
+                    let returned_parent = returned_parent.clone();
+                    async move {
+                        observed_queries.fetch_add(1, Ordering::SeqCst);
+                        Json(serde_json::json!([returned_parent]))
+                    }
+                }),
+            )
+            .route(
+                "/events",
+                post(move |body: Bytes| {
+                    let observed_events = observed_events.clone();
+                    async move {
+                        observed_events.fetch_add(1, Ordering::SeqCst);
+                        let event: nostr::Event =
+                            serde_json::from_slice(&body).expect("submitted event");
+                        Json(serde_json::json!({
+                            "accepted": true,
+                            "event_id": event.id.to_hex(),
+                            "message": "stored"
+                        }))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("relay listener");
+        let relay_url = format!("http://{}", listener.local_addr().expect("listener addr"));
+        let relay_server =
+            tokio::spawn(async move { axum::serve(listener, app).await.expect("relay server") });
+
+        let keys = Keys::generate();
+        let required_recipient = Keys::generate().public_key();
+        let reply = EventBuilder::new(Kind::Custom(9), "reply")
+            .tags([
+                Tag::parse(["h", &channel_id]).expect("reply channel"),
+                Tag::parse(["e", &parent.id.to_hex(), "", "reply"]).expect("reply marker"),
+            ])
+            .sign_with_keys(&keys)
+            .expect("signed reply");
+        let mut client = BuzzClient::new(relay_url, keys, None, None).expect("client");
+        client.delivery_broker = None;
+        client.top_level_mention_policy = Some(required_recipient.to_hex());
+
+        client
+            .submit_stored_event(reply)
+            .await
+            .expect("signed same-channel reply is submitted");
+        relay_server.abort();
+
+        assert_eq!(query_posts.load(Ordering::SeqCst), 1);
+        assert_eq!(event_posts.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

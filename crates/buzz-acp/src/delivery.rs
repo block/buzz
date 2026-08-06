@@ -4,10 +4,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use buzz_core::delivery_broker::{
-    broker_response_digest, is_brokered_message_kind, BrokerErrorCode, BrokerOperation,
-    BrokerRequest, BrokerResponse, BrokerResponseEnvelope, BROKER_CAPABILITY_ENV, BROKER_DIR_ENV,
-    BROKER_PROTOCOL_VERSION, BROKER_RESPONSE_ATTESTATION_KIND, BROKER_RESPONSE_PUBKEY_ENV,
-    MAX_BROKER_REQUEST_BYTES, MAX_BROKER_RESPONSE_BYTES, MAX_BROKER_RESULT_BYTES,
+    broker_response_digest, evaluate_top_level_mention_policy, is_brokered_message_kind,
+    is_mention_policy_message_kind, validate_mention_policy_reply_parent,
+    validate_top_level_mention_policy_config, BrokerErrorCode, BrokerOperation, BrokerRequest,
+    BrokerResponse, BrokerResponseEnvelope, MentionPolicyDecision, MentionPolicyReplyContext,
+    BROKER_CAPABILITY_ENV, BROKER_DIR_ENV, BROKER_PROTOCOL_VERSION,
+    BROKER_RESPONSE_ATTESTATION_KIND, BROKER_RESPONSE_PUBKEY_ENV, MAX_BROKER_REQUEST_BYTES,
+    MAX_BROKER_RESPONSE_BYTES, MAX_BROKER_RESULT_BYTES, TOP_LEVEL_MENTION_PUBKEYS_ENV,
 };
 use nostr::{Event, EventBuilder, Keys, Kind};
 use subtle::ConstantTimeEq;
@@ -66,7 +69,12 @@ impl DeliveryBroker {
         relay_url: &str,
         keys: Keys,
         auth_tag_json: Option<String>,
+        top_level_mention_policy: Option<String>,
     ) -> anyhow::Result<Self> {
+        if let Some(configured) = top_level_mention_policy.as_deref() {
+            validate_top_level_mention_policy_config(configured)
+                .map_err(|message| anyhow::anyhow!("{TOP_LEVEL_MENTION_PUBKEYS_ENV}: {message}"))?;
+        }
         // Keep the broker parent outside the agent workspace. The Codex policy
         // receives only `<root>/requests` as an additional writable root, so it
         // cannot rename `processing`, `responses`, or the broker root itself.
@@ -126,7 +134,14 @@ impl DeliveryBroker {
         let task_root = root.path().to_path_buf();
         let task_capability = capability.clone();
         let task = tokio::spawn(async move {
-            run_broker(task_root, task_capability, response_keys, rest).await;
+            run_broker(
+                task_root,
+                task_capability,
+                response_keys,
+                rest,
+                top_level_mention_policy,
+            )
+            .await;
         });
 
         Ok(Self {
@@ -164,7 +179,13 @@ impl Drop for DeliveryBroker {
     }
 }
 
-async fn run_broker(root: PathBuf, capability: String, response_keys: Keys, rest: RestClient) {
+async fn run_broker(
+    root: PathBuf,
+    capability: String,
+    response_keys: Keys,
+    rest: RestClient,
+    top_level_mention_policy: Option<String>,
+) {
     let mut last_cleanup = tokio::time::Instant::now();
     let mut last_lease_refresh = tokio::time::Instant::now();
     let mut jobs = tokio::task::JoinSet::new();
@@ -196,6 +217,7 @@ async fn run_broker(root: PathBuf, capability: String, response_keys: Keys, rest
                     let job_capability = capability.clone();
                     let job_response_keys = response_keys.clone();
                     let job_rest = rest.clone();
+                    let job_mention_policy = top_level_mention_policy.clone();
                     jobs.spawn(async move {
                         handle_claimed_request(
                             &job_root,
@@ -204,6 +226,7 @@ async fn run_broker(root: PathBuf, capability: String, response_keys: Keys, rest
                             &job_capability,
                             &job_response_keys,
                             &job_rest,
+                            job_mention_policy.as_deref(),
                         )
                         .await;
                     });
@@ -430,10 +453,17 @@ async fn handle_claimed_request(
     capability: &str,
     response_keys: &Keys,
     rest: &RestClient,
+    top_level_mention_policy: Option<&str>,
 ) {
     let response = match tokio::time::timeout(
         REQUEST_PROCESSING_TIMEOUT,
-        process_request_file(request_id, &path, capability, rest),
+        process_request_file(
+            request_id,
+            &path,
+            capability,
+            rest,
+            top_level_mention_policy,
+        ),
     )
     .await
     {
@@ -622,6 +652,7 @@ async fn process_request_file(
     path: &Path,
     expected_capability: &str,
     rest: &RestClient,
+    top_level_mention_policy: Option<&str>,
 ) -> BrokerResponse {
     let bytes = match read_bounded_regular_file(path, MAX_BROKER_REQUEST_BYTES) {
         Ok(bytes) => bytes,
@@ -702,7 +733,8 @@ async fn process_request_file(
             }
         }
         BrokerOperation::SubmitStoredMessage { event } => {
-            match submit_verified_message(rest, &event).await {
+            match submit_verified_message_with_policy(rest, &event, top_level_mention_policy).await
+            {
                 Ok(value) => BrokerResponse::success(filename_request_id, value),
                 Err((code, message)) => BrokerResponse::failure(filename_request_id, code, message),
             }
@@ -728,9 +760,18 @@ fn bounded_result_response(request_id: Uuid, value: serde_json::Value) -> Broker
     }
 }
 
+#[cfg(test)]
 async fn submit_verified_message(
     rest: &RestClient,
     event: &Event,
+) -> Result<serde_json::Value, (BrokerErrorCode, String)> {
+    submit_verified_message_with_policy(rest, event, None).await
+}
+
+async fn submit_verified_message_with_policy(
+    rest: &RestClient,
+    event: &Event,
+    top_level_mention_policy: Option<&str>,
 ) -> Result<serde_json::Value, (BrokerErrorCode, String)> {
     let kind = event.kind.as_u16();
     if !is_brokered_message_kind(kind) {
@@ -757,6 +798,18 @@ async fn submit_verified_message(
             format!("event signature verification failed: {error}"),
         )
     })?;
+    if is_mention_policy_message_kind(kind) {
+        if let Some(configured) = top_level_mention_policy {
+            match evaluate_top_level_mention_policy(event, configured)
+                .map_err(|message| (BrokerErrorCode::InvalidRequest, message))?
+            {
+                MentionPolicyDecision::Allow => {}
+                MentionPolicyDecision::VerifyReply(context) => {
+                    verify_mention_policy_reply_parent(rest, &context).await?;
+                }
+            }
+        }
+    }
 
     let expected_id = event.id.to_hex();
     match exact_readback_once(rest, event).await {
@@ -848,6 +901,87 @@ async fn submit_verified_message(
             )),
         )),
     }
+}
+
+async fn verify_mention_policy_reply_parent(
+    rest: &RestClient,
+    context: &MentionPolicyReplyContext,
+) -> Result<(), (BrokerErrorCode, String)> {
+    let filters = [serde_json::json!({
+        "ids": [context.parent_event_id.clone()],
+        "limit": 1
+    })];
+    let value = rest.query_values(&filters).await.map_err(|error| {
+        (
+            BrokerErrorCode::Internal,
+            sanitize_detail(&format!("reply parent query failed: {error}")),
+        )
+    })?;
+    let parents: Vec<Event> = serde_json::from_value(value).map_err(|error| {
+        (
+            BrokerErrorCode::Internal,
+            sanitize_detail(&format!("reply parent response was invalid: {error}")),
+        )
+    })?;
+    let mut matching = parents
+        .into_iter()
+        .filter(|parent| parent.id.to_hex() == context.parent_event_id);
+    let parent = matching.next().ok_or_else(|| {
+        (
+            BrokerErrorCode::InvalidRequest,
+            format!("reply parent {} was not found", context.parent_event_id),
+        )
+    })?;
+    if matching.next().is_some() {
+        return Err((
+            BrokerErrorCode::InvalidRequest,
+            "relay returned duplicate reply parents".into(),
+        ));
+    }
+    validate_mention_policy_reply_parent(&parent, context)
+        .map_err(|message| (BrokerErrorCode::InvalidRequest, message))
+}
+
+pub(crate) fn normalize_top_level_mention_policy(
+    persona_env_vars: &mut Vec<(String, String)>,
+) -> anyhow::Result<Option<String>> {
+    let parent = match std::env::var(TOP_LEVEL_MENTION_PUBKEYS_ENV) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("{TOP_LEVEL_MENTION_PUBKEYS_ENV} is not valid UTF-8")
+        }
+    };
+    normalize_top_level_mention_policy_with_parent(parent, persona_env_vars)
+}
+
+fn normalize_top_level_mention_policy_with_parent(
+    parent: Option<String>,
+    persona_env_vars: &mut Vec<(String, String)>,
+) -> anyhow::Result<Option<String>> {
+    let selected = select_top_level_mention_policy(parent, persona_env_vars);
+    if let Some(configured) = selected.as_deref() {
+        validate_top_level_mention_policy_config(configured)
+            .map_err(|message| anyhow::anyhow!("{TOP_LEVEL_MENTION_PUBKEYS_ENV}: {message}"))?;
+    }
+    persona_env_vars.retain(|(key, _)| key != TOP_LEVEL_MENTION_PUBKEYS_ENV);
+    if let Some(configured) = selected.as_ref() {
+        persona_env_vars.push((TOP_LEVEL_MENTION_PUBKEYS_ENV.into(), configured.clone()));
+    }
+    Ok(selected)
+}
+
+fn select_top_level_mention_policy(
+    parent: Option<String>,
+    persona_env_vars: &[(String, String)],
+) -> Option<String> {
+    parent.or_else(|| {
+        persona_env_vars
+            .iter()
+            .rev()
+            .find(|(key, _)| key == TOP_LEVEL_MENTION_PUBKEYS_ENV)
+            .map(|(_, value)| value.clone())
+    })
 }
 
 async fn verify_exact_readback(rest: &RestClient, expected: &Event) -> Result<(), String> {
@@ -1099,13 +1233,33 @@ mod tests {
         submit_count: Arc<AtomicUsize>,
     }
 
-    async fn test_query(State(state): State<TestRelayState>) -> Json<serde_json::Value> {
+    async fn test_query(
+        State(state): State<TestRelayState>,
+        body: Bytes,
+    ) -> Json<serde_json::Value> {
+        let filters: serde_json::Value =
+            serde_json::from_slice(&body).expect("query filter payload");
+        let requested_ids = filters
+            .as_array()
+            .and_then(|filters| filters.first())
+            .and_then(|filter| filter.get("ids"))
+            .and_then(serde_json::Value::as_array)
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()
+            });
         let events = state
             .stored
             .lock()
             .expect("stored lock")
             .clone()
             .into_iter()
+            .filter(|event| {
+                requested_ids
+                    .as_ref()
+                    .is_none_or(|ids| ids.contains(&event.id.to_hex().as_str()))
+            })
             .collect::<Vec<_>>();
         Json(serde_json::to_value(events).expect("events json"))
     }
@@ -1207,6 +1361,183 @@ mod tests {
         assert_eq!(kind_error.0, BrokerErrorCode::Unsupported);
         assert_eq!(signer_error.0, BrokerErrorCode::Unauthorized);
         assert_eq!(signature_error.0, BrokerErrorCode::InvalidRequest);
+    }
+
+    #[tokio::test]
+    async fn configured_mention_policy_rejects_before_broker_relay_submission() {
+        let keys = Keys::generate();
+        let required_recipient = Keys::generate().public_key();
+        let wrong_recipient = Keys::generate().public_key();
+        let event = EventBuilder::new(Kind::Custom(9), "wrong recipient")
+            .tags([nostr::Tag::public_key(wrong_recipient)])
+            .sign_with_keys(&keys)
+            .expect("event");
+        let (mut rest, submit_count) = spawn_test_relay(
+            None,
+            true,
+            serde_json::json!({
+                "accepted": true,
+                "event_id": event.id.to_hex(),
+                "message": "stored"
+            }),
+        )
+        .await;
+        rest.keys = keys;
+
+        let error =
+            submit_verified_message_with_policy(&rest, &event, Some(&required_recipient.to_hex()))
+                .await
+                .expect_err("policy mismatch must fail closed");
+
+        assert_eq!(error.0, BrokerErrorCode::InvalidRequest);
+        assert_eq!(submit_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn configured_mention_policy_verifies_unmentioned_reply_parent() {
+        let keys = Keys::generate();
+        let parent_keys = Keys::generate();
+        let required_recipient = Keys::generate().public_key();
+        let channel_id = Uuid::new_v4().to_string();
+        let parent = EventBuilder::new(Kind::Custom(9), "parent")
+            .tags([nostr::Tag::parse(["h", &channel_id]).expect("parent channel")])
+            .sign_with_keys(&parent_keys)
+            .expect("parent event");
+        let reply = EventBuilder::new(Kind::Custom(9), "reply")
+            .tags([
+                nostr::Tag::parse(["h", &channel_id]).expect("reply channel"),
+                nostr::Tag::parse(["e", &parent.id.to_hex(), "", "reply"]).expect("reply marker"),
+            ])
+            .sign_with_keys(&keys)
+            .expect("reply event");
+        let (mut rest, submit_count) = spawn_test_relay(
+            Some(parent),
+            true,
+            serde_json::json!({
+                "accepted": true,
+                "event_id": reply.id.to_hex(),
+                "message": "stored"
+            }),
+        )
+        .await;
+        rest.keys = keys;
+
+        let result =
+            submit_verified_message_with_policy(&rest, &reply, Some(&required_recipient.to_hex()))
+                .await
+                .expect("signed same-channel reply");
+
+        assert_eq!(result["event_id"], reply.id.to_hex());
+        assert_eq!(result["readback_verified"], true);
+        assert_eq!(submit_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn configured_mention_policy_rejects_forged_or_cross_channel_reply() {
+        let keys = Keys::generate();
+        let required_recipient = Keys::generate().public_key();
+        let parent_channel = Uuid::new_v4().to_string();
+        let reply_channel = Uuid::new_v4().to_string();
+        let parent = EventBuilder::new(Kind::Custom(9), "parent")
+            .tags([nostr::Tag::parse(["h", &parent_channel]).expect("parent channel")])
+            .sign_with_keys(&Keys::generate())
+            .expect("parent event");
+        let reply = EventBuilder::new(Kind::Custom(9), "reply")
+            .tags([
+                nostr::Tag::parse(["h", &reply_channel]).expect("reply channel"),
+                nostr::Tag::parse(["e", &parent.id.to_hex(), "", "reply"]).expect("reply marker"),
+            ])
+            .sign_with_keys(&keys)
+            .expect("reply event");
+        let (mut rest, submit_count) = spawn_test_relay(
+            Some(parent),
+            true,
+            serde_json::json!({"accepted": true, "event_id": reply.id.to_hex()}),
+        )
+        .await;
+        rest.keys = keys;
+
+        let error =
+            submit_verified_message_with_policy(&rest, &reply, Some(&required_recipient.to_hex()))
+                .await
+                .expect_err("cross-channel reply must fail closed");
+
+        assert_eq!(error.0, BrokerErrorCode::InvalidRequest);
+        assert_eq!(submit_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn configured_mention_policy_does_not_block_edit_payloads() {
+        let keys = Keys::generate();
+        let required_recipient = Keys::generate().public_key();
+        let event = EventBuilder::new(Kind::Custom(40003), "edited")
+            .tags([])
+            .sign_with_keys(&keys)
+            .expect("edit event");
+        let (mut rest, submit_count) = spawn_test_relay(
+            None,
+            true,
+            serde_json::json!({
+                "accepted": true,
+                "event_id": event.id.to_hex(),
+                "message": "stored"
+            }),
+        )
+        .await;
+        rest.keys = keys;
+
+        submit_verified_message_with_policy(&rest, &event, Some(&required_recipient.to_hex()))
+            .await
+            .expect("edit remains deliverable");
+
+        assert_eq!(submit_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn mention_policy_resolution_uses_parent_then_last_persona_value() {
+        let first = Keys::generate().public_key().to_hex();
+        let last = Keys::generate().public_key().to_hex();
+        let parent = Keys::generate().public_key().to_hex();
+        let persona = vec![
+            (TOP_LEVEL_MENTION_PUBKEYS_ENV.into(), first),
+            ("UNRELATED".into(), "value".into()),
+            (TOP_LEVEL_MENTION_PUBKEYS_ENV.into(), last.clone()),
+        ];
+
+        assert_eq!(
+            select_top_level_mention_policy(Some(parent.clone()), &persona),
+            Some(parent)
+        );
+        assert_eq!(select_top_level_mention_policy(None, &persona), Some(last));
+    }
+
+    #[test]
+    fn mention_policy_normalization_collapses_duplicates_and_validates() {
+        let first = Keys::generate().public_key().to_hex();
+        let selected = Keys::generate().public_key().to_hex();
+        let mut persona = vec![
+            (TOP_LEVEL_MENTION_PUBKEYS_ENV.into(), first),
+            ("UNRELATED".into(), "value".into()),
+            (TOP_LEVEL_MENTION_PUBKEYS_ENV.into(), selected.clone()),
+        ];
+
+        let result = normalize_top_level_mention_policy_with_parent(None, &mut persona)
+            .expect("valid policy");
+
+        assert_eq!(result, Some(selected.clone()));
+        let normalized = persona
+            .iter()
+            .filter(|(key, _)| key == TOP_LEVEL_MENTION_PUBKEYS_ENV)
+            .map(|(_, value)| value.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            normalized,
+            vec![selected.as_str()],
+            "normalization must leave one exact policy value"
+        );
+
+        let mut invalid = vec![(TOP_LEVEL_MENTION_PUBKEYS_ENV.into(), "invalid".into())];
+        assert!(normalize_top_level_mention_policy_with_parent(None, &mut invalid).is_err());
     }
 
     #[tokio::test]
