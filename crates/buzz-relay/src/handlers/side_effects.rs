@@ -1,5 +1,6 @@
 //! NIP-29 and NIP-25 side-effect handlers.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use nostr::{Event, EventBuilder, Kind, Tag};
@@ -3043,14 +3044,56 @@ pub async fn publish_nip43_member_removed(
     publish_nip43_delta(tenant, state, 8001, target_pubkey_hex, "member-removed").await
 }
 
-/// Reconcile channels that exist in the DB but don't have kind:39000 events.
+fn p_tag_pubkeys(event: &Event) -> BTreeSet<String> {
+    event
+        .tags
+        .iter()
+        .filter_map(|tag| {
+            let parts = tag.as_slice();
+            if parts.len() >= 2 && parts[0] == "p" {
+                Some(parts[1].to_ascii_lowercase())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn discovery_event_for_kind(events: &[StoredEvent], kind: u32) -> Option<&Event> {
+    events
+        .iter()
+        .find(|event| event_kind_u32(&event.event) == kind)
+        .map(|event| &event.event)
+}
+
+fn discovery_event_has_exact_p_tags(event: Option<&Event>, expected: &BTreeSet<String>) -> bool {
+    event.is_some_and(|event| p_tag_pubkeys(event) == *expected)
+}
+
+fn discovery_events_are_complete(
+    events: &[StoredEvent],
+    admin_pubkeys: &BTreeSet<String>,
+    member_pubkeys: &BTreeSet<String>,
+) -> bool {
+    discovery_event_for_kind(events, KIND_NIP29_GROUP_METADATA).is_some()
+        && discovery_event_has_exact_p_tags(
+            discovery_event_for_kind(events, KIND_NIP29_GROUP_ADMINS),
+            admin_pubkeys,
+        )
+        && discovery_event_has_exact_p_tags(
+            discovery_event_for_kind(events, KIND_NIP29_GROUP_MEMBERS),
+            member_pubkeys,
+        )
+}
+
+/// Reconcile channels that exist in the DB but don't have complete discovery events.
 ///
 /// This handles the case where channels were created via direct SQL inserts
-/// (e.g. test seed scripts) rather than through the Nostr event pipeline.
-/// Emits kind:39000 (metadata) and kind:39002 (members) for each channel
-/// that is missing its discovery events.
+/// (e.g. test seed scripts) rather than through the Nostr event pipeline, and
+/// repairs partial historical discovery heads whose 39001/39002 events are
+/// missing canonical member `p` tags.
 ///
-/// Idempotent: checks for existing kind:39000 events before emitting.
+/// Idempotent: checks the current 39000/39001/39002 heads before emitting.
 pub async fn reconcile_channel_events(
     tenant: &TenantContext,
     state: &Arc<AppState>,
@@ -3064,14 +3107,17 @@ pub async fn reconcile_channel_events(
 
     let mut reconciled = 0u32;
     for channel in &channels {
-        // Check if kind:39000 event already exists for this channel.
         let channel_id_str = channel.id.to_string();
-        let existing = match state
+        let discovery_events = match state
             .db
             .query_events(&EventQuery {
-                kinds: Some(vec![39000]),
+                kinds: Some(vec![
+                    KIND_NIP29_GROUP_METADATA as i32,
+                    KIND_NIP29_GROUP_ADMINS as i32,
+                    KIND_NIP29_GROUP_MEMBERS as i32,
+                ]),
                 d_tag: Some(channel_id_str.clone()),
-                limit: Some(1),
+                limit: Some(10),
                 ..EventQuery::for_community(tenant.community())
             })
             .await
@@ -3087,8 +3133,28 @@ pub async fn reconcile_channel_events(
             }
         };
 
-        if existing.is_empty() {
-            // No discovery event — emit one.
+        let members = match state.db.get_members(tenant.community(), channel.id).await {
+            Ok(members) => members,
+            Err(e) => {
+                tracing::warn!(
+                    channel_id = %channel.id,
+                    error = %e,
+                    "reconcile: failed to query channel members"
+                );
+                continue;
+            }
+        };
+        let admin_pubkeys: BTreeSet<String> = members
+            .iter()
+            .filter(|member| member.role == "owner" || member.role == "admin")
+            .map(|member| hex::encode(&member.pubkey))
+            .collect();
+        let member_pubkeys: BTreeSet<String> = members
+            .iter()
+            .map(|member| hex::encode(&member.pubkey))
+            .collect();
+
+        if !discovery_events_are_complete(&discovery_events, &admin_pubkeys, &member_pubkeys) {
             if let Err(e) = emit_group_discovery_events(tenant, state, channel.id).await {
                 tracing::warn!(
                     channel_id = %channel.id,
@@ -3372,6 +3438,106 @@ fn topic_for_subscription(channel_id: Option<Uuid>) -> EventTopic {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stored_discovery_event(kind: u32, tags: Vec<Tag>) -> StoredEvent {
+        let event = EventBuilder::new(Kind::Custom(kind as u16), "")
+            .tags(tags)
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign discovery test event");
+        StoredEvent::with_received_at(event, chrono::Utc::now(), Some(Uuid::new_v4()), true)
+    }
+
+    #[test]
+    fn discovery_completeness_requires_owner_self_p_tags() {
+        let channel_id = Uuid::new_v4().to_string();
+        let owner = "a".repeat(64);
+        let metadata = stored_discovery_event(
+            KIND_NIP29_GROUP_METADATA,
+            vec![Tag::parse(["d", &channel_id]).expect("d tag")],
+        );
+        let admins = stored_discovery_event(
+            KIND_NIP29_GROUP_ADMINS,
+            vec![
+                Tag::parse(["d", &channel_id]).expect("d tag"),
+                Tag::parse(["p", &owner, "owner"]).expect("owner p tag"),
+            ],
+        );
+        let members = stored_discovery_event(
+            KIND_NIP29_GROUP_MEMBERS,
+            vec![
+                Tag::parse(["d", &channel_id]).expect("d tag"),
+                Tag::parse(["p", &owner, "", "owner"]).expect("member p tag"),
+            ],
+        );
+
+        let expected = BTreeSet::from([owner]);
+        assert!(discovery_events_are_complete(
+            &[metadata, admins, members],
+            &expected,
+            &expected
+        ));
+    }
+
+    #[test]
+    fn discovery_completeness_rejects_missing_member_p_tags() {
+        let channel_id = Uuid::new_v4().to_string();
+        let owner = "b".repeat(64);
+        let metadata = stored_discovery_event(
+            KIND_NIP29_GROUP_METADATA,
+            vec![Tag::parse(["d", &channel_id]).expect("d tag")],
+        );
+        let admins = stored_discovery_event(
+            KIND_NIP29_GROUP_ADMINS,
+            vec![
+                Tag::parse(["d", &channel_id]).expect("d tag"),
+                Tag::parse(["p", &owner, "owner"]).expect("owner p tag"),
+            ],
+        );
+        let members_without_p = stored_discovery_event(
+            KIND_NIP29_GROUP_MEMBERS,
+            vec![Tag::parse(["d", &channel_id]).expect("d tag")],
+        );
+
+        let expected = BTreeSet::from([owner]);
+        assert!(!discovery_events_are_complete(
+            &[metadata, admins, members_without_p],
+            &expected,
+            &expected
+        ));
+    }
+
+    #[test]
+    fn discovery_completeness_rejects_stale_extra_member_p_tags() {
+        let channel_id = Uuid::new_v4().to_string();
+        let owner = "c".repeat(64);
+        let removed = "d".repeat(64);
+        let metadata = stored_discovery_event(
+            KIND_NIP29_GROUP_METADATA,
+            vec![Tag::parse(["d", &channel_id]).expect("d tag")],
+        );
+        let admins = stored_discovery_event(
+            KIND_NIP29_GROUP_ADMINS,
+            vec![
+                Tag::parse(["d", &channel_id]).expect("d tag"),
+                Tag::parse(["p", &owner, "owner"]).expect("owner p tag"),
+            ],
+        );
+        let members = stored_discovery_event(
+            KIND_NIP29_GROUP_MEMBERS,
+            vec![
+                Tag::parse(["d", &channel_id]).expect("d tag"),
+                Tag::parse(["p", &owner, "", "owner"]).expect("owner p tag"),
+                Tag::parse(["p", &removed, "", "member"]).expect("removed p tag"),
+            ],
+        );
+
+        let expected = BTreeSet::from([owner]);
+        assert!(!discovery_events_are_complete(
+            &[metadata, admins, members],
+            &expected,
+            &expected
+        ));
+    }
 
     #[test]
     fn delete_tombstone_omits_absent_moderation_metadata() {
