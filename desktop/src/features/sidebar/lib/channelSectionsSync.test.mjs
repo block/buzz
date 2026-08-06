@@ -13,205 +13,8 @@ function makeStore(overrides = {}) {
   };
 }
 
-// ─── destroy() must cancel pending publish, not flush ─────────────────────────
+// ─── Shared test helpers ───────────────────────────────────────────────────────
 
-// Regression guard for the community-switch cross-relay publish vector:
-// edit sections in relay A → destroy() is called (relayUrl dep change) →
-// no publish should fire. The scoped localStorage write is durable; when the
-// user returns to relay A the seed-publish path handles it.
-test("destroy: cancels pending publish without flushing to the relay", () => {
-  const publishCalls = [];
-  mock.method(relayClient, "fetchEvents", () => Promise.resolve([]));
-  mock.method(relayClient, "publishEvent", (...args) => {
-    publishCalls.push(args);
-    return Promise.resolve();
-  });
-
-  // Simulate the timer scheduler with a manual clock so we can advance it.
-  let timerCallback = null;
-  const originalSetTimeout = globalThis.window?.setTimeout;
-  const originalClearTimeout = globalThis.window?.clearTimeout;
-
-  // Inject a fake window.setTimeout/clearTimeout if needed.
-  const fakeTimers = [];
-  let nextId = 1;
-  if (typeof globalThis.window === "undefined") {
-    globalThis.window = {};
-  }
-  globalThis.window.setTimeout = (fn, _ms) => {
-    const id = nextId++;
-    fakeTimers.push({ id, fn });
-    timerCallback = fn;
-    return id;
-  };
-  globalThis.window.clearTimeout = (id) => {
-    const idx = fakeTimers.findIndex((t) => t.id === id);
-    if (idx !== -1) {
-      fakeTimers.splice(idx, 1);
-      timerCallback = null;
-    }
-  };
-
-  try {
-    const manager = new ChannelSectionSyncManager("pk-test", "wss://r.test");
-    const store = makeStore({
-      sections: [{ id: "s1", name: "Work", order: 0 }],
-    });
-
-    // Queue a publish — this sets the debounce timer.
-    manager.publishSections(store);
-    assert.ok(timerCallback !== null, "debounce timer should be set");
-
-    // Destroy before the debounce fires — simulates community switch.
-    manager.destroy();
-
-    // Timer must be cleared and no publish should fire now.
-    assert.ok(
-      timerCallback === null,
-      "debounce timer should be cleared on destroy",
-    );
-
-    // Advance time by invoking the callback that was cleared — it shouldn't exist.
-    // If clearTimeout didn't work, try firing whatever was captured before destroy.
-    // (There's nothing to fire after a correct destroy.)
-    assert.equal(
-      publishCalls.length,
-      0,
-      "no publish event should have been sent after destroy",
-    );
-  } finally {
-    // Restore timer functions.
-    if (originalSetTimeout !== undefined) {
-      globalThis.window.setTimeout = originalSetTimeout;
-    }
-    if (originalClearTimeout !== undefined) {
-      globalThis.window.clearTimeout = originalClearTimeout;
-    }
-    mock.reset();
-  }
-});
-
-// Regression guard for the timer-fired race: debounce fires → doPublish starts
-// awaiting fetchOwnBlobBeforePublish → destroy() is called (relayUrl dep
-// change) → publishEvent must never be called even though the timer already
-// fired and cleared itself before destroy() ran.
-test("destroy: aborts in-flight doPublish after fetchOwnBlobBeforePublish resolves", async () => {
-  // fetchEvents is held until we release it — simulates the latency window.
-  let releaseFetch = null;
-  const publishCalls = [];
-
-  mock.method(relayClient, "fetchEvents", () => {
-    return new Promise((resolve) => {
-      // resolve with empty so fetchOwnBlobBeforePublish returns the local store
-      releaseFetch = () => resolve([]);
-    });
-  });
-  mock.method(relayClient, "publishEvent", (...args) => {
-    publishCalls.push(args);
-    return Promise.resolve();
-  });
-
-  if (typeof globalThis.window === "undefined") {
-    globalThis.window = {};
-  }
-  let capturedCallback = null;
-  let nextId = 1;
-  const origSetTimeout = globalThis.window.setTimeout;
-  const origClearTimeout = globalThis.window.clearTimeout;
-  globalThis.window.setTimeout = (fn, _ms) => {
-    capturedCallback = fn;
-    return nextId++;
-  };
-  globalThis.window.clearTimeout = (_id) => {
-    capturedCallback = null;
-  };
-
-  try {
-    const manager = new ChannelSectionSyncManager("pk-race", "wss://r.test");
-    const store = makeStore({
-      sections: [{ id: "s1", name: "Work", order: 0 }],
-    });
-
-    // Queue the publish — captures the debounce callback.
-    manager.publishSections(store);
-    assert.ok(capturedCallback !== null, "debounce timer should be set");
-
-    // Fire the debounce manually — this starts doPublish() and nulls
-    // debounceTimer inside publishSections' callback, leaving the async
-    // doPublish running and awaiting fetchOwnBlobBeforePublish.
-    const timerFn = capturedCallback;
-    capturedCallback = null; // timer cleared itself inside the callback
-    timerFn();
-
-    // Now destroy() — debounceTimer is already null (timer fired), so only
-    // the destroyed flag can stop doPublish.
-    manager.destroy();
-
-    // Release the held fetchEvents — fetchOwnBlobBeforePublish resolves with
-    // the local store, then doPublish should check destroyed and abort.
-    releaseFetch();
-
-    // Drain microtasks so doPublish fully runs through to its abort point.
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    assert.equal(
-      publishCalls.length,
-      0,
-      "publishEvent must not be called after destroy() even when timer already fired",
-    );
-  } finally {
-    globalThis.window.setTimeout = origSetTimeout;
-    globalThis.window.clearTimeout = origClearTimeout;
-    mock.reset();
-  }
-});
-
-test("destroy: is safe to call with no pending publish", () => {
-  const manager = new ChannelSectionSyncManager("pk-no-pending", "wss://r.test");
-  // Should not throw even with nothing queued.
-  assert.doesNotThrow(() => manager.destroy());
-});
-
-test("destroy: cancelPendingPublish clears pendingStore", () => {
-  let timerCallback = null;
-  let nextId = 1;
-  if (typeof globalThis.window === "undefined") {
-    globalThis.window = {};
-  }
-  const orig = globalThis.window.setTimeout;
-  const origClear = globalThis.window.clearTimeout;
-  globalThis.window.setTimeout = (fn, _ms) => {
-    timerCallback = fn;
-    return nextId++;
-  };
-  globalThis.window.clearTimeout = (_id) => {
-    timerCallback = null;
-  };
-
-  try {
-    const manager = new ChannelSectionSyncManager("pk-pending-null", "wss://r.test");
-    const store = makeStore({
-      sections: [{ id: "s1", name: "Test", order: 0 }],
-    });
-    manager.publishSections(store);
-    assert.deepEqual(manager.getPendingStore(), store);
-
-    manager.destroy();
-    assert.equal(
-      manager.getPendingStore(),
-      null,
-      "pendingStore must be null after destroy",
-    );
-    assert.ok(timerCallback === null, "timer must be cleared after destroy");
-  } finally {
-    globalThis.window.setTimeout = orig;
-    globalThis.window.clearTimeout = origClear;
-  }
-});
-
-// ─── Boot seed-publish guard (the revert-fix regression suite) ────────────────
-
-// Helper: build a minimal fake window with controllable localStorage and timers.
 function makeFakeWindow() {
   const storage = new Map();
   const ls = {
@@ -222,7 +25,7 @@ function makeFakeWindow() {
   };
   let timerCallback = null;
   let nextTimerId = 100;
-  const fakeWindow = {
+  return {
     localStorage: ls,
     setTimeout: (fn, _ms) => {
       timerCallback = fn;
@@ -238,155 +41,147 @@ function makeFakeWindow() {
         fn();
       }
     },
+    _hasTimer: () => timerCallback !== null,
   };
-  return fakeWindow;
 }
 
 function installFakeWindow(fw) {
-  const orig = {};
-  for (const key of ["localStorage", "setTimeout", "clearTimeout"]) {
-    orig[key] = globalThis.window?.[key];
-  }
   if (typeof globalThis.window === "undefined") globalThis.window = {};
+  const origLs = globalThis.window.localStorage;
+  const origSt = globalThis.window.setTimeout;
+  const origCt = globalThis.window.clearTimeout;
   globalThis.window.localStorage = fw.localStorage;
   globalThis.window.setTimeout = fw.setTimeout;
   globalThis.window.clearTimeout = fw.clearTimeout;
   return () => {
-    for (const key of ["localStorage", "setTimeout", "clearTimeout"]) {
-      if (orig[key] !== undefined) {
-        globalThis.window[key] = orig[key];
-      }
-    }
+    if (origLs !== undefined) globalThis.window.localStorage = origLs;
+    if (origSt !== undefined) globalThis.window.setTimeout = origSt;
+    if (origCt !== undefined) globalThis.window.clearTimeout = origCt;
   };
 }
 
 function makeSectionsStore(sections = []) {
-  return {
-    version: 1,
-    sections,
-    assignments: {},
-  };
+  return { version: 1, sections, assignments: {} };
 }
 
-// Watermark key format: buzz-sync-watermark.v1:<blobType>:<pubkey>:<encodedRelay>
-// Relay is normalised (lowercase, no trailing slash) before encoding.
 const RELAY = "wss://r.test";
 const RELAY_KEY = encodeURIComponent(RELAY);
 
-// 1. fetch failed (error/timeout) + local non-empty → zero publish calls
-// Mutation test: removing the `failed` guard causes bootstrap to call publishSections.
-test("revert-fix: fetch failed (error) does not trigger seed-publish via bootstrap", async () => {
+// ─── destroy() must cancel pending publish, not flush ─────────────────────────
+
+// Regression guard for the community-switch cross-relay publish vector:
+// edit sections in relay A → destroy() is called (relayUrl dep change) →
+// no publish should fire.
+test("destroy: cancels pending publish without flushing to the relay", () => {
+  mock.method(relayClient, "fetchEvents", () => Promise.resolve([]));
   const publishCalls = [];
-  mock.method(relayClient, "fetchEvents", () =>
-    Promise.reject(new Error("relay timeout")),
-  );
   mock.method(relayClient, "publishEvent", (...args) => {
     publishCalls.push(args);
     return Promise.resolve();
   });
+  const fw = makeFakeWindow();
+  const restore = installFakeWindow(fw);
+  try {
+    const manager = new ChannelSectionSyncManager("pk-test", RELAY);
+    manager.publishSections(makeStore({ sections: [{ id: "s1", name: "Work", order: 0 }] }));
+    assert.ok(fw._hasTimer(), "debounce timer should be set");
+    manager.destroy();
+    assert.ok(!fw._hasTimer(), "debounce timer should be cleared on destroy");
+    assert.equal(publishCalls.length, 0);
+    assert.equal(manager.getPendingStore(), null);
+  } finally {
+    restore();
+    mock.reset();
+  }
+});
 
+// Regression guard for the timer-fired race: debounce fires → doPublish awaits
+// fetchOwnBlobBeforePublish → destroy() called → publishEvent must not fire.
+test("destroy: aborts in-flight doPublish after fetchOwnBlobBeforePublish resolves", async () => {
+  let releaseFetch = null;
+  const publishCalls = [];
+  mock.method(relayClient, "fetchEvents", () => new Promise((res) => { releaseFetch = () => res([]); }));
+  mock.method(relayClient, "publishEvent", (...args) => { publishCalls.push(args); return Promise.resolve(); });
+  const fw = makeFakeWindow();
+  const restore = installFakeWindow(fw);
+  try {
+    const manager = new ChannelSectionSyncManager("pk-race", RELAY);
+    manager.publishSections(makeStore({ sections: [{ id: "s1", name: "Work", order: 0 }] }));
+    fw._fireTimer(); // starts doPublish, which is now awaiting fetchOwnBlobBeforePublish
+    manager.destroy();
+    releaseFetch();
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(publishCalls.length, 0, "publishEvent must not fire after destroy");
+  } finally {
+    restore();
+    mock.reset();
+  }
+});
+
+test("destroy: is safe to call with no pending publish", () => {
+  const fw = makeFakeWindow();
+  const restore = installFakeWindow(fw);
+  try {
+    const manager = new ChannelSectionSyncManager("pk-no-pending", RELAY);
+    assert.doesNotThrow(() => manager.destroy());
+  } finally {
+    restore();
+  }
+});
+
+// ─── Boot seed-publish guard (the revert-fix regression suite) ────────────────
+
+// Bootstrap wiring tests (1-3): drive the production bootstrap() path so that
+// mutations to the failed/absent+head/first-sync branches fail here.
+// Policy logic is tested in sidebarSyncWatermark.test.mjs.
+
+// 1. fetch failed → hold, pendingStore null (mutation: remove failed guard → seed queued)
+test("revert-fix: fetch failed (error) does not trigger seed-publish via bootstrap", async () => {
+  mock.method(relayClient, "fetchEvents", () => Promise.reject(new Error("relay timeout")));
+  mock.method(relayClient, "publishEvent", () => Promise.resolve());
   const fw = makeFakeWindow();
   const restore = installFakeWindow(fw);
   try {
     const manager = new ChannelSectionSyncManager("pk-fail", RELAY);
-    const local = makeSectionsStore([{ id: "s1", name: "Work", order: 0 }]);
-    const result = await manager.bootstrap(local);
-    assert.equal(
-      result.action,
-      "hold",
-      "bootstrap must return hold on failed fetch",
-    );
-    assert.equal(
-      manager.getPendingStore(),
-      null,
-      "pendingStore must be null after failed fetch — no seed was queued",
-    );
-    assert.equal(publishCalls.length, 0, "no publish after failed fetch");
+    const result = await manager.bootstrap(makeSectionsStore([{ id: "s1", name: "Work", order: 0 }]));
+    assert.equal(result.action, "hold");
+    assert.equal(manager.getPendingStore(), null);
   } finally {
     restore();
     mock.reset();
   }
 });
 
-// 2. fetch absent + persisted head > 0 → zero publish calls (the dev-build stale-copy case)
-// Mutation test: setting watermark to 0 in localStorage causes bootstrap to seed.
+// 2. absent + prior watermark → hold, pendingStore null (mutation: clear watermark → seed queued)
 test("revert-fix: absent fetch with prior watermark blocks seed-publish via bootstrap", async () => {
-  const publishCalls = [];
   mock.method(relayClient, "fetchEvents", () => Promise.resolve([]));
-  mock.method(relayClient, "publishEvent", (...args) => {
-    publishCalls.push(args);
-    return Promise.resolve();
-  });
-
+  mock.method(relayClient, "publishEvent", () => Promise.resolve());
   const fw = makeFakeWindow();
-  // Pre-seed a watermark (simulates a prior session that had seen a blob).
-  fw.localStorage.setItem(
-    `buzz-sync-watermark.v1:channel-sections:pk-stale:${RELAY_KEY}`,
-    "1700000000",
-  );
+  fw.localStorage.setItem(`buzz-sync-watermark.v1:channel-sections:pk-stale:${RELAY_KEY}`, "1700000000");
   const restore = installFakeWindow(fw);
   try {
     const manager = new ChannelSectionSyncManager("pk-stale", RELAY);
-    assert.ok(
-      manager.getPersistedWatermark() > 0,
-      "manager must read watermark from localStorage at construction",
-    );
-    const local = makeSectionsStore([{ id: "s1", name: "Work", order: 0 }]);
-    const result = await manager.bootstrap(local);
-    // bootstrap calls fetchRemoteSections → absent → watermark > 0 → hold
-    assert.equal(
-      result.action,
-      "hold",
-      "bootstrap must return hold when watermark > 0",
-    );
-    assert.equal(
-      manager.getPendingStore(),
-      null,
-      "pendingStore must be null when watermark > 0 — no seed was queued",
-    );
-    assert.equal(
-      publishCalls.length,
-      0,
-      "watermark > 0 must block seed-publish even on absent fetch",
-    );
+    assert.ok(manager.getPersistedWatermark() > 0);
+    const result = await manager.bootstrap(makeSectionsStore([{ id: "s1", name: "Work", order: 0 }]));
+    assert.equal(result.action, "hold");
+    assert.equal(manager.getPendingStore(), null);
   } finally {
     restore();
     mock.reset();
   }
 });
 
-// 3. fetch absent + head 0 + local non-empty → seed-publish fires (first-sync preserved)
-// Mutation test: removing the absent+head-0 seed call prevents publishEvent from being observed.
-test("revert-fix: absent fetch with zero watermark allows seed-publish via bootstrap", async () => {
-  const publishEventCalls = [];
+// 3. absent + zero watermark + non-empty → seed queued (mutation: remove seed call → pendingStore null)
+test("revert-fix: absent fetch with zero watermark seeds via bootstrap (first-sync preserved)", async () => {
   mock.method(relayClient, "fetchEvents", () => Promise.resolve([]));
-  mock.method(relayClient, "publishEvent", (...args) => {
-    publishEventCalls.push(args);
-    return Promise.resolve();
-  });
-
+  mock.method(relayClient, "publishEvent", () => Promise.resolve());
   const fw = makeFakeWindow();
-  // No watermark in storage — simulates genuine first-time user.
   const restore = installFakeWindow(fw);
   try {
     const manager = new ChannelSectionSyncManager("pk-fresh", RELAY);
-    assert.equal(
-      manager.getPersistedWatermark(),
-      0,
-      "watermark must start at 0",
-    );
-    const local = makeSectionsStore([{ id: "s1", name: "Work", order: 0 }]);
-    const result = await manager.bootstrap(local);
-    assert.equal(
-      result.action,
-      "hold",
-      "bootstrap returns hold (seed is async)",
-    );
-    // bootstrap must have queued a publish (pendingStore is set immediately).
-    assert.ok(
-      manager.getPendingStore() !== null,
-      "bootstrap must queue a seed-publish when absent + watermark == 0",
-    );
+    const result = await manager.bootstrap(makeSectionsStore([{ id: "s1", name: "Work", order: 0 }]));
+    assert.equal(result.action, "hold");
+    assert.ok(manager.getPendingStore() !== null);
   } finally {
     restore();
     mock.reset();
@@ -413,33 +208,18 @@ test("revert-fix: sections LWW — newer decryptable pre-publish event selected 
   });
   mock.method(relayClient, "publishEvent", () => Promise.resolve());
 
-  // Instead of mocking nip44DecryptFromSelf directly (it's ESM), use the
-  // fact that parse returns null for invalid JSON — test the LWW path via
-  // getPersistedWatermark and headBeforeFetch separation.
-  // The key invariant: after seeing an event with created_at=100, a second
-  // pre-publish event with created_at=200 must still be accepted (200 > 100).
-  // This would break if the watermark advance happened before the comparison.
+  // The key invariant: after seeing event@100, a pre-publish event@200 must
+  // still be accepted. Breaks if the watermark advance happened before the
+  // comparison (200 > 200 → false instead of 200 > 100 → true).
   const fw = makeFakeWindow();
   const restore = installFakeWindow(fw);
   try {
     const managerA = new ChannelSectionSyncManager("pk-lww", RELAY);
-    // Simulate boot: advance watermark to 100 (as if boot fetch saw event@100).
     await managerA.fetchRemoteSections();
-    const headAfterBoot = managerA.getPersistedWatermark();
-    // The head should be recorded (either 100 from undecryptable event).
-    assert.ok(headAfterBoot >= 100, "head must be recorded from boot event");
-    // The pre-publish fetch (callCount=2) will see created_at=200.
-    // If headBeforeFetch is correctly snapshotted before recording,
-    // 200 > 100 (headBeforeFetch) → remote wins.
-    // If headBeforeFetch was NOT snapshotted (bug), 200 > 200 → false → local wins.
-    // We can observe this by checking that the second fetchEvents call was used:
-    // after doPublish runs through fetchOwnBlobBeforePublish, the watermark should
-    // advance to 200 if the event was observed.
-    const store = makeSectionsStore([{ id: "s1", name: "A", order: 0 }]);
-    managerA.publishSections(store);
+    assert.ok(managerA.getPersistedWatermark() >= 100, "head must be recorded from boot event");
+    managerA.publishSections(makeSectionsStore([{ id: "s1", name: "A", order: 0 }]));
     fw._fireTimer();
     await new Promise((r) => setTimeout(r, 10));
-    // The watermark should have advanced to at least 200 (the pre-publish event).
     assert.ok(
       managerA.getPersistedWatermark() >= 200,
       "pre-publish event created_at=200 must advance the watermark (LWW comparison uses headBeforeFetch not current head)",
@@ -459,28 +239,15 @@ test("revert-fix: undecryptable live event advances watermark before decrypt att
     liveCallback = onEvent;
     return Promise.resolve(async () => {});
   });
-
   const fw = makeFakeWindow();
   const restore = installFakeWindow(fw);
   try {
     const manager = new ChannelSectionSyncManager("pk-live", RELAY);
     assert.equal(manager.getPersistedWatermark(), 0, "watermark starts at 0");
-
-    // Start the live subscription.
     await manager.subscribeToSections(() => {});
     assert.ok(liveCallback !== null, "subscribeLive must have captured the callback");
-
-    // Deliver an undecryptable event via the live callback.
-    liveCallback({
-      pubkey: "pk-live",
-      content: "!bad-cipher!",
-      created_at: 1700005555,
-      id: "live-evt-1",
-    });
-
-    // Drain microtasks so the async decryptAndParse resolves.
+    liveCallback({ pubkey: "pk-live", content: "!bad-cipher!", created_at: 1700005555, id: "live-evt-1" });
     await new Promise((r) => setTimeout(r, 0));
-
     assert.ok(
       manager.getPersistedWatermark() >= 1700005555,
       "live undecryptable event must advance the watermark before decrypt is attempted",
