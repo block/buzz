@@ -234,6 +234,14 @@ export function DocumentEditorPane({
   // reformatted; repeating the warning on every note is just noise.
   const alwaysLivePreview = useAlwaysLivePreview();
 
+  // The outline is published by the live editor's plugin, so a note opened in
+  // source mode leaves whatever the *previous* note published standing — an
+  // outline of a file the user is no longer looking at, complete with working
+  // scroll-to targets into a document that is no longer mounted. Clear it.
+  React.useEffect(() => {
+    if (isSource) onHeadingsChange([]);
+  }, [isSource, onHeadingsChange, tab.path]);
+
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       {hasExternalChange ? (

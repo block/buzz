@@ -3,9 +3,11 @@
  *
  * Currently one setting: whether to trust live preview with files the
  * round-trip guard flags. Off by default — the guard exists because this
- * editor genuinely cannot represent tables, callouts, footnotes or raw HTML,
- * and autosaving one would rewrite it. Turning it on is a considered choice,
- * so it lives in Settings rather than behind a per-file prompt.
+ * editor genuinely cannot represent callouts, footnotes or raw HTML, and
+ * autosaving one would rewrite it. (Tables used to head that list; they gained
+ * a schema node and now round-trip, which is why the copy names only what is
+ * still true.) Turning it on is a considered choice, so it lives in Settings
+ * rather than behind a per-file prompt.
  */
 import * as React from "react";
 

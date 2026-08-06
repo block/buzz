@@ -90,11 +90,11 @@ export function DocumentsSettingsCard() {
           <label className="min-w-0" htmlFor="documents-always-live-preview">
             <p className="text-sm font-medium">Always open in live preview</p>
             <p className="mt-1 text-sm text-muted-foreground">
-              Some markdown cannot be represented in the editor — tables,
-              callouts, footnotes and raw HTML. Those notes normally open in
-              source mode so editing them cannot rewrite the file. Turn this on
-              to open everything in live preview instead; saving such a note
-              will reformat it.
+              Some markdown cannot be represented in the editor — callouts,
+              footnotes and raw HTML. Those notes normally open in source mode
+              so editing them cannot rewrite the file. Turn this on to open
+              everything in live preview instead; saving such a note will
+              reformat it.
             </p>
           </label>
           <Switch

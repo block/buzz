@@ -262,3 +262,40 @@ test.describe("Documents right rail", () => {
     await expect(page.getByTestId("documents-outline")).toBeVisible();
   });
 });
+
+test.describe("Documents outline hygiene", () => {
+  test("switching to a source-mode note clears the previous note's outline", async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      window.localStorage.removeItem("buzz.documents.vaultPath.v1");
+    });
+    await installMockBridge(page);
+    await page.goto("/");
+
+    await page.waitForFunction(
+      () => typeof window.__BUZZ_E2E_SEED_MOCK_VAULT_FILE__ === "function",
+    );
+    await page.evaluate(() => {
+      const seed = window.__BUZZ_E2E_SEED_MOCK_VAULT_FILE__;
+      if (!seed) throw new Error("mock vault seed helper is unavailable");
+      seed("/mock/vault/Outlined.md", "# One\n\n## Two\n\nBody.\n");
+      // Raw HTML fails the round-trip guard, so this opens in source mode.
+      seed("/mock/vault/Rawish.md", '# Raw\n\n<div align="center">x</div>\n');
+    });
+
+    await page.getByTestId("open-documents-view").click();
+    await page.getByTestId("documents-choose-vault").click();
+    await expect(page.getByTestId("documents-tree")).toBeVisible();
+
+    await page.getByTestId("documents-file-Outlined.md").click();
+    await expect(page.getByTestId("documents-outline-item-One")).toBeVisible();
+
+    // The outline belongs to the note being viewed. A source-mode note has no
+    // live editor to publish one, so the previous note's headings must not
+    // linger — they would scroll into a document that is no longer mounted.
+    await page.getByTestId("documents-file-Rawish.md").click();
+    await expect(page.getByTestId("documents-source-editor")).toBeVisible();
+    await expect(page.getByTestId("documents-outline-item-One")).toHaveCount(0);
+  });
+});
