@@ -11,6 +11,7 @@ import {
   useStartManagedAgentMutation,
   useUpdateManagedAgentMutation,
 } from "@/features/agents/hooks";
+import { useAgentAccessOwnerOnlyQuery } from "@/features/agents/useAgentAccessOwnerOnly";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import type {
   ManagedAgent,
@@ -63,9 +64,9 @@ import {
   type RuntimeModelProviderSelection,
 } from "./runtimeModelProviderSelection";
 import { AgentCreationPreview } from "./AgentCreationPreview";
+import { OwnerOnlyAccessField } from "./OwnerOnlyAccessField";
 import type { EnvVarsValue } from "./EnvVarsEditor";
 import { useRequiredCredentialState } from "./useRequiredCredentialState";
-import { CreateAgentRespondToField } from "./RespondToField";
 import { RunOnSummarySection } from "./RunOnSummarySection";
 import { PersonaDropdownField } from "./PersonaDropdownField";
 import {
@@ -392,6 +393,9 @@ export function AgentInstanceEditDialog({
     });
 
   const { data: bakedEnvKeys } = useBakedBuildEnvKeysQuery({ enabled: open });
+  const { data: agentAccessOwnerOnly } = useAgentAccessOwnerOnlyQuery({
+    enabled: open,
+  });
 
   // Merge global env as the base layer so credential keys satisfied via global
   // config (e.g. ANTHROPIC_API_KEY) are available to model discovery. Use
@@ -905,7 +909,6 @@ export function AgentInstanceEditDialog({
             )}
           </div>
           <div className="space-y-5">
-            {/* Agent name */}
             <div className="space-y-1.5">
               <label
                 className="text-sm font-medium text-foreground"
@@ -933,17 +936,14 @@ export function AgentInstanceEditDialog({
                 />
               </div>
             </div>
-
-            {/* Who can send instructions */}
-            <CreateAgentRespondToField
+            <OwnerOnlyAccessField
+              accessLocked={agentAccessOwnerOnly === true}
               allowlist={respondToAllowlist}
               disabled={updateMutation.isPending}
               mode={respondTo}
               onAllowlistChange={setRespondToAllowlist}
               onModeChange={setRespondTo}
-              variant="persona"
             />
-
             <RunOnSummarySection backend={agent.backend} />
 
             {/* Provider (runtime) */}

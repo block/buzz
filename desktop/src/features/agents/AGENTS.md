@@ -164,7 +164,10 @@ with a TypeScript lookup table or an id comparison in a component.
    shown; when it *is* remote they picked that host from the selector
    themselves. Never synthesize a run location a surface doesn't have. Don't
    expose `respond-to`, `allowlist`, Nostr, or harness jargon in primary UI
-   copy.
+   copy. **The owner-only-access build capability is backend-independent.** When
+   `getAgentAccessOwnerOnly()` is true, every managed agent's access control is
+   locked to owner-only, including provider-backed agents. A provider backend
+   does not prove remote execution and must never create a policy carve-out.
 
 ## The tests that enforce this
 

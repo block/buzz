@@ -199,6 +199,47 @@ test("running teammates restart when their allowlist does not include the lead",
   );
 });
 
+test("owner-only-access policy does not restart running local and provider teammates", () => {
+  for (const backend of [
+    { type: "local" },
+    { type: "provider", id: "remote", config: {} },
+  ]) {
+    assert.equal(
+      welcomeTeammateNeedsRestart(
+        {
+          ...honey,
+          backend,
+          status: "running",
+          needsRestart: false,
+          respondTo: "owner-only",
+          respondToAllowlist: [],
+        },
+        fizz.pubkey,
+        true,
+      ),
+      false,
+    );
+  }
+});
+
+test("owner-only-access policy still restarts running teammates for runtime changes", () => {
+  assert.equal(
+    welcomeTeammateNeedsRestart(
+      {
+        ...honey,
+        backend: { type: "local" },
+        status: "running",
+        needsRestart: true,
+        respondTo: "owner-only",
+        respondToAllowlist: [],
+      },
+      fizz.pubkey,
+      true,
+    ),
+    true,
+  );
+});
+
 test("opener keeps partial-readiness warm and mentions only online teammates", () => {
   const agentSet = { lead: fizz, teammates: [honey, bumble] };
   const introTeammates = selectWelcomeKickoffIntroTeammates(
