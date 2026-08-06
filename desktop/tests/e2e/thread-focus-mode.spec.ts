@@ -30,17 +30,37 @@ async function seedLongThread(page: import("@playwright/test").Page) {
   });
 }
 
-async function topVisibleMessageId(
+async function scrollToMiddleVisibleMessage(
   body: import("@playwright/test").Locator,
+  threadRootId: string,
 ): Promise<string> {
-  return body.evaluate((element) => {
-    const top = element.getBoundingClientRect().top;
-    const row = Array.from(
-      element.querySelectorAll<HTMLElement>("[data-message-id]"),
-    ).find((candidate) => candidate.getBoundingClientRect().bottom > top);
-    if (!row?.dataset.messageId) throw new Error("No visible thread anchor");
-    return row.dataset.messageId;
-  });
+  let anchorId: string | null = null;
+  await expect
+    .poll(async () => {
+      anchorId = await body.evaluate((element) => {
+        const maxScrollTop = element.scrollHeight - element.clientHeight;
+        if (maxScrollTop <= 0) return null;
+
+        const targetScrollTop = Math.floor(maxScrollTop * 0.4);
+        element.scrollTop = targetScrollTop;
+        element.dispatchEvent(new Event("scroll", { bubbles: true }));
+
+        if (Math.abs(element.scrollTop - targetScrollTop) > 1) return null;
+        const bounds = element.getBoundingClientRect();
+        const row = Array.from(
+          element.querySelectorAll<HTMLElement>("[data-message-id]"),
+        ).find((candidate) => {
+          const rect = candidate.getBoundingClientRect();
+          return rect.bottom > bounds.top && rect.top < bounds.bottom;
+        });
+        return row?.dataset.messageId ?? null;
+      });
+      return anchorId !== null && anchorId !== threadRootId;
+    })
+    .toBe(true);
+
+  if (!anchorId) throw new Error("No visible middle-thread anchor");
+  return anchorId;
 }
 
 /**
@@ -181,11 +201,7 @@ test("focus and split preserve reading context and interaction ownership", async
     .toBe(true);
   await expect(channel).toHaveAttribute("inert", "");
 
-  await body.evaluate((element) => {
-    element.scrollTop = element.scrollHeight * 0.4;
-    element.dispatchEvent(new Event("scroll", { bubbles: true }));
-  });
-  const anchorId = await topVisibleMessageId(body);
+  const anchorId = await scrollToMiddleVisibleMessage(body, rootId);
 
   const focusModeToggle = page.getByRole("button", {
     name: "Show thread beside channel",
