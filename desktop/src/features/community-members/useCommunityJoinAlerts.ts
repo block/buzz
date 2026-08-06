@@ -53,8 +53,12 @@ const MEMBER_REFRESH_DEBOUNCE_MS = 500;
  * new community's storage key.
  *
  * Binding the identity, the ledger, and the ordering state into one object
- * created by the effect run makes that class of bug unrepresentable rather than
- * patched read-by-read: a callback can only ever reach its own session.
+ * created by the effect run turns those scattered ambient reads into a single
+ * value with an identity that can be compared. `handleSnapshot` still reads
+ * `sessionRef.current`, so it is the surrounding ordering that makes the bug
+ * unreachable: cleanup retires the session before the next run installs its
+ * own, each retired callback is stopped by its run's `disposed` flag, and every
+ * send boundary re-checks that the session it captured is still the live one.
  */
 type JoinAlertSession = {
   communityId: string;

@@ -1674,6 +1674,15 @@ describe("useCommunityJoinAlerts — mounted subscription behaviour", () => {
       "precondition: the demotion itself discloses nothing",
     );
 
+    // Persisted ledger immediately before the delayed frame is released. The
+    // notification count alone cannot distinguish "refused before touching the
+    // ledger" from "recorded BOB as seen but suppressed the banner" — and the
+    // second shape would silently swallow the alert forever once the session
+    // recovers, since a key already marked seen is never announced again.
+    const ledgerBeforeRelease = storage.get(
+      joinAlertStorageKey(COMMUNITY_A, VIEWER),
+    );
+
     // Now the stale authorized frame lands.
     await releaseRefetch();
     await settleAfterNotifyWindow();
@@ -1686,6 +1695,15 @@ describe("useCommunityJoinAlerts — mounted subscription behaviour", () => {
     assert.ok(
       !notifications.some((entry) => entry.body?.includes(BOB.slice(0, 8))),
       "the demoted viewer must never learn the new member's identity",
+    );
+    assert.equal(
+      storage.get(joinAlertStorageKey(COMMUNITY_A, VIEWER)),
+      ledgerBeforeRelease,
+      "the latched session must refuse the frame before reconciliation, leaving the ledger untouched",
+    );
+    assert.ok(
+      !(ledgerBeforeRelease ?? "").includes(BOB),
+      "control: BOB must not already be in the ledger, or the assertion above is vacuous",
     );
 
     await unmount();
