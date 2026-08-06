@@ -299,15 +299,13 @@ async fn nip11_or_ws_handler(
     // `icon` simply absent), so the doc cannot leak which hosts are mapped.
     let tenant = match crate::tenant::bind_community(&state.db, raw_host).await {
         Ok(ctx) => ctx,
-        Err(_) => {
-            // Generic rejection: do not distinguish "unmapped" from "lookup
-            // error", and never echo the host, so an unauthenticated caller
-            // cannot probe which communities exist on this deployment.
-            return (
-                StatusCode::NOT_FOUND,
-                "relay: no community is configured for this host",
-            )
-                .into_response();
+        Err(err) => {
+            // Generic rejection: never echo the host, never reveal the
+            // underlying error. The status code still distinguishes permanent
+            // (unmapped host → 404, clients stop retrying) from transient
+            // (lookup failure → 503, clients retry) — collapsing both to 404
+            // made DB hiccups look like the relay had vanished (#5030).
+            return (err.http_status(), err.public_message()).into_response();
         }
     };
 

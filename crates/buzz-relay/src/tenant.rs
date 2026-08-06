@@ -50,12 +50,50 @@ pub trait HostResolver: Send + Sync {
 pub enum BindError<E> {
     /// The host did not map to any community on this deployment. Callers MUST
     /// reject the request with a *generic* error — never echo the host back or
-    /// distinguish "unmapped" from other failures, so an unauthenticated
-    /// caller cannot probe which hosts exist.
+    /// leak the underlying failure, so an unauthenticated caller cannot probe
+    /// which hosts exist from the response body. This is a **permanent**
+    /// condition: clients treat 404 as terminal and correctly stop retrying.
     UnmappedHost,
     /// The resolution lookup itself failed (e.g. database error). Treated as
     /// fail-closed: the request is rejected, never admitted to a default tenant.
+    /// Unlike [`BindError::UnmappedHost`] this is **transient** — the host may
+    /// be mapped, but the backend was temporarily unavailable. See
+    /// [`BindError::http_status`] for why callers surface it as 503 rather
+    /// than 404.
     Lookup(E),
+}
+
+impl<E> BindError<E> {
+    /// HTTP status for a failed bind: 404 for a genuinely unmapped host
+    /// (permanent — clients treat 404 as terminal and stop retrying), 503 for
+    /// a lookup failure (transient — clients retry 5xx).
+    ///
+    /// #5030 measured the cost of collapsing both to 404: a relay-side DB
+    /// hiccup during a reconnect made an otherwise healthy relay look
+    /// permanently gone to clients (buzz-acp classifies `WebSocket(Http): 404`
+    /// as terminal), so a 22% reconnect-failure rate turned into sessions
+    /// going dark after the retry budget was exhausted.
+    ///
+    /// The response BODY stays byte-identical for both variants (see
+    /// [`BindError::public_message`]) — the anti-probe property is preserved
+    /// in the steady state. The only new signal is the status code, and it is
+    /// observable only while the backend lookup is actually failing: an
+    /// attacker probing during a DB outage can tell mapped hosts (503) from
+    /// unmapped ones (404). That narrow, outage-window leak is the accepted
+    /// tradeoff for correct transient semantics; the alternative made healthy
+    /// relays indistinguishable from decommissioned ones to every client.
+    pub fn http_status(&self) -> axum::http::StatusCode {
+        match self {
+            BindError::UnmappedHost => axum::http::StatusCode::NOT_FOUND,
+            BindError::Lookup(_) => axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        }
+    }
+
+    /// Shared, host-free rejection body — identical for both variants so the
+    /// message alone never reveals mapping state or the underlying error.
+    pub fn public_message(&self) -> &'static str {
+        "relay: no community is configured for this host"
+    }
 }
 
 /// Bind a raw connection host to a [`TenantContext`], failing closed.
@@ -329,5 +367,25 @@ mod tests {
             let err = bind_community(&r, "evil.example").await.unwrap_err();
             assert!(matches!(err, BindError::UnmappedHost));
         }
+    }
+
+    #[test]
+    fn unmapped_host_maps_to_permanent_404_and_lookup_to_transient_503() {
+        // The body stays identical across variants (anti-probe property), but
+        // the status code separates permanent from transient so clients retry
+        // DB hiccups instead of abandoning the relay (#5030).
+        let unmapped = BindError::<&str>::UnmappedHost;
+        let lookup = BindError::<&str>::Lookup("db down");
+
+        assert_eq!(unmapped.http_status(), axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(
+            lookup.http_status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(unmapped.public_message(), lookup.public_message());
+        assert!(
+            !unmapped.public_message().contains("db down"),
+            "the underlying error must never leak into the rejection body"
+        );
     }
 }
