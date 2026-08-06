@@ -49,7 +49,7 @@ export function useChannelSortPreference(
   const lastAppliedEventId = React.useRef("");
 
   React.useEffect(() => {
-    if (!pubkey) {
+    if (!pubkey || !relayUrl) {
       setStore(DEFAULT_STORE);
       lastAppliedRemoteTs.current = 0;
       lastAppliedEventId.current = "";
@@ -101,7 +101,7 @@ export function useChannelSortPreference(
   );
 
   React.useEffect(() => {
-    if (!pubkey) return;
+    if (!pubkey || !relayUrl) return;
     let cancelled = false;
     const local = readChannelSortStore(pubkey, relayUrl);
     void managerRef.current?.bootstrap(local).then((result) => {

@@ -45,7 +45,7 @@ export function useChannelSections(
   const lastAppliedEventId = React.useRef("");
 
   React.useEffect(() => {
-    if (!pubkey) {
+    if (!pubkey || !relayUrl) {
       setStore(DEFAULT_STORE);
       lastAppliedRemoteTs.current = 0;
       lastAppliedEventId.current = "";
@@ -54,7 +54,6 @@ export function useChannelSections(
     setStore(readChannelSectionsStore(pubkey, relayUrl));
     lastAppliedRemoteTs.current = 0;
     lastAppliedEventId.current = "";
-    // Pass relayUrl so the manager can scope its watermark key.
     managerRef.current = new ChannelSectionSyncManager(pubkey, relayUrl);
     return () => {
       managerRef.current?.destroy();
@@ -103,7 +102,7 @@ export function useChannelSections(
   );
 
   React.useEffect(() => {
-    if (!pubkey) return;
+    if (!pubkey || !relayUrl) return;
     let cancelled = false;
     const local = readChannelSectionsStore(pubkey, relayUrl);
     void managerRef.current?.bootstrap(local).then((result) => {
