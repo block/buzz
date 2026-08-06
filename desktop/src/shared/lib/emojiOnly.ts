@@ -26,14 +26,14 @@ function buildNativeEmojiSet(): Set<string> {
   return set;
 }
 
-function isNativeEmojiCluster(cluster: string): boolean {
+export function isNativeEmojiCluster(cluster: string): boolean {
   nativeEmojiSet ??= buildNativeEmojiSet();
   return (
     nativeEmojiSet.has(cluster) || /\p{Extended_Pictographic}/u.test(cluster)
   );
 }
 
-function readGrapheme(text: string, start: number): string {
+export function readGrapheme(text: string, start: number): string {
   const firstCodePoint = text.codePointAt(start);
   if (firstCodePoint === undefined) {
     return "";
@@ -135,4 +135,10 @@ export function isEmojiOnlyMessage(
   }
 
   return sawEmoji;
+}
+/** True only when the entire value is one native emoji grapheme cluster. */
+export function isSingleNativeEmoji(value: string): boolean {
+  if (!value) return false;
+  const cluster = readGrapheme(value, 0);
+  return cluster === value && isNativeEmojiCluster(cluster);
 }

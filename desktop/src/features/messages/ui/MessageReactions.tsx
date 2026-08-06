@@ -3,6 +3,7 @@ import * as React from "react";
 
 import { EmojiPicker } from "@/features/custom-emoji/ui/EmojiPicker";
 import type { TimelineReaction } from "@/features/messages/types";
+import { reactionGlyphPresentation } from "@/features/messages/lib/reactionGlyphPresentation";
 import { recordQuickReactionEmoji } from "@/features/messages/ui/useQuickReactionEmojis";
 import { cn } from "@/shared/lib/cn";
 import { emojiDisplayName } from "@/shared/lib/emojiName";
@@ -19,9 +20,11 @@ const REACTION_PILL_BASE_CLASSES =
   "inline-flex h-7 items-center rounded-full border text-xs font-medium leading-none transition-colors";
 const REACTION_CUSTOM_GLYPH_CLASSES = "h-3.5 w-3.5";
 const REACTION_NATIVE_GLYPH_CLASSES = "h-3 w-3 text-xs";
+const REACTION_TEXT_GLYPH_CLASSES = "max-w-32 shrink-0 truncate text-xs";
 const REACTION_COUNT_CLASSES = "text-muted-foreground";
 const REACTION_NATIVE_COUNT_CLASSES =
   "text-muted-foreground translate-y-[0.5px]";
+const REACTION_TEXT_COUNT_CLASSES = "text-muted-foreground shrink-0";
 const REACTION_PILL_HOVER_CLASSES =
   "hover:bg-primary/10 hover:text-foreground focus-visible:bg-primary/10 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring";
 const BADGE_BURST_STABLE_FRAMES = 2;
@@ -67,9 +70,11 @@ function isSameBadgeBurstRect(
 function EmojiGlyph({
   reaction,
   className,
+  text,
 }: {
   reaction: TimelineReaction;
   className?: string;
+  text?: string;
 }) {
   const displayName = emojiDisplayName(reaction.emoji);
   if (reaction.emojiUrl) {
@@ -94,7 +99,7 @@ function EmojiGlyph({
       )}
       title={displayName}
     >
-      {reaction.emoji}
+      {text ?? reaction.emoji}
     </span>
   );
 }
@@ -430,6 +435,29 @@ function ReactionPill({
   };
 
   const displayName = emojiDisplayName(reaction.emoji);
+  const presentation = reaction.emojiUrl
+    ? null
+    : reactionGlyphPresentation(reaction.emoji);
+  const glyphClasses = reaction.emojiUrl
+    ? REACTION_CUSTOM_GLYPH_CLASSES
+    : presentation?.kind === "native"
+      ? REACTION_NATIVE_GLYPH_CLASSES
+      : REACTION_TEXT_GLYPH_CLASSES;
+  const countClasses = reaction.emojiUrl
+    ? REACTION_COUNT_CLASSES
+    : presentation?.kind === "native"
+      ? REACTION_NATIVE_COUNT_CLASSES
+      : REACTION_TEXT_COUNT_CLASSES;
+  const pillContents = (
+    <>
+      <EmojiGlyph
+        reaction={reaction}
+        className={glyphClasses}
+        text={presentation?.text}
+      />
+      <AnimatedCount className={countClasses} value={reaction.count} />
+    </>
+  );
 
   if (reaction.users.length === 0) {
     return (
@@ -443,22 +471,7 @@ function ReactionPill({
         ref={setPillRef}
         type="button"
       >
-        <EmojiGlyph
-          reaction={reaction}
-          className={
-            reaction.emojiUrl
-              ? REACTION_CUSTOM_GLYPH_CLASSES
-              : REACTION_NATIVE_GLYPH_CLASSES
-          }
-        />
-        <AnimatedCount
-          className={
-            reaction.emojiUrl
-              ? REACTION_COUNT_CLASSES
-              : REACTION_NATIVE_COUNT_CLASSES
-          }
-          value={reaction.count}
-        />
+        {pillContents}
       </button>
     );
   }
@@ -484,22 +497,7 @@ function ReactionPill({
             ref={setPillRef}
             type="button"
           >
-            <EmojiGlyph
-              reaction={reaction}
-              className={
-                reaction.emojiUrl
-                  ? REACTION_CUSTOM_GLYPH_CLASSES
-                  : REACTION_NATIVE_GLYPH_CLASSES
-              }
-            />
-            <AnimatedCount
-              className={
-                reaction.emojiUrl
-                  ? REACTION_COUNT_CLASSES
-                  : REACTION_NATIVE_COUNT_CLASSES
-              }
-              value={reaction.count}
-            />
+            {pillContents}
           </button>
         </span>
       </PopoverTrigger>

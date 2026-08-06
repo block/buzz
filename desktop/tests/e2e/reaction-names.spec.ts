@@ -55,6 +55,53 @@ async function capturePopover(
   });
 }
 
+async function emitReaction(
+  page: import("@playwright/test").Page,
+  content: string,
+  pubkey: string,
+): Promise<void> {
+  await page.evaluate(
+    ({ content, pubkey, targetId }) => {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content,
+        extraTags: [["e", targetId]],
+        kind: 7,
+        pubkey,
+      });
+    },
+    { content, pubkey, targetId: REACTION_TARGET_EVENT_ID },
+  );
+}
+
+async function expectFallbackPill(
+  page: import("@playwright/test").Page,
+  reaction: string,
+  visibleText: string,
+): Promise<void> {
+  const pill = reactionTargetRow(page).getByRole("button", {
+    name: `Toggle ${reaction} reaction`,
+  });
+  await expect(pill).toBeVisible();
+  await expect(pill).toHaveAttribute("title", reaction);
+  await expect(pill.locator("img")).toHaveCount(0);
+
+  const glyph = pill.locator("span[title]");
+  await expect(glyph).toHaveText(visibleText);
+  const [pillRect, glyphRect, countRect] = await Promise.all([
+    pill.boundingBox(),
+    glyph.boundingBox(),
+    pill.locator(".buzz-animated-count").boundingBox(),
+  ]);
+  expect(pillRect && glyphRect && countRect).toBeTruthy();
+  if (!pillRect || !glyphRect || !countRect) return;
+  expect(glyphRect.x + glyphRect.width).toBeLessThanOrEqual(countRect.x);
+  expect(
+    glyphRect.x >= pillRect.x &&
+      countRect.x + countRect.width <= pillRect.x + pillRect.width,
+  ).toBeTruthy();
+}
+
 test.beforeEach(async ({ page }) => {
   await installMockBridge(page, {
     searchProfiles: [
@@ -167,4 +214,31 @@ test("maximum-length reaction name wraps inside a fixed-width popover", async ({
   await expect(avatar).toHaveAttribute("src", MAX_REACTION_AVATAR_URL);
   await waitForImage(avatar);
   await capturePopover(page, popover, "max-length-after.png");
+});
+
+test("literal fallback reactions do not overlap their counts", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await page.waitForFunction(
+    () =>
+      window.__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+        channelName: "general",
+        kind: 7,
+      }) === true,
+  );
+
+  for (const reaction of [":bozo:", "ship it"]) {
+    await emitReaction(page, reaction, BOB_PUBKEY);
+    await emitReaction(page, reaction, "c".repeat(64));
+  }
+
+  await expectFallbackPill(page, ":bozo:", "bozo");
+  await expectFallbackPill(page, "ship it", "ship it");
+  await reactionTargetRow(page).screenshot({
+    animations: "disabled",
+    path: "test-results/reaction-text-fallback.png",
+  });
 });
