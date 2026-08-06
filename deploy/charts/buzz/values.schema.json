@@ -43,6 +43,10 @@
       "pattern": "^([0-9a-f]{64})?$",
       "description": "64-char lowercase hex Nostr pubkey of the relay operator. Required when relay.requireRelayMembership=true."
     },
+    "ownerPubkeySecretKey": {
+      "type": "string",
+      "description": "Key in secrets.existingSecret containing the relay owner pubkey."
+    },
     "secrets": {
       "type": "object",
       "additionalProperties": false,
