@@ -1001,7 +1001,7 @@ pub async fn cmd_remove_channel_member(
     Ok(())
 }
 
-/// Set the channel addition policy — sign and submit a kind:10100 (agent profile) event.
+/// Set the channel addition policy — sign and submit a kind:10101 event.
 pub async fn cmd_set_add_policy(client: &BuzzClient, policy: &str) -> Result<(), CliError> {
     match policy {
         "anyone" | "owner_only" | "nobody" => {}
@@ -1014,7 +1014,7 @@ pub async fn cmd_set_add_policy(client: &BuzzClient, policy: &str) -> Result<(),
 
     // Check if this policy is allowed by the deployment.
     // NOTE: This gate covers only the `buzz channels set-add-policy` CLI path.
-    // A client that submits a kind:10100 event directly to the relay bypasses
+    // A client that submits a kind:10101 event directly to the relay bypasses
     // this check. Full enforcement requires relay-side validation, which is
     // intentionally out of scope for this change (see team decision: no
     // relay-side enforcement of client behavior).
@@ -1035,7 +1035,7 @@ pub async fn cmd_set_add_policy(client: &BuzzClient, policy: &str) -> Result<(),
     let content = serde_json::json!({ "channel_add_policy": policy }).to_string();
     use nostr::{EventBuilder, Kind};
     let builder = EventBuilder::new(
-        Kind::Custom(buzz_sdk::kind::KIND_AGENT_PROFILE as u16),
+        Kind::Custom(buzz_sdk::kind::KIND_CHANNEL_ADD_POLICY as u16),
         &content,
     )
     .tags([]);
