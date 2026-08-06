@@ -801,7 +801,6 @@ export function ProjectsView() {
 
   const projectsHeader = (
     <PageHeader
-      action={<div className="-mr-[10px] -mt-2">{createMenu}</div>}
       className="pointer-events-auto mb-8"
       description="Set up and manage your projects."
       title="Projects"
@@ -830,6 +829,9 @@ export function ProjectsView() {
         className="pointer-events-none absolute right-[3px] top-0 z-50 w-1 rounded-full bg-border/80 opacity-0 transition-opacity duration-200"
         ref={scrollIndicatorRef}
       />
+      {/* Create button pinned to the pane's top-right corner: it never
+          scrolls with the page, it just stays put. */}
+      <div className="absolute right-4 top-5 z-40 sm:top-6">{createMenu}</div>
       <CreateProjectDialog
         isCreating={createProjectMutation.isPending}
         onCreate={async (input) => {

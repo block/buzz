@@ -78,14 +78,15 @@ export function ProjectsOverviewPanel({
 
   // The feed owns the full left column; the stat counters live at the top
   // of the side rail as compact cards, above People and Contribution
-  // Activity, instead of a full-width row over the feed.
+  // Activity, instead of a full-width row over the feed. The feed column
+  // has no left inset so the timeline spine lines up with the section tabs.
   return (
     <section
-      className="-ml-4 -mr-[calc(1rem+10px)] mb-4"
+      className="-mr-[calc(1rem+10px)] mb-4"
       data-testid="projects-overview-panel"
     >
       <div className="grid xl:grid-cols-[minmax(0,1fr)_18rem] 2xl:grid-cols-[minmax(0,1fr)_24rem]">
-        <div className="order-1 min-w-0 p-4 pt-2 xl:order-none xl:col-start-1 xl:row-start-1">
+        <div className="order-1 min-w-0 pb-4 pr-4 pt-2 xl:order-none xl:col-start-1 xl:row-start-1">
           {children}
         </div>
         <div className="order-2 flex min-w-0 flex-col gap-3 px-4 pb-4 pt-2 xl:order-none xl:col-start-2 xl:row-start-1">

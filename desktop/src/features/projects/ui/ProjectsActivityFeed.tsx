@@ -27,7 +27,6 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import {
   PROJECT_EVENT_VISUALS,
-  ProjectEventTypeIcon,
   type ProjectEventKind,
 } from "./ProjectEventTypeIcon";
 
@@ -253,18 +252,23 @@ function buildActivityItems({
 
 function ActivityCard({
   compact,
+  isFirst,
+  isLast,
   item,
   onOpen,
   onOpenProject,
   profiles,
 }: {
   compact: boolean;
+  isFirst: boolean;
+  isLast: boolean;
   item: ProjectActivityItem;
   onOpen: () => void;
   onOpenProject: () => void;
   profiles?: UserProfileLookup;
 }) {
   const visual = PROJECT_EVENT_VISUALS[item.kind];
+  const TypeIcon = visual.icon;
   const profile = item.actorPubkey
     ? profiles?.[normalizePubkey(item.actorPubkey)]
     : undefined;
@@ -275,61 +279,71 @@ function ActivityCard({
   return (
     <div
       className={cn(
-        "relative block w-full bg-transparent text-left transition-colors hover:bg-muted/20",
-        compact ? "p-3" : "p-4",
+        "relative block w-full rounded-xl bg-transparent text-left transition-colors hover:bg-muted/20",
+        compact ? "py-3 pr-3" : "py-4 pr-4",
       )}
       data-testid="projects-activity-card"
     >
       <button
         aria-label={`Open ${item.title} in ${item.target.project.name}`}
-        className="absolute inset-0 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+        className="absolute inset-0 rounded-xl focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
         onClick={onOpen}
         type="button"
       />
       <div className="pointer-events-none relative flex min-w-0 items-start gap-3">
-        <div className="relative flex w-10 shrink-0 justify-end self-stretch">
-          <span
-            aria-hidden="true"
-            className={cn(
-              "absolute left-1.5 right-6 rounded-bl-md border-b border-l border-border/80",
-              compact ? "-top-3 h-6" : "-top-4 h-7",
-            )}
-          />
-          <span
-            aria-hidden="true"
-            className={cn(
-              "absolute left-1.5 right-6 top-3 rounded-tl-md border-l border-t border-border/80",
-              compact ? "-bottom-3" : "-bottom-4",
-            )}
-          />
-          <span className="relative z-10 inline-flex rounded-full bg-background">
-            <ProjectEventTypeIcon kind={item.kind} />
-          </span>
+        {/* Avatar gutter: a vertical spine runs through the avatar centers
+            to connect consecutive cards. Segments extend into the card's
+            vertical padding so they meet the neighbouring card's segments;
+            the first card has no incoming line and the last no outgoing. */}
+        <div
+          className={cn(
+            "relative flex shrink-0 items-start justify-center self-stretch",
+            compact ? "w-5" : "w-9",
+          )}
+        >
+          {isFirst ? null : (
+            <span
+              aria-hidden="true"
+              className={cn(
+                "absolute left-1/2 w-px -translate-x-1/2 bg-border/80",
+                compact ? "-top-3 h-3" : "-top-4 h-4",
+              )}
+            />
+          )}
+          {isLast ? null : (
+            <span
+              aria-hidden="true"
+              className={cn(
+                "absolute left-1/2 w-px -translate-x-1/2 bg-border/80",
+                compact ? "-bottom-3 top-5" : "-bottom-4 top-9",
+              )}
+            />
+          )}
+          {item.actorPubkey ? (
+            <UserProfilePopover pubkey={item.actorPubkey} triggerElement="span">
+              <button
+                aria-label={`View ${actorLabel}'s profile`}
+                className="pointer-events-auto relative z-10 shrink-0 rounded-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                type="button"
+              >
+                <UserAvatar
+                  accent={profile?.isAgent === true}
+                  avatarUrl={profile?.avatarUrl ?? null}
+                  displayName={actorLabel}
+                  size={compact ? "xs" : "md"}
+                />
+              </button>
+            </UserProfilePopover>
+          ) : (
+            <UserAvatar
+              accent={profile?.isAgent === true}
+              avatarUrl={profile?.avatarUrl ?? null}
+              className="relative z-10 shrink-0"
+              displayName={actorLabel}
+              size={compact ? "xs" : "md"}
+            />
+          )}
         </div>
-        {item.actorPubkey ? (
-          <UserProfilePopover pubkey={item.actorPubkey} triggerElement="span">
-            <button
-              aria-label={`View ${actorLabel}'s profile`}
-              className="pointer-events-auto relative z-10 shrink-0 rounded-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-              type="button"
-            >
-              <UserAvatar
-                accent={profile?.isAgent === true}
-                avatarUrl={profile?.avatarUrl ?? null}
-                displayName={actorLabel}
-                size={compact ? "xs" : "md"}
-              />
-            </button>
-          </UserProfilePopover>
-        ) : (
-          <UserAvatar
-            accent={profile?.isAgent === true}
-            avatarUrl={profile?.avatarUrl ?? null}
-            className="shrink-0"
-            displayName={actorLabel}
-            size={compact ? "xs" : "md"}
-          />
-        )}
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-start gap-2">
             <div className="min-w-0 flex-1 text-xs text-muted-foreground/70">
@@ -340,7 +354,7 @@ function ActivityCard({
                     triggerElement="span"
                   >
                     <button
-                      className="pointer-events-auto relative z-10 rounded-sm hover:underline focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+                      className="pointer-events-auto relative z-10 rounded-sm font-semibold text-foreground hover:underline focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
                       type="button"
                     >
                       {actorLabel}
@@ -351,7 +365,7 @@ function ActivityCard({
                 )}{" "}
                 {item.action}{" "}
                 <button
-                  className="pointer-events-auto relative z-10 inline-block max-w-48 truncate rounded-sm align-bottom hover:underline focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring sm:max-w-64 2xl:max-w-none"
+                  className="pointer-events-auto relative z-10 inline-block max-w-48 truncate rounded-sm align-bottom font-semibold text-foreground hover:underline focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring sm:max-w-64 2xl:max-w-none"
                   onClick={onOpenProject}
                   type="button"
                 >
@@ -385,9 +399,16 @@ function ActivityCard({
             ) : null}
           </div>
           <div className={compact ? "mt-2" : "mt-3"}>
-            <p className="min-w-0 truncate text-sm font-semibold leading-5 text-foreground">
-              {item.title}
-            </p>
+            {/* Bare event-type glyph beside the headline (no badge circle). */}
+            <div className="flex min-w-0 items-start gap-2">
+              <TypeIcon
+                aria-hidden="true"
+                className={cn("mt-0.5 h-4 w-4 shrink-0", visual.iconClassName)}
+              />
+              <p className="min-w-0 flex-1 truncate text-sm font-semibold leading-5 text-foreground">
+                {item.title}
+              </p>
+            </div>
             {item.body ? (
               <p
                 className={cn(
@@ -443,11 +464,13 @@ export function ProjectsActivityFeed(props: ProjectsActivityFeedProps) {
       className="relative bg-transparent"
       data-testid="projects-activity-timeline"
     >
-      {items.map((item) => {
+      {items.map((item, index) => {
         return (
           <div className="relative" key={item.id}>
             <ActivityCard
               compact={props.compact === true}
+              isFirst={index === 0}
+              isLast={index === items.length - 1}
               item={item}
               onOpen={() => {
                 if (item.target.type === "project") {
