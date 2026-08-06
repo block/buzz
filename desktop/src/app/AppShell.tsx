@@ -602,10 +602,11 @@ export function AppShell() {
   );
   const handleOpenSettings = React.useCallback(
     (section: SettingsSection = DEFAULT_SETTINGS_SECTION) => {
+      if (settingsOpen) return;
       setIsChannelManagementOpen(false);
       void goSettings(section);
     },
-    [goSettings],
+    [goSettings, settingsOpen],
   );
   const handleCloseSettings = React.useCallback(
     () => closeSettings(),
