@@ -126,15 +126,8 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         install_hint: "Buzz talks to Grok Build through its CLI's agent stdio mode.",
         underlying_cli: None,
     },
-    PresetHarness {
-        id: "opencode",
-        label: "OpenCode",
-        command: "opencode",
-        args: &["acp"],
-        install_instructions_url: "https://opencode.ai/docs",
-        install_hint: "Buzz talks to OpenCode through its CLI's ACP mode (opencode acp).",
-        underlying_cli: None,
-    },
+    // OpenCode moved to KNOWN_ACP_RUNTIMES so it could carry a config_file_path
+    // — see the note on its entry in discovery.rs.
     PresetHarness {
         id: "kimi",
         label: "Kimi Code",
