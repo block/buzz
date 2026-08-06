@@ -36,9 +36,7 @@ use tauri::{Builder, Runtime};
 /// the Cmd+W accelerator does not exist.
 pub fn install<R: Runtime>(builder: Builder<R>) -> Builder<R> {
     #[cfg(target_os = "macos")]
-    let builder = builder
-        .menu(build)
-        .on_menu_event(|app, event| crate::tray_menu::handle_menu_event(app, event.id.as_ref()));
+    let builder = builder.menu(build);
     builder
 }
 
