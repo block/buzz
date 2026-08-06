@@ -156,10 +156,7 @@ test("relay-A watermark is preserved after relay-B session", () => {
   });
 });
 
-// ── runBootstrap policy ───────────────────────────────────────────────────────
-//
-// The shared policy is tested once here so that a mutation to any one branch
-// cannot hide behind per-surface duplication.
+// ── runBootstrap policy — tested once; mutations to any branch fail here ─────
 
 function makeBootstrapArgs({ fetchResult, lastHead, localNonEmpty }) {
   let publishCount = 0;
