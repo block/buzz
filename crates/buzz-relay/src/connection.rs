@@ -14,7 +14,7 @@ use tracing::Instrument as _;
 use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
 
-use buzz_auth::{generate_challenge, AuthContext, LimitType};
+use buzz_auth::{generate_challenge, ConnectionAuthContext, LimitType};
 use buzz_core::tenant::TenantContext;
 use nostr::Filter;
 
@@ -46,7 +46,7 @@ pub enum AuthState {
         challenge: String,
     },
     /// Client has successfully authenticated.
-    Authenticated(AuthContext),
+    Authenticated(ConnectionAuthContext),
     /// Authentication attempt was rejected.
     Failed,
 }

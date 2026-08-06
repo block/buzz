@@ -17,6 +17,8 @@
 
 /// Channel access checking trait and helpers.
 pub mod access;
+/// Versioned, transport-neutral authorization context.
+pub mod context;
 /// Authentication error types.
 pub mod error;
 /// NIP-42 challenge–response authentication.
@@ -31,6 +33,18 @@ pub mod rate_limit;
 pub mod scope;
 
 pub use access::{check_read_access, check_write_access, require_scope, ChannelAccessChecker};
+pub use context::{
+    resolve_current_federated_policy, AdmissionExpiry, AssertionExpiry, AssertionNotBefore,
+    AssertionTransport, AuthContext, AuthContextError, AuthContextInput, AuthContextV1,
+    AuthContextVersion, AuthMethod, AuthTransport, AuthorityAdapterError, AuthorityAdapterFuture,
+    AuthorizationReason, AuthorizedCommunityAccess, BindingResolutionRequest, BindingSource,
+    BindingVersion, CapabilityFinalizationSeal, CurrentPolicyRequest, CurrentPolicyResolutionSink,
+    DelegationCapability, DelegationExpiry, DirectBindingResolutionSink, EnrollmentMode,
+    ExistingBindingResolutionSink, FederatedAuthorityAdapter, FederatedAuthorization,
+    FederatedIdentityRequirement, FederatedPrincipal, NostrAuthority, ResolvedFederatedPolicy,
+    VerifiedFederatedAssertion, VerifiedKeyAttestation, VerifiedNostrProof, VerifiedOwnerAdmission,
+    VerifiedTransportDelegation, VersionedBindingRef,
+};
 pub use error::AuthError;
 pub use nip42::{generate_challenge, verify_nip42_event};
 pub use nip98::verify_nip98_event;
@@ -43,48 +57,50 @@ pub use rate_limit::{
 };
 pub use scope::{parse_scopes, Scope};
 
+/// Existing NIP authentication result stored on a relay connection.
+///
+/// This remains separate from [`AuthContext`], which is finalized only after
+/// transport authentication and every configured authorization policy pass.
+#[derive(Clone)]
+pub struct ConnectionAuthContext {
+    /// The authenticated Nostr public key.
+    pub pubkey: nostr::PublicKey,
+    /// Permission scopes granted to this connection.
+    pub scopes: Vec<Scope>,
+    /// Channel restriction (`None` means unrestricted).
+    pub channel_ids: Option<Vec<uuid::Uuid>>,
+    /// How the connection was authenticated.
+    pub auth_method: AuthMethod,
+    /// NIP-OA verified owner pubkey, when present.
+    pub agent_owner_pubkey: Option<nostr::PublicKey>,
+}
+
+impl std::fmt::Debug for ConnectionAuthContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ConnectionAuthContext")
+            .field("pubkey", &"[redacted]")
+            .field("scopes", &"[redacted]")
+            .field("channel_ids", &"[redacted]")
+            .field("auth_method", &self.auth_method)
+            .field("agent_owner_pubkey", &"[redacted]")
+            .finish()
+    }
+}
+
+impl ConnectionAuthContext {
+    /// Returns `true` if this context includes the given [`Scope`].
+    pub fn has_scope(&self, scope: &Scope) -> bool {
+        self.scopes.contains(scope)
+    }
+}
+
 #[cfg(any(test, feature = "test-utils"))]
 pub use access::MockAccessChecker;
 #[cfg(any(test, feature = "test-utils"))]
 pub use nip98_replay::AlwaysFreshReplayGuard;
 #[cfg(any(test, feature = "test-utils"))]
 pub use rate_limit::AlwaysAllowRateLimiter;
-
-/// How the connection was authenticated.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AuthMethod {
-    /// NIP-42 challenge/response — Schnorr signature over kind:22242.
-    Nip42,
-    /// NIP-98 HTTP Auth — Schnorr signature over kind:27235.
-    Nip98,
-}
-
-/// The result of a successful authentication, bound to a connection.
-#[derive(Debug, Clone)]
-pub struct AuthContext {
-    /// The authenticated Nostr public key.
-    pub pubkey: nostr::PublicKey,
-    /// Permission scopes granted to this connection.
-    pub scopes: Vec<Scope>,
-    /// Channel restriction (reserved for future per-channel access control).
-    ///
-    /// `None` means unrestricted.
-    pub channel_ids: Option<Vec<uuid::Uuid>>,
-    /// How the connection was authenticated.
-    pub auth_method: AuthMethod,
-    /// NIP-OA verified owner pubkey (if authenticated via owner attestation).
-    ///
-    /// `None` for direct relay members or non-NIP-OA auth paths.
-    /// Set by the relay membership gate when NIP-OA fallback succeeds.
-    pub agent_owner_pubkey: Option<nostr::PublicKey>,
-}
-
-impl AuthContext {
-    /// Returns `true` if this context includes the given [`Scope`].
-    pub fn has_scope(&self, scope: &Scope) -> bool {
-        self.scopes.contains(scope)
-    }
-}
 
 /// Top-level authentication configuration, typically loaded from the relay's TOML config file.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -112,7 +128,7 @@ impl AuthService {
         &self.config
     }
 
-    /// Verify a NIP-42 AUTH event and return an [`AuthContext`].
+    /// Verify a NIP-42 AUTH event and return a [`ConnectionAuthContext`].
     ///
     /// Pure cryptographic verification — no network calls, no JWT, no tokens.
     pub async fn verify_auth_event(
@@ -120,7 +136,7 @@ impl AuthService {
         auth_event: nostr::Event,
         expected_challenge: &str,
         relay_url: &str,
-    ) -> Result<AuthContext, AuthError> {
+    ) -> Result<ConnectionAuthContext, AuthError> {
         // Verify NIP-42 signature (spawn_blocking for CPU-bound Schnorr verify)
         let event_clone = auth_event.clone();
         let challenge_owned = expected_challenge.to_string();
@@ -133,12 +149,12 @@ impl AuthService {
 
         // In pure Nostr mode, all authenticated connections get full scopes.
         // Per-channel access is enforced by the relay's membership checks (NIP-29).
-        Ok(AuthContext {
+        Ok(ConnectionAuthContext {
             pubkey: auth_event.pubkey,
             scopes: Scope::all_known(),
             channel_ids: None,
             auth_method: AuthMethod::Nip42,
-            agent_owner_pubkey: None, // Set later by relay membership gate if NIP-OA
+            agent_owner_pubkey: None,
         })
     }
 }
@@ -183,17 +199,41 @@ mod tests {
     }
 
     #[test]
-    fn auth_context_scope_check() {
+    fn connection_auth_context_scope_check() {
         let keys = Keys::generate();
-        let ctx = AuthContext {
+        let context = ConnectionAuthContext {
             pubkey: keys.public_key(),
             scopes: vec![Scope::MessagesRead, Scope::ChannelsRead],
             channel_ids: None,
             auth_method: AuthMethod::Nip42,
             agent_owner_pubkey: None,
         };
-        assert!(ctx.has_scope(&Scope::MessagesRead));
-        assert!(!ctx.has_scope(&Scope::MessagesWrite));
+
+        assert!(context.has_scope(&Scope::MessagesRead));
+        assert!(!context.has_scope(&Scope::MessagesWrite));
+    }
+
+    #[test]
+    fn connection_auth_context_debug_redacts_authorization_data() {
+        let actor = Keys::generate();
+        let owner = Keys::generate();
+        let channel_id = uuid::Uuid::new_v4();
+        let context = ConnectionAuthContext {
+            pubkey: actor.public_key(),
+            scopes: vec![Scope::MessagesRead],
+            channel_ids: Some(vec![channel_id]),
+            auth_method: AuthMethod::Nip42,
+            agent_owner_pubkey: Some(owner.public_key()),
+        };
+
+        assert_eq!(
+            format!("{context:?}"),
+            concat!(
+                "ConnectionAuthContext { pubkey: \"[redacted]\", scopes: \"[redacted]\", ",
+                "channel_ids: \"[redacted]\", auth_method: Nip42, ",
+                "agent_owner_pubkey: \"[redacted]\" }"
+            )
+        );
     }
 
     #[tokio::test]
