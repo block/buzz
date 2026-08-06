@@ -794,6 +794,7 @@ impl Config {
             env("ANTHROPIC_API_KEY").as_deref(),
             env("OPENAI_COMPAT_API_KEY").as_deref(),
             env("OPENROUTER_API_KEY").as_deref(),
+            env("OPENAI_COMPAT_SESSION_FILE").as_deref(),
         )?;
 
         // Universal model override — takes priority over provider-specific model
@@ -1057,11 +1058,16 @@ fn present_nonempty(v: Option<&str>) -> bool {
     v.map(str::trim).is_some_and(|s| !s.is_empty())
 }
 
+/// `openai_session_file` is an alternative credential, not an extra: when an
+/// OAuth session file is configured, the bearer is read (and refreshed) from it
+/// per request and `OPENAI_COMPAT_API_KEY` is never consulted. Requiring the
+/// static key anyway rejects a perfectly valid configuration at startup.
 fn resolve_provider(
     requested: Option<&str>,
     anthropic_key: Option<&str>,
     openai_key: Option<&str>,
     openrouter_key: Option<&str>,
+    openai_session_file: Option<&str>,
 ) -> Result<Provider, String> {
     match requested.map(str::trim).filter(|s| !s.is_empty()) {
         Some(raw) => {
@@ -1071,9 +1077,13 @@ fn resolve_provider(
                 "anthropic" => Err(
                     "config: ANTHROPIC_API_KEY required".into(),
                 ),
-                "openai" | "openai-compat" if present_nonempty(openai_key) => Ok(Provider::OpenAi),
+                "openai" | "openai-compat"
+                    if present_nonempty(openai_key) || present_nonempty(openai_session_file) =>
+                {
+                    Ok(Provider::OpenAi)
+                }
                 "openai" | "openai-compat" => Err(
-                    "config: OPENAI_COMPAT_API_KEY required".into(),
+                    "config: OPENAI_COMPAT_API_KEY or OPENAI_COMPAT_SESSION_FILE required".into(),
                 ),
                 "databricks" => Ok(Provider::Databricks),
                 "databricks_v2" | "databricks-v2" => Ok(Provider::DatabricksV2),
@@ -1296,11 +1306,11 @@ mod tests {
     #[test]
     fn resolve_provider_keeps_requested_provider_when_token_present() {
         assert_eq!(
-            resolve_provider(Some("anthropic"), Some("sk-ant"), None, None).unwrap(),
+            resolve_provider(Some("anthropic"), Some("sk-ant"), None, None, None).unwrap(),
             Provider::Anthropic
         );
         assert_eq!(
-            resolve_provider(Some("openai"), None, Some("sk-openai"), None).unwrap(),
+            resolve_provider(Some("openai"), None, Some("sk-openai"), None, None).unwrap(),
             Provider::OpenAi
         );
     }
@@ -1308,18 +1318,44 @@ mod tests {
     #[test]
     fn resolve_provider_errors_when_requested_provider_key_missing() {
         // No fallback — missing key returns an error regardless of Databricks availability.
-        let err = resolve_provider(Some("anthropic"), None, None, None).unwrap_err();
+        let err = resolve_provider(Some("anthropic"), None, None, None, None).unwrap_err();
         assert!(err.contains("ANTHROPIC_API_KEY required"), "{err}");
 
-        let err = resolve_provider(Some("openai-compat"), None, Some("   "), None).unwrap_err();
-        assert!(err.contains("OPENAI_COMPAT_API_KEY required"), "{err}");
+        let err =
+            resolve_provider(Some("openai-compat"), None, Some("   "), None, None).unwrap_err();
+        assert!(err.contains("OPENAI_COMPAT_API_KEY"), "{err}");
     }
 
     #[test]
     fn resolve_provider_errors_when_provider_env_absent() {
         // No implicit inference — absent BUZZ_AGENT_PROVIDER is an error.
-        let err = resolve_provider(None, None, None, None).unwrap_err();
+        let err = resolve_provider(None, None, None, None, None).unwrap_err();
         assert!(err.contains("BUZZ_AGENT_PROVIDER is required"), "{err}");
+    }
+
+    #[test]
+    fn resolve_provider_accepts_session_file_without_static_key() {
+        // The production case: agents authenticate from an OAuth session file and
+        // have no OPENAI_COMPAT_API_KEY at all. Requiring the static key here made
+        // buzz-agent exit before build_token_source could ever select the
+        // session-backed source, crash-looping against a session valid throughout.
+        assert_eq!(
+            resolve_provider(
+                Some("openai-compat"),
+                None,
+                None,
+                None,
+                Some("/var/lib/buzz-agents/grok-session.json")
+            )
+            .unwrap(),
+            Provider::OpenAi
+        );
+        // Neither credential is still an error, and the message names both.
+        let err = resolve_provider(Some("openai-compat"), None, None, None, None).unwrap_err();
+        assert!(err.contains("OPENAI_COMPAT_API_KEY"), "{err}");
+        assert!(err.contains("OPENAI_COMPAT_SESSION_FILE"), "{err}");
+        // Whitespace is not a credential.
+        assert!(resolve_provider(Some("openai-compat"), None, None, None, Some("  ")).is_err());
     }
 
     #[test]
@@ -1328,19 +1364,19 @@ mod tests {
         // When BUZZ_AGENT_PROVIDER=databricks, resolve_provider succeeds regardless
         // of DATABRICKS_HOST/MODEL (those are validated later in from_env()).
         assert_eq!(
-            resolve_provider(Some("databricks"), None, None, None).unwrap(),
+            resolve_provider(Some("databricks"), None, None, None, None).unwrap(),
             Provider::Databricks
         );
         // Missing key for other providers still errors — no Databricks fallback.
-        let err = resolve_provider(Some("openai"), None, None, None).unwrap_err();
-        assert!(err.contains("OPENAI_COMPAT_API_KEY required"), "{err}");
-        let err = resolve_provider(None, None, None, None).unwrap_err();
+        let err = resolve_provider(Some("openai"), None, None, None, None).unwrap_err();
+        assert!(err.contains("OPENAI_COMPAT_API_KEY"), "{err}");
+        let err = resolve_provider(None, None, None, None, None).unwrap_err();
         assert!(err.contains("BUZZ_AGENT_PROVIDER is required"), "{err}");
     }
 
     #[test]
     fn resolve_provider_unsupported_error_preserves_user_casing() {
-        let err = resolve_provider(Some("OpenAIish"), None, None, None).unwrap_err();
+        let err = resolve_provider(Some("OpenAIish"), None, None, None, None).unwrap_err();
         assert!(err.contains("BUZZ_AGENT_PROVIDER=OpenAIish"));
     }
 
@@ -2786,14 +2822,14 @@ mod tests {
     #[test]
     fn resolve_provider_openrouter_with_key() {
         assert_eq!(
-            resolve_provider(Some("openrouter"), None, None, Some("sk-or-123")).unwrap(),
+            resolve_provider(Some("openrouter"), None, None, Some("sk-or-123"), None).unwrap(),
             Provider::OpenRouter
         );
     }
 
     #[test]
     fn resolve_provider_openrouter_missing_key() {
-        let err = resolve_provider(Some("openrouter"), None, None, None).unwrap_err();
+        let err = resolve_provider(Some("openrouter"), None, None, None, None).unwrap_err();
         assert!(err.contains("OPENROUTER_API_KEY"));
     }
 }
