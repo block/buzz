@@ -5,10 +5,7 @@ import {
   useRelayAgentsQuery,
   useTeamsQuery,
 } from "@/features/agents/hooks";
-import {
-  useChannelMembersQuery,
-  useChannelsQuery,
-} from "@/features/channels/hooks";
+import { useChannelMembersQuery } from "@/features/channels/hooks";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import type { MentionSuggestion } from "@/features/messages/ui/MentionAutocomplete";
 import {
@@ -16,7 +13,6 @@ import {
   coalesceAutocompleteCandidatesByKey,
   filterCachedAgentSuggestions,
   getMentionableAgentPubkeys,
-  getSharedChannelIds,
   isAgentIdentityInAllowedList,
   isAgentMentionChannelType,
   shouldHideAgentFromMentions,
@@ -107,7 +103,6 @@ export function useMentions(
   const isArchivedDiscovery = useIsArchivedPredicate();
   const managedAgentsQuery = useManagedAgentsQuery();
   const relayAgentsQuery = useRelayAgentsQuery();
-  const channelsQuery = useChannelsQuery();
   const personasQuery = usePersonasQuery();
   const teamsQuery = useTeamsQuery();
   const managedAgentDirectoryReady =
@@ -190,10 +185,6 @@ export function useMentions(
       ),
     [relayAgentsQuery.data],
   );
-  const sharedChannelIds = React.useMemo(
-    () => getSharedChannelIds(channelsQuery.data),
-    [channelsQuery.data],
-  );
   const mentionChannelId = isAgentMentionChannelType(options?.channelType)
     ? channelId
     : null;
@@ -205,15 +196,15 @@ export function useMentions(
           ? { type: "channel", channelId: mentionChannelId }
           : { type: "managed-only" },
         managedAgentPubkeys,
+        profiles,
         relayAgents: relayAgentsQuery.data,
-        sharedChannelIds,
       }),
     [
       currentPubkey,
       managedAgentPubkeys,
       mentionChannelId,
+      profiles,
       relayAgentsQuery.data,
-      sharedChannelIds,
     ],
   );
   const personaNameByPubkey = React.useMemo(() => {

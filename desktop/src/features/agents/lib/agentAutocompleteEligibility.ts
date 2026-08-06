@@ -1,3 +1,5 @@
+import { mergeOwnedAgentPubkeys } from "@/features/agents/knownAgentPubkeys";
+import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { Channel, RelayAgent } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
@@ -13,10 +15,20 @@ export function relayAgentIsSharedWithUser(
   agent: Pick<RelayAgent, "channelIds" | "respondTo" | "respondToAllowlist">,
   sharedChannelIds: ReadonlySet<string>,
   currentPubkey?: string | null,
+  isOwnedByViewer = false,
 ) {
   const normalizedCurrentPubkey = currentPubkey
     ? normalizePubkey(currentPubkey)
     : null;
+
+  // `owner-only` names exactly one person who may instruct the agent, so that
+  // person can invoke it. It is also the server default, so an agent created
+  // without an explicit mode used to be invocable by nobody at all. Ownership
+  // is matched, never assumed: an agent whose owner we cannot resolve stays
+  // hidden.
+  if (agent.respondTo === "owner-only") {
+    return isOwnedByViewer && normalizedCurrentPubkey !== null;
+  }
 
   if (agent.respondTo === "allowlist" && normalizedCurrentPubkey) {
     return agent.respondToAllowlist
@@ -34,10 +46,16 @@ export function relayAgentCanRespondInChannel(
   agent: Pick<RelayAgent, "channelIds" | "respondTo" | "respondToAllowlist">,
   channelId: string,
   currentPubkey?: string | null,
+  isOwnedByViewer = false,
 ) {
   return (
     agent.channelIds.includes(channelId) &&
-    relayAgentIsSharedWithUser(agent, new Set([channelId]), currentPubkey)
+    relayAgentIsSharedWithUser(
+      agent,
+      new Set([channelId]),
+      currentPubkey,
+      isOwnedByViewer,
+    )
   );
 }
 
@@ -46,33 +64,57 @@ export type AgentEligibilityScope =
   | { type: "channel"; channelId: string }
   | { type: "managed-only" };
 
+const EMPTY_CHANNEL_IDS: ReadonlySet<string> = new Set();
+
 export function getMentionableAgentPubkeys({
   currentPubkey,
   eligibilityScope,
   managedAgentPubkeys,
+  profiles,
   relayAgents,
-  sharedChannelIds,
+  sharedChannelIds = EMPTY_CHANNEL_IDS,
 }: {
   currentPubkey?: string | null;
   eligibilityScope: AgentEligibilityScope;
   managedAgentPubkeys: Iterable<string>;
+  /**
+   * Profile metadata, the only place an agent's owner is published: the relay
+   * directory (`RelayAgent`) carries no owner field. Omit it and `owner-only`
+   * agents stay hidden, which is the pre-existing behaviour.
+   */
+  profiles?: UserProfileLookup;
   relayAgents: readonly RelayAgent[] | undefined;
-  sharedChannelIds: ReadonlySet<string>;
+  /** Read only by the `community` scope; the others derive their own. */
+  sharedChannelIds?: ReadonlySet<string>;
 }) {
   const pubkeys = new Set(
     [...managedAgentPubkeys].map((pubkey) => normalizePubkey(pubkey)),
   );
+  const ownedAgentPubkeys = mergeOwnedAgentPubkeys(
+    undefined,
+    profiles,
+    currentPubkey,
+  );
 
   for (const agent of relayAgents ?? []) {
+    const isOwnedByViewer = ownedAgentPubkeys.has(
+      normalizePubkey(agent.pubkey),
+    );
     const isAllowed =
       eligibilityScope.type === "managed-only"
         ? false
         : eligibilityScope.type === "community"
-          ? relayAgentIsSharedWithUser(agent, sharedChannelIds, currentPubkey)
+          ? relayAgentIsSharedWithUser(
+              agent,
+              sharedChannelIds,
+              currentPubkey,
+              isOwnedByViewer,
+            )
           : relayAgentCanRespondInChannel(
               agent,
               eligibilityScope.channelId,
               currentPubkey,
+              isOwnedByViewer,
             );
     if (isAllowed) {
       pubkeys.add(normalizePubkey(agent.pubkey));
