@@ -1990,6 +1990,18 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(findRichText('Newest live update'), findsOneWidget);
+      final latestMessage = find.byKey(
+        const ValueKey('channel-message-group-newest'),
+      );
+      final composerDock = find.byKey(const ValueKey('channel-composer-dock'));
+      expect(
+        tester.getBottomLeft(latestMessage).dy,
+        lessThanOrEqualTo(tester.getTopLeft(composerDock).dy + 1),
+      );
+      expect(
+        find.byKey(const ValueKey('channel-jump-to-latest')),
+        findsNothing,
+      );
     });
 
     testWidgets(
