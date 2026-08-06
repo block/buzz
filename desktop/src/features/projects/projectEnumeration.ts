@@ -9,12 +9,26 @@ import { buildProjectReadModels, type Project } from "./projectModels";
 
 const PROJECT_ENUMERATION_PAGE_SIZE = 500;
 
-type ProjectEventFilter = {
+// Relays commonly cap filter tag-value lists; chunk `#a` scoping well below
+// any such cap.
+const TOMBSTONE_COORDINATE_CHUNK_SIZE = 100;
+
+/** Additional server-side scoping merged into every enumeration page. */
+export type ProjectEventExtraFilter = {
+  "#a"?: string[];
+};
+
+type ProjectEventFilter = ProjectEventExtraFilter & {
   kinds: number[];
   limit: number;
   since?: number;
   until?: number;
 };
+
+export type FetchProjectEventsExhaustively = (
+  kinds: number[],
+  extraFilter?: ProjectEventExtraFilter,
+) => Promise<RelayEvent[]>;
 
 type FetchProjectEventPage = (
   filter: ProjectEventFilter,
@@ -29,6 +43,7 @@ export async function enumerateProjectEvents(
   fetchPage: FetchProjectEventPage,
   kinds: number[],
   pageSize: number,
+  extraFilter?: ProjectEventExtraFilter,
 ): Promise<RelayEvent[]> {
   if (!Number.isSafeInteger(pageSize) || pageSize <= 0) {
     throw new Error(
@@ -41,6 +56,7 @@ export async function enumerateProjectEvents(
 
   for (;;) {
     const page = await fetchPage({
+      ...extraFilter,
       kinds,
       limit: pageSize,
       ...(until === undefined ? {} : { until }),
@@ -50,6 +66,7 @@ export async function enumerateProjectEvents(
 
     const oldest = Math.min(...page.map((event) => event.created_at));
     const boundary = await fetchPage({
+      ...extraFilter,
       kinds,
       limit: pageSize,
       since: oldest,
@@ -75,13 +92,62 @@ export async function enumerateProjectEvents(
 
 export function fetchProjectEventsExhaustively(
   kinds: number[],
+  extraFilter?: ProjectEventExtraFilter,
   pageSize = PROJECT_ENUMERATION_PAGE_SIZE,
 ): Promise<RelayEvent[]> {
   return enumerateProjectEvents(
     (filter) => relayClient.fetchEvents(filter),
     kinds,
     pageSize,
+    extraFilter,
   );
+}
+
+/** `kind:owner:dtag` coordinate for an addressable announcement event. */
+function eventCoordinate(event: RelayEvent): string | null {
+  const dtag = event.tags.find((tag) => tag[0] === "d")?.[1];
+  if (typeof dtag !== "string" || dtag.length === 0) return null;
+  return `${event.kind}:${event.pubkey.toLowerCase()}:${dtag}`;
+}
+
+/**
+ * Fetches the NIP-09 kind:5 tombstones relevant to the given announcement
+ * events, scoped server-side with `#a` filters on the announcements' own
+ * coordinates. Kind:5 is the app-wide deletion kind (every deleted chat
+ * message is one), so enumerating it unscoped crawls the entire community's
+ * deletion history — minutes on a large relay. Only tombstones addressing a
+ * currently visible project/repo coordinate can affect the read models, so
+ * scoping is semantically equivalent (see `buildDeletionThresholds`).
+ */
+async function fetchScopedDeletionEvents(
+  fetchExhaustively: FetchProjectEventsExhaustively,
+  announcementEvents: RelayEvent[],
+): Promise<RelayEvent[]> {
+  const coordinates = [
+    ...new Set(
+      announcementEvents.flatMap((event) => {
+        const coordinate = eventCoordinate(event);
+        return coordinate ? [coordinate] : [];
+      }),
+    ),
+  ];
+  if (coordinates.length === 0) return [];
+
+  const chunks: string[][] = [];
+  for (
+    let index = 0;
+    index < coordinates.length;
+    index += TOMBSTONE_COORDINATE_CHUNK_SIZE
+  ) {
+    chunks.push(
+      coordinates.slice(index, index + TOMBSTONE_COORDINATE_CHUNK_SIZE),
+    );
+  }
+
+  const pages = await Promise.all(
+    chunks.map((chunk) => fetchExhaustively([KIND_DELETION], { "#a": chunk })),
+  );
+  return pages.flat();
 }
 
 /**
@@ -95,23 +161,30 @@ export function fetchProjectEventsExhaustively(
  * returning an empty deletion set that would resurrect every deleted head.
  */
 export async function buildProjectsFromFetcher(
-  fetchExhaustively: (kinds: number[]) => Promise<RelayEvent[]>,
+  fetchExhaustively: FetchProjectEventsExhaustively,
   options: {
     relayOrigin?: string | null;
     hiddenAddresses?: ReadonlySet<string>;
   } = {},
 ): Promise<Project[]> {
-  const [projectEvents, repositoryEvents, tombstoneResult] = await Promise.all([
+  const [projectEvents, repositoryEvents] = await Promise.all([
     fetchExhaustively([KIND_PROJECT_ANNOUNCEMENT]),
     fetchExhaustively([KIND_REPO_ANNOUNCEMENT]),
-    fetchExhaustively([KIND_DELETION]).then(
-      (events) => ({ ok: true as const, events }),
-      (error: unknown) => ({
-        ok: false as const,
-        message: error instanceof Error ? error.message : "Unknown error",
-      }),
-    ),
   ]);
+
+  // Tombstones are fetched second (not in parallel) because the `#a` scoping
+  // needs the announcement coordinates; both announcement kinds are small,
+  // so this costs one extra round trip, not a full crawl.
+  const tombstoneResult = await fetchScopedDeletionEvents(fetchExhaustively, [
+    ...projectEvents,
+    ...repositoryEvents,
+  ]).then(
+    (events) => ({ ok: true as const, events }),
+    (error: unknown) => ({
+      ok: false as const,
+      message: error instanceof Error ? error.message : "Unknown error",
+    }),
+  );
 
   if (!tombstoneResult.ok) {
     throw new Error(
