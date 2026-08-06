@@ -168,8 +168,8 @@ test("cursor visibility can blink without a new terminal frame", () => {
   assert.ok(restored.fills.some((fill) => fill[0] === 20 && fill[2] === 1.2));
 });
 
-test("text preserves soft wraps and hard line breaks", () => {
-  const grid = new TerminalGrid({ generation: 0, columns: 8, screenLines: 3 });
+test("text preserves soft-wrap spaces and hard line breaks", () => {
+  const grid = new TerminalGrid({ generation: 0, columns: 5, screenLines: 3 });
   grid.apply({
     viewport: grid.viewport,
     full: true,
@@ -181,11 +181,11 @@ test("text preserves soft wraps and hard line breaks", () => {
         spans: [
           {
             style: { fg: 0, bg: 0, flags: 0 },
-            clusters: [
-              { column: 1, text: "A", width: 1 },
-              { column: 3, text: "😀", width: 2 },
-              { column: 6, text: "B", width: 1 },
-            ],
+            clusters: [..."abcd "].map((text, column) => ({
+              column,
+              text,
+              width: 1,
+            })),
           },
         ],
       },
@@ -195,7 +195,10 @@ test("text preserves soft wraps and hard line breaks", () => {
         spans: [
           {
             style: { fg: 0, bg: 0, flags: 0 },
-            clusters: [{ column: 0, text: "é", width: 1 }],
+            clusters: [
+              { column: 0, text: "é", width: 1 },
+              { column: 1, text: "f", width: 1 },
+            ],
           },
         ],
       },
@@ -212,5 +215,5 @@ test("text preserves soft wraps and hard line breaks", () => {
     ],
   });
 
-  assert.equal(grid.text(), " A 😀 Bé\ntail");
+  assert.equal(grid.text(), "abcd éf\ntail");
 });

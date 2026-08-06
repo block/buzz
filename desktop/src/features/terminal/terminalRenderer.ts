@@ -150,8 +150,8 @@ export class TerminalGrid {
             }
           }
         }
-        const text = cells.join("").trimEnd();
-        return row.wrapped ? text : `${text}\n`;
+        const text = cells.join("");
+        return row.wrapped ? text : `${text.trimEnd()}\n`;
       })
       .join("")
       .replace(/\n$/, "");
