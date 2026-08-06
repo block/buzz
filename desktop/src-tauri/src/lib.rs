@@ -880,6 +880,7 @@ pub fn run() {
             set_audio_output_device,
             get_audio_output_device,
             start_pairing,
+            start_identity_recovery_pairing,
             confirm_pairing_sas,
             cancel_pairing,
             apply_workspace,
