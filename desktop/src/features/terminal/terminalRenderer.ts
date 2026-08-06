@@ -56,6 +56,12 @@ export const TERMINAL_CELL_METRICS = {
   boldFont: '700 14px "JetBrains Mono", monospace',
 } as const satisfies CellMetrics;
 
+export type TerminalSelectionRow = {
+  line: number;
+  text: string;
+  wrapped: boolean;
+};
+
 type RetainedRow = {
   wrapped: boolean;
   spans: readonly TerminalSpan[];
@@ -138,21 +144,56 @@ export class TerminalGrid {
     return this.#viewport;
   }
 
-  text(): string {
-    return this.#rows
-      .map((row) => {
-        const cells = Array.from({ length: this.#viewport.columns }, () => " ");
-        for (const span of row.spans) {
-          for (const cluster of span.clusters) {
-            cells[cluster.column] = cluster.text;
-            for (let offset = 1; offset < cluster.width; offset++) {
-              cells[cluster.column + offset] = "";
-            }
+  selectionRows(): readonly TerminalSelectionRow[] {
+    return this.#rows.map((row, line) => {
+      const cells = Array.from({ length: this.#viewport.columns }, () => " ");
+      for (const span of row.spans) {
+        for (const cluster of span.clusters) {
+          cells[cluster.column] = cluster.text;
+          for (let offset = 1; offset < cluster.width; offset++) {
+            cells[cluster.column + offset] = "";
           }
         }
-        const text = cells.join("");
-        return row.wrapped ? text : `${text.trimEnd()}\n`;
-      })
+      }
+      const text = cells.join("");
+      return {
+        line,
+        text: row.wrapped ? text : text.trimEnd(),
+        wrapped: row.wrapped,
+      };
+    });
+  }
+
+  selectionText(
+    startRow: number,
+    startOffset: number,
+    endRow: number,
+    endOffset: number,
+  ): string {
+    const rows = this.selectionRows();
+    if (
+      startRow < 0 ||
+      endRow < startRow ||
+      endRow >= rows.length ||
+      startOffset < 0 ||
+      endOffset < 0
+    ) {
+      return "";
+    }
+    let selected = "";
+    for (let index = startRow; index <= endRow; index++) {
+      const row = rows[index];
+      const from = index === startRow ? startOffset : 0;
+      const to = index === endRow ? endOffset : row.text.length;
+      selected += row.text.slice(from, to);
+      if (index < endRow && !row.wrapped) selected += "\n";
+    }
+    return selected;
+  }
+
+  text(): string {
+    return this.selectionRows()
+      .map((row) => (row.wrapped ? row.text : `${row.text}\n`))
       .join("")
       .replace(/\n$/, "");
   }

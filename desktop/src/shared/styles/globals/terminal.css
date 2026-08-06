@@ -199,6 +199,10 @@
     white-space: pre;
   }
 
+  .buzz-terminal-selection-layer > div {
+    height: 17px;
+  }
+
   .buzz-terminal-selection-layer::selection {
     background: hsl(var(--accent) / 0.65);
     color: transparent;

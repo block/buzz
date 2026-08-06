@@ -872,11 +872,86 @@ test("mirrors the active canvas grid into a selectable plain-text layer", async 
     ".buzz-terminal-selection-layer",
   );
   await waitFor(() =>
-    assert.equal(selectionLayer.textContent.split("\n")[0], "one"),
+    assert.equal(
+      selectionLayer.querySelector("[data-terminal-selection-row='0']")
+        .textContent,
+      "one",
+    ),
   );
 
   subject.rerender({ sessions: SWAPPED_SESSIONS });
   await waitFor(() =>
-    assert.equal(selectionLayer.textContent.split("\n")[0], "two"),
+    assert.equal(
+      selectionLayer.querySelector("[data-terminal-selection-row='0']")
+        .textContent,
+      "two",
+    ),
   );
+});
+
+test("lays out screen rows separately but copies soft wraps as one logical line", async () => {
+  const frame = {
+    cursor: { column: 0, line: 0, visible: false },
+    full: true,
+    rows: [
+      {
+        line: 0,
+        wrapped: true,
+        spans: [
+          {
+            style: { fg: 0, bg: 0, flags: 0 },
+            clusters: [
+              { column: 0, text: "a", width: 1 },
+              { column: 1, text: "b", width: 1 },
+              { column: 2, text: "c", width: 1 },
+              { column: 3, text: "d", width: 1 },
+              { column: 4, text: " ", width: 1 },
+            ],
+          },
+        ],
+      },
+      {
+        line: 1,
+        wrapped: false,
+        spans: [
+          {
+            style: { fg: 0, bg: 0, flags: 0 },
+            clusters: [
+              { column: 0, text: "é", width: 1 },
+              { column: 1, text: "f", width: 1 },
+            ],
+          },
+        ],
+      },
+    ],
+    viewport: { columns: 5, generation: 1, screenLines: 2 },
+  };
+  const subject = fixture({
+    sessionFrames: [{ frame, sessionId: "one" }],
+  });
+  await ready(subject.view);
+  const selectionLayer = subject.view.container.querySelector(
+    ".buzz-terminal-selection-layer",
+  );
+  await waitFor(() =>
+    assert.equal(
+      selectionLayer.querySelectorAll("[data-terminal-selection-row]").length,
+      2,
+    ),
+  );
+  const rows = selectionLayer.querySelectorAll("[data-terminal-selection-row]");
+  assert.equal(rows[0].textContent, "abcd ");
+  assert.equal(rows[1].textContent, "éf");
+
+  const selection = window.getSelection();
+  selection.removeAllRanges();
+  const range = document.createRange();
+  range.setStart(rows[0].firstChild, 1);
+  range.setEnd(rows[1].firstChild, rows[1].textContent.length);
+  selection.addRange(range);
+  const copied = new Map();
+  fireEvent.copy(rows[0].parentElement, {
+    clipboardData: { setData: (type, value) => copied.set(type, value) },
+  });
+  assert.equal(copied.get("text/plain"), "bcd éf");
 });
