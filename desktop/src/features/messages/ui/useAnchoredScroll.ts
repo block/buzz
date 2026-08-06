@@ -18,6 +18,8 @@ import { useVirtualizedViewportResize } from "./useVirtualizedViewportResize";
  */
 const AT_BOTTOM_THRESHOLD_PX = 32;
 
+type ScrollTargetAlignment = "bottom" | "center";
+
 type AnchorState =
   | { kind: "at-bottom" }
   | { kind: "message"; messageId: string; topOffset: number }
@@ -40,6 +42,8 @@ type UseAnchoredScrollOptions = {
 
   /** When set, scroll to this message on mount and on change. */
   targetMessageId?: string | null;
+  /** How to place the target message when it is reached. */
+  targetAlignment?: ScrollTargetAlignment;
   /** Whether a targeted message should pulse after scrolling to it. */
   highlightTargetMessage?: boolean;
   /** Keeps a targeted message centered until the user deliberately scrolls. */
@@ -147,6 +151,10 @@ function computeAnchor(
   return { kind: "at-bottom" };
 }
 
+function makeTargetKey(id: string | null, alignment: ScrollTargetAlignment) {
+  return id ? `${alignment}:${id}` : null;
+}
+
 export function useAnchoredScroll({
   scrollContainerRef,
   contentRef,
@@ -156,6 +164,7 @@ export function useAnchoredScroll({
   splitPanelOpen = false,
 
   targetMessageId = null,
+  targetAlignment = "center",
   highlightTargetMessage = true,
   pinTargetCentered = false,
   onTargetReached,
@@ -188,7 +197,8 @@ export function useAnchoredScroll({
   const prevFirstMessageIdRef = React.useRef<string | undefined>(undefined);
   const prevMessageCountRef = React.useRef(0);
   const prevMessagesRef = React.useRef<Array<{ id: string }>>([]);
-  const handledTargetIdRef = React.useRef<string | null>(null);
+  const handledTargetRequestRef = React.useRef<string | null>(null);
+  const targetRequestKey = makeTargetKey(targetMessageId, targetAlignment);
   const highlightTimeoutRef = React.useRef<number | null>(null);
   // Tracks a pending rAF queued by pinToBottomOnMount so it can be cancelled
   // on channel switch (the channelId reset effect clears it).
@@ -225,7 +235,7 @@ export function useAnchoredScroll({
     prevFirstMessageIdRef.current = undefined;
     prevMessageCountRef.current = 0;
     prevMessagesRef.current = [];
-    handledTargetIdRef.current = null;
+    handledTargetRequestRef.current = null;
     forceBottomOnNextAppendRef.current = false;
     settlingRef.current = false;
     programmaticScrollTopRef.current = null;
@@ -438,6 +448,11 @@ export function useAnchoredScroll({
       const el = container.querySelector<HTMLElement>(
         `[data-message-id="${messageId}"]`,
       );
+      if (targetAlignment === "bottom") {
+        if (!el) return false;
+        scrollToBottomImperative(options.behavior ?? "auto");
+        return true;
+      }
       if (virtualizerOwnsPrependAnchoring && virtualScrollToMessage) {
         // Target navigation owns the viewport before any movement strategy is
         // chosen. The already-mounted fast path centers the DOM node directly
@@ -538,6 +553,8 @@ export function useAnchoredScroll({
       highlightMessage,
       pinTargetCentered,
       scrollContainerRef,
+      scrollToBottomImperative,
+      targetAlignment,
       virtualCancelBottomIntent,
       virtualizerOwnsPrependAnchoring,
       writePinnedCenterScroll,
@@ -640,7 +657,7 @@ export function useAnchoredScroll({
             highlight: highlightTargetMessage,
           })
         ) {
-          handledTargetIdRef.current = targetMessageId;
+          handledTargetRequestRef.current = targetRequestKey;
           onTargetReached?.(targetMessageId);
         } else {
           pinToBottomOnMount();
@@ -770,6 +787,7 @@ export function useAnchoredScroll({
     scrollContainerRef,
     scrollToBottomImperative,
     scrollToMessageImperative,
+    targetRequestKey,
     targetMessageId,
     virtualScrollToBottom,
     virtualSettleAtBottom,
@@ -879,7 +897,7 @@ export function useAnchoredScroll({
   // biome-ignore lint/correctness/useExhaustiveDependencies: `messages` and `virtualizerRenderVersion` are intentional retry triggers, not values read by the effect body — the effect reads the DOM (querySelector), and we need it to re-run each time the message list or virtualized rendered range changes so a target spliced into older history gets centered once its row commits.
   React.useEffect(() => {
     if (!targetMessageId) {
-      handledTargetIdRef.current = null;
+      handledTargetRequestRef.current = null;
       releasePinnedCenter();
       return;
     }
@@ -889,7 +907,8 @@ export function useAnchoredScroll({
     ) {
       releasePinnedCenter();
     }
-    if (handledTargetIdRef.current === targetMessageId || isLoading) return;
+    if (handledTargetRequestRef.current === targetRequestKey || isLoading)
+      return;
     if (!hasInitializedRef.current) return; // initial-mount path will handle.
 
     void virtualizerRenderVersion;
@@ -904,7 +923,7 @@ export function useAnchoredScroll({
           highlight: highlightTargetMessage,
         })
       ) {
-        handledTargetIdRef.current = targetMessageId;
+        handledTargetRequestRef.current = targetRequestKey;
         onTargetReached?.(targetMessageId);
       }
       return;
@@ -915,11 +934,14 @@ export function useAnchoredScroll({
       // each `messages` commit and retries until the row exists.
       return;
     }
-    handledTargetIdRef.current = targetMessageId;
-    scrollToMessageImperative(targetMessageId, {
-      highlight: highlightTargetMessage,
-    });
-    onTargetReached?.(targetMessageId);
+    if (
+      scrollToMessageImperative(targetMessageId, {
+        highlight: highlightTargetMessage,
+      })
+    ) {
+      handledTargetRequestRef.current = targetRequestKey;
+      onTargetReached?.(targetMessageId);
+    }
   }, [
     highlightTargetMessage,
     isLoading,
@@ -928,6 +950,7 @@ export function useAnchoredScroll({
     releasePinnedCenter,
     scrollContainerRef,
     scrollToMessageImperative,
+    targetRequestKey,
     targetMessageId,
     virtualizerOwnsPrependAnchoring,
     virtualizerRenderVersion,

@@ -266,6 +266,87 @@ function BottomStateHarness({
   return null;
 }
 
+function makeBottomTargetNodes() {
+  const resizeObservers = [];
+  const content = {};
+  const container = {
+    clientHeight: 400,
+    listeners: new Map(),
+    scrollHeight: 1_000,
+    scrollTop: 0,
+    addEventListener(type, listener) {
+      this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+    },
+    getBoundingClientRect() {
+      return { bottom: this.clientHeight, top: 0 };
+    },
+    querySelector() {
+      return row;
+    },
+    querySelectorAll() {
+      return [row];
+    },
+    removeEventListener(type, listener) {
+      this.listeners.set(
+        type,
+        (this.listeners.get(type) ?? []).filter(
+          (current) => current !== listener,
+        ),
+      );
+    },
+    scrollBy(_x, y) {
+      this.scrollTop = Math.max(
+        0,
+        Math.min(this.scrollTop + y, this.scrollHeight - this.clientHeight),
+      );
+    },
+    scrollTo({ top }) {
+      this.scrollTop = Math.max(
+        0,
+        Math.min(top, this.scrollHeight - this.clientHeight),
+      );
+    },
+  };
+  const row = {
+    dataset: { messageId: "selected" },
+    getBoundingClientRect() {
+      const top = 900 - container.scrollTop;
+      return { bottom: top + 40, height: 40, top };
+    },
+    scrollIntoView() {
+      container.scrollTop = 100;
+    },
+  };
+
+  globalThis.ResizeObserver = class {
+    constructor(callback) {
+      this.callback = callback;
+      resizeObservers.push(this);
+    }
+
+    disconnect() {}
+
+    observe(target) {
+      this.target = target;
+    }
+  };
+
+  return { container, content, resizeObservers };
+}
+
+function BottomTargetHarness({ refs }) {
+  useAnchoredScroll({
+    channelId: "conversation",
+    contentRef: refs.content,
+    isLoading: false,
+    messages: [{ id: "root" }, { id: "selected" }],
+    scrollContainerRef: refs.container,
+    targetAlignment: "bottom",
+    targetMessageId: "selected",
+  });
+  return null;
+}
+
 function VirtualTargetHarness({ refs }) {
   const didRun = React.useRef(false);
   const bottomApi = useVirtualizedBottomSettle(
@@ -519,6 +600,36 @@ test("user interaction releases and retires a pending pinned target", async () =
 
   assert.deepEqual(settled, ["selected"]);
   assert.deepEqual(nodes.container.scrollWrites, []);
+  await act(async () => root.unmount());
+});
+
+test("bottom target opens at the physical floor and follows late growth", async () => {
+  const refs = {
+    container: { current: null },
+    content: { current: null },
+  };
+  const root = createRoot(document.createElement("div"));
+  const nodes = makeBottomTargetNodes();
+  refs.container.current = nodes.container;
+  refs.content.current = nodes.content;
+
+  await act(async () => {
+    root.render(React.createElement(BottomTargetHarness, { refs }));
+  });
+
+  assert.equal(
+    nodes.container.scrollTop,
+    600,
+    "explicit bottom target lands at the initial physical floor",
+  );
+  nodes.container.scrollHeight = 1_600;
+  nodes.resizeObservers[0].callback();
+  assert.equal(
+    nodes.container.scrollTop,
+    1_200,
+    "explicit bottom target remains pinned after late content growth",
+  );
+
   await act(async () => root.unmount());
 });
 
