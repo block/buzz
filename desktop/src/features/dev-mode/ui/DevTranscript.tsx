@@ -458,8 +458,8 @@ export function DevTranscript({
     [channel.id, getThreadReadAt, threadSummaries, readStateVersion],
   );
 
-  // Kind-7 reactions ride along as window aux events (pages + live); agents
-  // react while working, so these double as a per-prompt activity signal.
+  // Kind-7 reactions ride along as window aux events (pages + live); agent
+  // harness 👀/💬 status reactions become the per-prompt activity indicator.
   const rootReactions = React.useMemo(() => {
     const store = windowQuery.data;
     if (!store) return new Map<string, MessageReaction[]>();

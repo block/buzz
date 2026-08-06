@@ -10,11 +10,14 @@ import {
   type MentionStyle,
 } from "@/features/dev-mode/lib/highlightContent";
 import {
+  type AgentStatusSummary,
   applyReactionToggle,
   groupReactions,
   type MessageReaction,
   type ReactionGroup,
+  splitAgentStatus,
 } from "@/features/dev-mode/lib/messageReactions";
+import { DevSpotlightText } from "@/features/dev-mode/ui/DevSpotlightText";
 import type {
   AgentResolver,
   NameResolver,
@@ -60,6 +63,40 @@ function ReactionGlyph({ group }: { group: ReactionGroup }) {
       className="inline-block h-4 w-4 -translate-y-px object-contain align-text-bottom"
       draggable={false}
     />
+  );
+}
+
+/**
+ * Per-message agent activity, derived from the harness's 👀/💬 status
+ * reactions but rendered as text instead of emoji chips: a dim "queued"
+ * while the prompt waits and a spotlight-swept "working…" (the same sweep
+ * working channel names get) while an agent is on it.
+ */
+function AgentStatusIndicator({
+  summary,
+  resolveName,
+}: {
+  summary: AgentStatusSummary;
+  resolveName: NameResolver;
+}) {
+  const names = [...new Set(summary.pubkeys.map(resolveName))].join(", ");
+  if (summary.status === "working") {
+    return (
+      <span
+        className="shrink-0 select-none text-xs text-muted-foreground"
+        data-testid="dev-mode-agent-status-working"
+      >
+        <DevSpotlightText text={`${names} working…`} />
+      </span>
+    );
+  }
+  return (
+    <span
+      className="shrink-0 select-none text-xs text-muted-foreground/50"
+      data-testid="dev-mode-agent-status-queued"
+    >
+      {names} queued
+    </span>
   );
 }
 
@@ -205,7 +242,11 @@ export function DevMessageRow({
   currentPubkey: string | null;
   /** Whether a kind:40003 edit has been applied to this message's content. */
   edited?: boolean;
-  /** Emoji reacted onto this message — agents react while working, so this doubles as the loading state. */
+  /**
+   * Emoji reacted onto this message. Agent-published 👀/💬 harness status
+   * reactions are split out and rendered as a text activity indicator; the
+   * rest render as ordinary chips.
+   */
   reactions?: MessageReaction[];
   resolveName: NameResolver;
   resolveColor: AuthorColorResolver;
@@ -217,6 +258,10 @@ export function DevMessageRow({
   const imetaByUrl = React.useMemo(
     () => parseImetaTags(event.tags),
     [event.tags],
+  );
+  const { status: agentStatus, rest: chipReactions } = React.useMemo(
+    () => splitAgentStatus(reactions, resolveIsAgent),
+    [reactions, resolveIsAgent],
   );
 
   if (event.kind === KIND_SYSTEM_MESSAGE) {
@@ -271,11 +316,17 @@ export function DevMessageRow({
             (edited)
           </span>
         ) : null}
+        {agentStatus ? (
+          <AgentStatusIndicator
+            resolveName={resolveName}
+            summary={agentStatus}
+          />
+        ) : null}
         <DevReactions
           canReact={currentPubkey !== null && !event.pending}
           currentPubkey={currentPubkey}
           eventId={event.id}
-          reactions={reactions}
+          reactions={chipReactions}
           resolveName={resolveName}
         />
       </div>

@@ -53,8 +53,9 @@ function reactionEmojiTagUrl(
 }
 
 /**
- * Aggregate kind-7 reaction events by target message. Agents react to a
- * prompt while working on it, so these chips double as the loading state.
+ * Aggregate kind-7 reaction events by target message. Agent harness status
+ * reactions (👀/💬) ride along here and are split out at render time by
+ * `splitAgentStatus` into the per-message activity indicator.
  * Reactions withdrawn via a kind-5/9005 deletion marker are dropped, and
  * duplicate deliveries of the same (target, reactor, emoji) collapse to one.
  */
@@ -98,6 +99,57 @@ export function collectReactions(
     }
   }
   return byTarget;
+}
+
+export type AgentStatus = "queued" | "working";
+
+export type AgentStatusSummary = {
+  status: AgentStatus;
+  /** Agents backing the status — 💬 reactors when working, else 👀 reactors. */
+  pubkeys: string[];
+};
+
+const STATUS_SEEN = "👀";
+const STATUS_WORKING = "💬";
+
+/** Strip variation selectors so emoji-presentation variants still match. */
+function normalizeEmoji(emoji: string): string {
+  return emoji.replace(/[\uFE00-\uFE0F]/g, "");
+}
+
+/**
+ * The buzz-acp harness reacts 👀 ("queued — an agent will handle this") and
+ * 💬 ("an agent is actively working") onto the prompt it is serving. Dev mode
+ * renders those as a per-message status affordance instead of emoji chips:
+ * this splits agent-published status reactions out of the chip list. The same
+ * emoji from a human is an ordinary reaction and stays a chip. 💬 outranks 👀.
+ */
+export function splitAgentStatus(
+  reactions: MessageReaction[] | undefined,
+  isAgent: (pubkey: string) => boolean,
+): { status: AgentStatusSummary | null; rest: MessageReaction[] } {
+  const rest: MessageReaction[] = [];
+  const seen: string[] = [];
+  const working: string[] = [];
+  for (const reaction of reactions ?? []) {
+    const emoji = normalizeEmoji(reaction.emoji);
+    const isStatus = emoji === STATUS_SEEN || emoji === STATUS_WORKING;
+    if (!isStatus || !isAgent(reaction.pubkey)) {
+      rest.push(reaction);
+      continue;
+    }
+    (emoji === STATUS_WORKING ? working : seen).push(reaction.pubkey);
+  }
+  if (working.length > 0) {
+    return {
+      status: { status: "working", pubkeys: [...new Set(working)] },
+      rest,
+    };
+  }
+  if (seen.length > 0) {
+    return { status: { status: "queued", pubkeys: [...new Set(seen)] }, rest };
+  }
+  return { status: null, rest };
 }
 
 /**

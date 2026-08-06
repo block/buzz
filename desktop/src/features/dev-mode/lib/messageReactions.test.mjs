@@ -5,6 +5,7 @@ import {
   applyReactionToggle,
   collectReactions,
   groupReactions,
+  splitAgentStatus,
 } from "./messageReactions.ts";
 
 const TARGET = "a".repeat(64);
@@ -163,4 +164,63 @@ test("toggle drops a group that empties", () => {
     groups.map((group) => group.emoji),
     ["👀"],
   );
+});
+
+const isAgent = (pubkey) => pubkey.startsWith("agent");
+
+test("agent 👀 becomes a queued status, not a chip", () => {
+  const { status, rest } = splitAgentStatus(
+    [
+      { emoji: "👀", pubkey: "agent-amp" },
+      { emoji: "🔥", pubkey: "alice" },
+    ],
+    isAgent,
+  );
+  assert.deepEqual(status, { status: "queued", pubkeys: ["agent-amp"] });
+  assert.deepEqual(
+    rest.map((reaction) => reaction.emoji),
+    ["🔥"],
+  );
+});
+
+test("agent 💬 outranks 👀 and reports the working agents", () => {
+  const { status } = splitAgentStatus(
+    [
+      { emoji: "👀", pubkey: "agent-amp" },
+      { emoji: "💬", pubkey: "agent-codex" },
+      { emoji: "💬", pubkey: "agent-codex" },
+    ],
+    isAgent,
+  );
+  assert.deepEqual(status, { status: "working", pubkeys: ["agent-codex"] });
+});
+
+test("human 👀/💬 stay ordinary chips", () => {
+  const { status, rest } = splitAgentStatus(
+    [
+      { emoji: "👀", pubkey: "alice" },
+      { emoji: "💬", pubkey: "bob" },
+    ],
+    isAgent,
+  );
+  assert.equal(status, null);
+  assert.deepEqual(
+    rest.map((reaction) => reaction.emoji),
+    ["👀", "💬"],
+  );
+});
+
+test("status emoji with a variation selector still matches", () => {
+  const { status, rest } = splitAgentStatus(
+    [{ emoji: "👀\uFE0F", pubkey: "agent-amp" }],
+    isAgent,
+  );
+  assert.deepEqual(status, { status: "queued", pubkeys: ["agent-amp"] });
+  assert.deepEqual(rest, []);
+});
+
+test("no reactions yields no status and no chips", () => {
+  const { status, rest } = splitAgentStatus(undefined, isAgent);
+  assert.equal(status, null);
+  assert.deepEqual(rest, []);
 });
