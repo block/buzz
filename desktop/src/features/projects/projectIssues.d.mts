@@ -24,6 +24,8 @@ export type ProjectIssue = {
   author: string;
   createdAt: number;
   repoAddress: string | null;
+  channelId: string | null;
+  originAgentName: string | null;
   labels: string[];
   recipients: string[];
   status: ProjectIssueStatus;
@@ -54,6 +56,11 @@ export function projectIssueEventsToIssues(
   statusEvents?: RelayEvent[],
   commentEvents?: RelayEvent[],
 ): ProjectIssue[];
+export function nextProjectIssueCommentCreatedAt(
+  issue: ProjectIssue,
+  now: number,
+  author: string,
+): number;
 export function buildGitIssueTags(input: {
   repoAddress: string;
   repoOwner: string;

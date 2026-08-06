@@ -1,6 +1,7 @@
 use crate::agent::RunCtx;
 use crate::config::{
-    HANDOFF_MAX_OUTPUT_TOKENS, HANDOFF_MAX_TOOL_NAMES, HANDOFF_ORIGINAL_TASK_MAX_BYTES,
+    HANDOFF_MAX_OUTPUT_TOKENS, HANDOFF_MAX_TOOL_NAMES, HANDOFF_MIN_PROMPT_BUDGET_BYTES,
+    HANDOFF_ORIGINAL_TASK_MAX_BYTES, MAX_CONTEXT_RECOVERIES_PER_RUN,
 };
 use crate::types::HistoryItem;
 
@@ -22,24 +23,147 @@ pub(crate) enum HandoffOutcome {
     Cancelled,
 }
 
+/// Result of the reactive context-recovery ladder.
+pub(crate) enum ContextRecovery {
+    /// History was reset; the caller should retry the request.
+    Recovered,
+    /// Cancelled mid-recovery.
+    Cancelled,
+    /// No rescue remains — the caller must surface the provider error. Either
+    /// the per-`run()` budget is spent or the prompt budget fell below the
+    /// floor where a summary can still be useful.
+    Exhausted,
+}
+
 const HANDOFF_SYSTEM_PROMPT: &str = "You are generating a context handoff summary for the next \
 turn of an autonomous agent. Be concise but thorough. Cover: what the original task was, what \
 you accomplished, key decisions made, what remains, and one concrete next step. Output plain \
 text only — no tool calls, no JSON. Stay under 8192 tokens.";
 
 impl RunCtx<'_> {
-    pub(crate) async fn maybe_handoff(&mut self) -> HandoffOutcome {
+    pub(crate) async fn maybe_handoff(&mut self, handoff_attempts: &mut usize) -> HandoffOutcome {
         if !self.should_handoff() {
             return HandoffOutcome::Skipped;
         }
-        if *self.handoff_count >= self.cfg.max_handoffs {
-            tracing::info!(
-                "handoff cap reached ({}); using truncation",
-                self.cfg.max_handoffs
+        if *handoff_attempts >= self.cfg.max_handoffs {
+            let projected = self.projected_handoff_input_tokens();
+            let threshold =
+                token_threshold(self.cfg.max_context_tokens, self.cfg.max_output_tokens);
+            tracing::warn!(
+                session_id = self.session_id,
+                reason = "preflight",
+                handoff_attempts = *handoff_attempts,
+                max_handoffs = self.cfg.max_handoffs,
+                projected_tokens = projected,
+                threshold_tokens = threshold,
+                "handoff cap reached; using truncation",
             );
             return HandoffOutcome::Skipped;
         }
-        let prompt = self.build_handoff_prompt();
+        // Consume one attempt slot before calling handoff(). This ensures
+        // that empty-summary, summarize-error, and cancellation outcomes all
+        // burn budget — not just successful compactions — so the cap cannot
+        // be bypassed by a flaky summarizer.
+        *handoff_attempts += 1;
+        self.handoff(None).await
+    }
+
+    /// Handoff forced by a provider context-window rejection, bypassing both
+    /// gates in [`Self::maybe_handoff`].
+    ///
+    /// The gates exist to *predict* overflow; a 400 naming a context-length
+    /// overflow is overflow already observed, so neither prediction applies.
+    /// `should_handoff()` reads a token count frozen at the last SUCCESSFUL
+    /// request (a failed request reports no usage), so it is under threshold by
+    /// construction — that frozen reading is the permanent stick. And
+    /// `max_handoffs` is a cost cap whose only alternative here is a request
+    /// that cannot succeed.
+    ///
+    /// `history_budget_bytes` is explicit rather than derived from
+    /// `cfg.max_context_tokens`: that window is the quantity the provider just
+    /// contradicted, so the recovery ladder must not be computed from it.
+    pub(crate) async fn forced_handoff(&mut self, history_budget_bytes: usize) -> HandoffOutcome {
+        tracing::warn!(
+            "provider reported context overflow; forcing handoff (history budget {history_budget_bytes} bytes)"
+        );
+        self.handoff(Some(history_budget_bytes)).await
+    }
+
+    /// The reactive context-recovery ladder, run after the provider rejected a
+    /// request with a context-window 400.
+    ///
+    /// `attempts` is the caller's per-`run()` recovery counter, advanced here as
+    /// rungs are consumed. The caller owns it so the budget spans every
+    /// context-400 in the turn, not just the rungs of one ladder.
+    ///
+    /// The shrink schedule is anchored on the history that was just *observed*
+    /// to be too large, halving from there — not on `cfg.max_context_tokens`,
+    /// which the provider just contradicted and which may be overstated by an
+    /// unknown factor. Halving needs no calibration: by the third rung it is at
+    /// 1/8 of the rejected size.
+    ///
+    /// Loops rather than returning after one rung because the summarize call
+    /// travels the same provider path and can be rejected for the same reason.
+    /// Treating that as unrecoverable would reproduce the very stick this fixes:
+    /// the next rung halves the summarizer's own prompt, which is the only way
+    /// out.
+    ///
+    /// Gives up when the next budget would fall below
+    /// [`HANDOFF_MIN_PROMPT_BUDGET_BYTES`]. That can happen on the FIRST rung
+    /// when history is already small — correct, not premature: if a few KiB of
+    /// history still overflows the window, the overflow is dominated by what a
+    /// handoff cannot shrink (system prompt, tool schemas, the live user
+    /// prompt), so further halving would only issue smaller doomed requests in
+    /// place of a clear error.
+    pub(crate) async fn recover_from_context_overflow(
+        &mut self,
+        attempts: &mut u32,
+    ) -> ContextRecovery {
+        let rejected_bytes: usize = self
+            .history
+            .iter()
+            .map(HistoryItem::context_pressure_bytes)
+            .sum();
+        loop {
+            if *attempts >= MAX_CONTEXT_RECOVERIES_PER_RUN {
+                tracing::error!(
+                    "context recovery budget spent ({MAX_CONTEXT_RECOVERIES_PER_RUN} attempts this turn); surfacing provider error"
+                );
+                return ContextRecovery::Exhausted;
+            }
+            // Shift by `attempts + 1`: the first rung already halves, since
+            // rebuilding the rejected size would just fail again.
+            let shift = (*attempts + 1).min(usize::BITS - 1);
+            let budget = rejected_bytes >> shift;
+            *attempts += 1;
+            if budget < HANDOFF_MIN_PROMPT_BUDGET_BYTES {
+                tracing::error!(
+                    "context recovery would shrink the handoff prompt to {budget} bytes, below \
+                     the {HANDOFF_MIN_PROMPT_BUDGET_BYTES}-byte floor (history {rejected_bytes} \
+                     bytes); surfacing provider error"
+                );
+                return ContextRecovery::Exhausted;
+            }
+            match self.forced_handoff(budget).await {
+                HandoffOutcome::Performed => return ContextRecovery::Recovered,
+                HandoffOutcome::Cancelled => return ContextRecovery::Cancelled,
+                // Summarizer errored or returned nothing — possibly because its
+                // own prompt overflowed. Truncation is not a usable fallback
+                // (it sizes against the request-body budget, not context
+                // pressure), so take the next rung with a smaller prompt.
+                HandoffOutcome::Skipped => {
+                    tracing::warn!(
+                        "forced handoff at {budget} bytes did not run; shrinking further"
+                    )
+                }
+            }
+        }
+    }
+
+    /// The handoff mechanism itself: summarize, reset, re-seat the live prompt.
+    /// Holds no gate — callers decide whether a handoff is warranted.
+    async fn handoff(&mut self, history_budget_bytes: Option<usize>) -> HandoffOutcome {
+        let prompt = self.build_handoff_prompt(history_budget_bytes);
         let tokens_before = self.projected_handoff_input_tokens();
         let summary = tokio::select! {
             biased;
@@ -164,7 +288,10 @@ impl RunCtx<'_> {
         }
     }
 
-    fn build_handoff_prompt(&self) -> String {
+    /// Build the summarizer prompt. `history_budget_bytes` overrides the
+    /// budget normally derived from `cfg.max_context_tokens`; `None` keeps the
+    /// derived value, which is what the proactive path uses.
+    fn build_handoff_prompt(&self, history_budget_bytes: Option<usize>) -> String {
         let mut head = String::new();
         head.push_str(&format!(
             "[Internal handoff #{} — context reset]\n\n",
@@ -192,11 +319,22 @@ impl RunCtx<'_> {
              (2) what was accomplished, (3) key decisions, (4) what remains, \
              (5) one concrete next step. Be concise but thorough. Plain text.\n";
         let history_header = "\n# Session History (oldest first)\n";
-        let prompt_budget = handoff_prompt_budget_bytes(
-            self.cfg.max_context_tokens,
-            HANDOFF_MAX_OUTPUT_TOKENS,
-            head.len() + history_header.len() + tail.len(),
-        );
+        let fixed_bytes = head.len() + history_header.len() + tail.len();
+        // An explicit budget is the allowance for the whole prompt, so subtract
+        // the fixed frame from it exactly as the derived path does — otherwise
+        // a caller's ceiling would be silently exceeded by the frame. When the
+        // frame alone is larger than the budget, history drops to zero and the
+        // frame is what remains: it is already independently clamped
+        // (`HANDOFF_ORIGINAL_TASK_MAX_BYTES`, `HANDOFF_MAX_TOOL_NAMES`) and is
+        // not reducible from here.
+        let prompt_budget = match history_budget_bytes {
+            Some(explicit) => explicit.saturating_sub(fixed_bytes),
+            None => handoff_prompt_budget_bytes(
+                self.cfg.max_context_tokens,
+                HANDOFF_MAX_OUTPUT_TOKENS,
+                fixed_bytes,
+            ),
+        };
 
         let mut snippets: Vec<String> = Vec::new();
         let mut snippets_bytes = 0usize;

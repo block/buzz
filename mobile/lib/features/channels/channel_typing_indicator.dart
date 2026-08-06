@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/theme/theme.dart';
@@ -72,17 +73,74 @@ class ChannelTypingIndicator extends ConsumerWidget {
             ),
             const SizedBox(width: Grid.xxs),
             Flexible(
-              child: Text(
+              child: _TypingTextShimmer(
                 text,
                 style: context.textTheme.labelSmall?.copyWith(
-                  color: context.colors.primary,
-                  fontStyle: FontStyle.italic,
+                  color: context.colors.onSurfaceVariant,
                 ),
-                overflow: TextOverflow.ellipsis,
               ),
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _TypingTextShimmer extends HookWidget {
+  final String text;
+  final TextStyle? style;
+
+  const _TypingTextShimmer(this.text, {this.style});
+
+  @override
+  Widget build(BuildContext context) {
+    final animation = useAnimationController(
+      duration: const Duration(milliseconds: 2600),
+    );
+    final reducedMotion = MediaQuery.disableAnimationsOf(context);
+    final baseColor = style?.color ?? context.colors.onSurfaceVariant;
+    final highlightColor =
+        Color.lerp(context.colors.surface, baseColor, 0.4) ?? baseColor;
+
+    useEffect(() {
+      if (reducedMotion) {
+        animation
+          ..stop()
+          ..value = 0;
+      } else {
+        animation.repeat();
+      }
+      return animation.stop;
+    }, [animation, reducedMotion]);
+
+    final label = Text(text, style: style, overflow: TextOverflow.ellipsis);
+    if (reducedMotion) return label;
+
+    return RepaintBoundary(
+      child: AnimatedBuilder(
+        animation: animation,
+        child: label,
+        builder: (context, child) {
+          final center = 1.5 - (animation.value * 3);
+          return ShaderMask(
+            key: const ValueKey('channel-typing-shimmer'),
+            blendMode: BlendMode.srcIn,
+            shaderCallback: (bounds) => LinearGradient(
+              begin: Alignment(center - 1, 0),
+              end: Alignment(center + 1, 0),
+              colors: [
+                baseColor,
+                baseColor,
+                highlightColor,
+                baseColor,
+                baseColor,
+              ],
+              stops: const [0, 0.34, 0.5, 0.66, 1],
+            ).createShader(bounds),
+            child: child,
+          );
+        },
       ),
     );
   }

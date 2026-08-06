@@ -48,7 +48,6 @@ type CommunityRailProps = {
     id: string,
     updates: Partial<Pick<Community, "name" | "relayUrl" | "token">>,
   ) => void;
-  onRemoveCommunity: (id: string) => void;
   onReorderCommunities: (orderedIds: string[]) => void;
 };
 
@@ -107,7 +106,7 @@ function CommunityButton({
   dragAttributes?: React.HTMLAttributes<HTMLElement>;
   isDragging?: boolean;
 }) {
-  const { mentionCount, showBadge, showDot, pending, badgeLabel } =
+  const { mentionCount, showBadge, showDot, badgeLabel } =
     communityRailIndicators(unread);
 
   const tooltipLabel = showBadge
@@ -136,11 +135,8 @@ function CommunityButton({
             >
               <span
                 className={cn(
-                  "flex h-9 w-9 items-center justify-center overflow-hidden rounded-2xl text-xs font-semibold transition-all",
-                  isActive
-                    ? "rounded-xl bg-primary text-primary-foreground"
-                    : "bg-sidebar-accent/60 text-sidebar-foreground/80 hover:rounded-xl hover:bg-primary/80 hover:text-primary-foreground",
-                  pending && !isActive && "opacity-60",
+                  "flex h-9 w-9 items-center justify-center overflow-hidden rounded-xl bg-sidebar-accent/60 text-xs font-semibold text-sidebar-foreground/80 outline-2 outline-offset-2 outline-primary/0 transition-[outline-color]",
+                  isActive ? "outline-primary" : "hover:outline-primary/50",
                 )}
               >
                 {iconUrl ? (
@@ -173,7 +169,9 @@ function CommunityButton({
             </button>
           </ContextMenuTrigger>
         </TooltipTrigger>
-        <TooltipContent side="right">{tooltipLabel}</TooltipContent>
+        <TooltipContent side="right" sideOffset={8}>
+          {tooltipLabel}
+        </TooltipContent>
       </Tooltip>
       <ContextMenuContent data-testid={`community-rail-menu-${community.id}`}>
         {menu}
@@ -305,7 +303,6 @@ export function CommunityRail({
   onSwitchCommunity,
   onAddCommunity,
   onUpdateCommunity,
-  onRemoveCommunity,
   onReorderCommunities,
 }: CommunityRailProps) {
   const { unreadByCommunity, markCommunityRead } = useCommunityUnread(
@@ -370,7 +367,7 @@ export function CommunityRail({
   return (
     <nav
       aria-label="Communities"
-      className="relative z-20 flex w-14 shrink-0 flex-col items-center gap-2 overflow-y-auto bg-sidebar px-2.5 pb-5 pt-[calc(var(--buzz-top-chrome-height,40px)+7px)]"
+      className="relative z-0 flex w-14 shrink-0 flex-col items-center gap-2.5 overflow-y-auto bg-sidebar px-2.5 pb-5 pt-[calc(var(--buzz-top-chrome-height,40px)+7px)]"
       data-testid="community-rail"
     >
       <DndContext
@@ -420,14 +417,14 @@ export function CommunityRail({
             <Plus className="h-4 w-4" />
           </button>
         </TooltipTrigger>
-        <TooltipContent side="right">Add community</TooltipContent>
+        <TooltipContent side="right" sideOffset={8}>
+          Add community
+        </TooltipContent>
       </Tooltip>
       <EditCommunityDialog
-        canRemove={communities.length > 1}
         onOpenChange={(open) => {
           if (!open) setEditingCommunity(null);
         }}
-        onRemove={onRemoveCommunity}
         onSave={onUpdateCommunity}
         open={editingCommunity !== null}
         community={editingCommunity}
