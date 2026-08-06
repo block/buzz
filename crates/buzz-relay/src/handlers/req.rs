@@ -15,6 +15,7 @@ use buzz_db::EventQuery;
 use buzz_pubsub::EventTopic;
 use hex;
 use nostr::Filter;
+use tokio_util::sync::CancellationToken;
 
 use buzz_auth::Scope;
 
@@ -45,6 +46,7 @@ pub async fn handle_req(
     filters: Vec<Filter>,
     conn: Arc<ConnectionState>,
     state: Arc<AppState>,
+    request_cancel: CancellationToken,
 ) {
     let (conn_id, pubkey_bytes, token_channel_ids) = {
         let auth = conn.auth_state.read().await;
@@ -60,16 +62,6 @@ pub async fn handle_req(
                 }
 
                 let pk_bytes = ctx.pubkey.to_bytes().to_vec();
-
-                let subs = conn.subscriptions.lock().await;
-                if !subs.contains_key(&sub_id) && subs.len() >= MAX_SUBSCRIPTIONS {
-                    conn.send(RelayMessage::closed(
-                        &sub_id,
-                        "error: too many subscriptions",
-                    ));
-                    return;
-                }
-
                 (conn.conn_id, pk_bytes, ctx.channel_ids.clone())
             }
             _ => {
@@ -216,45 +208,58 @@ pub async fn handle_req(
             ));
             return;
         }
-        handle_search_req(
-            &sub_id,
-            &filters,
-            &accessible_channels,
-            token_channel_ids.is_none(),
-            &conn.tenant,
-            &pubkey_bytes,
-            &conn,
-            &state,
-            trace_state.as_ref(),
-        )
-        .await;
+        tokio::select! {
+            biased;
+            _ = request_cancel.cancelled() => {}
+            _ = handle_search_req(
+                &sub_id,
+                &filters,
+                &accessible_channels,
+                token_channel_ids.is_none(),
+                &conn.tenant,
+                &pubkey_bytes,
+                &conn,
+                &state,
+                trace_state.as_ref(),
+            ) => {}
+        }
         return;
     }
 
-    {
+    let replaced = {
         let mut subs = conn.subscriptions.lock().await;
+        if request_cancel.is_cancelled() {
+            return;
+        }
+        if !subs.contains_key(&sub_id) && subs.len() >= MAX_SUBSCRIPTIONS {
+            conn.send(RelayMessage::closed(
+                &sub_id,
+                "error: too many subscriptions",
+            ));
+            return;
+        }
         subs.insert(sub_id.clone(), filters.clone());
-    }
-
-    let replaced = state.sub_registry.register_scoped(
-        conn.tenant.community(),
-        conn_id,
-        sub_id.clone(),
-        filters.clone(),
-        channel_id,
-    );
-    if let Some(replaced) = replaced {
+        let replaced = state.sub_registry.register_scoped(
+            conn.tenant.community(),
+            conn_id,
+            sub_id.clone(),
+            filters.clone(),
+            channel_id,
+        );
+        if let Some(replaced) = replaced {
+            state
+                .pubsub
+                .release_topic(&conn.tenant, topic_for_subscription(replaced.channel_id))
+                .await;
+        }
         state
             .pubsub
-            .release_topic(&conn.tenant, topic_for_subscription(replaced.channel_id))
+            .retain_topic(&conn.tenant, topic_for_subscription(channel_id))
             .await;
-    }
-    state
-        .pubsub
-        .retain_topic(&conn.tenant, topic_for_subscription(channel_id))
-        .await;
+        replaced
+    };
 
-    debug!(conn_id = %conn_id, sub_id = %sub_id, "Subscription registered");
+    debug!(conn_id = %conn_id, sub_id = %sub_id, replaced = replaced.is_some(), "Subscription registered");
 
     // NIP-01 OR semantics: execute one DB query per filter and deduplicate results
     // by event ID. Collapsing all filters into a single query would merge their
@@ -317,7 +322,15 @@ pub async fn handle_req(
     .buffered(FILTER_QUERY_CONCURRENCY);
 
     // Phase 3 — post-processing, strictly in filter order.
-    while let Some((idx, per_filter_channel, filter_events)) = results.next().await {
+    loop {
+        let next = tokio::select! {
+            biased;
+            _ = request_cancel.cancelled() => return,
+            next = results.next() => next,
+        };
+        let Some((idx, per_filter_channel, filter_events)) = next else {
+            break;
+        };
         let filter = &filters[idx];
         let events = match filter_events {
             Ok(evs) => evs,
@@ -370,6 +383,9 @@ pub async fn handle_req(
         }
 
         for stored in &events {
+            if request_cancel.is_cancelled() {
+                return;
+            }
             // Per-filter NIP-01 matching — use the current filter only, not the
             // full filter set. OR semantics across filters are handled by the outer
             // loop (each filter gets its own DB query).
@@ -410,6 +426,9 @@ pub async fn handle_req(
         }
     }
 
+    if request_cancel.is_cancelled() {
+        return;
+    }
     conn.send(RelayMessage::eose(&sub_id));
 
     debug!(

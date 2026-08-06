@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::ws::{Message as WsMessage, WebSocket};
+use dashmap::DashMap;
 use futures_util::{Sink, SinkExt, StreamExt};
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -28,6 +29,34 @@ const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Shared mutable subscription map for a single WebSocket connection.
 pub(crate) type ConnectionSubscriptions = Arc<Mutex<HashMap<String, Vec<Filter>>>>;
+
+/// In-flight REQ handlers keyed by client subscription ID.
+type PendingReqs = Arc<DashMap<String, (Uuid, CancellationToken)>>;
+
+fn start_pending_req(
+    pending_reqs: &PendingReqs,
+    sub_id: &str,
+    connection_cancel: &CancellationToken,
+) -> (Uuid, CancellationToken) {
+    let request_id = Uuid::new_v4();
+    let request_cancel = connection_cancel.child_token();
+    if let Some((_, previous_cancel)) =
+        pending_reqs.insert(sub_id.to_owned(), (request_id, request_cancel.clone()))
+    {
+        previous_cancel.cancel();
+    }
+    (request_id, request_cancel)
+}
+
+fn finish_pending_req(pending_reqs: &PendingReqs, sub_id: &str, request_id: Uuid) {
+    pending_reqs.remove_if(sub_id, |_, (active_id, _)| *active_id == request_id);
+}
+
+fn cancel_pending_req(pending_reqs: &PendingReqs, sub_id: &str) {
+    if let Some((_, (_, request_cancel))) = pending_reqs.remove(sub_id) {
+        request_cancel.cancel();
+    }
+}
 
 /// Request for the writer to flush a restart close and report the result.
 pub(crate) struct RestartClose {
@@ -273,7 +302,15 @@ async fn handle_active_connection(
     let _ = heartbeat_task.await;
     let _ = auth_timeout_task.await;
 
-    for removed in state.sub_registry.remove_connection(conn.conn_id) {
+    // Synchronize teardown with REQ registration. A handler that acquired the
+    // mutex before cancellation finishes its registration first and is removed
+    // here; one that acquires it afterward observes its cancelled request token.
+    let removed_subscriptions = {
+        let mut subscriptions = conn.subscriptions.lock().await;
+        subscriptions.clear();
+        state.sub_registry.remove_connection(conn.conn_id)
+    };
+    for removed in removed_subscriptions {
         state
             .pubsub
             .release_topic(&conn.tenant, topic_for_subscription(removed.channel_id))
@@ -437,6 +474,7 @@ async fn recv_loop(
     missed_pongs: Arc<AtomicU8>,
     cancel: CancellationToken,
 ) {
+    let pending_reqs = Arc::new(DashMap::new());
     loop {
         tokio::select! {
             msg = ws_recv.next() => {
@@ -458,7 +496,12 @@ async fn recv_loop(
                             break;
                         }
                         trace!(len = text.len(), "frame received");
-                        handle_text_message(text.to_string(), Arc::clone(&conn), Arc::clone(&state)).await;
+                        handle_text_message(
+                            text.to_string(),
+                            Arc::clone(&conn),
+                            Arc::clone(&state),
+                            Arc::clone(&pending_reqs),
+                        ).await;
                     }
                     Some(Ok(WsMessage::Binary(bytes))) => {
                         let max_frame_bytes = state.config.max_frame_bytes;
@@ -480,7 +523,12 @@ async fn recv_loop(
                         // (notably certain Nostr libraries) send text payloads in binary frames.
                         // NIP-01 is text-only, but accepting binary is a common relay extension.
                         if let Ok(text) = String::from_utf8(bytes.to_vec()) {
-                            handle_text_message(text, Arc::clone(&conn), Arc::clone(&state)).await;
+                            handle_text_message(
+                                text,
+                                Arc::clone(&conn),
+                                Arc::clone(&state),
+                                Arc::clone(&pending_reqs),
+                            ).await;
                         }
                     }
                     Some(Ok(WsMessage::Pong(_))) => {
@@ -511,7 +559,12 @@ async fn recv_loop(
     }
 }
 
-async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Arc<AppState>) {
+async fn handle_text_message(
+    text: String,
+    conn: Arc<ConnectionState>,
+    state: Arc<AppState>,
+    pending_reqs: PendingReqs,
+) {
     let msg = match ClientMessage::parse(&text) {
         Ok(m) => m,
         Err(e) => {
@@ -573,10 +626,20 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
                     return;
                 }
             };
+            let (request_id, request_cancel) =
+                start_pending_req(&pending_reqs, &sub_id, &conn.cancel);
             let span = tracing::info_span!("ws.req", conn_id = %conn.conn_id, sub_id = %sub_id);
             tokio::spawn(
                 async move {
-                    handlers::req::handle_req(sub_id, filters, conn, state).await;
+                    handlers::req::handle_req(
+                        sub_id.clone(),
+                        filters,
+                        Arc::clone(&conn),
+                        state,
+                        request_cancel,
+                    )
+                    .await;
+                    finish_pending_req(&pending_reqs, &sub_id, request_id);
                     drop(permit);
                 }
                 .instrument(span),
@@ -604,6 +667,7 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
             );
         }
         ClientMessage::Close(sub_id) => {
+            cancel_pending_req(&pending_reqs, &sub_id);
             handlers::close::handle_close(sub_id, Arc::clone(&conn), Arc::clone(&state)).await;
         }
     }
@@ -795,6 +859,46 @@ mod tests {
                 other => panic!("unexpected websocket message in test: {other:?}"),
             })
             .collect()
+    }
+
+    #[test]
+    fn close_cancels_an_in_flight_req() {
+        let pending_reqs = Arc::new(DashMap::new());
+        let connection_cancel = CancellationToken::new();
+        let (_, request_cancel) = start_pending_req(&pending_reqs, "history", &connection_cancel);
+
+        cancel_pending_req(&pending_reqs, "history");
+
+        assert!(request_cancel.is_cancelled());
+        assert!(pending_reqs.is_empty());
+    }
+
+    #[test]
+    fn replacement_req_cancels_only_the_previous_generation() {
+        let pending_reqs = Arc::new(DashMap::new());
+        let connection_cancel = CancellationToken::new();
+        let (old_id, old_cancel) = start_pending_req(&pending_reqs, "live", &connection_cancel);
+        let (new_id, new_cancel) = start_pending_req(&pending_reqs, "live", &connection_cancel);
+
+        assert!(old_cancel.is_cancelled());
+        assert!(!new_cancel.is_cancelled());
+
+        finish_pending_req(&pending_reqs, "live", old_id);
+        assert!(pending_reqs.contains_key("live"));
+
+        finish_pending_req(&pending_reqs, "live", new_id);
+        assert!(pending_reqs.is_empty());
+    }
+
+    #[test]
+    fn connection_close_cancels_an_in_flight_req() {
+        let pending_reqs = Arc::new(DashMap::new());
+        let connection_cancel = CancellationToken::new();
+        let (_, request_cancel) = start_pending_req(&pending_reqs, "history", &connection_cancel);
+
+        connection_cancel.cancel();
+
+        assert!(request_cancel.is_cancelled());
     }
 
     #[test]
