@@ -1985,3 +1985,101 @@ async fn test_channel_window_rejects_half_cursor_and_client_overlay_kinds() {
     }
     ws.disconnect().await.expect("disconnect");
 }
+
+/// Query the relay for kind:1985 labels carrying `#h = channel_id`.
+///
+/// Deliberately the same generic `POST /query` surface a third-party client would
+/// use, not a label-specific route — a label is an ordinary event and must be
+/// readable as one. Kinds are explicit because an open-ended query hits the
+/// relay's p-gate and returns 403.
+async fn query_channel_labels(keys: &Keys, channel_id: &str) -> Vec<serde_json::Value> {
+    let client = reqwest::Client::new();
+    let filters = serde_json::json!([{
+        "kinds": [1985],
+        "#h": [channel_id],
+        "limit": 50,
+    }]);
+    let resp = client
+        .post(format!("{}/query", relay_http_url()))
+        .header("X-Pubkey", &keys.public_key().to_hex())
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&filters).unwrap())
+        .send()
+        .await
+        .expect("submit label query");
+    assert!(
+        resp.status().is_success(),
+        "label query failed: {}",
+        resp.status()
+    );
+    let body: serde_json::Value = resp.json().await.expect("parse label query response");
+    body.as_array().cloned().unwrap_or_default()
+}
+
+/// NIP-32: a kind:1985 label is accepted, stored, and readable as an ordinary event.
+///
+/// `required_scope_for_kind` returns `Err` for unknown kinds and the relay refuses them,
+/// so before kind:1985 was registered this test fails at the `accepted` assertion rather
+/// than at the read-back — the failure mode is a refusal, not a silent drop.
+///
+/// The read-back is the half that matters. Acceptance alone would also be satisfied by a
+/// relay that ACKs and discards; requiring the event to come back through the same generic
+/// query surface a third-party client uses, with its `L`/`l` pair intact, is what proves a
+/// label is stored and served like any other event rather than special-cased.
+#[tokio::test]
+#[ignore]
+async fn test_nip32_label_is_accepted_and_readable() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    let channel = create_test_channel(&keys).await;
+
+    // A unique namespace per run, so a stale label from an earlier run cannot
+    // satisfy the assertions below.
+    let namespace = format!("org.buzz.e2e.{}", uuid::Uuid::new_v4());
+    let subject = Keys::generate().public_key().to_hex();
+
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+
+    let label = EventBuilder::new(Kind::Custom(1985), "")
+        .tags([
+            Tag::parse(["L", &namespace]).expect("L tag"),
+            Tag::parse(["l", "completed", &namespace]).expect("l tag"),
+            Tag::parse(["p", &subject]).expect("p tag"),
+            Tag::parse(["h", &channel]).expect("h tag"),
+        ])
+        .sign_with_keys(&keys)
+        .expect("sign label");
+    let label_id = label.id.to_hex();
+
+    let ok = client.send_event(label).await.expect("send label");
+    assert!(
+        ok.accepted,
+        "relay rejected kind:1985 — NIP-32 is advertised in NIP-11, so refusing it \
+         makes that advertisement a lie: {}",
+        ok.message
+    );
+    client.disconnect().await.expect("disconnect");
+
+    let labels = query_channel_labels(&keys, &channel).await;
+    let stored = labels
+        .iter()
+        .find(|e| e["id"].as_str() == Some(label_id.as_str()))
+        .unwrap_or_else(|| {
+            panic!("kind:1985 was accepted but is not readable back on #h={channel}")
+        });
+
+    // The tags are the whole payload of a label. An event stored with its L/l pair
+    // dropped would still round-trip by id and prove nothing.
+    let tags = stored["tags"].as_array().expect("tags array");
+    let has = |name: &str, val: &str| {
+        tags.iter().any(|t| {
+            t.as_array().is_some_and(|t| {
+                t.first().and_then(|v| v.as_str()) == Some(name)
+                    && t.get(1).and_then(|v| v.as_str()) == Some(val)
+            })
+        })
+    };
+    assert!(has("L", &namespace), "namespace `L` tag lost: {tags:?}");
+    assert!(has("l", "completed"), "label value `l` tag lost: {tags:?}");
+    assert!(has("p", &subject), "subject `p` tag lost: {tags:?}");
+}
