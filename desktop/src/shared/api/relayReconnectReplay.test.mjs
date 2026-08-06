@@ -801,6 +801,47 @@ test("exhausted backfill pins the floor: next replay still requests the original
   );
 });
 
+test("in-flight stale abort keeps the pinned floor for the superseding connection", async () => {
+  // Race from re-review of b70a6716d: connection A's paging aborts because it
+  // was superseded while a history REQ was in flight. That abort must NOT be
+  // treated as completion — the same subscription object carries the pinned
+  // floor that connection B's replay still needs.
+  resetGate(0);
+  const filter = buildChannelFilter("channel-1", 50);
+  const subscription = {
+    mode: "live",
+    filter,
+    onEvent: () => {},
+    lastSeenCreatedAt: 1000,
+  };
+  const subscriptions = new Map([["live-1", subscription]]);
+
+  let historyCalls = 0;
+  await replayLiveSubscriptions({
+    subscriptions,
+    now: 2000,
+    sendRaw: async () => {},
+    requestHistory: async () => {
+      historyCalls++;
+      // Connection A is superseded while the REQ is in flight: the sub is
+      // re-registered by connection B under a new subId. The object stays
+      // alive; only A's map entry disappears.
+      subscriptions.delete("live-1");
+      subscriptions.set("live-1b", subscription);
+      // A full page would otherwise continue paging — the post-await
+      // isActive() check must abort instead.
+      return eventRange("full", 1001, 500);
+    },
+  });
+
+  assert.equal(historyCalls, 1, "stale connection must stop paging");
+  assert.equal(
+    subscription.pendingReplaySince,
+    995,
+    "a stale abort must not clear the floor the new connection needs",
+  );
+});
+
 // ── Teardown ──────────────────────────────────────────────────────────────────
 
 test("teardown — restore Date.now", () => {

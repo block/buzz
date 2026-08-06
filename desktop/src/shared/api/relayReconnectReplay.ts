@@ -94,6 +94,16 @@ export function shouldPageReconnectReplay(filter: RelaySubscriptionFilter) {
   );
 }
 
+/**
+ * Page one subscription's missed-window history.
+ *
+ * Returns `true` only when the window was genuinely completed (short page or
+ * boundary reached). Returns `false` when the pass aborted because the
+ * connection went stale (`isActive()` false) — callers must NOT treat that as
+ * completion: the same subscription object is shared with the superseding
+ * connection, and clearing its pinned `pendingReplaySince` on a stale abort
+ * would erase the floor the new connection still needs.
+ */
 export async function replayReconnectHistoryPages({
   subscription,
   since,
@@ -106,11 +116,11 @@ export async function replayReconnectHistoryPages({
   until: number;
   isActive: () => boolean;
   requestHistory: (filter: RelaySubscriptionFilter) => Promise<RelayEvent[]>;
-}) {
+}): Promise<boolean> {
   let pageUntil = until;
 
   while (pageUntil >= since) {
-    if (!isActive()) return;
+    if (!isActive()) return false;
 
     const events = await requestHistory(
       buildReconnectReplayFilter(
@@ -121,17 +131,18 @@ export async function replayReconnectHistoryPages({
       ),
     );
 
-    if (!isActive()) return;
+    if (!isActive()) return false;
 
     for (const event of events) subscription.onEvent(event);
-    if (events.length < RECONNECT_REPLAY_PAGE_LIMIT) return;
+    if (events.length < RECONNECT_REPLAY_PAGE_LIMIT) return true;
 
     const oldestCreatedAt = events[0]?.created_at;
-    if (oldestCreatedAt === undefined || oldestCreatedAt <= since) return;
+    if (oldestCreatedAt === undefined || oldestCreatedAt <= since) return true;
 
     pageUntil =
       oldestCreatedAt < pageUntil ? oldestCreatedAt : oldestCreatedAt - 1;
   }
+  return true;
 }
 
 export async function replayLiveSubscriptions({
@@ -275,14 +286,18 @@ export async function replayLiveSubscriptions({
       subscription.pendingReplaySince = replaySince;
       for (let attempt = 1; attempt <= PAGE_REPLAY_MAX_ATTEMPTS; attempt++) {
         try {
-          await replayReconnectHistoryPages({
+          const completed = await replayReconnectHistoryPages({
             subscription,
             since: replaySince,
             until: now,
             isActive: () => subscriptions.get(subId) === subscription,
             requestHistory,
           });
-          subscription.pendingReplaySince = undefined;
+          // A stale-connection abort is NOT completion: the superseding
+          // connection shares this subscription object and still needs the
+          // pinned floor for its own replay. Only a genuinely completed
+          // window may release it.
+          if (completed) subscription.pendingReplaySince = undefined;
           return;
         } catch (error) {
           console.warn(
