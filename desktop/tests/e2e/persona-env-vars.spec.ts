@@ -329,7 +329,7 @@ test("persona model options follow the selected LLM provider", async ({
 
   await selectDropdownOption(page, llmProvider, "OpenAI");
   const dialog = page.getByRole("dialog");
-  await expect(dialog.getByLabel("OpenAI API Key")).toBeVisible();
+  await expect(dialog.getByLabel("OpenAI Runtime API Key")).toBeVisible();
   await expect(
     dialog.getByRole("button", { name: "Advanced", exact: true }),
   ).toHaveAttribute("aria-expanded", "false");
@@ -343,7 +343,7 @@ test("persona model options follow the selected LLM provider", async ({
 
   await selectDropdownOption(page, llmProvider, "Anthropic");
   await expect(dialog.getByLabel("Anthropic API Key")).toBeVisible();
-  await expect(dialog.getByLabel("OpenAI API Key")).not.toBeVisible();
+  await expect(dialog.getByLabel("OpenAI Runtime API Key")).not.toBeVisible();
   await expect(model).toBeVisible();
 
   // Switch back to inherited defaults — per-agent provider, credential, and

@@ -62,13 +62,10 @@ function entryRenderKey(entry: MainTimelineEntry): string {
   return entry.message.renderKey ?? entry.message.id;
 }
 
-const MEMBERSHIP_GROUP_WINDOW_SECONDS = 5 * 60;
-
-type MembershipChangePayload = {
-  actor: string | null;
-  mode: "added" | "joined";
-  target: string;
-};
+type MembershipChangePayload =
+  | { mode: "self-arrival"; target: string }
+  | { actor: string; mode: "addition"; target: string }
+  | { mode: "departure"; target: string };
 
 function parseMembershipChangePayload(
   entry: MainTimelineEntry,
@@ -81,6 +78,10 @@ function parseMembershipChangePayload(
       actor?: unknown;
       target?: unknown;
     };
+    if (payload.type === "member_left" && typeof payload.actor === "string") {
+      const target = payload.actor.trim().toLowerCase();
+      return target ? { mode: "departure", target } : null;
+    }
     if (
       payload.type !== "member_joined" ||
       typeof payload.actor !== "string" ||
@@ -92,10 +93,9 @@ function parseMembershipChangePayload(
     const actor = payload.actor.trim().toLowerCase();
     const target = payload.target.trim().toLowerCase();
     if (!actor || !target) return null;
-
     return actor === target
-      ? { actor: null, mode: "joined", target }
-      : { actor, mode: "added", target };
+      ? { mode: "self-arrival", target }
+      : { actor, mode: "addition", target };
   } catch {
     return null;
   }
@@ -105,9 +105,16 @@ function membershipChangesCanGroup(
   first: MembershipChangePayload,
   second: MembershipChangePayload,
 ): boolean {
+  if (first.mode === "self-arrival") {
+    return (
+      second.mode === "self-arrival" ||
+      (second.mode === "departure" && first.target === second.target)
+    );
+  }
   return (
-    first.mode === second.mode &&
-    (first.mode === "joined" || first.actor === second.actor)
+    first.mode === "addition" &&
+    second.mode === "addition" &&
+    first.actor === second.actor
   );
 }
 
@@ -116,6 +123,12 @@ function membershipChangesCanGroup(
  * history cannot repartition the rows that are already loaded. Their key is
  * likewise the newest entry's key: extending the oldest visible group changes
  * its contents, but not its identity or the virtual list's existing key suffix.
+ *
+ * Compatible membership activities stay together while they are contiguous.
+ * Self-joins and additions from one administrator each form their own summary;
+ * a self-join immediately followed by that member leaving becomes a single
+ * lifecycle summary. Each adjacent event must fall within the one-hour activity
+ * window, so uninterrupted activity can extend beyond an hour overall.
  */
 function buildMembershipGroups(
   entries: readonly MainTimelineEntry[],
@@ -134,14 +147,14 @@ function buildMembershipGroups(
     let start = end;
     while (start > 0) {
       const candidate = entries[start - 1];
+      const nextEntry = entries[start];
       const candidatePayload = parseMembershipChangePayload(candidate);
       if (
         barrierIndexes.has(start) ||
         !candidatePayload ||
         !membershipChangesCanGroup(candidatePayload, newestPayload) ||
         newestEntry.message.createdAt < candidate.message.createdAt ||
-        newestEntry.message.createdAt - candidate.message.createdAt >
-          MEMBERSHIP_GROUP_WINDOW_SECONDS
+        nextEntry.message.createdAt - candidate.message.createdAt > 60 * 60
       ) {
         break;
       }

@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import type { ForcedUnreadSource } from "@/features/channels/forcedUnreadStore";
 import {
   buildCreatedAtByMessageId,
   buildDirectReplyIdsByParentId,
@@ -40,6 +41,10 @@ type UseChannelUnreadStateOptions = {
   activeThreadMessages?: TimelineMessage[];
   getChannelReadAt: (channelId: string) => number | null;
   getMessageReadAt: (messageId: string) => number | null;
+  clearChannelUnreadSource: (
+    channelId: string,
+    source: ForcedUnreadSource,
+  ) => void;
   markChannelUnread: (channelId: string) => void;
   markMessageRead: (messageId: string, timestamp: number) => void;
   isThreadMuted: (rootId: string) => boolean;
@@ -69,6 +74,7 @@ export function useChannelUnreadState({
   activeThreadMessages,
   getChannelReadAt,
   getMessageReadAt,
+  clearChannelUnreadSource,
   markChannelUnread,
   markMessageRead,
   isThreadMuted,
@@ -487,16 +493,26 @@ export function useChannelUnreadState({
         const createdAt = createdAtByMessageId.get(id);
         if (createdAt !== undefined) markMessageRead(id, createdAt);
       }
+      if (activeChannelId && forcedUnreadMsgRef.current.size === 0) {
+        clearChannelUnreadSource(activeChannelId, "manual");
+      }
       forceUnreadRender();
     },
-    [createdAtByMessageId, getReplyDescendantIdsForMessage, markMessageRead],
+    [
+      activeChannelId,
+      clearChannelUnreadSource,
+      createdAtByMessageId,
+      getReplyDescendantIdsForMessage,
+      markMessageRead,
+    ],
   );
 
   // Mark a message and its whole subtree UNREAD (LP4 v3 menu action). Markers
   // are monotonic and cannot move backward, so this writes NO marker: it adds
   // the ids to the session-local forced-unread overlay the badge predicates OR
-  // in. Cleared on channel-leave; does not survive reload (symmetric with the
-  // shipped channel mark-unread).
+  // in. It also forces the channel-level unread projection so leaving the
+  // channel restores its bold sidebar emphasis. The per-message overlay is
+  // cleared on channel-leave; the channel-level force survives until reopen.
   const handleMarkMessageUnread = React.useCallback(
     (messageId: string) => {
       for (const id of [
@@ -505,9 +521,12 @@ export function useChannelUnreadState({
       ]) {
         forcedUnreadMsgRef.current.add(id);
       }
+      if (activeChannelId) {
+        markChannelUnread(activeChannelId);
+      }
       forceUnreadRender();
     },
-    [getReplyDescendantIdsForMessage],
+    [activeChannelId, getReplyDescendantIdsForMessage, markChannelUnread],
   );
 
   return {
