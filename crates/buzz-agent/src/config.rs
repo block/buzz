@@ -704,6 +704,11 @@ pub enum OpenAiApi {
 
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// Path to an on-disk OIDC session (the Grok CLI's auth.json shape). When
+    /// set, the bearer is re-read and refreshed PER REQUEST instead of being
+    /// captured once at spawn — see auth::GrokSessionTokenSource for why that
+    /// distinction took a fleet down.
+    pub session_file: Option<std::path::PathBuf>,
     pub provider: Provider,
     pub system_prompt: String,
     pub max_rounds: u32,
@@ -815,7 +820,13 @@ impl Config {
                 OpenAiApi::Auto, // unused for Anthropic
             ),
             Provider::OpenAi => (
-                req("OPENAI_COMPAT_API_KEY")?,
+                // A session file supplies the token per request, so the static
+                // key becomes optional. Exactly one of the two must be present.
+                if env("OPENAI_COMPAT_SESSION_FILE").is_some() {
+                    env("OPENAI_COMPAT_API_KEY").unwrap_or_default()
+                } else {
+                    req("OPENAI_COMPAT_API_KEY")?
+                },
                 resolve_model(
                     buzz_agent_model.as_deref(),
                     env("OPENAI_COMPAT_MODEL").as_deref(),
@@ -886,6 +897,7 @@ impl Config {
             hints_enabled: parse_env("BUZZ_AGENT_NO_HINTS", 0u8)? == 0,
             thinking_effort: parse_thinking_effort(env("BUZZ_AGENT_THINKING_EFFORT").as_deref())?,
             prompt_caching: parse_env("BUZZ_AGENT_PROMPT_CACHING", 1u8)? != 0,
+            session_file: env("OPENAI_COMPAT_SESSION_FILE").map(std::path::PathBuf::from),
         };
         cfg.validate()?;
         Ok(cfg)
@@ -902,6 +914,7 @@ impl Config {
             provider,
             api_key,
             base_url,
+            session_file: None,
             model: String::new(),
             system_prompt: String::new(),
             anthropic_api_version: "2023-06-01".into(),
