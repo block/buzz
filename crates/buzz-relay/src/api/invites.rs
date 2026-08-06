@@ -232,7 +232,14 @@ async fn authenticate(
     headers: &HeaderMap,
     path: &str,
     body: &[u8],
-) -> Result<(buzz_core::TenantContext, nostr::PublicKey), (StatusCode, Json<Value>)> {
+) -> Result<
+    (
+        buzz_core::TenantContext,
+        nostr::PublicKey,
+        crate::corporate_identity::CorporateIdentityProof,
+    ),
+    (StatusCode, Json<Value>),
+> {
     let raw_host = headers
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
@@ -257,7 +264,45 @@ async fn authenticate(
     )?;
     bridge::check_nip98_replay(state, &tenant, event_id_bytes).await?;
 
-    Ok((tenant, pubkey))
+    let identity_jwt = crate::corporate_identity::identity_jwt_from_headers(
+        headers,
+        &state.config.corporate_identity,
+    );
+    let auth_tag = headers
+        .get("x-auth-tag")
+        .and_then(|value| value.to_str().ok());
+    let identity_proof = crate::corporate_identity::verify_corporate_identity(
+        state,
+        tenant.community(),
+        pubkey,
+        identity_jwt.as_deref(),
+        auth_tag,
+    )
+    .await
+    .map_err(|error| error.into_api_error())?;
+
+    Ok((tenant, pubkey, identity_proof))
+}
+
+async fn record_atomic_identity_rejection(
+    state: &AppState,
+    community_id: buzz_core::CommunityId,
+    pubkey: nostr::PublicKey,
+    proof: crate::corporate_identity::CorporateIdentityProof,
+    binding: buzz_db::identity_binding::BindIdentityResult,
+) -> (StatusCode, Json<Value>) {
+    match crate::corporate_identity::finalize_atomic_corporate_identity_result(
+        state,
+        community_id,
+        pubkey,
+        proof,
+        Some(binding),
+    )
+    .await
+    {
+        Err(error) => error.into_api_error(),
+        Ok(_) => internal_error("atomic invite identity rejection was unexpectedly accepted"),
+    }
 }
 
 /// Mint an invite code — `POST /api/invites`, NIP-98 signed by an owner/admin.
@@ -269,7 +314,8 @@ pub async fn mint_invite(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let (tenant, pubkey) = authenticate(&state, &headers, "/api/invites", &body).await?;
+    let (tenant, pubkey, identity_proof) =
+        authenticate(&state, &headers, "/api/invites", &body).await?;
 
     // Authz mirrors kind:9030 (add member): owner or admin only.
     let sender_hex = pubkey.to_hex();
@@ -298,6 +344,14 @@ pub async fn mint_invite(
     };
 
     let (ttl, max_uses) = validate_mint_request(&request)?;
+    crate::corporate_identity::finalize_corporate_identity(
+        &state,
+        tenant.community(),
+        pubkey,
+        identity_proof,
+    )
+    .await
+    .map_err(|error| error.into_api_error())?;
 
     // Mint a v2 opaque, database-backed invite.
     let invite = state
@@ -349,7 +403,8 @@ pub async fn claim_invite(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let (tenant, pubkey) = authenticate(&state, &headers, "/api/invites/claim", &body).await?;
+    let (tenant, pubkey, identity_proof) =
+        authenticate(&state, &headers, "/api/invites/claim", &body).await?;
 
     if claim_rate_limited(&state, tenant.community(), &pubkey) {
         return Err(api_error(
@@ -360,6 +415,15 @@ pub async fn claim_invite(
 
     let request: ClaimInviteRequest = serde_json::from_slice(&body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid claim JSON: {e}")))?;
+    // Invite admission must be coupled to the identity being admitted. A
+    // delegated owner proof can become stale between verification and the
+    // invite transaction, so bootstrap claims require the joiner's direct JWT.
+    if crate::corporate_identity::proof_is_delegated(&identity_proof) {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "direct relay identity required for invite claim",
+        ));
+    }
 
     let claimer_hex = pubkey.to_hex();
     let key = invite_token::derive_invite_key(&state.relay_keypair);
@@ -384,9 +448,11 @@ pub async fn claim_invite(
         }
 
         let token_hash = hash_v2_code(&request.code);
+        let identity_binding =
+            crate::corporate_identity::binding_input_for_proof(&identity_proof, &pubkey);
         let outcome = state
             .db
-            .claim_relay_invite(
+            .claim_relay_invite_with_identity(
                 tenant.community(),
                 &token_hash,
                 &claimer_hex,
@@ -395,12 +461,24 @@ pub async fn claim_invite(
                     .join_policy
                     .as_ref()
                     .map(|policy| policy.version.as_str()),
+                identity_binding.as_ref(),
             )
             .await
             .map_err(|e| internal_error(&format!("v2 invite claim: {e}")))?;
 
         return match outcome {
-            buzz_db::relay_invite::ClaimOutcome::Joined { .. } => {
+            buzz_db::relay_invite::ClaimOutcome::Joined {
+                identity_binding, ..
+            } => {
+                crate::corporate_identity::finalize_atomic_corporate_identity_result(
+                    &state,
+                    tenant.community(),
+                    pubkey,
+                    identity_proof,
+                    identity_binding,
+                )
+                .await
+                .map_err(|error| error.into_api_error())?;
                 tracing::info!(
                     community = %tenant.community(),
                     member = %claimer_hex,
@@ -422,7 +500,18 @@ pub async fn claim_invite(
                     "role": "member",
                 })))
             }
-            buzz_db::relay_invite::ClaimOutcome::AlreadyMember { .. } => {
+            buzz_db::relay_invite::ClaimOutcome::AlreadyMember {
+                identity_binding, ..
+            } => {
+                crate::corporate_identity::finalize_atomic_corporate_identity_result(
+                    &state,
+                    tenant.community(),
+                    pubkey,
+                    identity_proof,
+                    identity_binding,
+                )
+                .await
+                .map_err(|error| error.into_api_error())?;
                 Ok(Json(serde_json::json!({
                     "status": "already_member",
                     "community_id": tenant.community().to_string(),
@@ -438,6 +527,26 @@ pub async fn claim_invite(
             }
             buzz_db::relay_invite::ClaimOutcome::Invalid => {
                 Err(api_error(StatusCode::FORBIDDEN, "invite_invalid"))
+            }
+            buzz_db::relay_invite::ClaimOutcome::IdentityConflict(conflict) => {
+                Err(record_atomic_identity_rejection(
+                    &state,
+                    tenant.community(),
+                    pubkey,
+                    identity_proof,
+                    buzz_db::identity_binding::BindIdentityResult::Conflict(conflict),
+                )
+                .await)
+            }
+            buzz_db::relay_invite::ClaimOutcome::IdentityRevoked => {
+                Err(record_atomic_identity_rejection(
+                    &state,
+                    tenant.community(),
+                    pubkey,
+                    identity_proof,
+                    buzz_db::identity_binding::BindIdentityResult::Revoked,
+                )
+                .await)
             }
         };
     }
@@ -463,9 +572,11 @@ pub async fn claim_invite(
             .map_err(|_| api_error(StatusCode::FORBIDDEN, "join_policy_required"))?;
     }
 
-    let was_inserted = state
+    let identity_binding =
+        crate::corporate_identity::binding_input_for_proof(&identity_proof, &pubkey);
+    let claim_outcome = state
         .db
-        .claim_relay_membership(
+        .claim_relay_membership_with_identity(
             tenant.community(),
             &claimer_hex,
             &payload.r,
@@ -474,9 +585,45 @@ pub async fn claim_invite(
                 .join_policy
                 .as_ref()
                 .map(|policy| policy.version.as_str()),
+            identity_binding.as_ref(),
         )
         .await
         .map_err(|e| internal_error(&format!("invite claim insert: {e}")))?;
+    let (was_inserted, identity_binding) = match claim_outcome {
+        buzz_db::relay_members::MembershipClaimOutcome::Joined {
+            inserted,
+            identity_binding,
+        } => (inserted, identity_binding),
+        buzz_db::relay_members::MembershipClaimOutcome::IdentityConflict(conflict) => {
+            return Err(record_atomic_identity_rejection(
+                &state,
+                tenant.community(),
+                pubkey,
+                identity_proof,
+                buzz_db::identity_binding::BindIdentityResult::Conflict(conflict),
+            )
+            .await);
+        }
+        buzz_db::relay_members::MembershipClaimOutcome::IdentityRevoked => {
+            return Err(record_atomic_identity_rejection(
+                &state,
+                tenant.community(),
+                pubkey,
+                identity_proof,
+                buzz_db::identity_binding::BindIdentityResult::Revoked,
+            )
+            .await);
+        }
+    };
+    crate::corporate_identity::finalize_atomic_corporate_identity_result(
+        &state,
+        tenant.community(),
+        pubkey,
+        identity_proof,
+        identity_binding,
+    )
+    .await
+    .map_err(|error| error.into_api_error())?;
 
     if was_inserted {
         tracing::info!(

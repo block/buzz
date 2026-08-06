@@ -9,6 +9,7 @@ use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 use crate::error::{DbError, Result};
+use crate::identity_binding::{BindIdentityResult, IdentityBindingConflict, IdentityBindingInput};
 use buzz_core::CommunityId;
 
 // Re-export the canonical enum definitions from buzz-core.
@@ -387,12 +388,7 @@ pub async fn add_member(
     role: MemberRole,
     invited_by: Option<&[u8]>,
 ) -> Result<MemberRecord> {
-    if pubkey.len() != 32 {
-        return Err(DbError::InvalidData(format!(
-            "pubkey must be 32 bytes, got {}",
-            pubkey.len()
-        )));
-    }
+    validate_member_pubkey(pubkey)?;
 
     let mut tx = pool.begin().await?;
 
@@ -400,7 +396,105 @@ pub async fn add_member(
     // sequence against concurrent membership writes on this channel.
     acquire_channel_membership_lock(&mut tx, community_id, channel_id).await?;
 
-    let channel = get_channel_tx(&mut tx, community_id, channel_id).await?;
+    let record = add_member_tx(&mut tx, community_id, channel_id, pubkey, role, invited_by).await?;
+    tx.commit().await?;
+    Ok(record)
+}
+
+/// Outcome of atomically adding a channel member and binding corporate identity.
+#[derive(Debug, Clone)]
+pub enum ChannelAdmissionOutcome {
+    /// Membership and any staged identity binding committed together.
+    Joined {
+        /// The committed membership row.
+        member: MemberRecord,
+        /// Binding committed in the same transaction, when one was staged.
+        identity_binding: Option<BindIdentityResult>,
+    },
+    /// The staged identity conflicts with an active binding.
+    IdentityConflict(IdentityBindingConflict),
+    /// The staged identity principal or key is revoked.
+    IdentityRevoked,
+}
+
+/// Add a channel member and optional corporate identity binding in one transaction.
+pub async fn add_member_with_identity(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    pubkey: &[u8],
+    role: MemberRole,
+    invited_by: Option<&[u8]>,
+    identity: Option<&IdentityBindingInput<'_>>,
+) -> Result<ChannelAdmissionOutcome> {
+    validate_member_pubkey(pubkey)?;
+    if identity.is_some_and(|identity| identity.pubkey != pubkey) {
+        return Err(DbError::InvalidData(
+            "channel membership pubkey does not match staged identity key".to_string(),
+        ));
+    }
+
+    let mut tx = pool.begin().await?;
+    // Keep this first: every channel membership writer shares this lock order.
+    acquire_channel_membership_lock(&mut tx, community_id, channel_id).await?;
+
+    let member =
+        match add_member_tx(&mut tx, community_id, channel_id, pubkey, role, invited_by).await {
+            Ok(member) => member,
+            Err(error) => {
+                tx.rollback().await?;
+                return Err(error);
+            }
+        };
+    let identity_binding = if let Some(identity) = identity {
+        match crate::identity_binding::bind_or_validate_identity_tx(&mut tx, community_id, identity)
+            .await
+        {
+            Ok(binding @ (BindIdentityResult::Created | BindIdentityResult::Matched)) => {
+                Some(binding)
+            }
+            Ok(BindIdentityResult::Conflict(conflict)) => {
+                tx.rollback().await?;
+                return Ok(ChannelAdmissionOutcome::IdentityConflict(conflict));
+            }
+            Ok(BindIdentityResult::Revoked) => {
+                tx.rollback().await?;
+                return Ok(ChannelAdmissionOutcome::IdentityRevoked);
+            }
+            Err(error) => {
+                tx.rollback().await?;
+                return Err(error);
+            }
+        }
+    } else {
+        None
+    };
+    tx.commit().await?;
+    Ok(ChannelAdmissionOutcome::Joined {
+        member,
+        identity_binding,
+    })
+}
+
+fn validate_member_pubkey(pubkey: &[u8]) -> Result<()> {
+    if pubkey.len() != 32 {
+        return Err(DbError::InvalidData(format!(
+            "pubkey must be 32 bytes, got {}",
+            pubkey.len()
+        )));
+    }
+    Ok(())
+}
+
+async fn add_member_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    pubkey: &[u8],
+    role: MemberRole,
+    invited_by: Option<&[u8]>,
+) -> Result<MemberRecord> {
+    let channel = get_channel_tx(tx, community_id, channel_id).await?;
 
     let effective_role = if channel.visibility == "private" {
         let inviter = invited_by.ok_or_else(|| {
@@ -411,7 +505,7 @@ pub async fn add_member(
         let is_creator_bootstrap = inviter == pubkey && inviter == channel.created_by.as_slice();
 
         if !is_creator_bootstrap {
-            let inviter_role_str = get_active_role_tx(&mut tx, community_id, channel_id, inviter)
+            let inviter_role_str = get_active_role_tx(tx, community_id, channel_id, inviter)
                 .await?
                 .ok_or_else(|| {
                     DbError::AccessDenied("inviter is not an active member".to_string())
@@ -439,7 +533,7 @@ pub async fn add_member(
         // elevated roles. Self-join always gets Member.
         if role.is_elevated() {
             let granter_role = match invited_by {
-                Some(inv) => get_active_role_tx(&mut tx, community_id, channel_id, inv).await?,
+                Some(inv) => get_active_role_tx(tx, community_id, channel_id, inv).await?,
                 None => None,
             };
             match granter_role.as_deref() {
@@ -471,10 +565,10 @@ pub async fn add_member(
     // current authority from a removed row would make soft-deleted ownership a
     // resurrection token: an owner removed by another owner could self-rejoin
     // via kind:9021 (`Member, None`) and silently regain ownership.
-    let current_role = get_active_role_tx(&mut tx, community_id, channel_id, pubkey).await?;
+    let current_role = get_active_role_tx(tx, community_id, channel_id, pubkey).await?;
     if let Some(current_role) = current_role.filter(|r| r != effective_role.as_str()) {
         let actor_role = match invited_by {
-            Some(inviter) => get_active_role_tx(&mut tx, community_id, channel_id, inviter).await?,
+            Some(inviter) => get_active_role_tx(tx, community_id, channel_id, inviter).await?,
             None => None,
         };
         let actor_role: Option<MemberRole> = actor_role.and_then(|r| r.parse().ok());
@@ -494,7 +588,7 @@ pub async fn add_member(
             )
             .bind(community_id.as_uuid())
             .bind(channel_id)
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut **tx)
             .await?;
             let owner_count: i64 = row.try_get("cnt")?;
             if owner_count <= 1 {
@@ -520,7 +614,7 @@ pub async fn add_member(
     .bind(pubkey)
     .bind(effective_role.as_str())
     .bind(invited_by)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
 
     let row = sqlx::query(
@@ -532,11 +626,10 @@ pub async fn add_member(
     .bind(community_id.as_uuid())
     .bind(channel_id)
     .bind(pubkey)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await?;
 
     let record = row_to_member_record(row)?;
-    tx.commit().await?;
     Ok(record)
 }
 
@@ -1536,7 +1629,9 @@ mod tests {
     const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
 
     async fn setup_pool() -> PgPool {
-        PgPool::connect(TEST_DB_URL)
+        let database_url =
+            std::env::var("BUZZ_TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.to_string());
+        PgPool::connect(&database_url)
             .await
             .expect("connect to test DB")
     }
@@ -1606,6 +1701,388 @@ mod tests {
         .expect("insert owner membership");
 
         get_channel(pool, CommunityId::from_uuid(community_id), id).await
+    }
+
+    fn identity_for<'a>(pubkey: &'a [u8], uid: &'a str) -> IdentityBindingInput<'a> {
+        IdentityBindingInput {
+            issuer: "https://idp.example",
+            uid,
+            pubkey,
+            display_name: Some("private@example.com"),
+            source: crate::identity_binding::SOURCE_JWT_NPUB,
+        }
+    }
+
+    async fn trusted_assertion_count(pool: &PgPool, community: CommunityId) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE community_id = $1 AND kind = $2")
+            .bind(community.as_uuid())
+            .bind(buzz_core::kind::KIND_USER_TRUSTED_ASSERTION as i32)
+            .fetch_one(pool)
+            .await
+            .expect("trusted assertion count")
+    }
+
+    async fn active_membership_count(
+        pool: &PgPool,
+        community: CommunityId,
+        channel_id: Uuid,
+        pubkey: &[u8],
+    ) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM channel_members \
+             WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3 \
+               AND removed_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(channel_id)
+        .bind(pubkey)
+        .fetch_one(pool)
+        .await
+        .expect("active membership count")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn atomic_huddle_admission_membership_failure_leaves_no_identity_state() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let owner = random_pubkey();
+        let non_member_inviter = random_pubkey();
+        let joiner = random_pubkey();
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "atomic-membership-failure",
+            ChannelType::Stream,
+            ChannelVisibility::Private,
+            None,
+            &owner,
+            Some(3600),
+        )
+        .await
+        .expect("create private huddle");
+        let identity = identity_for(&joiner, "membership-failure");
+
+        let error = add_member_with_identity(
+            &pool,
+            community,
+            channel.id,
+            &joiner,
+            MemberRole::Member,
+            Some(&non_member_inviter),
+            Some(&identity),
+        )
+        .await
+        .expect_err("non-member inviter must fail admission");
+        assert!(matches!(error, DbError::AccessDenied(_)), "{error:?}");
+        assert_eq!(
+            active_membership_count(&pool, community, channel.id, &joiner).await,
+            0
+        );
+        assert!(
+            crate::identity_binding::get_active_identity_binding_by_pubkey(
+                &pool, community, &joiner,
+            )
+            .await
+            .expect("binding lookup")
+            .is_none()
+        );
+        assert_eq!(trusted_assertion_count(&pool, community).await, 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn atomic_huddle_admission_identity_conflict_rolls_back_membership() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let owner = random_pubkey();
+        let bound_key = random_pubkey();
+        let joiner = random_pubkey();
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "atomic-identity-conflict",
+            ChannelType::Stream,
+            ChannelVisibility::Private,
+            None,
+            &owner,
+            Some(3600),
+        )
+        .await
+        .expect("create private huddle");
+        crate::identity_binding::bind_or_validate_identity(
+            &pool,
+            community,
+            "https://idp.example",
+            "conflicting-principal",
+            &bound_key,
+            Some("bound@example.com"),
+            crate::identity_binding::SOURCE_JWT_NPUB,
+        )
+        .await
+        .expect("seed conflicting binding");
+        let identity = identity_for(&joiner, "conflicting-principal");
+
+        let outcome = add_member_with_identity(
+            &pool,
+            community,
+            channel.id,
+            &joiner,
+            MemberRole::Member,
+            Some(&owner),
+            Some(&identity),
+        )
+        .await
+        .expect("typed identity conflict");
+        assert!(matches!(
+            outcome,
+            ChannelAdmissionOutcome::IdentityConflict(_)
+        ));
+        assert_eq!(
+            active_membership_count(&pool, community, channel.id, &joiner).await,
+            0
+        );
+        assert_eq!(trusted_assertion_count(&pool, community).await, 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn atomic_huddle_admission_identity_storage_failure_rolls_back_membership() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let owner = random_pubkey();
+        let joiner = random_pubkey();
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "atomic-identity-storage-failure",
+            ChannelType::Stream,
+            ChannelVisibility::Private,
+            None,
+            &owner,
+            Some(3600),
+        )
+        .await
+        .expect("create private huddle");
+        let suffix = community_id.simple();
+        let function_name = format!("buzz_test_fail_identity_{suffix}");
+        let trigger_name = format!("buzz_test_fail_identity_insert_{suffix}");
+        // Identifiers and the literal UUID below are derived only from a generated UUID.
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "CREATE FUNCTION {function_name}() RETURNS trigger LANGUAGE plpgsql AS $$ \
+             BEGIN RAISE EXCEPTION 'injected identity storage failure'; END $$"
+        )))
+        .execute(&pool)
+        .await
+        .expect("create failure function");
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "CREATE TRIGGER {trigger_name} BEFORE INSERT ON identity_bindings \
+             FOR EACH ROW WHEN (NEW.community_id = '{community_id}'::uuid) \
+             EXECUTE FUNCTION {function_name}()"
+        )))
+        .execute(&pool)
+        .await
+        .expect("create failure trigger");
+        let identity = identity_for(&joiner, "storage-failure");
+
+        let result = add_member_with_identity(
+            &pool,
+            community,
+            channel.id,
+            &joiner,
+            MemberRole::Member,
+            Some(&owner),
+            Some(&identity),
+        )
+        .await;
+
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP TRIGGER {trigger_name} ON identity_bindings"
+        )))
+        .execute(&pool)
+        .await
+        .expect("drop failure trigger");
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP FUNCTION {function_name}()"
+        )))
+        .execute(&pool)
+        .await
+        .expect("drop failure function");
+
+        assert!(matches!(result, Err(DbError::Sqlx(_))), "{result:?}");
+        assert_eq!(
+            active_membership_count(&pool, community, channel.id, &joiner).await,
+            0
+        );
+        assert!(
+            crate::identity_binding::get_active_identity_binding_by_pubkey(
+                &pool, community, &joiner,
+            )
+            .await
+            .expect("binding lookup")
+            .is_none()
+        );
+        assert_eq!(trusted_assertion_count(&pool, community).await, 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn atomic_huddle_admission_success_and_retry_commit_each_row_once() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let owner = random_pubkey();
+        let joiner = random_pubkey();
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "atomic-success-retry",
+            ChannelType::Stream,
+            ChannelVisibility::Private,
+            None,
+            &owner,
+            Some(3600),
+        )
+        .await
+        .expect("create private huddle");
+        let identity = identity_for(&joiner, "successful-principal");
+
+        let first = add_member_with_identity(
+            &pool,
+            community,
+            channel.id,
+            &joiner,
+            MemberRole::Member,
+            Some(&owner),
+            Some(&identity),
+        )
+        .await
+        .expect("first admission");
+        assert!(matches!(
+            first,
+            ChannelAdmissionOutcome::Joined {
+                identity_binding: Some(BindIdentityResult::Created),
+                ..
+            }
+        ));
+
+        let retry = add_member_with_identity(
+            &pool,
+            community,
+            channel.id,
+            &joiner,
+            MemberRole::Member,
+            Some(&owner),
+            Some(&identity),
+        )
+        .await
+        .expect("idempotent retry");
+        assert!(matches!(
+            retry,
+            ChannelAdmissionOutcome::Joined {
+                identity_binding: Some(BindIdentityResult::Matched),
+                ..
+            }
+        ));
+        assert_eq!(
+            active_membership_count(&pool, community, channel.id, &joiner).await,
+            1
+        );
+        let binding_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM identity_bindings \
+             WHERE community_id = $1 AND pubkey = $2 AND revoked_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(&joiner)
+        .fetch_one(&pool)
+        .await
+        .expect("binding count");
+        assert_eq!(binding_count, 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn existing_member_and_non_corporate_paths_remain_idempotent() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let owner = random_pubkey();
+        let existing_member = random_pubkey();
+        let non_corporate_joiner = random_pubkey();
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "unchanged-admission-paths",
+            ChannelType::Stream,
+            ChannelVisibility::Private,
+            None,
+            &owner,
+            Some(3600),
+        )
+        .await
+        .expect("create private huddle");
+
+        add_member(
+            &pool,
+            community,
+            channel.id,
+            &existing_member,
+            MemberRole::Member,
+            Some(&owner),
+        )
+        .await
+        .expect("existing member add");
+        add_member(
+            &pool,
+            community,
+            channel.id,
+            &existing_member,
+            MemberRole::Member,
+            Some(&owner),
+        )
+        .await
+        .expect("existing member retry");
+        assert_eq!(
+            active_membership_count(&pool, community, channel.id, &existing_member).await,
+            1
+        );
+
+        let outcome = add_member_with_identity(
+            &pool,
+            community,
+            channel.id,
+            &non_corporate_joiner,
+            MemberRole::Member,
+            Some(&owner),
+            None,
+        )
+        .await
+        .expect("non-corporate admission");
+        assert!(matches!(
+            outcome,
+            ChannelAdmissionOutcome::Joined {
+                identity_binding: None,
+                ..
+            }
+        ));
+        assert_eq!(
+            active_membership_count(&pool, community, channel.id, &non_corporate_joiner).await,
+            1
+        );
+        assert!(
+            crate::identity_binding::get_active_identity_binding_by_pubkey(
+                &pool,
+                community,
+                &non_corporate_joiner,
+            )
+            .await
+            .expect("binding lookup")
+            .is_none()
+        );
+        assert_eq!(trusted_assertion_count(&pool, community).await, 0);
     }
 
     async fn insert_channel_with_id(

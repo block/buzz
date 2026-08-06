@@ -74,6 +74,9 @@ pub struct GitAuth {
     pub pubkey: nostr::PublicKey,
     /// Server-resolved tenant bound from the request Host before auth checks.
     pub tenant: TenantContext,
+    /// Cryptographically verified identity staged until repository policy
+    /// authorization succeeds.
+    identity_proof: crate::corporate_identity::CorporateIdentityProof,
 }
 
 impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
@@ -211,6 +214,25 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
             .get("x-auth-tag")
             .and_then(|value| value.to_str().ok());
         let auth_tag = event_auth_tag.as_deref().or(header_auth_tag);
+        let identity_jwt = crate::corporate_identity::identity_jwt_from_headers(
+            &parts.headers,
+            &state.config.corporate_identity,
+        );
+        let identity_proof = match crate::corporate_identity::verify_corporate_identity(
+            state,
+            tenant.community(),
+            pubkey,
+            identity_jwt.as_deref(),
+            auth_tag,
+        )
+        .await
+        {
+            Ok(proof) => proof,
+            Err(e) => {
+                warn!(pubkey = %pubkey.to_hex(), error = %e, "git: corporate identity denied");
+                return Err((e.status_code(), e.public_message()).into_response());
+            }
+        };
         if crate::api::relay_members::enforce_relay_membership(
             state,
             tenant.community(),
@@ -223,11 +245,29 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
             warn!(pubkey = %pubkey.to_hex(), "git: relay membership denied");
             return Err((StatusCode::FORBIDDEN, "restricted: not a relay member").into_response());
         }
-
         deny_banned_git_principal(&state.db, tenant.community(), &pubkey, auth_tag).await?;
 
-        Ok(GitAuth { pubkey, tenant })
+        Ok(GitAuth {
+            pubkey,
+            tenant,
+            identity_proof,
+        })
     }
+}
+
+async fn finalize_git_corporate_identity(state: &AppState, auth: &GitAuth) -> Result<(), Response> {
+    crate::corporate_identity::finalize_corporate_identity(
+        state,
+        auth.tenant.community(),
+        auth.pubkey,
+        auth.identity_proof.clone(),
+    )
+    .await
+    .map(|_| ())
+    .map_err(|e| {
+        warn!(pubkey = %auth.pubkey.to_hex(), error = %e, "git: corporate identity finalization denied");
+        (e.status_code(), e.public_message()).into_response()
+    })
 }
 
 /// Deny banned principals on every Git HTTP request.
@@ -769,6 +809,7 @@ pub async fn info_refs(
         repo_name,
     )
     .await?;
+    finalize_git_corporate_identity(&state, &auth).await?;
 
     // Track C fast path: only for clone advertisement. The receive-pack
     // advertisement carries a different capability set (report-status,
@@ -1025,6 +1066,7 @@ pub async fn upload_pack(
         repo_name,
     )
     .await?;
+    finalize_git_corporate_identity(&state, &auth).await?;
 
     let body = decode_git_request_body(&headers, body, UPLOAD_PACK_MAX_DECODED_BYTES);
     let permit = acquire_git_permit(&state, "upload_pack")?;
@@ -1186,6 +1228,7 @@ pub async fn receive_pack(
         repo_id: repo_name.to_string(),
         pusher: auth.pubkey,
         tenant: auth.tenant,
+        identity_proof: auth.identity_proof,
         repo_handle: repo,
     };
     Ok(finalize_push(&state, ctx).await)
@@ -1777,6 +1820,8 @@ pub(crate) struct PushContext {
     /// Server-resolved tenant that selected the pointer namespace and owns
     /// any derived kind:30618 event from this push.
     pub tenant: TenantContext,
+    /// Identity proof finalized only after the pre-receive policy hook accepts.
+    pub identity_proof: crate::corporate_identity::CorporateIdentityProof,
     /// The hydrated workspace handle. Held until response construction
     /// (which happens *after* `cas_publish` returns) so the tempdir
     /// outlives the receive-pack subprocess and the CAS publish.
@@ -1821,6 +1866,18 @@ async fn finalize_push(state: &Arc<AppState>, ctx: PushContext) -> Response {
         let response = build_git_response("receive-pack", ctx.pack);
         drop(ctx.repo_handle);
         return response;
+    }
+
+    if let Err(error) = crate::corporate_identity::finalize_corporate_identity(
+        state,
+        ctx.tenant.community(),
+        ctx.pusher,
+        ctx.identity_proof.clone(),
+    )
+    .await
+    {
+        warn!(pusher = %ctx.pusher.to_hex(), error = %error, "git: post-policy corporate identity finalization denied");
+        return (error.status_code(), error.public_message()).into_response();
     }
 
     // Step 7 (CAS). The PushContext binds `parent_state` (observed at

@@ -233,6 +233,48 @@ pub enum HuddleReleaseOutcome {
     NotOwner,
 }
 
+/// Remove a denied admission, atomically seal its room when it was the last
+/// peer, and release only the exact freshly acquired owner token before the
+/// empty room is evicted. Keeping the sealed room manager-visible during the
+/// awaited release prevents a registration holding the old room `Arc` from
+/// entering under that generation. The Redis release itself is owner- and
+/// generation-matched, so stale cleanup cannot delete a replacement token.
+pub async fn cleanup_failed_admission_lease(
+    directory: Option<&dyn HuddleDirectory>,
+    acquired_lease: &mut Option<HuddleLease>,
+    rooms: &AudioRoomManager,
+    community_id: CommunityId,
+    session_id: Uuid,
+    room: &Arc<Room>,
+    peer_id: Uuid,
+) -> Result<Option<HuddleReleaseOutcome>, MeshError> {
+    let sealed_empty = room
+        .remove_peer_and_check_ended(peer_id)
+        .map(|(_, ended)| ended)
+        .unwrap_or(false);
+    if !sealed_empty {
+        return Ok(None);
+    }
+
+    let released = if let Some(lease) = acquired_lease.take() {
+        let result = match directory {
+            Some(directory) => directory.release(&lease).await,
+            None => Err(MeshError::Transport(
+                "acquired huddle lease has no directory".to_string(),
+            )),
+        };
+        result.map(Some)
+    } else {
+        Ok(None)
+    };
+
+    // Preserve the pre-existing bounded Redis-error behavior: an unrenewed
+    // token expires at its TTL, while the empty local room is immediately
+    // reusable instead of becoming a permanent `ended` tombstone.
+    rooms.cleanup_if_empty(community_id, session_id);
+    released
+}
+
 /// Result of an ownership acquire attempt.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AcquireOutcome {
@@ -1831,6 +1873,7 @@ mod tests {
         // yields `Renewed` (lease holds). `release` returns the scripted value.
         renew_outcomes: Mutex<std::collections::VecDeque<HuddleRenewOutcome>>,
         release_outcome: Mutex<Option<HuddleReleaseOutcome>>,
+        release_fails: Mutex<bool>,
         renew_calls: Mutex<u32>,
         release_calls: Mutex<u32>,
     }
@@ -1906,6 +1949,9 @@ mod tests {
         }
         async fn release(&self, _lease: &HuddleLease) -> Result<HuddleReleaseOutcome, MeshError> {
             *self.release_calls.lock().unwrap() += 1;
+            if *self.release_fails.lock().unwrap() {
+                return Err(MeshError::Transport("injected release failure".into()));
+            }
             Ok(self
                 .release_outcome
                 .lock()
@@ -2569,6 +2615,102 @@ mod tests {
             !lost.is_cancelled(),
             "room-empty is a clean release, not owner-loss"
         );
+    }
+
+    /// Both private-admission failure exits share the same cleanup primitive:
+    /// seal and evict the failed room, release the exact freshly acquired lease
+    /// token once, and let an immediate retry acquire the next generation.
+    #[tokio::test]
+    async fn failed_identity_admissions_release_lease_and_allow_immediate_retry() {
+        for failure_case in ["identity_conflict", "identity_storage_failure"] {
+            let session = Uuid::new_v4();
+            let rooms = AudioRoomManager::new();
+            let room = rooms.get_or_create(community(), session);
+            let (peer_id, _, _, _) = room.add_peer(failure_case.into(), 1).unwrap();
+            let dir = Arc::new(FakeDir::owned_by(Ownership {
+                owner_runtime_id: rt(1),
+                generation: 5,
+            }));
+            let mut acquired = Some(lease_for(session, 5));
+
+            assert_eq!(
+                cleanup_failed_admission_lease(
+                    Some(&*dir),
+                    &mut acquired,
+                    &rooms,
+                    community(),
+                    session,
+                    &room,
+                    peer_id,
+                )
+                .await
+                .unwrap(),
+                Some(HuddleReleaseOutcome::Released),
+                "{failure_case} must release its exact owner token"
+            );
+            assert!(acquired.is_none());
+            assert_eq!(*dir.release_calls.lock().unwrap(), 1);
+            assert!(rooms.get(community(), session).is_none());
+            assert!(matches!(
+                room.add_peer("stale-room".into(), 1),
+                Err(AdmissionError::Ended)
+            ));
+
+            // Model Redis's successful exact-token delete and monotonic next
+            // generation, then retry immediately in this same task.
+            *dir.owner.lock().unwrap() = None;
+            *dir.acquire.lock().unwrap() = Some(AcquireOutcome::Acquired(lease_for(session, 6)));
+            let registry = HuddleOwnerRegistry::new();
+            let retried = tokio::time::timeout(
+                Duration::from_secs(2),
+                resolve_join_owner_ready(&*dir, community(), session, rt(1), &registry),
+            )
+            .await
+            .expect("retry must not wait for the 30-second lease TTL")
+            .expect("retry acquires the released huddle");
+            assert_eq!(retried.outcome, JoinOutcome::LocalOwner { generation: 6 });
+            assert_eq!(
+                retried.acquired.as_ref().map(HuddleLease::generation),
+                Some(6)
+            );
+        }
+    }
+
+    /// A Redis error preserves 037's bounded-TTL fallback without leaving the
+    /// local manager permanently pinned to the sealed failed room.
+    #[tokio::test]
+    async fn failed_admission_release_error_does_not_tombstone_room() {
+        let session = Uuid::new_v4();
+        let rooms = AudioRoomManager::new();
+        let room = rooms.get_or_create(community(), session);
+        let (peer_id, _, _, _) = room.add_peer("failed".into(), 1).unwrap();
+        let dir = FakeDir::owned_by(Ownership {
+            owner_runtime_id: rt(1),
+            generation: 5,
+        });
+        *dir.release_fails.lock().unwrap() = true;
+        let mut acquired = Some(lease_for(session, 5));
+
+        assert!(cleanup_failed_admission_lease(
+            Some(&dir),
+            &mut acquired,
+            &rooms,
+            community(),
+            session,
+            &room,
+            peer_id,
+        )
+        .await
+        .is_err());
+        assert!(acquired.is_none());
+        assert_eq!(*dir.release_calls.lock().unwrap(), 1);
+        assert!(rooms.get(community(), session).is_none());
+
+        let replacement = rooms.get_or_create(community(), session);
+        assert!(!Arc::ptr_eq(&room, &replacement));
+        replacement
+            .add_peer("retry".into(), 1)
+            .expect("release errors must not permanently tombstone the room");
     }
 
     /// `drain` is generation-fenced like `release`, but unlike room-empty it

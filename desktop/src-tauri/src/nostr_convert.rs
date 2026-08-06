@@ -280,10 +280,7 @@ pub fn channel_members_from_event(event: &Event) -> Result<ChannelMembersRespons
 
 // ── kind:0 (profile metadata) ───────────────────────────────────────────────
 
-/// Convert a kind:0 metadata event to [`ProfileInfo`].
-///
-/// The event's `content` is a JSON object per NIP-01:
-/// `{"name":"...","display_name":"...","picture":"...","about":"...","nip05":"..."}`.
+/// Convert a kind:0 profile metadata event to [`ProfileInfo`].
 pub fn profile_info_from_event(event: &Event) -> Result<ProfileInfo, String> {
     let v: Value = serde_json::from_str(&event.content)
         .map_err(|e| format!("kind:0 content is not valid JSON: {e}"))?;
@@ -300,6 +297,8 @@ pub fn profile_info_from_event(event: &Event) -> Result<ProfileInfo, String> {
     Ok(ProfileInfo {
         pubkey: event.pubkey.to_hex(),
         display_name,
+        verified_name: None,
+        verified_name_expires_at: None,
         avatar_url,
         about,
         nip05_handle,
@@ -308,10 +307,8 @@ pub fn profile_info_from_event(event: &Event) -> Result<ProfileInfo, String> {
     })
 }
 
-/// Convert multiple kind:0 events to [`UsersBatchResponse`].
-///
-/// `requested_pubkeys` lets us populate `missing` for any pubkey that had
-/// no metadata event in the input set.
+/// Convert the most recent kind:0 event per pubkey to [`UsersBatchResponse`].
+/// Requested pubkeys without metadata are returned separately.
 pub fn users_batch_from_events(
     events: &[Event],
     requested_pubkeys: &[String],
@@ -319,6 +316,9 @@ pub fn users_batch_from_events(
     // Keep only the most recent kind:0 per pubkey.
     let mut latest: HashMap<String, &Event> = HashMap::new();
     for ev in events {
+        if ev.kind.as_u16() != 0 {
+            continue;
+        }
         let pk = ev.pubkey.to_hex();
         let take = match latest.get(&pk) {
             None => true,
@@ -339,6 +339,8 @@ pub fn users_batch_from_events(
                 .and_then(Value::as_str)
                 .or_else(|| v.get("name").and_then(Value::as_str))
                 .map(str::to_string),
+            verified_name: None,
+            verified_name_expires_at: None,
             name: v.get("name").and_then(Value::as_str).map(str::to_string),
             avatar_url: v.get("picture").and_then(Value::as_str).map(str::to_string),
             nip05_handle: v.get("nip05").and_then(Value::as_str).map(str::to_string),
@@ -546,8 +548,7 @@ pub fn relay_members_from_event(event: &Event) -> Value {
 pub(crate) fn timestamp_to_iso(secs: u64) -> String {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
     let dt = UNIX_EPOCH + Duration::from_secs(secs);
-    // Format manually as RFC-3339 — the `time` crate is already a transitive
-    // dep, but using SystemTime keeps this self-contained.
+    // Format manually as RFC-3339; SystemTime keeps this self-contained.
     let dur = dt
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default();
@@ -561,8 +562,7 @@ pub(crate) fn timestamp_to_iso(secs: u64) -> String {
     format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
 }
 
-/// Convert days-since-1970-01-01 to (year, month, day) using the civil-from-days
-/// algorithm by Howard Hinnant (public domain).
+/// Convert epoch days to a date using Howard Hinnant's public-domain algorithm.
 fn days_to_ymd(days: i64) -> (i64, u32, u32) {
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;

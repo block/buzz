@@ -692,6 +692,27 @@ jobs:
             --run-ignored ignored-only
         env:
           DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
+      - name: Relay-verified identity lifecycle tests
+        run: |
+          docker exec -e PGPASSWORD="${BUZZ_TEST_POSTGRES_PASSWORD}" buzz-postgres \
+            psql -U buzz -d postgres -v ON_ERROR_STOP=1 \
+            -c "CREATE DATABASE buzz_identity_tests"
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E '(package(buzz-db) and test(/identity_binding::tests/)) or (package(buzz-relay) and test(/corporate_identity::tests/))' \
+            --test-threads 1 \
+            --run-ignored ignored-only
+        env:
+          DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz_identity_tests
+      - name: Corporate identity boundary regressions
+        run: |
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E 'package(buzz-relay) and test(/^(corporate_identity::tests::jwt_validation_rejects_missing_and_malformed_audience_claims|api::bridge::tests::(corporate_identity_disables_x_pubkey_bridge_fallback|moderation_reads_require_corporate_identity_after_nip98_proof)|api::media::tests::protected_media_reads_require_corporate_identity_for_get_and_head)$/)' \
+            --test-threads 1 \
+            --run-ignored all
+        env:
+          DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz_identity_tests
       - name: Workspace profile (kind:9033) gate tests
         # Call-site integration for the 9033 authorization gate: open relay
         # rosterless/steward transitions and the closed-relay admin/owner rule,

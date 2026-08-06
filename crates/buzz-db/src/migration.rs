@@ -561,7 +561,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 28);
+        assert_eq!(migrations.len(), 30);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -946,6 +946,43 @@ mod tests {
             long_reactions.contains("ALTER TABLE reactions ALTER COLUMN emoji TYPE VARCHAR(66)")
         );
         assert!(desired_schema.contains("emoji               VARCHAR(66) NOT NULL"));
+
+        // Relay-verified identity bindings are additive and community-scoped.
+        assert_eq!(migrations[28].version, 29);
+        assert!(migrations[28]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE identity_bindings"));
+        assert!(migrations[28]
+            .sql
+            .as_str()
+            .contains("idx_identity_bindings_active_principal"));
+        assert_eq!(migrations[29].version, 30);
+        assert!(migrations[29].sql.as_str().contains("revocation_scope"));
+        assert!(migrations[29]
+            .sql
+            .as_str()
+            .contains("idx_identity_bindings_revoked_principal"));
+        assert!(migrations[29]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE identity_principals"));
+        assert!(migrations[29]
+            .sql
+            .as_str()
+            .contains("INSERT INTO identity_principals"));
+        assert!(migrations[29]
+            .sql
+            .as_str()
+            .contains("INSERT INTO identity_revoked_keys"));
+        assert!(migrations[29]
+            .sql
+            .as_str()
+            .contains("rotation_completed_at"));
+        assert!(migrations[29]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE identity_revoked_keys"));
     }
 
     #[test]
@@ -1188,7 +1225,7 @@ mod tests {
         run_migrations(&pool)
             .await
             .expect("retry succeeds after operator repair");
-        assert_eq!(applied_versions(&pool).await.last().copied(), Some(27));
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(29));
     }
 
     #[tokio::test]
@@ -1274,6 +1311,7 @@ mod tests {
             "communities",
             "events",
             "channels",
+            "identity_bindings",
             "scheduled_workflow_fires",
             "audit_log",
         ] {

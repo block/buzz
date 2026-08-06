@@ -1077,7 +1077,9 @@ test("right-click menus expose distinct selectors for links, relay video, and of
     sha: MENU_OFF_RELAY_VIDEO_SHA,
     filename: "external-clip.mp4",
   });
-  const offRelayPlayer = page.getByTestId("video-player").last();
+  const offRelayPlayer = page
+    .getByTestId("video-player")
+    .filter({ has: page.locator(`video[src="${MENU_OFF_RELAY_VIDEO_URL}"]`) });
   await expect(offRelayPlayer).toBeVisible();
   await offRelayPlayer.click({ button: "right", force: true });
 

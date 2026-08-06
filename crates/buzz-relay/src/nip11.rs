@@ -304,7 +304,14 @@ async fn workspace_icon_for_host(state: &crate::state::AppState, raw_host: &str)
 /// Centralised so the content-negotiated root handler and the dedicated
 /// `/info` endpoint can't drift apart.
 pub(crate) fn nip11_facts(state: &crate::state::AppState) -> (Option<String>, bool) {
-    let has_stable_key = state.config.relay_private_key.is_some();
+    // Production relays are stable when an explicit key is configured. Dev
+    // relays are also stable: main.rs deliberately uses the deterministic
+    // secp256k1 key `1` whenever token auth is disabled so relay-authored
+    // addressable events survive restarts. NIP-11 must advertise that key too,
+    // otherwise clients cannot verify those events (including identity
+    // assertions) even though their signer is stable.
+    let has_stable_key =
+        state.config.relay_private_key.is_some() || !state.config.require_auth_token;
     let relay_self = has_stable_key.then(|| state.relay_keypair.public_key().to_hex());
     let advertise_nip43 = has_stable_key && state.config.require_relay_membership;
     (relay_self, advertise_nip43)

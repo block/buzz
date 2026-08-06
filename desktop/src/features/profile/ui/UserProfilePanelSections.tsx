@@ -51,10 +51,10 @@ import type {
 import { cn } from "@/shared/lib/cn";
 import { Alert, AlertDescription, AlertTitle } from "@/shared/ui/alert";
 import { Badge } from "@/shared/ui/badge";
+import { VerifiedBadge } from "@/shared/ui/VerifiedBadge";
+import { getCurrentVerifiedName } from "@/shared/lib/verifiedIdentity";
 
 export { AgentInstructionsFocusedView } from "@/features/profile/ui/UserProfilePanelAgentDetails";
-
-// ── Summary view ─────────────────────────────────────────────────────────────
 
 export type ProfileSummaryViewProps = {
   activityAgent: ProfileActivityAgent | null;
@@ -475,8 +475,6 @@ export function ProfileSummaryView({
   );
 }
 
-// ── Hero & metadata ──────────────────────────────────────────────────────────
-
 function ProfileHero({
   displayName,
   isBot,
@@ -491,6 +489,10 @@ function ProfileHero({
   userStatus: ProfileSummaryViewProps["userStatus"];
 }) {
   const presenceDotClassName = isBot ? "h-4.5 w-4.5" : "h-3.5 w-3.5";
+  const verifiedName = getCurrentVerifiedName(
+    profile?.verifiedName,
+    profile?.verifiedNameExpiresAt,
+  );
 
   return (
     <div className="flex flex-col items-center gap-3 text-center">
@@ -540,6 +542,19 @@ function ProfileHero({
             />
           ) : null}
         </div>
+
+        {verifiedName ? (
+          <div
+            className="flex items-center justify-center gap-1.5 text-sm font-medium text-muted-foreground"
+            data-testid="user-profile-verified-alias"
+          >
+            <span>{verifiedName}</span>
+            <VerifiedBadge
+              verifiedName={verifiedName}
+              verifiedNameExpiresAt={profile?.verifiedNameExpiresAt}
+            />
+          </div>
+        ) : null}
 
         {profile?.about?.trim() ? (
           <ProfileHeroDescription

@@ -127,6 +127,13 @@ pub(crate) fn verify_bridge_auth_with_options(
     Err(api_error(StatusCode::UNAUTHORIZED, "missing Nostr auth"))
 }
 
+/// Corporate identity enrollment must always start from cryptographic proof of
+/// the Nostr key. The development-only `X-Pubkey` fallback is caller-controlled
+/// and therefore cannot safely participate in a durable identity binding.
+fn bridge_requires_nip98(require_auth_token: bool, require_corporate_identity: bool) -> bool {
+    require_auth_token || require_corporate_identity
+}
+
 /// Check NIP-98 replay and record the event ID atomically.
 ///
 /// The correctness boundary is the shared, community-scoped Redis seen-set on
@@ -173,6 +180,40 @@ async fn check_nip98_replay_with_guard(
             ))
         }
     }
+}
+
+async fn verify_bridge_corporate_identity(
+    state: &AppState,
+    tenant: &TenantContext,
+    headers: &HeaderMap,
+    pubkey: nostr::PublicKey,
+    auth_tag: Option<&str>,
+) -> Result<crate::corporate_identity::CorporateIdentityProof, (StatusCode, Json<Value>)> {
+    let identity_jwt = crate::corporate_identity::identity_jwt_from_headers(
+        headers,
+        &state.config.corporate_identity,
+    );
+    crate::corporate_identity::verify_corporate_identity(
+        state,
+        tenant.community(),
+        pubkey,
+        identity_jwt.as_deref(),
+        auth_tag,
+    )
+    .await
+    .map_err(|e| e.into_api_error())
+}
+
+async fn finalize_bridge_corporate_identity(
+    state: &AppState,
+    tenant: &TenantContext,
+    pubkey: nostr::PublicKey,
+    proof: crate::corporate_identity::CorporateIdentityProof,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    crate::corporate_identity::finalize_corporate_identity(state, tenant.community(), pubkey, proof)
+        .await
+        .map(|_| ())
+        .map_err(|e| e.into_api_error())
 }
 
 /// Construct the NIP-98 `u`-tag expected URL for a request bound to `tenant`.
@@ -642,7 +683,10 @@ pub async fn submit_event(
         "POST",
         &url,
         Some(&body),
-        state.config.require_auth_token,
+        bridge_requires_nip98(
+            state.config.require_auth_token,
+            state.config.corporate_identity.require,
+        ),
     )?;
     let pubkey_hex = pubkey.to_hex();
 
@@ -801,6 +845,16 @@ async fn submit_event_authed(
 
     // Enforce relay membership (with NIP-OA fallback via x-auth-tag header).
     let auth_tag = headers.get("x-auth-tag").and_then(|v| v.to_str().ok());
+    let identity_proof =
+        match verify_bridge_corporate_identity(state, tenant, headers, pubkey, auth_tag).await {
+            Ok(proof) => proof,
+            Err(e) => {
+                return SubmitOutcome::Err {
+                    status: e.0,
+                    response: e,
+                };
+            }
+        };
     let nip_oa_owner = match super::relay_members::enforce_relay_membership(
         state,
         tenant.community(),
@@ -823,6 +877,13 @@ async fn submit_event_authed(
             };
         }
     };
+    if let Err(e) = finalize_bridge_corporate_identity(state, tenant, pubkey, identity_proof).await
+    {
+        return SubmitOutcome::Err {
+            status: e.0,
+            response: e,
+        };
+    }
     if let Some(owner) = nip_oa_owner {
         super::relay_members::materialize_nip_oa_owner(state, tenant, &pubkey, &owner).await;
     }
@@ -910,7 +971,10 @@ pub async fn query_events(
         "POST",
         &url,
         Some(&body),
-        state.config.require_auth_token,
+        bridge_requires_nip98(
+            state.config.require_auth_token,
+            state.config.corporate_identity.require,
+        ),
     )?;
     let pubkey_hex = pubkey.to_hex();
 
@@ -961,6 +1025,8 @@ async fn query_events_authed(
     let pubkey_bytes = pubkey.to_bytes().to_vec();
 
     let auth_tag = headers.get("x-auth-tag").and_then(|v| v.to_str().ok());
+    let identity_proof =
+        verify_bridge_corporate_identity(state, tenant, headers, pubkey, auth_tag).await?;
     super::relay_members::enforce_relay_membership(
         state,
         tenant.community(),
@@ -968,7 +1034,6 @@ async fn query_events_authed(
         auth_tag,
     )
     .await?;
-
     // Two-pass parse: preserve raw JSON for custom extension fields (before_id,
     // depth_limit, feed_types) that nostr::Filter silently drops.
     let raw_filters: Vec<Value> = serde_json::from_slice(body)
@@ -1006,6 +1071,7 @@ async fn query_events_authed(
         .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)
         .await
         .map_err(|e| internal_error(&format!("channel access lookup: {e}")))?;
+    finalize_bridge_corporate_identity(state, tenant, pubkey, identity_proof).await?;
 
     if filters.iter().any(|f| f.search.is_some()) {
         if has_mixed_search_filters(&filters) {
@@ -1353,7 +1419,10 @@ pub async fn count_events(
         "POST",
         &url,
         Some(&body),
-        state.config.require_auth_token,
+        bridge_requires_nip98(
+            state.config.require_auth_token,
+            state.config.corporate_identity.require,
+        ),
     )?;
     let pubkey_hex = pubkey.to_hex();
 
@@ -1402,6 +1471,8 @@ async fn count_events_authed(
     let pubkey_bytes = pubkey.to_bytes().to_vec();
 
     let auth_tag = headers.get("x-auth-tag").and_then(|v| v.to_str().ok());
+    let identity_proof =
+        verify_bridge_corporate_identity(state, tenant, headers, pubkey, auth_tag).await?;
     super::relay_members::enforce_relay_membership(
         state,
         tenant.community(),
@@ -1409,7 +1480,6 @@ async fn count_events_authed(
         auth_tag,
     )
     .await?;
-
     let filters: Vec<nostr::Filter> = serde_json::from_slice(body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
 
@@ -1439,6 +1509,7 @@ async fn count_events_authed(
         .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)
         .await
         .map_err(|e| internal_error(&format!("channel access lookup: {e}")))?;
+    finalize_bridge_corporate_identity(state, tenant, pubkey, identity_proof).await?;
 
     let mut total: u64 = 0;
     for filter in &filters {
@@ -2087,10 +2158,22 @@ async fn authorize_moderation_read(
         _ => path.to_string(),
     };
     let url = nip98_expected_url(&state.config.relay_url, &tenant, &path_with_query);
-    let (pubkey, event_id_bytes) =
-        verify_bridge_auth(headers, "GET", &url, None, state.config.require_auth_token)?;
+    let (pubkey, event_id_bytes) = verify_bridge_auth(
+        headers,
+        "GET",
+        &url,
+        None,
+        bridge_requires_nip98(
+            state.config.require_auth_token,
+            state.config.corporate_identity.require,
+        ),
+    )?;
     check_nip98_replay(state, &tenant, event_id_bytes).await?;
     let pubkey_bytes = pubkey.to_bytes().to_vec();
+
+    let auth_tag = headers.get("x-auth-tag").and_then(|v| v.to_str().ok());
+    let identity_proof =
+        verify_bridge_corporate_identity(state, &tenant, headers, pubkey, auth_tag).await?;
 
     crate::handlers::moderation_authz::authorize_moderation_action(
         &tenant,
@@ -2107,6 +2190,7 @@ async fn authorize_moderation_read(
             "restricted: moderator access required",
         )
     })?;
+    finalize_bridge_corporate_identity(state, &tenant, pubkey, identity_proof).await?;
 
     Ok(tenant)
 }
@@ -2265,6 +2349,33 @@ mod tests {
             .expect("sign auth event")
             .id
             .to_bytes()
+    }
+
+    #[test]
+    fn corporate_identity_disables_x_pubkey_bridge_fallback() {
+        let keys = Keys::generate();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-pubkey",
+            keys.public_key()
+                .to_hex()
+                .parse()
+                .expect("valid pubkey header"),
+        );
+
+        assert!(!bridge_requires_nip98(false, false));
+        assert!(bridge_requires_nip98(true, false));
+        assert!(bridge_requires_nip98(false, true));
+
+        let (status, _) = verify_bridge_auth(
+            &headers,
+            "POST",
+            "https://relay.example/events",
+            Some(b"{}"),
+            bridge_requires_nip98(false, true),
+        )
+        .expect_err("corporate identity enrollment must require a signed NIP-98 event");
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
     #[test]
@@ -3370,6 +3481,12 @@ mod tests {
     ///
     /// Returns `None` when local Postgres is not reachable.
     async fn bridge_handler_test_state() -> Option<Arc<crate::state::AppState>> {
+        bridge_handler_test_state_with_corporate_identity(false).await
+    }
+
+    async fn bridge_handler_test_state_with_corporate_identity(
+        require_corporate_identity: bool,
+    ) -> Option<Arc<crate::state::AppState>> {
         let mut config = crate::config::Config::from_env().ok()?;
         config.database_url = TEST_DB_URL.to_string();
         // Use the real local Redis so enforce_http_admission can pass.
@@ -3378,6 +3495,12 @@ mod tests {
         config.relay_url = "wss://bridge-test.local".to_string();
         config.require_auth_token = false;
         config.require_relay_membership = false;
+        config.corporate_identity.require = require_corporate_identity;
+        if require_corporate_identity {
+            config.corporate_identity.jwks_uri = "http://127.0.0.1:9/jwks".to_string();
+            config.corporate_identity.issuer = "https://idp.example".to_string();
+            config.corporate_identity.audience = "buzz-relay".to_string();
+        }
 
         let pool = sqlx::PgPool::connect(TEST_DB_URL).await.ok()?;
         let db = buzz_db::Db::from_pool(pool.clone());
@@ -3412,6 +3535,52 @@ mod tests {
         );
         state.nip98_replay = Arc::new(AlwaysFreshReplayGuard);
         Some(Arc::new(state))
+    }
+
+    #[test]
+    #[ignore = "requires Postgres"]
+    fn moderation_reads_require_corporate_identity_after_nip98_proof() {
+        use axum::body::Body;
+        use axum::http::{header, Request};
+        use tower::ServiceExt;
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current_thread runtime");
+        let state = rt
+            .block_on(bridge_handler_test_state_with_corporate_identity(true))
+            .expect("local Postgres not reachable");
+        let host = format!("bridge-moderation-{}.local", uuid::Uuid::new_v4().simple());
+        rt.block_on(state.db.ensure_configured_community(&host))
+            .expect("ensure community");
+
+        let keys = Keys::generate();
+        let signed_url = format!("https://{host}/moderation/reports");
+        let event_json = build_nip98_event_json(&keys, &signed_url, "GET");
+        let auth = nip98_auth_headers(&event_json)
+            .get(header::AUTHORIZATION)
+            .cloned()
+            .expect("authorization header");
+        let response = rt
+            .block_on(
+                crate::router::build_router(state).oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri("/moderation/reports")
+                        .header(header::HOST, host)
+                        .header(header::AUTHORIZATION, auth)
+                        .body(Body::empty())
+                        .expect("build request"),
+                ),
+            )
+            .expect("router oneshot");
+
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "a valid NIP-98 moderator request without an identity JWT must fail before role authorization"
+        );
     }
 
     /// Drive a single POST /events request through the router and return the

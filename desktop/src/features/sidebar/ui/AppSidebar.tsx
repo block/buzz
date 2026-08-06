@@ -53,6 +53,7 @@ import type {
 } from "@/features/sidebar/ui/AppSidebar.types";
 import { SidebarRelayConnectionCard } from "@/features/sidebar/ui/SidebarRelayConnectionCard";
 import type { useSidebarRelayConnectionCard } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
+import { formatVerifiedProfileLabel } from "@/features/profile/lib/identity";
 import {
   SidebarLoadingContent,
   useSidebarLoadingShape,
@@ -485,7 +486,7 @@ export function AppSidebar({
       directMessages,
       enabled: shouldLoadDmMetadata,
       fallbackDisplayName,
-      profileDisplayName: profile?.displayName,
+      profileDisplayName: formatVerifiedProfileLabel(profile),
     });
   const sortedDirectMessages = React.useMemo(
     () =>
@@ -505,7 +506,7 @@ export function AppSidebar({
     streamChannels,
   });
   const resolvedDisplayName =
-    profile?.displayName?.trim() ||
+    formatVerifiedProfileLabel(profile) ||
     fallbackDisplayName?.trim() ||
     "Current identity";
   const isCreatingAny =

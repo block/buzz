@@ -86,7 +86,6 @@ pub async fn ws_audio_handler(
                 .into_response();
         }
     };
-
     let permit = match acquire_audio_connection_permit(&state.conn_semaphore) {
         Some(permit) => permit,
         None => {
@@ -98,12 +97,23 @@ pub async fn ws_audio_handler(
                 .into_response();
         }
     };
+    let corporate_identity_jwt = crate::corporate_identity::identity_jwt_from_headers(
+        &headers,
+        &state.config.corporate_identity,
+    );
 
     // Keep the parser boundary at the largest message this route accepts. The
     // checks in the receive loop still distinguish text from binary policy, but
     // they run after tungstenite has assembled a message.
     limit_audio_websocket(ws).on_upgrade(move |socket| {
-        handle_audio_connection(socket, state, tenant, channel_id, permit)
+        handle_audio_connection(
+            socket,
+            state,
+            tenant,
+            channel_id,
+            permit,
+            corporate_identity_jwt,
+        )
     })
 }
 
@@ -141,12 +151,55 @@ fn default_protocol_version() -> u8 {
     1
 }
 
+/// Remove a denied private admission and release only the exact owner lease
+/// that this connection acquired. The room is sealed while it is still the
+/// manager-visible instance, so a remote registration that already holds its
+/// `Arc` cannot enter between the peer removal and the Redis release.
+async fn cleanup_failed_private_audio_admission(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    channel_id: Uuid,
+    room: &Arc<crate::audio::room::Room>,
+    peer_id: Uuid,
+    acquired_lease: &mut Option<crate::audio::join::HuddleLease>,
+) {
+    let directory = state
+        .mesh()
+        .map(|mesh| &mesh.directory as &dyn crate::audio::join::HuddleDirectory);
+    match crate::audio::join::cleanup_failed_admission_lease(
+        directory,
+        acquired_lease,
+        &state.audio_rooms,
+        tenant.community(),
+        channel_id,
+        room,
+        peer_id,
+    )
+    .await
+    {
+        Ok(Some(crate::audio::join::HuddleReleaseOutcome::Released)) | Ok(None) => {}
+        Ok(Some(crate::audio::join::HuddleReleaseOutcome::NotOwner)) => {
+            debug!(
+                channel_id = %channel_id,
+                "failed audio admission lease already moved; stale cleanup left current owner intact"
+            );
+        }
+        Err(e) => {
+            warn!(
+                channel_id = %channel_id,
+                "failed audio admission could not release huddle owner lease: {e}"
+            );
+        }
+    }
+}
+
 async fn handle_audio_connection(
     socket: WebSocket,
     state: Arc<AppState>,
     tenant: TenantContext,
     channel_id: Uuid,
     _permit: OwnedSemaphorePermit,
+    corporate_identity_jwt: Option<String>,
 ) {
     let cancel = CancellationToken::new();
     let community_id = tenant.community();
@@ -159,7 +212,16 @@ async fn handle_audio_connection(
         community_id,
         cancel.clone(),
         move || async move { check_state.db.is_community_active(community_id).await },
-        move || handle_active_audio_connection(socket, run_state, tenant, channel_id, cancel),
+        move || {
+            handle_active_audio_connection(
+                socket,
+                run_state,
+                tenant,
+                channel_id,
+                cancel,
+                corporate_identity_jwt,
+            )
+        },
     )
     .await;
 }
@@ -170,6 +232,7 @@ async fn handle_active_audio_connection(
     tenant: TenantContext,
     channel_id: Uuid,
     cancel: CancellationToken,
+    corporate_identity_jwt: Option<String>,
 ) {
     let (mut ws_send, mut ws_recv) = socket.split();
 
@@ -241,6 +304,29 @@ async fn handle_active_audio_connection(
     let pubkey_bytes = pubkey.to_bytes().to_vec();
     let parent_channel_id = auth_msg.parent_channel_id;
 
+    let identity_proof = match crate::corporate_identity::verify_corporate_identity(
+        &state,
+        tenant.community(),
+        pubkey,
+        corporate_identity_jwt.as_deref(),
+        auth_tag_json.as_deref(),
+    )
+    .await
+    {
+        Ok(proof) => proof,
+        Err(e) => {
+            warn!(channel_id = %channel_id, pubkey = %pubkey_hex, error = %e, "audio: corporate identity denied");
+            let _ = ws_send
+                .send(WsMessage::Text(
+                    serde_json::json!({"type": "error", "message": e.public_message()})
+                        .to_string()
+                        .into(),
+                ))
+                .await;
+            return;
+        }
+    };
+
     if crate::api::relay_members::enforce_relay_membership(
         &state,
         tenant.community(),
@@ -262,7 +348,7 @@ async fn handle_active_audio_connection(
     }
 
     // ── Step 3: membership check / auto-add ───────────────────────────────────
-    let parent_id_for_event = match ensure_membership(
+    let (parent_id_for_event, auto_add_member_by) = match ensure_membership(
         &state,
         &tenant,
         channel_id,
@@ -283,6 +369,43 @@ async fn handle_active_audio_connection(
                 .await;
             return;
         }
+    };
+
+    // Existing members and open channels retain the established identity path.
+    // Private-huddle auto-add is deferred until room admission succeeds, then
+    // membership and direct identity binding commit in one database transaction.
+    let deferred_private_admission = if let Some(added_by) = auto_add_member_by {
+        Some((added_by, identity_proof))
+    } else {
+        let identity_decision = match crate::corporate_identity::finalize_corporate_identity(
+            &state,
+            tenant.community(),
+            pubkey,
+            identity_proof,
+        )
+        .await
+        {
+            Ok(decision) => decision,
+            Err(e) => {
+                warn!(channel_id = %channel_id, pubkey = %pubkey_hex, error = %e, "audio: corporate identity finalization denied");
+                let _ = ws_send
+                    .send(WsMessage::Text(
+                        serde_json::json!({"type": "error", "message": e.public_message()})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await;
+                return;
+            }
+        };
+        crate::corporate_identity::spawn_session_revalidation(
+            Arc::clone(&state),
+            tenant.community(),
+            pubkey,
+            identity_decision,
+            cancel.clone(),
+        );
+        None
     };
 
     // Huddle cross-pod routing (mesh) OR single-pod guardrail.
@@ -547,6 +670,113 @@ async fn handle_active_audio_connection(
             return;
         }
     };
+
+    if let Some((added_by, identity_proof)) = deferred_private_admission {
+        let identity_input =
+            crate::corporate_identity::binding_input_for_proof(&identity_proof, &pubkey);
+        let outcome = state
+            .db
+            .add_member_with_identity(
+                tenant.community(),
+                channel_id,
+                &pubkey_bytes,
+                MemberRole::Member,
+                Some(&added_by),
+                identity_input.as_ref(),
+            )
+            .await;
+        let committed_binding = match outcome {
+            Ok(buzz_db::channel::ChannelAdmissionOutcome::Joined {
+                identity_binding, ..
+            }) => identity_binding,
+            Ok(buzz_db::channel::ChannelAdmissionOutcome::IdentityConflict(conflict)) => Some(
+                buzz_db::identity_binding::BindIdentityResult::Conflict(conflict),
+            ),
+            Ok(buzz_db::channel::ChannelAdmissionOutcome::IdentityRevoked) => {
+                Some(buzz_db::identity_binding::BindIdentityResult::Revoked)
+            }
+            Err(e) => {
+                warn!(channel_id = %channel_id, pubkey = %pubkey_hex, "audio membership auto-add failed: {e}");
+                let _ = ws_send
+                    .send(WsMessage::Text(
+                        serde_json::json!({"type":"error","message":"not a member"})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await;
+                if let (Some(session), Some(stream)) =
+                    (remote_session.as_ref(), remote_stream.as_mut())
+                {
+                    crate::audio::join::send_clean_close(
+                        stream,
+                        session.fenced(),
+                        session.pubkey(),
+                    )
+                    .await;
+                }
+                cleanup_failed_private_audio_admission(
+                    &state,
+                    &tenant,
+                    channel_id,
+                    &room,
+                    peer_id,
+                    &mut acquired_lease,
+                )
+                .await;
+                return;
+            }
+        };
+        let identity_decision =
+            match crate::corporate_identity::finalize_atomic_corporate_identity_result(
+                &state,
+                tenant.community(),
+                pubkey,
+                identity_proof,
+                committed_binding,
+            )
+            .await
+            {
+                Ok(decision) => decision,
+                Err(e) => {
+                    warn!(channel_id = %channel_id, pubkey = %pubkey_hex, error = %e, "audio: corporate identity finalization denied");
+                    let _ = ws_send
+                        .send(WsMessage::Text(
+                            serde_json::json!({"type": "error", "message": e.public_message()})
+                                .to_string()
+                                .into(),
+                        ))
+                        .await;
+                    if let (Some(session), Some(stream)) =
+                        (remote_session.as_ref(), remote_stream.as_mut())
+                    {
+                        crate::audio::join::send_clean_close(
+                            stream,
+                            session.fenced(),
+                            session.pubkey(),
+                        )
+                        .await;
+                    }
+                    cleanup_failed_private_audio_admission(
+                        &state,
+                        &tenant,
+                        channel_id,
+                        &room,
+                        peer_id,
+                        &mut acquired_lease,
+                    )
+                    .await;
+                    return;
+                }
+            };
+        crate::corporate_identity::spawn_session_revalidation(
+            Arc::clone(&state),
+            tenant.community(),
+            pubkey,
+            identity_decision,
+            cancel.clone(),
+        );
+        state.invalidate_membership(&tenant, channel_id, &pubkey_bytes);
+    }
 
     info!(
         channel_id = %channel_id,
@@ -1156,7 +1386,7 @@ async fn ensure_membership(
     channel_id: Uuid,
     pubkey_bytes: &[u8],
     parent_channel_id: Option<Uuid>,
-) -> Result<Uuid, String> {
+) -> Result<(Uuid, Option<Vec<u8>>), String> {
     // Load channel first — reject archived channels before any membership check.
     // This ensures auto-ended huddles can't be rejoined by existing members.
     let channel = state
@@ -1199,11 +1429,11 @@ async fn ensure_membership(
         .map_err(|e| format!("db error: {e}"))?;
 
     if is_member {
-        return Ok(lifecycle_parent_id);
+        return Ok((lifecycle_parent_id, None));
     }
 
     if channel.visibility == "open" {
-        return Ok(lifecycle_parent_id);
+        return Ok((lifecycle_parent_id, None));
     }
 
     // Auto-add path: private ephemeral channel + caller is member of parent.
@@ -1214,20 +1444,7 @@ async fn ensure_membership(
             .map_err(|e| format!("db error: {e}"))?;
 
         if parent_member {
-            state
-                .db
-                .add_member(
-                    tenant.community(),
-                    channel_id,
-                    pubkey_bytes,
-                    MemberRole::Member,
-                    Some(&channel.created_by),
-                )
-                .await
-                .map_err(|e| format!("auto-add failed: {e}"))?;
-            state.invalidate_membership(tenant, channel_id, pubkey_bytes);
-
-            return Ok(lifecycle_parent_id);
+            return Ok((lifecycle_parent_id, Some(channel.created_by)));
         }
     }
 

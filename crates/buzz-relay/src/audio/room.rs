@@ -682,6 +682,10 @@ mod tests {
             .remove_peer_and_check_ended(peer_id)
             .expect("peer existed");
         assert!(ended, "single-peer room should end on its last departure");
+        let err = room1
+            .add_peer("late-peer".to_string(), 2)
+            .expect_err("a stale room handle must not admit after empty cleanup seals it");
+        assert!(matches!(err, AdmissionError::Ended));
         assert!(manager.cleanup_if_empty(community_id, channel_id));
 
         // Next joiner with a different version on the same channel id gets a

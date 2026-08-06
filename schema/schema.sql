@@ -190,6 +190,89 @@ CREATE UNIQUE INDEX idx_users_nip05 ON users (community_id, lower(nip05_handle))
 CREATE UNIQUE INDEX idx_users_okta ON users (community_id, okta_user_id)
     WHERE okta_user_id IS NOT NULL;
 
+-- ── Relay-verified identity bindings ─────────────────────────────────────────
+-- Conformance: verified identity is community-scoped. An issuer-qualified uid
+-- is the stable product/user-management identity; a Nostr pubkey is the
+-- protocol credential currently bound to it. This table is intentionally a
+-- binding and lifecycle authority. Revocation scope distinguishes principal
+-- disablement, a single-key revocation, and an operator-authorized rotation.
+
+CREATE TABLE identity_bindings (
+    community_id    UUID NOT NULL REFERENCES communities(id),
+    issuer          TEXT NOT NULL,
+    uid             TEXT NOT NULL,
+    pubkey          BYTEA NOT NULL,
+    display_name    TEXT,
+    source          TEXT NOT NULL CHECK (source IN ('jwt_npub', 'db_binding')),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_seen_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    revoked_at      TIMESTAMPTZ,
+    revoked_by      BYTEA,
+    revoked_reason  TEXT,
+    revocation_scope TEXT NOT NULL DEFAULT 'principal'
+                     CHECK (revocation_scope IN ('principal', 'key', 'rotation')),
+    rotation_completed_at TIMESTAMPTZ,
+    rotated_to_pubkey BYTEA,
+    rotation_by      BYTEA,
+    rotation_reason  TEXT,
+    CONSTRAINT chk_identity_bindings_issuer_not_empty CHECK (length(issuer) > 0),
+    CONSTRAINT chk_identity_bindings_uid_not_empty CHECK (length(uid) > 0),
+    CONSTRAINT chk_identity_bindings_pubkey_len CHECK (length(pubkey) = 32),
+    CONSTRAINT chk_identity_bindings_revoked_by_len CHECK (revoked_by IS NULL OR length(revoked_by) = 32),
+    CONSTRAINT chk_identity_bindings_rotation_state CHECK (
+        (rotation_completed_at IS NULL
+            AND rotated_to_pubkey IS NULL
+            AND rotation_by IS NULL
+            AND rotation_reason IS NULL)
+        OR
+        (rotation_completed_at IS NOT NULL
+            AND rotated_to_pubkey IS NOT NULL
+            AND length(rotated_to_pubkey) = 32
+            AND (rotation_by IS NULL OR length(rotation_by) = 32)
+            AND rotation_reason IS NOT NULL
+            AND length(rotation_reason) > 0)
+    )
+);
+
+CREATE UNIQUE INDEX idx_identity_bindings_active_principal
+    ON identity_bindings (community_id, issuer, uid)
+    WHERE revoked_at IS NULL;
+CREATE UNIQUE INDEX idx_identity_bindings_active_pubkey
+    ON identity_bindings (community_id, pubkey)
+    WHERE revoked_at IS NULL;
+CREATE INDEX idx_identity_bindings_pubkey
+    ON identity_bindings (community_id, pubkey);
+CREATE INDEX idx_identity_bindings_revoked_principal
+    ON identity_bindings (community_id, issuer, uid)
+    WHERE revoked_at IS NOT NULL AND revocation_scope = 'principal';
+
+CREATE TABLE identity_principals (
+    community_id    UUID NOT NULL REFERENCES communities(id),
+    issuer          TEXT NOT NULL,
+    uid             TEXT NOT NULL,
+    disabled_at     TIMESTAMPTZ,
+    disabled_by     BYTEA,
+    disabled_reason TEXT,
+    PRIMARY KEY (community_id, issuer, uid),
+    CHECK (length(issuer) > 0),
+    CHECK (length(uid) > 0),
+    CHECK (disabled_by IS NULL OR length(disabled_by) = 32),
+    CHECK ((disabled_at IS NULL) = (disabled_reason IS NULL))
+);
+
+CREATE TABLE identity_revoked_keys (
+    community_id UUID NOT NULL REFERENCES communities(id),
+    pubkey       BYTEA NOT NULL,
+    revoked_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    revoked_by   BYTEA,
+    reason       TEXT NOT NULL,
+    PRIMARY KEY (community_id, pubkey),
+    CHECK (length(pubkey) = 32),
+    CHECK (revoked_by IS NULL OR length(revoked_by) = 32),
+    CHECK (length(reason) > 0)
+);
+
 -- ── Events (partitioned by month on created_at) ──────────────────────────────
 -- Conformance: "Channel-less global events and DMs". `community_id` leads the
 -- PK and every hot-path index. Partition stays BY RANGE (created_at) — the
