@@ -32,7 +32,6 @@ import type {
   AgentPersona,
   ChannelMember,
   ChannelType,
-  UserSearchResult,
 } from "@/shared/api/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { detectPrefixQuery } from "@/shared/lib/detectPrefixQuery";
@@ -44,9 +43,13 @@ import { useDraftMentionRouting } from "./useDraftMentionRouting";
 import { rankMentionCandidates } from "./mentionRanking";
 import { mapMentionCandidateToSuggestion } from "./mentionSuggestionMapping";
 import {
+  buildCategoryMentionCandidates,
   buildTeamMentionCandidates,
-  formatTeamMention,
+  formatGroupMention,
+  formatSearchUserDisplayName,
+  formatSearchUserSecondaryLabel,
   globalSearchIdentityKey,
+  groupMentionMembers,
   type MentionCandidate,
   mentionCandidateLabel,
 } from "./mentionCandidates";
@@ -59,17 +62,6 @@ export type PersonaMentionTarget = {
 type UseMentionsOptions = {
   channelType?: ChannelType | null;
 };
-function formatSearchUserDisplayName(user: UserSearchResult) {
-  return user.displayName?.trim() || user.nip05Handle?.trim() || null;
-}
-function formatSearchUserSecondaryLabel(user: UserSearchResult) {
-  const displayName = user.displayName?.trim();
-  const nip05Handle = user.nip05Handle?.trim();
-  if (displayName && nip05Handle) {
-    return nip05Handle;
-  }
-  return null;
-}
 function appendUniqueName(current: string[], name: string): string[] {
   return current.some(
     (candidate) => candidate.toLowerCase() === name.toLowerCase(),
@@ -447,8 +439,9 @@ export function useMentions(
         personasQuery.data ?? [],
         mentionCandidates,
       ),
+      ...buildCategoryMentionCandidates(mentionCandidates, currentPubkey),
     ],
-    [mentionCandidates, personasQuery.data, teamsQuery.data],
+    [currentPubkey, mentionCandidates, personasQuery.data, teamsQuery.data],
   );
 
   const ownerPubkeys = React.useMemo(
@@ -615,10 +608,9 @@ export function useMentions(
       }
 
       const displayName = suggestion.displayName;
-      const teamMembers =
-        suggestion.kind === "team" ? suggestion.teamMembers : null;
+      const teamMembers = groupMentionMembers(suggestion);
       const insertText = teamMembers
-        ? formatTeamMention(displayName, teamMembers)
+        ? formatGroupMention(suggestion, teamMembers)
         : `@${displayName} `;
 
       const mentions = mentionMapRef.current;
