@@ -150,6 +150,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         let web_index = web_dir.as_ref().map(|dir| dir.join("index.html"));
         let web_files = web_dir.map(ServeDir::new);
         let serve_git_web_gui = state.config.serve_git_web_gui;
+        let web_spa_full = state.config.web_spa_full;
         let fallback_state = state.clone();
         let spa_fallback = tower::service_fn(move |req: axum::extract::Request| {
             let admin_index = admin_index.clone();
@@ -176,7 +177,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                     if path.starts_with("/assets/") {
                         return files.oneshot(req).await.map(IntoResponse::into_response);
                     }
-                    if should_serve_spa(path, serve_git_web_gui) {
+                    if should_serve_spa(path, serve_git_web_gui, web_spa_full) {
                         return Ok(read_spa_index(&index).await);
                     }
                 }
@@ -218,8 +219,40 @@ fn is_invite_landing_path(path: &str) -> bool {
         .is_some_and(|code| !code.is_empty() && !code.contains('/'))
 }
 
-fn should_serve_spa(path: &str, serve_git_web_gui: bool) -> bool {
+fn should_serve_spa(path: &str, serve_git_web_gui: bool, web_spa_full: bool) -> bool {
+    if web_spa_full {
+        // A deployment whose bundle is a full client wants client-side routing on
+        // arbitrary paths. Server-owned prefixes still 404, so a mistyped API call
+        // gets an error rather than an HTML page a client would try to parse.
+        return !is_server_owned_path(path);
+    }
     is_invite_landing_path(path) || (serve_git_web_gui && is_git_web_gui_path(path))
+}
+
+/// Paths the relay answers itself, which must never fall back to the SPA shell.
+fn is_server_owned_path(path: &str) -> bool {
+    const PREFIXES: [&str; 7] = [
+        "/api/",
+        "/git/",
+        "/hooks/",
+        "/media/",
+        "/upload/",
+        "/.well-known/",
+        "/_",
+    ];
+    const EXACT: [&str; 10] = [
+        "/events",
+        "/query",
+        "/count",
+        "/info",
+        "/health",
+        "/moderation",
+        "/upload",
+        "/api",
+        "/git",
+        "/hooks",
+    ];
+    PREFIXES.iter().any(|p| path.starts_with(p)) || EXACT.contains(&path)
 }
 
 fn is_git_web_gui_path(path: &str) -> bool {
@@ -481,13 +514,60 @@ mod tests {
 
     #[test]
     fn invite_is_always_served_but_git_gui_requires_opt_in() {
-        assert!(should_serve_spa("/invite/payload.mac", false));
-        assert!(should_serve_spa("/invite/payload.mac", true));
-        assert!(!should_serve_spa("/", false));
-        assert!(!should_serve_spa("/repos/example", false));
-        assert!(should_serve_spa("/", true));
-        assert!(should_serve_spa("/repos/example", true));
-        assert!(!should_serve_spa("/arbitrary", true));
+        assert!(should_serve_spa("/invite/payload.mac", false, false));
+        assert!(should_serve_spa("/invite/payload.mac", true, false));
+        assert!(!should_serve_spa("/", false, false));
+        assert!(!should_serve_spa("/repos/example", false, false));
+        assert!(should_serve_spa("/", true, false));
+        assert!(should_serve_spa("/repos/example", true, false));
+        assert!(!should_serve_spa("/arbitrary", true, false));
+    }
+
+    #[test]
+    fn full_spa_mode_serves_arbitrary_client_routes() {
+        // Opting in makes client-side routing work for paths the relay has never
+        // heard of -- that is the whole point of a full client bundle.
+        assert!(should_serve_spa("/arbitrary", false, true));
+        assert!(should_serve_spa("/settings", false, true));
+        assert!(should_serve_spa("/settings/profile/nested", false, true));
+        assert!(should_serve_spa("/", false, true));
+        assert!(should_serve_spa("/repos/example", false, true));
+        assert!(should_serve_spa("/invite/payload.mac", false, true));
+    }
+
+    #[test]
+    fn full_spa_mode_still_lets_server_paths_404() {
+        // Falling back to HTML here would turn a mistyped API call into a 200
+        // that clients then fail to parse.
+        for path in [
+            "/api/invites",
+            "/api",
+            "/git/owner/repo.git",
+            "/hooks/abc",
+            "/media/blob",
+            "/upload",
+            "/.well-known/nostr.json",
+            "/_liveness",
+            "/_status",
+            "/events",
+            "/query",
+            "/count",
+            "/info",
+            "/health",
+            "/moderation",
+        ] {
+            assert!(
+                !should_serve_spa(path, true, true),
+                "{path} must not fall back to the SPA shell"
+            );
+        }
+    }
+
+    #[test]
+    fn full_spa_mode_is_off_by_default() {
+        // Without the opt-in, behaviour is unchanged: unknown paths 404.
+        assert!(!should_serve_spa("/settings", false, false));
+        assert!(!should_serve_spa("/arbitrary", false, false));
     }
 
     #[tokio::test(flavor = "current_thread")]
