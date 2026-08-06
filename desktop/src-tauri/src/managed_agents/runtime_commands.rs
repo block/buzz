@@ -283,7 +283,9 @@ fn start_pair(
         .lock()
         .ok()
         .map(|keys| keys.public_key().to_hex());
-    let mut process = spawn_agent_child(&app, record, &key.relay_url, lazy, owner.as_deref())?;
+    // Dial the configured relay, not `key.relay_url` (the loopback-normalized
+    // identity). See the note in `spawn_agent_child`.
+    let mut process = spawn_agent_child(&app, record, &relay_url, lazy, owner.as_deref())?;
     let now = crate::util::now_iso();
     let receipt = ManagedAgentRuntimeReceipt {
         key: key.clone(),
