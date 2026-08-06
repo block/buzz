@@ -367,14 +367,15 @@ mod tests {
 
     #[test]
     fn synthetic_server_proves_initialize_and_tool_discovery() {
-        let node = super::super::super::resolve_command("node")
+        let resolved_node = super::super::super::resolve_command("node")
             .expect("Hermit must provide Node for desktop tests");
+        let (node, node_fingerprint) =
+            canonical_connection_command(&resolved_node.to_string_lossy()).unwrap();
         let script = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../tests/fixtures/synthetic-project-connection-mcp.mjs");
         assert!(script.is_file(), "missing fixture {}", script.display());
         let args = vec![script.to_string_lossy().to_string()];
-        let executable_sha256 =
-            approved_execution_sha256(&executable_sha256(&node).unwrap(), &args).unwrap();
+        let executable_sha256 = approved_execution_sha256(&node_fingerprint, &args).unwrap();
         let connection = StoredProjectConnection {
             id: "synthetic-project-connection".to_string(),
             project_scope: ProjectConnectionScope {
@@ -385,7 +386,7 @@ mod tests {
             name: "Synthetic analytics".to_string(),
             provider: "Buzz test fixture".to_string(),
             capability_ids: Vec::new(),
-            command: node.to_string_lossy().to_string(),
+            command: node,
             args,
             env_keys: vec!["PROJECT_CONNECTION_CANARY".to_string()],
             discovered_tools: Vec::new(),
