@@ -24,6 +24,8 @@ pub(super) struct DeployProjections {
     /// Effective parallelism derived from the same resolved `descriptor.command`
     /// as `launch.policy_env["BUZZ_ACP_AGENTS"]`.
     pub effective_parallelism: u32,
+    /// Access fields projected from the same build policy that gates local starts.
+    pub owner_only_access: bool,
 }
 
 /// Resolve the deploy-specific structured model/provider for a managed agent.
@@ -170,6 +172,7 @@ pub(super) fn build_deploy_payload(
             effective_provider: effective.provider.value,
             effective_prompt: effective.system_prompt.value,
             effective_parallelism,
+            owner_only_access: crate::managed_agents::owner_only_access_build(),
         },
         merged_user_env,
         launch,
@@ -179,8 +182,8 @@ pub(super) fn build_deploy_payload(
 /// Pure serialization half of [`build_deploy_payload`]. Legacy top-level fields
 /// remain for display/bookkeeping; providers execute the resolved `launch` block.
 /// `projections.effective_parallelism` is pre-computed from the same resolved
-/// descriptor as `launch.policy_env["BUZZ_ACP_AGENTS"]` — the two fields are
-/// always consistent regardless of stale `record.agent_command` pins.
+/// descriptor as `launch.policy_env["BUZZ_ACP_AGENTS"]`. Access is projected from
+/// the same compiled policy that gates local starts.
 pub(super) fn deploy_payload_json(
     record: &ManagedAgentRecord,
     relay_url: String,
@@ -188,6 +191,8 @@ pub(super) fn deploy_payload_json(
     merged_env: BTreeMap<String, String>,
     launch: serde_json::Value,
 ) -> serde_json::Value {
+    let (respond_to, respond_to_allowlist) =
+        crate::managed_agents::projected_access_with_policy(record, projections.owner_only_access);
     serde_json::json!({
         "name": &record.name,
         "relay_url": relay_url,
@@ -204,8 +209,8 @@ pub(super) fn deploy_payload_json(
         // Legacy top-level field: projected from the same resolved descriptor as
         // launch.policy_env["BUZZ_ACP_AGENTS"] — the two are always consistent.
         "parallelism": projections.effective_parallelism,
-        "respond_to": record.respond_to,
-        "respond_to_allowlist": &record.respond_to_allowlist,
+        "respond_to": respond_to,
+        "respond_to_allowlist": respond_to_allowlist,
         "env_vars": merged_env,
         "launch": launch,
     })
@@ -363,6 +368,7 @@ mod tests {
                 effective_provider: None,
                 effective_prompt: None,
                 effective_parallelism,
+                owner_only_access: false,
             },
             BTreeMap::new(),
             launch.clone(),
@@ -407,6 +413,7 @@ mod tests {
                 effective_provider: None,
                 effective_prompt: None,
                 effective_parallelism,
+                owner_only_access: false,
             },
             BTreeMap::new(),
             launch.clone(),
@@ -452,6 +459,7 @@ mod tests {
                 effective_provider: None,
                 effective_prompt: None,
                 effective_parallelism,
+                owner_only_access: false,
             },
             BTreeMap::new(),
             launch.clone(),
