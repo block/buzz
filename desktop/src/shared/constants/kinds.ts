@@ -33,6 +33,11 @@ export const KIND_FORUM_COMMENT = 45003;
 export const KIND_APPROVAL_REQUEST = 46010;
 export const KIND_MEMBER_ADDED_NOTIFICATION = 44100;
 export const KIND_MEMBER_REMOVED_NOTIFICATION = 44101;
+// Interactive "question card" elicitation flow. 44300 is the agent-authored
+// question card (renders its own timeline row); 44301 is the human's answer,
+// which routes back to the agent and does NOT render its own row.
+export const KIND_ELICITATION_REQUEST = 44300;
+export const KIND_ELICITATION_RESPONSE = 44301;
 export const KIND_TYPING_INDICATOR = 20002;
 export const KIND_HUDDLE_REACTION = 24810;
 export const KIND_HUDDLE_STARTED = 48100;
@@ -97,6 +102,7 @@ export const CHANNEL_EVENT_KINDS = [
   KIND_STREAM_MESSAGE_EDIT, // 40003 — message edits
   KIND_STREAM_MESSAGE_DIFF, // 40008 — message diffs
   KIND_SYSTEM_MESSAGE, // 40099 — system messages (join, leave, etc.)
+  KIND_ELICITATION_REQUEST, // 44300 — interactive question card
   KIND_HUDDLE_STARTED, // 48100 — visible huddle session card
   KIND_HUDDLE_PARTICIPANT_JOINED, // 48101 — huddle lifecycle overlay
   KIND_HUDDLE_PARTICIPANT_LEFT, // 48102 — huddle lifecycle overlay
@@ -136,6 +142,7 @@ export const CHANNEL_TIMELINE_CONTENT_KINDS = [
   KIND_JOB_RESULT, // 43004
   KIND_JOB_CANCEL, // 43005
   KIND_JOB_ERROR, // 43006
+  KIND_ELICITATION_REQUEST, // 44300 — interactive question card (own row)
   KIND_HUDDLE_STARTED, // 48100 — huddle session card
 ] as const;
 
