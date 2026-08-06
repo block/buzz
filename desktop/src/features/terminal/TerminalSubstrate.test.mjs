@@ -558,6 +558,7 @@ function frameWith(text, generation = 1) {
     rows: [
       {
         line: 0,
+        wrapped: false,
         spans: [
           {
             style: { fg: 0, bg: 0, flags: 0 },

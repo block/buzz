@@ -23,7 +23,11 @@ export type TerminalSpan = {
   clusters: readonly TerminalCluster[];
 };
 
-export type TerminalRow = { line: number; spans: readonly TerminalSpan[] };
+export type TerminalRow = {
+  line: number;
+  wrapped: boolean;
+  spans: readonly TerminalSpan[];
+};
 export type TerminalCursor = {
   line: number;
   column: number;
@@ -52,7 +56,10 @@ export const TERMINAL_CELL_METRICS = {
   boldFont: '700 14px "JetBrains Mono", monospace',
 } as const satisfies CellMetrics;
 
-type RetainedRow = readonly TerminalSpan[];
+type RetainedRow = {
+  wrapped: boolean;
+  spans: readonly TerminalSpan[];
+};
 
 export type PaintContext = Pick<
   CanvasRenderingContext2D,
@@ -120,7 +127,10 @@ export class TerminalGrid {
 
   constructor(viewport: TerminalViewport) {
     this.#viewport = viewport;
-    this.#rows = Array.from({ length: viewport.screenLines }, () => []);
+    this.#rows = Array.from({ length: viewport.screenLines }, () => ({
+      wrapped: false,
+      spans: [],
+    }));
     this.markAllDirty();
   }
 
@@ -130,9 +140,9 @@ export class TerminalGrid {
 
   text(): string {
     return this.#rows
-      .map((spans) => {
+      .map((row) => {
         const cells = Array.from({ length: this.#viewport.columns }, () => " ");
-        for (const span of spans) {
+        for (const span of row.spans) {
           for (const cluster of span.clusters) {
             cells[cluster.column] = cluster.text;
             for (let offset = 1; offset < cluster.width; offset++) {
@@ -140,9 +150,11 @@ export class TerminalGrid {
             }
           }
         }
-        return cells.join("").trimEnd();
+        const text = cells.join("").trimEnd();
+        return row.wrapped ? text : `${text}\n`;
       })
-      .join("\n");
+      .join("")
+      .replace(/\n$/, "");
   }
 
   apply(frame: TerminalFrame): boolean {
@@ -159,7 +171,7 @@ export class TerminalGrid {
     this.#dirty.add(this.#cursor.line);
     for (const row of frame.rows) {
       if (row.line < this.#rows.length) {
-        this.#rows[row.line] = row.spans;
+        this.#rows[row.line] = { wrapped: row.wrapped, spans: row.spans };
         this.#dirty.add(row.line);
       }
     }
@@ -168,7 +180,10 @@ export class TerminalGrid {
 
   resize(viewport: TerminalViewport): void {
     this.#viewport = viewport;
-    this.#rows = Array.from({ length: viewport.screenLines }, () => []);
+    this.#rows = Array.from({ length: viewport.screenLines }, () => ({
+      wrapped: false,
+      spans: [],
+    }));
     this.#cursor = { line: 0, column: 0, visible: false };
     this.markAllDirty();
   }
@@ -203,7 +218,7 @@ export class TerminalGrid {
         this.#viewport.columns * metrics.width,
         metrics.height,
       );
-      for (const span of this.#rows[line] ?? []) {
+      for (const span of this.#rows[line]?.spans ?? []) {
         const background = resolvePackedColor(
           span.style.bg,
           palette,

@@ -240,6 +240,7 @@ mod tests {
         Frame {
             rows: vec![RowFrame {
                 line: marker,
+                wrapped: false,
                 spans: Vec::new(),
             }],
             cursor: CursorFrame {

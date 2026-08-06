@@ -68,6 +68,7 @@ test("clusters draw at computed columns, never accumulated text width", () => {
       rows: [
         {
           line: 0,
+          wrapped: false,
           spans: [
             {
               style: { fg: 0x01000007, bg: 0x01000101, flags: 0 },
@@ -108,6 +109,7 @@ test("combining marks stay in one cluster and consume one cell", () => {
     rows: [
       {
         line: 0,
+        wrapped: false,
         spans: [
           {
             style: { fg: 0x01000007, bg: 0x01000101, flags: 0 },
@@ -166,8 +168,8 @@ test("cursor visibility can blink without a new terminal frame", () => {
   assert.ok(restored.fills.some((fill) => fill[0] === 20 && fill[2] === 1.2));
 });
 
-test("text reconstructs selectable viewport content with cell alignment", () => {
-  const grid = new TerminalGrid({ generation: 0, columns: 8, screenLines: 2 });
+test("text preserves soft wraps and hard line breaks", () => {
+  const grid = new TerminalGrid({ generation: 0, columns: 8, screenLines: 3 });
   grid.apply({
     viewport: grid.viewport,
     full: true,
@@ -175,6 +177,7 @@ test("text reconstructs selectable viewport content with cell alignment", () => 
     rows: [
       {
         line: 0,
+        wrapped: true,
         spans: [
           {
             style: { fg: 0, bg: 0, flags: 0 },
@@ -188,6 +191,7 @@ test("text reconstructs selectable viewport content with cell alignment", () => 
       },
       {
         line: 1,
+        wrapped: false,
         spans: [
           {
             style: { fg: 0, bg: 0, flags: 0 },
@@ -195,8 +199,18 @@ test("text reconstructs selectable viewport content with cell alignment", () => 
           },
         ],
       },
+      {
+        line: 2,
+        wrapped: false,
+        spans: [
+          {
+            style: { fg: 0, bg: 0, flags: 0 },
+            clusters: [{ column: 0, text: "tail", width: 1 }],
+          },
+        ],
+      },
     ],
   });
 
-  assert.equal(grid.text(), " A 😀 B\né");
+  assert.equal(grid.text(), " A 😀 Bé\ntail");
 });
