@@ -1,0 +1,10 @@
+n=50 file=/tmp/buzz-perf-proof/before-success.txt
+quiet_median: median=16.0 p95=24.0 min=16.0 max=24.0 mean=16.6
+quiet_p95: median=24.0 p95=24.0 min=16.0 max=32.0 mean=23.0
+quiet_over50: median=0.0 p95=1.0 min=0.0 max=1.0 mean=0.1
+quiet_longtask: median=0.0 p95=106.6 min=0.0 max=336.0 mean=11.1
+busy_median: median=24.0 p95=32.0 min=16.0 max=32.0 mean=27.5
+busy_p95: median=32.0 p95=32.0 min=24.0 max=40.0 mean=32.0
+busy_over50: median=0.0 p95=1.0 min=0.0 max=1.0 mean=0.1
+busy_longtask: median=282.5 p95=541.7 min=197.0 max=710.0 mean=324.5
+busy_minus_quiet_median: median=8.0 mean=10.9
