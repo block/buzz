@@ -1064,6 +1064,30 @@ mod tests {
         assert!(reserve_managed_agent_start(&state, &key).is_ok());
     }
 
+    #[test]
+    fn windows_recovery_teardown_never_launches_an_external_helper() {
+        let source = include_str!("process_lifecycle.rs");
+        assert!(!source.contains("std::process::Command"));
+        assert!(!source.contains("Command::new"));
+    }
+
+    #[test]
+    fn windows_recovery_teardown_finds_descendants_by_generation() {
+        let entries = [
+            (10, 1),
+            (11, 10),
+            (12, 10),
+            (13, 11),
+            (14, 13),
+            (99, 1),
+            (11, 10),
+        ];
+        assert_eq!(
+            super::super::runtime::descendant_process_waves(&entries, 10),
+            vec![vec![11, 12], vec![13], vec![14]]
+        );
+    }
+
     fn payload(
         relay_url: &str,
         lifecycle: ManagedAgentRuntimeLifecycle,

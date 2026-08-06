@@ -6,8 +6,10 @@
 //!   - [`JobHandle`] / [`create_job_for_child`] — the in-process stop path. A
 //!     Job Object owns the tree and `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` kills
 //!     it when the handle drops.
-//!   - [`taskkill_tree`] — the after-restart path, where only the PID survives
-//!     in the record and no job handle is available.
+//!   - [`terminate_process_tree`] — the after-restart path, where only the PID
+//!     survives in the record and no job handle is available. It uses Win32
+//!     process enumeration/termination directly so teardown never launches an
+//!     external helper while a runtime-management lock is held.
 //!
 //! This module is `#[cfg(windows)]`-only; nothing here compiles on other
 //! platforms.
@@ -105,23 +107,120 @@ fn create_job_for_child(pid: u32) -> Option<JobHandle> {
     }
 }
 
-/// Kill the entire process tree rooted at `pid` via `taskkill /T`, the closest
-/// equivalent to the Unix process-group kill. Used on the after-restart path
-/// where no job handle survived. `CREATE_NO_WINDOW` keeps taskkill's own
-/// console from flashing.
-pub fn taskkill_tree(pid: u32) -> Result<(), String> {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let status = std::process::Command::new("taskkill")
-        .args(["/T", "/F", "/PID", &pid.to_string()])
-        .creation_flags(CREATE_NO_WINDOW)
-        .status()
-        .map_err(|error| format!("failed to run taskkill for pid {pid}: {error}"))?;
-    if status.success() {
+/// Snapshot `(pid, parent_pid)` for every visible process without launching a
+/// helper executable.
+fn process_snapshot() -> Result<Vec<(u32, u32)>, String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, FALSE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err(format!(
+                "failed to snapshot Windows processes: error {}",
+                windows_sys::Win32::Foundation::GetLastError()
+            ));
+        }
+        let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut entries = Vec::new();
+        if Process32FirstW(snapshot, &mut entry) != FALSE {
+            loop {
+                entries.push((entry.th32ProcessID, entry.th32ParentProcessID));
+                if Process32NextW(snapshot, &mut entry) == FALSE {
+                    break;
+                }
+            }
+        }
+        CloseHandle(snapshot);
+        Ok(entries)
+    }
+}
+
+fn terminate_pid(pid: u32, wait: bool) -> Result<(), String> {
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, ERROR_INVALID_PARAMETER, FALSE, STILL_ACTIVE, WAIT_OBJECT_0,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, TerminateProcess, WaitForSingleObject,
+        PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+    };
+
+    unsafe {
+        let process = OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, FALSE, pid);
+        if process.is_null() {
+            let error = windows_sys::Win32::Foundation::GetLastError();
+            // The process may have exited between the snapshot and OpenProcess.
+            if error == ERROR_INVALID_PARAMETER {
+                return Ok(());
+            }
+            return Err(format!(
+                "failed to open managed process {pid} for termination: error {error}"
+            ));
+        }
+        if TerminateProcess(process, 1) == FALSE {
+            let error = windows_sys::Win32::Foundation::GetLastError();
+            let mut exit_code = STILL_ACTIVE as u32;
+            let already_exited = GetExitCodeProcess(process, &mut exit_code) != FALSE
+                && exit_code != STILL_ACTIVE as u32;
+            CloseHandle(process);
+            if already_exited {
+                return Ok(());
+            }
+            return Err(format!(
+                "failed to terminate managed process {pid}: error {error}"
+            ));
+        }
+        if wait && WaitForSingleObject(process, 1_000) != WAIT_OBJECT_0 {
+            CloseHandle(process);
+            return Err(format!(
+                "managed process {pid} did not exit within one second after termination"
+            ));
+        }
+        CloseHandle(process);
+        Ok(())
+    }
+}
+
+/// Kill the entire process tree rooted at `pid` through Win32 APIs. This is
+/// the after-restart equivalent of dropping the live Job Object handle. The
+/// root is terminated and reaped first so it cannot create new descendants;
+/// then descendants from snapshots taken before and after root termination are
+/// terminated deepest-first.
+pub fn terminate_process_tree(pid: u32) -> Result<(), String> {
+    let mut entries = process_snapshot()?;
+    terminate_pid(pid, true)?;
+    let after = process_snapshot()?;
+    // If `pid` was recycled immediately after the original root exited, do
+    // not follow the new process's children. Otherwise the post-exit snapshot
+    // closes the small window in which the root could create a last child
+    // between the first snapshot and TerminateProcess.
+    if !after.iter().any(|(candidate, _)| *candidate == pid) {
+        entries.extend(after);
+    }
+    entries.sort_unstable();
+    entries.dedup();
+
+    let mut errors = Vec::new();
+    for wave in super::runtime::descendant_process_waves(&entries, pid)
+        .into_iter()
+        .rev()
+    {
+        for descendant in wave {
+            if let Err(error) = terminate_pid(descendant, false) {
+                errors.push(error);
+            }
+        }
+    }
+    if errors.is_empty() {
         Ok(())
     } else {
         Err(format!(
-            "taskkill exited with status {status} for pid {pid}"
+            "failed to terminate part of managed process tree {pid}: {}",
+            errors.join("; ")
         ))
     }
 }

@@ -39,7 +39,10 @@ per-pair reservation rejects a duplicate start during the unlocked phase. A
 shutdown, concurrent record edit, receipt-write failure, or store-save failure
 wins the race and the unregistered child is terminated and reaped after every
 runtime lock has been released. No external process may be spawned while a
-runtime-management lock is held.
+runtime-management lock is held. On Windows, live children are owned by Job
+Objects; after a desktop restart, recovered process trees are enumerated and
+terminated through Win32 APIs directly. The recovery path does not launch
+`taskkill` or any other helper executable.
 
 Unexpected local listener exits use three bounded recovery attempts after 5
 seconds, 30 seconds, and 2 minutes. Recovery is suppressed while an agent has

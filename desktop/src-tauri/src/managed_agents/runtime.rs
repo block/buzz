@@ -72,6 +72,8 @@ pub(crate) use sweep::sweep_untracked_bundle_harnesses;
 type RespondToEnv = (Vec<(&'static str, String)>, Vec<&'static str>);
 
 mod process;
+#[cfg(any(windows, test))]
+pub(crate) use process::descendant_process_waves;
 #[cfg(test)]
 use process::{
     buzz_marker_entry, name_matches_interpreter, name_matches_known_binary,

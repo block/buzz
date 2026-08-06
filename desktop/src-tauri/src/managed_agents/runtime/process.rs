@@ -30,6 +30,34 @@ pub(crate) const KNOWN_AGENT_BINARIES: &[&str] = &[
 /// `process_has_buzz_marker()`). This avoids sweeping unrelated node processes.
 pub(crate) const KNOWN_SCRIPT_INTERPRETERS: &[&str] = &["node"];
 
+/// Expand a process snapshot into descendant generations rooted at `root`.
+/// Kept platform-independent so the Windows recovery teardown topology can be
+/// unit-tested on every CI host.
+#[cfg(any(windows, test))]
+pub(crate) fn descendant_process_waves(entries: &[(u32, u32)], root: u32) -> Vec<Vec<u32>> {
+    let mut known = std::collections::HashSet::from([root]);
+    let mut waves = Vec::new();
+    loop {
+        let mut wave_seen = std::collections::HashSet::new();
+        let wave = entries
+            .iter()
+            .filter_map(|(pid, parent)| {
+                (*pid != root
+                    && !known.contains(pid)
+                    && known.contains(parent)
+                    && wave_seen.insert(*pid))
+                .then_some(*pid)
+            })
+            .collect::<Vec<_>>();
+        if wave.is_empty() {
+            break;
+        }
+        known.extend(wave.iter().copied());
+        waves.push(wave);
+    }
+    waves
+}
+
 /// Check if a process name matches any of our known agent binaries.
 /// Uses exact match or prefix-with-separator to avoid false positives
 /// (e.g. `"goose"` must not match `"mongoose"`).
@@ -263,9 +291,10 @@ pub(crate) fn terminate_process(pid: u32) -> Result<(), String> {
 #[cfg(windows)]
 pub(crate) fn terminate_process(pid: u32) -> Result<(), String> {
     // No job handle is available on this path (e.g. after an app restart, when
-    // we only recovered the PID from the record), so fall back to taskkill on
-    // the whole tree.
-    super::super::process_lifecycle::taskkill_tree(pid)
+    // we only recovered the PID from the record), so enumerate and terminate
+    // the tree directly through Win32 APIs. This must not spawn a helper while
+    // callers hold runtime-management locks.
+    super::super::process_lifecycle::terminate_process_tree(pid)
 }
 
 #[cfg(not(any(unix, windows)))]
