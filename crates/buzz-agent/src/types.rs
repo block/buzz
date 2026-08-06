@@ -388,6 +388,18 @@ pub enum AgentError {
     Llm(String),
     LlmAuth(String),
     LlmModelNotFound(String),
+    /// The provider rejected the request because the input exceeded the
+    /// model's context window (an HTTP 400 whose body names a context-length
+    /// overflow). Typed rather than folded into [`Self::Llm`] because the
+    /// agent loop treats it as a *recovery* signal, not a terminal error: it
+    /// is the only ground-truth indication that history must shrink, needing
+    /// no window estimate that could itself be miscalibrated.
+    ///
+    /// Classified where the HTTP status and body are still separate values, so
+    /// the loop never has to sniff a formatted string — by the time an error
+    /// leaves `Llm::complete` it has already been decorated with the model
+    /// name.
+    LlmContextExceeded(String),
     /// The provider explicitly rejected image content for the selected model.
     /// Kept distinct so the agent loop can remove the unsupported image from
     /// replayed history and give the model a recoverable tool error.
@@ -403,6 +415,7 @@ impl std::fmt::Display for AgentError {
             Self::Llm(s) => write!(f, "llm: {s}"),
             Self::LlmAuth(s) => write!(f, "llm auth: {s}"),
             Self::LlmModelNotFound(s) => write!(f, "llm model not found: {s}"),
+            Self::LlmContextExceeded(s) => write!(f, "llm context exceeded: {s}"),
             Self::UnsupportedImageInput(s) => write!(f, "llm image input unsupported: {s}"),
             Self::Mcp(s) => write!(f, "mcp: {s}"),
             Self::Cancelled => write!(f, "cancelled"),

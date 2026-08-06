@@ -778,3 +778,52 @@ fn spawn_snapshot_instance_args_win_over_definition_args() {
         "instance args and definition args must produce different snapshots"
     );
 }
+
+// ── Parallelism cap: above-cap equivalence + cap crossing ─────────────────────
+//
+// The snapshot stores the *effective* parallelism (min(requested, harness cap))
+// so that over-cap edits that don't change the running pool size do not raise a
+// spurious "restart required" badge, while cap crossings (e.g. 8 → 3, where 3
+// is below the cap) still badge because the pool actually changes.
+
+/// Two over-cap parallelism values (10 and 8) produce the same snapshot for
+/// OpenClaw: both clamp to OPENCLAW_MAX_PARALLELISM (5).
+#[test]
+fn openclaw_above_cap_parallelism_snapshots_equal() {
+    let mut at_10 = record();
+    at_10.runtime = Some("openclaw".into());
+    at_10.agent_command = "openclaw".into();
+    at_10.parallelism = 10;
+
+    let mut at_8 = record();
+    at_8.runtime = Some("openclaw".into());
+    at_8.agent_command = "openclaw".into();
+    at_8.parallelism = 8;
+
+    assert_eq!(
+        snapshot(&at_10, &[], &[], "wss://ws.example", &Default::default()),
+        snapshot(&at_8, &[], &[], "wss://ws.example", &Default::default()),
+        "parallelism 10 and 8 both clamp to 5 for OpenClaw — snapshots must be equal, no restart badge"
+    );
+}
+
+/// A cap-crossing edit (8 → 3) produces different snapshots: 8 clamps to 5,
+/// but 3 is below the cap and runs as 3 — the pool changes, so the badge fires.
+#[test]
+fn openclaw_cap_crossing_parallelism_snapshots_differ() {
+    let mut at_8 = record();
+    at_8.runtime = Some("openclaw".into());
+    at_8.agent_command = "openclaw".into();
+    at_8.parallelism = 8;
+
+    let mut at_3 = record();
+    at_3.runtime = Some("openclaw".into());
+    at_3.agent_command = "openclaw".into();
+    at_3.parallelism = 3;
+
+    assert_ne!(
+        snapshot(&at_8, &[], &[], "wss://ws.example", &Default::default()),
+        snapshot(&at_3, &[], &[], "wss://ws.example", &Default::default()),
+        "parallelism 8 (clamps to 5) and 3 (runs as 3) must produce different snapshots"
+    );
+}

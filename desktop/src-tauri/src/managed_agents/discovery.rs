@@ -1403,8 +1403,8 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntr
             auth_status: AuthStatus::Unknown,
             login_hint: None,
             source: HarnessSource::Builtin,
-            // Builtin entries have no user-editable env; definition_env is empty.
             definition_env: Default::default(),
+            max_parallelism: super::parallelism::harness_max_parallelism(runtime.id),
         },
     }
 }
@@ -1565,9 +1565,8 @@ pub fn discover_acp_runtimes_from(
                 auth_status: AuthStatus::NotApplicable,
                 login_hint: None,
                 source: HarnessSource::Custom,
-                // Carry definition env into the catalog so the edit form can
-                // read it back — prevents silently erasing env on save.
-                definition_env: def.env.clone(),
+                definition_env: def.env.clone(), // preserve for edit round-trip
+                max_parallelism: super::parallelism::harness_max_parallelism(&def.command),
             });
         }
     }

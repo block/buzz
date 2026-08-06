@@ -54,7 +54,8 @@ webkit2gtk = { version = "=2.0.2", features = ["v2_22"] }
 block2 = { version = "0.6", default-features = false, features = ["std"] }
 objc2 = { version = "0.6.4", default-features = false }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSEvent", "NSHapticFeedback", "NSMenu", "NSMenuItem", "NSStatusItem", "block2"] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSProcessInfo", "NSString"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSDictionary", "NSError", "NSBundle", "NSObject", "NSProcessInfo", "NSString"] }
+objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["block2", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSettings", "UNNotificationTrigger", "UNUserNotificationCenter"] }
 keyring = { version = "3.6.3", default-features = false, features = ["apple-native", "vendored"], optional = true }
 security-framework = { version = "3.7.0", features = ["OSX_10_15"] }
 window-vibrancy = "0.6"

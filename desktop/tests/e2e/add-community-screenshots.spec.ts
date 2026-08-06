@@ -55,7 +55,11 @@ test("capture: add-community choices", async ({ page }) => {
 test("capture: join an existing community", async ({ page }) => {
   await page.getByTestId("add-community-join").click();
   const dialog = page.getByTestId("add-community-dialog");
-  await page.getByLabel("Community URL or invite link").waitFor();
+  const communityUrl = page.getByLabel("Community URL or invite link");
+  await communityUrl.fill("community.example.com");
+  await page.getByTestId("community-api-token-reveal").waitFor({
+    state: "detached",
+  });
   await waitForAnimations(page);
   await dialog.screenshot({ path: `${OUTDIR}/02-join.png` });
 });
