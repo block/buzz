@@ -4,7 +4,7 @@
 
 - [x] Fork e remotes configurados
 - [x] Plano e ADR documentados
-- [ ] Pipeline de imagem validado — workflow de release ainda em execução
+- [ ] Pipeline de imagem validado — workflow `31128541447` ainda em execução
 - [x] PR de bootstrap aberto e mergeado (#2)
 
 ## Phase 2 — Infraestrutura GitOps
@@ -12,7 +12,7 @@
 - [x] ArgoCD repository preparado (#101, #102)
 - [x] PostgreSQL 17 dedicado declarado
 - [x] Redis 7.x dedicado declarado
-- [ ] S3/prefixo dedicado — bucket ainda não provisionado
+- [x] Bucket S3 dedicado provisionado e endurecido; credenciais ainda pendentes
 - [x] ExternalSecret declarado
 
 ## Phase 3 — Staging
@@ -32,8 +32,11 @@
 ## Bloqueios operacionais
 
 - parâmetros `/buzz-staging/*` ainda não existem no AWS SSM;
+- credenciais S3 dedicadas ainda não foram criadas/armazenadas;
 - `external-secrets`, `cert-manager` e `external-dns` estão em `CreateContainerError`;
+- o ingress-nginx e o ArgoCD também estão afetados;
 - `buzz-staging.lolmeida.com` ainda não resolve DNS;
-- bucket S3 `buzz-staging-media` ainda não existe;
+- o Vaultwarden está inacessível pelo endpoint HTTPS;
+- o containerd do MicroK8s reporta snapshots/mounts ausentes;
 - a identidade Nostr do owner/relay ainda precisa de decisão e armazenamento no Vaultwarden;
 - a imagem multi-arch ainda precisa de digest publicado no GHCR.
