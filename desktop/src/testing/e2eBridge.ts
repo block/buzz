@@ -7814,6 +7814,12 @@ let mockGlobalAgentConfig: {
   model: string | null;
   preferred_runtime?: string | null;
 } | null = null;
+/**
+ * Routing policies written through `set_agent_routing_policy`, keyed by pubkey.
+ * Opaque on purpose: the shape is the harness's, and the mock only has to hand
+ * back what it was given.
+ */
+const mockRoutingPolicies = new Map<string, unknown>();
 
 // Per-page get_nsec call counter for sequenced error testing.
 let nsecCallCount = 0;
@@ -10285,6 +10291,7 @@ export function maybeInstallE2eTauriMocks() {
   mockGlobalAgentConfig = config.mock?.globalAgentConfig
     ? { ...config.mock.globalAgentConfig }
     : null;
+  mockRoutingPolicies.clear();
   resetMockRelayMembers(config);
   resetMockRelayAgents(config);
   resetMockManagedAgents(config);
@@ -12797,6 +12804,32 @@ export function maybeInstallE2eTauriMocks() {
       case "get_agent_config_surface": {
         const configArgs = payload as { pubkey: string };
         return buildMockConfigSurface(configArgs.pubkey);
+      }
+      // Per-turn model routing. Kept in memory so the edit dialog's routing
+      // table round-trips inside a test the way it does against the real
+      // command — without a mock the editor's mount-time read would throw into
+      // its own error state and every Advanced-panel test would see it.
+      case "get_agent_routing_policy": {
+        const { pubkey } = payload as { pubkey: string };
+        return {
+          path: `/mock/agents/routing/${pubkey}.json`,
+          policy: mockRoutingPolicies.get(pubkey) ?? null,
+        };
+      }
+      case "set_agent_routing_policy": {
+        const { pubkey, policy } = payload as {
+          pubkey: string;
+          policy: unknown;
+        };
+        if (policy === null || policy === undefined) {
+          mockRoutingPolicies.delete(pubkey);
+        } else {
+          mockRoutingPolicies.set(pubkey, policy);
+        }
+        return {
+          path: `/mock/agents/routing/${pubkey}.json`,
+          policy: mockRoutingPolicies.get(pubkey) ?? null,
+        };
       }
       case "get_runtime_file_config": {
         const runtimeId = (payload as { runtimeId?: string } | null | undefined)

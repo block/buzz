@@ -786,6 +786,8 @@ pub fn run() {
             get_baked_build_env_keys,
             get_baked_build_env,
             put_agent_session_config,
+            get_agent_routing_policy,
+            set_agent_routing_policy,
             get_global_agent_config,
             set_global_agent_config,
             mesh_start_node,

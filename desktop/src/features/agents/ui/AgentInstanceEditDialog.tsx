@@ -1199,6 +1199,7 @@ export function AgentInstanceEditDialog({
                       requiredEnvKeys={advancedRequiredEnvKeys}
                       catalogStatus={runtimeCatalogStatus}
                       selectedRuntime={prospectiveRuntime}
+                      routingPolicyPubkey={agent.pubkey}
                       systemPrompt={systemPrompt}
                       onAcpCommandChange={setAcpCommand}
                       onAgentArgsChange={setAgentArgs}

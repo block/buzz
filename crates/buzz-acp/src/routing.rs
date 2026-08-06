@@ -448,6 +448,57 @@ mod tests {
         );
     }
 
+    /// The other half of the desktop contract. Buzz Desktop writes this file
+    /// (`commands/agent_routing_policy.rs`) and points `BUZZ_ROUTING_POLICY` at
+    /// it; `from_env` swallows a parse failure by design, so a field rename
+    /// would disable routing silently. This document is byte-for-byte what
+    /// `policy_shape_matches_the_harness_contract` asserts the desktop emits —
+    /// if one side is renamed, one of the two tests fails.
+    #[test]
+    fn a_desktop_written_policy_parses() {
+        let raw = r#"{
+          "enabled": true,
+          "rules": [
+            {
+              "name": "db",
+              "match_kind": "contains_all",
+              "any": ["migration"],
+              "model": "codex-model"
+            }
+          ],
+          "classifier": {
+            "url": "http://localhost:11434",
+            "model": "gemma3:27b",
+            "labels": [{ "label": "database", "model": "db-model" }],
+            "timeout_ms": 20000
+          },
+          "default_model": "fallback"
+        }"#;
+
+        let p: Policy = serde_json::from_str(raw).expect("desktop-written policy must parse");
+        assert!(p.enabled);
+        assert_eq!(p.rules[0].match_kind, MatchKind::ContainsAll);
+        assert_eq!(p.rules[0].model, "codex-model");
+        assert_eq!(p.default_model.as_deref(), Some("fallback"));
+        let classifier = p.classifier.as_ref().expect("classifier");
+        assert_eq!(classifier.timeout_ms, 20_000);
+        assert_eq!(classifier.labels[0].model, "db-model");
+
+        // A rule the desktop saved must actually route.
+        let decision = p.decide_static("write the migration").expect("a decision");
+        assert_eq!(decision.model, "codex-model");
+    }
+
+    /// The desktop omits `classifier` and `default_model` when unset
+    /// (`skip_serializing_if`). That minimal document must still load.
+    #[test]
+    fn a_minimal_desktop_policy_parses() {
+        let p: Policy = serde_json::from_str(r#"{"enabled": false, "rules": []}"#).expect("parse");
+        assert!(!p.enabled);
+        assert!(p.classifier.is_none());
+        assert!(p.default_model.is_none());
+    }
+
     #[test]
     fn a_broken_policy_file_disables_routing_rather_than_erroring() {
         assert!(serde_json::from_str::<Policy>("{ not json").is_err());
