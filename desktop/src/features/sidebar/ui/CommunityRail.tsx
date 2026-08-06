@@ -133,10 +133,17 @@ function CommunityButton({
               {...dragAttributes}
               {...dragListeners}
             >
+              {isActive ? (
+                <span
+                  aria-hidden="true"
+                  className="absolute -left-2.5 h-5 w-1 rounded-r-full bg-primary"
+                  data-testid={`community-rail-active-${community.id}`}
+                />
+              ) : null}
               <span
                 className={cn(
                   "flex h-9 w-9 items-center justify-center overflow-hidden rounded-xl bg-sidebar-accent/60 text-xs font-semibold text-sidebar-foreground/80 outline-2 outline-offset-2 outline-primary/0 transition-[outline-color]",
-                  isActive ? "outline-primary" : "hover:outline-primary/50",
+                  !isActive && "hover:outline-primary/50",
                 )}
               >
                 {iconUrl ? (
