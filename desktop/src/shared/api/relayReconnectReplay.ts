@@ -14,6 +14,21 @@ export const RECONNECT_REPLAY_PAGE_LIMIT = 500;
 export const RECONNECT_REPLAY_PAGE_CONCURRENCY = 4;
 
 /**
+ * Maximum attempts for one subscription's paged history backfill.
+ *
+ * Backfill failures must never escape `replayLiveSubscriptions`: by the time
+ * paging starts, every live REQ has already been re-established on a healthy,
+ * authenticated socket. Letting a history rejection propagate makes the
+ * session tear that socket down (`resetConnection`) and reconnect straight
+ * into the same rate-limit window — the "briefly connected → can't reach the
+ * relay" flap loop. Instead each sub retries behind the rate-limit gate a
+ * bounded number of times, then degrades to live-only for this connection.
+ * The sub's `lastSeenCreatedAt` is untouched by the failed backfill, so the
+ * missed window is retried on the next reconnect replay.
+ */
+export const PAGE_REPLAY_MAX_ATTEMPTS = 3;
+
+/**
  * Maximum live subscriptions sent per relay REQ burst during reconnect.
  *
  * Capping the initial blast prevents admission-control bursts on degraded
@@ -237,13 +252,36 @@ export async function replayLiveSubscriptions({
     ),
     pageReplayConcurrency,
     async ({ subId, subscription, replaySince }) => {
-      await replayReconnectHistoryPages({
-        subscription,
-        since: replaySince,
-        until: now,
-        isActive: () => subscriptions.get(subId) === subscription,
-        requestHistory,
-      });
+      // Backfill is best-effort: a failure here (typically a `rate-limited:`
+      // CLOSED on a history REQ) must never escape to the session and tear
+      // down the healthy, authenticated socket carrying the live REQs — that
+      // is the connect→drop flap loop. Retry behind the gate a bounded number
+      // of times, then degrade to live-only for this connection. The next
+      // reconnect replays the same window because `lastSeenCreatedAt` only
+      // advances on delivered events.
+      for (let attempt = 1; attempt <= PAGE_REPLAY_MAX_ATTEMPTS; attempt++) {
+        try {
+          await replayReconnectHistoryPages({
+            subscription,
+            since: replaySince,
+            until: now,
+            isActive: () => subscriptions.get(subId) === subscription,
+            requestHistory,
+          });
+          return;
+        } catch (error) {
+          console.warn(
+            `[reconnect replay] history backfill attempt ${attempt}/${PAGE_REPLAY_MAX_ATTEMPTS} failed for ${subId}:`,
+            error,
+          );
+          if (attempt === PAGE_REPLAY_MAX_ATTEMPTS) return;
+          // The failed REQ's CLOSED handler arms the rate-limit gate before
+          // rejecting; wait for it (no-op when the failure wasn't back-pressure)
+          // and re-check that this replay's connection is still current.
+          if (isRateLimited()) await waitForRateLimit();
+          if (subscriptions.get(subId) !== subscription || !isActive()) return;
+        }
+      }
     },
   );
 }

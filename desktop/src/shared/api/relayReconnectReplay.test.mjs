@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   buildReconnectReplayFilter,
+  PAGE_REPLAY_MAX_ATTEMPTS,
   replayLiveSubscriptions,
   REPLAY_BATCH_SIZE,
   shouldPageReconnectReplay,
@@ -597,6 +598,129 @@ test("batch-1 arms gate mid-replay: batch-2 is withheld until gate expires", asy
     batch2Ids.length,
     1,
     "batch 2 must send the remaining sub after the gate expires",
+  );
+});
+
+// ── Backfill failure containment ─────────────────────────────────────────────
+
+test("history backfill rejection never escapes replayLiveSubscriptions", async () => {
+  resetGate(0);
+  const filter = buildChannelFilter("channel-1", 50);
+  const subscriptions = new Map([
+    [
+      "live-1",
+      {
+        mode: "live",
+        filter,
+        onEvent: () => {},
+        lastSeenCreatedAt: 1000,
+      },
+    ],
+  ]);
+
+  let historyCalls = 0;
+  // Must resolve — a rejection here is the socket-killing flap regression.
+  await replayLiveSubscriptions({
+    subscriptions,
+    now: 2000,
+    sendRaw: async () => {},
+    requestHistory: async () => {
+      historyCalls++;
+      throw new Error("rate-limited: quota exceeded; retry in 4s");
+    },
+  });
+
+  assert.equal(
+    historyCalls,
+    PAGE_REPLAY_MAX_ATTEMPTS,
+    "backfill must retry a bounded number of times, then degrade",
+  );
+});
+
+test("backfill retry waits out the armed gate, then succeeds", async () => {
+  resetGate(0);
+  const delivered = [];
+  const filter = buildChannelFilter("channel-1", 50);
+  const subscriptions = new Map([
+    [
+      "live-1",
+      {
+        mode: "live",
+        filter,
+        onEvent: (event) => delivered.push(event),
+        lastSeenCreatedAt: 1000,
+      },
+    ],
+  ]);
+
+  const attemptAtMs = [];
+  let armGate;
+  const gateArmed = new Promise((resolve) => {
+    armGate = resolve;
+  });
+  const replayPromise = replayLiveSubscriptions({
+    subscriptions,
+    now: 2000,
+    sendRaw: async () => {},
+    requestHistory: async () => {
+      attemptAtMs.push(fakeNow);
+      if (attemptAtMs.length === 1) {
+        // Mirror relayClosedRecovery: the CLOSED handler arms the gate
+        // before rejecting the history promise.
+        activateRateLimit(4);
+        armGate();
+        throw new Error("rate-limited: quota exceeded; retry in 4s");
+      }
+      return [event("recovered", 1500)];
+    },
+  });
+
+  // Wait until the gate is actually armed, then expire it. The retry loop is
+  // (or will be) suspended in waitForRateLimit; expiring the gate releases it.
+  await gateArmed;
+  tickTo(4_001);
+  await replayPromise;
+
+  assert.equal(attemptAtMs.length, 2, "one failure, one retry");
+  assert.ok(
+    attemptAtMs[1] >= 4_001,
+    "retry must not fire before the rate-limit gate expires",
+  );
+  assert.deepEqual(
+    delivered.map((e) => e.id),
+    ["recovered"],
+    "the retried backfill must deliver its events",
+  );
+});
+
+test("backfill retry aborts when the subscription was replaced", async () => {
+  resetGate(0);
+  const filter = buildChannelFilter("channel-1", 50);
+  const subscription = {
+    mode: "live",
+    filter,
+    onEvent: () => {},
+    lastSeenCreatedAt: 1000,
+  };
+  const subscriptions = new Map([["live-1", subscription]]);
+
+  let historyCalls = 0;
+  await replayLiveSubscriptions({
+    subscriptions,
+    now: 2000,
+    sendRaw: async () => {},
+    requestHistory: async () => {
+      historyCalls++;
+      // Simulate the subscription being torn down while the REQ is in flight.
+      subscriptions.delete("live-1");
+      throw new Error("rate-limited: quota exceeded; retry in 4s");
+    },
+  });
+
+  assert.equal(
+    historyCalls,
+    1,
+    "no retry may target a subscription that no longer exists",
   );
 });
 
