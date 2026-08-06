@@ -16,6 +16,7 @@ import { AgentConfigPanel } from "@/features/agents/ui/AgentConfigPanel";
 import { getPresenceLabel } from "@/features/presence/lib/presence";
 import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
 import type { ProfileActivityAgent } from "@/features/profile/lib/profileActivityAgent";
+import { resolveSecondaryNip05Label } from "@/features/profile/lib/identity";
 import type {
   useFollowMutation,
   useUnfollowMutation,
@@ -51,8 +52,6 @@ import type {
 import { cn } from "@/shared/lib/cn";
 import { Alert, AlertDescription, AlertTitle } from "@/shared/ui/alert";
 import { Badge } from "@/shared/ui/badge";
-import { VerifiedBadge } from "@/shared/ui/VerifiedBadge";
-import { getCurrentVerifiedName } from "@/shared/lib/verifiedIdentity";
 
 export { AgentInstructionsFocusedView } from "@/features/profile/ui/UserProfilePanelAgentDetails";
 
@@ -489,9 +488,9 @@ function ProfileHero({
   userStatus: ProfileSummaryViewProps["userStatus"];
 }) {
   const presenceDotClassName = isBot ? "h-4.5 w-4.5" : "h-3.5 w-3.5";
-  const verifiedName = getCurrentVerifiedName(
-    profile?.verifiedName,
-    profile?.verifiedNameExpiresAt,
+  const nip05Handle = resolveSecondaryNip05Label(
+    displayName,
+    profile?.nip05Handle,
   );
 
   return (
@@ -543,19 +542,6 @@ function ProfileHero({
           ) : null}
         </div>
 
-        {verifiedName ? (
-          <div
-            className="flex items-center justify-center gap-1.5 text-sm font-medium text-muted-foreground"
-            data-testid="user-profile-verified-alias"
-          >
-            <span>{verifiedName}</span>
-            <VerifiedBadge
-              verifiedName={verifiedName}
-              verifiedNameExpiresAt={profile?.verifiedNameExpiresAt}
-            />
-          </div>
-        ) : null}
-
         {profile?.about?.trim() ? (
           <ProfileHeroDescription
             about={profile.about.trim()}
@@ -563,8 +549,8 @@ function ProfileHero({
           />
         ) : null}
 
-        {profile?.nip05Handle ? (
-          <p className="text-sm text-muted-foreground">{profile.nip05Handle}</p>
+        {nip05Handle ? (
+          <p className="text-sm text-muted-foreground">{nip05Handle}</p>
         ) : null}
 
         {userStatus ? (

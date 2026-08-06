@@ -988,6 +988,10 @@ fn topic_for_subscription(channel_id: Option<Uuid>) -> EventTopic {
 }
 
 #[cfg(test)]
+#[path = "connection/j3c_current_binding_wire.rs"]
+mod j3c_current_binding_wire;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize};

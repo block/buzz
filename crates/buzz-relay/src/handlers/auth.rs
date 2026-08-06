@@ -15,6 +15,9 @@ use axum::extract::ws::Message as WsMessage;
 use buzz_auth::{
     AuthTransport, VerifiedDelegationOutput, VerifiedEvidenceAdapter, VerifiedNostrProof,
 };
+use buzz_core::client_binding_bootstrap::{
+    ClientBindingBootstrapInputV1, ClientBindingScopeV1, CLIENT_BINDING_BOOTSTRAP_SUB_ID,
+};
 use tracing::{debug, info, warn};
 
 use crate::connection::{AuthState, ConnectionState};
@@ -441,25 +444,46 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                     return;
                 }
             };
+            let client_binding_scope =
+                ClientBindingScopeV1::from_verified_auth_event(&verified_event)
+                    .ok()
+                    .filter(|scope| scope.relay_signer() == state.relay_keypair.public_key());
             *conn.auth_state.write().await = AuthState::Authenticated(auth_ctx);
             state.conn_manager.set_authenticated_authority(
                 conn_id,
                 Arc::clone(&verified_proof),
                 verified_assertion.clone(),
             );
-            if let (Some(runtime), Some(assertion)) =
-                (state.client_status_runtime().cloned(), verified_assertion)
-            {
-                if let Err(error) = runtime
-                    .present_after_auth(
-                        Arc::clone(&state),
-                        verified_proof,
-                        assertion,
-                        conn_id,
-                        conn.cancel.clone(),
-                    )
-                    .await
-                {
+            if let (Some(runtime), Some(assertion), Some(scope)) = (
+                state.client_status_runtime().cloned(),
+                verified_assertion,
+                client_binding_scope,
+            ) {
+                let bootstrap_queued = ClientBindingBootstrapInputV1::new(
+                    conn.tenant.community(),
+                    pubkey,
+                    scope.connection_epoch().clone(),
+                    nostr::Timestamp::now().as_secs(),
+                )
+                .ok()
+                .and_then(|input| input.sign_with_relay_keys(&state.relay_keypair).ok())
+                .is_some_and(|event| {
+                    conn.send(RelayMessage::event(CLIENT_BINDING_BOOTSTRAP_SUB_ID, &event))
+                });
+                let presentation = if bootstrap_queued {
+                    runtime
+                        .present_after_auth(
+                            Arc::clone(&state),
+                            verified_proof,
+                            assertion,
+                            conn_id,
+                            conn.cancel.clone(),
+                        )
+                        .await
+                } else {
+                    Err(crate::authorization_runtime::status::ClientStatusRuntimeError::DeliveryUnavailable)
+                };
+                if let Err(error) = presentation {
                     // Presentation failure never widens or narrows access. The
                     // client receives no current indicator and clears any old
                     // status on its existing freshness/disconnect boundary.

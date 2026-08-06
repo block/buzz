@@ -665,9 +665,9 @@ export async function signRelayEvent(input: {
   const eventJson = await invokeTauri<string>("sign_event", input);
   return JSON.parse(eventJson) as RelayEvent;
 }
-
 export async function createAuthEvent(input: {
   challenge: string;
+  nativeWebsocketId?: number;
   relayUrl: string;
 }): Promise<RelayEvent> {
   const eventJson = await invokeTauri<string>("create_auth_event", input);

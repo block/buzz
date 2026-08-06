@@ -677,8 +677,8 @@ export function UserProfilePanel({
     if (ownerPubkey) {
       const ownerProfile = ownerProfileQuery.data;
       return (
-        ownerProfile?.nip05Handle?.trim() ||
         ownerProfile?.displayName?.trim() ||
+        ownerProfile?.nip05Handle?.trim() ||
         truncatePubkey(ownerPubkey)
       );
     }
@@ -689,8 +689,8 @@ export function UserProfilePanel({
 
     const currentProfile = currentProfileQuery.data;
     return (
-      currentProfile?.nip05Handle?.trim() ||
       currentProfile?.displayName?.trim() ||
+      currentProfile?.nip05Handle?.trim() ||
       truncatePubkey(currentPubkey)
     );
   }, [

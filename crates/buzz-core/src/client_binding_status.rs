@@ -602,6 +602,41 @@ impl ClientBindingStatusTracker {
         self.status = None;
     }
 
+    /// Clear presentation and retain a parseable trusted-invalid revision.
+    ///
+    /// The event is independently authenticated against this tracker's relay
+    /// before its bounded revision is considered. Retaining the revision
+    /// prevents replaying the same malformed envelope as a later syntactically
+    /// valid value from restoring presentation.
+    pub fn retain_trusted_invalid_high_water(&mut self, event: &Event) {
+        #[derive(Deserialize)]
+        struct RevisionOnly {
+            status_revision: u64,
+        }
+
+        self.status = None;
+        if event.content.len() > MAX_CLIENT_BINDING_STATUS_PAYLOAD_BYTES
+            || verify_event(event).is_err()
+            || event.pubkey != self.trusted_relay_pubkey
+        {
+            return;
+        }
+        let Ok(candidate) = serde_json::from_str::<RevisionOnly>(&event.content) else {
+            return;
+        };
+        if candidate.status_revision == 0
+            || self
+                .high_water
+                .is_some_and(|high_water| candidate.status_revision <= high_water.revision)
+        {
+            return;
+        }
+        self.high_water = Some(StatusHighWater {
+            revision: candidate.status_revision,
+            event_id: event.id,
+        });
+    }
+
     /// Replace the trusted scope and clear both presentation and revision state.
     ///
     /// Call this on relay-identity, authorization-domain, or event-author

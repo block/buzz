@@ -951,6 +951,7 @@ type MockFilter = {
 
 type MockSocket = {
   handler: WsHandler;
+  projectionHandler?: WsHandler;
   subscriptions: Map<string, MockSubscription>;
 };
 
@@ -1118,6 +1119,7 @@ declare global {
       event: string,
       payload: unknown,
     ) => Promise<void>;
+    __BUZZ_E2E_EMIT_CURRENT_PROJECTION__?: (payload: unknown) => boolean;
     __BUZZ_E2E_SET_MOCK_HUDDLE_SNAPSHOT__?: (input: {
       members: MockHuddleMemberSeed[];
       transcriptionEnabled: boolean;
@@ -9315,7 +9317,11 @@ async function resolveGetEvent(
   return JSON.stringify(events[0]);
 }
 
-async function connectRealSocket(args: { url?: string; onMessage: unknown }) {
+async function connectRealSocket(args: {
+  url?: string;
+  onMessage: unknown;
+  onProjection?: unknown;
+}) {
   relayWebsocketConnectAttemptStarts.push(Date.now());
   const wsId = nextSocketId++;
   const ws = new WebSocket(args.url ?? DEFAULT_RELAY_WS_URL);
@@ -9344,7 +9350,10 @@ async function connectRealSocket(args: { url?: string; onMessage: unknown }) {
   });
 }
 
-async function connectMockSocket(args: { onMessage: unknown }) {
+async function connectMockSocket(args: {
+  onMessage: unknown;
+  onProjection?: unknown;
+}) {
   relayWebsocketConnectAttemptStarts.push(Date.now());
   if (mockWebsocketUnavailable) {
     throw new Error("mock relay unavailable");
@@ -9363,6 +9372,10 @@ async function connectMockSocket(args: { onMessage: unknown }) {
 
   mockSockets.set(wsId, {
     handler,
+    projectionHandler:
+      args.onProjection === undefined
+        ? undefined
+        : resolveHandler(args.onProjection),
     subscriptions: new Map(),
   });
 
@@ -12477,6 +12490,7 @@ export function maybeInstallE2eTauriMocks() {
           ]),
         );
       case "plugin:websocket|connect":
+      case "plugin:websocket|connect_with_status":
         if (isRelayMode(activeConfig)) {
           return connectRealSocket(
             payload as Parameters<typeof connectRealSocket>[0],
@@ -12765,6 +12779,14 @@ export function maybeInstallE2eTauriMocks() {
   };
   window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__ = (command, payload) =>
     handleMockCommand(command, payload ?? null);
+  window.__BUZZ_E2E_EMIT_CURRENT_PROJECTION__ = (payload) => {
+    const socket = [...mockSockets.values()]
+      .reverse()
+      .find((candidate) => candidate.projectionHandler !== undefined);
+    if (!socket?.projectionHandler) return false;
+    socket.projectionHandler(payload);
+    return true;
+  };
   window.__BUZZ_E2E_EMIT_TAURI_EVENT__ = (event, payload) =>
     emit(event, payload);
   mockIPC(handleMockCommand, { shouldMockEvents: true });

@@ -7,6 +7,7 @@ import {
   personaManagedAgentUpdate,
   profilePanelTabFromSearch,
   profilePanelViewFromSearch,
+  resolveProfileDisplayName,
 } from "./UserProfilePanelUtils.ts";
 
 function agent(overrides = {}) {
@@ -90,6 +91,46 @@ test("personaManagedAgentUpdate syncs edited persona identity to linked agent", 
     model: "new-model",
     envVars: { NEW_KEY: "2" },
   });
+});
+
+test("resolveProfileDisplayName keeps the safe profile naming chain", () => {
+  const pubkey = "12".repeat(32);
+  const baseProfile = {
+    pubkey,
+    displayName: null,
+    verifiedName: "relay alias",
+    verifiedNameExpiresAt: 9_999_999_999,
+    avatarUrl: null,
+    about: null,
+    nip05Handle: "user@nip05.test",
+    ownerPubkey: null,
+    hasProfileEvent: true,
+  };
+
+  assert.equal(
+    resolveProfileDisplayName({
+      profile: { ...baseProfile, displayName: "Profile name" },
+      persona: persona({ displayName: "Safe persona fallback" }),
+      pubkey,
+    }),
+    "Profile name",
+  );
+  assert.equal(
+    resolveProfileDisplayName({
+      profile: baseProfile,
+      persona: persona({ displayName: "Safe persona fallback" }),
+      pubkey,
+    }),
+    "user@nip05.test",
+  );
+  assert.equal(
+    resolveProfileDisplayName({
+      profile: { ...baseProfile, nip05Handle: null },
+      persona: persona({ displayName: "Safe persona fallback" }),
+      pubkey,
+    }),
+    "Safe persona fallback",
+  );
 });
 
 test("personaManagedAgentUpdate skips unrelated or unchanged agents", () => {

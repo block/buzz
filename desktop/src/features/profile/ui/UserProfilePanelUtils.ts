@@ -229,8 +229,9 @@ export function resolveProfileDisplayName({
   pubkey: string | null;
 }) {
   return (
-    profile?.displayName ??
-    persona?.displayName ??
+    profile?.displayName?.trim() ||
+    profile?.nip05Handle?.trim() ||
+    persona?.displayName?.trim() ||
     (pubkey ? truncatePubkey(pubkey) : "Agent")
   );
 }
@@ -244,8 +245,8 @@ export function resolveOwnerHandle(
   }
 
   return (
-    profile?.nip05Handle?.trim() ||
     profile?.displayName?.trim() ||
+    profile?.nip05Handle?.trim() ||
     truncatePubkey(currentPubkey)
   );
 }

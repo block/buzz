@@ -18,6 +18,7 @@ use buzz_auth::{
     AuthorizationProfileId, BindingVersion, PolicyVersion, VerificationOnlyDisposition,
 };
 use buzz_core::{
+    client_binding_bootstrap::CLIENT_BINDING_STATUS_SUB_ID,
     client_binding_status::{
         ClientBindingStatusBuildError, ClientBindingStatusError, ClientBindingStatusInputV1,
         MAX_CLIENT_BINDING_STATUS_LABEL_BYTES,
@@ -760,10 +761,8 @@ impl DedicatedClientStatusTransport for ConnectionManagerClientStatusTransport {
         {
             return Err(DedicatedClientStatusTransportError::Unavailable);
         }
-        let frame = crate::protocol::RelayMessage::event(
-            "__buzz_client_binding_status_v1__",
-            delivery.event(),
-        );
+        let frame =
+            crate::protocol::RelayMessage::event(CLIENT_BINDING_STATUS_SUB_ID, delivery.event());
         self.connections
             .send_to(delivery.connection_id(), frame)
             .then_some(())

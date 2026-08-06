@@ -13,6 +13,17 @@ const PRODUCTION_RUNTIME: &str = include_str!("../src/authorization_runtime/prod
 const AUTH_HANDLER: &str = include_str!("../src/handlers/auth.rs");
 const KIND_REGISTRY: &str = include_str!("../../buzz-core/src/kind.rs");
 const INGEST_HANDLER: &str = include_str!("../src/handlers/ingest.rs");
+const READ_ONLY_RELAY_CLIENT: &str =
+    include_str!("../../../desktop/src/shared/api/readOnlyRelayClient.ts");
+const PRIMARY_RELAY_CLIENT: &str =
+    include_str!("../../../desktop/src/shared/api/relayClientSession.ts");
+const STATUS_RELAY_CLIENT: &str =
+    include_str!("../../../desktop/src/shared/api/relayClientStatusConnection.ts");
+const NATIVE_WEBSOCKET: &str = include_str!("../../../desktop/src-tauri/src/native_websocket.rs");
+const DESKTOP_BUILD: &str = include_str!("../../../desktop/src-tauri/build.rs");
+const WORKSPACE_COMMAND: &str =
+    include_str!("../../../desktop/src-tauri/src/commands/workspace.rs");
+const IDENTITY_COMMAND: &str = include_str!("../../../desktop/src-tauri/src/commands/identity.rs");
 
 #[test]
 fn mandatory_o4_security_contracts_are_present() {
@@ -318,6 +329,31 @@ fn status_uses_only_the_dedicated_authenticated_production_path() {
                 continue;
             }
             let source = fs::read_to_string(&file).expect("source file is readable");
+            let native_socket_tests =
+                file == repo.join("desktop/src-tauri/src/native_websocket_tests.rs");
+            if native_socket_tests {
+                assert!(NATIVE_WEBSOCKET
+                    .contains("#[cfg(test)]\n#[path = \"native_websocket_tests.rs\"]\nmod tests;"));
+                continue;
+            }
+            let native_session =
+                file == repo.join("desktop/src-tauri/src/client_binding_status_session.rs");
+            let native_socket = file == repo.join("desktop/src-tauri/src/native_websocket.rs");
+            let native_socket_status =
+                file == repo.join("desktop/src-tauri/src/native_websocket_status.rs");
+            let native_module_declaration = file == repo.join("desktop/src-tauri/src/lib.rs");
+            if native_module_declaration {
+                assert_eq!(
+                    source.matches("mod client_binding_status_session;").count(),
+                    1,
+                    "native status module must have one private declaration"
+                );
+            }
+            let source_to_scan = if native_module_declaration {
+                source.replacen("mod client_binding_status_session;", "", 1)
+            } else {
+                source.clone()
+            };
             for forbidden in [
                 "KIND_CLIENT_BINDING_STATUS",
                 "ClientBindingStatus",
@@ -325,8 +361,32 @@ fn status_uses_only_the_dedicated_authenticated_production_path() {
                 "24244",
                 "deliver_verification_only",
             ] {
+                let expected_native_count = match (
+                    native_session,
+                    native_socket,
+                    native_socket_status,
+                    forbidden,
+                ) {
+                    (true, false, false, "KIND_CLIENT_BINDING_STATUS") => Some(1),
+                    (true, false, false, "ClientBindingStatus") => Some(33),
+                    (true, false, false, "client_binding_status") => Some(2),
+                    (false, true, false, "ClientBindingStatus") => Some(2),
+                    (false, true, false, "client_binding_status") => Some(1),
+                    (false, false, true, "ClientBindingStatus") => Some(3),
+                    (false, false, true, "client_binding_status") => Some(1),
+                    _ => None,
+                };
+                if let Some(expected) = expected_native_count {
+                    assert_eq!(
+                        source_to_scan.matches(forbidden).count(),
+                        expected,
+                        "{} changed the narrow native status allowance for {forbidden}",
+                        file.display()
+                    );
+                    continue;
+                }
                 assert!(
-                    !source.contains(forbidden),
+                    !source_to_scan.contains(forbidden),
                     "{} exposes status through an ordinary route {forbidden}",
                     file.display()
                 );
@@ -353,6 +413,100 @@ fn status_uses_only_the_dedicated_authenticated_production_path() {
     assert!(nip11.contains("with_conformant_federated_identity"));
     assert!(router.contains("nip11_document(&state, raw_host).await"));
     assert!(!status.contains("std::env"));
+}
+
+#[test]
+fn scope_mutations_finalize_the_status_fence_before_propagating_failure() {
+    let workspace = WORKSPACE_COMMAND
+        .split("pub async fn apply_workspace")
+        .nth(1)
+        .and_then(|suffix| suffix.split("#[tauri::command]").next())
+        .expect("workspace command body exists");
+    let identity = IDENTITY_COMMAND
+        .split("pub async fn import_identity")
+        .nth(1)
+        .and_then(|suffix| suffix.split("/// Commit an imported identity").next())
+        .expect("identity command body exists");
+
+    for (name, command, result_propagation) in [
+        ("workspace", workspace, "mutation_result?"),
+        ("identity", identity, "let identity = identity_result?"),
+    ] {
+        let begin = command
+            .find(".begin_scope_mutation()")
+            .unwrap_or_else(|| panic!("{name} must enter the status mutation fence"));
+        let blocking = command
+            .find("spawn_blocking")
+            .unwrap_or_else(|| panic!("{name} blocking mutation exists"));
+        let finish = command
+            .find(".finish_scope_mutation()")
+            .unwrap_or_else(|| panic!("{name} must exit the status mutation fence"));
+        let propagate = command
+            .find(result_propagation)
+            .unwrap_or_else(|| panic!("{name} must propagate its stored result"));
+        assert!(
+            begin < blocking && blocking < finish && finish < propagate,
+            "{name} must finalize the status fence on success, error, or join failure"
+        );
+        assert!(
+            !command.contains(".invalidate_projection()"),
+            "{name} must not leave a reconnect gap between independent invalidations"
+        );
+    }
+}
+
+#[test]
+fn auth_bootstrap_precedes_status_and_success_ack() {
+    let bootstrap = AUTH_HANDLER
+        .find("conn.send(RelayMessage::event(CLIENT_BINDING_BOOTSTRAP_SUB_ID, &event))")
+        .expect("AUTH queues the exact-connection bootstrap");
+    let presentation = AUTH_HANDLER
+        .find(".present_after_auth(")
+        .expect("AUTH invokes O4 presentation");
+    let success = AUTH_HANDLER
+        .find("conn.send(RelayMessage::ok(&event_id_hex, true, \"\"))")
+        .expect("AUTH queues the successful NIP-42 acknowledgement");
+
+    assert!(
+        bootstrap < presentation && presentation < success,
+        "bootstrap must be queued before O4 status and the NIP-42 OK"
+    );
+    assert!(AUTH_HANDLER.contains("ClientBindingScopeV1::from_verified_auth_event"));
+    assert!(AUTH_HANDLER.contains("scope.relay_signer() == state.relay_keypair.public_key()"));
+    assert!(AUTH_HANDLER.contains("if let (Some(runtime), Some(assertion), Some(scope)) ="));
+    assert!(AUTH_HANDLER.contains("let presentation = if bootstrap_queued"));
+    assert!(!include_str!("../src/router.rs").contains("CLIENT_BINDING_EPOCH_HEADER"));
+    assert!(!READ_ONLY_RELAY_CLIENT.contains("onProjection"));
+    assert!(!READ_ONLY_RELAY_CLIENT.contains("nativeWebsocketId"));
+}
+
+#[test]
+fn native_status_connect_is_dedicated_and_primary_composition_is_bound() {
+    let ordinary = NATIVE_WEBSOCKET
+        .split("async fn connect(")
+        .nth(1)
+        .and_then(|suffix| suffix.split("#[tauri::command]").next())
+        .expect("ordinary native connect command exists");
+    let status = NATIVE_WEBSOCKET
+        .split("async fn connect_with_status(")
+        .nth(1)
+        .and_then(|suffix| suffix.split("async fn connect_internal(").next())
+        .expect("dedicated status connect command exists");
+
+    assert!(!ordinary.contains("on_projection"));
+    assert!(status.contains("on_projection: Channel<serde_json::Value>"));
+    assert!(!status.contains("Option<Channel<serde_json::Value>>"));
+    assert!(NATIVE_WEBSOCKET.contains("connect_with_status,"));
+    assert!(DESKTOP_BUILD.contains("\"connect_with_status\""));
+
+    assert!(PRIMARY_RELAY_CLIENT.contains("RelayClientStatusConnection"));
+    assert!(PRIMARY_RELAY_CLIENT.contains("statusConnection.connect("));
+    assert!(PRIMARY_RELAY_CLIENT.contains("statusConnection.bind(wsId, connectionRelayUrl);"));
+    assert!(PRIMARY_RELAY_CLIENT.contains("statusConnection.handleAuthChallenge(rest[0])"));
+    assert!(STATUS_RELAY_CLIENT.contains("\"plugin:websocket|connect_with_status\""));
+    assert!(!STATUS_RELAY_CLIENT.contains("\"plugin:websocket|connect\""));
+    assert!(STATUS_RELAY_CLIENT.contains("onProjection: this.projectionChannel"));
+    assert!(STATUS_RELAY_CLIENT.contains("nativeWebsocketId: binding.id"));
 }
 
 #[test]

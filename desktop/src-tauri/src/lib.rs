@@ -3,6 +3,7 @@ mod app_menu;
 mod app_state;
 mod archive;
 mod builderlab;
+mod client_binding_status_session;
 mod commands;
 mod deep_link;
 mod egress_guard;

@@ -3,16 +3,16 @@ import test from "node:test";
 
 import {
   formatOwnerLabel,
-  formatVerifiedUserLabel,
+  formatProfileLabel,
   profileLookupsEqual,
+  resolveSecondaryNip05Label,
   resolveUserLabel,
+  truncatePubkey,
 } from "./identity.ts";
 
 const OWNER_PUBKEY =
   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const USER_PUBKEY = "11".repeat(32);
-const NOW_MS = 1_800_000_000_000;
-const FUTURE_EXPIRATION = NOW_MS / 1_000 + 60;
 
 const summary = (over = {}) => ({
   displayName: "Ada",
@@ -66,8 +66,7 @@ test("profileLookupsEqual: same count, different keys is not equal", () => {
 test("profileLookupsEqual: a changed field is not equal", () => {
   for (const field of [
     "displayName",
-    "verifiedName",
-    "verifiedNameExpiresAt",
+    "name",
     "avatarUrl",
     "nip05Handle",
     "ownerPubkey",
@@ -82,6 +81,26 @@ test("profileLookupsEqual: a changed field is not equal", () => {
       `field ${field} should break equality`,
     );
   }
+});
+
+test("profileLookupsEqual ignores dormant verified transport fields", () => {
+  assert.equal(
+    profileLookupsEqual(
+      {
+        p1: summary({
+          verifiedName: "old alias",
+          verifiedNameExpiresAt: 1,
+        }),
+      },
+      {
+        p1: summary({
+          verifiedName: "new alias",
+          verifiedNameExpiresAt: 9_999_999_999,
+        }),
+      },
+    ),
+    true,
+  );
 });
 
 test("profileLookupsEqual: two empty lookups are equal", () => {
@@ -131,39 +150,87 @@ test("stabiliser: a real profile change swaps the reference (re-render fires)", 
   assert.equal(held, changed, "must re-stabilise around the new value");
 });
 
-test("formats a chosen name followed by the authoritative display name", () => {
+test("profile labels use display name and ignore verified fields", () => {
   assert.equal(
-    formatVerifiedUserLabel("Example", "example", FUTURE_EXPIRATION, NOW_MS),
-    "Example (example)",
-  );
-});
-
-test("does not duplicate equal chosen and authoritative names", () => {
-  assert.equal(
-    formatVerifiedUserLabel("example", "example", FUTURE_EXPIRATION, NOW_MS),
-    "example",
-  );
-});
-
-test("expired authoritative names fail closed", () => {
-  assert.equal(
-    formatVerifiedUserLabel("Example", "example", NOW_MS / 1_000, NOW_MS),
+    formatProfileLabel({
+      displayName: " Example ",
+      nip05Handle: "example@nip05.test",
+      verifiedName: "relay alias",
+      verifiedNameExpiresAt: 9_999_999_999,
+    }),
     "Example",
   );
 });
 
-test("resolved user labels keep the chosen name first", () => {
+test("profile labels fall back to NIP-05 and ignore verified fields", () => {
+  assert.equal(
+    formatProfileLabel({
+      displayName: " ",
+      nip05Handle: " example@nip05.test ",
+      verifiedName: "relay alias",
+      verifiedNameExpiresAt: 9_999_999_999,
+    }),
+    "example@nip05.test",
+  );
+});
+
+test("resolved user labels use display name without verified aliases", () => {
+  assert.equal(
+    resolveUserLabel({
+      pubkey: USER_PUBKEY,
+      fallbackName: "Safe fallback",
+      profiles: {
+        [USER_PUBKEY]: summary({
+          displayName: "Example",
+          verifiedName: "relay alias",
+          verifiedNameExpiresAt: 9_999_999_999,
+        }),
+      },
+    }),
+    "Example",
+  );
+});
+
+test("resolved user labels preserve the safe fallback chain", () => {
+  assert.equal(
+    resolveUserLabel({
+      pubkey: USER_PUBKEY,
+      fallbackName: " Safe fallback ",
+      profiles: {
+        [USER_PUBKEY]: summary({
+          displayName: null,
+          nip05Handle: null,
+          verifiedName: "relay alias",
+          verifiedNameExpiresAt: 9_999_999_999,
+        }),
+      },
+    }),
+    "Safe fallback",
+  );
   assert.equal(
     resolveUserLabel({
       pubkey: USER_PUBKEY,
       profiles: {
         [USER_PUBKEY]: summary({
-          displayName: "Example",
-          verifiedName: "example",
-          verifiedNameExpiresAt: Math.floor(Date.now() / 1_000) + 60,
+          displayName: null,
+          nip05Handle: null,
+          verifiedName: "relay alias",
+          verifiedNameExpiresAt: 9_999_999_999,
         }),
       },
     }),
-    "Example (example)",
+    truncatePubkey(USER_PUBKEY),
   );
+});
+
+test("secondary NIP-05 labels do not duplicate the primary label", () => {
+  assert.equal(
+    resolveSecondaryNip05Label("user@nip05.test", " user@nip05.test "),
+    null,
+  );
+  assert.equal(
+    resolveSecondaryNip05Label("Profile name", " user@nip05.test "),
+    "user@nip05.test",
+  );
+  assert.equal(resolveSecondaryNip05Label("Profile name", " "), null);
 });

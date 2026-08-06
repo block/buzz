@@ -2,6 +2,9 @@
 #![warn(missing_docs)]
 //! NIP-01 WebSocket relay for Buzz private team communication.
 
+#[cfg(test)]
+extern crate buzz_core as buzz_core_pkg;
+
 mod admission;
 
 /// Provider-neutral runtime authorization and bounded finalization.

@@ -17,14 +17,11 @@ import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import type { PresenceStatus } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { isMacPlatform } from "@/shared/lib/platform";
-import { VerifiedBadge } from "@/shared/ui/VerifiedBadge";
 
 interface ProfilePopoverProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   displayName: string;
-  verifiedName?: string | null;
-  verifiedNameExpiresAt?: number | null;
   avatarUrl: string | null;
   avatarDataUrl?: string | null;
   currentStatus: PresenceStatus;
@@ -55,8 +52,6 @@ export function ProfilePopover({
   open,
   onOpenChange,
   displayName,
-  verifiedName,
-  verifiedNameExpiresAt,
   avatarUrl,
   avatarDataUrl,
   currentStatus,
@@ -144,17 +139,9 @@ export function ProfilePopover({
                 />
               </MaskedAvatarBadgeFrame>
               <div className="min-w-0 flex-1">
-                <div className="flex min-w-0 items-center gap-1.5">
-                  <p className="truncate text-sm font-semibold leading-tight text-popover-foreground">
-                    {displayName}
-                  </p>
-                  {verifiedName ? (
-                    <VerifiedBadge
-                      verifiedName={verifiedName}
-                      verifiedNameExpiresAt={verifiedNameExpiresAt}
-                    />
-                  ) : null}
-                </div>
+                <p className="truncate text-sm font-semibold leading-tight text-popover-foreground">
+                  {displayName}
+                </p>
                 {/* ── Presence chip (opens status chooser) ─────────── */}
                 <Popover
                   onOpenChange={setPresenceMenuOpen}
