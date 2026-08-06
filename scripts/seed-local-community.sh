@@ -54,10 +54,18 @@ if primary:
 # Under row-zero host binding these are distinct hosts, so seed loopback aliases
 # for local dev to avoid a fail-closed 404 when one side uses an alternate
 # authority. Non-loopback deployments seed only RELAY_URL's authority.
-if host in {"localhost", "127.0.0.1"}:
-    hosts.extend(["localhost", "127.0.0.1"])
-    if port:
-        hosts.extend([f"localhost:{port}", f"127.0.0.1:{port}"])
+# LOCAL OVERRIDE (uncommitted): alias seeding disabled.
+#
+# Each host row is a SEPARATE community with its own community_id — there is no
+# alias mechanism. Seeding localhost/127.0.0.1 variants therefore does not make
+# one community reachable by several authorities; it creates up to four EMPTY
+# parallel communities. Whichever authority a client happens to use decides
+# which one it lands in, and a desktop on `localhost:23000` cannot see anything
+# an agent published via `127.0.0.1:23000`. That failure is silent: auth
+# succeeds, subscriptions succeed, queries return 200 with zero rows.
+#
+# Seeding only the primary authority converts that silent split back into the
+# loud fail-closed rejection the relay was designed to give.
 
 seen = []
 for h in hosts:
