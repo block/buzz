@@ -224,6 +224,48 @@ void main() {
       expect(notifier.pairedCodes, [code]);
     });
 
+    testWidgets('new identity import offers protection checked by default', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            pairingProvider.overrideWith(() => _ConfirmingSasPairingNotifier()),
+          ],
+          child: MaterialApp(theme: AppTheme.dark(), home: const PairingPage()),
+        ),
+      );
+
+      final checkbox = tester.widget<CheckboxListTile>(
+        find.byKey(const Key('protect-imported-identity-checkbox')),
+      );
+      expect(checkbox.value, isTrue);
+      expect(
+        find.textContaining('Routine Buzz use will not prompt'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('desktop recovery does not show import protection checkbox', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            pairingProvider.overrideWith(
+              () => _ConfirmingSasPairingNotifier(sendsIdentityToDesktop: true),
+            ),
+          ],
+          child: MaterialApp(theme: AppTheme.dark(), home: const PairingPage()),
+        ),
+      );
+
+      expect(
+        find.byKey(const Key('protect-imported-identity-checkbox')),
+        findsNothing,
+      );
+    });
+
     testWidgets('recovery SAS warns about permanent desktop access', (
       tester,
     ) async {
@@ -269,6 +311,9 @@ class _ErrorPairingNotifier extends Notifier<PairingState>
   void confirmSas() {}
 
   @override
+  void setProtectImportedIdentity(bool value) {}
+
+  @override
   void denySas() {}
 }
 
@@ -285,6 +330,9 @@ class _ConnectingPairingNotifier extends Notifier<PairingState>
 
   @override
   void confirmSas() {}
+
+  @override
+  void setProtectImportedIdentity(bool value) {}
 
   @override
   void denySas() {}
@@ -305,6 +353,9 @@ class _RecordingPairingNotifier extends Notifier<PairingState>
 
   @override
   void confirmSas() {}
+
+  @override
+  void setProtectImportedIdentity(bool value) {}
 
   @override
   void denySas() {}
@@ -331,6 +382,9 @@ class _ConfirmingSasPairingNotifier extends Notifier<PairingState>
 
   @override
   void confirmSas() {}
+
+  @override
+  void setProtectImportedIdentity(bool value) {}
 
   @override
   void denySas() {}

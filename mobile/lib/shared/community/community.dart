@@ -3,12 +3,15 @@ import 'package:uuid/uuid.dart';
 const _uuid = Uuid();
 const _sentinel = Object();
 
+enum SensitiveActionPolicy { notConfigured, enabled, disabledByUser }
+
 class Community {
   final String id;
   final String name;
   final String relayUrl;
   final String? pubkey;
   final String? nsec;
+  final SensitiveActionPolicy sensitiveActionPolicy;
   final DateTime addedAt;
 
   const Community({
@@ -17,6 +20,7 @@ class Community {
     required this.relayUrl,
     this.pubkey,
     this.nsec,
+    this.sensitiveActionPolicy = SensitiveActionPolicy.notConfigured,
     required this.addedAt,
   });
 
@@ -25,6 +29,8 @@ class Community {
     required String relayUrl,
     String? pubkey,
     String? nsec,
+    SensitiveActionPolicy sensitiveActionPolicy =
+        SensitiveActionPolicy.notConfigured,
   }) {
     return Community(
       id: _uuid.v4(),
@@ -32,6 +38,7 @@ class Community {
       relayUrl: relayUrl,
       pubkey: pubkey,
       nsec: nsec,
+      sensitiveActionPolicy: sensitiveActionPolicy,
       addedAt: DateTime.now(),
     );
   }
@@ -41,6 +48,7 @@ class Community {
     String? relayUrl,
     Object? pubkey = _sentinel,
     Object? nsec = _sentinel,
+    SensitiveActionPolicy? sensitiveActionPolicy,
   }) {
     return Community(
       id: id,
@@ -48,6 +56,8 @@ class Community {
       relayUrl: relayUrl ?? this.relayUrl,
       pubkey: pubkey == _sentinel ? this.pubkey : pubkey as String?,
       nsec: nsec == _sentinel ? this.nsec : nsec as String?,
+      sensitiveActionPolicy:
+          sensitiveActionPolicy ?? this.sensitiveActionPolicy,
       addedAt: addedAt,
     );
   }
@@ -58,6 +68,7 @@ class Community {
     'relayUrl': relayUrl,
     if (pubkey != null) 'pubkey': pubkey,
     if (nsec != null) 'nsec': nsec,
+    'sensitiveActionPolicy': sensitiveActionPolicy.name,
     'addedAt': addedAt.toIso8601String(),
   };
 
@@ -67,6 +78,10 @@ class Community {
     relayUrl: json['relayUrl'] as String,
     pubkey: json['pubkey'] as String?,
     nsec: json['nsec'] as String?,
+    sensitiveActionPolicy: SensitiveActionPolicy.values.firstWhere(
+      (value) => value.name == json['sensitiveActionPolicy'],
+      orElse: () => SensitiveActionPolicy.notConfigured,
+    ),
     addedAt: DateTime.parse(json['addedAt'] as String),
   );
 

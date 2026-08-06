@@ -67,6 +67,20 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
     );
   }
 
+  Future<void> updateSensitiveActionPolicy(SensitiveActionPolicy policy) async {
+    final current = state.value?.community;
+    if (current == null || current.sensitiveActionPolicy == policy) return;
+
+    final updated = current.copyWith(sensitiveActionPolicy: policy);
+    final storage = ref.read(communityStorageProvider);
+    await storage.save(updated);
+    ref.invalidate(communityListProvider);
+    ref.invalidate(activeCommunityProvider);
+    state = AsyncData(
+      AuthState(status: AuthStatus.authenticated, community: updated),
+    );
+  }
+
   Future<void> signOut() async {
     final storage = ref.read(communityStorageProvider);
     final activeId = await storage.loadActiveId();

@@ -10,6 +10,7 @@ import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/crypto/ecdh.dart';
 import 'package:buzz/shared/crypto/nip44.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/security/sensitive_action_authorizer.dart';
 
 /// Tests for [PairingNotifier]'s legacy `buzz://` payload parsing and
 /// SSRF-prevention validation.
@@ -194,13 +195,15 @@ void main() {
       late _ControllableSocket socket;
       late PairingNotifier notifier;
       late String recoveryCode;
+      late _FakeSensitiveActionAuthorizer authorizer;
 
-      setUp(() {
+      setUp(() async {
         final source = nostr.Keys(sourceSecret);
         recoveryCode =
             'nostrpair://${source.public}'
             '?secret=$sessionSecretHex'
             '&relay=wss%3A%2F%2Fpairing.buzz.xyz&v=1&mode=recover';
+        authorizer = _FakeSensitiveActionAuthorizer();
         notifier = PairingNotifier(
           socketFactory:
               ({
@@ -221,10 +224,13 @@ void main() {
           overrides: [
             pairingProvider.overrideWith(() => notifier),
             relayConfigProvider.overrideWith(_RecoveryRelayConfig.new),
+            authProvider.overrideWith(_ProtectedRecoveryAuthNotifier.new),
+            sensitiveActionAuthorizerProvider.overrideWithValue(authorizer),
           ],
         );
         container.read(pairingProvider);
         notifier = container.read(pairingProvider.notifier);
+        await container.read(authProvider.future);
       });
 
       test('recovery URI enables phone-to-desktop transfer', () async {
@@ -250,6 +256,8 @@ void main() {
             includeTranscriptHash: true,
           );
 
+          await Future<void>.delayed(Duration.zero);
+
           expect(
             container.read(pairingProvider).status,
             PairingStatus.transferring,
@@ -274,6 +282,37 @@ void main() {
         },
       );
 
+      test(
+        'protected recovery emits no payload when authentication is cancelled',
+        () async {
+          authorizer.result = DeviceAuthResult.cancelled;
+          await notifier.pair(recoveryCode);
+          notifier.confirmSas();
+          socket.sendSourceMessage(
+            sourceSecret: sourceSecret,
+            sessionSecretHex: sessionSecretHex,
+            message: {'type': 'sas-confirm'},
+            includeTranscriptHash: true,
+          );
+          await Future<void>.delayed(Duration.zero);
+
+          final messages = socket.decryptedPublishedMessages(sourceSecret);
+          expect(authorizer.calls, 1);
+          expect(
+            messages.where((message) => message['type'] == 'payload'),
+            isEmpty,
+          );
+          expect(
+            container.read(pairingProvider).status,
+            PairingStatus.confirmingSas,
+          );
+          expect(
+            container.read(pairingProvider).errorMessage,
+            contains('cancelled'),
+          );
+        },
+      );
+
       test('desktop storage failure surfaces an error', () async {
         await notifier.pair(recoveryCode);
         notifier.confirmSas();
@@ -283,6 +322,7 @@ void main() {
           message: {'type': 'sas-confirm'},
           includeTranscriptHash: true,
         );
+        await Future<void>.delayed(Duration.zero);
         socket.sendSourceMessage(
           sourceSecret: sourceSecret,
           sessionSecretHex: sessionSecretHex,
@@ -324,6 +364,11 @@ class FakeAuthNotifier extends AsyncNotifier<AuthState>
       const AuthState(status: AuthStatus.unauthenticated);
 
   @override
+  Future<void> updateSensitiveActionPolicy(
+    SensitiveActionPolicy policy,
+  ) async {}
+
+  @override
   Future<void> signOut() async {
     signedOut = true;
     state = const AsyncData(AuthState(status: AuthStatus.unauthenticated));
@@ -363,6 +408,35 @@ class _RecoveryRelayConfig extends RelayConfigNotifier {
 
   @override
   RelayConfig build() => RelayConfig(baseUrl: 'https://relay.test', nsec: nsec);
+}
+
+class _ProtectedRecoveryAuthNotifier extends AuthNotifier {
+  @override
+  Future<AuthState> build() async => AuthState(
+    status: AuthStatus.authenticated,
+    community: Community(
+      id: 'recovery',
+      name: 'Recovery',
+      relayUrl: 'https://relay.test',
+      nsec: _RecoveryRelayConfig.nsec,
+      sensitiveActionPolicy: SensitiveActionPolicy.enabled,
+      addedAt: DateTime.utc(2026, 8, 5),
+    ),
+  );
+}
+
+class _FakeSensitiveActionAuthorizer implements SensitiveActionAuthorizer {
+  DeviceAuthResult result = DeviceAuthResult.success;
+  int calls = 0;
+
+  @override
+  Future<DeviceAuthResult> authorizeIdentityAction() async {
+    calls++;
+    return result;
+  }
+
+  @override
+  Future<bool> isSupported() async => true;
 }
 
 class _ControllableSocket extends PairingSocket {

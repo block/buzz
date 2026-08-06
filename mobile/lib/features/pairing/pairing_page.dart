@@ -127,6 +127,12 @@ class PairingPage extends HookConsumerWidget {
                     sasCode: pairingState.sasCode ?? '------',
                     confirmed: pairingState.userConfirmedSas,
                     sendsIdentityToDesktop: pairingState.sendsIdentityToDesktop,
+                    protectImportedIdentity:
+                        pairingState.protectImportedIdentity,
+                    errorMessage: pairingState.errorMessage,
+                    onProtectionChanged: (value) => ref
+                        .read(pairingProvider.notifier)
+                        .setProtectImportedIdentity(value),
                     onConfirm: () =>
                         ref.read(pairingProvider.notifier).confirmSas(),
                     onDeny: () => ref.read(pairingProvider.notifier).denySas(),
@@ -196,6 +202,9 @@ class _SasVerificationView extends StatelessWidget {
   final String sasCode;
   final bool confirmed;
   final bool sendsIdentityToDesktop;
+  final bool protectImportedIdentity;
+  final String? errorMessage;
+  final ValueChanged<bool> onProtectionChanged;
   final VoidCallback onConfirm;
   final VoidCallback onDeny;
 
@@ -203,6 +212,9 @@ class _SasVerificationView extends StatelessWidget {
     required this.sasCode,
     required this.confirmed,
     required this.sendsIdentityToDesktop,
+    required this.protectImportedIdentity,
+    required this.errorMessage,
+    required this.onProtectionChanged,
     required this.onConfirm,
     required this.onDeny,
   });
@@ -265,6 +277,36 @@ class _SasVerificationView extends StatelessWidget {
             color: context.colors.onSurfaceVariant,
           ),
         ),
+
+        const SizedBox(height: Grid.sm),
+
+        if (!sendsIdentityToDesktop)
+          CheckboxListTile(
+            key: const Key('protect-imported-identity-checkbox'),
+            value: protectImportedIdentity,
+            onChanged: confirmed
+                ? null
+                : (value) => onProtectionChanged(value ?? false),
+            controlAffinity: ListTileControlAffinity.leading,
+            contentPadding: EdgeInsets.zero,
+            title: const Text(
+              'Use biometrics to confirm sensitive identity actions',
+            ),
+            subtitle: const Text(
+              'Routine Buzz use will not prompt. This protects identity transfer and reveal actions.',
+            ),
+          ),
+
+        if (errorMessage != null) ...[
+          const SizedBox(height: Grid.xs),
+          Text(
+            errorMessage!,
+            textAlign: TextAlign.center,
+            style: context.textTheme.bodySmall?.copyWith(
+              color: context.colors.error,
+            ),
+          ),
+        ],
 
         const SizedBox(height: Grid.lg),
 

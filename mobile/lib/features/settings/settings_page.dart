@@ -11,6 +11,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 import '../../shared/auth/auth.dart';
 import '../../shared/clipboard_utils.dart';
 import '../../shared/relay/relay.dart';
+import '../../shared/security/sensitive_action_authorizer.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/app_list.dart';
 import '../../shared/widgets/app_list_card.dart';
@@ -22,6 +23,7 @@ import 'theme_picker_page.dart';
 
 part 'settings_page/appearance_section.dart';
 part 'settings_page/connection_section.dart';
+part 'settings_page/mobile_security_section.dart';
 
 class SettingsPage extends HookConsumerWidget {
   const SettingsPage({
@@ -75,6 +77,7 @@ class SettingsPage extends HookConsumerWidget {
                 _ConnectionSection(
                   identityRecoveryPageBuilder: identityRecoveryPageBuilder,
                 ),
+                const _MobileSecuritySection(),
                 const _RemoveCommunitySection(),
               ],
             ),

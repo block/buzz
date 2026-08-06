@@ -43,6 +43,8 @@
 	<false/>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Buzz uses Face ID to confirm sensitive identity transfers.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Buzz needs camera access so you can take photos to attach to messages and scan QR codes for device pairing.</string>
 	<key>NSPhotoLibraryUsageDescription</key>

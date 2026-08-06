@@ -11,6 +11,7 @@ import '../../shared/auth/auth.dart';
 import '../../shared/crypto/ecdh.dart';
 import '../../shared/crypto/nip44.dart';
 import '../../shared/relay/relay.dart';
+import '../../shared/security/sensitive_action_authorizer.dart';
 import 'pairing_crypto.dart';
 import 'pairing_socket.dart';
 
@@ -37,6 +38,8 @@ class PairingState {
   final String? sasCode;
   final bool userConfirmedSas;
   final bool sendsIdentityToDesktop;
+  final bool protectImportedIdentity;
+  final bool authorizationInProgress;
 
   const PairingState({
     this.status = PairingStatus.idle,
@@ -44,6 +47,8 @@ class PairingState {
     this.sasCode,
     this.userConfirmedSas = false,
     this.sendsIdentityToDesktop = false,
+    this.protectImportedIdentity = true,
+    this.authorizationInProgress = false,
   });
 
   PairingState copyWith({
@@ -52,6 +57,8 @@ class PairingState {
     String? sasCode,
     bool? userConfirmedSas,
     bool? sendsIdentityToDesktop,
+    bool? protectImportedIdentity,
+    bool? authorizationInProgress,
   }) => PairingState(
     status: status ?? this.status,
     errorMessage: errorMessage ?? this.errorMessage,
@@ -59,6 +66,10 @@ class PairingState {
     userConfirmedSas: userConfirmedSas ?? this.userConfirmedSas,
     sendsIdentityToDesktop:
         sendsIdentityToDesktop ?? this.sendsIdentityToDesktop,
+    protectImportedIdentity:
+        protectImportedIdentity ?? this.protectImportedIdentity,
+    authorizationInProgress:
+        authorizationInProgress ?? this.authorizationInProgress,
   );
 }
 
@@ -110,29 +121,85 @@ class PairingNotifier extends Notifier<PairingState> {
 
   /// Confirm that the SAS code matches. Called by the UI after user approval.
   void confirmSas() {
-    if (state.status != PairingStatus.confirmingSas) return;
+    if (state.status != PairingStatus.confirmingSas ||
+        state.authorizationInProgress) {
+      return;
+    }
+    _userConfirmedSas = true;
+    state = state.copyWith(userConfirmedSas: true);
+    if (_sasConfirmReceived) unawaited(_continueAfterSas());
+  }
 
-    // If the desktop's sas-confirm has already arrived and been verified,
-    // transition immediately and process any buffered payload.
-    if (_sasConfirmReceived) {
-      state = state.copyWith(status: PairingStatus.transferring);
-      if (_sendIdentityToSource) {
-        _sendIdentityPayload();
-      } else {
-        final pending = _pendingPayload;
-        if (pending != null) {
-          _pendingPayload = null;
-          _handlePayload(pending);
-        }
-      }
+  void setProtectImportedIdentity(bool value) {
+    if (state.status != PairingStatus.confirmingSas ||
+        state.sendsIdentityToDesktop ||
+        state.authorizationInProgress) {
+      return;
+    }
+    state = state.copyWith(protectImportedIdentity: value);
+  }
+
+  Future<void> _continueAfterSas() async {
+    if (!_userConfirmedSas ||
+        !_sasConfirmReceived ||
+        state.status != PairingStatus.confirmingSas ||
+        state.authorizationInProgress) {
       return;
     }
 
-    // Desktop hasn't confirmed yet — record intent and wait. The transition
-    // will happen in _handleSasConfirm() once the transcript hash is verified.
-    _userConfirmedSas = true;
-    state = state.copyWith(userConfirmedSas: true);
+    final activePolicy = (await ref.read(
+      authProvider.future,
+    )).community?.sensitiveActionPolicy;
+    final requiresAuthorization = _sendIdentityToSource
+        ? activePolicy == SensitiveActionPolicy.enabled
+        : state.protectImportedIdentity;
+
+    if (requiresAuthorization) {
+      state = state.copyWith(authorizationInProgress: true);
+      final result = await ref
+          .read(sensitiveActionAuthorizerProvider)
+          .authorizeIdentityAction();
+      if (state.status != PairingStatus.confirmingSas) return;
+      if (result != DeviceAuthResult.success) {
+        _userConfirmedSas = false;
+        state = state.copyWith(
+          userConfirmedSas: false,
+          authorizationInProgress: false,
+          errorMessage: _authorizationError(result),
+        );
+        return;
+      }
+    }
+
+    _userConfirmedSas = false;
+    state = state.copyWith(
+      status: PairingStatus.transferring,
+      authorizationInProgress: false,
+    );
+    if (_sendIdentityToSource) {
+      _sendIdentityPayload();
+    } else {
+      final pending = _pendingPayload;
+      if (pending != null) {
+        _pendingPayload = null;
+        _handlePayload(pending);
+      }
+    }
   }
+
+  static String _authorizationError(
+    DeviceAuthResult result,
+  ) => switch (result) {
+    DeviceAuthResult.cancelled =>
+      'Identity confirmation was cancelled. Nothing was transferred.',
+    DeviceAuthResult.unavailable =>
+      'Device authentication is unavailable. Configure a device passcode or biometrics, or turn off protection for this import.',
+    DeviceAuthResult.lockedOut =>
+      'Device authentication is locked. Unlock it in system settings and try again.',
+    DeviceAuthResult.failed =>
+      'Identity confirmation failed. Nothing was transferred.',
+    DeviceAuthResult.success => '',
+  };
 
   /// Deny the SAS code. Send abort and terminate.
   void denySas() {
@@ -415,17 +482,7 @@ class PairingNotifier extends Notifier<PairingState> {
     // If the user already tapped "Codes Match", complete the transition now
     // that the transcript hash is verified.
     if (_userConfirmedSas) {
-      _userConfirmedSas = false;
-      state = state.copyWith(status: PairingStatus.transferring);
-      if (_sendIdentityToSource) {
-        _sendIdentityPayload();
-      } else {
-        final pending = _pendingPayload;
-        if (pending != null) {
-          _pendingPayload = null;
-          _handlePayload(pending);
-        }
-      }
+      unawaited(_continueAfterSas());
     }
     // Otherwise stay in confirmingSas — user must still confirm via confirmSas().
   }
@@ -534,6 +591,9 @@ class PairingNotifier extends Notifier<PairingState> {
         relayUrl: relayUrl,
         pubkey: pubkey,
         nsec: nsec,
+        sensitiveActionPolicy: state.protectImportedIdentity
+            ? SensitiveActionPolicy.enabled
+            : SensitiveActionPolicy.disabledByUser,
       );
       await ref
           .read(authProvider.notifier)
