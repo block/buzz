@@ -58,11 +58,37 @@ function installFakeWindow(fw) {
 const RELAY = "wss://r.test";
 const RELAY_KEY = encodeURIComponent(RELAY);
 
-// ─── destroy() must cancel pending publish, not flush ─────────────────────────
+// ─── Tauri mock helper ─────────────────────────────────────────────────────────
+// Same pattern as sections — intercepts nip44_decrypt_from_self, nip44_encrypt_to_self,
+// and sign_event for the LWW-baseline test. `goodCipherPayload`: returned for "good-cipher".
+function installTauriMock(goodCipherPayload) {
+  const orig = globalThis.window?.__TAURI_INTERNALS__;
+  if (typeof globalThis.window === "undefined") globalThis.window = {};
+  let captured = null;
+  globalThis.window.__TAURI_INTERNALS__ = {
+    invoke: (cmd, args) => {
+      if (cmd === "nip44_decrypt_from_self") {
+        if (args?.ciphertext === "bad-cipher") return Promise.reject(new Error("decrypt failed"));
+        return Promise.resolve(goodCipherPayload);
+      }
+      if (cmd === "nip44_encrypt_to_self") { captured = args?.plaintext ?? null; return Promise.resolve("ct"); }
+      if (cmd === "sign_event") {
+        return Promise.resolve(JSON.stringify({ id: "eid", pubkey: "pk-lww", content: "ct",
+          created_at: args?.createdAt ?? 0, kind: args?.kind ?? 0, tags: args?.tags ?? [], sig: "s" }));
+      }
+      return Promise.reject(new Error(`unmocked: ${cmd}`));
+    },
+  };
+  return {
+    restore: () => {
+      if (orig !== undefined) globalThis.window.__TAURI_INTERNALS__ = orig;
+      else delete globalThis.window.__TAURI_INTERNALS__;
+    },
+    capturedPlaintext: () => captured,
+  };
+}
 
-// Regression guard for the community-switch cross-relay publish vector:
-// change a sort mode in relay A → destroy() called (relayUrl dep change) →
-// no publish should fire.
+// ─── destroy() must cancel pending publish, not flush ─────────────────────────
 test("destroy: cancels pending publish without flushing to the relay", () => {
   mock.method(relayClient, "fetchEvents", () => Promise.resolve([]));
   const publishCalls = [];
@@ -183,90 +209,35 @@ test("revert-fix: absent fetch with zero watermark seeds via bootstrap (first-sy
 
 // 4. LWW baseline: newer decryptable pre-publish event still wins after an
 //    undecryptable head was recorded.
-// Mutation test: removing headBeforeFetch snapshot causes remote to never win.
+// Mutation test: headBeforeFetch → this.lastRemoteCreatedAt makes comparison
+// 200>200=false → local wins instead of remote → wrong content encrypted.
 test("revert-fix: sort LWW — newer decryptable pre-publish event selected after undecryptable head recorded", async () => {
-  // Boot fetch: undecryptable event, created_at=100 → head recorded to 100.
-  // Pre-publish fetch: decryptable event, created_at=200 → should win (200 > 100).
-  // Mutation: if headBeforeFetch is dropped and this.lastRemoteCreatedAt used instead,
-  // the comparison becomes 200 > 200 = false → local wins instead of remote → wrong content encrypted.
-  const REMOTE_GROUP_KEY = "remote-group-from-relay";
-  const LOCAL_GROUP_KEY = "local-group-from-app";
-  let capturedEncryptPlaintext = null;
+  const REMOTE_KEY = "remote-group-from-relay";
   let callCount = 0;
-
   mock.method(relayClient, "fetchEvents", () => {
     callCount++;
-    return Promise.resolve([
-      {
-        pubkey: "pk-lww",
-        content: callCount === 1 ? "bad-cipher" : "good-cipher",
-        created_at: callCount === 1 ? 100 : 200,
-        id: `evt-${callCount}`,
-      },
-    ]);
+    return Promise.resolve([{ pubkey: "pk-lww", content: callCount === 1 ? "bad-cipher" : "good-cipher",
+      created_at: callCount === 1 ? 100 : 200, id: `evt-${callCount}` }]);
   });
   mock.method(relayClient, "publishEvent", () => Promise.resolve());
-
   const fw = makeFakeWindow();
   const restore = installFakeWindow(fw);
-
-  // Intercept Tauri invokes so decryptAndParse, nip44EncryptToSelf, and signRelayEvent work in Node.
-  const origTauri = globalThis.window?.__TAURI_INTERNALS__;
-  if (typeof globalThis.window === "undefined") globalThis.window = {};
-  globalThis.window.__TAURI_INTERNALS__ = {
-    invoke: (cmd, args) => {
-      if (cmd === "nip44_decrypt_from_self") {
-        if (args?.ciphertext === "bad-cipher") return Promise.reject(new Error("decrypt failed"));
-        const remotePayload = JSON.stringify({
-          version: 1,
-          groups: { [REMOTE_GROUP_KEY]: "recent" },
-        });
-        return Promise.resolve(remotePayload);
-      }
-      if (cmd === "nip44_encrypt_to_self") {
-        capturedEncryptPlaintext = args?.plaintext ?? null;
-        return Promise.resolve("encrypted-ciphertext");
-      }
-      if (cmd === "sign_event") {
-        return Promise.resolve(JSON.stringify({
-          id: "signed-event-id",
-          pubkey: "pk-lww",
-          content: "encrypted-ciphertext",
-          created_at: args?.createdAt ?? 999,
-          kind: args?.kind ?? 0,
-          tags: args?.tags ?? [],
-          sig: "fake-sig",
-        }));
-      }
-      return Promise.reject(new Error(`unmocked tauri: ${cmd}`));
-    },
-  };
-
+  const tauri = installTauriMock(JSON.stringify({ version: 1, groups: { [REMOTE_KEY]: "recent" } }));
   try {
     const manager = new ChannelSortSyncManager("pk-lww", RELAY);
-    // Boot fetch: sees event@100 (bad-cipher), records head to 100. Remote = null.
     await manager.fetchRemoteSortPrefs();
-    assert.ok(manager.getPersistedWatermark() >= 100, "head must be recorded from boot event");
-    // Queue a publish with local sort prefs — triggers doPublish → fetchOwnBlobBeforePublish (callCount=2).
-    manager.publishSortPrefs(makeStore({ [LOCAL_GROUP_KEY]: "recent" }));
+    assert.ok(manager.getPersistedWatermark() >= 100);
+    manager.publishSortPrefs(makeStore({ "local-group": "recent" }));
     fw._fireTimer();
     await new Promise((r) => setTimeout(r, 20));
-    // If headBeforeFetch is correctly snapshotted: remote.createdAt(200) > headBeforeFetch(100) → true
-    //   → fetchOwnBlobBeforePublish returns remote.store → nip44_encrypt_to_self gets remote groups.
-    // If NOT snapshotted (mutation): 200 > this.lastRemoteCreatedAt(200) → false
-    //   → returns local store → nip44_encrypt_to_self gets local groups.
-    assert.ok(capturedEncryptPlaintext !== null, "nip44EncryptToSelf must have been called");
-    const encrypted = JSON.parse(capturedEncryptPlaintext);
+    const pt = tauri.capturedPlaintext();
+    assert.ok(pt !== null, "nip44EncryptToSelf must have been called");
     assert.ok(
-      encrypted.groups && REMOTE_GROUP_KEY in encrypted.groups,
-      `remote groups must win LWW merge — got: ${capturedEncryptPlaintext}`,
+      JSON.parse(pt).groups && REMOTE_KEY in JSON.parse(pt).groups,
+      `remote groups must win LWW merge — got: ${pt}`,
     );
   } finally {
-    if (origTauri !== undefined) {
-      globalThis.window.__TAURI_INTERNALS__ = origTauri;
-    } else {
-      delete globalThis.window.__TAURI_INTERNALS__;
-    }
+    tauri.restore();
     restore();
     mock.reset();
   }
