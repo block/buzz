@@ -286,6 +286,66 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
+    testWidgets('keeps the reaction popover on-screen when neither side fits', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(320, 240);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      const anchorRect = Rect.fromLTWH(40, 60, 240, 100);
+      const safeTop = 24.0;
+      const visibleBottom = 200.0;
+      const trayHeight = 68.0;
+      const trayGap = Grid.xxs;
+      final prefs = await _mockPrefs();
+      expect(anchorRect.top - trayGap - trayHeight, lessThan(safeTop));
+      expect(
+        anchorRect.bottom + trayGap + trayHeight,
+        greaterThan(visibleBottom),
+      );
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [savedPrefsProvider.overrideWithValue(prefs)],
+          child: MaterialApp(
+            theme: AppTheme.light(),
+            builder: (context, child) => MediaQuery(
+              data: MediaQuery.of(context).copyWith(
+                padding: const EdgeInsets.only(top: safeTop),
+                viewInsets: const EdgeInsets.only(bottom: 40),
+              ),
+              child: child!,
+            ),
+            home: Scaffold(
+              body: Consumer(
+                builder: (context, ref, _) => TextButton(
+                  onPressed: () => showMessageActions(
+                    context: context,
+                    ref: ref,
+                    message: _message(isSystem: true),
+                    channelId: _channelId,
+                    canManageMessage: false,
+                    anchorRect: anchorRect,
+                  ),
+                  child: const Text('open popover'),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('open popover'));
+      await tester.pumpAndSettle();
+
+      final trayRect = tester.getRect(
+        find.byKey(const ValueKey('reaction-popover-tray')),
+      );
+      expect(trayRect.top, greaterThanOrEqualTo(safeTop));
+      expect(trayRect.bottom, lessThanOrEqualTo(visibleBottom));
+    });
+
     testWidgets('shows Edit/Delete only with manage rights', (tester) async {
       final prefs = await _mockPrefs();
       await _pumpSheet(

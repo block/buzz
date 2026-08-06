@@ -60,16 +60,29 @@ class _MessageReactionPopover extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final topInset = MediaQuery.paddingOf(context).top;
-    final trayTop = anchorRect.top - _reactionTrayMaxHeight - Grid.xxs;
-    final showAbove = trayTop >= topInset;
-    final top = showAbove ? trayTop : anchorRect.bottom + Grid.xxs;
-    final trayScaleAlignment = showAbove
-        ? Alignment.bottomLeft
-        : Alignment.topLeft;
+    final mediaQuery = MediaQuery.of(context);
 
     return LayoutBuilder(
       builder: (context, constraints) {
+        final safeTop = mediaQuery.padding.top + mediaQuery.viewInsets.top;
+        final safeBottom =
+            constraints.maxHeight -
+            mediaQuery.padding.bottom -
+            mediaQuery.viewInsets.bottom;
+        final availableAbove = anchorRect.top - Grid.xxs - safeTop;
+        final availableBelow = safeBottom - anchorRect.bottom - Grid.xxs;
+        final showAbove =
+            availableAbove >= _reactionTrayMaxHeight ||
+            (availableBelow < _reactionTrayMaxHeight &&
+                availableAbove >= availableBelow);
+        final proposedTop = showAbove
+            ? anchorRect.top - _reactionTrayMaxHeight - Grid.xxs
+            : anchorRect.bottom + Grid.xxs;
+        final maxTop = math.max(safeTop, safeBottom - _reactionTrayMaxHeight);
+        final top = proposedTop.clamp(safeTop, maxTop).toDouble();
+        final trayScaleAlignment = showAbove
+            ? Alignment.bottomLeft
+            : Alignment.topLeft;
         final trayWidth = math.min(
           _reactionTrayMaxWidth,
           constraints.maxWidth - (Grid.xxs * 2),
