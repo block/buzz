@@ -8,26 +8,26 @@ const ATTACKER = "c".repeat(64);
 
 function makeProject(createdAt = 200) {
   return {
-    id: `${OWNER}:demo`,
+    id: `30621:${OWNER}:demo`,
     dtag: "demo",
     name: "Demo",
     description: "",
-    cloneUrls: [],
-    webUrl: null,
     owner: OWNER,
-    contributors: [],
     createdAt,
     projectChannelId: null,
     status: "active",
-    defaultBranch: "main",
-    repoAddress: `30617:${OWNER}:demo`,
+    projectAddress: `30621:${OWNER}:demo`,
+    primaryRepositoryAddress: null,
+    repositoryAddresses: [],
+    repositories: [],
+    legacy: false,
   };
 }
 
 function makeDeletionEvent({
   pubkey = OWNER,
   createdAt = 300,
-  coordinate = `30617:${OWNER}:demo`,
+  coordinate = `30621:${OWNER}:demo`,
 }) {
   return {
     id: "d".repeat(64),
@@ -68,7 +68,7 @@ test("deletion targeting different coordinate does not hide this one", () => {
   const project = makeProject(100);
   const deletion = makeDeletionEvent({
     createdAt: 300,
-    coordinate: `30617:${OWNER}:other-repo`,
+    coordinate: `30621:${OWNER}:other-repo`,
   });
   assert.ok(!isDeletedByA(project, [deletion]));
 });
