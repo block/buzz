@@ -51,11 +51,24 @@ type SummaryParticipantCandidate = {
 };
 
 function normalizeHeadMessage(message: TimelineMessage): TimelineMessage {
-  return {
+  if (message.depth === 0) {
+    return message;
+  }
+  // WeakMap-keyed on the source message so structure-shared timeline rows
+  // keep a stable depth-0 head identity across unrelated reformats.
+  let cached = normalizedHeadCache.get(message);
+  if (cached) {
+    return cached;
+  }
+  cached = {
     ...message,
     depth: 0,
   };
+  normalizedHeadCache.set(message, cached);
+  return cached;
 }
+
+const normalizedHeadCache = new WeakMap<TimelineMessage, TimelineMessage>();
 
 // Thread rows feed `MessageRow` a depth-normalized copy of each reply. Building
 // that copy fresh (`{ ...message, depth }`) on every render hands `MessageRow` a
@@ -71,7 +84,9 @@ function normalizeHeadMessage(message: TimelineMessage): TimelineMessage {
 //
 // Keyed on the source `reply` reference via a WeakMap: a new `timelineMessages`
 // set produces new reply objects (genuine recompute), and stale entries are
-// collected automatically when the old message set is dropped.
+// collected automatically when the old message set is dropped. Structure-
+// sharing formatted rows (`structureShareTimelineMessages`) makes this hit
+// across live sibling inserts.
 const normalizedInlineReplyCache = new WeakMap<
   TimelineMessage,
   Map<number, TimelineMessage>

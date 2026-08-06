@@ -2,6 +2,7 @@ import * as React from "react";
 
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
 import { THREAD_REPLY_ROW_MARGIN_INLINE_REM } from "@/features/messages/lib/threadTreeLayout";
+import { timelineMessagesEqual } from "@/features/messages/lib/structureShareTimelineMessages";
 import type { buildVideoReviewContextForMessage } from "@/features/messages/lib/videoReviewContext";
 import { canManageMessageForCurrentUser } from "@/features/messages/lib/canManageMessage";
 import type { TimelineMessage } from "@/features/messages/types";
@@ -91,7 +92,35 @@ type MessageRowItemProps = {
   videoReviewContext: ReturnType<typeof buildVideoReviewContextForMessage>;
 };
 
-export function MessageRowItem({
+function threadSummariesEqual(
+  a: MainTimelineEntry["summary"],
+  b: MainTimelineEntry["summary"],
+): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  if (
+    a.threadHeadId !== b.threadHeadId ||
+    a.replyCount !== b.replyCount ||
+    a.lastReplyAt !== b.lastReplyAt ||
+    a.participants.length !== b.participants.length
+  ) {
+    return false;
+  }
+  for (let i = 0; i < a.participants.length; i += 1) {
+    const left = a.participants[i];
+    const right = b.participants[i];
+    if (
+      left.id !== right.id ||
+      left.author !== right.author ||
+      left.avatarUrl !== right.avatarUrl
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function MessageRowItemBase({
   channelId,
   currentPubkey,
   entry,
@@ -226,3 +255,45 @@ export function MessageRowItem({
     </div>
   );
 }
+
+/**
+ * Wrapper memo: live timeline reformats rebuild `MainTimelineEntry` shells and
+ * `TimelineMessage` objects even when row content is unchanged. Compare the
+ * message by value (and summary by value) so unchanged *visible* rows skip
+ * recreating inline follow handlers / MessageRow props — cheaper than
+ * structure-sharing every formatted row on the format path.
+ */
+export const MessageRowItem = React.memo(
+  MessageRowItemBase,
+  (prev, next) =>
+    prev.channelId === next.channelId &&
+    prev.currentPubkey === next.currentPubkey &&
+    timelineMessagesEqual(prev.entry.message, next.entry.message) &&
+    threadSummariesEqual(prev.entry.summary, next.entry.summary) &&
+    prev.followThreadById === next.followThreadById &&
+    prev.footer === next.footer &&
+    prev.highlightedMessageId === next.highlightedMessageId &&
+    prev.huddleMemberPubkeys === next.huddleMemberPubkeys &&
+    prev.huddleMemberPubkeysPending === next.huddleMemberPubkeysPending &&
+    prev.hideAgentAccessBadges === next.hideAgentAccessBadges &&
+    prev.isContinuation === next.isContinuation &&
+    prev.isFollowedByContinuation === next.isFollowedByContinuation &&
+    prev.isFollowingThreadById === next.isFollowingThreadById &&
+    prev.isUnread === next.isUnread &&
+    prev.playEntrance === next.playEntrance &&
+    prev.onEntranceComplete === next.onEntranceComplete &&
+    prev.onDelete === next.onDelete &&
+    prev.onEdit === next.onEdit &&
+    prev.onMarkUnread === next.onMarkUnread &&
+    prev.onMarkRead === next.onMarkRead &&
+    prev.onReply === next.onReply &&
+    prev.onOpenThread === next.onOpenThread &&
+    prev.onToggleReaction === next.onToggleReaction &&
+    prev.profiles === next.profiles &&
+    prev.searchActiveMessageId === next.searchActiveMessageId &&
+    prev.searchMatchingMessageIds === next.searchMatchingMessageIds &&
+    prev.searchQuery === next.searchQuery &&
+    prev.threadUnreadCounts === next.threadUnreadCounts &&
+    prev.unfollowThreadById === next.unfollowThreadById &&
+    prev.videoReviewContext === next.videoReviewContext,
+);

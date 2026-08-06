@@ -42,9 +42,9 @@ import {
   useSendMessageMutation,
   useToggleReactionMutation,
 } from "@/features/messages/hooks";
-import { formatTimelineMessages } from "@/features/messages/lib/formatTimelineMessages";
 import { DeleteMessageConfirmDialog } from "@/features/messages/ui/DeleteMessageConfirmDialog";
 import { getThreadReference } from "@/features/messages/lib/threading";
+import type { TimelineMessage } from "@/features/messages/types";
 import {
   resolveTimelineLoadingLatch,
   selectTimelineLoadingState,
@@ -53,7 +53,6 @@ import { useFetchOlderMessages } from "@/features/messages/useFetchOlderMessages
 import { useIndependentThreadPanel } from "@/features/messages/useIndependentThreadPanel";
 import { useThreadReplies } from "@/features/messages/useThreadReplies";
 import { useChannelTyping } from "@/features/messages/useChannelTyping";
-import type { TimelineMessage } from "@/features/messages/types";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { useRelaySelfQuery } from "@/features/moderation/hooks";
 import type { RelayEvent, RespondToMode, SearchHit } from "@/shared/api/types";
@@ -65,6 +64,7 @@ import {
 } from "@/features/channels/ui/useHuddleChannelMessages";
 import { useHuddleReadMarker } from "@/features/channels/ui/useHuddleReadMarker";
 import { useHuddleThreadIsolation } from "@/features/channels/ui/useHuddleThreadIsolation";
+import { useFormattedTimelineMessages } from "@/features/channels/ui/useFormattedTimelineMessages";
 import { AgentSessionProvider } from "@/shared/context/AgentSessionContext";
 import { ProfilePanelProvider } from "@/shared/context/ProfilePanelContext";
 import { useMainInsetRef } from "@/shared/layout/MainInsetContext";
@@ -400,33 +400,18 @@ export function ChannelScreen({
   // unchanged persona/respond-to set.
   const personaLookup = useStableMap(personaLookupRaw);
   const respondToLookup = useStableMap(respondToLookupRaw);
-  const timelineMessages = React.useMemo(
-    () =>
-      formatTimelineMessages(
-        resolvedMessages,
-        activeChannel,
-        currentPubkey,
-        currentProfile?.avatarUrl ?? null,
-        messageProfiles,
-        channelMembers,
-        personaLookup,
-        respondToLookup,
-        relaySelfPubkey,
-        messageOwnerProfiles,
-      ),
-    [
-      activeChannel,
-      channelMembers,
-      currentProfile?.avatarUrl,
-      currentPubkey,
-      messageProfiles,
-      messageOwnerProfiles,
-      personaLookup,
-      relaySelfPubkey,
-      respondToLookup,
-      resolvedMessages,
-    ],
-  );
+  const timelineMessages = useFormattedTimelineMessages({
+    events: resolvedMessages,
+    channel: activeChannel,
+    currentPubkey,
+    currentAvatarUrl: currentProfile?.avatarUrl ?? null,
+    profiles: messageProfiles,
+    members: channelMembers,
+    personaLookup,
+    respondToLookup,
+    relaySelfPubkey,
+    ownerProfiles: messageOwnerProfiles,
+  });
   const handleFindSearchHit = React.useCallback((hit: SearchHit) => {
     const event = cacheSearchHitEvent(hit);
     setFindEvents((currentEvents) =>
