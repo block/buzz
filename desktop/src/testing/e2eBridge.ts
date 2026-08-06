@@ -590,6 +590,25 @@ type E2eConfig = {
       selectedModel?: string | null;
     };
     /**
+     * Override for `get_agent_models` — the catalog the ModelPicker reads.
+     *
+     * Mirrors `discoverAgentModels`. Without it `get_agent_models` always
+     * returns an empty list with `supportsSwitching: false`, so the picker can
+     * only ever be exercised in its "runtime default" empty state and the
+     * populated list (and therefore the switch path) is untestable in the
+     * browser harness.
+     */
+    agentModels?: {
+      models: Array<{
+        id: string;
+        name: string | null;
+        description?: string | null;
+      }>;
+      supportsSwitching: boolean;
+      agentDefaultModel?: string | null;
+      selectedModel?: string | null;
+    };
+    /**
      * When set, `discover_agent_models` throws with this message instead of
      * returning a catalog.
      */
@@ -12646,7 +12665,22 @@ export function maybeInstallE2eTauriMocks() {
         return handleGetManagedAgentLog(
           payload as Parameters<typeof handleGetManagedAgentLog>[0],
         );
-      case "get_agent_models":
+      case "get_agent_models": {
+        const modelsOverride = activeConfig?.mock?.agentModels;
+        if (modelsOverride) {
+          return {
+            agentName: "mock-agent",
+            agentVersion: "0.0.0",
+            models: modelsOverride.models.map((model) => ({
+              id: model.id,
+              name: model.name,
+              description: model.description ?? null,
+            })),
+            agentDefaultModel: modelsOverride.agentDefaultModel ?? null,
+            selectedModel: modelsOverride.selectedModel ?? null,
+            supportsSwitching: modelsOverride.supportsSwitching,
+          };
+        }
         return {
           agentName: "mock-agent",
           agentVersion: "0.0.0",
@@ -12655,6 +12689,7 @@ export function maybeInstallE2eTauriMocks() {
           selectedModel: null,
           supportsSwitching: false,
         };
+      }
       case "discover_agent_models": {
         const discoverError = activeConfig?.mock?.discoverAgentModelsError;
         if (discoverError) {
