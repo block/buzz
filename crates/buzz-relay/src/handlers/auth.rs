@@ -35,6 +35,37 @@ pub fn extract_auth_tag_json(event: &nostr::Event) -> Option<String> {
     serde_json::to_string(first.as_slice()).ok()
 }
 
+async fn verify_auth_event_against_any_relay_url(
+    auth_svc: Arc<buzz_auth::AuthService>,
+    event: nostr::Event,
+    challenge: &str,
+    relay_urls: &[String],
+) -> Result<buzz_auth::AuthContext, buzz_auth::AuthError> {
+    let Some((first, rest)) = relay_urls.split_first() else {
+        return Err(buzz_auth::AuthError::RelayUrlMismatch);
+    };
+
+    match auth_svc
+        .verify_auth_event(event.clone(), challenge, first)
+        .await
+    {
+        Err(buzz_auth::AuthError::RelayUrlMismatch) => {}
+        other => return other,
+    }
+
+    for relay_url in rest {
+        match auth_svc
+            .verify_auth_event(event.clone(), challenge, relay_url)
+            .await
+        {
+            Err(buzz_auth::AuthError::RelayUrlMismatch) => continue,
+            other => return other,
+        }
+    }
+
+    Err(buzz_auth::AuthError::RelayUrlMismatch)
+}
+
 /// Handle a NIP-42 AUTH message: verify the challenge response and transition
 /// the connection to authenticated state.
 ///
@@ -77,17 +108,19 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
     // tampered, NIP-42 verification will fail before we ever inspect it.
     let auth_tag_json = extract_auth_tag_json(&event);
 
-    let relay_url =
-        crate::api::bridge::nip42_expected_relay_url(&state.config.relay_url, &conn.tenant);
+    let relay_urls = crate::api::bridge::nip42_acceptable_relay_urls(
+        &state.config.relay_url,
+        &conn.tenant,
+        state.config.pairing_relay_url.as_deref(),
+    );
     let auth_svc = Arc::clone(&state.auth);
 
     metrics::counter!("buzz_auth_attempts_total", "method" => "nip42").increment(1);
 
-    // Pure NIP-42 verification — crypto only, no DB lookups.
-    match auth_svc
-        .verify_auth_event(event, &challenge, &relay_url)
-        .await
-    {
+    // Pure NIP-42 verification — crypto only, no DB lookups. The primary
+    // tenant-origin URL preserves cross-host binding; the optional configured
+    // pairing URL handles public HTTPS/WSS proxy paths used by QR import.
+    match verify_auth_event_against_any_relay_url(auth_svc, event, &challenge, &relay_urls).await {
         Ok(mut auth_ctx) => {
             let pubkey = auth_ctx.pubkey;
 
