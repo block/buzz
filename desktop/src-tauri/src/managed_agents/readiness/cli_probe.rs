@@ -1,9 +1,8 @@
 use std::{
     collections::HashMap,
     ffi::OsString,
-    io::Read,
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
-    process::Stdio,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Condvar, Mutex, OnceLock,
@@ -272,13 +271,25 @@ fn run_login_probe(
     augmented_path: Option<&str>,
     timeout: Duration,
 ) -> ProbeOutcome {
+    // Regular files cannot be held at a blocking EOF by forked descendants.
+    // This keeps output collection inside the same deadline as the child even
+    // when a CLI exits after spawning a process that inherited stdout/stderr.
+    let Ok(mut stdout) = tempfile::tempfile() else {
+        return ProbeOutcome::LoggedOut;
+    };
+    let Ok(mut stderr) = tempfile::tempfile() else {
+        return ProbeOutcome::LoggedOut;
+    };
+    let (Ok(stdout_writer), Ok(stderr_writer)) = (stdout.try_clone(), stderr.try_clone()) else {
+        return ProbeOutcome::LoggedOut;
+    };
     let mut command = std::process::Command::new(binary_path);
     command.args(&probe_args[1..]);
     if let Some(path) = augmented_path {
         command.env("PATH", path);
     }
     crate::util::configure_no_window(&mut command);
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    command.stdout(stdout_writer).stderr(stderr_writer);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -288,8 +299,6 @@ fn run_login_probe(
     let Ok(mut child) = command.spawn() else {
         return ProbeOutcome::LoggedOut;
     };
-    let stdout_reader = child.stdout.take().map(spawn_bounded_reader);
-    let stderr_reader = child.stderr.take().map(spawn_bounded_reader);
     let started_at = Instant::now();
     let (status, timed_out) = loop {
         match child.try_wait() {
@@ -308,8 +317,12 @@ fn run_login_probe(
             }
         }
     };
-    let _stdout = join_reader(stdout_reader);
-    let stderr = join_reader(stderr_reader);
+    // The direct child may have exited after forking a helper that inherited
+    // its output descriptors. Terminate that probe-only process group before
+    // returning so no authentication helper survives a completed probe.
+    kill_probe_process_tree(&mut child);
+    let _stdout = read_bounded_output(&mut stdout);
+    let stderr = read_bounded_output(&mut stderr);
     if timed_out {
         ProbeOutcome::TimedOut
     } else if let Some(status) = status {
@@ -319,28 +332,15 @@ fn run_login_probe(
     }
 }
 
-fn spawn_bounded_reader<R>(mut reader: R) -> std::thread::JoinHandle<Vec<u8>>
-where
-    R: Read + Send + 'static,
-{
-    std::thread::spawn(move || {
-        let mut retained = Vec::new();
-        let mut chunk = [0_u8; 8 * 1024];
-        while let Ok(count) = reader.read(&mut chunk) {
-            if count == 0 {
-                break;
-            }
-            let remaining = MAX_PROBE_OUTPUT_BYTES.saturating_sub(retained.len());
-            retained.extend_from_slice(&chunk[..count.min(remaining)]);
-        }
-        retained
-    })
-}
-
-fn join_reader(reader: Option<std::thread::JoinHandle<Vec<u8>>>) -> Vec<u8> {
-    reader
-        .and_then(|reader| reader.join().ok())
-        .unwrap_or_default()
+fn read_bounded_output(file: &mut std::fs::File) -> Vec<u8> {
+    if file.seek(SeekFrom::Start(0)).is_err() {
+        return Vec::new();
+    }
+    let mut retained = Vec::new();
+    let _ = file
+        .take(MAX_PROBE_OUTPUT_BYTES as u64)
+        .read_to_end(&mut retained);
+    retained
 }
 
 fn kill_probe_process_tree(child: &mut std::process::Child) {
@@ -452,6 +452,42 @@ mod tests {
         );
         assert_eq!(outcome, ProbeOutcome::LoggedOut);
         assert!(started_at.elapsed() < Duration::from_secs(2));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn login_probe_does_not_wait_for_descendant_held_output() {
+        use std::fs;
+        use std::time::{Duration, Instant};
+
+        let (temp, script_path) =
+            executable_script("#!/bin/sh\n(sleep 30) >&2 &\nprintf '%s' \"$!\" > \"$1\"\nexit 0\n");
+        let marker = temp.path().join("descendant-pid");
+        let marker_arg = marker.to_string_lossy().into_owned();
+        let started_at = Instant::now();
+        let outcome = super::run_login_probe(
+            &script_path,
+            &["probe-script", &marker_arg],
+            None,
+            Duration::from_secs(1),
+        );
+        assert_eq!(outcome, ProbeOutcome::LoggedIn);
+        assert!(started_at.elapsed() < Duration::from_secs(2));
+
+        let pid: i32 = fs::read_to_string(marker)
+            .expect("descendant pid marker")
+            .parse()
+            .expect("numeric descendant pid");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok()
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_err(),
+            "probe descendant survived"
+        );
     }
 
     #[cfg(unix)]
