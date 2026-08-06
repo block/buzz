@@ -19,6 +19,10 @@ import { useCreateProjectMutation } from "@/features/projects/useCreateProject";
 import { selectProjectRepository } from "@/features/projects/projectModels";
 import { useProjectsRepoSnapshotsQuery } from "@/features/projects/useProjectsRepoSnapshots";
 import {
+  useMemberChannelIds,
+  useRepositoryUnavailableReasonFor,
+} from "@/features/projects/useRepositoryAccess";
+import {
   projectRepoHostForProject,
   projectRepoHostForRepository,
 } from "@/features/projects/lib/projectRepoHost";
@@ -54,8 +58,10 @@ import {
 } from "@/features/projects/ui/RepositoryCards";
 import {
   getProjectUpdatedAt,
+  isProjectAccessibleToViewer,
   isProjectMine,
   isProjectOwnedByCurrentUser,
+  isRepositoryAccessibleToViewer,
   projectHasAgent,
   projectOwnerIsUser,
   projectPeople,
@@ -94,6 +100,7 @@ const PROJECT_SCOPE_OPTIONS: Array<{
   value: ProjectsRepositoryScope;
 }> = [
   { label: "All", value: "all" },
+  { label: "Accessible", value: "accessible" },
   { label: "My Projects", value: "mine" },
   { label: "Local", value: "local" },
 ];
@@ -102,6 +109,7 @@ const REPOSITORY_SCOPE_OPTIONS: Array<{
   value: ProjectsRepositoryScope;
 }> = [
   { label: "All", value: "all" },
+  { label: "Accessible", value: "accessible" },
   { label: "My Repositories", value: "mine" },
   { label: "Local", value: "local" },
   { label: "Buzz-hosted", value: "buzz" },
@@ -217,6 +225,11 @@ export function ProjectsView() {
     snapshotProjects,
     activeCommunity?.reposDir,
   );
+  const memberChannelIds = useMemberChannelIds();
+  const repositoryUnavailableReasonFor = useRepositoryUnavailableReasonFor(
+    repoSnapshotsQuery.data?.unavailable,
+    memberChannelIds,
+  );
   const [createProjectOpen, setCreateProjectOpen] = React.useState(false);
   const [createIssueOpen, setCreateIssueOpen] = React.useState(false);
   const [createPullRequestOpen, setCreatePullRequestOpen] =
@@ -325,6 +338,16 @@ export function ProjectsView() {
     [localRepositoriesQuery.data],
   );
 
+  const repositoryAccessInput = React.useMemo(
+    () => ({
+      currentPubkey,
+      localRepoNames,
+      memberChannelIds,
+      relayOrigin,
+    }),
+    [currentPubkey, localRepoNames, memberChannelIds, relayOrigin],
+  );
+
   const visibleProjects = React.useMemo(() => {
     if (filter !== "projects" && filter !== "agents" && filter !== "users") {
       return [];
@@ -334,6 +357,8 @@ export function ProjectsView() {
       .filter((project) => {
         const summary = activitySummariesQuery.data?.[project.id];
         const people = projectPeople(project, summary);
+        if (repositoryScope === "accessible")
+          return isProjectAccessibleToViewer(project, repositoryAccessInput);
         if (repositoryScope === "mine")
           return isProjectMine(project, currentPubkey);
         if (repositoryScope === "local")
@@ -376,6 +401,7 @@ export function ProjectsView() {
     profiles,
     projects,
     relayOrigin,
+    repositoryAccessInput,
     repositoryScope,
     sort,
   ]);
@@ -396,6 +422,12 @@ export function ProjectsView() {
     ];
     return repositories
       .filter(({ repository }) => {
+        if (repositoryScope === "accessible") {
+          return isRepositoryAccessibleToViewer(
+            repository,
+            repositoryAccessInput,
+          );
+        }
         if (repositoryScope === "mine") {
           if (!currentPubkey) return false;
           const normalizedCurrentPubkey = normalizePubkey(currentPubkey);
@@ -444,6 +476,7 @@ export function ProjectsView() {
     localRepoNames,
     projects,
     relayOrigin,
+    repositoryAccessInput,
     repositoryActivitySummariesQuery.data,
     repositoryScope,
     sort,
@@ -625,9 +658,9 @@ export function ProjectsView() {
               people={projectPeople(project, summary)}
               profiles={profiles}
               project={project}
-              repositoryUnavailableReason={
-                repoSnapshotsQuery.data?.unavailable[project.id]
-              }
+              repositoryUnavailableReason={repositoryUnavailableReasonFor(
+                project,
+              )}
               summary={summary}
             />
           );
@@ -652,9 +685,9 @@ export function ProjectsView() {
               people={projectPeople(project, summary)}
               profiles={profiles}
               project={project}
-              repositoryUnavailableReason={
-                repoSnapshotsQuery.data?.unavailable[project.id]
-              }
+              repositoryUnavailableReason={repositoryUnavailableReasonFor(
+                project,
+              )}
               summary={summary}
             />
           );
@@ -768,6 +801,7 @@ export function ProjectsView() {
 
   const projectsHeader = (
     <PageHeader
+      action={<div className="-mr-[10px] -mt-2">{createMenu}</div>}
       className="pointer-events-auto mb-8"
       description="Set up and manage your projects."
       title="Projects"
@@ -776,10 +810,9 @@ export function ProjectsView() {
 
   const projectsNavigation = (
     <div className="flex h-[3.25rem] min-w-0 items-center">
-      <div className="h-full min-w-0 flex-1">
+      <div className="h-full min-w-0 flex-1 overflow-hidden">
         <ProjectsToolbar filter={filter} onFilterChange={handleFilterChange} />
       </div>
-      {createMenu}
     </div>
   );
 

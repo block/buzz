@@ -29,6 +29,8 @@ import { ReadmePanel } from "./ProjectReadmePanel";
 import type { RepoSourceHeaderControls } from "./ProjectRepositorySource";
 
 type ProjectOverviewPanelProps = {
+  /** `buzz-channel` binding of the repository, for access-restricted copy. */
+  accessChannelId?: string | null;
   contributors: ProjectRepoContributor[];
   externalHost?: string;
   externalUrl?: string | null;
@@ -141,6 +143,7 @@ export function OverviewRailSection({
 }
 
 export function ProjectOverviewPanel({
+  accessChannelId,
   contributors,
   externalHost,
   externalUrl,
@@ -174,6 +177,7 @@ export function ProjectOverviewPanel({
         {/* ReadmePanel renders its own "no README" fallback while keeping
             the branch + source controls reachable. */}
         <ReadmePanel
+          accessChannelId={accessChannelId}
           externalHost={externalHost}
           externalUrl={externalUrl}
           file={readmeFile}

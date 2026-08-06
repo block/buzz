@@ -27,6 +27,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import {
   PROJECT_EVENT_VISUALS,
+  ProjectEventTypeIcon,
   type ProjectEventKind,
 } from "./ProjectEventTypeIcon";
 
@@ -274,18 +275,37 @@ function ActivityCard({
   return (
     <div
       className={cn(
-        "relative block w-full rounded-xl border border-border/60 bg-transparent text-left transition-colors hover:bg-muted/20",
+        "relative block w-full bg-transparent text-left transition-colors hover:bg-muted/20",
         compact ? "p-3" : "p-4",
       )}
       data-testid="projects-activity-card"
     >
       <button
         aria-label={`Open ${item.title} in ${item.target.project.name}`}
-        className="absolute inset-0 rounded-xl focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+        className="absolute inset-0 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
         onClick={onOpen}
         type="button"
       />
       <div className="pointer-events-none relative flex min-w-0 items-start gap-3">
+        <div className="relative flex w-10 shrink-0 justify-end self-stretch">
+          <span
+            aria-hidden="true"
+            className={cn(
+              "absolute left-1.5 right-6 rounded-bl-md border-b border-l border-border/80",
+              compact ? "-top-3 h-6" : "-top-4 h-7",
+            )}
+          />
+          <span
+            aria-hidden="true"
+            className={cn(
+              "absolute left-1.5 right-6 top-3 rounded-tl-md border-l border-t border-border/80",
+              compact ? "-bottom-3" : "-bottom-4",
+            )}
+          />
+          <span className="relative z-10 inline-flex rounded-full bg-background">
+            <ProjectEventTypeIcon kind={item.kind} />
+          </span>
+        </div>
         {item.actorPubkey ? (
           <UserProfilePopover pubkey={item.actorPubkey} triggerElement="span">
             <button
@@ -420,7 +440,8 @@ export function ProjectsActivityFeed(props: ProjectsActivityFeedProps) {
 
   return (
     <div
-      className={cn("relative", props.compact ? "space-y-2.5" : "space-y-3")}
+      className="relative bg-transparent"
+      data-testid="projects-activity-timeline"
     >
       {items.map((item) => {
         return (

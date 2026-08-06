@@ -23,7 +23,11 @@ import {
   type ViewerGitIdentity,
 } from "@/features/projects/lib/projectContributorMatching";
 import type { ProjectRepoHost } from "@/features/projects/lib/projectRepoHost";
-import { projectRepoUnavailableReason } from "@/features/projects/lib/projectRepoAvailability";
+import {
+  projectRepoUnavailableReason,
+  refineRepoUnavailableReason,
+} from "@/features/projects/lib/projectRepoAvailability";
+import { useMemberChannelIds } from "@/features/projects/useRepositoryAccess";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { Button } from "@/shared/ui/button";
 import { Tabs, TabsContent } from "@/shared/ui/tabs";
@@ -216,9 +220,17 @@ export function WorkspaceTabs({
       : files.length === 0
         ? "empty"
         : "available";
+  // The relay masks channel-ACL denials as 404 (anti-enumeration), so a
+  // "missing" git result is re-classified with the repository's channel
+  // binding and the viewer's memberships before it reaches the UI copy.
+  const memberChannelIds = useMemberChannelIds();
   const unavailableReason =
     gitDataState === "unavailable" && !externalHost
-      ? projectRepoUnavailableReason(displayedSnapshotError)
+      ? refineRepoUnavailableReason({
+          reason: projectRepoUnavailableReason(displayedSnapshotError),
+          repositoryChannelId: project.channelId,
+          memberChannelIds,
+        })
       : undefined;
   const repositoryLoaded =
     gitDataState === "available" || gitDataState === "empty";
@@ -411,6 +423,7 @@ export function WorkspaceTabs({
 
       <TabsContent className="m-0" value="overview">
         <ProjectOverviewPanel
+          accessChannelId={project.channelId}
           contributors={displayedContributors}
           externalHost={externalHost}
           externalUrl={externalHost ? sourceControls?.externalUrl : null}

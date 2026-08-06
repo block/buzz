@@ -62,9 +62,11 @@ export function ProjectsOverviewRail({
   const people = overviewPeople(projects, summaries);
   const activityByDay = overviewActivityByDay(projects, summaries);
 
+  // Plain stacked cards — the overview panel's rail column owns placement
+  // and spacing, so the sections can never drift apart or collide.
   return (
     <>
-      <div className="order-4 min-w-0 border-t border-border/40 px-4 py-4 xl:order-none xl:col-start-2 xl:row-start-1 xl:border-t-0 xl:pt-0">
+      <div className="rounded-lg border border-border/60 p-4">
         <OverviewRailSection title="People" titleClassName="text-base">
           {people.length > 0 ? (
             <div className="flex flex-wrap gap-1.5">
@@ -94,13 +96,13 @@ export function ProjectsOverviewRail({
         </OverviewRailSection>
       </div>
 
-      <div className="order-5 min-w-0 border-t border-border/40 px-4 pb-4 pt-3 xl:order-none xl:col-start-2 xl:row-start-2 xl:border-t-0">
-        <section className="space-y-2">
-          <h3 className="text-base font-semibold text-foreground">
-            Contribution Activity
-          </h3>
+      <div className="min-w-0 rounded-lg border border-border/60 p-4">
+        <OverviewRailSection
+          title="Contribution Activity"
+          titleClassName="text-base"
+        >
           <ProjectsContributionGraph activityByDay={activityByDay} compact />
-        </section>
+        </OverviewRailSection>
       </div>
     </>
   );

@@ -280,6 +280,16 @@ function RepositoryUnavailableIndicator({
       description: "No git repository was found on the Buzz relay.",
       label: "Uninitialized",
     },
+    access: {
+      description:
+        "You’re not a member of the channel that grants access to this repository.",
+      label: "No access",
+    },
+    unbound: {
+      description:
+        "The repository has no access channel binding, so the relay cannot authorize reads.",
+      label: "No access channel",
+    },
     network: {
       description: "The Buzz git service could not be reached.",
       label: "Unreachable",
@@ -292,13 +302,17 @@ function RepositoryUnavailableIndicator({
       description: "Buzz could not load this repository.",
       label: "Unavailable",
     },
-  }[reason];
+  } satisfies Record<
+    ProjectRepoUnavailableReason,
+    { description: string; label: string }
+  >;
+  const { description, label } = status[reason];
 
   return (
     <Tooltip>
       <TooltipTrigger asChild>
         <span
-          aria-label={`Repository ${status.label.toLowerCase()}`}
+          aria-label={`Repository ${label.toLowerCase()}`}
           className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-amber-600 hover:bg-amber-500/10 dark:text-amber-300"
           role="img"
         >
@@ -306,8 +320,8 @@ function RepositoryUnavailableIndicator({
         </span>
       </TooltipTrigger>
       <TooltipContent className="max-w-64">
-        <p className="font-medium">{status.label}</p>
-        <p className="text-muted-foreground">{status.description}</p>
+        <p className="font-medium">{label}</p>
+        <p className="text-muted-foreground">{description}</p>
       </TooltipContent>
     </Tooltip>
   );
