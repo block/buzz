@@ -662,6 +662,11 @@ export function RepositoryFilesPanel({
     [currentPath, files],
   );
   const visibleEntries = entries.slice(0, visibleEntryCount);
+  const nextVisibleEntryCount = nextRepositoryEntryLimit(
+    visibleEntryCount,
+    entries.length,
+  );
+  const nextEntryCount = nextVisibleEntryCount - visibleEntries.length;
   const latestCommit = snapshot?.latestCommit ?? null;
   const knownLatestCommitProfile = React.useMemo(
     () => profileForCommitAuthor(latestCommit, profiles),
@@ -971,10 +976,11 @@ export function RepositoryFilesPanel({
       </div>
       {entries.length > visibleEntries.length ? (
         <div className="flex items-center justify-between gap-3 border-border/50 border-t px-4 py-3 text-2xs text-muted-foreground">
-          <span>
+          <span aria-live="polite">
             Showing {visibleEntries.length} of {entries.length} entries.
           </span>
           <button
+            aria-label={`Show next ${nextEntryCount} entries, ${nextVisibleEntryCount} of ${entries.length} total`}
             className="shrink-0 font-medium text-foreground hover:underline"
             onClick={() =>
               setVisibleEntryCount((current) =>
@@ -983,11 +989,7 @@ export function RepositoryFilesPanel({
             }
             type="button"
           >
-            Show next{" "}
-            {Math.min(
-              REPOSITORY_ENTRY_PAGE_SIZE,
-              entries.length - visibleEntries.length,
-            )}
+            Show next {nextEntryCount}
           </button>
         </div>
       ) : null}
