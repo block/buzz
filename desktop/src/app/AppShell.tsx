@@ -703,7 +703,6 @@ export function AppShell() {
     settingsOpen,
   ]);
   useSettingsShortcuts({
-    onClose: handleCloseSettings,
     onOpenSettings: handleOpenSettings,
     open: isHuddleRoom ? undefined : settingsOpen,
   });
