@@ -92,19 +92,23 @@ function taskFromEvents(events: readonly ObserverEvent[]): {
 }
 
 function hasOsSandboxEvidence(events: readonly ObserverEvent[]): boolean {
-  return events.some((event) => {
-    if (event.kind !== "acp_read") return false;
+  const toolOutputById = new Map<string, string>();
+  for (const event of events) {
+    if (event.kind !== "acp_read") continue;
     const eventPayload = payload(event);
-    if (asString(eventPayload.method) !== "session/update") return false;
+    if (asString(eventPayload.method) !== "session/update") continue;
     const update = asRecord(asRecord(eventPayload.params).update);
-    return (
-      asString(update.sessionUpdate) === "tool_call_update" &&
-      asString(update.status) === "failed" &&
-      /permission denied|operation not permitted/i.test(
-        extractToolResult(update),
-      )
-    );
-  });
+    if (asString(update.sessionUpdate) !== "tool_call_update") continue;
+    const toolCallId = asString(update.toolCallId);
+    const output = extractToolResult(update);
+    if (toolCallId && output) toolOutputById.set(toolCallId, output);
+    if (asString(update.status) !== "failed") continue;
+    const detail = output || (toolCallId ? toolOutputById.get(toolCallId) : "");
+    if (/permission denied|operation not permitted/i.test(detail ?? "")) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export class LiveCausalLedger {

@@ -179,7 +179,8 @@ test("explains the latest raw ACP turn instead of the whole channel history", ()
         params: {
           update: {
             sessionUpdate: "tool_call_update",
-            status: "failed",
+            toolCallId: "touch-library",
+            status: "in_progress",
             content: [
               {
                 type: "content",
@@ -198,6 +199,32 @@ test("explains the latest raw ACP turn instead of the whole channel history", ()
       turnId: "turn-2",
       seq: 6,
       timestamp: "2026-08-05T12:01:04Z",
+      kind: "acp_read",
+      payload: {
+        method: "session/update",
+        params: {
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId: "touch-library",
+            status: "failed",
+            content: [],
+          },
+        },
+      },
+    },
+    ...Array.from({ length: 6 }, (_, index) => ({
+      ...base,
+      turnId: "turn-2",
+      seq: 7 + index,
+      timestamp: `2026-08-05T12:01:${String(5 + index).padStart(2, "0")}Z`,
+      kind: "acp_read",
+      payload: { method: "session/update", params: { update: {} } },
+    })),
+    {
+      ...base,
+      turnId: "turn-2",
+      seq: 13,
+      timestamp: "2026-08-05T12:01:11Z",
       kind: "turn_completed",
       payload: {},
     },

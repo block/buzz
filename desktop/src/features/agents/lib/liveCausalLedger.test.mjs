@@ -83,7 +83,8 @@ test("captures the task and OS failure from raw ACP evidence", async () => {
       params: {
         update: {
           sessionUpdate: "tool_call_update",
-          status: "failed",
+          toolCallId: "touch-library",
+          status: "in_progress",
           content: [
             {
               type: "text",
@@ -94,7 +95,21 @@ test("captures the task and OS failure from raw ACP evidence", async () => {
       },
     }),
   );
-  await ledger.ingest("agent", observer(3, "turn_completed"));
+  await ledger.ingest(
+    "agent",
+    observer(3, "acp_read", {
+      method: "session/update",
+      params: {
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "touch-library",
+          status: "failed",
+          content: [],
+        },
+      },
+    }),
+  );
+  await ledger.ingest("agent", observer(4, "turn_completed"));
 
   const [entry] = await ledger.entries();
   assert.equal(

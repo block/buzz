@@ -127,6 +127,7 @@ function permissionDecisionFromRawEvent(
 
 function toolResultFromRawEvent(
   event: ObserverEvent,
+  observerEvents: readonly ObserverEvent[],
 ): { detail: string; failed: boolean } | null {
   if (event.kind !== "acp_read" || acpMethod(event) !== "session/update") {
     return null;
@@ -135,7 +136,22 @@ function toolResultFromRawEvent(
   if (asString(update.sessionUpdate) !== "tool_call_update") return null;
   const status = asString(update.status);
   if (status !== "completed" && status !== "failed") return null;
-  const detail = extractToolResult(update) || `Tool ${status}.`;
+  const toolCallId = asString(update.toolCallId);
+  const earlierUpdate = toolCallId
+    ? [...observerEvents]
+        .reverse()
+        .map((candidate) => acpUpdate(candidate))
+        .find(
+          (candidateUpdate) =>
+            asString(candidateUpdate.sessionUpdate) === "tool_call_update" &&
+            asString(candidateUpdate.toolCallId) === toolCallId &&
+            Boolean(extractToolResult(candidateUpdate)),
+        )
+    : null;
+  const detail =
+    extractToolResult(update) ||
+    (earlierUpdate ? extractToolResult(earlierUpdate) : null) ||
+    `Tool ${status}.`;
   return {
     detail,
     failed:
@@ -170,7 +186,10 @@ function taskFromEvents(events: readonly ObserverEvent[]): string | null {
   return parsePromptText(prompt).userText || prompt.trim() || null;
 }
 
-function projectObserverEvent(event: ObserverEvent): CausalTimelineEvent {
+function projectObserverEvent(
+  event: ObserverEvent,
+  observerEvents: readonly ObserverEvent[],
+): CausalTimelineEvent {
   const payload = objectPayload(event);
   const eventId = observerEventId(event);
 
@@ -194,7 +213,7 @@ function projectObserverEvent(event: ObserverEvent): CausalTimelineEvent {
     };
   }
 
-  const rawToolResult = toolResultFromRawEvent(event);
+  const rawToolResult = toolResultFromRawEvent(event, observerEvents);
   if (rawToolResult) {
     const permissionFailure =
       rawToolResult.failed &&
@@ -336,7 +355,9 @@ export function buildTrustworthySessionTimeline(
   if (observerEvents.length === 0 && findings.length === 0) return [];
 
   const projected = [
-    ...observerEvents.map(projectObserverEvent),
+    ...observerEvents.map((event) =>
+      projectObserverEvent(event, observerEvents),
+    ),
     ...findings.map(projectFinding),
   ];
   const seenLayers = new Set(projected.map((event) => event.sourceLayer));
@@ -505,13 +526,21 @@ export function explainSession(
         evidenceIds: replayEvent ? [observerEventId(replayEvent)] : [],
       }
     : null;
+  const causalEvidence = facts.filter(
+    (event) =>
+      event.class === "decision" ||
+      event.title === "Tool failed" ||
+      event.title === "Tool completed" ||
+      event.title === "Turn failed",
+  );
 
   return {
     task,
     outcome,
     why,
     confidence,
-    evidence: facts.slice(-5),
+    evidence:
+      causalEvidence.length > 0 ? causalEvidence.slice(-5) : facts.slice(-5),
     unknowns: gaps,
     nextAction:
       remediation?.status === "validated"
