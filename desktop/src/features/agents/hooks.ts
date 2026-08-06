@@ -41,10 +41,14 @@ import {
 } from "@/shared/api/tauri";
 import type { HarnessDefinitionInput } from "@/shared/api/tauri";
 import {
+  archiveExternalAgentRuntime,
+  listExternalAgentRuntimes,
+  registerExternalAgentRuntime,
   setManagedAgentAutoRestart,
   setManagedAgentStartOnAppLaunch,
   startManagedAgent,
   stopManagedAgent,
+  type RegisterExternalAgentRuntimeInput,
 } from "@/shared/api/tauriManagedAgents";
 import { bootstrapManagedAgentRuntimePairs } from "@/features/agents/managedAgentRuntimeHooks";
 import {
@@ -71,6 +75,7 @@ import type {
   Channel,
   CreateManagedAgentInput,
   CreatePersonaInput,
+  ExternalAgentRuntime,
   ManagedAgent,
   UpdateManagedAgentInput,
   UpdatePersonaInput,
@@ -107,6 +112,9 @@ export type {
 
 export const relayAgentsQueryKey = ["relay-agents"] as const;
 export const managedAgentsQueryKey = ["managed-agents"] as const;
+export const externalAgentRuntimesQueryKey = [
+  "external-agent-runtimes",
+] as const;
 export const personasQueryKey = ["personas"] as const;
 export const acpRuntimesQueryKey = ["acp-runtimes"] as const;
 export const acpAuthMethodsQueryKey = ["acp-auth-methods"] as const;
@@ -356,6 +364,52 @@ export function useManagedAgentsQuery(options?: { enabled?: boolean }) {
       return agents?.some((agent) => agent.status === "running")
         ? 5_000
         : false;
+    },
+  });
+}
+
+export function useExternalAgentRuntimesQuery() {
+  return useQuery({
+    queryKey: externalAgentRuntimesQueryKey,
+    queryFn: listExternalAgentRuntimes,
+  });
+}
+
+export function useRegisterExternalAgentRuntimeMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: RegisterExternalAgentRuntimeInput) =>
+      registerExternalAgentRuntime(input),
+    onSuccess: (runtime) => {
+      queryClient.setQueryData<ExternalAgentRuntime[]>(
+        externalAgentRuntimesQueryKey,
+        (current) => {
+          const entries = current ?? [];
+          return [
+            ...entries.filter(
+              (entry) => entry.agentPubkey !== runtime.agentPubkey,
+            ),
+            runtime,
+          ];
+        },
+      );
+    },
+  });
+}
+
+export function useArchiveExternalAgentRuntimeMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (agentPubkey: string) =>
+      archiveExternalAgentRuntime(agentPubkey),
+    onSuccess: (runtime) => {
+      queryClient.setQueryData<ExternalAgentRuntime[]>(
+        externalAgentRuntimesQueryKey,
+        (current) =>
+          (current ?? []).map((entry) =>
+            entry.agentPubkey === runtime.agentPubkey ? runtime : entry,
+          ),
+      );
     },
   });
 }

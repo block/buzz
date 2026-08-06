@@ -21,6 +21,7 @@ import { TeamDeleteDialog } from "./TeamDeleteDialog";
 import { TeamDialog } from "./TeamDialog";
 import { TeamsSection } from "./TeamsSection";
 import { UnifiedAgentsSection } from "./UnifiedAgentsSection";
+import { ExternalRuntimesSection } from "./ExternalRuntimesSection";
 import { useManagedAgentActions } from "./useManagedAgentActions";
 import { usePersonaActions } from "./usePersonaActions";
 import { useTeamActions } from "./useTeamActions";
@@ -270,6 +271,8 @@ export function AgentsView() {
                 void personas.handleImportSnapshotFile(fileBytes, fileName);
               }}
             />
+
+            <ExternalRuntimesSection />
 
             <TeamsSection
               error={
