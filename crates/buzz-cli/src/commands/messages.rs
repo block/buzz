@@ -83,6 +83,73 @@ async fn resolve_thread_ref(
     })
 }
 
+/// Decide which event kind to emit for a root (non-reply) send, given the
+/// caller's explicit `--kind` override and the target channel's resolved
+/// channel type (`"forum"` or `"stream"`).
+///
+/// Rules:
+/// - An explicit `--kind` always wins: operators using `--kind 9` in a forum
+///   channel are intentionally opting out of the forum view and that escape
+///   hatch stays available.
+/// - When `--kind` is absent and the channel resolves as `forum`, emit
+///   `kind: 45001` so the new message appears in Buzz Desktop's forum topic
+///   list (the canonical first-party surface). Reporter: #5075.
+/// - When `--kind` is absent and the channel is `stream` (or its channel
+///   type is not resolvable to a canonical surface), fall back to the
+///   existing default of `kind: 9`.
+fn resolve_send_root_kind(explicit: Option<u16>, channel_type: Option<&str>) -> u16 {
+    if let Some(k) = explicit {
+        return k;
+    }
+    match channel_type {
+        Some("forum") => 45001,
+        _ => 9,
+    }
+}
+
+/// Query the relay for the target channel's kind:39000 metadata event and
+/// extract its channel type from the `["t", ...]` tag.
+///
+/// Returns `Ok(None)` when the channel is not found, its metadata is
+/// missing, or its `t` tag is absent — the caller treats this as "unknown
+/// channel type" and falls back to the default stream path. Errors only on
+/// transport or wire-shape failures, so a malformed 39000 does not silently
+/// route a forum post into the wrong surface.
+async fn fetch_channel_type(
+    client: &BuzzClient,
+    channel_uuid: &Uuid,
+) -> Result<Option<String>, CliError> {
+    let channel_id = channel_uuid.to_string();
+    let filter = serde_json::json!({
+        "kinds": [39000],
+        "#d": [channel_id],
+        "limit": 1,
+    });
+    let raw = client.query(&filter).await?;
+    let events: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| CliError::Other(format!("failed to parse query response: {e}")))?;
+    let arr = events
+        .as_array()
+        .ok_or_else(|| CliError::Other("query response is not an array".into()))?;
+    let event = match arr.first() {
+        Some(ev) => ev,
+        None => return Ok(None),
+    };
+    let tags = event
+        .get("tags")
+        .and_then(|t| t.as_array())
+        .ok_or_else(|| CliError::Other("channel metadata event missing 'tags' field".into()))?;
+    for tag in tags {
+        let Some(tag_arr) = tag.as_array() else {
+            continue;
+        };
+        if tag_arr.first().and_then(|v| v.as_str()) == Some("t") {
+            return Ok(tag_arr.get(1).and_then(|v| v.as_str()).map(str::to_string));
+        }
+    }
+    Ok(None)
+}
+
 /// Resolve the channel UUID for an event by querying for it via POST /query.
 /// Extracts the `h` tag value from the returned event's tags.
 async fn resolve_channel_id(client: &BuzzClient, event_id: &str) -> Result<Uuid, CliError> {
@@ -643,12 +710,26 @@ pub async fn cmd_send_message(
 
     let mention_refs: Vec<&str> = mention_pubkeys.iter().map(String::as_str).collect();
 
-    let builder = match p.kind {
-        Some(45001) => {
+    // Resolve the target channel's kind:39000 metadata when the caller did
+    // not pass `--kind` and did not pass `--reply-to`. A root send into a
+    // forum channel must be emitted as `kind: 45001` so it appears in Buzz
+    // Desktop's canonical forum topic list; otherwise it publishes as an
+    // invisible `kind: 9` stream event inside the forum. Reporter: #5075.
+    // Reply sends are handled separately (issue #3828 covers kind-45003
+    // inference from the parent event).
+    let resolved_kind = if p.kind.is_none() && p.reply_to.is_none() {
+        let channel_type = fetch_channel_type(client, &channel_uuid).await?;
+        resolve_send_root_kind(None, channel_type.as_deref())
+    } else {
+        p.kind.unwrap_or(9)
+    };
+
+    let builder = match resolved_kind {
+        45001 => {
             buzz_sdk::build_forum_post(channel_uuid, &final_content, &mention_refs, &media_tags)
                 .map_err(|e| CliError::Other(format!("build_forum_post failed: {e}")))?
         }
-        Some(45003) => {
+        45003 => {
             let tr = thread_ref.as_ref().ok_or_else(|| {
                 CliError::Usage("--reply-to is required for forum comments (kind 45003)".into())
             })?;
@@ -661,7 +742,7 @@ pub async fn cmd_send_message(
             )
             .map_err(|e| CliError::Other(format!("build_forum_comment failed: {e}")))?
         }
-        None | Some(9) => buzz_sdk::build_message(
+        9 => buzz_sdk::build_message(
             channel_uuid,
             &final_content,
             thread_ref.as_ref(),
@@ -670,7 +751,7 @@ pub async fn cmd_send_message(
             &media_tags,
         )
         .map_err(|e| CliError::Other(format!("build_message failed: {e}")))?,
-        Some(k) => {
+        k => {
             return Err(CliError::Usage(format!(
                 "--kind {k} is not supported (use 9, 45001, or 45003)"
             )))
@@ -995,7 +1076,7 @@ mod tests {
     use super::{
         event_mention_pubkeys, find_root_from_tags, match_profiles_by_name, merge_message_mentions,
         missing_members, normalize_explicit_mentions, parse_member_pubkeys,
-        resolve_names_to_pubkeys,
+        resolve_names_to_pubkeys, resolve_send_root_kind,
     };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
@@ -1371,5 +1452,40 @@ mod tests {
             profile_event(PK_VALID_A, Some("Aaron"), None),
         ];
         assert_eq!(match_profiles_by_name(&events, "Aaron").len(), 1);
+    }
+
+    // Regression tests for #5075: default root-send kind must be
+    // channel-type-aware so a forum root lands on the forum surface, not
+    // on the invisible stream.
+
+    /// No explicit `--kind` + forum channel → kind 45001 (forum topic).
+    #[test]
+    fn resolve_send_root_kind_forum_default_becomes_45001() {
+        assert_eq!(resolve_send_root_kind(None, Some("forum")), 45001);
+    }
+
+    /// No explicit `--kind` + stream channel → stays kind 9.
+    #[test]
+    fn resolve_send_root_kind_stream_default_stays_9() {
+        assert_eq!(resolve_send_root_kind(None, Some("stream")), 9);
+    }
+
+    /// No explicit `--kind` + unknown/unresolvable channel type → kind 9.
+    /// Guards the case where kind:39000 metadata is missing or has no
+    /// `["t", ...]` tag — we must not silently mislabel the destination.
+    #[test]
+    fn resolve_send_root_kind_unknown_type_falls_back_to_9() {
+        assert_eq!(resolve_send_root_kind(None, None), 9);
+        assert_eq!(resolve_send_root_kind(None, Some("")), 9);
+        assert_eq!(resolve_send_root_kind(None, Some("unknown-type")), 9);
+    }
+
+    /// An explicit `--kind` always wins, including kind 9 into a forum.
+    /// The opt-out must remain available for operators who know what
+    /// they're doing; the bug in #5075 is the *default* path.
+    #[test]
+    fn resolve_send_root_kind_explicit_overrides_forum_default() {
+        assert_eq!(resolve_send_root_kind(Some(9), Some("forum")), 9);
+        assert_eq!(resolve_send_root_kind(Some(45001), Some("stream")), 45001);
     }
 }
