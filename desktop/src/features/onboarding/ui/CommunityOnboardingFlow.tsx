@@ -371,6 +371,7 @@ export function CommunityOnboardingFlow({
             setIsMembershipDenied(false);
             update({ stage: "connecting", error: undefined });
           }}
+          onInviteRedeemStarted={() => setIsMembershipDenied(false)}
           onRetry={() => {
             setIsMembershipDenied(false);
             update({ stage: "connecting", error: undefined });
