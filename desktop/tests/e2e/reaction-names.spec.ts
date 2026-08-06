@@ -15,6 +15,8 @@ const MAX_REACTION_AVATAR_URL =
   'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"%3E%3Crect width="16" height="16" rx="4" fill="%23e5484d"/%3E%3C/svg%3E';
 const SHORT_REACTION_AVATAR_URL =
   'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"%3E%3Crect width="16" height="16" rx="4" fill="%2300a36c"/%3E%3C/svg%3E';
+const LONG_LITERAL_REACTION =
+  "this-is-a-deliberately-long-literal-reaction-that-must-truncate-without-moving-or-overlapping-the-count";
 const SCREENSHOT_DIR =
   process.env.REACTION_POPOVER_SCREENSHOT_DIR ??
   "test-results/reaction-popover-screenshots";
@@ -230,13 +232,26 @@ test("literal fallback reactions do not overlap their counts", async ({
       }) === true,
   );
 
-  for (const reaction of [":bozo:", "ship it"]) {
+  for (const reaction of [":bozo:", "ship it", LONG_LITERAL_REACTION]) {
     await emitReaction(page, reaction, BOB_PUBKEY);
     await emitReaction(page, reaction, "c".repeat(64));
   }
 
   await expectFallbackPill(page, ":bozo:", "bozo");
   await expectFallbackPill(page, "ship it", "ship it");
+  const longPill = reactionTargetRow(page).getByRole("button", {
+    name: `Toggle ${LONG_LITERAL_REACTION} reaction`,
+  });
+  const longGlyph = longPill.locator("span[title]");
+  await expectFallbackPill(page, LONG_LITERAL_REACTION, LONG_LITERAL_REACTION);
+  await expect(longGlyph).toHaveCSS("max-width", "128px");
+  await expect
+    .poll(() =>
+      longGlyph.evaluate(
+        (element) => element.scrollWidth > element.clientWidth,
+      ),
+    )
+    .toBe(true);
   await reactionTargetRow(page).screenshot({
     animations: "disabled",
     path: "test-results/reaction-text-fallback.png",
