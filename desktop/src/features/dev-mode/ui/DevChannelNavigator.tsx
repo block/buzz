@@ -30,6 +30,7 @@ function ChannelRow({
   isWorking,
   isHighPriority,
   isBlocked,
+  hasSendFailure,
   onOpen,
 }: {
   channel: Channel;
@@ -39,6 +40,7 @@ function ChannelRow({
   isWorking: boolean;
   isHighPriority: boolean;
   isBlocked: boolean;
+  hasSendFailure: boolean;
   onOpen: (channelId: string) => void;
 }) {
   const scrollHighlightedIntoView = React.useCallback(
@@ -97,11 +99,28 @@ function ChannelRow({
           className={cn(
             "min-w-0 flex-1 truncate",
             isUnread ? "font-semibold" : "font-medium",
+            // A mention lights the whole name, not just the dot — blocked
+            // (action needed) outranks a plain mention.
+            isUnread && isBlocked
+              ? "text-destructive"
+              : isUnread && isHighPriority
+                ? "text-warning"
+                : null,
           )}
         >
           #{" "}
           {isWorking ? <DevSpotlightText text={channel.name} /> : channel.name}
         </span>
+        {hasSendFailure ? (
+          <span
+            data-testid="dev-mode-send-failure"
+            role="img"
+            aria-label="message failed to send"
+            className="shrink-0 self-center text-xs font-semibold leading-none text-destructive"
+          >
+            !
+          </span>
+        ) : null}
         {isUnread ? (
           <span
             data-testid="dev-mode-unread-dot"
@@ -114,7 +133,7 @@ function ChannelRow({
               isBlocked
                 ? "text-destructive"
                 : isHighPriority
-                  ? "text-primary"
+                  ? "text-warning"
                   : "text-muted-foreground/60",
             )}
           >
@@ -143,6 +162,7 @@ export function DevChannelNavigator({
   workingChannelIds,
   highPriorityChannelIds,
   blockedChannelIds,
+  sendFailureChannelIds,
   highlightedId,
   dimmed,
   widthControls,
@@ -154,6 +174,7 @@ export function DevChannelNavigator({
   workingChannelIds: ReadonlySet<string>;
   highPriorityChannelIds: ReadonlySet<string>;
   blockedChannelIds: ReadonlySet<string>;
+  sendFailureChannelIds: ReadonlySet<string>;
   highlightedId: string | null;
   /** True while a channel is focused — the list stays visible but recedes. */
   dimmed: boolean;
@@ -169,7 +190,7 @@ export function DevChannelNavigator({
       <div
         className={cn(
           "flex min-w-0 flex-1 flex-col bg-background font-mono transition-opacity",
-          dimmed && "opacity-45",
+          dimmed && "opacity-70",
         )}
         data-testid="dev-mode-channel-navigator"
       >
@@ -198,6 +219,7 @@ export function DevChannelNavigator({
                   isWorking={workingChannelIds.has(channel.id)}
                   isHighPriority={highPriorityChannelIds.has(channel.id)}
                   isBlocked={blockedChannelIds.has(channel.id)}
+                  hasSendFailure={sendFailureChannelIds.has(channel.id)}
                   onOpen={onOpen}
                 />
               ))}

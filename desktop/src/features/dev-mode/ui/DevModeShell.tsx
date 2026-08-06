@@ -9,7 +9,15 @@ import {
   groupSessionChannels,
   usePinnedChannels,
 } from "@/features/dev-mode/lib/pinnedChannels";
-import { consumeComposerDraft } from "@/features/dev-mode/lib/composerDrafts";
+import {
+  consumeComposerDraft,
+  FRESH_DRAFT_KEY,
+} from "@/features/dev-mode/lib/composerDrafts";
+import {
+  clearSendFailure,
+  recordSendFailure,
+  useSendFailureChannelIds,
+} from "@/features/dev-mode/lib/sendFailures";
 import { useComposerDrafts } from "@/features/dev-mode/lib/useComposerDrafts";
 import { useComposerModeSelection } from "@/features/dev-mode/lib/useComposerModeSelection";
 import { copySelectionWithLinkUrls } from "@/features/dev-mode/lib/copyLinkUrls";
@@ -197,13 +205,19 @@ export function DevModeShell({
         : channel;
     });
   }, [subIndex]);
-  const { navigatorBlockedIds, navigatorHighPriorityIds, navigatorUnreadIds } =
-    useDevUnreadNavigatorIds(
-      subIndex,
-      unreadChannelIds,
-      highPriorityUnreadChannelIds,
-      blockedUnreadChannelIds,
-    );
+  const sendFailureChannelIds = useSendFailureChannelIds();
+  const {
+    navigatorBlockedIds,
+    navigatorHighPriorityIds,
+    navigatorSendFailureIds,
+    navigatorUnreadIds,
+  } = useDevUnreadNavigatorIds(
+    subIndex,
+    unreadChannelIds,
+    highPriorityUnreadChannelIds,
+    blockedUnreadChannelIds,
+    sendFailureChannelIds,
+  );
   const [workingChannelIds, navigatorWorkingIds] =
     useDevWorkingChannelIds(subIndex);
   const pinnedIds = usePinnedChannels();
@@ -276,6 +290,12 @@ export function DevModeShell({
     setActivePane("main");
     setSubDraftParentId(null);
     stopEditing();
+  }, [effectiveSessionId]);
+
+  // Opening a channel acknowledges its failed-send marker — the stashed
+  // draft is back in the composer at that point.
+  React.useEffect(() => {
+    if (effectiveSessionId) clearSendFailure(effectiveSessionId);
   }, [effectiveSessionId]);
 
   // Per-channel composer drafts. Called after the reset effect above so the
@@ -583,6 +603,10 @@ export function DevModeShell({
             mentions,
             media,
           );
+          // A landed send resolves the failure marker for both the channel
+          // posted to and the scope the prompt was drafted in.
+          clearSendFailure(channel.id);
+          if (draftKey !== FRESH_DRAFT_KEY) clearSendFailure(draftKey);
           // The conversation moved to the new prompt at the bottom.
           setSelectedRootId(null);
         } catch (submitError) {
@@ -591,8 +615,10 @@ export function DevModeShell({
               ? submitError.message
               : "Failed to send prompt.",
           );
-          // Restore the failed prompt to the channel it was sent from.
+          // Restore the failed prompt to the channel it was sent from and
+          // flag that channel so the failure is visible after switching away.
           restoreFailedPrompt(draftKey, prompt);
+          if (draftKey !== FRESH_DRAFT_KEY) recordSendFailure(draftKey);
         } finally {
           setBusy(false);
         }
@@ -627,29 +653,37 @@ export function DevModeShell({
         throw new Error("Thread is no longer available.");
       }
       rememberMode(mode);
-      if (selectedRoot) {
-        await sendToSession(
-          activeChannel,
-          prompt,
-          mode,
-          selectedRoot.id,
-          mentions,
-          media,
-        );
-        return;
+      // The panel shows the failure and keeps the reply text; the channel
+      // marker makes it visible after switching away.
+      try {
+        if (selectedRoot) {
+          await sendToSession(
+            activeChannel,
+            prompt,
+            mode,
+            selectedRoot.id,
+            mentions,
+            media,
+          );
+        } else {
+          // Draft side chat (⌘T): the first send posts a root message to the
+          // channel exactly like the main composer, then the pane attaches to
+          // that new thread.
+          const newRoot = await sendToSession(
+            activeChannel,
+            prompt,
+            mode,
+            undefined,
+            mentions,
+            media,
+          );
+          setSelectedRootId(newRoot.id);
+        }
+      } catch (sendError) {
+        recordSendFailure(activeChannel.id);
+        throw sendError;
       }
-      // Draft side chat (⌘T): the first send posts a root message to the
-      // channel exactly like the main composer, then the pane attaches to
-      // that new thread.
-      const newRoot = await sendToSession(
-        activeChannel,
-        prompt,
-        mode,
-        undefined,
-        mentions,
-        media,
-      );
-      setSelectedRootId(newRoot.id);
+      clearSendFailure(activeChannel.id);
     },
     [activeChannel, mode, rememberMode, selectedRoot, sendToSession],
   );
@@ -815,6 +849,7 @@ export function DevModeShell({
             highlightedId={view === "fresh" ? null : navigatorId}
             highPriorityChannelIds={navigatorHighPriorityIds}
             onOpen={openChannelAtUnread}
+            sendFailureChannelIds={navigatorSendFailureIds}
             unreadChannelIds={navigatorUnreadIds}
             workingChannelIds={navigatorWorkingIds}
             widthControls={navigatorWidthControls}
@@ -829,6 +864,7 @@ export function DevModeShell({
                 main={activeMainChannel}
                 onNewSubChannel={startSubChannelDraft}
                 onSelect={openChannel}
+                sendFailureChannelIds={sendFailureChannelIds}
                 subs={activeSubChannels}
                 unreadChannelIds={unreadChannelIds}
                 workingChannelIds={workingChannelIds}

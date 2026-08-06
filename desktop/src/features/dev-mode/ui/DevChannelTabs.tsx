@@ -20,6 +20,7 @@ export function DevChannelTabs({
   workingChannelIds,
   highPriorityChannelIds,
   blockedChannelIds,
+  sendFailureChannelIds,
   onSelect,
   onNewSubChannel,
 }: {
@@ -30,6 +31,7 @@ export function DevChannelTabs({
   workingChannelIds: ReadonlySet<string>;
   highPriorityChannelIds: ReadonlySet<string>;
   blockedChannelIds: ReadonlySet<string>;
+  sendFailureChannelIds: ReadonlySet<string>;
   onSelect: (channelId: string) => void;
   onNewSubChannel: () => void;
 }) {
@@ -48,6 +50,7 @@ export function DevChannelTabs({
     const isHighPriority = highPriorityChannelIds.has(channel.id);
     const isBlocked = blockedChannelIds.has(channel.id);
     const isWorking = workingChannelIds.has(channel.id);
+    const hasSendFailure = sendFailureChannelIds.has(channel.id);
     return (
       <button
         key={channel.id}
@@ -63,9 +66,30 @@ export function DevChannelTabs({
         onClick={() => onSelect(channel.id)}
         type="button"
       >
-        <span className={cn("whitespace-nowrap", isUnread && "font-semibold")}>
+        <span
+          className={cn(
+            "whitespace-nowrap",
+            isUnread && "font-semibold",
+            // Mirror the navigator: a mention lights the tab label itself.
+            isUnread && isBlocked
+              ? "text-destructive"
+              : isUnread && isHighPriority
+                ? "text-warning"
+                : null,
+          )}
+        >
           {isWorking ? <DevSpotlightText text={label} /> : label}
         </span>
+        {hasSendFailure ? (
+          <span
+            data-testid="dev-mode-send-failure"
+            role="img"
+            aria-label="message failed to send"
+            className="text-xs font-semibold leading-none text-destructive"
+          >
+            !
+          </span>
+        ) : null}
         {isUnread ? (
           <span
             aria-label={
@@ -76,7 +100,7 @@ export function DevChannelTabs({
               isBlocked
                 ? "text-destructive"
                 : isHighPriority
-                  ? "text-primary"
+                  ? "text-warning"
                   : "text-muted-foreground/60",
             )}
             role="img"

@@ -10,6 +10,7 @@ export function useDevUnreadNavigatorIds(
   unreadChannelIds: ReadonlySet<string>,
   highPriorityUnreadChannelIds: ReadonlySet<string>,
   blockedUnreadChannelIds: ReadonlySet<string>,
+  sendFailureChannelIds: ReadonlySet<string>,
 ) {
   const navigatorUnreadIds = React.useMemo(
     () => aggregateUnreadMains(subIndex, unreadChannelIds),
@@ -23,5 +24,16 @@ export function useDevUnreadNavigatorIds(
     () => aggregateUnreadMains(subIndex, blockedUnreadChannelIds),
     [subIndex, blockedUnreadChannelIds],
   );
-  return { navigatorBlockedIds, navigatorHighPriorityIds, navigatorUnreadIds };
+  // A failed send in a sub tab lights the parent's row — subs have no row
+  // of their own in the left list.
+  const navigatorSendFailureIds = React.useMemo(
+    () => aggregateUnreadMains(subIndex, sendFailureChannelIds),
+    [subIndex, sendFailureChannelIds],
+  );
+  return {
+    navigatorBlockedIds,
+    navigatorHighPriorityIds,
+    navigatorSendFailureIds,
+    navigatorUnreadIds,
+  };
 }
