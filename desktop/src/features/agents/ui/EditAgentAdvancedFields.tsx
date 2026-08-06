@@ -28,6 +28,10 @@ import {
   structuredEnvKeys,
   type RuntimeCatalogStatus,
 } from "../lib/agentConfigCore";
+import {
+  ROUTING_POLICY_ENV_KEY,
+  RoutingPolicyEditor,
+} from "./RoutingPolicyEditor";
 
 export function EditAgentAdvancedFields({
   acpCommand,
@@ -48,6 +52,7 @@ export function EditAgentAdvancedFields({
   requiredEnvKeys,
   catalogStatus = "ready",
   selectedRuntime,
+  routingPolicyPubkey,
   systemPrompt,
   onAcpCommandChange,
   onAgentArgsChange,
@@ -99,6 +104,12 @@ export function EditAgentAdvancedFields({
    * When undefined after the catalog has settled, no numeric controls render.
    */
   selectedRuntime?: AcpRuntimeCatalogEntry;
+  /**
+   * Agent pubkey, when this form edits a live agent instance. Enables the
+   * routing-policy table — the policy file is keyed by pubkey, so there is
+   * nothing to edit on a template/definition that has no agent yet.
+   */
+  routingPolicyPubkey?: string;
   systemPrompt: string;
   onAcpCommandChange: (value: string) => void;
   onAgentArgsChange: (value: string) => void;
@@ -374,6 +385,24 @@ export function EditAgentAdvancedFields({
             onEnvVarsChange(next);
           }}
           provider={provider}
+        />
+      ) : null}
+
+      {/* Per-turn model routing — instance-only (the policy file is keyed by pubkey). */}
+      {routingPolicyPubkey ? (
+        <RoutingPolicyEditor
+          disabled={disabled}
+          envValue={envVars[ROUTING_POLICY_ENV_KEY]}
+          onEnvVarChange={(key, value) => {
+            const next = { ...envVars };
+            if (value === "") {
+              delete next[key];
+            } else {
+              next[key] = value;
+            }
+            onEnvVarsChange(next);
+          }}
+          pubkey={routingPolicyPubkey}
         />
       ) : null}
     </div>
