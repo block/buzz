@@ -23,8 +23,9 @@ export const RECONNECT_REPLAY_PAGE_CONCURRENCY = 4;
  * into the same rate-limit window — the "briefly connected → can't reach the
  * relay" flap loop. Instead each sub retries behind the rate-limit gate a
  * bounded number of times, then degrades to live-only for this connection.
- * The sub's `lastSeenCreatedAt` is untouched by the failed backfill, so the
- * missed window is retried on the next reconnect replay.
+ * The window's lower bound is pinned in `pendingReplaySince` while unresolved
+ * (live events advance `lastSeenCreatedAt` regardless of backfill success),
+ * so the next reconnect still requests the missed window.
  */
 export const PAGE_REPLAY_MAX_ATTEMPTS = 3;
 
@@ -182,13 +183,21 @@ export async function replayLiveSubscriptions({
         entry[1].mode === "live",
     )
     .map(([subId, subscription]) => {
-      const replaySince =
+      const cursorSince =
         subscription.lastSeenCreatedAt === undefined
           ? undefined
           : Math.max(
               0,
               subscription.lastSeenCreatedAt - RECONNECT_REPLAY_SKEW_SECS,
             );
+      // A pinned floor from a previously failed backfill takes precedence
+      // over the cursor: live events kept advancing `lastSeenCreatedAt`
+      // while the older window stayed unresolved, and starting from the
+      // cursor would skip it permanently.
+      const replaySince =
+        cursorSince === undefined
+          ? subscription.pendingReplaySince
+          : Math.min(cursorSince, subscription.pendingReplaySince ?? Infinity);
       const shouldPageReplay =
         replaySince !== undefined &&
         shouldPageReconnectReplay(subscription.filter);
@@ -256,9 +265,14 @@ export async function replayLiveSubscriptions({
       // CLOSED on a history REQ) must never escape to the session and tear
       // down the healthy, authenticated socket carrying the live REQs — that
       // is the connect→drop flap loop. Retry behind the gate a bounded number
-      // of times, then degrade to live-only for this connection. The next
-      // reconnect replays the same window because `lastSeenCreatedAt` only
-      // advances on delivered events.
+      // of times, then degrade to live-only for this connection.
+      //
+      // Pin the window's lower bound before the first attempt: events on the
+      // already-restored live REQ advance `lastSeenCreatedAt` independently
+      // of backfill success, so without the pin an exhausted backfill
+      // followed by one live event would make the next reconnect skip the
+      // unresolved window permanently. Cleared only on a completed pass.
+      subscription.pendingReplaySince = replaySince;
       for (let attempt = 1; attempt <= PAGE_REPLAY_MAX_ATTEMPTS; attempt++) {
         try {
           await replayReconnectHistoryPages({
@@ -268,6 +282,7 @@ export async function replayLiveSubscriptions({
             isActive: () => subscriptions.get(subId) === subscription,
             requestHistory,
           });
+          subscription.pendingReplaySince = undefined;
           return;
         } catch (error) {
           console.warn(

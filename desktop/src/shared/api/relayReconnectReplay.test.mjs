@@ -9,6 +9,7 @@ import {
   shouldPageReconnectReplay,
 } from "./relayReconnectReplay.ts";
 import { buildChannelFilter } from "./relayChannelFilters.ts";
+import { prepareSubscriptionEvent } from "./relayClosedRecovery.ts";
 
 // ── Fake-timer + Date.now setup for gate tests ────────────────────────────────
 
@@ -721,6 +722,82 @@ test("backfill retry aborts when the subscription was replaced", async () => {
     historyCalls,
     1,
     "no retry may target a subscription that no longer exists",
+  );
+});
+
+test("exhausted backfill pins the floor: next replay still requests the original window after live events advance the cursor", async () => {
+  // The blocking review scenario on PR #4990: cursor=1000, all backfill
+  // attempts fail, a live event at 2100 then advances lastSeenCreatedAt via
+  // prepareSubscriptionEvent. Without the pinned floor, the next reconnect
+  // would start near 2095 and silently skip 1001..1999.
+  resetGate(0);
+  const filter = buildChannelFilter("channel-1", 50);
+  const subscription = {
+    mode: "live",
+    filter,
+    onEvent: () => {},
+    lastSeenCreatedAt: 1000,
+  };
+  const subscriptions = new Map([["live-1", subscription]]);
+
+  // Reconnect 1: every backfill attempt is rate-limited.
+  await replayLiveSubscriptions({
+    subscriptions,
+    now: 2000,
+    sendRaw: async () => {},
+    requestHistory: async () => {
+      throw new Error("rate-limited: quota exceeded; retry in 4s");
+    },
+  });
+  assert.equal(
+    subscription.pendingReplaySince,
+    995,
+    "exhausted backfill must pin the unresolved window's lower bound",
+  );
+
+  // A live event arrives through the normal cursor path.
+  prepareSubscriptionEvent(subscription, event("live-newer", 2100));
+  assert.equal(subscription.lastSeenCreatedAt, 2100);
+
+  // Reconnect 2: backfill now succeeds. It must request the ORIGINAL window.
+  const historyFilters = [];
+  await replayLiveSubscriptions({
+    subscriptions,
+    now: 2200,
+    sendRaw: async () => {},
+    requestHistory: async (filter) => {
+      historyFilters.push(filter);
+      return [];
+    },
+  });
+
+  assert.equal(historyFilters.length, 1);
+  assert.equal(
+    historyFilters[0].since,
+    995,
+    "replay must start from the pinned floor, not the advanced cursor",
+  );
+  assert.equal(
+    subscription.pendingReplaySince,
+    undefined,
+    "a completed backfill must clear the pinned floor",
+  );
+
+  // Reconnect 3: with the floor cleared, replay returns to the cursor.
+  const laterFilters = [];
+  await replayLiveSubscriptions({
+    subscriptions,
+    now: 2300,
+    sendRaw: async () => {},
+    requestHistory: async (filter) => {
+      laterFilters.push(filter);
+      return [];
+    },
+  });
+  assert.equal(
+    laterFilters[0].since,
+    2095,
+    "after recovery the cursor governs again",
   );
 });
 
