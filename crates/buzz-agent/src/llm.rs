@@ -158,7 +158,7 @@ impl Llm {
                 let v = self.post_openrouter(cfg, &body).await?;
                 parse_openai_with_reasoning_details(v)
             }
-            Provider::OpenAi | Provider::Databricks | Provider::DeepSeek | Provider::Groq => {
+            Provider::OpenAi | Provider::Databricks | Provider::DeepSeek | Provider::Groq | Provider::Meta => {
                 self.openai_request(
                     cfg,
                     effective_model,
@@ -271,7 +271,7 @@ impl Llm {
                 let v = self.post_openrouter(cfg, &body).await?;
                 Ok(parse_openai(v)?.text)
             }
-            Provider::OpenAi | Provider::Databricks | Provider::DeepSeek | Provider::Groq => {
+            Provider::OpenAi | Provider::Databricks | Provider::DeepSeek | Provider::Groq | Provider::Meta => {
                 let r = self
                     .openai_request(
                         cfg,
@@ -1925,7 +1925,7 @@ where
 ///   flow; subsequent requests use the cache + refresh transparently.
 pub(crate) fn build_token_source(cfg: &Config) -> Result<Arc<dyn TokenSource>, AgentError> {
     match cfg.provider {
-        Provider::Anthropic | Provider::OpenAi | Provider::OpenRouter | Provider::DeepSeek | Provider::Groq => {
+        Provider::Anthropic | Provider::OpenAi | Provider::OpenRouter | Provider::DeepSeek | Provider::Groq | Provider::Meta => {
             Ok(Arc::new(StaticTokenSource::new(cfg.api_key.clone())))
         }
         Provider::Databricks | Provider::DatabricksV2 => {

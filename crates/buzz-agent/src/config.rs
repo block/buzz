@@ -682,6 +682,12 @@ pub enum Provider {
     /// (override with `GROQ_BASE_URL`). Wire format is OpenAI-chat-compatible;
     /// uses Chat Completions only (not Responses). LPU hardware for fastest inference.
     Groq,
+    /// Meta Muse Spark via existing `muse login` OAuth session.
+    /// Reads token from `$MUSE_AUTH_PATH` or `~/.config/muse/auth.json`
+    /// (fallback `$HOME/.config/muse/auth.json`), or `META_API_KEY`.
+    /// Wire format is OpenAI-chat-compatible; base_url defaults to
+    /// `https://api.meta.ai/muse-code/v1` (override with `META_BASE_URL`).
+    Meta,
 }
 
 /// Which OpenAI-family HTTP API to call. Set via `OPENAI_COMPAT_API`
@@ -853,6 +859,18 @@ impl Config {
                 env_or("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
                 OpenAiApi::Chat, // Groq is Chat Completions only
             ),
+            Provider::Meta => {
+                let token = read_muse_token().ok_or_else(|| {
+                    "config: META_API_KEY or Muse OAuth token required — run `muse login` or set META_API_KEY / MUSE_AUTH_PATH".to_string()
+                })?;
+                let model = resolve_model(
+                    buzz_agent_model.as_deref(),
+                    env("META_MODEL").as_deref().or(env("OPENAI_COMPAT_MODEL").as_deref()),
+                )
+                .ok_or_else(|| "config: META_MODEL (or OPENAI_COMPAT_MODEL) required for provider=meta — e.g. muse-spark-1.2".to_string())?;
+                let base = env_or("META_BASE_URL", "https://api.meta.ai/muse-code/v1");
+                (token, model, base, parse_openai_api(env("OPENAI_COMPAT_API").as_deref())?)
+            },
         };
         let system_prompt = match (env("BUZZ_AGENT_SYSTEM_PROMPT"), env("BUZZ_AGENT_SYSTEM_PROMPT_FILE")) {
             (Some(_), Some(_)) => return Err(
@@ -1028,6 +1046,41 @@ impl Config {
     }
 }
 
+fn read_muse_token() -> Option<String> {
+    // META_API_KEY takes priority (matches `muse` launcher behavior)
+    if let Some(v) = std::env::var("META_API_KEY").ok().filter(|s| !s.trim().is_empty()) {
+        return Some(v.trim().to_string());
+    }
+    // Then try MUSE_AUTH_PATH or ~/.config/muse/auth.json
+    let path = std::env::var("MUSE_AUTH_PATH").ok().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        format!("{}/.config/muse/auth.json", home)
+    });
+    let data = std::fs::read_to_string(&path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&data).ok()?;
+    // Try common shapes: {"access_token": "..."}, {"token": "..."}, {"auth": {"access_token": ...}}
+    if let Some(t) = v.get("access_token").and_then(|x| x.as_str()).filter(|s| !s.trim().is_empty()) {
+        return Some(t.trim().to_string());
+    }
+    if let Some(t) = v.get("token").and_then(|x| x.as_str()).filter(|s| !s.trim().is_empty()) {
+        return Some(t.trim().to_string());
+    }
+    if let Some(t) = v.get("auth").and_then(|a| a.get("access_token")).and_then(|x| x.as_str()).filter(|s| !s.trim().is_empty()) {
+        return Some(t.trim().to_string());
+    }
+    // Muse `auth.json` shape: {"providers": {"meta": {"access_token": "...", "api_key": "..."}}}
+    if let Some(t) = v
+        .get("providers")
+        .and_then(|p| p.get("meta"))
+        .and_then(|m| m.get("access_token").or_else(|| m.get("api_key")))
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.trim().is_empty())
+    {
+        return Some(t.trim().to_string());
+    }
+    None
+}
+
 fn env(k: &str) -> Option<String> {
     std::env::var(k).ok()
 }
@@ -1064,6 +1117,16 @@ fn resolve_provider(
     deepseek_key: Option<&str>,
     groq_key: Option<&str>,
 ) -> Result<Provider, String> {
+    // Meta reuses your existing `muse login` OAuth — check before generic fallback
+    if let Some(raw) = requested.map(str::trim).filter(|s| !s.is_empty()) {
+        if raw.to_ascii_lowercase() == "meta" {
+            if read_muse_token().is_some() {
+                return Ok(Provider::Meta);
+            } else {
+                return Err("config: META_API_KEY or Muse OAuth token required — run `muse login` or set META_API_KEY / MUSE_AUTH_PATH".into());
+            }
+        }
+    }
     match requested.map(str::trim).filter(|s| !s.is_empty()) {
         Some(raw) => {
             let normalized = raw.to_ascii_lowercase();
