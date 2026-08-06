@@ -14,6 +14,7 @@ import {
   Trash2,
   TriangleAlert,
 } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { useAppShell } from "@/app/AppShellContext";
 import {
@@ -108,31 +109,29 @@ function MoveToSectionSubmenu({
  * "Copy" submenu (channel name / channel ID).
  */
 function CopyChannelSubmenu({ channel }: { channel: Channel }) {
+  const { t } = useTranslation();
   return (
     <ContextMenuSub>
       <ContextMenuSubTrigger>
         <ContextMenuIconSlot>
           <Copy className="h-4 w-4" />
         </ContextMenuIconSlot>
-        <span>Copy</span>
+        <span>{t("sidebar.channel.copy")}</span>
       </ContextMenuSubTrigger>
       <ContextMenuSubContent>
         <ContextMenuItem
           onSelect={() =>
-            copyTextToClipboard(
-              channel.name,
-              "Channel name copied to clipboard",
-            )
+            copyTextToClipboard(channel.name, t("sidebar.channel.nameCopied"))
           }
         >
-          <span>Copy channel name</span>
+          <span>{t("sidebar.channel.copyName")}</span>
         </ContextMenuItem>
         <ContextMenuItem
           onSelect={() =>
-            copyTextToClipboard(channel.id, "Channel ID copied to clipboard")
+            copyTextToClipboard(channel.id, t("sidebar.channel.idCopied"))
           }
         >
-          <span>Copy channel ID</span>
+          <span>{t("sidebar.channel.copyId")}</span>
         </ContextMenuItem>
       </ContextMenuSubContent>
     </ContextMenuSub>
@@ -179,6 +178,7 @@ export function ChannelContextMenuItems({
   onDeleteChannel?: (channel: Channel) => void;
   onLeaveChannel?: (channel: Channel) => void;
 }) {
+  const { t } = useTranslation();
   const {
     feedItemState,
     hasSidebarUnreadProjections,
@@ -261,7 +261,7 @@ export function ChannelContextMenuItems({
           <ContextMenuIconSlot>
             <CheckCircle2 className="h-4 w-4" />
           </ContextMenuIconSlot>
-          <span>Mark as read</span>
+          <span>{t("sidebar.channel.markAsRead")}</span>
         </ContextMenuItem>
       ) : !hasProjectedUnread && onMarkChannelUnread ? (
         <ContextMenuItem
@@ -272,7 +272,7 @@ export function ChannelContextMenuItems({
           <ContextMenuIconSlot>
             <CircleDot className="h-4 w-4" />
           </ContextMenuIconSlot>
-          <span>Mark unread</span>
+          <span>{t("sidebar.channel.markUnread")}</span>
         </ContextMenuItem>
       ) : null}
       {showMuteToggle || showStar ? <ContextMenuSeparator /> : null}
@@ -286,7 +286,7 @@ export function ChannelContextMenuItems({
             <ContextMenuIconSlot>
               <Bell className="h-4 w-4" />
             </ContextMenuIconSlot>
-            <span>Unmute channel</span>
+            <span>{t("sidebar.channel.unmute")}</span>
           </ContextMenuItem>
         ) : (
           <ContextMenuItem
@@ -295,7 +295,7 @@ export function ChannelContextMenuItems({
             <ContextMenuIconSlot>
               <BellOff className="h-4 w-4" />
             </ContextMenuIconSlot>
-            <span>Mute channel</span>
+            <span>{t("sidebar.channel.mute")}</span>
           </ContextMenuItem>
         )
       ) : null}
@@ -309,7 +309,7 @@ export function ChannelContextMenuItems({
             <ContextMenuIconSlot>
               <StarOff className="h-4 w-4" />
             </ContextMenuIconSlot>
-            <span>Unstar channel</span>
+            <span>{t("sidebar.channel.unstar")}</span>
           </ContextMenuItem>
         ) : (
           <ContextMenuItem
@@ -318,7 +318,7 @@ export function ChannelContextMenuItems({
             <ContextMenuIconSlot>
               <Star className="h-4 w-4" />
             </ContextMenuIconSlot>
-            <span>Star channel</span>
+            <span>{t("sidebar.channel.star")}</span>
           </ContextMenuItem>
         )
       ) : null}
@@ -331,7 +331,7 @@ export function ChannelContextMenuItems({
           <ContextMenuIconSlot>
             <LogOut className="h-4 w-4" />
           </ContextMenuIconSlot>
-          <span>Leave channel</span>
+          <span>{t("sidebar.channel.leave")}</span>
         </ContextMenuItem>
       ) : null}
       {ownerActionsLoading ? (
@@ -358,7 +358,7 @@ export function ChannelContextMenuItems({
           <ContextMenuIconSlot>
             <Archive className="h-4 w-4" />
           </ContextMenuIconSlot>
-          <span>Archive channel</span>
+          <span>{t("sidebar.channel.archive")}</span>
         </ContextMenuItem>
       ) : null}
       {canDeleteChannel ? (
@@ -370,7 +370,7 @@ export function ChannelContextMenuItems({
           <ContextMenuIconSlot>
             <Trash2 className="h-4 w-4" />
           </ContextMenuIconSlot>
-          <span>Delete channel</span>
+          <span>{t("sidebar.channel.delete")}</span>
         </ContextMenuItem>
       ) : null}
     </>

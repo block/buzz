@@ -14,6 +14,7 @@ import {
   Trash2,
 } from "lucide-react";
 import * as React from "react";
+import { useTranslation } from "react-i18next";
 
 import { buildMessageLink } from "@/features/messages/lib/messageLink";
 import { EmojiPicker } from "@/features/custom-emoji/ui/EmojiPicker";
@@ -82,6 +83,7 @@ function MoreActionsMenu({
   isFollowingThread?: boolean;
   isUnread?: boolean;
 }) {
+  const { t } = useTranslation();
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = React.useState(false);
   const [isReportDialogOpen, setIsReportDialogOpen] = React.useState(false);
   // Set true the moment the user picks "Edit message". The
@@ -112,7 +114,7 @@ function MoreActionsMenu({
           <TooltipTrigger asChild>
             <DropdownMenuTrigger asChild>
               <Button
-                aria-label="More actions"
+                aria-label={t("composer.actions.more")}
                 className={ACTION_BUTTON_CLASS}
                 data-testid={`more-actions-${message.id}`}
                 size="sm"
@@ -123,7 +125,7 @@ function MoreActionsMenu({
               </Button>
             </DropdownMenuTrigger>
           </TooltipTrigger>
-          <TooltipContent>More actions</TooltipContent>
+          <TooltipContent>{t("composer.actions.more")}</TooltipContent>
         </Tooltip>
         <DropdownMenuContent
           align="end"
@@ -145,7 +147,7 @@ function MoreActionsMenu({
               }}
             >
               <Pencil className="h-4 w-4" />
-              Edit message
+              {t("composer.actions.edit")}
             </DropdownMenuItem>
           ) : null}
 
@@ -165,7 +167,9 @@ function MoreActionsMenu({
               ) : (
                 <MailOpen className="h-4 w-4" />
               )}
-              {isUnread ? "Mark read" : "Mark unread"}
+              {isUnread
+                ? t("composer.actions.markRead")
+                : t("composer.actions.markUnread")}
             </DropdownMenuItem>
           ) : null}
 
@@ -184,7 +188,9 @@ function MoreActionsMenu({
               ) : (
                 <BellRing className="h-4 w-4" />
               )}
-              {isFollowingThread ? "Unfollow thread" : "Follow thread"}
+              {isFollowingThread
+                ? t("composer.actions.unfollowThread")
+                : t("composer.actions.followThread")}
             </DropdownMenuItem>
           ) : null}
 
@@ -193,12 +199,12 @@ function MoreActionsMenu({
               onClick={() => {
                 copyTextToClipboard(
                   message.body,
-                  "Message copied to clipboard",
+                  t("composer.actions.messageCopied"),
                 );
               }}
             >
               <Copy className="h-4 w-4" />
-              Copy message
+              {t("composer.actions.copyMessage")}
             </DropdownMenuItem>
           ) : null}
 
@@ -209,7 +215,7 @@ function MoreActionsMenu({
               }}
             >
               <Clock className="h-4 w-4" />
-              Remind me later
+              {t("composer.actions.remindLater")}
             </DropdownMenuItem>
           ) : null}
 
@@ -223,11 +229,11 @@ function MoreActionsMenu({
                   messageId: message.id,
                   threadRootId: rootId,
                 });
-                copyTextToClipboard(link, "Link copied to clipboard");
+                copyTextToClipboard(link, t("composer.actions.linkCopied"));
               }}
             >
               <Link2 className="h-4 w-4" />
-              Copy link
+              {t("composer.actions.copyLink")}
             </DropdownMenuItem>
           ) : null}
 
@@ -241,7 +247,7 @@ function MoreActionsMenu({
               }}
             >
               <Flag className="h-4 w-4" />
-              Report message
+              {t("composer.actions.report")}
             </DropdownMenuItem>
           ) : null}
 
@@ -254,7 +260,7 @@ function MoreActionsMenu({
               }}
             >
               <Trash2 className="h-4 w-4" />
-              Delete message
+              {t("composer.actions.delete")}
             </DropdownMenuItem>
           ) : null}
 
@@ -371,6 +377,7 @@ export const MessageActionBar = React.memo(function MessageActionBar({
    *  unread badge uses. Drives the single mark-read/unread toggle label. */
   isUnread?: boolean;
 }) {
+  const { t } = useTranslation();
   const [isReactionPickerOpen, setIsReactionPickerOpen] = React.useState(false);
   const [isDropdownOpen, setIsDropdownOpen] = React.useState(false);
   const customEmoji = useCustomEmoji();
@@ -475,7 +482,7 @@ export const MessageActionBar = React.memo(function MessageActionBar({
                 <TooltipTrigger asChild>
                   <PopoverTrigger asChild>
                     <Button
-                      aria-label="Open reactions"
+                      aria-label={t("composer.actions.openReactions")}
                       className={ACTION_BUTTON_CLASS}
                       data-testid={`react-message-${message.id}`}
                       size="sm"
@@ -486,7 +493,7 @@ export const MessageActionBar = React.memo(function MessageActionBar({
                     </Button>
                   </PopoverTrigger>
                 </TooltipTrigger>
-                <TooltipContent>React</TooltipContent>
+                <TooltipContent>{t("composer.actions.react")}</TooltipContent>
               </Tooltip>
               <PopoverContent
                 align="end"
@@ -517,7 +524,7 @@ export const MessageActionBar = React.memo(function MessageActionBar({
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
-                  aria-label="Reply"
+                  aria-label={t("composer.actions.reply")}
                   className={ACTION_BUTTON_CLASS}
                   data-testid={`reply-message-${message.id}`}
                   onClick={() => {
@@ -530,7 +537,7 @@ export const MessageActionBar = React.memo(function MessageActionBar({
                   <CornerUpLeft className={ACTION_ICON_CLASS} />
                 </Button>
               </TooltipTrigger>
-              <TooltipContent>Reply</TooltipContent>
+              <TooltipContent>{t("composer.actions.reply")}</TooltipContent>
             </Tooltip>
           ) : null}
 

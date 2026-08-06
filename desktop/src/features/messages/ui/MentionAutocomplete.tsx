@@ -1,4 +1,5 @@
 import * as React from "react";
+import { useTranslation } from "react-i18next";
 import { Bot, Users } from "lucide-react";
 import type { TeamMentionMember } from "@/features/messages/lib/mentionCandidates";
 
@@ -42,6 +43,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
   onSelect,
   position = "above",
 }: MentionAutocompleteProps) {
+  const { t } = useTranslation();
   const listRef = React.useRef<HTMLDivElement>(null);
 
   React.useEffect(() => {
@@ -100,7 +102,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
             (suggestion.personaId ? `persona-${suggestion.personaId}` : null) ??
             (suggestion.teamId ? `team-${suggestion.teamId}` : null) ??
             suggestion.displayName;
-          const agentLabel = "agent";
+          const agentLabel = t("composer.mention.agent");
           const hasNameCollision =
             (nameCounts.get(suggestion.displayName.toLowerCase()) ?? 0) > 1;
           const collisionNpub =
@@ -160,7 +162,9 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                     {suggestion.kind === "team" ? (
                       <span className="inline-flex shrink-0 items-center gap-1">
                         <Users aria-hidden="true" className="h-3.5 w-3.5" />
-                        team · {suggestion.teamMembers?.length ?? 0} agents
+                        {t("composer.mention.teamAgents", {
+                          count: suggestion.teamMembers?.length ?? 0,
+                        })}
                       </span>
                     ) : suggestion.isAgent ? (
                       <span className="inline-flex shrink-0 items-center gap-1">
@@ -184,17 +188,25 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                         className="min-w-0 truncate"
                         title={
                           suggestion.ownerLabel && suggestion.notInChannel
-                            ? `managed by ${suggestion.ownerLabel} · not in channel`
+                            ? t("composer.mention.managedByNotInChannel", {
+                                owner: suggestion.ownerLabel,
+                              })
                             : suggestion.ownerLabel
-                              ? `managed by ${suggestion.ownerLabel}`
-                              : "not in channel"
+                              ? t("composer.mention.managedBy", {
+                                  owner: suggestion.ownerLabel,
+                                })
+                              : t("composer.mention.notInChannel")
                         }
                       >
                         {suggestion.ownerLabel && suggestion.notInChannel
-                          ? `managed by ${suggestion.ownerLabel} · not in channel`
+                          ? t("composer.mention.managedByNotInChannel", {
+                              owner: suggestion.ownerLabel,
+                            })
                           : suggestion.ownerLabel
-                            ? `managed by ${suggestion.ownerLabel}`
-                            : "not in channel"}
+                            ? t("composer.mention.managedBy", {
+                                owner: suggestion.ownerLabel,
+                              })
+                            : t("composer.mention.notInChannel")}
                       </span>
                     ) : null}
                   </span>

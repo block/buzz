@@ -1,4 +1,5 @@
 import type * as React from "react";
+import { useTranslation } from "react-i18next";
 import {
   BellOff,
   ChevronDown,
@@ -70,6 +71,7 @@ function UnreadCountBadge({
   className?: string;
   count: number;
 }) {
+  const { t } = useTranslation();
   return (
     <span
       className={cn(
@@ -79,7 +81,10 @@ function UnreadCountBadge({
       data-testid={`channel-unread-${channelName}`}
     >
       {formatUnreadCount(count)}
-      <span className="sr-only"> new comment{count === 1 ? "" : "s"}</span>
+      <span className="sr-only">
+        {" "}
+        {t("sidebar.channel.newComments", { count })}
+      </span>
     </span>
   );
 }
@@ -91,12 +96,13 @@ function UnreadDotBadge({
   channelName: string;
   className?: string;
 }) {
+  const { t } = useTranslation();
   return (
     <span
       className={cn("h-2 w-2 shrink-0 rounded-full bg-primary", className)}
       data-testid={`channel-unread-dot-${channelName}`}
     >
-      <span className="sr-only">unread</span>
+      <span className="sr-only">{t("sidebar.channel.unread")}</span>
     </span>
   );
 }
@@ -423,6 +429,7 @@ export function SidebarSection({
   onUnmuteChannel?: (channelId: string) => void;
   sectionActionsOpen?: boolean;
 }) {
+  const { t } = useTranslation();
   if (items.length === 0 && !action && !emptyState) {
     return null;
   }
@@ -503,7 +510,7 @@ export function SidebarSection({
                     ) : null}
                     {channel.channelType === "dm" && onHideDm ? (
                       <button
-                        aria-label="Close direct message"
+                        aria-label={t("sidebar.channel.closeDirectMessage")}
                         className={cn(
                           "absolute right-1 top-1/2 z-10 -translate-y-1/2 after:absolute after:-inset-2 after:md:hidden group-data-[collapsible=icon]:hidden",
                           SIDEBAR_ROW_ICON_ACTION_CLASS,
