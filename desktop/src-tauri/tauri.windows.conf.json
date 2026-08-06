@@ -1,0 +1,10 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "build": {
+    "beforeDevCommand": {
+      "script": "node_modules\\.bin\\vite.CMD",
+      "cwd": "..",
+      "wait": false
+    }
+  }
+}
