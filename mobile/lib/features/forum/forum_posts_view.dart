@@ -33,6 +33,10 @@ class ForumPostsView extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final postsAsync = ref.watch(forumPostsProvider(channel.id));
     final isComposing = useState(false);
+    // A queued attachment can finish after this view is popped. Capture the
+    // app-level provider container instead of retaining the route's WidgetRef.
+    final providerContainer = ProviderScope.containerOf(context, listen: false);
+    final forumDelivery = ForumEventDelivery.capture(providerContainer);
 
     // Periodic refresh (every 15s, matching desktop).
     useEffect(() {
@@ -146,8 +150,7 @@ class ForumPostsView extends HookConsumerWidget {
                   mentionPubkeys, {
                   mediaTags = const <List<String>>[],
                 }) async {
-                  await createForumPost(
-                    ref,
+                  await forumDelivery.createPost(
                     channelId: channel.id,
                     content: content,
                     mentionPubkeys: mentionPubkeys,

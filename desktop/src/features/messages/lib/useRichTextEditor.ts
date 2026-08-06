@@ -9,6 +9,7 @@ import { Extension, type KeyboardShortcutCommand } from "@tiptap/core";
 import { Plugin, Selection, TextSelection } from "@tiptap/pm/state";
 import type { ResolvedPos } from "@tiptap/pm/model";
 
+import { readTextFromSystemClipboard } from "@/shared/api/tauriMedia";
 import {
   hasPrimaryShortcutModifier,
   isMacPlatform,
@@ -529,6 +530,39 @@ export function useRichTextEditor({
                 TextSelection.create(view.state.doc, position),
               ),
             );
+            return true;
+          }
+
+          // Cmd+Shift+V / Ctrl+Shift+V → paste the clipboard's plain-text
+          // representation. Embedded webviews permission-gate the browser
+          // clipboard API differently across operating systems, so packaged
+          // builds read through the native arboard command. Browser builds use
+          // navigator.clipboard as a fallback. Feed the result through
+          // ProseMirror's paste pipeline with clipboardData populated so its
+          // plain-text observers keep normal paste behavior.
+          if (
+            event.key.toLowerCase() === "v" &&
+            hasPrimaryShortcutModifier(event) &&
+            event.shiftKey &&
+            !event.altKey &&
+            !event.repeat &&
+            !event.isComposing
+          ) {
+            event.preventDefault();
+            void readTextFromSystemClipboard()
+              .then((text) => {
+                const clipboardData = new DataTransfer();
+                clipboardData.setData("text/plain", text);
+                view.pasteText(
+                  text,
+                  new ClipboardEvent("paste", { clipboardData }),
+                );
+              })
+              .catch(() => {
+                // The key is already consumed. Letting a delayed native paste
+                // race the asynchronous read could duplicate or unexpectedly
+                // format content.
+              });
             return true;
           }
 
