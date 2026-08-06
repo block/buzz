@@ -541,6 +541,29 @@ pub fn preview_prospective_persona_snapshot(
     }
     preview
 }
+/// How long to wait between flush sweeps.
+const FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Spawns the background loop that drains `pending_sync` rows to the relay.
+///
+/// One loop is the sole publisher for persona, team, and managed-agent writers;
+/// a relay-unreachable tick simply leaves rows pending for the next sweep.
+///
+/// Callers must skip this in recovery mode — flushing under an ephemeral key
+/// would publish events attributed to an identity the user does not own.
+pub fn spawn_flush_loop(handle: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        use tauri::Manager;
+        loop {
+            let state = handle.state::<AppState>();
+            if let Err(e) = flush_active_pending_events(&handle, &state).await {
+                eprintln!("buzz-desktop: event-flush: {e}");
+            }
+            tokio::time::sleep(FLUSH_INTERVAL).await;
+        }
+    });
+}
+
 #[cfg(test)]
 mod stale_pin_tests;
 #[cfg(test)]

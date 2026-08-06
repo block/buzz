@@ -30,9 +30,12 @@ impl ValidatedVaultPath {
 /// Onyx's commands took `(path, vault_path)` — letting a caller supply *both*
 /// sides of the containment check, so `read_file("/etc/passwd", "/etc")` passed.
 /// Five of its commands (`list_files`, `file_exists`, `get_file_modified_time`,
-/// `get_file_stats`, `list_assets`) skipped validation entirely. Buzz ships with
-/// `"csp": null` and renders remote content, so the IPC surface is the only
-/// boundary there is; the renderer never gets to name the root.
+/// `get_file_stats`, `list_assets`) skipped validation entirely.
+///
+/// A content security policy does not help here: CSP constrains what the page
+/// may load and execute, not what the app's own code may ask the backend to do.
+/// Every containment decision has to be made on this side of the IPC boundary,
+/// which is why the renderer never gets to name the root.
 #[derive(Default)]
 pub struct VaultState {
     inner: Mutex<Option<VaultRoots>>,

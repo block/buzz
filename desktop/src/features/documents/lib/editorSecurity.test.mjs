@@ -2,10 +2,16 @@
  * Hostile markdown through the real editor pipeline.
  *
  * A vault is not necessarily trusted input. Notes arrive from git repos, sync
- * clients, shared team folders and downloads, and Buzz ships with `"csp": null`,
- * so the renderer has no second line of defence. These tests feed the editor
- * the payloads an attacker would put in a `.md` file and assert that none of
- * them reach the DOM as anything but text.
+ * clients, shared team folders and downloads. These tests feed the editor the
+ * payloads an attacker would put in a `.md` file and assert that none of them
+ * reach the DOM as anything but text.
+ *
+ * Buzz does ship a CSP whose `script-src` omits `'unsafe-inline'`, so an
+ * injected `<script>` would not execute even if one got this far. That is a
+ * second line of defence, not a reason to skip the first: `img-src` and
+ * `connect-src` both allow `https:` and `http:`, so raw markup reaching the DOM
+ * could still beacon out the contents of a note without running any script at
+ * all. Escaping is what prevents that, and escaping is what this file pins.
  *
  * The configuration that makes this hold is in `vaultEditorExtensions.ts`:
  * `html: false`, `linkify: false` and `openOnClick: false`. Each is load-bearing
