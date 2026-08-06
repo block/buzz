@@ -1,6 +1,7 @@
 import * as React from "react";
 import { createFileRoute } from "@tanstack/react-router";
 
+import { validateProjectDetailSearch } from "@/features/projects/lib/projectDetailSearch";
 import { usePreviewFeatureWarning } from "@/shared/features";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 
@@ -11,24 +12,20 @@ const ProjectDetailScreen = React.lazy(async () => {
 
 export const Route = createFileRoute("/projects/$projectId")({
   component: ProjectDetailRouteComponent,
-  validateSearch: (search: Record<string, unknown>) => ({
-    commitHash:
-      typeof search.commitHash === "string" ? search.commitHash : undefined,
-    pullRequestId:
-      typeof search.pullRequestId === "string"
-        ? search.pullRequestId
-        : undefined,
-    issueId: typeof search.issueId === "string" ? search.issueId : undefined,
-    repositoryId:
-      typeof search.repositoryId === "string" ? search.repositoryId : undefined,
-  }),
+  validateSearch: validateProjectDetailSearch,
 });
 
 function ProjectDetailRouteComponent() {
   usePreviewFeatureWarning("projects");
   const { projectId } = Route.useParams();
-  const { commitHash, pullRequestId, issueId, repositoryId } =
-    Route.useSearch();
+  const {
+    commitHash,
+    pullRequestId,
+    issueId,
+    repositoryId,
+    repoRef,
+    repoPath,
+  } = Route.useSearch();
 
   return (
     <React.Suspense fallback={<ViewLoadingFallback kind="projects" />}>
@@ -37,6 +34,8 @@ function ProjectDetailRouteComponent() {
         issueId={issueId}
         projectId={projectId}
         pullRequestId={pullRequestId}
+        repoPath={repoPath}
+        repoRef={repoRef}
         repositoryId={repositoryId}
       />
     </React.Suspense>
