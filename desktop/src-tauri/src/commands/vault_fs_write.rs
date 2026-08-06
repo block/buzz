@@ -242,4 +242,49 @@ mod tests {
         assert_eq!(modified_ms(&root.join("Notes/absent.md")), 0);
         let _ = fs::remove_dir_all(&root);
     }
+
+    /// Deleting a linked folder must unlink it, never empty out its target.
+    ///
+    /// Containment here is lexical, so a folder the user symlinked into their
+    /// vault is reachable on purpose — which means "delete folder" can be aimed
+    /// at a link pointing anywhere on disk. `delete_vault_entry` branches on
+    /// `is_dir()`, which *follows* the link, so it calls `remove_dir_all` on a
+    /// symlink. That is only safe because `remove_dir_all` refuses to descend
+    /// through one (the fix for CVE-2022-21658); if that ever stopped holding,
+    /// or the branch were rewritten to canonicalize first, deleting a linked
+    /// folder would silently destroy the real directory behind it.
+    #[cfg(unix)]
+    #[test]
+    fn deleting_a_linked_folder_removes_the_link_not_its_target() {
+        let (root, state) = fixture("unlink");
+        let outside = root.parent().unwrap().join(format!(
+            "buzz-vault-write-outside-{}-unlink",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&outside);
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("precious.md"), "IRREPLACEABLE").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("Linked")).unwrap();
+
+        let target = validated(&state, &root.join("Linked"));
+        let path = target.as_path();
+        assert!(
+            path.is_dir(),
+            "is_dir() follows the link, as the command does"
+        );
+        assert!(fs::remove_dir_all(path).is_ok());
+
+        assert!(
+            root.join("Linked").symlink_metadata().is_err(),
+            "the link itself must be gone"
+        );
+        assert_eq!(
+            fs::read_to_string(outside.join("precious.md")).unwrap(),
+            "IRREPLACEABLE",
+            "the link's target must be untouched"
+        );
+
+        let _ = fs::remove_dir_all(&outside);
+        let _ = fs::remove_dir_all(&root);
+    }
 }

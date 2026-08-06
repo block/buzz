@@ -12,6 +12,37 @@ use crate::commands::vault_path::VaultState;
 /// a backstop against a pathologically deep target as well as against cycles.
 const MAX_TREE_DEPTH: usize = 32;
 
+/// Largest note Documents will read into memory.
+///
+/// Notes are prose: the biggest one in a real 471-note vault measured 110 KB,
+/// so 2 MB is roughly 18x the observed worst case. The cap exists because every
+/// read path loads the whole file into a `String` and ships it across IPC as
+/// JSON, and the frontend then parses it through TipTap twice — once for the
+/// round-trip guard, once for the editor. A single stray export, database dump
+/// or log file that happens to end in `.md` would otherwise freeze the app for
+/// as long as that takes, and `read_vault_files` does it for the whole vault in
+/// one call.
+///
+/// Refusing with a message the user can act on is strictly better than a beach
+/// ball: the file is still theirs, and the error names the size and the limit.
+const MAX_NOTE_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Reads a note, refusing anything above [`MAX_NOTE_BYTES`].
+///
+/// The size is checked before the read rather than after, so an oversized file
+/// is never held in memory even briefly.
+fn read_note(path: &Path) -> Result<String, String> {
+    let size = fs::metadata(path).map_err(|e| e.to_string())?.len();
+    if size > MAX_NOTE_BYTES {
+        return Err(format!(
+            "That note is {:.1} MB. Documents opens notes up to {} MB — open it in another editor.",
+            size as f64 / (1024.0 * 1024.0),
+            MAX_NOTE_BYTES / (1024 * 1024),
+        ));
+    }
+    fs::read_to_string(path).map_err(|e| e.to_string())
+}
+
 #[derive(Debug, Serialize)]
 pub struct VaultEntry {
     name: String,
@@ -132,11 +163,9 @@ pub async fn list_vault_files(state: State<'_, VaultState>) -> Result<Vec<VaultE
 #[tauri::command]
 pub async fn read_vault_file(state: State<'_, VaultState>, path: String) -> Result<String, String> {
     let validated = state.validate(&path)?;
-    tokio::task::spawn_blocking(move || {
-        fs::read_to_string(validated.as_path()).map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))?
+    tokio::task::spawn_blocking(move || read_note(validated.as_path()))
+        .await
+        .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
 /// Batch read, for building the note index and backlink corpus.
@@ -163,7 +192,9 @@ pub async fn read_vault_files(
             .into_iter()
             .map(|(path, resolved)| VaultFileContent {
                 path,
-                content: fs::read_to_string(&resolved).ok(),
+                // An oversized or unreadable note is skipped rather than
+                // failing the batch: it simply contributes no backlinks.
+                content: read_note(&resolved).ok(),
             })
             .collect()
     })
@@ -264,6 +295,36 @@ mod tests {
 
         let tree = build_vault_tree(&root);
         assert!(!tree.is_empty(), "the walk must still return real entries");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn reads_an_ordinary_note() {
+        let root = fixture("readok");
+        assert_eq!(read_note(&root.join("top.md")).unwrap(), "# top");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn refuses_a_note_larger_than_the_cap() {
+        let root = fixture("toobig");
+        let big = root.join("huge.md");
+        // One byte over is enough; writing 2 MB keeps the test quick.
+        fs::write(&big, vec![b'x'; (MAX_NOTE_BYTES + 1) as usize]).unwrap();
+
+        let error = read_note(&big).expect_err("an oversized note must be refused");
+        assert!(
+            error.contains("MB"),
+            "the message must tell the user the size and the limit: {error}"
+        );
+
+        // And the boundary itself is allowed, so the check is not off by one.
+        fs::write(&big, vec![b'x'; MAX_NOTE_BYTES as usize]).unwrap();
+        assert!(
+            read_note(&big).is_ok(),
+            "exactly at the cap must still open"
+        );
+
         let _ = fs::remove_dir_all(&root);
     }
 
