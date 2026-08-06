@@ -121,10 +121,8 @@ test("destroy: is safe to call with no pending publish", () => {
 });
 
 // ─── Boot seed-publish guard (the revert-fix regression suite) ────────────────
-
-// Bootstrap wiring tests (1-3): drive the production bootstrap() path so that
-// mutations to the failed/absent+head/first-sync branches fail here.
-// Policy logic is tested in sidebarSyncWatermark.test.mjs.
+// Wiring tests 1-3 drive the production bootstrap() path; policy tested once
+// in sidebarSyncWatermark.test.mjs.
 
 // 1. fetch failed (error/timeout) + local non-empty → hold, zero publish calls
 // Mutation: removing the failed guard causes bootstrap to call publishSortPrefs → pendingStore set.
