@@ -15,15 +15,11 @@ import {
   advanceWatermark,
   readWatermark,
   runBootstrap,
-  type BootstrapResult,
   type FetchResult,
 } from "./sidebarSyncWatermark";
 
-/** Result returned by `bootstrap()` — the hook acts on this without publishing. */
-export type { BootstrapResult };
-
 const D_TAG = "channel-sections";
-const BLOB_TYPE = "channel-sections";
+const BLOB_TYPE = D_TAG;
 const DEBOUNCE_MS = 2_000;
 
 export type RemoteSections = {
@@ -98,16 +94,7 @@ export class ChannelSectionSyncManager {
     if (createdAt > this.lastRemoteCreatedAt) {
       this.lastRemoteCreatedAt = createdAt;
     }
-    advanceWatermark(this.pubkey, BLOB_TYPE, createdAt, this.relayUrl);
-  }
-
-  /**
-   * Returns the persisted watermark as read at construction time.  A non-zero
-   * value means this manager has seen a remote blob in a prior session, so
-   * seed-publish must be skipped even when a boot fetch returns `absent`.
-   */
-  getPersistedWatermark(): number {
-    return this.lastRemoteCreatedAt;
+    advanceWatermark(this.pubkey, BLOB_TYPE, this.relayUrl, createdAt);
   }
 
   cancelPendingPublish(): void {
@@ -144,10 +131,10 @@ export class ChannelSectionSyncManager {
       });
       if (events.length === 0 || events[0].pubkey !== this.pubkey) return store;
       const event = events[0];
-      // Snapshot the comparison baseline BEFORE recording the raw head so the
-      // whole-blob LWW comparison uses the pre-fetch watermark, not the one
-      // advanced by this event (Thufir pass-2: advancing first would make the
-      // compare always false and silently kill the merge).
+      // Snapshot the watermark before advancing it: after recordRemoteHead
+      // runs, lastRemoteCreatedAt equals event.created_at, so the LWW
+      // comparison remote.createdAt > lastRemoteCreatedAt would always be
+      // false and silently suppress the merge.
       const headBeforeFetch = this.lastRemoteCreatedAt;
       this.recordRemoteHead(event.created_at);
       const remote = await decryptAndParse(event);
@@ -253,7 +240,6 @@ export class ChannelSectionSyncManager {
         this.recordRemoteHead(event.created_at);
         void decryptAndParse(event).then((result) => {
           if (result) {
-            this.recordRemoteHead(result.createdAt);
             onUpdate(result);
           }
         });
@@ -262,17 +248,10 @@ export class ChannelSectionSyncManager {
   }
 
   /**
-   * Bootstrap the manager on first mount.  Fetches the remote blob, records
-   * the raw head before decrypt on every outcome, and — if genuine first-time
-   * sync is detected — **performs the seed-publish itself** so hooks cannot
-   * publish during bootstrap at all.
-   *
-   * Returns `apply-remote` with the found data so the hook can apply it to
-   * React state, or `hold` when there is nothing for the hook to do.
+   * Fetches the remote blob on first mount, records the remote head, and
+   * delegates the seed/hold/apply-remote decision to `runBootstrap`.
    */
-  async bootstrap(
-    localStore: ChannelSectionStore,
-  ): Promise<BootstrapResult<RemoteSections>> {
+  async bootstrap(localStore: ChannelSectionStore) {
     const fetchResult = await this.fetchRemoteSections();
     return runBootstrap({
       fetchResult,
@@ -285,12 +264,11 @@ export class ChannelSectionSyncManager {
 
   destroy(): void {
     // Cancel any pending publish and mark this manager as destroyed so any
-    // in-flight doPublish() calls abort before reaching relayClient. The
-    // scoped localStorage write is already durable; when the user returns to
-    // this relay the existing seed-publish guard will re-publish from local
-    // state. Flushing here would race against community switching and could
-    // publish relay A's sections to relay B via the shared relayClient
-    // singleton.
+    // in-flight doPublish() calls abort before reaching relayClient.
+    // Pending debounce-window changes are intentionally dropped: flushing
+    // could publish relay A's sections to relay B via the shared relayClient
+    // singleton. On return, bootstrap's found path whole-blob-replaces from
+    // remote, so any dropped pending edit is lost.
     this.destroyed = true;
     this.cancelPendingPublish();
     this.pendingStore = null;

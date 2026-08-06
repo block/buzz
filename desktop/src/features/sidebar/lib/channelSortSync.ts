@@ -14,15 +14,11 @@ import {
   advanceWatermark,
   readWatermark,
   runBootstrap,
-  type BootstrapResult,
   type FetchResult,
 } from "./sidebarSyncWatermark";
 
-/** Result returned by `bootstrap()` — the hook acts on this without publishing. */
-export type { BootstrapResult };
-
 const D_TAG = "channel-sort";
-const BLOB_TYPE = "channel-sort";
+const BLOB_TYPE = D_TAG;
 const DEBOUNCE_MS = 2_000;
 
 export type RemoteSortPrefs = {
@@ -100,11 +96,7 @@ export class ChannelSortSyncManager {
     if (createdAt > this.lastRemoteCreatedAt) {
       this.lastRemoteCreatedAt = createdAt;
     }
-    advanceWatermark(this.pubkey, BLOB_TYPE, createdAt, this.relayUrl);
-  }
-
-  getPersistedWatermark(): number {
-    return this.lastRemoteCreatedAt;
+    advanceWatermark(this.pubkey, BLOB_TYPE, this.relayUrl, createdAt);
   }
 
   cancelPendingPublish(): void {
@@ -141,9 +133,10 @@ export class ChannelSortSyncManager {
       });
       if (events.length === 0 || events[0].pubkey !== this.pubkey) return store;
       const event = events[0];
-      // Snapshot the comparison baseline BEFORE recording the raw head so the
-      // whole-blob LWW comparison uses the pre-fetch watermark, not the one
-      // advanced by this event.
+      // Snapshot the watermark before advancing it: after recordRemoteHead
+      // runs, lastRemoteCreatedAt equals event.created_at, so the LWW
+      // comparison remote.createdAt > lastRemoteCreatedAt would always be
+      // false and silently suppress the merge.
       const headBeforeFetch = this.lastRemoteCreatedAt;
       this.recordRemoteHead(event.created_at);
       const remote = await decryptAndParse(event);
@@ -234,7 +227,6 @@ export class ChannelSortSyncManager {
         this.recordRemoteHead(event.created_at);
         void decryptAndParse(event).then((result) => {
           if (result) {
-            this.recordRemoteHead(result.createdAt);
             onUpdate(result);
           }
         });
@@ -243,13 +235,10 @@ export class ChannelSortSyncManager {
   }
 
   /**
-   * Bootstrap the manager on first mount.  Fetches the remote blob, records
-   * the raw head before decrypt on every outcome, and — if genuine first-time
-   * sync is detected — **performs the seed-publish itself**.
+   * Fetches the remote blob on first mount, records the remote head, and
+   * delegates the seed/hold/apply-remote decision to `runBootstrap`.
    */
-  async bootstrap(
-    localStore: ChannelSortStore,
-  ): Promise<BootstrapResult<RemoteSortPrefs>> {
+  async bootstrap(localStore: ChannelSortStore) {
     const fetchResult = await this.fetchRemoteSortPrefs();
     return runBootstrap({
       fetchResult,
@@ -262,12 +251,11 @@ export class ChannelSortSyncManager {
 
   destroy(): void {
     // Cancel any pending publish and mark this manager as destroyed so any
-    // in-flight doPublish() calls abort before reaching relayClient. The
-    // scoped localStorage write is already durable; when the user returns to
-    // this relay the existing seed-publish guard will re-publish from local
-    // state. Flushing here would race against community switching and could
-    // publish relay A's sort prefs to relay B via the shared relayClient
-    // singleton.
+    // in-flight doPublish() calls abort before reaching relayClient.
+    // Pending debounce-window changes are intentionally dropped: flushing
+    // could publish relay A's sort prefs to relay B via the shared relayClient
+    // singleton. On return, bootstrap's found path whole-blob-replaces from
+    // remote, so any dropped pending edit is lost.
     this.destroyed = true;
     this.cancelPendingPublish();
     this.pendingStore = null;

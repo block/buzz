@@ -19,7 +19,7 @@
  * two ways never produces two different keys.
  */
 
-import { normalizeRelayUrl } from "@/features/profile/lib/selfProfileStorage";
+import { normalizeRelayUrl } from "@/shared/lib/normalizeRelayUrl";
 
 const PREFIX = "buzz-sync-watermark.v1";
 
@@ -73,8 +73,8 @@ export function readWatermark(
 export function advanceWatermark(
   pubkey: string,
   blobType: string,
-  next: number,
   relayUrl: string,
+  next: number,
 ): void {
   try {
     const current = readWatermark(pubkey, blobType, relayUrl);

@@ -15,15 +15,11 @@ import {
   advanceWatermark,
   readWatermark,
   runBootstrap,
-  type BootstrapResult,
   type FetchResult,
 } from "./sidebarSyncWatermark";
 
-/** Result returned by `bootstrap()` — the hook acts on this without publishing. */
-export type { BootstrapResult };
-
 const D_TAG = "channel-mutes";
-const BLOB_TYPE = "channel-mutes";
+const BLOB_TYPE = D_TAG;
 const DEBOUNCE_MS = 2_000;
 
 export type RemoteMutes = {
@@ -90,11 +86,7 @@ export class ChannelMuteSyncManager {
     if (createdAt > this.lastRemoteCreatedAt) {
       this.lastRemoteCreatedAt = createdAt;
     }
-    advanceWatermark(this.pubkey, BLOB_TYPE, createdAt, this.relayUrl);
-  }
-
-  getPersistedWatermark(): number {
-    return this.lastRemoteCreatedAt;
+    advanceWatermark(this.pubkey, BLOB_TYPE, this.relayUrl, createdAt);
   }
 
   cancelPendingMutePublish(): void {
@@ -135,7 +127,6 @@ export class ChannelMuteSyncManager {
       this.recordRemoteHead(event.created_at);
       const remote = await decryptAndParse(event);
       if (!remote) return store;
-      this.recordRemoteHead(remote.createdAt);
       return mergeStores(store, remote.store);
     } catch {
       return store;
@@ -220,7 +211,6 @@ export class ChannelMuteSyncManager {
         this.recordRemoteHead(event.created_at);
         void decryptAndParse(event).then((result) => {
           if (result) {
-            this.recordRemoteHead(result.createdAt);
             onUpdate(result);
           }
         });
@@ -229,13 +219,10 @@ export class ChannelMuteSyncManager {
   }
 
   /**
-   * Bootstrap the manager on first mount.  Fetches the remote blob, records
-   * the raw head before decrypt on every outcome, and — if genuine first-time
-   * sync is detected — **performs the seed-publish itself**.
+   * Fetches the remote blob on first mount, records the remote head, and
+   * delegates the seed/hold/apply-remote decision to `runBootstrap`.
    */
-  async bootstrap(
-    localStore: ChannelMuteStore,
-  ): Promise<BootstrapResult<RemoteMutes>> {
+  async bootstrap(localStore: ChannelMuteStore) {
     const fetchResult = await this.fetchRemoteMutes();
     return runBootstrap({
       fetchResult,
@@ -248,11 +235,11 @@ export class ChannelMuteSyncManager {
 
   destroy(): void {
     // Cancel any pending publish and mark this manager as destroyed so any
-    // in-flight doPublish() calls abort before reaching relayClient. The
-    // scoped localStorage write is already durable; when the user returns to
-    // this relay the existing seed-publish guard will re-publish from local
-    // state. Flushing here would race against community switching and could
-    // publish relay A's mutes to relay B via the shared relayClient singleton.
+    // in-flight doPublish() calls abort before reaching relayClient.
+    // Pending debounce-window changes are intentionally dropped: flushing
+    // could publish relay A's state to relay B via the shared relayClient
+    // singleton. Local entries survive because the apply/publish paths merge
+    // per-entry via mergeStores, so no local work is permanently lost.
     this.destroyed = true;
     this.cancelPendingMutePublish();
     this.pendingStore = null;

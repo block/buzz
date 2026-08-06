@@ -3,56 +3,16 @@ import test, { mock } from "node:test";
 
 import { relayClient } from "@/shared/api/relayClient";
 import { ChannelMuteSyncManager } from "./channelMutesSync.ts";
+import {
+  makeFakeWindow,
+  installFakeWindow,
+} from "./sidebarSyncTestHelpers.mjs";
 
 const RELAY = "wss://r.test";
 const RELAY_KEY = encodeURIComponent(RELAY);
 
 function makeStore(channels = {}) {
   return { version: 1, channels };
-}
-
-function makeFakeWindow() {
-  const storage = new Map();
-  const ls = {
-    getItem: (k) => storage.get(k) ?? null,
-    setItem: (k, v) => storage.set(k, v),
-    removeItem: (k) => storage.delete(k),
-    clear: () => storage.clear(),
-  };
-  let timerCallback = null;
-  let nextTimerId = 100;
-  return {
-    localStorage: ls,
-    setTimeout: (fn, _ms) => {
-      timerCallback = fn;
-      return nextTimerId++;
-    },
-    clearTimeout: (_id) => {
-      timerCallback = null;
-    },
-    _fireTimer: () => {
-      if (timerCallback) {
-        const fn = timerCallback;
-        timerCallback = null;
-        fn();
-      }
-    },
-  };
-}
-
-function installFakeWindow(fw) {
-  if (typeof globalThis.window === "undefined") globalThis.window = {};
-  const origLs = globalThis.window.localStorage;
-  const origSt = globalThis.window.setTimeout;
-  const origCt = globalThis.window.clearTimeout;
-  globalThis.window.localStorage = fw.localStorage;
-  globalThis.window.setTimeout = fw.setTimeout;
-  globalThis.window.clearTimeout = fw.clearTimeout;
-  return () => {
-    if (origLs !== undefined) globalThis.window.localStorage = origLs;
-    if (origSt !== undefined) globalThis.window.setTimeout = origSt;
-    if (origCt !== undefined) globalThis.window.clearTimeout = origCt;
-  };
 }
 
 // ─── destroy() must cancel pending publish, not flush ─────────────────────────
@@ -63,7 +23,10 @@ function installFakeWindow(fw) {
 test("destroy: cancels pending publish without flushing to the relay", () => {
   const publishCalls = [];
   mock.method(relayClient, "fetchEvents", () => Promise.resolve([]));
-  mock.method(relayClient, "publishEvent", (...args) => { publishCalls.push(args); return Promise.resolve(); });
+  mock.method(relayClient, "publishEvent", (...args) => {
+    publishCalls.push(args);
+    return Promise.resolve();
+  });
   const fw = makeFakeWindow();
   const restore = installFakeWindow(fw);
   try {
@@ -81,8 +44,18 @@ test("destroy: cancels pending publish without flushing to the relay", () => {
 test("destroy: aborts in-flight doPublish after fetchOwnBlobBeforePublish resolves", async () => {
   let releaseFetch = null;
   const publishCalls = [];
-  mock.method(relayClient, "fetchEvents", () => new Promise((res) => { releaseFetch = () => res([]); }));
-  mock.method(relayClient, "publishEvent", (...args) => { publishCalls.push(args); return Promise.resolve(); });
+  mock.method(
+    relayClient,
+    "fetchEvents",
+    () =>
+      new Promise((res) => {
+        releaseFetch = () => res([]);
+      }),
+  );
+  mock.method(relayClient, "publishEvent", (...args) => {
+    publishCalls.push(args);
+    return Promise.resolve();
+  });
   const fw = makeFakeWindow();
   const restore = installFakeWindow(fw);
   try {
@@ -114,13 +87,17 @@ test("destroy: is safe to call with no pending publish", () => {
 
 // 1. fetch failed → hold, pendingStore null (mutation: remove failed guard → seed queued)
 test("revert-fix: fetch failed (error) does not trigger seed-publish via bootstrap", async () => {
-  mock.method(relayClient, "fetchEvents", () => Promise.reject(new Error("relay timeout")));
+  mock.method(relayClient, "fetchEvents", () =>
+    Promise.reject(new Error("relay timeout")),
+  );
   mock.method(relayClient, "publishEvent", () => Promise.resolve());
   const fw = makeFakeWindow();
   const restore = installFakeWindow(fw);
   try {
     const manager = new ChannelMuteSyncManager("pk-fail", RELAY);
-    const result = await manager.bootstrap(makeStore({ ch1: { muted: true, updatedAt: 1 } }));
+    const result = await manager.bootstrap(
+      makeStore({ ch1: { muted: true, updatedAt: 1 } }),
+    );
     assert.equal(result.action, "hold");
     assert.equal(manager.getPendingMuteStore(), null);
   } finally {
@@ -134,12 +111,23 @@ test("revert-fix: absent fetch with prior watermark blocks seed-publish via boot
   mock.method(relayClient, "fetchEvents", () => Promise.resolve([]));
   mock.method(relayClient, "publishEvent", () => Promise.resolve());
   const fw = makeFakeWindow();
-  fw.localStorage.setItem(`buzz-sync-watermark.v1:channel-mutes:pk-stale:${RELAY_KEY}`, "1700000000");
+  fw.localStorage.setItem(
+    `buzz-sync-watermark.v1:channel-mutes:pk-stale:${RELAY_KEY}`,
+    "1700000000",
+  );
   const restore = installFakeWindow(fw);
   try {
     const manager = new ChannelMuteSyncManager("pk-stale", RELAY);
-    assert.ok(manager.getPersistedWatermark() > 0);
-    const result = await manager.bootstrap(makeStore({ ch1: { muted: true, updatedAt: 1 } }));
+    assert.ok(
+      Number(
+        fw.localStorage.getItem(
+          `buzz-sync-watermark.v1:channel-mutes:pk-stale:${RELAY_KEY}`,
+        ) ?? "0",
+      ) > 0,
+    );
+    const result = await manager.bootstrap(
+      makeStore({ ch1: { muted: true, updatedAt: 1 } }),
+    );
     assert.equal(result.action, "hold");
     assert.equal(manager.getPendingMuteStore(), null);
   } finally {
@@ -156,8 +144,15 @@ test("revert-fix: absent fetch with zero watermark seeds via bootstrap (first-sy
   const restore = installFakeWindow(fw);
   try {
     const manager = new ChannelMuteSyncManager("pk-fresh", RELAY);
-    assert.equal(manager.getPersistedWatermark(), 0);
-    const result = await manager.bootstrap(makeStore({ ch1: { muted: true, updatedAt: 1 } }));
+    assert.equal(
+      fw.localStorage.getItem(
+        `buzz-sync-watermark.v1:channel-mutes:pk-fresh:${RELAY_KEY}`,
+      ),
+      null,
+    );
+    const result = await manager.bootstrap(
+      makeStore({ ch1: { muted: true, updatedAt: 1 } }),
+    );
     assert.equal(result.action, "hold");
     assert.ok(manager.getPendingMuteStore() !== null);
   } finally {
@@ -174,14 +169,28 @@ test("revert-fix: relay-A watermark does not suppress first-sync seed on relay-B
   mock.method(relayClient, "fetchEvents", () => Promise.resolve([]));
   mock.method(relayClient, "publishEvent", () => Promise.resolve());
   const fw = makeFakeWindow();
-  fw.localStorage.setItem(`buzz-sync-watermark.v1:channel-mutes:pk-iso:${encodeURIComponent(relayA)}`, "1700000100");
+  fw.localStorage.setItem(
+    `buzz-sync-watermark.v1:channel-mutes:pk-iso:${encodeURIComponent(relayA)}`,
+    "1700000100",
+  );
   const restore = installFakeWindow(fw);
   try {
     const managerB = new ChannelMuteSyncManager("pk-iso", relayB);
-    assert.equal(managerB.getPersistedWatermark(), 0, "relay B watermark must be independent of relay A head");
-    const result = await managerB.bootstrap(makeStore({ ch1: { muted: true, updatedAt: 1 } }));
+    assert.equal(
+      fw.localStorage.getItem(
+        `buzz-sync-watermark.v1:channel-mutes:pk-iso:${encodeURIComponent(relayB)}`,
+      ),
+      null,
+      "relay B watermark must be independent of relay A head",
+    );
+    const result = await managerB.bootstrap(
+      makeStore({ ch1: { muted: true, updatedAt: 1 } }),
+    );
     assert.equal(result.action, "hold");
-    assert.ok(managerB.getPendingMuteStore() !== null, "first-sync seed on relay B must not be blocked by relay A watermark");
+    assert.ok(
+      managerB.getPendingMuteStore() !== null,
+      "first-sync seed on relay B must not be blocked by relay A watermark",
+    );
   } finally {
     restore();
     mock.reset();

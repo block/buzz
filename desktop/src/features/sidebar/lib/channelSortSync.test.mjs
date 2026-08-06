@@ -3,85 +3,18 @@ import test, { mock } from "node:test";
 
 import { relayClient } from "@/shared/api/relayClient";
 import { ChannelSortSyncManager } from "./channelSortSync.ts";
+import {
+  makeFakeWindow,
+  installFakeWindow,
+  installTauriMock,
+} from "./sidebarSyncTestHelpers.mjs";
 
 function makeStore(groups = {}) {
   return { version: 1, groups };
 }
 
-// ─── Shared test helpers ───────────────────────────────────────────────────────
-
-function makeFakeWindow() {
-  const storage = new Map();
-  const ls = {
-    getItem: (k) => storage.get(k) ?? null,
-    setItem: (k, v) => storage.set(k, v),
-    removeItem: (k) => storage.delete(k),
-    clear: () => storage.clear(),
-  };
-  let timerCallback = null;
-  let nextTimerId = 100;
-  return {
-    localStorage: ls,
-    setTimeout: (fn, _ms) => {
-      timerCallback = fn;
-      return nextTimerId++;
-    },
-    clearTimeout: (_id) => {
-      timerCallback = null;
-    },
-    _fireTimer: () => {
-      if (timerCallback) {
-        const fn = timerCallback;
-        timerCallback = null;
-        fn();
-      }
-    },
-    _hasTimer: () => timerCallback !== null,
-  };
-}
-
-function installFakeWindow(fw) {
-  if (typeof globalThis.window === "undefined") globalThis.window = {};
-  const origLs = globalThis.window.localStorage;
-  const origSt = globalThis.window.setTimeout;
-  const origCt = globalThis.window.clearTimeout;
-  globalThis.window.localStorage = fw.localStorage;
-  globalThis.window.setTimeout = fw.setTimeout;
-  globalThis.window.clearTimeout = fw.clearTimeout;
-  return () => {
-    if (origLs !== undefined) globalThis.window.localStorage = origLs;
-    if (origSt !== undefined) globalThis.window.setTimeout = origSt;
-    if (origCt !== undefined) globalThis.window.clearTimeout = origCt;
-  };
-}
-
 const RELAY = "wss://r.test";
 const RELAY_KEY = encodeURIComponent(RELAY);
-
-// Tauri mock: same pattern as sections — intercepts nip44_decrypt_from_self/encrypt_to_self/sign_event.
-function installTauriMock(goodCipherPayload) {
-  const orig = globalThis.window?.__TAURI_INTERNALS__;
-  if (typeof globalThis.window === "undefined") globalThis.window = {};
-  let captured = null;
-  globalThis.window.__TAURI_INTERNALS__ = {
-    invoke: (cmd, args) => {
-      if (cmd === "nip44_decrypt_from_self") {
-        if (args?.ciphertext === "bad-cipher") return Promise.reject(new Error("decrypt failed"));
-        return Promise.resolve(goodCipherPayload);
-      }
-      if (cmd === "nip44_encrypt_to_self") { captured = args?.plaintext ?? null; return Promise.resolve("ct"); }
-      if (cmd === "sign_event") return Promise.resolve(JSON.stringify({ id: "eid", pubkey: "pk-lww", content: "ct", created_at: args?.createdAt ?? 0, kind: args?.kind ?? 0, tags: args?.tags ?? [], sig: "s" }));
-      return Promise.reject(new Error(`unmocked: ${cmd}`));
-    },
-  };
-  return {
-    restore: () => {
-      if (orig !== undefined) globalThis.window.__TAURI_INTERNALS__ = orig;
-      else delete globalThis.window.__TAURI_INTERNALS__;
-    },
-    capturedPlaintext: () => captured,
-  };
-}
 
 // ─── destroy() must cancel pending publish, not flush ─────────────────────────
 test("destroy: cancels pending publish without flushing to the relay", () => {
@@ -112,8 +45,18 @@ test("destroy: cancels pending publish without flushing to the relay", () => {
 test("destroy: aborts in-flight doPublish after fetchOwnBlobBeforePublish resolves", async () => {
   let releaseFetch = null;
   const publishCalls = [];
-  mock.method(relayClient, "fetchEvents", () => new Promise((res) => { releaseFetch = () => res([]); }));
-  mock.method(relayClient, "publishEvent", (...args) => { publishCalls.push(args); return Promise.resolve(); });
+  mock.method(
+    relayClient,
+    "fetchEvents",
+    () =>
+      new Promise((res) => {
+        releaseFetch = () => res([]);
+      }),
+  );
+  mock.method(relayClient, "publishEvent", (...args) => {
+    publishCalls.push(args);
+    return Promise.resolve();
+  });
   const fw = makeFakeWindow();
   const restore = installFakeWindow(fw);
   try {
@@ -123,7 +66,11 @@ test("destroy: aborts in-flight doPublish after fetchOwnBlobBeforePublish resolv
     manager.destroy();
     releaseFetch();
     await new Promise((r) => setTimeout(r, 0));
-    assert.equal(publishCalls.length, 0, "publishEvent must not fire after destroy");
+    assert.equal(
+      publishCalls.length,
+      0,
+      "publishEvent must not fire after destroy",
+    );
   } finally {
     restore();
     mock.reset();
@@ -148,7 +95,9 @@ test("destroy: is safe to call with no pending publish", () => {
 // 1. fetch failed (error/timeout) + local non-empty → hold, zero publish calls
 // Mutation: removing the failed guard causes bootstrap to call publishSortPrefs → pendingStore set.
 test("revert-fix: fetch failed (error) does not trigger seed-publish via bootstrap", async () => {
-  mock.method(relayClient, "fetchEvents", () => Promise.reject(new Error("relay timeout")));
+  mock.method(relayClient, "fetchEvents", () =>
+    Promise.reject(new Error("relay timeout")),
+  );
   mock.method(relayClient, "publishEvent", () => Promise.resolve());
   const fw = makeFakeWindow();
   const restore = installFakeWindow(fw);
@@ -169,11 +118,20 @@ test("revert-fix: absent fetch with prior watermark blocks seed-publish via boot
   mock.method(relayClient, "fetchEvents", () => Promise.resolve([]));
   mock.method(relayClient, "publishEvent", () => Promise.resolve());
   const fw = makeFakeWindow();
-  fw.localStorage.setItem(`buzz-sync-watermark.v1:channel-sort:pk-stale:${RELAY_KEY}`, "1700000000");
+  fw.localStorage.setItem(
+    `buzz-sync-watermark.v1:channel-sort:pk-stale:${RELAY_KEY}`,
+    "1700000000",
+  );
   const restore = installFakeWindow(fw);
   try {
     const manager = new ChannelSortSyncManager("pk-stale", RELAY);
-    assert.ok(manager.getPersistedWatermark() > 0);
+    assert.ok(
+      Number(
+        fw.localStorage.getItem(
+          `buzz-sync-watermark.v1:channel-sort:pk-stale:${RELAY_KEY}`,
+        ) ?? "0",
+      ) > 0,
+    );
     const result = await manager.bootstrap(makeStore({ channels: "recent" }));
     assert.equal(result.action, "hold");
     assert.equal(manager.getPendingStore(), null);
@@ -192,7 +150,12 @@ test("revert-fix: absent fetch with zero watermark seeds via bootstrap (first-sy
   const restore = installFakeWindow(fw);
   try {
     const manager = new ChannelSortSyncManager("pk-fresh", RELAY);
-    assert.equal(manager.getPersistedWatermark(), 0);
+    assert.equal(
+      fw.localStorage.getItem(
+        `buzz-sync-watermark.v1:channel-sort:pk-fresh:${RELAY_KEY}`,
+      ),
+      null,
+    );
     const result = await manager.bootstrap(makeStore({ channels: "recent" }));
     assert.equal(result.action, "hold");
     assert.ok(manager.getPendingStore() !== null);
@@ -211,17 +174,31 @@ test("revert-fix: sort LWW — newer decryptable pre-publish event selected afte
   let callCount = 0;
   mock.method(relayClient, "fetchEvents", () => {
     callCount++;
-    return Promise.resolve([{ pubkey: "pk-lww", content: callCount === 1 ? "bad-cipher" : "good-cipher",
-      created_at: callCount === 1 ? 100 : 200, id: `evt-${callCount}` }]);
+    return Promise.resolve([
+      {
+        pubkey: "pk-lww",
+        content: callCount === 1 ? "bad-cipher" : "good-cipher",
+        created_at: callCount === 1 ? 100 : 200,
+        id: `evt-${callCount}`,
+      },
+    ]);
   });
   mock.method(relayClient, "publishEvent", () => Promise.resolve());
   const fw = makeFakeWindow();
   const restore = installFakeWindow(fw);
-  const tauri = installTauriMock(JSON.stringify({ version: 1, groups: { [REMOTE_KEY]: "recent" } }));
+  const tauri = installTauriMock(
+    JSON.stringify({ version: 1, groups: { [REMOTE_KEY]: "recent" } }),
+  );
   try {
     const manager = new ChannelSortSyncManager("pk-lww", RELAY);
     await manager.fetchRemoteSortPrefs();
-    assert.ok(manager.getPersistedWatermark() >= 100);
+    assert.ok(
+      Number(
+        fw.localStorage.getItem(
+          `buzz-sync-watermark.v1:channel-sort:pk-lww:${RELAY_KEY}`,
+        ) ?? "0",
+      ) >= 100,
+    );
     manager.publishSortPrefs(makeStore({ "local-group": "recent" }));
     fw._fireTimer();
     await new Promise((r) => setTimeout(r, 20));
@@ -251,13 +228,31 @@ test("revert-fix: undecryptable live event advances watermark before decrypt att
   const restore = installFakeWindow(fw);
   try {
     const manager = new ChannelSortSyncManager("pk-live", RELAY);
-    assert.equal(manager.getPersistedWatermark(), 0, "watermark starts at 0");
+    assert.equal(
+      fw.localStorage.getItem(
+        `buzz-sync-watermark.v1:channel-sort:pk-live:${RELAY_KEY}`,
+      ),
+      null,
+      "watermark starts absent",
+    );
     await manager.subscribeToSortPrefs(() => {});
-    assert.ok(liveCallback !== null, "subscribeLive must have captured the callback");
-    liveCallback({ pubkey: "pk-live", content: "!bad-cipher!", created_at: 1700005555, id: "live-evt-1" });
+    assert.ok(
+      liveCallback !== null,
+      "subscribeLive must have captured the callback",
+    );
+    liveCallback({
+      pubkey: "pk-live",
+      content: "!bad-cipher!",
+      created_at: 1700005555,
+      id: "live-evt-1",
+    });
     await new Promise((r) => setTimeout(r, 0));
     assert.ok(
-      manager.getPersistedWatermark() >= 1700005555,
+      Number(
+        fw.localStorage.getItem(
+          `buzz-sync-watermark.v1:channel-sort:pk-live:${RELAY_KEY}`,
+        ) ?? "0",
+      ) >= 1700005555,
       "live undecryptable event must advance the watermark before decrypt is attempted",
     );
   } finally {
