@@ -18,11 +18,14 @@ type AgentRuntimeAvatarControlProps = {
   errorLabel?: string | null;
   errorTestId?: string;
   isActive: boolean;
+  isStopping?: boolean;
   isStarting: boolean;
   label: string;
   startTestId: string;
+  stopTestId?: string;
   onOpenError?: () => void;
   onStart: () => void;
+  onStop?: () => void;
 };
 
 const TAILWIND_SPACING = {
@@ -101,15 +104,19 @@ export function AgentRuntimeAvatarControl({
   errorLabel,
   errorTestId,
   isActive,
+  isStopping = false,
   isStarting,
   label,
   startTestId,
+  stopTestId,
   onOpenError,
   onStart,
+  onStop,
 }: AgentRuntimeAvatarControlProps) {
   const shouldReduceMotion = useReducedMotion();
   const trimmedAvatarUrl = avatarUrl?.trim() || null;
   const actionLabel = isStarting ? `Starting ${label}` : `Start ${label}`;
+  const stopLabel = isStopping ? `Stopping ${label}` : `Stop ${label}`;
   const hasError = !isActive && !isStarting && Boolean(errorLabel);
   const errorActionLabel = `${label} has a runtime error. Open runtime details.`;
   const transition = shouldReduceMotion ? { duration: 0 } : MASK_TRANSITION;
@@ -120,15 +127,35 @@ export function AgentRuntimeAvatarControl({
       badge={
         <span className="grid h-full w-full place-items-center">
           {isActive ? (
-            <span
-              aria-label={`${label} is running`}
-              className="flex h-6 w-6 items-center justify-center rounded-full"
-              data-testid={activeTestId}
-              role="img"
-              title={`${label} is running`}
+            <button
+              aria-label={stopLabel}
+              className="pointer-events-auto flex h-6 w-6 items-center justify-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-default disabled:opacity-90"
+              data-testid={stopTestId ?? activeTestId}
+              disabled={isStopping}
+              onClick={(event) => {
+                event.stopPropagation();
+                onStop?.();
+              }}
+              title={stopLabel}
+              type="button"
             >
-              <PresenceDot className={ACTIVE_DOT_CLASS_NAME} status="online" />
-            </span>
+              {isStopping ? (
+                <Spinner aria-label={stopLabel} className="h-4 w-4 border-2" />
+              ) : (
+                <span
+                  aria-label={`${label} is running`}
+                  className="flex h-6 w-6 items-center justify-center rounded-full"
+                  data-testid={activeTestId}
+                  role="img"
+                  title={`${label} is running`}
+                >
+                  <PresenceDot
+                    className={ACTIVE_DOT_CLASS_NAME}
+                    status="online"
+                  />
+                </span>
+              )}
+            </button>
           ) : (
             <button
               aria-label={hasError ? errorActionLabel : actionLabel}

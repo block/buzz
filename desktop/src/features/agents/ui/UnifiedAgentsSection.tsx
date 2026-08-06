@@ -5,7 +5,11 @@ import { resolveAgentCardModelLabel } from "@/features/agents/lib/agentCardModel
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import { useUserProfileQuery } from "@/features/profile/hooks";
-import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
+import type {
+  AgentPersona,
+  ManagedAgent,
+  RelayAgent,
+} from "@/shared/api/types";
 import type { ProfilePanelOpenOptions } from "@/shared/context/ProfilePanelContext";
 import { useFeedbackToasts } from "@/shared/hooks/useToastEffect";
 import { useFileImportZone } from "@/shared/hooks/useFileImportZone";
@@ -29,10 +33,12 @@ type UnifiedAgentsSectionProps = {
   actionErrorMessage: string | null;
   actionNoticeMessage: string | null;
   agents: ManagedAgent[];
+  remoteAgents: RelayAgent[];
   agentsError: Error | null;
   isActionPending: boolean;
   isAgentsLoading: boolean;
   startingAgentPubkey: string | null;
+  stoppingAgentPubkey: string | null;
   startingPersonaIds: ReadonlySet<string>;
   onOpenAgentProfile: (
     pubkey: string,
@@ -40,6 +46,7 @@ type UnifiedAgentsSectionProps = {
   ) => void;
   onOpenPersonaProfile: (persona: AgentPersona) => void;
   onStartAgent: (pubkey: string) => void;
+  onStopAgent: (pubkey: string) => void;
   onStartPersona: (persona: AgentPersona) => void;
   personas: AgentPersona[];
   personasError: Error | null;
@@ -72,14 +79,17 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     actionNoticeMessage,
     defaultModel,
     agents,
+    remoteAgents,
     agentsError,
     isActionPending,
     isAgentsLoading,
     startingAgentPubkey,
+    stoppingAgentPubkey,
     startingPersonaIds,
     onOpenAgentProfile,
     onOpenPersonaProfile,
     onStartAgent,
+    onStopAgent,
     onStartPersona,
     personas,
     personasError,
@@ -176,10 +186,12 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
                   key={group.persona.id}
                   persona={group.persona}
                   startingAgentPubkey={startingAgentPubkey}
+                  stoppingAgentPubkey={stoppingAgentPubkey}
                   startingPersonaIds={startingPersonaIds}
                   onOpenAgentProfile={onOpenAgentProfile}
                   onOpenPersonaProfile={onOpenPersonaProfile}
                   onStartAgent={onStartAgent}
+                  onStopAgent={onStopAgent}
                   onStartPersona={onStartPersona}
                 />
               );
@@ -200,9 +212,11 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
               groupKey="__unknown__"
               label="Unknown agents"
               startingAgentPubkey={startingAgentPubkey}
+              stoppingAgentPubkey={stoppingAgentPubkey}
               onToggle={toggle}
               onOpenAgentProfile={onOpenAgentProfile}
               onStartAgent={onStartAgent}
+              onStopAgent={onStopAgent}
             />
           ) : null}
           {ungrouped.length > 0 ? (
@@ -213,12 +227,36 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
               groupKey="__ungrouped__"
               label="Custom agents"
               startingAgentPubkey={startingAgentPubkey}
+              stoppingAgentPubkey={stoppingAgentPubkey}
               onToggle={toggle}
               onOpenAgentProfile={onOpenAgentProfile}
               onStartAgent={onStartAgent}
+              onStopAgent={onStopAgent}
             />
           ) : null}
         </div>
+      ) : null}
+
+      {remoteAgents.length > 0 ? (
+        <section className="space-y-3" data-testid="remote-agents-section">
+          <div>
+            <h2 className="font-semibold text-foreground text-lg">
+              Remote / DGX agents
+            </h2>
+            <p className="text-secondary-foreground text-sm">
+              Agents running on your relay or another machine.
+            </p>
+          </div>
+          <div className={IDENTITY_CARD_GRID_CLASS}>
+            {remoteAgents.map((agent) => (
+              <RemoteAgentCard
+                agent={agent}
+                key={agent.pubkey}
+                onOpenProfile={onOpenAgentProfile}
+              />
+            ))}
+          </div>
+        </section>
       ) : null}
 
       {agentsError ? (
@@ -239,16 +277,45 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
   );
 }
 
+function RemoteAgentCard({
+  agent,
+  onOpenProfile,
+}: {
+  agent: RelayAgent;
+  onOpenProfile: (pubkey: string) => void;
+}) {
+  const profileQuery = useUserProfileQuery(agent.pubkey);
+  const statusLabel = agent.status === "online" ? "Online" : agent.status;
+
+  return (
+    <AgentIdentityCard
+      ariaLabel={`${agent.name} remote agent profile`}
+      avatarUrl={profileQuery.data?.avatarUrl}
+      dataTestId={`remote-agent-${agent.pubkey}`}
+      label={agent.name}
+      modelLabel={agent.agentType || "DGX agent"}
+      onClick={() => onOpenProfile(agent.pubkey)}
+      statusBadge={
+        <span className="text-secondary-foreground/75 text-xs">
+          {statusLabel}
+        </span>
+      }
+    />
+  );
+}
+
 function AgentPersonaCard({
   actions,
   agent,
   defaultModel,
   persona,
   startingAgentPubkey,
+  stoppingAgentPubkey,
   startingPersonaIds,
   onOpenAgentProfile,
   onOpenPersonaProfile,
   onStartAgent,
+  onStopAgent,
   onStartPersona,
 }: {
   actions?: (
@@ -259,6 +326,7 @@ function AgentPersonaCard({
   defaultModel: string;
   persona: AgentPersona;
   startingAgentPubkey: string | null;
+  stoppingAgentPubkey: string | null;
   startingPersonaIds: ReadonlySet<string>;
   onOpenAgentProfile: (
     pubkey: string,
@@ -266,6 +334,7 @@ function AgentPersonaCard({
   ) => void;
   onOpenPersonaProfile: (persona: AgentPersona) => void;
   onStartAgent: (pubkey: string) => void;
+  onStopAgent: (pubkey: string) => void;
   onStartPersona: (persona: AgentPersona) => void;
 }) {
   const title = persona.displayName;
@@ -299,13 +368,16 @@ function AgentPersonaCard({
             errorLabel={friendlyError}
             errorTestId={`agent-runtime-error-${agent.pubkey}`}
             isActive={isActive}
+            isStopping={stoppingAgentPubkey === agent.pubkey}
             isStarting={startingAgentPubkey === agent.pubkey}
             label={title}
             startTestId={`agent-runtime-start-${agent.pubkey}`}
+            stopTestId={`agent-runtime-stop-${agent.pubkey}`}
             onOpenError={() => {
               onOpenAgentProfile(agent.pubkey, { tab: "runtime" });
             }}
             onStart={() => onStartAgent(agent.pubkey)}
+            onStop={() => onStopAgent(agent.pubkey)}
           />
         ) : (
           <AgentRuntimeAvatarControl
@@ -354,17 +426,21 @@ function StandaloneAgentCard({
   agent,
   defaultModel,
   startingAgentPubkey,
+  stoppingAgentPubkey,
   onOpenAgentProfile,
   onStartAgent,
+  onStopAgent,
 }: {
   agent: ManagedAgent;
   defaultModel: string;
   startingAgentPubkey: string | null;
+  stoppingAgentPubkey: string | null;
   onOpenAgentProfile: (
     pubkey: string,
     options?: ProfilePanelOpenOptions,
   ) => void;
   onStartAgent: (pubkey: string) => void;
+  onStopAgent: (pubkey: string) => void;
 }) {
   const title = agent.name;
   const profileQuery = useUserProfileQuery(agent.pubkey);
@@ -385,13 +461,16 @@ function StandaloneAgentCard({
           errorLabel={friendlyError}
           errorTestId={`agent-runtime-error-${agent.pubkey}`}
           isActive={isActive}
+          isStopping={stoppingAgentPubkey === agent.pubkey}
           isStarting={startingAgentPubkey === agent.pubkey}
           label={title}
           startTestId={`agent-runtime-start-${agent.pubkey}`}
+          stopTestId={`agent-runtime-stop-${agent.pubkey}`}
           onOpenError={() => {
             onOpenAgentProfile(agent.pubkey, { tab: "runtime" });
           }}
           onStart={() => onStartAgent(agent.pubkey)}
+          onStop={() => onStopAgent(agent.pubkey)}
         />
       }
       avatarUrl={profileQuery.data?.avatarUrl}
@@ -499,9 +578,11 @@ function CollapsibleAgentGroup({
   collapsed,
   defaultModel,
   startingAgentPubkey,
+  stoppingAgentPubkey,
   onToggle,
   onOpenAgentProfile,
   onStartAgent,
+  onStopAgent,
 }: {
   groupKey: string;
   label: string;
@@ -509,12 +590,14 @@ function CollapsibleAgentGroup({
   collapsed: ReadonlySet<string>;
   defaultModel: string;
   startingAgentPubkey: string | null;
+  stoppingAgentPubkey: string | null;
   onToggle: (key: string) => void;
   onOpenAgentProfile: (
     pubkey: string,
     options?: ProfilePanelOpenOptions,
   ) => void;
   onStartAgent: (pubkey: string) => void;
+  onStopAgent: (pubkey: string) => void;
 }) {
   const isCollapsed = collapsed.has(groupKey);
   return (
@@ -540,8 +623,10 @@ function CollapsibleAgentGroup({
               defaultModel={defaultModel}
               key={agent.pubkey}
               startingAgentPubkey={startingAgentPubkey}
+              stoppingAgentPubkey={stoppingAgentPubkey}
               onOpenAgentProfile={onOpenAgentProfile}
               onStartAgent={onStartAgent}
+              onStopAgent={onStopAgent}
             />
           ))}
         </div>
