@@ -25,6 +25,7 @@ import { IdentityCardSkeleton } from "@/shared/ui/identity-card-skeleton";
 import { AgentIdentityCard } from "./AgentIdentityCard";
 import { AgentRuntimeAvatarControl } from "./AgentRuntimeAvatarControl";
 import { CreateIdentityCard } from "./CreateIdentityCard";
+import { ModelPicker } from "./ModelPicker";
 import { PersonaActionsMenu } from "./PersonaActionsMenu";
 import { buildUnifiedGroups, pickProfileAgent } from "./unifiedAgentGroups";
 
@@ -327,6 +328,12 @@ function AgentPersonaCard({
       dataTestId={`persona-agent-row-${persona.id}`}
       label={title}
       modelLabel={modelLabel}
+      // A persona without a managed agent has nothing to switch, so it keeps the
+      // static label. With an agent, the same slot becomes a live picker: this is
+      // the only UI path to `switch_model` (kind:24200) — ModelPicker is its sole
+      // caller, and until now nothing rendered ModelPicker, so the backend could
+      // switch models that no screen could ask for.
+      modelControl={agent ? <ModelPicker agent={agent} /> : undefined}
       onClick={() => {
         if (agent) {
           onOpenAgentProfile(
@@ -406,6 +413,9 @@ function StandaloneAgentCard({
         personaModel: null,
         defaultModel,
       })}
+      // Unknown agents are managed agents with no persona, so they always have a
+      // ManagedAgent to switch — unlike AgentPersonaCard, there is no undefined case.
+      modelControl={<ModelPicker agent={agent} />}
       onClick={() => {
         onOpenAgentProfile(
           agent.pubkey,
