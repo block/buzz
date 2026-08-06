@@ -6,20 +6,122 @@ use tokio::task::JoinSet;
 
 use crate::builtin;
 use crate::config::{Config, MAX_PROMPT_BYTES, MAX_TOOL_CALLS_PER_TURN, MAX_TOOL_RESULT_BYTES};
-use crate::handoff::HandoffOutcome;
+use crate::handoff::{ContextRecovery, HandoffOutcome};
 use crate::hints::SkillEntry;
 use crate::llm::Llm;
 use crate::mcp::McpRegistry;
 use crate::mcp::ResultBudget;
 
 use crate::types::{
-    AgentError, ContentBlock, HistoryItem, ProviderStop, StopReason, ToolCall, ToolResult,
-    ToolResultContent, TurnTotalState,
+    AgentError, ContentBlock, HistoryItem, ProviderStop, SessionUsageBaseline, StopReason,
+    ToolCall, ToolResult, ToolResultContent, TurnTotalState,
 };
 use crate::wire::{self, WireSender};
 
 const ERROR_REFLECTION_SUFFIX: &str =
     "\n\n[Reflect] Before retrying, identify the cause and change your approach.";
+
+const UNSUPPORTED_IMAGE_TOOL_MESSAGE: &str = "The current model does not support image input. The image was removed from conversation history so this turn can continue. Use a text-based inspection tool or ask the user for a textual description instead.";
+
+/// Remove image blocks that the provider has explicitly rejected while keeping
+/// their surrounding tool result (and therefore the tool-call/result pairing)
+/// intact. Returns the number of images removed; zero means the provider error
+/// cannot be safely recovered by mutating history.
+fn replace_unsupported_images(history: &mut [HistoryItem]) -> usize {
+    let mut replaced = 0;
+    for item in history {
+        let HistoryItem::ToolResult(result) = item else {
+            continue;
+        };
+        let before = result.content.len();
+        result
+            .content
+            .retain(|content| !matches!(content, ToolResultContent::Image { .. }));
+        let removed = before - result.content.len();
+        if removed > 0 {
+            replaced += removed;
+            result.is_error = true;
+            result.content.push(ToolResultContent::Text(
+                UNSUPPORTED_IMAGE_TOOL_MESSAGE.to_string(),
+            ));
+        }
+    }
+    replaced
+}
+
+/// Maximum reply reminders emitted per prompt when `require_reply` is on.
+///
+/// After this many, the turn is allowed to end whether or not anything was
+/// published: the guard exists to catch accidental omission, not to compel
+/// speech. The shared `stop_max_rejections` budget can cut this lower — see
+/// [`Config::require_reply`](crate::config::Config::require_reply).
+const MAX_REPLY_NAGS: u32 = 2;
+
+/// Server label on the synthetic reply-guard objection.
+///
+/// Not a real MCP server. It rides the same tool-result path as `_Stop` hook
+/// output, so the model sees `{hook, server, text}` attribution naming the
+/// in-process guard rather than an MCP server that could be impersonated.
+const REPLY_GUARD_SERVER: &str = "buzz-agent";
+
+/// Reminder text emitted when a turn is about to end with nothing published.
+///
+/// Explicitly licenses silence. The base prompt tells agents that publishing is
+/// optional and "silence is usually correct"; a reminder that argued otherwise
+/// would fight that instruction and make agents chattier.
+const REPLY_GUARD_NAG: &str = "You are about to end this turn without calling `buzz messages send`. \
+Your assistant text and reasoning are never shown to anyone — if you did work, found an answer, \
+or hit a blocker that someone is waiting on, it exists only if you publish it. \
+If you already posted, or if silence is genuinely correct for this turn, ignore this and end your turn.";
+
+/// Whether `call` is a recognized attempt to publish a reply to Buzz.
+///
+/// Recognizes an *attempt*, not a successful publish: the command text is
+/// inspected, never the exit status. That is deliberate — a send that fails
+/// already returns a non-zero exit and error JSON to the model, which is louder
+/// feedback than the reminder this gates.
+///
+/// `has` + `!is_hook` are the same checks the dispatcher uses to accept a call
+/// (see `execute_calls`), so a hallucinated `fake__shell` — rejected at preflight
+/// and never executed — cannot disarm the guard. They must stay *before*
+/// [`is_reply_shaped`]: together with them, and only with them, the `__shell`
+/// suffix is exactly equivalent to "the bare tool name is `shell`".
+fn is_buzz_reply_call(call: &ToolCall, mcp: &McpRegistry) -> bool {
+    mcp.has(&call.name) && !mcp.is_hook(&call.name) && is_reply_shaped(&call.name, &call.arguments)
+}
+
+/// Whether a tool name and arguments have the shape of a Buzz publish command.
+///
+/// Split from [`is_buzz_reply_call`] only so the matcher is testable without a
+/// live [`McpRegistry`]; callers must apply the registry checks first.
+///
+/// On the name: `ends_with("__shell")` is exact rather than approximate *given*
+/// those checks. Registration rejects `__` in both server names and bare tool
+/// names, and qualified names are `{server}__{bare}`, so a trailing `__shell` can
+/// only straddle the separator if the bare name starts with `_` — which `is_hook`
+/// already excludes. Dropping the separator would not be exact: `powershell` and
+/// `noshell` both end in `shell`.
+///
+/// On the command: a deliberately coarse substring test, scoped to the structured
+/// `command` field so unrelated metadata — a `description` that quotes a send —
+/// cannot suppress the guard, and a non-string `command` is rejected rather than
+/// coerced. Known limits, both accepted: a command assembled at runtime (`$CMD`)
+/// or hidden in a wrapper script is missed, and text that merely quotes a send
+/// (`echo "buzz messages send"`) matches. Missing a real post is the expensive
+/// direction, and substring matching is the more forgiving one there.
+fn is_reply_shaped(name: &str, arguments: &serde_json::Value) -> bool {
+    name.ends_with("__shell")
+        && arguments
+            .get("command")
+            .and_then(|v| v.as_str())
+            .is_some_and(|cmd| {
+                // `messages send` also covers `messages send-diff`. `reactions
+                // add` counts because the base prompt directs agents to react
+                // rather than post a bare acknowledgement, so nagging an agent
+                // that reacted would punish documented-correct behavior.
+                cmd.contains("messages send") || cmd.contains("reactions add")
+            })
+}
 
 pub struct RunCtx<'a> {
     pub cfg: &'a Config,
@@ -76,9 +178,40 @@ pub struct RunCtx<'a> {
     /// Reset to `Unseen` at turn start in `run()`. Callers must not derive a
     /// total by summing input+output — that is the UI display approximation only.
     pub turn_total_state: &'a mut TurnTotalState,
+    /// Session-cumulative counters as they stood when this turn began. Added to
+    /// the `turn_*` accumulators above to report a cumulative figure mid-turn;
+    /// the session's own copy is only advanced once, after the turn returns.
+    pub usage_baseline: SessionUsageBaseline,
 }
 
 impl RunCtx<'_> {
+    /// Send a session-cumulative `usage_update` reflecting everything observed
+    /// up to and including the most recent LLM response.
+    ///
+    /// The figure is the turn-start baseline plus this turn's running
+    /// accumulators, which is exactly what `session/prompt` will fold into the
+    /// session once the turn returns — so a mid-turn notification and the
+    /// end-of-turn one agree, and a turn that never returns has still reported
+    /// everything but its final in-flight request.
+    async fn emit_usage_update(&self) {
+        let base = self.usage_baseline;
+        let payload = wire::usage_update_payload(
+            base.input_tokens
+                .saturating_add(self.turn_input_tokens.unwrap_or(0)),
+            base.output_tokens
+                .saturating_add(self.turn_output_tokens.unwrap_or(0)),
+            base.cached_input_tokens
+                .saturating_add(self.turn_cached_input_tokens.unwrap_or(0)),
+            base.total_state.merge_session(*self.turn_total_state),
+            self.effective_model,
+        );
+        wire::send(
+            self.wire,
+            wire::goose_session_update(self.session_id, payload),
+        )
+        .await;
+    }
+
     pub async fn run(&mut self, prompt: Vec<ContentBlock>) -> Result<StopReason, AgentError> {
         let user_text = prompt_to_text(prompt)?;
         if user_text.len() > MAX_PROMPT_BYTES {
@@ -96,12 +229,32 @@ impl RunCtx<'_> {
         *self.turn_output_tokens = None;
         *self.turn_cached_input_tokens = None;
         *self.turn_total_state = TurnTotalState::Unseen;
+        // Per-turn handoff-attempt counter. Scoped here (not persisted in the
+        // session) so `BUZZ_AGENT_MAX_HANDOFFS` bounds compactions per
+        // `session/prompt` turn rather than per session lifetime. A
+        // long-lived session legitimately needs unbounded handoffs across
+        // prompts; the cap only exists to stop runaway within a single turn.
+        // The session-cumulative `handoff_count` (used in log lines) is not
+        // reset: it reflects total compactions since session start.
+        let mut handoff_attempts: usize = 0;
 
         let mut round = 0u32;
         // Per-prompt `_Stop` objection count. Bounded per prompt (not per
         // session) so a stubborn exchange can't permanently disable the stop
         // guard for a long-lived session; `max_rounds` still caps the loop.
         let mut stop_rejections = 0u32;
+        // Reply-guard state for this prompt. `prompt()` *is* the turn, so
+        // locals here are per-turn by construction — same shape as
+        // `stop_rejections` above.
+        //
+        // Named for what it proves: a *recognized attempt* to publish, not a
+        // successful publish. See `is_buzz_reply_call`.
+        let mut buzz_reply_call_seen = false;
+        let mut reply_nags = 0u32;
+        // Per-`run()` reactive context-recovery budget. Per-turn, not
+        // per-session: a fresh prompt deserves a fresh chance to recover, and
+        // `max_rounds` defaults to 0 (unbounded) so it cannot bound this.
+        let mut context_recoveries = 0u32;
         loop {
             if self.cfg.max_rounds > 0 && round >= self.cfg.max_rounds {
                 return Ok(StopReason::MaxTurnRequests);
@@ -114,7 +267,7 @@ impl RunCtx<'_> {
             // its next request — the turn continues, it is not restarted. Drain
             // non-blocking; an empty queue is the common case.
             self.drain_steers();
-            match self.maybe_handoff().await {
+            match self.maybe_handoff(&mut handoff_attempts).await {
                 HandoffOutcome::Cancelled => return Ok(StopReason::Cancelled),
                 // Context was just reset — the prior request's token count no
                 // longer describes the (now much smaller) history. Clear both
@@ -136,10 +289,10 @@ impl RunCtx<'_> {
                 tools.push(builtin::load_skill_def());
             }
             round = round.saturating_add(1);
-            let response = tokio::select! {
+            let response_result = tokio::select! {
                 biased;
                 _ = self.cancel.changed() => return Ok(StopReason::Cancelled),
-                r = self.llm.complete(self.cfg, self.system_prompt, self.history, &tools, self.effective_model) => r?,
+                r = self.llm.complete(self.cfg, self.system_prompt, self.history, &tools, self.effective_model) => r,
                 _ = async {
                     // Keepalive ticker: emit a lightweight session update every 30s
                     // while waiting on the LLM provider. This resets the ACP harness
@@ -162,7 +315,78 @@ impl RunCtx<'_> {
                     }
                 } => unreachable!(),
             };
-
+            let response = match response_result {
+                Ok(response) => response,
+                Err(AgentError::UnsupportedImageInput(detail)) => {
+                    let removed = replace_unsupported_images(self.history);
+                    if removed == 0 {
+                        return Err(AgentError::UnsupportedImageInput(detail));
+                    }
+                    tracing::warn!(
+                        model = self.effective_model,
+                        removed_images = removed,
+                        "provider rejected image input; removed images from history and continuing turn"
+                    );
+                    continue;
+                }
+                // Reactive context recovery. A context-window 400 is the only
+                // ground-truth signal that history must shrink, and it arrives
+                // exactly when the proactive gate cannot act: a failed request
+                // reports no usage, so `last_request_input_tokens` stays frozen
+                // at the last SUCCESSFUL (sub-threshold) reading and
+                // `should_handoff()` returns false forever. Without this arm the
+                // error propagates out of `run()`, the in-memory session keeps
+                // the same oversized history, and every later prompt in that
+                // session fails the same way — a stick that persists across
+                // turns for the life of the session. (Restarting the agent DOES
+                // clear it: history lives only in the in-memory session map, so
+                // a restart is the manual workaround, not an exception to it.)
+                //
+                // Retried in-loop rather than returned so the recovered context
+                // continues the turn the user is waiting on.
+                Err(AgentError::LlmContextExceeded(e)) => {
+                    match self
+                        .recover_from_context_overflow(&mut context_recoveries)
+                        .await
+                    {
+                        ContextRecovery::Recovered => {
+                            // Refund the round the rejected request consumed.
+                            // `round` is incremented before `complete()`, so
+                            // without this a finite `max_rounds` is spent by a
+                            // request the provider refused to serve: the loop
+                            // would re-enter, hit the cap at the top, and return
+                            // `MaxTurnRequests` having destroyed history and
+                            // never asked the model again — a worse outcome than
+                            // the error it replaced.
+                            //
+                            // This cannot become an unbounded amnesty: refunds
+                            // happen only on a *successful* recovery, and
+                            // recoveries are independently capped by
+                            // `MAX_CONTEXT_RECOVERIES_PER_RUN`, so at most that
+                            // many rounds can ever be refunded in one turn. An
+                            // ordinary round is never refunded.
+                            round = round.saturating_sub(1);
+                            // Same reset as the proactive path (see
+                            // `HandoffOutcome::Performed` above): the frozen
+                            // token reading describes history that no longer
+                            // exists. Clearing it is what lets the gate work
+                            // again on later rounds.
+                            *self.last_request_input_tokens = None;
+                            *self.last_request_history_bytes = None;
+                            continue;
+                        }
+                        ContextRecovery::Cancelled => return Ok(StopReason::Cancelled),
+                        // No rescue left. Surface the provider's own error
+                        // rather than a synthetic one: it names the model and
+                        // the offending sizes, and a visible failure is the
+                        // point — the alternative is retrying forever.
+                        ContextRecovery::Exhausted => {
+                            return Err(AgentError::LlmContextExceeded(e))
+                        }
+                    }
+                }
+                Err(error) => return Err(error),
+            };
             // Record provider-reported input usage so the next loop iteration's
             // handoff gate can compare it against the token budget. We capture
             // it together with the history byte size AT THIS MOMENT — which is
@@ -217,6 +441,23 @@ impl RunCtx<'_> {
             // this gate rather than representing absent categories as zero.
             if response.input_tokens.is_some() || response.output_tokens.is_some() {
                 *self.turn_total_state = self.turn_total_state.fold(response.total_tokens);
+                // Report what the turn has burned SO FAR, before running the
+                // next round. A turn is many provider round-trips over many
+                // minutes, and until this point the only report was the one
+                // `session/prompt` sends after the turn returns — so a turn
+                // that was cancelled, timed out, or whose process was killed
+                // reported nothing at all, and its tokens (already billed)
+                // existed only in this stack frame. Reporting per round bounds
+                // the loss to the single request in flight.
+                //
+                // Emitting more than one `usage_update` per turn is expected by
+                // the consumer: buzz-acp's UsageTracker advances its committed
+                // baseline only when the turn's metric is published, so every
+                // notification within a turn measures from the same frozen
+                // baseline and the last one seen is the turn's true total.
+                // goose behaves the same way, which is why the tracker was
+                // written to tolerate it.
+                self.emit_usage_update().await;
             }
 
             if !response.reasoning.is_empty() {
@@ -264,7 +505,7 @@ impl RunCtx<'_> {
                     if stop_rejections >= self.cfg.stop_max_rejections {
                         return Ok(stop);
                     }
-                    let objections = self
+                    let mut objections = self
                         .mcp
                         .call_hooks(
                             "_Stop",
@@ -273,6 +514,17 @@ impl RunCtx<'_> {
                             &self.cfg.hook_servers,
                         )
                         .await;
+                    // Reply guard shares this gate and this budget, so a round
+                    // carrying both a hook objection and a reply reminder costs
+                    // one rejection and delivers both texts.
+                    if self.cfg.require_reply
+                        && !buzz_reply_call_seen
+                        && reply_nags < MAX_REPLY_NAGS
+                    {
+                        reply_nags += 1;
+                        objections
+                            .push((REPLY_GUARD_SERVER.to_string(), REPLY_GUARD_NAG.to_string()));
+                    }
                     if !objections.is_empty() {
                         stop_rejections = stop_rejections.saturating_add(1);
                         push_hook_outputs_as_tool_results(self.history, "_Stop", &objections);
@@ -289,6 +541,11 @@ impl RunCtx<'_> {
                     calls.len()
                 );
                 calls.truncate(MAX_TOOL_CALLS_PER_TURN);
+            }
+            // Deliberately after truncation: a publish-shaped call that was
+            // discarded never runs, so it must not suppress the reminder.
+            if self.cfg.require_reply && !buzz_reply_call_seen {
+                buzz_reply_call_seen = calls.iter().any(|c| is_buzz_reply_call(c, self.mcp));
             }
             self.history.push(HistoryItem::Assistant {
                 text: response.text,
@@ -799,6 +1056,148 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// `truncate_history` cannot serve as the context-window fallback: it is
+    /// measured in BYTES (`max_history_bytes`, default 16 MiB, a request-body
+    /// limiter) while the thing the fallback must defend is a TOKEN window
+    /// (`max_context_tokens`, default 200k). A history large enough to blow a
+    /// 200k-token window is nowhere near 16 MiB, so at the default budget the
+    /// fallback evicts nothing at all — which is why the `Skipped ->
+    /// truncate_history` path left the agent permanently stuck and the reactive
+    /// ladder had to be built instead.
+    ///
+    /// The negative assertion is paired with a positive control (same helper,
+    /// same fixture, budget set to the window instead) so that "evicted
+    /// nothing" is a real observation about the unit mismatch rather than a
+    /// blind probe that could never evict.
+    #[test]
+    fn truncate_history_is_a_noop_at_context_window_scale() {
+        // ~800 KB of history. At any real bytes/token density (densest real
+        // content is ~1.4 B/tok, typical prose ~3-4) this is >= 200k tokens,
+        // i.e. already over a 200k window.
+        let mut history: Vec<HistoryItem> = Vec::new();
+        for i in 0..400 {
+            history.push(HistoryItem::User(format!("q{i} {}", "x".repeat(1000))));
+            history.push(HistoryItem::Assistant {
+                text: format!("a{i} {}", "y".repeat(1000)),
+                tool_calls: vec![],
+                reasoning_details: None,
+            });
+        }
+        let total: usize = history.iter().map(HistoryItem::estimated_bytes).sum();
+        let pressure: usize = history
+            .iter()
+            .map(HistoryItem::context_pressure_bytes)
+            .sum();
+        assert!(
+            total > 800_000,
+            "fixture must be big enough to exceed a 200k-token window, got {total}"
+        );
+
+        // NEGATIVE: the real configured default budget.
+        let default_budget = 16 * 1024 * 1024;
+        let mut under_default = history.clone();
+        truncate_history(&mut under_default, default_budget);
+        assert_eq!(
+            under_default.len(),
+            history.len(),
+            "16 MiB byte budget evicted nothing from a {total}-byte history \
+             (pressure {pressure}) that already exceeds a 200k-token window"
+        );
+
+        // POSITIVE CONTROL: same helper, same fixture, budget set to the
+        // window instead. If this also evicted nothing the assertion above
+        // would prove nothing about the unit mismatch -- it would just mean
+        // the probe is blind.
+        let mut under_window = history.clone();
+        truncate_history(&mut under_window, 200_000);
+        assert!(
+            under_window.len() < history.len(),
+            "positive control must evict: probe is blind otherwise"
+        );
+    }
+
+    /// The shapes the guard must recognize as a publish attempt. Callers apply
+    /// the registry checks first; these cover the name suffix and command text.
+    #[test]
+    fn reply_shape_matches_documented_send_forms() {
+        for cmd in [
+            "buzz messages send --channel X --content Y",
+            "buzz --relay wss://r messages send --channel X --content Y",
+            "/abs/path/buzz messages send",
+            "printf 'hi' | buzz messages send --content -",
+            "buzz messages send-diff --diff -",
+            "buzz reactions add --event E --emoji +",
+            // Assembled through another shell: rev 3's tokenizer missed this.
+            r#"sh -c "buzz messages send --channel X""#,
+        ] {
+            assert!(
+                is_reply_shaped("dev__shell", &json!({ "command": cmd })),
+                "expected {cmd:?} to count as a publish attempt"
+            );
+        }
+    }
+
+    /// Commands that do real work but do not reply in the originating
+    /// conversation must still be nagged.
+    #[test]
+    fn reply_shape_rejects_non_reply_commands() {
+        for cmd in [
+            "buzz messages get --channel X",
+            "buzz channels list",
+            "buzz reactions remove --event E",
+            "buzz pr open --title T",
+            "buzz social publish --content hi",
+            "buzz notes set --name n",
+            "cargo test -p buzz-agent",
+        ] {
+            assert!(
+                !is_reply_shaped("dev__shell", &json!({ "command": cmd })),
+                "expected {cmd:?} not to count as a publish attempt"
+            );
+        }
+    }
+
+    /// The `__` separator is load-bearing: `ends_with("shell")` alone would
+    /// accept any registered tool whose name merely ends in those letters, and
+    /// `has()` proves registration, not the bare name.
+    #[test]
+    fn reply_shape_requires_the_qname_separator() {
+        let args = json!({ "command": "buzz messages send --channel X" });
+        for name in [
+            "dev__powershell",
+            "dev__noshell",
+            "shell",
+            "dev__send_message",
+        ] {
+            assert!(
+                !is_reply_shaped(name, &args),
+                "{name} must not satisfy the shell-tool check"
+            );
+        }
+        assert!(is_reply_shaped("dev__shell", &args));
+        assert!(is_reply_shaped("buzz-dev-mcp__shell", &args));
+    }
+
+    /// Only the field that carries the executable command counts. Searching
+    /// serialized arguments instead would let arbitrary metadata disarm the
+    /// guard, turning a description into an attempted send.
+    #[test]
+    fn reply_shape_reads_only_the_command_field() {
+        assert!(!is_reply_shaped(
+            "dev__shell",
+            &json!({ "description": "buzz messages send --channel X" })
+        ));
+        assert!(!is_reply_shaped(
+            "dev__shell",
+            &json!({ "workdir": "buzz messages send" })
+        ));
+        // Malformed `command` is rejected, not coerced — and must not panic.
+        assert!(!is_reply_shaped("dev__shell", &json!({ "command": 42 })));
+        assert!(!is_reply_shaped("dev__shell", &json!({ "command": null })));
+        assert!(!is_reply_shaped("dev__shell", &json!({})));
+        assert!(!is_reply_shaped("dev__shell", &json!("not an object")));
+    }
+
     /// A9 regression: `reasoning_details` contributes real bytes to
     /// `estimated_bytes` (see `types.rs::HistoryItem::size_with`), so a
     /// history item carrying a large opaque reasoning array must actually
@@ -845,6 +1244,47 @@ mod tests {
         );
         let total_after: usize = history.iter().map(HistoryItem::estimated_bytes).sum();
         assert!(total_after <= max_bytes);
+    }
+
+    #[test]
+    fn unsupported_images_become_recoverable_tool_errors() {
+        let mut history = vec![
+            HistoryItem::Assistant {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    provider_id: "call-image".into(),
+                    name: "dev__view_image".into(),
+                    arguments: json!({ "source": "spec.png" }),
+                    provider_extra: Default::default(),
+                }],
+                reasoning_details: None,
+            },
+            HistoryItem::ToolResult(ToolResult {
+                provider_id: "call-image".into(),
+                content: vec![
+                    ToolResultContent::Text("10x10 image from spec.png".into()),
+                    ToolResultContent::Image {
+                        data: "aW1n".into(),
+                        mime_type: "image/png".into(),
+                    },
+                ],
+                is_error: false,
+            }),
+        ];
+
+        assert_eq!(replace_unsupported_images(&mut history), 1);
+        let HistoryItem::ToolResult(result) = &history[1] else {
+            panic!("tool result must stay paired with the assistant tool call");
+        };
+        assert_eq!(result.provider_id, "call-image");
+        assert!(result.is_error);
+        assert!(result
+            .content
+            .iter()
+            .all(|content| !matches!(content, ToolResultContent::Image { .. })));
+        assert!(result.text().contains("does not support image input"));
+        assert!(result.text().contains("10x10 image from spec.png"));
+        assert_eq!(replace_unsupported_images(&mut history), 0);
     }
 
     #[test]

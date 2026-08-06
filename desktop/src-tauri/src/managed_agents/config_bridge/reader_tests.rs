@@ -56,6 +56,7 @@ fn test_runtime() -> &'static KnownAcpRuntime {
         thinking_env_var: Some("GOOSE_THINKING_EFFORT"),
         max_tokens_env_var: Some("GOOSE_MAX_TOKENS"),
         context_limit_env_var: Some("GOOSE_CONTEXT_LIMIT"),
+        max_rounds_env_var: None,
         required_normalized_fields: &["model", "provider"],
         login_hint: None,
         auth_probe_args: None,
@@ -120,11 +121,53 @@ fn test_record() -> ManagedAgentRecord {
     }
 }
 
+/// Default empty tiers: no persona or global inheritance.
+fn no_tiers() -> InheritedConfigTiers {
+    InheritedConfigTiers::default()
+}
+
+/// Tiers with only global env set (for AC-1 style tests).
+fn global_env_tiers(key: &str, val: &str) -> InheritedConfigTiers {
+    let mut global_env = BTreeMap::new();
+    global_env.insert(key.to_string(), val.to_string());
+    InheritedConfigTiers {
+        global_env,
+        ..Default::default()
+    }
+}
+
+/// Tiers with only persona env set.
+fn persona_env_tiers(key: &str, val: &str) -> InheritedConfigTiers {
+    let mut persona_env = BTreeMap::new();
+    persona_env.insert(key.to_string(), val.to_string());
+    InheritedConfigTiers {
+        persona_env,
+        ..Default::default()
+    }
+}
+
+/// Tiers with both persona and global env set for the same key.
+fn persona_and_global_env_tiers(
+    key: &str,
+    persona_val: &str,
+    global_val: &str,
+) -> InheritedConfigTiers {
+    let mut persona_env = BTreeMap::new();
+    persona_env.insert(key.to_string(), persona_val.to_string());
+    let mut global_env = BTreeMap::new();
+    global_env.insert(key.to_string(), global_val.to_string());
+    InheritedConfigTiers {
+        persona_env,
+        global_env,
+        ..Default::default()
+    }
+}
+
 #[test]
 fn pre_spawn_surface_reports_pending_acp_tiers() {
     let record = test_record();
     let runtime = test_runtime();
-    let surface = read_config_surface(&record, Some(runtime), None, None);
+    let surface = read_config_surface(&record, Some(runtime), None, &no_tiers());
 
     assert!(surface.is_pre_spawn);
     assert_eq!(surface.sources.acp_native, ConfigTierStatus::Pending);
@@ -140,7 +183,7 @@ fn surface_reports_mcp_specific_config_path() {
     let record = test_record();
     let runtime = test_runtime();
     let surface = with_goose_path_root(None, || {
-        read_config_surface(&record, Some(runtime), None, None)
+        read_config_surface(&record, Some(runtime), None, &no_tiers())
     });
 
     let path = surface
@@ -159,7 +202,7 @@ fn goose_mcp_config_path_follows_path_root_override() {
     let record = test_record();
     let runtime = test_runtime();
     let surface = with_goose_path_root(Some("/tmp/buzz-goose-root"), || {
-        read_config_surface(&record, Some(runtime), None, None)
+        read_config_surface(&record, Some(runtime), None, &no_tiers())
     });
 
     let expected_path = Path::new("/tmp/buzz-goose-root")
@@ -183,7 +226,7 @@ fn claude_surface_uses_mcp_config_path_not_settings_path() {
         config_file_path: Some("~/.claude/settings.json"),
         ..*test_runtime()
     };
-    let surface = read_config_surface(&record, Some(runtime), None, None);
+    let surface = read_config_surface(&record, Some(runtime), None, &no_tiers());
 
     assert!(surface
         .sources
@@ -203,7 +246,7 @@ fn record_model_overrides_file_model() {
     record.model = Some("explicit-model".to_string());
     let runtime = test_runtime();
 
-    let surface = read_config_surface(&record, Some(runtime), None, None);
+    let surface = read_config_surface(&record, Some(runtime), None, &no_tiers());
     let model = surface.normalized.model.unwrap();
     assert_eq!(model.value.as_deref(), Some("explicit-model"));
     assert_eq!(model.origin, ConfigOrigin::BuzzExplicit);
@@ -216,7 +259,7 @@ fn provider_locked_shows_locked() {
         provider_locked: true,
         ..*test_runtime()
     };
-    let surface = read_config_surface(&record, Some(runtime), None, None);
+    let surface = read_config_surface(&record, Some(runtime), None, &no_tiers());
     let provider = surface.normalized.provider.unwrap();
     assert_eq!(provider.value.as_deref(), Some("Anthropic (locked)"));
     assert_eq!(provider.origin, ConfigOrigin::HarnessConstraint);
@@ -242,7 +285,7 @@ fn post_spawn_with_model_config_option_uses_acp() {
         captured_at: "".to_string(),
     };
 
-    let surface = read_config_surface(&record, Some(runtime), Some(&cache), None);
+    let surface = read_config_surface(&record, Some(runtime), Some(&cache), &no_tiers());
     assert!(!surface.is_pre_spawn);
     let model = surface.normalized.model.unwrap();
     assert_eq!(model.value.as_deref(), Some("claude-opus-4"));
@@ -266,53 +309,86 @@ fn acp_model_overrides_file_model_with_override_tracking() {
         captured_at: "".to_string(),
     };
 
-    let surface = read_config_surface(&record, Some(runtime), Some(&cache), None);
+    let surface = read_config_surface(&record, Some(runtime), Some(&cache), &no_tiers());
     let model = surface.normalized.model.unwrap();
     assert_eq!(model.value.as_deref(), Some("acp-model"));
     assert_eq!(model.origin, ConfigOrigin::AcpConfigOption);
-    // The goose config file might have a model too — since we can't control
-    // the actual file in a unit test, just verify the override fields are populated
-    // when we manually construct the scenario via build_model_field.
 }
 
-// ── Persona resolution integration tests ────────────────────────────
+// ── Persona / global tier integration tests ──────────────────────────────────
 //
-// These simulate the call-site pattern in agent_config.rs:
-// 1. Inject persona-resolved values into the record (as if absent)
-// 2. Call read_config_surface (reader tags them BuzzExplicit)
-// 3. Re-tag injected fields to PersonaDefault
-//
-// This exercises the same logic path as get_agent_config_surface without
-// requiring Tauri AppHandle/State infrastructure.
+// These exercise the tiers-based candidate resolution for model, provider, and
+// system_prompt via `InheritedConfigTiers` — replacing the old inject+retag
+// simulation tests.
 
 #[test]
-fn persona_model_injection_produces_persona_default_origin() {
-    let mut record = test_record();
-    // Simulate: record has no model, persona provides one.
-    // The call-site injects it before calling the reader.
-    record.model = Some("persona-model".to_string());
+fn persona_model_tier_produces_persona_default_origin() {
+    let record = test_record(); // no record.model
     let runtime = test_runtime();
+    let tiers = InheritedConfigTiers {
+        persona_model: Some("persona-model".to_string()),
+        ..Default::default()
+    };
 
-    let mut surface = read_config_surface(&record, Some(runtime), None, None);
-
-    // Reader sees injected model as BuzzExplicit.
-    let model = surface.normalized.model.as_ref().unwrap();
-    assert_eq!(model.value.as_deref(), Some("persona-model"));
-    assert_eq!(model.origin, ConfigOrigin::BuzzExplicit);
-
-    // Call-site re-tags (simulating had_model == false).
-    if let Some(ref mut field) = surface.normalized.model {
-        if field.origin == ConfigOrigin::BuzzExplicit {
-            field.origin = ConfigOrigin::PersonaDefault;
-        }
-    }
+    let surface = read_config_surface(&record, Some(runtime), None, &tiers);
 
     let model = surface.normalized.model.unwrap();
     assert_eq!(model.value.as_deref(), Some("persona-model"));
     assert_eq!(model.origin, ConfigOrigin::PersonaDefault);
 }
 
-// ── Runtime override (Phase 3c) ──────────────────────────────────────
+#[test]
+fn global_model_tier_produces_global_default_origin() {
+    let record = test_record();
+    let runtime = test_runtime();
+    let tiers = InheritedConfigTiers {
+        global_model: Some("global-model".to_string()),
+        ..Default::default()
+    };
+
+    let surface = read_config_surface(&record, Some(runtime), None, &tiers);
+
+    let model = surface.normalized.model.unwrap();
+    assert_eq!(model.value.as_deref(), Some("global-model"));
+    assert_eq!(model.origin, ConfigOrigin::GlobalDefault);
+}
+
+#[test]
+fn persona_provider_tier_produces_persona_default_origin() {
+    let record = test_record();
+    let runtime = test_runtime();
+    let tiers = InheritedConfigTiers {
+        persona_provider: Some("anthropic".to_string()),
+        ..Default::default()
+    };
+
+    let surface = read_config_surface(&record, Some(runtime), None, &tiers);
+
+    let provider = surface.normalized.provider.unwrap();
+    assert_eq!(provider.value.as_deref(), Some("anthropic"));
+    assert_eq!(provider.origin, ConfigOrigin::PersonaDefault);
+}
+
+#[test]
+fn persona_prompt_tier_produces_persona_default_origin() {
+    let record = test_record();
+    let runtime = test_runtime();
+    let tiers = InheritedConfigTiers {
+        persona_prompt: Some("You are a helpful assistant.".to_string()),
+        ..Default::default()
+    };
+
+    let surface = read_config_surface(&record, Some(runtime), None, &tiers);
+
+    let prompt = surface.normalized.system_prompt.unwrap();
+    assert_eq!(
+        prompt.value.as_deref(),
+        Some("You are a helpful assistant.")
+    );
+    assert_eq!(prompt.origin, ConfigOrigin::PersonaDefault);
+}
+
+// ── Runtime override (model_overridden gate) ──────────────────────────────────
 //
 // A live ModelPicker switch is signalled by `model_overridden: true` in the
 // `session_config_captured` payload. The reader keys the override-active
@@ -321,7 +397,7 @@ fn persona_model_injection_produces_persona_default_origin() {
 
 #[test]
 fn runtime_override_wins_display_when_model_overridden_is_true() {
-    // Persona-linked agent (record.model == None); persona == "persona-model".
+    // Persona-linked agent (record.model == None); persona model via tiers.
     // A live switch pushed "live-model" to the session and set model_overridden.
     let record = test_record();
     let runtime = test_runtime();
@@ -334,29 +410,27 @@ fn runtime_override_wins_display_when_model_overridden_is_true() {
         goose_native_config: None,
         captured_at: "".to_string(),
     };
+    let tiers = InheritedConfigTiers {
+        persona_model: Some("persona-model".to_string()),
+        ..Default::default()
+    };
 
-    let surface = read_config_surface(
-        &record,
-        Some(runtime),
-        Some(&cache),
-        Some(("persona-model", ConfigOrigin::PersonaDefault)),
-    );
+    let surface = read_config_surface(&record, Some(runtime), Some(&cache), &tiers);
     let model = surface.normalized.model.unwrap();
 
     // Override wins the display value with a runtime-override origin.
     assert_eq!(model.value.as_deref(), Some("live-model"));
     assert_eq!(model.origin, ConfigOrigin::RuntimeOverride);
-    // Persona is the secondary value (not struck through — the UI keys off
-    // the RuntimeOverride origin to suppress strikethrough).
+    // Persona is the secondary value.
     assert_eq!(model.overridden_value.as_deref(), Some("persona-model"));
     assert_eq!(model.overridden_origin, Some(ConfigOrigin::PersonaDefault));
 }
 
 #[test]
 fn no_runtime_override_when_model_overridden_is_false() {
-    // At spawn the session's current_model == persona model (BUZZ_ACP_MODEL
-    // is set to the persona model) and model_overridden is false. No override;
-    // the field falls through to normal precedence.
+    // At spawn the session's current_model == persona model and
+    // model_overridden is false. No override; field falls through to normal
+    // precedence.
     let record = test_record();
     let runtime = test_runtime();
     let cache = SessionConfigCache {
@@ -368,17 +442,15 @@ fn no_runtime_override_when_model_overridden_is_false() {
         goose_native_config: None,
         captured_at: "".to_string(),
     };
+    let tiers = InheritedConfigTiers {
+        persona_model: Some("persona-model".to_string()),
+        ..Default::default()
+    };
 
-    let surface = read_config_surface(
-        &record,
-        Some(runtime),
-        Some(&cache),
-        Some(("persona-model", ConfigOrigin::PersonaDefault)),
-    );
+    let surface = read_config_surface(&record, Some(runtime), Some(&cache), &tiers);
     let model = surface.normalized.model.unwrap();
 
-    // model_overridden is false => the override branch is not taken: origin
-    // is the normal precedence result, never RuntimeOverride.
+    // model_overridden is false => the override branch is not taken.
     assert_ne!(model.origin, ConfigOrigin::RuntimeOverride);
     assert_eq!(model.value.as_deref(), Some("persona-model"));
     assert_ne!(model.overridden_origin, Some(ConfigOrigin::PersonaDefault));
@@ -402,106 +474,51 @@ fn no_false_positive_override_when_persona_edited_mid_life() {
         goose_native_config: None,
         captured_at: "".to_string(),
     };
+    let tiers = InheritedConfigTiers {
+        persona_model: Some("new-persona-model".to_string()),
+        ..Default::default()
+    };
 
-    let surface = read_config_surface(
-        &record,
-        Some(runtime),
-        Some(&cache),
-        Some(("new-persona-model", ConfigOrigin::PersonaDefault)),
-    );
+    let surface = read_config_surface(&record, Some(runtime), Some(&cache), &tiers);
     let model = surface.normalized.model.unwrap();
 
     // model_overridden is false => no RuntimeOverride, even though
     // acp_model != persona_model. The old divergence-based signal would
-    // have false-positived here. The persona is never surfaced as the
-    // overridden secondary (that marker is exclusive to a real override).
+    // have false-positived here.
     assert_ne!(model.origin, ConfigOrigin::RuntimeOverride);
     assert_ne!(model.overridden_origin, Some(ConfigOrigin::PersonaDefault));
 }
 
-#[test]
-fn persona_provider_injection_produces_persona_default_origin() {
-    let mut record = test_record();
-    // Simulate: record has no provider env var, persona provides one.
-    // The call-site injects it as GOOSE_PROVIDER before calling the reader.
-    record
-        .env_vars
-        .insert("GOOSE_PROVIDER".to_string(), "anthropic".to_string());
-    let runtime = test_runtime();
-
-    let mut surface = read_config_surface(&record, Some(runtime), None, None);
-
-    // Reader sees injected provider as BuzzExplicit.
-    let provider = surface.normalized.provider.as_ref().unwrap();
-    assert_eq!(provider.value.as_deref(), Some("anthropic"));
-    assert_eq!(provider.origin, ConfigOrigin::BuzzExplicit);
-
-    // Call-site re-tags (simulating had_provider == false).
-    if let Some(ref mut field) = surface.normalized.provider {
-        if field.origin == ConfigOrigin::BuzzExplicit {
-            field.origin = ConfigOrigin::PersonaDefault;
-        }
-    }
-
-    let provider = surface.normalized.provider.unwrap();
-    assert_eq!(provider.value.as_deref(), Some("anthropic"));
-    assert_eq!(provider.origin, ConfigOrigin::PersonaDefault);
-}
+// ── system_prompt builder unit tests ─────────────────────────────────────────
 
 #[test]
-fn persona_system_prompt_injection_produces_persona_default_origin() {
-    let mut record = test_record();
-    // Simulate: record has no system_prompt, persona provides one via env var.
-    // The call-site injects it as BUZZ_ACP_SYSTEM_PROMPT before calling the reader.
-    record.env_vars.insert(
-        "BUZZ_ACP_SYSTEM_PROMPT".to_string(),
-        "You are a helpful assistant.".to_string(),
-    );
-    let runtime = test_runtime();
-
-    let mut surface = read_config_surface(&record, Some(runtime), None, None);
-
-    // Reader sees injected prompt as BuzzExplicit.
-    let prompt = surface.normalized.system_prompt.as_ref().unwrap();
-    assert_eq!(
-        prompt.value.as_deref(),
-        Some("You are a helpful assistant.")
-    );
-    assert_eq!(prompt.origin, ConfigOrigin::BuzzExplicit);
-
-    // Call-site re-tags (simulating had_prompt == false).
-    if let Some(ref mut field) = surface.normalized.system_prompt {
-        if field.origin == ConfigOrigin::BuzzExplicit {
-            field.origin = ConfigOrigin::PersonaDefault;
-        }
-    }
-
-    let prompt = surface.normalized.system_prompt.unwrap();
-    assert_eq!(
-        prompt.value.as_deref(),
-        Some("You are a helpful assistant.")
-    );
-    assert_eq!(prompt.origin, ConfigOrigin::PersonaDefault);
-}
-
-#[test]
-fn config_file_only_system_prompt_surfaces_as_read_only_config_file_field() {
-    // Record/env has no prompt; the config file does. It must NOT be
-    // dropped — it should surface with ConfigFile origin, read-only.
-    let field = build_system_prompt_field(&None, &Some("File-driven prompt.".to_string())).unwrap();
+fn config_file_only_system_prompt_surfaces_as_config_file_origin() {
+    // Record/env has no prompt; the config file does. Must surface with
+    // ConfigFile origin. Write mechanism is always RespawnWithEnvVar for
+    // system_prompt — the UI writes back via BUZZ_ACP_SYSTEM_PROMPT.
+    let record = test_record();
+    let field = build_system_prompt_field(
+        &record,
+        &Some("File-driven prompt.".to_string()),
+        &no_tiers(),
+    )
+    .unwrap();
     assert_eq!(field.value.as_deref(), Some("File-driven prompt."));
     assert_eq!(field.origin, ConfigOrigin::ConfigFile);
-    assert!(matches!(field.write_via, ConfigWriteMechanism::ReadOnly));
+    assert!(matches!(
+        field.write_via,
+        ConfigWriteMechanism::RespawnWithEnvVar { ref env_key }
+            if env_key == "BUZZ_ACP_SYSTEM_PROMPT"
+    ));
     assert!(field.overridden_value.is_none());
 }
 
 #[test]
 fn record_system_prompt_shadows_config_file_prompt_as_secondary() {
-    let field = build_system_prompt_field(
-        &Some("Record prompt.".to_string()),
-        &Some("File prompt.".to_string()),
-    )
-    .unwrap();
+    let mut record = test_record();
+    record.system_prompt = Some("Record prompt.".to_string());
+    let field =
+        build_system_prompt_field(&record, &Some("File prompt.".to_string()), &no_tiers()).unwrap();
     assert_eq!(field.value.as_deref(), Some("Record prompt."));
     assert_eq!(field.origin, ConfigOrigin::BuzzExplicit);
     assert_eq!(field.overridden_value.as_deref(), Some("File prompt."));
@@ -510,19 +527,19 @@ fn record_system_prompt_shadows_config_file_prompt_as_secondary() {
 
 #[test]
 fn no_system_prompt_from_any_tier_yields_none() {
-    assert!(build_system_prompt_field(&None, &None).is_none());
+    let record = test_record();
+    assert!(build_system_prompt_field(&record, &None, &no_tiers()).is_none());
 }
 
 #[test]
 fn explicit_record_model_not_retagged_when_already_present() {
     let mut record = test_record();
-    // Record already has its own model — persona resolution should NOT re-tag.
+    // Record already has its own model — origin stays BuzzExplicit.
     record.model = Some("explicit-model".to_string());
     let runtime = test_runtime();
 
-    let surface = read_config_surface(&record, Some(runtime), None, None);
+    let surface = read_config_surface(&record, Some(runtime), None, &no_tiers());
 
-    // had_model == true, so no re-tagging occurs. Origin stays BuzzExplicit.
     let model = surface.normalized.model.unwrap();
     assert_eq!(model.value.as_deref(), Some("explicit-model"));
     assert_eq!(model.origin, ConfigOrigin::BuzzExplicit);
@@ -544,7 +561,7 @@ fn extra_env_vars_appear_in_advanced_as_buzz_explicit() {
         .insert("SPROUT_ACP_MEMORY".to_string(), "mem-value".to_string());
     let runtime = test_runtime();
 
-    let surface = read_config_surface(&record, Some(runtime), None, None);
+    let surface = read_config_surface(&record, Some(runtime), None, &no_tiers());
 
     let advanced_keys: Vec<&str> = surface.advanced.iter().map(|f| f.key.as_str()).collect();
     assert!(
@@ -575,21 +592,15 @@ fn extra_env_vars_appear_in_advanced_as_buzz_explicit() {
 
 #[test]
 fn extra_env_var_skipped_when_already_in_file_config_extra() {
-    // If a key is in both record.env_vars and file_config.extra, the config
-    // file entry wins (it was already added to advanced). The env var must
-    // not produce a second entry.
-    //
-    // We can't inject into file_config.extra directly in a unit test (it
-    // comes from disk), so we verify the dedup logic via the normalized-key
-    // path: GOOSE_THINKING_EFFORT is a normalized key and must not appear
-    // in advanced even if set in env_vars.
+    // If a key is normalized, it must not appear in advanced even if set
+    // in env_vars.
     let mut record = test_record();
     record
         .env_vars
         .insert("GOOSE_THINKING_EFFORT".to_string(), "high".to_string());
     let runtime = test_runtime();
 
-    let surface = read_config_surface(&record, Some(runtime), None, None);
+    let surface = read_config_surface(&record, Some(runtime), None, &no_tiers());
 
     let advanced_keys: Vec<&str> = surface.advanced.iter().map(|f| f.key.as_str()).collect();
     assert!(
@@ -598,7 +609,7 @@ fn extra_env_var_skipped_when_already_in_file_config_extra() {
     );
 }
 
-// ── buzz-agent normalized env-var field tests ───────────────────────────────
+// ── buzz-agent normalized env-var field tests ─────────────────────────────────
 //
 // buzz-agent uses env vars (not a config file) for max_output_tokens and
 // context_limit. build_numeric_env_field must surface these as BuzzExplicit
@@ -634,6 +645,7 @@ fn buzz_agent_runtime() -> &'static KnownAcpRuntime {
         thinking_env_var: Some("BUZZ_AGENT_THINKING_EFFORT"),
         max_tokens_env_var: Some("BUZZ_AGENT_MAX_OUTPUT_TOKENS"),
         context_limit_env_var: Some("BUZZ_AGENT_MAX_CONTEXT_TOKENS"),
+        max_rounds_env_var: Some("BUZZ_AGENT_MAX_ROUNDS"),
         required_normalized_fields: &["model", "provider"],
         login_hint: None,
         auth_probe_args: None,
@@ -649,7 +661,7 @@ fn buzz_agent_max_output_tokens_from_env_is_buzz_explicit() {
     );
     let runtime = buzz_agent_runtime();
 
-    let surface = read_config_surface(&record, Some(runtime), None, None);
+    let surface = read_config_surface(&record, Some(runtime), None, &no_tiers());
 
     let field = surface.normalized.max_output_tokens.unwrap();
     assert_eq!(field.value.as_deref(), Some("8192"));
@@ -670,7 +682,7 @@ fn buzz_agent_context_limit_from_env_is_buzz_explicit() {
     );
     let runtime = buzz_agent_runtime();
 
-    let surface = read_config_surface(&record, Some(runtime), None, None);
+    let surface = read_config_surface(&record, Some(runtime), None, &no_tiers());
 
     let field = surface.normalized.context_limit.unwrap();
     assert_eq!(field.value.as_deref(), Some("100000"));
@@ -688,7 +700,7 @@ fn buzz_agent_max_tokens_absent_when_no_env_var_or_file() {
     let record = test_record();
     let runtime = buzz_agent_runtime();
 
-    let surface = read_config_surface(&record, Some(runtime), None, None);
+    let surface = read_config_surface(&record, Some(runtime), None, &no_tiers());
 
     assert!(
         surface.normalized.max_output_tokens.is_none(),
@@ -713,7 +725,7 @@ fn buzz_agent_max_tokens_env_var_not_double_surfaced_in_advanced() {
     );
     let runtime = buzz_agent_runtime();
 
-    let surface = read_config_surface(&record, Some(runtime), None, None);
+    let surface = read_config_surface(&record, Some(runtime), None, &no_tiers());
 
     let advanced_keys: Vec<&str> = surface.advanced.iter().map(|f| f.key.as_str()).collect();
     assert!(
@@ -734,7 +746,7 @@ fn buzz_agent_thinking_effort_from_env_is_buzz_explicit() {
         .insert("BUZZ_AGENT_THINKING_EFFORT".to_string(), "high".to_string());
     let runtime = buzz_agent_runtime();
 
-    let surface = read_config_surface(&record, Some(runtime), None, None);
+    let surface = read_config_surface(&record, Some(runtime), None, &no_tiers());
 
     let field = surface.normalized.thinking_effort.unwrap();
     assert_eq!(field.value.as_deref(), Some("high"));
@@ -755,7 +767,7 @@ fn buzz_agent_thinking_effort_env_var_not_double_surfaced_in_advanced() {
     );
     let runtime = buzz_agent_runtime();
 
-    let surface = read_config_surface(&record, Some(runtime), None, None);
+    let surface = read_config_surface(&record, Some(runtime), None, &no_tiers());
 
     let advanced_keys: Vec<&str> = surface.advanced.iter().map(|f| f.key.as_str()).collect();
     assert!(
@@ -764,10 +776,20 @@ fn buzz_agent_thinking_effort_env_var_not_double_surfaced_in_advanced() {
     );
 }
 
+// ── provider builder unit tests ───────────────────────────────────────────────
+
 #[test]
 fn missing_required_provider_still_returns_dropdown_field() {
-    let provider = build_provider_field(&None, &None, Some("GOOSE_PROVIDER"), false, true)
-        .expect("required provider field should be surfaced even when empty");
+    let record = test_record();
+    let provider = build_provider_field(
+        &record,
+        &None,
+        Some("GOOSE_PROVIDER"),
+        false,
+        true,
+        &no_tiers(),
+    )
+    .expect("required provider field should be surfaced even when empty");
 
     assert_eq!(provider.value, None);
     assert_eq!(provider.origin, ConfigOrigin::EnvVar);
@@ -776,5 +798,156 @@ fn missing_required_provider_still_returns_dropdown_field() {
 
 #[test]
 fn missing_optional_provider_stays_hidden() {
-    assert!(build_provider_field(&None, &None, Some("GOOSE_PROVIDER"), false, false).is_none());
+    let record = test_record();
+    assert!(build_provider_field(
+        &record,
+        &None,
+        Some("GOOSE_PROVIDER"),
+        false,
+        false,
+        &no_tiers()
+    )
+    .is_none());
 }
+
+// ── thinking_effort persona/global tier tests (AC-1..5) ──────────────────────
+//
+// The plan's acceptance criteria for effort tier resolution.
+// Tier ordering: record env > ACP > persona env > global env > config file.
+
+fn buzz_agent_rt() -> &'static KnownAcpRuntime {
+    crate::managed_agents::discovery::known_acp_runtime_exact("buzz-agent")
+        .expect("buzz-agent must be in catalog")
+}
+
+/// AC-1: no record effort, global env has effort → GlobalDefault.
+/// Real-world case: global-agent-config has BUZZ_AGENT_THINKING_EFFORT=high,
+/// per-agent record has no env_vars → effort must surface with GlobalDefault origin.
+#[test]
+fn global_effort_surfaces_as_global_default_when_record_has_none() {
+    let record = test_record();
+    let runtime = buzz_agent_rt();
+    let tiers = global_env_tiers("BUZZ_AGENT_THINKING_EFFORT", "high");
+
+    let surface = read_config_surface(&record, Some(runtime), None, &tiers);
+
+    let effort = surface
+        .normalized
+        .thinking_effort
+        .expect("effort must surface from global tier");
+    assert_eq!(effort.value.as_deref(), Some("high"));
+    assert_eq!(effort.origin, ConfigOrigin::GlobalDefault);
+}
+
+/// AC-2: persona env has effort, global also has effort → PersonaDefault wins, shadows global.
+#[test]
+fn persona_effort_shadows_global_and_tags_persona_default() {
+    let record = test_record();
+    let runtime = buzz_agent_rt();
+    let tiers = persona_and_global_env_tiers("BUZZ_AGENT_THINKING_EFFORT", "medium", "high");
+
+    let surface = read_config_surface(&record, Some(runtime), None, &tiers);
+
+    let effort = surface
+        .normalized
+        .thinking_effort
+        .expect("effort must surface from persona tier");
+    assert_eq!(effort.value.as_deref(), Some("medium"));
+    assert_eq!(effort.origin, ConfigOrigin::PersonaDefault);
+    // global is the overridden baseline
+    assert_eq!(effort.overridden_value.as_deref(), Some("high"));
+    assert_eq!(effort.overridden_origin, Some(ConfigOrigin::GlobalDefault));
+}
+
+/// AC-3: record-level effort wins over persona and global, stays BuzzExplicit.
+#[test]
+fn record_effort_outranks_persona_and_global_keeps_buzz_explicit() {
+    let mut record = test_record();
+    record.env_vars.insert(
+        "BUZZ_AGENT_THINKING_EFFORT".to_string(),
+        "xhigh".to_string(),
+    );
+    let runtime = buzz_agent_rt();
+    let tiers = persona_and_global_env_tiers("BUZZ_AGENT_THINKING_EFFORT", "medium", "high");
+
+    let surface = read_config_surface(&record, Some(runtime), None, &tiers);
+
+    let effort = surface
+        .normalized
+        .thinking_effort
+        .expect("effort must surface from record tier");
+    assert_eq!(effort.value.as_deref(), Some("xhigh"));
+    assert_eq!(effort.origin, ConfigOrigin::BuzzExplicit);
+}
+
+/// AC-4: no effort from any tier → thinking_effort field is absent.
+#[test]
+fn no_effort_anywhere_yields_no_thinking_effort_field() {
+    let record = test_record();
+    let runtime = buzz_agent_rt();
+
+    let surface = read_config_surface(&record, Some(runtime), None, &no_tiers());
+
+    assert!(
+        surface.normalized.thinking_effort.is_none(),
+        "thinking_effort must be None when no tier has a value"
+    );
+}
+
+/// AC-5 (conflicting-ACP): inherited effort set (global=high) + live ACP effort=low
+/// → ACP wins as primary (AcpConfigOption), global is the overridden secondary.
+#[test]
+fn acp_effort_wins_over_inherited_global_effort_as_secondary() {
+    let record = test_record();
+    let runtime = buzz_agent_rt();
+    let cache = SessionConfigCache {
+        config_options: vec![AcpConfigOptionEntry {
+            config_id: "effort".to_string(),
+            category: Some("effort".to_string()),
+            display_name: Some("Effort".to_string()),
+            current_value: Some("low".to_string()),
+            options: vec![],
+        }],
+        available_modes: vec![],
+        available_models: vec![],
+        current_model: None,
+        model_overridden: false,
+        goose_native_config: None,
+        captured_at: "".to_string(),
+    };
+    let tiers = global_env_tiers("BUZZ_AGENT_THINKING_EFFORT", "high");
+
+    let surface = read_config_surface(&record, Some(runtime), Some(&cache), &tiers);
+
+    let effort = surface
+        .normalized
+        .thinking_effort
+        .expect("effort must surface from ACP tier");
+    // Live ACP value wins.
+    assert_eq!(effort.value.as_deref(), Some("low"));
+    assert_eq!(effort.origin, ConfigOrigin::AcpConfigOption);
+    // Global is surfaced as the overridden baseline.
+    assert_eq!(effort.overridden_value.as_deref(), Some("high"));
+    assert_eq!(effort.overridden_origin, Some(ConfigOrigin::GlobalDefault));
+}
+
+// ── Numerics inheritance tests ────────────────────────────────────────────────
+//
+// max_output_tokens and context_limit gain persona/global tiers.
+
+#[test]
+fn numeric_max_tokens_inherits_from_global_env() {
+    let record = test_record();
+    let runtime = buzz_agent_runtime();
+    let tiers = global_env_tiers("BUZZ_AGENT_MAX_OUTPUT_TOKENS", "16384");
+
+    let surface = read_config_surface(&record, Some(runtime), None, &tiers);
+
+    let field = surface.normalized.max_output_tokens.unwrap();
+    assert_eq!(field.value.as_deref(), Some("16384"));
+    assert_eq!(field.origin, ConfigOrigin::GlobalDefault);
+}
+
+// ── Extended tests (split file to respect line-count ratchet) ────────────────
+#[path = "reader_tests_ext.rs"]
+mod ext;

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -6,6 +8,7 @@ import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/custom_emoji/custom_emoji_render.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
+import '../../shared/widgets/anchored_popover_menu.dart';
 import '../../shared/widgets/masked_avatar_badge.dart';
 import 'profile_provider.dart';
 import 'set_status_sheet.dart';
@@ -26,12 +29,13 @@ class SettingsProfileHeader extends ConsumerWidget {
     final profile = ref.watch(profileProvider).asData?.value;
     final status = ref.watch(userStatusProvider).asData?.value;
     final hasStatus = status != null && !status.isEmpty;
+    final presence = ref.watch(presenceProvider).value ?? 'offline';
 
     void openStatusSheet() =>
         showSetStatusSheet(context, currentStatus: status);
 
     return Padding(
-      padding: const EdgeInsets.only(top: Grid.xxs, bottom: Grid.sm),
+      padding: const EdgeInsets.only(top: Grid.sm, bottom: Grid.sm),
       child: Column(
         children: [
           MaskedAvatarBadge(
@@ -59,8 +63,8 @@ class SettingsProfileHeader extends ConsumerWidget {
             style: context.textTheme.titleMedium,
             textAlign: TextAlign.center,
           ),
-          // No placeholder copy — the badge is the affordance, so this line
-          // appears only once there is an actual status to show.
+          // Keep the status text visible even when no emoji is set. NIP-38
+          // permits text-only statuses, which the avatar badge cannot represent.
           if (hasStatus)
             GestureDetector(
               onTap: openStatusSheet,
@@ -82,11 +86,153 @@ class SettingsProfileHeader extends ConsumerWidget {
                 ),
               ),
             ),
+          _PresencePill(
+            presence: presence,
+            onSelected: (nextPresence) => unawaited(
+              ref.read(presenceProvider.notifier).setPresence(nextPresence),
+            ),
+          ),
         ],
       ),
     );
   }
 }
+
+class _PresencePill extends StatelessWidget {
+  const _PresencePill({required this.presence, required this.onSelected});
+
+  final String presence;
+  final ValueChanged<String> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    final effectivePresence = switch (presence) {
+      'online' || 'away' => presence,
+      _ => 'offline',
+    };
+    final (backgroundColor, foregroundColor) = switch (effectivePresence) {
+      'online' => (
+        context.appColors.success.withValues(alpha: 0.15),
+        context.appColors.success,
+      ),
+      'away' => (
+        context.appColors.warning.withValues(alpha: 0.15),
+        context.appColors.warning,
+      ),
+      _ => (
+        context.colors.onSurfaceVariant.withValues(alpha: 0.15),
+        context.colors.onSurfaceVariant,
+      ),
+    };
+    final label = _presenceLabel(effectivePresence);
+
+    return Builder(
+      builder: (buttonContext) => Semantics(
+        button: true,
+        label: 'Presence: $label',
+        child: SizedBox(
+          key: const ValueKey('settings-presence-target'),
+          height: Grid.xl,
+          child: Material(
+            color: Colors.transparent,
+            child: InkWell(
+              key: const ValueKey('settings-presence-menu'),
+              borderRadius: BorderRadius.circular(Radii.full),
+              onTap: () async {
+                final selected = await showAnchoredPopover<String>(
+                  context: buttonContext,
+                  width: 176,
+                  alignment: AnchoredPopoverAlignment.center,
+                  offset: const Offset(0, Grid.half),
+                  menuPadding: const EdgeInsets.symmetric(vertical: Grid.half),
+                  surfaceKey: const ValueKey('settings-presence-popover'),
+                  items: [
+                    for (final option in const ['online', 'away', 'offline'])
+                      PopupMenuItem<String>(
+                        key: ValueKey('settings-presence-$option'),
+                        value: option,
+                        height: Grid.xl,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: Grid.twelve,
+                        ),
+                        child: Row(
+                          children: [
+                            Container(
+                              width: 10,
+                              height: 10,
+                              decoration: BoxDecoration(
+                                color: _presenceColor(context, option),
+                                shape: BoxShape.circle,
+                              ),
+                            ),
+                            const SizedBox(width: Grid.xxs),
+                            Expanded(
+                              child: Text(
+                                _presenceLabel(option),
+                                style: filterChipTextStyle.copyWith(
+                                  color: context.colors.onSurface,
+                                  fontWeight: option == effectivePresence
+                                      ? FontWeight.w500
+                                      : FontWeight.w400,
+                                ),
+                              ),
+                            ),
+                            if (option == effectivePresence)
+                              Icon(
+                                LucideIcons.check,
+                                size: 16,
+                                color: context.colors.primary,
+                              ),
+                          ],
+                        ),
+                      ),
+                  ],
+                );
+                if (buttonContext.mounted && selected != null) {
+                  onSelected(selected);
+                }
+              },
+              child: Center(
+                child: Material(
+                  key: const ValueKey('settings-presence-pill'),
+                  color: backgroundColor,
+                  borderRadius: BorderRadius.circular(Radii.full),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: Grid.xs,
+                      vertical: Grid.xxs,
+                    ),
+                    child: Text(
+                      label,
+                      key: const ValueKey('settings-presence-label'),
+                      style: filterChipTextStyle.copyWith(
+                        color: foregroundColor,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+String _presenceLabel(String presence) => switch (presence) {
+  'online' => 'Online',
+  'away' => 'Away',
+  _ => 'Offline',
+};
+
+Color _presenceColor(BuildContext context, String presence) =>
+    switch (presence) {
+      'online' => context.appColors.success,
+      'away' => context.appColors.warning,
+      _ => context.colors.outline,
+    };
 
 /// Fills the notch left by [MaskedAvatarBadge], so its size comes from the mask
 /// geometry rather than being set here.

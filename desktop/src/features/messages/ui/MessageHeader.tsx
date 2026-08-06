@@ -39,7 +39,7 @@ export function MessageAuthorText({
   return (
     <Component
       className={cn(
-        "truncate text-sm font-semibold leading-4 tracking-tight",
+        "truncate text-sm font-bold leading-4 tracking-tight",
         hoverUnderline && "hover:underline",
         className,
       )}

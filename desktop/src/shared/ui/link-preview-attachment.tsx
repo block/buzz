@@ -2,6 +2,7 @@ import { ExternalLink } from "lucide-react";
 
 import type { SupportedLinkPreview } from "@/shared/lib/linkPreview";
 import { cn } from "@/shared/lib/cn";
+import { BuzzMark } from "@/shared/ui/buzz-logo/BuzzMark";
 import {
   Attachment,
   AttachmentActions,
@@ -91,6 +92,10 @@ function GoogleSlidesLogo({ className }: { className?: string }) {
 
 function LinkPreviewLogo({ preview }: { preview: SupportedLinkPreview }) {
   switch (preview.kind) {
+    case "buzz-issue":
+    case "buzz-pull-request":
+    case "buzz-repository":
+      return <BuzzMark className="h-4 w-4" />;
     case "github-issue":
     case "github-pull-request":
     case "github-repository":
@@ -111,9 +116,16 @@ function LinkPreviewLogo({ preview }: { preview: SupportedLinkPreview }) {
 
 export function LinkPreviewAttachment({
   className,
+  onOpen,
   preview,
 }: {
   className?: string;
+  /**
+   * In-app navigation handler for links the OS cannot open (e.g. `buzz://`
+   * entity deep links). When set, the card renders a button trigger instead
+   * of an external anchor.
+   */
+  onOpen?: () => void;
   preview: SupportedLinkPreview;
 }) {
   return (
@@ -141,18 +153,29 @@ export function LinkPreviewAttachment({
           className="h-4 w-4 text-muted-foreground opacity-0 transition-opacity group-hover/attachment:opacity-100 group-focus-within/attachment:opacity-100"
         />
       </AttachmentActions>
-      <AttachmentTrigger asChild>
-        <a
+      {onOpen ? (
+        <AttachmentTrigger
           aria-label={`Open ${preview.provider} ${preview.typeLabel}: ${preview.title}`}
-          href={preview.href}
-          rel="noreferrer"
-          target="_blank"
+          onClick={onOpen}
         >
           <span className="sr-only">
             Open {preview.provider} {preview.typeLabel}: {preview.title}
           </span>
-        </a>
-      </AttachmentTrigger>
+        </AttachmentTrigger>
+      ) : (
+        <AttachmentTrigger asChild>
+          <a
+            aria-label={`Open ${preview.provider} ${preview.typeLabel}: ${preview.title}`}
+            href={preview.href}
+            rel="noreferrer"
+            target="_blank"
+          >
+            <span className="sr-only">
+              Open {preview.provider} {preview.typeLabel}: {preview.title}
+            </span>
+          </a>
+        </AttachmentTrigger>
+      )}
     </Attachment>
   );
 }

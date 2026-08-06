@@ -4,6 +4,7 @@ import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/relay/relay.dart';
+import '../../shared/theme/theme.dart';
 import 'user_profile.dart';
 
 /// The current user's profile (kind:0 metadata) loaded over the relay
@@ -50,13 +51,26 @@ final profileProvider = AsyncNotifierProvider<ProfileNotifier, UserProfile?>(
 /// [appLifecycleProvider] to send "away" when backgrounded.
 class PresenceNotifier extends AsyncNotifier<String> {
   static const _heartbeatInterval = Duration(seconds: 60);
+  static const _preferenceKeyPrefix = 'buzz_presence_preference_';
 
   Timer? _heartbeatTimer;
+  String? _preferencePubkey;
+  String? _manualPresence;
 
   @override
   Future<String> build() {
     ref.watch(relaySessionProvider);
-    ref.watch(profileProvider);
+    final pubkey = ref.watch(myPubkeyProvider)?.toLowerCase();
+
+    if (_preferencePubkey != pubkey) {
+      _preferencePubkey = pubkey;
+      final stored = pubkey == null
+          ? null
+          : ref
+                .read(savedPrefsProvider)
+                .getString('$_preferenceKeyPrefix$pubkey');
+      _manualPresence = stored == 'away' || stored == 'offline' ? stored : null;
+    }
 
     final lifecycle = ref.watch(appLifecycleProvider);
 
@@ -64,6 +78,13 @@ class PresenceNotifier extends AsyncNotifier<String> {
       _heartbeatTimer?.cancel();
       _heartbeatTimer = null;
     });
+
+    final manualPresence = _manualPresence;
+    if (manualPresence != null) {
+      _heartbeatTimer?.cancel();
+      _heartbeatTimer = null;
+      return _setPresence(manualPresence);
+    }
 
     if (lifecycle == AppLifecycleState.resumed) {
       _startHeartbeat();
@@ -85,6 +106,33 @@ class PresenceNotifier extends AsyncNotifier<String> {
     _heartbeatTimer = Timer.periodic(_heartbeatInterval, (_) {
       _setPresence('online');
     });
+  }
+
+  /// Updates the current user's presence preference and publishes it.
+  ///
+  /// Online restores automatic lifecycle-driven presence. Away and Offline
+  /// remain selected until the user chooses another value.
+  Future<void> setPresence(String status) async {
+    if (status != 'online' && status != 'away' && status != 'offline') return;
+
+    _manualPresence = status == 'online' ? null : status;
+    final pubkey = ref.read(myPubkeyProvider)?.toLowerCase();
+    if (pubkey != null) {
+      await ref
+          .read(savedPrefsProvider)
+          .setString('$_preferenceKeyPrefix$pubkey', _manualPresence ?? 'auto');
+    }
+
+    if (_manualPresence == null &&
+        ref.read(appLifecycleProvider) == AppLifecycleState.resumed) {
+      _startHeartbeat();
+    } else {
+      _heartbeatTimer?.cancel();
+      _heartbeatTimer = null;
+    }
+
+    state = AsyncData(status);
+    await _setPresence(status);
   }
 
   /// Publish a kind:20001 presence event. Returns the requested status

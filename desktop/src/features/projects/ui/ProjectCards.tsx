@@ -1,6 +1,7 @@
 import {
+  CircleAlert,
   CircleDot,
-  FolderGit2,
+  Folders,
   GitCommit,
   GitPullRequest,
   TerminalSquare,
@@ -22,6 +23,7 @@ import {
   getProjectUpdatedAt,
   relativeTime,
 } from "@/features/projects/lib/projectsViewHelpers";
+import type { ProjectRepoUnavailableReason } from "@/features/projects/lib/projectRepoAvailability";
 import { projectTerminalLabel } from "@/features/projects/ui/useOpenProjectTerminal";
 import {
   PROJECT_LIST_ROW_CLASS,
@@ -83,7 +85,7 @@ function ProjectUpdatedLabel({
   );
 }
 
-function ProjectPeopleStack({
+export function ProjectPeopleStack({
   pubkeys,
   profiles,
   workOwnerPubkey,
@@ -100,7 +102,7 @@ function ProjectPeopleStack({
   }
 
   return (
-    <div className="flex items-center justify-end -space-x-1.5">
+    <div className="pointer-events-auto flex items-center justify-end -space-x-1.5">
       {visible.map((pubkey, index) => {
         const profile = profiles?.[normalizePubkey(pubkey)];
         const label = resolveUserLabel({ pubkey, profiles });
@@ -167,7 +169,7 @@ const PROJECT_STAT_ITEMS = [
   },
 ] as const;
 
-function ProjectStatsRow({
+export function ProjectStatsRow({
   summary,
   fixedColumns = false,
 }: {
@@ -207,7 +209,7 @@ function ProjectStatsRow({
 
 // Segmented commits/PRs/issues distribution — the card's "progress bar".
 // Hovering thickens the bar and reveals a tooltip with the exact breakdown.
-function ProjectActivityBar({
+export function ProjectActivityBar({
   summary,
 }: {
   summary: ProjectActivitySummary | undefined;
@@ -263,10 +265,58 @@ function StatusPill({ status }: { status: string }) {
   );
 }
 
+function RepositoryUnavailableIndicator({
+  reason,
+}: {
+  reason: ProjectRepoUnavailableReason | undefined;
+}) {
+  if (!reason) return null;
+  const status = {
+    authentication: {
+      description: "Buzz could not authenticate with this repository.",
+      label: "Access failed",
+    },
+    missing: {
+      description: "No git repository was found on the Buzz relay.",
+      label: "Uninitialized",
+    },
+    network: {
+      description: "The Buzz git service could not be reached.",
+      label: "Unreachable",
+    },
+    ref: {
+      description: "The advertised branch is missing from the git remote.",
+      label: "Branch missing",
+    },
+    unknown: {
+      description: "Buzz could not load this repository.",
+      label: "Unavailable",
+    },
+  }[reason];
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span
+          aria-label={`Repository ${status.label.toLowerCase()}`}
+          className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-amber-600 hover:bg-amber-500/10 dark:text-amber-300"
+          role="img"
+        >
+          <CircleAlert className="h-3.5 w-3.5" />
+        </span>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-64">
+        <p className="font-medium">{status.label}</p>
+        <p className="text-muted-foreground">{status.description}</p>
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
 export function EmptyState() {
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-3 px-4 py-16 text-center">
-      <FolderGit2 className="h-10 w-10 text-muted-foreground/40" />
+      <Folders className="h-10 w-10 text-muted-foreground/40" />
       <div className="space-y-1">
         <p className="text-sm font-medium text-foreground">No projects yet</p>
         <p className="text-sm text-muted-foreground">
@@ -280,7 +330,7 @@ export function EmptyState() {
 export function EmptyFilteredState() {
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-3 border border-dashed border-border/60 px-4 py-12 text-center">
-      <FolderGit2 className="h-9 w-9 text-muted-foreground/40" />
+      <Folders className="h-9 w-9 text-muted-foreground/40" />
       <div className="space-y-1">
         <p className="text-sm font-medium text-foreground">
           No matching projects
@@ -302,7 +352,7 @@ function ProjectCardButton({
 }) {
   return (
     <button
-      className="absolute inset-0"
+      className="absolute inset-0 z-0 cursor-pointer"
       onClick={() => onOpen(project)}
       type="button"
     >
@@ -399,6 +449,7 @@ type ProjectItemProps = {
   people: string[];
   profiles?: UserProfileLookup;
   summary: ProjectActivitySummary | undefined;
+  repositoryUnavailableReason?: ProjectRepoUnavailableReason;
   hasLocal: boolean;
   canDelete: boolean;
   deleteDisabled: boolean;
@@ -412,6 +463,7 @@ export function ProjectGridCard({
   people,
   profiles,
   summary,
+  repositoryUnavailableReason,
   hasLocal,
   canDelete,
   deleteDisabled,
@@ -426,18 +478,27 @@ export function ProjectGridCard({
       data-testid={`project-card-${project.dtag}`}
     >
       <ProjectCardButton onOpen={onOpen} project={project} />
-      <div className="flex min-h-0 flex-1 flex-col">
+      <div className="pointer-events-none relative z-10 flex min-h-0 flex-1 flex-col">
         <div className="flex min-w-0 items-center justify-between gap-3 px-4 pt-3">
           <div className="flex min-w-0 items-center gap-2">
             <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border/60 bg-muted/40">
-              <FolderGit2 className="h-4.5 w-4.5 text-muted-foreground" />
+              <Folders className="h-4.5 w-4.5 text-muted-foreground" />
             </span>
             <span className="min-w-0 truncate text-sm font-semibold text-foreground">
               {project.name}
             </span>
+            <span className="shrink-0 text-xs text-muted-foreground">
+              {project.repositoryAddresses.length}{" "}
+              {project.repositoryAddresses.length === 1
+                ? "repository"
+                : "repositories"}
+            </span>
             <StatusPill status={project.status} />
+            <RepositoryUnavailableIndicator
+              reason={repositoryUnavailableReason}
+            />
           </div>
-          <div className="relative z-10 flex shrink-0 items-center gap-1">
+          <div className="pointer-events-auto relative z-10 flex shrink-0 items-center gap-1">
             <ProjectUpdatedLabel
               profiles={profiles}
               project={project}
@@ -484,6 +545,7 @@ export function ProjectListRow({
   people,
   profiles,
   summary,
+  repositoryUnavailableReason,
   hasLocal,
   canDelete,
   deleteDisabled,
@@ -497,12 +559,12 @@ export function ProjectListRow({
       data-testid={`project-row-${project.dtag}`}
     >
       <ProjectCardButton onOpen={onOpen} project={project} />
-      <div className="flex min-w-0 items-start gap-2.5">
-        <div className="flex min-w-0 flex-1 items-start gap-2.5">
+      <div className="pointer-events-none relative z-10 flex min-w-0 items-center gap-2.5">
+        <div className="flex min-w-0 flex-1 items-center gap-2.5">
           <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border/60 bg-muted/40">
-            <FolderGit2 className="h-4.5 w-4.5 text-muted-foreground" />
+            <Folders className="h-4.5 w-4.5 text-muted-foreground" />
           </span>
-          <div className="-mt-0.5 min-w-0">
+          <div className="min-w-0">
             <div className="flex min-w-0 items-center gap-2">
               <span className={PROJECT_LIST_ROW_TITLE_CLASS}>
                 {project.name}
@@ -515,7 +577,26 @@ export function ProjectListRow({
           </div>
         </div>
 
-        <div className={PROJECT_LIST_ROW_TRAILING_CLASS}>
+        <div
+          className={cn(PROJECT_LIST_ROW_TRAILING_CLASS, "pointer-events-auto")}
+        >
+          <div
+            className="hidden w-24 shrink-0 text-xs text-muted-foreground md:block"
+            data-testid="projects-row-context"
+          >
+            {project.repositoryAddresses.length}{" "}
+            {project.repositoryAddresses.length === 1
+              ? "repository"
+              : "repositories"}
+          </div>
+          <div
+            className="flex w-6 shrink-0 justify-center"
+            data-testid="projects-row-repository-status"
+          >
+            <RepositoryUnavailableIndicator
+              reason={repositoryUnavailableReason}
+            />
+          </div>
           <div
             className="hidden items-center gap-3 xl:flex"
             data-testid="projects-row-summary"
@@ -573,7 +654,7 @@ export function ProjectRailRow({
       <ProjectCardButton onOpen={onOpen} project={project} />
       <div className="flex min-w-0 items-start gap-2">
         <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-muted/50">
-          <FolderGit2 className="h-3.5 w-3.5 text-muted-foreground" />
+          <Folders className="h-3.5 w-3.5 text-muted-foreground" />
         </span>
         <div className="min-w-0 flex-1">
           <span className="block min-w-0 truncate text-xs font-semibold text-foreground">

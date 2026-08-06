@@ -268,7 +268,8 @@
 }
 
 /* Keep the subtle content-card lift in Buzz Light only. */
-:root[data-buzz-sidebar]:not(.dark) [data-buzz-content-surface] {
+:root[data-buzz-sidebar]:not(.dark)
+  [data-buzz-content-surface]:not([data-buzz-content-unframed]) {
   box-shadow:
     -1px -1px 0 0 hsl(var(--sidebar-border) / 0.45),
     0 0 4px 0 rgb(0 0 0 / 7%);
@@ -293,6 +294,19 @@
   background-color: transparent;
   background-image: none;
   isolation: isolate;
+}
+
+/* The Buzz theme uses a translucent color wash. Back it with an opaque copy
+ * of the same gradient by default so its color remains stable over every app
+ * surface, including a lifted huddle. */
+:root[data-buzz-sidebar] .buzz-theme-gradient-underlay {
+  background-image: linear-gradient(
+    to bottom,
+    var(--buzz-gradient-top),
+    var(--buzz-gradient-bottom)
+  );
+  background-repeat: no-repeat;
+  background-size: 100vw 100vh;
 }
 
 /*
@@ -805,4 +819,34 @@
 
 :root[data-buzz-translucent] .buzz-huddle-app-surface::after {
   background: transparent;
+}
+
+:root[data-buzz-translucent] .buzz-huddle-app-surface-open::after {
+  background: hsl(var(--buzz-huddle-drawer-surface));
+}
+
+/* Keep the Buzz gradient in the lifted app surface. The shell beneath it is
+ * strictly the huddle drawer, so its dark surface is revealed at the rounded
+ * lower corners instead of the theme gradient bleeding through there. */
+:root[data-buzz-sidebar] .buzz-huddle-shell[data-huddle-open="true"] {
+  background-color: hsl(var(--buzz-huddle-drawer-surface));
+  background-image: none;
+}
+
+:root[data-buzz-sidebar][data-buzz-translucent]
+  .buzz-huddle-shell[data-huddle-open="true"] {
+  background-color: hsl(var(--buzz-huddle-drawer-surface));
+  background-image: none;
+}
+
+/* Keep an explicit black base at z-0 while the lifted app surface (and its
+ * two gradient layers) sits above it. This prevents the default gradient
+ * backing from ever replacing the huddle drawer at the exposed corners. */
+:root[data-buzz-sidebar] .buzz-huddle-shell[data-huddle-open="true"]::before {
+  background: hsl(var(--buzz-huddle-drawer-surface));
+  content: "";
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+  z-index: 0;
 }
