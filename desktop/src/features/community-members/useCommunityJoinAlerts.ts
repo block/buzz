@@ -28,7 +28,7 @@ import {
   relayMembersFromEvent,
 } from "@/shared/api/relayMembers";
 import { getUsersBatch } from "@/shared/api/tauriProfiles";
-import type { RelayEvent } from "@/shared/api/types";
+import type { RelayEvent, RelayMember } from "@/shared/api/types";
 
 const KIND_NIP43_MEMBERSHIP_LIST = 13534;
 const KIND_NIP43_MEMBER_ADDED = 8000;
@@ -324,7 +324,28 @@ export function useCommunityJoinAlerts({ enabled }: { enabled: boolean }) {
 
     // The roster can change shape without anything being new to us (a removal
     // or a role change), so refresh the panel regardless of alert eligibility.
-    void queryClient.invalidateQueries({ queryKey: relayMembersQueryKey });
+    //
+    // Written directly rather than invalidated. `invalidateQueries` refetches
+    // every ACTIVE observer, and `listRelayMembers` is a REQ frame
+    // (`fetchFirstEvent({ kinds: [13534], limit: 1 })`), so with the members
+    // panel open this path emitted one REQ per accepted snapshot — measured
+    // 1:1 across 20 snapshots, live and in unit, against a documented budget
+    // of limit x window = 50 REQ per 5s (`default_human_ws()` = 10/s,
+    // `WS_BURST_WINDOW_SECS` = 5; REQ is billed as `WsEvents`). A join burst
+    // large enough to matter would rate-limit the owner out of their own app,
+    // and unlike the kind:8000 accelerator this path is not behind
+    // `MEMBER_REFRESH_DEBOUNCE_MS`.
+    //
+    // The refetch was never load-bearing: `roster` above is the output of the
+    // same `relayMembersFromEvent` parser `listRelayMembers` feeds the query
+    // with (`relayMembers.ts:125-127`), from a snapshot this session has
+    // already accepted as current — so the write is the identical shape and
+    // strictly fresher than a refetch, which would race the stream that
+    // triggered it. The stale fence above guarantees no superseded roster
+    // reaches here, and the query client is per-community
+    // (`CommunityQueryProvider key={communityKey}`, `App.tsx:556`), so this
+    // non-community-scoped key cannot be written across a switch.
+    queryClient.setQueryData<RelayMember[]>(relayMembersQueryKey, roster);
 
     // Authorize against the snapshot in hand, not the cached role that mounted
     // this effect. `useMyRelayMembershipLookupQuery` is only invalidated by this

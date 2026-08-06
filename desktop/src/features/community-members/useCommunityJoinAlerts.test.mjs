@@ -256,6 +256,7 @@ import { useCommunities } from "@/features/communities/useCommunities.tsx";
 import {
   myRelayMembershipLookupQueryKey,
   relayMembersQueryKey,
+  useRelayMembersQuery,
 } from "@/features/community-members/hooks.ts";
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -467,6 +468,7 @@ function mountHook({ role = "owner", enabled = true } = {}) {
   return {
     render,
     invalidations,
+    queryClient,
     switchCommunity: async (id) => {
       await act(async () => {
         control.switchCommunity(id);
@@ -976,22 +978,42 @@ describe("useCommunityJoinAlerts — mounted subscription behaviour", () => {
    * A snapshot refreshes the members panel regardless of alert eligibility: a
    * removal or a role change alters the roster without producing anything new
    * to alert on, and the open panel must still repaint.
+   *
+   * The refresh is a direct cache WRITE, not an invalidation — an invalidation
+   * refetched every active observer, costing one REQ frame per snapshot (see
+   * the two-arm REQ test at the end of this file). So this asserts the roster
+   * that lands in the cache, which is the property the panel actually renders
+   * from, and is a strictly stronger claim than "an invalidation was issued":
+   * it fails both if the refresh disappears AND if it writes the wrong roster.
    */
-  it("invalidates the members query on every snapshot, including a seeding one", async () => {
+  it("writes the roster into the members query on every snapshot, including a seeding one", async () => {
     const relay = installRelayStub();
-    const { render, invalidations, unmount } = mountHook();
+    const { render, queryClient, unmount } = mountHook();
 
     await render();
     await settle();
 
+    assert.equal(
+      queryClient.getQueryData(relayMembersQueryKey),
+      undefined,
+      "precondition: nothing has populated the members query yet",
+    );
+
     relay.emitSnapshot(snapshot([VIEWER, ALICE]));
     await settle();
 
-    assert.ok(
-      invalidations.some(
-        (key) => JSON.stringify(key) === JSON.stringify(relayMembersQueryKey),
-      ),
+    const cached = queryClient.getQueryData(relayMembersQueryKey);
+    assert.deepEqual(
+      cached?.map((member) => member.pubkey).sort(),
+      [VIEWER, ALICE].sort(),
       "the seeding snapshot must still refresh the roster panel",
+    );
+    // The viewer's own role rides in the snapshot, so the written rows carry it
+    // — a fixture writing bare pubkeys would render an owner as a plain member.
+    assert.equal(
+      cached?.find((member) => member.pubkey === VIEWER)?.role,
+      "owner",
+      "the written rows must carry roles, not just pubkeys",
     );
 
     await unmount();
@@ -2082,5 +2104,133 @@ describe("useCommunityJoinAlerts — mounted subscription behaviour", () => {
 
     await settleAfterNotifyWindow();
     await unmount();
+  });
+  /**
+   * The members panel must not turn each roster snapshot into a REQ frame.
+   *
+   * `useRelayMembersQuery` is the settings card's own query, and its queryFn
+   * `listRelayMembers` is a REQ (`fetchFirstEvent({ kinds: [13534], limit: 1 })`).
+   * `invalidateQueries` refetches every ACTIVE observer, so while the panel was
+   * open the snapshot handler emitted one REQ per accepted snapshot — measured
+   * 1:1 at 20 snapshots, both here and live against a real relay — against a
+   * per-principal budget of 50 REQ per 5s. Unlike the kind:8000 accelerator this
+   * path is not behind `MEMBER_REFRESH_DEBOUNCE_MS`, so nothing coalesced it.
+   *
+   * Both arms are asserted, and the second is what makes this test honest:
+   * DELETING the cache write also produces zero REQ, so a REQ-only assertion is
+   * satisfied by a fix that silently freezes the panel. The observed roster is
+   * the discriminator (measured: 21 keys with the write, 0 without it).
+   *
+   * The closed arm is the negative control — without it, a hook that stopped
+   * subscribing entirely would pass the open arm.
+   */
+  it("keeps the members panel fresh across a burst without emitting a REQ per snapshot", async () => {
+    const SNAPSHOT_COUNT = 20;
+    const relay = installRelayStub();
+
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    queryClient.setQueryData(["identity"], { pubkey: VIEWER });
+    queryClient.setQueryData(myRelayMembershipLookupQueryKey, {
+      snapshotFound: true,
+      membershipRequired: true,
+      membership: {
+        pubkey: VIEWER,
+        role: "owner",
+        addedBy: null,
+        createdAt: null,
+      },
+    });
+
+    // Mirrors CommunityMembersSettingsCard:251 — the real query hook, so this
+    // arm cannot pass by re-declaring the observer the regression runs through.
+    const observed = { roster: undefined };
+    function MembersPanelObserver() {
+      observed.roster = useRelayMembersQuery(true).data;
+      return null;
+    }
+
+    // The panel opens INSIDE the mounted tree, the way navigating to Settings
+    // does. Mounting a second tree instead would give the observer its own
+    // QueryClient and the invalidation could never reach it.
+    const openPanel = { current: null };
+    function Harness() {
+      useCommunityJoinAlerts({ enabled: true });
+      const [open, setOpen] = React.useState(false);
+      openPanel.current = setOpen;
+      return open ? React.createElement(MembersPanelObserver, null) : null;
+    }
+
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const render = async () => {
+      await act(async () => {
+        root.render(
+          React.createElement(
+            QueryClientProvider,
+            { client: queryClient },
+            React.createElement(
+              CommunitiesProvider,
+              null,
+              React.createElement(Harness, null),
+            ),
+          ),
+        );
+      });
+    };
+
+    /** Emit `SNAPSHOT_COUNT` growing rosters, returning REQ frames spent. */
+    const burst = async (startAt) => {
+      const before = relay.counts().fetchFirstEventCalls;
+      const roster = [VIEWER];
+      for (let i = 0; i < SNAPSHOT_COUNT; i++) {
+        roster.push(String(i).padStart(64, "e"));
+        const event = snapshot([...roster], {
+          id: `snap-req-${startAt}-${i}`,
+          createdAt: startAt + i,
+        });
+        relay.setRefetchSnapshot(event);
+        relay.emitSnapshot(event);
+        await settle(2);
+      }
+      await settleAfterNotifyWindow();
+      return relay.counts().fetchFirstEventCalls - before;
+    };
+
+    await render();
+    await settle();
+
+    // Arm 1 — panel closed (negative control).
+    const closedArmReqs = await burst(1_000);
+    assert.equal(
+      closedArmReqs,
+      0,
+      `panel closed must cost no REQ; spent ${closedArmReqs}`,
+    );
+
+    // Arm 2 — panel open: the regression arm.
+    await act(async () => {
+      openPanel.current(true);
+    });
+    await settle();
+    const openArmReqs = await burst(2_000);
+
+    assert.equal(
+      openArmReqs,
+      0,
+      `an open members panel must not cost a REQ per snapshot; spent ${openArmReqs} across ${SNAPSHOT_COUNT} snapshots`,
+    );
+
+    // The half a REQ count cannot see: deleting the write scores 0 REQ too.
+    assert.equal(
+      observed.roster?.length,
+      SNAPSHOT_COUNT + 1,
+      `the panel must observe the full roster (viewer + ${SNAPSHOT_COUNT}); got ${observed.roster?.length}`,
+    );
+
+    await act(async () => {
+      root.unmount();
+    });
   });
 });
