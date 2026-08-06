@@ -27,8 +27,11 @@ function overviewPeople(
       projects.flatMap((project) =>
         [
           project.owner,
-          ...project.contributors,
-          ...(summaries?.[project.repoAddress]?.participantPubkeys ?? []),
+          ...project.repositories.flatMap((repository) => [
+            repository.owner,
+            ...repository.contributors,
+          ]),
+          ...(summaries?.[project.id]?.participantPubkeys ?? []),
         ].map(normalizePubkey),
       ),
     ),
@@ -41,7 +44,7 @@ function overviewActivityByDay(
 ) {
   const merged: Record<string, number> = {};
   for (const project of projects) {
-    const byDay = summaries?.[project.repoAddress]?.activityByDay;
+    const byDay = summaries?.[project.id]?.activityByDay;
     if (!byDay) continue;
     for (const [day, count] of Object.entries(byDay)) {
       merged[day] = (merged[day] ?? 0) + count;

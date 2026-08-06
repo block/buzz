@@ -1387,19 +1387,25 @@ pub fn extract_p_tags(event: &serde_json::Value) -> Vec<serde_json::Value> {
         .unwrap_or_default()
 }
 
-/// Return a create-command response with an entity ID injected.
-pub fn create_response_with_id(resp: &str, id_key: &str, id_val: &str) -> String {
+/// Return a create-command response, injecting the entity ID **only** when the
+/// relay accepted the event (`"accepted": true`). When the relay rejected the
+/// event, emitting the locally-computed link would be misleading — callers
+/// that copy or share the link would reference an event that was never stored.
+pub fn create_response_with_id_if_accepted(resp: &str, id_key: &str, id_val: &str) -> String {
     let mut v: serde_json::Value = serde_json::from_str(resp).unwrap_or(serde_json::json!({}));
-    v[id_key] = serde_json::json!(id_val);
-    if v.get("accepted").is_none() {
-        v["accepted"] = serde_json::json!(true);
+    let accepted = v.get("accepted").and_then(|a| a.as_bool()).unwrap_or(false);
+    if accepted {
+        v[id_key] = serde_json::json!(id_val);
     }
     v.to_string()
 }
 
 /// Print a create-command response, injecting the generated entity ID.
 pub fn print_create_response(resp: &str, id_key: &str, id_val: &str) {
-    println!("{}", create_response_with_id(resp, id_key, id_val));
+    println!(
+        "{}",
+        create_response_with_id_if_accepted(resp, id_key, id_val)
+    );
 }
 
 /// Extract a JSON field from relay write response messages shaped as
@@ -2297,7 +2303,8 @@ mod retry_policy_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        advance_query_cursor, create_response_with_id, extract_relay_response_field, BuzzClient,
+        advance_query_cursor, create_response_with_id_if_accepted, extract_relay_response_field,
+        BuzzClient,
     };
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
@@ -2345,13 +2352,28 @@ mod tests {
     }
 
     #[test]
-    fn create_response_with_id_overrides_local_id_with_relay_id() {
+    fn create_response_with_id_if_accepted_injects_id_when_accepted() {
         let raw = r#"{"event_id":"abc","accepted":true,"message":"response:{\"workflow_id\":\"relay-id\"}"}"#;
-        let out = create_response_with_id(raw, "workflow_id", "relay-id");
+        let out = create_response_with_id_if_accepted(raw, "workflow_id", "relay-id");
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        // ID injected and original fields preserved when accepted.
         assert_eq!(v["workflow_id"].as_str(), Some("relay-id"));
         assert_eq!(v["event_id"].as_str(), Some("abc"));
         assert_eq!(v["accepted"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn create_response_with_id_if_accepted_omits_id_when_rejected() {
+        let raw = r#"{"event_id":"abc","accepted":false,"message":"duplicate"}"#;
+        let out = create_response_with_id_if_accepted(raw, "workflow_id", "local-id");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        // ID must not be present when relay rejected the event; emitting a
+        // link to an event that was never stored would mislead callers.
+        assert!(
+            v.get("workflow_id").is_none(),
+            "link field must be absent on rejected create"
+        );
+        assert_eq!(v["accepted"].as_bool(), Some(false));
     }
 
     // --- (a) auth-suppression regression pair ---

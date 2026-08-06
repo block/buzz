@@ -161,6 +161,45 @@ fn write_backup_file_overwrites_atomically() {
 }
 
 #[test]
+fn write_portable_backup_file_persists_0600_without_a_sibling() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("portable.ncryptsec");
+    write_portable_backup_file(&path, SPEC_NCRYPTSEC).unwrap();
+
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), SPEC_NCRYPTSEC);
+    let entries: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(
+        entries,
+        vec![std::ffi::OsString::from("portable.ncryptsec")]
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "portable backup must be owner-only");
+    }
+}
+
+#[test]
+fn write_portable_backup_file_preserves_an_existing_backup() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("portable.ncryptsec");
+    std::fs::write(&path, "ncryptsec1existing").unwrap();
+
+    let error = write_portable_backup_file(&path, SPEC_NCRYPTSEC).unwrap_err();
+
+    assert!(error.contains("already exists"), "{error}");
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "ncryptsec1existing"
+    );
+}
+
+#[test]
 fn delete_backup_file_is_idempotent() {
     let dir = tempfile::tempdir().unwrap();
     delete_backup_file(dir.path()).unwrap();
@@ -211,12 +250,16 @@ fn generated_passphrase_respects_word_count_and_separator() {
 
 #[test]
 fn generated_passphrase_clamps_word_count() {
+    // Use a separator that cannot appear in the EFF wordlist so a generated
+    // word such as "yo-yo" cannot be mistaken for two words.
+    const SEPARATOR: &str = "|";
+
     // Below the floor: clamped up to MIN_PASSPHRASE_WORDS, never shorter.
-    let phrase = generate_passphrase(1, "-").unwrap();
-    assert_eq!(phrase.split('-').count(), MIN_PASSPHRASE_WORDS);
+    let phrase = generate_passphrase(1, SEPARATOR).unwrap();
+    assert_eq!(phrase.split(SEPARATOR).count(), MIN_PASSPHRASE_WORDS);
     // Above the ceiling: clamped down to MAX_PASSPHRASE_WORDS.
-    let phrase = generate_passphrase(50, "-").unwrap();
-    assert_eq!(phrase.split('-').count(), MAX_PASSPHRASE_WORDS);
+    let phrase = generate_passphrase(50, SEPARATOR).unwrap();
+    assert_eq!(phrase.split(SEPARATOR).count(), MAX_PASSPHRASE_WORDS);
 }
 
 #[test]

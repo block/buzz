@@ -1541,7 +1541,7 @@ mod tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
-    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
+    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
 
     async fn setup_pool() -> PgPool {
         let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
@@ -1941,6 +1941,42 @@ mod tests {
             ])
             .sign_with_keys(keys)
             .expect("sign reaction event")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn reaction_single_tx_stores_wrapped_max_shortcode() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let target = make_text_event("long custom emoji target");
+        insert_event(&pool, community, &target, None)
+            .await
+            .expect("insert target");
+
+        let actor = Keys::generate();
+        let emoji = format!(":{}:", "a".repeat(64));
+        let reaction = make_reaction_event(&actor, &target.id.to_hex(), &emoji);
+        let outcome = insert_reaction_event_with_thread_metadata(
+            &pool,
+            community,
+            &reaction,
+            None,
+            None,
+            target.id.as_bytes(),
+            &actor.public_key().to_bytes(),
+            &emoji,
+        )
+        .await
+        .expect("store wrapped 64-character shortcode");
+
+        assert!(matches!(
+            outcome,
+            ReactionEventInsertOutcome::Inserted {
+                was_inserted: true,
+                ..
+            }
+        ));
+        assert_eq!(emoji.chars().count(), 66);
     }
 
     #[tokio::test]
