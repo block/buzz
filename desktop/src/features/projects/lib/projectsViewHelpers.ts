@@ -30,6 +30,12 @@ export type ProjectsFilter =
   | "users";
 export type ProjectsSort = "updated" | "created" | "name";
 
+export const REPOSITORY_ENTRY_PAGE_SIZE = 200;
+
+export function nextRepositoryEntryLimit(current: number, total: number) {
+  return Math.min(current + REPOSITORY_ENTRY_PAGE_SIZE, total);
+}
+
 const PROJECTS_VIEW_MODE_STORAGE_KEY = "buzz.projects.viewMode";
 const PROJECTS_FILTER_STORAGE_KEY = "buzz.projects.filter";
 const PROJECTS_REPOSITORY_SCOPE_STORAGE_KEY = "buzz.projects.repositoryScope";
