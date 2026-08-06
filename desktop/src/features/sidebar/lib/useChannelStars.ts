@@ -88,16 +88,22 @@ export function useChannelStars(pubkey: string | undefined): {
   React.useEffect(() => {
     if (!pubkey) return;
     let cancelled = false;
-    void managerRef.current?.fetchRemoteStars().then((remote) => {
+    void managerRef.current?.fetchRemoteStars().then((result) => {
       if (cancelled) return;
-      if (remote) {
-        setStore(applyRemote(remote));
-      } else {
-        const local = readChannelStarsStore(pubkey);
-        if (Object.keys(local.channels).length > 0) {
-          managerRef.current?.publishStars(local);
+      if (result.status === "found") {
+        setStore(applyRemote(result.data));
+      } else if (result.status === "absent") {
+        const seedAllowed =
+          managerRef.current !== null &&
+          managerRef.current.getPersistedWatermark() === 0;
+        if (seedAllowed) {
+          const local = readChannelStarsStore(pubkey);
+          if (Object.keys(local.channels).length > 0) {
+            managerRef.current?.publishStars(local);
+          }
         }
       }
+      // status === "failed": do nothing.
     });
     return () => {
       cancelled = true;
@@ -130,10 +136,10 @@ export function useChannelStars(pubkey: string | undefined): {
     if (!pubkey) return;
     let cancelled = false;
     const unsub = relayClient.subscribeToReconnects(() => {
-      void managerRef.current?.fetchRemoteStars().then((remote) => {
+      void managerRef.current?.fetchRemoteStars().then((result) => {
         if (cancelled) return;
-        if (remote) {
-          setStore(applyRemote(remote));
+        if (result.status === "found") {
+          setStore(applyRemote(result.data));
         }
         const pending = managerRef.current?.getPendingStarStore();
         if (pending) {

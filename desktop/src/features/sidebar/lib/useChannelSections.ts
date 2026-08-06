@@ -54,7 +54,8 @@ export function useChannelSections(
     setStore(readChannelSectionsStore(pubkey, relayUrl));
     lastAppliedRemoteTs.current = 0;
     lastAppliedEventId.current = "";
-    managerRef.current = new ChannelSectionSyncManager(pubkey);
+    // Pass relayUrl so the manager can scope its watermark key.
+    managerRef.current = new ChannelSectionSyncManager(pubkey, relayUrl);
     return () => {
       managerRef.current?.destroy();
       managerRef.current = null;
@@ -104,16 +105,30 @@ export function useChannelSections(
   React.useEffect(() => {
     if (!pubkey) return;
     let cancelled = false;
-    void managerRef.current?.fetchRemoteSections().then((remote) => {
+    void managerRef.current?.fetchRemoteSections().then((result) => {
       if (cancelled) return;
-      if (remote) {
-        setStore(applyRemote(remote));
-      } else {
-        const local = readChannelSectionsStore(pubkey, relayUrl);
-        if (local.sections.length > 0) {
-          managerRef.current?.publishSections(local);
+      if (result.status === "found") {
+        setStore(applyRemote(result.data));
+      } else if (result.status === "absent") {
+        // Genuine first-time sync: only seed-publish when the persisted
+        // watermark is 0 — if it is > 0 this relay has had a blob before and
+        // the empty response is transient (auth-race, reconnect, etc.).
+        const seedAllowed =
+          managerRef.current !== null &&
+          // The manager hydrates lastRemoteCreatedAt from localStorage in its
+          // constructor, so reading getPendingStore() would be wrong here — we
+          // need the watermark the manager was initialised with.  We expose it
+          // via a dedicated accessor to avoid coupling to internals.
+          managerRef.current.getPersistedWatermark() === 0;
+        if (seedAllowed) {
+          const local = readChannelSectionsStore(pubkey, relayUrl);
+          if (local.sections.length > 0) {
+            managerRef.current?.publishSections(local);
+          }
         }
       }
+      // status === "failed": do nothing — a fetch error or unreadable event
+      // must never trigger a seed-publish.
     });
     return () => {
       cancelled = true;
@@ -146,10 +161,10 @@ export function useChannelSections(
     if (!pubkey) return;
     let cancelled = false;
     const unsub = relayClient.subscribeToReconnects(() => {
-      void managerRef.current?.fetchRemoteSections().then((remote) => {
+      void managerRef.current?.fetchRemoteSections().then((result) => {
         if (cancelled) return;
-        if (remote) {
-          setStore(applyRemote(remote));
+        if (result.status === "found") {
+          setStore(applyRemote(result.data));
         }
         const pending = managerRef.current?.getPendingStore();
         if (pending) {

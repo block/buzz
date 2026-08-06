@@ -11,8 +11,14 @@ import {
   parseMutePayload,
   type ChannelMuteStore,
 } from "./channelMutesStorage";
+import {
+  advanceWatermark,
+  readWatermark,
+  type FetchResult,
+} from "./sidebarSyncWatermark";
 
 const D_TAG = "channel-mutes";
+const BLOB_TYPE = "channel-mutes";
 const DEBOUNCE_MS = 2_000;
 
 export type RemoteMutes = {
@@ -34,16 +40,20 @@ async function decryptAndParse(event: RelayEvent): Promise<RemoteMutes | null> {
 
 export class ChannelMuteSyncManager {
   private pubkey: string;
+  private relayUrl: string | undefined;
   private debounceTimer: number | null = null;
-  private lastRemoteCreatedAt = 0;
+  private lastRemoteCreatedAt: number;
   private pendingStore: ChannelMuteStore | null = null;
   private lastPublishedStore: ChannelMuteStore | null = null;
+  private destroyed = false;
 
-  constructor(pubkey: string) {
+  constructor(pubkey: string, relayUrl?: string) {
     this.pubkey = pubkey;
+    this.relayUrl = relayUrl;
+    this.lastRemoteCreatedAt = readWatermark(pubkey, BLOB_TYPE, relayUrl);
   }
 
-  async fetchRemoteMutes(): Promise<RemoteMutes | null> {
+  async fetchRemoteMutes(): Promise<FetchResult<RemoteMutes>> {
     try {
       const events = await relayClient.fetchEvents({
         kinds: [KIND_CHANNEL_MUTES],
@@ -51,19 +61,35 @@ export class ChannelMuteSyncManager {
         "#d": [D_TAG],
         limit: 1,
       });
-      if (events.length === 0) return null;
-      if (events[0].pubkey !== this.pubkey) return null;
-      const result = await decryptAndParse(events[0]);
-      if (result) {
-        this.lastRemoteCreatedAt = Math.max(
-          this.lastRemoteCreatedAt,
-          result.createdAt,
-        );
+      if (events.length === 0 || events[0].pubkey !== this.pubkey) {
+        return { status: "absent" };
       }
-      return result;
+      const event = events[0];
+      this.recordRemoteHead(event.created_at);
+      const result = await decryptAndParse(event);
+      if (!result) {
+        return { status: "failed", createdAt: event.created_at };
+      }
+      return {
+        status: "found",
+        data: result,
+        createdAt: result.createdAt,
+        eventId: result.eventId,
+      };
     } catch {
-      return null;
+      return { status: "failed" };
     }
+  }
+
+  private recordRemoteHead(createdAt: number): void {
+    if (createdAt > this.lastRemoteCreatedAt) {
+      this.lastRemoteCreatedAt = createdAt;
+    }
+    advanceWatermark(this.pubkey, BLOB_TYPE, createdAt, this.relayUrl);
+  }
+
+  getPersistedWatermark(): number {
+    return this.lastRemoteCreatedAt;
   }
 
   cancelPendingMutePublish(): void {
@@ -101,10 +127,7 @@ export class ChannelMuteSyncManager {
       if (events.length === 0 || events[0].pubkey !== this.pubkey) return store;
       const remote = await decryptAndParse(events[0]);
       if (!remote) return store;
-      this.lastRemoteCreatedAt = Math.max(
-        this.lastRemoteCreatedAt,
-        remote.createdAt,
-      );
+      this.recordRemoteHead(remote.createdAt);
       return mergeStores(store, remote.store);
     } catch {
       return store;
@@ -132,6 +155,10 @@ export class ChannelMuteSyncManager {
   private async doPublish(store: ChannelMuteStore): Promise<void> {
     try {
       const merged = await this.fetchOwnBlobBeforePublish(store);
+      // Guard: manager may have been destroyed while fetchOwnBlobBeforePublish
+      // was awaited (community switch during in-flight fetch). If so, abort
+      // before touching the relay.
+      if (this.destroyed) return;
       if (this.isIdenticalToLastPublished(merged)) {
         this.pendingStore = null;
         return;
@@ -154,15 +181,13 @@ export class ChannelMuteSyncManager {
           ["t", D_TAG], // relay discoverability; not used in our filters
         ],
       });
+      if (this.destroyed) return;
       await relayClient.publishEvent(
         event,
         "Timed out publishing channel mutes.",
         "Failed to publish channel mutes.",
       );
-      this.lastRemoteCreatedAt = Math.max(
-        this.lastRemoteCreatedAt,
-        event.created_at,
-      );
+      this.recordRemoteHead(event.created_at);
       this.lastPublishedStore = merged;
       this.pendingStore = null;
     } catch (error) {
@@ -184,10 +209,7 @@ export class ChannelMuteSyncManager {
         if (event.pubkey !== this.pubkey) return;
         void decryptAndParse(event).then((result) => {
           if (result) {
-            this.lastRemoteCreatedAt = Math.max(
-              this.lastRemoteCreatedAt,
-              result.createdAt,
-            );
+            this.recordRemoteHead(result.createdAt);
             onUpdate(result);
           }
         });
@@ -196,13 +218,14 @@ export class ChannelMuteSyncManager {
   }
 
   destroy(): void {
-    if (this.debounceTimer !== null && this.pendingStore !== null) {
-      window.clearTimeout(this.debounceTimer);
-      this.debounceTimer = null;
-      void this.doPublish(this.pendingStore);
-    } else if (this.debounceTimer !== null) {
-      window.clearTimeout(this.debounceTimer);
-      this.debounceTimer = null;
-    }
+    // Cancel any pending publish and mark this manager as destroyed so any
+    // in-flight doPublish() calls abort before reaching relayClient. The
+    // scoped localStorage write is already durable; when the user returns to
+    // this relay the existing seed-publish guard will re-publish from local
+    // state. Flushing here would race against community switching and could
+    // publish relay A's mutes to relay B via the shared relayClient singleton.
+    this.destroyed = true;
+    this.cancelPendingMutePublish();
+    this.pendingStore = null;
   }
 }

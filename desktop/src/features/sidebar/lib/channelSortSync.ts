@@ -10,8 +10,14 @@ import {
   parseChannelSortPayload,
   type ChannelSortStore,
 } from "./channelSortPreference";
+import {
+  advanceWatermark,
+  readWatermark,
+  type FetchResult,
+} from "./sidebarSyncWatermark";
 
 const D_TAG = "channel-sort";
+const BLOB_TYPE = "channel-sort";
 const DEBOUNCE_MS = 2_000;
 
 export type RemoteSortPrefs = {
@@ -44,17 +50,20 @@ async function decryptAndParse(
  */
 export class ChannelSortSyncManager {
   private pubkey: string;
+  private relayUrl: string | undefined;
   private debounceTimer: number | null = null;
-  private lastRemoteCreatedAt = 0;
+  private lastRemoteCreatedAt: number;
   private pendingStore: ChannelSortStore | null = null;
   private lastPublishedStore: ChannelSortStore | null = null;
   private destroyed = false;
 
-  constructor(pubkey: string) {
+  constructor(pubkey: string, relayUrl?: string) {
     this.pubkey = pubkey;
+    this.relayUrl = relayUrl;
+    this.lastRemoteCreatedAt = readWatermark(pubkey, BLOB_TYPE, relayUrl);
   }
 
-  async fetchRemoteSortPrefs(): Promise<RemoteSortPrefs | null> {
+  async fetchRemoteSortPrefs(): Promise<FetchResult<RemoteSortPrefs>> {
     try {
       const events = await relayClient.fetchEvents({
         kinds: [KIND_CHANNEL_SORT],
@@ -62,19 +71,35 @@ export class ChannelSortSyncManager {
         "#d": [D_TAG],
         limit: 1,
       });
-      if (events.length === 0) return null;
-      if (events[0].pubkey !== this.pubkey) return null;
-      const result = await decryptAndParse(events[0]);
-      if (result) {
-        this.lastRemoteCreatedAt = Math.max(
-          this.lastRemoteCreatedAt,
-          result.createdAt,
-        );
+      if (events.length === 0 || events[0].pubkey !== this.pubkey) {
+        return { status: "absent" };
       }
-      return result;
+      const event = events[0];
+      this.recordRemoteHead(event.created_at);
+      const result = await decryptAndParse(event);
+      if (!result) {
+        return { status: "failed", createdAt: event.created_at };
+      }
+      return {
+        status: "found",
+        data: result,
+        createdAt: result.createdAt,
+        eventId: result.eventId,
+      };
     } catch {
-      return null;
+      return { status: "failed" };
     }
+  }
+
+  private recordRemoteHead(createdAt: number): void {
+    if (createdAt > this.lastRemoteCreatedAt) {
+      this.lastRemoteCreatedAt = createdAt;
+    }
+    advanceWatermark(this.pubkey, BLOB_TYPE, createdAt, this.relayUrl);
+  }
+
+  getPersistedWatermark(): number {
+    return this.lastRemoteCreatedAt;
   }
 
   cancelPendingPublish(): void {
@@ -114,7 +139,7 @@ export class ChannelSortSyncManager {
       if (!remote) return store;
       // Sort prefs use whole-blob LWW: take whichever is newer
       if (remote.createdAt > this.lastRemoteCreatedAt) {
-        this.lastRemoteCreatedAt = remote.createdAt;
+        this.recordRemoteHead(remote.createdAt);
         return remote.store;
       }
       return store;
@@ -174,10 +199,7 @@ export class ChannelSortSyncManager {
         "Timed out publishing channel sort preferences.",
         "Failed to publish channel sort preferences.",
       );
-      this.lastRemoteCreatedAt = Math.max(
-        this.lastRemoteCreatedAt,
-        event.created_at,
-      );
+      this.recordRemoteHead(event.created_at);
       this.lastPublishedStore = merged;
       this.pendingStore = null;
     } catch (error) {
@@ -199,10 +221,7 @@ export class ChannelSortSyncManager {
         if (event.pubkey !== this.pubkey) return;
         void decryptAndParse(event).then((result) => {
           if (result) {
-            this.lastRemoteCreatedAt = Math.max(
-              this.lastRemoteCreatedAt,
-              result.createdAt,
-            );
+            this.recordRemoteHead(result.createdAt);
             onUpdate(result);
           }
         });

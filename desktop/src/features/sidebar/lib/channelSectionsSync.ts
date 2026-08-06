@@ -11,8 +11,14 @@ import {
   type ChannelSection,
   type ChannelSectionStore,
 } from "./channelSectionsStorage";
+import {
+  advanceWatermark,
+  readWatermark,
+  type FetchResult,
+} from "./sidebarSyncWatermark";
 
 const D_TAG = "channel-sections";
+const BLOB_TYPE = "channel-sections";
 const DEBOUNCE_MS = 2_000;
 
 export type RemoteSections = {
@@ -36,17 +42,22 @@ async function decryptAndParse(
 
 export class ChannelSectionSyncManager {
   private pubkey: string;
+  private relayUrl: string | undefined;
   private debounceTimer: number | null = null;
-  private lastRemoteCreatedAt = 0;
+  private lastRemoteCreatedAt: number;
   private pendingStore: ChannelSectionStore | null = null;
   private lastPublishedStore: ChannelSectionStore | null = null;
   private destroyed = false;
 
-  constructor(pubkey: string) {
+  constructor(pubkey: string, relayUrl?: string) {
     this.pubkey = pubkey;
+    this.relayUrl = relayUrl;
+    // Hydrate from localStorage so we never seed-publish if a remote blob has
+    // been seen in a prior session.
+    this.lastRemoteCreatedAt = readWatermark(pubkey, BLOB_TYPE, relayUrl);
   }
 
-  async fetchRemoteSections(): Promise<RemoteSections | null> {
+  async fetchRemoteSections(): Promise<FetchResult<RemoteSections>> {
     try {
       const events = await relayClient.fetchEvents({
         kinds: [KIND_CHANNEL_SECTIONS],
@@ -54,19 +65,44 @@ export class ChannelSectionSyncManager {
         "#d": [D_TAG],
         limit: 1,
       });
-      if (events.length === 0) return null;
-      if (events[0].pubkey !== this.pubkey) return null;
-      const result = await decryptAndParse(events[0]);
-      if (result) {
-        this.lastRemoteCreatedAt = Math.max(
-          this.lastRemoteCreatedAt,
-          result.createdAt,
-        );
+      if (events.length === 0 || events[0].pubkey !== this.pubkey) {
+        return { status: "absent" };
       }
-      return result;
+      const event = events[0];
+      // An event exists — record its created_at regardless of whether we can
+      // decrypt it, so seed-publish is blocked even when the payload is
+      // unreadable (e.g. wrong key).
+      this.recordRemoteHead(event.created_at);
+      const result = await decryptAndParse(event);
+      if (!result) {
+        return { status: "failed", createdAt: event.created_at };
+      }
+      return {
+        status: "found",
+        data: result,
+        createdAt: result.createdAt,
+        eventId: result.eventId,
+      };
     } catch {
-      return null;
+      return { status: "failed" };
     }
+  }
+
+  /** Update in-memory + persisted watermark. */
+  private recordRemoteHead(createdAt: number): void {
+    if (createdAt > this.lastRemoteCreatedAt) {
+      this.lastRemoteCreatedAt = createdAt;
+    }
+    advanceWatermark(this.pubkey, BLOB_TYPE, createdAt, this.relayUrl);
+  }
+
+  /**
+   * Returns the persisted watermark as read at construction time.  A non-zero
+   * value means this manager has seen a remote blob in a prior session, so
+   * seed-publish must be skipped even when a boot fetch returns `absent`.
+   */
+  getPersistedWatermark(): number {
+    return this.lastRemoteCreatedAt;
   }
 
   cancelPendingPublish(): void {
@@ -106,7 +142,7 @@ export class ChannelSectionSyncManager {
       if (!remote) return store;
       // Sections use whole-blob LWW: take whichever is newer
       if (remote.createdAt > this.lastRemoteCreatedAt) {
-        this.lastRemoteCreatedAt = remote.createdAt;
+        this.recordRemoteHead(remote.createdAt);
         return remote.store;
       }
       return store;
@@ -181,10 +217,7 @@ export class ChannelSectionSyncManager {
         "Timed out publishing channel sections.",
         "Failed to publish channel sections.",
       );
-      this.lastRemoteCreatedAt = Math.max(
-        this.lastRemoteCreatedAt,
-        event.created_at,
-      );
+      this.recordRemoteHead(event.created_at);
       this.lastPublishedStore = merged;
       this.pendingStore = null;
     } catch (error) {
@@ -206,10 +239,7 @@ export class ChannelSectionSyncManager {
         if (event.pubkey !== this.pubkey) return;
         void decryptAndParse(event).then((result) => {
           if (result) {
-            this.lastRemoteCreatedAt = Math.max(
-              this.lastRemoteCreatedAt,
-              result.createdAt,
-            );
+            this.recordRemoteHead(result.createdAt);
             onUpdate(result);
           }
         });

@@ -58,7 +58,7 @@ export function useChannelSortPreference(
     setStore(readChannelSortStore(pubkey, relayUrl));
     lastAppliedRemoteTs.current = 0;
     lastAppliedEventId.current = "";
-    managerRef.current = new ChannelSortSyncManager(pubkey);
+    managerRef.current = new ChannelSortSyncManager(pubkey, relayUrl);
     return () => {
       managerRef.current?.destroy();
       managerRef.current = null;
@@ -103,16 +103,22 @@ export function useChannelSortPreference(
   React.useEffect(() => {
     if (!pubkey) return;
     let cancelled = false;
-    void managerRef.current?.fetchRemoteSortPrefs().then((remote) => {
+    void managerRef.current?.fetchRemoteSortPrefs().then((result) => {
       if (cancelled) return;
-      if (remote) {
-        setStore(applyRemote(remote));
-      } else {
-        const local = readChannelSortStore(pubkey, relayUrl);
-        if (Object.keys(local.groups).length > 0) {
-          managerRef.current?.publishSortPrefs(local);
+      if (result.status === "found") {
+        setStore(applyRemote(result.data));
+      } else if (result.status === "absent") {
+        const seedAllowed =
+          managerRef.current !== null &&
+          managerRef.current.getPersistedWatermark() === 0;
+        if (seedAllowed) {
+          const local = readChannelSortStore(pubkey, relayUrl);
+          if (Object.keys(local.groups).length > 0) {
+            managerRef.current?.publishSortPrefs(local);
+          }
         }
       }
+      // status === "failed": do nothing.
     });
     return () => {
       cancelled = true;
@@ -145,10 +151,10 @@ export function useChannelSortPreference(
     if (!pubkey) return;
     let cancelled = false;
     const unsub = relayClient.subscribeToReconnects(() => {
-      void managerRef.current?.fetchRemoteSortPrefs().then((remote) => {
+      void managerRef.current?.fetchRemoteSortPrefs().then((result) => {
         if (cancelled) return;
-        if (remote) {
-          setStore(applyRemote(remote));
+        if (result.status === "found") {
+          setStore(applyRemote(result.data));
         }
         const pending = managerRef.current?.getPendingStore();
         if (pending) {
