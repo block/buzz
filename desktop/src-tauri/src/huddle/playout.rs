@@ -38,6 +38,8 @@ use super::wire::{FrameHeader, FLAG_DTX, V2_HEADER_LEN};
 /// cleared each tick — peers that didn't send a frame in the last window are
 /// considered silent.
 const SPEAKER_TICK_MS: u64 = 500;
+/// UI cadence for per-speaker waveform levels.
+const SPEAKER_LEVEL_TICK_MS: u64 = 50;
 /// Per-peer arrival window for the TTS interrupt frame counter.
 const FRAME_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
 /// Playout clock: NetEq emits 10 ms frames, so we tick at 10 ms.
@@ -52,7 +54,7 @@ const PLAYOUT_TICK_MS: u64 = 10;
 /// NetEq's PLC/expand path normally.
 const IDLE_PEER_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// Drift bound on per-peer rodio `Player` queue depth.
+/// Queue-depth thresholds for smooth producer/device clock-drift recovery.
 ///
 /// The playout pipeline has two clocks: the producer is a `tokio` 10 ms
 /// interval (this loop) that pulls from NetEq and appends to each peer's
@@ -67,12 +69,28 @@ const IDLE_PEER_GRACE: std::time::Duration = std::time::Duration::from_millis(50
 /// that drift would accumulate as monotonic added latency (and eventually
 /// memory).
 ///
-/// We bound it explicitly: before each append, if the queue is already
-/// at or above this threshold, drop the oldest queued frame with
-/// `Player::skip_one()` so the new frame replaces it. 4 frames × 10 ms
-/// = 40 ms, far below NetEq's `max_delay_ms = 200 ms`, so the audible
-/// effect is negligible while the worst-case latency stays bounded.
-const PLAYOUT_QUEUE_HIGH_WATER: usize = 4;
+/// Dropping a whole 10 ms buffer at a shallow queue depth creates a waveform
+/// discontinuity that is audible as a click or static. Once the queue grows
+/// beyond the recovery threshold, play it 2% faster until it returns to the
+/// target. A hard drop remains only as an emergency bound at 300 ms.
+const PLAYOUT_QUEUE_RECOVERY_START: usize = 10;
+const PLAYOUT_QUEUE_RECOVERY_END: usize = 4;
+const PLAYOUT_QUEUE_EMERGENCY_HIGH_WATER: usize = 30;
+const PLAYOUT_RECOVERY_SPEED: f32 = 1.02;
+
+/// Map sender-authored dBov into a useful UI range. Normal conversational
+/// speech generally sits between roughly -60 dBov and -12 dBov.
+fn normalized_speaker_level(level_dbov: i8) -> f32 {
+    ((f32::from(level_dbov) + 60.0) / 48.0).clamp(0.0, 1.0)
+}
+
+fn should_recover_playout(depth: usize, currently_recovering: bool) -> bool {
+    if currently_recovering {
+        depth > PLAYOUT_QUEUE_RECOVERY_END
+    } else {
+        depth >= PLAYOUT_QUEUE_RECOVERY_START
+    }
+}
 
 /// One remote peer's slot: jitter buffer + dedicated rodio Player.
 ///
@@ -87,6 +105,7 @@ struct PeerSlot {
     /// by the playout tick to decide whether to keep draining NetEq into the
     /// Player. Updated on every successful `insert_packet`.
     last_packet_at: tokio::time::Instant,
+    recovering_playout: bool,
 }
 
 impl PeerSlot {
@@ -96,6 +115,7 @@ impl PeerSlot {
                 jitter,
                 player: rodio::Player::connect_new(sink_mixer),
                 last_packet_at: tokio::time::Instant::now(),
+                recovering_playout: false,
             }),
             Err(e) => {
                 eprintln!("buzz-desktop: jitter buffer init peer {peer_idx}: {e}");
@@ -120,6 +140,19 @@ impl PeerSlot {
     /// OR keeps the invariant robust against future config tuning.
     fn is_active(&self) -> bool {
         self.last_packet_at.elapsed() < IDLE_PEER_GRACE || !self.jitter.is_empty()
+    }
+
+    fn update_playout_recovery(&mut self) {
+        let should_recover = should_recover_playout(self.player.len(), self.recovering_playout);
+        if should_recover == self.recovering_playout {
+            return;
+        }
+        self.recovering_playout = should_recover;
+        self.player.set_speed(if should_recover {
+            PLAYOUT_RECOVERY_SPEED
+        } else {
+            1.0
+        });
     }
 }
 
@@ -149,12 +182,16 @@ pub(crate) async fn run_playout_recv_loop(
     let mut index_to_pubkey: std::collections::HashMap<u8, String> =
         initial_peers.into_iter().collect();
     let mut active_indices: std::collections::HashSet<u8> = std::collections::HashSet::new();
+    let mut speaker_levels: std::collections::HashMap<u8, f32> = std::collections::HashMap::new();
     let mut frame_counts: std::collections::HashMap<u8, u16> = std::collections::HashMap::new();
     let mut last_frame_reset = tokio::time::Instant::now();
     let mut tts_was_active = false;
 
     let mut speaker_tick = tokio::time::interval(std::time::Duration::from_millis(SPEAKER_TICK_MS));
     speaker_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut speaker_level_tick =
+        tokio::time::interval(std::time::Duration::from_millis(SPEAKER_LEVEL_TICK_MS));
+    speaker_level_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut playout_tick = tokio::time::interval(std::time::Duration::from_millis(PLAYOUT_TICK_MS));
     // `Delay` (not `Skip`) so a brief stall in another select arm — e.g. the
     // ws_tx_for_pongs mutex contending with the encode-side task on a Ping —
@@ -187,15 +224,14 @@ pub(crate) async fn run_playout_recv_loop(
                     }
                     match slot.jitter.get_audio() {
                         Ok((samples, _vad)) => {
-                            // Bound producer-vs-device-clock drift. If our
-                            // tokio tick has gotten ahead of the audio
-                            // callback's actual consumption rate, drop the
-                            // oldest queued frame rather than letting the
-                            // queue grow without bound.
-                            if slot.player.len() >= PLAYOUT_QUEUE_HIGH_WATER {
+                            // Smooth out producer-vs-device clock drift. A
+                            // shallow hard drop used to remove entire 10 ms
+                            // chunks and create audible discontinuities.
+                            slot.update_playout_recovery();
+                            if slot.player.len() >= PLAYOUT_QUEUE_EMERGENCY_HIGH_WATER {
                                 eprintln!(
-                                    "buzz-desktop: playout queue high-water for peer {peer_idx} \
-                                     (depth={}) — dropping oldest frame",
+                                    "buzz-desktop: playout queue emergency high-water for peer \
+                                     {peer_idx} (depth={}) — dropping oldest frame",
                                     slot.player.len(),
                                 );
                                 slot.player.skip_one();
@@ -220,6 +256,22 @@ pub(crate) async fn run_playout_recv_loop(
                     let _ = app.emit("huddle-active-speakers", &pubkeys);
                 }
                 active_indices.clear();
+            }
+            _ = speaker_level_tick.tick() => {
+                if let Some(ref app) = app_handle {
+                    use tauri::Emitter;
+                    let levels: std::collections::HashMap<String, f32> = speaker_levels
+                        .iter()
+                        .filter_map(|(idx, level)| {
+                            index_to_pubkey.get(idx).cloned().map(|pubkey| (pubkey, *level))
+                        })
+                        .collect();
+                    let _ = app.emit("huddle-speaker-levels", &levels);
+                }
+                for level in speaker_levels.values_mut() {
+                    *level *= 0.55;
+                }
+                speaker_levels.retain(|_, level| *level > 0.015);
             }
             msg = ws_rx.next() => {
                 match msg {
@@ -253,6 +305,11 @@ pub(crate) async fn run_playout_recv_loop(
                         // make their tile flash for the 500 ms speaker tick.
                         if !is_dtx {
                             active_indices.insert(peer_idx);
+                            let level = normalized_speaker_level(header.level_dbov);
+                            speaker_levels
+                                .entry(peer_idx)
+                                .and_modify(|current| *current = current.max(level))
+                                .or_insert(level);
                         }
 
                         // TTS interrupt frame counter — reset on TTS rising edge.
@@ -328,6 +385,7 @@ pub(crate) async fn run_playout_recv_loop(
                                                     peers.remove(&key);
                                                     frame_counts.remove(&key);
                                                     active_indices.remove(&key);
+                                                    speaker_levels.remove(&key);
                                                 }
                                                 index_to_pubkey.insert(key, pk.to_string());
                                             }
@@ -351,6 +409,7 @@ pub(crate) async fn run_playout_recv_loop(
                                         peers.retain(|idx, _| identity_unchanged(idx));
                                         frame_counts.retain(|idx, _| identity_unchanged(idx));
                                         active_indices.retain(identity_unchanged);
+                                        speaker_levels.retain(|idx, _| identity_unchanged(idx));
                                         index_to_pubkey = replacement;
                                     }
                                 }
@@ -359,6 +418,8 @@ pub(crate) async fn run_playout_recv_loop(
                                         let key = idx as u8;
                                         index_to_pubkey.remove(&key);
                                         frame_counts.remove(&key);
+                                        active_indices.remove(&key);
+                                        speaker_levels.remove(&key);
                                         // Dropping Player detaches its queue from the
                                         // device mixer, freeing the per-peer slot.
                                         peers.remove(&key);
@@ -378,5 +439,35 @@ pub(crate) async fn run_playout_recv_loop(
                 }
             }
         }
+    }
+
+    if let Some(ref app) = app_handle {
+        use tauri::Emitter;
+        let _ = app.emit(
+            "huddle-speaker-levels",
+            &std::collections::HashMap::<String, f32>::new(),
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn speaker_level_maps_conversational_range() {
+        assert_eq!(normalized_speaker_level(-127), 0.0);
+        assert_eq!(normalized_speaker_level(-60), 0.0);
+        assert!((normalized_speaker_level(-36) - 0.5).abs() < f32::EPSILON);
+        assert_eq!(normalized_speaker_level(-12), 1.0);
+        assert_eq!(normalized_speaker_level(0), 1.0);
+    }
+
+    #[test]
+    fn playout_recovery_uses_hysteresis() {
+        assert!(!should_recover_playout(9, false));
+        assert!(should_recover_playout(10, false));
+        assert!(should_recover_playout(5, true));
+        assert!(!should_recover_playout(4, true));
     }
 }

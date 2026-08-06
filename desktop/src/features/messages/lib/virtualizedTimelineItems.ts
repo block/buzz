@@ -32,7 +32,7 @@ export function estimateVirtualizedTimelineItemHeight(
 ): number {
   if (item.kind === "bottom-spacer") return 96;
   if (item.kind === "leading-content") return 60;
-  if (item.kind === "day-divider") return 32;
+  if (item.kind === "day-divider") return 56;
   return estimateTimelineItemHeight(item.item);
 }
 
@@ -64,11 +64,12 @@ export function buildVirtualizedItems(
   dayGroups: readonly TimelineDayGroup[],
   leadingContent: React.ReactNode | undefined,
   historyExhausted: boolean,
+  showDayDividers = true,
 ): VirtualizedTimelineItem[] {
   const timelineItems = dayGroups.flatMap((group, groupIndex) => {
     const boundaryProven = groupIndex > 0 || historyExhausted;
     const divider =
-      group.headingTimestamp !== null && boundaryProven
+      showDayDividers && group.headingTimestamp !== null && boundaryProven
         ? [
             {
               kind: "day-divider" as const,

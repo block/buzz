@@ -1,5 +1,5 @@
 import 'package:buzz/features/channels/message_actions.dart';
-import 'package:buzz/features/channels/read_state/read_state_provider.dart';
+import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/features/channels/thread_follows/thread_follows_provider.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/shared/reminders/reminder_service.dart';
@@ -196,6 +196,22 @@ void main() {
       expect(find.text('Remind me'), findsNothing);
       expect(find.text('Edit message'), findsNothing);
       expect(find.text('Delete message'), findsNothing);
+      expect(find.byTooltip('Close sheet'), findsNothing);
+      expect(find.byKey(const ValueKey('quick-reaction-more')), findsOneWidget);
+      expect(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget.key is ValueKey<String> &&
+              (widget.key! as ValueKey<String>).value.startsWith(
+                'quick-reaction-',
+              ),
+        ),
+        findsNWidgets(6),
+      );
+      expect(
+        tester.getSize(find.byKey(const ValueKey('quick-reaction-\u{1F44D}'))),
+        const Size.square(52),
+      );
     });
 
     testWidgets('promotes Reply, Copy link, and Remind me to the fast-actions '
@@ -227,6 +243,47 @@ void main() {
       expect(find.text('Follow thread'), findsNothing);
       expect(find.text('Reply'), findsNothing);
       expect(find.text('Remind me'), findsNothing);
+      expect(find.byTooltip('Close sheet'), findsNothing);
+      expect(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget.key is ValueKey<String> &&
+              (widget.key! as ValueKey<String>).value.startsWith(
+                'quick-reaction-',
+              ),
+        ),
+        findsNWidgets(6),
+      );
+    });
+
+    testWidgets('keeps six reaction targets within a narrow phone', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(375, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final prefs = await _mockPrefs();
+
+      await _pumpSheet(tester, message: _message(), prefs: prefs);
+
+      expect(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget.key is ValueKey<String> &&
+              (widget.key! as ValueKey<String>).value.startsWith(
+                'quick-reaction-',
+              ),
+        ),
+        findsNWidgets(6),
+      );
+      expect(
+        tester
+            .getSize(find.byKey(const ValueKey('quick-reaction-\u{1F44D}')))
+            .width,
+        inInclusiveRange(44, 52),
+      );
+      expect(tester.takeException(), isNull);
     });
 
     testWidgets('shows Edit/Delete only with manage rights', (tester) async {

@@ -2,6 +2,7 @@ pub mod agent_management;
 mod client;
 mod commands;
 mod error;
+mod links;
 mod validate;
 
 use clap::{Parser, Subcommand};
@@ -212,6 +213,9 @@ enum Cmd {
     /// Announce and discover git repositories (NIP-34)
     #[command(subcommand)]
     Repos(ReposCmd),
+    /// Create and manage multi-repo projects (NIP-MP)
+    #[command(subcommand)]
+    Projects(ProjectsCmd),
     /// Send, get, list, and set status on git patches (NIP-34)
     #[command(subcommand)]
     Patches(PatchesCmd),
@@ -1227,6 +1231,122 @@ pub enum RepoPushRole {
     Member,
 }
 
+/// Visibility of a multi-repo project listing.
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub enum ProjectVisibility {
+    /// Project appears in public listings (default).
+    Listed,
+    /// Project is hidden from public listings.
+    Unlisted,
+}
+
+impl ProjectVisibility {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProjectVisibility::Listed => "listed",
+            ProjectVisibility::Unlisted => "unlisted",
+        }
+    }
+}
+
+#[derive(Subcommand)]
+pub enum ProjectsCmd {
+    /// Create a new multi-repo project (NIP-MP kind:30621)
+    ///
+    /// Requires at least one --repo. Fails with Conflict if the project already exists.
+    Create {
+        /// Project identifier (slug), up to 1024 bytes
+        slug: String,
+        /// Member repository coordinate: bare Buzz repo id (e.g. `buzz`) or full
+        /// `30617:<owner-hex>:<repo-d>` for cross-owner or colon-bearing repo ids.
+        /// At least one --repo is required.
+        #[arg(long = "repo", required = true)]
+        repo: Vec<String>,
+        /// Display name (≤256 bytes)
+        #[arg(long)]
+        name: Option<String>,
+        /// Description (≤2048 bytes)
+        #[arg(long)]
+        description: Option<String>,
+        /// Associated Buzz channel UUID
+        #[arg(long)]
+        channel: Option<String>,
+        /// Visibility: `listed` (default) or `unlisted`
+        #[arg(long)]
+        visibility: Option<ProjectVisibility>,
+    },
+    /// Get a project by slug
+    Get {
+        /// Project slug
+        slug: String,
+        /// Owner pubkey (64-char hex). Defaults to the current identity.
+        #[arg(long)]
+        owner: Option<String>,
+    },
+    /// List projects
+    List {
+        /// Owner pubkey (64-char hex). Defaults to the current identity.
+        #[arg(long)]
+        owner: Option<String>,
+        /// Maximum number of results
+        #[arg(long)]
+        limit: Option<u32>,
+    },
+    /// Add one or more member repositories to a project
+    #[command(name = "add-repo")]
+    AddRepo {
+        /// Project slug
+        slug: String,
+        /// Member repository coordinate (bare id or full `30617:<owner-hex>:<repo-d>`)
+        #[arg(long = "repo", required = true)]
+        repo: Vec<String>,
+    },
+    /// Remove one or more member repositories from a project
+    #[command(name = "remove-repo")]
+    RemoveRepo {
+        /// Project slug
+        slug: String,
+        /// Member repository coordinate to remove (bare id or full `30617:<owner-hex>:<repo-d>`)
+        #[arg(long = "repo", required = true)]
+        repo: Vec<String>,
+    },
+    /// Update project metadata (at least one setter or clearer required)
+    #[command(group = clap::ArgGroup::new("mutation").required(true).multiple(true))]
+    Update {
+        /// Project slug
+        slug: String,
+        /// Set the display name
+        #[arg(long, group = "mutation")]
+        name: Option<String>,
+        /// Remove the display name
+        #[arg(long, group = "mutation", conflicts_with = "name")]
+        clear_name: bool,
+        /// Set the description
+        #[arg(long, group = "mutation")]
+        description: Option<String>,
+        /// Remove the description
+        #[arg(long, group = "mutation", conflicts_with = "description")]
+        clear_description: bool,
+        /// Set the associated Buzz channel UUID
+        #[arg(long, group = "mutation")]
+        channel: Option<String>,
+        /// Remove the associated channel
+        #[arg(long, group = "mutation", conflicts_with = "channel")]
+        clear_channel: bool,
+        /// Set visibility: `listed` or `unlisted`
+        #[arg(long, group = "mutation")]
+        visibility: Option<ProjectVisibility>,
+        /// Remove the visibility tag (absence defaults to `listed`)
+        #[arg(long, group = "mutation", conflicts_with = "visibility")]
+        clear_visibility: bool,
+    },
+    /// Delete a project (head-based tombstone; verified after submit)
+    Delete {
+        /// Project slug
+        slug: String,
+    },
+}
+
 #[derive(Subcommand)]
 pub enum PatchesCmd {
     /// Send a git patch (NIP-34 kind:1617)
@@ -1865,6 +1985,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Social(sub) => commands::social::dispatch(sub, &client).await,
         Cmd::Notes(sub) => commands::notes::dispatch(sub, &client).await,
         Cmd::Repos(sub) => commands::repos::dispatch(sub, &client).await,
+        Cmd::Projects(sub) => commands::projects::dispatch(sub, &client).await,
         Cmd::Patches(sub) => commands::patches::dispatch(sub, &client).await,
         Cmd::Issues(sub) => commands::issues::dispatch(sub, &client).await,
         Cmd::Pr(sub) => commands::pr::dispatch(sub, &client).await,
@@ -1974,6 +2095,7 @@ mod tests {
             "pack",
             "patches",
             "pr",
+            "projects",
             "reactions",
             "repos",
             "social",
@@ -2130,6 +2252,18 @@ mod tests {
             vec!["get", "list", "send", "status"]
         );
         assert_eq!(
+            names(&cmd, "projects"),
+            vec![
+                "add-repo",
+                "create",
+                "delete",
+                "get",
+                "list",
+                "remove-repo",
+                "update"
+            ]
+        );
+        assert_eq!(
             names(&cmd, "issues"),
             vec!["create", "get", "list", "status"]
         );
@@ -2166,6 +2300,7 @@ mod tests {
             ("pack", 2),
             ("patches", 4),
             ("pr", 5),
+            ("projects", 7),
             ("reactions", 3),
             ("repos", 5),
             ("social", 7),
@@ -2231,6 +2366,113 @@ mod tests {
                 .map(|(cmd, env)| format!("  command={cmd:?} env={env:?}"))
                 .collect::<Vec<_>>()
                 .join("\n")
+        );
+    }
+
+    // ── projects update mutation group ────────────────────────────────────────
+
+    /// Multiple independent fields must be accepted in the same invocation.
+    #[test]
+    fn projects_update_multi_field_is_accepted() {
+        assert!(
+            Cli::try_parse_from([
+                "buzz",
+                "projects",
+                "update",
+                "my-slug",
+                "--name",
+                "X",
+                "--description",
+                "Y",
+            ])
+            .is_ok(),
+            "--name and --description together must be accepted"
+        );
+    }
+
+    /// A setter for one field and a clearer for a different field must be accepted.
+    #[test]
+    fn projects_update_setter_with_other_clearer_is_accepted() {
+        assert!(
+            Cli::try_parse_from([
+                "buzz",
+                "projects",
+                "update",
+                "my-slug",
+                "--name",
+                "X",
+                "--clear-description",
+            ])
+            .is_ok(),
+            "--name with --clear-description must be accepted"
+        );
+    }
+
+    /// A setter and its own clearer are mutually exclusive — clap must reject this.
+    #[test]
+    fn projects_update_setter_with_own_clearer_is_rejected() {
+        assert!(
+            Cli::try_parse_from([
+                "buzz",
+                "projects",
+                "update",
+                "my-slug",
+                "--name",
+                "X",
+                "--clear-name",
+            ])
+            .is_err(),
+            "--name and --clear-name together must be rejected by clap"
+        );
+    }
+
+    /// Providing no mutation options at all must be rejected by clap (required group).
+    #[test]
+    fn projects_update_no_mutation_is_rejected_by_clap() {
+        // Without credentials, a valid parse would reach authentication and fail
+        // with auth_error — but a clap-level rejection happens before any I/O.
+        // We verify it's a clap error (not just any error) by checking the error
+        // kind is not a runtime/auth failure — Cli::try_parse_from returns Err
+        // immediately for argument violations.
+        assert!(
+            Cli::try_parse_from(["buzz", "projects", "update", "my-slug"]).is_err(),
+            "update with no setters or clearers must be rejected at parse time"
+        );
+    }
+
+    /// An unrecognised visibility token must be rejected by clap before any I/O.
+    #[test]
+    fn projects_create_invalid_visibility_is_rejected_by_clap() {
+        assert!(
+            Cli::try_parse_from([
+                "buzz",
+                "projects",
+                "create",
+                "my-slug",
+                "--repo",
+                "buzz",
+                "--visibility",
+                "chartreuse",
+            ])
+            .is_err(),
+            "--visibility chartreuse must be rejected at parse time"
+        );
+    }
+
+    /// An unrecognised visibility token on update must be rejected by clap before any I/O.
+    #[test]
+    fn projects_update_invalid_visibility_is_rejected_by_clap() {
+        assert!(
+            Cli::try_parse_from([
+                "buzz",
+                "projects",
+                "update",
+                "my-slug",
+                "--visibility",
+                "chartreuse",
+            ])
+            .is_err(),
+            "--visibility chartreuse on update must be rejected at parse time"
         );
     }
 }

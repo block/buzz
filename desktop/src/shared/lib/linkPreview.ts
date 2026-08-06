@@ -1,4 +1,16 @@
+import {
+  buildIssueLink,
+  buildPullRequestLink,
+  buildRepoLink,
+  isEntityLink,
+  parseEntityLink,
+  type ParsedEntityLink,
+} from "./entityLink";
+
 export type SupportedLinkPreviewKind =
+  | "buzz-pull-request"
+  | "buzz-issue"
+  | "buzz-repository"
   | "github-pull-request"
   | "github-issue"
   | "github-repository"
@@ -13,6 +25,7 @@ export type SupportedLinkPreview = {
   kind: SupportedLinkPreviewKind;
   href: string;
   provider:
+    | "Buzz"
     | "GitHub"
     | "Linear"
     | "Google Drive"
@@ -31,10 +44,13 @@ export type SupportedLinkPreview = {
     | "presentation";
 };
 
+// Buzz relay hosts differ per community, so relay git URLs are recognized by
+// their distinctive path shape (`/git/<64-hex-pubkey>/<repo>`) rather than by
+// hostname, and require an explicit scheme.
 const SUPPORTED_URL_RE =
-  /(^|[\s([{<>"'])((?:https?:\/\/)?(?:(?:www\.)?github\.com|(?:www\.)?linear\.app|drive\.google\.com|docs\.google\.com)\/[^\s<>"'\]]+)/gi;
+  /(^|[\s([{<>"'])((?:https?:\/\/)?(?:(?:www\.)?github\.com|(?:www\.)?linear\.app|drive\.google\.com|docs\.google\.com)\/[^\s<>"'\]]+|https?:\/\/[^\s<>"'\]]+\/git\/[a-f0-9]{64}\/[^\s<>"'\]]+|buzz:\/\/(?:pr|issue|repo)\?[^\s<>"'\]]+)/gi;
 const MARKDOWN_SUPPORTED_LINK_RE =
-  /!?\[([^\]\n]+)\]\(((?:https?:\/\/)?(?:(?:www\.)?github\.com|(?:www\.)?linear\.app|drive\.google\.com|docs\.google\.com)\/[^)\s<>"']+)\)/gi;
+  /!?\[([^\]\n]+)\]\(((?:https?:\/\/)?(?:(?:www\.)?github\.com|(?:www\.)?linear\.app|drive\.google\.com|docs\.google\.com)\/[^)\s<>"']+|https?:\/\/[^)\s<>"']+\/git\/[a-f0-9]{64}\/[^)\s<>"']+|buzz:\/\/(?:pr|issue|repo)\?[^)\s<>"']+)\)/gi;
 const MAX_PREVIEWS = 8;
 
 type HiddenRange = {
@@ -266,6 +282,97 @@ function createPreview(
   };
 }
 
+/**
+ * Placeholder title shown before (or instead of) the relay event lookup in
+ * `useResolvedLinkPreviews` resolves the real `subject` / repo name.
+ * Exported so the resolver can tell "still the fallback" apart from a
+ * markdown-label override it must not overwrite.
+ */
+export function buzzEntityFallbackTitle(link: ParsedEntityLink): string {
+  if (link.type === "repo") return link.dtag;
+  return `${link.dtag} #${link.id.slice(0, 8)}`;
+}
+
+/**
+ * Map a `buzz://pr|issue|repo` deep link onto a preview card. The href is
+ * rebuilt through the canonical builders so equivalent links (case or query
+ * order variants) dedupe to a single card.
+ */
+function parseBuzzEntityPreview(href: string): SupportedLinkPreview | null {
+  const parsed = parseEntityLink(href);
+  if (!parsed.ok) return null;
+
+  const link = parsed.value;
+  const title = buzzEntityFallbackTitle(link);
+  if (link.type === "pr") {
+    return {
+      kind: "buzz-pull-request",
+      href: buildPullRequestLink(link),
+      provider: "Buzz",
+      title,
+      typeLabel: "PR",
+    };
+  }
+  if (link.type === "issue") {
+    return {
+      kind: "buzz-issue",
+      href: buildIssueLink(link),
+      provider: "Buzz",
+      title,
+      typeLabel: "issue",
+    };
+  }
+  return {
+    kind: "buzz-repository",
+    href: buildRepoLink(link),
+    provider: "Buzz",
+    title,
+    typeLabel: "repo",
+  };
+}
+
+const BUZZ_GIT_PATH_RE =
+  /^\/git\/([a-f0-9]{64})\/([a-zA-Z0-9._-]+?)(?:\.git)?\/?$/;
+
+/**
+ * Recognize a Buzz relay git URL (`{relay-origin}/git/<owner-pubkey>/<repo>`,
+ * the clone URL shape agents paste when announcing work). The preview href
+ * is normalized to the canonical `buzz://repo` deep link: the raw git
+ * transport endpoint is not a browsable page, and the buzz:// href gives the
+ * card the same in-app click navigation as explicit entity links (and
+ * dedupes the two spellings of the same repository).
+ *
+ * Security: the URL origin must equal `activeRelayOrigin` (the currently
+ * connected relay). Path shape alone is not proof that a host belongs to the
+ * active Buzz relay — an arbitrary external URL sharing the path shape must
+ * remain an ordinary external link. Pass `null` when the relay origin is not
+ * yet resolved; the link stays external until it can be verified.
+ */
+function parseBuzzGitLink(
+  parsed: URL,
+  activeRelayOrigin: string | null,
+): SupportedLinkPreview | null {
+  if (!activeRelayOrigin || parsed.origin !== activeRelayOrigin) {
+    return null;
+  }
+
+  const match = BUZZ_GIT_PATH_RE.exec(parsed.pathname);
+  if (!match) return null;
+
+  const [, owner, repo] = match;
+  if (repo.startsWith(".") || repo.includes("..") || repo.length > 64) {
+    return null;
+  }
+
+  return {
+    kind: "buzz-repository",
+    href: buildRepoLink({ owner, dtag: repo }),
+    provider: "Buzz",
+    title: repo,
+    typeLabel: "repo",
+  };
+}
+
 function parseGithubLink(parsed: URL): SupportedLinkPreview | null {
   if (normalizeHostname(parsed) !== "github.com") {
     return null;
@@ -416,10 +523,15 @@ function parseGoogleDocsLink(parsed: URL): SupportedLinkPreview | null {
 /** Parse a supported external URL into a compact preview. */
 export function parseSupportedLinkPreview(
   href: string,
+  activeRelayOrigin?: string | null,
 ): SupportedLinkPreview | null {
+  const candidate = trimUrlCandidate(href);
+  if (isEntityLink(candidate)) {
+    return parseBuzzEntityPreview(candidate);
+  }
+
   let parsed: URL;
   try {
-    const candidate = trimUrlCandidate(href);
     parsed = new URL(
       /^https?:\/\//i.test(candidate) ? candidate : `https://${candidate}`,
     );
@@ -432,6 +544,7 @@ export function parseSupportedLinkPreview(
   }
 
   return (
+    parseBuzzGitLink(parsed, activeRelayOrigin ?? null) ??
     parseGithubLink(parsed) ??
     parseLinearIssue(parsed) ??
     parseGoogleDriveLink(parsed) ??
@@ -442,16 +555,23 @@ export function parseSupportedLinkPreview(
 export function isSupportedLinkAutolinkLabel(
   label: string,
   preview: SupportedLinkPreview,
+  activeRelayOrigin?: string | null,
 ): boolean {
-  return parseSupportedLinkPreview(label)?.href === preview.href;
+  return (
+    parseSupportedLinkPreview(label, activeRelayOrigin)?.href === preview.href
+  );
 }
 
 function titleFromMarkdownLabel(
   label: string,
   preview: SupportedLinkPreview,
+  activeRelayOrigin: string | null,
 ): string | null {
   const title = label.replace(/\s+/g, " ").trim();
-  if (!title || isSupportedLinkAutolinkLabel(title, preview)) {
+  if (
+    !title ||
+    isSupportedLinkAutolinkLabel(title, preview, activeRelayOrigin)
+  ) {
     return null;
   }
   return title;
@@ -474,6 +594,7 @@ type LinkPreviewCandidate = {
 /** Extract supported link previews from message text, preserving first-seen order. */
 export function extractSupportedLinkPreviews(
   content: string,
+  activeRelayOrigin?: string | null,
 ): SupportedLinkPreview[] {
   const previews: SupportedLinkPreview[] = [];
   const seen = new Set<string>();
@@ -506,8 +627,9 @@ export function extractSupportedLinkPreviews(
 
   candidates.sort((a, b) => a.index - b.index || a.order - b.order);
 
+  const relayOrigin = activeRelayOrigin ?? null;
   for (const candidate of candidates) {
-    const preview = parseSupportedLinkPreview(candidate.href);
+    const preview = parseSupportedLinkPreview(candidate.href, relayOrigin);
     if (!preview || seen.has(preview.href)) continue;
 
     seen.add(preview.href);
@@ -515,7 +637,7 @@ export function extractSupportedLinkPreviews(
       withTitle(
         preview,
         candidate.label
-          ? titleFromMarkdownLabel(candidate.label, preview)
+          ? titleFromMarkdownLabel(candidate.label, preview, relayOrigin)
           : null,
       ),
     );

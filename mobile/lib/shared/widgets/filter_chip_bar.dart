@@ -129,15 +129,23 @@ class FilterChipBar<T> extends StatelessWidget {
             textAlign: fillWidth ? TextAlign.center : TextAlign.start,
             style: labelStyle,
           );
+    final centeredLabel = Align(
+      alignment: Alignment.center,
+      widthFactor: fillWidth ? null : 1,
+      heightFactor: 1,
+      child: label,
+    );
     final chip = FilterChip(
       selected: isSelected,
       showCheckmark: false,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(Radii.lg),
+      ),
+      side: BorderSide.none,
       label: fillWidth
-          ? SizedBox(
-              width: double.infinity,
-              child: Center(child: label),
-            )
-          : label,
+          ? SizedBox(width: double.infinity, child: centeredLabel)
+          : centeredLabel,
+      labelPadding: EdgeInsets.zero,
       onSelected: (_) => onSelected(item.id),
       padding: EdgeInsets.symmetric(
         horizontal: fillWidth ? Grid.quarter : Grid.twelve,
