@@ -92,7 +92,6 @@ async function openCreateDialogOnProvider(page: Page) {
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
-  await page.getByRole("menuitem", { name: "Create agent" }).click();
   const dialog = page.getByTestId("persona-dialog");
   await expect(dialog).toBeVisible({ timeout: 10_000 });
   const advanced = dialog.getByRole("button", {

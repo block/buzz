@@ -67,9 +67,6 @@ async function gotoApp(page: import("@playwright/test").Page) {
 
 async function openPersonaCatalog(page: import("@playwright/test").Page) {
   await page.getByTestId("new-agent-card").click();
-  await page
-    .getByRole("menuitem", { exact: true, name: "Discover agents" })
-    .click();
 }
 
 async function getCatalogOrder(page: import("@playwright/test").Page) {
@@ -239,10 +236,8 @@ test("catalog hides built-ins and shows the shared-agent empty state", async ({
   }
   await expect(page.getByTestId("persona-catalog-dialog-header")).toBeVisible();
   await expect(page.getByTestId("persona-catalog-dialog-body")).toBeVisible();
-  const emptyState = page.getByTestId("persona-catalog-empty-state");
-  await expect(emptyState).toContainText("No agents are being shared");
   await expect(
-    emptyState.getByTestId("persona-catalog-empty-agent-artwork"),
+    page.getByText("No shared agents", { exact: true }),
   ).toBeVisible();
   await expect(
     page.locator('[data-testid^="persona-catalog-list-item-"]'),
@@ -267,7 +262,9 @@ test("catalog empty state remains available after reopening", async ({
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
   await openPersonaCatalog(page);
-  await expect(page.getByTestId("persona-catalog-empty-state")).toBeVisible();
+  await expect(
+    page.getByText("No shared agents", { exact: true }),
+  ).toBeVisible();
 
   await page
     .getByTestId("persona-catalog-dialog")
@@ -275,9 +272,9 @@ test("catalog empty state remains available after reopening", async ({
     .click();
   await expect(page.getByTestId("persona-catalog-dialog")).not.toBeVisible();
   await openPersonaCatalog(page);
-  await expect(page.getByTestId("persona-catalog-empty-state")).toContainText(
-    "No agents are being shared",
-  );
+  await expect(
+    page.getByText("No shared agents", { exact: true }),
+  ).toBeVisible();
 });
 
 test("built-in persona edits persist", async ({ page }) => {
@@ -319,9 +316,6 @@ test("searches agent avatar emoji with focus on open", async ({ page }) => {
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
-  await page
-    .getByRole("menuitem", { exact: true, name: "Create agent" })
-    .click();
 
   await expect(page.getByTestId("persona-dialog")).toBeVisible();
   await page.getByLabel("Add avatar").click();
@@ -346,9 +340,6 @@ test("agent avatar emoji picker scrolls inside its popover", async ({
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
-  await page
-    .getByRole("menuitem", { exact: true, name: "Create agent" })
-    .click();
 
   await expect(page.getByTestId("persona-dialog")).toBeVisible();
   await page.getByLabel("Add avatar").click();
@@ -385,7 +376,7 @@ test("agent avatar emoji picker scrolls inside its popover", async ({
     .toBeGreaterThan(before);
 });
 
-test("the new agent card offers create, discover, and import", async ({
+test("the new agent card opens unified create, catalog, and import flows", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -437,27 +428,12 @@ test("the new agent card offers create, discover, and import", async ({
   );
 
   await newAgentCard.click();
-  await expect(
-    page.getByRole("menuitem", { exact: true, name: "Create agent" }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("menuitem", { exact: true, name: "Discover agents" }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("menuitem", { exact: true, name: "Import" }),
-  ).toBeVisible();
-  await page
-    .getByRole("menuitem", { exact: true, name: "Discover agents" })
-    .click();
-  await expect(page.getByTestId("persona-catalog-dialog")).toBeVisible();
-  await page
-    .getByTestId("persona-catalog-dialog")
-    .getByRole("button", { name: "Close" })
-    .click();
-  await newAgentCard.click();
-  await page
-    .getByRole("menuitem", { exact: true, name: "Create agent" })
-    .click();
+  const catalogDialog = page.getByTestId("persona-catalog-dialog");
+  await expect(catalogDialog).toBeVisible();
+  await expect(page.getByTestId("agent-catalog-create")).toHaveAttribute(
+    "aria-current",
+    "true",
+  );
 
   const dialog = page.getByTestId("persona-dialog");
   await expect(dialog).toBeVisible();
@@ -466,10 +442,10 @@ test("the new agent card offers create, discover, and import", async ({
   ).toHaveCount(0);
   await expect(dialog).not.toContainText("Enter a name for this agent.");
 
-  await dialog.getByRole("button", { name: "Cancel" }).click();
-  await newAgentCard.click();
+  await page.getByTestId("agent-catalog-import").click();
+  await expect(page.getByTestId("agent-catalog-import-dropzone")).toBeVisible();
   const fileChooserPromise = page.waitForEvent("filechooser");
-  await page.getByRole("menuitem", { exact: true, name: "Import" }).click();
+  await page.getByTestId("agent-catalog-import-dropzone").click();
   const fileChooser = await fileChooserPromise;
   await fileChooser.setFiles({
     buffer: Buffer.from("{}"),
@@ -1675,7 +1651,9 @@ test("a foreign reader does not receive an unshared kind 30175 persona", async (
   await expect(
     page.getByTestId(`persona-catalog-list-item-${remoteCatalogId}`),
   ).toHaveCount(0);
-  await expect(page.getByTestId("persona-catalog-empty-state")).toBeVisible();
+  await expect(
+    page.getByText("No shared agents", { exact: true }),
+  ).toBeVisible();
 });
 
 test("a catalog entry keeps the owner's emoji avatar", async ({ page }) => {
