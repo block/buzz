@@ -100,11 +100,22 @@ fn status_for_with(
 }
 
 fn local_setup_for(record: &super::ManagedAgentRecord, inputs: StatusInputs<'_>) -> bool {
+    local_setup_for_with(record, inputs, agent_readiness)
+}
+
+fn local_setup_for_with<F>(
+    record: &super::ManagedAgentRecord,
+    inputs: StatusInputs<'_>,
+    evaluate_readiness: F,
+) -> bool
+where
+    F: FnOnce(&super::readiness::EffectiveAgentEnv) -> AgentReadiness,
+{
     let StatusInputs { personas, global } = inputs;
     let command = record_agent_command(record, personas);
     let metadata = super::known_acp_runtime(&command);
     let effective = resolve_effective_agent_env(record, personas, metadata, global);
-    matches!(agent_readiness(&effective), AgentReadiness::Ready)
+    matches!(evaluate_readiness(&effective), AgentReadiness::Ready)
 }
 
 fn status_for_with_local_setup(
@@ -242,15 +253,12 @@ fn status_for_snapshot(
     snapshot: &RuntimeStatusSnapshot,
     inputs: StatusInputs<'_>,
 ) -> ManagedAgentRuntimeStatus {
-    let command = record_agent_command(&snapshot.record, inputs.personas);
-    let metadata = super::known_acp_runtime(&command);
-    let effective =
-        resolve_effective_agent_env(&snapshot.record, inputs.personas, metadata, inputs.global);
+    let local_setup = local_setup_for(&snapshot.record, inputs);
     ManagedAgentRuntimeStatus {
         pubkey: snapshot.process.key.pubkey.clone(),
         relay_url: snapshot.process.key.relay_url.clone(),
         requested_relay_url: None,
-        local_setup: matches!(agent_readiness(&effective), AgentReadiness::Ready),
+        local_setup,
         lifecycle: snapshot.process.lifecycle.clone(),
         pid: snapshot.process.status_pid,
         error: snapshot.process.error.clone(),
@@ -918,11 +926,23 @@ mod tests {
         let (release_probe_tx, release_probe_rx) = mpsc::channel();
         let worker_state = Arc::clone(&state);
         let worker = std::thread::spawn(move || {
-            let snapshot = collect_runtime_process_snapshots(&worker_state)
+            let _snapshot = collect_runtime_process_snapshots(&worker_state)
                 .expect("runtime snapshot should succeed");
-            probe_started_tx.send(()).expect("announce fake probe");
-            release_probe_rx.recv().expect("release fake probe");
-            snapshot
+            let record = record_with_relay("");
+            let personas = Vec::new();
+            let global = super::super::GlobalAgentConfig::default();
+            local_setup_for_with(
+                &record,
+                StatusInputs {
+                    personas: &personas,
+                    global: &global,
+                },
+                |_| {
+                    probe_started_tx.send(()).expect("announce fake probe");
+                    release_probe_rx.recv().expect("release fake probe");
+                    AgentReadiness::Ready
+                },
+            )
         });
 
         probe_started_rx.recv().expect("fake readiness started");
@@ -930,7 +950,7 @@ mod tests {
         assert!(state.managed_agents_store_lock.try_lock().is_ok());
         assert!(state.managed_agent_processes.try_lock().is_ok());
         release_probe_tx.send(()).expect("release fake readiness");
-        let _ = worker.join().expect("snapshot worker");
+        assert!(worker.join().expect("snapshot worker"));
     }
 
     fn payload(
