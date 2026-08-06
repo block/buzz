@@ -13,6 +13,7 @@ static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 /// Run all pending Buzz database migrations.
 pub async fn run_migrations(pool: &PgPool) -> Result<()> {
     reject_legacy_nip_rs_cardinality_ambiguity(pool).await?;
+    reject_legacy_audit_log_shape(pool).await?;
     MIGRATOR.run(pool).await?;
     // The replica-fence proof (see `replica_fence`) requires the commit-time
     // `created_at` floor trigger from migration 0021 — correctly shaped — on
@@ -89,6 +90,61 @@ async fn reject_legacy_nip_rs_cardinality_ambiguity(pool: &PgPool) -> Result<()>
     if ambiguous {
         return Err(crate::DbError::InvalidData(
             "NIP-RS migration blocked: pre-0007 database contains kind-30078 rows with ambiguous d/t tag cardinality; repair or remove those nonconforming rows before retrying"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Legacy single-tenant `audit_log` preflight (#4919).
+///
+/// The multi-tenant rewrite (commit `14fba21`) re-keyed `audit_log` to
+/// `(community_id, seq)` with a 9-column insert; the pre-rewrite table was a
+/// completely different shape (`actor_pubkey`/`metadata`/`channel_id`,
+/// `VARCHAR` hashes, no `community_id`). Fresh installs get the right shape
+/// from consolidated `0001`, and this crate deliberately owns NO startup
+/// migration for the legacy cutover — that conversion is an operator script
+/// (`scripts/cutover/1321_backfill_default_community.sql`, see the module
+/// header). The failure mode the issue actually hit is therefore not a missing
+/// migration but a *silent* one: a legacy `audit_log` makes every audit write
+/// ERROR with `column "community_id" does not exist` while the relay keeps
+/// serving traffic, and a tamper-evident audit chain quietly stops recording
+/// in production. Fail the boot loudly instead, with the operator path, on
+/// BOTH the migrating and non-migrating startup paths (called from
+/// `run_migrations` and from `main.rs` on every boot).
+///
+/// Shape check, not version check: this probes the live table rather than
+/// `_sqlx_migrations`, because affected deployments reached this state with
+/// no migration record of `audit_log` at all (the table was created outside
+/// the migration chain), so no version predicate would have caught them.
+pub async fn reject_legacy_audit_log_shape(pool: &PgPool) -> Result<()> {
+    // The table exists but carries no community_id column → legacy shape.
+    // Both halves are safe to evaluate in any order: the information_schema
+    // lookup is a no-op (zero rows) when the table does not exist.
+    let legacy: bool = sqlx::query_scalar(
+        "SELECT EXISTS (\
+             SELECT 1 FROM information_schema.columns \
+             WHERE table_schema = 'public' \
+               AND table_name = 'audit_log'\
+         ) \
+         AND NOT EXISTS (\
+             SELECT 1 FROM information_schema.columns \
+             WHERE table_schema = 'public' \
+               AND table_name = 'audit_log' \
+               AND column_name = 'community_id'\
+         )",
+    )
+    .fetch_one(pool)
+    .await?;
+
+    if legacy {
+        return Err(crate::DbError::InvalidData(
+            "Legacy single-tenant audit_log detected: the table lacks the multi-tenant \
+             community_id column, so every audit write fails with `column \"community_id\" \
+             does not exist` while the relay keeps serving. The legacy→multi-tenant cutover \
+             is deliberately NOT startup migration state — run the operator cutover script \
+             (scripts/cutover/1321_backfill_default_community.sql, see its header) or follow \
+             issue #4919 before starting the relay"
                 .into(),
         ));
     }
@@ -1310,5 +1366,63 @@ mod tests {
             search_expression.contains("ELSE NULL::tsvector"),
             "fresh installs must default non-allowlisted kinds to NULL: {search_expression}"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn legacy_audit_log_shape_blocks_startup_and_allows_clean_schema() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        MIGRATOR.run(&pool).await.expect("apply full schema");
+
+        // Fresh 0001 schema: audit_log has community_id → boot proceeds.
+        reject_legacy_audit_log_shape(&pool)
+            .await
+            .expect("clean multi-tenant audit_log must pass the preflight");
+
+        // Replace with the legacy single-tenant shape (pre-rewrite audit_log:
+        // VARCHAR hashes, metadata/channel_id, no community_id — issue #4919).
+        sqlx::query("DROP TABLE audit_log")
+            .execute(&pool)
+            .await
+            .expect("drop fresh audit_log");
+        sqlx::query(
+            r#"CREATE TABLE audit_log (
+                id           BIGSERIAL PRIMARY KEY,
+                event_id     BYTEA NOT NULL,
+                event_kind   INTEGER NOT NULL,
+                actor_pubkey VARCHAR(255) NOT NULL,
+                action       VARCHAR(64)  NOT NULL,
+                channel_id   BYTEA,
+                metadata     JSONB        NOT NULL,
+                prev_hash    VARCHAR(64)  NOT NULL,
+                hash         VARCHAR(64)  NOT NULL
+            )"#,
+        )
+        .execute(&pool)
+        .await
+        .expect("create legacy-shaped audit_log");
+
+        let err = reject_legacy_audit_log_shape(&pool)
+            .await
+            .expect_err("legacy audit_log must block the boot");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("community_id"),
+            "message must name the missing column: {msg}"
+        );
+        assert!(
+            msg.contains("cutover"),
+            "message must point at the operator cutover path: {msg}"
+        );
+
+        // Table absent entirely → preflight passes (pre-0001 fresh state).
+        sqlx::query("DROP TABLE audit_log")
+            .execute(&pool)
+            .await
+            .expect("drop legacy audit_log");
+        reject_legacy_audit_log_shape(&pool)
+            .await
+            .expect("no audit_log at all must pass the preflight");
     }
 }
