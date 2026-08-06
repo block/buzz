@@ -15,6 +15,7 @@ import type { ChannelType } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { Spinner } from "@/shared/ui/spinner";
+import { OverlayScrollbar } from "@/shared/ui/OverlayScrollbar";
 import { TooltipProvider } from "@/shared/ui/tooltip";
 import { UnreadPill, unreadCountLabel } from "@/shared/ui/UnreadPill";
 import { ChannelIntroBlock, type ChannelIntro } from "./ChannelIntroBlock";
@@ -68,6 +69,8 @@ type MessageTimelineProps = {
   /** Optional external ref to the scroll container — used by the parent to
    *  observe scroll position or adjust padding dynamically. */
   scrollContainerRef?: React.RefObject<HTMLDivElement | null>;
+  /** Composer overlay used to bound the custom scrollbar above the dock. */
+  composerOverlayRef?: React.RefObject<HTMLElement | null>;
   /** True when the timeline has the composer overlay below it. */
   hasComposerOverlay?: boolean;
   /** Companion huddle transcripts are live conversations, not channel history. */
@@ -199,6 +202,7 @@ const MessageTimelineBase = React.forwardRef<
     onToggleReaction,
     unfollowThreadById,
     scrollContainerRef: externalScrollRef,
+    composerOverlayRef,
     searchActiveMessageId = null,
     searchMatchingMessageIds,
     searchQuery,
@@ -725,6 +729,7 @@ const MessageTimelineBase = React.forwardRef<
             (!useTimelineVirtualizer || !showMessageList) &&
               cn(
                 "overflow-y-auto overflow-x-hidden overscroll-contain px-2 pt-1",
+                "buzz-content-scrollbar",
                 hasComposerOverlay
                   ? "pb-[var(--composer-overlay-height,6rem)]"
                   : "pb-4",
@@ -850,6 +855,14 @@ const MessageTimelineBase = React.forwardRef<
             </div>
           )}
         </div>
+
+        {composerOverlayRef ? (
+          <OverlayScrollbar
+            composerRef={composerOverlayRef}
+            resetKey={`${scrollContainerDomKey}:${hasComposerOverlay}`}
+            scrollRef={activeScrollContainerRef}
+          />
+        ) : null}
 
         {!isAtBottom ? (
           <div

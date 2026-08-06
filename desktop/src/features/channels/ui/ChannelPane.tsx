@@ -673,6 +673,7 @@ export const ChannelPane = React.memo(function ChannelPane({
             messages={visibleMessages}
             firstUnreadMessageId={firstUnreadMessageId}
             unreadCount={unreadCount}
+            composerOverlayRef={composerWrapperRef}
             onDelete={onDelete}
             onEdit={onEdit}
             onMarkUnread={onMarkUnread}
