@@ -15,6 +15,7 @@ const MAX_REACTION_AVATAR_URL =
   'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"%3E%3Crect width="16" height="16" rx="4" fill="%23e5484d"/%3E%3C/svg%3E';
 const SHORT_REACTION_AVATAR_URL =
   'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"%3E%3Crect width="16" height="16" rx="4" fill="%2300a36c"/%3E%3C/svg%3E';
+const UNRESOLVED_SHORTCODE = ":missing_reaction:";
 const LONG_LITERAL_REACTION =
   "this-is-a-deliberately-long-literal-reaction-that-must-truncate-without-moving-or-overlapping-the-count";
 const SCREENSHOT_DIR =
@@ -102,6 +103,50 @@ async function expectFallbackPill(
     glyphRect.x >= pillRect.x &&
       countRect.x + countRect.width <= pillRect.x + pillRect.width,
   ).toBeTruthy();
+}
+
+async function expectFallbackPopover(
+  page: import("@playwright/test").Page,
+  reaction: string,
+  visibleText: string,
+  screenshotName: string,
+): Promise<void> {
+  const pill = reactionTargetRow(page).getByRole("button", {
+    name: `Toggle ${reaction} reaction`,
+  });
+  await pill.hover();
+
+  const popover = page.locator("[data-radix-popper-content-wrapper]").filter({
+    has: page
+      .getByTestId("reaction-popover-name")
+      .filter({ hasText: reaction }),
+  });
+  await expect(popover).toBeVisible();
+  await expect(popover.getByTestId("reaction-popover-name")).toHaveText(
+    reaction,
+  );
+
+  const container = popover.getByTestId("reaction-popover-glyph-container");
+  const glyph = container.locator("span[title]");
+  await expect(glyph).toHaveText(visibleText);
+  await expect(glyph).toHaveAttribute("title", reaction);
+  const [containerRect, glyphRect] = await Promise.all([
+    container.boundingBox(),
+    glyph.boundingBox(),
+  ]);
+  expect(containerRect && glyphRect).toBeTruthy();
+  if (containerRect && glyphRect) {
+    expect(glyphRect.x).toBeGreaterThanOrEqual(containerRect.x);
+    expect(glyphRect.x + glyphRect.width).toBeLessThanOrEqual(
+      containerRect.x + containerRect.width,
+    );
+    expect(glyphRect.y).toBeGreaterThanOrEqual(containerRect.y);
+    expect(glyphRect.y + glyphRect.height).toBeLessThanOrEqual(
+      containerRect.y + containerRect.height,
+    );
+  }
+  await expect(container).toHaveCSS("overflow", "hidden");
+  await capturePopover(page, popover, screenshotName);
 }
 
 test.beforeEach(async ({ page }) => {
@@ -232,12 +277,16 @@ test("literal fallback reactions do not overlap their counts", async ({
       }) === true,
   );
 
-  for (const reaction of [":bozo:", "ship it", LONG_LITERAL_REACTION]) {
+  for (const reaction of [
+    UNRESOLVED_SHORTCODE,
+    "ship it",
+    LONG_LITERAL_REACTION,
+  ]) {
     await emitReaction(page, reaction, BOB_PUBKEY);
     await emitReaction(page, reaction, "c".repeat(64));
   }
 
-  await expectFallbackPill(page, ":bozo:", "bozo");
+  await expectFallbackPill(page, UNRESOLVED_SHORTCODE, "missing_reaction");
   await expectFallbackPill(page, "ship it", "ship it");
   const longPill = reactionTargetRow(page).getByRole("button", {
     name: `Toggle ${LONG_LITERAL_REACTION} reaction`,
@@ -253,6 +302,26 @@ test("literal fallback reactions do not overlap their counts", async ({
       ),
     )
     .toBe(true);
+
+  await expectFallbackPopover(
+    page,
+    UNRESOLVED_SHORTCODE,
+    "missing_reaction",
+    "unresolved-shortcode-after.png",
+  );
+  await expectFallbackPopover(
+    page,
+    "ship it",
+    "ship it",
+    "literal-text-after.png",
+  );
+  await expectFallbackPopover(
+    page,
+    LONG_LITERAL_REACTION,
+    LONG_LITERAL_REACTION,
+    "long-literal-after.png",
+  );
+
   await reactionTargetRow(page).screenshot({
     animations: "disabled",
     path: "test-results/reaction-text-fallback.png",

@@ -22,6 +22,9 @@ const REACTION_CUSTOM_GLYPH_CLASSES = "h-3.5 w-3.5";
 const REACTION_NATIVE_GLYPH_CLASSES = "h-3 w-3 text-xs";
 const REACTION_TEXT_GLYPH_CLASSES =
   "max-w-32 shrink-0 justify-start truncate text-left text-xs";
+const REACTION_POPOVER_NATIVE_GLYPH_CLASSES = "text-4xl";
+const REACTION_POPOVER_TEXT_GLYPH_CLASSES =
+  "w-full min-w-0 justify-start truncate text-left text-sm leading-snug";
 const REACTION_COUNT_CLASSES = "text-muted-foreground";
 const REACTION_NATIVE_COUNT_CLASSES =
   "text-muted-foreground translate-y-[0.5px]";
@@ -120,13 +123,25 @@ function formatReactionUsers(reaction: TimelineReaction): string {
 function ReactionPopoverContent({ reaction }: { reaction: TimelineReaction }) {
   const displayName = emojiDisplayName(reaction.emoji);
   const userText = formatReactionUsers(reaction);
+  const presentation = reaction.emojiUrl
+    ? null
+    : reactionGlyphPresentation(reaction.emoji);
+  const glyphClasses = reaction.emojiUrl
+    ? "h-12 w-12"
+    : presentation?.kind === "native"
+      ? REACTION_POPOVER_NATIVE_GLYPH_CLASSES
+      : REACTION_POPOVER_TEXT_GLYPH_CLASSES;
 
   return (
     <div className="flex flex-col items-center text-center">
-      <div className="mb-2 flex h-14 w-14 items-center justify-center">
+      <div
+        className="mb-2 flex h-14 w-14 items-center justify-center overflow-hidden"
+        data-testid="reaction-popover-glyph-container"
+      >
         <EmojiGlyph
           reaction={reaction}
-          className={reaction.emojiUrl ? "h-12 w-12" : "text-4xl"}
+          className={glyphClasses}
+          text={presentation?.text}
         />
       </div>
       <div className="max-w-[14rem] text-balance text-sm font-semibold leading-snug text-popover-foreground">
