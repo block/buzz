@@ -190,7 +190,7 @@ function PairingCodeConfirmation({
         Confirm mobile code
       </p>
       <fieldset
-        className="flex w-full self-center justify-center gap-1.5"
+        className="flex w-full self-center justify-center gap-[6px]"
         data-testid="pairing-sas-code"
       >
         <legend className="sr-only">Confirmation code {formattedCode}</legend>
@@ -198,8 +198,14 @@ function PairingCodeConfirmation({
           <span
             aria-hidden="true"
             className={cn(
-              "flex w-10 shrink-0 items-center justify-center rounded-xl border border-input/60 bg-background px-2 py-3 font-mono text-2xl font-semibold text-foreground",
-              position === 3 && "ml-2",
+              // The cell box is px-frozen on purpose. The digits stay
+              // rem-based (`text-2xl`) so they scale with Cmd +/- zoom, but a
+              // rem-sized cell (`w-10`) plus rem gaps grew the six cells past
+              // this fixed 266px column at 150% text scale and overlapped the
+              // step guidance. Freezing the box keeps the code block the same
+              // width at every zoom level; a zoomed digit still fits inside.
+              "flex w-[40px] shrink-0 items-center justify-center rounded-xl border border-input/60 bg-background py-3 font-mono text-2xl font-semibold text-foreground",
+              position === 3 && "ml-[8px]",
             )}
             data-testid={`pairing-sas-code-digit-${position + 1}`}
             key={position}
@@ -389,9 +395,18 @@ export function MobilePairingCard({
         }
       />
 
-      <SettingsOptionGroup className="w-full" data-testid="mobile-pairing-card">
+      <SettingsOptionGroup
+        className="w-full [container-type:inline-size]"
+        data-testid="mobile-pairing-card"
+      >
         <SettingsOptionRow
-          className="flex-col items-stretch justify-start gap-14 px-6 pb-4 pt-15 sm:flex-row sm:items-start sm:px-15"
+          // Side-by-side is gated on the *card's* own width, not the viewport.
+          // `sm:` fires at an 800px viewport, but the settings sidebar and
+          // content padding leave the card only ~443px there — the QR column
+          // and gap ate all of it, collapsing the step guidance to ~1px and
+          // stretching the card past 1000px tall. 46rem is the narrowest card
+          // width where the steps column still gets a readable ~294px.
+          className="flex-col items-stretch justify-start gap-14 px-6 pb-4 pt-15 [@container(min-width:46rem)]:flex-row [@container(min-width:46rem)]:items-start [@container(min-width:46rem)]:px-15"
           data-testid="mobile-pairing-layout"
         >
           <div className="flex w-[266px] max-w-full shrink-0 flex-col gap-3">
