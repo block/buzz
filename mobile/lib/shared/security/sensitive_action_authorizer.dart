@@ -1,5 +1,13 @@
+import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:local_auth/local_auth.dart';
+
+String sensitiveActionAuthenticationName(TargetPlatform platform) =>
+    switch (platform) {
+      TargetPlatform.iOS => 'Face ID',
+      TargetPlatform.android => 'biometrics',
+      _ => 'device authentication',
+    };
 
 /// Coarse outcomes safe to use for control flow without retaining OS details.
 enum DeviceAuthResult { success, cancelled, unavailable, lockedOut, failed }

@@ -6,6 +6,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import '../../shared/security/sensitive_action_authorizer.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/tappable_flapping_bee.dart';
@@ -221,6 +222,9 @@ class _SasVerificationView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final authenticationName = sensitiveActionAuthenticationName(
+      Theme.of(context).platform,
+    );
     return Column(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
@@ -289,8 +293,8 @@ class _SasVerificationView extends StatelessWidget {
                 : (value) => onProtectionChanged(value ?? false),
             controlAffinity: ListTileControlAffinity.leading,
             contentPadding: EdgeInsets.zero,
-            title: const Text(
-              'Use biometrics to confirm sensitive identity actions',
+            title: Text(
+              'Use $authenticationName to confirm sensitive identity actions',
             ),
             subtitle: const Text(
               'Routine Buzz use will not prompt. This protects identity transfer and reveal actions.',

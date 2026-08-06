@@ -12,6 +12,9 @@ class _MobileSecuritySection extends ConsumerWidget {
     final enabled =
         community.sensitiveActionPolicy == SensitiveActionPolicy.enabled;
     final capability = ref.watch(sensitiveActionAuthSupportedProvider);
+    final authenticationName = sensitiveActionAuthenticationName(
+      Theme.of(context).platform,
+    );
 
     return AppListCard(
       label: 'Mobile security',
@@ -33,7 +36,7 @@ class _MobileSecuritySection extends ConsumerWidget {
           title: 'Device authentication',
           subtitle: capability.when(
             data: (supported) => supported
-                ? 'Biometrics or device passcode available'
+                ? '${authenticationName[0].toUpperCase()}${authenticationName.substring(1)} or device passcode available'
                 : 'Unavailable or not configured',
             loading: () => 'Checking…',
             error: (_, _) => 'Unavailable',

@@ -224,6 +224,46 @@ void main() {
       expect(notifier.pairedCodes, [code]);
     });
 
+    testWidgets('uses Face ID copy on iOS builds', (tester) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            pairingProvider.overrideWith(() => _ConfirmingSasPairingNotifier()),
+          ],
+          child: MaterialApp(
+            theme: AppTheme.dark().copyWith(platform: TargetPlatform.iOS),
+            home: const PairingPage(),
+          ),
+        ),
+      );
+
+      expect(
+        find.text('Use Face ID to confirm sensitive identity actions'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('uses generic biometrics copy on Android builds', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            pairingProvider.overrideWith(() => _ConfirmingSasPairingNotifier()),
+          ],
+          child: MaterialApp(
+            theme: AppTheme.dark().copyWith(platform: TargetPlatform.android),
+            home: const PairingPage(),
+          ),
+        ),
+      );
+
+      expect(
+        find.text('Use biometrics to confirm sensitive identity actions'),
+        findsOneWidget,
+      );
+    });
+
     testWidgets('new identity import offers protection checked by default', (
       tester,
     ) async {
