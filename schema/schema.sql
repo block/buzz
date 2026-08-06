@@ -440,7 +440,7 @@ CREATE INDEX idx_workflow_approvals_workflow ON workflow_approvals (community_id
 CREATE INDEX idx_workflow_approvals_run ON workflow_approvals (community_id, run_id);
 CREATE INDEX idx_workflow_approvals_status ON workflow_approvals (community_id, status);
 
--- At-most-once claim for a workflow step's side effect. See migration 0027.
+-- At-most-once claim for a workflow step's side effect. See migration 0029.
 CREATE TABLE workflow_step_dispatches (
     community_id UUID        NOT NULL REFERENCES communities(id),
     run_id       UUID        NOT NULL,
