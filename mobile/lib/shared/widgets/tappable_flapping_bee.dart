@@ -47,12 +47,10 @@ class TappableFlappingBee extends HookConsumerWidget {
             animation: animation,
             builder: (context, _) {
               final flapAmount = 0.5 - (0.5 * cos(animation.value * 4 * pi));
-              return CustomPaint(
-                size: Size(width, width * 309 / 466),
-                painter: _FlappingBeePainter(
-                  color: color,
-                  flapAmount: flapAmount,
-                ),
+              return FlappingBee(
+                width: width,
+                color: color,
+                flapAmount: flapAmount,
               );
             },
           ),
@@ -62,11 +60,49 @@ class TappableFlappingBee extends HookConsumerWidget {
   }
 }
 
+/// The Buzz mark at a caller-controlled wing position.
+///
+/// [eyeProgress] is only used by the pull-to-refresh treatment. Leaving it null
+/// preserves the mark's ordinary cutout eyes.
+class FlappingBee extends StatelessWidget {
+  final double width;
+  final Color color;
+  final double flapAmount;
+  final double? eyeProgress;
+
+  const FlappingBee({
+    required this.width,
+    required this.color,
+    required this.flapAmount,
+    this.eyeProgress,
+    super.key,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return RepaintBoundary(
+      child: CustomPaint(
+        size: Size(width, width * 309 / 466),
+        painter: _FlappingBeePainter(
+          color: color,
+          flapAmount: flapAmount,
+          eyeProgress: eyeProgress,
+        ),
+      ),
+    );
+  }
+}
+
 class _FlappingBeePainter extends CustomPainter {
   final Color color;
   final double flapAmount;
+  final double? eyeProgress;
 
-  const _FlappingBeePainter({required this.color, required this.flapAmount});
+  const _FlappingBeePainter({
+    required this.color,
+    required this.flapAmount,
+    this.eyeProgress,
+  });
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -138,12 +174,22 @@ class _FlappingBeePainter extends CustomPainter {
       cutouts,
     );
 
-    canvas
-      ..drawPath(finishedMark, Paint()..color = color)
-      ..restore();
+    canvas.drawPath(finishedMark, Paint()..color = color);
+
+    if (eyeProgress case final progress?) {
+      final pupilRadius = 20 * progress.clamp(0.0, 1.0);
+      final pupilPaint = Paint()..color = color;
+      canvas
+        ..drawCircle(const Offset(193.3, 84.4), pupilRadius, pupilPaint)
+        ..drawCircle(const Offset(276, 84.4), pupilRadius, pupilPaint);
+    }
+
+    canvas.restore();
   }
 
   @override
   bool shouldRepaint(_FlappingBeePainter oldDelegate) =>
-      color != oldDelegate.color || flapAmount != oldDelegate.flapAmount;
+      color != oldDelegate.color ||
+      flapAmount != oldDelegate.flapAmount ||
+      eyeProgress != oldDelegate.eyeProgress;
 }
