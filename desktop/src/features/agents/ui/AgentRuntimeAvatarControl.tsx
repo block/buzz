@@ -1,7 +1,6 @@
-import { CircleAlert, Play } from "lucide-react";
+import { CircleAlert } from "lucide-react";
 import { useReducedMotion } from "motion/react";
 
-import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
 import {
   type AvatarBadgeCurve,
   MaskedAvatarBadgeFrame,
@@ -18,8 +17,10 @@ type AgentRuntimeAvatarControlProps = {
   errorLabel?: string | null;
   errorTestId?: string;
   isActive: boolean;
+  isRestarting?: boolean;
   isStarting: boolean;
   label: string;
+  requiresRestart?: boolean;
   startTestId: string;
   onOpenError?: () => void;
   onStart: () => void;
@@ -29,6 +30,7 @@ const TAILWIND_SPACING = {
   "1": 4,
   "2": 8,
   "2.5": 10,
+  "3.5": 14,
   "6": 24,
   "11": 44,
   "24": 96,
@@ -36,44 +38,58 @@ const TAILWIND_SPACING = {
 
 const AGENT_AVATAR_SIZE = TAILWIND_SPACING["24"];
 const ACTION_BADGE_SIZE = TAILWIND_SPACING["11"];
-const ACTIVE_BADGE_SIZE = TAILWIND_SPACING["6"];
-const ACTION_BADGE_OFFSET = TAILWIND_SPACING["2.5"];
+const ACTION_BUTTON_HEIGHT = 36;
+const START_ACTION_BADGE_WIDTH = 56;
+const RESTART_ACTION_BADGE_WIDTH = 72;
+const ACTIVE_BADGE_CUTOUT_SIZE = TAILWIND_SPACING["6"];
+const ACTIVE_DOT_SIZE = 18;
+const ACTION_BADGE_OFFSET = TAILWIND_SPACING["3.5"] + TAILWIND_SPACING["1"];
 const ACTIVE_BADGE_INSET = TAILWIND_SPACING["1"];
-const ACTIVE_DOT_CLASS_NAME = "h-4.5 w-4.5";
 const PROFILE_STATUS_CUTOUT_RATIO = 1.25;
 
 function getBadgeCenter(badgeSize: number, outwardOffset: number) {
   return AGENT_AVATAR_SIZE + outwardOffset - badgeSize / 2;
 }
 
-function getActionBadge(offset: number) {
+function getActionBadge(width: number, height: number, offset: number) {
+  const centerY = getBadgeCenter(ACTION_BADGE_SIZE, offset);
+  const clearance = (ACTION_BADGE_SIZE - height) / 2;
+
   return {
     cutout: {
-      cx: getBadgeCenter(ACTION_BADGE_SIZE, offset),
-      cy: getBadgeCenter(ACTION_BADGE_SIZE, offset),
+      // Keep the cutout on the avatar edge so the mask has the same soft,
+      // two-point join as the status dot. Unlike the status dot, center the
+      // primary action horizontally to make its purpose easier to spot.
+      cx: AGENT_AVATAR_SIZE / 2,
+      cy: centerY,
       r: ACTION_BADGE_SIZE / 2,
     },
     shell: {
-      bottom: -offset,
-      height: ACTION_BADGE_SIZE,
-      right: -offset,
-      width: ACTION_BADGE_SIZE,
+      bottom: AGENT_AVATAR_SIZE - centerY - height / 2,
+      height,
+      right: (AGENT_AVATAR_SIZE - width) / 2,
+      width,
     },
+    // Carry the vertical clearance around the end caps horizontally too, so
+    // the avatar gap stays even around the pill.
+    cutoutWidth: width + clearance * 2,
   } as const;
 }
 
 function getActiveBadge(inset: number) {
+  const center = getBadgeCenter(ACTIVE_BADGE_CUTOUT_SIZE, -inset);
+
   return {
     cutout: {
-      cx: getBadgeCenter(ACTIVE_BADGE_SIZE, -inset),
-      cy: getBadgeCenter(ACTIVE_BADGE_SIZE, -inset),
-      r: (ACTIVE_BADGE_SIZE / 2) * PROFILE_STATUS_CUTOUT_RATIO,
+      cx: center,
+      cy: center,
+      r: (ACTIVE_BADGE_CUTOUT_SIZE / 2) * PROFILE_STATUS_CUTOUT_RATIO,
     },
     shell: {
-      bottom: inset,
-      height: ACTIVE_BADGE_SIZE,
-      right: inset,
-      width: ACTIVE_BADGE_SIZE,
+      bottom: AGENT_AVATAR_SIZE - center - ACTIVE_DOT_SIZE / 2,
+      height: ACTIVE_DOT_SIZE,
+      right: AGENT_AVATAR_SIZE - center - ACTIVE_DOT_SIZE / 2,
+      width: ACTIVE_DOT_SIZE,
     },
   } as const;
 }
@@ -87,12 +103,26 @@ const ACTION_MASK_CURVE = {
   handleLengthRatio: 0.26,
 } satisfies AvatarBadgeCurve;
 
-const ACTION_BADGE = getActionBadge(ACTION_BADGE_OFFSET);
+const START_ACTION_BADGE = getActionBadge(
+  START_ACTION_BADGE_WIDTH,
+  ACTION_BUTTON_HEIGHT,
+  ACTION_BADGE_OFFSET,
+);
+const RESTART_ACTION_BADGE = getActionBadge(
+  RESTART_ACTION_BADGE_WIDTH,
+  ACTION_BUTTON_HEIGHT,
+  ACTION_BADGE_OFFSET,
+);
+const ERROR_BADGE = getActionBadge(
+  ACTION_BADGE_SIZE,
+  ACTION_BUTTON_HEIGHT,
+  ACTION_BADGE_OFFSET,
+);
 const ACTIVE_BADGE = getActiveBadge(ACTIVE_BADGE_INSET);
 
 const MASK_TRANSITION = {
-  duration: 0.22,
-  ease: [0.23, 1, 0.32, 1],
+  duration: 0.3,
+  ease: [0.4, 0, 0.2, 1],
 } as const;
 
 export function AgentRuntimeAvatarControl({
@@ -101,45 +131,66 @@ export function AgentRuntimeAvatarControl({
   errorLabel,
   errorTestId,
   isActive,
+  isRestarting = false,
   isStarting,
   label,
+  requiresRestart = false,
   startTestId,
   onOpenError,
   onStart,
 }: AgentRuntimeAvatarControlProps) {
   const shouldReduceMotion = useReducedMotion();
   const trimmedAvatarUrl = avatarUrl?.trim() || null;
-  const actionLabel = isStarting ? `Starting ${label}` : `Start ${label}`;
-  const hasError = !isActive && !isStarting && Boolean(errorLabel);
+  const isRestartAction = requiresRestart || isRestarting;
+  const actionLabel = isRestarting
+    ? "Restarting Agent"
+    : isStarting
+      ? "Starting Agent"
+      : isRestartAction
+        ? "Restart Agent"
+        : "Start Agent";
+  const actionText = isRestartAction ? "Restart" : "Start";
+  const isPending = isStarting || isRestarting;
+  const showRunningDot = isActive && !isRestartAction;
+  const hasError = !isActive && !isPending && Boolean(errorLabel);
   const errorActionLabel = `${label} has a runtime error. Open runtime details.`;
   const transition = shouldReduceMotion ? { duration: 0 } : MASK_TRANSITION;
-  const badge = isActive ? ACTIVE_BADGE : ACTION_BADGE;
+  const actionBadge = isRestartAction
+    ? RESTART_ACTION_BADGE
+    : START_ACTION_BADGE;
+  const badge = showRunningDot
+    ? ACTIVE_BADGE
+    : hasError
+      ? ERROR_BADGE
+      : actionBadge;
+  const actionCutoutWidth =
+    showRunningDot || hasError ? undefined : actionBadge.cutoutWidth;
 
   return (
     <MaskedAvatarBadgeFrame
       badge={
         <span className="grid h-full w-full place-items-center">
-          {isActive ? (
+          {showRunningDot ? (
             <span
               aria-label={`${label} is running`}
-              className="flex h-6 w-6 items-center justify-center rounded-full"
+              className="h-full w-full rounded-full"
               data-testid={activeTestId}
               role="img"
               title={`${label} is running`}
-            >
-              <PresenceDot className={ACTIVE_DOT_CLASS_NAME} status="online" />
-            </span>
+            />
           ) : (
             <button
               aria-label={hasError ? errorActionLabel : actionLabel}
               className={cn(
-                "pointer-events-auto flex h-9 w-9 items-center justify-center rounded-full transition-colors duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-default disabled:opacity-90",
+                "pointer-events-auto flex h-full w-full items-center justify-center rounded-full px-2.5 text-xs font-semibold leading-none transition-colors duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-default disabled:opacity-90",
                 hasError
                   ? "bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                  : "bg-primary text-primary-foreground hover:bg-primary/90",
+                  : isRestartAction
+                    ? "bg-transparent text-amber-800 hover:bg-amber-500/10 dark:text-amber-400"
+                    : "bg-primary text-primary-foreground hover:bg-primary/90",
               )}
               data-testid={hasError ? errorTestId : startTestId}
-              disabled={isStarting}
+              disabled={isPending}
               onClick={(event) => {
                 event.stopPropagation();
                 if (hasError) {
@@ -151,26 +202,36 @@ export function AgentRuntimeAvatarControl({
               title={hasError ? errorLabel || errorActionLabel : actionLabel}
               type="button"
             >
-              <span className="grid h-4 w-4 place-items-center">
-                {isStarting ? (
-                  <Spinner
-                    aria-label={actionLabel}
-                    className="h-4 w-4 border-2"
-                  />
-                ) : hasError ? (
-                  <CircleAlert className="h-4 w-4" />
-                ) : (
-                  <Play className="h-4 w-4 fill-current" />
-                )}
-              </span>
+              {isPending ? (
+                <Spinner
+                  aria-label={actionLabel}
+                  className="h-4 w-4 border-2"
+                />
+              ) : hasError ? (
+                <CircleAlert className="h-4 w-4" />
+              ) : (
+                actionText
+              )}
             </button>
           )}
         </span>
       }
       badgeBox={badge.shell}
+      badgeClassName={cn(
+        "transition-colors ease-in-out",
+        shouldReduceMotion ? "duration-0" : "duration-300",
+        showRunningDot
+          ? "bg-emerald-500"
+          : hasError
+            ? "bg-destructive"
+            : isRestartAction
+              ? "bg-amber-500/15"
+              : "bg-primary",
+      )}
       className="h-24 w-24"
-      curve={isActive ? STATUS_DOT_MASK_CURVE : ACTION_MASK_CURVE}
+      curve={showRunningDot ? STATUS_DOT_MASK_CURVE : ACTION_MASK_CURVE}
       cutout={badge.cutout}
+      cutoutWidth={actionCutoutWidth}
       maskTransition={transition}
       size={AGENT_AVATAR_SIZE}
     >
