@@ -209,6 +209,29 @@ export function useNotificationSettings(pubkey?: string) {
     void refreshPermission();
   }, [normalizedPubkey]);
 
+  React.useEffect(() => {
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") {
+        void refreshPermission();
+      }
+    };
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    window.addEventListener("focus", refreshWhenVisible);
+    return () => {
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+      window.removeEventListener("focus", refreshWhenVisible);
+    };
+  }, []);
+
+  React.useEffect(() => {
+    if (
+      settings.desktopEnabled &&
+      (permission === "denied" || permission === "unsupported")
+    ) {
+      setSettings((current) => ({ ...current, desktopEnabled: false }));
+    }
+  }, [permission, settings.desktopEnabled]);
+
   const setDesktopEnabled = React.useCallback(async (enabled: boolean) => {
     if (!enabled) {
       setErrorMessage(null);

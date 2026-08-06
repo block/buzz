@@ -15,22 +15,12 @@
 //!   `BUZZ_ACP_RESPOND_TO` to `owner-only` and pins the independent
 //!   `BUZZ_ACP_ALLOWED_RESPOND_TO=owner-only` guard on every start, whatever
 //!   the record says.
-//! - **Provider deploy payload.** [`projected_access_with_policy`] projects
-//!   owner-only into every deploy payload this build serializes, for both
-//!   backends.
-//!
-//! Not enforced, deliberately:
-//!
-//! - **A provider deployment that already exists is not reconciled at upgrade
-//!   time.** The projection above only reaches the provider when Desktop builds
-//!   a new payload: create-with-deploy, or an explicit Start/deploy of that
-//!   agent. A record with a `backend_agent_id` stays represented as deployed
-//!   across restarts without redeploying it, so an agent deployed from an
-//!   unmarked build with `anyone` or an allowlist keeps that wider access
-//!   remotely until it is next deployed from a marked build, while this build's
-//!   UI shows its access locked to "Only me". Rolling existing deployments
-//!   under the policy needs a rollout reconciliation pass (redeploy or
-//!   fail-closed on mismatch) that this capability does not attempt.
+//! - **Provider deployment, including upgrades.**
+//!   [`projected_access_with_policy`] projects owner-only into every payload.
+//!   Workspace apply redeploys each existing provider agent before the marked
+//!   build renders community UI. A failed redeploy fails the apply, so Desktop
+//!   does not present the locked owner-only control as applied while the remote
+//!   deployment may still use a wider policy.
 //!
 //! ## "owner-only" is owner plus verified same-owner sibling agents
 //!

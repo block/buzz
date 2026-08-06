@@ -19,7 +19,10 @@ import {
   isBuzzAgentRuntime,
   BUZZ_AGENT_THINKING_EFFORT,
 } from "./buzzAgentConfig";
-import { EDIT_AGENT_PARALLELISM_HELP } from "../lib/agentParallelism";
+import {
+  EDIT_AGENT_PARALLELISM_HELP,
+  parallelismCapHint,
+} from "../lib/agentParallelism";
 import {
   deriveNumericDescriptors,
   structuredEnvKeys,
@@ -127,6 +130,22 @@ export function EditAgentAdvancedFields({
     ],
     [hiddenEnvKeys, modelTuningRuntimeId, numericDescriptors],
   );
+
+  // Harness cap hint: show only when the selected runtime has a cap and the
+  // current parallelism value exceeds it. Cap and label come from the catalog
+  // entry — no hardcoded constant in TS.
+  const parallelismHint = React.useMemo(() => {
+    if (selectedRuntime?.maxParallelism === undefined || parallelism === "") {
+      return null;
+    }
+    const requested = parseInt(parallelism, 10);
+    if (Number.isNaN(requested)) return null;
+    return parallelismCapHint(
+      selectedRuntime.label,
+      selectedRuntime.maxParallelism,
+      requested,
+    );
+  }, [selectedRuntime, parallelism]);
 
   return (
     <div className="space-y-5 pt-2">
@@ -238,6 +257,11 @@ export function EditAgentAdvancedFields({
         <p className="text-xs text-muted-foreground">
           {EDIT_AGENT_PARALLELISM_HELP}
         </p>
+        {parallelismHint !== null ? (
+          <p className="text-xs text-amber-600 dark:text-amber-400">
+            {parallelismHint}
+          </p>
+        ) : null}
       </div>
 
       {/* Relay URL: intentionally no editor. The legacy per-record relay pin

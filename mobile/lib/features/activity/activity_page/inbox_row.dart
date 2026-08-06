@@ -340,32 +340,42 @@ class _InboxRow extends HookConsumerWidget {
   }
 
   void _showRowActions(BuildContext context) {
-    showModalBottomSheet<void>(
+    showBuzzModalBottomSheet<void>(
       context: context,
       builder: (sheetContext) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: Icon(
-                isDone ? LucideIcons.mail : LucideIcons.mailOpen,
-                size: 20,
-              ),
-              title: Text(isDone ? 'Mark unread' : 'Mark as read'),
-              onTap: () {
-                Navigator.of(sheetContext).pop();
-                isDone ? onMarkUnread() : onMarkRead();
-              },
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(
+            Grid.gutter,
+            0,
+            Grid.gutter,
+            Grid.xs,
+          ),
+          child: IconTheme.merge(
+            data: const IconThemeData(size: 18),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ListTile(
+                  leading: Icon(
+                    isDone ? LucideIcons.mail : LucideIcons.mailOpen,
+                  ),
+                  title: Text(isDone ? 'Mark unread' : 'Mark as read'),
+                  onTap: () {
+                    Navigator.of(sheetContext).pop();
+                    isDone ? onMarkUnread() : onMarkRead();
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(LucideIcons.externalLink),
+                  title: const Text('Open conversation'),
+                  onTap: () {
+                    Navigator.of(sheetContext).pop();
+                    onTap();
+                  },
+                ),
+              ],
             ),
-            ListTile(
-              leading: const Icon(LucideIcons.externalLink, size: 20),
-              title: const Text('Open conversation'),
-              onTap: () {
-                Navigator.of(sheetContext).pop();
-                onTap();
-              },
-            ),
-          ],
+          ),
         ),
       ),
     );

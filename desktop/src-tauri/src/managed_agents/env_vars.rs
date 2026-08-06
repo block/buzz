@@ -5,11 +5,13 @@
 //! Precedence: desktop parent env < persona env < agent env (last wins on
 //! key collision). See `runtime::spawn_agent_child`.
 //!
-//! A small set of *reserved* keys — Buzz's identity and secrets — are
-//! rejected at save time and stripped at runtime so a typo or malicious
-//! value can't swap the agent's nsec. Behavior knobs (GOOSE_MODE, BUZZ_ACP_MODEL, BUZZ_ACP_SYSTEM_PROMPT, …) remain
-//! freely overridable — those have dedicated UI fields, but power users
-//! may want to bypass them.
+//! A small set of *reserved* keys includes Buzz's identity, secrets, security
+//! gates, and control-plane values. Save-time validation rejects those keys.
+//! Runtime filtering strips old persisted overrides. Behavior knobs
+//! (GOOSE_MODE, BUZZ_ACP_MODEL, BUZZ_ACP_SYSTEM_PROMPT, …) remain freely
+//! overridable. Power users can still bypass their dedicated UI fields.
+//! `BUZZ_ACP_AGENTS` is reserved because Desktop applies harness-specific caps
+//! before it writes the provider launch policy.
 
 use std::collections::BTreeMap;
 

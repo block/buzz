@@ -41,6 +41,11 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     "BUZZ_ACP_AGENT_COMMAND",
     "BUZZ_ACP_AGENT_ARGS",
     "BUZZ_ACP_MCP_COMMAND",
+    // Control-plane parallelism: the Desktop resolves the effective
+    // worker-pool size (applying any per-harness cap) and writes it into
+    // launch.policy_env. A user-supplied BUZZ_ACP_AGENTS would bypass the
+    // harness cap and cause OpenClaw agents to spawn uncapped workers.
+    "BUZZ_ACP_AGENTS",
     // Security gates: respond-to mode + allowlist + deployment allowlist +
     // legacy owner-only fallback. Overriding would make the running agent's
     // gate diverge from the saved/UI-visible settings.

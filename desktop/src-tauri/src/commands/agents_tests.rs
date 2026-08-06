@@ -418,14 +418,17 @@ fn deploy_payload_for_policy(
     deploy_payload_json(
         record,
         "wss://relay.example".to_string(),
-        Some("gpt-x".to_string()),
-        Some("openai".to_string()),
-        None,
+        DeployProjections {
+            effective_model: Some("gpt-x".to_string()),
+            effective_provider: Some("openai".to_string()),
+            effective_prompt: None,
+            effective_parallelism: record.parallelism,
+            owner_only_access,
+        },
         std::collections::BTreeMap::new(),
         // Access projection is the subject here; the launch block is exercised
         // by the shared provider fixture test below.
         serde_json::Value::Null,
-        owner_only_access,
     )
 }
 
@@ -483,14 +486,19 @@ fn deploy_payload_matches_the_shared_full_launch_fixture() {
     let agent = deploy_payload_json(
         &record,
         "wss://relay.example".into(),
-        Some("gpt-5".into()),
-        Some("openai".into()),
-        None,
+        DeployProjections {
+            effective_model: Some("gpt-5".into()),
+            effective_provider: Some("openai".into()),
+            effective_prompt: None,
+            effective_parallelism: crate::managed_agents::effective_parallelism(
+                &descriptor.command,
+                record.parallelism,
+            ),
+            // Fixture asserts the record's own access fields survive.
+            owner_only_access: false,
+        },
         std::collections::BTreeMap::from([("USER_KEY".into(), "user-value".into())]),
         launch,
-        // Fixture asserts the record's own access fields survive, so the
-        // owner-only projection must be off for this comparison.
-        false,
     );
 
     assert_eq!(
@@ -553,12 +561,16 @@ fn current_build_deploy_payload_forwards_compiled_policy() {
     record.respond_to = RespondTo::Anyone;
     record.respond_to_allowlist = vec!["a".repeat(64)];
 
-    let payload = deploy_payload_json_for_current_build(
+    let payload = deploy_payload_json(
         &record,
         "wss://relay.example".to_string(),
-        None,
-        None,
-        None,
+        DeployProjections {
+            effective_model: None,
+            effective_provider: None,
+            effective_prompt: None,
+            effective_parallelism: record.parallelism,
+            owner_only_access: crate::managed_agents::owner_only_access_build(),
+        },
         std::collections::BTreeMap::new(),
         // The compiled access policy is the subject here; the launch block is
         // exercised by the shared provider fixture test above.
@@ -583,6 +595,41 @@ fn current_build_deploy_payload_forwards_compiled_policy() {
         payload["respond_to_allowlist"], expected_allowlist,
         "current-build deploy payload did not apply the compiled policy to the stale allowlist",
     );
+}
+
+#[test]
+fn provider_upgrade_reconciliation_targets_existing_deployments_only_in_marked_builds() {
+    use crate::managed_agents::BackendKind;
+
+    let mut record = bare_agent_record(None, None, None);
+    record.backend = BackendKind::Provider {
+        id: "provider".to_string(),
+        config: serde_json::json!({}),
+    };
+    record.backend_agent_id = Some("existing-provider-agent".to_string());
+    record.respond_to = crate::managed_agents::RespondTo::Anyone;
+    record.respond_to_allowlist = vec!["a".repeat(64)];
+
+    assert!(provider_access::needs_reconciliation_with_policy(
+        &record, true
+    ));
+    let payload = deploy_payload_for_policy(&record, true);
+    assert_eq!(payload["respond_to"], "owner-only");
+    assert_eq!(payload["respond_to_allowlist"], serde_json::json!([]));
+    assert!(!provider_access::needs_reconciliation_with_policy(
+        &record, false
+    ));
+
+    record.backend_agent_id = None;
+    assert!(!provider_access::needs_reconciliation_with_policy(
+        &record, true
+    ));
+
+    record.backend = BackendKind::Local;
+    record.backend_agent_id = Some("stale-provider-id".to_string());
+    assert!(!provider_access::needs_reconciliation_with_policy(
+        &record, true
+    ));
 }
 
 #[test]
