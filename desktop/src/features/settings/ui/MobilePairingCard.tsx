@@ -399,6 +399,21 @@ export function MobilePairingCard({
         className="w-full [container-type:inline-size]"
         data-testid="mobile-pairing-card"
       >
+        {/* Persistent polite live region. The pairing steps swap the QR view
+            for the inline code confirmation asynchronously, and a screen
+            reader would otherwise get no signal that a code is now waiting.
+            This stays mounted for every step so the announcement is reliable
+            (a region added at the same time as its text often isn't spoken)
+            and is visually hidden, so it changes nothing on screen. */}
+        <p aria-live="polite" className="sr-only" data-testid="pairing-status">
+          {step === "sas" && sasCode
+            ? `Verification code ${sasCode.slice(0, 3)} ${sasCode.slice(3, 6)} ready. Check that it matches on your mobile device, then confirm the codes match.`
+            : step === "transferring"
+              ? "Codes confirmed. Pairing your mobile device."
+              : step === "done"
+                ? "Your mobile app is now paired."
+                : ""}
+        </p>
         <SettingsOptionRow
           // Side-by-side is gated on the *card's* own width, not the viewport.
           // `sm:` fires at an 800px viewport, but the settings sidebar and
