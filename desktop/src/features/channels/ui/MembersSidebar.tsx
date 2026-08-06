@@ -17,6 +17,7 @@ import {
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useClassifiedMembers } from "@/features/channels/lib/useClassifiedMembers";
 import { formatMemberName } from "@/features/channels/lib/memberUtils";
+import { canRemoveMember as canRemoveMemberPolicy } from "./canRemoveMember";
 import {
   canAddChannelMembers,
   PRIVATE_CHANNEL_ADD_DENIED_MESSAGE,
@@ -491,14 +492,8 @@ export function MembersSidebar({
     [bots, managedAgentByPubkey],
   );
   const canRemoveMember = React.useCallback(
-    (member: ChannelMember) => {
-      return (
-        (selfMember?.role === "admin" && member.pubkey !== currentPubkey) ||
-        (selfMember?.role === "owner" && member.role !== "owner") ||
-        Boolean(selfMember && isMyBot(member)) ||
-        member.pubkey === currentPubkey
-      );
-    },
+    (member: ChannelMember) =>
+      canRemoveMemberPolicy(selfMember, member, currentPubkey, isMyBot),
     [currentPubkey, isMyBot, selfMember],
   );
   const removableManagedBots = React.useMemo(
