@@ -57,6 +57,7 @@ export const TERMINAL_CELL_METRICS = {
 } as const satisfies CellMetrics;
 
 export type TerminalSelectionRow = {
+  boundaries: readonly number[];
   line: number;
   text: string;
   wrapped: boolean;
@@ -156,12 +157,39 @@ export class TerminalGrid {
         }
       }
       const text = cells.join("");
+      const retainedText = row.wrapped ? text : text.trimEnd();
+      const boundaries = [0];
+      for (const segment of new Intl.Segmenter(undefined, {
+        granularity: "grapheme",
+      }).segment(retainedText)) {
+        boundaries.push(segment.index + segment.segment.length);
+      }
       return {
+        boundaries,
         line,
-        text: row.wrapped ? text : text.trimEnd(),
+        text: retainedText,
         wrapped: row.wrapped,
       };
     });
+  }
+
+  normalizeSelectionOffset(
+    rowIndex: number,
+    offset: number,
+    edge: "start" | "end",
+  ): number {
+    const row = this.selectionRows()[rowIndex];
+    if (!row) return 0;
+    const clamped = Math.max(0, Math.min(offset, row.text.length));
+    if (edge === "start") {
+      for (let index = row.boundaries.length - 1; index >= 0; index--) {
+        if (row.boundaries[index] <= clamped) return row.boundaries[index];
+      }
+      return 0;
+    }
+    return (
+      row.boundaries.find((boundary) => boundary >= clamped) ?? row.text.length
+    );
   }
 
   selectionText(

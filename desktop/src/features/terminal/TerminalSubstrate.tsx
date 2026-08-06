@@ -727,6 +727,16 @@ export function TerminalSubstrate({
               [startIndex, endIndex] = [endIndex, startIndex];
               [startOffset, endOffset] = [endOffset, startOffset];
             }
+            startOffset = grid.normalizeSelectionOffset(
+              startIndex,
+              startOffset,
+              "start",
+            );
+            endOffset = grid.normalizeSelectionOffset(
+              endIndex,
+              endOffset,
+              "end",
+            );
             event.preventDefault();
             event.clipboardData.setData(
               "text/plain",

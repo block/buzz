@@ -955,3 +955,83 @@ test("lays out screen rows separately but copies soft wraps as one logical line"
   });
   assert.equal(copied.get("text/plain"), "bcd éf");
 });
+
+test("copy normalizes grapheme and empty-row DOM endpoints", async () => {
+  const frame = {
+    cursor: { column: 0, line: 0, visible: false },
+    full: true,
+    rows: [
+      {
+        line: 0,
+        wrapped: false,
+        spans: [
+          {
+            style: { fg: 0, bg: 0, flags: 0 },
+            clusters: [
+              { column: 0, text: "😀", width: 2 },
+              { column: 2, text: "é", width: 1 },
+            ],
+          },
+        ],
+      },
+      { line: 1, wrapped: false, spans: [] },
+      {
+        line: 2,
+        wrapped: false,
+        spans: [
+          {
+            style: { fg: 0, bg: 0, flags: 0 },
+            clusters: [{ column: 0, text: "界", width: 2 }],
+          },
+        ],
+      },
+    ],
+    viewport: { columns: 5, generation: 1, screenLines: 3 },
+  };
+  const subject = fixture({ sessionFrames: [{ frame, sessionId: "one" }] });
+  await ready(subject.view);
+  const layer = subject.view.container.querySelector(
+    ".buzz-terminal-selection-layer",
+  );
+  await waitFor(() =>
+    assert.equal(
+      layer.querySelectorAll("[data-terminal-selection-row]").length,
+      3,
+    ),
+  );
+  const rows = layer.querySelectorAll("[data-terminal-selection-row]");
+  const copyRange = (range) => {
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    const copied = new Map();
+    fireEvent.copy(layer, {
+      clipboardData: { setData: (type, value) => copied.set(type, value) },
+    });
+    return copied.get("text/plain");
+  };
+
+  const splitEmoji = document.createRange();
+  splitEmoji.setStart(rows[0].firstChild, 1);
+  splitEmoji.setEnd(rows[0].firstChild, 1);
+  // A collapsed native selection does not dispatch custom clipboard content;
+  // span from the middle of the emoji into the combining cluster instead.
+  splitEmoji.setEnd(rows[0].firstChild, 3);
+  assert.equal(copyRange(splitEmoji), "😀é");
+
+  const throughBlank = document.createRange();
+  throughBlank.setStart(rows[0], 1);
+  throughBlank.setEnd(rows[2], 0);
+  assert.equal(copyRange(throughBlank), "\n\n");
+
+  const selection = window.getSelection();
+  selection.removeAllRanges();
+  selection.setBaseAndExtent(rows[2].firstChild, 1, rows[0].firstChild, 0);
+  const reverseCopied = new Map();
+  fireEvent.copy(layer, {
+    clipboardData: {
+      setData: (type, value) => reverseCopied.set(type, value),
+    },
+  });
+  assert.equal(reverseCopied.get("text/plain"), "😀é\n\n界");
+});

@@ -217,3 +217,34 @@ test("text preserves soft-wrap spaces and hard line breaks", () => {
 
   assert.equal(grid.text(), "abcd éf\ntail");
 });
+
+test("selection offsets expand to complete grapheme clusters and clamp empty rows", () => {
+  const grid = new TerminalGrid({ generation: 0, columns: 5, screenLines: 2 });
+  grid.apply({
+    viewport: grid.viewport,
+    full: true,
+    cursor: { line: 0, column: 0, visible: false },
+    rows: [
+      {
+        line: 0,
+        wrapped: false,
+        spans: [
+          {
+            style: { fg: 0, bg: 0, flags: 0 },
+            clusters: [
+              { column: 0, text: "😀", width: 2 },
+              { column: 2, text: "é", width: 1 },
+            ],
+          },
+        ],
+      },
+      { line: 1, wrapped: false, spans: [] },
+    ],
+  });
+
+  assert.equal(grid.normalizeSelectionOffset(0, 1, "start"), 0);
+  assert.equal(grid.normalizeSelectionOffset(0, 1, "end"), 2);
+  assert.equal(grid.normalizeSelectionOffset(0, 3, "start"), 2);
+  assert.equal(grid.normalizeSelectionOffset(0, 3, "end"), 4);
+  assert.equal(grid.normalizeSelectionOffset(1, 1, "end"), 0);
+});
