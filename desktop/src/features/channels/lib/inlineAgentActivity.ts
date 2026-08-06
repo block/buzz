@@ -31,11 +31,13 @@ function isSameTurn(
 }
 
 function isInlineActivityItem(item: TranscriptItem) {
-  return (
-    item.type !== "message" &&
-    item.renderClass !== "raw-rail" &&
-    item.renderClass !== "suppressed"
-  );
+  if (item.type === "message") {
+    return item.role === "user";
+  }
+  if (item.type === "metadata") {
+    return item.acpSource !== "raw_json_rpc";
+  }
+  return item.renderClass !== "raw-rail" && item.renderClass !== "suppressed";
 }
 
 /**

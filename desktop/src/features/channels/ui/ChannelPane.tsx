@@ -36,7 +36,6 @@ import { getThreadPanelLayout } from "@/features/channels/lib/threadPanelLayout"
 import { useThreadViewMode } from "@/features/channels/lib/threadViewModePreference";
 import { useThreadViewModeSwitch } from "@/features/channels/ui/useThreadViewModeSwitch";
 import { useFocusDrawerPresence } from "@/features/channels/ui/useFocusDrawerPresence";
-import { useChannelWorkingAgentPubkeys } from "@/features/agents/agentWorkingSignal";
 import { useCardMintJobs } from "@/features/agents/cardMintStore";
 import { BotActivityComposerAction } from "@/features/channels/ui/BotActivityBar";
 import { ChannelComposerActivityAccessory } from "@/features/channels/ui/ChannelComposerActivityAccessory";
@@ -338,18 +337,25 @@ export const ChannelPane = React.memo(function ChannelPane({
     !isComposerDisabled &&
     !isMainDeferredEditPending &&
     !isSinglePanelView;
-  const hasTypingActivity = typingPubkeys.length > 0;
-  // Unified working set for the composer bar: observer-derived turns primary,
-  // bot typing fallback (both folded together by agentWorkingSignal). This is
-  // what makes the bar show for an agent whose observer stream is live but
-  // whose typing signal never arrives — and vice versa.
-  const composerWorkingBotPubkeys = useChannelWorkingAgentPubkeys(
-    activeChannel?.id ?? null,
-  );
+  const {
+    composerWorkingBotPubkeys,
+    mainTimelineEntries,
+    messageLeadingContent,
+    trailingContent,
+    visibleMessages,
+  } = useChannelMainTimeline({
+    activeChannel,
+    activityAgents,
+    isHuddleTranscript,
+    messages,
+    onOpenAgentSession,
+    profiles,
+    threadSummaries,
+  });
   const hasComposerBotActivity = composerWorkingBotPubkeys.length > 0;
   const hasCardMintActivity = useCardMintJobs().length > 0;
   const hasComposerBottomActivity =
-    hasComposerBotActivity || hasTypingActivity || hasCardMintActivity;
+    hasComposerBotActivity || typingPubkeys.length > 0 || hasCardMintActivity;
   const threadComposerBotTypingPubkeys = React.useMemo(() => {
     if (!openThreadHeadId) return [];
     return botTypingEntries
@@ -373,7 +379,6 @@ export const ChannelPane = React.memo(function ChannelPane({
       }),
     [activeChannel, currentPubkey, profiles],
   );
-
   const handleWelcomeAddAgent = React.useCallback(() => {
     onAddAgent?.({
       beforeSend: () =>
@@ -389,21 +394,6 @@ export const ChannelPane = React.memo(function ChannelPane({
     onWelcomeAddAgent: onAddAgent ? handleWelcomeAddAgent : undefined,
   });
   const channelIntro = isHuddleTranscript ? null : standardChannelIntro;
-  const {
-    mainTimelineEntries,
-    messageLeadingContent,
-    trailingContent,
-    visibleMessages,
-  } = useChannelMainTimeline({
-    activeChannel,
-    activityAgents,
-    isHuddleTranscript,
-    messages,
-    onOpenAgentSession,
-    profiles,
-    threadSummaries,
-    workingBotPubkeys: composerWorkingBotPubkeys,
-  });
   useRenderScopedReactionHydration({
     activeChannel,
     mainTimelineEntries,

@@ -1,7 +1,8 @@
 import * as React from "react";
-import { Activity, ChevronRight } from "lucide-react";
+import { Activity, ChevronRight, ListTree, Waypoints } from "lucide-react";
 
 import { AgentSessionTranscriptList } from "@/features/agents/ui/AgentSessionTranscriptList";
+import { ModelWorkStream } from "@/features/agents/ui/ModelWorkStreamView";
 import { useAgentTranscript } from "@/features/agents/ui/useObserverEvents";
 import {
   buildInlineAgentActivityPlacement,
@@ -30,6 +31,7 @@ export function useInlineAgentActivity({
   renderedMessageIds: ReadonlySet<string>;
   workingBotPubkeys: string[];
 }): InlineAgentActivity | null {
+  const [view, setView] = React.useState<"flow" | "trace">("flow");
   const workingSet = React.useMemo(
     () => new Set(workingBotPubkeys.map((pubkey) => pubkey.toLowerCase())),
     [workingBotPubkeys],
@@ -90,6 +92,9 @@ export function useInlineAgentActivity({
 
   const avatarUrl =
     profiles?.[selectedAgent.pubkey.toLowerCase()]?.avatarUrl ?? null;
+  const traceItems = placement.items.filter(
+    (item) => item.type !== "message" && item.type !== "metadata",
+  );
   const content = (
     <section
       aria-label={`${selectedAgent.name} activity`}
@@ -104,33 +109,82 @@ export function useInlineAgentActivity({
           size="sm"
         />
         <div className="min-w-0 flex-1 border-l-2 border-primary/25 pl-3">
-          <button
-            className="group mb-2 inline-flex max-w-full items-center gap-1 text-xs font-semibold text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
-            onClick={() => onOpenAgentSession(selectedAgent.pubkey, channelId)}
-            type="button"
-          >
-            <Activity aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
-            <span className="truncate">{selectedAgent.name} activity</span>
-            <ChevronRight
-              aria-hidden="true"
-              className="h-3.5 w-3.5 shrink-0 transition-transform group-hover:translate-x-0.5"
+          <div className="mb-2 flex min-w-0 items-center justify-between gap-2">
+            <button
+              className="group inline-flex min-w-0 items-center gap-1 text-xs font-semibold text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+              onClick={() =>
+                onOpenAgentSession(selectedAgent.pubkey, channelId)
+              }
+              type="button"
+            >
+              <Activity aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
+              <span className="truncate">{selectedAgent.name} activity</span>
+              <ChevronRight
+                aria-hidden="true"
+                className="h-3.5 w-3.5 shrink-0 transition-transform group-hover:translate-x-0.5"
+              />
+            </button>
+            <div
+              aria-label="Agent activity view"
+              className="flex h-7 shrink-0 items-center rounded-md border border-border/80 bg-muted/30 p-0.5"
+              role="tablist"
+            >
+              <button
+                aria-selected={view === "flow"}
+                className={viewButtonClassName(view === "flow")}
+                onClick={() => setView("flow")}
+                role="tab"
+                title="Work stream"
+                type="button"
+              >
+                <Waypoints aria-hidden="true" className="h-3 w-3" />
+                Flow
+              </button>
+              <button
+                aria-selected={view === "trace"}
+                className={viewButtonClassName(view === "trace")}
+                onClick={() => setView("trace")}
+                role="tab"
+                title="Full trace"
+                type="button"
+              >
+                <ListTree aria-hidden="true" className="h-3 w-3" />
+                Trace
+              </button>
+            </div>
+          </div>
+          {view === "flow" ? (
+            <ModelWorkStream
+              agentAvatarUrl={avatarUrl}
+              agentName={selectedAgent.name}
+              agentPubkey={selectedAgent.pubkey}
+              isWorking={isWorking}
+              items={placement.items}
+              profiles={profiles}
             />
-          </button>
-          <AgentSessionTranscriptList
-            agentAvatarUrl={avatarUrl}
-            agentName={selectedAgent.name}
-            agentPubkey={selectedAgent.pubkey}
-            channelId={channelId}
-            contentContainerClassName="gap-2"
-            emptyDescription="Waiting for activity."
-            items={placement.items}
-            profiles={profiles}
-            variant="inlineTimeline"
-          />
+          ) : (
+            <AgentSessionTranscriptList
+              agentAvatarUrl={avatarUrl}
+              agentName={selectedAgent.name}
+              agentPubkey={selectedAgent.pubkey}
+              channelId={channelId}
+              contentContainerClassName="gap-2"
+              emptyDescription="Waiting for activity."
+              items={traceItems}
+              profiles={profiles}
+              variant="inlineTimeline"
+            />
+          )}
         </div>
       </div>
     </section>
   );
 
   return { ...placement, content };
+}
+
+function viewButtonClassName(selected: boolean) {
+  return selected
+    ? "inline-flex h-6 items-center gap-1 rounded-[4px] bg-background px-1.5 text-3xs font-semibold text-foreground shadow-xs"
+    : "inline-flex h-6 items-center gap-1 rounded-[4px] px-1.5 text-3xs font-medium text-muted-foreground transition-colors hover:text-foreground";
 }

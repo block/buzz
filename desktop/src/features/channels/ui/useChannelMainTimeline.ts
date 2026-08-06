@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import { useChannelWorkingAgentPubkeys } from "@/features/agents/agentWorkingSignal";
 import type { BotActivityAgent } from "@/features/channels/ui/BotActivityBar";
 import { useInlineAgentActivity } from "@/features/channels/ui/InlineAgentActivity";
 import { useChannelPaneMessages } from "@/features/channels/ui/useChannelPaneMessages";
@@ -16,7 +17,6 @@ export function useChannelMainTimeline({
   onOpenAgentSession,
   profiles,
   threadSummaries,
-  workingBotPubkeys,
 }: {
   activeChannel: Channel | null;
   activityAgents: BotActivityAgent[];
@@ -25,8 +25,10 @@ export function useChannelMainTimeline({
   onOpenAgentSession: (pubkey: string, channelId?: string | null) => void;
   profiles?: UserProfileLookup;
   threadSummaries?: ReadonlyMap<string, ChannelWindowThreadSummary>;
-  workingBotPubkeys: string[];
 }) {
+  const composerWorkingBotPubkeys = useChannelWorkingAgentPubkeys(
+    activeChannel?.id ?? null,
+  );
   const { mainTimelineEntries, visibleMessages } = useChannelPaneMessages({
     activeChannel,
     isHuddleTranscript,
@@ -44,7 +46,7 @@ export function useChannelMainTimeline({
     onOpenAgentSession,
     profiles,
     renderedMessageIds,
-    workingBotPubkeys,
+    workingBotPubkeys: composerWorkingBotPubkeys,
   });
   const messageLeadingContent = React.useMemo(
     () =>
@@ -57,6 +59,7 @@ export function useChannelMainTimeline({
   );
 
   return {
+    composerWorkingBotPubkeys,
     mainTimelineEntries,
     messageLeadingContent,
     trailingContent:

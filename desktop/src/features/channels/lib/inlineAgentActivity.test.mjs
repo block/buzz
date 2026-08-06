@@ -88,3 +88,54 @@ test("does not leave an unanchored trace behind after a turn completes", () => {
 
   assert.equal(placement, null);
 });
+
+test("keeps safe input context for the flow while excluding assistant output", () => {
+  const placement = buildInlineAgentActivityPlacement({
+    channelId: "channel-1",
+    isWorking: true,
+    renderedMessageIds: new Set(),
+    transcript: [
+      {
+        channelId: "channel-1",
+        id: "context-1",
+        renderClass: "raw-rail",
+        sections: [{ title: "Channel history", body: "private context" }],
+        sessionId: "session-1",
+        timestamp: "2026-08-04T18:00:00.000Z",
+        title: "Prompt context",
+        turnId: "turn-1",
+        type: "metadata",
+      },
+      {
+        channelId: "channel-1",
+        id: "user-1",
+        renderClass: "message",
+        role: "user",
+        sessionId: "session-1",
+        text: "What changed?",
+        timestamp: "2026-08-04T18:00:00.000Z",
+        title: "User",
+        turnId: "turn-1",
+        type: "message",
+      },
+      {
+        channelId: "channel-1",
+        id: "assistant-1",
+        renderClass: "message",
+        role: "assistant",
+        sessionId: "session-1",
+        text: "Here is the answer.",
+        timestamp: "2026-08-04T18:00:01.000Z",
+        title: "Assistant",
+        turnId: "turn-1",
+        type: "message",
+      },
+      toolItem({ id: "read-1" }),
+    ],
+  });
+
+  assert.deepEqual(
+    placement?.items.map((item) => item.id),
+    ["context-1", "user-1", "read-1"],
+  );
+});
