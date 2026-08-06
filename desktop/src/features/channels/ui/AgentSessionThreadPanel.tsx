@@ -5,12 +5,14 @@ import {
   Settings,
   Sparkles,
   TerminalSquare,
+  Upload,
 } from "lucide-react";
 import { toast } from "sonner";
 
 import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import {
+  deriveLatestSessionId,
   mergeObserverEventWindows,
   observerEventScrollId,
   scopeByChannel,
@@ -18,6 +20,7 @@ import {
 import { deriveTranscriptBlockIds } from "@/features/agents/ui/agentSessionTranscriptGrouping";
 import type { ObserverEvent } from "@/features/agents/ui/agentSessionTypes";
 import { ManagedAgentSessionPanel } from "@/features/agents/ui/ManagedAgentSessionPanel";
+import { ShepherdEvidencePanel } from "@/features/agents/ui/ShepherdEvidencePanel";
 import {
   useArchivedChannelEvents,
   useObserverEvents,
@@ -41,6 +44,7 @@ import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { resolveUserLabel } from "@/features/profile/lib/identity";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { importShepherdEvidence } from "@/shared/api/tauriShepherd";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -128,6 +132,10 @@ export function AgentSessionThreadPanel({
     () => mergeObserverEventWindows(scopedEvents, archivedChannelEvents),
     [scopedEvents, archivedChannelEvents],
   );
+  const latestSessionId = React.useMemo(
+    () => deriveLatestSessionId(combinedHeaderEvents),
+    [combinedHeaderEvents],
+  );
   const latestActivityAt = React.useMemo(
     () => getLatestActivityTimestamp(combinedHeaderEvents),
     [combinedHeaderEvents],
@@ -160,6 +168,7 @@ export function AgentSessionThreadPanel({
     scopeKey: rawFeedScopeKey,
     show: false,
   }));
+  const [shepherdRefreshKey, setShepherdRefreshKey] = React.useState(0);
   const showRawFeed =
     rawFeedState.scopeKey === rawFeedScopeKey && rawFeedState.show;
   const handleRawFeedChange = React.useCallback(
@@ -265,6 +274,31 @@ export function AgentSessionThreadPanel({
         error instanceof Error
           ? error.message
           : `Failed to stop ${agent.name}'s current turn.`,
+      );
+    }
+  }
+
+  async function handleImportShepherdTrace() {
+    if (!sessionChannelId || !latestSessionId) return;
+    const sourceRunRef = window.prompt("Enter the Shepherd run reference:");
+    if (!sourceRunRef) return;
+    const exportJson = window.prompt("Paste the Shepherd JSON trace export:");
+    if (!exportJson) return;
+    try {
+      const record = await importShepherdEvidence({
+        agentPubkey: agent.pubkey,
+        channelId: sessionChannelId,
+        sessionId: latestSessionId,
+        sourceRunRef,
+        exportJson,
+      });
+      toast.success(
+        `Imported ${record.evidence.totalEffects} redacted Shepherd effects.`,
+      );
+      setShepherdRefreshKey((value) => value + 1);
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Shepherd import failed.",
       );
     }
   }
@@ -387,6 +421,23 @@ export function AgentSessionThreadPanel({
             <DropdownMenuSeparator />
             <DropdownMenuItem
               className="items-start gap-3"
+              disabled={!sessionChannelId || !latestSessionId}
+              onSelect={() => void handleImportShepherdTrace()}
+              title="Import a Shepherd JSON trace into this session."
+            >
+              <Upload className="mt-0.5 h-4 w-4 text-muted-foreground" />
+              <span className="min-w-0 flex-1">
+                <span className="block text-sm font-medium">
+                  Import Shepherd trace
+                </span>
+                <span className="mt-0.5 block text-xs text-muted-foreground">
+                  Validate, redact, and attach evidence to this session.
+                </span>
+              </span>
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              className="items-start gap-3"
               data-testid="agent-session-stop-turn"
               disabled={!canStopCurrentTurn}
               onSelect={() => {
@@ -492,6 +543,14 @@ export function AgentSessionThreadPanel({
       >
         <div ref={topSentinelRef} aria-hidden className="h-px" />
         <div ref={contentRef}>
+          {sessionChannelId && latestSessionId ? (
+            <ShepherdEvidencePanel
+              agentPubkey={agent.pubkey}
+              channelId={sessionChannelId}
+              sessionId={latestSessionId}
+              refreshKey={shepherdRefreshKey}
+            />
+          ) : null}
           <ManagedAgentSessionPanel
             agent={agent}
             channelId={sessionChannelId}

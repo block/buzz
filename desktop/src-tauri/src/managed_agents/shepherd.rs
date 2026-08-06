@@ -21,7 +21,7 @@ struct ShepherdExport {
 }
 
 /// A redacted Shepherd boundary event safe to join to Buzz's evidence plane.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShepherdEvidenceEvent {
     pub sequence: u64,
@@ -35,13 +35,13 @@ pub struct ShepherdEvidenceEvent {
 }
 
 /// Buzz-owned representation of one imported Shepherd trace.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShepherdEvidenceEnvelope {
-    pub schema: &'static str,
-    pub source: &'static str,
+    pub schema: String,
+    pub source: String,
     pub source_run_ref: Option<String>,
-    pub coverage: &'static str,
+    pub coverage: String,
     pub total_effects: usize,
     pub effect_types: Vec<String>,
     pub events: Vec<ShepherdEvidenceEvent>,
@@ -128,10 +128,10 @@ pub fn normalize_shepherd_export(
     }
 
     Ok(ShepherdEvidenceEnvelope {
-        schema: "buzz.external-execution-evidence.v1",
-        source: "shepherd",
+        schema: "buzz.external-execution-evidence.v1".to_string(),
+        source: "shepherd".to_string(),
         source_run_ref: source_run_ref.filter(|value| !value.trim().is_empty()),
-        coverage: "boundary-effects-only",
+        coverage: "boundary-effects-only".to_string(),
         total_effects: events.len(),
         effect_types: observed_types.into_iter().collect(),
         events,
@@ -171,5 +171,18 @@ mod tests {
 
         let duplicate = r#"{"total_effects":2,"timeline":[{"_sequence":1,"effect_type":"a"},{"_sequence":1,"effect_type":"b"}]}"#;
         assert!(normalize_shepherd_export(duplicate, None).is_err());
+    }
+
+    #[test]
+    fn accepts_real_shepherd_0_3_0_export_and_redacts_payloads() {
+        let input = include_str!("fixtures/shepherd-0.3.0-export.json");
+        let result = normalize_shepherd_export(input, Some("real-0.3.0".into()))
+            .expect("normalize real Shepherd 0.3.0 export");
+        assert_eq!(result.total_effects, 6);
+        assert_eq!(result.events.first().map(|event| event.sequence), Some(0));
+        let serialized = serde_json::to_string(&result).expect("serialize");
+        assert!(!serialized.contains("fixture prompt"));
+        assert!(!serialized.contains("fixture response"));
+        assert!(!serialized.contains("echo hi"));
     }
 }

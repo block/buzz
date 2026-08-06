@@ -1,0 +1,19 @@
+{
+  "total_effects": 6,
+  "effect_types": [
+    "task_started",
+    "prompt_sent",
+    "agent_message",
+    "tool_call_started",
+    "tool_call_completed",
+    "task_completed"
+  ],
+  "timeline": [
+    {"_sequence":0,"_source_context":null,"_scope_id":null,"_scope_depth":0,"effect_type":"task_started","task_name":"BuzzFixture","provider_id":null,"binding_name":null,"context_id":null,"timestamp":1786027107.3105228,"inputs":{},"scope_id":"","parent_scope_id":null,"device_name":null,"stage_name":null},
+    {"_sequence":1,"_source_context":null,"_scope_id":null,"_scope_depth":0,"effect_type":"prompt_sent","task_name":null,"provider_id":null,"binding_name":null,"context_id":null,"timestamp":1786027107.310556,"system_prompt":"","user_prompt":"fixture prompt","total_tokens":0,"input_tokens":0,"model_id":""},
+    {"_sequence":2,"_source_context":null,"_scope_id":null,"_scope_depth":0,"effect_type":"agent_message","task_name":null,"provider_id":null,"binding_name":null,"context_id":null,"timestamp":1786027107.310564,"content":"fixture response","is_partial":false},
+    {"_sequence":3,"_source_context":null,"_scope_id":null,"_scope_depth":0,"effect_type":"tool_call_started","task_name":null,"provider_id":null,"binding_name":null,"context_id":null,"timestamp":1786027107.310573,"tool_call_id":"tc1","tool_name":"bash","params":{"command":"echo hi"}},
+    {"_sequence":4,"_source_context":null,"_scope_id":null,"_scope_depth":0,"effect_type":"tool_call_completed","task_name":null,"provider_id":null,"binding_name":null,"context_id":null,"timestamp":1786027107.31058,"tool_call_id":"tc1","tool_name":"bash","success":true,"output":"hi","duration_ms":0.0},
+    {"_sequence":5,"_source_context":null,"_scope_id":null,"_scope_depth":0,"effect_type":"task_completed","task_name":"BuzzFixture","provider_id":null,"binding_name":null,"context_id":null,"timestamp":1786027107.310587,"outputs":{},"duration_ms":100.0,"device_name":null,"stage_name":null,"metadata":{}}
+  ]
+}
