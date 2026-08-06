@@ -254,10 +254,6 @@ export function usePersonaActions() {
             setPersonaErrorMessage(
               `${persona.displayName} was created, but it did not start: ${created.spawnError}`,
             );
-          } else {
-            setPersonaNoticeMessage(
-              `Created and started ${created.agent.name}.`,
-            );
           }
           if (created.profileSyncError) {
             setPersonaErrorMessage(
