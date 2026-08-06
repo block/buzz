@@ -231,6 +231,30 @@ pub(crate) fn nip42_expected_relay_url(config_relay_url: &str, tenant: &TenantCo
     format!("{scheme}://{}", tenant.host())
 }
 
+/// Candidate relay URLs accepted for NIP-42 AUTH on this connection.
+///
+/// The per-tenant bare origin remains the primary host-binding check. A
+/// configured pairing relay URL is also accepted because mobile QR flows sign
+/// the exact scanned `BUZZ_PAIRING_RELAY_URL`, which may include a public proxy
+/// path even though the upstream relay sees a different internal origin.
+pub(crate) fn nip42_acceptable_relay_urls(
+    config_relay_url: &str,
+    tenant: &TenantContext,
+    pairing_relay_url: Option<&str>,
+) -> Vec<String> {
+    let primary = nip42_expected_relay_url(config_relay_url, tenant);
+    let mut urls = vec![primary.clone()];
+
+    if let Some(pairing) = pairing_relay_url
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != primary)
+    {
+        urls.push(pairing.to_string());
+    }
+
+    urls
+}
+
 /// Extract a channel UUID from a single filter's `#h` tag.
 fn extract_channel_from_filter(filter: &nostr::Filter) -> Option<uuid::Uuid> {
     let h_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
@@ -2802,6 +2826,40 @@ mod tests {
 
         verify_nip42_with_urls(challenge, signed_relay_url, &expected)
             .expect("matching-host NIP-42 AUTH event must verify");
+    }
+
+    /// Pairing QR flows sign the configured public pairing URL exactly. Keep
+    /// the primary tenant-origin check, but also expose the configured pairing
+    /// URL as an explicit fallback candidate so path-based HTTPS/WSS proxies do
+    /// not break NIP-42 auth with `relay url mismatch`.
+    #[test]
+    fn nip42_acceptable_relay_urls_includes_configured_pairing_relay_url() {
+        let tenant = fresh_tenant("100.69.147.38:3000");
+        let urls = nip42_acceptable_relay_urls(
+            "ws://100.69.147.38:3000",
+            &tenant,
+            Some("wss://kn8-m1-mbp.tail83606f.ts.net/buzz-relay"),
+        );
+
+        assert_eq!(
+            urls,
+            vec![
+                "ws://100.69.147.38:3000".to_string(),
+                "wss://kn8-m1-mbp.tail83606f.ts.net/buzz-relay".to_string(),
+            ]
+        );
+
+        let challenge = "fixed-challenge-for-test";
+        let tenant_expected = &urls[0];
+        let pairing_expected = &urls[1];
+        let signed_pairing_url = "wss://kn8-m1-mbp.tail83606f.ts.net/buzz-relay";
+
+        let err = verify_nip42_with_urls(challenge, signed_pairing_url, tenant_expected)
+            .expect_err("tenant-origin check alone should reject path-based pairing URL");
+        assert!(matches!(err, buzz_auth::AuthError::RelayUrlMismatch));
+
+        verify_nip42_with_urls(challenge, signed_pairing_url, pairing_expected)
+            .expect("configured pairing relay URL should verify as explicit fallback");
     }
 
     /// `nip42_expected_relay_url` derives host from `tenant`, not from

@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
 use crate::app_state::AppState;
-use crate::relay::{relay_api_base_url_with_override, relay_ws_url_with_override};
+use crate::relay::{relay_http_base_url, relay_ws_url_with_override};
 
 #[derive(Serialize, Clone)]
 struct PairingSasPayload {
@@ -95,7 +95,6 @@ pub async fn start_pairing(
     let pubkey_hex = keys.public_key().to_hex();
 
     let ws_url = relay_ws_url_with_override(&state);
-    let http_url = relay_api_base_url_with_override(&state);
 
     // NIP-43 relays gate connections on membership, so an unpaired peer can't
     // reach the main relay yet — it must go through the /pair sidecar. Open
@@ -104,12 +103,13 @@ pub async fn start_pairing(
     // which is also true for plain NIP-42 / NIP-OA relays where the main
     // relay is reachable.
     let pairing_relay_url = resolve_pairing_relay_url(&ws_url, probe_pairing_relay(&ws_url).await)?;
+    let payload_relay_url = relay_http_base_url(&pairing_relay_url);
 
     let (session, qr_payload) = PairingSession::new_source(pairing_relay_url.clone());
     let qr_uri = encode_qr(&qr_payload);
 
     let payload_json = serde_json::json!({
-        "relayUrl": http_url,
+        "relayUrl": payload_relay_url,
         "pubkey": pubkey_hex,
         "nsec": nsec,
     });
