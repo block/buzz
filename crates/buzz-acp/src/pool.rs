@@ -3865,6 +3865,66 @@ pub(crate) async fn reaction_add(rest: &crate::relay::RestClient, event_id: &str
     }
 }
 
+/// Resolve the NIP-10 thread a notice must land in, from the tags of the event
+/// that triggered it.
+///
+/// `None` when the trigger carried no thread tags — the notice then posts at
+/// channel level. This is what keeps a notice in the thread the owner was
+/// typing in instead of surfacing as an unrelated root message.
+pub(crate) fn thread_ref_from_tags(thread_tags: &ThreadTags) -> Option<buzz_sdk::ThreadRef> {
+    let root = thread_tags.root_event_id.as_deref()?;
+    let root_id = nostr::EventId::from_hex(root).ok()?;
+    let parent_id = thread_tags
+        .parent_event_id
+        .as_deref()
+        .and_then(|p| nostr::EventId::from_hex(p).ok())
+        .unwrap_or(root_id);
+    Some(buzz_sdk::ThreadRef {
+        root_event_id: root_id,
+        parent_event_id: parent_id,
+    })
+}
+
+/// Best-effort: publish a kind:40099 system message into `channel_id`, signed
+/// with the agent's own key.
+///
+/// Carries the outcome of an owner control command the harness consumed. A
+/// cancelled turn or a rotated session is a lifecycle event, not the agent
+/// speaking, so it renders as a system row beside "X joined the channel"
+/// instead of as a message in the conversation. It still lands in the thread
+/// the command was typed in — thread placement is derived from NIP-10 `e` tags
+/// and is kind-agnostic on the client.
+///
+/// Errors are logged and swallowed: the notice must never take down the main
+/// loop, and must never block the command it reports on.
+pub(crate) async fn post_system_notice(
+    rest: &crate::relay::RestClient,
+    channel_id: Uuid,
+    thread_tags: &ThreadTags,
+    payload: &serde_json::Value,
+) {
+    let thread_ref = thread_ref_from_tags(thread_tags);
+    let builder = match buzz_sdk::build_system_message(channel_id, payload, thread_ref.as_ref()) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(channel = %channel_id, "system notice: build failed: {e}");
+            return;
+        }
+    };
+    let event = match builder.sign_with_keys(&rest.keys) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!(channel = %channel_id, "system notice: sign failed: {e}");
+            return;
+        }
+    };
+    match tokio::time::timeout(Duration::from_secs(5), rest.submit_event(&event)).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => tracing::warn!(channel = %channel_id, "system notice failed: {e}"),
+        Err(_) => tracing::warn!(channel = %channel_id, "system notice timed out"),
+    }
+}
+
 /// Best-effort: post a visible failure notice (kind:9) to a channel after a
 /// batch is dead-lettered. Replies into the thread of `thread_tags` when the
 /// triggering event was threaded. Errors are logged and swallowed — the
@@ -3875,18 +3935,7 @@ pub(crate) async fn post_failure_notice(
     thread_tags: &ThreadTags,
     content: &str,
 ) {
-    let thread_ref = thread_tags.root_event_id.as_deref().and_then(|root| {
-        let root_id = nostr::EventId::from_hex(root).ok()?;
-        let parent_id = thread_tags
-            .parent_event_id
-            .as_deref()
-            .and_then(|p| nostr::EventId::from_hex(p).ok())
-            .unwrap_or(root_id);
-        Some(buzz_sdk::ThreadRef {
-            root_event_id: root_id,
-            parent_event_id: parent_id,
-        })
-    });
+    let thread_ref = thread_ref_from_tags(thread_tags);
     let builder =
         match buzz_sdk::build_message(channel_id, content, thread_ref.as_ref(), &[], false, &[]) {
             Ok(b) => b,
