@@ -66,13 +66,21 @@ test.describe("community rail", () => {
     await expect(buttonA).toBeVisible();
     await expect(buttonB).toBeVisible();
 
-    // The active community is marked via aria-current.
+    // The active community is marked semantically and with a persistent rail.
     await expect(buttonA).toHaveAttribute("aria-current", "true");
     await expect(buttonB).not.toHaveAttribute("aria-current", "true");
-    await expect(buttonA.locator(":scope > span").first()).toHaveCSS(
-      "opacity",
-      "1",
+    const activeIndicator = page.getByTestId(
+      `community-rail-active-${COMMUNITY_A.id}`,
     );
+    await expect(activeIndicator).toBeVisible();
+    await expect(
+      page.getByTestId(`community-rail-active-${COMMUNITY_B.id}`),
+    ).toHaveCount(0);
+    await expect(activeIndicator).toHaveCSS("height", "20px");
+    await expect(activeIndicator).toHaveCSS("width", "4px");
+    await expect(
+      buttonA.locator(":scope > span:not([data-testid])").first(),
+    ).toHaveCSS("opacity", "1");
     await expect(buttonB.locator(":scope > span").first()).toHaveCSS(
       "opacity",
       "1",
@@ -80,7 +88,7 @@ test.describe("community rail", () => {
     const [activeStyle, inactiveStyle] = await Promise.all(
       [buttonA, buttonB].map((button) =>
         button
-          .locator(":scope > span")
+          .locator(":scope > span:not([data-testid])")
           .first()
           .evaluate((element) => {
             const style = getComputedStyle(element);
@@ -88,6 +96,7 @@ test.describe("community rail", () => {
               backgroundColor: style.backgroundColor,
               borderRadius: style.borderRadius,
               color: style.color,
+              outlineColor: style.outlineColor,
               outlineStyle: style.outlineStyle,
               outlineWidth: style.outlineWidth,
             };
@@ -98,6 +107,7 @@ test.describe("community rail", () => {
     expect(activeStyle.borderRadius).toBe(inactiveStyle.borderRadius);
     expect(activeStyle.borderRadius).toBe("12px");
     expect(activeStyle.color).toBe(inactiveStyle.color);
+    expect(activeStyle.outlineColor).toBe(inactiveStyle.outlineColor);
     expect(activeStyle.outlineStyle).toBe("solid");
     expect(activeStyle.outlineWidth).toBe("2px");
     expect(inactiveStyle.outlineStyle).toBe("solid");

@@ -668,9 +668,9 @@ pub async fn mint_agent_card(
             .ok_or_else(|| "Agent avatar data URL could not be decoded.".to_string())?,
         Some(url) if url.starts_with("http://") || url.starts_with("https://") => {
             // Relay-hosted avatars (kind:0 pictures under the relay's /media/)
-            // may require Blossom get-auth (`require_media_get_auth`). Mint the
-            // header ONLY for same-origin URLs so the token never leaves the
-            // relay (same contract as `media_download.rs`).
+            // require Blossom get-auth. Mint the header ONLY for same-origin URLs
+            // so the token never leaves the relay (same contract as
+            // `media_download.rs`).
             let relay_base = crate::relay::relay_api_base_url_with_override(&state);
             let auth = is_same_origin(url, &relay_base)
                 .then(|| crate::commands::media::mint_media_get_auth(&state, &relay_base))

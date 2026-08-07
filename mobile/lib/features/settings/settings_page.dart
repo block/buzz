@@ -24,9 +24,14 @@ part 'settings_page/appearance_section.dart';
 part 'settings_page/connection_section.dart';
 
 class SettingsPage extends HookConsumerWidget {
-  const SettingsPage({super.key, required this.profileHeader});
+  const SettingsPage({
+    super.key,
+    required this.profileHeader,
+    required this.identityRecoveryPageBuilder,
+  });
 
   final Widget profileHeader;
+  final WidgetBuilder identityRecoveryPageBuilder;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -67,7 +72,9 @@ class SettingsPage extends HookConsumerWidget {
               children: [
                 profileHeader,
                 const _AppearanceSection(),
-                const _ConnectionSection(),
+                _ConnectionSection(
+                  identityRecoveryPageBuilder: identityRecoveryPageBuilder,
+                ),
                 const _RemoveCommunitySection(),
               ],
             ),

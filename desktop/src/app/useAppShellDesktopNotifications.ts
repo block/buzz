@@ -5,6 +5,7 @@ import {
   toSearchHit,
 } from "@/app/AppShell.helpers";
 import { getThreadReference } from "@/features/messages/lib/threading";
+import { useCommunityJoinAlerts } from "@/features/community-members/useCommunityJoinAlerts";
 import { hasMentionForEvent } from "@/features/notifications/lib/shouldNotify";
 import type { NotificationSettings } from "@/features/notifications/hooks";
 import {
@@ -45,6 +46,13 @@ export function useAppShellDesktopNotifications({
   pubkey?: string;
   silentChannelIds?: ReadonlySet<string>;
 }) {
+  // Roster alerts are owner/admin-only and self-gating; mounted here because
+  // it shares this hook's "desktop notifications are on" precondition and
+  // AppShell sits at the file-size ratchet ceiling.
+  useCommunityJoinAlerts({
+    enabled: enabled && notificationSettings.desktopEnabled,
+  });
+
   const handleChannelNotification = React.useEffectEvent(
     (_channelId: string, event: RelayEvent) => {
       if (!enabled) return;
