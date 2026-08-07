@@ -59,7 +59,7 @@ test("empty Projects keeps Create controls and offers an empty-state CTA", async
   await page.getByRole("menuitem", { name: "Project" }).click();
   await expect(page.getByTestId("create-project-dialog")).toBeVisible();
   await page.keyboard.press("Escape");
-  await expect(page.getByTestId("create-project-dialog")).not.toBeVisible();
+  await expect(page.getByTestId("create-project-dialog")).toBeHidden();
 
   // Entry point 2: the empty-state CTA.
   await page.getByTestId("projects-empty-create-project").click();
