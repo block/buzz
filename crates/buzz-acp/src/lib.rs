@@ -3973,6 +3973,16 @@ mod agent_draft_prompt_tests {
             .contains("add them explicitly with `buzz channels add-member` only when authorized"));
         assert!(prompt.contains("never changes membership automatically"));
     }
+
+    #[test]
+    fn shared_base_prompt_explains_mention_as_wake_up_and_points_to_reactions() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("wake-up"));
+        assert!(prompt.contains("bare display name with no `@`"));
+        assert!(prompt.contains("You may read a message and do nothing"));
+        assert!(prompt.contains("buzz reactions add"));
+        assert!(prompt.contains("A reaction is not a session wake-up"));
+    }
 }
 
 fn default_heartbeat_prompt() -> String {
