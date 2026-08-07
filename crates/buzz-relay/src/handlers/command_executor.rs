@@ -857,7 +857,7 @@ async fn handle_workflow_trigger(
     // member could otherwise invoke another user's webhook or message actions.
     if workflow.owner_pubkey != self_bytes {
         return Err(IngestError::Rejected(
-            "forbidden: not authorized to trigger this workflow".into(),
+            "forbidden: only the workflow owner may trigger this workflow".into(),
         ));
     }
 
@@ -866,25 +866,34 @@ async fn handle_workflow_trigger(
     // Without this, a disabled workflow — including one disabled because its
     // owner was removed from the channel — could still be fired by the owner.
     if !workflow.enabled || workflow.status != buzz_db::workflow::WorkflowStatus::Active {
-        return Err(IngestError::Rejected(
-            "forbidden: workflow is disabled or inactive".into(),
-        ));
+        return Err(IngestError::Rejected(format!(
+            "forbidden: workflow is {} (enabled={}); \
+             active runs require enabled=true and status=Active",
+            workflow.status, workflow.enabled
+        )));
     }
     let def: buzz_workflow::WorkflowDef = serde_json::from_value(workflow.definition.clone())
         .map_err(|e| IngestError::Internal(format!("error: corrupt workflow definition: {e}")))?;
     let Some(wf_channel_id) = workflow.channel_id else {
         // No channel scope means no channel authority to verify — fail closed.
         return Err(IngestError::Rejected(
-            "forbidden: workflow has no channel scope".into(),
+            "forbidden: workflow has no channel scope; cannot verify owner authority".into(),
         ));
     };
-    state
+    if let Err(e) = state
         .workflow_engine
         .check_owner_authority(community_id, wf_channel_id, &workflow.owner_pubkey, &def)
         .await
-        .map_err(|_| {
-            IngestError::Rejected("forbidden: not authorized to trigger this workflow".into())
-        })?;
+    {
+        // Surface *why* the authority check failed so the caller can act —
+        // previously this returned a generic "not authorized" that left the
+        // caller unable to distinguish a SEC-006 elevated-role denial from a
+        // disabled workflow or a membership lapse (issue #5122).
+        return Err(IngestError::Rejected(workflow_owner_authority_denial(
+            def.requires_elevated_authority(),
+            &e,
+        )));
+    }
 
     // Persist the command event under the workflow channel even though the
     // trigger event itself only carries the workflow UUID. Storing channel
@@ -1367,4 +1376,59 @@ async fn resume_workflow_after_approval(
     engine
         .finalize_run(community_id, run_id, result, existing_trace)
         .await;
+}
+
+/// Build the user-facing rejection text when a manual workflow trigger fails
+/// its SEC-006 owner-authority check.
+///
+/// Exfiltration-capable definitions (those containing a `call_webhook` step)
+/// require the owner to currently hold an elevated role (`owner` or `admin`) —
+/// plain membership is insufficient. Ordinary definitions only require channel
+/// membership.
+///
+/// Previously both branches returned the same generic "not authorized" text,
+/// which left the owner of a `call_webhook` workflow unable to tell SEC-006
+/// (role missing) apart from a disabled workflow or a membership lapse (issue
+/// #5122: "workflow appears to succeed, no run record"). Naming the cause in
+/// the rejection gives the caller an actionable next step.
+fn workflow_owner_authority_denial(
+    requires_elevated_authority: bool,
+    error: &buzz_workflow::WorkflowError,
+) -> String {
+    if requires_elevated_authority {
+        format!(
+            "forbidden: SEC-006 — workflow contains exfiltration-capable \
+             actions (call_webhook) that require the owner to hold the \
+             'owner' or 'admin' role in this channel; {error}"
+        )
+    } else {
+        format!("forbidden: workflow owner's channel authority check failed; {error}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::workflow_owner_authority_denial;
+    use buzz_workflow::WorkflowError;
+
+    #[test]
+    fn denial_for_elevated_definition_names_sec006_and_call_webhook() {
+        let err = WorkflowError::Unauthorized("not a member".into());
+        let msg = workflow_owner_authority_denial(true, &err);
+        assert!(msg.starts_with("forbidden:"));
+        assert!(msg.contains("SEC-006"));
+        assert!(msg.contains("call_webhook"));
+        assert!(msg.contains("owner' or 'admin' role"));
+        assert!(msg.contains("not a member"));
+    }
+
+    #[test]
+    fn denial_for_ordinary_definition_has_no_sec006_hint() {
+        let err = WorkflowError::Unauthorized("unknown".into());
+        let msg = workflow_owner_authority_denial(false, &err);
+        assert!(msg.starts_with("forbidden:"));
+        assert!(!msg.contains("SEC-006"));
+        assert!(!msg.contains("call_webhook"));
+        assert!(msg.contains("unknown"));
+    }
 }
