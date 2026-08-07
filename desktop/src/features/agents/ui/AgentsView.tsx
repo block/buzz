@@ -25,8 +25,6 @@ import { usePersonaActions } from "./usePersonaActions";
 import { useTeamActions } from "./useTeamActions";
 import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
 import { useBakedBuildEnvQuery, useRelayAgentsQuery } from "@/features/agents/hooks";
-import { useUsersBatchQuery } from "@/features/profile/hooks";
-import { useIdentityQuery } from "@/shared/api/hooks";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
@@ -42,40 +40,19 @@ import { getInheritedAgentDefaults } from "./bakedEnvHelpers";
 
 export function AgentsView() {
   const { openPersonaProfilePanel, openProfilePanel } = useProfilePanel();
-  const identityQuery = useIdentityQuery();
   const relayAgentsQuery = useRelayAgentsQuery();
   const { globalConfig } = useGlobalAgentConfig();
   const { data: bakedEnv } = useBakedBuildEnvQuery({ enabled: true });
   const inheritedDefaults = getInheritedAgentDefaults(globalConfig, bakedEnv);
   const agents = useManagedAgentActions();
-  const relayAgentPubkeys = React.useMemo(
-    () => (relayAgentsQuery.data ?? []).map((agent) => agent.pubkey),
-    [relayAgentsQuery.data],
-  );
-  const relayProfilesQuery = useUsersBatchQuery(relayAgentPubkeys, {
-    enabled: relayAgentPubkeys.length > 0,
-  });
   const externalAgents = React.useMemo(() => {
-    const ownerPubkey = identityQuery.data?.pubkey;
-    if (!ownerPubkey) return [];
     const localPubkeys = new Set(
       agents.managedAgents.map((agent) => normalizePubkey(agent.pubkey)),
     );
-    return (relayAgentsQuery.data ?? []).filter((agent) => {
-      const pubkey = normalizePubkey(agent.pubkey);
-      const profile = relayProfilesQuery.data?.profiles[pubkey];
-      return (
-        !localPubkeys.has(pubkey) &&
-        profile?.ownerPubkey &&
-        normalizePubkey(profile.ownerPubkey) === normalizePubkey(ownerPubkey)
-      );
-    });
-  }, [
-    agents.managedAgents,
-    identityQuery.data?.pubkey,
-    relayAgentsQuery.data,
-    relayProfilesQuery.data,
-  ]);
+    return (relayAgentsQuery.data ?? []).filter(
+      (agent) => !localPubkeys.has(normalizePubkey(agent.pubkey)),
+    );
+  }, [agents.managedAgents, relayAgentsQuery.data]);
   const personas = usePersonaActions();
   const teamImportInputRef = React.useRef<HTMLInputElement | null>(null);
   const aiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);

@@ -214,6 +214,31 @@ async function countCommandInvocations(
   );
 }
 
+test("shows relay agents outside Desktop even when their owner profile is unavailable", async ({
+  page,
+}) => {
+  const externalPubkey = "ab".repeat(32);
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        agentType: "omp",
+        name: "Cluster GLM",
+        pubkey: externalPubkey,
+        status: "online",
+      },
+    ],
+  });
+
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+
+  const section = page.getByTestId("external-agents-section");
+  await expect(section).toBeVisible();
+  await expect(section).toContainText("Cluster GLM");
+  await expect(section).toContainText("External");
+  await expect(section).toContainText("omp · online");
+});
+
 test("catalog hides built-ins and shows the shared-agent empty state", async ({
   page,
 }) => {
