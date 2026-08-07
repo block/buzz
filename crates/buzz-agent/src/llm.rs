@@ -2237,12 +2237,30 @@ pub(crate) fn build_token_source(cfg: &Config) -> Result<Arc<dyn TokenSource>, A
     }
 }
 
+/// Completion-token cap that [`Llm::summarize`] actually requests from
+/// `provider`, given the caller's visible-text budget. OpenRouter grants
+/// reasoning a separate, equal budget on top of the text budget (see
+/// [`openrouter_summary_body`]), so its top-level cap is double the caller's
+/// budget; every other provider requests the caller's budget unchanged.
+/// Callers that reserve output headroom in an input budget
+/// (`handoff_prompt_budget_bytes`) must reserve THIS value, not the text
+/// budget — otherwise input plus the actual completion allowance can exceed
+/// the configured context window.
+pub(crate) fn summary_completion_cap(provider: Provider, max_output_tokens: u32) -> u32 {
+    match provider {
+        Provider::OpenRouter => max_output_tokens.saturating_mul(2),
+        Provider::Anthropic | Provider::OpenAi | Provider::Databricks | Provider::DatabricksV2 => {
+            max_output_tokens
+        }
+    }
+}
+
 /// Build the request body for `Llm::summarize` on `Provider::OpenRouter`.
 /// Extracted so tests can assert on the actual wire shape instead of a
-/// hand-rolled literal — summaries never carry `reasoning` (see
-/// `apply_openrouter_mutations`, which the summary path never calls).
-/// It spells the token limit `max_tokens` directly for the same reason: the
-/// mutation that renames it is never applied here.
+/// hand-rolled literal — summaries never carry config-driven reasoning
+/// *effort* (see `apply_openrouter_mutations`, which the summary path never
+/// calls). It spells the token limit `max_tokens` directly for the same
+/// reason: the mutation that renames it is never applied here.
 fn openrouter_summary_body(
     effective_model: &str,
     system_prompt: &str,
@@ -2264,7 +2282,7 @@ fn openrouter_summary_body(
     json!({
         "model": effective_model,
         "stream": false,
-        "max_tokens": max_output_tokens.saturating_mul(2),
+        "max_tokens": summary_completion_cap(Provider::OpenRouter, max_output_tokens),
         "reasoning": {
             "max_tokens": max_output_tokens,
             "exclude": true,
