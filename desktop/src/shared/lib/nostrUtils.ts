@@ -1,4 +1,5 @@
-import { decode, npubEncode } from "nostr-tools/nip19";
+import { hexToBytes } from "@noble/hashes/utils.js";
+import { decode, npubEncode, nsecEncode } from "nostr-tools/nip19";
 import { getPublicKey } from "nostr-tools/pure";
 
 /**
@@ -23,7 +24,8 @@ export function safeNpub(pubkey: string): string | null {
   }
 }
 
-const HEX_PUBKEY_REGEX = /^[0-9a-f]{64}$/;
+/** 32-byte key material as 64 hex chars (pubkey or secret; case-insensitive). */
+export const HEX_64_REGEX = /^[0-9a-fA-F]{64}$/;
 
 /**
  * Parse user-entered public key input — either a 64-character hex pubkey or
@@ -35,7 +37,7 @@ const HEX_PUBKEY_REGEX = /^[0-9a-f]{64}$/;
  */
 export function parsePubkeyInput(input: string): string | null {
   const trimmed = input.trim().toLowerCase();
-  if (HEX_PUBKEY_REGEX.test(trimmed)) {
+  if (HEX_64_REGEX.test(trimmed)) {
     return trimmed;
   }
   if (trimmed.startsWith("npub1")) {
@@ -52,20 +54,51 @@ export function parsePubkeyInput(input: string): string | null {
 }
 
 /**
- * Decode a bech32 nsec string and derive the matching npub. Returns null if
- * the input is not a syntactically valid `nsec1…` (does NOT throw — this is
- * intended for live form validation where the user is mid-typing).
+ * Normalize a pasted private key to bech32 `nsec1…`.
+ *
+ * Accepts either `nsec1…` or a 64-char hex secret (what `buzz-admin
+ * generate-key` prints / `BUZZ_PRIVATE_KEY` accepts). Returns null for
+ * anything else — does not throw; intended for live form validation.
+ */
+export function normalizePrivateKeyToNsec(input: string): string | null {
+  const trimmed = input.trim();
+  if (trimmed.startsWith("nsec1")) {
+    try {
+      const decoded = decode(trimmed);
+      if (decoded.type !== "nsec") {
+        return null;
+      }
+      return trimmed;
+    } catch {
+      return null;
+    }
+  }
+  if (HEX_64_REGEX.test(trimmed)) {
+    try {
+      return nsecEncode(hexToBytes(trimmed.toLowerCase()));
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Decode a private key (bech32 `nsec1…` or 64-char hex) and derive the
+ * matching npub. Returns null if the input is not a syntactically valid
+ * secret (does NOT throw — this is intended for live form validation where
+ * the user is mid-typing).
  *
  * The input is trimmed first; surrounding whitespace from copy-paste or a
  * dropped `.key` file is tolerated.
  */
 export function nsecToNpub(nsec: string): string | null {
-  const trimmed = nsec.trim();
-  if (!trimmed.startsWith("nsec1")) {
+  const normalized = normalizePrivateKeyToNsec(nsec);
+  if (!normalized) {
     return null;
   }
   try {
-    const decoded = decode(trimmed);
+    const decoded = decode(normalized);
     if (decoded.type !== "nsec") {
       return null;
     }

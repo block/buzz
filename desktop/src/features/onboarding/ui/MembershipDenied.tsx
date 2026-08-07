@@ -65,7 +65,7 @@ export function MembershipDenied({
   const handleImportKey = React.useCallback(async () => {
     if (!previewNpub) {
       setImportError(
-        "That doesn't look like a valid nsec. Paste an nsec1 key.",
+        "That doesn't look like a valid key. Paste an nsec1… or 64-char hex secret.",
       );
       return;
     }
@@ -186,7 +186,7 @@ export function MembershipDenied({
                     setNsecInput(event.target.value);
                     setImportError(null);
                   }}
-                  placeholder="nsec1..."
+                  placeholder="nsec1… or hex secret"
                   spellCheck={false}
                   type="password"
                   value={nsecInput}
