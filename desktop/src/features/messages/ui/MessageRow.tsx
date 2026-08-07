@@ -40,6 +40,7 @@ import { resolveSnapshotSharedBy } from "@/features/messages/lib/snapshotSharedB
 import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 import { Markdown } from "@/shared/ui/markdown";
 import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
+import { CollapsibleMessageBody } from "./CollapsibleMessageBody";
 import { MessageActionBar } from "./MessageActionBar";
 import { MessageAgentOwner } from "./MessageAgentOwner";
 import { MessageAuthorText, MessageHeaderRow } from "./MessageHeader";
@@ -356,31 +357,36 @@ export const MessageRow = React.memo(
           }
 
           return (
-            <Markdown
-              channelNames={channelNames}
-              className={cn(
-                "max-w-full text-sm",
-                emojiOnly &&
-                  "text-4xl leading-tight [&_p]:leading-tight [&_img[data-custom-emoji]]:h-[1.45em] [&_img[data-custom-emoji]]:align-middle [&_button:has(img[data-custom-emoji])]:align-middle",
-              )}
-              // Only pass the author pubkey for agent-authored messages so
-              // config-nudge cards can authenticate the sender. Uses the
-              // raw event signer (signerPubkey), not a relay-delegated display
-              // author, because the agent itself must have signed the card.
-              configNudgeAuthorPubkey={getConfigNudgeAuthorPubkey(
-                message,
-                isKnownAgentPubkey,
-              )}
-              content={message.body}
-              customEmoji={customEmoji}
-              imetaByUrl={imetaByUrl}
-              agentMentionPubkeysByName={agentMentionPubkeysByName}
-              mentionNames={mentionNames}
-              mentionPubkeysByName={mentionPubkeysByName}
+            <CollapsibleMessageBody
+              highlighted={highlighted}
               searchQuery={searchQuery}
-              snapshotSharedBy={snapshotSharedBy}
-              videoReviewContext={videoReviewContext}
-            />
+            >
+              <Markdown
+                channelNames={channelNames}
+                className={cn(
+                  "max-w-full text-sm",
+                  emojiOnly &&
+                    "text-4xl leading-tight [&_p]:leading-tight [&_img[data-custom-emoji]]:h-[1.45em] [&_img[data-custom-emoji]]:align-middle [&_button:has(img[data-custom-emoji])]:align-middle",
+                )}
+                // Only pass the author pubkey for agent-authored messages so
+                // config-nudge cards can authenticate the sender. Uses the
+                // raw event signer (signerPubkey), not a relay-delegated display
+                // author, because the agent itself must have signed the card.
+                configNudgeAuthorPubkey={getConfigNudgeAuthorPubkey(
+                  message,
+                  isKnownAgentPubkey,
+                )}
+                content={message.body}
+                customEmoji={customEmoji}
+                imetaByUrl={imetaByUrl}
+                agentMentionPubkeysByName={agentMentionPubkeysByName}
+                mentionNames={mentionNames}
+                mentionPubkeysByName={mentionPubkeysByName}
+                searchQuery={searchQuery}
+                snapshotSharedBy={snapshotSharedBy}
+                videoReviewContext={videoReviewContext}
+              />
+            </CollapsibleMessageBody>
           );
       }
     };

@@ -33,6 +33,10 @@ const PREVIEW_CARD = 70;
 const MESSAGE_ITEM_BOTTOM_PADDING = 10; // TimelineMessageList pb-2.5
 const MIN_ESTIMATE = 60; // never reserve less than the old flat floor
 const CONTINUATION_MIN_ESTIMATE = 28;
+// CollapsibleMessageBody clamps long bodies; over-reserving the full dump
+// makes the virtualizer leave huge empty gaps until paint.
+const COLLAPSED_BODY_MAX_PX = 240;
+const EXPAND_TOGGLE_ROW = 22;
 
 function mediaHeightFromDim(dim: string | undefined): number {
   const dimensions = dimensionsFromDim(dim);
@@ -117,10 +121,10 @@ export function estimateRowHeight(
   const proseForLineCount = stripMediaOnlyLines(prose);
 
   let height = isContinuation ? CONTINUATION_ROW_CHROME : ROW_CHROME;
-  height +=
+  let bodyHeight =
     wrappedLineCount(proseForLineCount.trim() === "" ? "" : proseForLineCount) *
     TEXT_LINE_HEIGHT;
-  height += codeLines * CODE_LINE_HEIGHT;
+  bodyHeight += codeLines * CODE_LINE_HEIGHT;
 
   const imetaUrls = new Set<string>();
   if (message.tags && message.tags.length > 0) {
@@ -128,13 +132,13 @@ export function estimateRowHeight(
     for (const entry of imeta.values()) {
       if (!entry.url) continue;
       imetaUrls.add(entry.url);
-      height += mediaReserveHeight(entry.dim);
+      bodyHeight += mediaReserveHeight(entry.dim);
     }
   }
   for (const url of mediaUrlsInBody(body)) {
     if (imetaUrls.has(url)) continue; // already counted via its imeta dim
     // dim-less inline media reserves the fixed markdown image box plus its mt-1.
-    height += mediaReserveHeight(undefined);
+    bodyHeight += mediaReserveHeight(undefined);
   }
 
   // A bare non-media URL on its own line usually renders a link-preview card.
@@ -144,7 +148,13 @@ export function estimateRowHeight(
       (line) =>
         /^\s*https?:\/\/\S+\s*$/.test(line) && !MEDIA_URL_RE.test(line.trim()),
     );
-  if (hasPreviewUrlLine) height += PREVIEW_CARD;
+  if (hasPreviewUrlLine) bodyHeight += PREVIEW_CARD;
+
+  if (bodyHeight > COLLAPSED_BODY_MAX_PX) {
+    height += COLLAPSED_BODY_MAX_PX + EXPAND_TOGGLE_ROW;
+  } else {
+    height += bodyHeight;
+  }
 
   if (message.reactions && message.reactions.length > 0) height += REACTION_ROW;
 
