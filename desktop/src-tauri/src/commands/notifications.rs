@@ -39,10 +39,43 @@ pub async fn show_native_notification(
         crate::macos_notifications::show(title, body, target).await
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(target_os = "windows")]
+    {
+        windows::show(app, title, body, target);
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         let _ = (&app, &title, &body, &target);
-        Err("show_native_notification is only supported on Linux and macOS".to_string())
+        Err("show_native_notification is not supported on this platform".to_string())
+    }
+}
+
+#[cfg(target_os = "windows")]
+mod windows {
+    pub fn show(
+        app: tauri::AppHandle,
+        title: String,
+        body: Option<String>,
+        _target: Option<serde_json::Value>,
+    ) {
+        std::thread::spawn(move || {
+            let app_id = app.config().identifier.clone();
+            let mut toast = tauri_winrt_notification::Toast::new(&app_id);
+            toast.title(&title);
+            if let Some(body_text) = body.as_deref() {
+                toast.body(body_text);
+            }
+            toast.sound(Some(tauri_winrt_notification::Sound::Mute));
+
+            match toast.show() {
+                Ok(_) => {}
+                Err(error) => {
+                    eprintln!("buzz-desktop: failed to post Windows native notification: {error}");
+                }
+            }
+        });
     }
 }
 
