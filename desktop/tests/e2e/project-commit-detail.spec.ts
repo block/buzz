@@ -527,7 +527,7 @@ test("commit detail opens from the commits feed with a diff", async ({
     page.getByRole("button", { name: "Copy commit hash" }),
   ).toBeVisible();
   await expect(
-    page.getByRole("link", { name: "project guide" }),
+    page.getByRole("link", { name: "project guide", exact: true }),
   ).toHaveAttribute("href", "https://example.com/project-guide");
   await expect(
     page.getByRole("button", { name: "Architecture" }),

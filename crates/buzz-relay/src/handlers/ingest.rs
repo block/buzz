@@ -212,6 +212,72 @@ pub fn reject_with_transport(transport: &'static str, reason: &'static str) {
     .increment(1);
 }
 
+fn valid_link_preview_text(value: &str, max: usize, allow_newlines: bool) -> bool {
+    value.len() <= max
+        && !value
+            .chars()
+            .any(|character| character.is_control() && !(allow_newlines && character == '\n'))
+}
+
+fn validate_link_preview_tags(event: &Event, media_base_url: &str) -> Result<(), String> {
+    const MAX_SNAPSHOTS: usize = 8;
+    const MAX_TITLE: usize = 300;
+    const MAX_SITE: usize = 100;
+    const MAX_DESCRIPTION: usize = 1000;
+
+    let mut count = 0;
+    let mut suppressed = false;
+    let mut seen = std::collections::HashSet::new();
+    for tag in event.tags.iter() {
+        let parts = tag.as_slice();
+        if parts.first().map(String::as_str) != Some("link-preview") {
+            continue;
+        }
+        count += 1;
+        if parts == ["link-preview", "none"] {
+            if count > 1 {
+                return Err("link-preview suppression cannot include snapshots".into());
+            }
+            suppressed = true;
+            continue;
+        }
+        if suppressed
+            || count > MAX_SNAPSHOTS
+            || parts.len() != 11
+            || parts[1] != "snapshot"
+            || parts[2] != "1"
+        {
+            return Err("invalid link-preview snapshot tag".into());
+        }
+        let canonical =
+            url::Url::parse(&parts[3]).map_err(|_| "invalid link-preview canonical URL")?;
+        if canonical.scheme() != "https"
+            || !canonical.username().is_empty()
+            || canonical.password().is_some()
+            || canonical.fragment().is_some()
+            || !seen.insert(parts[3].clone())
+            || !event.content.contains(&parts[3])
+        {
+            return Err("invalid link-preview canonical URL".into());
+        }
+        for (value, max, allow_newlines) in [
+            (&parts[4], MAX_TITLE, false),
+            (&parts[5], MAX_SITE, false),
+            (&parts[6], MAX_DESCRIPTION, true),
+        ] {
+            if !valid_link_preview_text(value, max, allow_newlines) {
+                return Err("invalid link-preview snapshot text".into());
+            }
+        }
+        if !super::imeta::validate_local_image_media_pair(&parts[7], &parts[8], media_base_url)
+            || !super::imeta::validate_local_image_media_pair(&parts[9], &parts[10], media_base_url)
+        {
+            return Err("link-preview media must reference matching local image blobs".into());
+        }
+    }
+    Ok(())
+}
+
 /// Successful ingestion result.
 pub struct IngestResult {
     /// Hex-encoded event ID.
@@ -2647,6 +2713,13 @@ async fn ingest_event_inner(
         });
     }
 
+    let tenant_media_base =
+        crate::api::media::media_base_url_for_tenant(&state.config.relay_url, tenant.host());
+    if kind_u32 == KIND_STREAM_MESSAGE {
+        validate_link_preview_tags(&event, &tenant_media_base)
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    }
+
     let imeta_tags: Vec<Vec<String>> = event
         .tags
         .iter()
@@ -2654,8 +2727,6 @@ async fn ingest_event_inner(
         .map(|t| t.as_slice().iter().map(|s| s.to_string()).collect())
         .collect();
     if !imeta_tags.is_empty() {
-        let tenant_media_base =
-            crate::api::media::media_base_url_for_tenant(&state.config.relay_url, tenant.host());
         crate::api::validate_imeta_tags(&imeta_tags, &tenant_media_base)
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
         crate::api::verify_imeta_blobs(tenant, &imeta_tags, &state.media_storage)
@@ -3630,6 +3701,109 @@ mod tests {
             ],
         );
         assert!(validate_diff_event(&event).is_err());
+    }
+
+    #[test]
+    fn link_preview_suppression_accepts_blanket_marker() {
+        let event = make_event_with_tags(
+            KIND_STREAM_MESSAGE,
+            "https://example.com",
+            &[&["link-preview", "none"]],
+        );
+
+        assert!(validate_link_preview_tags(&event, "https://media.example.com").is_ok());
+    }
+
+    #[test]
+    fn link_preview_suppression_rejects_duplicate_marker() {
+        let event = make_event_with_tags(
+            KIND_STREAM_MESSAGE,
+            "https://example.com",
+            &[&["link-preview", "none"], &["link-preview", "none"]],
+        );
+
+        assert_eq!(
+            validate_link_preview_tags(&event, "https://media.example.com"),
+            Err("link-preview suppression cannot include snapshots".into())
+        );
+    }
+
+    #[test]
+    fn link_preview_suppression_rejects_mixed_snapshot_tags_in_either_order() {
+        let snapshot = [
+            "link-preview",
+            "snapshot",
+            "1",
+            "https://example.com",
+            "Example",
+            "Example",
+            "Description",
+            "",
+            "",
+            "",
+            "",
+        ];
+        for tags in [
+            vec![&["link-preview", "none"][..], &snapshot[..]],
+            vec![&snapshot[..], &["link-preview", "none"][..]],
+        ] {
+            let event = make_event_with_tags(KIND_STREAM_MESSAGE, "https://example.com", &tags);
+            assert!(validate_link_preview_tags(&event, "https://media.example.com").is_err());
+        }
+    }
+
+    fn make_link_preview_event(title: &str, site: &str, description: &str) -> Event {
+        make_event_with_tags(
+            KIND_STREAM_MESSAGE,
+            "https://example.com",
+            &[&[
+                "link-preview",
+                "snapshot",
+                "1",
+                "https://example.com",
+                title,
+                site,
+                description,
+                "",
+                "",
+                "",
+                "",
+            ]],
+        )
+    }
+
+    #[test]
+    fn link_preview_snapshot_accepts_description_newlines() {
+        let event = make_link_preview_event(
+            "Example title",
+            "Example site",
+            "First paragraph\n\nSecond paragraph",
+        );
+
+        assert!(validate_link_preview_tags(&event, "https://media.example.com").is_ok());
+    }
+
+    #[test]
+    fn link_preview_snapshot_rejects_title_and_site_newlines() {
+        for (title, site) in [
+            ("Example\ntitle", "Example site"),
+            ("Example title", "Example\nsite"),
+        ] {
+            let event = make_link_preview_event(title, site, "Description");
+            assert!(validate_link_preview_tags(&event, "https://media.example.com").is_err());
+        }
+    }
+
+    #[test]
+    fn link_preview_snapshot_rejects_non_newline_controls_in_all_text_fields() {
+        for (title, site, description) in [
+            ("Example\ttitle", "Example site", "Description"),
+            ("Example title", "Example\rsite", "Description"),
+            ("Example title", "Example site", "Unsafe\tdescription"),
+        ] {
+            let event = make_link_preview_event(title, site, description);
+            assert!(validate_link_preview_tags(&event, "https://media.example.com").is_err());
+        }
     }
 
     fn make_dummy_event() -> Event {
