@@ -37,6 +37,7 @@ pub struct BlobDescriptor {
 }
 
 /// Build an `imeta` tag array from a BlobDescriptor (NIP-92 media metadata).
+#[cfg(test)]
 pub fn build_imeta_tag(d: &BlobDescriptor) -> Vec<String> {
     let mut tag = vec![
         "imeta".to_string(),
@@ -1843,6 +1844,34 @@ mod retry_policy_tests {
         );
     }
 
+    /// A semantic relay rejection is definitive and must not be retried or
+    /// translated into an ambiguous delivery outcome.
+    #[tokio::test]
+    async fn stored_event_422_is_a_definitive_single_attempt_rejection() {
+        let (url, attempts) = test_server(|_| {
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                r#"{"error":"invalid event"}"#.to_string(),
+            )
+        })
+        .await;
+        let client = test_client(&url);
+        let event = make_stored_event(client.keys());
+        let err = client.submit_event(event).await.unwrap_err();
+
+        assert!(
+            matches!(
+                err,
+                CliError::Relay {
+                    status: 422,
+                    ref body
+                } if body == "invalid event"
+            ),
+            "expected definitive relay rejection, got {err:?}"
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
     /// Spin up a one-shot axum server that handles `GET /info` (and any other GET).
     /// Same contract as `test_server` — returns base URL and attempt counter.
     async fn get_server<F>(f: F) -> (String, Arc<AtomicU32>)
@@ -2051,6 +2080,9 @@ mod retry_policy_tests {
         let bodies: Arc<std::sync::Mutex<Vec<Vec<u8>>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
         let bodies2 = bodies.clone();
+        let auth_headers: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let auth_headers2 = auth_headers.clone();
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -2077,6 +2109,13 @@ mod retry_policy_tests {
                     .unwrap_or(0);
                 let payload = buf[body_end..].to_vec();
                 bodies2.lock().unwrap().push(payload);
+                let request = String::from_utf8_lossy(&buf);
+                let auth = request
+                    .lines()
+                    .find(|line| line.to_ascii_lowercase().starts_with("authorization:"))
+                    .unwrap_or_default()
+                    .to_string();
+                auth_headers2.lock().unwrap().push(auth);
 
                 if n < 3 {
                     // Partial body drop.
@@ -2114,6 +2153,10 @@ mod retry_policy_tests {
             captured[1], captured[2],
             "attempt 2 and 3 must use identical event bytes"
         );
+        let auth_headers = auth_headers.lock().unwrap();
+        assert!(auth_headers.iter().all(|header| !header.is_empty()));
+        assert_ne!(auth_headers[0], auth_headers[1]);
+        assert_ne!(auth_headers[1], auth_headers[2]);
     }
 
     /// `upload_file` uses `with_retry_body` — the full operation including response
