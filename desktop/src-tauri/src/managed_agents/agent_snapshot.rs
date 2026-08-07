@@ -403,6 +403,15 @@ pub(crate) fn validate_snapshot(snapshot: &AgentSnapshot) -> Result<(), String> 
     if snapshot.profile.display_name.trim().is_empty() {
         return Err("Snapshot profile.displayName is empty".to_string());
     }
+    super::validate_agent_definition_text(
+        &snapshot.profile.display_name,
+        snapshot
+            .definition
+            .system_prompt
+            .as_deref()
+            .unwrap_or_default(),
+    )
+    .map_err(|error| format!("Snapshot definition is unsafe: {error}"))?;
     Ok(())
 }
 

@@ -171,6 +171,15 @@ with a TypeScript lookup table or an id comparison in a component.
    `getAgentAccessOwnerOnly()` is true, every managed agent's access control is
    locked to owner-only, including provider-backed agents. A provider backend
    does not prove remote execution and must never create a policy carve-out.
+12. **Shared instructions must be reviewable byte-for-byte.** Agent definitions
+   execute their `system_prompt` verbatim, so catalog and snapshot review
+   surfaces render the literal prompt, never the chat Markdown projection
+   (which can conceal spoilers, link destinations, and image sources). Reject
+   Unicode default-ignorable, bidirectional-formatting, and non-layout control
+   characters at both the untrusted catalog parser and the Rust persistence /
+   import boundary. Do not silently strip them: rejection keeps the reviewed
+   string identical to the executed string. New sharing paths must reuse the
+   same validation before they persist or activate a definition.
 
 ## The tests that enforce this
 
@@ -191,6 +200,9 @@ with a TypeScript lookup table or an id comparison in a component.
 - `lib/agentAccessWarning.test.mjs` — every mode × run-location copy variant
   plus both resolvers, including unknown-reads-as-local and
   blank-`runOn`-is-not-a-provider.
+- `lib/personaCatalogRelay.test.mjs` and
+  `ui/personaCatalogOwnerLabel.test.mjs` — reject invisible definition text
+  and keep Markdown concealment syntax literal in the review surface.
 - `desktop/tests/e2e/onboarding-agent-defaults.spec.ts` — onboarding behavior
   acceptance coverage for readiness, failure states, defaults, session-draft
   restoration, zero-write Skip, Next save failure/retry, navigation, and
@@ -198,6 +210,8 @@ with a TypeScript lookup table or an id comparison in a component.
 - Rust: `runtime_metadata_env_vars` tests pin spawn-time key application.
 - Rust: persona sharing/retention tests pin relay+owner scoping, durable
   enqueue errors, relay rejection/unavailability, and accepted publication.
+- Rust: `definition_validation` and inbound persona tests pin the shared
+  Unicode/control-character policy at local, import, publish, and sync gates.
 
 ## Keep this file true
 
