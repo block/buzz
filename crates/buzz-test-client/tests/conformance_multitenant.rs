@@ -1741,19 +1741,17 @@ mod workflows {
     }
 
     /// Define a workflow in `channel_id` on `http_base`'s community (kind:30620,
-    /// `h`=channel, content=YAML). Returns the **server-generated** workflow id,
-    /// parsed out of the OK message (`response:{"workflow_id":"…"}`). This id is
-    /// the tenant-scoped handle the trigger door confines: defined under A, it
-    /// only resolves under A.
+    /// `h`=channel, `d`=workflow UUID, content=YAML). `handle_workflow_def`
+    /// requires the NIP-33 d-tag to BE the workflow UUID — the workflow row id
+    /// and the event d-tag are the same string — so the client supplies it and
+    /// the OK message (`response:{"workflow_id":"…"}`) echoes it back. This id
+    /// is the tenant-scoped handle the trigger door confines: defined under A,
+    /// it only resolves under A.
     async fn define_workflow(http_base: &str, keys: &Keys, channel_id: &str, name: &str) -> String {
-        // `h` binds the channel; `name` is required by `handle_workflow_def`
-        // (it rejects "missing workflow name" before parsing YAML). We use the
-        // `name` tag, not `d`: the server *generates* the workflow id, and that
-        // generated id — not any client-supplied `d` — is the handle this row
-        // confines. A `d` tag here would falsely imply the trigger resolves by
-        // client key.
+        let workflow_id = uuid::Uuid::new_v4().to_string();
         let event = EventBuilder::new(Kind::Custom(KIND_WORKFLOW_DEF), workflow_yaml(name))
             .tags(vec![
+                Tag::parse(["d", &workflow_id]).unwrap(),
                 Tag::parse(["h", channel_id]).unwrap(),
                 Tag::parse(["name", name]).unwrap(),
             ])
