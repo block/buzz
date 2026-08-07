@@ -1371,6 +1371,7 @@ fn any_respawn_in_flight(crash_history: &[SlotCircuit]) -> bool {
 /// Result of a background respawn task.
 struct RespawnResult {
     index: usize,
+    desired_model: Option<String>,
     /// Tuple: (initialized client, protocol version, agent name).
     result: Result<(AcpClient, u32, String)>,
 }
@@ -1400,14 +1401,16 @@ struct SteerAckEvent {
 /// permanently, silently losing the slot forever.
 struct RespawnGuard {
     index: usize,
+    desired_model: Option<String>,
     tx: mpsc::Sender<RespawnResult>,
     sent: bool,
 }
 
 impl RespawnGuard {
-    fn new(index: usize, tx: mpsc::Sender<RespawnResult>) -> Self {
+    fn new(index: usize, desired_model: Option<String>, tx: mpsc::Sender<RespawnResult>) -> Self {
         Self {
             index,
+            desired_model,
             tx,
             sent: false,
         }
@@ -1423,6 +1426,7 @@ impl RespawnGuard {
         // respawn_in_flight guard has drifted — that's a bug, not a transient.
         match self.tx.try_send(RespawnResult {
             index: self.index,
+            desired_model: self.desired_model.clone(),
             result,
         }) {
             Ok(()) => self.sent = true,
@@ -1447,6 +1451,7 @@ impl Drop for RespawnGuard {
             // Best-effort: try_send in Drop (can't await).
             let _ = self.tx.try_send(RespawnResult {
                 index: self.index,
+                desired_model: self.desired_model.clone(),
                 result: Err(anyhow::anyhow!("respawn task panicked or was cancelled")),
             });
         }
@@ -2060,7 +2065,7 @@ async fn tokio_main() -> Result<()> {
                 let env = config.persona_env_vars.clone();
                 let has_codex = config.has_generated_codex_config;
                 let observer = observer.clone();
-                let guard = RespawnGuard::new(idx, respawn_tx.clone());
+                let guard = RespawnGuard::new(idx, config.model.clone(), respawn_tx.clone());
                 respawn_tasks.spawn(async move {
                     let result = spawn_and_init(&cmd, &args, &env, has_codex, idx, observer).await;
                     guard.send(result);
@@ -2091,7 +2096,7 @@ async fn tokio_main() -> Result<()> {
                         acp,
                         state: SessionState::default(),
                         model_capabilities: None,
-                        desired_model: config.model.clone(),
+                        desired_model: rr.desired_model,
                         model_overridden: false,
                         agent_name,
                         goose_system_prompt_supported: None,
@@ -3411,6 +3416,10 @@ fn handle_prompt_result(
     // branch below records what actually happened; only the hard-timeout
     // match arm in the death_message construction reads it.
     let mut hard_timeout_fate_suffix: Option<&'static str> = None;
+    let failover_available = config
+        .fallback_model
+        .as_ref()
+        .is_some_and(|fallback| result.agent.desired_model.as_ref() != Some(fallback));
 
     // Requeue BEFORE mark_complete: requeue() sets retry_after with a future
     // deadline, and mark_complete() checks for it to decide whether to preserve
@@ -3446,7 +3455,8 @@ fn handle_prompt_result(
                 PromptOutcome::Timeout(TimeoutKind::Hard {
                     recently_active: false
                 })
-            ) {
+            ) && !failover_available
+            {
                 tracing::error!(
                     channel_id = %batch.channel_id,
                     events = batch.events.len(),
@@ -3464,11 +3474,16 @@ fn handle_prompt_result(
                 PromptOutcome::Timeout(TimeoutKind::Hard {
                     recently_active: true
                 })
-            ) {
+            ) || (matches!(
+                result.outcome,
+                PromptOutcome::Timeout(TimeoutKind::Hard { .. })
+            ) && failover_available)
+            {
                 tracing::warn!(
                     channel_id = %batch.channel_id,
                     events = batch.events.len(),
-                    "hard-cap timeout with recent activity — requeueing for retry"
+                    failover_available,
+                    "hard-cap timeout — requeueing for retry"
                 );
                 if let Some(dead) = queue.requeue(batch) {
                     let content = format!(
@@ -3704,18 +3719,22 @@ fn handle_prompt_result(
                     | acp::AcpError::Timeout(_)
                     | acp::AcpError::Protocol(_)
             );
+            let is_primary_model_error = failover_available
+                && matches!(e, acp::AcpError::AgentError { .. })
+                && !is_auth_error(e);
             let error_code = match &e {
                 acp::AcpError::AgentError { code, .. } => Some(*code),
                 _ => None,
             };
-            if is_transport_error {
+            if is_transport_error || is_primary_model_error {
                 tracing::warn!(
                     agent = agent_index,
                     outcome = outcome_label,
                     configured_model = %harness_configured_model,
                     pid = harness_pid,
                     error = %e,
-                    "transport/protocol error — respawning agent"
+                    failover = is_primary_model_error,
+                    "fatal agent error — respawning agent"
                 );
                 emit_turn_error(&e.to_string(), error_code);
 
@@ -3840,7 +3859,11 @@ fn recover_panicked_agent(
     let args = config.agent_args.clone();
     let env = config.persona_env_vars.clone();
     let has_codex = config.has_generated_codex_config;
-    let guard = RespawnGuard::new(i, respawn_tx.clone());
+    let desired_model = config
+        .fallback_model
+        .clone()
+        .or_else(|| config.model.clone());
+    let guard = RespawnGuard::new(i, desired_model, respawn_tx.clone());
     respawn_tasks.spawn(async move {
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
@@ -4001,6 +4024,18 @@ fn default_heartbeat_prompt() -> String {
 /// The result comes back through `respawn_tx` so the main loop stays responsive.
 ///
 /// Returns `true` if a respawn task was spawned, `false` if the circuit is open.
+fn next_model_after_fatal_failure(
+    current: Option<String>,
+    primary: Option<&String>,
+    fallback: Option<&String>,
+) -> Option<String> {
+    fallback
+        .filter(|fallback| current.as_ref() != Some(*fallback))
+        .cloned()
+        .or(current)
+        .or_else(|| primary.cloned())
+}
+
 fn spawn_respawn_task(
     old_agent: OwnedAgent,
     config: &Config,
@@ -4010,6 +4045,21 @@ fn spawn_respawn_task(
     observer: Option<observer::ObserverHandle>,
 ) -> bool {
     let index = old_agent.index;
+    let previous_model = old_agent.desired_model.clone();
+    let desired_model = next_model_after_fatal_failure(
+        previous_model,
+        config.model.as_ref(),
+        config.fallback_model.as_ref(),
+    );
+
+    if desired_model != old_agent.desired_model {
+        tracing::warn!(
+            agent = index,
+            from_model = ?old_agent.desired_model,
+            to_model = ?desired_model,
+            "activating same-harness fallback model"
+        );
+    }
 
     // Circuit breaker: record crash, decide whether to respawn.
     let delay = match slot.record_crash() {
@@ -4034,7 +4084,7 @@ fn spawn_respawn_task(
     let args = config.agent_args.clone();
     let env = config.persona_env_vars.clone();
     let has_codex = config.has_generated_codex_config;
-    let guard = RespawnGuard::new(index, respawn_tx.clone());
+    let guard = RespawnGuard::new(index, desired_model, respawn_tx.clone());
     respawn_tasks.spawn(async move {
         // Shutdown old agent (reap child, prevent zombie).
         let mut agent = old_agent;
@@ -4061,6 +4111,31 @@ fn normalized_agent_name(init_result: &serde_json::Value) -> String {
         .unwrap_or("unknown")
         .trim()
         .to_ascii_lowercase()
+}
+
+#[cfg(test)]
+mod model_fallback_tests {
+    use super::next_model_after_fatal_failure;
+
+    #[test]
+    fn primary_failure_selects_fallback() {
+        let primary = "deepseek-v4-flash:cloud".to_string();
+        let fallback = "minimax-m3:cloud".to_string();
+        assert_eq!(
+            next_model_after_fatal_failure(Some(primary.clone()), Some(&primary), Some(&fallback),),
+            Some(fallback)
+        );
+    }
+
+    #[test]
+    fn fallback_failure_does_not_loop_back_to_primary() {
+        let primary = "deepseek-v4-flash:cloud".to_string();
+        let fallback = "minimax-m3:cloud".to_string();
+        assert_eq!(
+            next_model_after_fatal_failure(Some(fallback.clone()), Some(&primary), Some(&fallback),),
+            Some(fallback)
+        );
+    }
 }
 
 async fn shutdown_agent_slots(slots: &mut [Option<OwnedAgent>]) {
@@ -6198,6 +6273,7 @@ mod build_mcp_servers_tests {
             typing_enabled: true,
             memory_enabled: false,
             model: None,
+            fallback_model: None,
             session_title: None,
             permission_mode: config::PermissionMode::DontAsk,
             respond_to: config::RespondTo::Anyone,
@@ -6420,6 +6496,7 @@ mod error_outcome_emission_tests {
             typing_enabled: true,
             memory_enabled: false,
             model: None,
+            fallback_model: None,
             session_title: None,
             permission_mode: config::PermissionMode::DontAsk,
             respond_to: config::RespondTo::Anyone,

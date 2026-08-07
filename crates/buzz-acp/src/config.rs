@@ -418,6 +418,11 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_MODEL")]
     pub model: Option<String>,
 
+    /// Same-harness model to use after the primary model returns a provider
+    /// error, times out, or loses its transport. Remains active until restart.
+    #[arg(long, env = "BUZZ_ACP_FALLBACK_MODEL")]
+    pub fallback_model: Option<String>,
+
     /// Title for the agent's ACP sessions, passed out-of-band in `session/new`
     /// `_meta`. Adapters that recognize it name the session after this value;
     /// others ignore it. Never enters the prompt.
@@ -527,6 +532,8 @@ pub struct Config {
     pub memory_enabled: bool,
     /// Desired LLM model ID. Applied after every `session_new_full()`.
     pub model: Option<String>,
+    /// Same-harness model selected after a fatal primary-model failure.
+    pub fallback_model: Option<String>,
     /// Sanitized session title, sent as `_meta.sessionTitle` on `session/new`.
     /// `None` when unset or when the configured value sanitized to empty.
     pub session_title: Option<String>,
@@ -1088,6 +1095,12 @@ impl Config {
             typing_enabled: !args.no_typing,
             memory_enabled: args.memory && !args.no_memory,
             model,
+            fallback_model: args
+                .fallback_model
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
             session_title: args
                 .session_title
                 .as_deref()
@@ -1125,7 +1138,7 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} fallback_model={} permission_mode={} {}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
@@ -1145,6 +1158,7 @@ impl Config {
             self.typing_enabled,
             self.memory_enabled,
             self.model.as_deref().unwrap_or("(agent default)"),
+            self.fallback_model.as_deref().unwrap_or("(none)"),
             self.permission_mode,
             respond_to_detail,
             allowed_respond_to_detail,
@@ -1462,6 +1476,7 @@ mod tests {
             typing_enabled: true,
             memory_enabled: true,
             model: None,
+            fallback_model: None,
             session_title: None,
             permission_mode: PermissionMode::DontAsk,
             respond_to: RespondTo::Anyone,
@@ -2184,6 +2199,19 @@ channels = "ALL"
             "120",
         ]);
         assert_eq!(configured.exit_after_inactivity, 120);
+    }
+
+    #[test]
+    fn fallback_model_accepts_cli_value() {
+        let key = "0".repeat(64);
+        let args = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            &key,
+            "--fallback-model",
+            "minimax-m3:cloud",
+        ]);
+        assert_eq!(args.fallback_model.as_deref(), Some("minimax-m3:cloud"));
     }
 
     #[test]
