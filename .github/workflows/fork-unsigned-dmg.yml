@@ -1,0 +1,56 @@
+name: Fork unsigned DMG
+
+on:
+  push:
+    tags:
+      - "fork-desktop-v[0-9]*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build unsigned macOS DMG
+    if: github.repository == 'atlas-maxjb/buzz'
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ github.ref_name }}
+      TAURI_BUNDLER_DMG_IGNORE_CI: "true"
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+      MACOSX_DEPLOYMENT_TARGET: "10.15"
+      CMAKE_OSX_DEPLOYMENT_TARGET: "10.15"
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+
+      - name: Install desktop dependencies
+        run: just desktop-install-ci
+
+      - name: Set application version
+        run: |
+          VERSION="${VERSION#fork-desktop-v}"
+          cd desktop
+          node scripts/set-version-from-tag.mjs "$VERSION"
+          cd src-tauri
+          cargo update --workspace
+
+      - name: Build sidecars
+        run: |
+          cargo build --release -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli
+          ./scripts/bundle-sidecars.sh
+
+      - name: Build unsigned DMG
+        run: cd desktop && pnpm tauri build --verbose --no-sign --config src-tauri/tauri.conf.json
+
+      - name: Upload DMG to fork release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          DMG=$(find desktop/src-tauri/target/release/bundle/dmg -name '*.dmg' -type f | head -1)
+          test -n "$DMG"
+          gh release upload "$GITHUB_REF_NAME" "$DMG" --repo "$GITHUB_REPOSITORY" --clobber

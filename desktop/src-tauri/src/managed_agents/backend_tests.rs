@@ -160,7 +160,7 @@ esac"#,
 
     let id = provider_deploy(&provider, &serde_json::json!({}), &serde_json::json!({}))
         .expect("staged deploy");
-    assert_eq!(id, "remote-1");
+    assert_eq!(id.agent_id, "remote-1");
     let paths: Vec<_> = std::fs::read_to_string(log)
         .unwrap()
         .lines()
@@ -173,6 +173,29 @@ esac"#,
         !Path::new(&paths[0]).exists(),
         "staging directory must be deleted"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn provider_enrollment_uses_explicit_one_time_operation() {
+    let directory = tempfile::tempdir().unwrap();
+    let provider = directory.path().join("provider");
+    let seen = directory.path().join("operation");
+    let body = format!(
+        r#"read request
+case "$request" in
+  *\"op\":\"info\"*) printf '%s\n' '{{"ok":true,"name":"openclaw","version":"1","protocol_version":1,"description":"enrollment","config_schema":{{}},"enrollment":{{"operation":"enroll","one_time":true,"credential_fields":["private_key_nsec","auth_tag","relay_url"]}}}}' ;;
+  *\"op\":\"enroll\"*) printf enroll > '{}'; printf '%s\n' '{{"ok":true,"agent_id":"openclaw-1"}}' ;;
+  *) exit 2 ;;
+esac"#,
+        seen.display()
+    );
+    write_test_provider(&provider, &body);
+
+    let id = provider_deploy(&provider, &serde_json::json!({}), &serde_json::json!({}))
+        .expect("staged enrollment");
+    assert_eq!(id.agent_id, "openclaw-1");
+    assert_eq!(std::fs::read_to_string(seen).unwrap(), "enroll");
 }
 
 #[cfg(unix)]
@@ -216,7 +239,7 @@ esac"#,
     let id = provider_deploy(&provider, &serde_json::json!({}), &serde_json::json!({}))
         .expect("deploy from immutable staged copy");
 
-    assert_eq!(id, "original-staged-bytes");
+    assert_eq!(id.agent_id, "original-staged-bytes");
     assert_eq!(
         std::fs::metadata(&provider).unwrap().ino(),
         inode_before,
@@ -257,7 +280,7 @@ esac"#,
     let id = provider_deploy(&provider, &serde_json::json!({}), &serde_json::json!({}))
         .expect("deploy from immutable staged copy");
 
-    assert_eq!(id, "original-staged-bytes");
+    assert_eq!(id.agent_id, "original-staged-bytes");
     assert_ne!(
         std::fs::metadata(&provider).unwrap().ino(),
         inode_before,

@@ -10,7 +10,7 @@ const STDERR_CAP: usize = 65536;
 const STDOUT_CAP: usize = 1_048_576; // 1 MB
 const PROVIDER_PROTOCOL_VERSION: u64 = 1;
 
-fn validate_provider_info(info: &serde_json::Value) -> Result<(), String> {
+pub fn validate_provider_info(info: &serde_json::Value) -> Result<(), String> {
     let object = info
         .as_object()
         .ok_or_else(|| "provider info response must be a JSON object".to_string())?;
@@ -45,6 +45,38 @@ fn validate_provider_info(info: &serde_json::Value) -> Result<(), String> {
         return Err("provider info response missing object config_schema".to_string());
     }
 
+    // Providers that can import an agent into an existing remote runtime may
+    // opt into the one-shot enrollment operation. Keep this capability
+    // explicit and closed-world: a provider cannot silently change the
+    // meaning of the secret-bearing deploy request.
+    if let Some(enrollment) = object.get("enrollment") {
+        let enrollment = enrollment
+            .as_object()
+            .ok_or_else(|| "provider enrollment must be an object".to_string())?;
+        if enrollment.get("operation").and_then(serde_json::Value::as_str) != Some("enroll")
+            || enrollment.get("one_time") != Some(&serde_json::Value::Bool(true))
+        {
+            return Err(
+                "provider enrollment must declare operation: enroll and one_time: true".to_string(),
+            );
+        }
+        if let Some(fields) = enrollment.get("credential_fields") {
+            let fields = fields.as_array().ok_or_else(|| {
+                "provider enrollment credential_fields must be an array".to_string()
+            })?;
+            if fields.iter().any(|field| field.as_str().is_none()) {
+                return Err(
+                    "provider enrollment credential_fields must contain strings".to_string(),
+                );
+            }
+        }
+        if enrollment.keys().any(|field| {
+            !["operation", "one_time", "credential_fields"].contains(&field.as_str())
+        }) {
+            return Err("provider enrollment contains an unknown field".to_string());
+        }
+    }
+
     const FIELDS: &[&str] = &[
         "ok",
         "name",
@@ -52,6 +84,7 @@ fn validate_provider_info(info: &serde_json::Value) -> Result<(), String> {
         "protocol_version",
         "description",
         "config_schema",
+        "enrollment",
     ];
     if let Some(field) = object
         .keys()
@@ -506,11 +539,16 @@ fn stage_provider(
 
 /// Deploy through one immutable staged copy: negotiate protocol v1 before the
 /// secret-bearing request, then invoke deploy on those exact same bytes.
+pub struct ProviderDeployResult {
+    pub agent_id: String,
+    pub enrollment_command: Option<String>,
+}
+
 pub fn provider_deploy(
     binary: &Path,
     agent: &serde_json::Value,
     provider_config: &serde_json::Value,
-) -> Result<String, String> {
+) -> Result<ProviderDeployResult, String> {
     let (_directory, staged, _digest, _execution_guard) = stage_provider(binary)?;
     let info_request = serde_json::json!({
         "op": "info",
@@ -519,17 +557,25 @@ pub fn provider_deploy(
     let info = invoke_provider(&staged, &info_request, Duration::from_secs(10))?;
     validate_provider_info(&info)?;
 
-    let request = serde_json::json!({
-        "op": "deploy",
+    let enrollment = info.get("enrollment").is_some();
+    let mut request = serde_json::json!({
+        "op": if enrollment { "enroll" } else { "deploy" },
         "request_id": uuid::Uuid::new_v4().to_string(),
         "agent": agent,
         "provider_config": provider_config,
     });
+    if enrollment {
+        request["enrollment"] = serde_json::json!({ "version": 1, "mode": "one-time" });
+    }
     let resp = invoke_provider(&staged, &request, Duration::from_secs(600))?;
-    resp["agent_id"]
+    let agent_id = resp["agent_id"]
         .as_str()
         .map(String::from)
-        .ok_or_else(|| "deploy response missing agent_id".to_string())
+        .ok_or_else(|| "deploy response missing agent_id".to_string())?;
+    Ok(ProviderDeployResult {
+        agent_id,
+        enrollment_command: resp["enrollment_command"].as_str().map(String::from),
+    })
 }
 
 /// Validate provider_config: flat object, scalar values, no secret-like keys.
