@@ -5,10 +5,13 @@
  * state is available; on first-ever launch it falls back to this black default.
  *
  * Kept as a linked stylesheet (not an inline <style>) so that Tauri's
- * build-time asset processing does not add a 'sha256-…' source to style-src.
- * Per the CSP spec a hash or nonce in a directive causes the browser to ignore
- * 'unsafe-inline', which would block TipTap's runtime stylesheet injection and
- * emoji-mart's shadow-root styles in packaged builds.
+ * build-time asset processing does not inject a nonce token into this element.
+ * Tauri nonces inline <style> elements and adds the corresponding 'nonce-…'
+ * source to style-src at runtime; per the CSP spec a nonce in a directive
+ * causes the browser to ignore 'unsafe-inline', which would block TipTap's
+ * runtime stylesheet injection and emoji-mart's shadow-root styles in packaged
+ * builds. The inline boot script is SHA-256 hashed (not nonced) — that path
+ * only applies to scripts, not stylesheets.
  */
 html {
   background-color: #000;

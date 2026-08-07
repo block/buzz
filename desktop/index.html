@@ -13,11 +13,8 @@
       CSS loads, so this never shows through after boot.
 
       The linked stylesheet (boot.css) applies the initial black background.
-      Keeping it as a <link> rather than an inline <style> prevents Tauri's
-      build-time asset processing from adding a 'sha256-…' source to style-src:
-      per the CSP spec a hash in a directive makes the browser ignore
-      'unsafe-inline', which would block TipTap's runtime stylesheet injection
-      and emoji-mart's shadow-root styles in packaged builds.
+      Kept as a <link> rather than an inline <style> to avoid Tauri's nonce
+      injection for style-src (see boot.css for the full rationale).
 
       The inline script below reads the cached theme background (same
       `buzz-theme-cache` entry ThemeProvider writes) and applies it synchronously
