@@ -66,6 +66,12 @@ import {
 import { ExternalLinkAnchor } from "./markdown/ExternalLinkAnchor";
 import { FileCard } from "./markdown/FileCard";
 import { InlineEmojiPopover } from "./markdown/InlineEmojiPopover";
+import {
+  MarkdownBlockquote,
+  MarkdownListItem,
+  MarkdownOrderedList,
+  MarkdownUnorderedList,
+} from "./markdown/directionalBlocks";
 import { MarkdownInput } from "./markdown/MarkdownInput";
 import {
   MediaContextMenu,
@@ -1280,9 +1286,6 @@ function createMarkdownComponents(
   interactive = true,
   mediaInset = false,
 ): Components {
-  const listItemClassName = "[&_p]:inline";
-  const listClassName = "space-y-1 pl-6 marker:text-muted-foreground/80";
-
   function MarkdownAnchor({
     children,
     href,
@@ -1436,11 +1439,7 @@ function createMarkdownComponents(
       </SpoilerInline>
     ),
     a: MarkdownAnchor,
-    blockquote: ({ children }) => (
-      <blockquote className="border-l-2 border-border pl-4 italic text-muted-foreground [&>*:first-child]:mt-0 [&>*+*]:mt-2">
-        {children}
-      </blockquote>
-    ),
+    blockquote: MarkdownBlockquote,
     br: () => <br />,
     code: ({ children, className, ...props }: React.ComponentProps<"code">) => {
       const rawCode = String(children);
@@ -1548,10 +1547,8 @@ function createMarkdownComponents(
       );
     },
     input: MarkdownInput,
-    li: ({ children }) => <li className={listItemClassName}>{children}</li>,
-    ol: ({ children }) => (
-      <ol className={cn("list-decimal", listClassName)}>{children}</ol>
-    ),
+    li: MarkdownListItem,
+    ol: MarkdownOrderedList,
     p: ({ children }) => {
       // Detect media-only paragraphs (images + <br> from remarkBreaks).
       // Multi-image: render as a compact, count-aware mosaic. Two images split
@@ -1601,9 +1598,7 @@ function createMarkdownComponents(
         {children}
       </th>
     ),
-    ul: ({ children }) => (
-      <ul className={cn("list-disc", listClassName)}>{children}</ul>
-    ),
+    ul: MarkdownUnorderedList,
     mention: function MarkdownMention({
       children,
     }: {

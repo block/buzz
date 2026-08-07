@@ -492,6 +492,13 @@ export function useRichTextEditor({
           autocorrect: "off",
           class: `${MESSAGE_MARKDOWN_CLASS} min-h-0 resize-none overflow-y-hidden border-0 bg-transparent px-0 py-0 text-sm leading-5 text-foreground shadow-none focus-visible:ring-0 caret-foreground outline-hidden max-w-none`,
           "data-testid": "message-input",
+          // The `unicode-bidi: plaintext` rule already gives each paragraph its
+          // own direction, but ProseMirror renders its own list nodes rather
+          // than the markdown components that carry `dir="auto"`, so a list
+          // typed in RTL would keep its markers and indent on the left. `auto`
+          // on the root sets `direction` from the draft's first strong
+          // character, which is what the marker side follows.
+          dir: "auto",
           spellcheck: "true",
         },
         // ArrowUp in an empty composer → edit your last message (Slack

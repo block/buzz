@@ -146,9 +146,13 @@
   margin: 0.25rem 0;
 }
 
+/* Logical, not physical: the editor root carries `dir="auto"`, so an RTL draft
+   flips `direction` and the quote bar, bullets, and their indent have to follow
+   it. With `padding-left` the markers stayed pinned to the left edge while the
+   text moved right, which renders them outside the padded area. */
 .rich-text-composer .tiptap blockquote {
-  border-left: 2px solid hsl(var(--border));
-  padding-left: 1rem;
+  border-inline-start: 2px solid hsl(var(--border));
+  padding-inline-start: 1rem;
   font-style: italic;
   color: hsl(var(--muted-foreground));
   margin: 0.25rem 0;
@@ -156,13 +160,13 @@
 
 .rich-text-composer .tiptap ul {
   list-style-type: disc;
-  padding-left: 1.5rem;
+  padding-inline-start: 1.5rem;
   margin: 0.25rem 0;
 }
 
 .rich-text-composer .tiptap ol {
   list-style-type: decimal;
-  padding-left: 1.5rem;
+  padding-inline-start: 1.5rem;
   margin: 0.25rem 0;
 }
 
