@@ -21,19 +21,20 @@ use buzz_core::kind::{
     KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN,
     KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES, KIND_HUDDLE_PARTICIPANT_JOINED,
     KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED, KIND_IA_ARCHIVE_REQUEST,
-    KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT, KIND_MEMBER_ADDED_NOTIFICATION,
-    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT,
-    KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST,
-    KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT, KIND_NIP29_DELETE_GROUP,
-    KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST, KIND_NIP29_LEAVE_REQUEST,
-    KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER, KIND_NIP43_LEAVE_REQUEST,
-    KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST, KIND_PRESENCE_UPDATE,
-    KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_PROJECT, KIND_REACTION, KIND_READ_STATE, KIND_REPORT,
-    KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF,
-    KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED,
-    KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEAM_CATALOG, KIND_TEXT_NOTE,
-    KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER,
-    RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+    KIND_IA_UNARCHIVE_REQUEST, KIND_LABEL, KIND_LONG_FORM, KIND_MANAGED_AGENT,
+    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN,
+    KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN,
+    KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST, KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT,
+    KIND_NIP29_DELETE_GROUP, KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST,
+    KIND_NIP29_LEAVE_REQUEST, KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER,
+    KIND_NIP43_LEAVE_REQUEST, KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST,
+    KIND_PRESENCE_UPDATE, KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_PROJECT, KIND_REACTION,
+    KIND_READ_STATE, KIND_REPORT, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED,
+    KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED,
+    KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM,
+    KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+    RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
+    RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
@@ -272,6 +273,11 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         // Ingest persists them to `moderation_reports` and suppresses public
         // storage/fanout; reports are signals, never enforcement triggers.
         KIND_REPORT | KIND_PRODUCT_FEEDBACK => Ok(Scope::MessagesWrite),
+        // NIP-32 labels are ordinary member writes. Deliberately NOT routed like
+        // kind:1984 above: a report is a private signal to moderators, a label is a
+        // public claim, so it takes the normal store-and-fanout path and is subject
+        // to the same membership gate as any other message write.
+        KIND_LABEL => Ok(Scope::MessagesWrite),
         // Community moderation commands are direct, mod-authz-gated writes.
         // Scope only proves the transport can submit message writes; the
         // command handler owns role/capability authorization.
@@ -3582,6 +3588,51 @@ mod tests {
             required_scope_for_kind(KIND_PRESENCE_UPDATE, &dummy).is_err(),
             "KIND_PRESENCE_UPDATE should not be in the scope allowlist"
         );
+    }
+
+    /// NIP-32 labels are accepted as ordinary member writes.
+    ///
+    /// `required_scope_for_kind` returns `Err` for unknown kinds and the relay rejects them,
+    /// so without this arm a kind:1985 event is refused at ingest and the advertised NIP-32
+    /// support in the NIP-11 document would be a lie.
+    #[test]
+    fn nip32_labels_are_accepted_as_member_writes() {
+        let dummy = make_dummy_event();
+        assert_eq!(
+            required_scope_for_kind(KIND_LABEL, &dummy).unwrap(),
+            Scope::MessagesWrite,
+            "kind:1985 must be a normal message write — same gate as any other member event"
+        );
+    }
+
+    /// A label must not be swallowed by any of the special routing branches.
+    ///
+    /// Every diversion in `handle_event` is keyed on `kind_u32 == KIND_X` — reports go to a
+    /// moderation queue and are suppressed from fanout, gift wraps take a private path, and
+    /// so on. A label is a PUBLIC claim and must take the ordinary store-and-fanout path, so
+    /// it must collide with none of those kinds.
+    ///
+    /// LIMIT, stated rather than implied: this proves no EXISTING branch catches a label. It
+    /// cannot prove a future one will not — that needs an integration test over the full
+    /// ingest path, which this unit test is not. An earlier version of this test tried to
+    /// prove it by grepping its own source file with `include_str!`, which failed for the
+    /// funniest possible reason: the file contains the needle, inside the assertion itself.
+    #[test]
+    fn nip32_labels_are_not_swallowed_by_a_routing_branch() {
+        for (name, other) in [
+            ("KIND_REPORT", KIND_REPORT),
+            ("KIND_PRODUCT_FEEDBACK", KIND_PRODUCT_FEEDBACK),
+            ("KIND_GIFT_WRAP", KIND_GIFT_WRAP),
+            ("KIND_PRESENCE_UPDATE", KIND_PRESENCE_UPDATE),
+            ("KIND_REACTION", KIND_REACTION),
+            ("KIND_AUTH", KIND_AUTH),
+        ] {
+            assert_ne!(
+                KIND_LABEL, other,
+                "kind:1985 collides with {name}, so labels would inherit its routing \
+                 instead of being stored and fanned out normally"
+            );
+        }
     }
 
     #[test]

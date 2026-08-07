@@ -326,6 +326,21 @@ pub const KIND_TEAM_CATALOG: u32 = 30178;
 /// the relay never auto-actions on them (NIP-56).
 pub const KIND_REPORT: u32 = 1984;
 
+// NIP-32 labelling
+/// NIP-32: Label an event, pubkey, or address (kind:1985).
+///
+/// The general attestation primitive: `L` names a namespace, `l` carries the
+/// value, and the target is a `p` / `e` / `a` / `r` / `t` tag. Where kind:1984
+/// carries a complaint to moderators, kind:1985 carries an arbitrary claim, and
+/// unlike a report it is an ordinary member write — stored and fanned out like
+/// any other event, with no moderation queue and no special casing.
+///
+/// Relevant here because a relay may label a pubkey *with its own key*: paired
+/// with the NIP-11 `self` identity this relay already publishes, that makes a
+/// label attributable to the relay that issued it rather than merely to some
+/// keypair. That is the one thing a reader cannot otherwise establish.
+pub const KIND_LABEL: u32 = 1985;
+
 /// Buzz product feedback submission. Accepted at ingest, sidecarred to the
 /// deployment feedback table, and never stored or fanned out as an event.
 pub const KIND_PRODUCT_FEEDBACK: u32 = 42000;
@@ -658,6 +673,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_TEAM_CATALOG,
     KIND_PRIVATE_MANAGED_AGENT,
     KIND_REPORT,
+    KIND_LABEL,
     KIND_PRODUCT_FEEDBACK,
     KIND_NIP29_PUT_USER,
     KIND_NIP29_REMOVE_USER,

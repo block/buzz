@@ -49,6 +49,7 @@ PGPASSWORD=buzz_dev psql -h localhost -U buzz -d buzz -c \
 | **Group chat (kind:9)** | ✅ | Send/receive messages with `#h <channel-uuid>` tag |
 | **Reactions (kind:7)** | ✅ | Standard NIP-25; channel derived from target event's `#e` tag (client `#h` ignored) |
 | **Deletions (kind:5)** | ✅ | Standard NIP-09; self-authored only. `#h` optional, `#e` required |
+| **Labels (kind:1985)** | ✅ | Standard NIP-32; `L` names the namespace, `l` carries the value, target is a `p`/`e`/`a`/`r`/`t` tag. An ordinary member write — stored and fanned out like any other event, with no moderation queue (unlike kind:1984 reports, which are a private signal to moderators). Include `#h` to scope a label to a channel; without it the label is community-global and will not match a channel-scoped subscription |
 | **User profiles (kind:0)** | ✅ | NIP-01 metadata; synced to users table (display_name, avatar, about, NIP-05). NIP-05 handles must canonicalize to this relay's domain — off-domain or invalid handles are silently cleared. If a NIP-05 handle collides with another user's (UNIQUE constraint), the handle is skipped but other profile fields (display_name, avatar, about) are still synced. |
 | **Group creation (kind:9007)** | ✅ | NIP-29; include `name` tag, optional `visibility` and `channel_type` |
 | **Add user (kind:9000)** | ✅ | Open: any user, subject to target's `channel_add_policy` (`owner_only`/`nobody` can block). Private: owner/admin only. Self-add bypasses agent policy but not private-channel auth. |
