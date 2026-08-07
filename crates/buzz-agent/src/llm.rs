@@ -115,7 +115,10 @@ impl Llm {
     pub fn new(cfg: &Config) -> Result<Self, AgentError> {
         let http = Client::builder()
             .connect_timeout(LLM_CONNECT_TIMEOUT)
-            .read_timeout(cfg.llm_timeout)
+            // No client-level read_timeout: we apply a per-request total
+            // timeout via RequestBuilder::timeout() so that escalated budgets
+            // on slow models are not silently floored by a fixed client-level
+            // value. The connect_timeout above still bounds the handshake phase.
             .build()
             .map_err(|e| AgentError::Llm(format!("http: {e}")))?;
         let auth = build_token_source(cfg)?;
@@ -136,11 +139,17 @@ impl Llm {
         effective_model: &str,
     ) -> Result<LlmResponse, AgentError> {
         let effort = cfg.thinking_effort;
+        // Compute the base per-request timeout once. For known slow-generation
+        // models (e.g. claude-fable) this may be larger than cfg.llm_timeout
+        // when the env var was not set explicitly; see Config::effective_llm_timeout.
+        let base_timeout = cfg.effective_llm_timeout(effective_model);
+        let call_start = std::time::Instant::now();
         let result = match cfg.provider {
             Provider::Anthropic => self
                 .post_anthropic(
                     cfg,
                     &anthropic_body(cfg, system_prompt, history, tools, effective_model, effort),
+                    base_timeout,
                 )
                 .await
                 .and_then(parse_anthropic),
@@ -153,7 +162,7 @@ impl Llm {
                     effective_model,
                     cfg.prompt_caching,
                 );
-                self.post_openrouter(cfg, &body)
+                self.post_openrouter(cfg, &body, base_timeout)
                     .await
                     .and_then(parse_openai_with_reasoning_details)
             }
@@ -188,38 +197,58 @@ impl Llm {
                             )
                         }
                     },
+                    base_timeout,
                 )
                 .await
             }
             Provider::DatabricksV2 => {
-                self.databricks_v2_request(cfg, effective_model, |route| match route {
-                    DatabricksV2Route::OpenAiResponses => {
-                        // OpenAI Responses path: normalize effort against the per-model table.
-                        let e =
-                            effort.map(|ef| normalize_effort_for_openai_route(ef, effective_model));
-                        (
-                            responses_body(cfg, system_prompt, history, tools, effective_model, e),
-                            parse_responses as OpenAiParse,
-                        )
-                    }
-                    DatabricksV2Route::AnthropicMessages => {
-                        // Anthropic Messages path: normalize effort (none|minimal → omit).
-                        let e = effort.and_then(normalize_effort_for_anthropic_route);
-                        (
-                            anthropic_body(cfg, system_prompt, history, tools, effective_model, e),
-                            parse_anthropic as OpenAiParse,
-                        )
-                    }
-                    DatabricksV2Route::MlflowChatCompletions => {
-                        // MLflow Chat path (OpenAI-shaped): normalize effort against the per-model table.
-                        let e =
-                            effort.map(|ef| normalize_effort_for_openai_route(ef, effective_model));
-                        (
-                            openai_body(cfg, system_prompt, history, tools, effective_model, e),
-                            parse_openai as OpenAiParse,
-                        )
-                    }
-                })
+                self.databricks_v2_request(
+                    cfg,
+                    effective_model,
+                    |route| match route {
+                        DatabricksV2Route::OpenAiResponses => {
+                            // OpenAI Responses path: normalize effort against the per-model table.
+                            let e = effort
+                                .map(|ef| normalize_effort_for_openai_route(ef, effective_model));
+                            (
+                                responses_body(
+                                    cfg,
+                                    system_prompt,
+                                    history,
+                                    tools,
+                                    effective_model,
+                                    e,
+                                ),
+                                parse_responses as OpenAiParse,
+                            )
+                        }
+                        DatabricksV2Route::AnthropicMessages => {
+                            // Anthropic Messages path: normalize effort (none|minimal → omit).
+                            let e = effort.and_then(normalize_effort_for_anthropic_route);
+                            (
+                                anthropic_body(
+                                    cfg,
+                                    system_prompt,
+                                    history,
+                                    tools,
+                                    effective_model,
+                                    e,
+                                ),
+                                parse_anthropic as OpenAiParse,
+                            )
+                        }
+                        DatabricksV2Route::MlflowChatCompletions => {
+                            // MLflow Chat path (OpenAI-shaped): normalize effort against the per-model table.
+                            let e = effort
+                                .map(|ef| normalize_effort_for_openai_route(ef, effective_model));
+                            (
+                                openai_body(cfg, system_prompt, history, tools, effective_model, e),
+                                parse_openai as OpenAiParse,
+                            )
+                        }
+                    },
+                    base_timeout,
+                )
                 .await
             }
         };
@@ -232,7 +261,7 @@ impl Llm {
         // Every arm above returns its `Result` into this mapper rather than
         // using `?` — an early return would silently skip the stamp, which is
         // exactly what the Anthropic and OpenRouter arms used to do.
-        result.map_err(|e| match e {
+        let stamped = result.map_err(|e| match e {
             AgentError::Llm(s) => AgentError::Llm(format!("({effective_model}) {s}")),
             AgentError::LlmModelNotFound(s) => {
                 AgentError::LlmModelNotFound(format!("({effective_model}) {s}"))
@@ -245,7 +274,25 @@ impl Llm {
                 AgentError::LlmContextExceeded(format!("({effective_model}) {s}"))
             }
             other => other,
-        })
+        });
+        // Emit one INFO event per successful LLM call. This gives operators
+        // visibility into healthy-but-slow generation (which previously logged
+        // nothing at INFO) and provides a wall-clock record even when no error
+        // fires. Token counts use `?`-formatting to preserve the None-vs-zero
+        // distinction: `None` means the provider omitted usage entirely.
+        if let Ok(ref response) = stamped {
+            let duration_ms = call_start.elapsed().as_millis();
+            tracing::info!(
+                model = effective_model,
+                provider = ?cfg.provider,
+                duration_ms,
+                input_tokens = ?response.input_tokens,
+                cached_input_tokens = ?response.cached_input_tokens,
+                output_tokens = ?response.output_tokens,
+                "llm: call completed"
+            );
+        }
+        stamped
     }
 
     pub async fn summarize(
@@ -256,6 +303,12 @@ impl Llm {
         max_output_tokens: u32,
         effective_model: &str,
     ) -> Result<String, AgentError> {
+        // Handoff summarization is bounded by the generic llm_timeout, not the
+        // model-aware slow-model default: summaries are small requests unlikely
+        // to approach the 240 s window, and we don't want to hold the handoff
+        // path open for 600 s on a slow model when the actual call completes
+        // in seconds.
+        let base_timeout = cfg.llm_timeout;
         match cfg.provider {
             Provider::Anthropic => {
                 let body = json!({
@@ -267,7 +320,7 @@ impl Llm {
                         "content": [{ "type": "text", "text": user_prompt }],
                     }],
                 });
-                Ok(parse_anthropic(self.post_anthropic(cfg, &body).await?)?.text)
+                Ok(parse_anthropic(self.post_anthropic(cfg, &body, base_timeout).await?)?.text)
             }
             Provider::OpenRouter => {
                 let body = openrouter_summary_body(
@@ -276,7 +329,7 @@ impl Llm {
                     user_prompt,
                     max_output_tokens,
                 );
-                let v = self.post_openrouter(cfg, &body).await?;
+                let v = self.post_openrouter(cfg, &body, base_timeout).await?;
                 Ok(parse_openai(v)?.text)
             }
             Provider::OpenAi | Provider::Databricks => {
@@ -311,56 +364,67 @@ impl Llm {
                                 )
                             }
                         },
+                        base_timeout,
                     )
                     .await?;
                 Ok(r.text)
             }
             Provider::DatabricksV2 => {
                 let r = self
-                    .databricks_v2_request(cfg, effective_model, |route| match route {
-                        DatabricksV2Route::OpenAiResponses => (
-                            json!({
-                                "model": effective_model,
-                                "max_output_tokens": max_output_tokens,
-                                "instructions": system_prompt,
-                                "input": user_prompt,
-                            }),
-                            parse_responses as OpenAiParse,
-                        ),
-                        DatabricksV2Route::AnthropicMessages => (
-                            json!({
-                                "model": effective_model,
-                                "max_tokens": max_output_tokens,
-                                "system": system_prompt,
-                                "messages": [{
-                                    "role": "user",
-                                    "content": [{ "type": "text", "text": user_prompt }],
-                                }],
-                            }),
-                            parse_anthropic as OpenAiParse,
-                        ),
-                        DatabricksV2Route::MlflowChatCompletions => (
-                            json!({
-                                "model": effective_model,
-                                "stream": false,
-                                "max_completion_tokens": max_output_tokens,
-                                "messages": [
-                                    { "role": "system", "content": system_prompt },
-                                    { "role": "user", "content": user_prompt },
-                                ],
-                            }),
-                            parse_openai as OpenAiParse,
-                        ),
-                    })
+                    .databricks_v2_request(
+                        cfg,
+                        effective_model,
+                        |route| match route {
+                            DatabricksV2Route::OpenAiResponses => (
+                                json!({
+                                    "model": effective_model,
+                                    "max_output_tokens": max_output_tokens,
+                                    "instructions": system_prompt,
+                                    "input": user_prompt,
+                                }),
+                                parse_responses as OpenAiParse,
+                            ),
+                            DatabricksV2Route::AnthropicMessages => (
+                                json!({
+                                    "model": effective_model,
+                                    "max_tokens": max_output_tokens,
+                                    "system": system_prompt,
+                                    "messages": [{
+                                        "role": "user",
+                                        "content": [{ "type": "text", "text": user_prompt }],
+                                    }],
+                                }),
+                                parse_anthropic as OpenAiParse,
+                            ),
+                            DatabricksV2Route::MlflowChatCompletions => (
+                                json!({
+                                    "model": effective_model,
+                                    "stream": false,
+                                    "max_completion_tokens": max_output_tokens,
+                                    "messages": [
+                                        { "role": "system", "content": system_prompt },
+                                        { "role": "user", "content": user_prompt },
+                                    ],
+                                }),
+                                parse_openai as OpenAiParse,
+                            ),
+                        },
+                        base_timeout,
+                    )
                     .await?;
                 Ok(r.text)
             }
         }
     }
 
-    async fn post_anthropic(&self, cfg: &Config, body: &Value) -> Result<Value, AgentError> {
+    async fn post_anthropic(
+        &self,
+        cfg: &Config,
+        body: &Value,
+        base_timeout: std::time::Duration,
+    ) -> Result<Value, AgentError> {
         let url = format!("{}/v1/messages", cfg.base_url.trim_end_matches('/'));
-        post(&self.http, &url, body, false, cfg.llm_timeout, |r| {
+        post(&self.http, &url, body, false, base_timeout, |r| {
             r.header("x-api-key", &cfg.api_key)
                 .header("anthropic-version", &cfg.anthropic_api_version)
         })
@@ -378,6 +442,7 @@ impl Llm {
         effective_model: &str,
         tools_supplied: bool,
         mut build: F,
+        base_timeout: std::time::Duration,
     ) -> Result<LlmResponse, AgentError>
     where
         F: FnMut(bool, &str) -> (Value, OpenAiParse) + Send,
@@ -387,7 +452,7 @@ impl Llm {
             effective_model == MESH_AUTO_MODEL_ID && request_model == MESH_VIRTUAL_MODEL_ID;
 
         let first = self
-            .openai_request_for_model(cfg, &request_model, &mut build)
+            .openai_request_for_model(cfg, &request_model, &mut build, base_timeout)
             .await;
         match first {
             Err(PostError::MeshFallback(detail)) if adaptive_mesh => {
@@ -399,7 +464,7 @@ impl Llm {
                     provider_message = detail,
                     "relay-mesh auto: collective request failed; retrying once with auto"
                 );
-                self.openai_request_for_model(cfg, MESH_AUTO_MODEL_ID, &mut build)
+                self.openai_request_for_model(cfg, MESH_AUTO_MODEL_ID, &mut build, base_timeout)
                     .await
                     .map_err(PostError::into_agent)
             }
@@ -416,7 +481,7 @@ impl Llm {
                     fallback_model = MESH_AUTO_MODEL_ID,
                     "relay-mesh auto: collective response emitted unstructured tool markup; retrying once with auto"
                 );
-                self.openai_request_for_model(cfg, MESH_AUTO_MODEL_ID, &mut build)
+                self.openai_request_for_model(cfg, MESH_AUTO_MODEL_ID, &mut build, base_timeout)
                     .await
                     .map_err(PostError::into_agent)
             }
@@ -568,6 +633,7 @@ impl Llm {
         cfg: &Config,
         request_model: &str,
         build: &mut F,
+        base_timeout: std::time::Duration,
     ) -> Result<LlmResponse, PostError>
     where
         F: FnMut(bool, &str) -> (Value, OpenAiParse) + Send,
@@ -579,14 +645,14 @@ impl Llm {
         if use_responses {
             let (body, parse) = build(true, request_model);
             return parse(
-                self.post_openai(cfg, "/responses", &body, request_model)
+                self.post_openai(cfg, "/responses", &body, request_model, base_timeout)
                     .await?,
             )
             .map_err(PostError::from);
         }
         let (body, parse) = build(false, request_model);
         match self
-            .post_openai(cfg, "/chat/completions", &body, request_model)
+            .post_openai(cfg, "/chat/completions", &body, request_model, base_timeout)
             .await
         {
             Ok(value) => parse(value).map_err(PostError::from),
@@ -595,7 +661,7 @@ impl Llm {
             {
                 let (body, parse) = build(true, request_model);
                 parse(
-                    self.post_openai(cfg, "/responses", &body, request_model)
+                    self.post_openai(cfg, "/responses", &body, request_model, base_timeout)
                         .await?,
                 )
                 .map_err(PostError::from)
@@ -609,6 +675,7 @@ impl Llm {
         cfg: &Config,
         effective_model: &str,
         build: F,
+        base_timeout: std::time::Duration,
     ) -> Result<LlmResponse, AgentError>
     where
         F: FnOnce(DatabricksV2Route) -> (Value, OpenAiParse) + Send,
@@ -616,9 +683,15 @@ impl Llm {
         let route = databricks_v2_route_for_model(effective_model);
         let (body, parse) = build(route);
         parse(
-            self.post_openai(cfg, databricks_v2_path(route), &body, effective_model)
-                .await
-                .map_err(PostError::into_agent)?,
+            self.post_openai(
+                cfg,
+                databricks_v2_path(route),
+                &body,
+                effective_model,
+                base_timeout,
+            )
+            .await
+            .map_err(PostError::into_agent)?,
         )
     }
 
@@ -633,6 +706,7 @@ impl Llm {
         path: &str,
         body: &Value,
         effective_model: &str,
+        base_timeout: std::time::Duration,
     ) -> Result<Value, PostError> {
         let (url, body_owned);
         let body_ref: &Value = match cfg.provider {
@@ -666,7 +740,7 @@ impl Llm {
                 &url,
                 body_ref,
                 effective_model == MESH_VIRTUAL_MODEL_ID,
-                cfg.llm_timeout,
+                base_timeout,
                 |r| r.bearer_auth(&bearer),
             )
             .await
@@ -684,12 +758,17 @@ impl Llm {
         }
     }
 
-    async fn post_openrouter(&self, cfg: &Config, body: &Value) -> Result<Value, AgentError> {
+    async fn post_openrouter(
+        &self,
+        cfg: &Config,
+        body: &Value,
+        base_timeout: std::time::Duration,
+    ) -> Result<Value, AgentError> {
         let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
         let mut bearer = self.auth.bearer().await?;
         let mut refreshed = false;
         loop {
-            match openrouter_post(&self.http, &url, body, &bearer, cfg.llm_timeout).await {
+            match openrouter_post(&self.http, &url, body, &bearer, base_timeout).await {
                 Err(AgentError::LlmAuth(_)) if !refreshed => {
                     refreshed = true;
                     let new_bearer = self.auth.refresh_now(&bearer).await?;
@@ -1713,6 +1792,34 @@ const MAX_RETRIES: u32 = 3;
 const BASE_BACKOFF_MS: u64 = 500;
 const MAX_BACKOFF_MS: u64 = 8_000;
 
+/// Maximum per-request timeout after escalation.
+///
+/// Each attempt that ends with a timeout doubles the budget for the next
+/// attempt: base, 2×base, 4×base, … The escalation is bounded here so a
+/// slow model cannot keep a worker alive indefinitely. The cap is also
+/// applied when `base` already exceeds it (e.g. an operator-set 1500 s stays
+/// 1500 s instead of being truncated to 1200 s — we never shrink the budget).
+const ESCALATION_TIMEOUT_CAP: std::time::Duration = std::time::Duration::from_secs(1200);
+
+/// Compute the per-attempt timeout after `timeout_failures` prior attempts
+/// timed out.
+///
+/// The budget doubles for every timeout failure: `base × 2^timeout_failures`.
+/// Non-timeout retryable failures (429, 5xx, connect resets) are not counted
+/// here — they are not evidence of a slow model. The budget is capped at
+/// `max(ESCALATION_TIMEOUT_CAP, base)` so a base already above the cap is
+/// preserved as-is.
+///
+/// Examples at base = 240 s: 0 failures → 240 s; 1 → 480 s; 2 → 960 s; 3 → 1200 s.
+fn escalated_timeout(base: std::time::Duration, timeout_failures: u32) -> std::time::Duration {
+    // `checked_shl` returns None when the shift would overflow u32; saturate to
+    // u32::MAX so the cap below clamps it rather than panicking or wrapping.
+    let multiplier = 1u32.checked_shl(timeout_failures).unwrap_or(u32::MAX);
+    let scaled = base.saturating_mul(multiplier);
+    let cap = ESCALATION_TIMEOUT_CAP.max(base);
+    scaled.min(cap)
+}
+
 async fn backoff_with_jitter(attempt: u32) {
     let base = BASE_BACKOFF_MS
         .saturating_mul(1u64 << attempt)
@@ -1752,15 +1859,17 @@ enum TimeoutPhase {
 
 /// Pure function: build the human-readable timeout message for an LLM call.
 ///
-/// Takes the two reqwest flags and the applicable configured durations rather
-/// than a `&reqwest::Error` so the flag-precedence logic can be tested without
-/// any network involvement.
+/// Takes the two reqwest flags and the per-request total timeout rather than a
+/// `&reqwest::Error` so the flag-precedence logic can be tested without any
+/// network involvement.
 ///
-/// `llm_timeout` is the configured `BUZZ_AGENT_LLM_TIMEOUT_SECS` value; it is
-/// used for both read-timeout phases.  Connect timeouts use `LLM_CONNECT_TIMEOUT`.
+/// `per_request_timeout` is the `RequestBuilder::timeout()` value applied to
+/// the attempt that fired; this is computed by `escalated_timeout` and may be
+/// larger than `cfg.llm_timeout` when earlier attempts already timed out.
+/// Connect timeouts use `LLM_CONNECT_TIMEOUT`.
 fn timeout_message(
     is_connect: bool,
-    llm_timeout: std::time::Duration,
+    per_request_timeout: std::time::Duration,
     phase: TimeoutPhase,
 ) -> String {
     if is_connect {
@@ -1770,11 +1879,13 @@ fn timeout_message(
     } else {
         match phase {
             TimeoutPhase::Transport => format!(
-                "read timeout: no response bytes received within {llm_timeout:?} \
+                "read timeout: no response bytes received within {per_request_timeout:?} \
                  (consider raising BUZZ_AGENT_LLM_TIMEOUT_SECS)"
             ),
+            // Total-request timeout fired during body streaming: the response
+            // started but did not complete within the window.
             TimeoutPhase::BodyRead => format!(
-                "read timeout: no further response bytes received within {llm_timeout:?} \
+                "request timed out: response did not complete within {per_request_timeout:?} \
                  (consider raising BUZZ_AGENT_LLM_TIMEOUT_SECS)"
             ),
         }
@@ -1783,18 +1894,22 @@ fn timeout_message(
 
 /// Produce a human-readable description of a transport-layer reqwest error.
 ///
-/// reqwest's `Display` for a `read_timeout` fire is the opaque
+/// reqwest's `Display` for a timeout fire is the opaque
 /// `"error sending request for url (...)"` — the same text as every other
 /// pre-response failure — because the HTTP layer lumps them together.
 /// We replace that string with a factual message that names which kind of
 /// timeout fired, making it immediately obvious in logs whether the client
-/// never connected or whether the server stopped sending bytes.
+/// never connected or whether no response bytes arrived within the window.
 ///
-/// `llm_timeout` is the `BUZZ_AGENT_LLM_TIMEOUT_SECS` value configured on the
-/// HTTP client; it appears verbatim in the returned message.
-fn classify_transport_error(e: &reqwest::Error, llm_timeout: std::time::Duration) -> String {
+/// `per_request_timeout` is the `RequestBuilder::timeout()` value applied to
+/// the attempt that fired; it is the `escalated_timeout` for that attempt and
+/// may be larger than `cfg.llm_timeout` on retried attempts.
+fn classify_transport_error(
+    e: &reqwest::Error,
+    per_request_timeout: std::time::Duration,
+) -> String {
     if e.is_timeout() {
-        timeout_message(e.is_connect(), llm_timeout, TimeoutPhase::Transport)
+        timeout_message(e.is_connect(), per_request_timeout, TimeoutPhase::Transport)
     } else {
         format!("transport: {e}")
     }
@@ -1803,16 +1918,20 @@ fn classify_transport_error(e: &reqwest::Error, llm_timeout: std::time::Duration
 /// Produce a human-readable description of an error that occurred while
 /// reading response body chunks (`resp.chunk()`).
 ///
-/// A timeout here means headers and possibly body bytes arrived but the
-/// stream then stalled past the read timeout.  Any other body-decode failure
-/// preserves the `"body read: ..."` prefix expected by callers and existing
-/// tests.
+/// A timeout here means the total per-request budget expired during body
+/// streaming — headers (and possibly some body bytes) arrived but the response
+/// did not complete within the window. Any other body-decode failure preserves
+/// the `"body read: ..."` prefix expected by callers and existing tests.
 ///
-/// `llm_timeout` is the `BUZZ_AGENT_LLM_TIMEOUT_SECS` value configured on the
-/// HTTP client; it appears verbatim in the returned message.
-fn classify_body_read_error(e: &reqwest::Error, llm_timeout: std::time::Duration) -> String {
+/// `per_request_timeout` is the `RequestBuilder::timeout()` value applied to
+/// the attempt that fired; it is the `escalated_timeout` for that attempt and
+/// may be larger than `cfg.llm_timeout` on retried attempts.
+fn classify_body_read_error(
+    e: &reqwest::Error,
+    per_request_timeout: std::time::Duration,
+) -> String {
     if e.is_timeout() {
-        timeout_message(e.is_connect(), llm_timeout, TimeoutPhase::BodyRead)
+        timeout_message(e.is_connect(), per_request_timeout, TimeoutPhase::BodyRead)
     } else {
         format!("body read: {e}")
     }
@@ -1903,7 +2022,7 @@ async fn post<F>(
     url: &str,
     body: &Value,
     detect_mesh_fallback: bool,
-    read_timeout: std::time::Duration,
+    base_timeout: std::time::Duration,
     apply: F,
 ) -> Result<Value, PostError>
 where
@@ -1912,23 +2031,33 @@ where
     let body_bytes = serde_json::to_vec(body)
         .map_err(|e| PostError::Agent(AgentError::Llm(format!("serialize: {e}"))))?;
     let call_start = std::time::Instant::now();
+    // Count prior attempts that ended with a timeout so we can double the
+    // budget on the next attempt. Non-timeout retryable failures (429, 5xx,
+    // connect resets) are not evidence of a slow model and do NOT escalate.
+    let mut timeout_failures: u32 = 0;
     for attempt in 0..MAX_RETRIES {
+        let per_request_timeout = escalated_timeout(base_timeout, timeout_failures);
         let resp = match apply(
             http.post(url)
                 .header("content-type", "application/json")
-                .body(body_bytes.clone()),
+                .body(body_bytes.clone())
+                .timeout(per_request_timeout),
         )
         .send()
         .await
         {
             Ok(r) => r,
             Err(e) => {
+                if e.is_timeout() {
+                    timeout_failures += 1;
+                }
                 if attempt + 1 < MAX_RETRIES && is_retryable_transport_error(&e) {
                     tracing::warn!(
                         attempt = attempt + 1,
                         max_attempts = MAX_RETRIES,
                         error = %e,
                         is_timeout = e.is_timeout(),
+                        timeout_failures,
                         "llm: transport error, retrying"
                     );
                     backoff_with_jitter(attempt).await;
@@ -1937,7 +2066,7 @@ where
                 return Err(PostError::Agent(terminal_llm_error(
                     call_start.elapsed(),
                     attempt + 1,
-                    &classify_transport_error(&e, read_timeout),
+                    &classify_transport_error(&e, per_request_timeout),
                 )));
             }
         };
@@ -2033,7 +2162,7 @@ where
                     return Err(PostError::Agent(terminal_llm_error(
                         call_start.elapsed(),
                         attempt + 1,
-                        &classify_body_read_error(&e, read_timeout),
+                        &classify_body_read_error(&e, per_request_timeout),
                     )));
                 }
             }
@@ -2131,12 +2260,11 @@ enum OpenRouterErrorClass {
 
 /// Ceiling applied to the server-supplied `Retry-After` header before we
 /// sleep on it. OpenRouter can advertise waits up to an hour, but
-/// `openrouter_post`'s per-attempt sleep happens *outside*
-/// `Client::timeout` (`cfg.llm_timeout`, default 240s) — an unclamped hint
-/// could keep a single turn alive for up to two full-duration sleeps across
-/// `MAX_RETRIES`. Clamping (never rejecting) keeps us honoring the server's
-/// backoff signal while bounding worst-case turn latency to a value smaller
-/// than the connect/response timeout.
+/// `openrouter_post`'s per-attempt sleep happens *outside* the per-request
+/// `.timeout()` budget — an unclamped hint could keep a single turn alive for
+/// up to two full-duration sleeps across `MAX_RETRIES`. Clamping (never
+/// rejecting) keeps us honoring the server's backoff signal while bounding
+/// worst-case turn latency to a value smaller than the per-request timeout.
 const RETRY_AFTER_CAP_SECS: u64 = 60;
 
 fn parse_retry_after_header(headers: &reqwest::header::HeaderMap) -> Option<std::time::Duration> {
@@ -2187,12 +2315,16 @@ async fn openrouter_post(
     url: &str,
     body: &Value,
     bearer: &str,
-    read_timeout: std::time::Duration,
+    base_timeout: std::time::Duration,
 ) -> Result<Value, AgentError> {
     let body_bytes =
         serde_json::to_vec(body).map_err(|e| AgentError::Llm(format!("serialize: {e}")))?;
     let call_start = std::time::Instant::now();
+    // Count prior timeout failures for per-attempt budget escalation; see
+    // `escalated_timeout` for the doubling strategy.
+    let mut timeout_failures: u32 = 0;
     for attempt in 0..MAX_RETRIES {
+        let per_request_timeout = escalated_timeout(base_timeout, timeout_failures);
         let resp = match http
             .post(url)
             .header("content-type", "application/json")
@@ -2200,17 +2332,22 @@ async fn openrouter_post(
             .header("X-OpenRouter-Title", "Buzz")
             .bearer_auth(bearer)
             .body(body_bytes.clone())
+            .timeout(per_request_timeout)
             .send()
             .await
         {
             Ok(r) => r,
             Err(e) => {
+                if e.is_timeout() {
+                    timeout_failures += 1;
+                }
                 if attempt + 1 < MAX_RETRIES && is_retryable_transport_error(&e) {
                     tracing::warn!(
                         attempt = attempt + 1,
                         max_attempts = MAX_RETRIES,
                         error = %e,
                         is_timeout = e.is_timeout(),
+                        timeout_failures,
                         "llm: openrouter transport error, retrying"
                     );
                     backoff_with_jitter(attempt).await;
@@ -2219,7 +2356,7 @@ async fn openrouter_post(
                 return Err(terminal_llm_error(
                     call_start.elapsed(),
                     attempt + 1,
-                    &classify_transport_error(&e, read_timeout),
+                    &classify_transport_error(&e, per_request_timeout),
                 ));
             }
         };
@@ -2354,7 +2491,7 @@ async fn openrouter_post(
                     return Err(terminal_llm_error(
                         call_start.elapsed(),
                         attempt + 1,
-                        &classify_body_read_error(&e, read_timeout),
+                        &classify_body_read_error(&e, per_request_timeout),
                     ))
                 }
             }
@@ -2514,6 +2651,7 @@ mod tests {
             hints_enabled: true,
             thinking_effort: None,
             prompt_caching: true,
+            llm_timeout_explicit: true,
         }
     }
 
@@ -4564,6 +4702,73 @@ mod tests {
         );
     }
 
+    // ---- escalated_timeout (pure-function tests) ----------------------------
+
+    /// No prior timeouts → budget is base unchanged.
+    #[test]
+    fn escalated_timeout_zero_failures_returns_base() {
+        let base = Duration::from_secs(240);
+        assert_eq!(
+            escalated_timeout(base, 0),
+            base,
+            "0 timeout failures must return base unchanged"
+        );
+    }
+
+    /// One prior timeout → budget doubles.
+    #[test]
+    fn escalated_timeout_one_failure_doubles() {
+        let base = Duration::from_secs(240);
+        assert_eq!(
+            escalated_timeout(base, 1),
+            Duration::from_secs(480),
+            "1 timeout failure must double the base to 480s"
+        );
+    }
+
+    /// Two prior timeouts → budget quadruples.
+    #[test]
+    fn escalated_timeout_two_failures_quadruples() {
+        let base = Duration::from_secs(240);
+        assert_eq!(
+            escalated_timeout(base, 2),
+            Duration::from_secs(960),
+            "2 timeout failures must quadruple the base to 960s"
+        );
+    }
+
+    /// At three prior timeouts (base 240 s, 240×8 = 1920 s) the cap kicks in
+    /// and the result is clamped to ESCALATION_TIMEOUT_CAP (1200 s).
+    #[test]
+    fn escalated_timeout_three_failures_capped_at_1200s() {
+        let base = Duration::from_secs(240);
+        assert_eq!(
+            escalated_timeout(base, 3),
+            Duration::from_secs(1200),
+            "3 timeout failures with 240s base must be capped at 1200s"
+        );
+    }
+
+    /// When base already exceeds the cap, the cap is raised to base (we never
+    /// shrink the operator-configured budget).
+    #[test]
+    fn escalated_timeout_base_above_cap_is_never_shrunk() {
+        let base = Duration::from_secs(1500);
+        // All scaled values (1×, 2×, 4×, …) are ≥ base, and the effective cap
+        // is max(ESCALATION_TIMEOUT_CAP, base) = 1500s, so they're all clamped
+        // to 1500s.
+        assert_eq!(
+            escalated_timeout(base, 0),
+            Duration::from_secs(1500),
+            "base 1500s at 0 failures must stay 1500s"
+        );
+        assert_eq!(
+            escalated_timeout(base, 1),
+            Duration::from_secs(1500),
+            "base 1500s at 1 failure must be capped at 1500s (not truncated to 1200s)"
+        );
+    }
+
     // ---- timeout_message (pure-function tests, no network) ------------------
 
     /// Connect timeout (is_connect=true) wins regardless of phase and shows
@@ -4617,27 +4822,35 @@ mod tests {
         );
     }
 
-    /// Body-read timeout (BodyRead phase) says "no further response bytes"
-    /// (headers and possibly partial body already arrived) and shows the value.
+    /// Body-read timeout (BodyRead phase) says "response did not complete" and
+    /// shows the per-request timeout value and the config-knob hint.
+    ///
+    /// With per-request total timeouts, a body-stall fires the same total-budget
+    /// timer as a transport stall — the message reflects that the entire request
+    /// (not just a read-idle window) expired.
     #[test]
-    fn timeout_message_body_read_phase_says_no_further_bytes_and_duration() {
-        let llm = std::time::Duration::from_secs(300);
-        let msg = timeout_message(false, llm, TimeoutPhase::BodyRead);
+    fn timeout_message_body_read_phase_says_did_not_complete_and_duration() {
+        let per_request = std::time::Duration::from_secs(300);
+        let msg = timeout_message(false, per_request, TimeoutPhase::BodyRead);
         assert!(
-            msg.starts_with("read timeout:"),
-            "body-read timeout must start with 'read timeout:': {msg}"
+            msg.starts_with("request timed out:"),
+            "body-read timeout must start with 'request timed out:': {msg}"
         );
         assert!(
-            msg.contains("no further"),
-            "body-read timeout must say 'no further': {msg}"
+            msg.contains("did not complete"),
+            "body-read timeout must say 'did not complete': {msg}"
         );
         assert!(
             msg.contains("300s"),
-            "body-read timeout must include the 300s configured value: {msg}"
+            "body-read timeout must include the 300s per-request value: {msg}"
         );
         assert!(
             msg.contains("BUZZ_AGENT_LLM_TIMEOUT_SECS"),
             "body-read timeout must reference the config knob: {msg}"
+        );
+        assert!(
+            !msg.contains("read timeout"),
+            "body-read timeout must not say 'read timeout': {msg}"
         );
     }
 
@@ -4763,16 +4976,16 @@ mod tests {
     /// A body-read timeout fires after headers arrive but before the body is
     /// complete.  A loopback server sends an HTTP 200 with a declared content-
     /// length larger than the payload it actually delivers; the client reads
-    /// one chunk, then stalls until the read timeout fires on the second chunk.
+    /// one chunk, then stalls until the per-request total timeout fires.
     ///
     /// Asserts the exact wording, configured duration, and config-knob hint.
     /// Also covers the non-timeout fallback via classify_body_read_error.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn classify_body_read_error_timeout_says_no_further_bytes() {
+    async fn classify_body_read_error_timeout_says_did_not_complete() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 
-        let llm_timeout = std::time::Duration::from_millis(100);
+        let per_request_timeout = std::time::Duration::from_millis(100);
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -4793,14 +5006,17 @@ mod tests {
                           test",
                     )
                     .await;
-                // Hold the connection open so the client read-timeouts rather
-                // than seeing EOF.
+                // Hold the connection open so the client times out rather than
+                // seeing EOF.
                 tokio::time::sleep(std::time::Duration::from_secs(10)).await;
             }
         });
 
+        // Use a client-level read_timeout to produce a body-stall error; in
+        // production we use per-request .timeout(), but the error classification
+        // is the same — reqwest sets is_timeout() in both cases.
         let client = reqwest::Client::builder()
-            .read_timeout(llm_timeout)
+            .read_timeout(per_request_timeout)
             .build()
             .unwrap();
 
@@ -4819,18 +5035,18 @@ mod tests {
         );
 
         // ---- classify_body_read_error: timeout path ----
-        let msg = classify_body_read_error(&err, llm_timeout);
+        let msg = classify_body_read_error(&err, per_request_timeout);
         assert!(
-            msg.starts_with("read timeout:"),
-            "body-read timeout must start with 'read timeout:': {msg}"
+            msg.starts_with("request timed out:"),
+            "body-read timeout must start with 'request timed out:': {msg}"
         );
         assert!(
-            msg.contains("no further"),
-            "body-read timeout must say 'no further': {msg}"
+            msg.contains("did not complete"),
+            "body-read timeout must say 'did not complete': {msg}"
         );
         assert!(
             msg.contains("100ms"),
-            "body-read timeout must include the configured 100ms value: {msg}"
+            "body-read timeout must include the per-request 100ms value: {msg}"
         );
         assert!(
             msg.contains("BUZZ_AGENT_LLM_TIMEOUT_SECS"),
@@ -5348,7 +5564,7 @@ mod tests {
         c.base_url = base;
 
         let out = llm
-            .post_openai(&c, "/v1/x", &json!({}), "model")
+            .post_openai(&c, "/v1/x", &json!({}), "model", Duration::from_secs(30))
             .await
             .expect("retry with fresh token should succeed");
         assert_eq!(out, json!({ "ok": true }));
@@ -5357,7 +5573,7 @@ mod tests {
         // Second call's 401 must trigger its own refresh — the guard cannot
         // be a stored flag that an earlier turn already tripped.
         let out2 = llm
-            .post_openai(&c, "/v1/x", &json!({}), "model")
+            .post_openai(&c, "/v1/x", &json!({}), "model", Duration::from_secs(30))
             .await
             .unwrap();
         assert_eq!(out2, json!({ "ok": true }));
@@ -5384,7 +5600,7 @@ mod tests {
         c.base_url = base;
 
         let err = llm
-            .post_openai(&c, "/v1/x", &json!({}), "model")
+            .post_openai(&c, "/v1/x", &json!({}), "model", Duration::from_secs(30))
             .await
             .unwrap_err();
         assert!(
@@ -5415,7 +5631,7 @@ mod tests {
         c.base_url = base;
 
         let err = llm
-            .post_openai(&c, "/v1/x", &json!({}), "model")
+            .post_openai(&c, "/v1/x", &json!({}), "model", Duration::from_secs(30))
             .await
             .unwrap_err();
         assert!(
@@ -5446,7 +5662,7 @@ mod tests {
         c.base_url = base;
 
         let out = llm
-            .post_openai(&c, "/v1/x", &json!({}), "model")
+            .post_openai(&c, "/v1/x", &json!({}), "model", Duration::from_secs(30))
             .await
             .expect("retry with fresh token should clear the 403");
         assert_eq!(out, json!({ "ok": true }));
@@ -7015,36 +7231,50 @@ mod tests {
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
-    /// A `Retry-After` far beyond `RETRY_AFTER_CAP_SECS` must not stall the
-    /// retry loop for anywhere near its advertised duration — proving the
-    /// cap is enforced end-to-end in `openrouter_post`'s actual sleep, not
-    /// merely in the isolated `parse_retry_after_header` unit tests above.
-    /// Runs on a paused clock so a real 999999s wait would hang the test
-    /// instead of silently passing.
-    #[tokio::test(start_paused = true)]
-    async fn openrouter_post_429_retry_sleep_capped_despite_huge_retry_after() {
+    /// A `Retry-After` header is actually honored as a sleep before the retry.
+    ///
+    /// The cap enforcement is covered by the `parse_retry_after_header` unit
+    /// tests above; this test proves the parsed-and-capped delay is passed to
+    /// `tokio::time::sleep` rather than being computed but discarded. Uses a 1 s
+    /// Retry-After (well below the 60 s cap) so the test completes quickly in
+    /// real time while still asserting the sleep duration.
+    ///
+    /// Note: `start_paused = true` is intentionally NOT used here — a per-request
+    /// `RequestBuilder::timeout()` combined with a paused Tokio clock causes the
+    /// runtime to auto-advance time to the timeout before the stub I/O fires,
+    /// which would make all attempts appear to time out. Real-clock timing is
+    /// required for per-request `.timeout()` to coexist with stub TCP servers.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn openrouter_post_429_retry_after_sleep_is_honored() {
         let (url, _captured, attempts) = spawn_openrouter_stub(vec![
             CannedResponse::new(429, r#"{"error":{"message":"rate limited"}}"#)
-                .with_header("Retry-After", "999999"),
+                .with_header("Retry-After", "1"),
             CannedResponse::new(200, r#"{"choices":[{"message":{"content":"ok"}}]}"#),
         ])
         .await;
-        let http = Client::builder().build().unwrap();
-        let before = tokio::time::Instant::now();
+        let http = Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap();
+        let before = std::time::Instant::now();
         let out = openrouter_post(
             &http,
             &format!("{url}/x"),
             &json!({}),
             "key",
-            Duration::from_secs(5),
+            Duration::from_secs(30),
         )
         .await
-        .expect("second attempt succeeds");
+        .expect("second attempt succeeds after 1s Retry-After sleep");
         assert_eq!(out["choices"][0]["message"]["content"], "ok");
         assert!(
-            before.elapsed() <= Duration::from_secs(RETRY_AFTER_CAP_SECS + 5),
-            "retry sleep must be clamped to RETRY_AFTER_CAP_SECS ({RETRY_AFTER_CAP_SECS}s), \
-             not the header's 999999s: elapsed {:?}",
+            before.elapsed() >= Duration::from_millis(800),
+            "must sleep at least the Retry-After hint (1s): elapsed {:?}",
+            before.elapsed()
+        );
+        assert!(
+            before.elapsed() < Duration::from_secs(10),
+            "must complete well before the 60s cap: elapsed {:?}",
             before.elapsed()
         );
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
@@ -7293,7 +7523,10 @@ mod tests {
         let mut c = cfg(Provider::OpenRouter);
         c.base_url = url;
 
-        let err = llm.post_openrouter(&c, &json!({})).await.unwrap_err();
+        let err = llm
+            .post_openrouter(&c, &json!({}), Duration::from_secs(30))
+            .await
+            .unwrap_err();
         assert!(
             matches!(&err, AgentError::LlmAuth(s) if s.contains("static key rejected")),
             "static 401 must surface as LlmAuth with 'static key rejected': got {err:?}"
@@ -7327,7 +7560,9 @@ mod tests {
         let mut c = cfg(Provider::OpenRouter);
         c.base_url = base;
 
-        let result = llm.post_openrouter(&c, &json!({})).await;
+        let result = llm
+            .post_openrouter(&c, &json!({}), Duration::from_secs(30))
+            .await;
         // `spawn_auth_stub` returns `{"ok":true}` on success.
         assert!(
             result.is_ok(),
