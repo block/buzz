@@ -89,16 +89,16 @@ wait_healthy "MinIO" "buzz-minio"
 # ── Apply database schema ────────────────────────────────────────────────────
 
 log "Applying database schema..."
-export PGHOST=localhost
-export PGPORT=5432
+export PGHOST="${PGHOST:-localhost}"
+export PGPORT="${PGPORT:-5432}"
 export PGUSER=buzz
 export PGPASSWORD=buzz_dev
 export PGDATABASE=buzz
 
 # Use the already-running docker postgres for desired-state planning instead of
 # downloading an embedded Postgres from Maven Central (transient-fetch flake source).
-export PGSCHEMA_PLAN_HOST=localhost
-export PGSCHEMA_PLAN_PORT=5432
+export PGSCHEMA_PLAN_HOST="${PGHOST}"
+export PGSCHEMA_PLAN_PORT="${PGPORT}"
 export PGSCHEMA_PLAN_DB=buzz
 export PGSCHEMA_PLAN_USER=buzz
 export PGSCHEMA_PLAN_PASSWORD=buzz_dev
@@ -166,7 +166,7 @@ if [[ "${BUZZ_REQUIRE_RELAY_MEMBERSHIP:-}" == "true" ]]; then
 fi
 
 nohup env \
-  DATABASE_URL=postgres://buzz:buzz_dev@localhost:5432/buzz \
+  DATABASE_URL="postgres://buzz:buzz_dev@${PGHOST}:${PGPORT}/buzz" \
   REDIS_URL=redis://localhost:6379 \
   RELAY_URL=ws://localhost:3000 \
   BUZZ_BIND_ADDR=0.0.0.0:3000 \
