@@ -13,7 +13,9 @@
 //!
 //! * an NVIDIA GPU, the driver family behind most upstream reports; and
 //! * AppImage packaging, where linuxdeploy's AppRun hook pins `GDK_BACKEND=x11`
-//!   and the dmabuf renderer buys nothing on that XWayland path (#2338).
+//!   and the dmabuf renderer buys nothing on that XWayland path (#2338); and
+//! * an x86_64 CPU without AVX, where affected WebKitGTK 2.52 JavaScriptCore
+//!   builds can execute an AVX instruction and kill WebKitWebProcess (#3747).
 //!
 //! `--safe-rendering` is the manual escape hatch for a machine neither signal
 //! recognises; it also disables accelerated compositing, for that launch only.
@@ -33,22 +35,26 @@ const NVIDIA_PCI_VENDOR: &str = "0x10de";
 
 /// Where DRM devices advertise their PCI vendor.
 const DRM_ROOT: &str = "/sys/class/drm";
+/// Linux's processor feature inventory.
+const CPU_INFO: &str = "/proc/cpuinfo";
 
 /// Drops the zero-copy dmabuf buffer path. The workaround for #2338.
 const DISABLE_DMABUF: &str = "WEBKIT_DISABLE_DMABUF_RENDERER";
 /// Drops accelerated compositing as well. `--safe-rendering` only.
 const DISABLE_COMPOSITING: &str = "WEBKIT_DISABLE_COMPOSITING_MODE";
+/// Disables JavaScriptCore's JIT on AVX-less x86_64 CPUs. The workaround for
+/// #3747.
+const DISABLE_JSC_JIT: &str = "JSC_useJIT";
 
 /// What the heuristic applies: the #2338 workaround alone, matching the
 /// ecosystem precedents. `DISABLE_COMPOSITING` is deliberately not here — no
 /// report has isolated it as necessary, and it costs more rendering than this.
-const HEURISTIC: [&str; 1] = [DISABLE_DMABUF];
+const HEURISTIC: [(&str, &str); 1] = [(DISABLE_DMABUF, "1")];
 
-/// What `--safe-rendering` applies, which is also every variable this module may
-/// set and therefore every variable a user assignment takes away from it. Being
-/// the same list is the invariant: nothing outside it is ever written, so a user
-/// value for any other WebKit variable is not a conflict.
-const OWNED: [&str; 2] = [DISABLE_DMABUF, DISABLE_COMPOSITING];
+/// What `--safe-rendering` applies, which is also every rendering variable a
+/// user assignment takes away from this module. The JSC workaround is an
+/// independent decision with its own user override.
+const OWNED: [(&str, &str); 2] = [(DISABLE_DMABUF, "1"), (DISABLE_COMPOSITING, "1")];
 
 /// Reads one environment variable. Injected so the decision is testable without
 /// mutating the process environment. `OsString` rather than `String` because
@@ -58,9 +64,9 @@ type EnvLookup<'a> = &'a dyn Fn(&str) -> Option<OsString>;
 /// What this launch should do about its rendering environment.
 #[derive(Debug, PartialEq, Eq)]
 enum Plan {
-    /// Set each of these to `1`, then report `why`.
+    /// Apply each `(variable, value)` assignment, then report `why`.
     Apply {
-        vars: &'static [&'static str],
+        assignments: Vec<(&'static str, &'static str)>,
         why: String,
     },
     /// Change nothing, and report `why`.
@@ -82,13 +88,18 @@ pub fn apply() -> Result<(), String> {
         std::env::args_os(),
         &|key| std::env::var_os(key),
         Path::new(DRM_ROOT),
+        std::env::consts::ARCH,
+        Path::new(CPU_INFO),
     ) {
-        Plan::Apply { vars, why } => {
-            for var in vars {
+        Plan::Apply { assignments, why } => {
+            for (var, value) in &assignments {
                 // Safe here and only here — see the doc comment above.
-                std::env::set_var(var, "1");
+                std::env::set_var(var, value);
             }
-            let applied: Vec<String> = vars.iter().map(|var| format!("{var}=1")).collect();
+            let applied: Vec<String> = assignments
+                .iter()
+                .map(|(var, value)| format!("{var}={value}"))
+                .collect();
             eprintln!("buzz-desktop: {} — {why}", applied.join(" "));
             Ok(())
         }
@@ -100,12 +111,14 @@ pub fn apply() -> Result<(), String> {
     }
 }
 
-/// The whole decision, as a pure function of argv, the environment, and the DRM
-/// device tree.
+/// The whole decision, as a function of injected argv, environment, platform,
+/// and Linux hardware inventory paths.
 fn plan(
     args: impl IntoIterator<Item = impl AsRef<OsStr>>,
     env: EnvLookup<'_>,
     drm_root: &Path,
+    arch: &str,
+    cpu_info: &Path,
 ) -> Plan {
     let safe_rendering = args
         .into_iter()
@@ -116,45 +129,78 @@ fn plan(
         // A user who has assigned one of these has taken over the decision, so
         // the heuristic stands down wholesale — writing the *other* variable
         // behind their back would be exactly the surprise they opted out of.
-        return match safe_rendering {
+        if safe_rendering {
             // Two incompatible answers to one question, and no basis for
             // picking: honouring the flag would overwrite configuration the
             // user typed, honouring the environment would silently ignore a
             // rescue flag from a user whose app does not start.
-            true => Plan::Fatal {
+            return Plan::Fatal {
                 diagnostic: conflict(&user_set),
-            },
-            false => Plan::Leave {
-                why: format!("{} set in the environment", describe(&user_set)),
-            },
-        };
+            };
+        }
     }
+
+    let mut assignments = Vec::new();
+    let mut reasons = Vec::new();
 
     if safe_rendering {
-        return Plan::Apply {
-            vars: &OWNED,
-            why: format!("{SAFE_RENDERING} requested, this launch only"),
-        };
+        assignments.extend(OWNED);
+        reasons.push(format!("{SAFE_RENDERING} requested, this launch only"));
+    } else if user_set.is_empty() {
+        let signals = [
+            (nvidia_gpu(drm_root), "NVIDIA GPU"),
+            (env("APPIMAGE").is_some(), "AppImage"),
+        ];
+        let hits: Vec<&str> = signals
+            .iter()
+            .filter_map(|(hit, label)| hit.then_some(*label))
+            .collect();
+        if !hits.is_empty() {
+            assignments.extend(HEURISTIC);
+            reasons.push(hits.join(", "));
+        }
+    } else {
+        reasons.push(format!("{} set in the environment", describe(&user_set)));
     }
 
-    let signals = [
-        (nvidia_gpu(drm_root), "NVIDIA GPU"),
-        (env("APPIMAGE").is_some(), "AppImage"),
-    ];
-    let hits: Vec<&str> = signals
-        .iter()
-        .filter_map(|(hit, label)| hit.then_some(*label))
-        .collect();
+    if env(DISABLE_JSC_JIT).is_some() {
+        reasons.push(format!("{DISABLE_JSC_JIT} set in the environment"));
+    } else if avx_available(arch, cpu_info) == Some(false) {
+        assignments.push((DISABLE_JSC_JIT, "0"));
+        reasons.push("x86_64 CPU does not advertise AVX".to_string());
+    }
 
-    match hits.is_empty() {
+    match assignments.is_empty() {
         true => Plan::Leave {
-            why: "no NVIDIA GPU and not an AppImage".to_string(),
+            why: match reasons.is_empty() {
+                true => "no NVIDIA GPU, not an AppImage, and no AVX-less x86_64 CPU detected"
+                    .to_string(),
+                false => reasons.join("; "),
+            },
         },
         false => Plan::Apply {
-            vars: &HEURISTIC,
-            why: hits.join(", "),
+            assignments,
+            why: reasons.join("; "),
         },
     }
+}
+
+/// Whether an x86_64 CPU advertises AVX. Unknown architecture or unreadable /
+/// malformed CPU data produces no decision rather than disabling the JIT.
+fn avx_available(arch: &str, cpu_info: &Path) -> Option<bool> {
+    if arch != "x86_64" {
+        return None;
+    }
+
+    let cpu_info = std::fs::read_to_string(cpu_info).ok()?;
+    cpu_info.lines().find_map(|line| {
+        let (key, features) = line.split_once(':')?;
+        key.trim().eq_ignore_ascii_case("flags").then(|| {
+            features
+                .split_ascii_whitespace()
+                .any(|feature| feature.eq_ignore_ascii_case("avx"))
+        })
+    })
 }
 
 /// Owned variables the environment already carries, keyed by name.
@@ -164,7 +210,7 @@ fn plan(
 fn user_set(env: EnvLookup<'_>) -> Vec<(&'static str, OsString)> {
     OWNED
         .iter()
-        .filter_map(|key| env(key).map(|value| (*key, value)))
+        .filter_map(|&(key, _)| env(key).map(|value| (key, value)))
         .collect()
 }
 
