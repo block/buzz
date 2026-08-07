@@ -8,6 +8,7 @@ import type {
 } from "@/features/projects/hooks";
 import { relativeTime } from "@/features/projects/lib/projectsViewHelpers";
 import type { ProjectWorkItemSection } from "@/features/projects/projectWorkItems";
+import { cn } from "@/shared/lib/cn";
 import {
   resolveUserLabel,
   type UserProfileLookup,
@@ -31,6 +32,8 @@ import {
 } from "./projectListRowStyles";
 
 type ProjectsPullRequestsListProps = {
+  /** Render without container chrome — a parent table container provides border and rounding. */
+  embedded?: boolean;
   error: unknown;
   failedSections: ProjectWorkItemSection[];
   isLoading: boolean;
@@ -231,6 +234,7 @@ function PullRequestListRow({
 }
 
 export function ProjectsPullRequestsList({
+  embedded,
   error,
   failedSections,
   isLoading,
@@ -243,7 +247,12 @@ export function ProjectsPullRequestsList({
 }: ProjectsPullRequestsListProps) {
   if (isLoading) {
     return (
-      <div className="border border-border/60 px-4 py-12 text-center text-sm text-muted-foreground">
+      <div
+        className={cn(
+          "px-4 py-12 text-center text-sm text-muted-foreground",
+          !embedded && "border border-border/60",
+        )}
+      >
         Loading pull requests...
       </div>
     );
@@ -267,7 +276,12 @@ export function ProjectsPullRequestsList({
     return (
       <div className="space-y-3">
         {loadNotice}
-        <div className="border border-dashed border-border/60 px-4 py-12 text-center text-sm text-muted-foreground">
+        <div
+          className={cn(
+            "px-4 py-12 text-center text-sm text-muted-foreground",
+            !embedded && "border border-dashed border-border/60",
+          )}
+        >
           No pull requests yet.
         </div>
       </div>
@@ -299,7 +313,9 @@ export function ProjectsPullRequestsList({
     <div className="space-y-3">
       {loadNotice}
       <div
-        className={PROJECT_LIST_CONTAINER_CLASS}
+        className={
+          embedded ? "divide-y divide-border/60" : PROJECT_LIST_CONTAINER_CLASS
+        }
         data-testid="projects-list-container"
       >
         {pullRequests.map(({ project, pullRequest, repository }) => (
