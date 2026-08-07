@@ -6,6 +6,7 @@ import remarkGfm from "remark-gfm";
 import remarkMessageLinks from "@/features/messages/lib/remarkMessageLinks";
 import rehypeImageGallery from "@/shared/lib/rehypeImageGallery";
 import rehypeSearchHighlight from "@/shared/lib/rehypeSearchHighlight";
+import rehypeStructuredReplyLabels from "@/shared/lib/rehypeStructuredReplyLabels";
 import remarkChannelLinks from "@/shared/lib/remarkChannelLinks";
 import remarkCustomEmoji, {
   type CustomEmoji,
@@ -83,7 +84,10 @@ function listSegment(values: readonly string[] | undefined): string {
 function buildMarkdownElement(input: MarkdownParseInputs): React.ReactElement {
   markdownParseCount += 1;
   // biome-ignore lint/suspicious/noExplicitAny: PluggableList type not directly importable
-  const rehypePlugins: any[] = [rehypeImageGallery];
+  const rehypePlugins: any[] = [
+    rehypeImageGallery,
+    rehypeStructuredReplyLabels,
+  ];
   if (input.searchQuery && input.searchQuery.trim().length >= 2) {
     rehypePlugins.push([rehypeSearchHighlight, { query: input.searchQuery }]);
   }
