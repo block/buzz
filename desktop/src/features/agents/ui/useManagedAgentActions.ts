@@ -1,4 +1,5 @@
 import * as React from "react";
+import { toast } from "sonner";
 
 import {
   type AttachManagedAgentToChannelResult,
@@ -15,12 +16,7 @@ import {
 import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { usePresenceQuery } from "@/features/presence/hooks";
-import type {
-  AgentPersona,
-  Channel,
-  CreateManagedAgentResponse,
-  ManagedAgent,
-} from "@/shared/api/types";
+import type { AgentPersona, Channel, ManagedAgent } from "@/shared/api/types";
 import { removeChannelMember } from "@/shared/api/tauri";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import {
@@ -52,8 +48,6 @@ export function useManagedAgentActions() {
   const [isCreateOpen, setIsCreateOpen] = React.useState(false);
   const [agentToAddToChannel, setAgentToAddToChannel] =
     React.useState<ManagedAgent | null>(null);
-  const [createdAgent, setCreatedAgent] =
-    React.useState<CreateManagedAgentResponse | null>(null);
   const [startingPersonaIds, setStartingPersonaIds] = React.useState<
     ReadonlySet<string>
   >(() => new Set());
@@ -229,13 +223,11 @@ export function useManagedAgentActions() {
       const input = await buildInstanceInputForDefinition(persona, runtime);
 
       const created = await createAgentMutation.mutateAsync(input);
-      setCreatedAgent(created);
+      toast.success("Agent created");
       const notices = [...warnings];
 
       if (created.spawnError) {
         setActionErrorMessage(created.spawnError);
-      } else {
-        notices.push(`Started ${created.agent.name}.`);
       }
 
       if (created.profileSyncError) {
@@ -440,8 +432,6 @@ export function useManagedAgentActions() {
     setIsCreateOpen,
     agentToAddToChannel,
     setAgentToAddToChannel,
-    createdAgent,
-    setCreatedAgent,
     logAgentPubkey,
     setLogAgentPubkey,
     actionNoticeMessage,
