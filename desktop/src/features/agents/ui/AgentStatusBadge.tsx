@@ -24,12 +24,15 @@ export function AgentStatusBadge({
     return () => clearTimeout(timer);
   }, []);
 
-  const isActive = status === "running" || status === "deployed";
+  // A deployed remote agent that is not present has shut down; the deployment record survives
+  // because v1 has no `undeploy`, so it must not keep reading as live (I3, docs/remote-agents.md).
+  const presenceSaysOffline =
+    presenceLoaded && (!presenceStatus || presenceStatus === "offline");
+  const isActive =
+    (status === "running" || status === "deployed") &&
+    !(status === "deployed" && !inGracePeriod && presenceSaysOffline);
   const isStarting =
-    !inGracePeriod &&
-    presenceLoaded &&
-    status === "running" &&
-    (!presenceStatus || presenceStatus === "offline");
+    !inGracePeriod && presenceSaysOffline && status === "running";
 
   const variant: "default" | "warning" | "secondary" = isWorking
     ? "default"
