@@ -168,6 +168,30 @@ test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
 });
 
+test("AUTH arriving before connect resolves does not lose the first send", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    websocketAuthBeforeConnectResolves: true,
+  });
+  await page.goto("/");
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() => window.__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?.()),
+      { timeout: 5_000 },
+    )
+    .toBe("connected");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const message = `first send after early auth ${Date.now()}`;
+  await page.getByTestId("message-input").fill(message);
+  await page.getByTestId("send-message").click();
+
+  await expect(page.getByTestId("message-timeline")).toContainText(message);
+});
+
 test("failed initial relay dial retries automatically", async ({ page }) => {
   await installMockBridge(page, {
     websocketConnectErrors: ["mock relay pod unavailable"],
