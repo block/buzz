@@ -17,7 +17,7 @@ async function openBuzzProject(page: import("@playwright/test").Page) {
   await page.getByRole("button", { name: "Repositories", exact: true }).click();
   const projectEntry = page
     .locator(
-      '[data-testid="project-card-buzz"], [data-testid="project-row-buzz"]',
+      '[data-testid="repository-card-buzz"], [data-testid="repository-row-buzz"]',
     )
     .first();
   await expect(projectEntry).toBeVisible({ timeout: 10_000 });
