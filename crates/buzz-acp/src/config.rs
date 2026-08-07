@@ -468,6 +468,14 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_RELAY_OBSERVER", default_value_t = false)]
     pub relay_observer: bool,
 
+    /// Optional absolute Unix socket receiving accepted inbound signed events.
+    #[arg(long, env = "BUZZ_ACP_EVENT_SINK_SOCKET")]
+    pub event_sink_socket: Option<PathBuf>,
+
+    /// Shared connection/write/ack deadline for the local event sink.
+    #[arg(long, env = "BUZZ_ACP_EVENT_SINK_TIMEOUT_MS", default_value_t = 250)]
+    pub event_sink_timeout_ms: u64,
+
     /// Exit after this many seconds with no dispatched events and no turn in flight.
     /// 0 disables inactivity self-termination.
     #[arg(long, env = "BUZZ_ACP_EXIT_AFTER_INACTIVITY", default_value_t = 0)]
@@ -549,6 +557,10 @@ pub struct Config {
     pub has_generated_codex_config: bool,
     /// Whether to publish encrypted observer frames through the relay.
     pub relay_observer: bool,
+    /// Optional absolute local event-sink socket. None keeps the feature off.
+    pub event_sink_socket: Option<PathBuf>,
+    /// Shared connection/write/ack deadline for the local event sink.
+    pub event_sink_timeout_ms: u64,
     /// Seconds without dispatched events before an idle harness exits. 0 = disabled.
     pub exit_after_inactivity_secs: u64,
     /// Whether ACP/LLM subprocess initialization is deferred until accepted work arrives.
@@ -1099,6 +1111,8 @@ impl Config {
             persona_env_vars,
             has_generated_codex_config,
             relay_observer: args.relay_observer,
+            event_sink_socket: args.event_sink_socket,
+            event_sink_timeout_ms: args.event_sink_timeout_ms,
             exit_after_inactivity_secs: args.exit_after_inactivity,
             lazy_pool: args.lazy_pool,
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
@@ -1470,6 +1484,8 @@ mod tests {
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
+            event_sink_socket: None,
+            event_sink_timeout_ms: 250,
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             agent_owner: None,
@@ -2198,6 +2214,29 @@ channels = "ALL"
         let args = CliArgs::try_parse_from(["buzz-acp", "--private-key", &key, "--lazy-pool=true"]);
         assert!(args.is_err(), "bool flags do not take an explicit value");
         assert!(CliArgs::parse_from(["buzz-acp", "--private-key", &key, "--lazy-pool"]).lazy_pool);
+    }
+
+    #[test]
+    fn local_event_sink_defaults_off_and_accepts_explicit_bounded_config() {
+        let key = "0".repeat(64);
+        let default = CliArgs::parse_from(["buzz-acp", "--private-key", &key]);
+        assert_eq!(default.event_sink_socket, None);
+        assert_eq!(default.event_sink_timeout_ms, 250);
+
+        let configured = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            &key,
+            "--event-sink-socket",
+            "/run/buzz/matos.sock",
+            "--event-sink-timeout-ms",
+            "750",
+        ]);
+        assert_eq!(
+            configured.event_sink_socket,
+            Some(PathBuf::from("/run/buzz/matos.sock"))
+        );
+        assert_eq!(configured.event_sink_timeout_ms, 750);
     }
 
     #[test]

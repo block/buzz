@@ -446,6 +446,8 @@ pub struct BuzzEvent {
     pub channel_id: Uuid,
     /// The underlying Nostr event.
     pub event: Event,
+    /// Exact JSON bytes of the event object as received inside the NIP-01 frame.
+    pub raw_event_json: Box<str>,
 }
 
 /// Errors from relay operations.
@@ -488,6 +490,7 @@ enum RelayMessage {
     Event {
         subscription_id: String,
         event: Box<Event>,
+        raw_event_json: Box<str>,
     },
     Ok {
         event_id: String,
@@ -2081,6 +2084,7 @@ async fn handle_ws_message(
                 RelayMessage::Event {
                     subscription_id,
                     event,
+                    raw_event_json,
                 } => {
                     if subscription_id == OBSERVER_CONTROL_SUB_ID {
                         match observer_control_tx.try_send(*event) {
@@ -2118,6 +2122,7 @@ async fn handle_ws_message(
                         let buzz_event = BuzzEvent {
                             channel_id: channel_uuid,
                             event: *event,
+                            raw_event_json,
                         };
                         let cap = event_tx.max_capacity();
                         let used = cap - event_tx.capacity();
@@ -2159,6 +2164,7 @@ async fn handle_ws_message(
                             let buzz_event = BuzzEvent {
                                 channel_id,
                                 event: *event,
+                                raw_event_json,
                             };
                             // Warn at 80% capacity.
                             let cap = event_tx.max_capacity();
@@ -2428,8 +2434,11 @@ async fn process_handshake_buffer(
         let text = match &relay_msg {
             RelayMessage::Event {
                 subscription_id,
-                event,
-            } => serde_json::to_string(&json!(["EVENT", subscription_id, event])).ok(),
+                event: _,
+                raw_event_json,
+            } => serde_json::to_string(subscription_id)
+                .ok()
+                .map(|subscription| format!("[\"EVENT\",{subscription},{raw_event_json}]")),
             RelayMessage::Eose { subscription_id } => {
                 serde_json::to_string(&json!(["EOSE", subscription_id])).ok()
             }
@@ -3561,14 +3570,18 @@ pub(crate) fn parse_relay_message(text: &str) -> Result<RelayMessage, RelayError
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| RelayError::UnexpectedMessage(text.to_string()))?
                 .to_string();
-            let event: Event = serde_json::from_value(
-                arr.get(2)
-                    .cloned()
-                    .ok_or_else(|| RelayError::UnexpectedMessage(text.to_string()))?,
-            )?;
+            let raw_arr: Vec<Box<serde_json::value::RawValue>> = serde_json::from_str(text)?;
+            let raw_event_json = raw_arr
+                .get(2)
+                .ok_or_else(|| RelayError::UnexpectedMessage(text.to_string()))?
+                .get()
+                .to_string()
+                .into_boxed_str();
+            let event: Event = serde_json::from_str(&raw_event_json)?;
             Ok(RelayMessage::Event {
                 subscription_id: sub_id,
                 event: Box::new(event),
+                raw_event_json,
             })
         }
         "OK" => {
@@ -4178,6 +4191,31 @@ mod tests {
                 assert_eq!(message, "");
             }
             _ => panic!("expected Ok"),
+        }
+    }
+
+    #[test]
+    fn parse_event_preserves_exact_event_object_json() {
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "exact bytes")
+            .tags([])
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign event");
+        let raw = serde_json::to_string(&event)
+            .expect("serialize event")
+            .replace(',', ", ");
+        let text = format!(r#"["EVENT","ch-test",{raw}]"#);
+        let message = parse_relay_message(&text).expect("parse event frame");
+        match message {
+            RelayMessage::Event {
+                subscription_id,
+                event: parsed,
+                raw_event_json,
+            } => {
+                assert_eq!(subscription_id, "ch-test");
+                assert_eq!(parsed.id, event.id);
+                assert_eq!(&*raw_event_json, raw);
+            }
+            _ => panic!("expected event"),
         }
     }
 
