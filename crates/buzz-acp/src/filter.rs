@@ -349,9 +349,11 @@ const MAX_CONSECUTIVE_TIMEOUTS: u32 = 5;
 ///
 /// 1. **channels** — if not `"all"`, the event's channel UUID must be in the list.
 /// 2. **kinds** — if non-empty, the event kind must be in the list.
-/// 3. **require_mention** — if `true`, a `p` tag matching `agent_pubkey_hex` must
-///    exist. Tag kind is checked via `tag.as_slice()` for stable, library-independent
-///    access.
+/// 3. **require_mention** — if `true` and `implicitly_addressed` is `false`, an
+///    agent mention must exist. In DMs, recipient `p` tags are routing metadata,
+///    so only an explicit `mention` reference counts. Outside DMs, `p` tags are
+///    also accepted for compatibility. Verified one-to-one DMs containing the
+///    agent pass `implicitly_addressed = true`.
 /// 4. **filter** — if `Some`, the evalexpr expression must evaluate to `true`.
 ///
 /// # Fail-closed filter error handling
@@ -370,6 +372,8 @@ pub async fn match_event(
     channel_id: uuid::Uuid,
     rules: &[SubscriptionRule],
     agent_pubkey_hex: &str,
+    implicitly_addressed: bool,
+    is_dm: bool,
 ) -> Option<MatchedRule> {
     let filter_ctx = FilterContext::from_event(event, channel_id);
 
@@ -384,18 +388,13 @@ pub async fn match_event(
             continue;
         }
 
-        // 3. Mention check — look for a `p` tag whose first element equals
-        //    agent_pubkey_hex. Uses tag.as_slice() for stable, library-independent
-        //    access — avoids relying on the Display impl of tag kind.
-        if rule.require_mention {
-            let mentioned = event.tags.iter().any(|tag| {
-                let s = tag.as_slice();
-                s.first().map(|k| k.as_str()) == Some("p")
-                    && s.get(1).map(|v| v.as_str()) == Some(agent_pubkey_hex)
-            });
-            if !mentioned {
-                continue;
-            }
+        // 3. Mention check. DM `p` tags include every participant for delivery
+        // and notifications, so they do not prove an explicit @mention.
+        if rule.require_mention
+            && !implicitly_addressed
+            && !event_mentions_agent(event, agent_pubkey_hex, is_dm)
+        {
+            continue;
         }
 
         // 4. Optional evalexpr filter expression.
@@ -459,6 +458,26 @@ pub async fn match_event(
     None
 }
 
+/// Whether an event explicitly addresses the agent.
+///
+/// Buzz emits `mention` reference tags for composer-authored @mentions. In DMs,
+/// ordinary recipient `p` tags include every participant and therefore cannot
+/// distinguish an explicit mention. Streams retain `p`-tag compatibility for
+/// older clients.
+pub(crate) fn event_mentions_agent(
+    event: &nostr::Event,
+    agent_pubkey_hex: &str,
+    is_dm: bool,
+) -> bool {
+    event.tags.iter().any(|tag| {
+        let parts = tag.as_slice();
+        let kind = parts.first().map(|value| value.as_str());
+        let pubkey = parts.get(1).map(|value| value.as_str());
+        pubkey == Some(agent_pubkey_hex)
+            && (kind == Some("mention") || (!is_dm && kind == Some("p")))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -474,12 +493,16 @@ mod tests {
             .unwrap()
     }
 
-    /// Build a test event with an explicit `p` tag.
-    fn make_event_with_p_tag(kind: u32, content: &str, p_hex: &str) -> nostr::Event {
+    fn make_event_with_reference_tag(
+        kind: u32,
+        content: &str,
+        tag_kind: &str,
+        pubkey_hex: &str,
+    ) -> nostr::Event {
         let keys = Keys::generate();
-        let p_tag = Tag::parse(["p", p_hex]).expect("tag parse");
+        let reference_tag = Tag::parse([tag_kind, pubkey_hex]).expect("tag parse");
         EventBuilder::new(Kind::Custom(kind as u16), content)
-            .tags([p_tag])
+            .tags([reference_tag])
             .sign_with_keys(&keys)
             .unwrap()
     }
@@ -601,7 +624,9 @@ mod tests {
             ),
         ];
 
-        let matched = match_event(&event, channel_id, &rules, "").await.unwrap();
+        let matched = match_event(&event, channel_id, &rules, "", false, false)
+            .await
+            .unwrap();
         assert_eq!(matched.rule_index, 0);
         assert_eq!(matched.prompt_tag, "tag-first");
     }
@@ -630,7 +655,9 @@ mod tests {
             ),
         ];
 
-        let matched = match_event(&event, channel_id, &rules, "").await.unwrap();
+        let matched = match_event(&event, channel_id, &rules, "", false, false)
+            .await
+            .unwrap();
         assert_eq!(matched.rule_index, 1);
         assert_eq!(matched.prompt_tag, "matched");
     }
@@ -640,7 +667,9 @@ mod tests {
         let agent_pubkey = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
 
         let event_no_mention = make_event(9, "hello");
-        let event_with_mention = make_event_with_p_tag(9, "hello", agent_pubkey);
+        let event_with_p_tag = make_event_with_reference_tag(9, "hello", "p", agent_pubkey);
+        let event_with_mention_tag =
+            make_event_with_reference_tag(9, "hello", "mention", agent_pubkey);
         let channel_id = any_channel();
 
         let rules = vec![make_rule(
@@ -653,14 +682,67 @@ mod tests {
         )];
 
         // Without mention — no match.
-        let result = match_event(&event_no_mention, channel_id, &rules, agent_pubkey).await;
+        let result = match_event(
+            &event_no_mention,
+            channel_id,
+            &rules,
+            agent_pubkey,
+            false,
+            false,
+        )
+        .await;
         assert!(result.is_none());
 
-        // With mention — matches.
-        let matched = match_event(&event_with_mention, channel_id, &rules, agent_pubkey)
-            .await
-            .unwrap();
+        // Streams retain p-tag compatibility.
+        let matched = match_event(
+            &event_with_p_tag,
+            channel_id,
+            &rules,
+            agent_pubkey,
+            false,
+            false,
+        )
+        .await
+        .unwrap();
         assert_eq!(matched.prompt_tag, "mentioned");
+
+        // A group-DM recipient p tag is not an explicit mention.
+        let group_dm_recipient = match_event(
+            &event_with_p_tag,
+            channel_id,
+            &rules,
+            agent_pubkey,
+            false,
+            true,
+        )
+        .await;
+        assert!(group_dm_recipient.is_none());
+
+        // A composer-authored mention reference does count in a group DM.
+        let group_dm_mention = match_event(
+            &event_with_mention_tag,
+            channel_id,
+            &rules,
+            agent_pubkey,
+            false,
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(group_dm_mention.prompt_tag, "mentioned");
+
+        // A verified one-to-one agent DM is implicitly addressed with no tags.
+        let implicit_agent_dm_match = match_event(
+            &event_no_mention,
+            channel_id,
+            &rules,
+            agent_pubkey,
+            true,
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(implicit_agent_dm_match.prompt_tag, "mentioned");
     }
 
     #[tokio::test]
@@ -677,7 +759,7 @@ mod tests {
             None,
         )];
 
-        let result = match_event(&event, channel_id, &rules, "").await;
+        let result = match_event(&event, channel_id, &rules, "", false, false).await;
         assert!(result.is_none());
     }
 
@@ -725,7 +807,9 @@ mod tests {
             None, // no explicit tag
         )];
 
-        let matched = match_event(&event, channel_id, &rules, "").await.unwrap();
+        let matched = match_event(&event, channel_id, &rules, "", false, false)
+            .await
+            .unwrap();
         assert_eq!(matched.prompt_tag, "my-rule");
     }
 
@@ -755,7 +839,7 @@ mod tests {
         ];
 
         // Must return None — not "catch-all".
-        let result = match_event(&event, channel_id, &rules, "").await;
+        let result = match_event(&event, channel_id, &rules, "", false, false).await;
         assert!(
             result.is_none(),
             "filter error must fail closed, not fall through to next rule"
@@ -781,7 +865,7 @@ mod tests {
             .store(MAX_CONSECUTIVE_TIMEOUTS, Ordering::Relaxed);
 
         let rules = vec![rule];
-        let result = match_event(&event, channel_id, &rules, "").await;
+        let result = match_event(&event, channel_id, &rules, "", false, false).await;
         assert!(result.is_none(), "disabled rule must return None");
     }
 }

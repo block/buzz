@@ -27,7 +27,8 @@
 //! 1. Apply `ignore_self` gate.
 //! 2. Apply `author_allowed` gate (same as normal mode) so the nudge goes
 //!    only to authors the real agent would answer.
-//! 3. Require an explicit @mention via `event_mentions_agent`.
+//! 3. Require an explicit @mention except in a verified one-to-one DM with
+//!    this agent.
 //! 4. Apply `filter::match_event` so channel/kind rules still constrain.
 //! 5. Build and publish a nudge reply (surface-correct copy).
 //! 6. Deduplicate by event-id (reconnect replay must not double-nudge).
@@ -73,7 +74,7 @@ pub(crate) enum AcpAvailabilityStatus {
 use crate::{
     author_allowed,
     config::Config,
-    event_mentions_agent, filter,
+    filter,
     relay::{HarnessRelay, RelayEventPublisher},
 };
 
@@ -302,10 +303,10 @@ impl SetupPayload {
 /// Run the setup-mode event loop.
 ///
 /// Connects to the relay, subscribes to channels, and responds to @mentions
-/// of this agent with a surface-correct setup nudge. Never starts the agent
-/// pool. Reconnects on relay close (mirroring normal mode) so the nudge
-/// listener survives transient disconnects; `nudged_event_ids` deduplication
-/// guards against replay on reconnect.
+/// or messages in a verified one-to-one DM with this agent, using a
+/// surface-correct setup nudge. Never starts the agent pool. Reconnects on
+/// relay close (mirroring normal mode) so the nudge listener survives transient disconnects;
+/// `nudged_event_ids` deduplication guards against replay on reconnect.
 pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) -> Result<()> {
     tracing::info!(
         agent = %payload.agent_name,
@@ -346,8 +347,8 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
     let startup_owner = crate::resolve_agent_owner(&config);
     let owner_cache = crate::OwnerCache::new(startup_owner);
 
-    // Discover channels and subscribe (using a "mentions" rule so we get
-    // notified when someone @-mentions the agent).
+    // Discover channels and subscribe. Only verified one-to-one DMs with this
+    // agent are implicitly addressed.
     let channel_info_map = relay
         .discover_channels()
         .await
@@ -359,12 +360,27 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
     );
 
     let channel_ids: Vec<Uuid> = channel_info_map.keys().copied().collect();
+    let implicitly_addressed_channels: HashSet<Uuid> = channel_info_map
+        .iter()
+        .filter_map(|(id, info)| {
+            crate::is_one_to_one_agent_dm(
+                &info.channel_type,
+                &info.participant_pubkeys,
+                &pubkey_hex,
+            )
+            .then_some(*id)
+        })
+        .collect();
 
-    // Build subscription rules: mentions only (setup mode must not react to
-    // every message in a channel).
+    // Build subscription rules: mentions everywhere except one-to-one agent DMs.
     let rules = build_setup_subscription_rules(&config);
 
-    let channel_filters = crate::config::resolve_channel_filters(&config, &channel_ids, &rules);
+    let channel_filters = crate::config::resolve_channel_filters(
+        &config,
+        &channel_ids,
+        &implicitly_addressed_channels,
+        &rules,
+    );
 
     if channel_filters.is_empty() {
         tracing::warn!(
@@ -405,7 +421,7 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
         if kind_u32 == KIND_MEMBER_ADDED_NOTIFICATION
             || kind_u32 == KIND_MEMBER_REMOVED_NOTIFICATION
         {
-            handle_setup_membership(&mut relay, &buzz_event, &config, &rules, &channel_ids).await;
+            handle_setup_membership(&mut relay, &buzz_event, &config, &rules, &channel_info).await;
             continue;
         }
 
@@ -419,9 +435,18 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
             continue;
         }
 
-        // Require an explicit @mention of this agent — setup mode must not
-        // nudge on every channel event even if subscribe_mode is "all".
-        if !event_mentions_agent(&buzz_event.event, &pubkey_hex) {
+        let dm_classification =
+            crate::classify_dm_channel(buzz_event.channel_id, &channel_info, &pubkey_hex).await;
+
+        // Group DMs and channels still require an explicit mention. Only a
+        // verified one-to-one DM with this agent is implicitly addressed.
+        if !dm_classification.implicitly_addressed
+            && !filter::event_mentions_agent(
+                &buzz_event.event,
+                &pubkey_hex,
+                dm_classification.for_author_gate,
+            )
+        {
             continue;
         }
 
@@ -429,12 +454,11 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
         // to authors the real agent would have answered. Same DM hardening:
         // in DMs only owner/siblings get a nudge (fail-closed on unknown type).
         let author_hex = buzz_event.event.pubkey.to_hex();
-        let is_dm = crate::is_dm_channel(buzz_event.channel_id, &channel_info).await;
         let allowed = author_allowed(
             &config.respond_to,
             &config.respond_to_allowlist,
             &author_hex,
-            is_dm,
+            dm_classification.for_author_gate,
             &owner_cache,
             &rest_client,
         )
@@ -446,6 +470,8 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
             buzz_event.channel_id,
             &rules,
             &pubkey_hex,
+            dm_classification.implicitly_addressed,
+            dm_classification.for_author_gate,
         )
         .await
         .is_some();
@@ -514,10 +540,9 @@ pub(crate) fn should_nudge_for_event(
 
 /// Build the subscription rules used in setup mode.
 ///
-/// Always uses "mentions" mode: setup mode must not react to every event.
-/// Even if the agent's normal config is `subscribe_mode = all`, setup mode
-/// enforces explicit @mention filtering (see `event_mentions_agent` call in
-/// the loop above).
+/// Setup mode reacts only to explicit mentions in channels and to messages in
+/// verified one-to-one DMs with the agent. Even if the agent's normal config
+/// is `subscribe_mode = all`, it must not react to every stream or group-DM event.
 fn build_setup_subscription_rules(config: &Config) -> Vec<filter::SubscriptionRule> {
     use crate::config::SubscribeMode;
 
@@ -527,8 +552,8 @@ fn build_setup_subscription_rules(config: &Config) -> Vec<filter::SubscriptionRu
         .unwrap_or_else(|| vec![KIND_STREAM_MESSAGE, KIND_WORKFLOW_APPROVAL_REQUESTED]);
 
     match &config.subscribe_mode {
-        // Config mode: load the actual rules, but they will be filtered by
-        // the explicit event_mentions_agent check in the main loop anyway.
+        // Config mode: load the actual rules, with the main loop still
+        // enforcing explicit mentions outside one-to-one agent DMs.
         SubscribeMode::Config => match crate::config::load_rules(&config.config_path) {
             Ok(rules) => rules,
             Err(e) => {
@@ -565,20 +590,34 @@ async fn handle_setup_membership(
     buzz_event: &crate::relay::BuzzEvent,
     config: &Config,
     rules: &[filter::SubscriptionRule],
-    _initial_channel_ids: &[Uuid],
+    channel_info: &crate::pool::ChannelInfoResolver,
 ) {
     let kind_u32 = buzz_event.event.kind.as_u16() as u32;
     let channel_id = buzz_event.channel_id;
 
     if kind_u32 == KIND_MEMBER_ADDED_NOTIFICATION {
         // Subscribe to the newly-joined channel.
-        let ids = vec![channel_id];
-        let filters = crate::config::resolve_channel_filters(config, &ids, rules);
-        for (cid, filter) in filters {
-            if let Err(e) = relay.subscribe_channel(cid, filter).await {
-                tracing::warn!("setup-mode: failed to subscribe to new channel {cid}: {e}");
+        let is_implicitly_addressed = channel_info.resolve(channel_id).await.is_some_and(|info| {
+            crate::is_one_to_one_agent_dm(
+                &info.channel_type,
+                &info.participant_pubkeys,
+                &config.keys.public_key().to_hex(),
+            )
+        });
+        if let Some(filter) = crate::config::resolve_dynamic_channel_filter(
+            config,
+            channel_id,
+            is_implicitly_addressed,
+            rules,
+        ) {
+            if let Err(e) = relay.subscribe_channel(channel_id, filter).await {
+                tracing::warn!("setup-mode: failed to subscribe to new channel {channel_id}: {e}");
             } else {
-                tracing::info!("setup-mode: subscribed to new channel {cid}");
+                tracing::info!(
+                    channel_id = %channel_id,
+                    is_implicitly_addressed,
+                    "setup-mode: subscribed to new channel"
+                );
             }
         }
     } else if kind_u32 == KIND_MEMBER_REMOVED_NOTIFICATION {
