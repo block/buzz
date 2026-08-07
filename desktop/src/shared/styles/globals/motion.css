@@ -1,7 +1,7 @@
 /*
  * Buzz motion system
  *
- * Keep shared timing, easing, distance, and semantic motion primitives here.
+ * Keep shared timing, easing, and semantic motion primitives here.
  * Features decide when motion runs; this layer defines how Buzz moves.
  */
 
@@ -15,13 +15,13 @@
   /* Easing: direct for feedback, confident deceleration for entrances. */
   --motion-ease-standard: cubic-bezier(0.25, 1, 0.5, 1);
   --motion-ease-arrival: cubic-bezier(0.16, 1, 0.3, 1);
-
-  /* Distances stay restrained so motion supports hierarchy without spectacle. */
-  --motion-distance-arrival: 0.75rem;
-  --motion-blur-arrival: 2px;
 }
 
-/* A newly-created conversational object settling into the timeline. */
+/*
+ * Keep message arrival opacity-only. Timeline rows are positioned with
+ * transforms by the virtualizer; adding a nested transform or filter here can
+ * leave stale text tiles behind in WKWebView when rows are rapidly remeasured.
+ */
 .motion-enter-conversation {
   animation: motion-enter-conversation var(--motion-duration-arrival)
     var(--motion-ease-arrival) both;
@@ -29,15 +29,11 @@
 
 @keyframes motion-enter-conversation {
   from {
-    filter: blur(var(--motion-blur-arrival));
     opacity: 0;
-    transform: translateY(var(--motion-distance-arrival));
   }
 
   to {
-    filter: blur(0);
     opacity: 1;
-    transform: translateY(0);
   }
 }
 
@@ -49,9 +45,7 @@
   @keyframes motion-enter-conversation {
     from,
     to {
-      filter: none;
       opacity: 1;
-      transform: none;
     }
   }
 }
