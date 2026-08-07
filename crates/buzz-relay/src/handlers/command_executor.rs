@@ -199,6 +199,36 @@ async fn persist_command_event(
             .await
             .map_err(|e| IngestError::Internal(format!("error: replace old event: {e}")))?;
         }
+
+        // #4864: a workflow deleted via NIP-09 must not be resurrected by
+        // re-publishing its coordinate. `workflows delete` tombstones the
+        // kind:30620 event rows (see `handle_a_tag_deletion` in side_effects);
+        // without this guard a subsequent `workflows update` would insert a
+        // fresh live row that revives a workflow the owner explicitly deleted
+        // — and re-arms its webhook trigger with a brand-new secret. Fail
+        // closed: any tombstone at the coordinate rejects the publish.
+        if kind_i32 == buzz_core::kind::KIND_WORKFLOW_DEF as i32 {
+            let tombstoned: Option<(chrono::DateTime<chrono::Utc>,)> = sqlx::query_as(
+                "SELECT deleted_at FROM events \
+                 WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 \
+                 AND deleted_at IS NOT NULL \
+                 ORDER BY deleted_at DESC LIMIT 1",
+            )
+            .bind(tenant.community().as_uuid())
+            .bind(kind_i32)
+            .bind(pubkey_bytes.as_slice())
+            .bind(d_tag)
+            .fetch_optional(tx.as_mut())
+            .await
+            .map_err(|e| {
+                IngestError::Internal(format!("error: query tombstoned coordinate: {e}"))
+            })?;
+            if tombstoned.is_some() {
+                return Err(IngestError::Rejected(format!(
+                    "not found: workflow {d_tag} was deleted and cannot be re-published"
+                )));
+            }
+        }
     }
 
     let result = sqlx::query(
