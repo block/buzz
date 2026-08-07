@@ -1,4 +1,32 @@
 import type { Channel, ManagedAgent } from "@/shared/api/types";
+import type { AgentManagementRequest } from "./agentManagement";
+
+export type QueuedAgentManagementRequest = {
+  agentPubkey: string;
+  request: AgentManagementRequest;
+};
+
+export type AgentManagementRequestQueue = {
+  active: QueuedAgentManagementRequest | null;
+  queued: QueuedAgentManagementRequest[];
+};
+
+export function enqueueAgentManagementRequest(
+  state: AgentManagementRequestQueue,
+  incoming: QueuedAgentManagementRequest,
+): AgentManagementRequestQueue {
+  if (state.active === null) {
+    return { active: incoming, queued: state.queued };
+  }
+  return { active: state.active, queued: [...state.queued, incoming] };
+}
+
+export function advanceAgentManagementRequest(
+  state: AgentManagementRequestQueue,
+): AgentManagementRequestQueue {
+  const [active, ...queued] = state.queued;
+  return { active: active ?? null, queued };
+}
 
 /**
  * Defers the trust decision until both ownership and channel membership have
