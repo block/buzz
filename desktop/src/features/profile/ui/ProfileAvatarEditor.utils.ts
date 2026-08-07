@@ -72,6 +72,7 @@ const EMOJI_MART_SHADOW_CSS = `
 
   #root {
     --padding: var(--buzz-emoji-picker-padding, 16px);
+    --buzz-emoji-picker-search-control-height: 48px;
     --sidebar-width: 0px;
     display: flex;
     flex-direction: column;
@@ -125,6 +126,47 @@ const EMOJI_MART_SHADOW_CSS = `
 
   .category .sticky {
     display: none;
+  }
+
+  /* Match the app's member-search controls: a distinct resting surface and
+   * border make both the emoji search and its adjacent skin-tone control easy
+   * to find before either receives focus. */
+  .search input[type="search"],
+  .search + .flex {
+    background-color: rgb(var(--em-rgb-input));
+    box-shadow: inset 0 0 0 1px rgba(var(--em-rgb-color), 0.16);
+  }
+
+  .search input[type="search"] {
+    border-radius: 12px;
+    height: var(--buzz-emoji-picker-search-control-height);
+    padding-bottom: 0;
+    padding-top: 0;
+  }
+
+  .search input[type="search"]:focus {
+    box-shadow: inset 0 0 0 1px rgb(var(--em-rgb-accent));
+  }
+
+  .search + .flex {
+    border-radius: 12px;
+    flex: 0 0 auto;
+    height: var(--buzz-emoji-picker-search-control-height) !important;
+    margin-left: 8px;
+    width: var(--buzz-emoji-picker-search-control-height) !important;
+  }
+
+  .skin-tone-button {
+    background-color: transparent !important;
+    border: 0 !important;
+    border-radius: 8px;
+    box-shadow: none !important;
+    height: calc(var(--buzz-emoji-picker-search-control-height) - 8px) !important;
+    width: calc(var(--buzz-emoji-picker-search-control-height) - 8px) !important;
+  }
+
+  .skin-tone-button[aria-selected] {
+    background-color: transparent !important;
   }
 
   .category button .background {
@@ -593,14 +635,12 @@ export function useEmojiMartThemeVars() {
       const foreground = hslToRgbString(
         styles.getPropertyValue("--foreground"),
       );
-      const background = hslToRgbString(
-        styles.getPropertyValue("--background"),
-      );
+      const input = hslToRgbString(styles.getPropertyValue("--input"));
 
       setThemeVars({
         "--buzz-emoji-picker-rgb-background": muted ?? "54, 58, 79",
         "--buzz-emoji-picker-rgb-color": foreground ?? "245, 247, 255",
-        "--buzz-emoji-picker-rgb-input": background ?? "47, 51, 68",
+        "--buzz-emoji-picker-rgb-input": input ?? "47, 51, 68",
       } as React.CSSProperties);
     };
 

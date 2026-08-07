@@ -753,7 +753,11 @@ export function ProfileAvatarEditor({
               ) : (
                 <div className="relative grid content-start gap-3">
                   <div
-                    className="buzz-emoji-mart relative z-0 h-[316px] overflow-hidden rounded-xl bg-muted transition-colors duration-[250ms] ease-out"
+                    className={cn(
+                      "buzz-emoji-mart relative z-0 overflow-hidden rounded-xl bg-muted transition-colors duration-[250ms] ease-out",
+                      isOnboardingModal ? "h-[316px]" : "h-[384px]",
+                    )}
+                    data-testid={`${testIdPrefix}-emoji-picker`}
                     ref={emojiPickerContainerRef}
                     style={emojiMartThemeVars}
                   >
@@ -788,9 +792,9 @@ export function ProfileAvatarEditor({
                         applyEmojiAvatar(emoji.native, nextColor);
                       }}
                       previewPosition="none"
-                      searchPosition="none"
+                      searchPosition="sticky"
                       set="native"
-                      skinTonePosition="none"
+                      skinTonePosition="search"
                       theme={emojiPickerTheme}
                     />
                   </div>

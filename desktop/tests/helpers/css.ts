@@ -99,3 +99,23 @@ export async function expectSmoothCorners(
     )
     .toBe(true);
 }
+
+/**
+ * Waits for the Buzz emoji-picker overrides to be present in the Emoji Mart
+ * shadow root.
+ *
+ * The stylesheet is appended from a `requestAnimationFrame` loop that starts
+ * only once the `em-emoji-picker` custom element has attached its shadow root,
+ * so it can land a frame or more after the search input becomes visible. Any
+ * assertion on an overridden property (control heights, resting background)
+ * must wait for this, otherwise it can read Emoji Mart's un-overridden defaults.
+ */
+export async function expectEmojiMartStylesInstalled(picker: Locator) {
+  await expect
+    .poll(async () =>
+      picker.evaluate((element) =>
+        Boolean(element.shadowRoot?.querySelector("#buzz-emoji-mart-style")),
+      ),
+    )
+    .toBe(true);
+}
