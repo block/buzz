@@ -184,16 +184,25 @@
 }
 
 .message-markdown .agent-mention-at-hidden {
-  display: inline-block;
-  width: 0;
-  max-width: 0;
-  overflow: hidden;
+  /* Collapse the literal "@" to zero advance width WITHOUT using a
+     zero-width `inline-block` box. WebKitGTK (the Tauri webview on Linux)
+     mis-measures the caret rect for a text position adjacent to a
+     collapsed `inline-block`: it snaps the caret to the box's content
+     origin, which — because the following agent chip carries left padding
+     for its bot icon — renders the caret visually *inside* the chip
+     (e.g. "F|izz") even though the ProseMirror selection is correctly
+     after the whole mention. Hiding the "@" as plain inline text via
+     `font-size: 0` keeps zero advance width while leaving the caret on
+     the normal inline text path, which WebKit positions correctly.
+     `inline` (not `inline-block`) is essential to the fix. */
+  display: inline;
+  font-size: 0;
+  line-height: inherit;
   opacity: 0;
   padding: 0;
   margin: 0;
   border: 0;
   vertical-align: baseline;
-  line-height: 1;
 }
 
 .message-markdown .agent-mention-highlight {
