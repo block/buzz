@@ -148,6 +148,37 @@ fn resolve_mention_pubkeys(text: &str, members: &[(String, String)]) -> Vec<Stri
     out
 }
 
+/// Build the tags for a relay-signed workflow message.
+///
+/// Workflow ownership is provenance, not a notification target. Buzz clients
+/// and relay authorization already understand the relay-trusted `actor` tag as
+/// delegated authorship, while `p` tags drive mention notifications and ACP
+/// wake-up. Keep those concerns separate here: the owner is the actor, and only
+/// explicitly resolved mentions become `p` tags.
+fn build_message_tags(
+    channel_id: &str,
+    actor_pubkey: &str,
+    mentioned_pubkeys: &[String],
+) -> Result<Vec<Tag>, ActionSinkError> {
+    let mut tags = vec![
+        Tag::parse(["actor", actor_pubkey])
+            .map_err(|e| ActionSinkError::EventBuild(format!("actor tag: {e}")))?,
+        Tag::parse(["h", channel_id])
+            .map_err(|e| ActionSinkError::EventBuild(format!("h tag: {e}")))?,
+        Tag::parse(["buzz:workflow", "true"])
+            .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?,
+    ];
+
+    for mentioned in mentioned_pubkeys {
+        tags.push(
+            Tag::parse(["p", mentioned])
+                .map_err(|e| ActionSinkError::EventBuild(format!("mention p tag: {e}")))?,
+        );
+    }
+
+    Ok(tags)
+}
+
 /// Relay-side action sink — executes workflow side-effects directly.
 ///
 /// Holds a **weak** reference to `AppState` to avoid an `Arc` reference cycle:
@@ -252,24 +283,14 @@ impl ActionSink for RelayActionSink {
 
             // 3. Build kind:9 Nostr event
             //    - Signed by relay keypair (event.pubkey = relay pubkey)
-            //    - `p` tag attributes the message to the workflow owner
+            //    - `actor` tag attributes the message to the workflow owner
             //    - `h` tag scopes to the channel (NIP-29, canonical UUID)
             //    - `buzz:workflow` tag prevents recursive workflow triggering
             //    - one `p` tag per `@Name` that resolves to a channel member,
             //      so mentioned agents are woken (wake is `p`-tag gated)
-            let mut tags = vec![
-                Tag::parse(["p", &author_pubkey_hex])
-                    .map_err(|e| ActionSinkError::EventBuild(format!("p tag: {e}")))?,
-                Tag::parse(["h", &channel_id_canonical])
-                    .map_err(|e| ActionSinkError::EventBuild(format!("h tag: {e}")))?,
-                Tag::parse(["buzz:workflow", "true"])
-                    .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?,
-            ];
-
-            // Resolve `@Name` mentions to channel-member pubkeys and append a
-            // `p` tag for each (skipping the author, already tagged above). A
-            // resolution failure must not drop the message, so log and proceed
-            // with the base tags.
+            // Resolve `@Name` mentions to channel-member pubkeys. The owner is
+            // intentionally eligible here: an explicit owner mention should
+            // notify them even though ownership alone should not.
             let members = state
                 .db
                 .get_members(tenant.community(), channel_uuid)
@@ -288,15 +309,12 @@ impl ActionSink for RelayActionSink {
                     Some((name, nostr::PublicKey::from_slice(&u.pubkey).ok()?.to_hex()))
                 })
                 .collect();
-            for mentioned in resolve_mention_pubkeys(&text, &named_members) {
-                if mentioned == author_pubkey_hex {
-                    continue;
-                }
-                tags.push(
-                    Tag::parse(["p", &mentioned])
-                        .map_err(|e| ActionSinkError::EventBuild(format!("mention p tag: {e}")))?,
-                );
-            }
+            let mentioned_pubkeys = resolve_mention_pubkeys(&text, &named_members);
+            let tags = build_message_tags(
+                &channel_id_canonical,
+                &author_pubkey_hex,
+                &mentioned_pubkeys,
+            )?;
 
             let kind = Kind::from(KIND_STREAM_MESSAGE as u16);
             let event = EventBuilder::new(kind, &text)
@@ -375,6 +393,37 @@ mod tests {
     // A 64-char hex pubkey built from a single repeated nibble, for readable tests.
     fn pk(nibble: char) -> String {
         std::iter::repeat_n(nibble, 64).collect()
+    }
+
+    fn tag_values<'a>(tags: &'a [Tag], name: &str) -> Vec<&'a str> {
+        tags.iter()
+            .filter(|tag| tag.as_slice().first().map(String::as_str) == Some(name))
+            .filter_map(|tag| tag.as_slice().get(1).map(String::as_str))
+            .collect()
+    }
+
+    #[test]
+    fn workflow_owner_is_actor_without_implicit_mention() {
+        let actor = pk('a');
+        let tags = build_message_tags("36411e44-0e2d-4cfe-bd6e-567eb169db9f", &actor, &[])
+            .expect("valid workflow message tags");
+
+        assert_eq!(tag_values(&tags, "actor"), vec![actor.as_str()]);
+        assert!(tag_values(&tags, "p").is_empty());
+    }
+
+    #[test]
+    fn explicitly_mentioned_owner_is_actor_and_recipient_once() {
+        let actor = pk('a');
+        let tags = build_message_tags(
+            "36411e44-0e2d-4cfe-bd6e-567eb169db9f",
+            &actor,
+            std::slice::from_ref(&actor),
+        )
+        .expect("valid workflow message tags");
+
+        assert_eq!(tag_values(&tags, "actor"), vec![actor.as_str()]);
+        assert_eq!(tag_values(&tags, "p"), vec![actor.as_str()]);
     }
 
     #[test]
@@ -611,7 +660,7 @@ mod integration_tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn workflow_send_message_p_tags_mentioned_member() {
+    async fn workflow_send_message_separates_actor_from_mentioned_member() {
         let state = test_state().await;
 
         let author = nostr::Keys::generate();
@@ -698,14 +747,23 @@ mod integration_tests {
             .filter(|t| t.as_slice().first().map(|s| s.as_str()) == Some("p"))
             .filter_map(|t| t.as_slice().get(1).map(|s| s.as_str()))
             .collect();
+        let actor_tag_targets: Vec<&str> = stored
+            .event
+            .tags
+            .iter()
+            .filter(|t| t.as_slice().first().map(|s| s.as_str()) == Some("actor"))
+            .filter_map(|t| t.as_slice().get(1).map(|s| s.as_str()))
+            .collect();
 
-        assert!(
-            p_tag_targets.contains(&author_hex.as_str()),
-            "author should still be attributed via p tag; got {p_tag_targets:?}"
+        assert_eq!(
+            actor_tag_targets,
+            vec![author_hex.as_str()],
+            "workflow owner should be attributed exactly once via actor tag"
         );
-        assert!(
-            p_tag_targets.contains(&agent_hex.as_str()),
-            "mentioned member {agent_hex} must be p-tagged so it wakes; got {p_tag_targets:?}"
+        assert_eq!(
+            p_tag_targets,
+            vec![agent_hex.as_str()],
+            "only the explicitly mentioned member should receive a p tag"
         );
     }
 }
