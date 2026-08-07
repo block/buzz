@@ -496,9 +496,7 @@ pub fn spawn_agent_child(
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| effective_command.clone());
 
-    // The caller supplies the explicit canonical pair relay. This is the only
-    // relay this child may connect to, regardless of the record/workspace default.
-    let effective_relay_url = runtime_key.relay_url.clone();
+    let effective_relay_url = relay_url.to_string(); // CONFIGURED relay, not normalized key (multi-tenant by Host); see commit msg
 
     // Augment PATH for DMG launches so child processes can find:
     //   - bundled CLI via ~/.local/bin symlink
@@ -839,7 +837,7 @@ pub fn spawn_agent_child(
         super::spawn_snapshot::SpawnConfigInputs {
             record,
             descriptor: &descriptor,
-            relay_url: &effective_relay_url,
+            relay_url: &runtime_key.relay_url, // NORMALIZED: matches needs_restart recompute (see commit msg)
             team_instructions: team_instructions.as_deref(),
             system_prompt: effective_prompt.as_deref(),
             model: effective_model.as_deref(),
@@ -951,7 +949,9 @@ pub fn start_managed_agent_process(
     // Scalar PIDs are migration-only and never establish pair liveness.
     record.runtime_pid = None;
 
-    let mut process = spawn_agent_child(app, record, &key.relay_url, false, owner_hex)?;
+    // Connect via the configured relay (`relay_url`), not the normalized key —
+    // see spawn_agent_child: the loopback fold to 127.0.0.1 is identity-only.
+    let mut process = spawn_agent_child(app, record, &relay_url, false, owner_hex)?;
     let now = now_iso();
     let receipt = super::ManagedAgentRuntimeReceipt {
         key: key.clone(),
