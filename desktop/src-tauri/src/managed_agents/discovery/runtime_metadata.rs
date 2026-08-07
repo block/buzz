@@ -5,8 +5,9 @@ pub(crate) struct KnownAcpRuntime {
     pub commands: &'static [&'static str],
     pub aliases: &'static [&'static str],
     pub avatar_url: &'static str,
-    /// Legacy MCP server binary field. Vestigial — all agents now use the bundled CLI
-    /// directly. Will be removed when runtime discovery is simplified.
+    /// Optional MCP server binary injected into the ACP session to provide the agent
+    /// with workspace and Buzz CLI tools without depending on the agent's own shell
+    /// environment. Empty for runtimes that do not use the bundled server.
     pub mcp_command: Option<&'static str>,
     /// Whether to enable MCP hook tools (`_Stop`, `_PostCompact`) for this agent.
     pub mcp_hooks: bool,
@@ -83,6 +84,45 @@ impl KnownAcpRuntime {
     }
 }
 
+/// Hermes Agent runtime metadata. Extracted from `discovery.rs` so the
+/// runtime catalog table stays under the 1,627-line ratchet while keeping the
+/// known-runtime descriptors self-contained in this module.
+pub(super) const HERMES_RUNTIME: KnownAcpRuntime = KnownAcpRuntime {
+    id: "hermes",
+    label: "Hermes Agent",
+    commands: &["hermes-acp"],
+    aliases: &["hermes-agent"],
+    avatar_url: "",
+    mcp_command: Some("buzz-dev-mcp"),
+    mcp_hooks: false,
+    underlying_cli: Some("hermes"),
+    cli_install_commands: &[],
+    cli_install_commands_windows: &[],
+    adapter_install_commands: &[],
+    cli_install_instructions_url: "https://hermes-agent.nousresearch.com",
+    adapter_install_instructions_url: "https://hermes-agent.nousresearch.com",
+    cli_install_hint: "Install Hermes Agent so the hermes command is available.",
+    adapter_install_hint: "Hermes Agent provides the hermes-acp command.",
+    skill_dir: None,
+    supports_acp_model_switching: false,
+    model_env_var: None,
+    provider_env_var: None,
+    provider_locked: false,
+    default_env: &[],
+    config_file_path: None,
+    config_file_format: None,
+    supports_acp_native_config: false,
+    thinking_env_var: None,
+    max_tokens_env_var: None,
+    context_limit_env_var: None,
+    max_rounds_env_var: None,
+    required_normalized_fields: &[],
+    login_hint: Some(
+        "Complete Hermes Agent provider setup if hermes-acp reports missing credentials.",
+    ),
+    auth_probe_args: None,
+};
+
 #[cfg(test)]
 mod tests {
     use super::super::known_acp_runtime_exact;
@@ -122,5 +162,9 @@ mod tests {
         );
         assert!(codex.adapter_install_instructions_url.contains("codex-acp"));
         assert!(codex.cli_install_hint.contains("Codex CLI"));
+
+        let hermes = known_acp_runtime_exact("hermes").unwrap();
+        assert_eq!(hermes.commands, &["hermes-acp"]);
+        assert_eq!(hermes.mcp_command, Some("buzz-dev-mcp"));
     }
 }

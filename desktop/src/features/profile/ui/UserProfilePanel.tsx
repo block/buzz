@@ -199,6 +199,23 @@ export function UserProfilePanel({
     }
     return undefined;
   }, [managedAgentsQuery.data, persona, pubkey]);
+  const editAgentProfileKey = pubkey?.toLowerCase() ?? persona?.id ?? "";
+  const editAgentSnapshotRef = React.useRef<{
+    profileKey: string;
+    agent: NonNullable<typeof managedAgent>;
+  } | null>(null);
+  if (managedAgent) {
+    editAgentSnapshotRef.current = {
+      profileKey: editAgentProfileKey,
+      agent: managedAgent,
+    };
+  }
+  const editManagedAgent =
+    managedAgent ??
+    (editAgentOpen &&
+    editAgentSnapshotRef.current?.profileKey === editAgentProfileKey
+      ? editAgentSnapshotRef.current.agent
+      : undefined);
   const personaInstances = React.useMemo(() => {
     if (!managedAgent?.personaId) return managedAgent ? [managedAgent] : [];
     return (managedAgentsQuery.data ?? []).filter(
@@ -906,9 +923,9 @@ export function UserProfilePanel({
     </AuxiliaryPanelBody>
   );
   const editAgentDialog =
-    canEditAgent && managedAgent ? (
+    canEditAgent && editManagedAgent ? (
       <AgentDialog
-        agent={managedAgent}
+        agent={editManagedAgent}
         mode="instance-edit"
         initialFocus={editAgentFocus}
         onEditLinkedPersona={

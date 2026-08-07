@@ -13,6 +13,7 @@ import {
 import {
   listManagedAgentRuntimes,
   reconcileManagedAgentRuntimes,
+  restartManagedAgentRuntime,
   startManagedAgentRuntime,
   stopManagedAgentRuntime,
 } from "@/shared/api/tauriManagedAgents";
@@ -97,11 +98,15 @@ export function bootstrapManagedAgentRuntimePairs(
     });
 }
 
-export function useManagedAgentRuntimesQuery(options?: { enabled?: boolean }) {
+export function useManagedAgentRuntimesQuery(options?: {
+  enabled?: boolean;
+  refetchInterval?: number | false;
+}) {
   return useQuery({
     enabled: options?.enabled ?? true,
     queryKey: managedAgentRuntimesQueryKey,
     queryFn: listManagedAgentRuntimes,
+    refetchInterval: options?.refetchInterval ?? false,
   });
 }
 
@@ -148,34 +153,31 @@ export function clearActiveTurnsForAgentOnStop(
 }
 
 /**
- * Execute a pair restart as stop → relay-scoped badge clear → start.
+ * Execute one backend-atomic pair restart, then clear relay-scoped badges.
  *
  * Extracted from `useManagedAgentRuntimeAction`'s `mutationFn` so the
- * three-step lifecycle boundary can be tested directly without a hook-render
- * harness.  All three operations are injected, keeping this function free of
+ * lifecycle boundary can be tested directly without a hook-render harness.
+ * Both operations are injected, keeping this function free of
  * React and Tauri imports.
  *
  * Guarantees:
- * - Clear fires only when stop succeeds.
- * - A failed start occurs after the clear — the badge is already gone.
- * - No clear can fire after start begins, so genuinely-new turns are safe.
+ * - Stop plus eager start remain one backend transition-lock boundary.
+ * - Clear fires only after that atomic restart succeeds.
+ * - Failed restarts leave the badge intact rather than clearing a potentially
+ *   still-active turn.
  */
 export async function restartManagedAgentPair(
   pubkey: string,
   relayUrl: string,
-  stop: (
+  restart: (
     pubkey: string,
     relayUrl: string,
   ) => Promise<ManagedAgentRuntimeStatus>,
   clear: (pubkey: string, relayUrl: string) => void,
-  start: (
-    pubkey: string,
-    relayUrl: string,
-  ) => Promise<ManagedAgentRuntimeStatus>,
 ): Promise<ManagedAgentRuntimeStatus> {
-  await stop(pubkey, relayUrl);
+  const runtime = await restart(pubkey, relayUrl);
   clear(pubkey, relayUrl);
-  return start(pubkey, relayUrl);
+  return runtime;
 }
 
 export function useManagedAgentRuntimeAction() {
@@ -195,9 +197,8 @@ export function useManagedAgentRuntimeAction() {
         return restartManagedAgentPair(
           pubkey,
           relayUrl,
-          stopManagedAgentRuntime,
+          restartManagedAgentRuntime,
           clearActiveTurnsForAgentOnStop,
-          startManagedAgentRuntime,
         );
       }
       return startManagedAgentRuntime(pubkey, relayUrl);

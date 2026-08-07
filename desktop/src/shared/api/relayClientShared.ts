@@ -29,6 +29,26 @@ export function isRelayConnectionDegraded(state: ConnectionState): boolean {
   );
 }
 
+/** Fail closed when a caller cancels an in-flight relay send. */
+export function assertRelaySendNotAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new Error("Message send cancelled.");
+  }
+}
+
+/** Fail closed when native signing returns an unexpected author. */
+export function assertRelayEventAuthor(
+  actualPubkey: string,
+  expectedPubkey?: string,
+): void {
+  if (
+    expectedPubkey &&
+    actualPubkey.toLowerCase() !== expectedPubkey.toLowerCase()
+  ) {
+    throw new Error("The message author changed before posting.");
+  }
+}
+
 export type RelaySubscriptionFilter = {
   ids?: string[];
   kinds: number[];

@@ -7,6 +7,7 @@ import {
   useAcpRuntimesQuery,
   useAgentConfigSurface,
   useBakedBuildEnvKeysQuery,
+  useSetManagedAgentAutoRestartMutation,
   usePersonasQuery,
   useStartManagedAgentMutation,
   useUpdateManagedAgentMutation,
@@ -23,7 +24,6 @@ import { Button } from "@/shared/ui/button";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
 import { Dialog } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
-import { setManagedAgentAutoRestart } from "@/shared/api/tauriManagedAgents";
 import { EditAgentAdvancedFields } from "./EditAgentAdvancedFields";
 import {
   ADVANCED_FIELDS_MOTION_TRANSITION,
@@ -89,6 +89,13 @@ import { resolveModelFieldStatusMessage } from "./agentConfigControls";
 import { AdvancedRequiredBadge } from "./AdvancedRequiredBadge";
 import { showAgentProfileSyncWarning } from "./agentProfileSyncWarning";
 import { AddCustomHarnessDialog } from "./AddCustomHarnessDialog";
+import { AgentRapidActionsFooter } from "./AgentRapidActionsFooter";
+import { AgentRapidTestPanel } from "./AgentRapidTestPanel";
+import {
+  revalidateRapidPostSaveRoute,
+  type RapidSaveMode,
+} from "./agentRapidTest";
+import { useAgentRapidIteration } from "./useAgentRapidIteration";
 import {
   ADD_CUSTOM_HARNESS_OPTION,
   runtimeDropdownAction,
@@ -113,7 +120,14 @@ export function AgentInstanceEditDialog({
   onUpdated?: (agent: ManagedAgent) => void;
 }) {
   const updateMutation = useUpdateManagedAgentMutation();
+  const autoRestartMutation = useSetManagedAgentAutoRestartMutation();
   const startMutation = useStartManagedAgentMutation();
+  const rapidIteration = useAgentRapidIteration({
+    agentBackend: agent.backend,
+    agentPubkey: agent.pubkey,
+    onClose: () => onOpenChange(false),
+    open,
+  });
   const runtimesQuery = useAcpRuntimesQuery({ enabled: open });
   const configSurfaceQuery = useAgentConfigSurface(open ? agent.pubkey : null);
   const runtimes = runtimesQuery.data ?? [];
@@ -205,6 +219,7 @@ export function AgentInstanceEditDialog({
         runtimes.find((r) => r.id === agent.agentCommand.trim());
       setSelectedRuntimeId(matched ? matched.id : "custom");
       updateMutation.reset();
+      autoRestartMutation.reset();
     }
   }, [open, agent.pubkey]);
 
@@ -584,7 +599,12 @@ export function AgentInstanceEditDialog({
   }
 
   function handleOpenChange(next: boolean) {
-    onOpenChange(next);
+    if (!next && rapidIteration.isPending) {
+      rapidIteration.cancel();
+      onOpenChange(false);
+      return;
+    }
+    if (next || !isSubmitPending) onOpenChange(next);
   }
 
   const providerValid = isEditAgentProviderSaveValid({
@@ -595,6 +615,10 @@ export function AgentInstanceEditDialog({
     originalRuntimeSupportsProvider,
   });
 
+  const isSubmitPending =
+    updateMutation.isPending ||
+    autoRestartMutation.isPending ||
+    rapidIteration.isPending;
   const canSubmit =
     computeEditAgentFormValidity({
       name,
@@ -609,24 +633,26 @@ export function AgentInstanceEditDialog({
       requiredEnvKeyMissing,
     }) &&
     providerValid &&
-    !updateMutation.isPending &&
+    !isSubmitPending &&
     !isAvatarUploadPending;
 
-  async function handleSubmit() {
-    try {
+  async function handleSubmit(mode: RapidSaveMode = "save") {
+    updateMutation.reset();
+    autoRestartMutation.reset();
+    const deferredUpdate: { agent: ManagedAgent | null } = { agent: null };
+    const saveAgent: Parameters<typeof rapidIteration.run>[1] = async (
+      markRecordSaved,
+      _signal,
+      assertActionAuthority,
+    ) => {
+      assertActionAuthority();
       const parsedParallelism = Number.parseInt(parallelism, 10);
       const parsedArgs = agentArgs
         .split(",")
         .map((v) => v.trim())
         .filter((v) => v.length > 0);
-      // Model to persist — from the shared inherited-submission snapshot so a
-      // provider-backed inherit-transition carries the persona model (readiness
-      // requires one) and a deliberate local model still wins.
       const normalizedModel = inheritedSubmission.model;
 
-      // Harness pin resolution — see resolveAgentCommandUpdate for the full
-      // sentinel/pin/no-op contract, including the inherit→pin transition where
-      // the prefilled command equals the original but must still be pinned.
       const agentCommandUpdate = resolveAgentCommandUpdate({
         inheritHarness,
         agentCommand,
@@ -634,38 +660,21 @@ export function AgentInstanceEditDialog({
         agentCommandOverride: agent.agentCommandOverride ?? null,
       });
 
-      // Classify the effective post-submit runtime's provider capability as a
-      // tri-state: "capable" persists the provider, "locked" clears it (only
-      // when we KNOW it's provider-locked, e.g. Claude), "unknown" OMITS it so a
-      // transient/custom state never becomes a destructive write. Resolved
-      // STATICALLY (by id) so a not-yet-loaded catalog can't misclassify a known
-      // runtime as "unknown" — see resolveRuntimeProviderCapability. The runtime
-      // id is the shared prospectiveRuntimeId, so submit and the block-save gate
-      // always agree on which runtime is being saved.
       const providerRuntimeCapability = resolveRuntimeProviderCapability(
         prospectiveRuntimeId,
         runtimeSupportsLlmProviderSelection(prospectiveRuntimeId),
       );
 
-      // Provider + env to persist — the shared inherited-submission snapshot
-      // (same values the credential gate validates), so gate ↔ record ↔ spawn
-      // all agree. See resolveInheritedRuntimeSubmission.
       const normalizedSubmitProvider = inheritedSubmission.provider;
       const submitEnvVars = inheritedSubmission.envVars;
       const input: UpdateManagedAgentInput = {
         pubkey: agent.pubkey,
         name: name.trim() !== agent.name ? name.trim() : undefined,
-        // relayUrl deliberately never submitted: the legacy per-record pin is
-        // ignored (#2122) and the stored value is preserved as-is.
         acpCommand:
           acpCommand.trim() !== agent.acpCommand
             ? acpCommand.trim()
             : undefined,
         agentCommand: agentCommandUpdate,
-        // A non-inheriting selection is a deliberate pin — signal it so the
-        // backend preserves a Custom/runtime command even when it maps to the
-        // linked persona's own runtime (otherwise it would be dropped back to
-        // inherit). Omitted (falsy) when inheriting or on a name-only edit.
         harnessOverride:
           agentCommandUpdate != null ? !inheritHarness : undefined,
         agentArgs:
@@ -676,7 +685,6 @@ export function AgentInstanceEditDialog({
           parsedParallelism > 0 && parsedParallelism !== agent.parallelism
             ? parsedParallelism
             : undefined,
-        // Linked instances defer model/provider/systemPrompt to the definition.
         systemPrompt:
           linkedPersona != null
             ? undefined
@@ -689,11 +697,7 @@ export function AgentInstanceEditDialog({
             : normalizedModel !== (agent.model ?? null)
               ? normalizedModel
               : undefined,
-        // Tri-state provider persistence keyed on providerRuntimeCapability:
-        //   "capable"  → persist: value if changed, omit if unchanged.
-        //   "locked"   → clear: send null if provider was set, else omit.
-        //   "unknown"  → omit always (never send null for a transient state).
-        // llmProviderFieldVisible is for UX visibility only; not used here.
+        // Persist, clear, or omit by the named runtime-capability tri-state.
         provider:
           linkedPersona != null
             ? undefined
@@ -710,12 +714,6 @@ export function AgentInstanceEditDialog({
           ? undefined
           : submitEnvVars,
         respondTo: respondTo !== agent.respondTo ? respondTo : undefined,
-        // The allowlist is preserved across mode toggles in local UI state
-        // (so a user can flip away from allowlist and back without losing
-        // their entries), but we only send it on the wire when (a) it
-        // actually changed, AND (b) the saved mode will need it. Sending
-        // an allowlist while switching to a non-allowlist mode would be
-        // harmless server-side, but it's noise in the persisted record.
         respondToAllowlist:
           respondTo === "allowlist" &&
           respondToAllowlist.join(",") !== agent.respondToAllowlist.join(",")
@@ -723,29 +721,58 @@ export function AgentInstanceEditDialog({
             : undefined,
       };
 
-      const result = await updateMutation.mutateAsync(input);
-      if (autoRestartOnConfigChange !== agent.autoRestartOnConfigChange) {
-        // Standalone setter (mirrors start-on-app-launch) — not part of
-        // UpdateManagedAgentInput, so the frozen update shape stays frozen.
-        await setManagedAgentAutoRestart(
-          agent.pubkey,
-          autoRestartOnConfigChange,
-        );
+      const hasAgentUpdates = Object.entries(input).some(
+        ([key, value]) => key !== "pubkey" && value !== undefined,
+      );
+      let savedAgent = agent;
+      let profileSyncError: string | null = null;
+      if (hasAgentUpdates) {
+        const result = await updateMutation.mutateAsync(input);
+        savedAgent = result.agent;
+        profileSyncError = result.profileSyncError;
       }
-      showAgentProfileSyncWarning(result.agent.name, result.profileSyncError);
-      handleOpenChange(false);
-      onUpdated?.(result.agent);
-      // The auto-restart policy deliberately never fires for a stopped or
-      // failing agent (a broken agent must not auto-loop), so an edit meant
-      // to FIX one silently waits for a manual start. Offer that start
-      // explicitly instead of relying on the user to know the policy.
-      if (!isManagedAgentActive(result.agent)) {
-        const startedName = result.agent.name;
+      markRecordSaved();
+      // Persistence is already committed. Capture it before optional
+      // follow-up work so the parent is still notified when cancellation,
+      // auto-restart, or route revalidation interrupts the rapid action.
+      deferredUpdate.agent = savedAgent;
+      assertActionAuthority();
+      if (autoRestartOnConfigChange !== agent.autoRestartOnConfigChange) {
+        savedAgent = await autoRestartMutation.mutateAsync({
+          pubkey: agent.pubkey,
+          autoRestartOnConfigChange,
+        });
+        deferredUpdate.agent = savedAgent;
+        assertActionAuthority();
+      }
+      if (mode !== "save") {
+        await revalidateRapidPostSaveRoute({
+          savedAgent,
+          expectedRuntimeId: prospectiveRuntimeId,
+          expectedAgentCommand: agentCommand,
+          expectedAcpCommand: acpCommand,
+          refetchRuntimes: runtimesQuery.refetch,
+          refetchPersonas: personasQuery.refetch,
+        });
+        assertActionAuthority();
+      }
+      showAgentProfileSyncWarning(savedAgent.name, profileSyncError);
+      if (mode === "save") {
+        onUpdated?.(savedAgent);
+        deferredUpdate.agent = null;
+      } else {
+        // Keep the dialog mounted through restart, Ready polling, smoke
+        // publication, and thread navigation. Notifying the parent here can
+        // close the dialog and abort the post-save workflow before it sends.
+        deferredUpdate.agent = savedAgent;
+      }
+      if (mode === "save" && !isManagedAgentActive(savedAgent)) {
+        const startedName = savedAgent.name;
         toast(`${startedName} saved while stopped.`, {
           action: {
             label: "Start now",
             onClick: () => {
-              startMutation.mutate(result.agent.pubkey, {
+              startMutation.mutate(savedAgent.pubkey, {
                 onSuccess: () => toast.success(`${startedName} started.`),
                 onError: (error) =>
                   toast.error(
@@ -758,8 +785,11 @@ export function AgentInstanceEditDialog({
           },
         });
       }
-    } catch {
-      // React Query stores the error; keep dialog open and render it inline.
+      return savedAgent;
+    };
+    await rapidIteration.run(mode, saveAgent);
+    if (deferredUpdate.agent) {
+      onUpdated?.(deferredUpdate.agent);
     }
   }
 
@@ -842,6 +872,10 @@ export function AgentInstanceEditDialog({
   const advancedFieldsTransition = shouldReduceMotion
     ? { duration: 0 }
     : ADVANCED_FIELDS_MOTION_TRANSITION;
+  const submitError =
+    (updateMutation.error instanceof Error
+      ? "Could not save the managed agent changes."
+      : null) ?? rapidIteration.error;
 
   return (
     <Dialog onOpenChange={handleOpenChange} open={open}>
@@ -853,24 +887,17 @@ export function AgentInstanceEditDialog({
         headerClassName="pb-2"
         title={`Edit ${agent.name}`}
         footer={
-          <div className="flex w-full items-center justify-end gap-2">
-            <Button
-              disabled={updateMutation.isPending || isAvatarUploadPending}
-              onClick={() => handleOpenChange(false)}
-              type="button"
-              variant="outline"
-            >
-              Cancel
-            </Button>
-            <Button
-              data-testid="edit-agent-dialog-submit"
-              disabled={!canSubmit}
-              onClick={() => void handleSubmit()}
-              type="button"
-            >
-              {updateMutation.isPending ? "Saving..." : "Save changes"}
-            </Button>
-          </div>
+          <AgentRapidActionsFooter
+            canSubmit={canSubmit}
+            canRestart={rapidIteration.canRestart}
+            canSmoke={rapidIteration.canSmoke}
+            hasRapidTestSelection={rapidIteration.selection !== null}
+            isAvatarUploadPending={isAvatarUploadPending}
+            isSubmitPending={isSubmitPending}
+            onCancel={() => handleOpenChange(false)}
+            onSubmit={(mode) => void handleSubmit(mode)}
+            rapidAction={rapidIteration.action}
+          />
         }
       >
         <div className="grid gap-5 lg:grid-cols-[220px_minmax(0,1fr)]">
@@ -925,7 +952,7 @@ export function AgentInstanceEditDialog({
                     "h-8 px-0 py-0 leading-6",
                     PERSONA_FIELD_CONTROL_CLASS,
                   )}
-                  disabled={updateMutation.isPending}
+                  disabled={isSubmitPending}
                   id="edit-agent-name"
                   onChange={(event) => setName(event.target.value)}
                   placeholder="Agent name"
@@ -937,7 +964,7 @@ export function AgentInstanceEditDialog({
             {/* Who can send instructions */}
             <CreateAgentRespondToField
               allowlist={respondToAllowlist}
-              disabled={updateMutation.isPending}
+              disabled={isSubmitPending}
               mode={respondTo}
               onAllowlistChange={setRespondToAllowlist}
               onModeChange={setRespondTo}
@@ -955,7 +982,7 @@ export function AgentInstanceEditDialog({
                 Provider
               </label>
               <PersonaDropdownField
-                disabled={updateMutation.isPending}
+                disabled={isSubmitPending}
                 id="edit-agent-runtime"
                 onValueChange={handleRuntimeDropdownChange}
                 options={runtimeDropdownOptions}
@@ -998,7 +1025,7 @@ export function AgentInstanceEditDialog({
                       "h-8 px-0 py-0 leading-6",
                       PERSONA_FIELD_CONTROL_CLASS,
                     )}
-                    disabled={updateMutation.isPending}
+                    disabled={isSubmitPending}
                     id="edit-agent-command"
                     onChange={(event) => setAgentCommand(event.target.value)}
                     placeholder="Full path or shell command"
@@ -1026,7 +1053,7 @@ export function AgentInstanceEditDialog({
                   )}
                 </label>
                 <PersonaDropdownField
-                  disabled={updateMutation.isPending}
+                  disabled={isSubmitPending}
                   id="edit-agent-llm-provider"
                   onValueChange={handleProviderDropdownChange}
                   options={providerDropdownOptions}
@@ -1047,7 +1074,7 @@ export function AgentInstanceEditDialog({
                         "h-8 px-0 py-0 leading-6",
                         PERSONA_FIELD_CONTROL_CLASS,
                       )}
-                      disabled={updateMutation.isPending}
+                      disabled={isSubmitPending}
                       id="edit-agent-custom-provider"
                       onChange={(event) => setProvider(event.target.value)}
                       placeholder="Custom provider ID"
@@ -1060,7 +1087,7 @@ export function AgentInstanceEditDialog({
 
             {llmProviderFieldVisible && topLevelSecretEnvVar ? (
               <PersonaProviderApiKeyField
-                disabled={updateMutation.isPending}
+                disabled={isSubmitPending}
                 envVarName={topLevelSecretEnvVar}
                 isInherited={apiKeyIsInherited}
                 inheritedLabel={apiKeyInheritedLabel}
@@ -1092,7 +1119,7 @@ export function AgentInstanceEditDialog({
                 )}
               </label>
               <PersonaDropdownField
-                disabled={updateMutation.isPending || modelDiscoveryLoading}
+                disabled={isSubmitPending || modelDiscoveryLoading}
                 id="edit-agent-model"
                 onValueChange={handleModelDropdownChange}
                 options={modelDropdownOptions}
@@ -1113,7 +1140,7 @@ export function AgentInstanceEditDialog({
                       "h-8 px-0 py-0 leading-6",
                       PERSONA_FIELD_CONTROL_CLASS,
                     )}
-                    disabled={updateMutation.isPending}
+                    disabled={isSubmitPending}
                     id="edit-agent-custom-model"
                     onChange={(event) => setModel(event.target.value)}
                     placeholder="Custom model ID"
@@ -1141,6 +1168,18 @@ export function AgentInstanceEditDialog({
               onOpenChange={setAiDefaultsOpen}
               open={aiDefaultsOpen}
               returnFocusRef={aiDefaultsTriggerRef}
+            />
+
+            <AgentRapidTestPanel
+              agent={agent}
+              disabled={isSubmitPending}
+              logContent={rapidIteration.logContent}
+              logError={rapidIteration.logError}
+              logLoading={rapidIteration.logLoading}
+              onSelectionChange={rapidIteration.setSelection}
+              open={open}
+              runtime={rapidIteration.runtime}
+              runtimeControlsAvailable={rapidIteration.canRestart}
             />
 
             {/* Advanced settings */}
@@ -1178,7 +1217,7 @@ export function AgentInstanceEditDialog({
                       acpCommand={acpCommand}
                       agentArgs={agentArgs}
                       autoRestartOnConfigChange={autoRestartOnConfigChange}
-                      disabled={updateMutation.isPending}
+                      disabled={isSubmitPending}
                       envVars={envVars}
                       fileSatisfiedEnvKeys={fileSatisfiedEnvKeys}
                       hiddenEnvKeys={
@@ -1214,10 +1253,8 @@ export function AgentInstanceEditDialog({
             </div>
 
             {/* Error */}
-            {updateMutation.error instanceof Error ? (
-              <p className="text-sm text-destructive">
-                {updateMutation.error.message}
-              </p>
+            {submitError ? (
+              <p className="text-sm text-destructive">{submitError}</p>
             ) : null}
           </div>
         </div>

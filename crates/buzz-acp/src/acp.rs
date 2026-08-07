@@ -5,8 +5,9 @@
 //! 1. [`AcpClient::spawn`] — launch agent binary as subprocess
 //! 2. [`AcpClient::initialize`] — protocol version negotiation
 //! 3. [`AcpClient::session_new`] — create session with MCP server config
-//! 4. [`AcpClient::session_prompt_with_idle_timeout`] — send prompt with idle/hard deadline, return stop reason
-//! 5. [`AcpClient::session_cancel`] / [`AcpClient::cancel_with_cleanup`] — cancel in-flight turn
+//! 4. [`AcpClient::session_load`] — reconnect to a persisted session after process replacement
+//! 5. [`AcpClient::session_prompt_with_idle_timeout`] — send prompt with idle/hard deadline, return stop reason
+//! 6. [`AcpClient::session_cancel`] / [`AcpClient::cancel_with_cleanup`] — cancel in-flight turn
 
 use futures_util::StreamExt;
 use tokio::io::AsyncWriteExt;
@@ -642,6 +643,29 @@ impl AcpClient {
         system_prompt: Option<SystemPromptTransport<'_>>,
         session_title: Option<&str>,
     ) -> Result<SessionNewResponse, AcpError> {
+        self.session_new_full_with_timeout(
+            cwd,
+            mcp_servers,
+            system_prompt,
+            session_title,
+            Self::SESSION_SETUP_TIMEOUT,
+        )
+        .await
+    }
+
+    /// Send `session/new` with an explicit setup timeout.
+    ///
+    /// ACP adapters may do expensive one-time provider, plugin, or session
+    /// initialization while handling `session/new`. Hosts that already have a
+    /// per-agent wall-clock limit should pass a bounded value derived from it.
+    pub async fn session_new_full_with_timeout(
+        &mut self,
+        cwd: &str,
+        mcp_servers: Vec<McpServer>,
+        system_prompt: Option<SystemPromptTransport<'_>>,
+        session_title: Option<&str>,
+        setup_timeout: std::time::Duration,
+    ) -> Result<SessionNewResponse, AcpError> {
         let mut params = serde_json::json!({
             "cwd": cwd,
             "mcpServers": mcp_servers,
@@ -660,7 +684,9 @@ impl AcpClient {
             // Merge — _meta may already carry systemPrompt from ClaudeMeta above.
             params["_meta"]["sessionTitle"] = serde_json::Value::String(title.to_owned());
         }
-        let result = self.send_request("session/new", params).await?;
+        let result = self
+            .send_request_with_timeout("session/new", params, setup_timeout)
+            .await?;
         let session_id = result["sessionId"]
             .as_str()
             .ok_or_else(|| AcpError::Protocol("session/new response missing sessionId".into()))?
@@ -687,6 +713,38 @@ impl AcpClient {
             .session_new_full(cwd, mcp_servers, system_prompt, session_title)
             .await?
             .session_id)
+    }
+
+    /// Load an existing persisted ACP session and re-register its MCP servers.
+    ///
+    /// `session/load` is deliberately used instead of `session/resume`: Hermes
+    /// returns `null` when the requested session no longer exists, while resume
+    /// is allowed to silently create a replacement. The caller must make that
+    /// replacement decision explicitly so session churn is observable.
+    pub async fn session_load(
+        &mut self,
+        cwd: &str,
+        session_id: &str,
+        mcp_servers: Vec<McpServer>,
+        setup_timeout: std::time::Duration,
+    ) -> Result<bool, AcpError> {
+        let result = self
+            .send_request_with_timeout(
+                "session/load",
+                serde_json::json!({
+                    "cwd": cwd,
+                    "sessionId": session_id,
+                    "mcpServers": mcp_servers,
+                }),
+                setup_timeout,
+            )
+            .await?;
+        if result.is_null() {
+            tracing::warn!(target: "acp::session", "session/load did not find {session_id}");
+            return Ok(false);
+        }
+        tracing::info!(target: "acp::session", "session loaded: {session_id}");
+        Ok(true)
     }
 
     /// Send Goose's custom system-prompt request after `session/new`.
@@ -1061,8 +1119,14 @@ impl AcpClient {
         Ok(())
     }
 
-    /// Default timeout for non-prompt RPCs (initialize, session/new, etc.).
+    /// Default timeout for ordinary non-prompt RPCs (initialize, model changes,
+    /// authentication, etc.).
     const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+    /// Upper bound for the one-time `session/new` setup phase. The managed
+    /// runtime may lower this to its configured max-turn duration.
+    pub(crate) const SESSION_SETUP_TIMEOUT: std::time::Duration =
+        std::time::Duration::from_secs(300);
 
     /// Send a JSON-RPC request and wait for the matching response.
     ///
@@ -1070,13 +1134,22 @@ impl AcpClient {
     /// then calls [`read_until_response`](Self::read_until_response).
     ///
     /// The write phase is bounded by `WRITE_TIMEOUT` (30s) and the read phase
-    /// by `REQUEST_TIMEOUT` (60s), so worst-case wall clock is ~90s. Non-prompt
-    /// RPCs like `initialize` and `session/new` should complete in seconds;
-    /// if they don't, the agent is likely stuck and we must not block forever.
+    /// by the selected request timeout. Ordinary RPCs use `REQUEST_TIMEOUT`
+    /// (60s); the expensive `session/new` path uses its explicit setup budget.
     async fn send_request(
         &mut self,
         method: &str,
         params: serde_json::Value,
+    ) -> Result<serde_json::Value, AcpError> {
+        self.send_request_with_timeout(method, params, Self::REQUEST_TIMEOUT)
+            .await
+    }
+
+    async fn send_request_with_timeout(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+        timeout: std::time::Duration,
     ) -> Result<serde_json::Value, AcpError> {
         let id = self.next_id;
         self.next_id += 1;
@@ -1093,7 +1166,6 @@ impl AcpClient {
         // Wrap write + read in a single timeout so a hung agent can't block forever.
         // We cannot use an async block that borrows `self` mutably across two awaits
         // inside timeout(), so we sequence them with early-return on timeout.
-        let timeout = Self::REQUEST_TIMEOUT;
         match tokio::time::timeout(timeout, self.write_ndjson(&msg)).await {
             Ok(result) => result?,
             Err(_) => return Err(AcpError::Timeout(timeout)),
@@ -3319,6 +3391,37 @@ mod tests {
             received["params"]["systemPrompt"].as_str(),
             Some("Custom system prompt"),
             "systemPrompt should be included in params when Some"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_new_full_with_timeout_uses_explicit_budget() {
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+            read -t 2 _req
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+
+        let timeout = std::time::Duration::from_millis(50);
+        let started = std::time::Instant::now();
+        let result = client
+            .session_new_full_with_timeout("/tmp", vec![], None, None, timeout)
+            .await;
+
+        assert!(
+            matches!(result, Err(AcpError::Timeout(actual)) if actual == timeout),
+            "expected explicit session setup timeout"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "explicit timeout did not fail promptly: {:?}",
+            started.elapsed()
         );
     }
 

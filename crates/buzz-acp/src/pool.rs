@@ -41,6 +41,7 @@ use crate::queue::{
     PromptProfile, PromptProfileLookup, ThreadTags,
 };
 use crate::relay::{ChannelInfo, RestClient};
+use crate::session_store::{SessionRecord, SessionStore};
 
 /// Window within which agent activity before a hard-cap death qualifies
 /// the turn as "recently active" (eligible for requeue instead of dead-letter).
@@ -564,6 +565,8 @@ pub struct PromptContext {
     /// the desktop keys per (agent, relay) pair, e.g. `session_config_captured`,
     /// mirroring the `managed_agent_runtime_lifecycle` frames.
     pub relay_url: String,
+    /// Restart-durable channel/work-session affinity for this managed identity.
+    pub session_store: SessionStore,
 }
 
 impl AgentPool {
@@ -919,10 +922,14 @@ async fn create_session_and_apply_model(
         channel_type,
         ctx.session_title.as_deref(),
     );
+    // Hermes can load its provider/plugin state lazily during session/new.
+    // Give that setup phase more than the ordinary 60s RPC budget, while
+    // respecting the managed agent's configured wall-clock ceiling.
+    let session_setup_timeout = ctx.max_turn_duration.min(AcpClient::SESSION_SETUP_TIMEOUT);
 
     let resp = agent
         .acp
-        .session_new_full(
+        .session_new_full_with_timeout(
             &ctx.cwd,
             mcp_servers,
             session_new_system_prompt(
@@ -932,6 +939,7 @@ async fn create_session_and_apply_model(
                 combined_system_prompt.as_deref(),
             ),
             session_title.as_deref(),
+            session_setup_timeout,
         )
         .await?;
 
@@ -1025,6 +1033,39 @@ async fn create_session_and_apply_model(
     }
 
     Ok(resp.session_id)
+}
+
+/// Reattach a fresh ACP child to a persisted session. A transport/setup error
+/// remains an error; only a clean `false` (session not found) or method-not-found
+/// response permits the caller's single explicit replacement-session path.
+async fn load_persisted_session(
+    agent: &mut OwnedAgent,
+    ctx: &PromptContext,
+    record: &SessionRecord,
+    channel_id: Uuid,
+    channel_type: Option<&str>,
+) -> Result<bool, AcpError> {
+    let mcp_servers = mcp_servers_with_git_origin(
+        &ctx.mcp_servers,
+        Some(channel_id),
+        channel_type,
+        ctx.session_title.as_deref(),
+    );
+    let setup_timeout = ctx.max_turn_duration.min(AcpClient::SESSION_SETUP_TIMEOUT);
+    agent
+        .acp
+        .session_load(&ctx.cwd, &record.session_id, mcp_servers, setup_timeout)
+        .await
+}
+
+fn batch_thread_root(batch: Option<&FlushBatch>) -> Option<String> {
+    batch.and_then(|batch| {
+        batch
+            .events
+            .iter()
+            .rev()
+            .find_map(|event| crate::queue::parse_thread_tags(&event.event).root_event_id)
+    })
 }
 
 fn mcp_servers_with_git_origin(
@@ -1593,62 +1634,185 @@ pub async fn run_prompt_task(
         PromptSource::Heartbeat => None,
     };
 
+    let thread_root_event_id = batch_thread_root(batch.as_ref());
     let (session_id, is_new_session) = match &source {
         PromptSource::Channel(cid) => {
             if let Some(sid) = agent.state.sessions.get(cid) {
                 (sid.clone(), false)
             } else {
-                // The title is channel-qualified (`Agent · #channel`) so one
-                // agent in several channels doesn't produce identical session
-                // rows; `title_channel` comes from the single resolve above and
-                // is `None` for DM, unresolved, and unnamed channels.
-                match create_session_and_apply_model(
-                    &mut agent,
-                    &ctx,
-                    agent_core.as_deref(),
-                    agent_canvas.as_deref(),
-                    title_channel.as_deref(),
-                    Some(*cid),
-                    origin_channel_type.as_deref(),
-                )
-                .await
-                {
-                    Ok(sid) => {
-                        tracing::info!(
+                let mut continued_from = None;
+                let loaded_session = if let Some(record) = ctx.session_store.get(*cid) {
+                    let identity_matches = record.agent_pubkey
+                        == ctx.agent_keys.public_key().to_hex()
+                        && record.relay_url == ctx.relay_url
+                        && record.harness_name == ctx.harness_name;
+                    if !identity_matches {
+                        continued_from = Some(record.session_id.clone());
+                        tracing::warn!(
                             target: "pool::session",
-                            "created session {sid} for channel {cid}"
+                            channel = %cid,
+                            prior_session = %record.session_id,
+                            "persisted session identity/runtime mismatch; creating one linked replacement"
                         );
-                        agent.state.sessions.insert(*cid, sid.clone());
-                        // Commit canvas only after session creation succeeds (I3).
-                        if let Some((pending_cid, section)) = pending_canvas.take() {
-                            agent.state.canvas_sections.insert(pending_cid, section);
+                        None
+                    } else {
+                        match load_persisted_session(
+                            &mut agent,
+                            &ctx,
+                            &record,
+                            *cid,
+                            origin_channel_type.as_deref(),
+                        )
+                        .await
+                        {
+                            Ok(true) => {
+                                tracing::info!(
+                                    target: "pool::session",
+                                    channel = %cid,
+                                    session = %record.session_id,
+                                    work_key = %record.work_key,
+                                    "loaded persisted session"
+                                );
+                                agent.acp.observe(
+                                    "session_resumed",
+                                    serde_json::json!({
+                                        "sessionId": record.session_id,
+                                        "workKey": record.work_key,
+                                        "channelId": cid,
+                                        "lastCompletedTurnId": record.last_completed_turn_id,
+                                    }),
+                                );
+                                if let Err(error) = ctx.session_store.commit_session(
+                                    *cid,
+                                    thread_root_event_id.clone(),
+                                    record.session_id.clone(),
+                                    record.continued_from.clone(),
+                                ) {
+                                    tracing::error!(
+                                        target: "pool::session_store",
+                                        channel = %cid,
+                                        error = %error,
+                                        "loaded session is live but its durable metadata could not be refreshed"
+                                    );
+                                }
+                                Some(record.session_id)
+                            }
+                            Ok(false) | Err(AcpError::AgentError { code: -32601, .. }) => {
+                                continued_from = Some(record.session_id.clone());
+                                tracing::warn!(
+                                    target: "pool::session",
+                                    channel = %cid,
+                                    prior_session = %record.session_id,
+                                    "persisted session cannot be loaded; allowing one linked replacement"
+                                );
+                                None
+                            }
+                            Err(error) => {
+                                tracing::error!(
+                                    target: "pool::session",
+                                    channel = %cid,
+                                    prior_session = %record.session_id,
+                                    error = %error,
+                                    "persisted session load failed; refusing silent replacement"
+                                );
+                                send_prompt_result(
+                                    &result_tx,
+                                    &turn_id,
+                                    agent,
+                                    source,
+                                    PromptOutcome::Error(error),
+                                    requeue_batch_if_queue(&ctx, batch),
+                                );
+                                return;
+                            }
                         }
-                        (sid, true)
                     }
-                    Err(AcpError::AgentExited) => {
-                        agent.state.invalidate_all();
-                        send_prompt_result(
-                            &result_tx,
-                            &turn_id,
-                            agent,
-                            source,
-                            PromptOutcome::AgentExited,
-                            requeue_batch_if_queue(&ctx, batch),
-                        );
-                        return;
-                    }
-                    Err(e) => {
-                        // Session creation failed; pending canvas was never committed,
-                        // so the next retry will re-fetch a fresh revision.
-                        send_prompt_result(
-                            &result_tx,
-                            &turn_id,
-                            agent,
-                            source,
-                            PromptOutcome::Error(e),
-                            requeue_batch_if_queue(&ctx, batch),
-                        );
-                        return;
+                } else {
+                    None
+                };
+
+                if let Some(sid) = loaded_session {
+                    agent.state.sessions.insert(*cid, sid.clone());
+                    (sid, false)
+                } else {
+                    // The title is channel-qualified (`Agent · #channel`) so one
+                    // agent in several channels doesn't produce identical session
+                    // rows; `title_channel` comes from the single resolve above and
+                    // is `None` for DM, unresolved, and unnamed channels.
+                    match create_session_and_apply_model(
+                        &mut agent,
+                        &ctx,
+                        agent_core.as_deref(),
+                        agent_canvas.as_deref(),
+                        title_channel.as_deref(),
+                        Some(*cid),
+                        origin_channel_type.as_deref(),
+                    )
+                    .await
+                    {
+                        Ok(sid) => {
+                            tracing::info!(
+                                target: "pool::session",
+                                continued_from = continued_from.as_deref().unwrap_or(""),
+                                "created session {sid} for channel {cid}"
+                            );
+                            agent.state.sessions.insert(*cid, sid.clone());
+                            if let Err(error) = ctx.session_store.commit_session(
+                                *cid,
+                                thread_root_event_id.clone(),
+                                sid.clone(),
+                                continued_from.clone(),
+                            ) {
+                                // Keep this live session in memory so a storage
+                                // fault cannot create a session/new retry loop.
+                                tracing::error!(
+                                    target: "pool::session_store",
+                                    channel = %cid,
+                                    session = %sid,
+                                    error = %error,
+                                    "new session is live but durable affinity write failed"
+                                );
+                            }
+                            agent.acp.observe(
+                                "session_affinity_committed",
+                                serde_json::json!({
+                                    "sessionId": sid,
+                                    "workKey": SessionStore::work_key(*cid),
+                                    "channelId": cid,
+                                    "continuedFrom": continued_from,
+                                }),
+                            );
+                            // Commit canvas only after session creation succeeds (I3).
+                            if let Some((pending_cid, section)) = pending_canvas.take() {
+                                agent.state.canvas_sections.insert(pending_cid, section);
+                            }
+                            (sid, true)
+                        }
+                        Err(AcpError::AgentExited) => {
+                            agent.state.invalidate_all();
+                            send_prompt_result(
+                                &result_tx,
+                                &turn_id,
+                                agent,
+                                source,
+                                PromptOutcome::AgentExited,
+                                requeue_batch_if_queue(&ctx, batch),
+                            );
+                            return;
+                        }
+                        Err(e) => {
+                            // Session creation failed; pending canvas was never committed,
+                            // so the next retry will re-fetch a fresh revision.
+                            send_prompt_result(
+                                &result_tx,
+                                &turn_id,
+                                agent,
+                                source,
+                                PromptOutcome::Error(e),
+                                requeue_batch_if_queue(&ctx, batch),
+                            );
+                            return;
+                        }
                     }
                 }
             }
@@ -2016,6 +2180,22 @@ pub async fn run_prompt_task(
                             Ok(stop_reason) => {
                                 log_stop_reason(&source, &stop_reason);
                                 agent.state.invalidate(&source);
+                                // This branch is reached only for an explicit
+                                // supervisor/control cancellation. The old
+                                // session is intentionally rotated, so remove
+                                // its durable affinity as well as in-memory
+                                // state. Crash/timeout paths below preserve
+                                // the mapping for restart continuity.
+                                if let PromptSource::Channel(cid) = &source {
+                                    if let Err(error) = ctx.session_store.remove(*cid) {
+                                        tracing::error!(
+                                            target: "pool::session_store",
+                                            channel = %cid,
+                                            error = %error,
+                                            "could not remove durable session after explicit control cancellation"
+                                        );
+                                    }
+                                }
                                 let retry_batch =
                                     requeue_cancelled_batch(&ctx, control_signal, batch);
 
@@ -2110,6 +2290,33 @@ pub async fn run_prompt_task(
                             &source,
                             &control_signal,
                         );
+                        if let PromptSource::Channel(cid) = &source {
+                            if let Err(error) = ctx.session_store.mark_turn_completed(
+                                *cid,
+                                &session_id,
+                                &turn_id,
+                            ) {
+                                tracing::error!(
+                                    target: "pool::session_store",
+                                    channel = %cid,
+                                    error = %error,
+                                    "could not persist completed-turn receipt"
+                                );
+                            }
+                            if matches!(
+                                control_signal,
+                                ControlSignal::Rotate | ControlSignal::SwitchModel(_)
+                            ) {
+                                if let Err(error) = ctx.session_store.remove(*cid) {
+                                    tracing::error!(
+                                        target: "pool::session_store",
+                                        channel = %cid,
+                                        error = %error,
+                                        "could not remove explicitly rotated durable session"
+                                    );
+                                }
+                            }
+                        }
                         let usage = agent.acp.take_turn_usage();
                         publish_agent_turn_metric(
                             &ctx,
@@ -2138,6 +2345,20 @@ pub async fn run_prompt_task(
     match prompt_result {
         Ok(stop_reason) => {
             log_stop_reason(&source, &stop_reason);
+
+            if let PromptSource::Channel(cid) = &source {
+                if let Err(error) =
+                    ctx.session_store
+                        .mark_turn_completed(*cid, &session_id, &turn_id)
+                {
+                    tracing::error!(
+                        target: "pool::session_store",
+                        channel = %cid,
+                        error = %error,
+                        "could not persist completed-turn receipt"
+                    );
+                }
+            }
 
             let should_rotate = matches!(
                 stop_reason,
@@ -2169,6 +2390,16 @@ pub async fn run_prompt_task(
                     "rotating session for {source:?} after {stop_reason:?}",
                 );
                 agent.state.invalidate(&source);
+                if let PromptSource::Channel(cid) = &source {
+                    if let Err(error) = ctx.session_store.remove(*cid) {
+                        tracing::error!(
+                            target: "pool::session_store",
+                            channel = %cid,
+                            error = %error,
+                            "could not remove rotated durable session"
+                        );
+                    }
+                }
             }
 
             let core_stop = acp_stop_to_core(&stop_reason);
@@ -6542,6 +6773,11 @@ mod tests {
             memory_enabled: false,
             harness_name: "goose".to_string(),
             relay_url: "ws://127.0.0.1:3000".to_string(),
+            session_store: SessionStore::isolated_for_test(
+                &agent_keys.public_key().to_hex(),
+                "ws://127.0.0.1:3000",
+                "goose",
+            ),
         }
     }
 

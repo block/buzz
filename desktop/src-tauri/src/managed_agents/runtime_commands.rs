@@ -5,11 +5,10 @@ use tauri::{AppHandle, Emitter, Manager};
 use super::{
     agent_readiness, append_log_marker, current_instance_id, find_managed_agent_mut,
     load_global_agent_config, load_managed_agents, load_personas, managed_agent_runtime_log_path,
-    process_is_running, record_agent_command, resolve_effective_agent_env, save_managed_agents,
-    spawn_agent_child, terminate_process, terminate_untracked_pair_runtime,
-    write_agent_runtime_receipt, AgentReadiness, BackendKind, ManagedAgentPairRuntime,
-    ManagedAgentRuntimeKey, ManagedAgentRuntimeLifecycle, ManagedAgentRuntimeReceipt,
-    ManagedAgentRuntimeStatus,
+    record_agent_command, resolve_effective_agent_env, save_managed_agents, spawn_agent_child,
+    terminate_process, terminate_untracked_pair_runtime, write_agent_runtime_receipt,
+    AgentReadiness, BackendKind, ManagedAgentPairRuntime, ManagedAgentRuntimeKey,
+    ManagedAgentRuntimeLifecycle, ManagedAgentRuntimeReceipt, ManagedAgentRuntimeStatus,
 };
 use crate::app_state::AppState;
 
@@ -236,6 +235,79 @@ pub fn start_managed_agent_runtime(
     start_managed_agent_runtime_pair_lazy(pubkey, relay_url, app)
 }
 
+fn wait_for_runtime_child_exit(
+    child: &mut std::process::Child,
+    timeout: std::time::Duration,
+) -> Result<Option<std::process::ExitStatus>, String> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+            return Ok(Some(status));
+        }
+        if std::time::Instant::now() >= deadline {
+            return Ok(None);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+fn stop_tracked_runtime_process(
+    runtime: &mut ManagedAgentPairRuntime,
+) -> Result<std::process::ExitStatus, String> {
+    #[cfg(windows)]
+    {
+        let pid = runtime.child.id();
+        if let Some(job) = runtime.process.job.take() {
+            // Closing the tracked kill-on-close Job Object is the primary tree
+            // teardown. Never follow it with an unbounded Child::wait while the
+            // runtime transition is serialized: a wedged root would otherwise
+            // stall restart and every status query indefinitely.
+            drop(job);
+            if let Some(status) =
+                wait_for_runtime_child_exit(&mut runtime.child, std::time::Duration::from_secs(2))?
+            {
+                return Ok(status);
+            }
+
+            // The job tree should already be gone. Terminate only the tracked
+            // root if it survived Job close, then keep the final reap bounded
+            // and fail closed instead of orphaning an untracked runtime. A
+            // concurrent exit makes Child::kill harmless; the final try_wait
+            // below remains authoritative.
+            let _ = runtime.child.kill();
+            return wait_for_runtime_child_exit(
+                &mut runtime.child,
+                std::time::Duration::from_secs(3),
+            )?
+            .ok_or_else(|| "managed runtime did not exit after tracked teardown".to_string());
+        }
+        if let Some(status) = runtime
+            .child
+            .try_wait()
+            .map_err(|error| error.to_string())?
+        {
+            return Ok(status);
+        }
+        terminate_process(pid)?;
+    }
+
+    #[cfg(not(windows))]
+    if super::process_is_running(runtime.child.id()) {
+        terminate_process(runtime.child.id())?;
+    }
+
+    wait_for_runtime_child_exit(&mut runtime.child, std::time::Duration::from_secs(5))?
+        .ok_or_else(|| "managed runtime did not exit after teardown".to_string())
+}
+
+fn with_managed_agent_runtime_transition<T>(
+    transition: &std::sync::Mutex<()>,
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let _transition = transition.lock().map_err(|e| e.to_string())?;
+    operation()
+}
+
 fn start_pair(
     pubkey: String,
     relay_url: String,
@@ -248,6 +320,17 @@ fn start_pair(
         .managed_agent_runtime_transition
         .lock()
         .map_err(|e| e.to_string())?;
+    start_pair_locked(pubkey, relay_url, lazy, expected_updated_at, app.clone())
+}
+
+fn start_pair_locked(
+    pubkey: String,
+    relay_url: String,
+    lazy: bool,
+    expected_updated_at: Option<&str>,
+    app: AppHandle,
+) -> Result<ManagedAgentRuntimeStatus, String> {
+    let state = app.state::<AppState>();
     if state.shutdown_started.load(Ordering::Acquire) {
         return Err("desktop shutdown has started".into());
     }
@@ -320,6 +403,15 @@ pub fn stop_managed_agent_runtime(
         .managed_agent_runtime_transition
         .lock()
         .map_err(|e| e.to_string())?;
+    stop_managed_agent_runtime_locked(pubkey, relay_url, app.clone())
+}
+
+fn stop_managed_agent_runtime_locked(
+    pubkey: String,
+    relay_url: String,
+    app: AppHandle,
+) -> Result<ManagedAgentRuntimeStatus, String> {
+    let state = app.state::<AppState>();
     let _store = state
         .managed_agents_store_lock
         .lock()
@@ -332,12 +424,7 @@ pub fn stop_managed_agent_runtime(
         .lock()
         .map_err(|e| e.to_string())?;
     if let Some(mut runtime) = runtimes.remove(&key) {
-        let stop_result = if process_is_running(runtime.child.id()) {
-            terminate_process(runtime.child.id())
-        } else {
-            Ok(())
-        }
-        .and_then(|()| runtime.child.wait().map_err(|e| e.to_string()));
+        let stop_result = stop_tracked_runtime_process(&mut runtime);
         match stop_result {
             Ok(status) => {
                 record.last_exit_code = status.code();
@@ -382,8 +469,18 @@ pub fn restart_managed_agent_runtime(
     relay_url: String,
     app: AppHandle,
 ) -> Result<ManagedAgentRuntimeStatus, String> {
-    stop_managed_agent_runtime(pubkey.clone(), relay_url.clone(), app.clone())?;
-    start_pair(pubkey, relay_url, true, None, app)
+    // An explicit restart is an apply-and-verify boundary. Hold the transition
+    // lock across teardown and eager start so reconcile or another lazy start
+    // cannot insert a pair between the two halves of the restart.
+    let state = app.state::<AppState>();
+    let restart_app = app.clone();
+    with_managed_agent_runtime_transition(&state.managed_agent_runtime_transition, || {
+        stop_managed_agent_runtime_locked(pubkey.clone(), relay_url.clone(), restart_app.clone())?;
+        // Start eagerly so the lifecycle observer can report `ready` before
+        // an owner-authored smoke is posted; ordinary start/reconcile paths
+        // remain lazy.
+        start_pair_locked(pubkey, relay_url, false, None, restart_app)
+    })
 }
 
 /// Probe whether this agent can operate on `requested_relay_url`.
@@ -712,5 +809,21 @@ mod tests {
             Some("unexpected"),
         );
         assert!(observer_lifecycle_key(&ready_with_error.pubkey, &ready_with_error).is_err());
+    }
+
+    #[test]
+    fn restart_transition_blocks_lazy_start_between_stop_and_eager_start() {
+        let transition = std::sync::Mutex::new(());
+        let mut events = Vec::new();
+        let lazy_start_interleaved = with_managed_agent_runtime_transition(&transition, || {
+            events.push("stop");
+            let lazy_start_interleaved = transition.try_lock().is_ok();
+            events.push("eager-start");
+            Ok(lazy_start_interleaved)
+        })
+        .unwrap();
+
+        assert!(!lazy_start_interleaved);
+        assert_eq!(events, ["stop", "eager-start"]);
     }
 }

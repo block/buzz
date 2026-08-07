@@ -33,6 +33,7 @@ import { resetAvatarProfileSync } from "@/features/profile/avatarProfileSync";
 import { resetSidebarRelayConnectionCardState } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
 import { clearMarkdownNodeCache } from "@/shared/ui/markdown/nodeCache";
 import { resetVideoPlayerState } from "@/shared/ui/videoPlayerState";
+import { resetRapidActionLeases } from "@/features/agents/rapidActionLease";
 
 import {
   initFirstCommunity,
@@ -52,6 +53,7 @@ function resetCommunityState({
 }: {
   resetAvatarState: boolean;
 }): void {
+  resetRapidActionLeases();
   relayClient.disconnect();
   resetRateLimitGate();
   clearAllDrafts();

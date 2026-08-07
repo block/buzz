@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashSet};
 
 use nostr::Keys;
 use serde::Deserialize;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 use super::agent_model_process::run_agent_models_command;
 // The map-only lookup is reached solely from the base-URL helpers that exist for
@@ -736,8 +736,13 @@ pub async fn update_managed_agent(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<UpdateManagedAgentResponse, String> {
-    // Phase 1: local save (synchronous, under lock)
-    let (summary, sync_params, rollback) = {
+    // Phase 1 performs blocking mutex and filesystem work. Keep it off the
+    // async runtime so concurrent runtime status/restart IPC can keep making
+    // progress while this local transaction completes.
+    let phase_one_app = app.clone();
+    let (summary, sync_params, rollback) = tokio::task::spawn_blocking(move || {
+        let app = phase_one_app;
+        let state = app.state::<AppState>();
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -902,8 +907,10 @@ pub async fn update_managed_agent(
             )?
         };
         let rollback = name_changed.then(|| AgentUpdateRollback::new(previous_record, record));
-        (summary, sync_params, rollback)
-    }; // lock dropped here
+        Ok::<_, String>((summary, sync_params, rollback))
+    })
+    .await
+    .map_err(|error| format!("spawn_blocking failed: {error}"))??;
 
     try_regenerate_nest(&app);
 

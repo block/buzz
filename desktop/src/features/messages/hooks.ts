@@ -76,6 +76,12 @@ type MessageQueryContext = {
   queryKey: ReturnType<typeof channelMessagesKey>;
 };
 
+function assertMessageSendNotAborted(signal?: AbortSignal) {
+  if (signal?.aborted) {
+    throw new Error("Message send cancelled.");
+  }
+}
+
 const CHANNEL_TIMELINE_KINDS = new Set<number>(CHANNEL_TIMELINE_CONTENT_KINDS);
 const CHANNEL_AUX_KINDS = new Set<number>(CHANNEL_AUX_EVENT_KINDS);
 
@@ -413,6 +419,7 @@ export function useSendMessageMutation(
       mentionPubkeys?: string[];
       parentEventId?: string | null;
       mediaTags?: string[][];
+      abortSignal?: AbortSignal;
     },
     MessageQueryContext | undefined
   >({
@@ -423,7 +430,9 @@ export function useSendMessageMutation(
       mentionPubkeys,
       parentEventId,
       mediaTags,
+      abortSignal,
     }) => {
+      assertMessageSendNotAborted(abortSignal);
       // Prefer a channel captured by the caller at compose time. Otherwise,
       // resolve a captured id from the shared channel cache so navigation
       // cannot redirect the message. Legacy callers without either value use
@@ -469,6 +478,7 @@ export function useSendMessageMutation(
       // the relay's tag validation runs. The WebSocket path emits no extra
       // tags, so emoji-only messages would otherwise lose their emoji tag.
       if (parentEventId || imetaTags.length > 0 || emojiTags.length > 0) {
+        assertMessageSendNotAborted(abortSignal);
         const cachedMessages =
           queryClient.getQueryData<RelayEvent[]>(
             channelMessagesKey(effectiveChannel.id),
@@ -530,6 +540,8 @@ export function useSendMessageMutation(
         content,
         recipientPubkeys,
         mentionTags,
+        abortSignal,
+        identity.pubkey,
       );
     },
     onMutate: async ({
@@ -539,7 +551,9 @@ export function useSendMessageMutation(
       mentionPubkeys,
       parentEventId,
       mediaTags,
+      abortSignal,
     }) => {
+      assertMessageSendNotAborted(abortSignal);
       // Mirror mutationFn's target resolution so the optimistic message lands
       // in the cache for the same channel as the real send. A caller-supplied
       // channel remains valid even when a stale channel-list read omitted it.

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 use super::agent_env::build_buzz_agent_provider_defaults;
 
@@ -569,6 +569,12 @@ pub fn spawn_agent_child(
     command.env("RUST_LOG", child_rust_log_filter());
     command.env("BUZZ_PRIVATE_KEY", &record.private_key_nsec);
     command.env("BUZZ_RELAY_URL", &effective_relay_url);
+    if let Ok(data_dir) = app.path().app_data_dir() {
+        command.env(
+            "BUZZ_RUNTIME_CONTROL_DIR",
+            data_dir.join("agents").join("runtime-control"),
+        );
+    }
     command.env("BUZZ_ACP_LAZY_POOL", if lazy { "true" } else { "false" });
     command.env("BUZZ_ACP_AGENT_COMMAND", &resolved_agent_command);
     command.env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","));
@@ -709,8 +715,13 @@ pub fn spawn_agent_child(
     // which is the single source of truth. The previously-emitted
     // `BUZZ_ACP_TURN_TIMEOUT` is deprecated upstream and was pinning every
     // agent to the desktop's stale default (320s), bypassing harness bumps.
+    // Desktop owns both idle bounds. Saved custom/persona env cannot override
+    // either key (BUZZ_ACP_EXIT_AFTER_INACTIVITY is reserved), and an unset
+    // record must not inherit an ambient process-level shutdown policy.
+    command.env_remove("BUZZ_ACP_EXIT_AFTER_INACTIVITY");
     if let Some(idle) = record.idle_timeout_seconds {
         command.env("BUZZ_ACP_IDLE_TIMEOUT", idle.to_string());
+        command.env("BUZZ_ACP_EXIT_AFTER_INACTIVITY", idle.to_string());
     }
 
     if let Some(max_dur) = record.max_turn_duration_seconds {

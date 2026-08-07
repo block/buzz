@@ -10,6 +10,7 @@ use rmcp::{
 use std::path::Path;
 use std::sync::Arc;
 
+mod agent_runtime_control;
 mod paths;
 mod read_file;
 mod rg;
@@ -94,6 +95,17 @@ impl DevMcp {
             Ok(text) => todo::text_result(text),
             Err(e) => todo::error_result(format!("Error: {e}")),
         }
+    }
+
+    #[tool(
+        name = "agent_runtime_control",
+        description = "Buzz Management supervisor only. Start exactly one stopped managed worker before assigning it, or stop it after its callback. Requires the target agent's 64-character hex pubkey and exact ws(s) relay URL. Requests are signed by the supervisor identity and independently verified by Buzz Desktop."
+    )]
+    async fn agent_runtime_control(
+        &self,
+        Parameters(p): Parameters<agent_runtime_control::RuntimeControlParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        agent_runtime_control::run(p).await
     }
 
     /// Hook: called by the agent before honoring end_turn. Returns

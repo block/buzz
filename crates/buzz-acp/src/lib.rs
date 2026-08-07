@@ -9,6 +9,7 @@ mod pool;
 mod pool_lifecycle;
 mod queue;
 mod relay;
+mod session_store;
 mod setup_mode;
 mod usage;
 
@@ -59,8 +60,10 @@ fn is_subcommand(name: &str) -> bool {
     std::env::args().nth(1).map(|a| a == name).unwrap_or(false)
 }
 
-/// Timeout for lightweight helper subcommands (spawn + initialize + model/method probes).
-const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
+/// Timeout for helper subcommands that may trigger Hermes provider/plugin/session
+/// setup. Ordinary ACP RPCs still retain their separate 60-second fail-fast
+/// budget; this outer bound prevents slow first-run discovery from being cut off.
+const MODELS_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 /// Timeout for `buzz-acp authenticate`. Browser-based vendor auth can require
 /// human interaction, so it must not share the short probe timeout.
@@ -111,6 +114,14 @@ fn emit_runtime_lifecycle(
                 "error": error,
             }),
         );
+    }
+}
+
+fn initial_runtime_lifecycle(lazy_pool: bool) -> &'static str {
+    if lazy_pool {
+        "listening"
+    } else {
+        "ready"
     }
 }
 
@@ -1566,18 +1577,23 @@ async fn tokio_main() -> Result<()> {
         }
     }
 
-    if config.lazy_pool {
-        emit_runtime_lifecycle(
-            observer.as_ref(),
-            &runtime_start_nonce,
-            &pubkey_hex,
-            &config.relay_url,
-            "listening",
-            None,
-        );
-    }
+    // Runtime readiness is the pool/startup boundary. Individual channel
+    // subscription and presence-publication errors remain deliberately
+    // non-fatal above; the caller's correlated smoke is the end-to-end
+    // delivery acceptance rather than this lifecycle frame.
+    emit_runtime_lifecycle(
+        observer.as_ref(),
+        &runtime_start_nonce,
+        &pubkey_hex,
+        &config.relay_url,
+        initial_runtime_lifecycle(config.lazy_pool),
+        None,
+    );
 
     let base_prompt_content = config.base_prompt_content.take();
+    let harness_name = crate::config::normalize_agent_command_identity(&config.agent_command);
+    let session_store =
+        crate::session_store::SessionStore::open(&pubkey_hex, &config.relay_url, &harness_name);
     let ctx = Arc::new(PromptContext {
         mcp_servers: build_mcp_servers(&config),
         initial_message: config.initial_message.clone(),
@@ -1610,8 +1626,9 @@ async fn tokio_main() -> Result<()> {
             .as_deref()
             .and_then(|hex| nostr::PublicKey::from_hex(hex).ok()),
         memory_enabled: config.memory_enabled,
-        harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
+        harness_name,
         relay_url: config.relay_url.clone(),
+        session_store,
     });
 
     if !config.memory_enabled {
@@ -3728,6 +3745,36 @@ mod agent_draft_prompt_tests {
     }
 
     #[test]
+    fn shared_base_prompt_routes_buzz_through_the_injected_mcp_shell() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("mcp__buzz_dev_mcp__shell"));
+        assert!(prompt.contains("its timeout field is `timeout_ms`"));
+        assert!(prompt.contains("Do not call Hermes built-in `terminal`"));
+        assert!(prompt.contains("skip todos"));
+        assert!(prompt.contains("as the first and only tool"));
+        assert!(prompt.contains("A direct answer or reply does not need a preflight command"));
+    }
+
+    #[test]
+    fn shared_base_prompt_declares_native_tools_and_local_searxng_route() {
+        let prompt = include_str!("base_prompt.md");
+        for marker in [
+            "`delegate_task`",
+            "`execute_code`",
+            "`mcp__buzz_dev_mcp__read_file`",
+            "`mcp__buzz_dev_mcp__str_replace`",
+            "`mcp__buzz_dev_mcp__view_image`",
+            "http://127.0.0.1:8888/search?format=json",
+            "do not use generic `web_search` as a discovery fallback",
+        ] {
+            assert!(
+                prompt.contains(marker),
+                "missing base-prompt marker: {marker}"
+            );
+        }
+    }
+
+    #[test]
     fn shared_base_prompt_teaches_single_command_mentions_and_preflight() {
         let prompt = include_str!("base_prompt.md");
         assert!(prompt.contains("--mention <hex-or-npub>"));
@@ -4161,11 +4208,19 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
             }
         };
 
-    // Initialize + session/new under a timeout. Client is owned above,
+    // Initialize + session/new under a bounded setup timeout. Client is owned above,
     // so shutdown() runs on all paths (success, error, timeout).
-    let protocol_result = tokio::time::timeout(MODELS_TIMEOUT, async {
+    let protocol_result = tokio::time::timeout(acp::AcpClient::SESSION_SETUP_TIMEOUT, async {
         let init = client.initialize().await?;
-        let session = client.session_new_full(&cwd, vec![], None, None).await?;
+        let session = client
+            .session_new_full_with_timeout(
+                &cwd,
+                vec![],
+                None,
+                None,
+                acp::AcpClient::SESSION_SETUP_TIMEOUT,
+            )
+            .await?;
         Ok::<_, acp::AcpError>((init, session))
     })
     .await;
@@ -6775,5 +6830,20 @@ mod observer_payload_trim_tests {
         assert!(leaf.starts_with('…'));
         assert!(leaf.ends_with('…'));
         assert!(leaf.contains("[elided"));
+    }
+}
+
+#[cfg(test)]
+mod initial_runtime_lifecycle_tests {
+    use super::*;
+
+    #[test]
+    fn lazy_pool_initial_lifecycle_is_listening() {
+        assert_eq!(initial_runtime_lifecycle(true), "listening");
+    }
+
+    #[test]
+    fn eager_pool_initial_lifecycle_is_ready() {
+        assert_eq!(initial_runtime_lifecycle(false), "ready");
     }
 }

@@ -402,6 +402,14 @@ pub fn run() {
                 *guard = Some(app_handle.clone());
             }
 
+            // Signed local control requests let the persistent Buzz Management
+            // supervisor start exactly one stopped worker before assignment and
+            // stop it after callback. The watcher verifies the Nostr signature
+            // and saved supervisor identity before touching runtime ownership.
+            if !recovery_mode {
+                managed_agents::spawn_runtime_control_watcher(app_handle.clone());
+            }
+
             let (tts_settings, tts_settings_load_error) =
                 huddle::tts_settings::load_for_app(&app_handle);
             if let Ok(mut guard) = state.huddle_audio.tts.lock() {

@@ -41,6 +41,7 @@ reqwest = { workspace = true }
 # Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }
+atomic-write-file = "0.3"
 
 # IDs
 uuid = { workspace = true }

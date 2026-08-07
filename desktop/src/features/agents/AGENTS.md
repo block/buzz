@@ -153,6 +153,30 @@ with a TypeScript lookup table or an id comparison in a component.
    themselves. Never synthesize a run location a surface doesn't have. Don't
    expose `respond-to`, `allowlist`, Nostr, or harness jargon in primary UI
    copy.
+12. **Rapid agent tests are explicit owner-authored round trips.** Instance Edit
+    offers separate Save, Save & restart, and Save/restart/test actions. The
+    test action is never implicit: it awaits the normal managed-agent update,
+    restarts only the active community's runtime pair through
+    `useManagedAgentRuntimeAction`, revalidates membership after readiness,
+    posts through the canonical cache-aware owner message mutation with the
+    target agent's mention tag, and opens the root
+    thread only after the relay returns the accepted event id. Eligible targets
+    are joined, non-archived channels that already contain the agent; DMs are
+    valid. Prompt previews and UI errors must never interpolate environment
+    values, credentials, relay auth, or private key material. A posted smoke is
+    not a successful agent response—the visible thread reply remains the
+    acceptance boundary. After Save and before restart, revalidate the persisted
+    effective runtime, fresh catalog/persona route, harness command, and ACP
+    sidecar against the reviewed form. Refetch the owner identity immediately
+    before posting and reject a signed event whose author differs. Abort the
+    entire rapid action on dialog, agent, owner, or active-relay change; an
+    aborted WebSocket send must never reconnect onto a replacement community.
+    The rapid flow waits for the active community pair to report `ready` before
+    posting, excludes forum channels, and is unavailable for provider-backed
+    agents; only local runtime pairs accept restart + smoke.
+    Keep any inline harness-log tail bounded and redacted at the backend read
+    seam. Distinguish “posted” from “thread opened” so a navigation failure never
+    invites a duplicate external send.
 
 ## The tests that enforce this
 

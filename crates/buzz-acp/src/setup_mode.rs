@@ -115,6 +115,17 @@ pub(crate) enum RequirementPayload {
     },
     /// Git for Windows is missing; open Agent runtimes for the installation guide.
     GitBash,
+    /// A custom harness command cannot be resolved on the host. The desktop
+    /// emits this for unknown `runtime` ids whose `effective_command` does
+    /// not resolve in the current PATH. Mirror of `desktop::Requirement::
+    /// MissingBinary { command }` — kept in lock-step so the consumer side
+    /// can decode any payload the producer emits across minor version skew.
+    MissingBinary {
+        /// The command name that was not found (e.g. `"my-acp-agent"` or
+        /// `""` when `agent_command` was empty and the runtime id was not
+        /// one of the known runtimes).
+        command: String,
+    },
 }
 
 impl RequirementPayload {
@@ -188,6 +199,22 @@ impl RequirementPayload {
             }
             RequirementPayload::GitBash => {
                 "install Git for Windows (open Agent runtimes in Settings to diagnose)".to_string()
+            }
+            RequirementPayload::MissingBinary { command } => {
+                // Surface the command name (if non-empty) so the user can see
+                // what was missing; if the producer emitted an empty string
+                // because `agent_command` was unset and the runtime id was
+                // unrecognized, fall back to a generic instruction that
+                // points at the Edit Agent dialog where the command lives.
+                if command.is_empty() {
+                    "set the agent command in Edit Agent (open Agent runtimes in Settings to diagnose)"
+                        .to_string()
+                } else {
+                    format!(
+                        "install `{}` or add it to PATH (open Agent runtimes in Settings to diagnose)",
+                        command
+                    )
+                }
             }
         }
     }
@@ -697,6 +724,61 @@ mod tests {
             payload.requirements.as_slice(),
             [RequirementPayload::GitBash]
         ));
+    }
+
+    #[test]
+    fn setup_payload_deserializes_missing_binary_requirement() {
+        // Mirrors the producer payload from
+        // `desktop/src-tauri/src/managed_agents/runtime.rs` — the `MissingBinary`
+        // surface carries a `command` field that names the unresolvable binary.
+        let payload: SetupPayload = serde_json::from_str(
+            r#"{"agent_name":"Buzz Agent","agent_pubkey":"test","requirements":[{"surface":"missing_binary","command":"my-acp-agent"}]}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            payload.requirements.as_slice(),
+            [RequirementPayload::MissingBinary { command }] if command == "my-acp-agent"
+        ));
+    }
+
+    #[test]
+    fn setup_payload_deserializes_missing_binary_with_empty_command() {
+        // The producer emits an empty `command` when the managed-agent record
+        // has `agent_command: ""` and the runtime id is not one of the known
+        // ACP runtimes. The consumer must accept that without erroring.
+        let payload: SetupPayload = serde_json::from_str(
+            r#"{"agent_name":"Buzz Agent","agent_pubkey":"test","requirements":[{"surface":"missing_binary","command":""}]}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            payload.requirements.as_slice(),
+            [RequirementPayload::MissingBinary { command }] if command.is_empty()
+        ));
+    }
+
+    #[test]
+    fn missing_binary_instruction_names_the_command_when_present() {
+        let r = RequirementPayload::MissingBinary {
+            command: "my-acp-agent".to_string(),
+        };
+        let s = r.instruction();
+        assert!(s.contains("my-acp-agent"), "got {s:?}");
+        assert!(
+            s.contains("Agent runtimes"),
+            "should point to Agent runtimes; got {s:?}"
+        );
+    }
+
+    #[test]
+    fn missing_binary_instruction_falls_back_when_command_is_empty() {
+        let r = RequirementPayload::MissingBinary {
+            command: String::new(),
+        };
+        let s = r.instruction();
+        assert!(
+            s.contains("Edit Agent"),
+            "empty command should point to Edit Agent; got {s:?}"
+        );
     }
 
     #[test]

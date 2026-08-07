@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { isRelayConnectionDegraded, sortEvents } from "./relayClientShared.ts";
+import {
+  assertRelayEventAuthor,
+  assertRelaySendNotAborted,
+  isRelayConnectionDegraded,
+  sortEvents,
+} from "./relayClientShared.ts";
 
 function event(id, createdAt) {
   return {
@@ -39,4 +44,22 @@ test("isRelayConnectionDegraded — non-healthy states are degraded", () => {
   assert.equal(isRelayConnectionDegraded("reconnecting"), true);
   assert.equal(isRelayConnectionDegraded("stalled"), true);
   assert.equal(isRelayConnectionDegraded("disconnected"), true);
+});
+
+test("relay send cancellation fails closed only after abort", () => {
+  const controller = new AbortController();
+  assert.doesNotThrow(() => assertRelaySendNotAborted(controller.signal));
+  controller.abort();
+  assert.throws(
+    () => assertRelaySendNotAborted(controller.signal),
+    /send cancelled/,
+  );
+});
+
+test("relay author guard accepts case-only differences and rejects drift", () => {
+  assert.doesNotThrow(() => assertRelayEventAuthor("ABC123", "abc123"));
+  assert.throws(
+    () => assertRelayEventAuthor("wrong", "expected"),
+    /author changed/,
+  );
 });

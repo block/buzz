@@ -13,6 +13,8 @@ import {
   KIND_CHANNEL_THREAD_SUMMARY,
 } from "@/shared/constants/kinds";
 import {
+  assertRelayEventAuthor,
+  assertRelaySendNotAborted,
   getTextPayload,
   type ConnectionState,
   type PendingEvent,
@@ -254,8 +256,12 @@ export class RelayClient {
     content: string,
     mentionPubkeys: string[] = [],
     extraTags: string[][] = [],
+    abortSignal?: AbortSignal,
+    expectedAuthorPubkey?: string,
   ) {
+    assertRelaySendNotAborted(abortSignal);
     await this.ensureConnected();
+    assertRelaySendNotAborted(abortSignal);
 
     const tags: string[][] = [["h", channelId]];
     for (const pubkey of mentionPubkeys) {
@@ -270,11 +276,14 @@ export class RelayClient {
       content: content.trim(),
       tags,
     });
+    assertRelaySendNotAborted(abortSignal);
+    assertRelayEventAuthor(event.pubkey, expectedAuthorPubkey);
 
     return this.publishEvent(
       event,
       "Timed out while sending the message.",
       "Failed to send the message.",
+      abortSignal,
     );
   }
 
@@ -329,9 +338,7 @@ export class RelayClient {
     channelId: string,
     onEvent: (event: RelayEvent) => void,
   ) {
-    // 39005 rides only this window-store subscription — CHANNEL_EVENT_KINDS'
-    // other consumers (unread tracking, cache merges) must never see
-    // summary overlays.
+    // Keep 39005 summary overlays isolated from other channel consumers.
     return this.subscribe(
       {
         kinds: [...CHANNEL_EVENT_KINDS, KIND_CHANNEL_THREAD_SUMMARY],
@@ -343,11 +350,7 @@ export class RelayClient {
     );
   }
 
-  /**
-   * Subscribe to huddle lifecycle events (kinds 48100–48103) for a channel,
-   * so HuddleIndicator detects active huddles without being drowned out by
-   * regular channel messages. Includes the last 10 historical events.
-   */
+  /** Subscribe to huddle lifecycle events without regular-message noise. */
   async subscribeToHuddleEvents(
     channelId: string,
     onEvent: (event: RelayEvent) => void,
@@ -428,20 +431,14 @@ export class RelayClient {
   }
 
   async preconnect() {
-    // Explicit re-engagement (reconnect card / community switch): clears the
-    // terminal latch and AUTH rejection streak, and bypasses backoff once.
+    // Explicit reconnect clears terminal/AUTH state and bypasses backoff once.
     this.terminal = false;
     this.authOkTracker.reset();
     this.keepAliveRequested = true;
     await this.connectBypassingBackoff();
   }
 
-  /**
-   * Environment-driven resume (online/focus/visibility): bypasses a pending
-   * backoff timer but preserves the terminal latch and AUTH rejection streak
-   * — only `preconnect()` clears those, so resume events during repeated
-   * AUTH rejection cannot defeat the consecutive-rejection cap.
-   */
+  /** Resume through backoff without clearing terminal/AUTH-rejection state. */
   async resumeReconnect() {
     if (this.terminal) return;
     await this.connectBypassingBackoff();
@@ -475,21 +472,14 @@ export class RelayClient {
     return this.connectionStateEmitter.get();
   }
 
-  /**
-   * Subscribe to connection-state transitions. The listener fires
-   * immediately with the current state, so callers need no separate
-   * `getConnectionState()` call to seed their UI.
-   */
+  /** Subscribe and immediately receive the current connection state. */
   subscribeToConnectionState(listener: (state: ConnectionState) => void) {
     return this.connectionStateEmitter.subscribe(listener);
   }
 
   private async ensureConnected() {
     if (shouldRefuseConnect({ terminal: this.terminal })) {
-      // Terminal (e.g. relay rejected auth): refuse until disconnect() or
-      // preconnect() clears the latch, else the reconnect-timer catch and
-      // the publish/subscribe retry wrappers would race the terminal
-      // "disconnected" state back to "reconnecting".
+      // Only disconnect/preconnect may clear a terminal session latch.
       throw new Error("Relay session is terminal; cannot reconnect.");
     }
 
@@ -506,9 +496,7 @@ export class RelayClient {
         hasPendingReconnect: this.reconnectTimeout !== null,
       })
     ) {
-      // The reconnect coordinator owns outage pacing. Query, publish, and
-      // subscription callers must wait for its scheduled attempt instead of
-      // clearing the timer and creating an immediate reconnect storm.
+      // The reconnect coordinator alone owns outage pacing.
       return this.reconnectWaiters.wait();
     }
 
@@ -709,9 +697,11 @@ export class RelayClient {
     event: RelayEvent,
     timeoutMessage: string,
     sendErrorMessage: string,
+    abortSignal?: AbortSignal,
   ) {
-    // Await the gate before sending EVENT; op timeout starts after the wait.
+    assertRelaySendNotAborted(abortSignal);
     await waitForRateLimit();
+    assertRelaySendNotAborted(abortSignal);
 
     return new Promise<RelayEvent>((resolve, reject) => {
       const timeout = window.setTimeout(() => {
@@ -729,6 +719,11 @@ export class RelayClient {
       void this.sendRaw(["EVENT", event]).catch(async (error) => {
         const pendingEvent = this.pendingEvents.get(event.id);
         this.pendingEvents.delete(event.id);
+        if (abortSignal?.aborted) {
+          window.clearTimeout(timeout);
+          reject(new Error("Message send cancelled."));
+          return;
+        }
         const normalizedError = this.recoverFromSocketFailure(
           error,
           sendErrorMessage,
@@ -736,6 +731,7 @@ export class RelayClient {
 
         try {
           await this.ensureConnected();
+          assertRelaySendNotAborted(abortSignal);
           if (!pendingEvent) {
             throw normalizedError;
           }
