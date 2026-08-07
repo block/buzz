@@ -15,6 +15,38 @@ export default {
         title: ["2.5rem", { lineHeight: "1.15", letterSpacing: "-0.02em" }],
         // 36px — the backup-step private key, shown large in monospace
         "nsec-key": ["2.25rem", { lineHeight: "1.3" }],
+
+        // BlockUI-aligned semantic type roles. These intentionally resolve to
+        // Buzz's current shared-header and body styles; adopting BlockUI's
+        // target scale is a separate, visual migration. Keeping the role name
+        // stable lets that happen without another feature-level rename.
+        "display-page-title": [
+          "1.5rem",
+          {
+            lineHeight: "2rem",
+            fontWeight: "600",
+            letterSpacing: "-0.025em",
+          },
+        ],
+        "display-section-title": [
+          "1.125rem",
+          {
+            lineHeight: "1.75rem",
+            fontWeight: "600",
+            letterSpacing: "-0.025em",
+          },
+        ],
+        "body-medium": ["1rem", { lineHeight: "1.5rem", fontWeight: "400" }],
+        "label-medium": ["1rem", { lineHeight: "1.5rem", fontWeight: "600" }],
+        "body-small": [
+          "0.875rem",
+          { lineHeight: "1.25rem", fontWeight: "400" },
+        ],
+        "label-small": [
+          "0.875rem",
+          { lineHeight: "1.25rem", fontWeight: "600" },
+        ],
+        caption: ["0.75rem", { lineHeight: "1rem", fontWeight: "400" }],
       },
       boxShadow: {
         "content-edge": "-1px -1px 0 0 hsl(var(--sidebar-border) / 0.45)",
@@ -33,6 +65,16 @@ export default {
         lg: "var(--radius)",
         md: "calc(var(--radius) - 2px)",
         sm: "calc(var(--radius) - 4px)",
+        // Semantic aliases resolve to radius steps Buzz already uses. The
+        // aliases are intentionally non-visual until primitives opt into them.
+        "shape-control": "var(--shape-control)",
+        "shape-notice": "var(--shape-notice)",
+        "shape-menu": "var(--shape-menu)",
+        "shape-container": "var(--shape-container)",
+        "shape-overlay": "var(--shape-overlay)",
+        "shape-sheet": "var(--shape-sheet)",
+        "shape-pill": "var(--shape-pill)",
+        "shape-circular": "var(--shape-circular)",
       },
       spacing: {
         4.5: "1.125rem",
@@ -49,6 +91,29 @@ export default {
       colors: {
         background: "hsl(var(--background))",
         foreground: "hsl(var(--foreground))",
+        content: {
+          standard: "var(--content-standard)",
+          subtle: "var(--content-subtle)",
+          muted: "var(--content-muted)",
+          disabled: "var(--content-disabled)",
+          inverse: "var(--content-inverse)",
+        },
+        icon: {
+          standard: "var(--icon-standard)",
+          subtle: "var(--icon-subtle)",
+          muted: "var(--icon-muted)",
+          disabled: "var(--icon-disabled)",
+          inverse: "var(--icon-inverse)",
+        },
+        surface: {
+          app: "var(--surface-app)",
+          subtle: "var(--surface-subtle)",
+          standard: "var(--surface-standard)",
+          prominent: "var(--surface-prominent)",
+          inverse: "var(--surface-inverse)",
+          card: "var(--surface-card)",
+          popover: "var(--surface-popover)",
+        },
         card: {
           DEFAULT: "hsl(var(--card))",
           foreground: "hsl(var(--card-foreground))",
@@ -77,7 +142,13 @@ export default {
           DEFAULT: "hsl(var(--destructive))",
           foreground: "hsl(var(--destructive-foreground))",
         },
-        border: "hsl(var(--border))",
+        border: {
+          DEFAULT: "hsl(var(--border))",
+          subtle: "var(--border-subtle)",
+          standard: "var(--border-standard)",
+          prominent: "var(--border-prominent)",
+          focus: "var(--border-focus)",
+        },
         input: "hsl(var(--input))",
         ring: "hsl(var(--ring))",
         sidebar: {
@@ -96,6 +167,11 @@ export default {
           added: "var(--status-added)",
           deleted: "var(--status-deleted)",
           modified: "var(--status-modified)",
+          error: "var(--status-error)",
+          warning: "var(--status-warning)",
+          success: "var(--status-success)",
+          info: "var(--status-info)",
+          notification: "var(--status-notification)",
         },
         warning: {
           DEFAULT: "var(--ui-warning)",

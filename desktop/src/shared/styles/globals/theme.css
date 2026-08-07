@@ -47,6 +47,50 @@
     --sidebar-accent-foreground: 234 16.02% 35.49%;
     --sidebar-border: 225 13.56% 76.86%;
     --sidebar-ring: 225 13.56% 76.86%;
+
+    /*
+     * BlockUI-aligned semantic foundation contract.
+     *
+     * These aliases deliberately resolve to Buzz's existing substrate tokens,
+     * so introducing the contract has no intended visual effect. Several roles
+     * currently converge on one value (for example subtle/muted/disabled);
+     * later migrations can split those values here without renaming consumers.
+     */
+    --content-standard: hsl(var(--foreground));
+    --content-subtle: hsl(var(--muted-foreground));
+    --content-muted: hsl(var(--muted-foreground));
+    --content-disabled: hsl(var(--muted-foreground));
+    --content-inverse: hsl(var(--primary-foreground));
+    --icon-standard: var(--content-standard);
+    --icon-subtle: var(--content-subtle);
+    --icon-muted: var(--content-muted);
+    --icon-disabled: var(--content-disabled);
+    --icon-inverse: var(--content-inverse);
+    --surface-app: hsl(var(--background));
+    --surface-subtle: hsl(var(--muted));
+    --surface-standard: hsl(var(--secondary));
+    --surface-prominent: hsl(var(--accent));
+    --surface-inverse: hsl(var(--foreground));
+    --surface-card: hsl(var(--card));
+    --surface-popover: hsl(var(--popover));
+    --border-subtle: hsl(var(--border));
+    --border-standard: hsl(var(--border));
+    --border-prominent: hsl(var(--ring));
+    --border-focus: hsl(var(--ring));
+    --status-error: hsl(var(--destructive));
+    --status-warning: var(--ui-warning);
+    --status-success: var(--status-added);
+    --status-info: hsl(var(--primary));
+    --status-notification: hsl(var(--primary));
+    --shape-control: calc(var(--radius) - 2px);
+    --shape-notice: var(--radius);
+    --shape-menu: 1rem;
+    --shape-container: 1.5rem;
+    --shape-overlay: 2rem;
+    --shape-sheet: 2.5rem;
+    --shape-pill: 9999px;
+    --shape-circular: 9999px;
+
     /* Exact Buzz palette tokens; components consume these semantically. */
     --buzz-gradient-light-top: #e6e6b6;
     --buzz-gradient-light-bottom: #c4d0da;
