@@ -86,15 +86,68 @@ function applyTextScale(zoomFactor: number) {
   window.localStorage.setItem(TEXT_SCALE_STORAGE_KEY, String(zoomFactor));
 }
 
-export function useWebviewZoomShortcuts() {
-  const zoomFactorRef = React.useRef(DEFAULT_ZOOM_FACTOR);
+// Reactive store so Settings UI can read and set the zoom factor alongside the
+// keyboard shortcuts. Mirrors the threadViewModePreference pattern.
+const listeners = new Set<() => void>();
+let zoomFactor = readStoredZoomFactor();
 
+function subscribe(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
+function getSnapshot(): number {
+  return zoomFactor;
+}
+
+function getServerSnapshot(): number {
+  return DEFAULT_ZOOM_FACTOR;
+}
+
+function commitZoomFactor(next: number) {
+  const clamped = Math.min(
+    Math.max(roundZoomFactor(next), MIN_ZOOM_FACTOR),
+    MAX_ZOOM_FACTOR,
+  );
+  if (clamped === zoomFactor) return;
+  zoomFactor = clamped;
+  applyTextScale(clamped);
+  for (const listener of listeners) {
+    listener();
+  }
+}
+
+/** Read the persisted zoom factor outside of React. */
+export function getZoomFactor(): number {
+  return zoomFactor;
+}
+
+/** Set the zoom factor from UI (e.g. Settings dropdown). */
+export function setZoomFactor(next: number): void {
+  commitZoomFactor(next);
+}
+
+/** Reset the zoom factor to the default. */
+export function resetZoomFactor(): void {
+  commitZoomFactor(DEFAULT_ZOOM_FACTOR);
+}
+
+export const ZOOM_FACTOR_MIN = MIN_ZOOM_FACTOR;
+export const ZOOM_FACTOR_MAX = MAX_ZOOM_FACTOR;
+export const ZOOM_FACTOR_STEP = ZOOM_STEP;
+export const ZOOM_FACTOR_DEFAULT = DEFAULT_ZOOM_FACTOR;
+
+/** Reactive zoom factor — re-renders when keyboard shortcuts or UI change it. */
+export function useZoomFactor(): number {
+  return React.useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+}
+
+export function useWebviewZoomShortcuts() {
   React.useLayoutEffect(() => {
     const webview = getCurrentWebview();
-    const storedZoomFactor = readStoredZoomFactor();
-
-    zoomFactorRef.current = storedZoomFactor;
-    applyTextScale(storedZoomFactor);
+    applyTextScale(zoomFactor);
 
     // Keep the webview coordinate system stable; only text should scale.
     void webview.setZoom(DEFAULT_ZOOM_FACTOR).catch((error) => {
@@ -109,15 +162,13 @@ export function useWebviewZoomShortcuts() {
 
       event.preventDefault();
 
-      const previousZoomFactor = zoomFactorRef.current;
-      const nextZoomFactor = getNextZoomFactor(action, previousZoomFactor);
+      const nextZoomFactor = getNextZoomFactor(action, zoomFactor);
 
-      if (nextZoomFactor === previousZoomFactor) {
+      if (nextZoomFactor === zoomFactor) {
         return;
       }
 
-      zoomFactorRef.current = nextZoomFactor;
-      applyTextScale(nextZoomFactor);
+      commitZoomFactor(nextZoomFactor);
     }
 
     window.addEventListener("keydown", handleKeyDown);

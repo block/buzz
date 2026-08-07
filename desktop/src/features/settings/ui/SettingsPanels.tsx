@@ -14,6 +14,8 @@ import {
   MessagesSquare,
   MonitorCog,
   Moon,
+  Minus,
+  Plus,
   ShieldAlert,
   Smartphone,
   Smile,
@@ -37,6 +39,14 @@ import {
   useThreadViewMode,
   type ThreadViewMode,
 } from "@/features/channels/lib/threadViewModePreference";
+import {
+  resetZoomFactor,
+  setZoomFactor,
+  useZoomFactor,
+  ZOOM_FACTOR_MAX,
+  ZOOM_FACTOR_MIN,
+  ZOOM_FACTOR_STEP,
+} from "@/app/useWebviewZoomShortcuts";
 import { cn } from "@/shared/lib/cn";
 import { useCommunities } from "@/features/communities/useCommunities";
 import { Badge } from "@/shared/ui/badge";
@@ -695,6 +705,7 @@ function ThemeSettingsCard() {
       )}
 
       <ThreadLayoutSetting />
+      <TextSizeSetting />
     </section>
   );
 }
@@ -787,6 +798,65 @@ function ThreadLayoutSetting() {
             </DropdownMenuRadioGroup>
           </DropdownMenuContent>
         </DropdownMenu>
+      </SettingsOptionRow>
+    </SettingsOptionGroup>
+  );
+}
+
+function TextSizeSetting() {
+  const zoomFactor = useZoomFactor();
+  const pct = Math.round(zoomFactor * 100);
+
+  return (
+    <SettingsOptionGroup className="mt-4">
+      <SettingsOptionRow>
+        <div className="min-w-0">
+          <p className="text-sm font-medium">Text size</p>
+          <p className="text-sm font-normal text-muted-foreground">
+            {pct}% — use Cmd +/- to adjust, Cmd+0 to reset
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button
+            className="h-7 w-7 rounded-full border border-border/50 bg-muted/45 p-0 text-xs shadow-none hover:bg-muted/70"
+            data-testid="font-size-decrease"
+            disabled={zoomFactor <= ZOOM_FACTOR_MIN}
+            onClick={() => setZoomFactor(zoomFactor - ZOOM_FACTOR_STEP)}
+            size="sm"
+            type="button"
+            variant="ghost"
+          >
+            <Minus className="h-4 w-4" />
+          </Button>
+          <span
+            className="min-w-10 text-center text-xs font-medium tabular-nums"
+            data-testid="font-size-display"
+          >
+            {pct}%
+          </span>
+          <Button
+            className="h-7 w-7 rounded-full border border-border/50 bg-muted/45 p-0 text-xs shadow-none hover:bg-muted/70"
+            data-testid="font-size-increase"
+            disabled={zoomFactor >= ZOOM_FACTOR_MAX}
+            onClick={() => setZoomFactor(zoomFactor + ZOOM_FACTOR_STEP)}
+            size="sm"
+            type="button"
+            variant="ghost"
+          >
+            <Plus className="h-4 w-4" />
+          </Button>
+          <Button
+            className="h-7 rounded-full border border-border/50 bg-muted/45 px-2.5 text-xs font-medium shadow-none hover:bg-muted/70"
+            data-testid="font-size-reset"
+            disabled={zoomFactor === 1}
+            onClick={resetZoomFactor}
+            size="sm"
+            type="button"
+            variant="ghost"
+          >
+            Reset
+          </Button>
+        </div>
       </SettingsOptionRow>
     </SettingsOptionGroup>
   );
