@@ -96,7 +96,9 @@ Right-click shows "Star channel".
 ## Gotchas
 
 1. **Stale server** — `reuseExistingServer: true` means a prior build serves old
-   code. Kill port 4173 and rebuild (`cd desktop && pnpm run build`) after code changes.
+   code. Kill port 4173 and rebuild (`cd desktop && pnpm build:e2e`) after code
+   changes. Never plain `pnpm build` — it strips the E2E mock bridge and specs
+   fail at boot.
 2. **Clip for readability** — full 1280x720 screenshots are hard to read for sidebar
    features. Sidebar = 256px wide; context menus ~450px.
 3. **`post-screenshots.sh` requires `gh` auth** — the script uses `gh api` and
