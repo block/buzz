@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   buildVideoReviewCommentsByRootId,
   buildVideoReviewCommentsForRoot,
+  buildVideoReviewCommentRootIdsByMessageId,
   buildVideoReviewContextForMessage,
   buildVideoReviewContextsByMessageId,
   hasVideoAttachment,
@@ -156,6 +157,57 @@ test("buildVideoReviewCommentsForRoot returns descendants for one root", () => {
   assert.deepEqual(
     comments.map((comment) => comment.id),
     ["earlier-comment", "first-comment", "nested-reply"],
+  );
+});
+
+test("buildVideoReviewCommentRootIdsByMessageId targets the nearest video ancestor", () => {
+  const root = message({ id: "root", body: "Review request" });
+  const firstVideo = message({
+    id: "first-video",
+    body: "![video](https://relay/media/a.mp4)",
+    parentId: root.id,
+    rootId: root.id,
+  });
+  const firstComment = message({
+    id: "first-comment",
+    body: "[00:01] tighten this",
+    parentId: firstVideo.id,
+    rootId: root.id,
+  });
+  const nestedVideo = message({
+    id: "nested-video",
+    body: "![video](https://relay/media/b.mp4)",
+    parentId: firstComment.id,
+    rootId: root.id,
+  });
+  const nestedComment = message({
+    id: "nested-comment",
+    body: "[00:02] check this frame",
+    parentId: nestedVideo.id,
+    rootId: root.id,
+  });
+  const plainReply = message({
+    id: "plain-reply",
+    body: "No video ancestor",
+    parentId: root.id,
+    rootId: root.id,
+  });
+
+  const rootIds = buildVideoReviewCommentRootIdsByMessageId([
+    root,
+    firstVideo,
+    firstComment,
+    nestedVideo,
+    nestedComment,
+    plainReply,
+  ]);
+
+  assert.deepEqual(
+    [...rootIds.entries()],
+    [
+      [firstComment.id, firstVideo.id],
+      [nestedComment.id, nestedVideo.id],
+    ],
   );
 });
 
