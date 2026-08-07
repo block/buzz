@@ -348,6 +348,13 @@ mod tests {
             "push_gateway_delivery_request_replays",
             "product_feedback",
             "replica_heartbeat",
+            "community_deletion_requests",
+            "community_deletion_approvals",
+            "community_deletion_checkpoints",
+            "community_deletion_manifest_keys",
+            "storage_taxonomy_sweeps",
+            "community_serving_write_leases",
+            "community_deletion_executor_heartbeats",
         ] {
             if normalized[insert_pos..].contains(&format!("'{value}'")) {
                 globals.insert(value.to_owned());
@@ -561,7 +568,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 28);
+        assert_eq!(migrations.len(), 29);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -919,33 +926,53 @@ mod tests {
         assert!(heartbeat.contains("epoch"));
         assert!(heartbeat.contains("INSERT INTO replica_heartbeat (id) VALUES (1)"));
         assert!(heartbeat.contains("_operator_global_tables"));
-        // Channel-id lookup index (0027): serves the tenant-independent
-        // `channels` lookups that carry no community_id predicate, which no
-        // community_id-leading index can satisfy. Covering + partial so the
-        // planner can go index-only; asserted NOT UNIQUE because `id` alone is
-        // not unique in this table (the same channel id may exist under more
-        // than one community), so a unique index would encode a false
-        // constraint and fail to build on such a database.
+
+        // Channel-id lookup index (0027): serves tenant-independent channel lookups.
         assert_eq!(migrations[26].version, 27);
         let channel_id_index = migrations[26].sql.as_str();
         assert!(channel_id_index.contains("idx_channels_id_live"));
         assert!(channel_id_index.contains("INCLUDE (community_id)"));
         assert!(channel_id_index.contains("WHERE deleted_at IS NULL"));
-        assert!(
-            !channel_id_index.contains("CREATE UNIQUE INDEX"),
-            "channels.id is not unique across communities — index must not be UNIQUE",
-        );
-        assert!(
-            desired_schema.contains("idx_channels_id_live"),
-            "desired-state schema must carry the channel-id lookup index",
-        );
+        assert!(!channel_id_index.contains("CREATE UNIQUE INDEX"));
+        assert!(desired_schema.contains("idx_channels_id_live"));
 
+        // Main owns 0028 for long reaction payloads.
         assert_eq!(migrations[27].version, 28);
         let long_reactions = migrations[27].sql.as_str();
         assert!(
             long_reactions.contains("ALTER TABLE reactions ALTER COLUMN emoji TYPE VARCHAR(66)")
         );
         assert!(desired_schema.contains("emoji               VARCHAR(66) NOT NULL"));
+
+        // Durable whole-community deletion control plane and universal DB fence.
+        assert_eq!(migrations[28].version, 29);
+        let deletion = migrations[28].sql.as_str();
+        assert!(deletion.contains("CREATE TABLE community_deletion_requests"));
+        assert!(deletion.contains("CREATE TABLE community_deletion_approvals"));
+        assert!(deletion.contains("CREATE TABLE community_deletion_checkpoints"));
+        assert!(deletion.contains("CREATE TABLE community_serving_write_leases"));
+        assert!(deletion.contains("CREATE TABLE community_deletion_executor_heartbeats"));
+        assert!(deletion.contains("CREATE FUNCTION community_write_allowed"));
+        assert!(deletion.contains("LANGUAGE plpgsql VOLATILE"));
+        assert!(deletion.contains("CREATE FUNCTION assert_community_write_allowed"));
+        assert!(deletion.contains("current_setting('transaction_isolation') <> 'read committed'"));
+        assert!(deletion.contains("ERRCODE = 'invalid_transaction_state'"));
+        assert!(deletion.contains("CREATE FUNCTION enforce_community_write_fence"));
+        assert!(deletion.contains("CREATE FUNCTION attach_community_write_fence"));
+        assert!(deletion.contains("community_write_fence_excluded_table"));
+        assert!(deletion.contains("CREATE FUNCTION enforce_community_tombstone"));
+        assert!(deletion.contains("community tombstones are permanent"));
+        assert!(deletion.contains("SET LOCAL lock_timeout = '5s'"));
+        assert!(deletion.contains("'active', 'quiescing', 'fenced', 'tombstone'"));
+        assert!(deletion.contains("_operator_global_tables"));
+        assert!(deletion.contains("'submitted', 'inventoried', 'approved', 'fenced', 'drained'"));
+        assert!(deletion.contains("UNIQUE (id, community_id, inventory_digest)"));
+        assert!(deletion.contains("FOREIGN KEY (request_id, community_id, inventory_digest)"));
+        assert!(deletion.contains("prevent_community_deletion_request_retargeting"));
+        assert!(deletion.contains("prevent_community_deletion_approval_removal"));
+
+        assert!(deletion.contains("retry_stage TEXT CHECK"));
+        assert!(desired_schema.contains("retry_stage TEXT CHECK"));
     }
 
     #[test]
@@ -1188,7 +1215,7 @@ mod tests {
         run_migrations(&pool)
             .await
             .expect("retry succeeds after operator repair");
-        assert_eq!(applied_versions(&pool).await.last().copied(), Some(27));
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(28));
     }
 
     #[tokio::test]
@@ -1310,5 +1337,163 @@ mod tests {
             search_expression.contains("ELSE NULL::tsvector"),
             "fresh installs must default non-allowlisted kinds to NULL: {search_expression}"
         );
+
+        let active_a = uuid::Uuid::new_v4();
+        let active_b = uuid::Uuid::new_v4();
+        let to_fence = uuid::Uuid::new_v4();
+        for (community, label) in [
+            (active_a, "active-a"),
+            (active_b, "active-b"),
+            (to_fence, "to-fence"),
+        ] {
+            sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                .bind(community)
+                .bind(format!("late-fence-{label}-{}.example", community.simple()))
+                .execute(&pool)
+                .await
+                .expect("insert late-table test community");
+        }
+        sqlx::query(
+            "CREATE TABLE late_created_scoped (\
+                 community_id UUID NOT NULL, id BIGINT PRIMARY KEY, value TEXT NOT NULL\
+             )",
+        )
+        .execute(&pool)
+        .await
+        .expect("create late scoped table");
+        sqlx::query("SELECT attach_community_write_fence('late_created_scoped'::regclass)")
+            .execute(&pool)
+            .await
+            .expect("attach late create fence");
+        sqlx::query("CREATE TABLE late_altered_scoped (id BIGINT PRIMARY KEY)")
+            .execute(&pool)
+            .await
+            .expect("create table before late alter");
+        sqlx::query("ALTER TABLE late_altered_scoped ADD COLUMN community_id UUID NOT NULL")
+            .execute(&pool)
+            .await
+            .expect("add late community id");
+        sqlx::query("SELECT attach_community_write_fence('late_altered_scoped'::regclass)")
+            .execute(&pool)
+            .await
+            .expect("attach late alter fence");
+        let attached: Vec<String> = sqlx::query_scalar(
+            "SELECT c.relname FROM pg_trigger trigger \
+             JOIN pg_class c ON c.oid = trigger.tgrelid \
+             JOIN pg_proc procedure ON procedure.oid = trigger.tgfoid \
+             WHERE c.relname IN ('late_created_scoped', 'late_altered_scoped') \
+               AND procedure.proname = 'enforce_community_write_fence' \
+               AND NOT trigger.tgisinternal ORDER BY c.relname",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("read late trigger catalog");
+        assert_eq!(attached, vec!["late_altered_scoped", "late_created_scoped"]);
+        let malformed_fence_triggers: i64 = sqlx::query_scalar(
+            "SELECT count(*)::BIGINT FROM pg_trigger trigger \
+             JOIN pg_class c ON c.oid = trigger.tgrelid \
+             JOIN pg_proc procedure ON procedure.oid = trigger.tgfoid \
+             WHERE c.relname IN ('late_created_scoped', 'late_altered_scoped') \
+               AND procedure.proname = 'enforce_community_write_fence' \
+               AND NOT trigger.tgisinternal \
+               AND (trigger.tgenabled <> 'O' OR (trigger.tgtype & 31) <> 31)",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("validate late trigger mode and operations");
+        assert_eq!(malformed_fence_triggers, 0);
+
+        sqlx::query(
+            "INSERT INTO late_created_scoped (community_id, id, value) \
+             VALUES ($1, 1, 'same'), ($2, 2, 'source-fenced'), \
+                    ($1, 3, 'destination-fenced'), ($1, 4, 'opposite-a'), \
+                    ($3, 5, 'opposite-b')",
+        )
+        .bind(active_a)
+        .bind(to_fence)
+        .bind(active_b)
+        .execute(&pool)
+        .await
+        .expect("seed late table while communities active");
+        sqlx::query("UPDATE late_created_scoped SET value = 'same-ok' WHERE id = 1")
+            .execute(&pool)
+            .await
+            .expect("same-tenant active update");
+        sqlx::query("UPDATE late_created_scoped SET community_id = $1 WHERE id = 1")
+            .bind(active_b)
+            .execute(&pool)
+            .await
+            .expect("active-to-active update");
+
+        let mut fence_connection = pool.acquire().await.expect("fence connection");
+        sqlx::query("BEGIN")
+            .execute(&mut *fence_connection)
+            .await
+            .expect("begin direct fence");
+        sqlx::query(
+            "SELECT set_config('buzz.deletion_executor_community', $1, true), \
+                    set_config('buzz.deletion_fence_generation', '1', true)",
+        )
+        .bind(to_fence.to_string())
+        .execute(&mut *fence_connection)
+        .await
+        .expect("authorize direct fence");
+        sqlx::query(
+            "UPDATE communities SET deletion_state = 'fenced', \
+                    deletion_fence_generation = 1, archived_at = now() WHERE id = $1",
+        )
+        .bind(to_fence)
+        .execute(&mut *fence_connection)
+        .await
+        .expect("fence test destination");
+        sqlx::query("COMMIT")
+            .execute(&mut *fence_connection)
+            .await
+            .expect("commit direct fence");
+
+        let active_to_fenced =
+            sqlx::query("UPDATE late_created_scoped SET community_id = $1 WHERE id = 3")
+                .bind(to_fence)
+                .execute(&pool)
+                .await
+                .expect_err("active to fenced destination must fail");
+        assert!(active_to_fenced
+            .to_string()
+            .contains("community write fenced"));
+        let fenced_to_active =
+            sqlx::query("UPDATE late_created_scoped SET community_id = $1 WHERE id = 2")
+                .bind(active_a)
+                .execute(&pool)
+                .await
+                .expect_err("fenced source to active destination must fail");
+        assert!(fenced_to_active
+            .to_string()
+            .contains("community write fenced"));
+        let row_locations: Vec<(i64, uuid::Uuid)> = sqlx::query_as(
+            "SELECT id, community_id FROM late_created_scoped WHERE id IN (2, 3) ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("failed moves preserve row location");
+        assert_eq!(row_locations, vec![(2, to_fence), (3, active_a)]);
+
+        let move_a = sqlx::query("UPDATE late_created_scoped SET community_id = $1 WHERE id = 4")
+            .bind(active_b)
+            .execute(&pool);
+        let move_b = sqlx::query("UPDATE late_created_scoped SET community_id = $1 WHERE id = 5")
+            .bind(active_a)
+            .execute(&pool);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            let (a, b) = tokio::join!(move_a, move_b);
+            a.expect("opposite active move A");
+            b.expect("opposite active move B");
+        })
+        .await
+        .expect("opposite cross-tenant updates must not deadlock");
+
+        sqlx::query("DROP TABLE late_created_scoped, late_altered_scoped")
+            .execute(&pool)
+            .await
+            .expect("drop late-table fixtures");
     }
 }

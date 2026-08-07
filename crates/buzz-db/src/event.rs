@@ -1111,7 +1111,7 @@ pub struct ThreadMetadataParams<'a> {
     pub broadcast: bool,
 }
 
-async fn insert_event_with_thread_metadata_tx(
+pub(crate) async fn insert_event_with_thread_metadata_tx(
     tx: &mut Transaction<'_, Postgres>,
     community_id: CommunityId,
     event: &Event,

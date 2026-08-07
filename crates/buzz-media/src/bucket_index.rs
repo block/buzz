@@ -753,3 +753,258 @@ mod tests {
         );
     }
 }
+
+/// The exact community-scoped listing prefixes owned by one tenant, in
+/// ascending key order: media sidecars, upload records, and Git repository
+/// pointers. Every tenant-owned binding lives under one of these; shared
+/// immutable CAS/thumb/probe data is deliberately outside them (fleet-wide
+/// physical GC is a separate retention phase).
+pub fn tenant_prefixes(community: Uuid) -> [String; 3] {
+    [
+        format!("_meta/{community}/"),
+        format!("_uploads/{community}/"),
+        format!("repos/{community}/"),
+    ]
+}
+
+/// Whether one bucket key is a tenant-owned binding of `community` in the
+/// exact writer taxonomy: a media sidecar, an upload record, or a Git
+/// repository pointer. A malformed key under a tenant prefix is NOT owned —
+/// deletion fails closed on shapes this binary did not write.
+pub fn is_tenant_owned_key(community: Uuid, key: &str) -> bool {
+    match classify_key(key) {
+        KeyClass::Sidecar {
+            community: owner, ..
+        }
+        | KeyClass::Auxiliary {
+            community: owner, ..
+        } => owner == community,
+        KeyClass::Unknown => git_pointer_community(key) == Some(community),
+        KeyClass::Blob { .. } | KeyClass::Thumb { .. } => false,
+    }
+}
+
+/// Whether one bucket key belongs to the fleet's known writer taxonomy:
+/// blob/thumb/sidecar/upload shapes, any community's Git pointer, shared Git
+/// CAS data, or a `probe/` connectivity key.
+pub fn is_known_fleet_key(key: &str) -> bool {
+    !matches!(classify_key(key), KeyClass::Unknown)
+        || git_pointer_community(key).is_some()
+        || is_known_git_shared_key(key)
+        || key.starts_with("probe/")
+}
+
+/// Durable outcome of one fleet-wide taxonomy sweep.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TaxonomySweepOutcome {
+    /// Total objects listed.
+    pub listed_objects: u64,
+    /// Exact count of keys outside the known writer taxonomy.
+    pub unknown_object_count: u64,
+    /// Bounded sample of unknown keys, in listing order.
+    pub unknown_key_sample: Vec<String>,
+}
+
+/// Fold an entire paginated bucket listing into the fleet taxonomy outcome.
+///
+/// Deleting a tenant while the bucket contains a writer shape this binary
+/// does not understand is unsafe — but that is a *fleet* invariant, not a
+/// per-request one. This sweep records it once; deletion stages then gate on
+/// a recent clean sweep instead of re-listing the whole bucket per request.
+/// Same pagination/cap contract as [`fold_bucket_listing`]; memory is
+/// bounded by `sample_limit`, never the listing size.
+pub async fn sweep_bucket_taxonomy<F, Fut>(
+    cap: u64,
+    sample_limit: usize,
+    mut fetch_page: F,
+) -> Result<TaxonomySweepOutcome, SweepError>
+where
+    F: FnMut(Option<String>) -> Fut,
+    Fut: Future<Output = Result<Page, MediaError>>,
+{
+    let mut outcome = TaxonomySweepOutcome::default();
+    let mut continuation_token = None;
+    loop {
+        let page = fetch_page(continuation_token.take()).await?;
+        outcome.listed_objects += page.objects.len() as u64;
+        if outcome.listed_objects > cap {
+            return Err(SweepError::CapExceeded {
+                seen: outcome.listed_objects,
+                cap,
+            });
+        }
+        for (key, _size) in page.objects {
+            if !is_known_fleet_key(&key) {
+                outcome.unknown_object_count += 1;
+                if outcome.unknown_key_sample.len() < sample_limit {
+                    outcome.unknown_key_sample.push(key);
+                }
+            }
+        }
+        if !page.is_truncated {
+            break;
+        }
+        match page.next_continuation_token {
+            Some(token) => continuation_token = Some(token),
+            None => return Err(SweepError::MalformedPage),
+        }
+    }
+    Ok(outcome)
+}
+
+fn git_pointer_community(key: &str) -> Option<Uuid> {
+    let mut parts = key.split('/');
+    if parts.next()? != "repos" {
+        return None;
+    }
+    let community = parse_canonical_uuid(parts.next()?)?;
+    let owner = parts.next()?;
+    let repo = parts.next()?;
+    let pointer = parts.next()?;
+    if parts.next().is_some()
+        || owner.len() != 64
+        || !owner.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || repo.is_empty()
+        || repo.len() > 64
+        || repo.starts_with('.')
+        || repo.contains("..")
+        || !repo
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        || pointer != "pointer"
+    {
+        return None;
+    }
+    Some(community)
+}
+
+fn is_known_git_shared_key(key: &str) -> bool {
+    ["packs/", "idx/", "manifests/"].iter().any(|prefix| {
+        key.strip_prefix(prefix).is_some_and(|digest| {
+            digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+    })
+}
+
+#[cfg(test)]
+mod deletion_taxonomy_tests {
+    use super::*;
+
+    #[test]
+    fn tenant_ownership_is_exact_per_community_and_shape() {
+        let target = Uuid::from_u128(1);
+        let other = Uuid::from_u128(2);
+        let sha = "a".repeat(64);
+
+        assert!(is_tenant_owned_key(
+            target,
+            &format!("_meta/{target}/{sha}.json")
+        ));
+        assert!(is_tenant_owned_key(
+            target,
+            &format!("_uploads/{target}/{sha}/01ARZ3NDEKTSV4RRFFQ69G5FAV.json")
+        ));
+        assert!(is_tenant_owned_key(
+            target,
+            &format!("repos/{target}/{}/repo/pointer", "b".repeat(64))
+        ));
+        // Another tenant's bindings and shared CAS are never owned.
+        assert!(!is_tenant_owned_key(
+            target,
+            &format!("_meta/{other}/{sha}.json")
+        ));
+        assert!(!is_tenant_owned_key(target, &format!("{sha}.png")));
+        // A malformed key under the tenant's own prefix fails closed.
+        assert!(!is_tenant_owned_key(
+            target,
+            &format!("_meta/{target}/not-a-sidecar")
+        ));
+        assert!(!is_tenant_owned_key(
+            target,
+            &format!("repos/{target}/stray-file")
+        ));
+    }
+
+    #[test]
+    fn tenant_prefixes_cover_every_owned_shape_and_sort_ascending() {
+        let community = Uuid::from_u128(7);
+        let prefixes = tenant_prefixes(community);
+        assert!(prefixes.windows(2).all(|pair| pair[0] < pair[1]));
+        let sha = "c".repeat(64);
+        for key in [
+            format!("_meta/{community}/{sha}.json"),
+            format!("_uploads/{community}/{sha}/01ARZ3NDEKTSV4RRFFQ69G5FAV.json"),
+            format!("repos/{community}/{}/repo/pointer", "d".repeat(64)),
+        ] {
+            assert!(
+                prefixes
+                    .iter()
+                    .any(|prefix| key.starts_with(prefix.as_str())),
+                "owned key {key} must live under a tenant prefix"
+            );
+            assert!(is_tenant_owned_key(community, &key));
+        }
+    }
+
+    #[tokio::test]
+    async fn taxonomy_sweep_counts_all_unknowns_but_bounds_the_sample() {
+        let community = Uuid::from_u128(1);
+        let sha = "a".repeat(64);
+        let known = vec![
+            (format!("{sha}.png"), 1),
+            (format!("{sha}.thumb.jpg"), 1),
+            (format!("_meta/{community}/{sha}.json"), 1),
+            (format!("packs/{sha}"), 1),
+            (
+                format!("repos/{community}/{}/repo/pointer", "b".repeat(64)),
+                1,
+            ),
+            ("probe/cas-123.txt".to_string(), 1),
+        ];
+        let pages = [
+            Page {
+                objects: known,
+                next_continuation_token: Some("next".to_string()),
+                is_truncated: true,
+            },
+            Page {
+                objects: vec![
+                    ("future-format/one".to_string(), 1),
+                    ("future-format/two".to_string(), 1),
+                    ("future-format/three".to_string(), 1),
+                ],
+                next_continuation_token: None,
+                is_truncated: false,
+            },
+        ];
+        let outcome = sweep_bucket_taxonomy(100, 2, |token| {
+            let page = match token.as_deref() {
+                None => pages[0].clone(),
+                Some("next") => pages[1].clone(),
+                other => panic!("unexpected continuation token {other:?}"),
+            };
+            async move { Ok(page) }
+        })
+        .await
+        .expect("sweep synthetic listing");
+        assert_eq!(outcome.listed_objects, 9);
+        assert_eq!(outcome.unknown_object_count, 3);
+        assert_eq!(
+            outcome.unknown_key_sample,
+            vec!["future-format/one", "future-format/two"]
+        );
+    }
+
+    #[tokio::test]
+    async fn taxonomy_sweep_fails_closed_past_the_fleet_cap() {
+        let result = sweep_bucket_taxonomy(1, 10, |_token| async {
+            Ok(Page {
+                objects: vec![("a".to_string(), 1), ("b".to_string(), 1)],
+                next_continuation_token: None,
+                is_truncated: false,
+            })
+        })
+        .await;
+        assert!(matches!(result, Err(SweepError::CapExceeded { .. })));
+    }
+}

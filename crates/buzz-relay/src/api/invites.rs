@@ -260,6 +260,19 @@ async fn authenticate(
     Ok((tenant, pubkey))
 }
 
+fn map_mint_error(error: buzz_db::DbError) -> (StatusCode, Json<Value>) {
+    match error {
+        buzz_db::DbError::InvalidData(message) | buzz_db::DbError::DeletionSafety(message) => {
+            api_error(StatusCode::BAD_REQUEST, &message)
+        }
+        buzz_db::DbError::AccessDenied(_) => api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "community writes are temporarily unavailable",
+        ),
+        error => internal_error(&format!("invite mint: {error}")),
+    }
+}
+
 /// Mint an invite code — `POST /api/invites`, NIP-98 signed by an owner/admin.
 ///
 /// Returns the code, its expiry, and a shareable landing-page URL on the
@@ -304,10 +317,7 @@ pub async fn mint_invite(
         .db
         .mint_relay_invite(tenant.community(), &sender_hex, ttl, max_uses)
         .await
-        .map_err(|error| match error {
-            buzz_db::DbError::InvalidData(message) => api_error(StatusCode::BAD_REQUEST, &message),
-            error => internal_error(&format!("invite mint: {error}")),
-        })?;
+        .map_err(map_mint_error)?;
 
     // Same TLS-posture logic as nip98_expected_url: wss deployments get an
     // https landing page URL, ws dev/test deployments get http.
@@ -893,6 +903,19 @@ mod tests {
             .await;
             assert_eq!(response.status(), StatusCode::OK, "{body}");
         }
+    }
+
+    #[test]
+    fn mint_fence_errors_map_to_temporary_unavailability() {
+        let (status, body) = super::map_mint_error(buzz_db::DbError::AccessDenied(
+            "community is write-fenced".to_string(),
+        ));
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            body.0.get("error").and_then(Value::as_str),
+            Some("community writes are temporarily unavailable")
+        );
     }
 
     #[tokio::test]

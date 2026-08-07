@@ -526,165 +526,202 @@ pub async fn dispatch_action(
 ) -> Result<StepResult, WorkflowError> {
     use ActionDef::*;
 
-    match action {
-        SendMessage { text, channel } => {
-            // Look up workflow metadata for destination validation and
-            // attribution, scoped to the run's community — the same run/workflow
-            // UUID may exist in another community, so a bare-id lookup could
-            // load the wrong row and drive a side effect under it.
-            let wf_run = engine
-                .db
-                .get_workflow_run(community_id, run_id)
-                .await
-                .map_err(|e| {
-                    WorkflowError::WebhookError(format!(
-                        "SendMessage: failed to load workflow run {run_id}: {e}"
-                    ))
-                })?;
-            let workflow = engine
-                .db
-                .get_workflow(community_id, wf_run.workflow_id)
-                .await
-                .map_err(|e| {
-                    WorkflowError::WebhookError(format!(
-                        "SendMessage: failed to load workflow {}: {e}",
-                        wf_run.workflow_id
-                    ))
-                })?;
-            let channel_id = resolve_send_message_channel(
-                channel.as_deref(),
-                &trigger_ctx.channel_id,
-                workflow.channel_id,
-            )?;
-            let owner_pubkey_hex = hex::encode(&workflow.owner_pubkey);
-
-            info!(
-                run_id = %run_id,
-                step = step_id,
-                channel = %channel_id,
-                "SendMessage → {channel_id}: {text}"
-            );
-
-            let event_id = engine
-                .action_sink()?
-                .send_message(community_id, &channel_id, text, &owner_pubkey_hex)
-                .await
-                .map_err(WorkflowError::from)?;
-
-            Ok(StepResult::Completed(serde_json::json!({
-                "sent": true,
-                "event_id": event_id,
-            })))
-        }
-
-        SendDm { to, text: _ } => {
-            warn!(run_id = %run_id, step = step_id, "SendDm not yet implemented (to={to})");
-            // TODO (WF-07): emit DM event.
-            Err(WorkflowError::NotImplemented("SendDm".into()))
-        }
-
-        SetChannelTopic { topic: _ } => {
-            warn!(run_id = %run_id, step = step_id, "SetChannelTopic not yet implemented");
-            // TODO (WF-07): update channel topic via DB.
-            Err(WorkflowError::NotImplemented("SetChannelTopic".into()))
-        }
-
-        AddReaction { emoji } => {
-            info!(run_id = %run_id, step = step_id, "AddReaction → :{emoji}:");
-            if trigger_ctx.message_id.is_empty() {
-                return Err(WorkflowError::InvalidDefinition(
-                    "AddReaction: no trigger.message_id available".into(),
-                ));
-            }
-
-            #[cfg(feature = "reqwest")]
-            {
-                let result = add_reaction_impl(&trigger_ctx.message_id, emoji).await?;
-                Ok(StepResult::Completed(result))
-            }
-
-            #[cfg(not(feature = "reqwest"))]
-            {
-                warn!(
-                    run_id = %run_id,
-                    step = step_id,
-                    "AddReaction: reqwest feature not enabled, skipping HTTP call"
-                );
-                Ok(StepResult::Completed(
-                    serde_json::json!({ "added": false, "skipped": true }),
+    // The workflow engine can outlive the serving request that spawned it.
+    // Revalidate the durable community fence immediately before every external
+    // side effect (message publish, webhook, delay/resume). A storage failure is
+    // a denial, never permission to continue.
+    let serving_write =
+        buzz_deletion::acquire_serving_write(&engine.db, community_id, "workflow_action")
+            .await
+            .map_err(|error| {
+                WorkflowError::WebhookError(format!(
+                    "community write fence rejected workflow side effect: {error}"
                 ))
-            }
-        }
+            })?;
 
-        CallWebhook {
-            url,
-            method,
-            headers,
-            body,
-        } => {
-            let method_str = method.as_deref().unwrap_or("POST");
-            info!(run_id = %run_id, step = step_id, "CallWebhook → {method_str} {url}");
+    serving_write.verify().await.map_err(|error| {
+        WorkflowError::WebhookError(format!("community write lease lost: {error}"))
+    })?;
 
-            #[cfg(feature = "reqwest")]
-            {
-                let result = call_webhook_impl(url, method_str, headers, body).await?;
-                Ok(StepResult::Completed(result))
-            }
+    let result = serving_write
+        .protect(async {
+            match action {
+                SendMessage { text, channel } => {
+                    // Look up workflow metadata for destination validation and
+                    // attribution, scoped to the run's community — the same run/workflow
+                    // UUID may exist in another community, so a bare-id lookup could
+                    // load the wrong row and drive a side effect under it.
+                    let wf_run = engine
+                        .db
+                        .get_workflow_run(community_id, run_id)
+                        .await
+                        .map_err(|e| {
+                            WorkflowError::WebhookError(format!(
+                                "SendMessage: failed to load workflow run {run_id}: {e}"
+                            ))
+                        })?;
+                    let workflow = engine
+                        .db
+                        .get_workflow(community_id, wf_run.workflow_id)
+                        .await
+                        .map_err(|e| {
+                            WorkflowError::WebhookError(format!(
+                                "SendMessage: failed to load workflow {}: {e}",
+                                wf_run.workflow_id
+                            ))
+                        })?;
+                    let channel_id = resolve_send_message_channel(
+                        channel.as_deref(),
+                        &trigger_ctx.channel_id,
+                        workflow.channel_id,
+                    )?;
+                    let owner_pubkey_hex = hex::encode(&workflow.owner_pubkey);
 
-            #[cfg(not(feature = "reqwest"))]
-            {
-                // reqwest not enabled — log and return placeholder.
-                warn!(
-                    run_id = %run_id, step = step_id,
-                    "CallWebhook: reqwest feature not enabled, skipping HTTP call"
-                );
-                let _ = (headers, body); // suppress unused warnings
-                Ok(StepResult::Completed(serde_json::json!({
-                    "status": 0,
-                    "body": null,
-                    "skipped": true
-                })))
-            }
-        }
+                    info!(
+                        run_id = %run_id,
+                        step = step_id,
+                        channel = %channel_id,
+                        "SendMessage → {channel_id}: {text}"
+                    );
 
-        RequestApproval {
-            from,
-            message,
-            timeout,
-        } => {
-            let timeout_str = timeout.as_deref().unwrap_or("24h");
-            info!(
-                run_id = %run_id, step = step_id,
-                "RequestApproval from={from} timeout={timeout_str}: {message}"
-            );
+                    let event_id = engine
+                        .action_sink()?
+                        .send_message(community_id, &channel_id, text, &owner_pubkey_hex)
+                        .await
+                        .map_err(WorkflowError::from)?;
 
-            let token = generate_approval_token(run_id, step_id);
+                    Ok(StepResult::Completed(serde_json::json!({
+                        "sent": true,
+                        "event_id": event_id,
+                    })))
+                }
 
-            // TODO (WF-08): create approval record in DB, emit kind:46010.
-            // For now, return Suspended with the token so the caller can persist state.
+                SendDm { to, text: _ } => {
+                    warn!(run_id = %run_id, step = step_id, "SendDm not yet implemented (to={to})");
+                    // TODO (WF-07): emit DM event.
+                    Err(WorkflowError::NotImplemented("SendDm".into()))
+                }
 
-            Ok(StepResult::Suspended {
-                approval_token: token,
-            })
-        }
+                SetChannelTopic { topic: _ } => {
+                    warn!(run_id = %run_id, step = step_id, "SetChannelTopic not yet implemented");
+                    // TODO (WF-07): update channel topic via DB.
+                    Err(WorkflowError::NotImplemented("SetChannelTopic".into()))
+                }
 
-        Delay { duration } => {
-            let secs = parse_duration_secs(duration)?;
-            // Cap delay at 270 seconds (4.5 minutes) — must be less than default_timeout_secs (300s)
-            // to avoid non-deterministic StepTimeout. Long delays (hours/days)
-            // should use the scheduled resume pattern (future work: WF-09).
-            const MAX_DELAY_SECS: u64 = 270;
-            if secs > MAX_DELAY_SECS {
-                return Err(WorkflowError::InvalidDefinition(format!(
-                    "delay exceeds maximum of {MAX_DELAY_SECS} seconds (got {secs}s); \
+                AddReaction { emoji } => {
+                    info!(run_id = %run_id, step = step_id, "AddReaction → :{emoji}:");
+                    if trigger_ctx.message_id.is_empty() {
+                        Err(WorkflowError::InvalidDefinition(
+                            "AddReaction: no trigger.message_id available".into(),
+                        ))
+                    } else {
+                        #[cfg(feature = "reqwest")]
+                        {
+                            let result = add_reaction_impl(&trigger_ctx.message_id, emoji).await?;
+                            Ok(StepResult::Completed(result))
+                        }
+
+                        #[cfg(not(feature = "reqwest"))]
+                        {
+                            warn!(
+                                run_id = %run_id,
+                                step = step_id,
+                                "AddReaction: reqwest feature not enabled, skipping HTTP call"
+                            );
+                            Ok(StepResult::Completed(
+                                serde_json::json!({ "added": false, "skipped": true }),
+                            ))
+                        }
+                    }
+                }
+
+                CallWebhook {
+                    url,
+                    method,
+                    headers,
+                    body,
+                } => {
+                    let method_str = method.as_deref().unwrap_or("POST");
+                    info!(run_id = %run_id, step = step_id, "CallWebhook → {method_str} {url}");
+
+                    #[cfg(feature = "reqwest")]
+                    {
+                        let result = call_webhook_impl(url, method_str, headers, body).await?;
+                        Ok(StepResult::Completed(result))
+                    }
+
+                    #[cfg(not(feature = "reqwest"))]
+                    {
+                        // reqwest not enabled — log and return placeholder.
+                        warn!(
+                            run_id = %run_id, step = step_id,
+                            "CallWebhook: reqwest feature not enabled, skipping HTTP call"
+                        );
+                        let _ = (headers, body); // suppress unused warnings
+                        Ok(StepResult::Completed(serde_json::json!({
+                            "status": 0,
+                            "body": null,
+                            "skipped": true
+                        })))
+                    }
+                }
+
+                RequestApproval {
+                    from,
+                    message,
+                    timeout,
+                } => {
+                    let timeout_str = timeout.as_deref().unwrap_or("24h");
+                    info!(
+                        run_id = %run_id, step = step_id,
+                        "RequestApproval from={from} timeout={timeout_str}: {message}"
+                    );
+
+                    let token = generate_approval_token(run_id, step_id);
+
+                    // TODO (WF-08): create approval record in DB, emit kind:46010.
+                    // For now, return Suspended with the token so the caller can persist state.
+
+                    Ok(StepResult::Suspended {
+                        approval_token: token,
+                    })
+                }
+
+                Delay { duration } => {
+                    let secs = parse_duration_secs(duration)?;
+                    // Cap delay at 270 seconds (4.5 minutes) — must be less than default_timeout_secs (300s)
+                    // to avoid non-deterministic StepTimeout. Long delays (hours/days)
+                    // should use the scheduled resume pattern (future work: WF-09).
+                    const MAX_DELAY_SECS: u64 = 270;
+                    if secs > MAX_DELAY_SECS {
+                        return Err(WorkflowError::InvalidDefinition(format!(
+                            "delay exceeds maximum of {MAX_DELAY_SECS} seconds (got {secs}s); \
                      use the scheduled resume pattern for long delays"
-                )));
+                        )));
+                    }
+                    info!(run_id = %run_id, step = step_id, "Delay {duration} ({secs}s)");
+                    tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+                    Ok(StepResult::Completed(
+                        serde_json::json!({ "slept_secs": secs }),
+                    ))
+                }
             }
-            info!(run_id = %run_id, step = step_id, "Delay {duration} ({secs}s)");
-            tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
-            Ok(StepResult::Completed(
-                serde_json::json!({ "slept_secs": secs }),
-            ))
+        })
+        .await
+        .map_err(|error| {
+            WorkflowError::WebhookError(format!("community write lease lost: {error}"))
+        })?;
+    let release = serving_write.finish().await.map_err(|error| {
+        WorkflowError::WebhookError(format!("community write lease release failed: {error}"))
+    });
+    match result {
+        Ok(value) => {
+            release?;
+            Ok(value)
+        }
+        Err(error) => {
+            let _ = release;
+            Err(error)
         }
     }
 }

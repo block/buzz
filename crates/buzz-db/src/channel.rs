@@ -1508,6 +1508,7 @@ pub async fn reap_expired_ephemeral_channels(pool: &PgPool) -> Result<Vec<Reaped
            AND ch.archived_at IS NULL \
            AND ch.deleted_at IS NULL \
            AND c.archived_at IS NULL \
+           AND community_write_allowed(ch.community_id) \
          RETURNING ch.community_id, c.host, ch.id",
     )
     .fetch_all(pool)

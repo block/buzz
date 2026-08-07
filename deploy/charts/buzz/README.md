@@ -62,9 +62,15 @@ Buzz uses one URL style for both media and Git/CAS object-store requests:
 | `virtual` | `https://bucket.endpoint/key` | AWS-style providers and new Railway Storage Buckets |
 
 The chart always renders `s3.addressingStyle` as
-`BUZZ_S3_ADDRESSING_STYLE`. It renders `s3.region` as `BUZZ_S3_REGION` only
-when explicitly set, preserving the relay's existing `AWS_REGION` fallback for
-upgrades. Only `path` and `virtual` addressing styles are accepted; invalid
+`BUZZ_S3_ADDRESSING_STYLE` and `s3.region` as `BUZZ_S3_REGION`. The region
+defaults to `us-east-1`, keeping bundled MinIO and the in-pod
+`buzz-admin deletions` workflow operable without an ambient `AWS_REGION`.
+Production providers must set their credential region explicitly when it
+differs. Existing releases that previously omitted `s3.region` will begin
+rendering `BUZZ_S3_REGION=us-east-1` after upgrade, even if an image or
+`relay.extraEnv` entry supplied `AWS_REGION`; set `s3.region` to the provider's
+actual credential region before upgrading. Only `path` and `virtual` addressing
+styles are accepted; invalid
 values fail chart rendering and relay startup. The bundled MinIO quickstart
 deliberately keeps `path` because its Service DNS resolves one endpoint
 hostname, not arbitrary `<bucket>.<service>` names.
