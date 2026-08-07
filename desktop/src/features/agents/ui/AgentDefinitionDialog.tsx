@@ -1033,7 +1033,7 @@ export function AgentDefinitionDialog({
       open={open}
       title={title}
     >
-{form}
+      {form}
     </AgentDefinitionDialogShell>
   );
 }
