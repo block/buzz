@@ -12,6 +12,7 @@
         "appearance": "Appearance",
         "profile": "Profile",
         "notifications": "Notifications",
+        "voice": "Voice",
         "experimental": "Experiments",
         "agents": "Agents",
         "channelTemplates": "Channel templates",
@@ -48,7 +49,10 @@
     "language": {
       "label": "Language",
       "description": "Choose the language used by Buzz.",
-      "english": "English"
+      "system": "System",
+      "english": "English",
+      "traditionalChinese": "Traditional Chinese",
+      "simplifiedChinese": "Simplified Chinese"
     }
   },
   "sidebar": {

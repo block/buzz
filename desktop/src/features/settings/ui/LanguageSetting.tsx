@@ -1,11 +1,18 @@
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { isAppLanguage, resolveAppLanguage, setAppLanguage } from "@/i18n";
+import {
+  isAppLanguagePreference,
+  readStoredLanguagePreference,
+  setAppLanguage,
+} from "@/i18n";
 import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
 
 export function LanguageSetting() {
-  const { i18n, t } = useTranslation();
-  const language = resolveAppLanguage(i18n.resolvedLanguage);
+  const { t } = useTranslation();
+  const [languagePreference, setLanguagePreference] = useState(
+    readStoredLanguagePreference,
+  );
 
   return (
     <SettingsOptionGroup className="mt-8">
@@ -23,16 +30,22 @@ export function LanguageSetting() {
           data-testid="app-language"
           id="app-language"
           onChange={(event) => {
-            const nextLanguage = event.currentTarget.value;
-            if (isAppLanguage(nextLanguage)) {
-              void setAppLanguage(nextLanguage);
+            const nextPreference = event.currentTarget.value;
+            if (isAppLanguagePreference(nextPreference)) {
+              setLanguagePreference(nextPreference);
+              void setAppLanguage(nextPreference);
             }
           }}
-          value={language}
+          value={languagePreference}
         >
+          <option value="system">{t("settings.language.system")}</option>
           <option value="en">{t("settings.language.english")}</option>
-          <option value="zh-Hant">繁體中文</option>
-          <option value="zh-Hans">简体中文</option>
+          <option value="zh-Hant">
+            {t("settings.language.traditionalChinese")}
+          </option>
+          <option value="zh-Hans">
+            {t("settings.language.simplifiedChinese")}
+          </option>
         </select>
       </SettingsOptionRow>
     </SettingsOptionGroup>

@@ -179,7 +179,7 @@ export const settingsSections: SettingsSectionDescriptor[] = [
   },
   {
     value: "voice",
-    label: "Voice",
+    labelKey: "settings.nav.sections.voice",
     icon: Volume2,
   },
   {

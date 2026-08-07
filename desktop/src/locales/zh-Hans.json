@@ -12,6 +12,7 @@
         "appearance": "外观",
         "profile": "个人资料",
         "notifications": "通知",
+        "voice": "语音",
         "experimental": "实验",
         "agents": "Agents",
         "channelTemplates": "频道模板",
@@ -48,7 +49,10 @@
     "language": {
       "label": "语言",
       "description": "选择 Buzz 使用的语言。",
-      "english": "英文"
+      "system": "跟随系统",
+      "english": "英文",
+      "traditionalChinese": "繁体中文",
+      "simplifiedChinese": "简体中文"
     }
   },
   "sidebar": {

@@ -12,6 +12,7 @@
         "appearance": "外觀",
         "profile": "個人檔案",
         "notifications": "通知",
+        "voice": "語音",
         "experimental": "實驗功能",
         "agents": "Agents",
         "channelTemplates": "頻道範本",
@@ -47,8 +48,11 @@
     },
     "language": {
       "label": "語言",
-      "description": "選擇 Buzz 使用嘅語言。",
-      "english": "英文"
+      "description": "選擇 Buzz 使用的語言。",
+      "system": "跟隨系統",
+      "english": "英文",
+      "traditionalChinese": "繁體中文",
+      "simplifiedChinese": "簡體中文"
     }
   },
   "sidebar": {

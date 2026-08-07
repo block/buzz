@@ -9,26 +9,52 @@ import en from "@/locales/en.json";
 import zhHans from "@/locales/zh-Hans.json";
 import zhHant from "@/locales/zh-Hant.json";
 
-export const APP_LANGUAGES = ["en", "zh-Hant", "zh-Hans"] as const;
-export type AppLanguage = (typeof APP_LANGUAGES)[number];
+import {
+  APP_LANGUAGES,
+  DEFAULT_LANGUAGE,
+  resolveAppLanguage,
+  readLanguagePreference,
+  writeLanguagePreference,
+  type AppLanguage,
+  type AppLanguagePreference,
+} from "./language";
 
-export const DEFAULT_LANGUAGE: AppLanguage = "en";
-export const LANGUAGE_STORAGE_KEY = "buzz-language";
+export {
+  APP_LANGUAGES,
+  APP_LANGUAGE_PREFERENCES,
+  DEFAULT_LANGUAGE,
+  DEFAULT_LANGUAGE_PREFERENCE,
+  LANGUAGE_STORAGE_KEY,
+  isAppLanguage,
+  isAppLanguagePreference,
+  readLanguagePreference,
+  resolveAppLanguage,
+  resolveLanguagePreference,
+  resolveSystemAppLanguage,
+  writeLanguagePreference,
+} from "./language";
+export type { AppLanguage, AppLanguagePreference } from "./language";
 
-export function isAppLanguage(value: unknown): value is AppLanguage {
-  return (
-    typeof value === "string" &&
-    (APP_LANGUAGES as readonly string[]).includes(value)
-  );
+function getSystemLanguageCandidates(): readonly string[] {
+  if (typeof navigator === "undefined") return [];
+  return navigator.languages.length > 0
+    ? navigator.languages
+    : navigator.language
+      ? [navigator.language]
+      : [];
 }
 
-export function resolveAppLanguage(value: unknown): AppLanguage {
-  return isAppLanguage(value) ? value : DEFAULT_LANGUAGE;
+function getLanguageStorage(): Storage | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
 }
 
-function readStoredLanguage(): AppLanguage {
-  if (typeof window === "undefined") return DEFAULT_LANGUAGE;
-  return resolveAppLanguage(window.localStorage.getItem(LANGUAGE_STORAGE_KEY));
+export function readStoredLanguagePreference(): AppLanguagePreference {
+  return readLanguagePreference(getLanguageStorage());
 }
 
 export function createAppI18n(
@@ -57,7 +83,10 @@ export const i18n = createAppI18n(
     "zh-Hant": { translation: zhHant },
     "zh-Hans": { translation: zhHans },
   },
-  readStoredLanguage(),
+  resolveAppLanguage(
+    readStoredLanguagePreference(),
+    getSystemLanguageCandidates(),
+  ),
 );
 
 function applyDocumentLanguage(language: AppLanguage) {
@@ -68,10 +97,14 @@ function applyDocumentLanguage(language: AppLanguage) {
 
 applyDocumentLanguage(resolveAppLanguage(i18n.resolvedLanguage));
 
-export async function setAppLanguage(language: AppLanguage): Promise<void> {
-  if (typeof window !== "undefined") {
-    window.localStorage.setItem(LANGUAGE_STORAGE_KEY, language);
-  }
+export async function setAppLanguage(
+  preference: AppLanguagePreference,
+): Promise<void> {
+  const language = resolveAppLanguage(
+    preference,
+    getSystemLanguageCandidates(),
+  );
+  writeLanguagePreference(getLanguageStorage(), preference);
   await i18n.changeLanguage(language);
   applyDocumentLanguage(language);
 }

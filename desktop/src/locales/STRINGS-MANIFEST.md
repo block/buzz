@@ -12,6 +12,7 @@ This v1 manifest contains the English source strings extracted from the bounded 
 | `settings.nav.sections.appearance` | Appearance | Settings sidebar section label |
 | `settings.nav.sections.profile` | Profile | Settings sidebar section label |
 | `settings.nav.sections.notifications` | Notifications | Settings sidebar section label |
+| `settings.nav.sections.voice` | Voice | Settings sidebar section label |
 | `settings.nav.sections.experimental` | Experiments | Settings sidebar section label |
 | `settings.nav.sections.agents` | Agents | Settings sidebar section label |
 | `settings.nav.sections.channelTemplates` | Channel templates | Settings sidebar section label |
@@ -41,7 +42,10 @@ This v1 manifest contains the English source strings extracted from the bounded 
 | `settings.appearance.threadSplitDescription` | Threads open in a side panel next to the channel | Appearance settings panel |
 | `settings.language.label` | Language | Language selector row in Appearance settings |
 | `settings.language.description` | Choose the language used by Buzz. | Language selector row in Appearance settings |
+| `settings.language.system` | System | Language selector row in Appearance settings |
 | `settings.language.english` | English | Language selector row in Appearance settings |
+| `settings.language.traditionalChinese` | Traditional Chinese | Language selector row in Appearance settings |
+| `settings.language.simplifiedChinese` | Simplified Chinese | Language selector row in Appearance settings |
 | `sidebar.primary.inbox` | Inbox | Main app sidebar primary navigation |
 | `sidebar.primary.pulse` | Pulse | Main app sidebar primary navigation |
 | `sidebar.primary.projects` | Projects | Main app sidebar primary navigation |
