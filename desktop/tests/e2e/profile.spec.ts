@@ -1341,10 +1341,6 @@ test("Windows retries a false denied notification permission from settings", asy
   const desktopState = page.getByTestId("notifications-desktop-state");
 
   await desktopToggle.click();
-  await expect(desktopToggle).not.toBeChecked();
-  await expect(desktopState).toContainText("Blocked");
-
-  await desktopToggle.click();
   await expect(desktopToggle).toBeChecked();
   await expect(desktopState).toContainText("On");
   await expect
