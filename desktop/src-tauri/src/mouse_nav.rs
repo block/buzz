@@ -45,6 +45,7 @@ fn direction_for_swipe(delta_x: f64) -> Option<&'static str> {
     }
 }
 
+#[cfg(target_os = "macos")]
 pub fn init<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) {
     use block2::RcBlock;
     use objc2_app_kit::{NSEvent, NSEventMask, NSEventType};
@@ -101,6 +102,9 @@ pub fn init<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) {
         eprintln!("buzz-desktop: mouse-nav: failed to install NSEvent monitor");
     }
 }
+
+#[cfg(not(target_os = "macos"))]
+pub fn init<R: tauri::Runtime>(_app_handle: &tauri::AppHandle<R>) {}
 
 #[cfg(test)]
 mod tests {
