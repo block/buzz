@@ -88,6 +88,77 @@ See CONTRIBUTING.md for full setup details and dependency requirements.
 
 ---
 
+## Crate Dependency Hierarchy
+
+```
+buzz-core (zero I/O — types, verification, filter matching, kind registry)
+  ├── buzz-db       (Postgres: events, channels, tokens, workflows, audit)
+  ├── buzz-auth     (NIP-42/98, API tokens, scopes, rate limiting)
+  ├── buzz-pubsub   (Redis pub/sub, presence, typing indicators)
+  ├── buzz-search   (Postgres FTS: query, delete)
+  ├── buzz-audit    (Hash-chain tamper-evident log)
+  └── buzz-workflow (YAML-as-code automation engine, evalexpr conditions)
+       └── buzz-relay (ties everything together — the Axum server)
+
+buzz-acp            (agent harness — bridges relay @mentions to AI agents)
+buzz-cli            (agent-first CLI, JSON in / JSON out)
+buzz-admin          (operator CLI: relay membership + key generation)
+buzz-core also → buzz-sdk (typed event builders), buzz-media (Blossom/S3)
+```
+
+The relay (`buzz-relay`) imports and orchestrates all subsystems. Subsystems are **isolated from each other**: `buzz-workflow` never calls `buzz-pubsub`, `buzz-search` never calls `buzz-db`. All cross-subsystem coordination happens through the relay.
+
+## Event Pipeline
+
+When the relay receives `["EVENT", <event>]`, the handler (`handlers/event.rs`) runs this 12-step pipeline in order:
+
+```
+ 1. AUTH CHECK        — Authenticated? Has MessagesWrite scope?
+ 2. PUBKEY MATCH      — event.pubkey == auth_context.pubkey?
+ 3. KIND AUTH REJECT  — kind 22242 (AUTH) are never stored
+ 4. EPHEMERAL ROUTE   — kind 20000–29999 → ephemeral sub-pipeline
+ 5. VERIFY            — spawn_blocking: Schnorr sig + SHA-256 ID hash
+ 6. MEMBERSHIP        — channel tags → check_channel_membership
+ 7. DB INSERT         — db.insert_event (ON CONFLICT DO NOTHING)
+ 8. REDIS PUBLISH     — pubsub.publish_event (if channel-scoped)
+ 9. FAN-OUT           — sub_registry.fan_out → conn_manager.send_to
+10. SEARCH INDEX      — search_index_tx.send (bounded worker, non-blocking)
+11. AUDIT LOG         — audit.log (spawned async, non-blocking)
+12. WORKFLOW TRIGGER  — wf.on_event (spawned async, excludes 46001–46012)
+```
+
+Steps 10–12 are fire-and-forget (failure does not fail the event submission). Fan-out excludes global subscriptions from private-channel events. Workflow loop prevention: kinds 46001–46012, relay-signed `buzz:workflow` tag events, and `KIND_GIFT_WRAP` never trigger workflows.
+
+## Connection Lifecycle
+
+Every WebSocket connection follows this sequence:
+
+1. **Community binding** — `TenantContext` resolved from the request host before any handler runs
+2. **Semaphore acquire** — `conn_semaphore.try_acquire_owned()`; rejected if at capacity
+3. **NIP-42 challenge** — relay sends `["AUTH", "<challenge>"]`; connection registered in ConnectionManager
+4. **Authentication** — client responds with `["AUTH", <signed-event>]`; state transitions Pending → Authenticated or → Failed. Unauthenticated EVENT/REQ are rejected
+5. **Three concurrent loops** run for the connection lifetime:
+   - **recv_loop**: reads frames, parses `ClientMessage`, dispatches
+   - **send_loop**: drains mpsc channel, writes to WebSocket
+   - **heartbeat loop**: WebSocket ping every 30s; 3 missed pongs → disconnect
+6. **Cleanup**: cancel token → await loops → remove subscriptions → deregister → drop semaphore
+
+Max 1024 subscriptions/connection, 500 max historical results/filter, 64KB max frame. Slow clients (3 consecutive full send buffers) are disconnected.
+
+## Key Kind Ranges
+
+| Range | Meaning |
+|-------|---------|
+| 0–9999 | Standard Nostr kinds |
+| 10000–19999 | Replaceable events (NIP-16) |
+| 20000–29999 | Ephemeral events — not stored, not audited |
+| 30000–39999 | Parameterized replaceable events |
+| 40000–49999 | Buzz custom kinds |
+
+All 81+ kinds defined as `pub const KIND_*: u32` in `buzz-core/src/kind.rs`, exported in `ALL_KINDS: &[u32]`. Key custom kinds: 9/40002 (stream messages), 7 (reactions), 45001/45003 (forum posts/comments), 46001–46012 (workflow events), 20001 (presence), 40100 (canvas), 43001 (agent job requests).
+
+---
+
 ## Quality Gates
 
 Run `just ci` before every PR — it runs `fmt` + `clippy` + desktop lint +
