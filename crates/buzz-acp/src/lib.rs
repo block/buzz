@@ -38,7 +38,7 @@ use futures_util::FutureExt;
 use nostr::{PublicKey, ToBech32};
 use pool::{
     AgentPool, ControlSignal, IdleSwitchResult, OwnedAgent, PromptContext, PromptOutcome,
-    PromptResult, PromptSource, SessionState, TimeoutKind,
+    PromptResult, PromptSource, SessionState, TimeoutKind, PUBLICATION_VERIFICATION_ERROR_PREFIX,
 };
 use pool_lifecycle::PoolLifecycle;
 use queue::{CancelReason, EventQueue, FlushBatch, QueuedEvent, ThreadTags};
@@ -3360,6 +3360,13 @@ fn is_auth_error(error: &acp::AcpError) -> bool {
     message.contains("Re-authenticate") || message.contains("API Error: 401")
 }
 
+/// Publication verification failures are terminal for the batch. Retrying a
+/// turn after its agent may already have published would risk duplicate user
+/// replies; instead, surface an explicit failure asking the caller to retry.
+fn is_publication_verification_error(error: &acp::AcpError) -> bool {
+    matches!(error, acp::AcpError::Protocol(message) if message.starts_with(PUBLICATION_VERIFICATION_ERROR_PREFIX))
+}
+
 /// Spawn a task that posts a user-visible failure notice to the relay.
 ///
 /// Shared by the hard-cap immediate dead-letter path and the retries-exhausted
@@ -3480,6 +3487,16 @@ fn handle_prompt_result(
                 } else {
                     hard_timeout_fate_suffix = Some(" — requeued for retry (recently active)");
                 }
+            } else if matches!(&result.outcome, PromptOutcome::Error(e) if is_publication_verification_error(e))
+            {
+                tracing::error!(
+                    channel_id = %batch.channel_id,
+                    events = batch.events.len(),
+                    "dead-lettering batch immediately — reply publication could not be verified"
+                );
+                let content = "⚠️ I couldn't verify that my reply was delivered, so I stopped to avoid sending a duplicate. Please re-send the request."
+                    .to_string();
+                spawn_failure_notice(rest_client, &batch, content);
             } else if matches!(&result.outcome, PromptOutcome::Error(e) if is_auth_error(e)) {
                 // Auth errors are non-retryable: the token won't self-repair
                 // between retries, so requeueing only wastes attempt slots and
@@ -7413,6 +7430,20 @@ mod error_outcome_emission_tests {
             !is_auth_error(&e),
             "usage-credit error must NOT be classified as auth error"
         );
+    }
+
+    #[test]
+    fn publication_verification_error_is_terminal() {
+        let error = AcpError::Protocol(format!(
+            "{PUBLICATION_VERIFICATION_ERROR_PREFIX} no signed kind:9 reply"
+        ));
+        assert!(is_publication_verification_error(&error));
+    }
+
+    #[test]
+    fn unrelated_protocol_error_can_still_retry() {
+        let error = AcpError::Protocol("unexpected ACP response".to_string());
+        assert!(!is_publication_verification_error(&error));
     }
 
     #[test]
