@@ -16,13 +16,12 @@ import {
 import * as React from "react";
 import { toast } from "sonner";
 
-import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useIsManagedAgent } from "@/features/agent-memory/hooks";
-import { useChannelsQuery } from "@/features/channels/hooks";
+import { ProjectOriginReference } from "./ProjectOriginReference";
 import { ForumComposer } from "@/features/forum/ui/ForumComposer";
 import {
-  type Project,
   type ProjectPullRequest,
+  type Repository as Project,
   type ProjectPullRequestCommentAnchor,
   useCreateProjectPullRequestCommentMutation,
 } from "@/features/projects/hooks";
@@ -331,14 +330,6 @@ export function PullRequestDetailHeader({
   pullRequest: ProjectPullRequest;
 }) {
   const authorLabel = labelForPubkey(pullRequest.author, profiles);
-  const sourceChannelId = pullRequest.channelId;
-  const { goChannel } = useAppNavigation();
-  const channelsQuery = useChannelsQuery({
-    enabled: Boolean(sourceChannelId),
-  });
-  const sourceChannel = channelsQuery.data?.find(
-    (channel) => channel.id === sourceChannelId,
-  );
 
   return (
     <header className="min-w-0 space-y-1 p-4 pb-4">
@@ -364,27 +355,10 @@ export function PullRequestDetailHeader({
         <span title={formatExactTimestamp(pullRequest.createdAt)}>
           created {relativeTime(pullRequest.createdAt)}
         </span>
-        {sourceChannelId ? (
-          <span
-            className="inline-flex min-w-0 items-center gap-1"
-            title="Source channel is claimed by the pull request author and is not relay-verified."
-          >
-            <span>linked from</span>
-            {sourceChannel ? (
-              <button
-                aria-label={`Open author-claimed source channel #${sourceChannel.name}`}
-                className="truncate font-medium text-foreground underline-offset-2 hover:underline"
-                onClick={() => void goChannel(sourceChannel.id)}
-                type="button"
-              >
-                #{sourceChannel.name}
-              </button>
-            ) : (
-              <span>an unavailable channel</span>
-            )}
-            <span>(author-claimed)</span>
-          </span>
-        ) : null}
+        <ProjectOriginReference
+          agentName={pullRequest.originAgentName}
+          channelId={pullRequest.channelId}
+        />
       </p>
     </header>
   );

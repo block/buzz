@@ -86,6 +86,41 @@ export function shouldBounceForChannelNotification(tags: string[][]): boolean {
   return !isThreadReply(tags);
 }
 
+export function markAllReadSources({
+  activeChannelId,
+  channelActivityItems,
+  markAllChannelReadMarkers,
+  markActiveChannelRead,
+  undoUnreadFeedItem,
+  unreadFeedItemIds,
+}: {
+  activeChannelId: string | null;
+  channelActivityItems: ReadonlyArray<{
+    channelId: string | null;
+    createdAt: number;
+  }>;
+  markAllChannelReadMarkers: () => void;
+  markActiveChannelRead: (channelId: string, createdAt: number) => void;
+  undoUnreadFeedItem: (itemId: string) => void;
+  unreadFeedItemIds: ReadonlySet<string>;
+}) {
+  for (const itemId of unreadFeedItemIds) {
+    undoUnreadFeedItem(itemId);
+  }
+  markAllChannelReadMarkers();
+
+  if (!activeChannelId) return;
+
+  let latestActivityAt: number | null = null;
+  for (const item of channelActivityItems) {
+    if (item.channelId !== activeChannelId) continue;
+    latestActivityAt = Math.max(latestActivityAt ?? 0, item.createdAt);
+  }
+  if (latestActivityAt !== null) {
+    markActiveChannelRead(activeChannelId, latestActivityAt);
+  }
+}
+
 export function toSearchHit(
   target: DesktopNotificationTarget,
 ): SearchHit | null {

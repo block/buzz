@@ -60,6 +60,8 @@ type UserProfilePopoverProps = {
   triggerAriaLabel?: string;
   /** Set false when the trigger is inside another interactive control. */
   enableProfilePanel?: boolean;
+  /** Set false when a smaller, context-specific hover treatment is provided. */
+  enableHoverPopover?: boolean;
   /** When set to "bot", a BotIdenticon badge renders next to the display name. */
   role?: string;
   /** Value used to generate the BotIdenticon glyph (typically the author name). */
@@ -174,6 +176,7 @@ export function UserProfilePopover({
   triggerElement = "div",
   triggerAriaLabel,
   enableProfilePanel = true,
+  enableHoverPopover = true,
   role,
   botIdenticonValue,
 }: UserProfilePopoverProps) {
@@ -298,11 +301,14 @@ export function UserProfilePopover({
   }, []);
 
   const handleTriggerMouseEnter = React.useCallback(() => {
+    if (!enableHoverPopover) {
+      return;
+    }
     clearHoverTimer();
     hoverTimerRef.current = setTimeout(() => {
       setOpen(true);
     }, HOVER_OPEN_DELAY_MS);
-  }, [clearHoverTimer]);
+  }, [clearHoverTimer, enableHoverPopover]);
 
   const handleMouseLeave = React.useCallback(() => {
     clearHoverTimer();
@@ -593,6 +599,11 @@ export function UserProfilePopover({
         data-testid="user-profile-popover"
         onMouseEnter={handleContentMouseEnter}
         onMouseLeave={handleMouseLeave}
+        // This is a hover card: moving focus into its first button on open
+        // makes the profile header look keyboard-selected before the user has
+        // interacted with it. Keep focus on the trigger; Tab still enters the
+        // card and shows its normal focus treatment when needed.
+        onOpenAutoFocus={(event) => event.preventDefault()}
         side="top"
         sideOffset={8}
       >

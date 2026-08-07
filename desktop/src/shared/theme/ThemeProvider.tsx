@@ -15,6 +15,7 @@ import { createThemeVars, hexToHsl } from "./adaptive-theme";
 import {
   SYNTAX_THEMES,
   type SyntaxThemeName,
+  type ThemeInfo,
   extractThemeInfo,
   getThemePair,
   loadThemeData,
@@ -55,9 +56,15 @@ type ThemeContextValue = {
   accentColor: string;
   followSystem: boolean;
   hasPair: boolean;
+  terminalPalette: ThemeInfo["terminalPalette"] | null;
   setTheme: (name: string) => void;
   setAccentColor: (color: string) => void;
   setFollowSystem: (enabled: boolean) => void;
+  applyAppearance: (appearance: {
+    theme: SyntaxThemeName;
+    accent: string;
+    followSystem: boolean;
+  }) => void;
 };
 
 type ThemeProviderProps = {
@@ -426,9 +433,10 @@ function applyCachedVars(): string | null {
 let themeApplyRequest = 0;
 
 /** Apply a theme: load data, derive CSS vars, set them on :root. */
-async function applyTheme(
-  name: SyntaxThemeName,
-): Promise<{ isDark: boolean } | null> {
+async function applyTheme(name: SyntaxThemeName): Promise<{
+  isDark: boolean;
+  terminalPalette: ThemeInfo["terminalPalette"];
+} | null> {
   const requestToken = ++themeApplyRequest;
   const themeData = await loadThemeData(name);
   if (requestToken !== themeApplyRequest) return null;
@@ -477,7 +485,7 @@ async function applyTheme(
     // Storage full — non-critical
   }
 
-  return { isDark };
+  return { isDark, terminalPalette: info.terminalPalette };
 }
 
 export function ThemeProvider({
@@ -493,6 +501,9 @@ export function ThemeProvider({
     return document.documentElement.classList.contains("dark");
   });
   const [isLoading, setIsLoading] = useState(true);
+  const [terminalPalette, setTerminalPalette] = useState<
+    ThemeInfo["terminalPalette"] | null
+  >(null);
   const loadingRef = useRef<string | null>(null);
   const [accentColor, setAccentColorState] = useState<string>(() => {
     return window.localStorage.getItem(ACCENT_STORAGE_KEY) ?? DEFAULT_ACCENT;
@@ -535,6 +546,7 @@ export function ThemeProvider({
       // separate re-application here — that avoided the switch-time flicker.
       if (loadingRef.current === thisTheme) {
         setIsDark(result.isDark);
+        setTerminalPalette(result.terminalPalette);
         setIsLoading(false);
       }
     });
@@ -611,6 +623,31 @@ export function ThemeProvider({
     setFollowSystemState(enabled);
   }, []);
 
+  const applyAppearance = useCallback(
+    (appearance: {
+      theme: SyntaxThemeName;
+      accent: string;
+      followSystem: boolean;
+    }) => {
+      // Write the complete preference before updating state so applyTheme reads
+      // the target community's accent in the same batch, never the previous one.
+      try {
+        window.localStorage.setItem(THEME_STORAGE_KEY, appearance.theme);
+        window.localStorage.setItem(ACCENT_STORAGE_KEY, appearance.accent);
+        window.localStorage.setItem(
+          FOLLOW_SYSTEM_KEY,
+          appearance.followSystem ? "true" : "false",
+        );
+      } catch {
+        // Keep the active appearance responsive even if the local cache is full.
+      }
+      setSelectedTheme(appearance.theme);
+      setAccentColorState(appearance.accent);
+      setFollowSystemState(appearance.followSystem);
+    },
+    [],
+  );
+
   const value: ThemeContextValue = {
     themeName: effectiveTheme,
     selectedThemeName: selectedTheme,
@@ -619,9 +656,11 @@ export function ThemeProvider({
     accentColor,
     followSystem,
     hasPair,
+    terminalPalette,
     setTheme,
     setAccentColor,
     setFollowSystem,
+    applyAppearance,
   };
 
   return (

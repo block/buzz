@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Check, Eye, EyeOff, KeyRound } from "lucide-react";
+import { Check, Eye, EyeOff, FileKey2, KeyRound } from "lucide-react";
 
 import { cn } from "@/shared/lib/cn";
 import { nsecToNpub } from "@/shared/lib/nostrUtils";
@@ -16,7 +16,10 @@ import {
   ONBOARDING_PRIMARY_CTA_CLASS,
   ONBOARDING_SECONDARY_CTA_CLASS,
 } from "./OnboardingChrome";
-import { BackupPasswordTimeline } from "./BackupPasswordTimeline";
+import {
+  BackupFileUnlockPreview,
+  BackupPasswordTimeline,
+} from "./BackupPasswordTimeline";
 import { OnboardingFooter } from "./OnboardingFooter";
 
 const NOSTR_KEY_FILE_MAX_BYTES = 1024;
@@ -30,6 +33,11 @@ type NostrKeyImportFormProps = {
   onBack: () => void;
   onImport: (nsec: string, password?: string) => Promise<void>;
   onStageChange?: (stage: NostrKeyImportStage) => void;
+  showBack?: boolean;
+  /** Restrict this instance to selecting a backup file instead of typing a key. */
+  mode?: "key" | "backup";
+  /** Dialogs keep their actions inside the surface instead of the onboarding dock. */
+  footerMode?: "onboarding" | "inline";
   /** "spotlight" is the first-launch treatment: glowy centered input, no drop zone, pill buttons. */
   variant?: "default" | "spotlight";
 };
@@ -48,6 +56,9 @@ export function NostrKeyImportForm({
   onBack,
   onImport,
   onStageChange,
+  showBack = true,
+  mode = "key",
+  footerMode = "onboarding",
   variant = "default",
 }: NostrKeyImportFormProps) {
   const [nsecInput, setNsecInput] = React.useState("");
@@ -55,6 +66,7 @@ export function NostrKeyImportForm({
   const [isImporting, setIsImporting] = React.useState(false);
   const [importError, setImportError] = React.useState<string | null>(null);
   const [isDragging, setIsDragging] = React.useState(false);
+  const dragDepthRef = React.useRef(0);
   const [isRevealed, setIsRevealed] = React.useState(false);
   const inputRef = React.useRef<HTMLInputElement | null>(null);
   const passphraseInputRef = React.useRef<HTMLInputElement | null>(null);
@@ -89,6 +101,7 @@ export function NostrKeyImportForm({
     previewNpub === null &&
     trimmedInput.length >= 5;
   const errorMessage = importError ?? externalErrorMessage;
+  const Footer = footerMode === "inline" ? "div" : OnboardingFooter;
 
   React.useLayoutEffect(() => {
     if (isPasswordStage) {
@@ -101,6 +114,39 @@ export function NostrKeyImportForm({
   React.useEffect(() => {
     onStageChange?.(isPasswordStage ? "backup-password" : "key-entry");
   }, [isPasswordStage, onStageChange]);
+
+  React.useEffect(() => {
+    if (mode !== "backup" || isPasswordStage || isInteractionDisabled) {
+      dragDepthRef.current = 0;
+      setIsDragging(false);
+      return;
+    }
+
+    const handleDragEnter = (event: DragEvent) => {
+      if (!event.dataTransfer?.types.includes("Files")) return;
+      dragDepthRef.current += 1;
+      setIsDragging(true);
+    };
+    const handleDragLeave = () => {
+      dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+      if (dragDepthRef.current === 0) setIsDragging(false);
+    };
+    const handleDragEnd = () => {
+      dragDepthRef.current = 0;
+      setIsDragging(false);
+    };
+
+    window.addEventListener("dragenter", handleDragEnter);
+    window.addEventListener("dragleave", handleDragLeave);
+    window.addEventListener("drop", handleDragEnd);
+    window.addEventListener("dragend", handleDragEnd);
+    return () => {
+      window.removeEventListener("dragenter", handleDragEnter);
+      window.removeEventListener("dragleave", handleDragLeave);
+      window.removeEventListener("drop", handleDragEnd);
+      window.removeEventListener("dragend", handleDragEnd);
+    };
+  }, [isInteractionDisabled, isPasswordStage, mode]);
 
   const openFilePicker = React.useCallback(() => {
     if (isInteractionDisabled) {
@@ -194,12 +240,27 @@ export function NostrKeyImportForm({
   return (
     <form
       className="mt-8 flex w-full flex-col gap-4"
+      onDragOver={(event) => {
+        if (mode !== "backup" || isPasswordStage) return;
+        event.preventDefault();
+        if (!isInteractionDisabled) {
+          event.dataTransfer.dropEffect = "copy";
+        }
+      }}
+      onDrop={(event) => {
+        if (mode !== "backup" || isPasswordStage) return;
+        event.preventDefault();
+        setIsDragging(false);
+        if (!isInteractionDisabled) {
+          void handleFiles(event.dataTransfer.files);
+        }
+      }}
       onSubmit={(event) => {
         event.preventDefault();
         void handleSubmit();
       }}
     >
-      {!isPasswordStage ? (
+      {!isPasswordStage && mode === "key" ? (
         <div className="space-y-1.5 text-left">
           <label
             className={cn(
@@ -286,37 +347,61 @@ export function NostrKeyImportForm({
       {/* Hidden file input shared by both variants: the default drop zone and
           the spotlight "Choose a backup file" button both open it. Accepts the
           .ncryptsec backups our own save flow emits alongside raw .key files. */}
-      <input
-        accept=".key,.ncryptsec,text/plain"
-        className="sr-only"
-        data-testid="nostr-import-file-input"
-        disabled={isInteractionDisabled}
-        onChange={(event) => {
-          void handleFiles(event.currentTarget.files);
-          event.currentTarget.value = "";
-        }}
-        ref={fileInputRef}
-        tabIndex={-1}
-        type="file"
-      />
+      {mode === "backup" || variant !== "spotlight" ? (
+        <input
+          accept=".key,.ncryptsec,text/plain"
+          className="sr-only"
+          data-testid="nostr-import-file-input"
+          disabled={isInteractionDisabled}
+          id={
+            mode === "backup"
+              ? "nostr-import-backup-file-input"
+              : "nostr-import-file-input"
+          }
+          onChange={(event) => {
+            void handleFiles(event.currentTarget.files);
+            event.currentTarget.value = "";
+          }}
+          ref={fileInputRef}
+          tabIndex={-1}
+          type="file"
+        />
+      ) : null}
 
-      {!isPasswordStage && variant === "spotlight" ? (
-        // First-launch/wiped-identity treatment: no drop zone, but the file
-        // path must still exist — a backup saved through the OS dialog is
-        // exactly what a wiped user returns with.
-        <div className="mt-2 text-center">
-          <Button
-            className={ONBOARDING_SECONDARY_CTA_CLASS}
-            data-testid="nostr-import-file-button"
-            disabled={isInteractionDisabled}
-            onClick={openFilePicker}
-            type="button"
-            variant="ghost"
+      {!isPasswordStage && mode === "backup" ? (
+        <>
+          <div
+            className="mx-auto flex h-[312px] w-full max-w-[500px] flex-col items-center justify-center gap-4 [@media(max-height:40rem)]:h-auto"
+            data-testid="nostr-import-backup-file-section"
           >
-            Choose a backup file
-          </Button>
-        </div>
-      ) : !isPasswordStage ? (
+            <Button
+              className="h-9 rounded-full px-6"
+              data-testid="nostr-import-backup-picker"
+              disabled={isInteractionDisabled}
+              onClick={openFilePicker}
+              type="button"
+            >
+              <FileKey2 aria-hidden="true" className="mr-2 size-4" />
+              Choose a backup file
+            </Button>
+            <BackupFileUnlockPreview />
+          </div>
+          {isDragging ? (
+            <fieldset
+              className="absolute inset-[var(--buzz-card-textured-safe-inset)] z-10 flex items-center justify-center rounded-2xl border-2 border-dashed border-primary/60 bg-background/80 backdrop-blur-sm"
+              data-dragging="true"
+              data-testid="nostr-import-backup-drop"
+            >
+              <span className="flex items-center gap-2 rounded-full bg-foreground px-4 py-2 text-sm font-semibold text-background shadow-sm ring-1 ring-background/15">
+                <KeyRound aria-hidden="true" className="size-4" />
+                <span>Drop your backup file here</span>
+              </span>
+            </fieldset>
+          ) : null}
+        </>
+      ) : null}
+
+      {!isPasswordStage && mode === "key" && variant !== "spotlight" ? (
         <button
           className={cn(
             "relative flex h-[120px] flex-col items-center justify-center gap-3 overflow-hidden rounded-xl border border-transparent bg-muted text-foreground transition-[background-color,border-color,box-shadow,color] duration-[250ms] ease-out hover:bg-muted/80 disabled:opacity-60",
@@ -490,45 +575,58 @@ export function NostrKeyImportForm({
         </div>
       ) : null}
 
-      <OnboardingFooter>
-        <Button
-          className={
-            // Only the spotlight (onboarding) treatment gets the docked pill CTA.
-            // The default variant renders outside the onboarding footer provider
-            // (e.g. KeyringLockedScreen) and must stay full-width to match its
-            // sibling Back button.
-            variant === "spotlight"
-              ? ONBOARDING_PRIMARY_CTA_CLASS
-              : "h-10 w-full"
-          }
-          data-testid="nostr-import-submit"
-          disabled={!isValid || isInteractionDisabled}
-          onClick={() => void handleSubmit()}
-          type="button"
-        >
-          {isImporting ? (
-            <Spinner aria-label="Importing key" className="h-4 w-4 border-2" />
-          ) : variant === "spotlight" ? (
-            "Next"
-          ) : (
-            "Continue with this key"
-          )}
-        </Button>
+      <Footer
+        className={
+          footerMode === "inline"
+            ? "mt-6 flex flex-col items-center gap-2"
+            : undefined
+        }
+      >
+        {mode === "key" || isPasswordStage ? (
+          <Button
+            className={
+              // Only the spotlight (onboarding) treatment gets the docked pill CTA.
+              // The default variant renders outside the onboarding footer provider
+              // (e.g. KeyringLockedScreen) and must stay full-width to match its
+              // sibling Back button.
+              variant === "spotlight"
+                ? ONBOARDING_PRIMARY_CTA_CLASS
+                : "h-10 w-full"
+            }
+            data-testid="nostr-import-submit"
+            disabled={!isValid || isInteractionDisabled}
+            onClick={() => void handleSubmit()}
+            type="button"
+          >
+            {isImporting ? (
+              <Spinner
+                aria-label="Importing key"
+                className="h-4 w-4 border-2"
+              />
+            ) : variant === "spotlight" ? (
+              "Next"
+            ) : (
+              "Continue with this key"
+            )}
+          </Button>
+        ) : null}
 
-        <Button
-          className={
-            variant === "spotlight"
-              ? ONBOARDING_SECONDARY_CTA_CLASS
-              : "h-10 w-full text-muted-foreground hover:text-accent-foreground"
-          }
-          disabled={isImporting}
-          onClick={handleBack}
-          type="button"
-          variant="ghost"
-        >
-          {isPasswordStage ? "Back" : backLabel}
-        </Button>
-      </OnboardingFooter>
+        {showBack || isPasswordStage ? (
+          <Button
+            className={
+              variant === "spotlight"
+                ? ONBOARDING_SECONDARY_CTA_CLASS
+                : "h-10 w-full text-muted-foreground hover:text-accent-foreground"
+            }
+            disabled={isImporting}
+            onClick={handleBack}
+            type="button"
+            variant="ghost"
+          >
+            {isPasswordStage ? "Back" : backLabel}
+          </Button>
+        ) : null}
+      </Footer>
     </form>
   );
 }

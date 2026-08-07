@@ -1,4 +1,5 @@
 import type { ParsedMessageLink } from "@/features/messages/lib/messageLink";
+import type { ParsedEntityLink } from "@/shared/lib/entityLink";
 import type { Channel } from "@/shared/api/types";
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 import type { VideoReviewContext } from "../VideoPlayer";
@@ -31,7 +32,15 @@ export type MarkdownRuntime = {
   imetaByUrl?: ImetaLookup;
   mentionPubkeysByName?: Record<string, string>;
   onOpenChannel: (channelId: string) => void;
+  /** Navigate to a Buzz git entity (`buzz://pr|issue|repo` deep link). */
+  onOpenEntityLink: (link: ParsedEntityLink) => void;
   onOpenMessageLink: (link: ParsedMessageLink) => void;
+  /**
+   * The resolved relay origin (e.g. `https://buzz.block.builderlab.xyz`),
+   * or `null` when not yet resolved. Used by the anchor component to
+   * validate that clone-URL rewrites point to the active relay only.
+   */
+  relayOrigin: string | null;
   /** Display name of the message author sharing an agent snapshot. */
   snapshotSharedBy?: string;
   /**

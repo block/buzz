@@ -4,27 +4,30 @@
 //! phase enum, voice input mode, and response types.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex,
 };
 
+use super::agent_voice::AgentVoiceSettings;
 use super::{stt, tts};
 
 /// Voice input mode: push-to-talk (PTT) or voice-activity detection (VAD).
 ///
-/// PTT: mic is gated by a global shortcut (Ctrl+Space). Pressing the key sets
+/// PTT (the default): mic is gated by a global shortcut (Ctrl+Space). Pressing the key sets
 /// `ptt_active` and immediately cancels any playing TTS. Releasing the key
 /// (after a 200 ms delay) stops mic capture and flushes the utterance.
 ///
 /// VAD (default): the earshot VAD runs continuously and speech is accumulated
-/// whenever the probability exceeds the threshold. Barge-in is enabled in this
-/// mode.
+/// whenever the probability exceeds the threshold. While local TTS is playing,
+/// mic frames are discarded because VAD has no echo reference with which to
+/// distinguish the app's own playback from a human interruption.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum VoiceInputMode {
-    PushToTalk,
     #[default]
+    PushToTalk,
     VoiceActivity,
 }
 
@@ -44,6 +47,9 @@ pub struct HuddleState {
     pub phase: HuddlePhase,
     pub parent_channel_id: Option<String>,
     pub ephemeral_channel_id: Option<String>,
+    /// Root event for the huddle's visible parent-channel thread. Transcript
+    /// messages reply here while audio coordination stays ephemeral.
+    pub huddle_thread_event_id: Option<String>,
     /// Cancellation token for the audio relay WS task.
     #[serde(skip)]
     pub audio_ws_cancel: Option<tokio_util::sync::CancellationToken>,
@@ -67,6 +73,8 @@ pub struct HuddleState {
         deserialize_with = "deserialize_agent_pubkeys"
     )]
     pub agent_pubkeys: Arc<Mutex<Vec<String>>>,
+    /// Local, huddle-scoped playback choices for each participating agent.
+    pub agent_voice_settings: BTreeMap<String, AgentVoiceSettings>,
     /// Active STT pipeline — not serialized, not cloned.
     #[serde(skip)]
     pub stt_pipeline: Option<Arc<stt::SttPipeline>>,
@@ -127,6 +135,10 @@ pub struct HuddleState {
     /// Shared with the STT pipeline for mic gating.
     #[serde(skip)]
     pub ptt_active: Arc<AtomicBool>,
+    /// True while the clickable microphone control is manually unmuted.
+    /// In PTT mode, either this flag or `ptt_active` opens the STT gate.
+    #[serde(skip)]
+    pub manual_mic_unmuted: Arc<AtomicBool>,
 }
 
 fn serialize_agent_pubkeys<S>(v: &Arc<Mutex<Vec<String>>>, s: S) -> Result<S::Ok, S::Error>
@@ -161,10 +173,12 @@ impl Clone for HuddleState {
             phase: self.phase.clone(),
             parent_channel_id: self.parent_channel_id.clone(),
             ephemeral_channel_id: self.ephemeral_channel_id.clone(),
+            huddle_thread_event_id: self.huddle_thread_event_id.clone(),
             audio_ws_cancel: None,    // Never clone handles.
             audio_relay_pcm_tx: None, // Never clone handles.
             participants: self.participants.clone(),
             agent_pubkeys: Arc::new(Mutex::new(agent_pubkeys_snapshot)),
+            agent_voice_settings: self.agent_voice_settings.clone(),
             stt_pipeline: None, // Never clone the pipeline handle.
             tts_pipeline: None, // Never clone the pipeline handle.
             is_creator: self.is_creator,
@@ -180,6 +194,7 @@ impl Clone for HuddleState {
             session_generation: Arc::clone(&self.session_generation),
             voice_input_mode: self.voice_input_mode.clone(),
             ptt_active: Arc::clone(&self.ptt_active),
+            manual_mic_unmuted: Arc::clone(&self.manual_mic_unmuted),
         }
     }
 }
@@ -190,10 +205,12 @@ impl Default for HuddleState {
             phase: HuddlePhase::Idle,
             parent_channel_id: None,
             ephemeral_channel_id: None,
+            huddle_thread_event_id: None,
             audio_ws_cancel: None,
             audio_relay_pcm_tx: None,
             participants: Vec::new(),
             agent_pubkeys: Arc::new(Mutex::new(Vec::new())),
+            agent_voice_settings: BTreeMap::new(),
             stt_pipeline: None,
             tts_pipeline: None,
             is_creator: false,
@@ -209,6 +226,7 @@ impl Default for HuddleState {
             session_generation: Arc::new(AtomicU64::new(0)),
             voice_input_mode: VoiceInputMode::default(),
             ptt_active: Arc::new(AtomicBool::new(false)),
+            manual_mic_unmuted: Arc::new(AtomicBool::new(true)),
         }
     }
 }
@@ -318,6 +336,13 @@ mod tests {
         assert!(state.maybe_auto_enable_transcription_for_agents());
         assert!(state.transcription_enabled);
         assert!(!state.maybe_auto_enable_transcription_for_agents());
+    }
+
+    #[test]
+    fn defaults_to_push_to_talk_with_an_open_microphone() {
+        let state = HuddleState::default();
+        assert_eq!(state.voice_input_mode, super::VoiceInputMode::PushToTalk);
+        assert!(state.manual_mic_unmuted.load(Ordering::Acquire));
     }
 
     #[test]

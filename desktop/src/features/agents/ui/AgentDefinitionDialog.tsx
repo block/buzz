@@ -32,6 +32,7 @@ import {
   personaBehaviorDraftValid,
 } from "./personaBehaviorDraft";
 import {
+  ADVANCED_FIELDS_MOTION_TRANSITION,
   AUTO_MODEL_DROPDOWN_VALUE,
   AUTO_PROVIDER_DROPDOWN_VALUE,
   BLOCK_BUILD_HIDDEN_PROVIDER_IDS,
@@ -42,6 +43,7 @@ import {
   getDefaultPersonaRuntime,
   getPersonaModelOptions,
   getPersonaProviderOptions,
+  getProviderApiKeyLabel,
   getRuntimePersonaModelOptions,
   NO_RUNTIME_DROPDOWN_VALUE,
   runtimeSupportsLlmProviderSelection,
@@ -99,7 +101,7 @@ type AgentDefinitionDialogProps = {
   error: Error | null;
   isPending: boolean;
   runtimes: AcpRuntimeCatalogEntry[];
-  runtimesLoading?: boolean;
+  runtimeCatalogStatus?: "loading" | "ready" | "error";
   onOpenChange: (open: boolean) => void;
   onSubmit: (
     input: CreatePersonaInput | UpdatePersonaInput,
@@ -117,11 +119,6 @@ export type AgentDefinitionSubmitOptions = {
   publishCatalogUpdates: boolean;
 };
 
-const ADVANCED_FIELDS_MOTION_TRANSITION = {
-  duration: 0.18,
-  ease: [0.23, 1, 0.32, 1],
-} as const;
-
 export function AgentDefinitionDialog({
   open,
   title,
@@ -131,13 +128,14 @@ export function AgentDefinitionDialog({
   error,
   isPending,
   runtimes,
-  runtimesLoading = false,
+  runtimeCatalogStatus = "ready" as const,
   onOpenChange,
   onSubmit,
   publishCatalogUpdatesOnSave = false,
   createRunSection,
   createSubmitBlocked = false,
 }: AgentDefinitionDialogProps) {
+  const runtimesLoading = runtimeCatalogStatus === "loading";
   const [displayName, setDisplayName] = React.useState("");
   const [aiDefaultsOpen, setAiDefaultsOpen] = React.useState(false);
   const aiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);
@@ -397,11 +395,7 @@ export function AgentDefinitionDialog({
     (runtime.trim().length > 0 && runtimeCanChooseLlmProvider) ||
     blankRuntimeModelProviderEditable;
   const trimmedProvider = provider.trim();
-  // Required credential env keys for this runtime + provider combination.
-  // Used to show required markers on the LLM provider label and amber
-  // locked rows in the env vars editor.
-  // File-layer config for the selected runtime (e.g. goose config.yaml).
-  // Used to silence requirements already satisfied there.
+  // Required credential env keys and file-layer config; silences requirements satisfied in the file layer.
   const { data: runtimeFileConfig } = useRuntimeFileConfigQuery(runtime, {
     enabled: open,
   });
@@ -907,14 +901,11 @@ export function AgentDefinitionDialog({
               topLevelSecretEnvVar ? (
                 <PersonaProviderApiKeyField
                   disabled={isPending}
+                  envVarName={topLevelSecretEnvVar}
                   isInherited={apiKeyIsInherited}
                   inheritedLabel={apiKeyInheritedLabel}
                   isRequired={apiKeyIsRequired}
-                  label={
-                    effectiveProvider === "anthropic"
-                      ? "Anthropic API key"
-                      : "OpenAI API key"
-                  }
+                  label={getProviderApiKeyLabel(effectiveProvider) ?? "API key"}
                   onValueChange={(next) => {
                     setEnvVars((prev) => ({
                       ...prev,
@@ -1022,6 +1013,8 @@ export function AgentDefinitionDialog({
                       model={model}
                       modelTuningRuntimeId={runtime}
                       namePoolText={namePoolText}
+                      catalogStatus={runtimeCatalogStatus}
+                      selectedRuntime={selectedRuntime}
                       onBehaviorDraftChange={(nextBehaviorDraft) => {
                         setHasUserChanges(true);
                         setBehaviorDraft(nextBehaviorDraft);

@@ -130,14 +130,6 @@ test("agent owner label identifies the agent and owner", async ({ page }) => {
   await expect(ownerTreatment.locator(".sr-only")).toHaveText(
     "Agent managed by",
   );
-
-  const joinedRow = page
-    .getByTestId("system-message-row")
-    .filter({ hasText: "alice" })
-    .filter({ hasText: "joined the channel" });
-  await expect(joinedRow.getByTestId("message-agent-owner")).toContainText(
-    "managed bybob",
-  );
 });
 
 test("send a message and see it in timeline", async ({ page }) => {

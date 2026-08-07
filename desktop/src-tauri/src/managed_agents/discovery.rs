@@ -9,12 +9,15 @@ use crate::managed_agents::{
     AcpAvailabilityStatus, AcpRuntimeCatalogEntry, AuthStatus, CommandAvailabilityInfo,
     HarnessSource,
 };
-
 mod presets;
 mod runtime_metadata;
-
+#[macro_use]
+mod windows_install;
+pub(crate) use presets::{
+    canonical_harness_command, command_for_runtime_id, preset_harness_definitions,
+    preset_harness_ids,
+};
 use presets::{preset_catalog_entry, PRESET_HARNESSES};
-pub(crate) use presets::{preset_harness_definitions, preset_harness_ids};
 pub(crate) use runtime_metadata::KnownAcpRuntime;
 
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
@@ -85,7 +88,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         cli_install_commands: &["curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh | CONFIGURE=false bash"],
         // Goose's stable release currently publishes only the Unix installer;
         // its official Windows instructions intentionally point at this main-branch script.
-        cli_install_commands_windows: &["powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"$env:CONFIGURE='false'; irm https://raw.githubusercontent.com/aaif-goose/goose/main/download_cli.ps1 | iex\""],
+        cli_install_commands_windows: &[windows_install_command!("goose", "https://raw.githubusercontent.com/aaif-goose/goose/main/download_cli.ps1", "$env:CONFIGURE='false'; ")],
         adapter_install_commands: &[],
         cli_install_instructions_url: "https://goose-docs.ai/docs/getting-started/installation/",
         adapter_install_instructions_url: "",
@@ -103,6 +106,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         thinking_env_var: Some("GOOSE_THINKING_EFFORT"),
         max_tokens_env_var: Some("GOOSE_MAX_TOKENS"),
         context_limit_env_var: Some("GOOSE_CONTEXT_LIMIT"),
+        max_rounds_env_var: None,
         required_normalized_fields: &["model", "provider"],
         login_hint: None,
         auth_probe_args: None,
@@ -117,7 +121,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         mcp_hooks: false,
         underlying_cli: Some("claude"),
         cli_install_commands: &["curl -fsSL https://claude.ai/install.sh | bash"],
-        cli_install_commands_windows: &["powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"irm https://claude.ai/install.ps1 | iex\""],
+        cli_install_commands_windows: &[windows_install_command!("claude", "https://claude.ai/install.ps1")],
         adapter_install_commands: &["npm install -g @agentclientprotocol/claude-agent-acp"],
         cli_install_instructions_url: "https://code.claude.com/docs/en/getting-started",
         adapter_install_instructions_url: "https://github.com/agentclientprotocol/claude-agent-acp",
@@ -135,6 +139,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         thinking_env_var: None,
         max_tokens_env_var: None,
         context_limit_env_var: None,
+        max_rounds_env_var: None,
         required_normalized_fields: &[],
         login_hint: Some("Run the Claude CLI to complete authentication."),
         auth_probe_args: Some(&["claude", "auth", "status"]),
@@ -149,7 +154,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         mcp_hooks: false,
         underlying_cli: Some("codex"),
         cli_install_commands: &["curl -fsSL https://chatgpt.com/codex/install.sh | sh"],
-        cli_install_commands_windows: &["powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"irm https://chatgpt.com/codex/install.ps1 | iex\""],
+        cli_install_commands_windows: &[windows_install_command!("codex", "https://chatgpt.com/codex/install.ps1")],
         adapter_install_commands: &["npm install -g @agentclientprotocol/codex-acp"],
         cli_install_instructions_url: "https://developers.openai.com/codex/cli/",
         adapter_install_instructions_url: "https://github.com/agentclientprotocol/codex-acp",
@@ -167,6 +172,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         thinking_env_var: None,
         max_tokens_env_var: None,
         context_limit_env_var: None,
+        max_rounds_env_var: None,
         required_normalized_fields: &[],
         login_hint: Some("Run `codex login` to authenticate."),
         // Verified: `codex login status` exits 0 when logged in, non-zero otherwise.
@@ -200,6 +206,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         thinking_env_var: Some("BUZZ_AGENT_THINKING_EFFORT"),
         max_tokens_env_var: Some("BUZZ_AGENT_MAX_OUTPUT_TOKENS"),
         context_limit_env_var: Some("BUZZ_AGENT_MAX_CONTEXT_TOKENS"),
+        max_rounds_env_var: Some("BUZZ_AGENT_MAX_ROUNDS"),
         required_normalized_fields: &["model", "provider"],
         login_hint: None,
         auth_probe_args: None,
@@ -229,7 +236,7 @@ fn executable_basename(command: &str) -> String {
     }
 }
 
-fn normalize_command_identity(command: &str) -> String {
+pub(crate) fn normalize_command_identity(command: &str) -> String {
     let normalized = command.trim().replace('\\', "/");
     let basename = normalized.rsplit('/').next().unwrap_or(normalized.as_str());
     let lower = basename
@@ -278,11 +285,8 @@ pub(crate) fn known_acp_runtime_exact(id: &str) -> Option<&'static KnownAcpRunti
 /// The agent command a freshly-created agent defaults to when the create
 /// request supplies none. Resolves the bundled `buzz-agent` from the catalog so
 /// the default cannot drift from the provider definition. Falls back to the id
-/// if the catalog entry is missing.
-///
-/// The previous default was the bare global `goose`, which is not on PATH on a
-/// stock Windows install: every worker failed with `program not found`. The
-/// bundled `buzz-agent` ships with the app and resolves on every platform.
+/// if the catalog entry is missing. (Previous default was bare `goose`, which
+/// is not on PATH on a stock Windows install; buzz-agent ships with the app.)
 pub fn default_agent_command() -> String {
     known_acp_runtime_exact("buzz-agent")
         .and_then(|p| p.commands.first().copied())
@@ -294,9 +298,10 @@ pub fn default_agent_command() -> String {
 ///
 /// Resolution order:
 ///   1. explicit override (non-empty) — a deliberate per-instance pin;
-///   2. the record's own `runtime` id mapped to its primary command —
-///      records materialize their runtime at create/migration time;
-///      checks both static builtins AND the loaded preset/custom registry;
+///   2. the record's own `runtime` id mapped to its primary command via the
+///      authoritative three-tier lookup (static builtins → static preset list
+///      → loaded registry) — preset harnesses (e.g. openclaw) resolve
+///      correctly even with a cold registry;
 ///   3. legacy fallback: the linked persona's `runtime` (records created
 ///      before the unified model carry `persona_id` but no `runtime`);
 ///   4. `default_agent_command()`.
@@ -314,15 +319,11 @@ pub fn record_agent_command(
     }
 
     if let Some(id) = record.runtime.as_deref() {
-        // Check static builtins first.
-        if let Some(command) = known_acp_runtime_exact(id).and_then(|r| r.commands.first().copied())
-        {
-            return command.to_string();
-        }
-        // Fall back to loaded registry for preset/custom harnesses.
-        if let Some(def) = crate::managed_agents::custom_harnesses::lookup_loaded_harness_by_id(id)
-        {
-            return def.command.clone();
+        // Three-tier lookup: static builtins → static presets → loaded registry.
+        // Using the shared resolver ensures preset harnesses (e.g. openclaw)
+        // resolve correctly even without a warm registry.
+        if let Some(cmd) = presets::command_for_runtime_id(id) {
+            return cmd;
         }
     }
 
@@ -335,8 +336,9 @@ pub fn record_agent_command(
 ///
 /// Resolution order:
 ///   1. explicit override (non-empty) — a deliberate per-instance pin;
-///   2. the linked persona's `runtime` id mapped to its primary command
-///      (checks builtins then loaded preset/custom registry);
+///   2. the linked persona's `runtime` id mapped to its primary command via
+///      the authoritative three-tier lookup (static builtins → static preset
+///      list → loaded registry);
 ///   3. `default_agent_command()` — no persona/runtime, or persona deleted.
 pub fn effective_agent_command(
     persona_id: Option<&str>,
@@ -355,15 +357,9 @@ pub fn effective_agent_command(
         .and_then(|persona| persona.runtime.as_deref());
 
     if let Some(id) = runtime_id {
-        // Check static builtins first.
-        if let Some(command) = known_acp_runtime_exact(id).and_then(|r| r.commands.first().copied())
-        {
-            return command.to_string();
-        }
-        // Check loaded preset/custom registry.
-        if let Some(def) = crate::managed_agents::custom_harnesses::lookup_loaded_harness_by_id(id)
-        {
-            return def.command.clone();
+        // Three-tier lookup: static builtins → static presets → loaded registry.
+        if let Some(cmd) = presets::command_for_runtime_id(id) {
+            return cmd;
         }
     }
 
@@ -375,10 +371,8 @@ pub use overrides::{apply_agent_command_update, create_time_agent_command_overri
 
 /// Prefix of the typed dangling-harness error produced by
 /// `try_record_agent_command` / `resolve_effective_harness_descriptor`.
-///
-/// This sentinel is an internal Rust contract: user-facing surfaces must
-/// convert it to a sentence via [`user_facing_harness_error`] (spawn) or to
-/// the missing id via [`dangling_harness_id`] (summary) — never show it raw.
+/// Internal Rust contract: surfaces must convert it via [`user_facing_harness_error`] or
+/// [`dangling_harness_id`] — never show it raw.
 pub(crate) const DANGLING_HARNESS_PREFIX: &str = "DANGLING_HARNESS_ID:";
 
 /// Extract the missing harness id from a `DANGLING_HARNESS_ID:<id>` error.
@@ -398,22 +392,16 @@ pub(crate) fn user_facing_harness_error(error: &str) -> String {
     }
 }
 
-/// Summary-row display for a dangling harness id: shows the *missing* id so
-/// the agent list tells the same story as spawn (which refuses with the
-/// sentence above), rather than silently falling back to the default command
-/// as if the agent were healthy.
+/// Summary-row display for a dangling harness id: shows the *missing* id so the agent list
+/// tells the same story as spawn rather than silently falling back to the default command.
 pub(crate) fn dangling_harness_display(id: &str) -> String {
     format!("harness (deleted): {id}")
 }
 
 /// Spawn-time variant of `record_agent_command` that returns a typed error when
-/// a record's `runtime` id or its persona's `runtime` id is set but cannot be
-/// resolved (i.e. the definition was deleted after the agent was created).
-///
-/// Returns `Err("DANGLING_HARNESS_ID:<id>")` so callers can surface the error
-/// without falling through to `buzz-agent`.  When there is no runtime id at all
-/// the fallback to `default_agent_command()` is intentional (legacy agents
-/// pre-date the unified harness model).
+/// a record's `runtime` id or persona's `runtime` id is set but unresolvable
+/// (definition deleted after agent was created). Returns `Err("DANGLING_HARNESS_ID:<id>")`.
+/// When there is no runtime id at all, falls through to `default_agent_command()` intentionally.
 pub fn try_record_agent_command(
     record: &crate::managed_agents::types::ManagedAgentRecord,
     personas: &[crate::managed_agents::types::AgentDefinition],
@@ -430,12 +418,8 @@ pub fn try_record_agent_command(
 
     // Record-level runtime id: if set but unresolvable → typed error.
     if let Some(id) = record.runtime.as_deref() {
-        if let Some(cmd) = known_acp_runtime_exact(id).and_then(|r| r.commands.first().copied()) {
-            return Ok(cmd.to_string());
-        }
-        if let Some(def) = crate::managed_agents::custom_harnesses::lookup_loaded_harness_by_id(id)
-        {
-            return Ok(def.command.clone());
+        if let Some(cmd) = presets::command_for_runtime_id(id) {
+            return Ok(cmd);
         }
         return Err(format!("DANGLING_HARNESS_ID:{id}"));
     }
@@ -444,15 +428,8 @@ pub fn try_record_agent_command(
     if let Some(persona_id) = record.persona_id.as_deref() {
         if let Some(persona) = personas.iter().find(|p| p.id == persona_id) {
             if let Some(id) = persona.runtime.as_deref() {
-                if let Some(cmd) =
-                    known_acp_runtime_exact(id).and_then(|r| r.commands.first().copied())
-                {
-                    return Ok(cmd.to_string());
-                }
-                if let Some(def) =
-                    crate::managed_agents::custom_harnesses::lookup_loaded_harness_by_id(id)
-                {
-                    return Ok(def.command.clone());
+                if let Some(cmd) = presets::command_for_runtime_id(id) {
+                    return Ok(cmd);
                 }
                 return Err(format!("DANGLING_HARNESS_ID:{id}"));
             }
@@ -1136,7 +1113,7 @@ pub fn missing_command_message(command: &str, role: &str) -> String {
     }
 
     format!(
-        "{role} `{command}` was not found. Build the workspace binaries (`cargo build --release --workspace`) or add `target/release` to PATH as described in TESTING.md."
+        "{role} `{command}` was not found. Make sure it is installed and on your PATH. Antivirus software can quarantine bundled binaries — if that happened, restore the file or reinstall Buzz. (Source builds: see TESTING.md.)"
     )
 }
 
@@ -1413,6 +1390,9 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntr
             model_env_var: runtime.model_env_var.map(str::to_string),
             provider_env_var: runtime.provider_env_var.map(str::to_string),
             thinking_env_var: runtime.thinking_env_var.map(str::to_string),
+            max_tokens_env_var: runtime.max_tokens_env_var.map(str::to_string),
+            context_limit_env_var: runtime.context_limit_env_var.map(str::to_string),
+            max_rounds_env_var: runtime.max_rounds_env_var.map(str::to_string),
             install_hint,
             install_instructions_url: install_instructions_url.to_string(),
             can_auto_install,
@@ -1423,8 +1403,8 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntr
             auth_status: AuthStatus::Unknown,
             login_hint: None,
             source: HarnessSource::Builtin,
-            // Builtin entries have no user-editable env; definition_env is empty.
             definition_env: Default::default(),
+            max_parallelism: super::parallelism::harness_max_parallelism(runtime.id),
         },
     }
 }
@@ -1571,6 +1551,9 @@ pub fn discover_acp_runtimes_from(
                 model_env_var: None,
                 provider_env_var: None,
                 thinking_env_var: None,
+                max_tokens_env_var: None,
+                context_limit_env_var: None,
+                max_rounds_env_var: None,
                 install_hint: def.install_hint.clone(),
                 install_instructions_url: def.install_instructions_url.clone(),
                 // Security line: custom definitions carry no install scripts.
@@ -1582,9 +1565,8 @@ pub fn discover_acp_runtimes_from(
                 auth_status: AuthStatus::NotApplicable,
                 login_hint: None,
                 source: HarnessSource::Custom,
-                // Carry definition env into the catalog so the edit form can
-                // read it back — prevents silently erasing env on save.
-                definition_env: def.env.clone(),
+                definition_env: def.env.clone(), // preserve for edit round-trip
+                max_parallelism: super::parallelism::harness_max_parallelism(&def.command),
             });
         }
     }

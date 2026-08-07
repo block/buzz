@@ -99,10 +99,7 @@ class _EmojiTile extends StatelessWidget {
         button: true,
         label: entry.name,
         child: Center(
-          child: Text(
-            entry.native,
-            style: const TextStyle(fontSize: _emojiGlyphSize),
-          ),
+          child: NativeEmojiGlyph(emoji: entry.native, size: _emojiGlyphSize),
         ),
       ),
     );

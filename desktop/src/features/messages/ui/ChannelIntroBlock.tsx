@@ -63,7 +63,7 @@ export function ChannelIntroBlock({
         </p>
       ) : null}
       {intro.actions?.length ? (
-        <div className="mt-4 flex max-w-full flex-nowrap gap-3 overflow-x-auto pb-1">
+        <div className="mt-4 flex max-w-full flex-nowrap gap-3 overflow-x-auto p-1">
           {intro.actions.map((action) => {
             const hasDescription = Boolean(action.description);
 

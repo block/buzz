@@ -6,10 +6,12 @@ import { AppProfilePanelProvider } from "@/app/AppProfilePanelProvider";
 
 type AppHuddleBarProps = Pick<
   React.ComponentProps<typeof HuddleBar>,
-  "onOpenThread" | "onVisibilityChange"
+  "mode" | "onOpenHuddleWindow" | "onOpenThread" | "onVisibilityChange"
 >;
 
 export function AppHuddleBar({
+  mode,
+  onOpenHuddleWindow,
   onOpenThread,
   onVisibilityChange,
 }: AppHuddleBarProps) {
@@ -17,6 +19,8 @@ export function AppHuddleBar({
     <AppProfilePanelProvider>
       <HuddleBar
         className="h-full"
+        mode={mode}
+        onOpenHuddleWindow={onOpenHuddleWindow}
         onOpenThread={onOpenThread}
         onVisibilityChange={onVisibilityChange}
       />

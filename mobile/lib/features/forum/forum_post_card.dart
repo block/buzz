@@ -7,6 +7,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
+import '../../shared/widgets/modal_presentation.dart';
 import '../channels/message_content.dart';
 import '../profile/user_cache_provider.dart';
 import '../profile/user_profile_sheet.dart';
@@ -230,44 +231,47 @@ class ForumPostCard extends HookConsumerWidget {
         currentPubkey != null &&
         post.pubkey.toLowerCase() == currentPubkey!.toLowerCase();
 
-    showModalBottomSheet<void>(
+    showBuzzModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
       builder: (sheetContext) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(
-            Grid.gutter,
-            0,
-            Grid.gutter,
-            Grid.xs,
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              ListTile(
-                leading: const Icon(LucideIcons.copy),
-                title: const Text('Copy text'),
-                onTap: () {
-                  Navigator.of(sheetContext).pop();
-                  Clipboard.setData(ClipboardData(text: post.content));
-                },
-              ),
-              if (isOwn && onDelete != null)
+        child: IconTheme.merge(
+          data: const IconThemeData(size: 22),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(
+              Grid.gutter,
+              0,
+              Grid.gutter,
+              Grid.xs,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
                 ListTile(
-                  leading: Icon(
-                    LucideIcons.trash2,
-                    color: sheetContext.colors.error,
-                  ),
-                  title: Text(
-                    'Delete post',
-                    style: TextStyle(color: sheetContext.colors.error),
-                  ),
+                  leading: const Icon(LucideIcons.copy),
+                  title: const Text('Copy text'),
                   onTap: () {
                     Navigator.of(sheetContext).pop();
-                    _confirmDelete(context);
+                    Clipboard.setData(ClipboardData(text: post.content));
                   },
                 ),
-            ],
+                if (isOwn && onDelete != null)
+                  ListTile(
+                    leading: Icon(
+                      LucideIcons.trash2,
+                      color: sheetContext.colors.error,
+                    ),
+                    title: Text(
+                      'Delete post',
+                      style: TextStyle(color: sheetContext.colors.error),
+                    ),
+                    onTap: () {
+                      Navigator.of(sheetContext).pop();
+                      _confirmDelete(context);
+                    },
+                  ),
+              ],
+            ),
           ),
         ),
       ),
@@ -275,7 +279,7 @@ class ForumPostCard extends HookConsumerWidget {
   }
 
   void _confirmDelete(BuildContext context) {
-    showDialog<void>(
+    showBuzzDialog<void>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: const Text('Delete post'),
