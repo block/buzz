@@ -253,7 +253,8 @@ pub enum AgentJobError {
     /// The serialized content exceeds [`MAX_CONTENT_BYTES`].
     #[error("agent-job content is too large")]
     ContentTooLarge,
-    /// The content is malformed JSON or has trailing data.
+    /// The content is malformed JSON, has trailing data, or exceeds the
+    /// 126-container nesting limit.
     #[error("invalid agent-job JSON")]
     InvalidJson,
     /// An object contains a duplicate member name.

@@ -136,7 +136,7 @@ The codec exposes the following stable, public, machine-readable codes:
 | --- | --- |
 | `unsupported_kind` | The supplied event kind is not a reserved agent-job kind. |
 | `content_too_large` | Encoded content exceeds 16,384 bytes. |
-| `invalid_json` | Content is malformed JSON or has trailing data. |
+| `invalid_json` | Content is malformed JSON, has trailing data, or exceeds the 126-container nesting limit. |
 | `duplicate_field` | An object contains a duplicate member name. |
 | `invalid_schema` | JSON does not match the closed schema or closed enum values, or an encoded timestamp year is outside `0..=9999`. |
 | `unsupported_format` | `format` is not the exact v1 discriminator. |
