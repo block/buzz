@@ -22,6 +22,10 @@
 //! [`extract_at_mentions_with_known`] replaces the first step to correctly
 //! handle multi-word display names.
 //!
+//! Mention boundaries reject ASCII alphanumerics before `@` (so emails stay
+//! inert) but allow whitespace, punctuation, and non-ASCII script characters
+//! so CJK handoffs like `交给@Scout处理` still emit `p` tags (#3904).
+//!
 //! [`extract_nostr_uris`] handles NIP-27 inline `nostr:npub1…` references,
 //! skipping those inside code blocks/spans via [`strip_code_regions`].
 //!
@@ -50,14 +54,31 @@ pub struct MentionProfile<'a> {
     pub content_json: &'a str,
 }
 
+/// Whether `@` at byte offset `at_index` may start a mention.
+///
+/// Mentions open at start-of-string, after whitespace/punctuation, or after a
+/// non-ASCII character (CJK and other scripts often omit spaces — see #3904).
+/// An ASCII letter or digit immediately before `@` keeps email-like text
+/// (`user@host`) from becoming a mention.
+fn is_mention_at_boundary(content: &str, at_index: usize) -> bool {
+    if at_index == 0 {
+        return true;
+    }
+    let Some(prev) = content[..at_index].chars().next_back() else {
+        return true;
+    };
+    !prev.is_ascii_alphanumeric()
+}
+
 /// Extract single-word `@mention` names from message content.
 ///
 /// Prefer [`extract_at_mentions_with_known`] when known member names are
 /// available — it correctly handles multi-word display names.
 ///
 /// Returns lowercased names found after `@` tokens. An `@name` only matches
-/// when the `@` is at start-of-string or preceded by an ASCII whitespace
-/// character — this excludes things like email addresses (`user@host`).
+/// when the `@` is at a mention boundary (see [`is_mention_at_boundary`]) —
+/// this excludes email addresses (`user@host`) while allowing CJK-adjacent
+/// mentions such as `交给@Scout处理`.
 ///
 /// Allowed name characters: ASCII alphanumerics, `.`, `-`, `_`.
 /// Duplicates are removed; first-seen order is preserved.
@@ -70,10 +91,11 @@ pub fn extract_at_names(content: &str) -> Vec<String> {
     let chars: Vec<char> = content.chars().collect();
     let len = chars.len();
     let mut i = 0;
+    let mut byte_index = 0;
     while i < len {
-        if chars[i] == '@' {
-            let preceded_by_ws = i == 0 || chars[i - 1].is_ascii_whitespace();
-            if preceded_by_ws && i + 1 < len {
+        let ch = chars[i];
+        if ch == '@' {
+            if is_mention_at_boundary(content, byte_index) && i + 1 < len {
                 let start = i + 1;
                 let mut end = start;
                 while end < len {
@@ -93,6 +115,7 @@ pub fn extract_at_names(content: &str) -> Vec<String> {
                 }
             }
         }
+        byte_index += ch.len_utf8();
         i += 1;
     }
     names
@@ -100,10 +123,11 @@ pub fn extract_at_names(content: &str) -> Vec<String> {
 
 /// Extract `@mention` names from message content using known member names.
 ///
-/// At each `@` preceded by whitespace or start-of-string, tries known names
-/// longest-first (case-insensitive, word-boundary-checked), then falls back
-/// to single-word tokenization. Returns lowercased names in first-seen order,
-/// deduplicated. Empty/whitespace-only entries in `known_names` are ignored.
+/// At each `@` on a mention boundary (see [`is_mention_at_boundary`]), tries
+/// known names longest-first (case-insensitive, word-boundary-checked), then
+/// falls back to single-word tokenization. Returns lowercased names in
+/// first-seen order, deduplicated. Empty/whitespace-only entries in
+/// `known_names` are ignored.
 pub fn extract_at_mentions_with_known(content: &str, known_names: &[&str]) -> Vec<String> {
     if content.is_empty() || !content.contains('@') {
         return vec![];
@@ -120,8 +144,7 @@ pub fn extract_at_mentions_with_known(content: &str, known_names: &[&str]) -> Ve
     let mut seen = HashSet::new();
 
     for (i, _) in content.match_indices('@') {
-        let preceded = i == 0 || content.as_bytes()[i - 1].is_ascii_whitespace();
-        if !preceded {
+        if !is_mention_at_boundary(content, i) {
             continue;
         }
         let rest = &content[i + 1..];
@@ -152,8 +175,10 @@ pub fn extract_at_mentions_with_known(content: &str, known_names: &[&str]) -> Ve
 }
 
 fn is_word_boundary(s: &str) -> bool {
+    // Anything that cannot continue an ASCII mention token is a boundary —
+    // including CJK so `交给@Scout处理` matches Scout (#3904).
     s.chars().next().is_none_or(|c| {
-        c.is_ascii_whitespace() || matches!(c, ',' | ';' | '.' | '!' | '?' | ':' | ')' | ']' | '}')
+        !(c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
     })
 }
 
@@ -424,6 +449,23 @@ mod tests {
         assert!(extract_at_names("user@example.com").is_empty());
         assert!(extract_at_names("hello @ world").is_empty());
         assert!(extract_at_names("hello @").is_empty());
+    }
+
+    #[test]
+    fn extract_at_names_allows_cjk_adjacent_mentions() {
+        // #3904 — scripts that omit spaces still need agent handoffs to wake.
+        assert_eq!(extract_at_names("交给@Scout处理"), vec!["scout"]);
+        assert_eq!(extract_at_names("你好@Scout"), vec!["scout"]);
+        // ASCII letter/digit before @ stays email-safe.
+        assert!(extract_at_names("user@Scout").is_empty());
+    }
+
+    #[test]
+    fn extract_at_mentions_with_known_allows_cjk_adjacent() {
+        let result = extract_at_mentions_with_known("交给@Scout处理", &["Scout"]);
+        assert_eq!(result, vec!["scout"]);
+        let email = extract_at_mentions_with_known("user@Scout.com", &["Scout"]);
+        assert!(email.is_empty());
     }
 
     #[test]
