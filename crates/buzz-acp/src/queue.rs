@@ -51,6 +51,18 @@ pub struct QueuedEvent {
     pub prompt_tag: String,
 }
 
+/// Result of attempting to enqueue an event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuePushOutcome {
+    /// Whether the new event entered the queue.
+    pub accepted: bool,
+    /// Event evicted by the per-channel depth cap, if any.
+    ///
+    /// The caller uses this to clear lifecycle reactions attached when the
+    /// event originally entered the queue.
+    pub evicted_event_id: Option<String>,
+}
+
 /// A single event inside a [`FlushBatch`].
 #[derive(Debug, Clone)]
 pub struct BatchEvent {
@@ -226,8 +238,9 @@ impl EventQueue {
     /// In [`DedupMode::Drop`], events for any currently in-flight channel are
     /// silently discarded (debug-logged).
     ///
-    /// Returns `true` if the event was accepted, `false` if dropped.
-    pub fn push(&mut self, event: QueuedEvent) -> bool {
+    /// Returns whether the event was accepted and the ID of any older event
+    /// evicted by the per-channel depth cap.
+    pub fn push(&mut self, event: QueuedEvent) -> QueuePushOutcome {
         if matches!(self.dedup_mode, DedupMode::Drop)
             && self.in_flight_channels.contains(&event.channel_id)
         {
@@ -235,20 +248,29 @@ impl EventQueue {
                 channel_id = %event.channel_id,
                 "dropping event for in-flight channel (drop mode)"
             );
-            return false;
+            return QueuePushOutcome {
+                accepted: false,
+                evicted_event_id: None,
+            };
         }
         let queue = self.queues.entry(event.channel_id).or_default();
         // Enforce per-channel depth cap: drop oldest to make room.
-        if queue.len() >= MAX_PENDING_PER_CHANNEL {
-            queue.pop_front();
+        let evicted_event_id = if queue.len() >= MAX_PENDING_PER_CHANNEL {
+            let evicted = queue.pop_front().map(|queued| queued.event.id.to_hex());
             tracing::warn!(
                 channel_id = %event.channel_id,
                 limit = MAX_PENDING_PER_CHANNEL,
                 "queue depth cap reached — dropped oldest event"
             );
-        }
+            evicted
+        } else {
+            None
+        };
         queue.push_back(event);
-        true
+        QueuePushOutcome {
+            accepted: true,
+            evicted_event_id,
+        }
     }
 
     /// Try to flush the next batch.
@@ -621,18 +643,20 @@ impl EventQueue {
     /// Also clears any `retry_after` throttle for the channel.
     ///
     /// Returns the event IDs of dropped events so the caller can clean up
-    /// any reactions (👀) that were added at queue-push time.
+    /// any pickup reactions that were added at queue-push time.
     pub fn drain_channel(&mut self, channel_id: Uuid) -> Vec<String> {
-        let ids = self
+        let mut ids: Vec<String> = self
             .queues
             .remove(&channel_id)
             .map(|q| q.into_iter().map(|e| e.event.id.to_hex()).collect())
             .unwrap_or_default();
+        if let Some(withheld) = self.withheld_native_steer.remove(&channel_id) {
+            ids.extend(withheld.into_iter().map(|event| event.event.id.to_hex()));
+        }
         self.retry_after.remove(&channel_id);
         self.retry_counts.remove(&channel_id);
         self.cancelled_batches.remove(&channel_id);
         self.cancel_reasons.remove(&channel_id);
-        self.withheld_native_steer.remove(&channel_id);
         // Preserve in_flight_channels AND in_flight_deadlines: the in-flight
         // task will eventually complete (calling mark_complete) or the deadline
         // will expire (auto-cleaning the channel). Removing deadlines without
@@ -672,7 +696,7 @@ impl EventQueue {
     /// the event may have already been drained, removed, or never queued).
     ///
     /// Must be called synchronously from the mode-gate fork immediately
-    /// after `pool.send_steer` returns `Ok(())` and before any watcher task
+    /// after `pool.send_steer` succeeds and before any watcher task
     /// is spawned, so the withhold is established before `mark_complete` /
     /// any subsequent `flush_next` tick can run.
     pub fn mark_native_steer_pending(&mut self, channel_id: Uuid, event_id: &str) -> bool {
@@ -2717,6 +2741,27 @@ mod tests {
     }
 
     #[test]
+    fn test_push_reports_event_evicted_by_queue_cap() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let oldest = make_queued(ch, "oldest");
+        let oldest_id = oldest.event.id.to_hex();
+
+        let first = q.push(oldest);
+        assert!(first.accepted);
+        assert!(first.evicted_event_id.is_none());
+        for i in 1..MAX_PENDING_PER_CHANNEL {
+            q.push(make_queued(ch, &format!("fill-{i}")));
+        }
+
+        let outcome = q.push(make_queued(ch, "replacement"));
+
+        assert!(outcome.accepted);
+        assert_eq!(outcome.evicted_event_id, Some(oldest_id));
+        assert_eq!(pending_count(&q), MAX_PENDING_PER_CHANNEL);
+    }
+
+    #[test]
     fn test_requeue_preserve_timestamps_enforces_cap() {
         let mut q = EventQueue::new(DedupMode::Queue);
         let ch = Uuid::new_v4();
@@ -3538,6 +3583,25 @@ mod tests {
 
         let drained = q.drain_channel(ch);
         assert_eq!(drained.len(), 2);
+        assert_eq!(pending_count(&q), 0);
+    }
+
+    #[test]
+    fn test_drain_channel_returns_withheld_native_steer_events() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let ordinary = make_queued(ch, "ordinary");
+        let ordinary_id = ordinary.event.id.to_hex();
+        let steered = make_queued(ch, "steered");
+        let steered_id = steered.event.id.to_hex();
+
+        q.push(ordinary);
+        q.push(steered);
+        assert!(q.mark_native_steer_pending(ch, &steered_id));
+
+        assert_eq!(q.drain_channel(ch), vec![ordinary_id, steered_id]);
+        assert!(!q.queues.contains_key(&ch));
+        assert!(!q.withheld_native_steer.contains_key(&ch));
         assert_eq!(pending_count(&q), 0);
     }
 

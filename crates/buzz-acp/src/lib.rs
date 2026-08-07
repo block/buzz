@@ -41,7 +41,7 @@ use pool::{
     PromptResult, PromptSource, SessionState, TimeoutKind,
 };
 use pool_lifecycle::PoolLifecycle;
-use queue::{CancelReason, EventQueue, FlushBatch, QueuedEvent, ThreadTags};
+use queue::{CancelReason, EventQueue, FlushBatch, QueuePushOutcome, QueuedEvent, ThreadTags};
 use relay::{HarnessRelay, RelayEventPublisher};
 use tokio::sync::{mpsc, watch};
 use tracing_subscriber::EnvFilter;
@@ -1387,6 +1387,9 @@ struct RespawnResult {
 struct SteerAckEvent {
     channel_id: Uuid,
     event_id: String,
+    /// Exact turn that accepted the steer. A late ack must never bind cleanup
+    /// to a successor turn that happens to use the same channel.
+    task_id: tokio::task::Id,
     /// `Ok` if the read loop sent any of the locked `SteerAck` variants.
     /// `Err` if the oneshot was dropped without a send — should not happen
     /// under the current read-loop drains, but if it ever does the main
@@ -1915,10 +1918,10 @@ async fn tokio_main() -> Result<()> {
     let mut wake_tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 
     // Channel for non-cancelling steer ack watchers to forward outcomes back
-    // to the main loop. Each `pool.send_steer(...) == Ok(())` spawns a
+    // to the main loop. Each successful `pool.send_steer(...)` spawns a
     // short-lived task that awaits the `SteerRequest.ack_tx` oneshot and
     // forwards a `SteerAckEvent`. Unbounded because:
-    //   1. The producer count is bounded by in-flight goose turns
+    //   1. The producer count is bounded by in-flight prompt turns
     //      (`agents` slots, capacity-1 `steer_tx` each), so the channel
     //      cannot legitimately back up under steady state.
     //   2. We must never drop a steer outcome — losing an ack would leak a
@@ -2138,7 +2141,7 @@ async fn tokio_main() -> Result<()> {
                 Some(Err(e)) = join_set.join_next(), if !join_set.is_empty() => {
                     Some(PoolEvent::Panic(e))
                 }
-                // Goose-native steer ack from a watcher task. Outcomes drive
+                // Non-cancelling native steer ack from a watcher task. Outcomes drive
                 // queue side-effects (drop / release withheld event) and
                 // optionally the cancel+merge fallback signal. See the
                 // `Some(PoolEvent::SteerAck(...))` match arm below for the
@@ -2290,6 +2293,7 @@ async fn tokio_main() -> Result<()> {
                                     // complete normally (the relay may reject actions if
                                     // the agent lost access).
                                     let drained_ids = queue.drain_channel(ch);
+                                    let drained_count = drained_ids.len();
                                     let invalidated = if pool_ready {
                                         pool.invalidate_channel_sessions(ch)
                                     } else {
@@ -2299,25 +2303,23 @@ async fn tokio_main() -> Result<()> {
                                     // their sessions stripped when they return to the pool.
                                     removed_channels.insert(ch);
                                     typing_channels.remove(&ch);
-                                    // Best-effort: clean up 👀 on drained events.
+                                    // Best-effort: clean up pickup reactions on drained events.
                                     // Note: the relay revokes membership before
                                     // emitting the notification, so this DELETE may
-                                    // 403 on non-open channels. Stale 👀 in that
+                                    // 403 on non-open channels. A stale reaction in that
                                     // case is a known limitation — fix belongs in
                                     // the relay (clean up bot reactions on removal).
-                                    if !drained_ids.is_empty() {
+                                    if drained_count > 0 {
                                         let rc = ctx.rest_client.clone();
-                                        let ids = drained_ids.clone();
+                                        let ids = drained_ids;
                                         tokio::spawn(async move {
-                                            for eid in &ids {
-                                                pool::reaction_remove(&rc, eid, "👀").await;
-                                            }
+                                            pool::clear_pickup_reactions(rc, ids).await;
                                         });
                                     }
-                                    if !drained_ids.is_empty() || invalidated > 0 {
+                                    if drained_count > 0 || invalidated > 0 {
                                         tracing::info!(
                                             channel_id = %ch,
-                                            drained = drained_ids.len(),
+                                            drained = drained_count,
                                             invalidated,
                                             "cleaned up after membership removal"
                                         );
@@ -2497,22 +2499,34 @@ async fn tokio_main() -> Result<()> {
                             // backed payload) so the cost is negligible.
                             let event_for_steer = buzz_event.event.clone();
                             let prompt_tag_for_steer = prompt_tag.clone();
-                            let accepted = queue.push(QueuedEvent {
+                            let QueuePushOutcome {
+                                accepted,
+                                evicted_event_id,
+                            } = queue.push(QueuedEvent {
                                 channel_id: buzz_event.channel_id,
                                 event: buzz_event.event,
                                 received_at: std::time::Instant::now(),
                                 prompt_tag,
                             });
-                            // 👀 — immediate "seen" reaction, only if the event
+                            // Queue-cap eviction drops an event that previously
+                            // received a pickup reaction but will never enter a
+                            // ReactionGuard-owned batch.
+                            if let Some(evicted_event_id) = evicted_event_id {
+                                spawn_pickup_reaction_cleanup(
+                                    Some(&ctx.rest_client),
+                                    vec![evicted_event_id],
+                                );
+                            }
+                            // 🐱 — immediate pickup reaction, only if the event
                             // was actually queued (not dropped by DedupMode::Drop).
                             // Fire-and-forget: on rare fast-failure paths the
                             // guard's cleanup may race with this add, leaving a
-                            // cosmetic stale 👀. Acceptable — see ReactionGuard docs.
+                            // cosmetic stale cat. Acceptable — see ReactionGuard docs.
                             if accepted {
                                 let rc = ctx.rest_client.clone();
                                 let eid = event_id_hex.clone();
                                 tokio::spawn(async move {
-                                    pool::reaction_add(&rc, &eid, "👀").await;
+                                    pool::reaction_add(&rc, &eid, pool::REACTION_PICKUP).await;
                                 });
                             }
                             // Event is already queued. If mode requires it AND
@@ -2705,6 +2719,7 @@ async fn tokio_main() -> Result<()> {
                     &respawn_tx,
                     &mut respawn_tasks,
                     observer.clone(),
+                    Some(&ctx.rest_client),
                 ) == LoopAction::Exit
                 {
                     break;
@@ -2729,6 +2744,7 @@ async fn tokio_main() -> Result<()> {
                     &respawn_tx,
                     &mut respawn_tasks,
                     observer.clone(),
+                    Some(&ctx.rest_client),
                 );
                 if pool.live_count() == 0 && !any_respawn_in_flight(&crash_history) {
                     tracing::error!("all agents dead — exiting");
@@ -2743,6 +2759,7 @@ async fn tokio_main() -> Result<()> {
             Some(PoolEvent::SteerAck(SteerAckEvent {
                 channel_id,
                 event_id,
+                task_id,
                 ack,
             })) => {
                 // Mid-turn steer attempt resolved (either transport:
@@ -2859,6 +2876,17 @@ async fn tokio_main() -> Result<()> {
                 }
                 if drop_withheld {
                     queue.remove_event(channel_id, &event_id);
+                    // Native-steer events never enter a FlushBatch, so no
+                    // ReactionGuard owns their pickup reaction. Bind cleanup
+                    // to the exact turn that accepted the steer. If its result
+                    // raced ahead of this ack, clear immediately instead of
+                    // attaching to a successor turn on the same channel.
+                    if !pool.record_steered_event(task_id, &event_id) {
+                        spawn_pickup_reaction_cleanup(
+                            Some(&ctx.rest_client),
+                            vec![event_id.clone()],
+                        );
+                    }
                 }
                 if release_withheld {
                     queue.release_native_steer(channel_id, &event_id);
@@ -2954,6 +2982,11 @@ async fn tokio_main() -> Result<()> {
     }
 
     tracing::info!("shutdown: waiting for in-flight prompts");
+    // The shutdown drain consumes PromptResults directly instead of routing
+    // them through handle_prompt_result, so take the already-recorded native
+    // steer ids now and remove their pickup reactions while prompts settle.
+    let steered_cleanup =
+        spawn_pickup_reaction_cleanup(Some(&ctx.rest_client), pool.drain_all_steered_event_ids());
     // 30 s is generous for in-flight prompts to be cancelled; using
     // max_turn_duration here would cause Ctrl+C to hang for up to an hour.
     let grace = Duration::from_secs(30);
@@ -3006,6 +3039,24 @@ async fn tokio_main() -> Result<()> {
         }
     }
     drop(pool);
+
+    // Watchers can resolve during the grace period after the main loop stopped
+    // polling. Once all prompt tasks have settled, drop our sender and recover
+    // every successful crossing ack before exit.
+    drop(steer_ack_tx);
+    let crossing_cleanup = spawn_pickup_reaction_cleanup(
+        Some(&ctx.rest_client),
+        drain_crossing_steer_acks(&mut steer_ack_rx).await,
+    );
+
+    for handle in [steered_cleanup, crossing_cleanup].into_iter().flatten() {
+        if tokio::time::timeout(Duration::from_secs(10), handle)
+            .await
+            .is_err()
+        {
+            tracing::warn!("steered reaction cleanup did not finish before shutdown deadline");
+        }
+    }
 
     // Abort any in-flight respawn tasks. They may be sleeping in backoff or
     // running spawn_and_init — either way, we don't want them spawning new
@@ -3150,7 +3201,7 @@ fn signal_in_flight_task(
 /// event still reaches the agent via the universal path.
 ///
 /// The withheld event is NOT released here on `false` because no withhold
-/// was established: `mark_native_steer_pending` only runs on `Ok(())`.
+/// was established: `mark_native_steer_pending` only runs after send success.
 fn try_native_steer(
     pool: &mut AgentPool,
     queue: &mut EventQueue,
@@ -3189,7 +3240,7 @@ fn try_native_steer(
     };
 
     match pool.send_steer(channel_id, request) {
-        Ok(()) => {
+        Ok(task_id) => {
             // Withhold the queued event synchronously BEFORE spawning
             // the watcher: this closes the race where `mark_complete`
             // clears `in_flight_channels` and a stray `flush_next` could
@@ -3218,6 +3269,7 @@ fn try_native_steer(
                 let _ = ack_tx_clone.send(SteerAckEvent {
                     channel_id,
                     event_id: event_id_for_watcher,
+                    task_id,
                     ack,
                 });
             });
@@ -3318,6 +3370,7 @@ fn dispatch_pending(
                 recoverable_batch,
                 control_tx: Some(control_tx),
                 steer_tx,
+                steered_event_ids: Vec::new(),
             },
         );
         dispatched_channels.push((channel_id, typing_scope));
@@ -3329,6 +3382,53 @@ fn dispatch_pending(
         "dispatch_pending"
     );
     dispatched_channels
+}
+
+/// Spawn best-effort cleanup for events consumed through native steer.
+///
+/// Those events never enter a `FlushBatch`, so `ReactionGuard` cannot own
+/// their pickup indicator. All turn-stopping and late-ack paths converge here.
+/// A handle is returned so shutdown can bound-await the cleanup.
+fn spawn_pickup_reaction_cleanup(
+    rest_client: Option<&relay::RestClient>,
+    ids: Vec<String>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if ids.is_empty() {
+        return None;
+    }
+    let rest = rest_client?.clone();
+    Some(tokio::spawn(async move {
+        pool::clear_pickup_reactions(rest, ids).await;
+    }))
+}
+
+/// Recover successful steer acks that resolved after the main loop stopped
+/// polling but before prompt tasks settled during shutdown.
+///
+/// The caller drops its root sender and invokes this after the prompt grace
+/// period. A per-receive timeout prevents a wedged watcher from blocking exit.
+async fn drain_crossing_steer_acks(
+    steer_ack_rx: &mut mpsc::UnboundedReceiver<SteerAckEvent>,
+) -> Vec<String> {
+    let mut ids = Vec::new();
+    loop {
+        match tokio::time::timeout(Duration::from_secs(2), steer_ack_rx.recv()).await {
+            Ok(Some(event)) => {
+                if matches!(event.ack, Ok(pool::SteerAck::Success)) {
+                    ids.push(event.event_id);
+                }
+            }
+            Ok(None) => break,
+            Err(_) => {
+                tracing::warn!(
+                    drained = ids.len(),
+                    "steer ack watcher still pending at shutdown deadline"
+                );
+                break;
+            }
+        }
+    }
+    ids
 }
 
 /// Returns `true` when `error` is a non-retryable authentication failure.
@@ -3399,9 +3499,17 @@ fn handle_prompt_result(
 ) -> LoopAction {
     let before = pool.task_map().len();
     let agent_index = result.agent.index;
-    pool.task_map_mut()
-        .retain(|_, meta| meta.agent_index != agent_index);
+    let mut steered_event_ids = Vec::new();
+    pool.task_map_mut().retain(|_, meta| {
+        if meta.agent_index == agent_index {
+            steered_event_ids.append(&mut meta.steered_event_ids);
+            false
+        } else {
+            true
+        }
+    });
     debug_assert_eq!(before, pool.task_map().len() + 1);
+    spawn_pickup_reaction_cleanup(rest_client, steered_event_ids);
 
     // The hard-timeout death_message (below) must describe the batch's
     // *actual* fate, not just the `recently_active` eligibility flag — a
@@ -3764,6 +3872,7 @@ fn recover_panicked_agent(
     respawn_tx: &mpsc::Sender<RespawnResult>,
     respawn_tasks: &mut tokio::task::JoinSet<()>,
     observer: Option<observer::ObserverHandle>,
+    rest_client: Option<&relay::RestClient>,
 ) {
     let task_id = join_error.id();
     let Some(meta) = pool.task_map_mut().remove(&task_id) else {
@@ -3771,6 +3880,9 @@ fn recover_panicked_agent(
         return;
     };
     let i = meta.agent_index;
+
+    // The panicked task's ReactionGuard never saw natively steered events.
+    spawn_pickup_reaction_cleanup(rest_client, meta.steered_event_ids);
 
     // Requeue BEFORE mark_complete (same rationale as handle_prompt_result).
     if let Some(batch) = meta.recoverable_batch {
@@ -3862,6 +3974,7 @@ fn drain_ready_join_results(
     respawn_tx: &mpsc::Sender<RespawnResult>,
     respawn_tasks: &mut tokio::task::JoinSet<()>,
     observer: Option<observer::ObserverHandle>,
+    rest_client: Option<&relay::RestClient>,
 ) -> LoopAction {
     while let Some(Some(join_result)) = pool.join_set.join_next().now_or_never() {
         if let Err(join_error) = join_result {
@@ -3878,6 +3991,7 @@ fn drain_ready_join_results(
                 respawn_tx,
                 respawn_tasks,
                 observer.clone(),
+                rest_client,
             );
             if pool.live_count() == 0 && !any_respawn_in_flight(crash_history) {
                 return LoopAction::Exit;
@@ -3932,6 +4046,7 @@ fn dispatch_heartbeat(
             recoverable_batch: None,
             control_tx: None,
             steer_tx: None,
+            steered_event_ids: Vec::new(),
         },
     );
     *heartbeat_in_flight = true;
@@ -4703,6 +4818,7 @@ mod owner_control_command_tests {
                 recoverable_batch: None,
                 control_tx: Some(control_tx),
                 steer_tx: None,
+                steered_event_ids: Vec::new(),
             },
         );
 
@@ -6493,6 +6609,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                steered_event_ids: Vec::new(),
             },
         );
 
@@ -6569,6 +6686,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                steered_event_ids: Vec::new(),
             },
         );
         started_rx.await.unwrap();
@@ -6601,6 +6719,7 @@ mod error_outcome_emission_tests {
             &respawn_tx,
             &mut respawn_tasks,
             Some(observer.clone()),
+            None,
         );
 
         let panic = observer
@@ -6661,6 +6780,7 @@ mod error_outcome_emission_tests {
                     recoverable_batch: None,
                     control_tx: None,
                     steer_tx: None,
+                    steered_event_ids: Vec::new(),
                 },
             );
             let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -6752,6 +6872,7 @@ mod error_outcome_emission_tests {
                     recoverable_batch: None,
                     control_tx: None,
                     steer_tx: None,
+                    steered_event_ids: Vec::new(),
                 },
             );
             let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -6857,6 +6978,7 @@ mod error_outcome_emission_tests {
                     recoverable_batch: None,
                     control_tx: None,
                     steer_tx: None,
+                    steered_event_ids: Vec::new(),
                 },
             );
             let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -6933,6 +7055,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                steered_event_ids: Vec::new(),
             },
         );
         let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -7027,6 +7150,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                steered_event_ids: Vec::new(),
             },
         );
         let config = test_config();
@@ -7143,6 +7267,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                steered_event_ids: Vec::new(),
             },
         );
         let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -7282,6 +7407,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                steered_event_ids: Vec::new(),
             },
         );
         let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -7470,6 +7596,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                steered_event_ids: Vec::new(),
             },
         );
         let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -7555,6 +7682,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                steered_event_ids: Vec::new(),
             },
         );
         let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -7849,5 +7977,57 @@ mod observer_payload_trim_tests {
         assert!(leaf.starts_with('…'));
         assert!(leaf.ends_with('…'));
         assert!(leaf.contains("[elided"));
+    }
+}
+
+#[cfg(test)]
+mod steer_reaction_lifecycle_tests {
+    use super::*;
+
+    async fn ack_event(event_id: &str, ack: pool::SteerAck) -> SteerAckEvent {
+        let handle = tokio::spawn(async {});
+        let task_id = handle.id();
+        handle.await.expect("task id helper must finish");
+        SteerAckEvent {
+            channel_id: Uuid::new_v4(),
+            event_id: event_id.to_string(),
+            task_id,
+            ack: Ok(ack),
+        }
+    }
+
+    #[tokio::test]
+    async fn crossing_shutdown_drain_keeps_only_successful_steers() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tx.send(ack_event("delivered", pool::SteerAck::Success).await)
+            .unwrap();
+        tx.send(ack_event("released", pool::SteerAck::PromptCompletedNeutral).await)
+            .unwrap();
+        drop(tx);
+
+        assert_eq!(
+            drain_crossing_steer_acks(&mut rx).await,
+            vec!["delivered".to_string()]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn crossing_shutdown_drain_times_out_but_keeps_prior_successes() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tx.send(ack_event("delivered", pool::SteerAck::Success).await)
+            .unwrap();
+        // Keep the sender alive to model a watcher that never resolves.
+
+        assert_eq!(
+            drain_crossing_steer_acks(&mut rx).await,
+            vec!["delivered".to_string()]
+        );
+        drop(tx);
+    }
+
+    #[test]
+    fn steered_cleanup_is_noop_without_ids_or_rest_client() {
+        assert!(spawn_pickup_reaction_cleanup(None, vec!["event".to_string()]).is_none());
+        assert!(spawn_pickup_reaction_cleanup(None, Vec::new()).is_none());
     }
 }
