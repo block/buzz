@@ -1046,6 +1046,7 @@ dependencies = [
  "chrono",
  "hex",
  "hmac 0.13.0",
+ "http",
  "nostr",
  "percent-encoding",
  "rand 0.10.2",
