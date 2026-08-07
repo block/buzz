@@ -8,7 +8,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Weak};
 
-use buzz_core::kind::KIND_STREAM_MESSAGE;
+use buzz_core::kind::{KIND_STREAM_MESSAGE, KIND_WORKFLOW_APPROVAL_REQUESTED};
 use buzz_core::tenant::CommunityId;
 use buzz_workflow::action_sink::{ActionSink, ActionSinkError};
 use chrono::Utc;
@@ -148,6 +148,74 @@ fn resolve_mention_pubkeys(text: &str, members: &[(String, String)]) -> Vec<Stri
     out
 }
 
+/// Resolved channel context returned by [`resolve_channel`].
+struct ResolvedChannel {
+    state: Arc<AppState>,
+    tenant: buzz_core::tenant::TenantContext,
+    channel_uuid: Uuid,
+    channel_id_canonical: String,
+    channel: buzz_db::channel::ChannelRecord,
+}
+
+/// Shared validation prologue for action sink methods: upgrade the weak state
+/// reference, resolve the community host to a `TenantContext`, validate the
+/// content is non-empty, and look up + validate the target channel.
+async fn resolve_channel(
+    state_weak: &Weak<AppState>,
+    community_id: CommunityId,
+    channel_id: &str,
+    content: &str,
+) -> Result<ResolvedChannel, ActionSinkError> {
+    let state = state_weak
+        .upgrade()
+        .ok_or_else(|| ActionSinkError::Database("relay is shutting down".into()))?;
+
+    let host = state
+        .db
+        .lookup_community_host(community_id)
+        .await
+        .map_err(|e| ActionSinkError::Database(e.to_string()))?
+        .ok_or_else(|| {
+            ActionSinkError::Database(format!(
+                "workflow run community {community_id} is not mapped to a host"
+            ))
+        })?;
+    let tenant = buzz_core::tenant::TenantContext::resolved(community_id, host);
+
+    if content.trim().is_empty() {
+        return Err(ActionSinkError::EmptyContent);
+    }
+
+    let channel_uuid = Uuid::parse_str(channel_id)
+        .map_err(|e| ActionSinkError::InvalidInput(format!("invalid UUID: {e}")))?;
+    let channel_id_canonical = channel_uuid.to_string();
+
+    let channel = state
+        .db
+        .get_channel(tenant.community(), channel_uuid)
+        .await
+        .map_err(|e| match &e {
+            buzz_db::DbError::ChannelNotFound(_) | buzz_db::DbError::NotFound(_) => {
+                ActionSinkError::ChannelNotFound(channel_id_canonical.clone())
+            }
+            _ => ActionSinkError::Database(e.to_string()),
+        })?;
+
+    if channel.archived_at.is_some() {
+        return Err(ActionSinkError::ChannelArchived(
+            channel_id_canonical.clone(),
+        ));
+    }
+
+    Ok(ResolvedChannel {
+        state,
+        tenant,
+        channel_uuid,
+        channel_id_canonical,
+        channel,
+    })
+}
+
 /// Relay-side action sink — executes workflow side-effects directly.
 ///
 /// Holds a **weak** reference to `AppState` to avoid an `Arc` reference cycle:
@@ -182,58 +250,13 @@ impl ActionSink for RelayActionSink {
         let author_pubkey = author_pubkey.to_owned();
 
         Box::pin(async move {
-            // 0. Upgrade weak reference — fails only during shutdown.
-            let state = self
-                .state
-                .upgrade()
-                .ok_or_else(|| ActionSinkError::Database("relay is shutting down".into()))?;
-
-            // The run carries its owning community (`community_id`); the
-            // relay-signed kind:9 message belongs to *that* community, never the
-            // deployment default. Re-deriving the tenant from `config.relay_url`
-            // would post a community-B workflow's output into the deployment/
-            // default community under N>1. Read the community's host back to
-            // form a complete TenantContext (host is for labelling only — the
-            // community is already fixed and is never re-derived from it). Fail
-            // closed if the community no longer maps to a host.
-            let host = state
-                .db
-                .lookup_community_host(community_id)
-                .await
-                .map_err(|e| ActionSinkError::Database(e.to_string()))?
-                .ok_or_else(|| {
-                    ActionSinkError::Database(format!(
-                        "workflow run community {community_id} is not mapped to a host"
-                    ))
-                })?;
-            let tenant = buzz_core::tenant::TenantContext::resolved(community_id, host);
-
-            // 1. Validate content is not empty/whitespace-only
-            if text.trim().is_empty() {
-                return Err(ActionSinkError::EmptyContent);
-            }
-
-            // 2. Parse and validate channel — canonicalize UUID immediately
-            let channel_uuid = Uuid::parse_str(&channel_id)
-                .map_err(|e| ActionSinkError::InvalidInput(format!("invalid UUID: {e}")))?;
-            let channel_id_canonical = channel_uuid.to_string();
-
-            let channel = state
-                .db
-                .get_channel(tenant.community(), channel_uuid)
-                .await
-                .map_err(|e| match &e {
-                    buzz_db::DbError::ChannelNotFound(_) | buzz_db::DbError::NotFound(_) => {
-                        ActionSinkError::ChannelNotFound(channel_id_canonical.clone())
-                    }
-                    _ => ActionSinkError::Database(e.to_string()),
-                })?;
-
-            if channel.archived_at.is_some() {
-                return Err(ActionSinkError::ChannelArchived(
-                    channel_id_canonical.clone(),
-                ));
-            }
+            let ResolvedChannel {
+                state,
+                tenant,
+                channel_uuid,
+                channel_id_canonical,
+                channel,
+            } = resolve_channel(&self.state, community_id, &channel_id, &text).await?;
 
             let author_pubkey = nostr::PublicKey::from_hex(&author_pubkey).map_err(|e| {
                 ActionSinkError::InvalidInput(format!("invalid author pubkey: {e}"))
@@ -347,6 +370,101 @@ impl ActionSink for RelayActionSink {
 
             // 5. Post-persist side effects (fan-out, search, audit)
             //    Only if actually inserted (idempotency guard).
+            if was_inserted {
+                let _ = dispatch_persistent_event(
+                    &tenant,
+                    &state,
+                    &stored_event,
+                    kind_u32,
+                    &author_pubkey_hex,
+                    None,
+                )
+                .await;
+            }
+
+            Ok(event_id_hex)
+        })
+    }
+
+    fn emit_approval_requested(
+        &self,
+        params: buzz_workflow::ApprovalRequestParams,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
+        let buzz_workflow::ApprovalRequestParams {
+            community_id,
+            channel_id,
+            token_hash_hex,
+            approver_spec,
+            message,
+            workflow_id,
+            run_id,
+            author_pubkey,
+        } = params;
+
+        Box::pin(async move {
+            let ResolvedChannel {
+                state,
+                tenant,
+                channel_uuid,
+                channel_id_canonical,
+                channel: _,
+            } = resolve_channel(&self.state, community_id, &channel_id, &message).await?;
+
+            // Validate author pubkey.
+            let author_pk = nostr::PublicKey::from_hex(&author_pubkey).map_err(|e| {
+                ActionSinkError::InvalidInput(format!("invalid author pubkey: {e}"))
+            })?;
+            let author_pubkey_hex = author_pk.to_hex();
+
+            // 5. Validate workflow_id and run_id are valid UUIDs.
+            let _workflow_uuid = Uuid::parse_str(&workflow_id).map_err(|e| {
+                ActionSinkError::InvalidInput(format!("invalid workflow UUID: {e}"))
+            })?;
+            let _run_uuid = Uuid::parse_str(&run_id)
+                .map_err(|e| ActionSinkError::InvalidInput(format!("invalid run UUID: {e}")))?;
+
+            // 6. Build kind:46010 Nostr event.
+            //    - `d` tag: approval token hash (NIP-33 parameterized replaceable)
+            //    - `h` tag: NIP-29 channel scope
+            //    - `p` tag: workflow owner attribution
+            //    - `buzz:workflow` tag: prevents recursive workflow triggering
+            let tags = vec![
+                Tag::parse(["d", &token_hash_hex])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("d tag: {e}")))?,
+                Tag::parse(["h", &channel_id_canonical])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("h tag: {e}")))?,
+                Tag::parse(["p", &author_pubkey_hex])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("p tag: {e}")))?,
+                Tag::parse(["buzz:workflow", "true"])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?,
+            ];
+
+            let kind = Kind::from(KIND_WORKFLOW_APPROVAL_REQUESTED as u16);
+            let event = EventBuilder::new(kind, &message)
+                .tags(tags)
+                .sign_with_keys(&state.relay_keypair)
+                .map_err(|e| ActionSinkError::EventBuild(format!("signing: {e}")))?;
+
+            let event_id_hex = event.id.to_hex();
+            let kind_u32 = KIND_WORKFLOW_APPROVAL_REQUESTED;
+
+            info!(
+                event_id = %event_id_hex,
+                channel_id = %channel_id_canonical,
+                workflow_id = %workflow_id,
+                run_id = %run_id,
+                approver = %approver_spec,
+                "Workflow ApprovalRequested: posting kind {kind_u32} event"
+            );
+
+            // 7. Persist event (no thread metadata — approval events aren't threaded).
+            let (stored_event, was_inserted) = state
+                .db
+                .insert_event(tenant.community(), &event, Some(channel_uuid))
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+
+            // 8. Post-persist side effects (fan-out, search, audit).
             if was_inserted {
                 let _ = dispatch_persistent_event(
                     &tenant,
@@ -546,6 +664,67 @@ mod tests {
         // Same identity listed twice (e.g. two channels) is not a conflict.
         let members = vec![m("Fizz", &pk('6')), m("Fizz", &pk('6'))];
         assert_eq!(resolve_mention_pubkeys("@Fizz go", &members), vec![pk('6')]);
+    }
+
+    #[test]
+    fn approval_requested_event_has_correct_kind_and_tags() {
+        // Verify that a kind:46010 event built with the same tag structure
+        // as emit_approval_requested carries the expected tags.
+        let keys = nostr::Keys::generate();
+        let token_hash = "ab".repeat(32); // 64 hex chars
+        let channel_id = Uuid::new_v4().to_string();
+        let author_pk = nostr::Keys::generate().public_key().to_hex();
+
+        let tags = vec![
+            Tag::parse(["d", &token_hash]).unwrap(),
+            Tag::parse(["h", &channel_id]).unwrap(),
+            Tag::parse(["p", &author_pk]).unwrap(),
+            Tag::parse(["buzz:workflow", "true"]).unwrap(),
+        ];
+
+        let kind = Kind::from(KIND_WORKFLOW_APPROVAL_REQUESTED as u16);
+        let event = EventBuilder::new(kind, "Please approve this deployment")
+            .tags(tags)
+            .sign_with_keys(&keys)
+            .unwrap();
+
+        // Kind must be 46010.
+        assert_eq!(event.kind, Kind::from(46010u16));
+
+        let tag_slices: Vec<Vec<&str>> = event
+            .tags
+            .iter()
+            .map(|t| t.as_slice().iter().map(|s| s.as_str()).collect())
+            .collect();
+
+        // d tag carries the token hash.
+        assert!(
+            tag_slices
+                .iter()
+                .any(|t| t.len() == 2 && t[0] == "d" && t[1] == token_hash),
+            "expected d tag with token hash; got {tag_slices:?}"
+        );
+        // h tag carries the channel UUID.
+        assert!(
+            tag_slices
+                .iter()
+                .any(|t| t.len() == 2 && t[0] == "h" && t[1] == channel_id),
+            "expected h tag with channel id; got {tag_slices:?}"
+        );
+        // p tag carries the author pubkey.
+        assert!(
+            tag_slices
+                .iter()
+                .any(|t| t.len() == 2 && t[0] == "p" && t[1] == author_pk),
+            "expected p tag with author pubkey; got {tag_slices:?}"
+        );
+        // buzz:workflow tag prevents recursive triggering.
+        assert!(
+            tag_slices
+                .iter()
+                .any(|t| t.len() == 2 && t[0] == "buzz:workflow" && t[1] == "true"),
+            "expected buzz:workflow tag; got {tag_slices:?}"
+        );
     }
 
     #[test]

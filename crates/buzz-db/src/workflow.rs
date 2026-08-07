@@ -30,7 +30,7 @@ pub const LIST_MAX_LIMIT: i64 = 1000;
 ///
 /// Approval tokens are stored hashed so that a DB read does not expose
 /// the raw token (same pattern as API tokens in buzz-auth).
-fn hash_approval_token(token: &str) -> Vec<u8> {
+pub fn hash_approval_token(token: &str) -> Vec<u8> {
     Sha256::digest(token.as_bytes()).to_vec()
 }
 
@@ -2243,7 +2243,7 @@ mod tests {
                 run_id: run_a,
                 step_id: "gate",
                 step_index: 0,
-                approver_spec: "@anyone",
+                approver_spec: "any",
                 expires_at: expires,
             },
         )
@@ -2258,7 +2258,7 @@ mod tests {
                 run_id: run_b,
                 step_id: "gate",
                 step_index: 0,
-                approver_spec: "@anyone",
+                approver_spec: "any",
                 expires_at: expires,
             },
         )
