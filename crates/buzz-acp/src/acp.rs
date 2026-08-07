@@ -2508,6 +2508,40 @@ fn merge_wslenv(existing: Option<&str>, keys: &[String]) -> String {
     entries.join(":")
 }
 
+/// Translate an absolute Windows path into the equivalent WSL mount path
+/// (`C:\Users\x\.buzz` → `/mnt/c/Users/x/.buzz`).
+///
+/// Returns `None` for anything that is not a drive-letter path — UNC paths
+/// (`\\server\share`, including `\\wsl.localhost\…`), relative paths, and
+/// already-POSIX paths are all left untouched by the caller.
+fn translate_windows_path_to_wsl(cwd: &str) -> Option<String> {
+    let cwd = cwd.trim();
+    let mut chars = cwd.chars();
+    let drive = chars.next()?;
+    if !drive.is_ascii_alphabetic() || chars.next() != Some(':') {
+        return None;
+    }
+    let rest = cwd[2..].replace('\\', "/");
+    let rest = rest.trim_start_matches('/');
+    Some(format!("/mnt/{}/{}", drive.to_ascii_lowercase(), rest))
+}
+
+/// Session cwd to hand to a WSL-hosted agent via `session/new`.
+///
+/// When this process is spawning agents through the WSL wrap (see
+/// [`wsl_spawn_wrap`]), the agent runs inside the distro where a Windows
+/// drive path such as `C:\Users\x\.buzz` does not exist — and Hermes-class
+/// agents store the session cwd and use it as the root for edit-approval
+/// policies and workspace grounding. Translate drive-letter paths to their
+/// `/mnt/<drive>/…` form; everything else passes through untouched.
+pub(crate) fn session_cwd_for_wsl(cwd: &str) -> String {
+    if wsl_spawn_wrap().is_some() {
+        translate_windows_path_to_wsl(cwd).unwrap_or_else(|| cwd.to_string())
+    } else {
+        cwd.to_string()
+    }
+}
+
 /// Suppress the console window that Windows otherwise allocates for every
 /// console-subsystem child process spawned from a GUI (non-console) parent.
 /// No-op on non-Windows platforms.
@@ -3194,6 +3228,48 @@ mod tests {
             msg.contains("Hard turn timeout"),
             "HardTimeout display: {msg}"
         );
+    }
+
+    // ── WSL session cwd translation ─────────────────────────────────────────
+
+    #[test]
+    fn translate_windows_path_to_wsl_maps_drive_letters() {
+        assert_eq!(
+            translate_windows_path_to_wsl(r"C:\Users\ratz\.buzz"),
+            Some("/mnt/c/Users/ratz/.buzz".to_string())
+        );
+        assert_eq!(
+            translate_windows_path_to_wsl(r"D:\repos\foo"),
+            Some("/mnt/d/repos/foo".to_string())
+        );
+        // Forward-slash drive paths and root paths translate too.
+        assert_eq!(
+            translate_windows_path_to_wsl("C:/Users/ratz"),
+            Some("/mnt/c/Users/ratz".to_string())
+        );
+        assert_eq!(
+            translate_windows_path_to_wsl(r"C:\"),
+            Some("/mnt/c/".to_string())
+        );
+    }
+
+    #[test]
+    fn translate_windows_path_to_wsl_leaves_non_drive_paths_untouched() {
+        for cwd in [
+            r"\\server\share\path",
+            r"\\wsl.localhost\Ubuntu\home\rat",
+            "/home/rat/.buzz",
+            "/mnt/c/Users/ratz",
+            "relative/path",
+            ".",
+            "",
+        ] {
+            assert_eq!(
+                translate_windows_path_to_wsl(cwd),
+                None,
+                "expected no translation: {cwd:?}"
+            );
+        }
     }
 
     // ── WSL spawn wrap (pure helpers) ───────────────────────────────────────
