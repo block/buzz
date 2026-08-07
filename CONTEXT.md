@@ -30,6 +30,11 @@
 - **Native Windows Notifications**:
   - Webview2 `window.Notification` on Windows 10/11 Action Center fails silently without AUMID registration.
   - Native Windows Toast Notifications use `tauri-winrt-notification` (`Toast::new(&app_id)`) in `desktop/src-tauri/src/commands/notifications.rs` and `isWindowsPlatform()` in `desktop/src/features/notifications/lib/desktop.ts`.
+  - `Toast::text1` and `Toast::text2` consume `self` by value; builder methods must reassign instances (`toast = toast.text2(...)`).
+- **Cross-Platform Target Gating (`mouse_nav.rs`)**:
+  - macOS-only AppKit/Block modules (`block2`, `objc2_app_kit`) must be gated with `#[cfg(target_os = "macos")]` and provide a `#[cfg(not(target_os = "macos"))]` no-op stub (`pub fn init`) to maintain clean cross-platform builds on Windows and Linux.
+- **GitHub Actions Workflow Parameters**:
+  - `actions/setup-node` input parameter is `cache`, not `package-manager-cache`. Invalid parameter keys trigger workflow step validation failures.
 
 ## Pending Tasks
 - **Google SSO Onboarding Race Condition**:
