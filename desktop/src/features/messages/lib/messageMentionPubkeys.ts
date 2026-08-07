@@ -13,6 +13,7 @@ export function messageMentionPubkeys(
   channel: Channel,
   senderPubkey: string,
   explicitMentions: readonly string[] = [],
+  replyToAuthorPubkey?: string,
 ): string[] {
   const candidates =
     channel.channelType === "dm"
@@ -21,7 +22,10 @@ export function messageMentionPubkeys(
           ...channel.memberPubkeys,
           ...channel.participantPubkeys,
         ]
-      : explicitMentions;
+      : [
+          ...explicitMentions,
+          ...(replyToAuthorPubkey ? [replyToAuthorPubkey] : []),
+        ];
   const sender = normalizePubkey(senderPubkey);
 
   return [...new Set(candidates.map(normalizePubkey))].filter(

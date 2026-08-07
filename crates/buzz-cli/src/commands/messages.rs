@@ -46,6 +46,11 @@ fn find_root_from_tags(tags: &serde_json::Value) -> Option<String> {
     root.or(reply)
 }
 
+struct ResolvedThreadRef {
+    thread_ref: ThreadRef,
+    parent_author_pubkey: String,
+}
+
 /// Build a `ThreadRef` for a reply, given the immediate parent's event ID.
 ///
 /// Fetches the parent event from the relay and inspects its NIP-10 `e` tags to
@@ -57,7 +62,7 @@ fn find_root_from_tags(tags: &serde_json::Value) -> Option<String> {
 async fn resolve_thread_ref(
     client: &BuzzClient,
     parent_event_id: &str,
-) -> Result<ThreadRef, CliError> {
+) -> Result<ResolvedThreadRef, CliError> {
     let parent_eid = parse_event_id(parent_event_id)?;
     let filter = serde_json::json!({ "ids": [parent_event_id], "limit": 1 });
     let raw = client.query(&filter).await?;
@@ -67,6 +72,16 @@ async fn resolve_thread_ref(
         .as_array()
         .and_then(|a| a.first())
         .ok_or_else(|| CliError::Other(format!("parent event {parent_event_id} not found")))?;
+    let parent_author_pubkey = event
+        .get("pubkey")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|pubkey| PublicKey::from_hex(pubkey).ok())
+        .map(|pubkey| pubkey.to_hex())
+        .ok_or_else(|| {
+            CliError::Other(format!(
+                "parent event {parent_event_id} has an invalid pubkey"
+            ))
+        })?;
     let tags = event
         .get("tags")
         .cloned()
@@ -77,9 +92,12 @@ async fn resolve_thread_ref(
         _ => parent_eid,
     };
 
-    Ok(ThreadRef {
-        root_event_id: root_eid,
-        parent_event_id: parent_eid,
+    Ok(ResolvedThreadRef {
+        thread_ref: ThreadRef {
+            root_event_id: root_eid,
+            parent_event_id: parent_eid,
+        },
+        parent_author_pubkey,
     })
 }
 
@@ -596,7 +614,18 @@ pub async fn cmd_send_message(
     let has_explicit_mentions = !explicit_mentions.is_empty() || !uri_pubkeys.is_empty();
     let (member_pubkeys, auto_resolved) =
         resolve_content_mentions(client, &p.channel_id, &p.content, has_explicit_mentions).await?;
-    let mention_pubkeys = merge_message_mentions(&explicit_mentions, &uri_pubkeys, &auto_resolved)?;
+    let mut mention_pubkeys =
+        merge_message_mentions(&explicit_mentions, &uri_pubkeys, &auto_resolved)?;
+    let resolved_thread = if let Some(parent_event_id) = p.reply_to.as_deref() {
+        Some(resolve_thread_ref(client, parent_event_id).await?)
+    } else {
+        None
+    };
+    if let Some(resolved) = &resolved_thread {
+        if !mention_pubkeys.contains(&resolved.parent_author_pubkey) {
+            mention_pubkeys.push(resolved.parent_author_pubkey.clone());
+        }
+    }
 
     let missing = missing_members(&mention_pubkeys, &member_pubkeys);
     if !missing.is_empty() {
@@ -633,13 +662,7 @@ pub async fn cmd_send_message(
         format!("{}{media_content}", p.content)
     };
 
-    // Build thread ref if replying. `--reply-to` is the immediate parent; the
-    // thread root is derived from the parent's NIP-10 tags via the relay.
-    let thread_ref = if let Some(ref r) = p.reply_to {
-        Some(resolve_thread_ref(client, r).await?)
-    } else {
-        None
-    };
+    let thread_ref = resolved_thread.map(|resolved| resolved.thread_ref);
 
     let mention_refs: Vec<&str> = mention_pubkeys.iter().map(String::as_str).collect();
 
@@ -746,7 +769,7 @@ pub async fn cmd_send_diff_message(client: &BuzzClient, p: SendDiffParams) -> Re
     // `--reply-to` is the immediate parent; the thread root is derived from
     // the parent's NIP-10 tags via the relay.
     let thread_ref = if let Some(r) = &p.reply_to {
-        Some(resolve_thread_ref(client, r).await?)
+        Some(resolve_thread_ref(client, r).await?.thread_ref)
     } else {
         None
     };
