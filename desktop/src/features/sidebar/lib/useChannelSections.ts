@@ -45,7 +45,7 @@ export function useChannelSections(
   const lastAppliedEventId = React.useRef("");
 
   React.useEffect(() => {
-    if (!pubkey) {
+    if (!pubkey || !relayUrl) {
       setStore(DEFAULT_STORE);
       lastAppliedRemoteTs.current = 0;
       lastAppliedEventId.current = "";
@@ -54,7 +54,7 @@ export function useChannelSections(
     setStore(readChannelSectionsStore(pubkey, relayUrl));
     lastAppliedRemoteTs.current = 0;
     lastAppliedEventId.current = "";
-    managerRef.current = new ChannelSectionSyncManager(pubkey);
+    managerRef.current = new ChannelSectionSyncManager(pubkey, relayUrl);
     return () => {
       managerRef.current?.destroy();
       managerRef.current = null;
@@ -102,18 +102,16 @@ export function useChannelSections(
   );
 
   React.useEffect(() => {
-    if (!pubkey) return;
+    if (!pubkey || !relayUrl) return;
     let cancelled = false;
-    void managerRef.current?.fetchRemoteSections().then((remote) => {
+    const local = readChannelSectionsStore(pubkey, relayUrl);
+    void managerRef.current?.bootstrap(local).then((result) => {
       if (cancelled) return;
-      if (remote) {
-        setStore(applyRemote(remote));
-      } else {
-        const local = readChannelSectionsStore(pubkey, relayUrl);
-        if (local.sections.length > 0) {
-          managerRef.current?.publishSections(local);
-        }
+      if (result.action === "apply-remote") {
+        setStore(applyRemote(result.data));
       }
+      // "hold": seed already performed by bootstrap (if first-sync), or
+      // blocked (failed fetch / prior watermark). Hook does nothing.
     });
     return () => {
       cancelled = true;
@@ -146,10 +144,10 @@ export function useChannelSections(
     if (!pubkey) return;
     let cancelled = false;
     const unsub = relayClient.subscribeToReconnects(() => {
-      void managerRef.current?.fetchRemoteSections().then((remote) => {
+      void managerRef.current?.fetchRemoteSections().then((result) => {
         if (cancelled) return;
-        if (remote) {
-          setStore(applyRemote(remote));
+        if (result.status === "found") {
+          setStore(applyRemote(result.data));
         }
         const pending = managerRef.current?.getPendingStore();
         if (pending) {

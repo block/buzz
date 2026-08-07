@@ -3999,8 +3999,33 @@ impl Db {
     }
 
     /// Returns `true` if `pubkey` (64-char hex) is a member of `community`.
+    ///
+    /// Replica-routed on the bounded arm — the one PERMISSION read routed by
+    /// explicit product decision (bounded-stale membership beats the 10s
+    /// cache it replaced). Admits and revokes may lag by at most the budget
+    /// `B`; everything else fails closed to the writer, exactly like
+    /// [`Db::query_events_routed_bounded`]. Not precedent for routing other
+    /// permission reads.
     pub async fn is_relay_member(&self, community: CommunityId, pubkey: &str) -> Result<bool> {
-        relay_members::is_relay_member(&self.pool, community, pubkey).await
+        let path = "relay_membership";
+        match self.route_read(path, RoutePredicate::Bounded).await {
+            RouteDecision::Replica(mut tx, _entry, reason) => {
+                match relay_members::is_relay_member_on(&mut tx, community, pubkey).await {
+                    Ok(is_member) => {
+                        Self::record_route(path, "replica", reason);
+                        Ok(is_member)
+                    }
+                    Err(e) => {
+                        tracing::warn!(path, "replica read failed; re-running on writer: {e}");
+                        Self::record_route(path, "writer", "replica_error");
+                        relay_members::is_relay_member(&self.pool, community, pubkey).await
+                    }
+                }
+            }
+            RouteDecision::Writer => {
+                relay_members::is_relay_member(&self.pool, community, pubkey).await
+            }
+        }
     }
 
     /// Returns the relay member record for `pubkey` in `community`, or `None` if not found.
@@ -4094,6 +4119,12 @@ impl Db {
     /// Ensures the owner pubkey exists with role `"owner"` in `community`. Called at startup.
     pub async fn bootstrap_owner(&self, community: CommunityId, owner_pubkey: &str) -> Result<()> {
         relay_members::bootstrap_owner(&self.pool, community, owner_pubkey).await
+    }
+
+    /// Returns `true` if any member of `community` holds the `admin` or
+    /// `owner` role.
+    pub async fn has_admin_or_owner(&self, community: CommunityId) -> Result<bool> {
+        relay_members::has_admin_or_owner(&self.pool, community).await
     }
 
     /// Atomically transfers ownership of `community` to `new_owner_pubkey`,
@@ -7402,6 +7433,78 @@ mod tests {
             n, 2,
             "an over-budget entry must fail the count closed to the writer, \
              even when the covered arm would admit the shape"
+        );
+
+        drop_scratch_db(&admin, replica, &rname).await;
+        drop_scratch_db(&admin, writer, &wname).await;
+    }
+
+    /// Routed relay-membership check: budget unset ⇒ writer; budget set +
+    /// fresh proved entry ⇒ replica (bounded arm); over-budget entry ⇒
+    /// writer. Divergent membership rows prove which pool answered.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn is_relay_member_is_bounded_routed_and_fails_closed() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (writer, wname) = create_scratch_db(&admin, "mem_w").await;
+        let (replica, rname) = create_scratch_db(&admin, "mem_r").await;
+
+        let community = Uuid::new_v4();
+        for pool in [&writer, &replica] {
+            sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                .bind(community)
+                .bind(format!("member-routing-{}.example", community.simple()))
+                .execute(pool)
+                .await
+                .expect("insert community");
+        }
+        let cid = CommunityId::from_uuid(community);
+        let writer_only = "aa".repeat(32);
+        let replica_only = "bb".repeat(32);
+        relay_members::add_relay_member(&writer, cid, &writer_only, "member", None)
+            .await
+            .expect("seed writer member");
+        relay_members::add_relay_member(&replica, cid, &replica_only, "member", None)
+            .await
+            .expect("seed replica member");
+
+        let mut db = Db::from_pools(writer.clone(), replica.clone());
+        db.fence().force_open_for_tests(chrono::Utc::now());
+
+        // Budget unset ⇒ bounded arm disabled ⇒ writer.
+        assert!(
+            db.is_relay_member(cid, &writer_only)
+                .await
+                .expect("gate off"),
+            "budget unset must answer from the writer"
+        );
+        assert!(!db.is_relay_member(cid, &replica_only).await.unwrap());
+
+        // Budget set + fresh entry ⇒ replica.
+        db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(5)));
+        assert!(
+            db.is_relay_member(cid, &replica_only)
+                .await
+                .expect("gate on"),
+            "budget set must answer from the replica"
+        );
+        assert!(!db.is_relay_member(cid, &writer_only).await.unwrap());
+
+        // Entry older than the budget ⇒ fail closed to the writer. Close
+        // first so no prior fresh entry can be the one proved (matches the
+        // count test; today `force_open_for_tests_at` also clears the ring).
+        db.fence().close();
+        db.fence().force_open_for_tests_at(
+            chrono::Utc::now(),
+            std::time::Instant::now() - std::time::Duration::from_secs(10),
+        );
+        assert!(
+            db.is_relay_member(cid, &writer_only)
+                .await
+                .expect("entry too old"),
+            "an over-budget entry must fail closed to the writer"
         );
 
         drop_scratch_db(&admin, replica, &rname).await;

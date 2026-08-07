@@ -167,23 +167,18 @@ test("automatically shows community join requirements near the community URL", a
     .toContain('"relayUrl":"wss://policy.example.com"');
 });
 
-test("supports API tokens without cluttering the default join form", async ({
-  page,
-}) => {
+test("joins a community URL without an API token field", async ({ page }) => {
   await installMockBridge(page, { applyCommunityDelayMs: 1_000 });
   await page.goto("/");
 
   await openAddCommunityDialog(page);
   await page.getByTestId("add-community-join").click();
 
-  await expect(page.getByLabel("API token")).toHaveCount(0);
-  await expect(page.getByTestId("community-api-token-reveal")).toHaveCount(0);
-
   await page
     .getByLabel("Community URL or invite link")
     .fill("token.example.com");
-  await page.getByTestId("community-api-token-reveal").click();
-  await page.getByLabel("API token").fill("buzz_secret");
+  await expect(page.getByLabel("API token")).toHaveCount(0);
+  await expect(page.getByTestId("community-api-token-reveal")).toHaveCount(0);
   await page.getByTestId("invite-redeem-submit").click();
 
   await expect
@@ -191,20 +186,10 @@ test("supports API tokens without cluttering the default join form", async ({
       page.evaluate((key) => {
         const raw = window.localStorage.getItem(key);
         if (!raw) return null;
-        const transaction = JSON.parse(raw) as {
-          relayUrl?: string;
-          token?: string;
-        };
-        return {
-          relayUrl: transaction.relayUrl,
-          token: transaction.token,
-        };
+        return JSON.parse(raw) as { relayUrl?: string };
       }, COMMUNITY_ONBOARDING_STORAGE_KEY),
     )
-    .toEqual({
-      relayUrl: "wss://token.example.com",
-      token: "buzz_secret",
-    });
+    .toMatchObject({ relayUrl: "wss://token.example.com" });
 });
 
 test("hides Invites settings on open relays", async ({ page }) => {

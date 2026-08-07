@@ -8,10 +8,7 @@ import {
 import { formatTimelineMessages } from "@/features/messages/lib/formatTimelineMessages";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { Channel, RelayEvent } from "@/shared/api/types";
-import {
-  KIND_REACTION,
-  KIND_STREAM_MESSAGE_EDIT,
-} from "@/shared/constants/kinds";
+import { KIND_REACTION } from "@/shared/constants/kinds";
 
 type UseHomeInboxContextMessagesOptions = {
   channelMessages?: RelayEvent[];
@@ -24,6 +21,7 @@ type UseHomeInboxContextMessagesOptions = {
   selectedChannel: Channel | null;
   selectedEventId: string | null;
   selectedItem: InboxItem | null;
+  structuralEvents?: RelayEvent[];
 };
 
 export function useHomeInboxContextMessages({
@@ -37,25 +35,18 @@ export function useHomeInboxContextMessages({
   selectedChannel,
   selectedEventId,
   selectedItem,
+  structuralEvents = [],
 }: UseHomeInboxContextMessagesOptions): InboxContextMessage[] {
   return React.useMemo(() => {
     if (!selectedItem) return [];
 
     const eventById = new Map(events.map((event) => [event.id, event]));
     const contextEventIds = new Set(eventById.keys());
-    // Auxiliary overlays for the loaded context events: reactions AND edits.
-    // Edits matter for surfaces especially — a card's live updates are edit
-    // events, so without these the Inbox would render a stale card forever.
-    const contextAuxiliaries = [
+    const contextReactions = [
       ...(channelMessages ?? []),
       ...reactionEvents,
     ].filter((event) => {
-      if (
-        event.kind !== KIND_REACTION &&
-        event.kind !== KIND_STREAM_MESSAGE_EDIT
-      ) {
-        return false;
-      }
+      if (event.kind !== KIND_REACTION) return false;
       const targetId = getReactionTargetId(event.tags);
       return Boolean(targetId && contextEventIds.has(targetId));
     });
@@ -63,7 +54,7 @@ export function useHomeInboxContextMessages({
       ? (profiles?.[currentPubkey.toLowerCase()]?.avatarUrl ?? null)
       : null;
     const timelineMessages = formatTimelineMessages(
-      [...events, ...contextAuxiliaries],
+      [...events, ...structuralEvents, ...contextReactions],
       selectedChannel,
       currentPubkey,
       currentUserAvatarUrl,
@@ -94,5 +85,6 @@ export function useHomeInboxContextMessages({
     selectedChannel,
     selectedEventId,
     selectedItem,
+    structuralEvents,
   ]);
 }

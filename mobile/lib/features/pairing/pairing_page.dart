@@ -25,8 +25,13 @@ class PairingPage extends HookConsumerWidget {
   /// When true, the pairing page is being used to add a new community
   /// (user is already authenticated with at least one community).
   final bool addingCommunity;
+  final bool identityRecoveryOnly;
 
-  const PairingPage({super.key, this.addingCommunity = false});
+  const PairingPage({
+    super.key,
+    this.addingCommunity = false,
+    this.identityRecoveryOnly = false,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -51,6 +56,13 @@ class PairingPage extends HookConsumerWidget {
 
     Future<void> handleScannerResult(String? code) async {
       if (code != null && context.mounted) {
+        if (identityRecoveryOnly &&
+            Uri.tryParse(code)?.queryParameters['mode'] != 'recover') {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Scan a desktop recovery code.')),
+          );
+          return;
+        }
         await ref.read(pairingProvider.notifier).pair(code);
       }
     }
@@ -91,7 +103,7 @@ class PairingPage extends HookConsumerWidget {
               onPressed: () => Navigator.of(context).pop(),
             ),
             title: Text(
-              'Add Community',
+              identityRecoveryOnly ? 'Send to Desktop' : 'Add Community',
               style: isVerifyingSas
                   ? null
                   : context.textTheme.titleMedium?.copyWith(
@@ -114,6 +126,7 @@ class PairingPage extends HookConsumerWidget {
                   child: _SasVerificationView(
                     sasCode: pairingState.sasCode ?? '------',
                     confirmed: pairingState.userConfirmedSas,
+                    sendsIdentityToDesktop: pairingState.sendsIdentityToDesktop,
                     onConfirm: () =>
                         ref.read(pairingProvider.notifier).confirmSas(),
                     onDeny: () => ref.read(pairingProvider.notifier).denySas(),
@@ -146,7 +159,7 @@ class PairingPage extends HookConsumerWidget {
                     onConnect: () {
                       final code = codeController.text.trim();
                       if (code.isNotEmpty) {
-                        ref.read(pairingProvider.notifier).pair(code);
+                        unawaited(handleScannerResult(code));
                       }
                     },
                   ),
@@ -182,12 +195,14 @@ class PairingPage extends HookConsumerWidget {
 class _SasVerificationView extends StatelessWidget {
   final String sasCode;
   final bool confirmed;
+  final bool sendsIdentityToDesktop;
   final VoidCallback onConfirm;
   final VoidCallback onDeny;
 
   const _SasVerificationView({
     required this.sasCode,
     required this.confirmed,
+    required this.sendsIdentityToDesktop,
     required this.onConfirm,
     required this.onDeny,
   });
@@ -242,7 +257,9 @@ class _SasVerificationView extends StatelessWidget {
         const SizedBox(height: Grid.lg),
 
         Text(
-          'You are about to transfer your Buzz identity\nto this device. Only confirm if you initiated\nthis pairing from your desktop.',
+          sendsIdentityToDesktop
+              ? 'This sends your full Buzz identity to the desktop\nand grants it permanent access. Only confirm a\ndesktop you trust and a recovery you started.'
+              : 'You are about to transfer your Buzz identity\nto this device. Only confirm if you initiated\nthis pairing from your desktop.',
           textAlign: TextAlign.center,
           style: context.textTheme.bodySmall?.copyWith(
             color: context.colors.onSurfaceVariant,

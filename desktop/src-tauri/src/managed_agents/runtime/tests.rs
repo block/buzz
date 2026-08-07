@@ -117,72 +117,9 @@ fn unknown_command_returns_none() {
 
 // ── build_respond_to_env tests ───────────────────────────────────────
 
-use super::build_respond_to_env;
+use super::test_fixtures::{expected_mode, expected_owner_only, fixture};
+use super::{build_respond_to_env, build_respond_to_env_with_policy};
 use crate::managed_agents::types::{ManagedAgentRecord, RespondTo};
-
-/// Construct a minimal record fixture for env-building tests. Only the
-/// fields read by `build_respond_to_env` matter here.
-fn fixture(
-    respond_to: RespondTo,
-    allowlist: Vec<String>,
-    auth_tag: Option<String>,
-) -> ManagedAgentRecord {
-    ManagedAgentRecord {
-        pubkey: "p".into(),
-        name: "n".into(),
-        persona_id: None,
-        private_key_nsec: "nsec1fake".into(),
-        auth_tag,
-        relay_url: "ws://localhost:3000".into(),
-        avatar_url: None,
-        acp_command: "buzz-acp".into(),
-        agent_command: "goose".into(),
-        agent_command_override: None,
-        agent_args: vec![],
-        mcp_command: String::new(),
-        turn_timeout_seconds: 320,
-        idle_timeout_seconds: None,
-        max_turn_duration_seconds: None,
-        parallelism: 1,
-        system_prompt: None,
-        model: None,
-        provider: None,
-        persona_source_version: None,
-        env_vars: std::collections::BTreeMap::new(),
-        start_on_app_launch: false,
-        auto_restart_on_config_change: true,
-        runtime_pid: None,
-        backend: Default::default(),
-        backend_agent_id: None,
-        provider_binary_path: None,
-        team_id: None,
-        persona_team_dir: None,
-        persona_name_in_team: None,
-        created_at: "now".into(),
-        updated_at: "now".into(),
-        last_started_at: None,
-        last_stopped_at: None,
-        last_exit_code: None,
-        last_error: None,
-        last_error_code: None,
-        respond_to,
-        respond_to_allowlist: allowlist,
-        display_name: None,
-        slug: None,
-        runtime: None,
-        name_pool: Vec::new(),
-        is_builtin: false,
-        is_active: true,
-        shared: false,
-        source_team: None,
-        source_team_persona_slug: None,
-        catalog_source: None,
-        definition_respond_to: None,
-        definition_respond_to_allowlist: Vec::new(),
-        definition_parallelism: None,
-        relay_mesh: None,
-    }
-}
 
 #[test]
 fn build_env_owner_only_sets_mode_and_removes_others() {
@@ -195,6 +132,18 @@ fn build_env_owner_only_sets_mode_and_removes_others() {
     );
     assert!(!set_map.contains_key("BUZZ_ACP_RESPOND_TO_ALLOWLIST"));
     assert!(remove.contains(&"BUZZ_ACP_RESPOND_TO_ALLOWLIST"));
+    if expected_owner_only() {
+        assert_eq!(
+            set_map
+                .get("BUZZ_ACP_ALLOWED_RESPOND_TO")
+                .map(String::as_str),
+            Some("owner-only")
+        );
+        assert!(!remove.contains(&"BUZZ_ACP_ALLOWED_RESPOND_TO"));
+    } else {
+        assert!(!set_map.contains_key("BUZZ_ACP_ALLOWED_RESPOND_TO"));
+        assert!(remove.contains(&"BUZZ_ACP_ALLOWED_RESPOND_TO"));
+    }
     // auth_tag is present → no AGENT_OWNER fallback fires.
     assert!(remove.contains(&"BUZZ_ACP_AGENT_OWNER"));
 }
@@ -214,14 +163,19 @@ fn build_env_allowlist_sets_both_envs_and_joins() {
     let set_map: std::collections::HashMap<_, _> = set.into_iter().collect();
     assert_eq!(
         set_map.get("BUZZ_ACP_RESPOND_TO").map(String::as_str),
-        Some("allowlist")
+        Some(expected_mode("allowlist")),
+        "runtime wrapper did not apply the declared build policy",
     );
-    assert_eq!(
-        set_map
-            .get("BUZZ_ACP_RESPOND_TO_ALLOWLIST")
-            .map(String::as_str),
-        Some(format!("{a},{b}").as_str()),
-    );
+    if expected_owner_only() {
+        assert!(!set_map.contains_key("BUZZ_ACP_RESPOND_TO_ALLOWLIST"));
+    } else {
+        assert_eq!(
+            set_map
+                .get("BUZZ_ACP_RESPOND_TO_ALLOWLIST")
+                .map(String::as_str),
+            Some(format!("{a},{b}").as_str()),
+        );
+    }
 }
 
 #[test]
@@ -231,7 +185,30 @@ fn build_env_anyone_omits_allowlist_var() {
     let set_map: std::collections::HashMap<_, _> = set.into_iter().collect();
     assert_eq!(
         set_map.get("BUZZ_ACP_RESPOND_TO").map(String::as_str),
-        Some("anyone")
+        Some(expected_mode("anyone")),
+        "runtime wrapper did not apply the declared build policy",
+    );
+    assert!(!set_map.contains_key("BUZZ_ACP_RESPOND_TO_ALLOWLIST"));
+    assert!(remove.contains(&"BUZZ_ACP_RESPOND_TO_ALLOWLIST"));
+}
+
+#[test]
+fn owner_only_access_policy_overrides_stale_anyone_record_at_runtime() {
+    let rec = fixture(RespondTo::Anyone, vec!["a".repeat(64)], Some("tag".into()));
+    let (set, remove) = build_respond_to_env_with_policy(&rec, Some("owner"), true).unwrap();
+    let set_map: std::collections::HashMap<_, _> = set.into_iter().collect();
+
+    assert_eq!(
+        set_map.get("BUZZ_ACP_RESPOND_TO").map(String::as_str),
+        Some("owner-only"),
+        "owner-only-access runtime env widened stale access",
+    );
+    assert_eq!(
+        set_map
+            .get("BUZZ_ACP_ALLOWED_RESPOND_TO")
+            .map(String::as_str),
+        Some("owner-only"),
+        "owner-only-access runtime env omitted the owner-only guard",
     );
     assert!(!set_map.contains_key("BUZZ_ACP_RESPOND_TO_ALLOWLIST"));
     assert!(remove.contains(&"BUZZ_ACP_RESPOND_TO_ALLOWLIST"));
@@ -271,8 +248,17 @@ fn build_env_rejects_corrupted_allowlist() {
 #[test]
 fn build_env_rejects_empty_allowlist_in_allowlist_mode() {
     let rec = fixture(RespondTo::Allowlist, vec![], Some("tag".into()));
-    let err = build_respond_to_env(&rec, Some("owner")).unwrap_err();
-    assert!(err.contains("at least one pubkey"));
+    if expected_owner_only() {
+        let (set, _) = build_respond_to_env(&rec, Some("owner")).unwrap();
+        let set_map: std::collections::HashMap<_, _> = set.into_iter().collect();
+        assert_eq!(
+            set_map.get("BUZZ_ACP_RESPOND_TO").map(String::as_str),
+            Some("owner-only")
+        );
+    } else {
+        let err = build_respond_to_env(&rec, Some("owner")).unwrap_err();
+        assert!(err.contains("at least one pubkey"));
+    }
 }
 
 // ── persona fixture helpers ─────────────────────────────────────────
@@ -1271,7 +1257,13 @@ fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRun
     let process = crate::managed_agents::ManagedAgentProcess {
         child,
         log_path: std::path::PathBuf::new(),
-        spawn_config_hash: 0,
+        spawn_config: crate::managed_agents::spawn_snapshot::prospective_spawn_config_snapshot(
+            &minimal_record(&"cc".repeat(32)),
+            &[],
+            &[],
+            "wss://relay.example",
+            &Default::default(),
+        ),
         setup_mode: false,
         adapter_availability: None,
         start_nonce: "test-nonce".to_string(),
@@ -1279,38 +1271,4 @@ fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRun
         job: None,
     };
     crate::managed_agents::ManagedAgentPairRuntime::starting(process)
-}
-
-// ── restart_eligible tests ──────────────────────────────────────────────
-
-#[test]
-fn restart_eligible_true_when_non_orphan_has_hash_drift() {
-    assert!(super::restart_eligible(false, true, false));
-}
-
-#[test]
-fn restart_eligible_true_when_non_orphan_has_availability_drift() {
-    assert!(super::restart_eligible(false, false, true));
-}
-
-#[test]
-fn restart_eligible_false_when_orphan_has_hash_drift() {
-    // An orphan can never be restarted successfully — spawn refuses it —
-    // so hash drift alone must not surface "Restart required".
-    assert!(!super::restart_eligible(true, true, false));
-}
-
-#[test]
-fn restart_eligible_false_when_orphan_has_availability_drift() {
-    assert!(!super::restart_eligible(true, false, true));
-}
-
-#[test]
-fn restart_eligible_false_when_orphan_has_no_drift() {
-    assert!(!super::restart_eligible(true, false, false));
-}
-
-#[test]
-fn restart_eligible_false_when_non_orphan_has_no_drift() {
-    assert!(!super::restart_eligible(false, false, false));
 }

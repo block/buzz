@@ -957,6 +957,7 @@ export function UserProfilePanel({
         personaToExportSnapshot={personaToExportSnapshot}
         resolvedPersona={resolvedPersona}
         runtimes={acpRuntimesQuery.data ?? []}
+        runtimesError={acpRuntimesQuery.isError}
         runtimesLoading={acpRuntimesQuery.isLoading}
         updateError={
           updatePersonaMutation.error instanceof Error

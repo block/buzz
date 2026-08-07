@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:hooks_riverpod/misc.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -14,9 +15,15 @@ Widget _testable(
   Widget child, {
   List<Override> overrides = const [],
   bool disableAnimations = false,
+  VideoPreviewFrameLoader? videoPreviewFrameLoader,
 }) {
   return ProviderScope(
-    overrides: overrides,
+    overrides: [
+      videoPreviewFrameLoaderProvider.overrideWithValue(
+        videoPreviewFrameLoader ?? (_) async => null,
+      ),
+      ...overrides,
+    ],
     child: MaterialApp(
       theme: AppTheme.light(),
       home: Builder(
@@ -149,6 +156,24 @@ bool _spanHasStyle(
 
 void main() {
   group('MessageContent', () {
+    testWidgets('forwards text alignment to markdown rendering', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _testable(
+          const MessageContent(
+            content: 'Centered status',
+            textAlign: TextAlign.center,
+          ),
+        ),
+      );
+
+      expect(
+        tester.widget<GptMarkdown>(find.byType(GptMarkdown)).textAlign,
+        TextAlign.center,
+      );
+    });
+
     testWidgets('opens local file links through an authenticated download', (
       tester,
     ) async {
@@ -1075,6 +1100,52 @@ Photos
         expect(find.byIcon(LucideIcons.play), findsOneWidget);
       });
 
+      testWidgets('derives a first frame for a posterless video event', (
+        tester,
+      ) async {
+        const videoUrl = 'https://example.com/media/legacy-video.mp4';
+        var disposed = false;
+
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: '![video]($videoUrl)',
+              tags: [
+                ['imeta', 'url $videoUrl', 'm video/mp4', 'dim 1080x1920'],
+              ],
+            ),
+            videoPreviewFrameLoader: (url) async {
+              expect(url, videoUrl);
+              return LoadedVideoPreviewFrame(
+                aspectRatio: 9 / 16,
+                child: const ColoredBox(
+                  key: ValueKey('derived-video-frame'),
+                  color: Colors.blue,
+                ),
+                dispose: () async => disposed = true,
+              );
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(
+            const ValueKey('message-media-video-first-frame:$videoUrl'),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('derived-video-frame')),
+          findsOneWidget,
+        );
+        expect(find.text('Video attachment'), findsNothing);
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+        expect(disposed, isTrue);
+      });
+
       testWidgets(
         'tapping video preview opens overlay viewer with close button',
         (tester) async {
@@ -1114,6 +1185,15 @@ Photos
           );
           expect(viewer.backgroundColor, Colors.black);
           expect(viewer.appBar, isNull);
+          expect(
+            find.descendant(
+              of: find.byKey(
+                const ValueKey('message-media-video-viewer-reply-thread'),
+              ),
+              matching: find.byType(IconButton),
+            ),
+            findsNothing,
+          );
 
           // Close button is present
           expect(
@@ -1133,6 +1213,46 @@ Photos
           );
         },
       );
+
+      testWidgets('swiping down on the video dismisses its viewer', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: '![video](https://example.com/media/clip.mp4)',
+              tags: [
+                [
+                  'imeta',
+                  'url https://example.com/media/clip.mp4',
+                  'm video/mp4',
+                ],
+              ],
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(
+          find.byKey(
+            const ValueKey(
+              'message-media-video-preview:https://example.com/media/clip.mp4',
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.drag(
+          find.byKey(const ValueKey('message-media-video-viewer-gesture')),
+          const Offset(0, 140),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const ValueKey('message-media-video-viewer')),
+          findsNothing,
+        );
+      });
 
       testWidgets('treats only mp4 fallback URLs as videos', (tester) async {
         await tester.pumpWidget(
@@ -1170,6 +1290,43 @@ Photos
             ),
           ),
           findsOneWidget,
+        );
+      });
+
+      testWidgets('renders an explicitly tagged non-mp4 video preview', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: '![video](https://example.com/media/clip.mov)',
+              tags: [
+                [
+                  'imeta',
+                  'url https://example.com/media/clip.mov',
+                  'm video/quicktime',
+                ],
+              ],
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(
+            const ValueKey(
+              'message-media-video-preview:https://example.com/media/clip.mov',
+            ),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(
+            const ValueKey(
+              'message-media-image-preview:https://example.com/media/clip.mov',
+            ),
+          ),
+          findsNothing,
         );
       });
     });

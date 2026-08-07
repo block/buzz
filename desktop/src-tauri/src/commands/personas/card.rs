@@ -283,6 +283,35 @@ pub(crate) fn resolve_env_from_layers(
     process_value.filter(|k| !k.trim().is_empty())
 }
 
+/// Pure classification: same four env inputs as `resolve_env_from_layers`,
+/// returns which layer supplies `OPENAI_API_KEY` (agent > persona > global >
+/// process > none).
+pub(crate) fn resolve_key_layer(
+    global_env: &std::collections::BTreeMap<String, String>,
+    persona_env: &std::collections::BTreeMap<String, String>,
+    record_env: &std::collections::BTreeMap<String, String>,
+    process_value: Option<String>,
+) -> &'static str {
+    let key = "OPENAI_API_KEY";
+    let nonempty = |m: &std::collections::BTreeMap<String, String>| {
+        m.get(key).is_some_and(|v| !v.trim().is_empty())
+    };
+    if nonempty(record_env) {
+        return "agent";
+    }
+    if nonempty(persona_env) {
+        return "persona";
+    }
+    if nonempty(global_env) {
+        return "global";
+    }
+    let proc = process_value.as_deref().unwrap_or("");
+    if !proc.trim().is_empty() {
+        return "process";
+    }
+    "none"
+}
+
 /// The Responses endpoint to post mints to. `OPENAI_BASE_URL` (same env
 /// layering as the key) overrides the default host, supporting endpoints and
 /// proxies that speak the OpenAI Responses shape with Bearer auth. Azure
@@ -450,16 +479,15 @@ pub fn card_mint_save_openai_key(
     save_global_agent_config(&app, &config)
 }
 
-/// Report whether an OpenAI key would resolve for a card mint of agent `id`,
-/// using exactly the same env layering as `mint_agent_card`. Lets the mint
-/// dialog offer inline key setup BEFORE the user commits to a mint, instead
-/// of failing after the fact. Never returns the key itself.
+/// Report which env layer resolves the OpenAI key for a card mint of agent
+/// `id` — same layering as `mint_agent_card`. Delegates to `resolve_key_layer`
+/// for the classification; see that helper for the return-value contract.
 #[tauri::command]
 pub fn card_mint_key_status(
     id: String,
     app: AppHandle,
     state: State<'_, AppState>,
-) -> Result<bool, String> {
+) -> Result<String, String> {
     let _store_guard = state
         .managed_agents_store_lock
         .lock()
@@ -478,14 +506,13 @@ pub fn card_mint_key_status(
         .map(|p| p.env_vars.clone())
         .unwrap_or_default();
 
-    Ok(resolve_env_from_layers(
-        "OPENAI_API_KEY",
+    Ok(resolve_key_layer(
         &global.env_vars,
         &persona_env,
         &record.env_vars,
         std::env::var("OPENAI_API_KEY").ok(),
     )
-    .is_some())
+    .to_string())
 }
 
 /// Mint a trading card for the agent identified by `id` (instance pubkey,
@@ -641,9 +668,9 @@ pub async fn mint_agent_card(
             .ok_or_else(|| "Agent avatar data URL could not be decoded.".to_string())?,
         Some(url) if url.starts_with("http://") || url.starts_with("https://") => {
             // Relay-hosted avatars (kind:0 pictures under the relay's /media/)
-            // may require Blossom get-auth (`require_media_get_auth`). Mint the
-            // header ONLY for same-origin URLs so the token never leaves the
-            // relay (same contract as `media_download.rs`).
+            // require Blossom get-auth. Mint the header ONLY for same-origin URLs
+            // so the token never leaves the relay (same contract as
+            // `media_download.rs`).
             let relay_base = crate::relay::relay_api_base_url_with_override(&state);
             let auth = is_same_origin(url, &relay_base)
                 .then(|| crate::commands::media::mint_media_get_auth(&state, &relay_base))
