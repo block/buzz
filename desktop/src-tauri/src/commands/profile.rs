@@ -255,7 +255,7 @@ fn build_user_search_filter(query: &str, limit: usize, page: u32) -> serde_json:
     serde_json::json!({
         "kinds": [0],
         "search": query,
-        "search_mode": "prefix",
+        "search_mode": "contains",
         "limit": limit,
         "page": page,
     })
@@ -319,12 +319,14 @@ pub async fn search_users(
     // than a substring hit in `about`. The caller can request later pages via the
     // cursor so the UI cap is only a page size, not a terminal directory ceiling.
     //
-    // `search_mode: "prefix"` matters: every caller of this command is a
+    // `search_mode: "contains"` matters: every caller of this command is a
     // typeahead surface (member picker, @mention popup, DM recipient search,
-    // topbar people results), so a partially typed name must match. Without it
-    // the relay runs whole-word `websearch_to_tsquery` matching and "tyl"
-    // returns zero results for "Tyler". Same bridge-only extension the topbar
-    // message search uses (see `build_search_messages_filter`).
+    // topbar people results), so any typed fragment of a name must match.
+    // Whole-word FTS returns zero results for "tyl" → "Tyler", and prefix
+    // mode returns zero results for "kurs" → "mattkursmark" because the name
+    // is a single lexeme. Contains mode is ILIKE substring matching on the
+    // relay (same bridge-only `search_mode` extension family the topbar
+    // message search uses via `build_search_messages_filter`).
     let events = query_relay(&state, &[build_user_search_filter(trimmed, max, page)]).await?;
 
     let mut response = nostr_convert::rank_user_search_results(&events, trimmed, max);
@@ -469,15 +471,17 @@ mod tests {
     }
 
     #[test]
-    fn user_search_filter_requests_prefix_mode_for_typeahead() {
+    fn user_search_filter_requests_contains_mode_for_typeahead() {
         // Every caller of `search_users` is a typeahead surface. Whole-word
         // FTS matching returns zero results for a partially typed name
-        // ("tyl" for "Tyler"), which reads as "user doesn't exist" in the
-        // member picker and @mention popup. Pin the mode so it can't drift.
-        let filter = build_user_search_filter("tyl", 25, 1);
+        // ("tyl" for "Tyler"), and prefix matching returns zero results for
+        // a mid-name fragment ("kurs" for "mattkursmark"), which reads as
+        // "user doesn't exist" in the member picker and @mention popup. Pin
+        // the mode so it can't drift.
+        let filter = build_user_search_filter("kurs", 25, 1);
 
-        assert_eq!(filter["search"], serde_json::json!("tyl"));
-        assert_eq!(filter["search_mode"], serde_json::json!("prefix"));
+        assert_eq!(filter["search"], serde_json::json!("kurs"));
+        assert_eq!(filter["search_mode"], serde_json::json!("contains"));
         assert_eq!(filter["limit"], serde_json::json!(25));
         assert_eq!(filter["page"], serde_json::json!(1));
     }
