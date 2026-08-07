@@ -1,3 +1,33 @@
+use std::collections::BTreeMap;
+
+const OPENAI_API_KEY: &str = "OPENAI_API_KEY";
+const OPENAI_COMPAT_API_KEY: &str = "OPENAI_COMPAT_API_KEY";
+
+fn configured_openai_api_key(env: &BTreeMap<String, String>) -> Option<&str> {
+    if env.contains_key(OPENAI_API_KEY) {
+        return None;
+    }
+    env.get(OPENAI_COMPAT_API_KEY)
+        .map(String::as_str)
+        .filter(|value| !value.trim().is_empty())
+}
+
+/// Ensure every harness receives an explicitly configured OpenAI credential
+/// under OpenAI's standard environment variable name.
+///
+/// Buzz's built-in agent still reads `OPENAI_COMPAT_API_KEY`, so Desktop keeps
+/// that configured value and mirrors it to `OPENAI_API_KEY` at the common spawn
+/// boundary. An explicit `OPENAI_API_KEY` in the layered agent environment is
+/// never replaced, including when it was deliberately set to an empty value.
+pub(crate) fn apply_openai_api_key(
+    command: &mut std::process::Command,
+    env: &BTreeMap<String, String>,
+) {
+    if let Some(value) = configured_openai_api_key(env) {
+        command.env(OPENAI_API_KEY, value);
+    }
+}
+
 /// Returns the (key, value) env var pairs that should be forwarded to the
 /// agent process for model and provider selection.
 ///
@@ -76,7 +106,36 @@ pub(crate) fn resolve_session_title(display_name: Option<&str>, name: &str) -> O
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_session_title;
+    use std::collections::BTreeMap;
+
+    use super::{configured_openai_api_key, resolve_session_title};
+
+    #[test]
+    fn configured_compat_key_is_exposed_under_openai_standard_name() {
+        let env = BTreeMap::from([(
+            "OPENAI_COMPAT_API_KEY".to_string(),
+            "configured-key".to_string(),
+        )]);
+        assert_eq!(configured_openai_api_key(&env), Some("configured-key"));
+    }
+
+    #[test]
+    fn explicit_standard_openai_key_is_preserved() {
+        let env = BTreeMap::from([
+            (
+                "OPENAI_COMPAT_API_KEY".to_string(),
+                "configured-key".to_string(),
+            ),
+            ("OPENAI_API_KEY".to_string(), "explicit-key".to_string()),
+        ]);
+        assert_eq!(configured_openai_api_key(&env), None);
+    }
+
+    #[test]
+    fn blank_compat_key_is_not_exported() {
+        let env = BTreeMap::from([("OPENAI_COMPAT_API_KEY".to_string(), "  ".to_string())]);
+        assert_eq!(configured_openai_api_key(&env), None);
+    }
 
     #[test]
     fn resolve_session_title_prefers_display_name() {
