@@ -49,7 +49,9 @@ pub const MAX_WILDCARDS_PER_PATTERN: usize = 3;
 /// A validated ref pattern for matching git refs.
 ///
 /// Grammar: `segment ("/" segment)*` where segment is either a literal
-/// `[a-zA-Z0-9._-]+` or `*` (matches exactly one path segment).
+/// `[a-zA-Z0-9._+@-]+` or `*` (matches exactly one path segment). The literal
+/// alphabet matches `is_safe_refname` in the relay's git manifest layer, so
+/// every ref the relay accepts can also be named by a protection rule.
 ///
 /// Patterns MUST start with `refs/`. No `**`, `?`, `[...]`, or partial globs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,10 +149,14 @@ impl RefPattern {
             {
                 // Partial globs (e.g., "v*") are not allowed.
                 return Err(PatternError::InvalidSegment(part.to_string()));
-            } else if !part
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
-            {
+            } else if !part.chars().all(|c| {
+                c.is_ascii_alphanumeric()
+                    || c == '.'
+                    || c == '_'
+                    || c == '-'
+                    || c == '+'
+                    || c == '@'
+            }) {
                 return Err(PatternError::InvalidSegment(part.to_string()));
             } else {
                 segments.push(PatternSegment::Literal(part.to_string()));
@@ -648,6 +654,18 @@ mod tests {
         let p = RefPattern::parse("refs/*/release/*").unwrap();
         assert!(p.matches("refs/heads/release/v1"));
         assert!(!p.matches("refs/heads/release/v1/hotfix"));
+    }
+
+    #[test]
+    fn pattern_literal_accepts_git_legal_plus_and_at() {
+        // Refs containing `+`/`@` are pushable (#4194), so literal protection
+        // rules must be able to name them.
+        let p = RefPattern::parse("refs/heads/test/842+841-devnet").unwrap();
+        assert!(p.matches("refs/heads/test/842+841-devnet"));
+        assert!(!p.matches("refs/heads/test/842-841-devnet"));
+
+        let p = RefPattern::parse("refs/heads/dependabot/npm_and_yarn/@types/node-1.2.3").unwrap();
+        assert!(p.matches("refs/heads/dependabot/npm_and_yarn/@types/node-1.2.3"));
     }
 
     #[test]
