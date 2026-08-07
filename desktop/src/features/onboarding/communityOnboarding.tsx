@@ -154,8 +154,16 @@ export function startCommunityOnboarding(
   const relayUrl = canonicalRelayUrl(input.relayUrl);
   const existing = loadCommunityOnboardingTransaction(storage);
   if (existing?.relayUrl === relayUrl) {
+    const isMembershipRecoveryClaim =
+      input.source === "membership-recovery" &&
+      Boolean(input.inviteCode?.trim());
     const updated = {
       ...existing,
+      // A same-relay membership recovery is not a passive resume: the relay
+      // already rejected the connect attempt, so the invite must restart the
+      // transaction at the claim stage. Other same-relay ingress still keeps
+      // in-progress profile/finalization work intact.
+      stage: isMembershipRecoveryClaim ? "claiming" : existing.stage,
       firstCommunityPage:
         input.firstCommunityPage ?? existing.firstCommunityPage,
       inviteCode: input.inviteCode?.trim() || existing.inviteCode,

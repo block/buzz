@@ -17,6 +17,7 @@ type MembershipDeniedProps = {
   onBack: () => void;
   onChangeCommunity: () => void;
   onImportKey: (nsec: string) => Promise<void>;
+  onInviteRedeemStarted?: () => void;
   onRetry: () => void;
   pubkey: string;
 };
@@ -26,6 +27,7 @@ export function MembershipDenied({
   onBack,
   onChangeCommunity,
   onImportKey,
+  onInviteRedeemStarted,
   onRetry,
   pubkey,
 }: MembershipDeniedProps) {
@@ -86,14 +88,15 @@ export function MembershipDenied({
 
   const handleInviteRedeem = React.useCallback(
     (relayWsUrl: string, code: string, policyReceipt?: string) => {
-      communityOnboarding.start({
+      const started = communityOnboarding.start({
         source: "membership-recovery",
         relayUrl: relayWsUrl,
         inviteCode: code,
         policyReceipt,
       });
+      if (started) onInviteRedeemStarted?.();
     },
-    [communityOnboarding],
+    [communityOnboarding, onInviteRedeemStarted],
   );
 
   return (
