@@ -136,6 +136,8 @@ use crate::config::ChannelFilter;
 pub struct ChannelInfo {
     pub name: String,
     pub channel_type: String,
+    /// Channel description from the kind-39000 `about` tag, if present.
+    pub description: Option<String>,
 }
 
 pub(crate) fn channel_type_from_tags(tags: &[serde_json::Value]) -> String {
@@ -175,7 +177,7 @@ pub(crate) fn merge_discovered_channels(
     channel_uuids: Vec<Uuid>,
     meta_events: &serde_json::Value,
 ) -> HashMap<Uuid, ChannelInfo> {
-    let mut meta_map: HashMap<Uuid, (String, String)> = HashMap::new();
+    let mut meta_map: HashMap<Uuid, (String, String, Option<String>)> = HashMap::new();
     let mut archived: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
     if let Some(arr) = meta_events.as_array() {
         for ev in arr {
@@ -186,11 +188,13 @@ pub(crate) fn merge_discovered_channels(
             let mut d_val = None;
             let mut name = None;
             let mut is_archived = false;
+            let mut description = None;
             for tag in tags {
                 if let Some(arr) = tag.as_array() {
                     match arr.first().and_then(|v| v.as_str()) {
                         Some("d") => d_val = arr.get(1).and_then(|v| v.as_str()),
                         Some("name") => name = arr.get(1).and_then(|v| v.as_str()),
+                        Some("about") => description = arr.get(1).and_then(|v| v.as_str()),
                         Some("archived") => {
                             is_archived = arr.get(1).and_then(|v| v.as_str()) == Some("true")
                         }
@@ -206,7 +210,11 @@ pub(crate) fn merge_discovered_channels(
                     }
                     let ch_name = name.unwrap_or("unknown").to_string();
                     let ch_type = channel_type_from_tags(tags);
-                    meta_map.insert(uuid, (ch_name, ch_type));
+                    let ch_desc = description
+                        .map(|s| s.trim())
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string);
+                    meta_map.insert(uuid, (ch_name, ch_type, ch_desc));
                 }
             }
         }
@@ -217,10 +225,17 @@ pub(crate) fn merge_discovered_channels(
         if archived.contains(&uuid) {
             continue;
         }
-        let (name, channel_type) = meta_map
+        let (name, channel_type, description) = meta_map
             .remove(&uuid)
-            .unwrap_or_else(|| ("unknown".to_string(), "unknown".to_string()));
-        map.insert(uuid, ChannelInfo { name, channel_type });
+            .unwrap_or_else(|| ("unknown".to_string(), "unknown".to_string(), None));
+        map.insert(
+            uuid,
+            ChannelInfo {
+                name,
+                channel_type,
+                description,
+            },
+        );
     }
     map
 }
@@ -403,6 +418,43 @@ impl RestClient {
         let body_bytes = serde_json::to_vec(filters)
             .map_err(|e| RelayError::Http(format!("filter serialize error: {e}")))?;
         let resp = self.bridge_post("/query", &body_bytes).await?;
+        resp.json()
+            .await
+            .map_err(|e| RelayError::Http(e.to_string()))
+    }
+
+    /// Single-attempt query — identical to `query` but bypasses `request_with_retry`.
+    ///
+    /// Use on per-turn hot paths (e.g. canvas fetch) where the latency contract
+    /// forbids implicit retries: one HTTP attempt, one outcome, no retry delays.
+    pub async fn query_once(&self, filters: &[nostr::Filter]) -> Result<Value, RelayError> {
+        let body_bytes = serde_json::to_vec(filters)
+            .map_err(|e| RelayError::Http(format!("filter serialize error: {e}")))?;
+        let url = format!("{}/query", self.base_url);
+        let body_owned = body_bytes.to_vec();
+        let auth_tag_header = self.auth_tag_json.clone();
+        let auth = self
+            .nip98_header("POST", &url, Some(&body_owned))
+            .unwrap_or_default();
+        let mut req = self
+            .http
+            .post(&url)
+            .header("Authorization", auth)
+            .header("Content-Type", "application/json");
+        if let Some(ref tag) = auth_tag_header {
+            req = req.header("x-auth-tag", tag);
+        }
+        let resp = req
+            .body(body_owned)
+            .send()
+            .await
+            .map_err(|e| RelayError::Http(e.to_string()))?;
+        if !resp.status().is_success() {
+            return Err(RelayError::Http(format!(
+                "POST /query returned HTTP {}",
+                resp.status()
+            )));
+        }
         resp.json()
             .await
             .map_err(|e| RelayError::Http(e.to_string()))

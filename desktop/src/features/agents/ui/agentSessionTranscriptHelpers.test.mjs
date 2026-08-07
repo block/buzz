@@ -358,10 +358,10 @@ test("parseSystemPromptSections pins the realistic Workspace+Base+System+Core ha
 
 // ── Channel Canvas extraction ─────────────────────────────────────────────────
 
-test("parseSystemPromptSections pins the full Base+System+Core+Canvas harness shape", () => {
-  // with_canvas() appends "\n\n[Channel Canvas]\n{metadata}" after the core block.
-  // render_canvas_section() emits the revision event ID, last-modified timestamp,
-  // and fetch command — never the canvas body. All four sections are extracted in order.
+test("parseSystemPromptSections extracts channel canvas from historical session prompts", () => {
+  // Historical sessions (pre–channel-context-delivery rework) carried the canvas
+  // in the system prompt via with_canvas(). This test ensures historical sessions
+  // still parse correctly — the extractor is retained for backward compat.
   const framed = [
     "[Base]",
     "You are an assistant.",
@@ -387,6 +387,33 @@ test("parseSystemPromptSections pins the full Base+System+Core+Canvas harness sh
       body: "Canvas revision (event ID): a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2\nLast modified: 2026-07-11T10:00:00Z\nFetch current content with: buzz canvas get --channel 94a444a4-c0a3-5966-ab05-530c6ddc2301",
     },
   ]);
+});
+
+test("parseSystemPromptSections handles new-session shape without channel canvas (post-rework)", () => {
+  // New sessions (post–channel-context-delivery rework) no longer include canvas
+  // in the system prompt — canvas is delivered per-turn in [Context] instead.
+  // This test pins that the new shape extracts correctly and no canvas section appears.
+  const framed = [
+    "[Base]",
+    "You are an assistant.",
+    "",
+    "[System]",
+    "Persona instructions.",
+    "",
+    "[Agent Memory — core]",
+    "I am Duncan.",
+  ].join("\n");
+  const sections = parseSystemPromptSections(framed);
+  assert.deepEqual(sections, [
+    { title: "Base", body: "You are an assistant." },
+    { title: "System", body: "Persona instructions." },
+    { title: "Core Memory", body: "I am Duncan." },
+  ]);
+  // Confirm no canvas section present.
+  assert.ok(
+    !sections.some((s) => s.title === "Channel Canvas"),
+    "new-session shape must not contain a Channel Canvas section",
+  );
 });
 
 test("parseSystemPromptSections extracts canvas when no Base/System/Core present (canvas-only)", () => {

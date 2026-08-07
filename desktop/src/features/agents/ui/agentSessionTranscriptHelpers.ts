@@ -60,22 +60,31 @@ export function parsePromptText(text: string): {
  * `Team Instructions`/`Core Memory`/`Channel Canvas` sub-sections
  * deterministically.
  *
- * The harness composes the value in order:
- *   `[Base]\n{base}\n\n[System]\n{persona}\n\n[Team Instructions]\n{team}\n\n[Agent Memory — core]\n{core}\n\n[Channel Canvas]\n{canvas}`
- * with any section omitted when absent. Extraction runs in reverse producer
- * order so that each `lastIndexOf` search operates on the full input and each
- * extraction boundary is unambiguous.
+ * **Current system-prompt shape (post–channel-context-delivery rework):**
+ *   `[Workspace]\n{workspace}\n\n[Base]\n{base}\n\n[System]\n{persona}\n\n[Team Instructions]\n{team}\n\n[Agent Memory — core]\n{core}`
  *
- * Five extraction passes:
+ * The `[Channel Canvas]` section is no longer appended to new sessions.
+ * Canvas revisions are now delivered per-turn in the `[Context]` block of the
+ * user message. The extractor below is intentionally retained: historical
+ * session recordings captured before this change still carry the section in
+ * their system-prompt field and must continue to parse correctly. Graceful
+ * degradation when the section is absent is the default — the canvas
+ * extraction pass simply yields `null` / no section when `[Channel Canvas]`
+ * is not found.
  *
- * 1. **Canvas** (`[Channel Canvas]`): appended last by `with_canvas()`.
+ * Extraction runs in reverse producer order so that each `lastIndexOf` search
+ * operates on the full input and each extraction boundary is unambiguous.
+ *
+ * Five extraction passes (canvas included for historical compat):
+ *
+ * 1. **Canvas** (`[Channel Canvas]`): present only in historical sessions.
  *    - Start-of-string: canvas-only input.
  *    - Appended frame (`\n\n[Channel Canvas]\n`): blank-line separator used by
- *      `with_canvas()`; LAST occurrence guards against an embedded header in a
- *      persona body (single preceding newline only).
+ *      the now-removed `with_canvas()`; LAST occurrence guards against an
+ *      embedded header in a persona body (single preceding newline only).
  *
- * 2. **Core** (`[Agent Memory — core]`): appended before canvas by `with_core()`.
- *    Same two cases, same last-occurrence guard.
+ * 2. **Core** (`[Agent Memory — core]`): appended before canvas (or last in
+ *    new sessions) by `with_core()`. Same two cases, same last-occurrence guard.
  *
  * 3. **Team Instructions** (`[Team Instructions]`): appended before core by
  *    `with_team()` in `buzz-acp/src/pool.rs`. Same two cases (start-of-string
