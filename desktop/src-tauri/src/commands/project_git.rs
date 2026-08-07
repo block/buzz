@@ -8,6 +8,8 @@ use crate::app_state::AppState;
 use serde::Serialize;
 use std::time::UNIX_EPOCH;
 use tauri::State;
+
+const MAX_EAGER_FILE_PREVIEWS: usize = 250;
 #[derive(Clone, Serialize)]
 pub struct ProjectRepoCommitInfo {
     pub hash: String,
@@ -258,20 +260,25 @@ fn parse_worktree_files(
                 return None;
             }
             let size = Some(metadata.len());
+            Some((path, full_path, size))
+        })
+        .enumerate()
+        .map(|(index, (path, full_path, size))| {
             let latest_commit = latest_commit_by_path.get(path).cloned();
-            Some(ProjectRepoFileInfo {
+            ProjectRepoFileInfo {
                 path: path.to_string(),
                 kind: "blob".to_string(),
                 size,
-                preview_content: read_preview_content(repo_dir, path, size),
+                preview_content: (index < MAX_EAGER_FILE_PREVIEWS)
+                    .then(|| read_preview_content(repo_dir, path, size))
+                    .flatten(),
                 last_changed_at: latest_commit
                     .as_ref()
                     .map(|commit| commit.timestamp)
                     .or_else(|| path_modified_at(&full_path)),
                 latest_commit,
-            })
+            }
         })
-        .take(250)
         .collect()
 }
 
@@ -323,12 +330,16 @@ fn parse_ls_tree(
             let kind = parts.next()?.to_string();
             let _object = parts.next()?;
             let size = parts.next().and_then(|value| value.parse::<u64>().ok());
-            let preview_content = if kind == "blob" {
+            Some((path, kind, size))
+        })
+        .enumerate()
+        .map(|(index, (path, kind, size))| {
+            let preview_content = if kind == "blob" && index < MAX_EAGER_FILE_PREVIEWS {
                 read_preview_content(repo_dir, path, size)
             } else {
                 None
             };
-            Some(ProjectRepoFileInfo {
+            ProjectRepoFileInfo {
                 path: path.to_string(),
                 kind,
                 size,
@@ -337,9 +348,8 @@ fn parse_ls_tree(
                     .get(path)
                     .map(|commit| commit.timestamp),
                 latest_commit: latest_commit_by_path.get(path).cloned(),
-            })
+            }
         })
-        .take(250)
         .collect()
 }
 
@@ -985,4 +995,56 @@ pub async fn pull_project_local_repository(
     })
     .await
     .map_err(|error| format!("repo pull task failed: {error}"))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fmt::Write;
+
+    #[test]
+    fn committed_file_snapshot_keeps_entries_beyond_preview_budget() {
+        let mut tree_output = String::new();
+        for index in 0..=MAX_EAGER_FILE_PREVIEWS {
+            writeln!(
+                tree_output,
+                "100644 blob {index:040x} 7\tfile-{index:04}.txt"
+            )
+            .expect("write tree fixture");
+        }
+
+        let files = parse_ls_tree(
+            std::path::Path::new("."),
+            &tree_output,
+            &std::collections::HashMap::new(),
+        );
+
+        assert_eq!(files.len(), MAX_EAGER_FILE_PREVIEWS + 1);
+        assert_eq!(
+            files.last().map(|file| file.path.as_str()),
+            Some("file-0250.txt")
+        );
+    }
+
+    #[test]
+    fn worktree_snapshot_keeps_entries_beyond_preview_budget() {
+        let repo_dir = tempfile::tempdir().expect("create temporary repository");
+        let mut tracked_paths = String::new();
+        for index in 0..=MAX_EAGER_FILE_PREVIEWS {
+            let path = format!("file-{index:04}.txt");
+            std::fs::write(repo_dir.path().join(&path), "preview").expect("write worktree fixture");
+            tracked_paths.push_str(&path);
+            tracked_paths.push('\0');
+        }
+
+        let files = parse_worktree_files(
+            repo_dir.path(),
+            &tracked_paths,
+            &std::collections::HashMap::new(),
+        );
+
+        assert_eq!(files.len(), MAX_EAGER_FILE_PREVIEWS + 1);
+        assert_eq!(files[0].preview_content.as_deref(), Some("preview"));
+        assert_eq!(files[MAX_EAGER_FILE_PREVIEWS].preview_content, None);
+    }
 }
