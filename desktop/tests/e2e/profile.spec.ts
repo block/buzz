@@ -213,6 +213,7 @@ test("keeps the saved profile description after a community round trip", async (
 test("updates the relay-backed profile from settings", async ({ page }) => {
   const stamp = Date.now();
   const displayName = `Tyler QA ${stamp}`;
+  const name = `tyler-${stamp}`;
   const avatarUrl = `https://example.com/avatar-${stamp}.png`;
   const about = `Coordinating relay profile setup ${stamp}`;
   await page.goto("/");
@@ -234,12 +235,14 @@ test("updates the relay-backed profile from settings", async ({ page }) => {
   await expect(page.getByTestId("profile-metadata-edit")).toHaveText("Done");
   await expect(page.getByTestId("profile-about")).toBeVisible();
   await page.getByTestId("profile-display-name").fill(displayName);
+  await page.getByTestId("profile-name").fill(name);
   await page.getByTestId("profile-about").fill(about);
   await page.getByTestId("profile-metadata-edit").click();
 
   await expect(page.getByTestId("profile-display-name-value")).toHaveText(
     displayName,
   );
+  await expect(page.getByTestId("profile-name-value")).toHaveText(name);
   await expect(page.getByTestId("profile-about-value")).toHaveText(about);
 
   await page.getByTestId("profile-avatar-edit").click();
@@ -250,6 +253,7 @@ test("updates the relay-backed profile from settings", async ({ page }) => {
   await expect(page.getByTestId("profile-display-name-value")).toHaveText(
     displayName,
   );
+  await expect(page.getByTestId("profile-name-value")).toHaveText(name);
   await expect(page.getByTestId("profile-nip05")).toContainText("Not set");
   await page.getByTestId("profile-avatar-edit").click();
   await expect(page.getByTestId("profile-avatar-url")).toHaveValue("");
@@ -264,6 +268,7 @@ test("updates the relay-backed profile from settings", async ({ page }) => {
   await expect(page.getByTestId("profile-display-name-value")).toHaveText(
     displayName,
   );
+  await expect(page.getByTestId("profile-name-value")).toHaveText(name);
   await expandIdentity(page);
   await expect(page.getByTestId("profile-nip05")).toContainText("Not set");
   await page.getByTestId("profile-avatar-edit").click();
@@ -284,6 +289,7 @@ test("saves profile metadata from the block Done button", async ({ page }) => {
   await expect(page.getByTestId("profile-metadata-edit")).toHaveText("Done");
   await expect(page.getByTestId("profile-about")).toBeVisible();
   await page.getByTestId("profile-display-name").fill("Save Button QA");
+  await page.getByTestId("profile-name").fill("save-button-qa");
   await page.getByTestId("profile-about").fill("Temporary profile note");
   await expect(page.getByTestId("profile-save")).toHaveCount(0);
 
@@ -292,6 +298,9 @@ test("saves profile metadata from the block Done button", async ({ page }) => {
   await expect(page.getByTestId("profile-display-name")).toHaveCount(0);
   await expect(page.getByTestId("profile-display-name-value")).toHaveText(
     "Save Button QA",
+  );
+  await expect(page.getByTestId("profile-name-value")).toHaveText(
+    "save-button-qa",
   );
   await expect(page.getByTestId("profile-about-value")).toHaveText(
     "Temporary profile note",
@@ -305,6 +314,12 @@ test("saves profile metadata from the block Done button", async ({ page }) => {
   await waitForReactEffects(page);
   await expect(page.getByTestId("profile-about-value")).toHaveText("Not set");
   await expect(page.getByTestId("profile-save")).toHaveCount(0);
+
+  await page.getByTestId("profile-metadata-edit").click();
+  await page.getByTestId("profile-name").fill("   ");
+  await page.getByTestId("profile-metadata-edit").click();
+  await waitForReactEffects(page);
+  await expect(page.getByTestId("profile-name-value")).toHaveText("Not set");
 
   await page.getByTestId("profile-metadata-edit").click();
   await page.getByTestId("profile-display-name").fill("");

@@ -19,6 +19,7 @@ test("avatar step always shows Skip for now button without an error", async ({
   await page.goto("/");
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
+  await page.getByTestId("onboarding-name").fill("morty");
   await page.getByTestId("onboarding-next").click();
 
   await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
@@ -46,12 +47,25 @@ test("avatar step skip button completes community profile setup", async ({
   await page.goto("/");
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
+  await page.getByTestId("onboarding-name").fill("morty");
   await page.getByTestId("onboarding-next").click();
 
   await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
   await page.getByTestId("onboarding-skip").click();
 
   await expect(page.getByTestId("onboarding-gate")).not.toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [])
+          .filter(({ command }) => command === "update_profile")
+          .map(({ payload }) => payload),
+      ),
+    )
+    .toContainEqual({
+      displayName: "Morty QA",
+      name: "morty",
+    });
 });
 
 test("avatar Next button still requires an avatar to be chosen", async ({

@@ -416,6 +416,50 @@ test("reaction pills sort by earliest created_at ascending", () => {
   );
 });
 
+test("reaction actor labels fall back from blank display_name to name", () => {
+  const MSG_ID =
+    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+  const message = {
+    id: MSG_ID,
+    pubkey: PUBKEY_A,
+    kind: 9,
+    created_at: 1_700_000_000,
+    content: "hello",
+    tags: [["h", CHANNEL_ID]],
+    sig: "sig",
+  };
+  const reaction = {
+    id: `d${"d".repeat(63)}`,
+    pubkey: PUBKEY_B,
+    kind: 7,
+    created_at: 1_700_001_001,
+    content: "🎉",
+    tags: [
+      ["h", CHANNEL_ID],
+      ["e", MSG_ID],
+    ],
+    sig: "sig",
+  };
+
+  const output = formatTimelineMessages(
+    [message, reaction],
+    null,
+    undefined,
+    null,
+    {
+      [PUBKEY_B]: {
+        avatarUrl: null,
+        displayName: "   ",
+        name: "alice",
+        nip05Handle: null,
+        ownerPubkey: null,
+      },
+    },
+  );
+
+  assert.equal(output[0].reactions?.[0]?.users[0]?.displayName, "alice");
+});
+
 test("reaction pills with equal created_at tiebreak deterministically on emoji string", () => {
   const MSG_ID =
     "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";

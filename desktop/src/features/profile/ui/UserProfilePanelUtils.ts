@@ -160,6 +160,7 @@ export function getRelayAgentChannelIds(
 export function buildPersonaDraftProfile(persona: AgentPersona): Profile {
   return {
     pubkey: "",
+    name: null,
     displayName: persona.displayName,
     avatarUrl: persona.avatarUrl,
     about: null,
@@ -229,8 +230,9 @@ export function resolveProfileDisplayName({
   pubkey: string | null;
 }) {
   return (
-    profile?.displayName ??
-    persona?.displayName ??
+    profile?.displayName?.trim() ||
+    profile?.name?.trim() ||
+    persona?.displayName?.trim() ||
     (pubkey ? truncatePubkey(pubkey) : "Agent")
   );
 }
@@ -246,6 +248,7 @@ export function resolveOwnerHandle(
   return (
     profile?.nip05Handle?.trim() ||
     profile?.displayName?.trim() ||
+    profile?.name?.trim() ||
     truncatePubkey(currentPubkey)
   );
 }

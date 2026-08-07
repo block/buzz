@@ -107,15 +107,14 @@ export type { Identity, IdentityStorage } from "./identityTypes";
 
 export type Profile = {
   pubkey: string;
+  name: string | null; // Kind-0 short handle; not guaranteed unique.
   displayName: string | null;
   avatarUrl: string | null;
   about: string | null;
   nip05Handle: string | null;
   ownerPubkey: string | null;
-  /** True when a real kind:0 metadata event exists on the relay for this pubkey.
-   * False for the synthesized fallback returned when no event is present.
-   * Used by the onboarding gate to distinguish new users from returning users
-   * whose display name happens to be empty. */
+  /** True for a real kind:0 event, false for a synthesized missing-event
+   * fallback. Distinguishes new users from returning users with no display name. */
   hasProfileEvent: boolean;
 };
 
@@ -152,6 +151,7 @@ export type UserSearchPage = {
 
 export type UpdateProfileInput = {
   displayName?: string;
+  name?: string; // Empty/whitespace removes it; omission preserves it.
   avatarUrl?: string;
   about?: string;
   nip05Handle?: string;

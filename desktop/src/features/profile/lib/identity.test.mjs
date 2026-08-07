@@ -1,13 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { formatOwnerLabel, profileLookupsEqual } from "./identity.ts";
+import {
+  formatOwnerLabel,
+  mergeCurrentProfileIntoLookup,
+  profileLookupsEqual,
+  resolveUserLabel,
+} from "./identity.ts";
 
 const OWNER_PUBKEY =
   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 const summary = (over = {}) => ({
   displayName: "Ada",
+  name: null,
   avatarUrl: "https://x/a.png",
   nip05Handle: "ada@x",
   ownerPubkey: null,
@@ -18,9 +24,26 @@ const summary = (over = {}) => ({
 test("formatOwnerLabel resolves a known owner's display name", () => {
   assert.equal(
     formatOwnerLabel(OWNER_PUBKEY, null, {
-      [OWNER_PUBKEY]: summary({ displayName: "baxen" }),
+      [OWNER_PUBKEY]: summary({
+        displayName: "baxen",
+        nip05Handle: null,
+      }),
     }),
     "baxen",
+  );
+});
+
+test("formatOwnerLabel prefers NIP-05 when all owner identity fields coexist", () => {
+  assert.equal(
+    formatOwnerLabel(OWNER_PUBKEY, null, {
+      [OWNER_PUBKEY]: {
+        pubkey: OWNER_PUBKEY,
+        name: "legacy-name",
+        displayName: "Human Name",
+        nip05Handle: "owner@example.com",
+      },
+    }),
+    "owner@example.com",
   );
 });
 
@@ -58,6 +81,7 @@ test("profileLookupsEqual: same count, different keys is not equal", () => {
 test("profileLookupsEqual: a changed field is not equal", () => {
   for (const field of [
     "displayName",
+    "name",
     "avatarUrl",
     "nip05Handle",
     "ownerPubkey",
@@ -76,6 +100,72 @@ test("profileLookupsEqual: a changed field is not equal", () => {
 
 test("profileLookupsEqual: two empty lookups are equal", () => {
   assert.equal(profileLookupsEqual({}, {}), true);
+});
+
+test("resolveUserLabel uses a legacy kind-0 name when display_name is absent", () => {
+  assert.equal(
+    resolveUserLabel({
+      pubkey: OWNER_PUBKEY,
+      profiles: {
+        [OWNER_PUBKEY]: summary({
+          displayName: null,
+          name: "legacy-name",
+          nip05Handle: null,
+        }),
+      },
+    }),
+    "legacy-name",
+  );
+});
+
+test("mergeCurrentProfileIntoLookup uses a nonblank name as its presentation label", () => {
+  const profiles = mergeCurrentProfileIntoLookup(
+    {
+      [OWNER_PUBKEY]: summary({
+        displayName: "legacy-name",
+        name: "legacy-name",
+      }),
+    },
+    {
+      pubkey: OWNER_PUBKEY,
+      name: "legacy-name",
+      displayName: "   ",
+      avatarUrl: null,
+      nip05Handle: null,
+    },
+  );
+
+  assert.equal(profiles?.[OWNER_PUBKEY]?.displayName, "legacy-name");
+  assert.equal(profiles?.[OWNER_PUBKEY]?.name, "legacy-name");
+  assert.equal(
+    resolveUserLabel({ pubkey: OWNER_PUBKEY, profiles }),
+    "legacy-name",
+  );
+});
+
+test("mergeCurrentProfileIntoLookup does not restore a cleared name from stale lookup data", () => {
+  const profiles = mergeCurrentProfileIntoLookup(
+    {
+      [OWNER_PUBKEY]: summary({
+        displayName: "legacy-name",
+        name: "legacy-name",
+      }),
+    },
+    {
+      pubkey: OWNER_PUBKEY,
+      name: null,
+      displayName: null,
+      avatarUrl: null,
+      nip05Handle: null,
+    },
+  );
+
+  assert.equal(profiles?.[OWNER_PUBKEY]?.displayName, null);
+  assert.equal(profiles?.[OWNER_PUBKEY]?.name, null);
+  assert.notEqual(
+    resolveUserLabel({ pubkey: OWNER_PUBKEY, profiles }),
+    "legacy-name",
+  );
 });
 
 // Render-count proof for the Tier-1 typing-storm fix (#1533 discipline).

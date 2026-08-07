@@ -22,6 +22,7 @@ export type OnboardingProfileSeed = {
 export type OnboardingProfileValues = {
   avatarUrl: string;
   displayName: string;
+  name: string;
 };
 
 export type ProfileStepSaveRecovery = {
@@ -42,6 +43,7 @@ export type ProfileStepAvatarState = {
 
 export type ProfileStepState = {
   avatar: ProfileStepAvatarState;
+  handle: ProfileStepNameState;
   isUploadingAvatar: boolean;
   isSaving: boolean;
   name: ProfileStepNameState;
@@ -58,6 +60,7 @@ export type ProfileStepActions = {
   submit: () => void;
   updateAvatarUrl: (value: string) => void;
   updateDisplayName: (value: string) => void;
+  updateName: (value: string) => void;
 };
 
 export type SetupStepActions = {
