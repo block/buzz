@@ -64,6 +64,12 @@ final openDownloadedFileProvider = Provider<OpenDownloadedFile>((ref) {
   };
 });
 
+/// Whether [content] ends with the multi-image gallery rendered by
+/// [MessageContent].
+bool hasTrailingImageGallery(String content, List<List<String>> tags) {
+  return _extractTrailingImageGallery(content, parseImetaTags(tags)) != null;
+}
+
 String _safeDownloadedFilename(String filename) {
   final safe = filename
       .split(RegExp(r'[/\\]'))
