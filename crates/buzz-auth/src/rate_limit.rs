@@ -6,7 +6,7 @@
 //! ⚠️ Fixed windows allow up to 2× burst at boundaries. Upgrade to sliding
 //! window or token bucket for strict limiting.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 
 use buzz_core::TenantContext;
 use nostr::PublicKey;
@@ -207,11 +207,42 @@ pub fn rate_limit_key(ctx: &TenantContext, pubkey: &PublicKey, limit_type: &Limi
     )
 }
 
-/// Redis key for IP-based rate limit: `buzz:ratelimit:ip:{ip}:conn`.
+/// Redis key for IP-based rate limit: `buzz:ratelimit:ip:{bucket}:conn`.
 ///
-/// Operator-global by design — see [`RateLimiter`] docs.
+/// Operator-global by design — see [`RateLimiter`] docs. The address is
+/// bucketed by [`ip_rate_limit_bucket`] so an IPv6 client cannot mint a fresh
+/// counter per connection.
 pub fn ip_rate_limit_key(ip: &IpAddr) -> String {
-    format!("buzz:ratelimit:ip:{}:conn", ip)
+    format!("buzz:ratelimit:ip:{}:conn", ip_rate_limit_bucket(ip))
+}
+
+/// The counter identity an address is charged against.
+///
+/// IPv4 is keyed on the full address: v4 space is scarce, addresses are
+/// commonly shared behind carrier NAT, and widening the bucket would let one
+/// abusive client deny service to everyone behind the same egress.
+///
+/// IPv6 is keyed on the `/64` prefix. A single end site is routinely delegated
+/// a `/64` or shorter (RFC 4291 §2.5.4 fixes the interface identifier at 64
+/// bits), so keying on the full `/128` lets one host rotate through 2^64
+/// source addresses and get a fresh quota for every connection — the fence
+/// would count addresses, not clients.
+///
+/// IPv4-mapped addresses (`::ffff:a.b.c.d`) are unmapped to their IPv4 form
+/// first. Masking them to `/64` would collapse every IPv4 client that arrives
+/// over a dual-stack socket into the single `::/64` bucket, turning the fence
+/// into a global limit on all IPv4 traffic.
+pub fn ip_rate_limit_bucket(ip: &IpAddr) -> String {
+    match ip {
+        IpAddr::V4(v4) => v4.to_string(),
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => v4.to_string(),
+            None => {
+                let s = v6.segments();
+                format!("{}/64", Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0))
+            }
+        },
+    }
 }
 
 /// Always-allow rate limiter for unit tests.
@@ -310,6 +341,57 @@ mod tests {
         // IP fence stays operator-global — no community in the key.
         let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1));
         assert_eq!(ip_rate_limit_key(&ip), "buzz:ratelimit:ip:192.168.1.1:conn");
+    }
+
+    #[test]
+    fn ipv6_addresses_in_one_slash_64_share_a_counter() {
+        // The fence counts clients, not addresses. An end site holding a /64
+        // must not mint a fresh quota by rotating its interface identifier —
+        // it has 2^64 of them.
+        let a = IpAddr::V6("2001:db8:1:2::1".parse::<Ipv6Addr>().unwrap());
+        let b = IpAddr::V6("2001:db8:1:2:dead:beef:cafe:1".parse::<Ipv6Addr>().unwrap());
+        assert_eq!(ip_rate_limit_key(&a), ip_rate_limit_key(&b));
+        assert_eq!(
+            ip_rate_limit_key(&a),
+            "buzz:ratelimit:ip:2001:db8:1:2::/64:conn"
+        );
+    }
+
+    #[test]
+    fn distinct_ipv6_prefixes_keep_separate_counters() {
+        // Bucketing must not over-block: two different end sites stay independent.
+        let a = IpAddr::V6("2001:db8:1:2::1".parse::<Ipv6Addr>().unwrap());
+        let b = IpAddr::V6("2001:db8:1:3::1".parse::<Ipv6Addr>().unwrap());
+        assert_ne!(ip_rate_limit_key(&a), ip_rate_limit_key(&b));
+    }
+
+    #[test]
+    fn ipv4_mapped_addresses_are_not_collapsed() {
+        // ::ffff:a.b.c.d arrives on dual-stack sockets. Masking these to /64
+        // would put every IPv4 client in one bucket — a global IPv4 limit, and
+        // a self-inflicted outage rather than a fence.
+        let mapped_a = IpAddr::V6("::ffff:192.168.1.1".parse::<Ipv6Addr>().unwrap());
+        let mapped_b = IpAddr::V6("::ffff:203.0.113.9".parse::<Ipv6Addr>().unwrap());
+        assert_ne!(ip_rate_limit_key(&mapped_a), ip_rate_limit_key(&mapped_b));
+
+        // A mapped address charges the same counter as its native v4 form, so a
+        // client cannot double its quota by switching socket family.
+        let native = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1));
+        assert_eq!(ip_rate_limit_key(&mapped_a), ip_rate_limit_key(&native));
+    }
+
+    #[test]
+    fn ipv6_bucket_key_is_lowercase() {
+        // Same idempotence invariant the pubkey key holds: uppercase hex would
+        // split one logical client across two Redis rows → double quota.
+        let ip = IpAddr::V6("2001:DB8:AB:CD::1".parse::<Ipv6Addr>().unwrap());
+        let key = ip_rate_limit_key(&ip);
+        for c in key.chars() {
+            assert!(
+                !c.is_ascii_uppercase(),
+                "ip rate-limit key {key} must be all-lowercase ASCII"
+            );
+        }
     }
 
     #[tokio::test]
