@@ -855,15 +855,27 @@ fn filters_are_nip43_membership_only(filters: &[Filter]) -> bool {
 }
 
 /// Extract a channel UUID from a single filter's `#h` tag.
+///
+/// Returns `Some` only when the filter carries EXACTLY ONE `#h` value that
+/// parses as a UUID — multi-value `#h` filters (e.g. the desktop Workflows
+/// overview's batched `{"kinds":[30620], "#h":[c1, c2, …]}` query) must NOT
+/// collapse to the first channel. Collapsing would intersect the narrow
+/// `channel_id` predicate with the caller's broader access scope and silently
+/// drop every other channel from the result set (#5017 / #4419: the batched
+/// overview emptied whenever the lexicographically-first member channel —
+/// often a DM — contained no workflows). Multi-value `#h` filters fall back to
+/// the caller's full access scope via `apply_access_scope_to_query`.
+///
+/// Mirrors `extract_channel_from_filter` in `api/bridge.rs`, which enforces
+/// the same single-value rule for the bridge's per-filter access skip.
 fn extract_channel_id_from_filter(filter: &Filter) -> Option<uuid::Uuid> {
     for (tag_key, tag_values) in filter.generic_tags.iter() {
         let key = tag_key.to_string();
         if key == "h" {
-            for val in tag_values {
-                if let Ok(id) = val.parse::<uuid::Uuid>() {
-                    return Some(id);
-                }
+            if tag_values.len() != 1 {
+                return None;
             }
+            return tag_values.iter().next()?.parse::<uuid::Uuid>().ok();
         }
     }
     None
@@ -2086,5 +2098,55 @@ mod tests {
         ));
         // No #p tag — fallback required.
         assert!(!result_gated_count_safe_for_pushdown(&f, &owner));
+    }
+
+    // ── multi-value #h regression (#5017 / #4419) ──────────────────────────────
+    //
+    // The desktop Workflows overview batches every member channel into one
+    // `#h` filter (`{"kinds":[30620], "#h":[c1, c2, …]}`). A multi-value #h
+    // filter MUST NOT collapse to its first channel: the narrow `channel_id`
+    // predicate would intersect the caller's broader access scope and drop
+    // every other channel — the overview emptied whenever the first-sorted
+    // member channel (often a DM) contained no workflows. The collapse lived
+    // in `extract_channel_id_from_filter`, which returned the first parseable
+    // value regardless of count; the bridge's `extract_channel_from_filter`
+    // already required exactly one value, so the two diverged.
+
+    #[test]
+    fn multi_value_h_filter_does_not_collapse_to_first_channel() {
+        let c1 = uuid::Uuid::new_v4();
+        let c2 = uuid::Uuid::new_v4();
+        let h = SingleLetterTag::lowercase(Alphabet::H);
+        let single = Filter::new().custom_tags(h, [c1.to_string()]);
+        let multi = Filter::new().custom_tags(h, [c1.to_string(), c2.to_string()]);
+
+        // Single value → the channel predicate is pushed (unchanged behavior).
+        assert_eq!(extract_channel_id_from_filter(&single), Some(c1));
+        // Multi value → None: the caller's full access scope applies instead.
+        assert_eq!(extract_channel_id_from_filter(&multi), None);
+    }
+
+    #[test]
+    fn multi_value_h_filter_query_keeps_access_scope() {
+        let c1 = uuid::Uuid::new_v4();
+        let c2 = uuid::Uuid::new_v4();
+        let h = SingleLetterTag::lowercase(Alphabet::H);
+        let multi = Filter::new().custom_tags(h, [c1.to_string(), c2.to_string()]);
+        let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
+
+        let mut query = filter_to_query_params(
+            &multi,
+            extract_channel_id_from_filter(&multi),
+            community,
+        );
+        apply_access_scope_to_query(
+            &mut query,
+            extract_channel_id_from_filter(&multi),
+            &[c1, c2],
+        );
+
+        // No narrow single-channel predicate; both channels stay in scope.
+        assert_eq!(query.channel_id, None);
+        assert_eq!(query.channel_ids.as_deref(), Some([c1, c2].as_slice()));
     }
 }
