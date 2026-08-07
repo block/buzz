@@ -566,9 +566,42 @@ pub struct SendMessageParams {
     pub content: String,
     pub kind: Option<u16>,
     pub reply_to: Option<String>,
+    pub top_level: bool,
     pub broadcast: bool,
     pub files: Vec<String>,
     pub mentions: Vec<String>,
+}
+
+fn reply_to_from_sources(
+    top_level: bool,
+    explicit: Option<String>,
+    env_value: Option<String>,
+    file_path: Option<&std::ffi::OsStr>,
+) -> Option<String> {
+    if top_level {
+        return None;
+    }
+    explicit
+        .or_else(|| {
+            env_value.and_then(|value| {
+                let value = value.trim();
+                (!value.is_empty()).then(|| value.to_owned())
+            })
+        })
+        .or_else(|| {
+            let path = file_path?;
+            let value = std::fs::read_to_string(path).ok()?;
+            (!value.trim().is_empty()).then(|| value.trim().to_owned())
+        })
+}
+
+fn automatic_reply_to(top_level: bool, explicit: Option<String>) -> Option<String> {
+    reply_to_from_sources(
+        top_level,
+        explicit,
+        std::env::var("BUZZ_REPLY_TO").ok(),
+        std::env::var_os("BUZZ_REPLY_TO_FILE").as_deref(),
+    )
 }
 
 pub async fn cmd_send_message(
@@ -581,6 +614,7 @@ pub async fn cmd_send_message(
     // bugs for agent and human users alike.
     p.content = read_or_stdin(&p.content)?;
     validate_content_size(&p.content)?;
+    p.reply_to = automatic_reply_to(p.top_level, p.reply_to);
     if let Some(ref r) = p.reply_to {
         validate_hex64(r)?;
     }
@@ -877,6 +911,7 @@ pub async fn dispatch(
             content,
             kind,
             reply_to,
+            top_level,
             broadcast,
             files,
             mentions,
@@ -888,6 +923,7 @@ pub async fn dispatch(
                     content,
                     kind,
                     reply_to,
+                    top_level,
                     broadcast,
                     files,
                     mentions,
@@ -994,7 +1030,7 @@ pub async fn dispatch(
 mod tests {
     use super::{
         event_mention_pubkeys, find_root_from_tags, match_profiles_by_name, merge_message_mentions,
-        missing_members, normalize_explicit_mentions, parse_member_pubkeys,
+        missing_members, normalize_explicit_mentions, parse_member_pubkeys, reply_to_from_sources,
         resolve_names_to_pubkeys,
     };
     use buzz_sdk::mentions::{
@@ -1011,6 +1047,75 @@ mod tests {
     const PK_VALID_A: &str = "35c18ae273fccfaf80d629e20e7f8721b90499379addff533054acc2504c12b4";
     const PK_VALID_B: &str = "c6237ef84fa537c78dcee78efd2d4e59f728859c7f194da42ac51ededfa0be05";
     const PK_VALID_C: &str = "f4a42a97e594b77bdbd8ee35191c8b28a94a4cb871d96f32921558275421fb68";
+
+    #[test]
+    fn explicit_reply_to_precedes_environment_and_file() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), ID_B).unwrap();
+        assert_eq!(
+            reply_to_from_sources(
+                false,
+                Some(ID_A.into()),
+                Some(ID_B.into()),
+                Some(file.path().as_os_str()),
+            )
+            .as_deref(),
+            Some(ID_A)
+        );
+    }
+
+    #[test]
+    fn reply_to_environment_precedes_file() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), ID_A).unwrap();
+        assert_eq!(
+            reply_to_from_sources(
+                false,
+                None,
+                Some(format!(" {ID_B}\n")),
+                Some(file.path().as_os_str()),
+            )
+            .as_deref(),
+            Some(ID_B)
+        );
+    }
+
+    #[test]
+    fn reply_to_file_is_fallback_and_empty_values_are_ignored() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), format!(" {ID_A}\n")).unwrap();
+        assert_eq!(
+            reply_to_from_sources(
+                false,
+                None,
+                Some("  ".into()),
+                Some(file.path().as_os_str()),
+            )
+            .as_deref(),
+            Some(ID_A)
+        );
+        std::fs::write(file.path(), "").unwrap();
+        assert_eq!(
+            reply_to_from_sources(false, None, None, Some(file.path().as_os_str())),
+            None
+        );
+        assert_eq!(reply_to_from_sources(false, None, None, None), None);
+    }
+
+    #[test]
+    fn top_level_suppresses_explicit_environment_and_file_reply_targets() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), ID_A).unwrap();
+        assert_eq!(
+            reply_to_from_sources(
+                true,
+                Some(ID_A.into()),
+                Some(ID_B.into()),
+                Some(file.path().as_os_str()),
+            ),
+            None
+        );
+    }
 
     #[test]
     fn root_marker_wins_over_reply_marker() {
