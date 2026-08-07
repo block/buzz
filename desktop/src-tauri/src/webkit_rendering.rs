@@ -2,16 +2,17 @@
 //!
 //! WebKitGTK's dmabuf renderer aborts the web process during startup on some
 //! GPU/driver/compositor combinations, so Buzz comes up with no window at all
-//! and the user has no way to fix it (#2338, upstream tauri#9394). Setting
-//! `WEBKIT_DISABLE_DMABUF_RENDERER=1` avoids the abort by falling back to the
-//! shared-memory buffer path.
+//! and the user has no way to fix it (#2338, #3656, upstream tauri#9394).
+//! Setting `WEBKIT_DISABLE_DMABUF_RENDERER=1` avoids the abort by falling back
+//! to the shared-memory buffer path.
 //!
 //! WebKit reads each of these variables exactly once per process, so the choice
-//! has to be made before anything initializes — there is no runtime toggle and
+//! has to be made before anything initializes -- there is no runtime toggle and
 //! no second chance later in the same process. This module therefore decides
 //! from cheap preflight signals instead of reacting to a crash:
 //!
-//! * an NVIDIA GPU, the driver family behind most upstream reports; and
+//! * an NVIDIA or AMD GPU -- both driver families have triggered the blank
+//!   screen on various compositor/kernel combinations (#2338, #3656); and
 //! * AppImage packaging, where linuxdeploy's AppRun hook pins `GDK_BACKEND=x11`
 //!   and the dmabuf renderer buys nothing on that XWayland path (#2338).
 //!
@@ -30,6 +31,9 @@ const SAFE_RENDERING: &str = "--safe-rendering";
 
 /// PCI vendor ID reported by NVIDIA devices under `/sys/class/drm`.
 const NVIDIA_PCI_VENDOR: &str = "0x10de";
+
+/// PCI vendor ID reported by AMD/ATI devices under `/sys/class/drm`.
+const AMD_PCI_VENDOR: &str = "0x1002";
 
 /// Where DRM devices advertise their PCI vendor.
 const DRM_ROOT: &str = "/sys/class/drm";
@@ -138,7 +142,8 @@ fn plan(
     }
 
     let signals = [
-        (nvidia_gpu(drm_root), "NVIDIA GPU"),
+        (gpu_vendor(drm_root, NVIDIA_PCI_VENDOR), "NVIDIA GPU"),
+        (gpu_vendor(drm_root, AMD_PCI_VENDOR), "AMD GPU"),
         (env("APPIMAGE").is_some(), "AppImage"),
     ];
     let hits: Vec<&str> = signals
@@ -148,7 +153,7 @@ fn plan(
 
     match hits.is_empty() {
         true => Plan::Leave {
-            why: "no NVIDIA GPU and not an AppImage".to_string(),
+            why: "no NVIDIA/AMD GPU and not an AppImage".to_string(),
         },
         false => Plan::Apply {
             vars: &HEURISTIC,
@@ -177,15 +182,15 @@ fn describe(user_set: &[(&str, OsString)]) -> String {
     shown.join(", ")
 }
 
-/// Whether any DRM device reports NVIDIA's PCI vendor ID. An unreadable device
-/// tree is not a hit — the workaround has a real cost, so it needs evidence.
-fn nvidia_gpu(drm_root: &Path) -> bool {
+/// Whether any DRM device reports the given PCI vendor ID. An unreadable device
+/// tree is not a hit -- the workaround has a real cost, so it needs evidence.
+fn gpu_vendor(drm_root: &Path, vendor_id: &str) -> bool {
     let Ok(entries) = std::fs::read_dir(drm_root) else {
         return false;
     };
     entries.flatten().any(|entry| {
         std::fs::read_to_string(entry.path().join("device/vendor"))
-            .is_ok_and(|vendor| vendor.trim().eq_ignore_ascii_case(NVIDIA_PCI_VENDOR))
+            .is_ok_and(|vendor| vendor.trim().eq_ignore_ascii_case(vendor_id))
     })
 }
 
