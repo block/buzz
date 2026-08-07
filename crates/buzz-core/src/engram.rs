@@ -467,6 +467,11 @@ pub fn build_event(
 
     EventBuilder::new(Kind::Custom(KIND_AGENT_ENGRAM as u16), ciphertext)
         .tags(tags)
+        // NIP-AE requires exactly one `p` tag naming the owner. When an
+        // identity keeps memory for itself (agent == owner), the builder's
+        // default self-tagging filter would silently strip that tag and
+        // produce an envelope that fails head selection.
+        .allow_self_tagging()
         .custom_created_at(nostr::Timestamp::from(created_at))
         .sign_with_keys(agent_keys)
         .map_err(|e| EngramError::Sign(e.to_string()))
@@ -1045,5 +1050,34 @@ mod tests {
             extract_refs("I refer to [[mem/me]] from inside mem/me's value"),
             vec!["mem/me".to_string()]
         );
+    }
+
+    #[test]
+    fn self_owned_engram_keeps_required_p_tag() {
+        // An identity keeping memory for itself (agent == owner) must still
+        // produce a NIP-AE-valid envelope: the builder's self-tagging filter
+        // silently stripped the required `p` tag before this was pinned.
+        let keys = Keys::generate();
+        let me = keys.public_key();
+        let body = Body::Memory {
+            slug: "mem/self".to_string(),
+            value: Some("note to self".to_string()),
+        };
+        let event = build_event(&keys, &me, &body, 1_700_000_000).expect("event builds");
+        let p_values: Vec<String> = event
+            .tags
+            .iter()
+            .filter(|tag| tag.kind() == nostr::TagKind::p())
+            .filter_map(|tag| tag.content().map(str::to_string))
+            .collect();
+        assert_eq!(
+            p_values,
+            vec![me.to_hex()],
+            "exactly one p tag naming the owner"
+        );
+
+        let decoded = validate_and_decrypt(&event, &me, &me, keys.secret_key(), &me)
+            .expect("self-owned engram validates and decrypts");
+        assert_eq!(decoded, body);
     }
 }
