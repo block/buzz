@@ -621,20 +621,16 @@ pub async fn submit_event(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     // Row zero: bind this HTTP request to its community from the request host
     // before any tenant-scoped write, identical to the WS door in `router.rs`.
-    // Unmapped host or lookup failure fails closed with a generic 404 — never a
-    // default tenant, never echoing the host.
+    // Unmapped host or lookup failure fails closed with a generic body — never
+    // a default tenant, never echoing the host. The status still separates
+    // permanent (unmapped → 404) from transient (lookup failure → 503).
     let raw_host = headers
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let tenant = crate::tenant::bind_community(&state.db, raw_host)
         .await
-        .map_err(|_| {
-            api_error(
-                StatusCode::NOT_FOUND,
-                "relay: no community is configured for this host",
-            )
-        })?;
+        .map_err(|err| api_error(err.http_status(), err.public_message()))?;
 
     let url = nip98_expected_url(&state.config.relay_url, &tenant, "/events");
     let (pubkey, event_id_bytes) = verify_bridge_auth(
@@ -888,21 +884,16 @@ pub async fn query_events(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     // Row zero: bind this HTTP request to its community from the request host
     // before any tenant-scoped read, identical to the WS door in `router.rs`.
-    // An unmapped host or lookup failure fails closed with a generic 404 — never
-    // a default tenant, never echoing the host (so an unauthenticated caller
-    // cannot probe which communities exist on this deployment).
+    // An unmapped host or lookup failure fails closed with a generic body —
+    // never a default tenant, never echoing the host. The status separates
+    // permanent (unmapped → 404) from transient (lookup failure → 503).
     let raw_host = headers
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let tenant = crate::tenant::bind_community(&state.db, raw_host)
         .await
-        .map_err(|_| {
-            api_error(
-                StatusCode::NOT_FOUND,
-                "relay: no community is configured for this host",
-            )
-        })?;
+        .map_err(|err| api_error(err.http_status(), err.public_message()))?;
 
     let url = nip98_expected_url(&state.config.relay_url, &tenant, "/query");
     let (pubkey, event_id_bytes) = verify_bridge_auth(
@@ -1340,12 +1331,7 @@ pub async fn count_events(
         .unwrap_or("");
     let tenant = crate::tenant::bind_community(&state.db, raw_host)
         .await
-        .map_err(|_| {
-            api_error(
-                StatusCode::NOT_FOUND,
-                "relay: no community is configured for this host",
-            )
-        })?;
+        .map_err(|err| api_error(err.http_status(), err.public_message()))?;
 
     let url = nip98_expected_url(&state.config.relay_url, &tenant, "/count");
     let (pubkey, event_id_bytes) = verify_bridge_auth(
@@ -1811,16 +1797,18 @@ pub async fn workflow_webhook(
     // any tenant-scoped lookup or write. The host — not the workflow row —
     // determines the tenant: a request for community A's host may only reach
     // community A's workflows, even when the same workflow UUID also exists in
-    // community B. Unmapped host, lookup failure, and a workflow that does not
-    // exist in *this* community all fail closed with the same generic 404, so a
-    // caller cannot probe which hosts or workflow ids exist on other tenants.
+    // community B. An unmapped host or a workflow that does not exist in *this*
+    // community fail closed with the same generic 404, so a caller cannot probe
+    // which hosts or workflow ids exist on other tenants. A *lookup* failure
+    // (transient backend unavailability) surfaces as 503 instead, so clients
+    // retry rather than treating the relay as permanently gone.
     let raw_host = headers
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let tenant = crate::tenant::bind_community(&state.db, raw_host)
         .await
-        .map_err(|_| not_found("workflow not found"))?;
+        .map_err(|err| api_error(err.http_status(), err.public_message()))?;
     let community_id = tenant.community();
 
     let workflow = state
