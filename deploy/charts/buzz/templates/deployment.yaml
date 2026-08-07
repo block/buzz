@@ -101,6 +101,10 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             {{- toYaml .Values.relay.containerSecurityContext | nindent 12 }}
+          {{- with .Values.relay.lifecycle }}
+          lifecycle:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           {{- with .Values.relay.command }}
           command:
             {{- toYaml . | nindent 12 }}
