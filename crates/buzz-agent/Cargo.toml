@@ -32,6 +32,7 @@ serde_yaml = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls", "form"] }
 rmcp = { version = "1", default-features = false, features = ["client", "transport-child-process"] }
 arc-swap = "1"
+dirs = "6"
 getrandom = "0.4"
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

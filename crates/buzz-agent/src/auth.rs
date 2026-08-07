@@ -454,10 +454,21 @@ fn cache_path_for(cfg: &PkceOAuthConfig) -> Result<PathBuf, AgentError> {
     let dir = match &cfg.cache_dir_override {
         Some(p) => p.join(&cfg.cache_namespace),
         None => {
-            let home = std::env::var("HOME")
-                .map_err(|_| AgentError::Llm("oauth cache: $HOME not set".into()))?;
-            PathBuf::from(home)
-                .join(".config")
+            // Reading `$HOME` directly made this a hard error on Windows, where
+            // that variable is normally undefined. The `.config` segment is kept
+            // on every platform on purpose: switching Windows to `%APPDATA%` (or
+            // macOS to `dirs::config_dir`) would relocate caches that already
+            // exist, which is a separate call from fixing the failure.
+            //
+            // `$HOME` still wins where it is set — `dirs::home_dir` ignores it on
+            // Windows, which would move an existing Git Bash cache and defeat the
+            // per-test `HOME` isolation this module documents above.
+            let home = std::env::var_os("HOME")
+                .filter(|value| !value.is_empty())
+                .map(std::path::PathBuf::from)
+                .or_else(dirs::home_dir)
+                .ok_or_else(|| AgentError::Llm("oauth cache: no home directory".into()))?;
+            home.join(".config")
                 .join("buzz-agent")
                 .join("oauth")
                 .join(&cfg.cache_namespace)
@@ -682,19 +693,42 @@ mod tests {
         assert!(is_expired(&t));
     }
 
-    #[test]
-    fn cache_path_includes_namespace_and_hash() {
-        // HOME is required; cargo test runs set it.
-        let cfg = PkceOAuthConfig {
+    fn demo_oauth_config() -> PkceOAuthConfig {
+        PkceOAuthConfig {
             discovery_url: "https://example.com/.well-known".into(),
             client_id: "abc".into(),
             scopes: vec!["a".into(), "b".into()],
             cache_namespace: "demo".into(),
             cache_dir_override: None,
-        };
-        let p = cache_path_for(&cfg).unwrap();
-        assert!(p.to_string_lossy().contains("/buzz-agent/oauth/demo/"));
-        assert!(p.extension().and_then(|s| s.to_str()) == Some("json"));
+        }
+    }
+
+    #[test]
+    fn cache_path_includes_namespace_and_hash() {
+        let p = cache_path_for(&demo_oauth_config()).unwrap();
+        // Compared component-wise: a literal "/buzz-agent/oauth/demo/" can never
+        // match on Windows, where the separator is '\'.
+        let parts: Vec<String> = p
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            parts
+                .windows(3)
+                .any(|w| w[0] == "buzz-agent" && w[1] == "oauth" && w[2] == "demo"),
+            "expected buzz-agent/oauth/demo inside {p:?}"
+        );
+        assert_eq!(p.extension().and_then(|s| s.to_str()), Some("json"));
+    }
+
+    #[test]
+    fn cache_path_is_rooted_at_the_platform_home() {
+        // Regression guard: this read `$HOME` directly and returned Err on
+        // Windows, where that variable is normally undefined — every OAuth
+        // provider failed there with "oauth cache: $HOME not set".
+        let p = cache_path_for(&demo_oauth_config()).unwrap();
+        let home = dirs::home_dir().expect("platform must report a home directory");
+        assert!(p.starts_with(&home), "{p:?} must sit under {home:?}");
     }
 
     #[test]
