@@ -803,6 +803,32 @@ test("first-launch key import continues to machine setup", async ({ page }) => {
   await expect(page.getByTestId("app-loading-gate")).toHaveCount(0);
 });
 
+test("imported-key users can skip out of harness setup", async ({ page }) => {
+  // Regression: importing an existing key sets the onboarding state machine's
+  // "continuing" marker, which pinned the stage to onboarding even after
+  // complete() ran — so Skip/Next silently did nothing. The fresh-key skip
+  // tests never exercised the import path, so this gap shipped. Prove an
+  // imported-key user actually leaves onboarding on Skip.
+  await installMockBridge(page, undefined, {
+    skipCommunitySeed: true,
+    skipOnboardingSeed: true,
+  });
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Use an existing key" }).click();
+  const importedNsec = nsecEncode(hexToBytes(TEST_IDENTITIES.alice.privateKey));
+  await page.getByTestId("nostr-import-nsec-input").fill(importedNsec);
+  await page.getByTestId("nostr-import-submit").click();
+
+  await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
+  await page.getByTestId("onboarding-setup-skip").click();
+
+  // Reaching community onboarding proves machine onboarding completed rather
+  // than staying pinned on the setup step.
+  await expect(page.getByText("Join or create a community")).toBeVisible();
+  await expect(page.getByTestId("onboarding-page-2")).toHaveCount(0);
+});
+
 test("first-launch encrypted backup import asks for a passphrase and continues", async ({
   page,
 }) => {
