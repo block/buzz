@@ -13,6 +13,7 @@ import {
   isBroadcastReply,
   normalizeMentionPubkeys,
   resolveReplyRootId,
+  resolveReplyTargetAuthorPubkey,
 } from "@/features/messages/lib/threading";
 import {
   projectChannelWindowMessages,
@@ -99,6 +100,8 @@ export function createOptimisticMessage(
         parentEventId,
         resolveReplyRootId(parentEventId, currentMessages),
         mentionPubkeys,
+        resolveReplyTargetAuthorPubkey(parentEventId, currentMessages) ??
+          undefined,
       ),
     );
   } else {
@@ -459,11 +462,34 @@ export function useSendMessageMutation(
         emojiTags,
         mentionTags,
       } = splitOutgoingTags(mediaTags);
-      const recipientPubkeys = messageMentionPubkeys(
+      const recipientPubkeysBase = messageMentionPubkeys(
         effectiveChannel,
         identity.pubkey,
         mentionPubkeys,
       );
+
+      // Replying to a message implicitly addresses its author (notably agent
+      // accounts, which wake on an explicit mentioning `p` tag) even when the
+      // composer body has no literal "@mention". Resolve the replied-to event's
+      // author from the local cache and fold it into the real recipient p-tags
+      // so the reply actually reaches them on the wire.
+      let recipientPubkeys = recipientPubkeysBase;
+      if (parentEventId) {
+        const replyParentMessages =
+          queryClient.getQueryData<RelayEvent[]>(
+            channelMessagesKey(effectiveChannel.id),
+          ) ?? [];
+        const replyTargetAuthor = resolveReplyTargetAuthorPubkey(
+          parentEventId,
+          replyParentMessages,
+        );
+        if (replyTargetAuthor) {
+          recipientPubkeys = normalizeMentionPubkeys(
+            [...recipientPubkeysBase, replyTargetAuthor],
+            identity.pubkey,
+          );
+        }
+      }
 
       // Messages carrying media OR custom-emoji tags MUST go through REST so
       // the relay's tag validation runs. The WebSocket path emits no extra
@@ -494,6 +520,8 @@ export function useSendMessageMutation(
               parentEventId,
               resolveReplyRootId(parentEventId, cachedMessages),
               recipientPubkeys,
+              resolveReplyTargetAuthorPubkey(parentEventId, cachedMessages) ??
+                undefined,
             )
           : [];
         const baseTags = parentEventId
