@@ -48,6 +48,12 @@ type ManagedAgentSessionPanelProps = {
   className?: string;
   emptyDescription?: string;
   emptyState?: AgentSessionTranscriptEmptyState;
+  /**
+   * When false, skip SQLite archive windows and render live observer frames
+   * only. Overview surfaces (View all multi-agent cards) set this to avoid
+   * N concurrent archive hydrations when many agents are working.
+   */
+  includeArchivedEvents?: boolean;
   panelPadding?: boolean;
   rawLayout?: "responsive" | "exclusive";
   showHeader?: boolean;
@@ -59,6 +65,8 @@ type ManagedAgentSessionPanelProps = {
   transcriptOverride?: TranscriptItem[];
 };
 
+const EMPTY_ARCHIVED_EVENTS: ObserverEvent[] = [];
+
 export function ManagedAgentSessionPanel({
   agent,
   autoTail = false,
@@ -66,6 +74,7 @@ export function ManagedAgentSessionPanel({
   className,
   emptyDescription = "Mention this agent in a channel to watch the next turn.",
   emptyState = "idle",
+  includeArchivedEvents = true,
   panelPadding = true,
   rawLayout = "responsive",
   showHeader = true,
@@ -91,10 +100,15 @@ export function ManagedAgentSessionPanel({
   // them at the raw-event level and derive a single TranscriptState, so stateful
   // aggregates (tool start/update, plan replacement, permission request/response)
   // are never split across two independent state machines.
-  const archivedChannelEvents = useArchivedChannelEvents(
+  // Overview cards pass includeArchivedEvents=false so each card only binds
+  // the live window (already store-backed) and skips archive page traffic.
+  const archivedChannelEventsFromStore = useArchivedChannelEvents(
     agent.pubkey,
-    channelId,
+    includeArchivedEvents ? channelId : null,
   );
+  const archivedChannelEvents = includeArchivedEvents
+    ? archivedChannelEventsFromStore
+    : EMPTY_ARCHIVED_EVENTS;
 
   const scopedLiveEvents = React.useMemo(
     () => scopeByChannel(events, channelId),

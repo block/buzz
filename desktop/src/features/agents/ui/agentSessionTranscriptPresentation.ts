@@ -26,38 +26,58 @@ const LIFECYCLE_NOISE = new Set([
   "wire parse error",
 ]);
 
+/** Max length for composer / View-all activity headlines. */
+export const ACTIVITY_HEADLINE_MAX = 72;
+
+/**
+ * Collapse whitespace on the first line and ellipsize to `max` chars.
+ * Prevents shell/tool payload dumps from exploding overview UIs.
+ */
+export function clampHeadline(
+  text: string,
+  max = ACTIVITY_HEADLINE_MAX,
+): string {
+  const firstLine = text.split("\n")[0]?.replace(/\s+/g, " ").trim() ?? "";
+  if (firstLine.length === 0) {
+    return "";
+  }
+  if (firstLine.length <= max) {
+    return firstLine;
+  }
+  return `${firstLine.slice(0, Math.max(0, max - 3))}…`;
+}
+
 /** Human-readable headline for a single transcript item. */
 export function getActivityHeadline(item: TranscriptItem): string | null {
   if (item.type === "tool") {
     const summary = buildCompactToolSummary(item);
-    return [summary.label, summary.preview].filter(Boolean).join(" · ");
+    const joined = [summary.label, summary.preview].filter(Boolean).join(" · ");
+    return joined ? clampHeadline(joined) : null;
   }
 
   if (item.type === "message") {
     if (item.role === "assistant") {
       const trimmed = item.text.trim();
       if (trimmed.length > 0) {
-        const firstLine = trimmed.split("\n")[0]?.trim() ?? "";
-        if (firstLine.length > 0) {
-          return firstLine.length > 72
-            ? `${firstLine.slice(0, 69)}…`
-            : firstLine;
+        const clamped = clampHeadline(trimmed);
+        if (clamped.length > 0) {
+          return clamped;
         }
       }
       return "Responding";
     }
-    return item.title || "User prompt";
+    return clampHeadline(item.title || "User prompt");
   }
 
   if (item.type === "thought") {
-    return item.title === "Plan" ? "Planning" : item.title;
+    return clampHeadline(item.title === "Plan" ? "Planning" : item.title);
   }
 
   if (item.type === "metadata") {
-    return item.title;
+    return clampHeadline(item.title);
   }
 
-  return item.title;
+  return clampHeadline(item.title);
 }
 
 function isLifecycleNoise(

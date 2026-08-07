@@ -71,6 +71,11 @@ const ROW_ENTER_SPRING = {
 const ROW_ENTER_FROM = { opacity: 0, y: 12 } as const;
 const ROW_ENTER_TO = { opacity: 1, y: 0 } as const;
 
+/** Live-tail window for compact overview cards (View all multi-agent panel). */
+const COMPACT_PREVIEW_MAX_ITEMS = 40;
+/** Max rendered blocks after grouping — keeps DOM small under concurrent cards. */
+const COMPACT_PREVIEW_MAX_BLOCKS = 12;
+
 /**
  * False during the mount commit, true afterwards. Children mounted with the
  * initial batch (history load) read false and skip their enter animation;
@@ -152,17 +157,41 @@ export function AgentSessionTranscriptList({
     getLatestLive,
   );
 
+  const isCompactPreview = variant === "compactPreview";
+  // Compact overview cards only need the latest tail of the transcript.
+  // Cap before block-building so long agent turns don't allocate full
+  // display-block trees for every multi-agent card.
+  const transcriptItemsForDisplay = React.useMemo(() => {
+    if (!isCompactPreview || items.length <= COMPACT_PREVIEW_MAX_ITEMS) {
+      return items;
+    }
+    return items.slice(-COMPACT_PREVIEW_MAX_ITEMS);
+  }, [isCompactPreview, items]);
+
   const displayBlocks = React.useMemo(
-    () => buildTranscriptDisplayBlocks(items, latestLiveSessionId),
-    [items, latestLiveSessionId],
+    () =>
+      buildTranscriptDisplayBlocks(
+        transcriptItemsForDisplay,
+        latestLiveSessionId,
+      ),
+    [transcriptItemsForDisplay, latestLiveSessionId],
   );
+  const visibleDisplayBlocks = React.useMemo(() => {
+    if (
+      !isCompactPreview ||
+      displayBlocks.length <= COMPACT_PREVIEW_MAX_BLOCKS
+    ) {
+      return displayBlocks;
+    }
+    return displayBlocks.slice(-COMPACT_PREVIEW_MAX_BLOCKS);
+  }, [displayBlocks, isCompactPreview]);
   // Derive the same block keys the DOM renders as `data-message-id` so
   // useAnchoredScroll anchors on real DOM rows. Value-stabilized so the
   // hook's restoration effect only fires when the ordered block sequence
   // actually changes (same pattern as AgentSessionThreadPanel).
   const blockKeys = React.useMemo(
-    () => (autoTail ? displayBlocks.map(getDisplayBlockKey) : []),
-    [autoTail, displayBlocks],
+    () => (autoTail ? visibleDisplayBlocks.map(getDisplayBlockKey) : []),
+    [autoTail, visibleDisplayBlocks],
   );
   const stableBlockKeys = useStableArrayShallow(blockKeys);
   const scrollMessages = React.useMemo(
@@ -180,21 +209,26 @@ export function AgentSessionTranscriptList({
     scrollContainerRef,
   });
 
-  const isCompactPreview = variant === "compactPreview";
-  const animationPreferenceEnabled = useTranscriptAnimationEnabled();
+const animationPreferenceEnabled = useTranscriptAnimationEnabled();
   const shouldReduceMotion = useReducedMotion();
+  // Compact multi-agent cards skip motion entirely — N concurrent spring
+  // layouts dominate main-thread cost when several agents are working.
   const animationsDisabled =
-    Boolean(shouldReduceMotion) || !animationPreferenceEnabled;
+    isCompactPreview ||
+    Boolean(shouldReduceMotion) ||
+    !animationPreferenceEnabled;
   // Position (layout) animations are only safe when this component owns the
   // scroll container: `layoutScroll` below tells motion to subtract our scroll
   // offset when measuring rows. When an ancestor scrolls instead (autoTail
   // off), scrolling would register as false position deltas and rows would
   // visibly spring back toward their pre-scroll position, so only the enter
   // animation runs there.
-  const layoutAnimationsEnabled = !animationsDisabled && autoTail;
+  const layoutAnimationsEnabled =
+    !animationsDisabled && autoTail && !isCompactPreview;
   const hasCompletedInitialRenderRef = useHasCompletedInitialRender();
   const hasRenderableContent =
-    items.length > 0 && hasRenderableDisplayContent(displayBlocks, variant);
+    transcriptItemsForDisplay.length > 0 &&
+    hasRenderableDisplayContent(visibleDisplayBlocks, variant);
 
   const scrollContainerClassNames = cn(
     "w-full",
@@ -231,7 +265,7 @@ export function AgentSessionTranscriptList({
   return (
     <motion.div
       className={scrollContainerClassNames}
-      layoutScroll
+      layoutScroll={!isCompactPreview}
       onScroll={autoTail ? anchoredScroll.onScroll : undefined}
       ref={autoTail ? scrollContainerRef : undefined}
     >
@@ -248,11 +282,11 @@ export function AgentSessionTranscriptList({
         role="log"
       >
         <AgentSessionTranscriptVariantProvider value={variant}>
-          {displayBlocks.map((block) => {
+          {visibleDisplayBlocks.map((block) => {
             const blockKey = getDisplayBlockKey(block);
             return (
               <motion.div
-                animate={ROW_ENTER_TO}
+                animate={animationsDisabled ? undefined : ROW_ENTER_TO}
                 data-message-id={blockKey}
                 initial={
                   animationsDisabled || !hasCompletedInitialRenderRef.current

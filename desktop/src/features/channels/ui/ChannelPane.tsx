@@ -26,6 +26,8 @@ import { buildVideoReviewContextsByMessageId } from "@/features/messages/lib/vid
 import { useComposerHeightPadding } from "@/features/messages/ui/useComposerHeightPadding";
 import { UserProfilePanel } from "@/features/profile/ui/UserProfilePanel";
 import { ChannelFindBar } from "@/features/search/ui/ChannelFindBar";
+import { AllAgentsActivityPanel } from "@/features/channels/ui/AllAgentsActivityPanel";
+import { agentsForAllActivityPanel } from "@/features/channels/ui/botActivityViewAll";
 import { AgentSessionThreadPanel } from "@/features/channels/ui/AgentSessionThreadPanel";
 import { ChannelManagementAuxiliaryPanel } from "@/features/channels/ui/ChannelManagementAuxiliaryPanel";
 import { RightAuxiliaryPane } from "@/features/channels/ui/RightAuxiliaryPane";
@@ -124,6 +126,9 @@ export const ChannelPane = React.memo(function ChannelPane({
   onExpandThreadReplies,
   onJoinChannel,
   onOpenAgentSession,
+  onOpenAllAgentsActivity,
+  onCloseAllAgentsActivity,
+  allAgentsActivityOpen = false,
   onOpenDm,
   onOpenMembers,
   onOpenProfilePanel,
@@ -404,6 +409,14 @@ export const ChannelPane = React.memo(function ChannelPane({
   // whose typing signal never arrives — and vice versa.
   const composerWorkingBotPubkeys = useChannelWorkingAgentPubkeys(
     activeChannel?.id ?? null,
+  );
+  const allActivityPanelAgents = React.useMemo(
+    () =>
+      agentsForAllActivityPanel({
+        agents: activityAgents,
+        workingBotPubkeys: composerWorkingBotPubkeys,
+      }),
+    [activityAgents, composerWorkingBotPubkeys],
   );
   const hasComposerBotActivity = composerWorkingBotPubkeys.length > 0;
   const hasCardMintActivity = useCardMintJobs().length > 0;
@@ -802,6 +815,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                   channel={activeChannel}
                   currentPubkey={currentPubkey}
                   onOpenAgentSession={onOpenAgentSession}
+                  onOpenAllAgentActivity={onOpenAllAgentsActivity}
                   openAgentSessionPubkey={openAgentSessionPubkey}
                   profiles={profiles}
                   typingPubkeys={typingPubkeys}
@@ -925,6 +939,26 @@ export const ChannelPane = React.memo(function ChannelPane({
               />
             );
             return wrapThreadPanel(panel);
+          })()
+        ) : allAgentsActivityOpen && allActivityPanelAgents.length > 0 ? (
+          (() => {
+            const panel = (
+              <AllAgentsActivityPanel
+                agents={activityAgents}
+                channelId={activeChannel?.id ?? null}
+                isSinglePanelView={
+                  useSplitAuxiliaryPane ? false : isSinglePanelView
+                }
+                layout={useSplitAuxiliaryPane ? "split" : "standalone"}
+                onClose={onCloseAllAgentsActivity!}
+                onOpenAgentSession={onOpenAgentSession}
+                profiles={profiles}
+                transparentChrome={useSplitAuxiliaryPane}
+                widthPx={threadPanelWidthPx}
+                workingBotPubkeys={composerWorkingBotPubkeys}
+              />
+            );
+            return wrapAux(panel, "all-agents-activity-panel");
           })()
         ) : activeChannel && selectedAgent ? (
           (() => {
