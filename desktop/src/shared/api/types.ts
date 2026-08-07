@@ -277,6 +277,11 @@ export type RelayAgent = {
   status: "online" | "away" | "offline";
   respondTo: RespondToMode | null;
   respondToAllowlist: string[];
+  /**
+   * Host lineage pubkey from kind:10100 `host` (64-hex). Present for
+   * host-minted agents; used for environment badge hydration — not Local Start.
+   */
+  hostPubkey: string | null;
 };
 
 export type ManagedAgentRuntimeLifecycle =

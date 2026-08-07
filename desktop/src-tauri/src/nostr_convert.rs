@@ -964,6 +964,36 @@ mod tests {
     }
 
     #[test]
+    fn agents_preserves_host_lineage_for_directory_parse() {
+        let host = "b".repeat(64);
+        let e = ev(
+            10100,
+            &format!(r#"{{"name":"Grok","host":"{host}"}}"#),
+            vec![],
+        );
+        let v = agents_from_events(std::slice::from_ref(&e));
+        let agents = v.get("agents").cloned().unwrap();
+        let parsed: Vec<crate::managed_agents::RelayAgentInfo> =
+            serde_json::from_value(agents).unwrap();
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].host.as_deref(), Some(host.as_str()));
+        assert!(parsed[0].host.as_ref().is_some_and(|h| h.len() == 64));
+    }
+
+    #[test]
+    fn agents_host_absent_defaults_to_none() {
+        let e = ev(10100, r#"{"name":"Local-shaped"}"#, vec![]);
+        let v = agents_from_events(std::slice::from_ref(&e));
+        let agents = v.get("agents").cloned().unwrap();
+        let parsed: Vec<crate::managed_agents::RelayAgentInfo> =
+            serde_json::from_value(agents).unwrap();
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].host, None);
+    }
+
+    #[test]
     fn relay_members_dedupes_and_defaults_role() {
         let pk1 = "a".repeat(64);
         let pk2 = "b".repeat(64);

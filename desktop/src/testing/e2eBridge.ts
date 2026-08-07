@@ -817,6 +817,8 @@ type RawRelayAgent = {
   status: PresenceStatus;
   respond_to?: "owner-only" | "allowlist" | "anyone";
   respond_to_allowlist?: string[];
+  /** Optional kind:10100 host lineage pubkey (64-hex). */
+  host?: string | null;
 };
 
 type RawManagedAgent = {
@@ -3613,6 +3615,7 @@ function syncMockRelayAgentsFromManagedAgents() {
             : "offline",
         respond_to: agent.respond_to,
         respond_to_allowlist: [...agent.respond_to_allowlist],
+        host: null,
       };
     },
   );
