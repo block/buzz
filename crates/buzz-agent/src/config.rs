@@ -593,9 +593,16 @@ fn is_manual_budget_model(model: &str) -> bool {
 /// Sources: https://platform.claude.com/docs/en/build-with-claude/extended-thinking (support table)
 ///          https://platform.claude.com/docs/en/build-with-claude/effort (effort page)
 ///
-/// Adaptive thinking models (always-on or default-on):
+/// Adaptive thinking models:
 ///   Opus 4.8, Opus 4.7, Opus 4.6, Sonnet 5.x, Sonnet 4.6,
-///   Fable 5 (always-on), Mythos 5 (always-on), Mythos Preview (default-on).
+///   Fable 5, Mythos 5, Mythos Preview.
+///
+/// These models support `thinking: {type:"adaptive"}` + `output_config: {effort}`. Sending
+/// `thinking:{type:"adaptive"}` is required to activate `output_config.effort` — without it
+/// the effort field is ignored even on models that may reason by default. Some of these models
+/// also reason with no config at all (e.g., Fable 5, Mythos 5 always-on; Mythos Preview
+/// default-on per the extended-thinking support table), but we always send `type:"adaptive"`
+/// explicitly so that `output_config.effort` is honoured and thinking tokens are predictable.
 ///
 /// Note: Opus 4.5 is NOT in this bucket — it uses manual budget (see `is_manual_budget_model`).
 /// No prefix wildcards over version numbers; each entry is doc-verified explicitly.
@@ -618,6 +625,58 @@ fn is_adaptive_thinking_model(model: &str) -> bool {
         // Mythos Preview (default-on adaptive thinking, July 2025).
         // Note: xhigh is NOT available on Mythos Preview — clamp_adaptive_effort handles this.
         || model.starts_with("claude-mythos-preview")
+}
+
+/// Reasoning summary mode for the OpenAI Responses API route.
+///
+/// Controls the `reasoning.summary` field sent alongside `reasoning.effort` in
+/// `responses_body`. The Responses API only returns populated `summary` arrays
+/// when a summary mode is requested — without it, `summary: []` is returned and
+/// the observer feed shows no reasoning text even though the model billed thinking
+/// tokens.
+///
+/// **Responses-route only.** On the Anthropic route, thinking blocks contain the
+/// full reasoning text directly (no summary concept); this field is ignored there.
+/// On Chat Completions and OpenRouter paths the field is also ignored.
+///
+/// Set via `BUZZ_AGENT_THINKING_SUMMARY` (`auto|concise|detailed`).
+/// Unset/empty → `auto` (the provider chooses the best available summary for the
+/// model). Use `detailed` for maximum reasoning visibility in the observer feed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThinkingSummary {
+    /// Provider selects the best available summary format for the model.
+    Auto,
+    /// Shorter summaries — lower token overhead.
+    Concise,
+    /// Full-length summaries — maximum reasoning visibility.
+    Detailed,
+}
+
+impl ThinkingSummary {
+    /// The string value sent in the `reasoning.summary` field.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ThinkingSummary::Auto => "auto",
+            ThinkingSummary::Concise => "concise",
+            ThinkingSummary::Detailed => "detailed",
+        }
+    }
+}
+
+/// Parse `BUZZ_AGENT_THINKING_SUMMARY`. Pure (env-free) for testability.
+///
+/// Unset or empty → `Auto` (the safe default that works for all Responses-capable models).
+/// Invalid value → startup error.
+pub fn parse_thinking_summary(raw: Option<&str>) -> Result<ThinkingSummary, String> {
+    match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        None | Some("") => Ok(ThinkingSummary::Auto),
+        Some("auto") => Ok(ThinkingSummary::Auto),
+        Some("concise") => Ok(ThinkingSummary::Concise),
+        Some("detailed") => Ok(ThinkingSummary::Detailed),
+        Some(other) => Err(format!(
+            "config: BUZZ_AGENT_THINKING_SUMMARY={other} not supported (use auto|concise|detailed)"
+        )),
+    }
 }
 
 /// Parse `BUZZ_AGENT_THINKING_EFFORT`. Pure (env-free) for testability.
@@ -770,6 +829,12 @@ pub struct Config {
     /// Thinking/reasoning effort level. `None` = use provider default (no
     /// thinking config sent). Set via `BUZZ_AGENT_THINKING_EFFORT`.
     pub thinking_effort: Option<ThinkingEffort>,
+    /// Reasoning summary mode for the OpenAI Responses route. Controls the
+    /// `reasoning.summary` field emitted alongside `reasoning.effort`; only
+    /// takes effect when `thinking_effort` is also set. Default `Auto`.
+    /// Set via `BUZZ_AGENT_THINKING_SUMMARY`. Ignored on Anthropic, Chat
+    /// Completions, and OpenRouter routes.
+    pub thinking_summary: ThinkingSummary,
     /// Emit Anthropic `cache_control` breakpoints on the stable prefix
     /// (tools + system prompt) and the rolling conversation tail. Default on;
     /// disable with `BUZZ_AGENT_PROMPT_CACHING=0`. Consulted on every route that
@@ -885,6 +950,9 @@ impl Config {
             hook_servers: parse_hook_servers_env("MCP_HOOK_SERVERS"),
             hints_enabled: parse_env("BUZZ_AGENT_NO_HINTS", 0u8)? == 0,
             thinking_effort: parse_thinking_effort(env("BUZZ_AGENT_THINKING_EFFORT").as_deref())?,
+            thinking_summary: parse_thinking_summary(
+                env("BUZZ_AGENT_THINKING_SUMMARY").as_deref(),
+            )?,
             prompt_caching: parse_env("BUZZ_AGENT_PROMPT_CACHING", 1u8)? != 0,
         };
         cfg.validate()?;
@@ -928,6 +996,7 @@ impl Config {
             hook_servers: HookServers::None,
             hints_enabled: false,
             thinking_effort: None,
+            thinking_summary: ThinkingSummary::Auto,
             prompt_caching: false,
         }
     }
@@ -1413,6 +1482,60 @@ mod tests {
             err.contains("none|minimal|low|medium|high|xhigh|max"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn parse_thinking_summary_round_trips_all_values() {
+        for (raw, expected) in [
+            ("auto", ThinkingSummary::Auto),
+            ("concise", ThinkingSummary::Concise),
+            ("detailed", ThinkingSummary::Detailed),
+        ] {
+            assert_eq!(
+                parse_thinking_summary(Some(raw)).unwrap(),
+                expected,
+                "raw={raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_thinking_summary_unset_and_empty_yield_auto() {
+        assert_eq!(parse_thinking_summary(None).unwrap(), ThinkingSummary::Auto);
+        assert_eq!(
+            parse_thinking_summary(Some("")).unwrap(),
+            ThinkingSummary::Auto
+        );
+        assert_eq!(
+            parse_thinking_summary(Some("   ")).unwrap(),
+            ThinkingSummary::Auto
+        );
+    }
+
+    #[test]
+    fn parse_thinking_summary_is_case_insensitive() {
+        assert_eq!(
+            parse_thinking_summary(Some("DETAILED")).unwrap(),
+            ThinkingSummary::Detailed
+        );
+        assert_eq!(
+            parse_thinking_summary(Some("  Concise  ")).unwrap(),
+            ThinkingSummary::Concise
+        );
+    }
+
+    #[test]
+    fn parse_thinking_summary_rejects_unknown_value() {
+        let err = parse_thinking_summary(Some("verbose")).unwrap_err();
+        assert!(err.contains("BUZZ_AGENT_THINKING_SUMMARY=verbose"), "{err}");
+        assert!(err.contains("auto|concise|detailed"), "{err}");
+    }
+
+    #[test]
+    fn thinking_summary_as_str_mapping() {
+        assert_eq!(ThinkingSummary::Auto.as_str(), "auto");
+        assert_eq!(ThinkingSummary::Concise.as_str(), "concise");
+        assert_eq!(ThinkingSummary::Detailed.as_str(), "detailed");
     }
 
     #[test]

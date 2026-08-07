@@ -179,12 +179,14 @@ pub fn validate_user_env_keys(env_vars: &BTreeMap<String, String>) -> Result<(),
 /// Allowlist (case-insensitive):
 /// - `BUZZ_AGENT_PROVIDER`, `BUZZ_AGENT_MODEL` — agent runtime selection
 /// - `BUZZ_AGENT_THINKING_EFFORT` — non-secret enum (none/minimal/low/medium/high/xhigh/max)
+/// - `BUZZ_AGENT_THINKING_SUMMARY` — non-secret enum (auto/concise/detailed)
 /// - `DATABRICKS_HOST`, `DATABRICKS_MODEL` — Block non-secret defaults
 pub(crate) fn is_safe_to_reveal(key: &str) -> bool {
     const SAFE_KEYS: &[&str] = &[
         "BUZZ_AGENT_PROVIDER",
         "BUZZ_AGENT_MODEL",
         "BUZZ_AGENT_THINKING_EFFORT",
+        "BUZZ_AGENT_THINKING_SUMMARY",
         "DATABRICKS_HOST",
         "DATABRICKS_MODEL",
     ];
