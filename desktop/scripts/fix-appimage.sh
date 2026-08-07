@@ -50,7 +50,9 @@
 # Fedora alike). The shim has to run *after* AppRun.wrapped: the wrapper rewrites
 # the variable last -- after every apprun-hook -- so any value set before it is
 # discarded (verified empirically; a runtime GST_PLUGIN_SYSTEM_PATH_1_0 passed
-# into the AppImage does not survive). No tauri.conf.json knob can do this --
+# into the AppImage does not survive). Keep bundled libzstd — NixOS/appimage-run
+# hosts often lack libzstd.so.1 on the FHS path, and zstd is not part of the
+# Mesa/GLib conflict set above. No tauri.conf.json knob can do this —
 # bundle.linux.appimage only exposes bundleMediaFramework, files (copy-only, no
 # remove/symlink), and bundleXdgOpen.
 
@@ -107,7 +109,6 @@ rm -f \
   "$LIBDIR"/libsystemd.so* \
   "$LIBDIR"/libpcre2-8.so* \
   "$LIBDIR"/libgst*.so* \
-  "$LIBDIR"/libzstd.so* \
   "$LIBDIR"/libelf.so* \
   "$LIBDIR"/libffi.so*
 

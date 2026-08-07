@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   buildHighlightPatterns,
   findHighlightMatches,
+  snapPosOutOfAgentMention,
 } from "./mentionHighlightExtension.ts";
 
 // ── buildHighlightPatterns ────────────────────────────────────────────
@@ -163,4 +164,20 @@ test("#general should NOT match inside #generally (trailing word boundary)", () 
   const patterns = buildHighlightPatterns([], ["general"]);
   const matches = findHighlightMatches("#generally", patterns);
   assert.equal(matches.length, 0);
+});
+
+// ── Agent mention caret snap ──────────────────────────────────────────
+
+test("snapPosOutOfAgentMention leaves boundary positions alone", () => {
+  const ranges = [{ from: 0, to: 6 }]; // @alice
+  assert.equal(snapPosOutOfAgentMention(0, ranges), 0);
+  assert.equal(snapPosOutOfAgentMention(6, ranges), 6);
+});
+
+test("snapPosOutOfAgentMention ejects the caret from the chip interior", () => {
+  const ranges = [{ from: 0, to: 6 }]; // @alice
+  // Just after @ → nearer to start
+  assert.equal(snapPosOutOfAgentMention(1, ranges), 0);
+  // Mid-name → nearer to end
+  assert.equal(snapPosOutOfAgentMention(4, ranges), 6);
 });
