@@ -4,6 +4,7 @@ import {
   Folders,
   GitCommit,
   GitPullRequest,
+  Plus,
   TerminalSquare,
   Trash2,
 } from "lucide-react";
@@ -313,9 +314,16 @@ function RepositoryUnavailableIndicator({
   );
 }
 
-export function EmptyState() {
+export function EmptyState({
+  onCreateProject,
+}: {
+  onCreateProject?: () => void;
+} = {}) {
   return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-3 px-4 py-16 text-center">
+    <div
+      className="flex flex-1 flex-col items-center justify-center gap-3 px-4 py-16 text-center"
+      data-testid="projects-empty-state"
+    >
       <Folders className="h-10 w-10 text-muted-foreground/40" />
       <div className="space-y-1">
         <p className="text-sm font-medium text-foreground">No projects yet</p>
@@ -323,6 +331,18 @@ export function EmptyState() {
           Projects published to this relay will appear here.
         </p>
       </div>
+      {onCreateProject ? (
+        <Button
+          data-testid="projects-empty-create-project"
+          onClick={onCreateProject}
+          size="sm"
+          type="button"
+          variant="outline"
+        >
+          <Plus className="mr-1 h-4 w-4" />
+          Create your first project
+        </Button>
+      ) : null}
     </div>
   );
 }
