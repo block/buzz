@@ -7624,6 +7624,7 @@ let mockGlobalAgentConfig: {
   model: string | null;
   preferred_runtime?: string | null;
 } | null = null;
+let mockThreadParticipationPref: { enabled: boolean } = { enabled: true };
 
 // Per-page get_nsec call counter for sequenced error testing.
 let nsecCallCount = 0;
@@ -12308,6 +12309,17 @@ export function maybeInstallE2eTauriMocks() {
           ?.runtimeId;
         if (!runtimeId) return null;
         return config.mock?.runtimeFileConfigs?.[runtimeId] ?? null;
+      }
+      case "get_thread_participation": {
+        return mockThreadParticipationPref;
+      }
+      case "set_thread_participation": {
+        const enabled =
+          typeof (payload as { enabled?: unknown })?.enabled === "boolean"
+            ? (payload as { enabled: boolean }).enabled
+            : true;
+        mockThreadParticipationPref = { enabled };
+        return mockThreadParticipationPref;
       }
       case "get_global_agent_config": {
         // Return the mutable persisted mock value, seeded from the test config.

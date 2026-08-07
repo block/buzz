@@ -1,4 +1,10 @@
+import * as React from "react";
+
 import { usePreventSleepContext } from "@/features/agents/usePreventSleep";
+import {
+  getThreadParticipation,
+  setThreadParticipation,
+} from "@/shared/api/tauriThreadParticipation";
 import { Switch } from "@/shared/ui/switch";
 import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
 import {
@@ -11,6 +17,27 @@ export function PreventSleepSettingsCard() {
   const { enabled, setEnabled, hasRunningAgents, expired, clearExpired } =
     usePreventSleepContext();
   const persistentAudience = usePersistentAgentAudience(null);
+  const [threadParticipation, setThreadParticipationState] =
+    React.useState(true);
+  const [threadParticipationLoaded, setThreadParticipationLoaded] =
+    React.useState(false);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    void getThreadParticipation()
+      .then((pref) => {
+        if (!cancelled) {
+          setThreadParticipationState(pref.enabled);
+          setThreadParticipationLoaded(true);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setThreadParticipationLoaded(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   return (
     <section className="min-w-0" data-testid="settings-agents">
@@ -20,6 +47,34 @@ export function PreventSleepSettingsCard() {
       />
 
       <SettingsOptionGroup>
+        <SettingsOptionRow>
+          <div className="min-w-0">
+            <label
+              className="text-sm font-medium"
+              htmlFor="thread-participation-switch"
+            >
+              Continue conversations without @
+            </label>
+            <p className="text-sm font-normal text-muted-foreground">
+              After you @ an agent in a thread, it keeps responding to your bare
+              replies. If you @ someone else instead, that person is addressed
+              and the prior agent stays quiet. Restart agents to apply.
+            </p>
+          </div>
+          <Switch
+            checked={threadParticipation}
+            data-testid="thread-participation-toggle"
+            disabled={!threadParticipationLoaded}
+            id="thread-participation-switch"
+            onCheckedChange={(checked) => {
+              setThreadParticipationState(checked);
+              void setThreadParticipation(checked).catch(() => {
+                setThreadParticipationState(!checked);
+              });
+            }}
+          />
+        </SettingsOptionRow>
+
         <SettingsOptionRow>
           <div className="min-w-0">
             <label

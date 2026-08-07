@@ -64,6 +64,15 @@ buzz-acp
 
 That's it. The harness spawns `goose acp`, connects to the relay, discovers channels, and starts listening. When someone @mentions the agent, goose receives the message and can reply using the Buzz CLI that the harness configures automatically.
 
+### Thread participation (default on)
+
+After an agent is @mentioned in a thread (or starts one by replying to a top-level mention), **bare human follow-ups in that thread wake the agent without another @**. If the human @mentions someone else and not this agent, the agent stays quiet. Agent-authored messages never auto-continue (loop guard). Opt out with `--no-thread-participation` / `BUZZ_ACP_NO_THREAD_PARTICIPATION=true`.
+
+Active threads survive harness restarts: the set is written to
+`$BUZZ_ACP_STATE_DIR` (default `~/.local/share/buzz-acp/active-threads-<pubkey>.json`)
+and rehydrated from recent relay history (mentions of / posts by this agent
+within the 24h TTL) on startup.
+
 ## Running with Codex
 
 [codex-acp](https://github.com/agentclientprotocol/codex-acp) wraps OpenAI Codex in an ACP interface.

@@ -3309,8 +3309,10 @@ fn requeue_batch_if_queue(ctx: &PromptContext, batch: Option<FlushBatch>) -> Opt
 /// Map a cancelling [`ControlSignal`] to the [`CancelReason`] that should frame
 /// the merged re-prompt, then requeue the batch (in `Queue` dedup mode) with
 /// that reason stamped onto [`FlushBatch::cancel_reason`]. `Cancel`/`Rotate`
-/// drop the batch entirely. The reason is consumed by the main loop at requeue
-/// time (`requeue_as_cancelled`) and ultimately by `format_prompt`.
+/// drop the batch entirely (no merged re-prompt) but post a channel failure
+/// notice so the user is not left staring at silence after a long mid-turn
+/// cancel or harness shutdown. The reason is consumed by the main loop at
+/// requeue time (`requeue_as_cancelled`) and ultimately by `format_prompt`.
 #[inline]
 fn requeue_cancelled_batch(
     ctx: &PromptContext,
@@ -3320,13 +3322,42 @@ fn requeue_cancelled_batch(
     let reason = match signal {
         ControlSignal::Steer => CancelReason::Steer,
         ControlSignal::Interrupt | ControlSignal::SwitchModel(_) => CancelReason::Interrupt,
-        // Cancel/Rotate discard the batch — no merged re-prompt.
-        ControlSignal::Cancel | ControlSignal::Rotate => return None,
+        // Cancel/Rotate discard the batch — no merged re-prompt. Surface a
+        // channel notice so stop/shutdown cannot bury an in-flight turn.
+        ControlSignal::Cancel | ControlSignal::Rotate => {
+            if let Some(batch) = batch {
+                spawn_cancel_drop_notice(ctx, &batch, signal);
+            }
+            return None;
+        }
     };
     requeue_batch_if_queue(ctx, batch).map(|mut b| {
         b.cancel_reason = Some(reason);
         b
     })
+}
+
+/// Best-effort channel notice when Cancel/Rotate drops an in-flight batch.
+/// Without this, users see working indicators and steers for minutes/hours,
+/// then silence when the harness stops — the exact 51dacc57 failure mode.
+fn spawn_cancel_drop_notice(ctx: &PromptContext, batch: &FlushBatch, signal: ControlSignal) {
+    let why = match signal {
+        ControlSignal::Rotate => "agent session rotated",
+        _ => "stopped mid-task",
+    };
+    let content = format!(
+        "⚠️ I was {why} before finishing this turn. Re-mention me (or reply in this thread) if you still need the work done."
+    );
+    let thread_tags = batch
+        .events
+        .last()
+        .map(|be| crate::queue::parse_thread_tags(&be.event))
+        .unwrap_or_default();
+    let rest = ctx.rest_client.clone();
+    let channel_id = batch.channel_id;
+    tokio::spawn(async move {
+        post_failure_notice(&rest, channel_id, &thread_tags, &content).await;
+    });
 }
 
 /// Result of classifying a failed [`AcpClient::cancel_with_cleanup_grace`]

@@ -1598,9 +1598,15 @@ impl MergeFraming {
                 prior_header: "[What you were working on]",
                 new_header_single: "[New message — arrived while you were working]",
                 new_header_multi_prefix: "[New messages — arrived while you were working",
-                closing_note: "Note: A new message arrived while you were working. Continue your \
-                     in-progress work and incorporate the new message if it's relevant; if it's \
-                     unrelated, you may briefly acknowledge it and carry on.",
+                // Channel silence is a product failure: users see "working"
+                // indicators while steers pile up with no kind:9 reply. Force
+                // a visible channel update before more background tools.
+                closing_note: "Note: A new message arrived while you were working. Before more \
+                     tool calls, if the user is asking for status, progress, a result, a link, \
+                     confirmation, or anything they expect to see in chat, reply in the channel \
+                     first with `buzz messages send` (use `--reply-to` for the new message). \
+                     Then continue your in-progress work and incorporate the new message if \
+                     relevant. Do not stay silent in-channel while tools run.",
             },
             Some(CancelReason::Interrupt) => MergeFraming {
                 prior_header: "[Previous request — interrupted before completion]",
@@ -1922,15 +1928,21 @@ mod tests {
         let batch = make_merged_batch(Some(CancelReason::Steer));
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
 
-        // Steer framing: the new message "arrived while you were working" and
-        // the agent should "continue" — NOT supersede framing.
+        // Steer framing: the new message "arrived while you were working",
+        // channel reply is required before more tools, and work may continue —
+        // NOT supersede framing.
         assert!(
             prompt.contains("arrived while you were working"),
             "steer prompt should frame the new message as arriving mid-task: {prompt}"
         );
         assert!(
-            prompt.contains("Continue your"),
-            "steer prompt should instruct the agent to continue its work: {prompt}"
+            prompt.contains("buzz messages send"),
+            "steer prompt must require a channel-visible reply before more tools: {prompt}"
+        );
+        assert!(
+            prompt.contains("continue your in-progress work")
+                || prompt.contains("Continue your"),
+            "steer prompt should still allow continuing in-progress work: {prompt}"
         );
         assert!(
             !prompt.contains("supersedes"),
@@ -2004,14 +2016,18 @@ mod tests {
         assert_eq!(merged.cancel_reason, Some(CancelReason::Steer));
         let prompt = format_prompt(&merged, &FormatPromptArgs::default()).join("\n\n");
 
-        // Steer framing — "arrived while you were working" / "Continue", never
-        // supersede — survives the full queue→render path.
+        // Steer framing — "arrived while you were working" / channel-first /
+        // continue work, never supersede — survives the full queue→render path.
         assert!(
             prompt.contains("arrived while you were working"),
             "end-to-end steer prompt must carry steer framing: {prompt}"
         );
         assert!(
-            prompt.contains("Continue your"),
+            prompt.contains("buzz messages send"),
+            "end-to-end steer prompt must require channel reply: {prompt}"
+        );
+        assert!(
+            prompt.contains("continue your in-progress work"),
             "end-to-end steer prompt must instruct continue: {prompt}"
         );
         assert!(

@@ -333,6 +333,28 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_NO_MENTION_FILTER")]
     pub no_mention_filter: bool,
 
+    /// Continue conversations in threads where this agent is already active,
+    /// without requiring a fresh @mention. Default on for `subscribe=mentions`.
+    /// Bare human replies in an active thread wake the agent; exclusive @ of
+    /// someone else suppresses auto-continue. Agent-authored events never
+    /// auto-continue (loop guard). Pass `--no-thread-participation` to restore
+    /// classic mention-only behaviour.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_THREAD_PARTICIPATION",
+        conflicts_with = "no_thread_participation",
+        default_value_t = true
+    )]
+    pub thread_participation: bool,
+
+    /// Disable smart thread continuation (classic @mention-only wake-ups).
+    #[arg(
+        long,
+        env = "BUZZ_ACP_NO_THREAD_PARTICIPATION",
+        conflicts_with = "thread_participation"
+    )]
+    pub no_thread_participation: bool,
+
     #[arg(long, env = "BUZZ_ACP_CONFIG", default_value = "./buzz-acp.toml")]
     pub config: PathBuf,
 
@@ -514,6 +536,10 @@ pub struct Config {
     pub kinds_override: Option<Vec<u32>>,
     pub channels_override: Option<Vec<String>>,
     pub no_mention_filter: bool,
+    /// When true (default), bare human replies in active threads wake the agent
+    /// without a fresh @mention. Only applies under `subscribe=mentions` when
+    /// the mention filter is still on (`no_mention_filter == false`).
+    pub thread_participation: bool,
     pub config_path: PathBuf,
     pub context_message_limit: u32,
     /// Maximum turns per session before proactive rotation. 0 = disabled.
@@ -1081,6 +1107,7 @@ impl Config {
             kinds_override: args.kinds,
             channels_override: args.channels,
             no_mention_filter: args.no_mention_filter,
+            thread_participation: args.thread_participation && !args.no_thread_participation,
             config_path: args.config,
             context_message_limit: args.context_message_limit,
             max_turns_per_session: args.max_turns_per_session,
@@ -1109,6 +1136,31 @@ impl Config {
         Ok(config)
     }
 
+    /// Whether smart thread continuation is active for this process.
+    ///
+    /// Requires: flag on, mentions mode, and the classic mention filter still
+    /// enabled (`no_mention_filter == false`). With `no_mention_filter`, the
+    /// operator already requested a full firehose and we must not re-narrow it.
+    pub fn thread_participation_active(&self) -> bool {
+        self.thread_participation
+            && matches!(self.subscribe_mode, SubscribeMode::Mentions)
+            && !self.no_mention_filter
+    }
+
+    /// Whether channel REQs and subscription rules should require a `#p` mention.
+    ///
+    /// False when the operator disabled the mention filter, or when smart
+    /// participation needs the channel firehose so bare thread replies arrive.
+    pub fn require_mention_on_wire(&self) -> bool {
+        if self.no_mention_filter {
+            return false;
+        }
+        if self.thread_participation_active() {
+            return false;
+        }
+        true
+    }
+
     /// Human-readable summary (no secrets).
     pub fn summary(&self) -> String {
         let respond_to_detail = match &self.respond_to {
@@ -1125,7 +1177,7 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} thread_participation={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
@@ -1139,6 +1191,7 @@ impl Config {
             self.dedup_mode,
             self.multiple_event_handling,
             self.ignore_self,
+            self.thread_participation,
             self.context_message_limit,
             self.max_turns_per_session,
             self.presence_enabled,
@@ -1262,7 +1315,7 @@ pub fn resolve_channel_filters(
                     KIND_STREAM_REMINDER,
                 ]
             });
-            let require_mention = !config.no_mention_filter;
+            let require_mention = config.require_mention_on_wire();
             for ch in &target_channels {
                 result.insert(
                     *ch,
@@ -1367,7 +1420,7 @@ pub fn resolve_dynamic_channel_filter(
                     KIND_STREAM_REMINDER,
                 ]
             })),
-            require_mention: !config.no_mention_filter,
+            require_mention: config.require_mention_on_wire(),
         }),
         SubscribeMode::All => Some(ChannelFilter {
             kinds: config.kinds_override.clone(),
@@ -1455,6 +1508,7 @@ mod tests {
             kinds_override: None,
             channels_override: None,
             no_mention_filter: false,
+            thread_participation: true,
             config_path: PathBuf::from("./buzz-acp.toml"),
             context_message_limit: 12,
             max_turns_per_session: 0,
@@ -1507,12 +1561,27 @@ mod tests {
         assert_eq!(result.len(), 2);
         for ch in &channels {
             let f = result.get(ch).expect("channel should be present");
-            assert!(f.require_mention, "mentions mode requires mention");
+            // Default thread participation needs the channel firehose (no #p).
+            assert!(
+                !f.require_mention,
+                "default thread participation omits wire #p filter"
+            );
             let kinds = f.kinds.as_ref().expect("should have kinds");
             assert!(kinds.contains(&buzz_core::kind::KIND_STREAM_MESSAGE));
             assert!(kinds.contains(&buzz_core::kind::KIND_WORKFLOW_APPROVAL_REQUESTED));
             assert!(kinds.contains(&buzz_core::kind::KIND_STREAM_REMINDER));
         }
+    }
+
+    #[test]
+    fn test_mentions_mode_classic_mention_only_when_participation_off() {
+        let mut config = test_config(SubscribeMode::Mentions);
+        config.thread_participation = false;
+        let channels = vec![Uuid::new_v4()];
+        let result = resolve_channel_filters(&config, &channels, &[]);
+        let f = result.get(&channels[0]).unwrap();
+        assert!(f.require_mention);
+        assert!(!config.thread_participation_active());
     }
 
     #[test]
@@ -1535,6 +1604,8 @@ mod tests {
 
         let f = result.get(&channels[0]).unwrap();
         assert!(!f.require_mention);
+        // Firehose mode must not be re-narrowed by participation.
+        assert!(!config.thread_participation_active());
     }
 
     #[test]

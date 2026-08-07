@@ -448,7 +448,7 @@ fn unkeyable_failed_status(
 
 /// Spawn a lazy harness pair for every eligible (agent, community) pair.
 ///
-/// Eligibility is deliberately gated on `start_on_app_launch`: auto-start is
+/// Eligibility is gated on `is_active && start_on_app_launch`: auto-start is
 /// the *proactive fan-out* policy — "keep this agent warm in every community" —
 /// not a correctness prerequisite. A manual-start agent still works on demand
 /// everywhere: attaching it to a channel ensures its pair, an @mention wakes a
@@ -456,6 +456,10 @@ fn unkeyable_failed_status(
 /// preserves running pairs across relaunch. Fanning out warm-socket pairs for
 /// agents the user chose *not* to auto-start would contradict that choice, so
 /// reconcile leaves them alone until something explicitly asks for them.
+///
+/// Archived / inactive records (`is_active = false`) must never auto-start even
+/// if `start_on_app_launch` was left true — that combination reminted dual
+/// Welcome Team agents (two Fizz/Honey/Bumble pubkeys) after relay URL churn.
 #[tauri::command]
 pub async fn reconcile_managed_agent_runtimes(
     communities: Vec<super::ManagedAgentCommunityTarget>,
@@ -466,9 +470,11 @@ pub async fn reconcile_managed_agent_runtimes(
     let records = load_managed_agents(&app)?;
     let mut jobs = Vec::new();
     for community in communities {
-        for record in records
-            .iter()
-            .filter(|record| record.start_on_app_launch && record.backend == BackendKind::Local)
+        for record in records.iter().filter(|record| {
+            record.is_active
+                && record.start_on_app_launch
+                && record.backend == BackendKind::Local
+        })
         // The legacy per-record relay pin is deliberately ignored here — see
         // `effective_agent_relay_url`. Every local auto-start agent fans out
         // to every configured community.

@@ -5,6 +5,7 @@ mod config;
 mod engram_fetch;
 mod filter;
 mod observer;
+mod participation;
 mod pool;
 mod pool_lifecycle;
 mod queue;
@@ -359,6 +360,83 @@ async fn check_sibling_via_profile(
     }
 
     false
+}
+
+/// Whether `author` should be treated as an agent for thread-continuation
+/// suppression (agent-authored bare replies must not auto-wake this agent).
+///
+/// Heuristic order (cheap → expensive):
+/// 1. Author is our owner → human.
+/// 2. Author is on the respond-to allowlist → human (allowlist is for people).
+/// 3. Cached sibling result → agent if true.
+/// 4. Under `owner-only` / `allowlist`, any other admitted author is a sibling
+///    agent (the author gate already verified that).
+/// 5. Under `anyone`, fetch kind:0 and look for a NIP-OA `auth` tag shape.
+///    Unknown/error → treat as human (fail open for UX; explicit @ still works
+///    either way).
+async fn author_is_agent_for_continuation(
+    author: &str,
+    respond_to: &RespondTo,
+    allowlist: &HashSet<String>,
+    owner_cache: &OwnerCache,
+    rest_client: &relay::RestClient,
+) -> bool {
+    if owner_cache
+        .get()
+        .is_some_and(|o| o.eq_ignore_ascii_case(author))
+    {
+        return false;
+    }
+    if allowlist
+        .iter()
+        .any(|pk| pk.eq_ignore_ascii_case(author))
+    {
+        return false;
+    }
+    if let Some(is_sib) = owner_cache.is_known_sibling(author) {
+        return is_sib;
+    }
+    match respond_to {
+        RespondTo::Nobody => true,
+        RespondTo::OwnerOnly | RespondTo::Allowlist => {
+            // Non-owner, non-allowlist admissions are same-owner siblings.
+            true
+        }
+        RespondTo::Anyone => profile_has_agent_auth_tag(author, rest_client).await,
+    }
+}
+
+/// Cheap shape check: does this author's kind:0 carry a NIP-OA `auth` tag?
+///
+/// Not a security gate — only used to suppress agent↔agent auto-continue.
+async fn profile_has_agent_auth_tag(author: &str, rest_client: &relay::RestClient) -> bool {
+    let pk = match nostr::PublicKey::from_hex(author) {
+        Ok(pk) => pk,
+        Err(_) => return false,
+    };
+    let filter = nostr::Filter::new()
+        .kind(nostr::Kind::Metadata)
+        .author(pk)
+        .limit(1);
+    let resp = match tokio::time::timeout(Duration::from_millis(1500), rest_client.query(&[filter]))
+        .await
+    {
+        Ok(Ok(v)) => v,
+        _ => return false,
+    };
+    let Some(events) = resp.as_array() else {
+        return false;
+    };
+    let Some(event) = events.first() else {
+        return false;
+    };
+    let Some(tags) = event.get("tags").and_then(|t| t.as_array()) else {
+        return false;
+    };
+    tags.iter().any(|tag| {
+        tag.as_array()
+            .is_some_and(|parts| parts.len() == 4 && parts[0].as_str() == Some("auth"))
+    })
 }
 
 /// Observer frames are published at a global rate of AT MOST ONE relay frame
@@ -1720,8 +1798,16 @@ async fn tokio_main() -> Result<()> {
 
     let rules: Vec<SubscriptionRule> = match config.subscribe_mode {
         SubscribeMode::Mentions => {
+            // When smart thread participation is active, omit require_mention on
+            // the rule so bare thread replies reach local admission. The
+            // participation gate replaces the mention filter.
+            let require_mention = config.require_mention_on_wire();
             vec![SubscriptionRule {
-                name: "mentions".into(),
+                name: if config.thread_participation_active() {
+                    "mentions+threads".into()
+                } else {
+                    "mentions".into()
+                },
                 channels: filter::ChannelScope::All("all".into()),
                 kinds: config.kinds_override.clone().unwrap_or_else(|| {
                     vec![
@@ -1730,7 +1816,7 @@ async fn tokio_main() -> Result<()> {
                         KIND_STREAM_REMINDER,
                     ]
                 }),
-                require_mention: !config.no_mention_filter,
+                require_mention,
                 filter: None,
                 compiled_filter: None,
                 consecutive_timeouts: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
@@ -1977,6 +2063,56 @@ async fn tokio_main() -> Result<()> {
     // causal invalidation is needed, add a monotonic epoch counter per channel
     // and capture it in TaskMeta at dispatch time.
     let mut removed_channels: HashSet<Uuid> = HashSet::new();
+
+    // Threads where this agent is an active participant (mention or prior
+    // continuation). Used only when `thread_participation_active()`.
+    // Loaded from disk + rehydrated from recent relay history so harness
+    // restarts do not wipe continuation (restart amnesia).
+    let mut active_threads = if config.thread_participation_active() {
+        let path = participation::active_threads_state_path(&pubkey_hex);
+        let mut store = match participation::ActiveThreads::load(
+            &path,
+            participation::DEFAULT_THREAD_TTL,
+            participation::DEFAULT_MAX_ACTIVE_THREADS,
+        ) {
+            Ok(s) => {
+                tracing::info!(
+                    path = %path.display(),
+                    roots = s.len(),
+                    "loaded active-thread state from disk"
+                );
+                s
+            }
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "failed to load active-thread state — starting empty"
+                );
+                participation::ActiveThreads::new(
+                    participation::DEFAULT_THREAD_TTL,
+                    participation::DEFAULT_MAX_ACTIVE_THREADS,
+                )
+                .with_persist_path(Some(path.clone()))
+            }
+        };
+        let rehydrated = participation::rehydrate_from_relay(
+            &mut store,
+            &ctx.rest_client,
+            &pubkey_hex,
+            participation::DEFAULT_THREAD_TTL,
+        )
+        .await;
+        tracing::info!(
+            roots = store.len(),
+            rehydrated,
+            path = %path.display(),
+            "thread participation enabled — bare human replies in active threads wake this agent"
+        );
+        store
+    } else {
+        participation::ActiveThreads::default()
+    };
 
     //
     // One SlotCircuit per agent slot. crash_times entries are pruned to the last
@@ -2474,13 +2610,63 @@ async fn tokio_main() -> Result<()> {
                             }
 
                             let matched = filter::match_event(&buzz_event.event, buzz_event.channel_id, &rules, &pubkey_hex).await;
-                            let prompt_tag = match matched {
+                            let mut prompt_tag = match matched {
                                 Some(m) => m.prompt_tag,
                                 None => {
                                     tracing::debug!(channel_id = %buzz_event.channel_id, kind = buzz_event.event.kind.as_u16(), "event matched no rule — dropping");
                                     continue;
                                 }
                             };
+
+                            // Smart thread participation: after kinds/channels
+                            // match, decide mention vs active-thread continuation.
+                            // When disabled, require_mention on the rule already
+                            // enforced classic behaviour.
+                            if config.thread_participation_active() {
+                                let author_hex_for_gate = buzz_event.event.pubkey.to_hex();
+                                let author_is_agent = author_is_agent_for_continuation(
+                                    &author_hex_for_gate,
+                                    &config.respond_to,
+                                    &config.respond_to_allowlist,
+                                    &owner_cache,
+                                    &ctx.rest_client,
+                                )
+                                .await;
+                                let decision = participation::decide_event(
+                                    &buzz_event.event,
+                                    &pubkey_hex,
+                                    author_is_agent,
+                                    &mut active_threads,
+                                );
+                                match decision {
+                                    participation::ParticipationDecision::Admit {
+                                        reason,
+                                        ..
+                                    } => {
+                                        if matches!(
+                                            reason,
+                                            participation::AdmitReason::ThreadContinuation
+                                        ) {
+                                            prompt_tag = "thread-continuation".into();
+                                        }
+                                        tracing::info!(
+                                            channel_id = %buzz_event.channel_id,
+                                            event_id = %buzz_event.event.id.to_hex(),
+                                            ?reason,
+                                            "thread participation admitted event"
+                                        );
+                                    }
+                                    participation::ParticipationDecision::Drop => {
+                                        tracing::info!(
+                                            channel_id = %buzz_event.channel_id,
+                                            event_id = %buzz_event.event.id.to_hex(),
+                                            "thread participation — dropping (not mentioned, inactive thread, exclusive other, or agent author)"
+                                        );
+                                        continue;
+                                    }
+                                }
+                            }
+
                             // Capture author pubkey before queue.push() moves
                             // buzz_event.event (needed for mode gate below).
                             let author_hex = buzz_event.event.pubkey.to_hex();
@@ -2503,6 +2689,19 @@ async fn tokio_main() -> Result<()> {
                                 received_at: std::time::Instant::now(),
                                 prompt_tag,
                             });
+                            if accepted {
+                                tracing::info!(
+                                    channel_id = %buzz_event.channel_id,
+                                    event_id = %event_id_hex,
+                                    "queued inbound event for agent turn"
+                                );
+                            } else {
+                                tracing::info!(
+                                    channel_id = %buzz_event.channel_id,
+                                    event_id = %event_id_hex,
+                                    "inbound event not queued (dedup drop)"
+                                );
+                            }
                             // 👀 — immediate "seen" reaction, only if the event
                             // was actually queued (not dropped by DedupMode::Drop).
                             // Fire-and-forget: on rare fast-failure paths the
@@ -6191,6 +6390,7 @@ mod build_mcp_servers_tests {
             kinds_override: None,
             channels_override: None,
             no_mention_filter: false,
+            thread_participation: true,
             config_path: std::path::PathBuf::from("./buzz-acp.toml"),
             context_message_limit: 12,
             max_turns_per_session: 0,
@@ -6413,6 +6613,7 @@ mod error_outcome_emission_tests {
             kinds_override: None,
             channels_override: None,
             no_mention_filter: false,
+            thread_participation: true,
             config_path: std::path::PathBuf::from("./buzz-acp.toml"),
             context_message_limit: 12,
             max_turns_per_session: 0,
