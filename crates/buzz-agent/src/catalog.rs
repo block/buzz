@@ -14,6 +14,8 @@
 
 use std::sync::Arc;
 
+use crate::generated_model_capabilities::DATABRICKS_MODEL_NAMES;
+
 use reqwest::Client;
 
 use crate::{
@@ -23,8 +25,25 @@ use crate::{
     types::AgentError,
 };
 
+/// Returns the curated display name for a Databricks endpoint ID, or the raw
+/// ID when no entry exists in the registry.
+///
+/// The registry (`DATABRICKS_MODEL_NAMES`) is generated from the manifest
+/// (`scripts/model-capabilities.json`) exact records for the `databricks_v2`
+/// provider and covers the ~30 managed Databricks endpoints. Any custom or
+/// workspace endpoint not in the table is returned untouched — no heuristic
+/// guessing.
+pub(crate) fn databricks_model_name(id: &str) -> &str {
+    DATABRICKS_MODEL_NAMES
+        .iter()
+        .find(|(k, _)| *k == id)
+        .map(|(_, v)| *v)
+        .unwrap_or(id)
+}
+
 /// A discovered model entry: `id` is the picker value, `name` is the display
-/// label (same as `id` for Databricks — the API has no separate display name).
+/// label (curated from models.dev for known managed endpoints; raw ID for
+/// custom/unknown endpoints).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelEntry {
     pub id: String,
@@ -34,8 +53,10 @@ pub struct ModelEntry {
 /// Known Databricks AI Gateway v2 models — used only when an authenticated
 /// `api/ai-gateway/v2/endpoints` call succeeds with an empty list.
 /// Mirrors goose's `DATABRICKS_V2_KNOWN_MODELS`.
-pub const DATABRICKS_V2_KNOWN_MODELS: &[&str] =
-    &["databricks-gpt-5-5", "databricks-claude-opus-4-7"];
+///
+/// Phase 2 cutover: this is now a re-export of the generated constant in
+/// `generated_model_capabilities`. Phase 3 removes the old hand-maintained list.
+pub use crate::generated_model_capabilities::DATABRICKS_V2_KNOWN_MODELS;
 
 const AUTHENTICATED_EMPTY_CATALOG_SUFFIX: &str = " (default catalog)";
 
@@ -44,7 +65,10 @@ fn authenticated_empty_v2_catalog() -> Vec<ModelEntry> {
         .iter()
         .map(|id| ModelEntry {
             id: id.to_string(),
-            name: format!("{id}{AUTHENTICATED_EMPTY_CATALOG_SUFFIX}"),
+            name: format!(
+                "{}{AUTHENTICATED_EMPTY_CATALOG_SUFFIX}",
+                databricks_model_name(id)
+            ),
         })
         .collect()
 }
@@ -206,7 +230,7 @@ pub(crate) fn parse_v1_endpoints(json: &serde_json::Value) -> Result<Vec<ModelEn
 
             Some(ModelEntry {
                 id: name.clone(),
-                name,
+                name: databricks_model_name(&name).to_string(),
             })
         })
         .collect();
@@ -371,7 +395,7 @@ pub(crate) fn parse_v2_endpoints_page(
             Some(V2Endpoint {
                 entry: ModelEntry {
                     id: name.clone(),
-                    name,
+                    name: databricks_model_name(&name).to_string(),
                 },
                 created_ms: endpoint_created_ms(endpoint),
             })
@@ -649,8 +673,12 @@ mod tests {
         let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
 
         assert_eq!(ids, DATABRICKS_V2_KNOWN_MODELS);
+        // Each entry carries the curated display name (not the raw ID) plus the
+        // " (default catalog)" suffix to distinguish this authenticated-but-empty
+        // slate from a live discovery result.
         assert!(models.iter().all(|model| {
-            model.name == format!("{}{AUTHENTICATED_EMPTY_CATALOG_SUFFIX}", model.id)
+            let curated = databricks_model_name(&model.id);
+            model.name == format!("{curated}{AUTHENTICATED_EMPTY_CATALOG_SUFFIX}")
         }));
     }
 
@@ -664,5 +692,51 @@ mod tests {
         assert!(!is_chat_capable_endpoint("databricks-bge-large-en"));
         assert!(!is_chat_capable_endpoint("databricks-gte-large-en"));
         assert!(!is_chat_capable_endpoint("databricks-qwen3-embedding-0-6b"));
+    }
+    // ---------------------------------------------------------------------------
+    // Databricks model name registry
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn databricks_model_name_known_id_returns_curated_name() {
+        assert_eq!(databricks_model_name("databricks-gpt-5-5"), "GPT-5.5");
+        assert_eq!(
+            databricks_model_name("databricks-claude-opus-4-7"),
+            "Claude Opus 4.7"
+        );
+        assert_eq!(
+            databricks_model_name("databricks-gpt-oss-120b"),
+            "GPT OSS 120B"
+        );
+    }
+
+    #[test]
+    fn databricks_model_name_unknown_custom_endpoint_returns_raw_id() {
+        // Custom workspace endpoints must never be guessed — pass through unchanged.
+        assert_eq!(
+            databricks_model_name("databricks-team-2025-01"),
+            "databricks-team-2025-01"
+        );
+        assert_eq!(
+            databricks_model_name("databricks-finance-2025-01-30"),
+            "databricks-finance-2025-01-30"
+        );
+        assert_eq!(
+            databricks_model_name("some-unknown-endpoint"),
+            "some-unknown-endpoint"
+        );
+    }
+
+    #[test]
+    fn v2_known_models_fallback_entries_get_curated_names() {
+        // The DATABRICKS_V2_KNOWN_MODELS constant lists IDs that are in the
+        // registry, so their fallback entries must carry curated names.
+        for id in DATABRICKS_V2_KNOWN_MODELS {
+            let name = databricks_model_name(id);
+            assert_ne!(
+                name, *id,
+                "known model {id} should have a curated name, not raw ID"
+            );
+        }
     }
 }

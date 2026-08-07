@@ -541,13 +541,19 @@ test("databricks v1 routes like openai unknown (no gpt-5 model)", () => {
   assert.equal(defaultValue, "medium");
 });
 
-test("openai-compat returns all-7 with medium default", () => {
-  const { validValues, defaultValue } = getProviderEffortConfig(
-    "openai-compat",
-    "",
+test("openai-compat canonicalizes to openai: empty model returns all-except-max with medium default", () => {
+  // Regression: without canonicalization, openai-compat hit the unknown-provider fallback
+  // (all 7 values, default medium). After alias, it must resolve identically to openai.
+  const compat = getProviderEffortConfig("openai-compat", "");
+  const openai = getProviderEffortConfig("openai", "");
+  assert.deepEqual([...compat.validValues], [...openai.validValues]);
+  assert.equal(compat.defaultValue, openai.defaultValue);
+  // Concrete assertion: same as openai unknown model, not the all-7 fallback.
+  assert.deepEqual(
+    [...compat.validValues],
+    ["none", "minimal", "low", "medium", "high", "xhigh"],
   );
-  assert.equal(validValues.length, 7);
-  assert.equal(defaultValue, "medium");
+  assert.equal(compat.defaultValue, "medium");
 });
 
 test("empty provider returns all-7 with medium default", () => {
@@ -619,5 +625,127 @@ test("effort none is invalid for anthropic manual-budget (should trigger auto-cl
   assert.ok(
     !validValues.includes("none"),
     "none must not be in manual-budget set",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// getProviderEffortConfig — databricks-v2 hyphen alias (P3-B regression)
+// ---------------------------------------------------------------------------
+
+test("databricks-v2 hyphen alias canonicalizes to databricks_v2 underscore records", () => {
+  // The persisted alias "databricks-v2" must hit the same canonical records as "databricks_v2".
+  const hyphen = getProviderEffortConfig("databricks-v2", "databricks-gpt-5-5");
+  const underscore = getProviderEffortConfig(
+    "databricks_v2",
+    "databricks-gpt-5-5",
+  );
+  assert.deepEqual([...hyphen.validValues], [...underscore.validValues]);
+  assert.equal(hyphen.defaultValue, underscore.defaultValue);
+});
+
+test("databricks-v2 hyphen alias with databricks-gpt-5-5 returns [low,medium,high]", () => {
+  // Regression: without canonicalization this returned the all-7 unknown-provider fallback.
+  const { validValues, defaultValue } = getProviderEffortConfig(
+    "databricks-v2",
+    "databricks-gpt-5-5",
+  );
+  assert.deepEqual([...validValues], ["low", "medium", "high"]);
+  assert.equal(defaultValue, "medium");
+});
+
+// ---------------------------------------------------------------------------
+// getProviderEffortConfig — openai-compat alias (Thufir P3 corrective action 1)
+// ---------------------------------------------------------------------------
+// Rust normalizes "openai-compat" → Provider::OpenAi at config.rs:1218.
+// TS PROVIDER_ALIASES must match so UI effort table = Rust request behavior.
+
+test("openai-compat/gpt-5-pro resolves identically to openai/gpt-5-pro", () => {
+  const compat = getProviderEffortConfig("openai-compat", "gpt-5-pro");
+  const openai = getProviderEffortConfig("openai", "gpt-5-pro");
+  assert.deepEqual([...compat.validValues], [...openai.validValues]);
+  assert.equal(compat.defaultValue, openai.defaultValue);
+  // Concrete: gpt-5-pro is [high] only.
+  assert.deepEqual([...compat.validValues], ["high"]);
+  assert.equal(compat.defaultValue, "high");
+});
+
+test("openai-compat/gpt-5.5 resolves identically to openai/gpt-5.5", () => {
+  const compat = getProviderEffortConfig("openai-compat", "gpt-5.5");
+  const openai = getProviderEffortConfig("openai", "gpt-5.5");
+  assert.deepEqual([...compat.validValues], [...openai.validValues]);
+  assert.equal(compat.defaultValue, openai.defaultValue);
+});
+
+test("openai-compat/gpt-5 base resolves identically to openai/gpt-5", () => {
+  const compat = getProviderEffortConfig("openai-compat", "gpt-5");
+  const openai = getProviderEffortConfig("openai", "gpt-5");
+  assert.deepEqual([...compat.validValues], [...openai.validValues]);
+  assert.equal(compat.defaultValue, openai.defaultValue);
+});
+
+test("openai-compat alias is case-insensitive: OpenAI-Compat canonicalizes correctly", () => {
+  const mixed = getProviderEffortConfig("OpenAI-Compat", "gpt-5-pro");
+  const lower = getProviderEffortConfig("openai-compat", "gpt-5-pro");
+  assert.deepEqual([...mixed.validValues], [...lower.validValues]);
+  assert.equal(mixed.defaultValue, lower.defaultValue);
+});
+
+test("openai-compat alias handles surrounding whitespace: '  openai-compat  ' canonicalizes correctly", () => {
+  const padded = getProviderEffortConfig("  openai-compat  ", "gpt-5-pro");
+  const clean = getProviderEffortConfig("openai-compat", "gpt-5-pro");
+  assert.deepEqual([...padded.validValues], [...clean.validValues]);
+  assert.equal(padded.defaultValue, clean.defaultValue);
+});
+
+test("openai-compat alias handles mixed case + whitespace: '  OpenAI-Compat  ' canonicalizes correctly", () => {
+  const messy = getProviderEffortConfig("  OpenAI-Compat  ", "gpt-5");
+  const canonical = getProviderEffortConfig("openai", "gpt-5");
+  assert.deepEqual([...messy.validValues], [...canonical.validValues]);
+  assert.equal(messy.defaultValue, canonical.defaultValue);
+});
+
+// ---------------------------------------------------------------------------
+// PROVIDER_FALLBACKS prototype-key safety regression
+// ---------------------------------------------------------------------------
+
+test("prototype-key safety: provider='constructor' returns a complete record (Map prevents prototype leak)", () => {
+  const result = getProviderEffortConfig("constructor", "some-model");
+  // Must not crash and must return a non-empty validValues (complete record)
+  assert.ok(
+    Array.isArray(result.validValues) && result.validValues.length > 0,
+    "constructor provider must return a complete record (not an empty/broken result from prototype chain)",
+  );
+});
+
+test("prototype-key safety: provider='__proto__' returns a complete record", () => {
+  const result = getProviderEffortConfig("__proto__", "some-model");
+  assert.ok(
+    Array.isArray(result.validValues) && result.validValues.length > 0,
+    "__proto__ provider must return a complete record",
+  );
+});
+
+test("prototype-key safety: provider='hasOwnProperty' returns a complete record", () => {
+  const result = getProviderEffortConfig("hasOwnProperty", "some-model");
+  assert.ok(
+    Array.isArray(result.validValues) && result.validValues.length > 0,
+    "hasOwnProperty provider must return a complete record",
+  );
+});
+
+test("prototype-key safety: provider='toString' returns a complete record", () => {
+  const result = getProviderEffortConfig("toString", "some-model");
+  assert.ok(
+    Array.isArray(result.validValues) && result.validValues.length > 0,
+    "toString provider must return a complete record",
+  );
+});
+
+test("prototype-key safety: validValues.includes() does not throw for prototype-key provider", () => {
+  // This exercises the crash path: EffortSelectField calls validValues.includes()
+  const result = getProviderEffortConfig("constructor", "some-model");
+  assert.doesNotThrow(
+    () => result.validValues.includes("low"),
+    "validValues.includes() must not throw for prototype-key providers",
   );
 });

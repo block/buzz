@@ -312,3 +312,66 @@ test("isSuccessfulEmptyDiscovery_stillPending_isFalse", () => {
     false,
   );
 });
+
+// ── Discovered rows resolve through the shared label resolver ────────────────
+// Discovery can return a Databricks endpoint with a null or blank `name`
+// (v1 catalogs, and any harness that echoes IDs only). Those rows must still
+// show the curated registry name rather than the raw endpoint ID.
+
+test("discoveredRow_knownDatabricksIdWithNullName_showsCuratedName", () => {
+  const options = getDiscoveredPersonaModelOptions(
+    response({
+      models: [{ id: "databricks-gpt-5-5", name: null, description: null }],
+    }),
+    "",
+  );
+
+  assert.deepEqual(options.slice(1), [
+    { id: "databricks-gpt-5-5", label: "GPT-5.5" },
+  ]);
+});
+
+test("discoveredRow_knownDatabricksIdWithBlankName_showsCuratedName", () => {
+  const options = getDiscoveredPersonaModelOptions(
+    response({
+      models: [
+        { id: "databricks-claude-opus-4-7", name: "   ", description: null },
+      ],
+    }),
+    "",
+  );
+
+  assert.deepEqual(options.slice(1), [
+    { id: "databricks-claude-opus-4-7", label: "Claude Opus 4.7" },
+  ]);
+});
+
+test("discoveredRow_unknownCustomEndpointWithNoName_showsRawId", () => {
+  const options = getDiscoveredPersonaModelOptions(
+    response({
+      models: [
+        { id: "databricks-team-2025-01", name: null, description: null },
+      ],
+    }),
+    "",
+  );
+
+  assert.deepEqual(options.slice(1), [
+    { id: "databricks-team-2025-01", label: "databricks-team-2025-01" },
+  ]);
+});
+
+test("discoveredRow_nonblankDiscoveredName_winsOverRegistry", () => {
+  const options = getDiscoveredPersonaModelOptions(
+    response({
+      models: [
+        { id: "databricks-gpt-5-5", name: "Workspace GPT", description: null },
+      ],
+    }),
+    "",
+  );
+
+  assert.deepEqual(options.slice(1), [
+    { id: "databricks-gpt-5-5", label: "Workspace GPT" },
+  ]);
+});

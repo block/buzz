@@ -1,4 +1,7 @@
-import { formatAgentModelLabel } from "./formatAgentModelLabel";
+import {
+  formatAgentModelLabel,
+  resolveModelLabel,
+} from "./formatAgentModelLabel";
 import type { ManagedAgent } from "@/shared/api/types";
 
 /**
@@ -19,8 +22,10 @@ import type { ManagedAgent } from "@/shared/api/types";
  * than falling through to "inherited" for lack of an instance.
  */
 export function resolveAgentCardModelLabel(input: {
-  agent: Pick<ManagedAgent, "modelSource" | "model"> | undefined;
+  agent: Pick<ManagedAgent, "modelSource" | "model" | "provider"> | undefined;
   personaModel: string | null | undefined;
+  /** Inference provider for the persona/agent — threads provider-qualified label lookup. */
+  provider?: string | null | undefined;
   defaultModel: string;
 }): string {
   if (input.agent) {
@@ -30,15 +35,17 @@ export function resolveAgentCardModelLabel(input: {
       return formatDefaultModelLabel(input.defaultModel);
     }
     return input.agent.model?.trim()
-      ? formatAgentModelLabel(input.agent.model)
+      ? formatAgentModelLabel(input.agent.model, input.agent.provider)
       : formatDefaultModelLabel(input.defaultModel);
   }
   return input.personaModel?.trim()
-    ? formatAgentModelLabel(input.personaModel)
+    ? formatAgentModelLabel(input.personaModel, input.provider)
     : formatDefaultModelLabel(input.defaultModel);
 }
 
 export function formatDefaultModelLabel(defaultModel: string) {
   const model = defaultModel.trim();
-  return model ? `Default model (${model})` : "Default model";
+  return model
+    ? `Default model (${resolveModelLabel(model)})`
+    : "Default model";
 }

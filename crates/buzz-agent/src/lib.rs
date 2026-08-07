@@ -4,6 +4,7 @@ pub mod auth;
 mod builtin;
 pub mod catalog;
 pub mod config;
+pub mod generated_model_capabilities;
 mod handoff;
 mod hints;
 mod llm;
@@ -331,7 +332,7 @@ fn configured_model_fallback(model: &str) -> Vec<ModelEntry> {
     let model = model.trim().to_string();
     vec![ModelEntry {
         id: model.clone(),
-        name: model,
+        name: crate::catalog::databricks_model_name(&model).to_string(),
     }]
 }
 
@@ -956,11 +957,20 @@ mod tests {
 
     #[test]
     fn configured_model_fallback_is_trimmed_and_singular() {
+        // Non-registry ID: trim works, raw ID passes through as name
         assert_eq!(
             crate::configured_model_fallback("  configured-model  "),
             vec![ModelEntry {
                 id: "configured-model".into(),
                 name: "configured-model".into(),
+            }]
+        );
+        // Known registry ID: curated name is used
+        assert_eq!(
+            crate::configured_model_fallback("databricks-gpt-5-5"),
+            vec![ModelEntry {
+                id: "databricks-gpt-5-5".into(),
+                name: "GPT-5.5".into(),
             }]
         );
     }

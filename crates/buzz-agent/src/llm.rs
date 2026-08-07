@@ -9,8 +9,9 @@ use tokio::time::Instant;
 
 use crate::auth::{PkceOAuthConfig, PkceOAuthTokenSource, StaticTokenSource, TokenSource};
 use crate::config::{
-    is_openai_host, normalize_effort_for_anthropic_route, normalize_effort_for_openai_route,
-    Config, OpenAiApi, Provider, ThinkingEffort,
+    anthropic_thinking_config_generated, is_openai_host, normalize_effort_for_anthropic_route,
+    normalize_effort_for_databricks_v2, normalize_effort_for_provider, Config, OpenAiApi, Provider,
+    ThinkingEffort,
 };
 use crate::types::{
     AgentError, HistoryItem, LlmResponse, ProviderStop, ToolCall, ToolDef, ToolResultContent,
@@ -144,7 +145,15 @@ impl Llm {
             Provider::Anthropic => self
                 .post_anthropic(
                     cfg,
-                    &anthropic_body(cfg, system_prompt, history, tools, effective_model, effort),
+                    &anthropic_body(
+                        cfg,
+                        system_prompt,
+                        history,
+                        tools,
+                        effective_model,
+                        effort,
+                        "anthropic",
+                    ),
                 )
                 .await
                 .and_then(parse_anthropic),
@@ -162,17 +171,23 @@ impl Llm {
                     .and_then(parse_openai_with_reasoning_details)
             }
             Provider::OpenAi | Provider::Databricks => {
+                let provider_str = match cfg.provider {
+                    Provider::OpenAi => "openai",
+                    Provider::Databricks => "databricks",
+                    _ => unreachable!(),
+                };
                 self.openai_request(
                     cfg,
                     effective_model,
                     !tools.is_empty(),
                     |use_responses, request_model| {
-                        // Normalize effort for model-specific availability. Startup no longer rejects
-                        // `max` for pure OpenAI/Databricks; this per-model table is the single authority
-                        // — it keeps `max` for gpt-5.6, clamps `max`→`xhigh` for other OpenAI-shaped
-                        // models, and still applies corrections like none→minimal on the gpt-5 base.
-                        let e =
-                            effort.map(|ef| normalize_effort_for_openai_route(ef, request_model));
+                        // Normalize effort via the generated manifest — resolves the
+                        // actual provider/model record and applies resolve_openai_effort
+                        // over its supported_efforts.  Adopted F1 corrections (e.g.
+                        // databricks-gpt-5-5 → [low,medium,high]) are enforced here.
+                        let e = effort.map(|ef| {
+                            normalize_effort_for_provider(provider_str, request_model, ef)
+                        });
                         if use_responses {
                             (
                                 responses_body(
@@ -198,9 +213,9 @@ impl Llm {
             Provider::DatabricksV2 => {
                 self.databricks_v2_request(cfg, effective_model, |route| match route {
                     DatabricksV2Route::OpenAiResponses => {
-                        // OpenAI Responses path: normalize effort against the per-model table.
-                        let e =
-                            effort.map(|ef| normalize_effort_for_openai_route(ef, effective_model));
+                        // OpenAI Responses path: normalize effort via manifest normalization_policy.
+                        let e = effort
+                            .map(|ef| normalize_effort_for_databricks_v2(ef, effective_model));
                         (
                             responses_body(cfg, system_prompt, history, tools, effective_model, e),
                             parse_responses as OpenAiParse,
@@ -210,14 +225,22 @@ impl Llm {
                         // Anthropic Messages path: normalize effort (none|minimal → omit).
                         let e = effort.and_then(normalize_effort_for_anthropic_route);
                         (
-                            anthropic_body(cfg, system_prompt, history, tools, effective_model, e),
+                            anthropic_body(
+                                cfg,
+                                system_prompt,
+                                history,
+                                tools,
+                                effective_model,
+                                e,
+                                "databricks_v2",
+                            ),
                             parse_anthropic as OpenAiParse,
                         )
                     }
                     DatabricksV2Route::MlflowChatCompletions => {
-                        // MLflow Chat path (OpenAI-shaped): normalize effort against the per-model table.
-                        let e =
-                            effort.map(|ef| normalize_effort_for_openai_route(ef, effective_model));
+                        // MLflow Chat path (OpenAI-shaped): normalize effort via manifest.
+                        let e = effort
+                            .map(|ef| normalize_effort_for_databricks_v2(ef, effective_model));
                         (
                             openai_body(cfg, system_prompt, history, tools, effective_model, e),
                             parse_openai as OpenAiParse,
@@ -774,6 +797,7 @@ fn anthropic_body(
     tools: &[ToolDef],
     effective_model: &str,
     effort: Option<ThinkingEffort>,
+    provider: &str,
 ) -> Value {
     let mut messages: Vec<Value> = Vec::new();
     let mut pending: Vec<Value> = Vec::new();
@@ -845,8 +869,12 @@ fn anthropic_body(
     let mut body = json!({ "model": effective_model, "max_tokens": cfg.max_output_tokens,
         "system": system_value, "messages": messages });
     if let Some(e) = effort {
-        let (thinking, output_config) =
-            crate::config::anthropic_thinking_config(effective_model, e, cfg.max_output_tokens);
+        let (thinking, output_config) = anthropic_thinking_config_generated(
+            provider,
+            effective_model,
+            e,
+            cfg.max_output_tokens,
+        );
         if let Some(t) = thinking {
             body["thinking"] = t;
         }
@@ -1164,56 +1192,27 @@ fn is_responses_required_error(body: &str) -> bool {
         || b.contains("use the responses api")
 }
 
-/// OpenAI-family code names that appear as their own segment in a Databricks v2
-/// endpoint name (the GPT-5 launch aliases). The `gpt` family itself is matched
-/// separately by segment prefix so `gpt`, `gpt5`, and the `gpt` of a split
-/// `gpt-5` all qualify.
-const DATABRICKS_V2_OPENAI_CODE_NAMES: &[&str] = &["sol", "luna", "terra"];
-
-/// Anthropic (Claude) family and release code names that appear as their own
-/// segment in a Databricks v2 endpoint name — the `claude` prefix, the family
-/// names (`opus`, `sonnet`, `haiku`), and the release code names (`mythos`,
-/// `fable`). Getting a Claude model onto the Anthropic Messages route is what
-/// lets it carry a `cache_control` breakpoint; an endpoint that matches none of
-/// these falls through to the MLflow (OpenAI-wire) path, where Anthropic prompt
-/// caching is structurally impossible and the discount is silently lost.
-const DATABRICKS_V2_CLAUDE_NAMES: &[&str] =
-    &["claude", "opus", "sonnet", "haiku", "mythos", "fable"];
-
-/// Split a Databricks v2 endpoint name into its lowercase alphanumeric segments,
-/// breaking on any non-alphanumeric delimiter (`-`, `_`, `.`, `/`, …). E.g.
-/// `Databricks-Claude-Opus-5` -> `["databricks", "claude", "opus", "5"]`.
-fn model_name_segments(model: &str) -> Vec<String> {
-    model
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|s| !s.is_empty())
-        .map(str::to_ascii_lowercase)
-        .collect()
-}
-
+/// Returns the Databricks v2 wire route for a model name.
+///
+/// Phase 2 cutover: delegates to `resolve_model_capabilities` from the generated
+/// capability module. The generated resolver uses the same segment-based matching
+/// logic, now derived from the manifest single source of truth.
+///
+/// `RouteUnknown` (blank model) and `NotApplicable` (non-DBv2 provider) are not
+/// reachable here — this function is only called for DBv2 requests with an
+/// effective model string — both map to `MlflowChatCompletions` as a safe fallback.
 fn databricks_v2_route_for_model(model: &str) -> DatabricksV2Route {
-    // The v2 catalog exposes no family field, so the wire format is inferred
-    // from the endpoint name. Discovery deliberately keeps arbitrary custom
-    // aliases, so we match whole name *segments* rather than raw substrings: a
-    // substring test would misroute unrelated names — `consolidated-llama`
-    // (`sol`), `terraform-coder` (`terra`), `corpus-reranker`/`octopus-model`
-    // (`opus`) — onto a wire whose request shape their backend can't parse,
-    // turning a caching optimization into a hard request/parse failure. Segment
-    // matching still accepts real prefixed names like `goose-opus-5`.
-    let segments = model_name_segments(model);
-    let has_named_segment =
-        |names: &[&str]| segments.iter().any(|seg| names.contains(&seg.as_str()));
-    // `gpt` family: any segment beginning with `gpt` — covers `gpt`, `gpt5`, and
-    // the `gpt` segment of a split `gpt-5`, without matching mid-word.
-    let is_gpt_family = segments.iter().any(|seg| seg.starts_with("gpt"));
-    // OpenAI is checked before Claude so a name carrying both markers resolves
-    // to the OpenAI wire (preserving the prior `gpt-5`-first precedence).
-    if is_gpt_family || has_named_segment(DATABRICKS_V2_OPENAI_CODE_NAMES) {
-        DatabricksV2Route::OpenAiResponses
-    } else if has_named_segment(DATABRICKS_V2_CLAUDE_NAMES) {
-        DatabricksV2Route::AnthropicMessages
-    } else {
-        DatabricksV2Route::MlflowChatCompletions
+    use crate::generated_model_capabilities::{
+        resolve_model_capabilities, DatabricksV2Route as GenRoute,
+    };
+    match resolve_model_capabilities("databricks_v2", model).databricks_v2_wire_route {
+        GenRoute::OpenAiResponses => DatabricksV2Route::OpenAiResponses,
+        GenRoute::AnthropicMessages => DatabricksV2Route::AnthropicMessages,
+        // RouteUnknown (blank model) and NotApplicable (non-DBv2) are structurally
+        // unreachable from this call site; fall through to the mlflow path.
+        GenRoute::MlflowChatCompletions | GenRoute::RouteUnknown | GenRoute::NotApplicable => {
+            DatabricksV2Route::MlflowChatCompletions
+        }
     }
 }
 
@@ -3314,6 +3313,7 @@ mod tests {
             &[],
             "model",
             None,
+            "anthropic",
         );
         let content = &body["messages"][2]["content"][0]["content"];
         assert_eq!(content[0]["type"], "text");
@@ -3796,6 +3796,7 @@ mod tests {
             &[],
             "databricks-claude-opus-5",
             None,
+            "databricks_v2",
         );
         // Static prefix: system promoted to a structured block carrying the marker.
         assert_eq!(body["system"][0]["type"], "text");
@@ -3826,6 +3827,7 @@ mod tests {
             &[],
             "databricks-claude-opus-5",
             None,
+            "databricks_v2",
         );
         let msgs = body["messages"].as_array().unwrap();
         assert_eq!(msgs.len(), 1);
@@ -3846,6 +3848,7 @@ mod tests {
             &[],
             "databricks-claude-opus-5",
             None,
+            "anthropic",
         );
         // system stays a bare string; no marker anywhere.
         assert_eq!(body["system"], "sys");
@@ -3864,6 +3867,7 @@ mod tests {
             &[],
             "databricks-claude-opus-5",
             None,
+            "databricks_v2",
         );
         assert_eq!(body["system"], "");
         assert_eq!(
@@ -3883,6 +3887,7 @@ mod tests {
             &[],
             "model",
             None,
+            "anthropic",
         );
         assert!(
             body.get("thinking").is_none(),
@@ -3903,6 +3908,7 @@ mod tests {
             &[],
             "claude-3-7-sonnet-20250219",
             Some(ThinkingEffort::High),
+            "anthropic",
         );
         assert_eq!(body["thinking"]["type"], "enabled");
         // budget_tokens = min(32768, 4096-1024) = 3072
@@ -3922,6 +3928,7 @@ mod tests {
             &[],
             "claude-3-7-sonnet-20250219",
             Some(ThinkingEffort::High),
+            "anthropic",
         );
         assert!(
             body.get("thinking").is_none(),
@@ -3941,6 +3948,7 @@ mod tests {
             &[],
             "claude-3-7-sonnet-20250219",
             Some(ThinkingEffort::High),
+            "anthropic",
         );
         let t = body
             .get("thinking")
@@ -3960,6 +3968,7 @@ mod tests {
             &[],
             "claude-3-7-sonnet-20250219",
             Some(ThinkingEffort::High),
+            "anthropic",
         );
         assert_eq!(body["thinking"]["budget_tokens"], 32_768);
     }
@@ -3977,6 +3986,7 @@ mod tests {
             &[],
             "claude-3-7-sonnet-20250219",
             Some(ThinkingEffort::Low),
+            "anthropic",
         );
         // Low budget (1024) fits exactly at the boundary — emitted without capping.
         assert_eq!(body["thinking"]["budget_tokens"], 1024);
@@ -3995,6 +4005,7 @@ mod tests {
             &[],
             "claude-opus-4-7",
             Some(ThinkingEffort::High),
+            "anthropic",
         );
         assert_eq!(
             body["thinking"]["type"], "adaptive",
@@ -4016,6 +4027,7 @@ mod tests {
             &[],
             "claude-opus-4-5",
             Some(ThinkingEffort::High),
+            "anthropic",
         );
         assert_eq!(body["thinking"]["type"], "enabled");
         assert_eq!(body["thinking"]["budget_tokens"], 31_744); // min(32768, 32768-1024)
@@ -4035,6 +4047,7 @@ mod tests {
             &[],
             "gpt-4o",
             Some(ThinkingEffort::High),
+            "anthropic",
         );
         assert!(body.get("thinking").is_none(), "thinking must be absent");
         assert!(
@@ -4110,6 +4123,7 @@ mod tests {
             &[],
             "override-model",
             None,
+            "anthropic",
         );
         assert_eq!(body["model"], "override-model");
     }
@@ -4139,6 +4153,7 @@ mod tests {
             &[],
             "claude-opus-4-8",
             Some(ThinkingEffort::XHigh),
+            "anthropic",
         );
         assert_eq!(body["thinking"]["type"], "adaptive");
         assert_eq!(body["output_config"]["effort"], "xhigh");
@@ -4156,9 +4171,34 @@ mod tests {
             &[],
             "claude-opus-4-8",
             Some(ThinkingEffort::Max),
+            "anthropic",
         );
         assert_eq!(body["thinking"]["type"], "adaptive");
         assert_eq!(body["output_config"]["effort"], "max");
+    }
+
+    #[test]
+    fn anthropic_body_opus_4_6_xhigh_clamps_to_high() {
+        // Production-seam clamp: Opus 4.6 supported_efforts=[low,medium,high,max] — xhigh is
+        // absent. The adaptive clamp (config.rs:284-296) must find the highest supported ≤ xhigh,
+        // which is high (max > xhigh in the ThinkingEffort ordering). A regression that removes
+        // the clamp or breaks the ordering would emit "xhigh" or omit the field entirely.
+        let mut c = cfg(Provider::Anthropic);
+        c.max_output_tokens = 32_768;
+        let body = anthropic_body(
+            &c,
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "claude-opus-4-6",
+            Some(ThinkingEffort::XHigh),
+            "anthropic",
+        );
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert_eq!(
+            body["output_config"]["effort"], "high",
+            "XHigh on Opus 4.6 must clamp to high (xhigh not in supported_efforts)"
+        );
     }
 
     #[test]
@@ -4215,170 +4255,6 @@ mod tests {
             Some(ThinkingEffort::Minimal),
         );
         assert_eq!(body["reasoning"]["effort"], "minimal");
-    }
-
-    // ---- DatabricksV2 route-aware effort normalization (body-level assertions) ----
-    //
-    // The DBv2 `complete()` dispatch applies `normalize_effort_for_openai_route` /
-    // `normalize_effort_for_anthropic_route` before calling body builders. These tests
-    // verify the body shape that results from the already-normalized effort values — i.e.,
-    // they confirm the body builders correctly serialize the values the dispatch passes them.
-
-    #[test]
-    fn dbv2_openai_route_max_effort_clamped_to_xhigh_in_responses_body() {
-        // DBv2 GPT-5.5 route: max → clamped to xhigh by normalize_effort_for_openai_route
-        // before reaching responses_body. gpt-5.5 supports xhigh so the final value is xhigh.
-        let clamped =
-            crate::config::normalize_effort_for_openai_route(ThinkingEffort::Max, "gpt-5.5");
-        let body = responses_body(
-            &cfg_responses(),
-            "system",
-            &[HistoryItem::User("hi".into())],
-            &[],
-            "gpt-5.5",
-            Some(clamped),
-        );
-        assert_eq!(
-            body["reasoning"]["effort"], "xhigh",
-            "DBv2 GPT-5.5 route: max must be clamped to xhigh before responses_body"
-        );
-    }
-
-    #[test]
-    fn dbv2_openai_route_max_effort_passes_through_for_gpt5_6() {
-        let normalized =
-            crate::config::normalize_effort_for_openai_route(ThinkingEffort::Max, "gpt-5.6-sol");
-        let body = responses_body(
-            &cfg_responses(),
-            "system",
-            &[HistoryItem::User("hi".into())],
-            &[],
-            "gpt-5.6-sol",
-            Some(normalized),
-        );
-        assert_eq!(
-            body["reasoning"]["effort"], "max",
-            "DBv2 GPT-5.6 route must serialize max to the Responses API"
-        );
-    }
-
-    #[test]
-    fn dbv2_mlflow_route_max_effort_clamped_to_xhigh_in_openai_body() {
-        // DBv2 MLflow route (unknown model): max → clamped to xhigh by normalize_effort_for_openai_route.
-        // Unknown models pass through after the max→xhigh clamp.
-        let clamped =
-            crate::config::normalize_effort_for_openai_route(ThinkingEffort::Max, "llama-4");
-        let body = openai_body(
-            &cfg(Provider::OpenAi),
-            "system",
-            &[HistoryItem::User("hi".into())],
-            &[],
-            "llama-4",
-            Some(clamped),
-        );
-        assert_eq!(
-            body["reasoning_effort"], "xhigh",
-            "DBv2 MLflow route: max must be clamped to xhigh before openai_body"
-        );
-    }
-
-    #[test]
-    fn dbv2_openai_route_none_minimal_pass_through_in_responses_body() {
-        // Verify that supported values pass through for the respective model families.
-        // gpt-5.5 supports none (but not minimal); gpt-5 base supports minimal (but not none).
-        let none_normalized =
-            crate::config::normalize_effort_for_openai_route(ThinkingEffort::None, "gpt-5.5");
-        assert_eq!(
-            none_normalized,
-            ThinkingEffort::None,
-            "OpenAI normalizer must not touch none for gpt-5.5"
-        );
-        let minimal_normalized =
-            crate::config::normalize_effort_for_openai_route(ThinkingEffort::Minimal, "gpt-5");
-        assert_eq!(
-            minimal_normalized,
-            ThinkingEffort::Minimal,
-            "OpenAI normalizer must not touch minimal for gpt-5 base"
-        );
-        let body = responses_body(
-            &cfg_responses(),
-            "system",
-            &[HistoryItem::User("hi".into())],
-            &[],
-            "gpt-5.5",
-            Some(none_normalized),
-        );
-        assert_eq!(
-            body["reasoning"]["effort"], "none",
-            "DBv2 GPT-5.5 route: none must be emitted as-is"
-        );
-    }
-
-    #[test]
-    fn dbv2_claude_route_none_effort_omits_thinking_fields() {
-        // DBv2 Claude route: none → normalize_effort_for_anthropic_route returns None → omit.
-        let normalized = crate::config::normalize_effort_for_anthropic_route(ThinkingEffort::None);
-        assert_eq!(
-            normalized, None,
-            "Anthropic normalizer must return None for ThinkingEffort::None"
-        );
-        let mut c = cfg(Provider::Anthropic);
-        c.max_output_tokens = 32_768;
-        let body = anthropic_body(
-            &c,
-            "system",
-            &[HistoryItem::User("hi".into())],
-            &[],
-            "claude-opus-4-8",
-            normalized, // None → omit thinking fields
-        );
-        assert!(
-            body.get("thinking").is_none(),
-            "DBv2 Claude route: none effort must omit thinking fields"
-        );
-        assert!(
-            body.get("output_config").is_none(),
-            "DBv2 Claude route: none effort must omit output_config"
-        );
-    }
-
-    #[test]
-    fn dbv2_route_switch_max_body_level_simulation() {
-        // Body-level simulation of a session/set_model switch from a Claude model to a GPT-5
-        // model when thinking_effort=max. Calls body builders and normalizers directly (not
-        // through the ACP session/set_model path or DatabricksV2 dispatch) to verify the
-        // correct output shape for each side of the route switch.
-        // Before the switch: Claude route → max passes through as Anthropic "max".
-        // After the switch: GPT-5 route → max clamped to xhigh.
-        let mut c = cfg(Provider::Anthropic);
-        c.max_output_tokens = 32_768;
-
-        // Before switch: claude-opus-4-8 with effort=max → adaptive shape, effort="max"
-        let (thinking_before, oc_before) = crate::config::anthropic_thinking_config(
-            "claude-opus-4-8",
-            ThinkingEffort::Max,
-            32_768,
-        );
-        assert_eq!(thinking_before.unwrap()["type"], "adaptive");
-        assert_eq!(oc_before.unwrap()["effort"], "max");
-
-        // After switch to GPT-5.5 route: normalize max → xhigh for responses_body
-        // (gpt-5.5 supports xhigh, so the clamp result is xhigh, not further reduced)
-        let clamped =
-            crate::config::normalize_effort_for_openai_route(ThinkingEffort::Max, "gpt-5.5");
-        assert_eq!(clamped, ThinkingEffort::XHigh);
-        let body_after = responses_body(
-            &cfg_responses(),
-            "system",
-            &[HistoryItem::User("hi".into())],
-            &[],
-            "gpt-5.5",
-            Some(clamped),
-        );
-        assert_eq!(
-            body_after["reasoning"]["effort"], "xhigh",
-            "After set_model to GPT-5.5: max must be clamped to xhigh"
-        );
     }
 
     /// Regression: a connection that is accepted and then dropped before any
@@ -6811,6 +6687,7 @@ mod tests {
             &[],
             "claude-opus-4-7",
             None,
+            "anthropic",
         );
         let messages = body["messages"].as_array().unwrap();
         let assistant = messages

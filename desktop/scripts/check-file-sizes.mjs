@@ -58,4 +58,12 @@ await runFileSizeCheck({
   projectRoot,
   rules,
   label: "Desktop",
+  // Auto-generated files are exempt from the hand-authored 1000-line ceiling.
+  // The line count is bounded by the manifest's exact_records count, not by
+  // engineering complexity. Set per-file caps tightly to catch unexpected growth.
+  fileOverrides: {
+    // Generated from scripts/model-capabilities.json — grows only when new
+    // models are added to the manifest. Cap at current size + headroom.
+    "src/features/agents/ui/modelCapabilities.ts": 1200,
+  },
 });
