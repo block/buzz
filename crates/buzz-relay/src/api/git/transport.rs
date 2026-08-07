@@ -224,7 +224,92 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
             return Err((StatusCode::FORBIDDEN, "restricted: not a relay member").into_response());
         }
 
+        deny_banned_git_principal(&state.db, tenant.community(), &pubkey, auth_tag).await?;
+
         Ok(GitAuth { pubkey, tenant })
+    }
+}
+
+/// Deny banned principals on every Git HTTP request.
+///
+/// Git runs outside the WebSocket authentication path, so a valid NIP-98
+/// credential and channel membership are not enough — neither reflects a
+/// moderation ban. Git credentials are also deliberately reused across a
+/// session (see the replay notes above), so no session expiry would close the
+/// gap on its own. Re-read the durable ban per request instead.
+///
+/// Cascades to the proven NIP-OA owner, matching the NIP-42 gate in
+/// `handlers::auth`: banning a human must also revoke their agents, or the ban
+/// is bypassable by cloning and pushing through an agent key.
+async fn deny_banned_git_principal(
+    db: &buzz_db::Db,
+    community: buzz_core::CommunityId,
+    pubkey: &nostr::PublicKey,
+    auth_tag: Option<&str>,
+) -> Result<(), Response> {
+    let agent = git_restriction_state(db, community, pubkey).await?;
+
+    // Skip the owner read when the agent is already banned: the denial is
+    // identical either way. Mirrors the WebSocket cascade's short-circuit.
+    let owner = if agent.banned {
+        None
+    } else {
+        crate::api::relay_members::extract_nip_oa_owner(pubkey.as_bytes(), auth_tag)
+    };
+    let owner_state = match owner {
+        Some(owner) => Some(git_restriction_state(db, community, &owner).await?),
+        None => None,
+    };
+
+    enforce_git_ban_cascade(&agent, owner_state.as_ref()).map_err(|status| {
+        warn!(
+            pubkey = %pubkey.to_hex(),
+            owner = ?owner.map(|owner| owner.to_hex()),
+            "git: community ban denied request"
+        );
+        (status, "blocked: banned from this community").into_response()
+    })
+}
+
+/// One restriction read, failing closed with 503.
+///
+/// A restriction-store outage must not be reported to the client as a
+/// permission decision — 503 says "retry", 403 would claim a ban that was
+/// never read.
+async fn git_restriction_state(
+    db: &buzz_db::Db,
+    community: buzz_core::CommunityId,
+    pubkey: &nostr::PublicKey,
+) -> Result<buzz_db::moderation::RestrictionState, Response> {
+    db.moderation_restriction_state(community, pubkey.as_bytes())
+        .await
+        .map_err(|error| {
+            warn!(pubkey = %pubkey.to_hex(), error = %error, "git: ban lookup failed closed");
+            (StatusCode::SERVICE_UNAVAILABLE, "authorization unavailable").into_response()
+        })
+}
+
+fn enforce_git_ban(restriction: &buzz_db::moderation::RestrictionState) -> Result<(), StatusCode> {
+    if restriction.banned {
+        Err(StatusCode::FORBIDDEN)
+    } else {
+        Ok(())
+    }
+}
+
+/// Either principal's ban denies the request; `None` owner means no attested
+/// owner to inherit from.
+///
+/// Split from the DB reads so agent→owner precedence stays unit-testable
+/// without Postgres.
+fn enforce_git_ban_cascade(
+    agent: &buzz_db::moderation::RestrictionState,
+    owner: Option<&buzz_db::moderation::RestrictionState>,
+) -> Result<(), StatusCode> {
+    enforce_git_ban(agent)?;
+    match owner {
+        Some(owner) => enforce_git_ban(owner),
+        None => Ok(()),
     }
 }
 
@@ -1064,7 +1149,7 @@ pub async fn receive_pack(
         state.config.bind_addr.port()
     );
     let hooks_dir = repo.path().join("hooks").display().to_string();
-    let hook_env = vec![
+    let mut hook_env = vec![
         ("BUZZ_HOOK_URL", hook_url),
         (
             "BUZZ_HOOK_SECRET",
@@ -1077,13 +1162,8 @@ pub async fn receive_pack(
             auth.tenant.community().as_uuid().to_string(),
         ),
         ("BUZZ_PUSHER_PUBKEY", pusher_hex.clone()),
-        // Override any repo-local core.hooksPath setting; defense in
-        // depth even though the hydrated workspace has no inherited
-        // config.
-        ("GIT_CONFIG_COUNT", "1".to_string()),
-        ("GIT_CONFIG_KEY_0", "core.hooksPath".to_string()),
-        ("GIT_CONFIG_VALUE_0", hooks_dir),
     ];
+    hook_env.extend(receive_pack_git_config(hooks_dir));
 
     // Run receive-pack against the tempdir. Returns the *owned* subprocess
     // output (PackOutput) — crucially NOT a Response, so the post-push
@@ -1109,6 +1189,23 @@ pub async fn receive_pack(
         repo_handle: repo,
     };
     Ok(finalize_push(&state, ctx).await)
+}
+
+/// Per-process git configuration for the hydrated receive-pack workspace.
+fn receive_pack_git_config(hooks_dir: String) -> Vec<(&'static str, String)> {
+    vec![
+        // Override any repo-local core.hooksPath setting; defense in depth
+        // even though the hydrated workspace has no inherited config.
+        ("GIT_CONFIG_COUNT", "2".to_string()),
+        ("GIT_CONFIG_KEY_0", "core.hooksPath".to_string()),
+        ("GIT_CONFIG_VALUE_0", hooks_dir),
+        // A bare repository rejects deletion of its symbolic HEAD branch by
+        // default. Hydrated repositories are ephemeral, and cas_publish
+        // selects a surviving branch for the next manifest HEAD, so allow
+        // receive-pack to apply the deletion before that selection runs.
+        ("GIT_CONFIG_KEY_1", "receive.denyDeleteCurrent".to_string()),
+        ("GIT_CONFIG_VALUE_1", "ignore".to_string()),
+    ]
 }
 
 /// Buffered output of a `git --stateless-rpc` subprocess.
@@ -1921,9 +2018,146 @@ mod track_c_tests {
     use buzz_core::CommunityId;
     use nostr::{EventBuilder, Keys, Kind, Tag};
     use std::collections::BTreeMap;
+    use std::io::Write;
+    use std::process::Output;
 
     fn oid_sha1() -> String {
         "cb09a769da1c01f458fa6959d4e8eded38fac8d3".to_string()
+    }
+
+    fn run_test_git(cwd: &Path, args: &[&str], extra_env: &[(&str, String)]) -> Output {
+        let mut cmd = std::process::Command::new("git");
+        cmd.current_dir(cwd)
+            .args(args)
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("HOME", "/dev/null");
+        for (key, value) in extra_env {
+            cmd.env(key, value);
+        }
+        cmd.output().expect("run git")
+    }
+
+    fn run_test_receive_pack(repo: &Path, request: &[u8], extra_env: &[(&str, String)]) -> Output {
+        let mut cmd = std::process::Command::new("git");
+        cmd.arg("receive-pack")
+            .arg("--stateless-rpc")
+            .arg(repo)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("HOME", "/dev/null");
+        for (key, value) in extra_env {
+            cmd.env(key, value);
+        }
+
+        let mut child = cmd.spawn().expect("spawn receive-pack");
+        child
+            .stdin
+            .take()
+            .expect("receive-pack stdin")
+            .write_all(request)
+            .expect("write receive-pack request");
+        child.wait_with_output().expect("wait for receive-pack")
+    }
+
+    fn assert_git_success(output: Output, operation: &str) {
+        assert!(
+            output.status.success(),
+            "{operation} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn receive_pack_config_allows_deleting_current_branch() {
+        let root = tempfile::TempDir::new().expect("tempdir");
+        let remote = root.path().join("remote.git");
+        let source = root.path().join("source");
+        let remote_arg = remote.to_str().expect("utf-8 remote path");
+        let source_arg = source.to_str().expect("utf-8 source path");
+
+        assert_git_success(
+            run_test_git(
+                root.path(),
+                &["init", "--bare", "--initial-branch=main", remote_arg],
+                &[],
+            ),
+            "initialize bare remote",
+        );
+        assert_git_success(
+            run_test_git(
+                root.path(),
+                &["init", "--initial-branch=main", source_arg],
+                &[],
+            ),
+            "initialize source repository",
+        );
+        assert_git_success(
+            run_test_git(source.as_path(), &["config", "user.name", "Buzz Test"], &[]),
+            "configure user name",
+        );
+        assert_git_success(
+            run_test_git(
+                source.as_path(),
+                &["config", "user.email", "buzz-test@example.com"],
+                &[],
+            ),
+            "configure user email",
+        );
+        std::fs::write(source.join("README.md"), "test\n").expect("write fixture");
+        assert_git_success(
+            run_test_git(source.as_path(), &["add", "README.md"], &[]),
+            "stage fixture",
+        );
+        assert_git_success(
+            run_test_git(source.as_path(), &["commit", "-m", "fixture"], &[]),
+            "commit fixture",
+        );
+        assert_git_success(
+            run_test_git(
+                source.as_path(),
+                &["push", remote_arg, "main:main", "main:master"],
+                &[],
+            ),
+            "seed main and master",
+        );
+
+        let oid_output = run_test_git(remote.as_path(), &["rev-parse", "refs/heads/main"], &[]);
+        assert!(oid_output.status.success());
+        let old_oid = String::from_utf8(oid_output.stdout)
+            .expect("utf-8 oid")
+            .trim()
+            .to_string();
+        let command = format!(
+            "{old_oid} {} refs/heads/main\0report-status\n",
+            "0".repeat(40)
+        );
+        let mut request = format!("{:04x}", command.len() + 4).into_bytes();
+        request.extend_from_slice(command.as_bytes());
+        request.extend_from_slice(b"0000");
+
+        let git_config = receive_pack_git_config(remote.join("hooks").display().to_string());
+        let output = run_test_receive_pack(remote.as_path(), &request, &git_config);
+        assert!(
+            output.status.success(),
+            "receive-pack failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !receive_pack_report_rejected(&output.stdout),
+            "receive-pack rejected the deletion: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+
+        assert!(!remote.join("refs/heads/main").exists());
+        assert!(remote.join("refs/heads/master").exists());
     }
 
     /// A gzip-encoded request body is transparently inflated before it
@@ -2461,6 +2695,76 @@ mod sec005_read_gate_tests {
         assert!(!read_role_allows(Some("")), "empty role must deny");
     }
 
+    #[test]
+    fn durable_ban_denies_git_even_with_otherwise_valid_auth() {
+        let restriction = buzz_db::moderation::RestrictionState {
+            banned: true,
+            muted_until: None,
+        };
+
+        assert_eq!(enforce_git_ban(&restriction), Err(StatusCode::FORBIDDEN));
+    }
+
+    #[test]
+    fn timeout_without_ban_does_not_revoke_git_access() {
+        let restriction = buzz_db::moderation::RestrictionState {
+            banned: false,
+            muted_until: Some(chrono::Utc::now()),
+        };
+
+        assert_eq!(enforce_git_ban(&restriction), Ok(()));
+    }
+
+    fn restriction(banned: bool) -> buzz_db::moderation::RestrictionState {
+        buzz_db::moderation::RestrictionState {
+            banned,
+            muted_until: None,
+        }
+    }
+
+    // ── Agent → owner ban cascade ────────────────────────────────────────
+    //
+    // Git accepts NIP-OA attestations on the signed NIP-98 token, so an agent
+    // key can act for its owner (`deny_banned_git_principal`). The NIP-42 gate
+    // in `handlers::auth` cascades the ban check to the proven owner for that
+    // reason, and Git must agree: if only the presented key were checked, a
+    // banned human would keep clone and push access through any agent key.
+
+    #[test]
+    fn banned_owner_denies_git_for_an_otherwise_clear_agent() {
+        assert_eq!(
+            enforce_git_ban_cascade(&restriction(false), Some(&restriction(true))),
+            Err(StatusCode::FORBIDDEN),
+            "an agent must inherit its proven owner's ban"
+        );
+    }
+
+    #[test]
+    fn banned_agent_denies_git_whatever_the_owner_state() {
+        for owner in [None, Some(restriction(false)), Some(restriction(true))] {
+            assert_eq!(
+                enforce_git_ban_cascade(&restriction(true), owner.as_ref()),
+                Err(StatusCode::FORBIDDEN),
+                "a directly banned agent must be denied"
+            );
+        }
+    }
+
+    #[test]
+    fn clear_agent_and_clear_owner_allow_git() {
+        assert_eq!(
+            enforce_git_ban_cascade(&restriction(false), Some(&restriction(false))),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn clear_agent_without_attested_owner_allows_git() {
+        // No NIP-OA tag on the request: nothing to inherit, so the agent's own
+        // state decides. A missing owner must not read as a ban.
+        assert_eq!(enforce_git_ban_cascade(&restriction(false), None), Ok(()));
+    }
+
     fn announcement(keys: &Keys, tags: Vec<Tag>) -> nostr::Event {
         EventBuilder::new(Kind::Custom(30617), "")
             .tags(tags)
@@ -2815,5 +3119,130 @@ mod sec005_read_gate_tests {
                 .is_err(),
             "deleted announcement must deny reads even for channel members"
         );
+    }
+
+    // ── Ban gate wiring (requires Postgres) ──────────────────────────────
+    //
+    // The pure tests above fix the decision table; these prove the gate is
+    // actually wired to the durable store — that it reads the real ban row,
+    // resolves the NIP-OA owner from a live attestation, and fails closed when
+    // the store is unreachable. `deny_banned_git_principal` runs inside the
+    // `GitAuth` extractor, which every Git route (`info/refs`, `git-upload-pack`,
+    // `git-receive-pack`) goes through, so advertise, fetch and push all
+    // inherit these outcomes.
+
+    /// Community + a ban actor, without the channel/repo fixture the read-gate
+    /// tests need — the ban gate runs before any repo is resolved.
+    async fn setup_ban_community() -> (buzz_db::Db, buzz_core::CommunityId, Vec<u8>) {
+        let db = setup_db().await;
+        let host = format!("ban-git-{}.example", uuid::Uuid::new_v4().simple());
+        let community = db
+            .ensure_configured_community(&host)
+            .await
+            .expect("community")
+            .id;
+        let actor = Keys::generate().public_key().to_bytes().to_vec();
+        db.ensure_user(community, &actor).await.expect("actor");
+        (db, community, actor)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn ban_gate_denies_banned_member_and_allows_clear_member() {
+        let (db, community, actor) = setup_ban_community().await;
+        let member = Keys::generate();
+        let member_pk = member.public_key().to_bytes().to_vec();
+        db.ensure_user(community, &member_pk).await.expect("member");
+
+        assert!(
+            deny_banned_git_principal(&db, community, &member.public_key(), None)
+                .await
+                .is_ok(),
+            "precondition: an unbanned member passes the git ban gate"
+        );
+
+        db.ban_community_member(community, &member_pk, &actor, Some("test"), None)
+            .await
+            .expect("ban");
+
+        let (status, body) = denial_parts(
+            deny_banned_git_principal(&db, community, &member.public_key(), None).await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body, "blocked: banned from this community");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn ban_gate_cascades_to_a_banned_nip_oa_owner() {
+        let (db, community, actor) = setup_ban_community().await;
+        let owner = Keys::generate();
+        let agent = Keys::generate();
+        let owner_pk = owner.public_key().to_bytes().to_vec();
+        let agent_pk = agent.public_key().to_bytes().to_vec();
+        db.ensure_user(community, &owner_pk).await.expect("owner");
+        db.ensure_user(community, &agent_pk).await.expect("agent");
+
+        // A real attestation: the gate must verify it, not trust a claim.
+        let auth_tag = buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "kind=9")
+            .expect("auth tag");
+
+        assert!(
+            deny_banned_git_principal(&db, community, &agent.public_key(), Some(&auth_tag))
+                .await
+                .is_ok(),
+            "precondition: neither agent nor owner is banned"
+        );
+
+        // Ban the human only. The agent's own row stays clear.
+        db.ban_community_member(community, &owner_pk, &actor, Some("test"), None)
+            .await
+            .expect("ban owner");
+
+        let (status, _) = denial_parts(
+            deny_banned_git_principal(&db, community, &agent.public_key(), Some(&auth_tag)).await,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "banning the owner must revoke its agent's git access"
+        );
+
+        // An unattested request from the same agent key is unaffected: the
+        // cascade must follow a verified owner, not punish every agent.
+        assert!(
+            deny_banned_git_principal(&db, community, &agent.public_key(), None)
+                .await
+                .is_ok(),
+            "without an attestation there is no owner to inherit from"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn ban_gate_fails_closed_with_503_when_the_store_is_unreachable() {
+        let url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| TEST_DB_URL.to_string());
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect test DB");
+        let db = buzz_db::Db::from_pool(pool.clone());
+
+        // Closing the pool is the cheapest faithful stand-in for the
+        // restriction store being unavailable mid-request.
+        pool.close().await;
+
+        let community = buzz_core::CommunityId::from_uuid(uuid::Uuid::new_v4());
+        let (status, body) = denial_parts(
+            deny_banned_git_principal(&db, community, &Keys::generate().public_key(), None).await,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a store outage must deny as retryable, never allow and never claim a 403"
+        );
+        assert_eq!(body, "authorization unavailable");
     }
 }

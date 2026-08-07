@@ -11,16 +11,10 @@
  * prevents one community's cached identity from bleeding into another.
  */
 
-const STORAGE_KEY_PREFIX = "buzz-self-profile.v1";
+export { normalizeRelayUrl } from "@/shared/lib/normalizeRelayUrl";
+import { normalizeRelayUrl } from "@/shared/lib/normalizeRelayUrl";
 
-/**
- * Normalizes a relay URL for use in storage keys.
- * Trim, strip trailing slashes, lowercase — ensures equivalent URLs map to
- * the same key regardless of formatting differences.
- */
-export function normalizeRelayUrl(relayUrl: string): string {
-  return relayUrl.trim().replace(/\/+$/, "").toLowerCase();
-}
+const STORAGE_KEY_PREFIX = "buzz-self-profile.v1";
 
 /**
  * Dispatched on window after a successful writeSelfProfileCache so that any

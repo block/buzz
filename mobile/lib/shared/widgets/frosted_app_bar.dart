@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../theme/theme.dart';
+import 'directional_transition_scope.dart';
 
 /// Minimum height of the frosted app bar content area below the safe area.
 const _kBarContentMinHeight = Grid.xxs + 32 + Grid.xxs; // 48
@@ -33,6 +34,22 @@ double _barContentHeight(
   return accessibleHeight > _kBarContentMinHeight
       ? accessibleHeight
       : _kBarContentMinHeight;
+}
+
+/// Height for a compact title rail below the app bar's action row.
+///
+/// The rail normally stays at 40dp, but grows with an accessible title rather
+/// than clipping text at larger system text sizes.
+double frostedAppBarLowerTitleHeight(
+  BuildContext context, {
+  TextStyle? titleStyle,
+}) {
+  final style = _effectiveTitleStyle(context, titleStyle);
+  final scaledFontSize = MediaQuery.textScalerOf(
+    context,
+  ).scale(style.fontSize ?? 20);
+  final titleHeight = scaledFontSize * (style.height ?? 1);
+  return titleHeight > 40 ? titleHeight : 40;
 }
 
 /// Returns the total height of the [FrostedAppBar] including safe area padding.
@@ -81,6 +98,11 @@ class FrostedAppBar extends StatelessWidget {
   /// Height reserved for [bottom].
   final double bottomHeight;
 
+  /// Extends [bottom] upward into the title row without moving the app bar's
+  /// outer bounds. This keeps overlapping controls inside the app bar's hit
+  /// test region as well as its paint region.
+  final double bottomOverlap;
+
   /// Widgets displayed on the trailing (right) side.
   final List<Widget> actions;
 
@@ -95,6 +117,24 @@ class FrostedAppBar extends StatelessWidget {
   /// top section — see [buzzTopSectionGradient].
   final Gradient? gradient;
 
+  /// Whether to apply the translucent blur treatment behind the app bar.
+  ///
+  /// A page can leave its painted backdrop exposed at rest, then turn this on
+  /// when scrolling moves content beneath the controls.
+  final bool frosted;
+
+  /// Opacity of the frosted surface above the blurred backdrop.
+  final double frostedSurfaceOpacity;
+
+  /// Blur strength of the frosted backdrop.
+  final double frostedBlurSigma;
+
+  /// Whether to draw a divider below the app bar.
+  final bool showBottomDivider;
+
+  /// Opacity of the divider below the app bar.
+  final double bottomDividerOpacity;
+
   const FrostedAppBar({
     super.key,
     this.leading,
@@ -104,11 +144,21 @@ class FrostedAppBar extends StatelessWidget {
     this.titleContentHeight = 0,
     this.bottom,
     this.bottomHeight = 0,
+    this.bottomOverlap = 0,
     this.actions = const [],
     this.horizontalInset = Grid.quarter,
     this.iconColor,
     this.gradient,
-  }) : assert(bottom == null || bottomHeight > 0);
+    this.frosted = true,
+    this.frostedSurfaceOpacity = 0.5,
+    this.frostedBlurSigma = 20,
+    this.showBottomDivider = true,
+    this.bottomDividerOpacity = 0.15,
+  }) : assert(bottom == null || bottomHeight > 0),
+       assert(bottomOverlap >= 0),
+       assert(bottom != null || bottomOverlap == 0),
+       assert(frostedBlurSigma >= 0),
+       assert(bottomDividerOpacity >= 0 && bottomDividerOpacity <= 1);
 
   @override
   Widget build(BuildContext context) {
@@ -136,75 +186,112 @@ class FrostedAppBar extends StatelessWidget {
               )
             : null);
 
-    return Positioned(
-      top: 0,
-      left: 0,
-      right: 0,
-      child: ClipRect(
-        child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
-          child: Container(
-            padding: EdgeInsets.only(top: topPadding),
-            decoration: BoxDecoration(
-              // A gradient and a color cannot both paint, so the gradient
-              // replaces the frosted surface fill when one is supplied.
-              color: gradient == null
-                  ? context.colors.surface.withValues(alpha: 0.5)
-                  : null,
-              gradient: gradient,
-              border: Border(
-                bottom: BorderSide(
-                  color: context.colors.outlineVariant.withValues(alpha: 0.3),
-                  width: _kBottomBorderWidth,
-                ),
-              ),
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                SizedBox(
-                  height: barContentHeight,
+    final titleRow = SizedBox(
+      height: barContentHeight,
+      child: Padding(
+        padding: EdgeInsets.symmetric(horizontal: horizontalInset),
+        child: IconTheme.merge(
+          data: IconThemeData(color: iconColor),
+          child: Row(
+            children: [
+              ?effectiveLeading,
+              if (title != null)
+                Expanded(
                   child: Padding(
-                    padding: EdgeInsets.symmetric(horizontal: horizontalInset),
-                    child: IconTheme.merge(
-                      data: IconThemeData(color: iconColor),
-                      child: Row(
-                        children: [
-                          ?effectiveLeading,
-                          if (title != null)
-                            Expanded(
-                              child: Padding(
-                                padding: EdgeInsets.only(
-                                  left: effectiveLeading != null
-                                      ? 0
-                                      : Grid.gutter - Grid.quarter,
-                                  right: actions.isEmpty
-                                      ? Grid.gutter - Grid.quarter
-                                      : 0,
-                                ),
-                                child: DefaultTextStyle.merge(
-                                  style: effectiveTitleStyle,
-                                  overflow: TextOverflow.ellipsis,
-                                  maxLines: 1,
-                                  child: title!,
-                                ),
-                              ),
-                            )
-                          else
-                            const Spacer(),
-                          ...actions,
-                        ],
-                      ),
+                    padding: EdgeInsets.only(
+                      left: effectiveLeading != null
+                          ? 0
+                          : horizontalInset < Grid.gutter
+                          ? Grid.gutter - horizontalInset
+                          : 0,
+                      right: actions.isEmpty
+                          ? horizontalInset < Grid.gutter
+                                ? Grid.gutter - horizontalInset
+                                : 0
+                          : 0,
+                    ),
+                    child: DefaultTextStyle.merge(
+                      style: effectiveTitleStyle,
+                      overflow: TextOverflow.ellipsis,
+                      maxLines: 1,
+                      child: title!,
                     ),
                   ),
-                ),
-                if (bottom != null)
-                  SizedBox(height: bottomHeight, child: bottom),
-              ],
-            ),
+                )
+              else
+                const Spacer(),
+              ...actions,
+            ],
           ),
         ),
       ),
     );
+    final contentBody = bottom != null && bottomOverlap > 0
+        ? SizedBox(
+            height: barContentHeight + bottomHeight,
+            child: Stack(
+              children: [
+                Positioned(top: 0, left: 0, right: 0, child: titleRow),
+                Positioned(
+                  top: barContentHeight - bottomOverlap,
+                  left: 0,
+                  right: 0,
+                  height: bottomHeight + bottomOverlap,
+                  child: bottom!,
+                ),
+              ],
+            ),
+          )
+        : Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              titleRow,
+              if (bottom != null) SizedBox(height: bottomHeight, child: bottom),
+            ],
+          );
+
+    final content = DirectionalTransitionMotion(
+      transformKey: const ValueKey(
+        'frosted-app-bar-content-transition-transform',
+      ),
+      opacityKey: const ValueKey('frosted-app-bar-content-transition-opacity'),
+      child: contentBody,
+    );
+
+    final background = Container(
+      key: const ValueKey('frosted-app-bar-background'),
+      padding: EdgeInsets.only(top: topPadding),
+      decoration: BoxDecoration(
+        color: !frosted
+            ? Colors.transparent
+            : gradient == null
+            ? context.colors.surface.withValues(alpha: frostedSurfaceOpacity)
+            : null,
+        gradient: gradient,
+        border: showBottomDivider
+            ? Border(
+                bottom: BorderSide(
+                  color: navigationDivider(context, bottomDividerOpacity),
+                  width: _kBottomBorderWidth,
+                ),
+              )
+            : null,
+      ),
+      child: content,
+    );
+
+    final child = ClipRect(
+      child: frosted
+          ? BackdropFilter(
+              filter: ImageFilter.blur(
+                sigmaX: frostedBlurSigma,
+                sigmaY: frostedBlurSigma,
+              ),
+              child: background,
+            )
+          : background,
+    );
+
+    return Positioned(top: 0, left: 0, right: 0, child: child);
   }
 }

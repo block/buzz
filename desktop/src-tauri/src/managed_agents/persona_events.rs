@@ -450,12 +450,12 @@ pub fn persona_snapshot(persona: &AgentDefinition) -> PersonaSnapshot {
 /// This is the single apply used by every snapshot-apply site: the spawn
 /// re-pin (`start_local_agent_with_preflight`), the launch backfill and
 /// restore re-snapshot (`restore.rs`), and the prospective re-snapshot inside
-/// `spawn_config_hash` — so a future `PersonaSnapshot` field addition
-/// propagates to all of them at once.
+/// `prospective_spawn_config_snapshot` — so a future `PersonaSnapshot` field
+/// addition propagates to all of them at once.
 ///
 /// Deliberately does NOT touch `updated_at`: persistence stamps are the
-/// caller's concern, and `spawn_config_hash` (which applies this to a clone)
-/// must stay pure.
+/// caller's concern, and the prospective snapshot (which applies this to a
+/// clone) must stay pure.
 pub fn apply_persona_snapshot(record: &mut ManagedAgentRecord, persona: &AgentDefinition) {
     let snapshot = persona_snapshot(persona);
     if let Some(prompt) = snapshot.system_prompt {
@@ -464,23 +464,42 @@ pub fn apply_persona_snapshot(record: &mut ManagedAgentRecord, persona: &AgentDe
     record.model = snapshot.model;
     record.provider = snapshot.provider;
     record.runtime = snapshot.runtime;
-    // Drop a stale create-time harness pin when the definition names a
-    // different known runtime; custom commands stay pinned.
-    if let Some(def_runtime) = persona
+    // Drop a stale create-time harness pin when the definition switches to a
+    // different known runtime (builtin, static preset, or loaded custom). A pin
+    // that names an unknown/custom command is always kept.
+    //
+    // Both sides are resolved through the canonical harness-identity resolver
+    // (`canonical_harness_command`) which accepts either a runtime id OR a
+    // command string — covering aliases (e.g. "claude-code-acp"), path prefixes
+    // ("/usr/local/bin/goose"), and harnesses whose id ≠ command. The persona
+    // runtime side is resolved via `command_for_runtime_id` (id-only input is
+    // sufficient there since persona.runtime is always an authoritative id).
+    //
+    // Comparison is on canonical primary commands so "goose", "/usr/local/bin/goose",
+    // and runtime id "goose" all represent the same harness; the stale pin is
+    // dropped only when the canonical commands differ.
+    if let Some(new_cmd) = persona
         .runtime
         .as_deref()
         .map(str::trim)
         .filter(|r| !r.is_empty())
-        .and_then(crate::managed_agents::known_acp_runtime_exact)
+        .and_then(super::command_for_runtime_id)
     {
-        if let Some(pin_runtime) = record
+        if let Some(pin) = record
             .agent_command_override
             .as_deref()
-            .and_then(crate::managed_agents::known_acp_runtime)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
         {
-            if !std::ptr::eq(pin_runtime, def_runtime) {
-                record.agent_command_override = None;
+            // Resolve the pin via the canonical resolver (accepts id OR command).
+            if let Some(pin_cmd) = super::canonical_harness_command(pin) {
+                if pin_cmd != new_cmd {
+                    // Known harness switched to a different known harness — drop stale pin.
+                    record.agent_command_override = None;
+                }
+                // Same harness: keep the pin (e.g. explicit path override for same runtime).
             }
+            // Custom/unknown pin: always keep.
         }
     }
     // env_vars stay overrides-only. Self-heal records written before the env
@@ -498,8 +517,9 @@ pub fn apply_persona_snapshot(record: &mut ManagedAgentRecord, persona: &AgentDe
 /// paths re-pin it to its linked persona, without mutating `record` itself.
 ///
 /// Every decision made ahead of the real re-pin — the relay-mesh preflight in
-/// `start_local_agent_with_preflight`, the restart-badge hash in
-/// `spawn_config_hash` — needs to reason about spawn-time state, not
+/// `start_local_agent_with_preflight`, the restart-badge snapshot in
+/// `prospective_spawn_config_snapshot` — needs to reason about spawn-time
+/// state, not
 /// pre-snapshot bytes, so a persona edit that flips a field (e.g. `provider`
 /// to/from relay-mesh) between saves is reflected in the decision instead of
 /// the stale value the real [`apply_persona_snapshot`] is about to overwrite
@@ -507,7 +527,7 @@ pub fn apply_persona_snapshot(record: &mut ManagedAgentRecord, persona: &AgentDe
 /// so the spawn-time stamp and later recomputes agree when nothing changed.
 ///
 /// Orphaned records (persona deleted) pass through unchanged: the caller's
-/// own orphan handling — refusing to spawn, hashing as `(None, None, None)`
+/// own orphan handling — refusing to spawn, snapshotting as `(None, None, None)`
 /// — runs on the real record downstream, not on this preview.
 pub fn preview_prospective_persona_snapshot(
     record: &ManagedAgentRecord,
@@ -521,5 +541,7 @@ pub fn preview_prospective_persona_snapshot(
     }
     preview
 }
+#[cfg(test)]
+mod stale_pin_tests;
 #[cfg(test)]
 mod tests;

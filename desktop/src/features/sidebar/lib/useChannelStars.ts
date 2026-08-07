@@ -14,7 +14,10 @@ import {
 import { ChannelStarSyncManager } from "./channelStarsSync";
 import type { RemoteStars } from "./channelStarsSync";
 
-export function useChannelStars(pubkey: string | undefined): {
+export function useChannelStars(
+  pubkey: string | undefined,
+  relayUrl?: string,
+): {
   starredChannelIds: Set<string>;
   starChannel: (channelId: string) => void;
   unstarChannel: (channelId: string) => void;
@@ -31,7 +34,7 @@ export function useChannelStars(pubkey: string | undefined): {
   const lastAppliedEventId = React.useRef("");
 
   React.useEffect(() => {
-    if (!pubkey) {
+    if (!pubkey || !relayUrl) {
       setStore(DEFAULT_STORE);
       lastAppliedRemoteTs.current = 0;
       lastAppliedEventId.current = "";
@@ -40,12 +43,12 @@ export function useChannelStars(pubkey: string | undefined): {
     setStore(readChannelStarsStore(pubkey));
     lastAppliedRemoteTs.current = 0;
     lastAppliedEventId.current = "";
-    managerRef.current = new ChannelStarSyncManager(pubkey);
+    managerRef.current = new ChannelStarSyncManager(pubkey, relayUrl);
     return () => {
       managerRef.current?.destroy();
       managerRef.current = null;
     };
-  }, [pubkey]);
+  }, [pubkey, relayUrl]);
 
   React.useEffect(() => {
     if (!pubkey) {
@@ -86,24 +89,22 @@ export function useChannelStars(pubkey: string | undefined): {
   );
 
   React.useEffect(() => {
-    if (!pubkey) return;
+    if (!pubkey || !relayUrl) return;
     let cancelled = false;
-    void managerRef.current?.fetchRemoteStars().then((remote) => {
+    const local = readChannelStarsStore(pubkey);
+    void managerRef.current?.bootstrap(local).then((result) => {
       if (cancelled) return;
-      if (remote) {
-        setStore(applyRemote(remote));
-      } else {
-        const local = readChannelStarsStore(pubkey);
-        if (Object.keys(local.channels).length > 0) {
-          managerRef.current?.publishStars(local);
-        }
+      if (result.action === "apply-remote") {
+        setStore(applyRemote(result.data));
       }
+      // "hold": seed already performed by bootstrap (if first-sync), or blocked.
     });
     return () => {
       cancelled = true;
     };
-  }, [pubkey, applyRemote]);
+  }, [pubkey, relayUrl, applyRemote]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: relayUrl is intentional — rebinds subscription when the active relay changes even though it is not used inside the effect body directly (the manager via managerRef.current carries it)
   React.useEffect(() => {
     if (!pubkey) return;
     let unsub: (() => Promise<void>) | null = null;
@@ -124,16 +125,17 @@ export function useChannelStars(pubkey: string | undefined): {
       cancelled = true;
       if (unsub) void unsub();
     };
-  }, [pubkey, applyRemote]);
+  }, [pubkey, relayUrl, applyRemote]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: relayUrl is intentional — rebinds reconnect listener when the active relay changes (community switch) even though it is not referenced directly inside the effect body
   React.useEffect(() => {
     if (!pubkey) return;
     let cancelled = false;
     const unsub = relayClient.subscribeToReconnects(() => {
-      void managerRef.current?.fetchRemoteStars().then((remote) => {
+      void managerRef.current?.fetchRemoteStars().then((result) => {
         if (cancelled) return;
-        if (remote) {
-          setStore(applyRemote(remote));
+        if (result.status === "found") {
+          setStore(applyRemote(result.data));
         }
         const pending = managerRef.current?.getPendingStarStore();
         if (pending) {
@@ -145,7 +147,7 @@ export function useChannelStars(pubkey: string | undefined): {
       cancelled = true;
       unsub();
     };
-  }, [pubkey, applyRemote]);
+  }, [pubkey, relayUrl, applyRemote]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: store.channels is the relevant dep — the outer store identity can change without channels changing (e.g., on reconnect writes)
   const starredChannelIds = React.useMemo(

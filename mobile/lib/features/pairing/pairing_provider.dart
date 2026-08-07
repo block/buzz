@@ -36,12 +36,14 @@ class PairingState {
   final String? errorMessage;
   final String? sasCode;
   final bool userConfirmedSas;
+  final bool sendsIdentityToDesktop;
 
   const PairingState({
     this.status = PairingStatus.idle,
     this.errorMessage,
     this.sasCode,
     this.userConfirmedSas = false,
+    this.sendsIdentityToDesktop = false,
   });
 
   PairingState copyWith({
@@ -49,11 +51,14 @@ class PairingState {
     String? errorMessage,
     String? sasCode,
     bool? userConfirmedSas,
+    bool? sendsIdentityToDesktop,
   }) => PairingState(
     status: status ?? this.status,
     errorMessage: errorMessage ?? this.errorMessage,
     sasCode: sasCode ?? this.sasCode,
     userConfirmedSas: userConfirmedSas ?? this.userConfirmedSas,
+    sendsIdentityToDesktop:
+        sendsIdentityToDesktop ?? this.sendsIdentityToDesktop,
   );
 }
 
@@ -111,10 +116,14 @@ class PairingNotifier extends Notifier<PairingState> {
     // transition immediately and process any buffered payload.
     if (_sasConfirmReceived) {
       state = state.copyWith(status: PairingStatus.transferring);
-      final pending = _pendingPayload;
-      if (pending != null) {
-        _pendingPayload = null;
-        _handlePayload(pending);
+      if (_sendIdentityToSource) {
+        _sendIdentityPayload();
+      } else {
+        final pending = _pendingPayload;
+        if (pending != null) {
+          _pendingPayload = null;
+          _handlePayload(pending);
+        }
       }
       return;
     }
@@ -149,6 +158,7 @@ class PairingNotifier extends Notifier<PairingState> {
     _sasConfirmReceived = false;
     _userConfirmedSas = false;
     _pendingPayload = null;
+    _sendIdentityToSource = false;
   }
 
   // ── NIP-AB pairing flow ─────────────────────────────────────────────────
@@ -163,6 +173,7 @@ class PairingNotifier extends Notifier<PairingState> {
   Uint8List? _conversationKey;
   bool _sasConfirmReceived = false;
   bool _userConfirmedSas = false;
+  bool _sendIdentityToSource = false;
   Map<String, dynamic>? _pendingPayload; // buffered until user confirms SAS
   final Set<String> _processedEventIds = {}; // NIP-AB §Duplicate Event Handling
 
@@ -174,6 +185,8 @@ class PairingNotifier extends Notifier<PairingState> {
       final qr = parseNostrpairUri(uri);
       _sourcePubkey = qr.sourcePubkey;
       _sessionSecret = qr.sessionSecret;
+      _sendIdentityToSource =
+          Uri.parse(uri).queryParameters['mode'] == 'recover';
 
       final relayWsUrl = qr.relays.first;
 
@@ -234,6 +247,7 @@ class PairingNotifier extends Notifier<PairingState> {
       state = PairingState(
         status: PairingStatus.confirmingSas,
         sasCode: formatSas(sasCode),
+        sendsIdentityToDesktop: _sendIdentityToSource,
       );
 
       // 9. Start 120s session timeout.
@@ -359,6 +373,9 @@ class PairingNotifier extends Notifier<PairingState> {
         case 'abort':
           _handleAbort(msg);
           _processedEventIds.add(eventId);
+        case 'complete':
+          _handleComplete(msg);
+          _processedEventIds.add(eventId);
       }
     } catch (e) {
       // Silently discard invalid events per NIP-AB §Event Validation.
@@ -400,13 +417,42 @@ class PairingNotifier extends Notifier<PairingState> {
     if (_userConfirmedSas) {
       _userConfirmedSas = false;
       state = state.copyWith(status: PairingStatus.transferring);
-      final pending = _pendingPayload;
-      if (pending != null) {
-        _pendingPayload = null;
-        _handlePayload(pending);
+      if (_sendIdentityToSource) {
+        _sendIdentityPayload();
+      } else {
+        final pending = _pendingPayload;
+        if (pending != null) {
+          _pendingPayload = null;
+          _handlePayload(pending);
+        }
       }
     }
     // Otherwise stay in confirmingSas — user must still confirm via confirmSas().
+  }
+
+  void _sendIdentityPayload() {
+    final nsec = ref.read(relayConfigProvider).nsec;
+    if (nsec == null || nsec.isEmpty) {
+      _sendAbort('protocol_error');
+      _cleanup();
+      state = const PairingState(
+        status: PairingStatus.error,
+        errorMessage: 'No identity is available on this phone.',
+      );
+      return;
+    }
+    final content = _encryptMessage({
+      'type': 'payload',
+      'payload_type': 'nsec',
+      'payload': nsec,
+    });
+    _publishEvent(
+      kind: 24134,
+      content: content,
+      tags: [
+        ['p', _sourcePubkey!],
+      ],
+    );
   }
 
   void _handlePayload(Map<String, dynamic> msg) {
@@ -434,6 +480,22 @@ class PairingNotifier extends Notifier<PairingState> {
     }
 
     _processPayload(payloadType, payload);
+  }
+
+  void _handleComplete(Map<String, dynamic> msg) {
+    if (!_sendIdentityToSource || state.status != PairingStatus.transferring) {
+      return;
+    }
+    if (msg['success'] != true) {
+      _cleanup();
+      state = const PairingState(
+        status: PairingStatus.error,
+        errorMessage: 'Desktop could not store the identity.',
+      );
+      return;
+    }
+    _cleanup();
+    state = const PairingState(status: PairingStatus.success);
   }
 
   void _handleAbort(Map<String, dynamic> msg) {

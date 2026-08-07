@@ -225,6 +225,7 @@ export function AgentsView() {
               isActionPending={isActionPending}
               isAgentsLoading={agents.managedAgentsQuery.isLoading}
               startingAgentPubkey={agents.startingAgentPubkey}
+              restartingAgentPubkey={agents.restartingAgentPubkey}
               startingPersonaIds={agents.startingPersonaIds}
               onOpenAgentProfile={(pubkey, options) => {
                 openProfilePanel?.(pubkey, options);
@@ -234,6 +235,9 @@ export function AgentsView() {
               }}
               onStartAgent={(pubkey) => {
                 void agents.handleStart(pubkey);
+              }}
+              onRestartAgent={(pubkey) => {
+                void agents.handleRestart(pubkey);
               }}
               onStartPersona={(persona) => {
                 void agents.handleStartPersona(persona);
@@ -319,7 +323,13 @@ export function AgentsView() {
           }}
           onSubmitDefinition={personas.handleSubmit}
           runtimes={personas.acpRuntimesQuery.data ?? []}
-          runtimesLoading={personas.acpRuntimesQuery.isLoading}
+          runtimeCatalogStatus={
+            personas.acpRuntimesQuery.isLoading
+              ? "loading"
+              : personas.acpRuntimesQuery.isError
+                ? "error"
+                : "ready"
+          }
         />
       ) : null}
       {agents.agentToAddToChannel ? (
@@ -368,7 +378,13 @@ export function AgentsView() {
           isPending={personas.isPending}
           mode="definition-edit"
           runtimes={personas.acpRuntimesQuery.data ?? []}
-          runtimesLoading={personas.acpRuntimesQuery.isLoading}
+          runtimeCatalogStatus={
+            personas.acpRuntimesQuery.isLoading
+              ? "loading"
+              : personas.acpRuntimesQuery.isError
+                ? "error"
+                : "ready"
+          }
           onOpenChange={(open) => {
             if (!open) {
               personas.setPersonaDialogState(null);

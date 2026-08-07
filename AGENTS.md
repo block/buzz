@@ -13,14 +13,14 @@ Buzz spans five repos. This one (`block/buzz`) is the OSS source for the relay, 
 | Repo | Purpose |
 |------|---------|
 | [block/buzz](https://github.com/block/buzz) | OSS source — relay, desktop app, mobile app, CLI, agent harness |
-| [squareup/sprout-releases](https://github.com/squareup/sprout-releases) | Buildkite pipeline producing Block-signed macOS + iOS builds with `-block` version suffix |
+| [squareup/buzz-releases](https://github.com/squareup/buzz-releases) | Buildkite pipelines producing Block-signed macOS + iOS builds with `-block` desktop version suffix |
 | [squareup/sprout-oss](https://github.com/squareup/sprout-oss) | CI pipeline building the relay Docker image and pushing to internal ECR |
 | [squareup/block-coder-tf-stacks](https://github.com/squareup/block-coder-tf-stacks) | Terraform + ArgoCD deploying the relay to the staging Kubernetes cluster |
 | [squareup/sprout-backend-blox](https://github.com/squareup/sprout-backend-blox) | Desktop backend provider script connecting Blox workstation agents to the relay |
 
 ```
 block/buzz (source)
-  ├─► sprout-releases    (desktop + mobile builds → Artifactory, GitHub, Mobile Releases)
+  ├─► buzz-releases      (desktop + mobile builds → Artifactory, GitHub, Mobile Releases)
   ├─► sprout-oss         (relay Docker image → ECR)
   │     └─► block-coder-tf-stacks  (Helm chart → ArgoCD → staging cluster)
   └─── sprout-backend-blox         (Blox compute provider for Desktop agent launch)
@@ -100,10 +100,11 @@ Run `just test` for integration tests if you touched `buzz-relay`,
 formatting via `stage_fixed`. Pre-commit runs fix variants in parallel (Rust
 fmt, Tauri Rust fmt, desktop biome fix, web biome fix, mobile dart format).
 Auto-fixable issues are fixed and re-staged; unfixable lint issues block the
-commit. **Pre-push hooks** run clippy (workspace + Tauri) and fast unit tests
-in parallel (Rust, desktop JS, Tauri Rust, mobile Flutter) — no overlap with
-pre-commit. Builds are CI-only. Run `just fix-all` to auto-fix all formatting
-in one shot. Run `just ci` for the full local gate. Run `just hooks` to
+commit. **Pre-push hooks** run clippy (workspace + Tauri), desktop TypeScript
+typechecking (`tsc --noEmit`), and fast unit tests in parallel (Rust, desktop
+JS, Tauri Rust, mobile Flutter) — no overlap with pre-commit. Builds are
+CI-only. Run `just fix-all` to auto-fix all formatting in one shot. Run
+`just ci` for the full local gate. Run `just hooks` to
 re-install hooks after env changes. Before agents run Git or hooks, activate the
 repo's Hermit environment (`. ./bin/activate-hermit`); do not rewrite hook
 commands to compensate for an unconfigured shell `PATH`.
@@ -507,6 +508,7 @@ reconnects preserve pending avatar verification work):
 - `resetRenderScopedReactionHydration()` — reaction hydration cache
 - `clearSearchHitEventCache()` — search result event cache
 - `clearMarkdownNodeCache()` — markdown parse-node cache
+- `resetLinkPreviewTitleCache()` — link preview title cache (Buzz entity titles come from relay events)
 
 **If you add a new module-level cache, Map, or class instance that holds
 community-scoped data, you must add its reset to `resetCommunityState()`.**
