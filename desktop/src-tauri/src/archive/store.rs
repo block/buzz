@@ -70,6 +70,22 @@ CREATE TABLE IF NOT EXISTS observer_channel_index (
 CREATE INDEX IF NOT EXISTS idx_observer_channel
     ON observer_channel_index (identity_pubkey, relay_url, channel_id, created_at DESC, id DESC);
 
+-- Redacted evidence imported from optional external execution backends.
+CREATE TABLE IF NOT EXISTS shepherd_evidence (
+    identity_pubkey TEXT NOT NULL,
+    agent_pubkey    TEXT NOT NULL,
+    channel_id      TEXT NOT NULL,
+    session_id      TEXT NOT NULL,
+    turn_id         TEXT,
+    source_run_ref  TEXT NOT NULL,
+    evidence_json   TEXT NOT NULL,
+    imported_at     INTEGER NOT NULL,
+    PRIMARY KEY (identity_pubkey, source_run_ref)
+);
+CREATE INDEX IF NOT EXISTS idx_shepherd_evidence_session
+    ON shepherd_evidence
+       (identity_pubkey, agent_pubkey, channel_id, session_id, imported_at ASC);
+
 -- One-row migration state table: tracks which idempotent migrations have run.
 CREATE TABLE IF NOT EXISTS archive_migrations (
     name       TEXT PRIMARY KEY,
