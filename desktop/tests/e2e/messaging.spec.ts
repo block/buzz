@@ -232,7 +232,8 @@ test.beforeEach(async ({ page }, testInfo) => {
                             "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
                           imageDomain: "opengraph.githubassets.com",
                         },
-                        linkPreviewUploadDelayMs: 400,
+                        linkPreviewMetadataDelayMs: 300,
+                        linkPreviewUploadDelayMs: 1_200,
                       }
                     : testInfo.title.includes("link preview") ||
                         testInfo.title.includes("supported Compact")
@@ -248,11 +249,12 @@ test.beforeEach(async ({ page }, testInfo) => {
                             "loading card before cold resolver work",
                           )
                             ? 10_000
-                            : testInfo.title.includes("style defaults") ||
-                                testInfo.title.includes("send does not wait") ||
-                                testInfo.title.includes("attachment-sized")
-                              ? 1_500
-                              : undefined,
+                            : testInfo.title.includes("send does not wait")
+                              ? 3_000
+                              : testInfo.title.includes("style defaults") ||
+                                  testInfo.title.includes("attachment-sized")
+                                ? 1_500
+                                : undefined,
                           linkPreviewMetadataStartBlockMs:
                             testInfo.title.includes(
                               "loading card before cold resolver work",
@@ -719,6 +721,20 @@ test("send does not wait for a pending link preview snapshot", async ({
     composerPreviews.locator('[data-link-preview="github-pull-request"]'),
   ).toHaveAttribute("data-image-state", "pending");
 
+  // While metadata is still resolving Send is disabled so the button does not
+  // flicker ready -> not-ready. But a link whose metadata stalls must not trap
+  // the composer: past the disable cap Send re-enables even though the card is
+  // still pending, and sending ships a bare link with no snapshot tag.
+  await expect(page.getByTestId("send-message")).toBeDisabled();
+  await expect(composerPreviews).toHaveAttribute(
+    "data-has-pending-snapshots",
+    "false",
+  );
+  await expect(
+    composerPreviews.locator('[data-link-preview="github-pull-request"]'),
+  ).toHaveAttribute("data-image-state", "pending");
+  await expect(page.getByTestId("send-message")).toBeEnabled();
+
   await page.getByTestId("send-message").click();
   const row = page.getByTestId("message-row").last();
   await expect(row).toContainText(previewUrl);
@@ -746,6 +762,9 @@ test("send waits for an in-flight link preview snapshot upload", async ({
   const composerPreviews = page.locator("[data-composer-link-previews]");
   const card = composerPreviews.locator("[data-link-preview-composer-card]");
   await expect(card).toBeVisible();
+  // From the moment the preview appears (metadata still resolving) Send is
+  // disabled, so the button never flashes ready before the snapshot is built.
+  await expect(page.getByTestId("send-message")).toBeDisabled();
   // Metadata resolves (image painted) but the sendable tag is not ready yet:
   // the snapshot media upload is still in flight, so the card must NOT claim
   // "done" and no tag is captured.
@@ -755,6 +774,19 @@ test("send waits for an in-flight link preview snapshot upload", async ({
     "data-ready-snapshot-count",
     "0",
   );
+  await expect(composerPreviews).toHaveAttribute(
+    "data-has-pending-snapshots",
+    "true",
+  );
+  // Send stays disabled across the whole settle window (pending -> uploading),
+  // mirroring the attachment-upload guard, so the button visibly reflects "not
+  // ready yet" without flickering.
+  await expect(page.getByTestId("send-message")).toBeDisabled();
+
+  // Once the upload settles the tag is captured, the card claims "done", and
+  // Send re-enables.
+  await expect(card).toHaveAttribute("data-snapshot-tag-ready", "true");
+  await expect(page.getByTestId("send-message")).toBeEnabled();
 
   // Sending immediately must still land the preview: Send waits for the
   // in-flight upload rather than shipping a bare link.

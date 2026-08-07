@@ -104,6 +104,7 @@ function MessageComposerImpl({
   const {
     previewList: composerLinkPreviews,
     getReadyTags: getReadyLinkPreviewTags,
+    hasPendingSnapshots: hasPendingLinkPreviewSnapshots,
   } = useComposerLinkPreviews(deferredPreviewContent);
   const [isEmojiPickerOpen, setIsEmojiPickerOpen] = React.useState(false);
   const [isFormattingOpen, setIsFormattingOpen] = React.useState(false);
@@ -802,23 +803,16 @@ function MessageComposerImpl({
     });
   }, [media.setPendingImeta, richText.editor, scrollComposerToBottom]);
   // ── Send button state ───────────────────────────────────────────────
-  const sendDisabled = React.useMemo(
-    () =>
-      composerDisabled ||
-      media.isUploading ||
-      mentionSendFlow.isPreparingMentionSend ||
-      (isContentEmpty &&
-        media.pendingImeta.length === 0 &&
-        media.queuedAttachments.length === 0),
-    [
-      composerDisabled,
-      media.isUploading,
-      mentionSendFlow.isPreparingMentionSend,
-      isContentEmpty,
-      media.pendingImeta.length,
-      media.queuedAttachments.length,
-    ],
-  );
+  const hasNothingToSend =
+    isContentEmpty &&
+    media.pendingImeta.length === 0 &&
+    media.queuedAttachments.length === 0;
+  const sendDisabled =
+    composerDisabled ||
+    media.isUploading ||
+    hasPendingLinkPreviewSnapshots ||
+    mentionSendFlow.isPreparingMentionSend ||
+    hasNothingToSend;
   const handleCaptureSelection = React.useCallback(() => {}, []);
 
   const handlePaperclipClick = React.useCallback(() => {

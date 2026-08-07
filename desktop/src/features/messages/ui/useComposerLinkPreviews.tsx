@@ -30,6 +30,12 @@ import { Button } from "@/shared/ui/button";
 // relay upload hang the message indefinitely.
 const SNAPSHOT_SEND_WAIT_CAP_MS = 2000;
 
+// Upper bound on how long Send stays disabled while a preview is still settling
+// (metadata resolving, or snapshot media uploading). Past this the button
+// re-enables even if the tag never lands, so a dead or slow link never traps
+// the composer — the send-wait cap above still gives the tag a final chance.
+const SNAPSHOT_SETTLE_DISABLE_CAP_MS = 2000;
+
 function previewHostname(href: string): string {
   try {
     return new URL(href).hostname.replace(/^www\./, "");
@@ -242,11 +248,42 @@ export function useComposerLinkPreviews(content: string) {
     : candidates.flatMap((candidate) =>
         readyTags[candidate.href] ? [readyTags[candidate.href]] : [],
       );
+  // A preview is "settling" from paste until its sendable tag exists: metadata
+  // is still resolving, or it resolved and the snapshot media is uploading.
+  // Send stays disabled across the whole window so the button never flickers
+  // ready -> not-ready -> ready (buzz:// links never snapshot, so they never
+  // report settling). `imageState === "none"` is terminal (no snapshot), so it
+  // does not block. See the disable cap below for the dead/slow-link escape.
+  const hasSettlingSnapshots =
+    !suppressed &&
+    previews.some(
+      (preview) =>
+        !preview.href.startsWith("buzz://") &&
+        (preview.imageState === "pending" ||
+          (preview.snapshotReady && !readyTags[preview.href])),
+    );
+  // Re-enable Send once the disable cap elapses even if a preview is still
+  // settling, so a link whose metadata or upload stalls never traps the
+  // composer. Resets whenever settling ends or the draft's previews change.
+  const [settleDisableExpired, setSettleDisableExpired] = React.useState(false);
+  React.useEffect(() => {
+    if (!hasSettlingSnapshots) {
+      setSettleDisableExpired(false);
+      return;
+    }
+    const timer = window.setTimeout(
+      () => setSettleDisableExpired(true),
+      SNAPSHOT_SETTLE_DISABLE_CAP_MS,
+    );
+    return () => window.clearTimeout(timer);
+  }, [hasSettlingSnapshots]);
+  const hasPendingSnapshots = hasSettlingSnapshots && !settleDisableExpired;
   const hideAll = React.useCallback(() => setSuppressed(true), []);
   const previewList = previews.length ? (
     <div
       className="mb-2"
       data-composer-link-previews=""
+      data-has-pending-snapshots={hasPendingSnapshots ? "true" : "false"}
       data-ready-snapshot-count={readyTagsRef.current.length}
     >
       <div className="flex max-w-full items-start gap-1">
@@ -295,5 +332,5 @@ export function useComposerLinkPreviews(content: string) {
       return tag ? [tag] : [];
     });
   }, []);
-  return { previewList, getReadyTags };
+  return { previewList, getReadyTags, hasPendingSnapshots };
 }
