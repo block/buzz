@@ -75,19 +75,26 @@ pub struct Rule {
     pub model: String,
 }
 
+/// Shared needle check for both the model [`Rule`] and the [`HarnessRule`], so
+/// the two matchers cannot drift. An empty `any` never matches — a rule that
+/// matches everything must be expressed as a `default_*`, not by omission.
+fn any_contains(kind: MatchKind, any: &[String], haystack_lower: &str) -> bool {
+    if any.is_empty() {
+        return false;
+    }
+    let hit = |needle: &String| {
+        let n = needle.trim().to_lowercase();
+        !n.is_empty() && haystack_lower.contains(&n)
+    };
+    match kind {
+        MatchKind::Contains => any.iter().any(hit),
+        MatchKind::ContainsAll => any.iter().all(hit),
+    }
+}
+
 impl Rule {
     fn matches(&self, haystack_lower: &str) -> bool {
-        if self.any.is_empty() {
-            return false;
-        }
-        let hit = |needle: &String| {
-            let n = needle.trim().to_lowercase();
-            !n.is_empty() && haystack_lower.contains(&n)
-        };
-        match self.match_kind {
-            MatchKind::Contains => self.any.iter().any(hit),
-            MatchKind::ContainsAll => self.any.iter().all(hit),
-        }
+        any_contains(self.match_kind, &self.any, haystack_lower)
     }
 }
 
@@ -115,6 +122,71 @@ pub struct LabelTarget {
     pub model: String,
 }
 
+/// Harness-class routing — an optional sibling of the model-routing fields.
+///
+/// Where the model router picks a *model* for one agent's process, this picks a
+/// *harness class* (claude / opencode / codex) that should own a turn. It is
+/// consumed by an ingress "decline gate": each harness-agent runs the same
+/// deterministic decision and simply skips a turn another class owns, since the
+/// relay already delivered that turn to every subscribed process. It therefore
+/// mutates nothing and emits no wire frame — strictly less privileged than the
+/// model router.
+///
+/// Deterministic rules ONLY, by design: the decision is distributed across
+/// independent processes, so it must be reproducible in each one. A non-
+/// deterministic classifier could make two processes disagree and yield zero
+/// handlers (a dropped turn), which violates the fail-open contract. Semantic
+/// harness routing needs a single decision authority and is out of scope here —
+/// hence there is deliberately no `classifier` field.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessRouting {
+    /// This process's own harness class. `None` => the caller supplies the
+    /// class derived from the agent's command, so one shared harness block is
+    /// portable across every agent in a group.
+    #[serde(default)]
+    pub self_class: Option<String>,
+    /// Class that owns any turn no rule matched. `None` => never decline on a
+    /// no-match (the process handles it — fail-open).
+    #[serde(default)]
+    pub default_class: Option<String>,
+    /// Deterministic prompt -> class rules, reusing [`MatchKind`].
+    #[serde(default)]
+    pub rules: Vec<HarnessRule>,
+}
+
+/// A [`Rule`] whose target is a harness `class` rather than a `model`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct HarnessRule {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub match_kind: MatchKind,
+    #[serde(default)]
+    pub any: Vec<String>,
+    pub class: String,
+}
+
+impl HarnessRule {
+    fn matches(&self, haystack_lower: &str) -> bool {
+        any_contains(self.match_kind, &self.any, haystack_lower)
+    }
+}
+
+/// Why a harness class was chosen — the analogue of [`Reason`], carried into
+/// the log so a decline is never silent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HarnessReason {
+    Rule(String),
+    Default,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HarnessDecision {
+    pub class: String,
+    pub reason: HarnessReason,
+}
+
 /// A routing policy, loaded from `$BUZZ_ROUTING_POLICY`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Policy {
@@ -128,6 +200,10 @@ pub struct Policy {
     /// Model used when nothing matched. `None` => leave the agent's default alone.
     #[serde(default)]
     pub default_model: Option<String>,
+    /// Optional harness-class routing. Absent => the harness decline gate is off
+    /// (fail-open), identical to today's behavior.
+    #[serde(default)]
+    pub harness: Option<HarnessRouting>,
 }
 
 /// Why a model was chosen — carried into the log so a routing decision is never
@@ -207,6 +283,55 @@ impl Policy {
             model: m.clone(),
             reason: Reason::Default,
         })
+    }
+
+    /// Which harness class should own this turn. `None` => no opinion
+    /// (fail-open). Deterministic and IO-free, mirroring [`decide_static`], so
+    /// every process reaches the same answer and exactly one handles the turn.
+    ///
+    /// [`decide_static`]: Policy::decide_static
+    pub fn decide_harness(&self, prompt: &str) -> Option<HarnessDecision> {
+        if !self.enabled {
+            return None;
+        }
+        let h = self.harness.as_ref()?;
+        let lower = prompt.to_lowercase();
+        for (i, rule) in h.rules.iter().enumerate() {
+            if rule.matches(&lower) {
+                return Some(HarnessDecision {
+                    class: rule.class.clone(),
+                    reason: HarnessReason::Rule(
+                        rule.name
+                            .clone()
+                            .unwrap_or_else(|| format!("harness.rules[{i}]")),
+                    ),
+                });
+            }
+        }
+        h.default_class.clone().map(|class| HarnessDecision {
+            class,
+            reason: HarnessReason::Default,
+        })
+    }
+
+    /// Should the process whose class is `self_class` DECLINE this turn?
+    ///
+    /// Returns `Some(target)` only when a *different* class owns the turn — the
+    /// caller then skips its local enqueue and a matching-class agent takes it.
+    /// Returns `None` in every fail-open case: routing disabled, no harness
+    /// block, no rule matched with no `default_class`, or the target equals this
+    /// process's class. The harness block's `self_class` overrides the passed
+    /// `self_class`, so one shared block is portable across a group.
+    pub fn harness_decline(&self, prompt: &str, self_class: &str) -> Option<HarnessDecision> {
+        let self_class = self
+            .harness
+            .as_ref()
+            .and_then(|h| h.self_class.as_deref())
+            .unwrap_or(self_class);
+        match self.decide_harness(prompt) {
+            Some(d) if !d.class.eq_ignore_ascii_case(self_class) => Some(d),
+            _ => None,
+        }
     }
 
     /// Full decision for a turn: rules, then classifier, then default.
@@ -380,6 +505,79 @@ mod tests {
     fn absent_default_model_leaves_the_agent_alone() {
         let p = policy(serde_json::json!({ "enabled": true, "rules": [] }));
         assert_eq!(p.fallback(), None);
+    }
+
+    #[test]
+    fn harness_rules_pick_a_class_and_an_absent_block_is_fail_open() {
+        let p = policy(serde_json::json!({
+            "enabled": true,
+            "rules": [],
+            "harness": {
+                "default_class": "claude",
+                "rules": [
+                    { "name": "db", "match_kind": "contains_all", "any": ["migration"], "class": "codex" },
+                    { "name": "ui", "any": ["button"], "class": "opencode" }
+                ]
+            }
+        }));
+
+        // A matched rule names the owning class, case-insensitively.
+        let d = p.decide_harness("write the MIGRATION").unwrap();
+        assert_eq!(d.class, "codex");
+        assert_eq!(d.reason, HarnessReason::Rule("db".into()));
+
+        // Same turn: the codex process owns it => no decline; the claude process
+        // declines toward codex.
+        assert!(p.harness_decline("write the migration", "codex").is_none());
+        assert_eq!(
+            p.harness_decline("write the migration", "claude").unwrap().class,
+            "codex"
+        );
+
+        // An unmatched turn falls to default_class; a codex process declines
+        // toward claude, a claude process handles it.
+        assert_eq!(
+            p.harness_decline("just chatting", "codex").unwrap().class,
+            "claude"
+        );
+        assert!(p.harness_decline("just chatting", "claude").is_none());
+
+        // self_class in the block overrides the passed identity.
+        let owned = policy(serde_json::json!({
+            "enabled": true, "rules": [],
+            "harness": { "self_class": "codex", "default_class": "claude" }
+        }));
+        assert_eq!(
+            owned.harness_decline("anything", "opencode").unwrap().class,
+            "claude"
+        );
+
+        // No harness block => never declines (unchanged behavior).
+        let bare = policy(serde_json::json!({ "enabled": true, "rules": [] }));
+        assert!(bare.harness_decline("anything", "codex").is_none());
+        assert_eq!(bare.decide_harness("anything"), None);
+
+        // Disabled policy => no opinion even with a harness block.
+        let off = policy(serde_json::json!({
+            "enabled": false,
+            "harness": { "default_class": "codex" }
+        }));
+        assert!(off.harness_decline("x", "claude").is_none());
+    }
+
+    #[test]
+    fn a_harness_block_with_a_classifier_field_is_rejected() {
+        // Guards R2: a distributed decline cannot use a non-deterministic
+        // classifier, so the field must not exist. deny_unknown_fields makes the
+        // mistake loud rather than silently ignoring it.
+        let err = serde_json::from_value::<Policy>(serde_json::json!({
+            "enabled": true,
+            "harness": {
+                "default_class": "codex",
+                "classifier": { "url": "http://x", "model": "m" }
+            }
+        }));
+        assert!(err.is_err(), "a classifier inside harness must not parse");
     }
 
     #[tokio::test]
