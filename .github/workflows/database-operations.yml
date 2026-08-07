@@ -1,0 +1,44 @@
+name: Buzz Database Operations
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: "Operação da base de dados"
+        required: true
+        type: choice
+        options:
+          - healthcheck
+          - ensure
+          - migrate
+        default: healthcheck
+      migration_file:
+        description: "Ficheiro SQL versionado no repo; obrigatório para migrate"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  database:
+    uses: lolmeida/github-actions/.github/workflows/database.yml@main # NOSONAR: adoption is pinned to @main until the GHAR v1 release
+    with:
+      engine: postgres
+      operation: ${{ inputs.operation }}
+      environment: production
+      database_name: buzz
+      migration_file: ${{ inputs.migration_file }}
+      admin_ssm_connection_path: /shared/postgres
+      application_ssm_connection_path: /buzz
+      admin_host: postgres.prod-database.svc.cluster.local
+      admin_port: "5432"
+      admin_username: lolmeida
+      application_host: postgres.prod-database.svc.cluster.local
+      application_port: "5432"
+      postgres_sslmode: require
+      aws_region: eu-central-1
+      aws_role_arn: arn:aws:iam::904727092208:role/github-actions-buzz-database
+      runs_on: arc-buzz-database
