@@ -76,7 +76,12 @@ impl McpServer {
 
     fn sensitive_values(&self) -> Box<dyn Iterator<Item = &String> + '_> {
         match self {
-            Self::Stdio(server) => Box::new(server.env.iter().map(|entry| &entry.value)),
+            Self::Stdio(server) => Box::new(
+                server
+                    .args
+                    .iter()
+                    .chain(server.env.iter().map(|entry| &entry.value)),
+            ),
             Self::Http(server) => Box::new(
                 std::iter::once(&server.url).chain(server.headers.iter().map(|entry| &entry.value)),
             ),
@@ -428,9 +433,9 @@ pub struct AcpClient {
     /// Best-effort context attached to raw ACP wire events.
     observer_context: ObserverContext,
     /// Credential values retained across sessions for log and observer redaction.
-    sensitive_mcp_env_values: Vec<String>,
+    sensitive_mcp_values: Vec<String>,
     /// Multi-pattern matcher rebuilt when a session introduces new credentials.
-    sensitive_mcp_env_matcher: Option<AhoCorasick>,
+    sensitive_mcp_matcher: Option<AhoCorasick>,
     /// Most recently observed `_meta.goose.activeRunId` from a
     /// `session/update` notification of kind `session_info_update`.
     ///
@@ -805,8 +810,8 @@ impl AcpClient {
             observer: None,
             observer_agent_index: None,
             observer_context: ObserverContext::default(),
-            sensitive_mcp_env_values: Vec::new(),
-            sensitive_mcp_env_matcher: None,
+            sensitive_mcp_values: Vec::new(),
+            sensitive_mcp_matcher: None,
             active_run_id: None,
             steering_supported: false,
             steer_rx: None,
@@ -835,7 +840,7 @@ impl AcpClient {
         self.observer_agent_index
     }
 
-    fn register_sensitive_mcp_env_values(&mut self, servers: &[McpServer]) -> Result<(), AcpError> {
+    fn register_sensitive_mcp_values(&mut self, servers: &[McpServer]) -> Result<(), AcpError> {
         let mut changed = false;
         for value in servers
             .iter()
@@ -843,11 +848,11 @@ impl AcpClient {
             .filter(|value| safe_sensitive_pattern(value))
         {
             if !self
-                .sensitive_mcp_env_values
+                .sensitive_mcp_values
                 .iter()
                 .any(|registered| registered == value)
             {
-                self.sensitive_mcp_env_values.push(value.clone());
+                self.sensitive_mcp_values.push(value.clone());
                 changed = true;
             }
         }
@@ -855,26 +860,25 @@ impl AcpClient {
             return Ok(());
         }
 
-        self.sensitive_mcp_env_values
+        self.sensitive_mcp_values
             .sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
-        self.sensitive_mcp_env_matcher = Some(
-            AhoCorasick::new(&self.sensitive_mcp_env_values).map_err(|_| {
+        self.sensitive_mcp_matcher =
+            Some(AhoCorasick::new(&self.sensitive_mcp_values).map_err(|_| {
                 AcpError::Protocol("failed to initialize MCP credential redaction".to_string())
-            })?,
-        );
+            })?);
         Ok(())
     }
 
     fn redact_wire_text<'a>(&self, text: &'a str) -> Cow<'a, str> {
-        redact_wire_text(text, self.sensitive_mcp_env_matcher.as_ref())
+        redact_wire_text(text, self.sensitive_mcp_matcher.as_ref())
     }
 
     fn redact_wire_value(&self, value: &serde_json::Value) -> serde_json::Value {
-        redact_wire_value(value, self.sensitive_mcp_env_matcher.as_ref())
+        redact_wire_value(value, self.sensitive_mcp_matcher.as_ref())
     }
 
     fn agent_error_from_json(&self, error: &serde_json::Value) -> AcpError {
-        agent_error_from_json(error, self.sensitive_mcp_env_matcher.as_ref())
+        agent_error_from_json(error, self.sensitive_mcp_matcher.as_ref())
     }
 
     /// Emit a semantic event to the local observer feed, if enabled.
@@ -953,7 +957,7 @@ impl AcpClient {
         system_prompt: Option<SystemPromptTransport<'_>>,
         session_title: Option<&str>,
     ) -> Result<SessionNewResponse, AcpError> {
-        self.register_sensitive_mcp_env_values(&mcp_servers)?;
+        self.register_sensitive_mcp_values(&mcp_servers)?;
         let mut params = serde_json::json!({
             "cwd": cwd,
             "mcpServers": mcp_servers,
@@ -4132,6 +4136,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plain_mcp_argument_echo_is_redacted() {
+        let argument_secret = "argument-secret-returned-by-adapter";
+        let error_response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {
+                "code": -32057,
+                "message": format!("adapter rejected argument {argument_secret}")
+            }
+        })
+        .to_string();
+        let script = format!(
+            "read -t 2 _init\n\
+             printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{{\"protocolVersion\":2,\"agentCapabilities\":{{}}}}}}'\n\
+             read -t 2 _session\n\
+             printf '%s\\n' '{error_response}'\n\
+             sleep 1"
+        );
+        let mut client = spawn_script(&script).await;
+        let observer = ObserverHandle::in_process();
+        client.set_observer(Some(observer.clone()), 0);
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+
+        let result = client
+            .session_new_full(
+                "/tmp",
+                vec![McpServer::Stdio(McpServerStdio {
+                    name: "analytics".into(),
+                    command: "analytics-mcp".into(),
+                    args: vec!["--token".into(), argument_secret.into()],
+                    env: vec![],
+                })],
+                None,
+                None,
+            )
+            .await;
+
+        match result {
+            Err(AcpError::AgentError { code, message }) => {
+                assert_eq!(code, -32057);
+                assert_eq!(message, REDACTED_MCP_VALUE);
+                assert!(!message.contains(argument_secret));
+            }
+            Err(other) => panic!("expected redacted AgentError, got {other:?}"),
+            Ok(_) => panic!("expected session/new to return an error"),
+        }
+
+        let serialized_events =
+            serde_json::to_string(&observer.snapshot()).expect("serialize observer snapshot");
+        assert!(!serialized_events.contains(argument_secret));
+        assert!(serialized_events.contains(REDACTED_MCP_VALUE));
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn plain_mcp_secret_echo_is_redacted_and_old_session_values_are_retained() {
         let first_secret = "first-session-adapter-secret";
         let second_secret = "second-session-adapter-secret";
@@ -4191,16 +4253,16 @@ mod tests {
             Ok(_) => panic!("expected second session/new to return an error"),
         }
 
-        assert_eq!(client.sensitive_mcp_env_values.len(), 2);
+        assert_eq!(client.sensitive_mcp_values.len(), 2);
         assert!(
             client
-                .sensitive_mcp_env_values
+                .sensitive_mcp_values
                 .iter()
                 .any(|value| value == first_secret),
             "credentials from earlier sessions must remain registered"
         );
         assert!(client
-            .sensitive_mcp_env_values
+            .sensitive_mcp_values
             .iter()
             .any(|value| value == second_secret));
         let serialized_events =
@@ -4265,7 +4327,7 @@ mod tests {
         });
         let mut client = spawn_inert_client().await;
         client
-            .register_sensitive_mcp_env_values(&[McpServer::Stdio(McpServerStdio {
+            .register_sensitive_mcp_values(&[McpServer::Stdio(McpServerStdio {
                 name: "analytics".into(),
                 command: "analytics-mcp".into(),
                 args: vec![],

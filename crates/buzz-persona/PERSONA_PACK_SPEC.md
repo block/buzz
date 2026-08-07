@@ -433,7 +433,8 @@ therefore do not reach a running session in the current implementation.
 
 The runtime launch boundary is a separate, versioned MCP launch document. A future
 resolver must convert approved persona or template requirements and Project Connections
-into that document. Version 1 of the launch document supports stdio only.
+into that document. Version 1 of the launch document supports local stdio and remote
+Streamable HTTP servers.
 
 ### Pack-Level: `.mcp.json`
 
