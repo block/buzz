@@ -1021,6 +1021,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
+ "dirs",
  "getrandom 0.4.3",
  "hex",
  "nix 0.31.3",
@@ -1060,7 +1061,7 @@ dependencies = [
 
 [[package]]
 name = "buzz-desktop"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "anyhow",
  "arboard",

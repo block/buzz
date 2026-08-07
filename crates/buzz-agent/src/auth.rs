@@ -453,15 +453,12 @@ fn cache_path_for(cfg: &PkceOAuthConfig) -> Result<PathBuf, AgentError> {
 
     let dir = match &cfg.cache_dir_override {
         Some(p) => p.join(&cfg.cache_namespace),
-        None => {
-            let home = std::env::var("HOME")
-                .map_err(|_| AgentError::Llm("oauth cache: $HOME not set".into()))?;
-            PathBuf::from(home)
-                .join(".config")
-                .join("buzz-agent")
-                .join("oauth")
-                .join(&cfg.cache_namespace)
-        }
+        None => dirs::home_dir()
+            .ok_or_else(|| AgentError::Llm("oauth cache: home directory not found".into()))?
+            .join(".config")
+            .join("buzz-agent")
+            .join("oauth")
+            .join(&cfg.cache_namespace),
     };
     Ok(dir.join(format!("{hash}.json")))
 }
@@ -683,8 +680,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_path_includes_namespace_and_hash() {
-        // HOME is required; cargo test runs set it.
+    fn cache_path_uses_platform_home_directory() {
         let cfg = PkceOAuthConfig {
             discovery_url: "https://example.com/.well-known".into(),
             client_id: "abc".into(),
@@ -693,8 +689,14 @@ mod tests {
             cache_dir_override: None,
         };
         let p = cache_path_for(&cfg).unwrap();
-        assert!(p.to_string_lossy().contains("/buzz-agent/oauth/demo/"));
-        assert!(p.extension().and_then(|s| s.to_str()) == Some("json"));
+        let expected_dir = dirs::home_dir()
+            .unwrap()
+            .join(".config")
+            .join("buzz-agent")
+            .join("oauth")
+            .join("demo");
+        assert_eq!(p.parent(), Some(expected_dir.as_path()));
+        assert_eq!(p.extension().and_then(|s| s.to_str()), Some("json"));
     }
 
     #[test]

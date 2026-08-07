@@ -173,9 +173,11 @@ export function AppShell() {
   const identityQuery = useIdentityQuery();
   const { mutedChannelIds, muteChannel, unmuteChannel } = useChannelMutes(
     identityQuery.data?.pubkey,
+    communitiesHook.activeCommunity?.relayUrl,
   );
   const { starredChannelIds, starChannel, unstarChannel } = useChannelStars(
     identityQuery.data?.pubkey,
+    communitiesHook.activeCommunity?.relayUrl,
   );
   usePersonaSync(
     identityQuery.data?.pubkey,
@@ -786,7 +788,7 @@ export function AppShell() {
               />
             ) : null}
             <SidebarProvider
-              className="relative z-10 min-h-0 flex-1 flex-col overflow-visible"
+              className="relative z-10 min-h-0 min-w-0 flex-1 flex-col overflow-visible"
               data-testid="app-sidebar-layer"
             >
               <AppProfilePanelProvider>
