@@ -35,7 +35,7 @@ export function QuickBotBar({ personas, pending, onAdd }: QuickBotBarProps) {
     >
       <div
         className={cn(
-          "flex items-center gap-1 overflow-hidden transition-all duration-200 ease-out",
+          "flex items-center gap-1 overflow-hidden transition-[max-width,margin-right,opacity] duration-motion-state ease-motion-standard",
           "max-w-0 opacity-0 group-hover/quick:mr-1 group-hover/quick:max-w-[120px] group-hover/quick:opacity-100",
         )}
       >

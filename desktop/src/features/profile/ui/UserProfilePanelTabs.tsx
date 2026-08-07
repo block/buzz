@@ -713,7 +713,7 @@ function ActivityCarouselDots({
             <span
               aria-hidden="true"
               className={cn(
-                "relative z-10 block rounded-full bg-foreground transition-all",
+                "relative z-10 block rounded-full bg-foreground transition-[width,opacity] duration-motion-feedback ease-motion-standard",
                 isSelected
                   ? "h-1 w-4"
                   : "h-1 w-1 opacity-30 group-hover:opacity-60",

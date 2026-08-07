@@ -70,7 +70,7 @@ export function DroppableSectionBody({
     <div
       ref={setNodeRef}
       className={cn(
-        "rounded-md transition-all",
+        "rounded-md transition-shadow duration-motion-feedback ease-motion-standard",
         isOver && "ring-2 ring-primary/30",
         className,
       )}
@@ -96,7 +96,7 @@ export function DroppableUngroupedBody({
     <div
       ref={setNodeRef}
       className={cn(
-        "rounded-md transition-all",
+        "rounded-md transition-shadow duration-motion-feedback ease-motion-standard",
         isOver && "ring-2 ring-primary/30",
         className,
       )}

@@ -780,7 +780,7 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
   const reactionPicker = canToggleReactions ? (
     <div
       className={cn(
-        "overflow-hidden rounded-full border border-border/70 bg-background/95 shadow-xs backdrop-blur-sm supports-[backdrop-filter]:bg-background/85 transition-all duration-150 ease-out",
+        "overflow-hidden rounded-full border border-border/70 bg-background/95 shadow-xs backdrop-blur-sm supports-[backdrop-filter]:bg-background/85 transition-[max-width,border-color,border-width,box-shadow,opacity,transform] duration-motion-feedback ease-motion-standard",
         "max-w-0 border-0 shadow-none translate-y-1 opacity-0",
         "group-hover/message:max-w-9 group-hover/message:border group-hover/message:border-border/70 group-hover/message:shadow-xs group-hover/message:translate-y-0 group-hover/message:opacity-100",
         "group-focus-within/message:max-w-9 group-focus-within/message:border group-focus-within/message:border-border/70 group-focus-within/message:shadow-xs group-focus-within/message:translate-y-0 group-focus-within/message:opacity-100",

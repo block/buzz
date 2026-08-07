@@ -225,7 +225,7 @@ export function ProjectActivityBar({
     // can receive hover events. Fixed h-2 wrapper keeps layout stable
     // while the inner bar grows on hover.
     <div className="group/activity-bar relative z-10 flex h-2 w-full items-center">
-      <div className="flex h-1.5 w-full gap-px overflow-hidden rounded-full bg-muted/60 transition-all duration-150 group-hover/activity-bar:h-2">
+      <div className="flex h-1.5 w-full gap-px overflow-hidden rounded-full bg-muted/60 transition-[height] duration-motion-feedback ease-motion-standard group-hover/activity-bar:h-2">
         {total > 0
           ? items
               .filter((item) => item.count > 0)

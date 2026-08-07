@@ -42,6 +42,14 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  :root {
+    /* Semantic transition utilities inherit the user's motion preference. */
+    --motion-duration-instant: 1ms;
+    --motion-duration-fast: 1ms;
+    --motion-duration-standard: 1ms;
+    --motion-duration-arrival: 1ms;
+  }
+
   .motion-enter-conversation {
     animation-duration: 1ms;
   }

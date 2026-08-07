@@ -416,7 +416,7 @@ export function CommunityRail({
         <TooltipTrigger asChild>
           <button
             aria-label="Add community"
-            className="flex h-9 w-9 items-center justify-center rounded-2xl bg-sidebar-accent/60 text-sidebar-foreground/70 outline-hidden transition-all hover:rounded-xl hover:bg-primary/80 hover:text-primary-foreground focus:outline-none focus-visible:outline-none"
+            className="flex h-9 w-9 items-center justify-center rounded-2xl bg-sidebar-accent/60 text-sidebar-foreground/70 outline-hidden transition-[border-radius,background-color,color] duration-motion-feedback ease-motion-standard hover:rounded-xl hover:bg-primary/80 hover:text-primary-foreground focus:outline-none focus-visible:outline-none"
             data-testid="community-rail-add"
             onClick={onAddCommunity}
             type="button"

@@ -577,7 +577,7 @@ function VolumeControl({
       <input
         aria-label="Volume"
         className={cn(
-          "video-volume-slider h-3 cursor-pointer transition-all duration-200",
+          "video-volume-slider h-3 cursor-pointer transition-[width,margin-left,opacity] duration-motion-state ease-motion-standard",
           expanded
             ? "ml-1 w-16"
             : "pointer-events-none w-0 opacity-0 focus-visible:pointer-events-auto focus-visible:ml-1 focus-visible:w-16 focus-visible:opacity-100 group-hover/volume:pointer-events-auto group-hover/volume:ml-1 group-hover/volume:w-16 group-hover/volume:opacity-100",

@@ -547,7 +547,7 @@ const SidebarRail = React.forwardRef<
         }}
         title="Drag to resize sidebar"
         className={cn(
-          "absolute inset-y-0 z-20 hidden w-4 -translate-x-1/2 transition-all ease-linear group-data-[side=left]:-right-4 group-data-[side=right]:left-0 sm:flex",
+          "absolute inset-y-0 z-20 hidden w-4 -translate-x-1/2 transition-[left,right] duration-motion-state ease-linear group-data-[side=left]:-right-4 group-data-[side=right]:left-0 sm:flex",
           "cursor-col-resize",
           "after:absolute after:bottom-0 after:left-1/2 after:top-6 after:z-10 after:w-px after:-translate-x-1/2 after:bg-transparent after:content-['']",
           "disabled:pointer-events-none disabled:hidden",

@@ -38,7 +38,7 @@ export function StepProgress({
           <span
             aria-hidden="true"
             className={cn(
-              "h-1.5 rounded-full transition-all duration-200 ease-out",
+              "h-1.5 rounded-full transition-[width,background-color] duration-motion-state ease-motion-standard",
               isActive && cn("w-6 bg-primary", activeSegmentClassName),
               !isActive &&
                 isComplete &&

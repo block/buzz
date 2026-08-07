@@ -37,6 +37,16 @@ export default {
       spacing: {
         4.5: "1.125rem",
       },
+      transitionDuration: {
+        "motion-feedback": "var(--motion-duration-instant)",
+        "motion-state": "var(--motion-duration-fast)",
+        "motion-standard": "var(--motion-duration-standard)",
+        "motion-arrival": "var(--motion-duration-arrival)",
+      },
+      transitionTimingFunction: {
+        "motion-standard": "var(--motion-ease-standard)",
+        "motion-arrival": "var(--motion-ease-arrival)",
+      },
       fontFamily: {
         sans: [
           '"Inter Variable"',
