@@ -674,8 +674,21 @@ pub async fn ensure_starter_channels(
         existing_channels = get_channels(state.clone()).await?;
     }
 
+    // Best-effort from here: a spec that still has no match is normal
+    // community evolution, not a failure. In an established community the
+    // starter channels may have been renamed, made private (their kind:39000
+    // is then invisible to a non-member joiner), archived, or converted to a
+    // forum — none of which should block a new member's onboarding.
+    // The freshly-created case needs no rescue either: the relay grants the
+    // creator owner membership at create time, so a slow kind:39000 only
+    // delays sidebar visibility. `ensure_starter_channel_memberships` skips
+    // unmatched specs, joining only the starter channels that are actually
+    // observable.
     if !has_all_starter_channels(&existing_channels) {
-        return Err("starter channels created but metadata not yet available".to_string());
+        eprintln!(
+            "buzz-desktop: ensure_starter_channels: proceeding without full starter set \
+             (metadata missing or channels customized)"
+        );
     }
 
     ensure_starter_channel_memberships(&state, &creator_keys, &mut existing_channels).await?;
