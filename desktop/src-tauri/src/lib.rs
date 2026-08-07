@@ -590,7 +590,10 @@ pub fn run() {
                     use tauri::Manager;
                     loop {
                         let state = flush_handle.state::<AppState>();
-                        if let Err(e) = managed_agents::persona_events::flush_active_pending_events(
+                        // Every scope, not just the active community's: a row
+                        // queued while another community was open is otherwise
+                        // never retried again. See `flush_all_pending_events`.
+                        if let Err(e) = managed_agents::persona_events::flush_all_pending_events(
                             &flush_handle,
                             &state,
                         )
