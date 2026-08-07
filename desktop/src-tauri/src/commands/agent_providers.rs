@@ -1,4 +1,6 @@
-use crate::managed_agents::{discover_provider_candidates, invoke_provider, BackendProviderInfo};
+use crate::managed_agents::{
+    discover_provider_candidates, invoke_provider, validate_provider_info, BackendProviderInfo,
+};
 
 #[tauri::command]
 pub async fn discover_backend_providers() -> Result<Vec<BackendProviderInfo>, String> {
@@ -39,7 +41,9 @@ pub async fn probe_backend_provider(binary_path: String) -> Result<serde_json::V
         "request_id": uuid::Uuid::new_v4().to_string(),
     });
     tokio::task::spawn_blocking(move || {
-        invoke_provider(&canonical, &request, std::time::Duration::from_secs(10))
+        let info = invoke_provider(&canonical, &request, std::time::Duration::from_secs(10))?;
+        validate_provider_info(&info)?;
+        Ok(info)
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
