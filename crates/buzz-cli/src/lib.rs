@@ -348,6 +348,43 @@ buzz agents archived"
     Archived,
 }
 
+/// Curated agent message categories — the only traffic agents may publish.
+///
+/// Agents must never post raw turns, tool logs, heartbeats, or progress spam.
+/// Every agent-authored channel message should be one of these categories so
+/// relays and clients can filter curated signal from raw traffic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum CuratedCategory {
+    /// A case state genuinely changed
+    #[value(name = "state-change")]
+    StateChange,
+    /// A real question needing a human
+    #[value(name = "question")]
+    Question,
+    /// A human approval gate
+    #[value(name = "gate")]
+    Gate,
+    /// Critical alert
+    #[value(name = "alert")]
+    Alert,
+    /// Final report / receipt
+    #[value(name = "report")]
+    Report,
+}
+
+impl CuratedCategory {
+    /// Wire form used in tags and quiet confirmation output.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::StateChange => "state-change",
+            Self::Question => "question",
+            Self::Gate => "gate",
+            Self::Alert => "alert",
+            Self::Report => "report",
+        }
+    }
+}
+
 #[derive(Subcommand)]
 pub enum MessagesCmd {
     /// Send a message to a channel
@@ -376,6 +413,39 @@ pub enum MessagesCmd {
         /// Pubkey to mention (hex or npub; repeatable). Supplying any explicit identity permits unresolved or ambiguous @Name text as presentation-only; uniquely resolved member names still notify.
         #[arg(long = "mention")]
         mentions: Vec<String>,
+    },
+    /// Publish a curated agent message (state-change|question|gate|alert|report only)
+    #[command(
+        after_help = "Agents must only publish curated categories — never raw turns, tool logs, heartbeats, or progress spam.\n\n\
+Category is machine-readable via tags: [\"buzz-category\", \"<category>\"] and [\"t\", \"buzz-curated\"].\n\
+Optional audit fields: --case, --record-url. --shadow wraps content with SHADOW / NOT DELIVERED.\n\n\
+Examples:\n  \
+buzz messages publish-curated --channel <UUID> --category state-change --content \"Case moved to quoted\"\n  \
+buzz messages publish-curated --channel <UUID> --category gate --content \"Approve PO #42?\" --case po-42 --shadow\n  \
+echo \"Need decision\" | buzz messages publish-curated --channel <UUID> --category question --content -"
+    )]
+    PublishCurated {
+        /// Channel UUID
+        #[arg(long)]
+        channel: String,
+        /// Curated category (state-change|question|gate|alert|report)
+        #[arg(long, value_enum)]
+        category: CuratedCategory,
+        /// Message body; use '-' to read from stdin. Must be non-empty.
+        #[arg(long)]
+        content: String,
+        /// Event ID to reply to (creates a thread)
+        #[arg(long)]
+        reply_to: Option<String>,
+        /// Business case reference / id for audit trails
+        #[arg(long = "case")]
+        case_id: Option<String>,
+        /// URL of the source record (quote, ticket, dashboard, …)
+        #[arg(long = "record-url")]
+        record_url: Option<String>,
+        /// Shadow mode: content is visibly marked SHADOW / NOT DELIVERED
+        #[arg(long, default_value_t = false)]
+        shadow: bool,
     },
     /// Send a code diff / patch to a channel
     SendDiff {
@@ -2159,6 +2229,7 @@ mod tests {
                 "delete",
                 "edit",
                 "get",
+                "publish-curated",
                 "search",
                 "send",
                 "send-diff",
@@ -2296,7 +2367,7 @@ mod tests {
             ("feed", 1),
             ("issues", 4),
             ("media", 1),
-            ("messages", 8),
+            ("messages", 9),
             ("pack", 2),
             ("patches", 4),
             ("pr", 5),
