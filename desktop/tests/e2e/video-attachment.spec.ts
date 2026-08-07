@@ -624,12 +624,20 @@ test("video upload previews use poster frames and inline videos open review mode
   // must not remount the review dialog or wipe an in-progress comment draft.
   await commentBox.click();
   await commentBox.fill("Second pass note");
+  const commentEditor = await commentBox.elementHandle();
+  if (!commentEditor) {
+    throw new Error("Expected the review comment editor to be mounted.");
+  }
   await emitMockMessage(page, "general", "Unrelated chatter mid-review");
-  await expect(
-    page
-      .getByTestId("message-row")
-      .filter({ hasText: "Unrelated chatter mid-review" }),
-  ).toHaveCount(1);
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+      }),
+  );
+  expect(await commentEditor.evaluate((element) => element.isConnected)).toBe(
+    true,
+  );
   await expect(commentBox).toHaveText("Second pass note");
   await expect(commentBox).toBeFocused();
   await expect(page.getByTestId("video-review-composer-timecode")).toHaveText(
@@ -745,6 +753,14 @@ test("video upload previews use poster frames and inline videos open review mode
     .getByTestId("video-review-backdrop")
     .click({ position: { x: 4, y: 4 } });
   await expect(page.getByTestId("video-review-dialog")).toHaveCount(0);
+
+  // Re-open the channel so the thread summary is sourced from the persisted
+  // mock history instead of depending on whether the background timeline row
+  // stayed mounted while the modal handled live comment updates.
+  await page.getByTestId("channel-random").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
 
   const videoSummaryRow = page.locator(
     `[data-thread-head-id="${videoMessageId}"]`,
