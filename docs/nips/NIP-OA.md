@@ -90,6 +90,18 @@ Clients SHOULD display provenance only when the `auth` tag verifies successfully
 Clients SHOULD ignore an invalid `auth` tag for protocol purposes.
 Clients MUST NOT display owner provenance when the `auth` tag is invalid.
 
+## Unsigned Carriers
+
+An `auth` tag MAY appear on an unsigned event, including a [NIP-59](59.md) rumor.
+An unsigned carrier has no `sig`, so the authenticity precondition in Client Behavior cannot be satisfied by the carrier itself.
+Verifiers MUST NOT treat an `auth` tag on an unsigned carrier as verified provenance unless an enclosing signed layer authenticates the carrier's `pubkey`.
+For a NIP-59 rumor that layer is the seal: the verifier MUST confirm the seal's signature is valid and that the seal's `pubkey` equals the rumor's `pubkey`, as [NIP-17](17.md) already requires.
+The signing preimage is unchanged and uses the rumor's `pubkey`.
+Conditions are evaluated against the rumor's `kind` and `created_at`, which NIP-59 designates as canonical.
+Verifiers MUST NOT substitute the seal's or gift wrap's `created_at`, which NIP-59 permits to be tweaked.
+An `auth` tag carried inside a gift wrap is not observable by the relay, so the correlation described in Privacy Considerations is disclosed to recipients only.
+Implementations MUST NOT surface the tag outside the decrypted context.
+
 ## Security Properties
 
 The owner key and the agent key are independent keys.
