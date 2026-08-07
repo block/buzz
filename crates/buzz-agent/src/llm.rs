@@ -2237,22 +2237,56 @@ pub(crate) fn build_token_source(cfg: &Config) -> Result<Arc<dyn TokenSource>, A
     }
 }
 
+/// Completion-token cap that [`Llm::summarize`] actually requests from
+/// `provider`, given the caller's visible-text budget. OpenRouter grants
+/// reasoning a separate, equal budget on top of the text budget (see
+/// [`openrouter_summary_body`]), so its top-level cap is double the caller's
+/// budget; every other provider requests the caller's budget unchanged.
+/// Callers that reserve output headroom in an input budget
+/// (`handoff_prompt_budget_bytes`) must reserve THIS value, not the text
+/// budget — otherwise input plus the actual completion allowance can exceed
+/// the configured context window.
+pub(crate) fn summary_completion_cap(provider: Provider, max_output_tokens: u32) -> u32 {
+    match provider {
+        Provider::OpenRouter => max_output_tokens.saturating_mul(2),
+        Provider::Anthropic | Provider::OpenAi | Provider::Databricks | Provider::DatabricksV2 => {
+            max_output_tokens
+        }
+    }
+}
+
 /// Build the request body for `Llm::summarize` on `Provider::OpenRouter`.
 /// Extracted so tests can assert on the actual wire shape instead of a
-/// hand-rolled literal — summaries never carry `reasoning` (see
-/// `apply_openrouter_mutations`, which the summary path never calls).
-/// It spells the token limit `max_tokens` directly for the same reason: the
-/// mutation that renames it is never applied here.
+/// hand-rolled literal — summaries never carry config-driven reasoning
+/// *effort* (see `apply_openrouter_mutations`, which the summary path never
+/// calls). It spells the token limit `max_tokens` directly for the same
+/// reason: the mutation that renames it is never applied here.
 fn openrouter_summary_body(
     effective_model: &str,
     system_prompt: &str,
     user_prompt: &str,
     max_output_tokens: u32,
 ) -> Value {
+    // Reasoning models spend output tokens thinking before emitting any
+    // visible text, and that spend counts against `max_tokens`. Left
+    // unseparated, a model can burn the entire cap mid-reasoning and return an
+    // empty `content` — observed with deepseek-v4-flash, where 13 consecutive
+    // handoff attempts length-stopped inside the reasoning channel and every
+    // one degraded to lossy history truncation. Give reasoning its own
+    // equal-sized budget on top of the text budget so `max_output_tokens`
+    // remains what the caller means: visible summary text. `exclude` keeps the
+    // reasoning out of the response body; `summarize()` only reads `content`.
+    // Non-reasoning endpoints ignore the `reasoning` object (see
+    // `apply_openrouter_mutations` on why it is never paired with
+    // `provider.require_parameters`).
     json!({
         "model": effective_model,
         "stream": false,
-        "max_tokens": max_output_tokens,
+        "max_tokens": summary_completion_cap(Provider::OpenRouter, max_output_tokens),
+        "reasoning": {
+            "max_tokens": max_output_tokens,
+            "exclude": true,
+        },
         "messages": [
             { "role": "system", "content": system_prompt },
             { "role": "user", "content": user_prompt },
@@ -6263,8 +6297,14 @@ mod tests {
         assert!(body.get("max_completion_tokens").is_none());
     }
 
+    /// The summary body reserves `max_output_tokens` for visible text by
+    /// granting reasoning a separate, equal budget on top and excluding it
+    /// from the response. Without the separation, a reasoning model can spend
+    /// the entire cap thinking and length-stop with empty `content`, which
+    /// `summarize()` reports as an empty summary and the handoff degrades to
+    /// lossy truncation.
     #[test]
-    fn openrouter_summary_carries_neither_reasoning_nor_provider() {
+    fn openrouter_summary_budgets_reasoning_separately_and_carries_no_provider() {
         let body = openrouter_summary_body(
             "anthropic/claude-opus-4-7",
             "summarize",
@@ -6274,14 +6314,25 @@ mod tests {
         assert_eq!(body["model"], "anthropic/claude-opus-4-7");
         assert_eq!(body["messages"][0]["role"], "system");
         assert_eq!(body["messages"][1]["content"], "text to summarize");
-        assert_eq!(body["max_tokens"], 1024);
+        assert_eq!(
+            body["max_tokens"], 2048,
+            "total cap must cover the text budget plus the reasoning budget"
+        );
+        assert_eq!(
+            body["reasoning"]["max_tokens"], 1024,
+            "reasoning gets its own budget so it cannot starve the summary text"
+        );
+        assert_eq!(
+            body["reasoning"]["exclude"], true,
+            "reasoning must not be included in the response; summarize() reads only content"
+        );
+        assert!(
+            body["reasoning"].get("effort").is_none(),
+            "budget-based cap only; effort stays unset for the summary call"
+        );
         assert!(
             body.get("max_completion_tokens").is_none(),
             "summary body must use OpenRouter's token-limit spelling"
-        );
-        assert!(
-            body.get("reasoning").is_none(),
-            "summary body must not carry reasoning"
         );
         assert!(
             body.get("provider").is_none(),
