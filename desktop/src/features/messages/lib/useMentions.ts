@@ -22,6 +22,7 @@ import {
   getSharedChannelIds,
   isAgentMentionChannelType,
   rememberSelectedAgentPubkeys,
+  relayAgentRespondsToNobody,
   shouldHideAgentFromMentions,
   uniqueAutocompleteLabels,
 } from "@/features/agents/lib/agentAutocompleteEligibility";
@@ -331,6 +332,11 @@ export function useMentions(
       });
     }
     for (const agent of relayAgentsQuery.data ?? []) {
+      // A record that declares it never responds (`respond_to: "nobody"`)
+      // is not a mention target, whatever else the record carries.
+      if (relayAgentRespondsToNobody(agent)) {
+        continue;
+      }
       const pubkey = normalizePubkey(agent.pubkey);
       addCandidate({
         kind: "identity",

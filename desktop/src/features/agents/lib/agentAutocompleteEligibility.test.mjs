@@ -12,6 +12,7 @@ import {
   isAgentMentionChannelType,
   relayAgentCanRespondInChannel,
   relayAgentIsSharedWithUser,
+  relayAgentRespondsToNobody,
   shouldHideAgentFromMentions,
   uniqueAutocompleteLabels,
 } from "./agentAutocompleteEligibility.ts";
@@ -128,6 +129,58 @@ test("relayAgentIsSharedWithUser: accepts allowlist agents for the current user"
     ),
     false,
   );
+});
+
+test("relayAgentRespondsToNobody: flags only the heartbeat-only directory mode", () => {
+  assert.equal(relayAgentRespondsToNobody({ respondTo: "nobody" }), true);
+  assert.equal(relayAgentRespondsToNobody({ respondTo: "anyone" }), false);
+  assert.equal(relayAgentRespondsToNobody({ respondTo: "owner-only" }), false);
+  assert.equal(relayAgentRespondsToNobody({ respondTo: null }), false);
+});
+
+test("relayAgentIsSharedWithUser: never accepts a nobody record, even with a matching allowlist", () => {
+  const sharedChannelIds = new Set(["general"]);
+
+  assert.equal(
+    relayAgentIsSharedWithUser(
+      {
+        respondTo: "nobody",
+        respondToAllowlist: [CURRENT_PUBKEY],
+        channelIds: ["general"],
+      },
+      sharedChannelIds,
+      CURRENT_PUBKEY,
+    ),
+    false,
+  );
+});
+
+test("getMentionableAgentPubkeys: excludes a nobody directory entry and keeps a responding agent", () => {
+  const result = getMentionableAgentPubkeys({
+    eligibilityScope: { type: "community" },
+    managedAgentPubkeys: [],
+    currentPubkey: CURRENT_PUBKEY,
+    relayAgents: [
+      // A responding agent sharing a channel with the viewer stays.
+      {
+        pubkey: PUB_B,
+        respondTo: "anyone",
+        respondToAllowlist: [],
+        channelIds: ["general"],
+      },
+      // A heartbeat-only record is never a mention target, even when it
+      // shares a channel and names the viewer in a stale allowlist.
+      {
+        pubkey: PUB_C,
+        respondTo: "nobody",
+        respondToAllowlist: [CURRENT_PUBKEY],
+        channelIds: ["general"],
+      },
+    ],
+    sharedChannelIds: new Set(["general"]),
+  });
+
+  assert.deepEqual(result, new Set([PUB_B]));
 });
 
 test("relayAgentCanRespondInChannel: requires exact channel membership and viewer access", () => {

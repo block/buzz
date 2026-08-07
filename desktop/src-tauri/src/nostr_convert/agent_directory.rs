@@ -136,7 +136,7 @@ fn relay_agent_from_managed_policy(agent_pubkey: &str, event: &Event) -> Option<
         channel_ids: Vec::new(),
         capabilities: Vec::new(),
         status: "offline".to_string(),
-        respond_to: Some(content.respond_to),
+        respond_to: Some(content.respond_to.into()),
         respond_to_allowlist: content.respond_to_allowlist,
     })
 }

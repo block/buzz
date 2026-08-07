@@ -379,7 +379,7 @@ fn agents_preserves_public_respond_to_mode_for_directory_parse() {
     assert_eq!(parsed.len(), 1);
     assert_eq!(
         parsed[0].respond_to,
-        Some(crate::managed_agents::RespondTo::Anyone)
+        Some(crate::managed_agents::DirectoryRespondTo::Anyone)
     );
 }
 
@@ -398,7 +398,7 @@ fn agents_preserves_allowlist_metadata_for_directory_parse() {
     assert_eq!(parsed.len(), 1);
     assert_eq!(
         parsed[0].respond_to,
-        Some(crate::managed_agents::RespondTo::Allowlist)
+        Some(crate::managed_agents::DirectoryRespondTo::Allowlist)
     );
     assert_eq!(parsed[0].respond_to_allowlist, vec!["a".repeat(64)]);
 }
@@ -439,7 +439,7 @@ fn managed_agent_directory_accepts_only_the_verified_owner_policy() {
     assert_eq!(agents[0].name, "Codex");
     assert_eq!(
         agents[0].respond_to,
-        Some(crate::managed_agents::RespondTo::Allowlist)
+        Some(crate::managed_agents::DirectoryRespondTo::Allowlist)
     );
     assert_eq!(agents[0].respond_to_allowlist, vec![viewer_pubkey]);
 }
@@ -592,7 +592,7 @@ fn relay_agent_directory_preserves_headless_profiles_and_prefers_verified_manage
         .expect("headless profile retained");
     assert_eq!(
         headless.respond_to,
-        Some(crate::managed_agents::RespondTo::Anyone)
+        Some(crate::managed_agents::DirectoryRespondTo::Anyone)
     );
     assert!(
         headless.channel_ids.is_empty(),
@@ -606,7 +606,7 @@ fn relay_agent_directory_preserves_headless_profiles_and_prefers_verified_manage
     assert_eq!(managed.name, "Codex");
     assert_eq!(
         managed.respond_to,
-        Some(crate::managed_agents::RespondTo::Allowlist)
+        Some(crate::managed_agents::DirectoryRespondTo::Allowlist)
     );
     assert_eq!(managed.respond_to_allowlist, vec![viewer_pubkey]);
 }
@@ -759,4 +759,48 @@ fn timestamp_to_iso_known_value() {
     assert_eq!(timestamp_to_iso(1_609_459_200), "2021-01-01T00:00:00Z");
     // Epoch
     assert_eq!(timestamp_to_iso(0), "1970-01-01T00:00:00Z");
+
+    #[test]
+    fn agents_tolerate_heartbeat_only_respond_to_for_directory_parse() {
+        // `nobody` is a real harness mode (buzz-acp: heartbeat-only, all
+        // inbound events dropped). One such record must not fail the whole
+        // directory batch.
+        let nobody = ev(10100, r#"{"name":"Beacon","respond_to":"nobody"}"#, vec![]);
+        let anyone = ev(10100, r#"{"name":"Scout","respond_to":"anyone"}"#, vec![]);
+        let v = agents_from_events(&[nobody, anyone]);
+        let agents = v.get("agents").cloned().unwrap();
+        let parsed: Vec<crate::managed_agents::RelayAgentInfo> =
+            serde_json::from_value(agents).unwrap();
+
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(
+            parsed[0].respond_to,
+            Some(crate::managed_agents::DirectoryRespondTo::Nobody)
+        );
+        assert_eq!(
+            parsed[1].respond_to,
+            Some(crate::managed_agents::DirectoryRespondTo::Anyone)
+        );
+    }
+
+    #[test]
+    fn agents_degrade_unknown_respond_to_without_dropping_the_record() {
+        // The directory is an open surface: a mode this build has never
+        // heard of reads as "unset" for that record alone, and the rest of
+        // the batch is unaffected.
+        let unknown = ev(10100, r#"{"name":"Odd","respond_to":"sometimes"}"#, vec![]);
+        let anyone = ev(10100, r#"{"name":"Scout","respond_to":"anyone"}"#, vec![]);
+        let v = agents_from_events(&[unknown, anyone]);
+        let agents = v.get("agents").cloned().unwrap();
+        let parsed: Vec<crate::managed_agents::RelayAgentInfo> =
+            serde_json::from_value(agents).unwrap();
+
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].name, "Odd");
+        assert_eq!(parsed[0].respond_to, None);
+        assert_eq!(
+            parsed[1].respond_to,
+            Some(crate::managed_agents::DirectoryRespondTo::Anyone)
+        );
+    }
 }
