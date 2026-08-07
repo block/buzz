@@ -21,6 +21,7 @@ void main() {
           nsec: nostr.Keys.generate().nsec,
         ),
         fetchMembers: (_) async => const [],
+        isDirectMessage: (_) async => false,
         readUserCache: () => const {},
         addLocalMessage: (_, event) => localMessages.add(event),
         completeLocalMessage: (_, eventId) => completedIds.add(eventId),
@@ -54,6 +55,7 @@ void main() {
         nsec: nostr.Keys.generate().nsec,
       ),
       fetchMembers: (_) async => const [],
+      isDirectMessage: (_) async => false,
       readUserCache: () => const {},
       addLocalMessage: (_, event) => localMessages.add(event),
       completeLocalMessage: (_, eventId) => completedIds.add(eventId),
@@ -120,17 +122,14 @@ void main() {
           joinedAt: DateTime.utc(2026),
         ),
       ],
+      isDirectMessage: (_) async => true,
       readUserCache: () => const {},
       addLocalMessage: (_, _) {},
       completeLocalMessage: (_, _) {},
       removeLocalMessage: (_, _) {},
     );
 
-    final result = send(
-      channelId: _channelId,
-      content: 'hello',
-      isDirectMessage: true,
-    );
+    final result = send(channelId: _channelId, content: 'hello');
     await session.published;
 
     final pTags = session.event.tags
@@ -164,6 +163,7 @@ void main() {
           joinedAt: DateTime.utc(2026),
         ),
       ],
+      isDirectMessage: (_) async => true,
       readUserCache: () => const {},
       addLocalMessage: (_, _) {},
       completeLocalMessage: (_, _) {},
@@ -175,7 +175,6 @@ void main() {
       content: 'thread reply',
       parentEventId: 'a' * 64,
       rootEventId: 'b' * 64,
-      isDirectMessage: true,
     );
     await session.published;
 
@@ -200,6 +199,7 @@ void main() {
         fetchedMembers = true;
         return const [];
       },
+      isDirectMessage: (_) async => false,
       readUserCache: () => const {},
       addLocalMessage: (_, _) {},
       completeLocalMessage: (_, _) {},
@@ -220,6 +220,35 @@ void main() {
 
     session.accept();
     await result;
+  });
+
+  test('fails closed when the channel type cannot be determined', () async {
+    final session = _PendingPublishRelaySession();
+    var fetchedMembers = false;
+    var addedLocalMessage = false;
+    final send = SendMessage(
+      signedEventRelay: SignedEventRelay(
+        session: session,
+        nsec: nostr.Keys.generate().nsec,
+      ),
+      fetchMembers: (_) async {
+        fetchedMembers = true;
+        return const [];
+      },
+      isDirectMessage: (_) async => throw StateError('unknown channel'),
+      readUserCache: () => const {},
+      addLocalMessage: (_, _) => addedLocalMessage = true,
+      completeLocalMessage: (_, _) {},
+      removeLocalMessage: (_, _) {},
+    );
+
+    await expectLater(
+      send(channelId: _channelId, content: 'hello'),
+      throwsA(isA<StateError>()),
+    );
+
+    expect(fetchedMembers, isFalse);
+    expect(addedLocalMessage, isFalse);
   });
 }
 

@@ -2,6 +2,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/relay/relay.dart';
 import '../channels/channel_management_provider.dart';
+import '../channels/channels_provider.dart';
 import '../profile/user_cache_provider.dart';
 import '../profile/user_profile.dart';
 import 'channel_messages_provider.dart';
@@ -11,6 +12,7 @@ import 'channel_messages_provider.dart';
 class SendMessage {
   final SignedEventRelay _signedEventRelay;
   final Future<List<ChannelMember>> Function(String channelId) _fetchMembers;
+  final Future<bool> Function(String channelId) _isDirectMessage;
   final Map<String, UserProfile> Function() _readUserCache;
   final void Function(String channelId, NostrEvent event) _addLocalMessage;
   final void Function(String channelId, String eventId) _completeLocalMessage;
@@ -21,6 +23,7 @@ class SendMessage {
     required SignedEventRelay signedEventRelay,
     required Future<List<ChannelMember>> Function(String channelId)
     fetchMembers,
+    required Future<bool> Function(String channelId) isDirectMessage,
     required Map<String, UserProfile> Function() readUserCache,
     required void Function(String channelId, NostrEvent event) addLocalMessage,
     required void Function(String channelId, String eventId)
@@ -29,6 +32,7 @@ class SendMessage {
     bool Function()? isDeliveryValid,
   }) : _signedEventRelay = signedEventRelay,
        _fetchMembers = fetchMembers,
+       _isDirectMessage = isDirectMessage,
        _readUserCache = readUserCache,
        _addLocalMessage = addLocalMessage,
        _completeLocalMessage = completeLocalMessage,
@@ -48,10 +52,10 @@ class SendMessage {
     String? parentEventId,
     String? rootEventId,
     List<String>? mentionPubkeys,
-    bool isDirectMessage = false,
     List<List<String>> mediaTags = const [],
   }) async {
     _ensureDeliveryValid();
+    final isDirectMessage = await _isDirectMessage(channelId);
     // Use explicitly passed pubkeys, or resolve @mentions against
     // channel members to avoid matching the wrong user.
     final resolvedMentions =
@@ -191,6 +195,13 @@ final sendMessageProvider = Provider<SendMessage>((ref) {
     ),
     fetchMembers: (channelId) =>
         ref.read(channelMembersProvider(channelId).future),
+    isDirectMessage: (channelId) async {
+      final channels = await ref.read(channelsProvider.future);
+      for (final channel in channels) {
+        if (channel.id == channelId) return channel.isDm;
+      }
+      throw StateError('Cannot determine channel type for $channelId');
+    },
     readUserCache: () => ref.read(userCacheProvider),
     addLocalMessage: (channelId, event) => ref
         .read(channelMessagesProvider(channelId).notifier)
