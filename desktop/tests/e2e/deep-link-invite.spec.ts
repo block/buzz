@@ -318,6 +318,55 @@ test("deleted public starter channels do not strand community onboarding", async
   ).toBe(1);
 });
 
+test("required Welcome creation failure keeps community onboarding open", async ({
+  page,
+}) => {
+  const welcomeError = "Channel creation is not permitted.";
+  await seedActiveIdentity(page, TEST_IDENTITIES.tyler);
+  await page.addInitScript(
+    ({ pubkey, relayUrl, storageKey }) => {
+      window.localStorage.setItem(
+        `buzz-machine-onboarding-complete.v2:${pubkey}`,
+        "true",
+      );
+      const timestamp = new Date().toISOString();
+      window.localStorage.setItem(
+        storageKey,
+        JSON.stringify({
+          id: "txn-welcome-failure-1",
+          source: "deep-link-join",
+          stage: "team-intro",
+          relayUrl,
+          communityName: "hive",
+          communityId: "e2e-default-community",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        }),
+      );
+    },
+    {
+      pubkey: COMMUNITY_ONBOARDING_PUBKEY,
+      relayUrl: COMMUNITY_RELAY_URL,
+      storageKey: TRANSACTION_STORAGE_KEY,
+    },
+  );
+  await installMockBridge(
+    page,
+    { createChannelErrors: [welcomeError] },
+    { relayWsUrl: COMMUNITY_RELAY_URL, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Take me to Buzz" }).click();
+
+  await expect(page.getByTestId("community-onboarding-flow")).toBeVisible();
+  await expect(page.getByText(`${welcomeError} Try again.`)).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Take me to Buzz" }),
+  ).toBeEnabled();
+  await expect(page.getByTestId("chat-title")).toHaveCount(0);
+});
+
 test("persisted deep-link invite hands off to Joining after machine onboarding", async ({
   page,
 }) => {
