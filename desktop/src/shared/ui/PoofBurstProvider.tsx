@@ -16,7 +16,6 @@ const POOF_FRAMES = [
   { id: "poof-5", src: "/pow/poof5@3x.png" },
 ] as const;
 
-let poofAudio: HTMLAudioElement | null = null;
 let poofAudioContext: AudioContext | null = null;
 let poofAudioBuffer: AudioBuffer | null = null;
 let poofAudioBufferPromise: Promise<AudioBuffer | null> | null = null;
@@ -94,24 +93,15 @@ function loadPoofAudioBuffer() {
   return poofAudioBufferPromise;
 }
 
-function playFallbackPoofSound() {
-  try {
-    poofAudio ??= new Audio(POOF_SOUND_URL);
-    poofAudio.volume = 0.34;
-    poofAudio.currentTime = 0;
-    poofAudio.play().catch(() => {
-      // Best-effort — browsers can still block audio playback.
-    });
-  } catch {
-    // Best-effort only: audio may be unavailable or blocked.
-  }
-}
-
 function playPoofSound() {
   const audioContext = getPoofAudioContext();
-  if (!audioContext || !poofAudioBuffer) {
-    playFallbackPoofSound();
-    void loadPoofAudioBuffer();
+  if (!audioContext) {
+    return;
+  }
+  if (!poofAudioBuffer) {
+    void loadPoofAudioBuffer().then((audioBuffer) => {
+      if (audioBuffer) playPoofSound();
+    });
     return;
   }
 
@@ -124,14 +114,22 @@ function playPoofSound() {
     gain.connect(audioContext.destination);
     if (audioContext.state === "suspended") {
       void audioContext.resume().then(
-        () => source.start(),
-        () => playFallbackPoofSound(),
+        () => {
+          try {
+            source.start();
+          } catch {
+            // Best-effort only.
+          }
+        },
+        () => {
+          // Best-effort only.
+        },
       );
     } else {
       source.start();
     }
   } catch {
-    playFallbackPoofSound();
+    // Best-effort only: audio may be unavailable or blocked.
   }
 }
 
@@ -147,13 +145,6 @@ export function PoofBurstProvider({ children }: { children: React.ReactNode }) {
     }
 
     void loadPoofAudioBuffer();
-    try {
-      poofAudio ??= new Audio(POOF_SOUND_URL);
-      poofAudio.preload = "auto";
-      poofAudio.load();
-    } catch {
-      // Best-effort only.
-    }
   }, []);
 
   useEffect(() => {

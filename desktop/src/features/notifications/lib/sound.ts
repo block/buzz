@@ -135,27 +135,127 @@ export function shouldPlayNotificationSound(
   return !channelId || !silentChannelIds?.has(channelId);
 }
 
-const cache = new Map<SoundName, HTMLAudioElement>();
+const bufferCache = new Map<SoundName, Promise<AudioBuffer>>();
+let audioContext: AudioContext | null = null;
+const activePlaybacks = new Map<SoundName, SoundPlayback>();
 
-function getAudio(name: SoundName): HTMLAudioElement {
-  let audio = cache.get(name);
-  if (!audio) {
-    audio = new Audio(`/sounds/${name}.mp3`);
-    cache.set(name, audio);
-  }
-  return audio;
+export type SoundPlayback = {
+  stop: () => void;
+  onEnded: (listener: () => void) => () => void;
+};
+
+function getAudioContext(): AudioContext {
+  audioContext ??= new AudioContext({ latencyHint: "interactive" });
+  return audioContext;
 }
 
-export function playNotificationSound(
+function getAudioBuffer(
+  context: AudioContext,
   name: SoundName,
-): HTMLAudioElement | null {
-  try {
-    const audio = getAudio(name);
-    audio.currentTime = 0;
-    audio.play().catch(() => {
-      // Best-effort — user may not have interacted with the page yet.
+): Promise<AudioBuffer> {
+  const cached = bufferCache.get(name);
+  if (cached) return cached;
+
+  const pending = fetch(`/sounds/${name}.mp3`)
+    .then((response) => {
+      if (!response.ok) {
+        throw new Error(
+          `Failed to load notification sound: ${response.status}`,
+        );
+      }
+      return response.arrayBuffer();
+    })
+    .then((data) => context.decodeAudioData(data))
+    .catch((error) => {
+      if (bufferCache.get(name) === pending) {
+        bufferCache.delete(name);
+      }
+      throw error;
     });
-    return audio;
+  bufferCache.set(name, pending);
+  return pending;
+}
+
+function createPlayback(): {
+  playback: SoundPlayback;
+  setSource: (source: AudioBufferSourceNode) => void;
+  finish: () => void;
+  isStopped: () => boolean;
+} {
+  let source: AudioBufferSourceNode | null = null;
+  let stopped = false;
+  let ended = false;
+  const listeners = new Set<() => void>();
+
+  const finish = () => {
+    if (ended) return;
+    ended = true;
+    for (const listener of listeners) listener();
+    listeners.clear();
+  };
+
+  return {
+    playback: {
+      stop: () => {
+        if (stopped) return;
+        stopped = true;
+        try {
+          source?.stop();
+        } catch {
+          // The source may not have started yet.
+        }
+        finish();
+      },
+      onEnded: (listener) => {
+        if (ended) {
+          queueMicrotask(listener);
+          return () => {};
+        }
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+    },
+    setSource: (nextSource) => {
+      source = nextSource;
+    },
+    finish,
+    isStopped: () => stopped,
+  };
+}
+
+export function playNotificationSound(name: SoundName): SoundPlayback | null {
+  try {
+    const context = getAudioContext();
+    activePlaybacks.get(name)?.stop();
+
+    const controller = createPlayback();
+    activePlaybacks.set(name, controller.playback);
+    controller.playback.onEnded(() => {
+      if (activePlaybacks.get(name) === controller.playback) {
+        activePlaybacks.delete(name);
+      }
+    });
+
+    void (async () => {
+      try {
+        const buffer = await getAudioBuffer(context, name);
+        if (controller.isStopped()) return;
+        if (context.state === "suspended") await context.resume();
+        if (controller.isStopped()) return;
+
+        const source = context.createBufferSource();
+        source.buffer = buffer;
+        source.connect(context.destination);
+        source.addEventListener("ended", controller.finish, { once: true });
+        controller.setSource(source);
+        source.start();
+      } catch {
+        // Best-effort — audio can be blocked or unavailable.
+        controller.finish();
+      }
+    })();
+
+    return controller.playback;
   } catch {
     // Best-effort only.
     return null;
