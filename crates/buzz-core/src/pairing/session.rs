@@ -223,6 +223,48 @@ impl PairingSession {
         Ok(event)
     }
 
+    /// (Source) Process a payload sent back by the target.
+    ///
+    /// This is used by recovery flows where the QR-displaying device requests
+    /// a secret from an already-authorized scanning device.
+    pub fn handle_return_payload(
+        &mut self,
+        event: &Event,
+    ) -> Result<(PayloadType, Zeroizing<String>), PairingError> {
+        self.check_expired()?;
+        self.expect_state(SessionState::Transferring)?;
+        self.expect_role(Role::Source)?;
+        self.validate_event_from_peer(event)?;
+
+        let msg = self.decrypt_message(event)?;
+        match msg {
+            PairingMessage::Payload {
+                payload_type,
+                payload,
+            } => {
+                self.state = SessionState::PayloadExchanged;
+                self.record_event(event);
+                Ok((payload_type, Zeroizing::new(payload)))
+            }
+            other => Err(unexpected("payload", &other)),
+        }
+    }
+
+    /// (Source) Report whether a returned payload was imported successfully.
+    pub fn send_source_complete(&mut self, success: bool) -> Result<Event, PairingError> {
+        self.check_expired()?;
+        self.expect_state(SessionState::PayloadExchanged)?;
+        self.expect_role(Role::Source)?;
+
+        let event = self.build_event(&PairingMessage::Complete { success })?;
+        self.state = if success {
+            SessionState::Completed
+        } else {
+            SessionState::Aborted
+        };
+        Ok(event)
+    }
+
     /// (Source) Build the payload event carrying the secret.
     pub fn send_payload(
         &mut self,
@@ -819,6 +861,74 @@ mod tests {
             .handle_complete(&complete_event)
             .expect("handle complete");
         assert_eq!(source.state(), SessionState::Completed);
+    }
+
+    /// Reverse happy-path: the scanning target returns an nsec and the source
+    /// reports the import result. Duplicate payloads remain single-use.
+    #[test]
+    fn reverse_payload_flow_is_single_use() {
+        let (mut source, qr) = PairingSession::new_source("wss://relay.test".into());
+        let (mut target, offer) = PairingSession::new_target(&qr).expect("target");
+        let source_sas = source.handle_offer(&offer).expect("offer");
+        let sas_confirm = source.confirm_sas().expect("source confirm");
+        assert_eq!(
+            target
+                .handle_sas_confirm(&sas_confirm)
+                .expect("sas-confirm"),
+            source_sas
+        );
+        target.confirm_target_sas().expect("target confirm");
+
+        let payload = target
+            .build_event(&PairingMessage::Payload {
+                payload_type: PayloadType::Nsec,
+                payload: "nsec1recovered".into(),
+            })
+            .expect("return payload");
+        let (payload_type, secret) = source
+            .handle_return_payload(&payload)
+            .expect("handle return payload");
+        assert_eq!(payload_type, PayloadType::Nsec);
+        assert_eq!(*secret, "nsec1recovered");
+        assert_eq!(source.state(), SessionState::PayloadExchanged);
+        assert!(source.handle_return_payload(&payload).is_err());
+
+        let complete = source.send_source_complete(true).expect("source complete");
+        assert_eq!(source.state(), SessionState::Completed);
+        assert!(matches!(
+            target.decrypt_message(&complete).expect("decrypt complete"),
+            PairingMessage::Complete { success: true }
+        ));
+    }
+
+    #[test]
+    fn reverse_payload_import_failure_aborts_both_peers() {
+        let (mut source, qr) = PairingSession::new_source("wss://relay.test".into());
+        let (mut target, offer) = PairingSession::new_target(&qr).expect("target");
+        source.handle_offer(&offer).expect("offer");
+        let sas_confirm = source.confirm_sas().expect("source confirm");
+        target
+            .handle_sas_confirm(&sas_confirm)
+            .expect("sas-confirm");
+        target.confirm_target_sas().expect("target confirm");
+        let payload = target
+            .build_event(&PairingMessage::Payload {
+                payload_type: PayloadType::Nsec,
+                payload: "invalid".into(),
+            })
+            .expect("return payload");
+        source
+            .handle_return_payload(&payload)
+            .expect("handle return payload");
+
+        let complete = source
+            .send_source_complete(false)
+            .expect("failure complete");
+        assert_eq!(source.state(), SessionState::Aborted);
+        assert!(matches!(
+            target.decrypt_message(&complete).expect("decrypt complete"),
+            PairingMessage::Complete { success: false }
+        ));
     }
 
     /// State machine rejects out-of-order operations.

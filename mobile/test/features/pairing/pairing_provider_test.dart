@@ -2,9 +2,14 @@ import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:nostr/nostr.dart' as nostr;
+import 'package:buzz/features/pairing/pairing_crypto.dart';
 import 'package:buzz/features/pairing/pairing_provider.dart';
 import 'package:buzz/features/pairing/pairing_socket.dart';
 import 'package:buzz/shared/auth/auth.dart';
+import 'package:buzz/shared/crypto/ecdh.dart';
+import 'package:buzz/shared/crypto/nip44.dart';
+import 'package:buzz/shared/relay/relay.dart';
 
 /// Tests for [PairingNotifier]'s legacy `buzz://` payload parsing and
 /// SSRF-prevention validation.
@@ -180,6 +185,115 @@ void main() {
       container.read(pairingProvider.notifier).reset();
       expect(container.read(pairingProvider).status, PairingStatus.idle);
     });
+
+    group('desktop identity recovery', () {
+      const sourceSecret =
+          '09b3065e3570a3a4054660dccd66e12774a99a904fdb0ca02dbc6c3136249506';
+      const sessionSecretHex =
+          'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789';
+      late _ControllableSocket socket;
+      late PairingNotifier notifier;
+      late String recoveryCode;
+
+      setUp(() {
+        final source = nostr.Keys(sourceSecret);
+        recoveryCode =
+            'nostrpair://${source.public}'
+            '?secret=$sessionSecretHex'
+            '&relay=wss%3A%2F%2Fpairing.buzz.xyz&v=1&mode=recover';
+        notifier = PairingNotifier(
+          socketFactory:
+              ({
+                required wsUrl,
+                required ephemeralPrivkey,
+                required onMessage,
+                required onDisconnected,
+              }) {
+                socket = _ControllableSocket(
+                  ephemeralPrivkey: ephemeralPrivkey,
+                  onMessage: onMessage,
+                  onDisconnected: onDisconnected,
+                );
+                return socket;
+              },
+        );
+        container = ProviderContainer(
+          overrides: [
+            pairingProvider.overrideWith(() => notifier),
+            relayConfigProvider.overrideWith(_RecoveryRelayConfig.new),
+          ],
+        );
+        container.read(pairingProvider);
+        notifier = container.read(pairingProvider.notifier);
+      });
+
+      test('recovery URI enables phone-to-desktop transfer', () async {
+        await notifier.pair(recoveryCode);
+
+        final state = container.read(pairingProvider);
+        expect(state.status, PairingStatus.confirmingSas);
+        expect(state.sendsIdentityToDesktop, isTrue);
+        expect(state.sasCode, hasLength(6));
+      });
+
+      test(
+        'matching SAS sends nsec and successful completion finishes',
+        () async {
+          await notifier.pair(recoveryCode);
+          notifier.confirmSas();
+          expect(container.read(pairingProvider).userConfirmedSas, isTrue);
+
+          socket.sendSourceMessage(
+            sourceSecret: sourceSecret,
+            sessionSecretHex: sessionSecretHex,
+            message: {'type': 'sas-confirm'},
+            includeTranscriptHash: true,
+          );
+
+          expect(
+            container.read(pairingProvider).status,
+            PairingStatus.transferring,
+          );
+          final sentMessages = socket.decryptedPublishedMessages(sourceSecret);
+          expect(
+            sentMessages.any(
+              (message) =>
+                  message['type'] == 'payload' &&
+                  message['payload_type'] == 'nsec' &&
+                  message['payload'] == _RecoveryRelayConfig.nsec,
+            ),
+            isTrue,
+          );
+
+          socket.sendSourceMessage(
+            sourceSecret: sourceSecret,
+            sessionSecretHex: sessionSecretHex,
+            message: {'type': 'complete', 'success': true},
+          );
+          expect(container.read(pairingProvider).status, PairingStatus.success);
+        },
+      );
+
+      test('desktop storage failure surfaces an error', () async {
+        await notifier.pair(recoveryCode);
+        notifier.confirmSas();
+        socket.sendSourceMessage(
+          sourceSecret: sourceSecret,
+          sessionSecretHex: sessionSecretHex,
+          message: {'type': 'sas-confirm'},
+          includeTranscriptHash: true,
+        );
+        socket.sendSourceMessage(
+          sourceSecret: sourceSecret,
+          sessionSecretHex: sessionSecretHex,
+          message: {'type': 'complete', 'success': false},
+        );
+
+        final state = container.read(pairingProvider);
+        expect(state.status, PairingStatus.error);
+        expect(state.errorMessage, contains('could not store'));
+      });
+    });
   });
 }
 
@@ -239,5 +353,94 @@ class _DisconnectingSocket extends PairingSocket {
   @override
   Future<void> connect() async {
     disconnectCallback(Exception('Connection closed'));
+  }
+}
+
+class _RecoveryRelayConfig extends RelayConfigNotifier {
+  static final nsec = nostr.Keys(
+    '1111111111111111111111111111111111111111111111111111111111111111',
+  ).nsec;
+
+  @override
+  RelayConfig build() => RelayConfig(baseUrl: 'https://relay.test', nsec: nsec);
+}
+
+class _ControllableSocket extends PairingSocket {
+  final String ephemeralPrivkey;
+  final void Function(List<dynamic> message) relayMessageCallback;
+  final List<Map<String, dynamic>> published = [];
+  bool _connected = false;
+  int _eventSequence = 0;
+
+  _ControllableSocket({
+    required this.ephemeralPrivkey,
+    required super.onMessage,
+    required super.onDisconnected,
+  }) : relayMessageCallback = onMessage,
+       super(wsUrl: 'ws://unused', ephemeralPrivkey: ephemeralPrivkey);
+
+  @override
+  bool get isConnected => _connected;
+
+  @override
+  Future<void> connect() async => _connected = true;
+
+  @override
+  void subscribe(String subId, int kind, String pubkeyHex) {}
+
+  @override
+  void publishEvent(Map<String, dynamic> event) => published.add(event);
+
+  @override
+  void dispose() => _connected = false;
+
+  List<Map<String, dynamic>> decryptedPublishedMessages(String sourceSecret) {
+    final key = getConversationKey(
+      sourceSecret,
+      nostr.Keys(ephemeralPrivkey).public,
+    );
+    return published
+        .map(
+          (event) =>
+              jsonDecode(nip44Decrypt(key, event['content'] as String))
+                  as Map<String, dynamic>,
+        )
+        .toList();
+  }
+
+  void sendSourceMessage({
+    required String sourceSecret,
+    required String sessionSecretHex,
+    required Map<String, dynamic> message,
+    bool includeTranscriptHash = false,
+  }) {
+    final source = nostr.Keys(sourceSecret);
+    final targetPubkey = nostr.Keys(ephemeralPrivkey).public;
+    final sessionSecret = hexToBytes(sessionSecretHex);
+    final body = Map<String, dynamic>.from(message);
+    if (includeTranscriptHash) {
+      final shared = ecdhSharedSecret(sourceSecret, targetPubkey);
+      final (_, sasInput) = deriveSas(shared, sessionSecret);
+      body['transcript_hash'] = bytesToHex(
+        deriveTranscriptHash(
+          deriveSessionId(sessionSecret),
+          hexToBytes(source.public),
+          hexToBytes(targetPubkey),
+          sasInput,
+          sessionSecret,
+        ),
+      );
+    }
+    final key = getConversationKey(sourceSecret, targetPubkey);
+    final event = nostr.Event.from(
+      kind: 24134,
+      content: nip44Encrypt(key, jsonEncode(body)),
+      tags: [
+        ['p', targetPubkey],
+      ],
+      secretKey: sourceSecret,
+      createdAt: 1_700_000_000 + _eventSequence++,
+    );
+    relayMessageCallback(['EVENT', 'pair', event.toMap()]);
   }
 }

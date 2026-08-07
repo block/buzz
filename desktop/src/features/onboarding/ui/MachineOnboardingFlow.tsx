@@ -10,6 +10,12 @@ import {
 } from "@/shared/api/tauriIdentity";
 import type { IdentityStorage } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+} from "@/shared/ui/dialog";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { BackupStep } from "./BackupStep";
 import { DefaultConfigStep } from "./DefaultConfigStep";
@@ -20,12 +26,14 @@ import {
   useEncryptedBackupSession,
 } from "./EncryptedBackupCreator";
 import { IdentityKeyHelpDialog } from "./IdentityKeyHelpDialog";
+import { IdentityRecoveryPairing } from "./IdentityRecoveryPairing";
 import { LandingBees } from "./LandingBees";
 import {
   NostrKeyImportForm,
   type NostrKeyImportStage,
 } from "./NostrKeyImportForm";
 import {
+  ONBOARDING_INK_ICON_CLASS,
   ONBOARDING_LANDING_CTA_CLASS,
   ONBOARDING_SECONDARY_CTA_CLASS,
   OnboardingChrome,
@@ -53,6 +61,7 @@ export type PostOnboardingNavigation = {
 export function MachineOnboardingFlow({
   complete,
   continueWithIdentity,
+  continueWithRecoveredIdentity,
   identityLost,
   initialPage,
   queryClient,
@@ -60,6 +69,7 @@ export function MachineOnboardingFlow({
 }: {
   complete: (pubkey?: string) => void;
   continueWithIdentity: (pubkey: string) => void;
+  continueWithRecoveredIdentity: (pubkey: string) => void;
   identityLost: boolean;
   initialPage?: MachineOnboardingPage;
   queryClient: QueryClient;
@@ -79,6 +89,10 @@ export function MachineOnboardingFlow({
   const [identityWasImported, setIdentityWasImported] = React.useState(false);
   const [keyImportStage, setKeyImportStage] =
     React.useState<NostrKeyImportStage>("key-entry");
+  const [keyImportDialog, setKeyImportDialog] = React.useState<
+    "backup" | "phone" | null
+  >(null);
+  const [phoneRecoveryStep, setPhoneRecoveryStep] = React.useState("loading");
   const [selectedPubkey, setSelectedPubkey] = React.useState<string | null>(
     null,
   );
@@ -127,6 +141,26 @@ export function MachineOnboardingFlow({
       setIsPending(false);
     }
   }, [queryClient]);
+
+  const loadRecoveredIdentity = React.useCallback(async () => {
+    setIsPending(true);
+    setError(null);
+    try {
+      const identity = await getIdentity();
+      continueWithRecoveredIdentity(identity.pubkey);
+      queryClient.setQueryData(["identity"], identity);
+      setIdentityWasImported(true);
+      setSelectedPubkey(identity.pubkey);
+      setIdentityStorage(identity.storage);
+      setPage("setup");
+    } catch (cause) {
+      setError(
+        cause instanceof Error ? cause.message : "Failed to load identity",
+      );
+    } finally {
+      setIsPending(false);
+    }
+  }, [continueWithRecoveredIdentity, queryClient]);
 
   const replaceLostIdentity = React.useCallback(async () => {
     const confirmed = window.confirm(
@@ -243,6 +277,7 @@ export function MachineOnboardingFlow({
                   className={`${ONBOARDING_SECONDARY_CTA_CLASS} px-5`}
                   disabled={isPending}
                   onClick={() => {
+                    setKeyImportDialog(null);
                     setKeyImportStage("key-entry");
                     setPage("key-import");
                   }}
@@ -265,7 +300,7 @@ export function MachineOnboardingFlow({
             >
               <motion.div
                 animate={{ opacity: 1, y: 0 }}
-                className="shrink-0"
+                className="relative z-10 shrink-0"
                 initial={reduceMotion ? false : { opacity: 0, y: 10 }}
                 key={keyImportStage}
                 transition={{
@@ -276,31 +311,132 @@ export function MachineOnboardingFlow({
                 <h1 className="text-title font-normal text-foreground">
                   {keyImportStage === "backup-password"
                     ? "Unlock your account"
-                    : identityLost
-                      ? "Re-import your key"
-                      : "Enter your private key"}
+                    : "Enter your private key"}
                 </h1>
-                <p className="mt-5 max-w-[440px] text-sm leading-6 text-foreground/80">
-                  {keyImportStage === "backup-password"
-                    ? "Enter your backup password to unlock your key and restore your identity."
-                    : identityLost
-                      ? "Your identity is no longer in the system keyring. Re-import your nsec to restore it."
-                      : "If you already have a Buzz account, enter your private key below to get started."}
-                </p>
+                <div className="mt-5 max-w-[440px] text-sm leading-6 text-foreground/80">
+                  {keyImportStage === "backup-password" ? (
+                    "Enter your backup password to restore your identity."
+                  ) : (
+                    <p>
+                      Paste your private key to sign in to Buzz. You can also
+                      use a{" "}
+                      <button
+                        className="rounded-sm font-medium underline decoration-foreground/40 underline-offset-4 transition-colors hover:decoration-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-60"
+                        data-testid="nostr-import-file-button"
+                        disabled={isPending}
+                        onClick={() => setKeyImportDialog("backup")}
+                        type="button"
+                      >
+                        backup file
+                      </button>
+                      , or{" "}
+                      <button
+                        className="rounded-sm font-medium underline decoration-foreground/40 underline-offset-4 transition-colors hover:decoration-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-60"
+                        data-testid="nostr-import-phone-link"
+                        disabled={isPending}
+                        onClick={() => setKeyImportDialog("phone")}
+                        type="button"
+                      >
+                        recover from your phone
+                      </button>
+                      .
+                    </p>
+                  )}
+                </div>
               </motion.div>
               <div className="buzz-onboarding-key-import-position w-full">
-                <NostrKeyImportForm
-                  backLabel={identityLost ? "Start new identity" : "Back"}
-                  onBack={
-                    identityLost
-                      ? () => void replaceLostIdentity()
-                      : () => setPage("identity")
-                  }
-                  onImport={importExistingIdentity}
-                  onStageChange={setKeyImportStage}
-                  variant="spotlight"
-                />
+                <div className="flex flex-col items-center">
+                  <NostrKeyImportForm
+                    backLabel="Back"
+                    onBack={() => {
+                      setKeyImportStage("key-entry");
+                      if (identityLost) {
+                        return;
+                      }
+                      setPage("identity");
+                    }}
+                    onImport={importExistingIdentity}
+                    onStageChange={setKeyImportStage}
+                    showBack={!identityLost}
+                    variant="spotlight"
+                  />
+                  {identityLost && keyImportStage === "key-entry" ? (
+                    <Button
+                      className={`${ONBOARDING_SECONDARY_CTA_CLASS} mt-2 px-5`}
+                      onClick={() => void replaceLostIdentity()}
+                      type="button"
+                      variant="ghost"
+                    >
+                      Start new identity
+                    </Button>
+                  ) : null}
+                </div>
               </div>
+              <Dialog
+                onOpenChange={(open) => {
+                  if (!open) setKeyImportDialog(null);
+                }}
+                open={keyImportDialog === "backup"}
+              >
+                <DialogContent
+                  className="buzz-onboarding-neutral-theme max-w-[47.5rem] -translate-y-5"
+                  closeButtonClassName={ONBOARDING_INK_ICON_CLASS}
+                  data-system-color-scheme="light"
+                  data-testid="backup-recovery-dialog"
+                  surface="textured"
+                >
+                  <div className="mx-auto w-full max-w-[35rem] pb-6 pt-10 text-center max-sm:pb-4 max-sm:pt-6">
+                    <DialogTitle className="text-balance px-8 text-3xl font-normal text-foreground">
+                      Restore from a backup file
+                    </DialogTitle>
+                    <DialogDescription className="mx-auto mt-4 max-w-[28rem] text-sm leading-6 text-foreground/80">
+                      Choose the encrypted backup file you saved from Buzz.
+                    </DialogDescription>
+                    <NostrKeyImportForm
+                      footerMode="inline"
+                      mode="backup"
+                      onBack={() => setKeyImportDialog(null)}
+                      onImport={importExistingIdentity}
+                      showBack={false}
+                      variant="spotlight"
+                    />
+                  </div>
+                </DialogContent>
+              </Dialog>
+              <Dialog
+                onOpenChange={(open) => {
+                  if (!open) setKeyImportDialog(null);
+                }}
+                open={keyImportDialog === "phone"}
+              >
+                <DialogContent
+                  className="buzz-onboarding-neutral-theme max-h-[calc(100dvh-2rem)] max-w-[47.5rem] -translate-y-5 overflow-y-auto"
+                  closeButtonClassName={ONBOARDING_INK_ICON_CLASS}
+                  data-system-color-scheme="light"
+                  data-testid="phone-recovery-dialog"
+                  surface="textured"
+                >
+                  <div className="mx-auto flex w-full max-w-[35rem] flex-col items-center pb-6 pt-8 text-center max-sm:pb-4 max-sm:pt-4">
+                    <DialogTitle className="text-balance px-8 text-3xl font-normal text-foreground">
+                      {identityLost
+                        ? "Recover from your phone"
+                        : "Use your Buzz identity"}
+                    </DialogTitle>
+                    <DialogDescription className="mt-4 text-sm leading-6 text-foreground/80">
+                      {phoneRecoveryStep === "loading" ||
+                      phoneRecoveryStep === "qr"
+                        ? "Scan this code with a signed-in Buzz phone."
+                        : "Confirm the code before sharing your identity."}
+                    </DialogDescription>
+                    <div className="mt-5">
+                      <IdentityRecoveryPairing
+                        onRecovered={loadRecoveredIdentity}
+                        onStepChange={setPhoneRecoveryStep}
+                      />
+                    </div>
+                  </div>
+                </DialogContent>
+              </Dialog>
             </OnboardingSlideTransition>
           ) : page === "backup" ? (
             backupSubview === "password" ? (
