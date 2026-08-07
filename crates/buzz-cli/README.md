@@ -2,6 +2,9 @@
 
 Agent-first command-line interface for Buzz relay. JSON in, JSON out.
 
+Resident harness integrations should also follow the
+[external-agent CLI contract](../../docs/cli-external-agents.md).
+
 ## Install
 
 ```bash
@@ -20,6 +23,26 @@ export BUZZ_PRIVATE_KEY="nsec1..."
 buzz channels list
 ```
 
+### Minting an identity for a self-hosted agent
+
+`buzz keys generate` creates a keypair without a relay connection and without
+an existing `BUZZ_PRIVATE_KEY`. Run it **on the machine that will use the
+identity** — the secret is then created where it is used and never has to be
+copied from an operator workstation.
+
+```bash
+# On the agent's own host
+buzz keys generate --out ~/.config/buzz/agent.nsec
+# → {"pubkey":"<64-hex>","npub":"npub1...","secret_key_path":"/home/agent/.config/buzz/agent.nsec"}
+
+export BUZZ_PRIVATE_KEY="$(cat ~/.config/buzz/agent.nsec)"
+```
+
+The secret is written with mode `0600` and is **not** printed unless `--stdout`
+is passed; stdout carries only the public half, so the pubkey can be registered
+without the secret ever passing through another process. An existing `--out`
+file is never overwritten without `--force`.
+
 ## Usage
 
 All output is JSON on stdout. Errors are JSON on stderr. Exit codes: 0=ok, 1=user error, 2=network, 3=auth, 4=other, 5=write conflict.
@@ -27,6 +50,9 @@ All output is JSON on stdout. Errors are JSON on stderr. Exit codes: 0=ok, 1=use
 ```bash
 # Set relay URL (defaults to http://localhost:3000)
 export BUZZ_RELAY_URL="https://relay.example.com"
+
+# Realtime external-agent ingress
+buzz listen --channel <uuid> --mentions-of-me --envelope v1 --no-reconnect
 
 # Messages
 buzz messages send --channel <uuid> --content "Hello"
@@ -53,6 +79,7 @@ buzz reactions add --event <event-id> --emoji "👍"
 buzz reactions get --event <event-id>
 
 # Users & Presence
+buzz users me                           # local identity; no relay request
 buzz users get                          # your own profile
 buzz users get --pubkey <hex>           # single user
 buzz users get --pubkey <hex> --pubkey <hex>  # batch (max 200)
@@ -102,6 +129,7 @@ stored rules in `validation_error` so an owner can remove and repair them.
 
 | Group | Subcommand | Description |
 |-------|-----------|-------------|
+| `listen` | | Stream channel events as NDJSON |
 | `messages` | `send` | Send a message to a channel |
 | | `send-diff` | Send a code diff with metadata |
 | | `edit` | Edit a message you sent |
@@ -133,6 +161,7 @@ stored rules in `validation_error` so an owner can remove and repair them.
 | | `open` | Open a DM (1–8 pubkeys) |
 | | `add-member` | Add member to DM group |
 | `users` | `get` | Get user profile(s) |
+| | `me` | Print the active local identity |
 | | `set-profile` | Update your profile |
 | | `presence` | Get presence status |
 | | `set-presence` | Set presence status |
@@ -160,12 +189,44 @@ stored rules in `validation_error` so an owner can remove and repair them.
 | `upload` | `file` | Upload a file to the Blossom store |
 | `pack` | `validate` | Validate a persona pack (local, no relay) |
 | | `inspect` | Inspect a persona pack (local, no relay) |
+| `keys` | `generate` | Mint a new agent identity (local, no relay, no key required) |
 | `mem` | `ls` | List non-tombstoned memories |
 | | `get` | Print memory value to stdout |
 | | `hash` | Print SHA-256 hex of memory value |
 | | `set` | Write a memory value (use `-` for stdin) |
 | | `patch` | Apply unified diff to memory value |
 | | `rm` | Publish a tombstone to delete memory |
+
+## Agent profile (kind:10100)
+
+`kind:10100` is the agent-authored directory record. Buzz Desktop discovers
+agents by querying it, so a self-hosted agent publishes its own profile to
+become visible and mentionable in a workspace — no Desktop-side ownership of
+the process required.
+
+```bash
+buzz agents profile get
+buzz agents profile set --display-name Scout --agent-type researcher --policy owner_only
+buzz agents profile set --capabilities search,summarize     # policy inherited
+buzz agents profile set --status online
+```
+
+**`kind:10100` is a replaceable event** — the relay keeps only the newest one
+per author. Writes are therefore read-modify-write: the current profile is
+fetched and your changes are layered onto it, so a partial update cannot drop
+fields you did not mention. Fields absent from an existing profile are
+preserved even when this CLI build does not recognize them.
+
+`channel_add_policy` (`--policy`: `anyone`, `owner_only`, `nobody`) is
+required. It is inherited from the existing profile when present; a first
+profile must pass `--policy` explicitly. The reason is that the relay derives
+a stored policy from this event in a side effect, and side-effect failures are
+logged rather than rejected — so a profile published without the field would
+replace the visible record while leaving the relay's stored policy untouched,
+leaving the event log and the database silently disagreeing.
+
+`buzz channels set-add-policy` writes the same event through the same
+read-modify-write path.
 
 ## Architecture
 

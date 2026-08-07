@@ -11,6 +11,29 @@ use crate::{AgentsCmd, RespondToArg};
 
 pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), CliError> {
     match command {
+        AgentsCmd::Profile(sub) => {
+            use crate::commands::agent_profile::{self, ProfileUpdate};
+            use crate::AgentProfileCmd;
+            match sub {
+                AgentProfileCmd::Get => agent_profile::cmd_profile_get(client).await,
+                AgentProfileCmd::Set {
+                    display_name,
+                    agent_type,
+                    capabilities,
+                    status,
+                    policy,
+                } => {
+                    let update = ProfileUpdate {
+                        display_name,
+                        agent_type,
+                        capabilities,
+                        status,
+                        channel_add_policy: policy,
+                    };
+                    agent_profile::cmd_profile_set(client, &update).await
+                }
+            }
+        }
         AgentsCmd::DraftCreate {
             channel,
             display_name,

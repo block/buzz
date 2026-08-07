@@ -339,8 +339,11 @@ fn format_events(normalized: &str, format: &crate::OutputFormat) -> String {
                 .map(|e| {
                     serde_json::json!({
                         "id": e.get("id").cloned().unwrap_or_default(),
+                        "pubkey": e.get("pubkey").cloned().unwrap_or_default(),
+                        "kind": e.get("kind").cloned().unwrap_or_default(),
                         "content": e.get("content").cloned().unwrap_or_default(),
                         "created_at": e.get("created_at").cloned().unwrap_or_default(),
+                        "tags": e.get("tags").cloned().unwrap_or_default(),
                     })
                 })
                 .collect();
@@ -993,8 +996,8 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        event_mention_pubkeys, find_root_from_tags, match_profiles_by_name, merge_message_mentions,
-        missing_members, normalize_explicit_mentions, parse_member_pubkeys,
+        event_mention_pubkeys, find_root_from_tags, format_events, match_profiles_by_name,
+        merge_message_mentions, missing_members, normalize_explicit_mentions, parse_member_pubkeys,
         resolve_names_to_pubkeys,
     };
     use buzz_sdk::mentions::{
@@ -1011,6 +1014,42 @@ mod tests {
     const PK_VALID_A: &str = "35c18ae273fccfaf80d629e20e7f8721b90499379addff533054acc2504c12b4";
     const PK_VALID_B: &str = "c6237ef84fa537c78dcee78efd2d4e59f728859c7f194da42ac51ededfa0be05";
     const PK_VALID_C: &str = "f4a42a97e594b77bdbd8ee35191c8b28a94a4cb871d96f32921558275421fb68";
+
+    #[test]
+    fn compact_message_output_keeps_adapter_contract_fields() {
+        let normalized = serde_json::json!([
+            {
+                "id": ID_A,
+                "pubkey": PUBKEY,
+                "kind": 40002,
+                "content": "hello @agent",
+                "created_at": 1785100000_u64,
+                "tags": [
+                    ["h", "00000000-0000-0000-0000-000000000000"],
+                    ["p", PK_VALID_A]
+                ],
+                "sig": "not-in-compact"
+            }
+        ])
+        .to_string();
+
+        let output = format_events(&normalized, &crate::OutputFormat::Compact);
+        let compact: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+        assert_eq!(compact[0]["id"], ID_A);
+        assert_eq!(compact[0]["pubkey"], PUBKEY);
+        assert_eq!(compact[0]["kind"], 40002);
+        assert_eq!(compact[0]["content"], "hello @agent");
+        assert_eq!(compact[0]["created_at"], 1785100000_u64);
+        assert_eq!(
+            compact[0]["tags"],
+            json!([
+                ["h", "00000000-0000-0000-0000-000000000000"],
+                ["p", PK_VALID_A]
+            ])
+        );
+        assert!(compact[0].get("sig").is_none());
+    }
 
     #[test]
     fn root_marker_wins_over_reply_marker() {
