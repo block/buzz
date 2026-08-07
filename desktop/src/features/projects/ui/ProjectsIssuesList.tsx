@@ -12,6 +12,7 @@ import {
   resolveUserLabel,
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
+import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { Card } from "@/shared/ui/card";
 import { DropdownMenuItem } from "@/shared/ui/dropdown-menu";
@@ -31,6 +32,8 @@ import {
 } from "./projectListRowStyles";
 
 type ProjectsIssuesListProps = {
+  /** Render without container chrome — a parent table container provides border and rounding. */
+  embedded?: boolean;
   error: unknown;
   failedSections: ProjectWorkItemSection[];
   isLoading: boolean;
@@ -73,25 +76,40 @@ function IssueHeader({
       <div className="flex min-w-0 items-center gap-1.5">
         <p className={PROJECT_LIST_ROW_TITLE_CLASS}>{issue.title}</p>
       </div>
-      <p className={`truncate ${PROJECT_LIST_ROW_SUBTEXT_CLASS}`}>
-        {project.name}
-        {includeDate ? ` · created ${relativeTime(issue.createdAt)}` : null} ·
-        by{" "}
-        <ProjectAuthorIdentity
-          label={authorLabel}
-          profiles={profiles}
-          pubkey={issue.author}
-          testId={authorTestId}
-        />
+      {/* Flex (not inline flow) so the 20px author avatar cannot grow the
+          line box — keeps row heights identical to the PR list. */}
+      <div
+        className={`flex min-w-0 items-center gap-x-1.5 overflow-hidden whitespace-nowrap ${PROJECT_LIST_ROW_SUBTEXT_CLASS}`}
+      >
+        <span>{project.name}</span>
         {includeDate ? (
-          ` · ${issue.status}`
+          <>
+            <span>·</span>
+            <span>created {relativeTime(issue.createdAt)}</span>
+          </>
+        ) : null}
+        <span>·</span>
+        <span className="inline-flex items-center gap-1">
+          <span>by</span>
+          <ProjectAuthorIdentity
+            label={authorLabel}
+            profiles={profiles}
+            pubkey={issue.author}
+            testId={authorTestId}
+          />
+        </span>
+        {includeDate ? (
+          <>
+            <span>·</span>
+            <span>{issue.status}</span>
+          </>
         ) : (
           <>
-            <span className="md:hidden"> · </span>
+            <span className="md:hidden">·</span>
             <span className="md:hidden">{issue.status}</span>
           </>
         )}
-      </p>
+      </div>
     </div>
   );
 }
@@ -223,6 +241,7 @@ function IssueListRow({
 }
 
 export function ProjectsIssuesList({
+  embedded,
   error,
   failedSections,
   isLoading,
@@ -235,7 +254,12 @@ export function ProjectsIssuesList({
 }: ProjectsIssuesListProps) {
   if (isLoading) {
     return (
-      <div className="border border-border/60 px-4 py-12 text-center text-sm text-muted-foreground">
+      <div
+        className={cn(
+          "px-4 py-12 text-center text-sm text-muted-foreground",
+          !embedded && "border border-border/60",
+        )}
+      >
         Loading issues...
       </div>
     );
@@ -259,7 +283,12 @@ export function ProjectsIssuesList({
     return (
       <div className="space-y-3">
         {loadNotice}
-        <div className="border border-dashed border-border/60 px-4 py-12 text-center text-sm text-muted-foreground">
+        <div
+          className={cn(
+            "px-4 py-12 text-center text-sm text-muted-foreground",
+            !embedded && "border border-dashed border-border/60",
+          )}
+        >
           No issues yet.
         </div>
       </div>
@@ -291,7 +320,9 @@ export function ProjectsIssuesList({
     <div className="space-y-3">
       {loadNotice}
       <div
-        className={PROJECT_LIST_CONTAINER_CLASS}
+        className={
+          embedded ? "divide-y divide-border/60" : PROJECT_LIST_CONTAINER_CLASS
+        }
         data-testid="projects-list-container"
       >
         {issues.map(({ project, issue, repository }) => (

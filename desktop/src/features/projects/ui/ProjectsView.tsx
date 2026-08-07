@@ -42,12 +42,8 @@ import { ProjectsOverviewPanel } from "@/features/projects/ui/ProjectsOverviewPa
 import { ProjectsOverviewRail } from "@/features/projects/ui/ProjectsOverviewRail";
 import { ProjectsPullRequestsList } from "@/features/projects/ui/ProjectsPullRequestsList";
 import { ProjectsWorkItemsLoadNotice } from "@/features/projects/ui/ProjectsWorkItemsLoadNotice";
-import { ProjectsListScopeDropdown } from "@/features/projects/ui/ProjectsListScopeDropdown";
-import { PROJECT_LIST_CONTAINER_CLASS } from "@/features/projects/ui/projectListRowStyles";
-import {
-  ProjectsToolbar,
-  ProjectsViewModeToggle,
-} from "@/features/projects/ui/ProjectsToolbar";
+import { ProjectsListHeaderBar } from "@/features/projects/ui/ProjectsListHeaderBar";
+import { ProjectsToolbar } from "@/features/projects/ui/ProjectsToolbar";
 import {
   hasLocalCheckout,
   hasLocalRepositoryCheckout,
@@ -95,40 +91,6 @@ import { Button } from "@/shared/ui/button";
 import { PageHeader } from "@/shared/ui/PageHeader";
 
 const MANY_PROJECTS_THRESHOLD = 12;
-const PROJECT_SCOPE_OPTIONS: Array<{
-  label: string;
-  value: ProjectsRepositoryScope;
-}> = [
-  { label: "All", value: "all" },
-  { label: "Accessible", value: "accessible" },
-  { label: "My Projects", value: "mine" },
-  { label: "Local", value: "local" },
-];
-const REPOSITORY_SCOPE_OPTIONS: Array<{
-  label: string;
-  value: ProjectsRepositoryScope;
-}> = [
-  { label: "All", value: "all" },
-  { label: "Accessible", value: "accessible" },
-  { label: "My Repositories", value: "mine" },
-  { label: "Local", value: "local" },
-  { label: "Buzz-hosted", value: "buzz" },
-  { label: "Linked", value: "linked" },
-];
-const PULL_REQUEST_SCOPE_OPTIONS: Array<{
-  label: string;
-  value: ProjectsWorkItemScope;
-}> = [
-  { label: "All", value: "all" },
-  { label: "My Pull Requests", value: "mine" },
-];
-const ISSUE_SCOPE_OPTIONS: Array<{
-  label: string;
-  value: ProjectsWorkItemScope;
-}> = [
-  { label: "All", value: "all" },
-  { label: "My Issues", value: "mine" },
-];
 
 export function ProjectsView() {
   const { goProject } = useAppNavigation();
@@ -668,7 +630,7 @@ export function ProjectsView() {
       </div>
     ) : (
       <div
-        className={PROJECT_LIST_CONTAINER_CLASS}
+        className="divide-y divide-border/60"
         data-testid="projects-list-container"
       >
         {visibleProjects.map((project) => {
@@ -716,7 +678,7 @@ export function ProjectsView() {
         ))}
       </div>
     ) : (
-      <div className={PROJECT_LIST_CONTAINER_CLASS}>
+      <div className="divide-y divide-border/60">
         {visibleRepositories.map(({ project, repository }) => (
           <RepositoryListRow
             hasLocal={hasLocalRepositoryCheckout(repository, localRepoNames)}
@@ -734,27 +696,21 @@ export function ProjectsView() {
       </div>
     );
 
-  const listControls = (
-    <div className="flex flex-wrap items-center gap-2 sm:justify-end">
-      <label className="flex items-center gap-2 text-xs text-muted-foreground">
-        <span className="sr-only">Sort projects</span>
-        <select
-          className="h-8 rounded-md bg-transparent px-2 text-xs text-foreground outline-hidden hover:bg-muted/50 focus:ring-1 focus:ring-ring"
-          onChange={(event) =>
-            handleSortChange(event.target.value as ProjectsSort)
-          }
-          value={sort}
-        >
-          <option value="updated">Recent activity</option>
-          <option value="created">Created date</option>
-          <option value="name">Name</option>
-        </select>
-      </label>
-      <ProjectsViewModeToggle
-        onViewModeChange={handleViewModeChange}
-        viewMode={viewMode}
-      />
-    </div>
+  const listHeaderBar = (
+    <ProjectsListHeaderBar
+      filter={filter}
+      variant={viewMode === "list" ? "row" : "bar"}
+      issueScope={issueScope}
+      onIssueScopeChange={handleIssueScopeChange}
+      onPullRequestScopeChange={handlePullRequestScopeChange}
+      onRepositoryScopeChange={handleRepositoryScopeChange}
+      onSortChange={handleSortChange}
+      onViewModeChange={handleViewModeChange}
+      pullRequestScope={pullRequestScope}
+      repositoryScope={repositoryScope}
+      sort={sort}
+      viewMode={viewMode}
+    />
   );
 
   const workItemFailedSections = [
@@ -912,79 +868,62 @@ export function ProjectsView() {
                   <section className="space-y-3">{activityFeed}</section>
                 </ProjectsOverviewPanel>
               ) : (
-                <section className="space-y-3">
-                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <section>
+                  {/* In list view the header is the table's first row inside
+                      the bordered container; in card view it is a standalone
+                      bar with the cards flowing below. */}
+                  <div
+                    className={
+                      viewMode === "list"
+                        ? "overflow-hidden rounded-xl border border-border/60"
+                        : "space-y-3"
+                    }
+                  >
+                    {listHeaderBar}
                     {filter === "prs" ? (
-                      <ProjectsListScopeDropdown
-                        label="Filter pull requests"
-                        onChange={handlePullRequestScopeChange}
-                        options={PULL_REQUEST_SCOPE_OPTIONS}
-                        value={pullRequestScope}
+                      <ProjectsPullRequestsList
+                        embedded={viewMode === "list"}
+                        error={projectsWorkItemsQuery.error}
+                        failedSections={
+                          projectsWorkItemsQuery.data?.pullRequests
+                            .failedSections ?? []
+                        }
+                        isLoading={projectsWorkItemsQuery.isLoading}
+                        isRetrying={
+                          projectsWorkItemsQuery.isFetching &&
+                          !projectsWorkItemsQuery.isLoading
+                        }
+                        onOpen={handleOpenPullRequest}
+                        onRetry={() => void projectsWorkItemsQuery.refetch()}
+                        profiles={profiles}
+                        pullRequests={visiblePullRequests}
+                        viewMode={viewMode}
                       />
                     ) : filter === "issues" ? (
-                      <ProjectsListScopeDropdown
-                        label="Filter issues"
-                        onChange={handleIssueScopeChange}
-                        options={ISSUE_SCOPE_OPTIONS}
-                        value={issueScope}
+                      <ProjectsIssuesList
+                        embedded={viewMode === "list"}
+                        error={projectsWorkItemsQuery.error}
+                        failedSections={
+                          projectsWorkItemsQuery.data?.issues.failedSections ??
+                          []
+                        }
+                        isLoading={projectsWorkItemsQuery.isLoading}
+                        isRetrying={
+                          projectsWorkItemsQuery.isFetching &&
+                          !projectsWorkItemsQuery.isLoading
+                        }
+                        issues={visibleIssues}
+                        onOpen={handleOpenIssue}
+                        onRetry={() => void projectsWorkItemsQuery.refetch()}
+                        profiles={profiles}
+                        viewMode={viewMode}
                       />
                     ) : filter === "projects" ? (
-                      <ProjectsListScopeDropdown
-                        label="Filter projects"
-                        onChange={handleRepositoryScopeChange}
-                        options={PROJECT_SCOPE_OPTIONS}
-                        value={repositoryScope}
-                      />
+                      projectItems
                     ) : (
-                      <ProjectsListScopeDropdown
-                        label="Filter repositories"
-                        onChange={handleRepositoryScopeChange}
-                        options={REPOSITORY_SCOPE_OPTIONS}
-                        value={repositoryScope}
-                      />
+                      repositoryItems
                     )}
-                    {listControls}
                   </div>
-                  {filter === "prs" ? (
-                    <ProjectsPullRequestsList
-                      error={projectsWorkItemsQuery.error}
-                      failedSections={
-                        projectsWorkItemsQuery.data?.pullRequests
-                          .failedSections ?? []
-                      }
-                      isLoading={projectsWorkItemsQuery.isLoading}
-                      isRetrying={
-                        projectsWorkItemsQuery.isFetching &&
-                        !projectsWorkItemsQuery.isLoading
-                      }
-                      onOpen={handleOpenPullRequest}
-                      onRetry={() => void projectsWorkItemsQuery.refetch()}
-                      profiles={profiles}
-                      pullRequests={visiblePullRequests}
-                      viewMode={viewMode}
-                    />
-                  ) : filter === "issues" ? (
-                    <ProjectsIssuesList
-                      error={projectsWorkItemsQuery.error}
-                      failedSections={
-                        projectsWorkItemsQuery.data?.issues.failedSections ?? []
-                      }
-                      isLoading={projectsWorkItemsQuery.isLoading}
-                      isRetrying={
-                        projectsWorkItemsQuery.isFetching &&
-                        !projectsWorkItemsQuery.isLoading
-                      }
-                      issues={visibleIssues}
-                      onOpen={handleOpenIssue}
-                      onRetry={() => void projectsWorkItemsQuery.refetch()}
-                      profiles={profiles}
-                      viewMode={viewMode}
-                    />
-                  ) : filter === "projects" ? (
-                    projectItems
-                  ) : (
-                    repositoryItems
-                  )}
                 </section>
               )}
             </div>
