@@ -8,6 +8,14 @@ use crate::app_state::AppState;
 use serde::Serialize;
 use std::time::UNIX_EPOCH;
 use tauri::State;
+
+// Bound eager content without truncating the repository tree.
+const MAX_EAGER_FILE_PREVIEWS: usize = 250;
+
+#[cfg(test)]
+#[path = "project_git_tests.rs"]
+mod tests;
+
 #[derive(Clone, Serialize)]
 pub struct ProjectRepoCommitInfo {
     pub hash: String,
@@ -254,24 +262,26 @@ fn parse_worktree_files(
         .filter_map(|path| {
             let full_path = repo_dir.join(path);
             let metadata = std::fs::metadata(&full_path).ok()?;
-            if !metadata.is_file() {
-                return None;
-            }
+            metadata.is_file().then_some((path, full_path, metadata))
+        })
+        .enumerate()
+        .map(|(index, (path, full_path, metadata))| {
             let size = Some(metadata.len());
             let latest_commit = latest_commit_by_path.get(path).cloned();
-            Some(ProjectRepoFileInfo {
+            ProjectRepoFileInfo {
                 path: path.to_string(),
                 kind: "blob".to_string(),
                 size,
-                preview_content: read_preview_content(repo_dir, path, size),
+                preview_content: (index < MAX_EAGER_FILE_PREVIEWS)
+                    .then(|| read_preview_content(repo_dir, path, size))
+                    .flatten(),
                 last_changed_at: latest_commit
                     .as_ref()
                     .map(|commit| commit.timestamp)
                     .or_else(|| path_modified_at(&full_path)),
                 latest_commit,
-            })
+            }
         })
-        .take(250)
         .collect()
 }
 
@@ -314,6 +324,7 @@ fn parse_ls_tree(
     output: &str,
     latest_commit_by_path: &std::collections::HashMap<String, ProjectRepoCommitInfo>,
 ) -> Vec<ProjectRepoFileInfo> {
+    let mut blob_index = 0;
     output
         .lines()
         .filter_map(|line| {
@@ -323,11 +334,12 @@ fn parse_ls_tree(
             let kind = parts.next()?.to_string();
             let _object = parts.next()?;
             let size = parts.next().and_then(|value| value.parse::<u64>().ok());
-            let preview_content = if kind == "blob" {
-                read_preview_content(repo_dir, path, size)
-            } else {
-                None
-            };
+            if kind == "blob" {
+                blob_index += 1;
+            }
+            let preview_content = (kind == "blob" && blob_index <= MAX_EAGER_FILE_PREVIEWS)
+                .then(|| read_preview_content(repo_dir, path, size))
+                .flatten();
             Some(ProjectRepoFileInfo {
                 path: path.to_string(),
                 kind,
@@ -339,7 +351,6 @@ fn parse_ls_tree(
                 latest_commit: latest_commit_by_path.get(path).cloned(),
             })
         })
-        .take(250)
         .collect()
 }
 

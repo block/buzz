@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { relativeTime } from "./projectsViewHelpers.ts";
+import {
+  nextRepositoryEntryLimit,
+  relativeTime,
+} from "./projectsViewHelpers.ts";
 
 const DAY_SECONDS = 24 * 60 * 60;
 
@@ -42,4 +45,10 @@ test("relativeTime includes the year only across a year boundary", () => {
     relativeTime(crossYearCreatedAt, crossYearNow),
     crossYearExpected,
   );
+});
+
+test("repository entry pagination advances and clamps to the total", () => {
+  assert.equal(nextRepositoryEntryLimit(200, 450), 400);
+  assert.equal(nextRepositoryEntryLimit(400, 450), 450);
+  assert.equal(nextRepositoryEntryLimit(450, 450), 450);
 });
