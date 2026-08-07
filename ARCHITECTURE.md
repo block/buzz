@@ -158,7 +158,9 @@ Note: `KIND_AUTH` (22242) is `pub const KIND_AUTH: u32` in `buzz-core/src/kind.r
 | Relay → Client | `["NOTICE", "message"]` | Informational message |
 | Relay → Client | `["AUTH", <challenge>]` | Authentication challenge |
 
-Max frame size: 65,536 bytes. Max subscriptions per connection: 1024. Max historical results per filter: 500.
+Default max frame size: 512 KiB (`BUZZ_MAX_FRAME_BYTES` can override it). Max
+subscriptions per connection: 1024. Max historical results per filter: 1,000.
+Event content has a separate 256 KiB ingest limit.
 
 ---
 
@@ -323,7 +325,7 @@ This prevents a race where a non-member receives live fan-out events from a priv
 
 ### Historical Query (EOSE)
 
-After registering, the REQ handler queries Postgres for stored events matching the filters (up to 500 per filter, hard cap). These are sent as `["EVENT", sub_id, event]` frames before `["EOSE", sub_id]`. New events arriving after EOSE are delivered via the fan-out path.
+After registering, the REQ handler queries Postgres for stored events matching the filters (up to 1,000 per filter, hard cap). These are sent as `["EVENT", sub_id, event]` frames before `["EOSE", sub_id]`. New events arriving after EOSE are delivered via the fan-out path.
 
 ---
 
@@ -632,9 +634,9 @@ pub enum AuthState { Pending { challenge: String }, Authenticated(AuthContext), 
 
 | Constant | Value | Purpose |
 |----------|-------|---------|
-| `MAX_FRAME_BYTES` | 65,536 | Max WebSocket frame size |
+| `DEFAULT_MAX_FRAME_BYTES` | 512 KiB | Default WebSocket frame size; `BUZZ_MAX_FRAME_BYTES` can override it |
 | `MAX_SUBSCRIPTIONS` | 1024 | Per-connection subscription limit |
-| `MAX_HISTORICAL_LIMIT` | 500 | Per-filter historical query cap |
+| `DEFAULT_MAX_PAGE_LIMIT` | 1,000 | Per-filter historical query cap advertised as NIP-11 `limitation.max_limit` |
 | `handler_semaphore` capacity | 1024 | Concurrent EVENT/REQ handlers |
 
 **Does NOT:** implement business logic — delegates to the appropriate crate for every operation.
@@ -730,7 +732,7 @@ Every security-sensitive operation uses an explicit, verified pattern. No implic
 |---------|-----------|
 | Schnorr signatures | `verify_event()` in `buzz-core` — every event verified before storage |
 | Event ID | SHA-256 of canonical serialization verified independently of signature |
-| Frame size | `MAX_FRAME_BYTES = 65,536` — oversized frames rejected, connection closed |
+| Frame size | `DEFAULT_MAX_FRAME_BYTES = 512 KiB` by default; `BUZZ_MAX_FRAME_BYTES` can override it. Oversized frames are rejected and the connection is closed. |
 | Search event IDs | 64-char hex validation before URL construction — prevents path injection |
 | Workflow step IDs | Alphanumeric + underscore only — prevents evalexpr variable injection |
 | Partition names | Allowlist of table names + strict suffix/date validators — prevents DDL injection |

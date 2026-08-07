@@ -964,6 +964,10 @@ goose-bg relay="ws://localhost:3000" agents="1" heartbeat="0" prompt="" key="$BU
     screen -dmS goose-agent-{{agents}} bash -c "$(printf '%q ' env "${env_args[@]}") ./target/release/buzz-acp"
     echo "Agent running in screen session 'goose-agent-{{agents}}'. Attach with: screen -r goose-agent-{{agents}}"
 
+# Verify that the Hermes/OpenClaw preset command can complete ACP initialize + session/new
+agent-harness-acceptance harness="all":
+    ./scripts/agent-harness-acceptance.sh "{{harness}}"
+
 # ─── Benchmarking ─────────────────────────────────────────────────────────────
 
 # Run the Buzz orchestra benchmark — leaderboard-eligible by default (TB 2.1, k=5, Sonnet+Haiku). Stands up its own Docker stack; --gui opens a live spectator desktop app; other flags pass to benchmark.py (--dataset/--path, --include-task, --attempts, --manifest, --dry-run, ...)
